@@ -92,6 +92,61 @@ export default [
     },
   },
   { name: 'handoff bridge: application: completed read becomes host', run: async () => assert((await source({ api: { getLocalApplicationHandoff: async () => ({ completed: true }) } }).read(lane)).kind === 'host', 'completed app state must become host') },
+  {
+    name: 'handoff bridge: application: fresh-context handoff metadata remains main-only and non-enumerable',
+    run: async () => {
+      const transition = { ...handoff, freshContextRequired: true, freshContextKey: 'blind-review-a' };
+      const adapter = source({ api: {
+        getLocalApplicationHandoff: async () => ({ handoff: transition }),
+        submitLocalApplicationHandoff: async () => ({ accepted: true, completed: false, handoff: transition }),
+      } });
+      const opened = await adapter.read(lane);
+      const accepted = await adapter.submit(lane, { code: 'BRIDGE-CODE', text: '{}' });
+      for (const candidate of [opened.handoff, accepted.handoff, accepted.next]) {
+        assert(candidate?.freshContextRequired === true && candidate?.freshContextKey === 'blind-review-a'
+          && !Object.keys(candidate).includes('freshContextRequired') && !Object.keys(candidate).includes('freshContextKey')
+          && !JSON.stringify(candidate).includes('freshContextRequired') && !JSON.stringify(candidate).includes('freshContextKey'),
+        'the adapter must retain private transition metadata for the engine without making it serializable');
+      }
+    },
+  },
+  { name: 'handoff bridge: application: malformed fresh-context keys fail closed without reaching a projection', run: async () => {
+    const malformed = { ...handoff, freshContextRequired: true, freshContextKey: 'bad key\nprivate' };
+    const result = await source({ api: { getLocalApplicationHandoff: async () => ({ handoff: malformed }) } }).read(lane);
+    assert(result.kind === 'threw' && result.shape === true && !JSON.stringify(result).includes('freshContext'),
+      'unsafe internal transition keys must turn into a shape failure rather than a public handoff field');
+  } },
+  {
+    name: 'handoff bridge: application: career-match task identity is projected and forwarded for every app operation',
+    run: async () => {
+      const calls = [];
+      const taskLane = { ...lane, matchTaskId: 'match-01' };
+      const career = { ...handoff, stage: 'career-match', matchTaskId: 'match-01', parallelTasks: [{ id: 'match-01' }, { id: 'match-02' }],
+        parallelTaskForecast: { totalUnits: 25_000_000, completedUnits: 10, remainingUnits: 24_999_990, activeWaveUnits: 10 } };
+      const adapter = source({ api: {
+        getLocalApplicationHandoff: async args => { calls.push(['read', args]); return { handoff: career }; },
+        localApplicationStatus: async (...args) => { calls.push(['status', args]); return { status: 'queued' }; },
+        submitLocalApplicationHandoff: async args => { calls.push(['submit', args]); return { accepted: true, completed: true }; },
+      } });
+      const opened = await adapter.read(taskLane);
+      await adapter.status(taskLane);
+      await adapter.submit(taskLane, { code: 'BRIDGE-CODE', text: '{}' });
+      assert(opened.matchTaskId === 'match-01' && opened.parallelTasks?.[1]?.id === 'match-02'
+        && opened.parallelTaskForecast?.remainingUnits === 24_999_990, 'the bridge retains opaque task routing plus the exact bounded-wave backlog forecast');
+      assert(calls[0][1].matchTaskId === 'match-01' && calls[1][1][2].matchTaskId === 'match-01' && calls[2][1].matchTaskId === 'match-01', 'read, status and submit must all address the same claimed task');
+    },
+  },
+  {
+    name: 'handoff bridge: application: authority-match projection caps fanout and rejects an untruthful aggregate forecast',
+    run: async () => {
+      const parallelTasks = Array.from({ length: 20 }, (_unused, index) => ({ id: `match-${index}` }));
+      const career = { ...handoff, stage: 'career-match', parallelTasks,
+        parallelTaskForecast: { totalUnits: 100, completedUnits: 4, remainingUnits: 97, activeWaveUnits: 20 } };
+      const opened = await source({ api: { getLocalApplicationHandoff: async () => ({ handoff: career }) } }).read(lane);
+      assert(opened.kind === 'open' && opened.parallelTasks.length === 10 && !opened.parallelTaskForecast,
+        'an adapter cannot expand the live wave or publish a forecast whose remaining total is false');
+    },
+  },
   { name: 'handoff bridge: application: malformed handoff is a fixed shape failure', run: async () => assert((await source({ api: { getLocalApplicationHandoff: async () => ({ handoff: { prompt: 'only prompt' } }) } }).read(lane)).shape === true, 'bad app handoff must not be copied') },
   {
     name: 'handoff bridge: application: read watchdog returns busy and preserves the shared call',

@@ -42,7 +42,7 @@ function healthFixture(id) {
 function seeded(seed) { let value = seed >>> 0; return () => { value = Math.imul(value ^ (value >>> 15), 1 | value); value ^= value + Math.imul(value ^ (value >>> 7), 61 | value); return ((value ^ (value >>> 14)) >>> 0) / 0x100000000; }; }
 
 export default [
-  { name: 'handoff bridge: ui: shared setup validators depend only on inert capacity policy and reject hostile input', run: () => {
+  { name: 'handoff bridge: ui: shared setup validators are dependency-free and reject hostile input', run: () => {
     assert({}.handoffBridgeGetStatus === undefined, 'the UI must tolerate a preload without bridge keys');
     assert(isValidHostname('b-0123456789abcdef0123.lullascape.com'), 'the production hostname shape must be accepted');
     for (const hostile of ['example.com', 'Bridge.example.com', 'bridge.example.com.', '127.0.0.1', 'bridge..example.com', 'bridge:443.example.com', 'bridge\n.example.com', 'bráce.example.com', 'xn--brce-6pa.example.com']) assert(!isValidHostname(hostile), `hostname validator must reject ${JSON.stringify(hostile)}`);
@@ -53,7 +53,7 @@ export default [
     const source = fs.readFileSync(configUrl, 'utf8');
     assert(IMPORT_SYNTAX.test("import/* split */ { readFile } from 'node:fs';"), 'import scan must recognize comment-separated import syntax');
     const imports = [...source.matchAll(/\bimport\s+(?:[^'"]+?\s+from\s+)?['"]([^'"]+)['"]/g)].map(match => match[1]);
-    assert(imports.length === 1 && imports[0] === './handoffScheduler.js', 'shared configuration may depend only on the inert capacity policy');
+    assert(imports.length === 0, 'shared configuration validators must stay dependency-free');
   } },
   { name: 'handoff bridge: ui: health precedence is exhaustive and every closed enum is safe', run: () => {
     assert(HEALTH_IDS.length === 21 && new Set(HEALTH_IDS).size === HEALTH_IDS.length, 'the 21 health ids must be closed and unique');
@@ -80,6 +80,20 @@ export default [
       && normalizeBridgeStatus(rawStatus(1, { config: { pluginName: 'My Bridge 2' } })).config.pluginName === 'My Bridge 2',
     'blank legacy status names must become the default while custom names remain unchanged');
     assert(normalizeBridgeStatus(rawStatus(1, { prefs: { sourcePolicy: 'off' } })).prefs.sourcePolicy === 'off', 'the accepted source-policy off value must survive normalization');
+  } },
+  { name: 'handoff bridge: ui: fresh-chat recovery exposes only its closed quiet reason', run: () => {
+    const normalized = normalizeBridgeStatus(rawStatus(1, {
+      chat: { pool: { active: true, generation: 7, workerCount: 1, workers: [{
+        ordinal: 1, state: 'quiet', completed: 1, quietReason: 'fresh_context_required', freshContextRequired: true,
+      }] } },
+    }));
+    const worker = normalized.chat.pool.workers[0];
+    assert(worker?.state === 'quiet' && worker.quietReason === 'fresh_context_required'
+      && !Object.hasOwn(worker, 'freshContextRequired') && !JSON.stringify(normalized).includes('freshContextRequired'),
+    'renderer normalization must retain the closed restart reason while dropping the private transition field');
+    assert(BRIDGE_UI_COPY.workerState('quiet', worker.quietReason) === 'Fresh chat needed'
+      && BRIDGE_UI_COPY.workerQuiet(worker.quietReason).includes('fresh ChatGPT chat'),
+    'the safe status reason must make the existing replacement action understandable without revealing handoff metadata');
   } },
   { name: 'handoff bridge: ui: an answer-silent pool worker takes health precedence over aggregate working chat telemetry', run: () => {
     const status = rawStatus(1, {
@@ -177,6 +191,10 @@ export default [
   { name: 'handoff bridge: ui: job row states retain their intended neutral and dock copy', run: () => {
     assert(describeJobRow({ phase: 'unread' }).text === 'Waiting for ChatGPT', 'an unread released job is waiting, not unreadable');
     assert(describeJobRow({ phase: 'held', reason: 'human_advance' }).text === 'Answered here; ChatGPT stopped serving it', 'a human advance must use the dock-answer copy');
+    assert(describeJobRow({ phase: 'needs_user', reason: 'read_failed' }).action === 'retry-reading'
+      && describeJobRow({ phase: 'needs_user', reason: 'app_fix_required' }).action === 'dock'
+      && describeJobRow({ phase: 'needs_user', reason: 'canvas_unavailable' }).action === 'dock',
+    'only a recoverable read_failed lane exposes the retry-reading action; app-fix and unavailable-canvas blocks remain dock-only');
   } },
   { name: 'handoff bridge: ui: status and diagnostic normalizers retain only closed safe fields', run: () => {
     const hostile = normalizeBridgeStatus(rawStatus(1, {
@@ -238,11 +256,37 @@ export default [
     const copySource = fs.readFileSync(copyUrl, 'utf8');
     assert(!copySource.includes('cloudflared tunnel route dns NAME'), 'renderer copy must never instruct cloudflared to route DNS by tunnel name');
     const items = Array.from({ length: APPLICATION_HANDOFF_LIMIT + 4 }, (_, index) => ({ kind: 'application', jobId: `00000000-0000-4000-8000-${String(index).padStart(12, '0')}`, canvasFilePath: `/tmp/${index}.canvas`, handoffCode: `code-${index}`, prompt: 'synthetic', label: `Marisol Quenby ${index}`, stage: 'resume' })); const projected = projectDockItemsForBridge(items.reverse());
-    assert(projected.length === APPLICATION_HANDOFF_LIMIT, 'dock projection must retain its fixed application limit'); assert(projected.every(item => !Object.hasOwn(item, 'label') && Object.hasOwn(item, 'sig')), 'publication projection may never contain renderer labels');
+    assert(projected.length === items.length && projected.map(item => item.jobId).join(',') === items.map(item => item.jobId).sort().join(','), 'dock projection must retain every queued application in deterministic order, beyond live worker capacity'); assert(projected.every(item => !Object.hasOwn(item, 'label') && Object.hasOwn(item, 'sig')), 'publication projection may never contain renderer labels');
     const duplicate = { ...items[0], canvasFilePath: '/tmp/duplicate.canvas', handoffCode: 'other-code' }; const forward = projectDockItemsForBridge([items[0], duplicate]); const reverse = projectDockItemsForBridge([duplicate, items[0]]);
     assert(JSON.stringify(forward) === JSON.stringify(reverse), 'duplicate dock items must project deterministically regardless of discovery order');
     const sent = []; let timer; let interval; const stop = startBridgeJobPublisher({ api: { handoffBridgePublishJobs: payload => sent.push(payload) }, subscribe: listener => { listener(); return () => {}; }, getItems: () => items, setTimer: fn => { timer = fn; return 1; }, clearTimer: () => { timer = null; }, setIntervalFn: fn => { interval = fn; return 2; }, clearIntervalFn: () => { interval = null; } }); timer?.(); interval?.(); stop();
     assert(sent.length >= 2 && sent.every(payload => payload.jobs.every(job => !Object.hasOwn(job, 'label'))), 'all publisher payloads must exclude labels'); assert(sent.at(-1).unmount === true && sent.at(-1).jobs.length === 0, 'publisher must clear its sender on unmount');
+    // Startup recovery can discover a persisted application before main has
+    // bound the restored BrowserWindow to its canvas. A later ready edge must
+    // replay the otherwise identical snapshot, so main can register/release
+    // the recovered job without waiting for the normal keep-alive interval.
+    const recoveredSent = []; let recoveredReady; let recoveredUnsubscribed = 0;
+    const stopRecovered = startBridgeJobPublisher({
+      api: {
+        handoffBridgePublishJobs: payload => recoveredSent.push(payload),
+        onHandoffBridgeCanvasFileReady(listener) { recoveredReady = listener; return () => { recoveredUnsubscribed += 1; }; },
+      },
+      subscribe: () => () => {}, getItems: () => [items[0]],
+    });
+    assert(recoveredSent.length === 1 && typeof recoveredReady === 'function', 'a recovered job is initially published and subscribes for main canvas binding');
+    recoveredReady();
+    assert(recoveredSent.length === 2 && recoveredSent[1].seq > recoveredSent[0].seq
+      && JSON.stringify(recoveredSent[1].jobs) === JSON.stringify(recoveredSent[0].jobs),
+    'the canvas-ready edge replays an unchanged recovered job snapshot');
+    stopRecovered();
+    assert(recoveredUnsubscribed === 1 && recoveredSent.at(-1).unmount === true, 'publisher cleanup removes the canvas-ready listener and clears its publication');
+    const overFifty = Array.from({ length: 51 }, (_, index) => ({ ...items[0], jobId: `00000000-0000-4000-8000-${String(index + 100).padStart(12, '0')}` }));
+    const chunked = []; const stopChunked = startBridgeJobPublisher({ api: { handoffBridgePublishJobs: payload => chunked.push(payload) }, subscribe: () => () => {}, getItems: () => overFifty }); stopChunked();
+    const chunks = chunked.filter(payload => !payload.unmount);
+    assert(chunks.length === 2 && chunks[0].jobs.length === 50 && chunks[1].jobs.length === 1
+      && chunks.every((payload, index) => payload.snapshot?.index === index && payload.snapshot?.final === (index === chunks.length - 1))
+      && chunks.flatMap(payload => payload.jobs).map(item => item.jobId).join(',') === projectDockItemsForBridge(overFifty).map(item => item.jobId).join(','),
+    'a >50 backlog must be transmitted as one ordered atomic snapshot, not truncated to its final IPC chunk');
   } },
   { name: 'handoff bridge: ui: status store ref-counts, rejects stale generations and survives no preload', async run() {
     __resetHandoffBridgeStoreForTests(); assert(!hasHandoffBridgeApi({}), 'an older preload has no bridge API'); const missingStop = startHandoffBridgeStatusSync({}); missingStop();

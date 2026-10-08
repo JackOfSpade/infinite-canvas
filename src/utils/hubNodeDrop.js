@@ -14,9 +14,22 @@ export function filePayloadFromDraggedNodes(nodes) {
     }));
 }
 
+// Display names are editable and native paths sometimes carry a harmless
+// trailing separator/whitespace. Normalize only that suffix before checking
+// the final extension; do not resolve or touch the filesystem here.
+export function isAppBundlePathOrName(value) {
+  if (typeof value !== 'string') return false;
+  const normalized = value.trim().replace(/[\\/]+$/, '');
+  return /\.app$/i.test(normalized);
+}
+
 export function fileSupportedByHub(hubType, file) {
-  const name = file?.filename || file?.filePath || '';
-  if (hubType === 'jobhub') return !/\.app$/i.test(name);
+  // A DocumentNode display name is editable and may be stale. Treat an app
+  // bundle as unsupported when either visible name OR actual path says .app;
+  // accepting a disguised bundle here would bypass the same policy enforced by
+  // Job Search's final admission filter.
+  const names = [file?.filename, file?.filePath].filter(value => typeof value === 'string');
+  if (hubType === 'jobhub') return !names.some(isAppBundlePathOrName);
   if (hubType === 'sellhub') return isProductImageFile(file);
   return false;
 }

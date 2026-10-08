@@ -1,9 +1,10 @@
-import { __analysisPathsForCurrentRequestForTests, __createDescriptionRecoveryCheckpointForTests, __discardJobAnalysisSnapshotForTests, __discardOwnedJobRunForTests, __formatJobAnalysisPromptForTests, __getJobAnalysisRetirementStateForTests, __loadDescriptionRecoveryCheckpointForTests, __loadJobAnalysisSnapshotForTests, __removeDescriptionRecoveryCheckpointForTests, __runWithIpcRequestContextForTests, __saveDescriptionRecoverySnapshotIfCurrentForTests, __saveJobAnalysisSnapshotForTests, assessDescriptionRecoverySnapshotOwnership, assert, canRecoverGatheredRunDirectly, collectDeletedJobAnalysisDiscards, collectDeletedJobRunDiscards, createDescriptionRecoveryMutex, filterJobsByDescriptionEvidence, fs, getJobAnalysisPaths, ipcMain, isLiveDescriptionRecoveryRun, isSafeJobAnalysisCleanupNoop, listDescriptionRecoveryCheckpointsSync, path, readRunState, setStage, startRun } from '../test-dependencies.js';
+import { __analysisPathsForCurrentRequestForTests, __createDescriptionRecoveryCheckpointForTests, __discardJobAnalysisSnapshotForTests, __discardOwnedJobRunForTests, __formatJobAnalysisPromptForTests, __getJobAnalysisRetirementStateForTests, __loadDescriptionRecoveryCheckpointForTests, __loadJobAnalysisSnapshotForTests, __removeDescriptionRecoveryCheckpointForTests, __runWithIpcRequestContextForTests, __saveDescriptionRecoverySnapshotIfCurrentForTests, __saveJobAnalysisSnapshotForTests, assessDescriptionRecoverySnapshotOwnership, assert, canRecoverGatheredRunDirectly, claimJobAnalysisOperationAuthority, collectDeletedJobAnalysisDiscards, collectDeletedJobRunDiscards, createDescriptionRecoveryMutex, filterJobsByDescriptionEvidence, fs, getJobAnalysisPaths, ipcMain, isLiveDescriptionRecoveryRun, isSafeJobAnalysisCleanupNoop, listDescriptionRecoveryCheckpointsSync, markSourceStatus, path, PDFDocument, readRunState, recordSourcePage, setStage, startRun } from '../test-dependencies.js';
+import { writeApprovedCareerSnapshotFixture } from './careerSnapshotFixture.mjs';
 import { normalizeJobsMarkup, repairJobsMojibake } from '../../src/utils/textEncoding.js';
 import { careerFilesCleanupNeedsWarning, isJobAnalysisSnapshotAfterClear, nextJobAnalysisClearWatermark, normalizeJobAnalysisClearRunId, normalizeJobAnalysisClearWatermark } from '../../src/utils/jobAnalysisRecovery.js';
 import { getJobDescriptionRecoveryCheckpointPath } from '../../electron/ipc/jobAnalysisPaths.js';
-import { __extractCareerFileSectionsForTests, __recordJobSourceResumeAttemptForTests, buildJobAnalysisSnapshot, getJobsResumeAttributionForReport, getJobsTelemetryHubCountForReport, registerJobsHandlers } from '../../electron/ipc/jobs.js';
-import { finishRunWithSavedListings, isRunCollectionFinishedWithSavedListings, markSourceStatus, recordSourcePage } from '../../electron/ipc/jobRunStaging.js';
+import { __assertCareerInputDescriptorsStillMatchForTests, __extractCareerFileSectionsForTests, __pruneStaleCareerInputStagesForTests, __recordJobSourceResumeAttemptForTests, __resolvePinnedScoringInputForTests, __stageCareerInputFilesForTests, buildJobAnalysisSnapshot, getJobsResumeAttributionForReport, getJobsTelemetryHubCountForReport, partitionPinnedScoringEvidenceForTests, reducePinnedScoringPageResultsForTests, registerJobsHandlers, scoringPromptFitsEnvelopeForTests, subdividePinnedScoringEvidenceForEnvelopeForTests, validatePagedAttachmentAuditReceiptForTests } from '../../electron/ipc/jobs.js';
+import { finishRunWithSavedListings, isRunCollectionFinishedWithSavedListings } from '../../electron/ipc/jobRunStaging.js';
 import { receiptTime } from '../../electron/ipc/bugReport/jobsSnapshot.js';
 import { discardDeletedJobAnalysisSnapshots, discardDeletedJobRuns } from '../../src/utils/canvasInteractions.js';
 import { __canPerformJobSourceActionForTests, __canWriteJobResolveTelemetryForTests, __consumeRecoveryBlockedUrlForTests, __getJobsTelemetryForReportForTests, __recordResumeAttemptForTests, __resetJobsTelemetryForTests, __restoreJobsTelemetryIfCurrentRunForTests, getJobsTelemetry, nativeChallengeTerminalDisposition, orderedBlockedManualSourceUrls, recordLinkedinResolveAttempt, recordResolveMergeOutcome } from '../test-dependencies.js';
@@ -11,6 +12,805 @@ import { formatJobAnalysisRecoveryLifecycleMarkdown, readJobAnalysisRecoveryLife
 import { CODE_DEFINITIONS } from '../../src/utils/bugReportCodes.js';
 
 export default [
+  {
+    name: 'career snapshot publication refuses a source file rewritten after its input fingerprint was captured',
+    run: async () => {
+      const dir = fs.mkdtempSync(path.join('/tmp', 'ic-career-toctou-'));
+      const file = path.join(dir, 'Work Experience.md');
+      try {
+        fs.writeFileSync(file, '# Before\n- Original fact\n', 'utf8');
+        const crypto = await import('node:crypto');
+        const before = crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
+        await __assertCareerInputDescriptorsStillMatchForTests([file], [{ name: 'Work Experience.md', contentHash: before }]);
+        fs.writeFileSync(file, '# After\n- Rewritten fact\n', 'utf8');
+        let failure = null;
+        try {
+          await __assertCareerInputDescriptorsStillMatchForTests([file], [{ name: 'Work Experience.md', contentHash: before }]);
+        } catch (error) {
+          failure = error;
+        }
+        assert(failure?.message === 'Career files changed while the profile was being compiled. Keep the files unchanged and try again.',
+          'the final publication fence must reject a changed source instead of publishing an old-fingerprint snapshot made from new bytes');
+        return { sourceMutationRejected: true };
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  },
+  {
+    name: 'career snapshot stages the exact input bytes before extraction, defeating ABA rewrites and duplicate basenames',
+    run: async () => {
+      const root = fs.mkdtempSync(path.join('/tmp', 'ic-career-stage-'));
+      const firstDirectory = path.join(root, 'first');
+      const secondDirectory = path.join(root, 'second');
+      const original = path.join(firstDirectory, 'Work Experience.md');
+      const duplicateName = path.join(secondDirectory, 'Work Experience.md');
+      let staged = null;
+      let stagingRoot = null;
+      try {
+        fs.mkdirSync(firstDirectory, { recursive: true });
+        fs.mkdirSync(secondDirectory, { recursive: true });
+        fs.writeFileSync(original, '# A\n- staged fact\n', 'utf8');
+        fs.writeFileSync(duplicateName, '# Other\n- distinct fact\n', 'utf8');
+        stagingRoot = fs.mkdtempSync(path.join(process.cwd(), '.ic-career-stage-root-'));
+        staged = await __stageCareerInputFilesForTests([original, duplicateName], { stagingRoot });
+        const stagedMode = fs.statSync(staged.directory).mode & 0o777;
+        const fileModes = staged.stagedPaths.map(file => fs.statSync(file).mode & 0o777);
+        let readerPath = null;
+        const extracted = await __extractCareerFileSectionsForTests([staged.stagedPaths[0]], {
+          sourceNames: [staged.sourceNames[0]],
+          readPlainText: async (filePath) => {
+            readerPath = filePath;
+            // Simulate the live input changing to B and then returning to A
+            // while a worker is reading. The parser must read only the staged
+            // A bytes and the final original-path descriptor fence must still
+            // see the returned A version.
+            fs.writeFileSync(original, '# B\n- transient rewrite\n', 'utf8');
+            fs.writeFileSync(original, '# A\n- staged fact\n', 'utf8');
+            return fs.promises.readFile(filePath, 'utf8');
+          },
+        });
+        await __assertCareerInputDescriptorsStillMatchForTests([original], [staged.descriptors[0]]);
+        assert(readerPath === staged.stagedPaths[0]
+          && readerPath !== original
+          && extracted.sections[0] === '===== FILE: Work Experience.md =====\n# A\n- staged fact\n'
+          && staged.sourceNames.join(',') === 'Work Experience.md,Work Experience.md'
+          && staged.stagedPaths[0] !== staged.stagedPaths[1]
+          && staged.descriptors[0].contentHash !== staged.descriptors[1].contentHash
+          && (stagedMode & 0o077) === 0
+          && fileModes.every(mode => (mode & 0o077) === 0),
+        'the byte sequence hashed for the snapshot is privately staged before extraction, remains stable through an A→B→A live rewrite, and cannot collide for duplicate basenames');
+        return { stagedBytesBound: true, duplicateBasenamesDistinct: true };
+      } finally {
+        await staged?.cleanup?.();
+        if (stagingRoot) fs.rmSync(stagingRoot, { recursive: true, force: true });
+        fs.rmSync(root, { recursive: true, force: true });
+      }
+    },
+  },
+  {
+    name: 'career snapshot direct text preserves the staged UTF-8 source exactly, not a Markdown-normalized compatibility view',
+    run: async () => {
+      const directory = fs.mkdtempSync(path.join('/tmp', 'ic-career-direct-text-'));
+      const file = path.join(directory, 'Freeform Notes.md');
+      // Deliberately include source-significant characters that the ordinary
+      // direct-text safety classifier may normalize before returning its
+      // verdict. The importer must retain this exact staged decoded source.
+      const raw = '\uFEFF# Role\r\n- Built **everything**  \r\n\r\n';
+      try {
+        fs.writeFileSync(file, raw, 'utf8');
+        const extracted = await __extractCareerFileSectionsForTests([file], {
+          sourceNames: ['Freeform Notes.md'],
+          readPlainText: async () => 'Role\n- Built everything',
+        });
+        assert(extracted.directTextFiles === 1
+          && extracted.transcribedFiles === 0
+          && extracted.sourceFiles[0].text === raw
+          && extracted.sections[0] === `===== FILE: Freeform Notes.md =====\n${raw}`
+          && extracted.sourceFiles[0].transcriptionAudit?.mode === 'verbatim',
+        'a direct source must use its exact staged UTF-8 text for every snapshot projection; a classifier result may select the direct route but cannot rewrite the human-authored corpus');
+        return { rawChars: raw.length, directTextFiles: extracted.directTextFiles };
+      } finally {
+        fs.rmSync(directory, { recursive: true, force: true });
+      }
+    },
+  },
+  {
+    name: 'attachment page and boundary audit waves use the rolling shared worker roster',
+    run: async () => {
+      const pending = [];
+      let extractPart = 0;
+      const complete = __extractCareerFileSectionsForTests(['/tmp/parallel-audit-pages.pdf'], {
+        verifyTranscription: true,
+        readPlainText: async () => null,
+        callDocument: (_filePath, _prompt, options) => {
+          if (options.task === 'career-file-extract') {
+            const part = extractPart++;
+            return part < 2
+              ? { text: `PART-${part}`, completeRegion: false, complete: false, nextCursor: `cursor-${part}` }
+              : { text: `PART-${part}`, completeRegion: true, complete: true };
+          }
+          return new Promise(resolve => pending.push({ task: options.task, resolve }));
+        },
+      });
+      for (let attempt = 0; attempt < 20 && pending.length < 3; attempt += 1) await new Promise(resolve => setImmediate(resolve));
+      const pageAudits = pending.splice(0, 3);
+      assert(pageAudits.length === 3 && pageAudits.every(item => item.task === 'career-file-transcription-audit'),
+        'all independently extracted attachment parts must open their audit handoffs together, not wait page-by-page');
+      pageAudits.forEach(item => item.resolve({ decision: 'pass', text: '', findings: [] }));
+      for (let attempt = 0; attempt < 20 && pending.length < 2; attempt += 1) await new Promise(resolve => setImmediate(resolve));
+      const boundaryAudits = pending.splice(0, 2);
+      assert(boundaryAudits.length === 2 && boundaryAudits.every(item => item.task === 'career-file-boundary-audit'),
+        'all independent adjacent joins must open together after the page-audit dependency completes');
+      boundaryAudits.forEach(item => item.resolve({ decision: 'pass', affectedPageIds: [], findings: [] }));
+      const result = await complete;
+      assert(result.sourceFiles[0].text === 'PART-0PART-1PART-2'
+        && result.sourceFiles[0].transcriptionAudit.pages.length === 3
+        && result.sourceFiles[0].transcriptionAudit.boundaries.length === 2,
+      'the rolling waves preserve exact ordered joining and every page/boundary receipt');
+      return { pageAuditWorkers: pageAudits.length, boundaryAuditWorkers: boundaryAudits.length };
+    },
+  },
+  {
+    name: 'attachment transcription is independently repaired and re-audited in parallel before compiler input',
+    run: async () => {
+      const calls = [];
+      const pending = [];
+      const complete = __extractCareerFileSectionsForTests(['/tmp/one.pdf', '/tmp/two.pdf'], {
+        verifyTranscription: true,
+        readPlainText: async () => null,
+        callDocument: (filePath, _prompt, options) => new Promise(resolve => {
+          calls.push({ filePath, task: options.task });
+          pending.push({ filePath, task: options.task, resolve });
+        }),
+      });
+      await new Promise(resolve => setImmediate(resolve));
+      assert(calls.length === 2 && calls.every(call => call.task === 'career-file-extract'),
+        'independent source files begin their attachment transcription handoffs in parallel');
+      pending.splice(0, 2).forEach(({ filePath, resolve }) => resolve({ text: `TRANSCRIPT ${path.basename(filePath)}` }));
+      await new Promise(resolve => setImmediate(resolve));
+      assert(calls.length === 4 && calls.slice(2).every(call => call.task === 'career-file-transcription-audit'),
+        'each completed attachment transcription immediately starts its own independent fidelity audit without waiting for another file');
+      pending.splice(0, 2).forEach(({ resolve }) => resolve({
+        decision: 'pass', text: '', findings: [],
+      }));
+      const parallel = await complete;
+      assert(parallel.sourceFiles.every(source => source.transcriptionAudit?.mode === 'attachment'
+        && source.transcriptionAudit.decision === 'pass'
+        && source.transcriptionAudit.roundCount === 3
+        && source.transcriptionAudit.pages?.[0]?.findingDigestSample.length === 1
+        && source.transcriptionAudit.pages?.[0]?.stateDigestSample.length === 1),
+      'a pass records compact ordered audit-state metadata, not a second transcript copy');
+
+      let revision = 0;
+      const repaired = await __extractCareerFileSectionsForTests(['/tmp/revision.pdf'], {
+        verifyTranscription: true,
+        readPlainText: async () => null,
+        callDocument: async (_filePath, _prompt, options) => {
+          if (options.task === 'career-file-extract') return { text: 'Role: Analyst' };
+          revision += 1;
+          return revision === 1
+            ? { decision: 'revised', text: 'Role: Analyst\nMetric: 50 users', findings: [{ id: 'omission-1', kind: 'omission', detail: 'The metric row was omitted.' }] }
+            : { decision: 'pass', text: '', findings: [] };
+        },
+      });
+      const receipt = repaired.sourceFiles[0].transcriptionAudit;
+      assert(repaired.sections[0].includes('Metric: 50 users') && receipt.revisionCount === 1
+        && receipt.roundCount === 4 && receipt.findingCount === 1 && receipt.pages[0].findingDigestSample.length === 2
+        && receipt.pages[0].stateDigestSample.length === 2 && /^[a-f0-9]{64}$/.test(receipt.pages[0].stateHistoryDigest),
+      'a replacement transcription is not trusted until a second attachment audit passes it, and the immutable receipt records its ordered convergence history');
+
+      let extendedRevision = 0;
+      const extended = await __extractCareerFileSectionsForTests(['/tmp/extended-revisions.pdf'], {
+        verifyTranscription: true,
+        readPlainText: async () => null,
+        callDocument: async (_filePath, _prompt, options) => {
+          if (options.task === 'career-file-extract') return { text: 'Draft' };
+          extendedRevision += 1;
+          return extendedRevision <= 4
+            ? { decision: 'revised', text: `Draft\nRevision ${extendedRevision}`, findings: [{ id: `omission-${extendedRevision}`, kind: 'omission', detail: `Missing row ${extendedRevision}.` }] }
+            : { decision: 'pass', text: '', findings: [] };
+        },
+      });
+      const extendedReceipt = extended.sourceFiles[0].transcriptionAudit;
+      assert(extendedReceipt.revisionCount === 4 && extendedReceipt.roundCount === 7
+        && extendedReceipt.pages[0].stateDigestSample.length === 5 && /^[a-f0-9]{64}$/.test(extendedReceipt.pages[0].stateHistoryDigest),
+      'attachment transcription continues past the former revision cap while every audit state makes novel material progress');
+
+      let cycleRound = 0;
+      let nonConvergent = null;
+      try {
+        await __extractCareerFileSectionsForTests(['/tmp/non-convergent.pdf'], {
+          verifyTranscription: true,
+          readPlainText: async () => null,
+          callDocument: async (_filePath, _prompt, options) => {
+            if (options.task === 'career-file-extract') return { text: 'Draft A' };
+            cycleRound += 1;
+            if (cycleRound === 1) return { decision: 'revised', text: 'Draft B', findings: [{ id: 'missing-a', kind: 'omission', detail: 'Missing A.' }, { id: 'missing-b', kind: 'omission', detail: 'Missing B.' }] };
+            if (cycleRound === 2) return { decision: 'revised', text: 'Draft A', findings: [{ id: 'missing-c', kind: 'omission', detail: 'Missing C.' }] };
+            return { decision: 'revised', text: 'Draft B', findings: [{ id: 'missing-b', kind: 'omission', detail: 'Missing B.' }, { id: 'missing-a', kind: 'omission', detail: 'Missing A.' }] };
+          },
+        });
+      } catch (error) { nonConvergent = error; }
+      assert(nonConvergent?.code === 'CAREER_SNAPSHOT_TRANSCRIPTION_AUDIT_NON_CONVERGENT'
+        && nonConvergent.message.includes('repeated a prior candidate/findings state')
+        && nonConvergent.message.includes('Human review is required'),
+      'a repeated candidate plus normalized unresolved findings stops with a precise human-review non-convergence diagnostic');
+
+      let malformed = null;
+      try {
+        await __extractCareerFileSectionsForTests(['/tmp/malformed.pdf'], {
+          verifyTranscription: true,
+          readPlainText: async () => null,
+          callDocument: async (_filePath, _prompt, options) => options.task === 'career-file-extract'
+            ? { text: 'Original transcript' }
+            : { decision: 'pass', text: 'Changed despite pass', findings: [] },
+        });
+      } catch (error) { malformed = error; }
+      assert(malformed?.code === 'CAREER_SNAPSHOT_TRANSCRIPTION_AUDIT_INVALID',
+        'a malformed fidelity response or a non-identical pass cannot enter the compilation corpus');
+      return { parallelAudits: 2, repairedRounds: receipt.roundCount, extendedRounds: extendedReceipt.roundCount, nonConvergenceRejected: true, malformedRejected: true };
+    },
+  },
+  {
+    name: 'attachment transcription pages an over-300k document with ordered native-region receipts',
+    run: async () => {
+      const pageCount = 6;
+      const pageText = index => `Table ${index + 1}: metric | value\n${'x'.repeat(59_900)}`;
+      const heapBefore = process.memoryUsage().heapUsed;
+      let extractionCalls = 0;
+      const result = await __extractCareerFileSectionsForTests(['/tmp/paged-large.pdf'], {
+        verifyTranscription: true,
+        readPlainText: async () => null,
+        callDocument: async (_filePath, prompt, options) => {
+          if (options.task === 'career-file-extract') {
+            extractionCalls += 1;
+            const host = JSON.parse(prompt.slice(prompt.indexOf('HOST_CONTINUATION:\n') + 'HOST_CONTINUATION:\n'.length));
+            return {
+              documentId: host.documentId,
+              pageId: `native-page-${host.pageIndex + 1}`,
+              pageIndex: host.pageIndex,
+              text: pageText(host.pageIndex),
+              complete: host.pageIndex === pageCount - 1,
+              ...(host.pageIndex === pageCount - 1 ? {} : { nextCursor: `cursor-${host.pageIndex + 1}` }),
+            };
+          }
+          if (options.task === 'career-file-boundary-audit') return { decision: 'pass', affectedPageIds: [], findings: [] };
+          const page = JSON.parse(prompt.slice(prompt.indexOf('<CANDIDATE_TRANSCRIPTION_PAGE>\n') + '<CANDIDATE_TRANSCRIPTION_PAGE>\n'.length, prompt.indexOf('\n</CANDIDATE_TRANSCRIPTION_PAGE>')));
+          return { documentId: page.documentId, pageId: page.pageId, decision: 'pass', text: '', findings: [] };
+        },
+      });
+      const receipt = result.sourceFiles[0].transcriptionAudit;
+      const heapDelta = Math.max(0, process.memoryUsage().heapUsed - heapBefore);
+      assert(result.sourceFiles[0].text.length > 300_000
+        && extractionCalls === pageCount
+        && heapDelta < 64 * 1024 * 1024
+        && receipt.pages?.length === pageCount
+        && receipt.pages.every((page, index) => page.pageIndex === index && /^attachment-part-[a-f0-9]{48}$/u.test(page.pageId) && page.roundCount === 1)
+        && receipt.roundCount === pageCount + 1 + (pageCount - 1) + 1 && receipt.revisionCount === 0
+        && receipt.mergeMode === 'exact-concatenation-v1'
+        && receipt.pages.every(page => /^[a-f0-9]{64}$/.test(page.textDigest)
+          && page.findingDigestSample.length <= 8 && page.stateDigestSample.length <= 8)
+        && validatePagedAttachmentAuditReceiptForTests(receipt),
+      'a logical document larger than the old full-response cap is retained as ordered bounded attachment-native pages with compact independent audit receipts, without a runaway compatibility-continuation allocation loop');
+
+      const splitTable = await __extractCareerFileSectionsForTests(['/tmp/table-boundary.pdf'], {
+        readPlainText: async () => null,
+        callDocument: async (_filePath, prompt, options) => {
+          if (options.task === 'career-file-extract') {
+            const host = JSON.parse(prompt.slice(prompt.indexOf('HOST_CONTINUATION:\n') + 'HOST_CONTINUATION:\n'.length));
+            return {
+              documentId: host.documentId, pageId: `table-${host.pageIndex}`, pageIndex: host.pageIndex,
+              text: host.pageIndex === 0 ? '# Experience\nQ4 revenue | $1,2' : '50 | audited\n# Skills\nTypeScript\n',
+              complete: host.pageIndex === 1,
+              ...(host.pageIndex === 0 ? { nextCursor: 'after-table-left' } : {}),
+            };
+          }
+          if (options.task === 'career-file-boundary-audit') return { decision: 'pass', affectedPageIds: [], findings: [] };
+          const page = JSON.parse(prompt.slice(prompt.indexOf('<CANDIDATE_TRANSCRIPTION_PAGE>\n') + '<CANDIDATE_TRANSCRIPTION_PAGE>\n'.length, prompt.indexOf('\n</CANDIDATE_TRANSCRIPTION_PAGE>')));
+          return { documentId: page.documentId, pageId: page.pageId, decision: 'pass', text: '', findings: [] };
+        },
+      });
+      const tamperedReceipt = {
+        ...receipt,
+        pages: receipt.pages.map((page, index) => index === 1 ? { ...page, pageIndex: 9 } : page),
+      };
+      assert(splitTable.sourceFiles[0].text === '# Experience\nQ4 revenue | $1,250 | audited\n# Skills\nTypeScript\n'
+        && !validatePagedAttachmentAuditReceiptForTests(tamperedReceipt),
+      'the host concatenates exact ordered chunks without trimming or separators, including a table row split at a response boundary, and rejects a tampered receipt');
+
+      let legacyExtract = null;
+      let legacyAudit = null;
+      try {
+        await __extractCareerFileSectionsForTests(['/tmp/current-contract.pdf'], {
+          adaptLegacyTestResponses: false,
+          readPlainText: async () => null,
+          callDocument: async () => ({ text: 'old whole-document reply' }),
+        });
+      } catch (error) { legacyExtract = error; }
+      try {
+        await __extractCareerFileSectionsForTests(['/tmp/current-audit-contract.pdf'], {
+          adaptLegacyTestResponses: false,
+          verifyTranscription: true,
+          readPlainText: async () => null,
+          callDocument: async (_filePath, prompt, options) => {
+            if (options.task === 'career-file-extract') {
+              const host = JSON.parse(prompt.slice(prompt.indexOf('HOST_CONTINUATION:\n') + 'HOST_CONTINUATION:\n'.length));
+              return {
+                documentId: host.documentId, pageId: host.expectedPageId || 'current-page', pageIndex: 0,
+                regionId: host.expectedRegion?.id || 'current-region', regionIndex: host.expectedRegion?.index ?? 0,
+                partIndex: 0, text: 'current page', completeRegion: true, complete: true,
+              };
+            }
+            return { decision: 'pass', text: '', findings: [] };
+          },
+        });
+      } catch (error) { legacyAudit = error; }
+      assert(legacyExtract?.code === 'CAREER_SNAPSHOT_TRANSCRIPTION_INVALID_PAGE'
+        && /schema/i.test(legacyAudit?.message || ''),
+      'a current v8 extraction or audit refuses legacy unbound whole-document responses rather than silently restoring the old one-response contract');
+
+      let repairRound = 0;
+      const longRepair = await __extractCareerFileSectionsForTests(['/tmp/compact-receipt.pdf'], {
+        verifyTranscription: true,
+        readPlainText: async () => null,
+        callDocument: async (_filePath, prompt, options) => {
+          if (options.task === 'career-file-extract') {
+            const host = JSON.parse(prompt.slice(prompt.indexOf('HOST_CONTINUATION:\n') + 'HOST_CONTINUATION:\n'.length));
+            return { documentId: host.documentId, pageId: 'repair-page', pageIndex: 0, text: 'draft 0', complete: true };
+          }
+          const page = JSON.parse(prompt.slice(prompt.indexOf('<CANDIDATE_TRANSCRIPTION_PAGE>\n') + '<CANDIDATE_TRANSCRIPTION_PAGE>\n'.length, prompt.indexOf('\n</CANDIDATE_TRANSCRIPTION_PAGE>')));
+          repairRound += 1;
+          return repairRound <= 10
+            ? { documentId: page.documentId, pageId: page.pageId, decision: 'revised', text: `draft ${repairRound}`, findings: [{ id: `f-${repairRound}`, kind: 'omission', detail: `missing ${repairRound}` }] }
+            : { documentId: page.documentId, pageId: page.pageId, decision: 'pass', text: '', findings: [] };
+        },
+      });
+      const longRepairPage = longRepair.sourceFiles[0].transcriptionAudit.pages[0];
+      assert(longRepairPage.roundCount === 11 && longRepairPage.revisionCount === 10
+        && longRepairPage.findingDigestSample.length === 8 && longRepairPage.stateDigestSample.length === 8
+        && !Object.hasOwn(longRepairPage, 'findingDigests') && !Object.hasOwn(longRepairPage, 'stateDigests')
+        && validatePagedAttachmentAuditReceiptForTests(longRepair.sourceFiles[0].transcriptionAudit),
+      'unbounded convergent page repairs keep truthful aggregate counts while persisting only bounded diagnostic samples plus complete chained digests');
+
+      let invalid = null;
+      try {
+        await __extractCareerFileSectionsForTests(['/tmp/duplicate-page.pdf'], {
+          readPlainText: async () => null,
+          callDocument: async (_filePath, prompt) => {
+            const host = JSON.parse(prompt.slice(prompt.indexOf('HOST_CONTINUATION:\n') + 'HOST_CONTINUATION:\n'.length));
+            return { documentId: host.documentId, pageId: 'same-region', pageIndex: host.pageIndex, text: 'table row', complete: false, nextCursor: host.pageIndex ? 'cursor-2' : 'cursor-1' };
+          },
+        });
+      } catch (error) { invalid = error; }
+      assert(invalid?.code === 'CAREER_SNAPSHOT_TRANSCRIPTION_INVALID_PAGE',
+        'duplicate, out-of-order, or no-progress attachment continuation pages fail before any partial corpus is published');
+      return { pages: pageCount, chars: result.sourceFiles[0].text.length, extractionCalls, heapDelta, exactTableMerge: true, duplicateRejected: true };
+    },
+  },
+  {
+    name: 'attachment receipt v3 binds host inventory, contiguous region mapping, boundary repair, and compact history',
+    run: async () => {
+      let boundaryRound = 0;
+      let pageRepair = 0;
+      const regions = ['pdf-page-000001', 'pdf-page-000002', 'pdf-page-000003'].map((id, index) => ({ id, index }));
+      const result = await __extractCareerFileSectionsForTests(['/tmp/v3-boundary.pdf'], {
+        verifyTranscription: true,
+        readPlainText: async () => null,
+        attachmentInventoryProvider: async () => ({ kind: 'pdf', regions, audit: null }),
+        callDocument: async (_filePath, prompt, options) => {
+          if (options.task === 'career-file-extract') {
+            const host = JSON.parse(prompt.slice(prompt.indexOf('HOST_CONTINUATION:\n') + 'HOST_CONTINUATION:\n'.length));
+            return { documentId: host.documentId, pageId: host.expectedPageId, pageIndex: host.pageIndex,
+              regionId: host.expectedRegion.id, regionIndex: host.expectedRegion.index, partIndex: host.partIndex,
+              text: ['Heading\nrow | 1\n', 'continued | 2\n', 'tail\n'][host.pageIndex], completeRegion: true, complete: host.pageIndex === 2 };
+          }
+          if (options.task === 'career-file-boundary-audit') {
+            const boundary = JSON.parse(prompt.slice(prompt.indexOf('<CANDIDATE_TRANSCRIPTION_BOUNDARY>\n') + '<CANDIDATE_TRANSCRIPTION_BOUNDARY>\n'.length, prompt.indexOf('\n</CANDIDATE_TRANSCRIPTION_BOUNDARY>')));
+            boundaryRound += 1;
+            if (boundaryRound === 1) return { documentId: boundary.documentId, leftPageId: boundary.leftPageId, rightPageId: boundary.rightPageId, decision: 'issue', affectedPageIds: [boundary.rightPageId], findings: [{ id: 'join-row', kind: 'structure', detail: 'The table continuation requires its page-local delimiter.' }] };
+            return { documentId: boundary.documentId, leftPageId: boundary.leftPageId, rightPageId: boundary.rightPageId, decision: 'pass', affectedPageIds: [], findings: [] };
+          }
+          const page = JSON.parse(prompt.slice(prompt.indexOf('<CANDIDATE_TRANSCRIPTION_PAGE>\n') + '<CANDIDATE_TRANSCRIPTION_PAGE>\n'.length, prompt.indexOf('\n</CANDIDATE_TRANSCRIPTION_PAGE>')));
+          if (page.boundaryFindings?.length && pageRepair++ === 0) return { documentId: page.documentId, pageId: page.pageId, decision: 'revised', text: ' | repaired\n', findings: [{ id: 'join-row', kind: 'structure', detail: 'Restored the page-local delimiter.' }] };
+          return { documentId: page.documentId, pageId: page.pageId, decision: 'pass', text: '', findings: [] };
+        },
+      });
+      const receipt = result.sourceFiles[0].transcriptionAudit;
+      const tamperedRegion = structuredClone(receipt);
+      tamperedRegion.pages[1].regionId = tamperedRegion.pages[0].regionId;
+      const tamperedPart = structuredClone(receipt);
+      tamperedPart.pages[1].partIndex = 1;
+      const tamperedBoundary = structuredClone(receipt);
+      tamperedBoundary.boundaries[0].rightPageId = 'forged-page';
+      assert(receipt.receiptVersion === 3 && receipt.inventory.kind === 'pdf' && receipt.inventory.audit === null
+        && receipt.inventory.regionCount === 3 && receipt.pages.every((page, index) => page.regionId === regions[index].id && page.regionIndex === index && page.partIndex === 0 && page.partCount === 1)
+        && receipt.boundaryCount === 2 && receipt.boundaries[0].roundCount === 2 && receipt.pages[1].revisionCount === 1
+        && receipt.coverage.decision === 'pass' && receipt.coverage.coveredRegionDigest === receipt.inventory.digest
+        && validatePagedAttachmentAuditReceiptForTests(receipt)
+        && !validatePagedAttachmentAuditReceiptForTests(tamperedRegion)
+        && !validatePagedAttachmentAuditReceiptForTests(tamperedPart)
+        && !validatePagedAttachmentAuditReceiptForTests(tamperedBoundary),
+      'v3 receipt binds exact PDF inventory order and mapping, reruns full-page repair after a boundary issue, and rejects mapping or boundary receipt tampering');
+
+      let repeated = null;
+      let toggle = false;
+      try {
+        await __extractCareerFileSectionsForTests(['/tmp/v3-repeat.pdf'], {
+          verifyTranscription: true, readPlainText: async () => null,
+          attachmentInventoryProvider: async () => ({ kind: 'image', regions: [{ id: 'image-region-000001', index: 0 }, { id: 'image-region-000002', index: 1 }], audit: null }),
+          callDocument: async (_filePath, prompt, options) => {
+            if (options.task === 'career-file-extract') {
+              const host = JSON.parse(prompt.slice(prompt.indexOf('HOST_CONTINUATION:\n') + 'HOST_CONTINUATION:\n'.length));
+              return { documentId: host.documentId, pageId: host.expectedPageId, pageIndex: host.pageIndex,
+                regionId: host.expectedRegion.id, regionIndex: host.expectedRegion.index, partIndex: host.partIndex,
+                text: host.pageIndex ? 'B' : 'A', completeRegion: true, complete: host.pageIndex === 1 };
+            }
+            if (options.task === 'career-file-boundary-audit') {
+              const boundary = JSON.parse(prompt.slice(prompt.indexOf('<CANDIDATE_TRANSCRIPTION_BOUNDARY>\n') + '<CANDIDATE_TRANSCRIPTION_BOUNDARY>\n'.length, prompt.indexOf('\n</CANDIDATE_TRANSCRIPTION_BOUNDARY>')));
+              return { documentId: boundary.documentId, leftPageId: boundary.leftPageId, rightPageId: boundary.rightPageId, decision: 'issue', affectedPageIds: [boundary.leftPageId], findings: [{ id: 'loop', kind: 'structure', detail: 'Unresolved join.' }] };
+            }
+            const page = JSON.parse(prompt.slice(prompt.indexOf('<CANDIDATE_TRANSCRIPTION_PAGE>\n') + '<CANDIDATE_TRANSCRIPTION_PAGE>\n'.length, prompt.indexOf('\n</CANDIDATE_TRANSCRIPTION_PAGE>')));
+            if (page.boundaryFindings?.length) { toggle = !toggle; return { documentId: page.documentId, pageId: page.pageId, decision: 'revised', text: toggle ? 'C' : 'A', findings: [{ id: 'loop', kind: 'structure', detail: 'Unresolved join.' }] }; }
+            return { documentId: page.documentId, pageId: page.pageId, decision: 'pass', text: '', findings: [] };
+          },
+        });
+      } catch (error) { repeated = error; }
+      assert(repeated?.code === 'CAREER_SNAPSHOT_TRANSCRIPTION_AUDIT_NON_CONVERGENT' && /boundary audits did not converge/u.test(repeated.message),
+        'a repeated normalized page-plus-boundary-finding state fails closed rather than accepting an endlessly repaired attachment');
+      let invalidInventory = null;
+      try {
+        await __extractCareerFileSectionsForTests(['/tmp/v3-invalid-inventory.pdf'], {
+          attachmentInventoryProvider: async () => ({ kind: 'pdf', regions: [{ id: 'pdf-page-000002', index: 1 }, { id: 'pdf-page-000002', index: 0 }], audit: null }),
+          readPlainText: async () => null, callDocument: async () => { throw new Error('must not extract malformed inventory'); },
+        });
+      } catch (error) { invalidInventory = error; }
+      assert(/repeated or out-of-order regions/u.test(invalidInventory?.message || ''),
+        'a duplicate or out-of-order injected inventory is rejected before a worker can transcribe an ambiguous region mapping');
+      return { version: receipt.receiptVersion, boundaryRounds: boundaryRound, mappingTamperRejected: true, repeatedBoundaryStateRejected: true, malformedInventoryRejected: true };
+    },
+  },
+  {
+    name: 'physical PDF and image inventories are host-owned before v3 extraction',
+    run: async () => {
+      const directory = fs.mkdtempSync(path.join('/tmp', 'ic-attachment-inventory-'));
+      const pdfPath = path.join(directory, 'three-pages.pdf');
+      const imagePath = path.join(directory, 'single.png');
+      try {
+        const pdf = await PDFDocument.create();
+        for (let index = 0; index < 3; index += 1) pdf.addPage([200, 200]).drawText(`page ${index + 1}`);
+        fs.writeFileSync(pdfPath, await pdf.save());
+        fs.writeFileSync(imagePath, Buffer.from('not-decoded-by-host-inventory'));
+        const callDocument = async (_filePath, prompt, options) => {
+          if (options.task === 'career-file-extract') {
+            const host = JSON.parse(prompt.slice(prompt.indexOf('HOST_CONTINUATION:\n') + 'HOST_CONTINUATION:\n'.length));
+            return { documentId: host.documentId, pageId: host.expectedPageId, pageIndex: host.pageIndex,
+              regionId: host.expectedRegion.id, regionIndex: host.expectedRegion.index, partIndex: host.partIndex,
+              text: `${host.expectedRegion.id}\n`, completeRegion: true, complete: host.expectedRegion.index === (host.expectedRegion.id.startsWith('pdf-') ? 2 : 0) };
+          }
+          if (options.task === 'career-file-boundary-audit') {
+            const boundary = JSON.parse(prompt.slice(prompt.indexOf('<CANDIDATE_TRANSCRIPTION_BOUNDARY>\n') + '<CANDIDATE_TRANSCRIPTION_BOUNDARY>\n'.length, prompt.indexOf('\n</CANDIDATE_TRANSCRIPTION_BOUNDARY>')));
+            return { documentId: boundary.documentId, leftPageId: boundary.leftPageId, rightPageId: boundary.rightPageId, decision: 'pass', affectedPageIds: [], findings: [] };
+          }
+          const page = JSON.parse(prompt.slice(prompt.indexOf('<CANDIDATE_TRANSCRIPTION_PAGE>\n') + '<CANDIDATE_TRANSCRIPTION_PAGE>\n'.length, prompt.indexOf('\n</CANDIDATE_TRANSCRIPTION_PAGE>')));
+          return { documentId: page.documentId, pageId: page.pageId, decision: 'pass', text: '', findings: [] };
+        };
+        const [pdfResult, imageResult] = await Promise.all([
+          __extractCareerFileSectionsForTests([pdfPath], { verifyTranscription: true, inventoryAttachments: true, readPlainText: async () => null, callDocument }),
+          __extractCareerFileSectionsForTests([imagePath], { verifyTranscription: true, inventoryAttachments: true, readPlainText: async () => null, callDocument }),
+        ]);
+        const pdfReceipt = pdfResult.sourceFiles[0].transcriptionAudit;
+        const imageReceipt = imageResult.sourceFiles[0].transcriptionAudit;
+        assert(pdfReceipt.inventory.kind === 'pdf' && pdfReceipt.inventory.regions.map(region => region.id).join(',') === 'pdf-page-000001,pdf-page-000002,pdf-page-000003'
+          && imageReceipt.inventory.kind === 'image' && imageReceipt.inventory.regionCount === 1 && imageReceipt.inventory.regions[0].id === 'image-region-000001'
+          && validatePagedAttachmentAuditReceiptForTests(pdfReceipt) && validatePagedAttachmentAuditReceiptForTests(imageReceipt),
+        'pdfjs supplies exact host-owned physical PDF page identities and an image has exactly one host-owned region before any worker can declare completion');
+        return { pdfPages: pdfReceipt.inventory.regionCount, imageRegions: imageReceipt.inventory.regionCount };
+      } finally { fs.rmSync(directory, { recursive: true, force: true }); }
+    },
+  },
+  {
+    name: 'AI-container inventory audits and extraction remain paged beyond 100 regions, including a multipart region',
+    run: async () => {
+      const directory = fs.mkdtempSync(path.join('/tmp', 'ic-paged-container-'));
+      const filePath = path.join(directory, 'large-container.docx');
+      fs.writeFileSync(filePath, 'synthetic container bytes', 'utf8');
+      const regionCount = 103;
+      const regions = Array.from({ length: regionCount }, (_value, index) => ({ id: `container-region-${String(index + 1).padStart(6, '0')}`, index }));
+      const calls = [];
+      try {
+        const result = await __extractCareerFileSectionsForTests([filePath], {
+          verifyTranscription: true,
+          inventoryAttachments: true,
+          readPlainText: async () => null,
+          callDocument: async (_file, prompt, options) => {
+            calls.push(options.task);
+            if (options.task === 'career-file-inventory') {
+              const host = JSON.parse(prompt.slice(prompt.indexOf('HOST_INVENTORY_CONTINUATION:\n') + 'HOST_INVENTORY_CONTINUATION:\n'.length));
+              const page = regions.slice(host.startIndex, host.startIndex + 100);
+              return { documentId: host.documentId, regions: page, complete: host.startIndex + page.length === regions.length,
+                ...(host.startIndex + page.length === regions.length ? {} : { nextCursor: `inventory-${host.startIndex + page.length}` }) };
+            }
+            if (options.task === 'career-file-inventory-audit') {
+              const begin = '<CANDIDATE_ATTACHMENT_INVENTORY>\n';
+              const end = '\n</CANDIDATE_ATTACHMENT_INVENTORY>';
+              const candidate = JSON.parse(prompt.slice(prompt.indexOf(begin) + begin.length, prompt.indexOf(end)));
+              return { documentId: candidate.documentId, startIndex: candidate.startIndex, decision: 'pass', regions: candidate.regions, complete: candidate.complete };
+            }
+            if (options.task === 'career-file-extract') {
+              const host = JSON.parse(prompt.slice(prompt.indexOf('HOST_CONTINUATION:\n') + 'HOST_CONTINUATION:\n'.length));
+              const firstPart = host.expectedRegion.index === 0 && host.partIndex === 0;
+              const lastRegion = host.expectedRegion.index === regionCount - 1;
+              return {
+                documentId: host.documentId,
+                pageId: host.expectedPageId,
+                pageIndex: host.pageIndex,
+                regionId: host.expectedRegion.id,
+                regionIndex: host.expectedRegion.index,
+                partIndex: host.partIndex,
+                text: firstPart ? 'A'.repeat(60_000) : host.expectedRegion.index === 0 ? 'B' : `region-${host.expectedRegion.index + 1}\n`,
+                completeRegion: !firstPart,
+                complete: !firstPart && lastRegion,
+                ...(firstPart ? { nextCursor: 'region-0-part-1' } : {}),
+              };
+            }
+            if (options.task === 'career-file-boundary-audit') {
+              const begin = '<CANDIDATE_TRANSCRIPTION_BOUNDARY>\n';
+              const end = '\n</CANDIDATE_TRANSCRIPTION_BOUNDARY>';
+              const boundary = JSON.parse(prompt.slice(prompt.indexOf(begin) + begin.length, prompt.indexOf(end)));
+              return { documentId: boundary.documentId, leftPageId: boundary.leftPageId, rightPageId: boundary.rightPageId, decision: 'pass', affectedPageIds: [], findings: [] };
+            }
+            const begin = '<CANDIDATE_TRANSCRIPTION_PAGE>\n';
+            const end = '\n</CANDIDATE_TRANSCRIPTION_PAGE>';
+            const page = JSON.parse(prompt.slice(prompt.indexOf(begin) + begin.length, prompt.indexOf(end)));
+            return { documentId: page.documentId, pageId: page.pageId, decision: 'pass', text: '', findings: [] };
+          },
+        });
+        const receipt = result.sourceFiles[0].transcriptionAudit;
+        assert(receipt.inventory.kind === 'ai-container' && receipt.inventory.regionCount === regionCount
+          && receipt.inventory.audit.roundCount === 2 && receipt.inventory.audit.samples.length <= 8
+          && receipt.pages.length === regionCount + 1
+          && receipt.pages[0].regionId === regions[0].id && receipt.pages[0].partIndex === 0 && receipt.pages[0].partCount === 2
+          && receipt.pages[1].regionId === regions[0].id && receipt.pages[1].partIndex === 1 && receipt.pages[1].partCount === 2
+          && receipt.pages.at(-1).regionId === regions.at(-1).id
+          && result.sourceFiles[0].text.length > 60_000
+          && calls.filter(task => task === 'career-file-inventory-audit').length === 2
+          && validatePagedAttachmentAuditReceiptForTests(receipt),
+        'AI-container discovery/audit pages have no global 100-region ceiling, while each region is fully covered by stable contiguous multipart extraction and receipt validation');
+        return { regions: receipt.inventory.regionCount, parts: receipt.pages.length, inventoryAuditRounds: receipt.inventory.audit.roundCount };
+      } finally {
+        fs.rmSync(directory, { recursive: true, force: true });
+      }
+    },
+  },
+  {
+    name: 'pinned scoring re-reads approved projection and ignores mutable renderer career text',
+    run: async () => {
+      const afterOldBoundary = `APPROVED_EVIDENCE_AFTER_80K_${'z'.repeat(80_100)}`;
+      const snapshot = {
+        status: 'approved', snapshotId: 'a'.repeat(64), profile: {
+          identity: { name: 'Ada', contacts: ['ada@example.test'], evidenceSegmentIds: [] },
+          roles: [{ id: 'role-1', title: 'Engineer', employer: 'Acme', startDate: '2020', endDate: 'Present', location: '', achievementIds: ['achievement-1'], skillIds: [] }],
+          achievements: [{ id: 'achievement-1', roleId: 'role-1', claim: afterOldBoundary, technologies: [], metrics: [], evidenceSegmentIds: [] }],
+          projects: [], skills: [], education: [], certifications: [], otherEvidence: [], segmentCoverage: [],
+        },
+      };
+      const resolved = await __resolvePinnedScoringInputForTests({
+        careerSnapshotId: snapshot.snapshotId,
+        profile: { titles: ['Renderer lie'] }, careerData: 'RENDERER_RAW_SOURCE_ONLY', root: '/unused',
+        readSnapshot: async () => snapshot,
+      });
+      let missing = null;
+      try {
+        await __resolvePinnedScoringInputForTests({ careerSnapshotId: snapshot.snapshotId, root: '/unused', readSnapshot: async () => null });
+      } catch (error) { missing = error; }
+      const planned = buildJobAnalysisSnapshot({
+        jobs: [], profile: resolved.profile, careerData: resolved.careerData,
+        careerSnapshotId: snapshot.snapshotId, approvedScoringSnapshot: true,
+      });
+      assert(resolved.pinned && resolved.careerData.includes('APPROVED_EVIDENCE_AFTER_80K_')
+        && !resolved.careerData.includes('RENDERER_RAW_SOURCE_ONLY')
+        && resolved.profile.workHistory[0].id === 'role-1'
+        && planned.candidateEvidencePages?.some(page => page.text.includes('APPROVED_EVIDENCE_AFTER_80K_'))
+        && /missing, stale, or no longer approved/.test(missing?.message || ''),
+      'a pinned score input is reconstructed from the approved snapshot (including evidence beyond the former raw-prefix boundary), ignores renderer text, and fails closed when the pin cannot be read');
+      return { pinned: true, approvedChars: resolved.careerData.length, missingRejected: true };
+    },
+  },
+  {
+    name: 'pinned scoring pages every approved evidence slice and hierarchically reduces complete ordered coverage',
+    run: () => {
+      const pages = partitionPinnedScoringEvidenceForTests([
+        'FIRST_PAGE_UNIQUE_EVIDENCE\n',
+        ...Array.from({ length: 8 }, (_, index) => `middle ${index} ${'x'.repeat(47_000)}\n`),
+        `LAST_PAGE_UNIQUE_EVIDENCE ${'y'.repeat(47_000)}\n`,
+      ].join(''));
+      const pageResults = pages.map((page, index) => [{
+        matchScore: index === pages.length - 1 ? 98 : index === 0 ? 91 : 20,
+        reasoning: index === pages.length - 1 ? 'Late approved evidence is the strongest direct match.' : 'Earlier approved evidence.',
+        careerDirection: 'Engineering',
+        requirementAssessments: [{ requirementText: 'Core skill', priority: 'required', status: 'direct', jobEvidence: 'Need core skill', candidateEvidence: index === pages.length - 1 ? 'LAST_PAGE_UNIQUE_EVIDENCE' : 'FIRST_PAGE_UNIQUE_EVIDENCE' }],
+        materialGaps: index === pages.length - 1 ? [{ requirementText: 'Required regulated credential', priority: 'required', status: 'not_documented', jobEvidence: 'Credential is required', candidateEvidence: '' }] : [],
+      }]);
+      const reduced = reducePinnedScoringPageResultsForTests(pages, pageResults, 1);
+      const reducedFromRollingMap = reducePinnedScoringPageResultsForTests(
+        pages,
+        new Map(pageResults.map((rows, index) => [index, rows])),
+        1,
+      );
+      let missing = null;
+      let tampered = null;
+      try { reducePinnedScoringPageResultsForTests(pages, pageResults.slice(0, -1), 1); } catch (error) { missing = error; }
+      try { reducePinnedScoringPageResultsForTests([{ ...pages[0], digest: '0'.repeat(64) }, ...pages.slice(1)], pageResults, 1); } catch (error) { tampered = error; }
+      const summary = JSON.parse(reduced.summary);
+      assert(pages.length > 8
+        && summary.coverage.pageCount === pages.length
+        && reduced.evidence[0].observations[0].pageId === pages.at(-1).id
+        && reduced.evidence[0].observations[0].requirementAssessments[0].candidateEvidence === 'LAST_PAGE_UNIQUE_EVIDENCE'
+        && reduced.evidence[0].requirementCount >= 2
+        && reduced.evidence[0].requirementStatuses.some(item => item.status === 'not_documented' && item.requirementText === 'Required regulated credential')
+        && reduced.rows[0].requirementAssessments.some(item => item.candidateEvidence === 'LAST_PAGE_UNIQUE_EVIDENCE')
+        && reduced.ledgerPages.length >= 1
+        && reducedFromRollingMap.coverage.pageDigest === reduced.coverage.pageDigest
+        && reducedFromRollingMap.rows[0]?.matchScore === reduced.rows[0]?.matchScore
+        && /missing one or more required pages/.test(missing?.message || '')
+        && /identity or digest is invalid/.test(tampered?.message || ''),
+      'all deterministic evidence pages are required before final scoring, hierarchical coverage stays bounded, a late high-value page outranks early evidence, and missing/tampered pages fail closed');
+      return { pages: pages.length, lateEvidenceWins: true, rollingMapReduction: true, missingRejected: true, tamperRejected: true };
+    },
+  },
+  {
+    name: 'pinned scoring measures the complete UTF-8 prompt envelope rather than only career-page characters',
+    run: () => {
+      const safe = scoringPromptFitsEnvelopeForTests({ cachedPrefix: 'rubric', prompt: 'job plus page' });
+      const unsafe = scoringPromptFitsEnvelopeForTests({ cachedPrefix: 'é'.repeat(90_000), prompt: 'job' });
+      assert(safe.fits && !unsafe.fits && unsafe.bytes > unsafe.limit,
+        'the scoring envelope counts UTF-8 rubric/prefix/job/schema material and rejects an actual oversized complete prompt');
+      return { safeBytes: safe.bytes, rejectedBytes: unsafe.bytes, limit: unsafe.limit };
+    },
+  },
+  {
+    name: 'pinned scoring recursively subdivides record groups without character leaves or source loss',
+    run: () => {
+      const source = Array.from({ length: 320 }, (_unused, index) => `RECORD_${String(index).padStart(4, '0')}\n`).join('');
+      const initial = partitionPinnedScoringEvidenceForTests(source);
+      const leaves = subdividePinnedScoringEvidenceForEnvelopeForTests(initial, page => Buffer.byteLength(page.text, 'utf8') <= 2_048);
+      const atomicSource = `ATOMIC_LONG_RECORD:${'x'.repeat(5_000)}`;
+      const atomic = subdividePinnedScoringEvidenceForEnvelopeForTests(
+        partitionPinnedScoringEvidenceForTests(atomicSource),
+        page => Buffer.byteLength(page.text, 'utf8') <= 2_048,
+      );
+      assert(leaves.length > initial.length
+        && leaves.every((page, index) => page.index === index && Buffer.byteLength(page.text, 'utf8') <= 2_048)
+        && leaves.map(page => page.text).join('') === source
+        && new Set(leaves.map(page => page.id)).size === leaves.length
+        && atomic.length === 1 && atomic[0].text === atomicSource,
+      'an envelope-too-large evidence page is recursively split into bounded record groups with exact concatenation, while an atomic long source record never becomes millions of character leaves');
+      return { initialPages: initial.length, leafPages: leaves.length, sourceChars: source.length, atomicChars: atomicSource.length };
+    },
+  },
+  {
+    name: 'pinned scoring never authorizes a partial-page score when any required leaf is null',
+    run: () => {
+      const pages = partitionPinnedScoringEvidenceForTests(`APPROVED_GOOD_EVIDENCE\n${'x'.repeat(24_100)}`);
+      const pageResults = pages.map((_page, index) => [index === 0 ? {
+        matchScore: 93,
+        reasoning: 'The first leaf contains direct evidence.',
+        careerDirection: 'Engineering',
+        requirementAssessments: [{ requirementText: 'Core skill', priority: 'required', status: 'direct', jobEvidence: 'Need core skill', candidateEvidence: 'APPROVED_GOOD_EVIDENCE' }],
+        materialGaps: [],
+      } : null]);
+      const reduced = reducePinnedScoringPageResultsForTests(pages, pageResults, 1);
+      const receipt = reduced.coverageReceipts[0];
+      assert(pages.length > 1
+        && reduced.rows[0] === null
+        && reduced.evidence[0].unscorable
+        && reduced.evidence[0].observations.length === 1
+        && receipt.pageCount === pages.length
+        && receipt.failedLeaves.length === pages.length - 1
+        && receipt.failedLeaves.every(leaf => pages[leaf.pageIndex]?.id === leaf.pageId && pages[leaf.pageIndex]?.digest === leaf.pageDigest)
+        && reduced.ledgerPages.some(page => page.entries.some(entry => entry.kind === 'unscorable-page-coverage')),
+      'one valid page cannot make a full pinned score authoritative when another required page failed; the resulting placeholder carries exact failed-leaf coverage');
+      return { pages: pages.length, failedLeaves: receipt.failedLeaves.length, partialScoreRejected: true };
+    },
+  },
+  {
+    name: 'pinned scoring keeps full requirement identity and pages an oversized status ledger without a final summary call',
+    run: () => {
+      const pages = partitionPinnedScoringEvidenceForTests('APPROVED_FULL_EVIDENCE\n');
+      const sharedPrefix = `Required control ${'X'.repeat(420)}`;
+      const requirements = [
+        { requirementText: `${sharedPrefix} A`, priority: 'required', status: 'not_documented', jobEvidence: 'Control A is mandatory.', candidateEvidence: '' },
+        { requirementText: `${sharedPrefix} B`, priority: 'required', status: 'not_documented', jobEvidence: 'Control B is mandatory.', candidateEvidence: '' },
+        ...Array.from({ length: 260 }, (_value, index) => ({
+          requirementText: `Distinct required evidence ${index}: ${'q'.repeat(120)}`,
+          priority: 'required', status: 'not_documented',
+          jobEvidence: `Posting control ${index}: ${'p'.repeat(120)}`,
+          candidateEvidence: '',
+        })),
+      ];
+      const reduced = reducePinnedScoringPageResultsForTests(pages, [[{
+        matchScore: 72, reasoning: 'Every complete page-local requirement is retained by the host ledger.', careerDirection: 'Engineering',
+        requirementAssessments: [], materialGaps: requirements,
+      }]], 1);
+      const statuses = reduced.evidence[0].requirementStatuses;
+      const prefixStatuses = statuses.filter(item => item.requirementText.startsWith(sharedPrefix));
+      assert(prefixStatuses.length === 2 && new Set(prefixStatuses.map(item => item.id)).size === 2
+        && reduced.rows[0].materialGaps.length === requirements.length
+        && reduced.ledgerPages.length > 1
+        && reduced.ledgerPages.every((page, index) => page.index === index && /^[a-f0-9]{64}$/u.test(page.digest)),
+      'full normalized material fields, not truncated prefixes, identify requirements; every status/evidence record is retained in bounded ledger pages rather than a 24k aggregate reducer abort');
+      return { requirements: requirements.length, ledgerPages: reduced.ledgerPages.length, prefixCollisionRejected: true };
+    },
+  },
+  {
+    name: 'career input staging preserves original sensitive-path gates and safely prunes only stale private runs',
+    run: async () => {
+      const root = fs.mkdtempSync(path.join(process.cwd(), '.ic-career-stage-lifecycle-'));
+      const stagingRoot = path.join(root, 'staging');
+      const sensitiveDirectory = path.join(root, '.ssh');
+      const sensitiveFile = path.join(sensitiveDirectory, 'credentials');
+      try {
+        fs.mkdirSync(sensitiveDirectory, { recursive: true });
+        fs.writeFileSync(sensitiveFile, 'secret', 'utf8');
+        let rejected = null;
+        try { await __stageCareerInputFilesForTests([sensitiveFile], { stagingRoot }); } catch (error) { rejected = error; }
+        let symlinkRejected = null;
+        const harmlessLookingLink = path.join(root, 'ordinary.pdf');
+        try {
+          fs.symlinkSync(sensitiveFile, harmlessLookingLink);
+          try { await __stageCareerInputFilesForTests([harmlessLookingLink], { stagingRoot }); } catch (error) { symlinkRejected = error; }
+        } catch (error) {
+          // Some restricted CI filesystems prohibit symlinks. The direct-path
+          // assertion above still exercises the mandatory primary fence there.
+          if (!['EPERM', 'EACCES', 'ENOTSUP'].includes(error?.code)) throw error;
+        }
+        const oversized = path.join(root, 'oversized.pdf');
+        fs.closeSync(fs.openSync(oversized, 'w'));
+        fs.truncateSync(oversized, (50 * 1024 * 1024) + 1);
+        let oversizedRejected = null;
+        try { await __stageCareerInputFilesForTests([oversized], { stagingRoot }); } catch (error) { oversizedRejected = error; }
+        const boundedDescriptor = path.join(root, 'descriptor.md');
+        fs.writeFileSync(boundedDescriptor, 'before', 'utf8');
+        const descriptorHash = (await import('node:crypto')).createHash('sha256').update('before').digest('hex');
+        fs.truncateSync(boundedDescriptor, (50 * 1024 * 1024) + 1);
+        let finalFenceOversizeRejected = null;
+        try {
+          await __assertCareerInputDescriptorsStillMatchForTests([boundedDescriptor], [{ name: 'descriptor.md', contentHash: descriptorHash }]);
+        } catch (error) { finalFenceOversizeRejected = error; }
+        const escapedStagingTarget = path.join(root, 'outside-staging');
+        const symlinkedStagingRoot = path.join(root, 'staging-link');
+        let symlinkedRootRejected = null;
+        try {
+          fs.mkdirSync(escapedStagingTarget);
+          fs.symlinkSync(escapedStagingTarget, symlinkedStagingRoot);
+          const ordinary = path.join(root, 'ordinary.md');
+          fs.writeFileSync(ordinary, 'ordinary', 'utf8');
+          try { await __stageCareerInputFilesForTests([ordinary], { stagingRoot: symlinkedStagingRoot }); } catch (error) { symlinkedRootRejected = error; }
+        } catch (error) {
+          if (!['EPERM', 'EACCES', 'ENOTSUP'].includes(error?.code)) throw error;
+        }
+        fs.mkdirSync(stagingRoot, { recursive: true, mode: 0o700 });
+        const oldRun = path.join(stagingRoot, 'run-abcdef');
+        const currentRun = path.join(stagingRoot, 'run-ghijkl');
+        const foreign = path.join(stagingRoot, 'keep-this');
+        fs.mkdirSync(oldRun); fs.mkdirSync(currentRun); fs.mkdirSync(foreign);
+        const old = new Date(Date.now() - (26 * 60 * 60 * 1000));
+        fs.utimesSync(oldRun, old, old);
+        const removed = await __pruneStaleCareerInputStagesForTests({ stagingRoot, now: Date.now() });
+        assert(/Refusing to read a sensitive system\/credential path/u.test(rejected?.message || '')
+          && (symlinkRejected == null || /Refusing to read a sensitive system\/credential path/u.test(symlinkRejected?.message || ''))
+          && /50 MiB career-file safety limit/u.test(oversizedRejected?.message || '')
+          && /50 MiB career-file safety limit/u.test(finalFenceOversizeRejected?.message || '')
+          && (symlinkedRootRejected == null || /staging root .*symlink|staging root changed/u.test(symlinkedRootRejected?.message || ''))
+          && !fs.existsSync(oldRun) && fs.existsSync(currentRun) && fs.existsSync(foreign) && removed === 1,
+        'a sensitive original, safe-looking symlink, oversized input, or symlinked staging root is refused before private bytes can escape or be read unboundedly, while startup cleanup removes only stale mkdtemp-shaped private runs');
+        return { sensitiveRejected: true, symlinkRejected: Boolean(symlinkRejected), oversizedRejected: true, finalFenceOversizeRejected: true, symlinkedRootRejected: Boolean(symlinkedRootRejected), staleRunsPruned: removed };
+      } finally {
+        fs.rmSync(root, { recursive: true, force: true });
+      }
+    },
+  },
   {
     name: 'job analysis snapshot publication flushes both replacement and directory before recovery acknowledges',
     run: () => {
@@ -158,14 +958,14 @@ export default [
       for (let attempt = 0; attempt < 20 && wideCalls.length < 11; attempt += 1) {
         await new Promise(resolve => setImmediate(resolve));
       }
-      assert(wideCalls.length === 10 && activeWide === 9 && peakWide === 10,
-        'the eleventh career document must wait for the full fixed ten-document wave');
+      assert(wideCalls.length === 11 && activeWide === 10 && peakWide === 10,
+        'the eleventh career document must refill the completed slot without waiting for a fixed wave barrier');
       wideCalls.slice(1).forEach(call => call.release());
       for (let attempt = 0; attempt < 20 && wideCalls.length < 11; attempt += 1) {
         await new Promise(resolve => setImmediate(resolve));
       }
-      assert(wideCalls.length === 11 && activeWide === 1 && peakWide === 10,
-        'the next career-document wave begins only after its first ten prompts settle');
+      assert(wideCalls.length === 11 && activeWide === 0 && peakWide === 10,
+        'the rolling career-document roster preserves its ten-live-request safety bound');
       wideCalls[10].release();
       const wideResult = await wide;
       assert(wideResult.transcribedFiles === 11 && wideResult.sections.length === 11,
@@ -195,7 +995,7 @@ export default [
         failure = error;
       }
       assert(siblingStarted && siblingAbortObserved
-        && failure?.message.includes('No text could be read from empty.pdf'),
+        && /continuation page/.test(failure?.message || ''),
       'an invalid file response aborts and settles every still-pending sibling handoff before the drop fails');
 
       const parent = new AbortController();
@@ -252,18 +1052,18 @@ export default [
 
         aiCalls.length = 0;
         const mixed = await __extractCareerFileSectionsForTests([docxPath, notesMd, pdfPath, notesTxt], { callDocument });
-        assert(aiCalls.map(call => path.basename(call.filePath)).join(',') === 'career.docx,resume.pdf', `only the .docx and the .pdf reach the AI: ${JSON.stringify(aiCalls)}`);
+        assert(aiCalls.map(call => path.basename(call.filePath)).sort().join(',') === 'career.docx,resume.pdf', `only the .docx and the .pdf reach the AI (concurrent dispatch order is intentionally not authoritative): ${JSON.stringify(aiCalls)}`);
         assert(mixed.directTextFiles === 2 && mixed.transcribedFiles === 2, 'the markdown and text files are read locally');
         assert(mixed.sections[0] === '===== FILE: career.docx =====\nTRANSCRIBED career.docx'
-          && mixed.sections[1] === '===== FILE: notes.md =====\nNotes\n- one'
+          && mixed.sections[1] === '===== FILE: notes.md =====\n## Notes\n* one\n'
           && mixed.sections[2] === '===== FILE: resume.pdf =====\nTRANSCRIBED resume.pdf'
-          && mixed.sections[3] === '===== FILE: notes.txt =====\nPlain notes', 'sections keep drop order whichever route each file took');
+          && mixed.sections[3] === '===== FILE: notes.txt =====\nPlain notes\n', 'sections keep drop order and exact direct-text source bytes whichever route each file took');
 
         // The per-file "No text could be read" error applies to a transcribed .docx and .pdf alike.
         for (const file of [docxPath, pdfPath]) {
           let emptyError = null;
           try { await __extractCareerFileSectionsForTests([file], { callDocument: async () => ({ text: '  ' }) }); } catch (error) { emptyError = error; }
-          assert(emptyError && emptyError.message.includes(`No text could be read from ${path.basename(file)}`), `an empty transcription of ${path.basename(file)} still names the file`);
+          assert(emptyError && /continuation page/.test(emptyError.message), `an empty transcription of ${path.basename(file)} is rejected by the current paged contract`);
         }
         // An aborted signal stops the extraction before any reader or handoff runs.
         aiCalls.length = 0;
@@ -381,9 +1181,10 @@ export default [
       const stagingEnd = source.indexOf('const stageOnPage =', stagingStart);
       const staging = source.slice(stagingStart, stagingEnd);
       assert(staging.includes('if (resumeScope) {')
-        && staging.includes('if (!skipProviderCollection) {\n        const stageAdvanced = await setJobRunStage')
-        && staging.includes('if (hasExactResumeToken && stageAdvanced !== true)')
-        && staging.includes('} else {\n      const startedRun = await startJobRun'),
+        && staging.includes('if (!skipProviderCollection) {')
+        && staging.includes('await assertSearchCurrent();')
+        && staging.includes("const stageAdvanced = await setJobRunStage(canvasFilePath, 'searching', runStartedAt, {")
+        && staging.includes('if (stageAdvanced !== true)'),
       'gathered-only recovery remains inside the resume branch, preserving its original manifest token and staged rows instead of starting/truncating a fresh run');
       // A run that dies DURING the gather never reaches the finalization loop
       // below, so a source's terminal status has to be durable the moment that
@@ -480,16 +1281,20 @@ export default [
           expectedRunId: runId,
           nodeId,
         });
+        const fixtureAuthority = (await readRunState(canvasPath, startedAt + 401, { nodeId }))
+          ?.manifest?.inputs?.operationAuthority;
 
         const first = await finishRunWithSavedListings(canvasPath, {
           expectedRunId: runId,
           nodeId,
+          expectedOperationAuthority: fixtureAuthority,
           now: stoppedAt,
         });
         const marked = await readRunState(canvasPath, stoppedAt + 1, { nodeId });
         const second = await finishRunWithSavedListings(canvasPath, {
           expectedRunId: runId,
           nodeId,
+          expectedOperationAuthority: fixtureAuthority,
           now: stoppedAt + 500,
         });
         const attemptedDowngrade = await setStage(canvasPath, 'searching', stoppedAt + 600, {
@@ -565,9 +1370,23 @@ export default [
         registerJobsHandlers();
         const searchJobs = ipcMain.__getInvokeHandler('search-jobs');
         const peekJobRun = ipcMain.__getInvokeHandler('peek-job-run');
+        const career = await writeApprovedCareerSnapshotFixture();
+        const claim = await claimJobAnalysisOperationAuthority({
+          canvasFilePath: canvasPath,
+          hubId: nodeId,
+          operationId: 'test-config-skipped-source',
+          semanticBase: {
+            kind: 'test-config-skipped-source', careerSnapshotId: career.snapshotId,
+            runId: 'test-config-skipped-run', analysisRevisionId: null,
+            fingerprint: null, continuationId: null, sourceArtifactFingerprint: null,
+          },
+        });
+        assert(claim.admitted === true, 'the fixture must obtain the same durable authority required by provider IPC');
         const result = await searchJobs({ sender }, {
           nodeId,
           canvasFilePath: canvasPath,
+          careerSnapshotId: career.snapshotId,
+          operationAuthority: claim.receipt,
           queries: ['data engineer'],
           enabledSourceIds: ['usajobs'],
           // USAJobs is country-applicable here, so this reaches config-missing
@@ -610,50 +1429,55 @@ export default [
         'same-folder canvases use distinct non-sensitive hashed analysis filenames');
         await fs.promises.writeFile(paths.lastSuccessJsonPath, JSON.stringify({ canvasFilePath: canvas, jobs: [{ title: 'Recovered A' }] }));
         await fs.promises.writeFile(siblingPaths.lastSuccessJsonPath, JSON.stringify({ canvasFilePath: siblingCanvas, jobs: [{ title: 'Recovered B' }] }));
-        let loaded = await __loadJobAnalysisSnapshotForTests(canvas);
-        const siblingLoaded = await __loadJobAnalysisSnapshotForTests(siblingCanvas);
-        assert(loaded.origin === 'last-success' && loaded.snapshot.jobs[0].title === 'Recovered A'
-          && loaded.paths.jsonPath === paths.lastSuccessJsonPath
-          && loaded.paths.promptPath === null
-          && siblingLoaded.origin === 'last-success' && siblingLoaded.snapshot.jobs[0].title === 'Recovered B'
-          && siblingLoaded.paths.jsonPath === siblingPaths.lastSuccessJsonPath,
-        'a missing current snapshot recovers only that canvas’s populated last-success copy and returns its real JSON path without a mismatched prompt');
-        await fs.promises.writeFile(paths.jsonPath, '{not json');
-        loaded = await __loadJobAnalysisSnapshotForTests(canvas);
-        assert(loaded.origin === 'last-success', 'a corrupt current snapshot recovers the populated last-success copy');
-        const currentSnapshot = {
-          canvasFilePath: canvas,
-          createdAt: '2026-08-27T12:34:56.000Z',
-          gatheredJobCount: 0,
-          cachedPrefix: 'Candidate evidence for the current saved snapshot.',
-          previewBatches: [],
-          jobs: [],
-        };
-        await fs.promises.writeFile(paths.jsonPath, JSON.stringify(currentSnapshot));
-        loaded = await __loadJobAnalysisSnapshotForTests(canvas);
-        assert(loaded.origin === 'current' && loaded.snapshot.jobs.length === 0 && loaded.paths.promptPath === null,
-          'a valid empty current snapshot remains authoritative over older populated data and does not expose a missing prompt');
-        await fs.promises.writeFile(paths.promptPath, 'Complete AI scoring prompt — stale sibling/run content');
-        loaded = await __loadJobAnalysisSnapshotForTests(canvas);
-        assert(loaded.origin === 'current' && loaded.paths.promptPath === null,
-          'a stale prompt beside a current snapshot is never exposed as a verified prompt');
-        await fs.promises.writeFile(paths.promptPath, __formatJobAnalysisPromptForTests(currentSnapshot));
-        loaded = await __loadJobAnalysisSnapshotForTests(canvas);
-        assert(loaded.origin === 'current' && loaded.paths.promptPath === paths.promptPath,
-          'only a current prompt whose full content matches the recovered snapshot is exposed');
-        await fs.promises.rm(paths.jsonPath);
-        await fs.promises.rm(paths.lastSuccessJsonPath);
-        await fs.promises.writeFile(paths.legacyJsonPath, JSON.stringify({ canvasFilePath: canvas, jobs: [{ title: 'Legacy owned' }] }));
-        loaded = await __loadJobAnalysisSnapshotForTests(canvas);
-        assert(loaded.origin === 'legacy-current' && loaded.snapshot.jobs[0].title === 'Legacy owned'
-          && loaded.paths.jsonPath === paths.legacyJsonPath
-          && loaded.paths.promptPath === null,
-        'an old directory-scoped snapshot remains recoverable only after it proves this canvas owns it, with no unverified legacy prompt path');
-        await fs.promises.writeFile(paths.legacyJsonPath, JSON.stringify({ canvasFilePath: siblingCanvas, jobs: [{ title: 'Must not cross' }] }));
-        let rejected = false;
-        try { await __loadJobAnalysisSnapshotForTests(canvas); } catch (error) { rejected = error?.code === 'ENOENT'; }
-        assert(rejected, 'a mismatched legacy snapshot is rejected instead of crossing canvases in the same directory');
-        return { origin: loaded.origin, namespace: path.basename(paths.jsonPath).slice(0, 19) };
+        let rejectedA = false;
+        let rejectedB = false;
+        try { await __loadJobAnalysisSnapshotForTests(canvas); } catch (error) { rejectedA = error?.code === 'ENOENT'; }
+        try { await __loadJobAnalysisSnapshotForTests(siblingCanvas); } catch (error) { rejectedB = error?.code === 'ENOENT'; }
+        assert(rejectedA && rejectedB,
+          'unsealed historical or ownerless snapshot bytes are diagnostics-only and cannot become a recovery input merely because their canvas field looks plausible');
+        return { unsealedRejected: true, namespace: path.basename(paths.jsonPath).slice(0, 19) };
+      } finally {
+        await fs.promises.rm(root, { recursive: true, force: true });
+      }
+    },
+  },
+  {
+    name: 'job analysis recovery preserves an immutable career snapshot pin without guessing one for legacy data',
+    run: async () => {
+      const root = await fs.promises.mkdtemp(path.join('/tmp', 'ic-analysis-career-pin-'));
+      const canvas = path.join(root, 'canvas.json');
+      const hubId = 'career-pin-hub';
+      const runId = 'career-pin-run';
+      const careerSnapshotId = 'a'.repeat(64);
+      try {
+        const { snapshot } = buildJobAnalysisSnapshot({
+          jobs: [{ title: 'Pinned Engineer', company: 'Example' }],
+          profile: { titles: ['Engineer'] },
+          careerData: 'Approved career projection only.',
+          careerSnapshotId,
+          nodeId: hubId,
+          snapshotContext: { sourceHubId: hubId, runId, canvasFilePath: canvas },
+        });
+        assert(snapshot.careerSnapshotId === careerSnapshotId,
+          'a fresh analysis snapshot must record the exact approved career artifact that its scores will represent');
+        await __saveJobAnalysisSnapshotForTests(snapshot);
+        const restored = await __loadJobAnalysisSnapshotForTests(canvas, hubId, runId);
+        assert(restored.snapshot.careerSnapshotId === careerSnapshotId
+          && restored.snapshot.jobs[0]?.title === 'Pinned Engineer',
+        'a restart must restore the saved candidate universe and its immutable career pin together');
+
+        const legacy = buildJobAnalysisSnapshot({
+          jobs: [], profile: {}, careerData: 'Legacy data', nodeId: hubId,
+          careerSnapshotId: 'not-a-snapshot-id',
+          snapshotContext: { sourceHubId: hubId, runId: 'legacy-pin-run', canvasFilePath: canvas },
+        }).snapshot;
+        const renderer = fs.readFileSync(path.resolve('src/nodes/JobSearchNode.jsx'), 'utf8');
+        assert(legacy.careerSnapshotId === null
+          && renderer.includes('const admittedSavedCareerSnapshotId = normalizedJobCareerSnapshotId(snapshot.careerSnapshotId)')
+          && renderer.includes('if (!admittedSavedCareerSnapshotId || !savedSnapshotStillCurrent())')
+          && renderer.includes('stampJobsWithCareerSnapshot(scoredJobs, baseData.careerSnapshotId)'),
+        'missing or malformed historical IDs remain legacy/null and cannot be resumed; recovered scored jobs are stamped only from their exact immutable pin');
+        return { persistedPin: true, recoveredPin: restored.snapshot.careerSnapshotId, legacyRemainsNull: true };
       } finally {
         await fs.promises.rm(root, { recursive: true, force: true });
       }
@@ -783,22 +1607,11 @@ export default [
         await fs.promises.rm(hubAPaths.jsonPath);
         await fs.promises.rm(hubAPaths.lastSuccessJsonPath);
         await fs.promises.writeFile(hubAPaths.legacyCanvasJsonPath, JSON.stringify(hubA));
-        loaded = await __loadJobAnalysisSnapshotForTests(canvas, 'hub-a', 'run-a');
-        assert(loaded.origin === 'legacy-canvas-current' && loaded.paths.jsonPath === hubAPaths.legacyCanvasJsonPath,
-          'a missing owner bundle falls back first to the earlier canvas-hashed bundle after exact hub and canvas validation');
-
-        await fs.promises.rm(hubAPaths.legacyCanvasJsonPath);
-        await fs.promises.writeFile(hubAPaths.legacyJsonPath, JSON.stringify(hubA));
-        loaded = await __loadJobAnalysisSnapshotForTests(canvas, 'hub-a', 'run-a');
-        assert(loaded.origin === 'legacy-current' && loaded.paths.jsonPath === hubAPaths.legacyJsonPath,
-          'the pre-namespace directory bundle remains available only after the canvas-hash migration fallback is exhausted');
-
-        await fs.promises.writeFile(hubAPaths.legacyJsonPath, JSON.stringify(hubB));
         let rejected = false;
         try { await __loadJobAnalysisSnapshotForTests(canvas, 'hub-a', 'run-a'); } catch (error) { rejected = error?.code === 'ENOENT'; }
         assert(rejected,
-          'a foreign owner or run token in either legacy generation is never returned to this hub');
-        return { ownerPath: path.basename(hubAPaths.jsonPath), legacyOrigin: loaded.origin };
+          'an owner-looking legacy bundle still lacks an authority publication and is never returned to this hub after the recovery fence ships');
+        return { ownerPath: path.basename(hubAPaths.jsonPath), unsealedLegacyRejected: true };
       } finally {
         await fs.promises.rm(root, { recursive: true, force: true });
       }
@@ -1561,10 +2374,11 @@ export default [
           && reanalysisStored.reportMetadata?.candidatePoolJobCount === 2,
         'a saved-job reanalysis with no source run writes the strictly-scoped v2 metadata envelope physically first');
         const invalidRunToken = { ...reanalysis, runId: 42, marker: 'invalid-run-token' };
-        await __saveJobAnalysisSnapshotForTests(invalidRunToken);
+        const invalidRunSave = await __saveJobAnalysisSnapshotForTests(invalidRunToken);
         const invalidRunStored = await read(paths.jsonPath);
-        assert(!Object.hasOwn(invalidRunStored, 'reportMetadata') && invalidRunStored.runId === 42,
-          'a non-null malformed source run is preserved for normal resume handling but never coerced into the v2 null-run diagnostic exception');
+        assert(invalidRunSave.retired === true && invalidRunSave.reason === 'missing-fixture-ownership'
+          && invalidRunStored.marker === reanalysis.marker,
+          'a non-null malformed run cannot be sealed even by the explicit test fixture adapter, so it cannot replace the last valid recovery artifact');
         for (const [label, malformed] of [
           ['null canvas', { ...initial, canvasFilePath: null }],
           ['absent canvas', (() => { const value = { ...initial }; delete value.canvasFilePath; return value; })()],
@@ -1576,9 +2390,13 @@ export default [
           }],
         ]) {
           const saved = await __saveJobAnalysisSnapshotForTests(malformed);
-          const stored = await read(saved.jsonPath);
-          assert(!Object.hasOwn(stored, 'reportMetadata'),
-            `${label} preserves recovery payload compatibility without emitting an envelope the bounded reader must reject`);
+          if (saved.retired) {
+            assert(true, `${label} is refused by the explicit fixture adapter rather than creating an unsealed compatibility artifact`);
+          } else {
+            const stored = await read(saved.jsonPath);
+            assert(!Object.hasOwn(stored, 'reportMetadata'),
+              `${label} keeps its deliberately non-resumable payload out of the bounded recovery metadata envelope`);
+          }
         }
         return { currentAndLastSuccess: true, recoveryRewrite: true, reanalysisMetadataV2: true };
       } finally {
@@ -1915,9 +2733,9 @@ export default [
         assert(unsavedDiscards.length === 1
           && unsavedDiscards[0].canvasFilePath === null
           && unsavedCleanup.cleared === false
-          && unsavedCleanup.checkpointCleanup.removed === true
+          && unsavedCleanup.checkpointCleanup.removed === false
           && !unsavedCheckpointExists,
-        'deleting an unsaved hub removes its private app-data checkpoint even though it has no manifest');
+        'an unsaved hub has no stable durable-authority scope, so it cannot create a recovery checkpoint that a later hub deletion would need to retire');
 
         const jobsSource = fs.readFileSync(path.resolve('electron/ipc/jobs.js'), 'utf8');
         const genericResolveStart = jobsSource.indexOf('const runGenericResolve = async () => {');
@@ -2243,10 +3061,13 @@ export default [
       const postSearch = jobSearchNode.slice(postSearchStart, postSearchEnd);
       assert(postSearch.includes('const needsDescriptionRecoverySnapshot')
         && postSearch.includes('blockingWarnings.filter(isDescriptionRecoverySourceWarning)')
+        && postSearch.includes('const strictRecoverySourceIds = new Set(')
         && postSearch.includes("sourceId === 'google' || sourceId === 'linkedin'")
         && postSearch.includes('descriptionRecoveryJobs,')
         && postSearch.includes('runId: jobRunId')
-        && sourceCard.includes('jobRunId,\n          secondTabUrl')
+        && postSearch.includes('saveDescriptionRecoveryCheckpoint: true')
+        && postSearch.includes('operationAuthority: operationAuthorityFor(analysisOperation)')
+        && sourceCard.includes('jobRunId')
         && generic.includes('jobRunId = null')
         && generic.includes('assessDescriptionRecoveryCheckpoint({ snapshot, origin, nodeId, jobRunId, canvasFilePath })')
         && generic.includes('description-recovery-snapshot-stale'),
@@ -2569,12 +3390,12 @@ export default [
         const listing = listDescriptionRecoveryCheckpointsSync(canvas);
         const row = listing.checkpoints.find(checkpoint => checkpoint.runId === runId);
         const loaded = await __loadDescriptionRecoveryCheckpointForTests(canvas, hubId, runId);
-        assert(saved.saved === true && row?.state === 'metadata-only' && row.actionable === true
+        assert(saved.saved === true && row?.state === 'metadata-only' && row.actionable === false
           && row.sourceHubId === hubId && row.nodeId === hubId
           && row.checkpointBytes > 512 * 1024
           && listing.ignored.oversized === 0
           && loaded.snapshot.jobs[0].description.length === 600 * 1024,
-        'a large new checkpoint is discovered from its first-property reportMetadata envelope without parsing its body, then the exact user-authorized load still restores the full payload');
+        'a large new checkpoint is discoverable from its first-property reportMetadata envelope without parsing its body, but sync diagnostics never call it actionable before the exact async authority check restores the full payload');
 
         const legacyRunId = 'oversized-legacy-checkpoint-run';
         const legacyPath = getJobDescriptionRecoveryCheckpointPath(canvas, legacyRunId, path.join(dir, 'unsaved-analysis'));
@@ -2584,9 +3405,9 @@ export default [
           descriptionRecoveryCount: 0, payload: 'x'.repeat(600 * 1024),
         }), 'utf8');
         const legacy = listDescriptionRecoveryCheckpointsSync(canvas).checkpoints.find(checkpoint => checkpoint.runId === legacyRunId);
-        assert(legacy?.state === 'legacy-prefix' && legacy.actionable === true
+        assert(legacy?.state === 'legacy-prefix' && legacy.actionable === false
           && legacy.checkpointBytes > 512 * 1024,
-        'a pre-envelope oversized checkpoint is safely attributed by bounded root-header fields instead of being silently abandoned');
+        'a pre-envelope oversized checkpoint is safely attributed by bounded root-header fields for diagnostics, without claiming it is actionable before an exact async authority check');
         return { oversizedBytes: row.checkpointBytes, legacyBytes: legacy.checkpointBytes };
       } finally {
         fs.rmSync(dir, { recursive: true, force: true });

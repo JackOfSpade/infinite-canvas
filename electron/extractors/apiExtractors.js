@@ -240,13 +240,10 @@ export function linkedInPageStopReason({
 const LINKEDIN_MAX_UNPRODUCTIVE_PAGES = 2;
 
 /**
- * Offset ceiling for one LinkedIn query's walk (6 pages x 25). The binding
- * constraint is not LinkedIn's own result cap but our enrichment budget: every
- * gathered row costs one browser navigation in
- * enrichLinkedInDescriptionsBrowser, which feeds the rate-limit wall. Raising
- * this without also raising MAX_CONTEXT_ROTATIONS trades breadth for a block.
+ * LinkedIn walk depth has no fixed total-results ceiling. Source-local pacing
+ * plus the explicit empty/repeated/no-output stop reasons above are the safety
+ * controls; collection itself must not silently discard a later valid page.
  */
-const LINKEDIN_MAX_RESULTS = 150;
 
 /**
  * Pacing for LinkedIn's guest *search* API, independent of detail-page
@@ -326,15 +323,15 @@ export async function fetchLinkedInJobs(queries, signal = null, maxAgeDays = nul
     } catch {
       // Progress callback is diagnostics-only — never let it break the scrape.
     }
-    // Walk up to 150 results (6 pages × 25). LinkedIn's guest API is heavily
-    // anti-bot, so depth is PACED, not blitzed:
+    // Walk until the provider is exhausted or demonstrably no-progress.
+    // LinkedIn's guest API is heavily anti-bot, so depth is PACED, not blitzed:
     //   • a human-scale gap before every request after the first plus a small
     //     rolling-window checkpoint. One counter spans page walks AND query
     //     modules, so a one-page module cannot make the next module's page 0
     //     arrive at the old shorter 4.5s cadence,
     //   • an early-exit the moment a page returns no cards, or no card this
     //     QUERY has not already seen (below), so a low-volume query never walks
-    //     all 6 pages — we only go deep when results justify it. Freshness is
+    //     every page — we only go deep when results justify it. Freshness is
     //     deliberately per-query: measuring it against the run-wide dedup set
     //     ended a query's walk whenever an earlier query had already returned
     //     that page's rows, which is the normal case, not an edge case,
@@ -345,7 +342,7 @@ export async function fetchLinkedInJobs(queries, signal = null, maxAgeDays = nul
     const seenInThisQuery = new Set();
     let stopReason = null;
     let unproductiveStreak = 0;
-    for (let start = 0; start < LINKEDIN_MAX_RESULTS; start += 25) {
+    for (let start = 0; ; start += 25) {
       if (signal?.aborted) break;
       const pacing = linkedInApiRequestPacing({ requestsIssued: apiRequestsIssued });
       if (pacing.delayDue) {
@@ -502,11 +499,11 @@ export async function fetchLinkedInJobs(queries, signal = null, maxAgeDays = nul
         newToThisQuery,
         unproductiveStreak,
         nextStart: start + 25,
-        maxResults: LINKEDIN_MAX_RESULTS,
+        maxResults: Infinity,
       });
       if (pageStop) {
         stopReason = pageStop;
-        if (pageStop !== 'result-ceiling') break;
+        break;
       }
     }
     if (stopReason) queryStopReasons.push({ query, stopReason });
@@ -515,19 +512,17 @@ export async function fetchLinkedInJobs(queries, signal = null, maxAgeDays = nul
   // `gathered` is the pre-user-limit match count. jobs.js applies the persisted
   // per-platform allowance centrally so every source shares the same semantics.
   //
-  // `stopReasons` + `cap` make a ceiling-truncated walk distinguishable from an
-  // exhausted one. Without them a query stopped by LINKEDIN_MAX_RESULTS and a
-  // query that genuinely ran out both reported the same thing, and `capOverflow`
-  // in jobs.js could never fire because `gathered` was already the truncated
-  // number. Observation only — nothing downstream branches on it.
-  const ceilingBound = queryStopReasons.some(r => r.stopReason === 'result-ceiling');
+  // `stopReasons` records the provider-exhausted/no-progress distinction for
+  // diagnostics. There is intentionally no source-internal result ceiling:
+  // the persisted per-platform allowance is the only user-selected collection
+  // limit, and it is applied centrally in jobs.js.
   return {
     items: allJobs,
     warning,
     cancelled: !!signal?.aborted,
     gathered: allJobs.length,
     stopReasons: queryStopReasons,
-    cap: ceilingBound ? { type: 'source-internal', limit: LINKEDIN_MAX_RESULTS } : null,
+    cap: null,
   };
 }
 
@@ -1733,13 +1728,6 @@ function mapUSAJobsRows(resultItems) {
  */
 const USAJOBS_RESULTS_PER_PAGE = 500;
 
-/**
- * Backstop on the page walk. The real stop condition is the provider's own
- * SearchResultCountAll; this only bounds a pathological response where the
- * reported total never agrees with the rows actually served.
- */
-const USAJOBS_MAX_PAGES = 10;
-
 async function fetchUSAJobsPages(query, apiKey, email, signal, requestedAgeDays, location, rowBudget = Infinity) {
   const rows = [];
   let providerTotal = null;
@@ -1749,8 +1737,9 @@ async function fetchUSAJobsPages(query, apiKey, email, signal, requestedAgeDays,
   // True when the walk stopped because a LATER page failed, i.e. we hold a
   // partial result set rather than the whole corpus.
   let truncatedByError = false;
+  const pageDigests = new Set();
 
-  for (let page = 1; page <= USAJOBS_MAX_PAGES; page++) {
+  for (let page = 1; ; page++) {
     if (signal?.aborted) break;
     const params = new URLSearchParams({
       Keyword: query,
@@ -1804,6 +1793,13 @@ async function fetchUSAJobsPages(query, apiKey, email, signal, requestedAgeDays,
       if (Number.isFinite(all) && all >= 0) providerTotal = all;
     }
     if (pageItems.length === 0) break;
+    const pageDigest = JSON.stringify(pageItems.map(item => item?.MatchedObjectId || item?.MatchedObjectDescriptor?.PositionID || item));
+    if (pageDigests.has(pageDigest)) {
+      warning ||= { code: 'provider-pagination-stalled', severity: 'warn', evidence: `USAJobs repeated page ${page}; retained rows are partial and can be resumed from this cursor.` };
+      truncatedByError = true;
+      break;
+    }
+    pageDigests.add(pageDigest);
     rows.push(...pageItems);
     if (providerTotal != null && rows.length >= providerTotal) break;
     // Stop as soon as the user's per-platform allowance is satisfied. Walking

@@ -701,6 +701,14 @@ and project retrospectives, and to preserve **all figures, dates, units and tabl
 when the content is not obviously "résumé material." Keep the existing "do not summarize away detail
 and do not invent anything" constraint — this pass stays pure transcription.
 
+Each non-plain-file transcription is independently audited against the same staged attachment. A
+revision is a complete replacement and is re-audited until it passes; this is deliberately not
+limited to a preset number of quality rounds. The host records deterministic ordered fingerprints
+of the candidate plus normalized unresolved findings. If a state repeats, the workflow fails with
+an explicit non-convergence code and requires human review instead of publishing uncertain career
+data. Transport, file-size, schema, cancellation, and existing safety-failure limits remain in
+force.
+
 Without this change the ledger has nothing to join, and the whole feature underperforms silently.
 
 ---

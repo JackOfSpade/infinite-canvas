@@ -56,16 +56,16 @@ export const SOURCE_SCAN_ROWS = Object.freeze({
   'cimd.js': { allow: ['node:https', 'node:dns', 'node:net', 'node:crypto'] },
   'egressProbe.js': { allow: ['node:https', 'node:dns', 'node:crypto', './cimd.js'] },
   'oauthStore.js': { allow: ['node:fs', 'node:path', 'node:crypto'] },
-  // constants.js is the inert values module with no imports of its own; the
-  // config validator reads the jobsPerChat range from it rather than repeating
-  // the numbers, which is how a legal value starts being rejected on save.
+  // constants.js is the inert values module. The store owns only live worker
+  // capability validation; retired conversation quotas are accepted solely
+  // for migration and never regain operational meaning.
   'store.js': { allow: ['node:fs', 'node:path', 'node:crypto', './constants.js', '../../../src/utils/handoffBridgeConfig.js'] },
   'laneStore.js': { allow: ['node:fs', 'node:path', 'node:crypto', '../../../src/utils/handoffScheduler.js'] },
-  'engine.js': { allow: sibling('node:crypto') },
+  'engine.js': { allow: sibling('node:crypto', '../../../src/utils/handoffScheduler.js') },
   'lanes.js': { allow: sibling('node:crypto') },
   // Pure, main-process planning math for the manual worker pool. Its only
   // import is the inert bridge capacity policy.
-  'workerPool.js': { allow: ['./constants.js'] },
+  'workerPool.js': { allow: ['./constants.js', '../../../src/utils/handoffScheduler.js'] },
   'preflight.js': { allow: sibling('node:crypto', './lanes.js', '../../../src/utils/pasteIdentityGuard.js') },
   'framing.js': { allow: sibling('node:crypto', '../../../src/utils/pasteIdentityGuard.js', '../../../src/utils/handoffBridgeConfig.js') },
   'errors.js': { allow: sibling('node:crypto') },

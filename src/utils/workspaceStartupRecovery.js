@@ -411,13 +411,34 @@ export function backgroundJobResumeRequest(node, offer, canvasFilePath) {
 
 function exactContinuationReceiptState(node, intent) {
   if (!intent?.terminalResultAvailable) return null;
-  const receipt = findJobContinuationAppliedReceipt(node?.data || {}, intent);
+  const data = node?.data || {};
+  const receipt = findJobContinuationAppliedReceipt(data, intent);
   if (!receipt) return { state: 'awaiting-mounted-replay', receipt: null };
+  // The sidecar, rather than mutable canvas node data, is the authority for a
+  // terminal acknowledgement. The hidden worker may claim a one-hop successor
+  // later, but it must begin from these exact persisted values.
+  const operationAuthority = intent.operationAuthority || null;
+  const careerSnapshotId = typeof intent.careerSnapshotId === 'string' && /^[a-f0-9]{64}$/.test(intent.careerSnapshotId)
+    ? intent.careerSnapshotId
+    : null;
+  const parentArtifactFingerprint = typeof intent.parentArtifactFingerprint === 'string'
+    && /^[a-f0-9]{64}$/.test(intent.parentArtifactFingerprint)
+    ? intent.parentArtifactFingerprint
+    : null;
+  // A terminal acknowledgement mutates durable continuation state. It must
+  // retain the same pin/evidence boundary as its provider action, not infer a
+  // new authority merely because startup discovered an applied UI receipt.
+  if (!operationAuthority || !careerSnapshotId || !parentArtifactFingerprint) {
+    return { state: 'awaiting-mounted-replay', receipt: null };
+  }
   return {
     state: receipt.appliedProcessEpoch === intent.processEpoch
       ? 'awaiting-canvas-save'
       : 'terminal-ack-ready',
     receipt,
+    operationAuthority,
+    careerSnapshotId,
+    parentArtifactFingerprint,
   };
 }
 
@@ -467,12 +488,28 @@ function lateSourceContinuationEntry(node, intent, canvasFilePath, boardIds) {
     jobPreferences: data.activeJobPreferences ?? data.jobPreferences ?? '',
     preferencePlan: data.jobPreferencePlan ?? data.jobPreferencesInterpretation ?? null,
   };
+  const operationAuthority = intent.operationAuthority || null;
+  const careerSnapshotId = typeof intent.careerSnapshotId === 'string' && /^[a-f0-9]{64}$/.test(intent.careerSnapshotId)
+    ? intent.careerSnapshotId
+    : null;
+  if (!operationAuthority || !careerSnapshotId || typeof intent.parentArtifactFingerprint !== 'string' || !/^[a-f0-9]{64}$/.test(intent.parentArtifactFingerprint)) return {
+    kind: 'jobcontinuation', nodeId: node.id, runId: intent.parentRunId,
+    intent, state: 'awaiting-mounted-recovery',
+  };
+  const parentArtifactFingerprint = intent.parentArtifactFingerprint;
+  const inheritedBase = operationAuthority?.semanticBase || {};
   return {
     kind: 'jobcontinuation',
     nodeId: node.id,
     runId: intent.parentRunId,
     intent,
     state: 'ready',
+    operationAuthority,
+    operationSemanticBase: {
+      kind: 'usajobs-late-append', careerSnapshotId, runId: intent.parentRunId,
+      fingerprint: inheritedBase.fingerprint ?? null, analysisRevisionId: inheritedBase.analysisRevisionId ?? null,
+      continuationId: intent.intentId || null, sourceArtifactFingerprint: parentArtifactFingerprint,
+    },
     identity: {
       canvasFilePath,
       nodeId: node.id,
@@ -485,6 +522,9 @@ function lateSourceContinuationEntry(node, intent, canvasFilePath, boardIds) {
       canonicalLocation: preferredLocation,
       generationFingerprint: `${data.resultDisposition || ''}:${moduleFingerprint(data.scoredJobs)}`,
       operationInput,
+      operationAuthority,
+      careerSnapshotId,
+      parentArtifactFingerprint,
     },
     request: {
       query,
@@ -499,6 +539,9 @@ function lateSourceContinuationEntry(node, intent, canvasFilePath, boardIds) {
       targetRole: operationInput.targetRole,
       jobPreferences: operationInput.jobPreferences,
       preferencePlan: operationInput.preferencePlan,
+      operationAuthority,
+      careerSnapshotId,
+      parentArtifactFingerprint,
     },
   };
 }
@@ -554,6 +597,16 @@ function sourceRecoveryContinuationEntry(node, nodes, edges, intent, canvasFileP
     enabledSourceIds: data.enabledSourceIds,
     preferredLocation,
   };
+  const operationAuthority = intent.operationAuthority || null;
+  const careerSnapshotId = typeof intent.careerSnapshotId === 'string' && /^[a-f0-9]{64}$/.test(intent.careerSnapshotId)
+    ? intent.careerSnapshotId
+    : null;
+  if (!operationAuthority || !careerSnapshotId || typeof intent.parentArtifactFingerprint !== 'string' || !/^[a-f0-9]{64}$/.test(intent.parentArtifactFingerprint)) return {
+    kind: 'jobcontinuation', nodeId: node.id, runId: intent.parentRunId,
+    intent, boardOwner, state: 'awaiting-mounted-recovery',
+  };
+  const parentArtifactFingerprint = intent.parentArtifactFingerprint;
+  const inheritedBase = operationAuthority?.semanticBase || {};
   return {
     kind: 'jobcontinuation',
     nodeId: node.id,
@@ -561,6 +614,12 @@ function sourceRecoveryContinuationEntry(node, nodes, edges, intent, canvasFileP
     intent,
     boardOwner,
     state: 'ready',
+    operationAuthority,
+    operationSemanticBase: {
+      kind: 'resolved-source-continuation', careerSnapshotId, runId: intent.parentRunId,
+      fingerprint: inheritedBase.fingerprint ?? null, analysisRevisionId: inheritedBase.analysisRevisionId ?? null,
+      continuationId: intent.intentId || null, sourceArtifactFingerprint: parentArtifactFingerprint,
+    },
     identity: {
       canvasFilePath,
       nodeId: node.id,
@@ -573,6 +632,9 @@ function sourceRecoveryContinuationEntry(node, nodes, edges, intent, canvasFileP
       canonicalLocation: data.canonicalLocation || data.preferredLocation || '',
       generationFingerprint: `${data.resultDisposition || ''}:${moduleFingerprint(data.scoredJobs)}:${moduleFingerprint(data.pendingJobs)}`,
       operationInput,
+      operationAuthority,
+      careerSnapshotId,
+      parentArtifactFingerprint,
     },
     request: {
       sourceId: 'indeed',
@@ -584,6 +646,9 @@ function sourceRecoveryContinuationEntry(node, nodes, edges, intent, canvasFileP
       jobRunId: intent.parentRunId,
       preferredLocation,
       resumeState,
+      operationAuthority,
+      careerSnapshotId,
+      parentArtifactFingerprint,
     },
   };
 }

@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import {
   beginJobContinuation,
   checkpointJobContinuationResult,
@@ -25,6 +26,8 @@ import {
   withCanvasRecoveryOwner,
   withCanvasRecoveryRebind,
 } from '../../electron/ipc/canvasRecoveryPaths.js';
+import { claimJobAnalysisOperationAuthority, withCurrentJobAnalysisOperationAuthority } from '../../electron/ipc/jobAnalysisOperationAuthorityStore.js';
+import { getJobAnalysisPaths, rebindJobAnalysisRecoveryOwners } from '../../electron/ipc/jobAnalysisPaths.js';
 import {
   JOB_RUN_COLLECTION_DISPOSITION,
   clearRunWithResult,
@@ -66,6 +69,49 @@ function nextTurn() {
 
 const profileFingerprint = 'b'.repeat(64);
 
+const sha256 = value => crypto.createHash('sha256').update(value).digest('hex');
+
+// Continuation tests must exercise the same provenance boundary as production:
+// a claimed authority has sealed the exact parent artifact before an intent is
+// admitted.  This deliberately does not fake a renderer-derived digest.
+async function sealContinuationIdentity(canvasFilePath, identity, { careerSnapshotId = 'a'.repeat(64) } = {}) {
+  const operation = await claimJobAnalysisOperationAuthority({
+    canvasFilePath,
+    hubId: identity.nodeId,
+    operationId: `test-cont-${sha256(`${canvasFilePath}:${identity.nodeId}:${identity.parentRunId}:${identity.generationFingerprint || ''}`).slice(0, 24)}`,
+    semanticBase: {
+      kind: 'search', careerSnapshotId, runId: null, analysisRevisionId: null,
+      fingerprint: null, continuationId: null, sourceArtifactFingerprint: null,
+    },
+  });
+  if (!operation.admitted || !operation.receipt) throw new Error('fixture could not claim continuation authority');
+  const snapshot = {
+    canvasFilePath,
+    nodeId: identity.nodeId,
+    sourceHubId: identity.nodeId,
+    runId: identity.parentRunId,
+    careerSnapshotId,
+    operationAuthority: operation.receipt,
+  };
+  const serialized = `${JSON.stringify(snapshot)}\n`;
+  const parentArtifactFingerprint = sha256(serialized);
+  const paths = getJobAnalysisPaths(canvasFilePath, null, identity.nodeId);
+  const sealed = await withCurrentJobAnalysisOperationAuthority({
+    canvasFilePath, hubId: identity.nodeId, ...operation.receipt,
+  }, async (_record, stage) => {
+    await stage({ publications: [{ slot: 'current', digest: parentArtifactFingerprint }] });
+    await fs.promises.writeFile(paths.jsonPath, serialized, { mode: 0o600 });
+    return { ok: true };
+  });
+  if (!sealed.admitted) throw new Error('fixture could not seal continuation parent artifact');
+  return {
+    ...identity,
+    careerSnapshotId,
+    operationAuthority: operation.receipt,
+    parentArtifactFingerprint,
+  };
+}
+
 export default [
   {
     name: 'job continuation leases are canvas-scoped and terminal receipts survive the same-process autosave gap',
@@ -91,22 +137,24 @@ export default [
       const senderB = sender(2);
       const senderC = sender(3);
       try {
-        const begunA = await beginJobContinuation(canvasA, { ...identity, recoveryMode: 'automatic', now: 101 });
-        const begunB = await beginJobContinuation(canvasB, { ...identity, recoveryMode: 'automatic', now: 101 });
-        assert(begunA.ok && begunB.ok && begunA.intent.intentId === begunB.intent.intentId,
-          'fixture must prove identical non-canvas intent ids can exist in cloned canvases');
+        const identityA = await sealContinuationIdentity(canvasA, identity);
+        const identityB = await sealContinuationIdentity(canvasB, identity);
+        const begunA = await beginJobContinuation(canvasA, { ...identityA, recoveryMode: 'automatic', now: 101 });
+        const begunB = await beginJobContinuation(canvasB, { ...identityB, recoveryMode: 'automatic', now: 101 });
+        assert(begunA.ok && begunB.ok && begunA.intent.intentId !== begunB.intent.intentId,
+          'the sealed authority receipt is part of the continuation identity, so cloned canvases cannot borrow one another’s capability');
 
         const claimA = await claimJobContinuation(canvasA, {
-          ...identity, intentId: begunA.intent.intentId, autoResume: true, automaticOperation: 'execute',
+          ...identityA, intentId: begunA.intent.intentId, autoResume: true, automaticOperation: 'execute',
         }, { sender: senderA });
         const claimB = await claimJobContinuation(canvasB, {
-          ...identity, intentId: begunB.intent.intentId, autoResume: true, automaticOperation: 'execute',
+          ...identityB, intentId: begunB.intent.intentId, autoResume: true, automaticOperation: 'execute',
         }, { sender: senderB });
         const duplicateA = await claimJobContinuation(canvasA, {
-          ...identity, intentId: begunA.intent.intentId,
+          ...identityA, intentId: begunA.intent.intentId,
         }, { sender: senderC });
         assert(claimA.ok && claimB.ok && duplicateA.busy,
-          'different canvases may claim identical intent ids while one canvas remains single-owner');
+          'different canvases may claim their own exact continuations while one canvas remains single-owner');
         assert(validateJobContinuationExecution(
           begunA.intent.intentId, claimA.leaseToken, senderA, canvasA,
         ) && !validateJobContinuationExecution(
@@ -119,24 +167,32 @@ export default [
           intentId: begunA.intent.intentId,
           leaseToken: claimA.leaseToken,
           operation: identity.operation,
+          careerSnapshotId: identityA.careerSnapshotId,
+          operationAuthority: identityA.operationAuthority,
+          parentArtifactFingerprint: identityA.parentArtifactFingerprint,
           result: { success: true, jobs: [{ id: 'durable-result' }], warning: null },
         }, { sender: senderA });
         assert(checkpoint.saved && checkpoint.resultKey && checkpoint.processEpoch,
-          'terminal provider output is durable before its invoke can reply');
+          `terminal provider output is durable before its invoke can reply: ${JSON.stringify(checkpoint)}`);
         const sameProcessAck = await completeJobContinuation(canvasA, {
           nodeId: identity.nodeId,
           parentRunId: identity.parentRunId,
           intentId: begunA.intent.intentId,
+          operation: identity.operation,
+          leaseToken: claimA.leaseToken,
+          careerSnapshotId: identityA.careerSnapshotId,
+          operationAuthority: identityA.operationAuthority,
+          parentArtifactFingerprint: identityA.parentArtifactFingerprint,
           expectedResultKey: checkpoint.resultKey,
           appliedProcessEpoch: checkpoint.processEpoch,
-        });
+        }, { sender: senderA });
         assert(!sameProcessAck.ok && sameProcessAck.reason === 'same-process-autosave-unproven',
-          'same-process React application cannot delete the only durable copy before canvas autosave');
+          `same-process React application cannot delete the only durable copy before canvas autosave: ${JSON.stringify(sameProcessAck)}`);
 
         releaseJobContinuationExecution(begunA.intent.intentId, claimA.leaseToken, senderA);
         releaseJobContinuationExecution(begunB.intent.intentId, claimB.leaseToken, senderB);
         const replayClaim = await claimJobContinuation(canvasA, {
-          ...identity,
+          ...identityA,
           intentId: begunA.intent.intentId,
           autoResume: true,
           automaticOperation: 'replay',
@@ -146,6 +202,9 @@ export default [
           parentRunId: identity.parentRunId,
           intentId: begunA.intent.intentId,
           leaseToken: replayClaim.leaseToken,
+          careerSnapshotId: identityA.careerSnapshotId,
+          operationAuthority: identityA.operationAuthority,
+          parentArtifactFingerprint: identityA.parentArtifactFingerprint,
         }, { sender: senderC });
         assert(replay.found && replay.result?.jobs?.[0]?.id === 'durable-result'
           && replay.resultKey === checkpoint.resultKey,
@@ -153,18 +212,26 @@ export default [
         releaseJobContinuationExecution(begunA.intent.intentId, replayClaim.leaseToken, senderC);
 
         const restarted = await import(`../../electron/ipc/jobContinuation.js?restart=${Date.now()}`);
+        const restartClaim = await restarted.claimJobContinuation(canvasA, {
+          ...identityA, intentId: begunA.intent.intentId, autoResume: true, automaticOperation: 'replay',
+        }, { sender: senderC });
         const laterAck = await restarted.completeJobContinuation(canvasA, {
           nodeId: identity.nodeId,
           parentRunId: identity.parentRunId,
           intentId: begunA.intent.intentId,
+          operation: identity.operation,
+          leaseToken: restartClaim.leaseToken,
+          careerSnapshotId: identityA.careerSnapshotId,
+          operationAuthority: identityA.operationAuthority,
+          parentArtifactFingerprint: identityA.parentArtifactFingerprint,
           expectedResultKey: checkpoint.resultKey,
           appliedProcessEpoch: checkpoint.processEpoch,
-        });
-        assert(laterAck.ok && laterAck.removed && (await listJobContinuations(canvasA, identity.nodeId)).length === 0,
+        }, { sender: senderC });
+        assert(restartClaim.ok && laterAck.ok && laterAck.removed && (await listJobContinuations(canvasA, identity.nodeId)).length === 0,
           'only a later process observing the exact saved result receipt may retire the terminal sidecar');
 
         const attemptedAgainB = await claimJobContinuation(canvasB, {
-          ...identity, intentId: begunB.intent.intentId, autoResume: true, automaticOperation: 'execute',
+          ...identityB, intentId: begunB.intent.intentId, autoResume: true, automaticOperation: 'execute',
         }, { sender: senderB });
         assert(attemptedAgainB.attempted,
           'one-shot automatic attempts remain scoped to their own canvas and operation');
@@ -242,34 +309,41 @@ export default [
         const stopAfter = path.join(dir, 'stop-after.json');
         fs.writeFileSync(stopBefore, '{}');
         fs.writeFileSync(stopAfter, '{}');
-        const begun = await beginJobContinuation(stopBefore, { ...identity, recoveryMode: 'automatic', now: 200 });
+        const stopIdentity = await sealContinuationIdentity(stopBefore, identity);
+        const begun = await beginJobContinuation(stopBefore, { ...stopIdentity, recoveryMode: 'automatic', now: 200 });
         const claimed = await claimJobContinuation(stopBefore, {
-          ...identity, intentId: begun.intent.intentId,
+          ...stopIdentity, intentId: begun.intent.intentId,
         }, { sender: owner });
         let stopWriterEntered = false;
         const stopRebind = withCanvasRecoveryRebind(stopBefore, stopAfter, async ({ installAlias }) => {
           stopWriterEntered = true;
-          const migrated = await rebindJobContinuationOwners(stopBefore, stopAfter);
-          if (migrated.success) installAlias();
-          return migrated;
+          const analysis = await rebindJobAnalysisRecoveryOwners(stopBefore, stopAfter, { alreadyExclusive: true });
+          const migrated = analysis.success ? await rebindJobContinuationOwners(stopBefore, stopAfter) : { success: false };
+          if (migrated.success && analysis.success) installAlias();
+          return { ...migrated, success: migrated.success && analysis.success, analysis };
         });
         await nextTurn();
         const paused = await withCanvasRecoveryOwner(owner, () => pauseJobContinuations(stopBefore, {
           nodeId: identity.nodeId,
           parentRunId: identity.parentRunId,
+          intentId: begun.intent.intentId,
+          careerSnapshotId: stopIdentity.careerSnapshotId,
+          operationAuthority: stopIdentity.operationAuthority,
+          parentArtifactFingerprint: stopIdentity.parentArtifactFingerprint,
           now: 201,
         }));
         assert(paused.ok && paused.paused === 1 && !stopWriterEntered,
           'Stop durably marks the exact continuation manual through its existing read before abort/release');
         releaseJobContinuationExecution(begun.intent.intentId, claimed.leaseToken, owner);
-        assert((await stopRebind).success, 'Save As proceeds after the stopped execution releases');
+        const stopMoved = await stopRebind;
+        assert(stopMoved.success, `Save As proceeds after the stopped execution releases: ${JSON.stringify(stopMoved)}`);
         const pausedAfter = (await listJobContinuations(stopAfter, identity.nodeId))[0];
         assert(pausedAfter?.recoveryMode === 'manual', 'the migrated continuation retains the durable Stop tombstone');
 
         const clearOwner = sender(33);
         const clearClaim = await claimJobContinuation(stopAfter, {
-          ...identity,
-          intentId: begun.intent.intentId,
+          ...pausedAfter,
+          intentId: pausedAfter.intentId,
           allowManualResume: true,
         }, { sender: clearOwner });
         const clearAfter = path.join(dir, 'clear-after.json');
@@ -277,18 +351,23 @@ export default [
         let clearWriterEntered = false;
         const clearRebind = withCanvasRecoveryRebind(stopAfter, clearAfter, async ({ installAlias }) => {
           clearWriterEntered = true;
-          const migrated = await rebindJobContinuationOwners(stopAfter, clearAfter);
-          if (migrated.success) installAlias();
-          return migrated;
+          const analysis = await rebindJobAnalysisRecoveryOwners(stopAfter, clearAfter, { alreadyExclusive: true });
+          const migrated = analysis.success ? await rebindJobContinuationOwners(stopAfter, clearAfter) : { success: false };
+          if (migrated.success && analysis.success) installAlias();
+          return { ...migrated, success: migrated.success && analysis.success, analysis };
         });
         await nextTurn();
         const cleared = await withCanvasRecoveryOwner(clearOwner, () => clearJobContinuations(stopAfter, {
           nodeId: identity.nodeId,
           parentRunId: identity.parentRunId,
+          intentId: pausedAfter.intentId,
+          careerSnapshotId: pausedAfter.careerSnapshotId,
+          operationAuthority: pausedAfter.operationAuthority,
+          parentArtifactFingerprint: pausedAfter.parentArtifactFingerprint,
         }));
         assert(cleared.ok && cleared.removed === 1 && !clearWriterEntered,
-          'explicit Clear can durably tombstone/remove its exact active continuation before cancellation');
-        releaseJobContinuationExecution(begun.intent.intentId, clearClaim.leaseToken, clearOwner);
+          `explicit Clear can durably tombstone/remove its exact active continuation before cancellation: ${JSON.stringify({ cleared, clearClaim, pausedAfter })}`);
+        releaseJobContinuationExecution(pausedAfter.intentId, clearClaim.leaseToken, clearOwner);
         assert((await clearRebind).success, 'Clear releases the long read so a queued Save As can finish');
         assert((await listJobContinuations(clearAfter, identity.nodeId)).length === 0,
           'a cleared continuation cannot reappear at the adopted path');
@@ -298,9 +377,10 @@ export default [
         fs.writeFileSync(successBefore, '{}');
         fs.writeFileSync(successAfter, '{}');
         const successIdentity = { ...identity, nodeId: 'hub-success', parentRunId: 'run-success', generationFingerprint: 'generation-success' };
-        const successBegun = await beginJobContinuation(successBefore, { ...successIdentity, recoveryMode: 'automatic', now: 300 });
+        const sealedSuccessIdentity = await sealContinuationIdentity(successBefore, successIdentity);
+        const successBegun = await beginJobContinuation(successBefore, { ...sealedSuccessIdentity, recoveryMode: 'automatic', now: 300 });
         const successClaim = await claimJobContinuation(successBefore, {
-          ...successIdentity, intentId: successBegun.intent.intentId,
+          ...sealedSuccessIdentity, intentId: successBegun.intent.intentId,
         }, { sender: owner });
         const terminal = await checkpointJobContinuationResult(successBefore, {
           nodeId: successIdentity.nodeId,
@@ -308,12 +388,16 @@ export default [
           intentId: successBegun.intent.intentId,
           leaseToken: successClaim.leaseToken,
           operation: successIdentity.operation,
+          careerSnapshotId: sealedSuccessIdentity.careerSnapshotId,
+          operationAuthority: sealedSuccessIdentity.operationAuthority,
+          parentArtifactFingerprint: sealedSuccessIdentity.parentArtifactFingerprint,
           result: { resolved: true, items: [{ id: 'saved-before-rebind' }] },
         }, { sender: owner });
         const successRebind = withCanvasRecoveryRebind(successBefore, successAfter, async ({ installAlias }) => {
-          const migrated = await rebindJobContinuationOwners(successBefore, successAfter);
-          if (migrated.success) installAlias();
-          return migrated;
+          const analysis = await rebindJobAnalysisRecoveryOwners(successBefore, successAfter, { alreadyExclusive: true });
+          const migrated = analysis.success ? await rebindJobContinuationOwners(successBefore, successAfter) : { success: false };
+          if (migrated.success && analysis.success) installAlias();
+          return { ...migrated, success: migrated.success && analysis.success, analysis };
         });
         await nextTurn();
         releaseJobContinuationExecution(successBegun.intent.intentId, successClaim.leaseToken, owner);
@@ -327,25 +411,38 @@ export default [
         fs.writeFileSync(retireBefore, '{}');
         fs.writeFileSync(retireAfter, '{}');
         const retireIdentity = { ...identity, nodeId: 'hub-retire', parentRunId: 'run-retire', generationFingerprint: 'generation-retire' };
-        const retireBegun = await beginJobContinuation(retireBefore, { ...retireIdentity, recoveryMode: 'automatic', now: 400 });
+        const sealedRetireIdentity = await sealContinuationIdentity(retireBefore, retireIdentity);
+        const retireBegun = await beginJobContinuation(retireBefore, { ...sealedRetireIdentity, recoveryMode: 'automatic', now: 400 });
         const retireClaim = await claimJobContinuation(retireBefore, {
-          ...retireIdentity, intentId: retireBegun.intent.intentId,
+          ...sealedRetireIdentity, intentId: retireBegun.intent.intentId,
         }, { sender: stranger });
         const retireRebind = withCanvasRecoveryRebind(retireBefore, retireAfter, async ({ installAlias }) => {
-          const migrated = await rebindJobContinuationOwners(retireBefore, retireAfter);
-          if (migrated.success) installAlias();
-          return migrated;
+          const analysis = await rebindJobAnalysisRecoveryOwners(retireBefore, retireAfter, { alreadyExclusive: true });
+          const migrated = analysis.success ? await rebindJobContinuationOwners(retireBefore, retireAfter) : { success: false };
+          if (migrated.success && analysis.success) installAlias();
+          return { ...migrated, success: migrated.success && analysis.success, analysis };
         });
         await nextTurn();
         releaseJobContinuationExecution(retireBegun.intent.intentId, retireClaim.leaseToken, stranger);
         assert((await retireRebind).success, 'supersession releases its execution before sidecar retirement');
+        const retiredIntent = (await listJobContinuations(retireAfter, retireIdentity.nodeId))[0];
+        const retireAckClaim = await claimJobContinuation(retireAfter, {
+          ...retiredIntent, intentId: retiredIntent.intentId,
+        }, { sender: stranger });
         const retired = await completeJobContinuation(retireBefore, {
           nodeId: retireIdentity.nodeId,
           parentRunId: retireIdentity.parentRunId,
-          intentId: retireBegun.intent.intentId,
+          intentId: retiredIntent.intentId,
+          operation: retireIdentity.operation,
+          // Reclaim after the migration so the acknowledgement has an exact
+          // active execution lease at the adopted owner path.
+          leaseToken: retireAckClaim.leaseToken,
+          careerSnapshotId: retiredIntent.careerSnapshotId,
+          operationAuthority: retiredIntent.operationAuthority,
+          parentArtifactFingerprint: retiredIntent.parentArtifactFingerprint,
           superseded: true,
-        });
-        assert(retired.ok && retired.removed && (await listJobContinuations(retireAfter, retireIdentity.nodeId)).length === 0,
+        }, { sender: stranger });
+        assert(retireAckClaim.ok && retired.ok && retired.removed && (await listJobContinuations(retireAfter, retireIdentity.nodeId)).length === 0,
           'retirement follows the adopted alias and cannot deadlock or leave an orphan');
 
         const sourceCard = fs.readFileSync(path.resolve('src/nodes/JobSourceCardNode.jsx'), 'utf8');
@@ -388,10 +485,11 @@ export default [
       const oldOpen = fs.promises.open;
       try {
         for (const [index, nodeId] of ['hub-a', 'hub-b'].entries()) {
+          const identity = await sealContinuationIdentity(before, {
+            ...base, nodeId, generationFingerprint: `generation-${nodeId}`,
+          });
           const begun = await beginJobContinuation(before, {
-            ...base,
-            nodeId,
-            generationFingerprint: `generation-${nodeId}`,
+            ...identity,
             recoveryMode: 'automatic',
             now: 100 + index,
           });
@@ -410,6 +508,10 @@ export default [
           }
           return oldUnlink.call(fs.promises, target, ...args);
         };
+        // Production migrates sealed analysis artifacts first, so the
+        // continuation copier can atomically rebind its parent byte digest.
+        const analysisFirst = await rebindJobAnalysisRecoveryOwners(before, after);
+        assert(analysisFirst.success, 'fixture must move sealed parent artifacts before continuation sidecars');
         const interrupted = await rebindJobContinuationOwners(before, after);
         assert(!interrupted.success && oldDeletes === 2,
           'the fixture interrupts after deletion has begun, not during the copy phase');
@@ -418,17 +520,24 @@ export default [
         'durable destination copies survive once destructive source deletion starts');
         fs.promises.unlink = oldUnlink;
         const retried = await rebindJobContinuationOwners(before, after);
-        assert(retried.success
+        const authorityRebind = analysisFirst;
+        assert(retried.success && authorityRebind.success
           && (await listJobContinuations(after, 'hub-a')).length === 1
           && (await listJobContinuations(after, 'hub-b')).length === 1,
-        'an idempotent replay accepts identical destinations and converges the remaining source deletion');
+        `an idempotent replay accepts identical destinations and converges the remaining source deletion: ${JSON.stringify({ retried, authorityRebind })}`);
 
         let directorySyncOpens = 0;
         fs.promises.open = async (target, flags, ...args) => {
           if (target === dir && flags === 'r') directorySyncOpens += 1;
           return oldOpen.call(fs.promises, target, flags, ...args);
         };
-        const cleared = await clearJobContinuations(after, { nodeId: 'hub-a', parentRunId: 'run' });
+        const hubAIntent = (await listJobContinuations(after, 'hub-a'))[0];
+        const cleared = await clearJobContinuations(after, {
+          nodeId: 'hub-a', parentRunId: 'run', intentId: hubAIntent?.intentId,
+          careerSnapshotId: hubAIntent?.careerSnapshotId,
+          operationAuthority: hubAIntent?.operationAuthority,
+          parentArtifactFingerprint: hubAIntent?.parentArtifactFingerprint,
+        });
         assert(cleared.ok && cleared.removed === 1 && directorySyncOpens > 0,
           'removing a continuation store’s last file fsyncs the parent directory before acknowledgement');
         return { partialDeleteReplayConverged: true, lastFileDirectoryFsynced: true };
@@ -538,6 +647,7 @@ export default [
       fs.writeFileSync(canvas, '{}');
       const nodeId = 'saved-hub';
       const runId = 'saved-run';
+      const careerSnapshotId = 'a'.repeat(64);
       const queries = Array.from({ length: 16 }, (_, index) => `software engineer ${index + 1}`);
       const doneSources = ['linkedin', 'remoteok', 'weworkremotely', 'ziprecruiter', 'dice', 'usajobs'];
       const legacyBlockedSources = ['google', 'indeed', 'glassdoor'];
@@ -548,6 +658,7 @@ export default [
         data: {
           hubState: 'empty',
           jobRunId: null,
+          careerSnapshotId,
           resumeProfile: { name: 'Candidate', locations: ['Toronto, ON'] },
           resumeFingerprint: profileFingerprint,
           canonicalLocation: 'Toronto, ON',
@@ -561,11 +672,27 @@ export default [
         },
       };
       try {
+        const admitted = await claimJobAnalysisOperationAuthority({
+          canvasFilePath: canvas,
+          hubId: nodeId,
+          operationId: 'saved-card-fixture-operation',
+          semanticBase: {
+            kind: 'fixture-fresh', careerSnapshotId, runId,
+            fingerprint: profileFingerprint, analysisRevisionId: null,
+            continuationId: null, sourceArtifactFingerprint: null,
+          },
+        });
+        assert(admitted?.admitted === true && admitted?.receipt,
+          'the current-format saved-card fixture must claim a durable analysis authority before staging');
+        const operationAuthority = admitted.receipt;
         const started = await startRun(canvas, {
           runId,
           startedAt: 100,
           queries,
           profileFingerprint,
+          careerSnapshotId,
+          operationAuthority,
+          requireCareerSnapshot: true,
           targetRole: '',
           jobPreferences: 'Software engineering roles',
           jobPreferencePlan: { titles: ['Software Engineer'] },
@@ -595,10 +722,12 @@ export default [
             now: 110 + sourceIndex,
             expectedRunId: runId,
             nodeId,
+            expectedOperationAuthority: operationAuthority,
           });
           await markSourceStatus(canvas, sourceId, 'done', 120 + sourceIndex, {
             expectedRunId: runId,
             nodeId,
+            expectedOperationAuthority: operationAuthority,
           });
         }
         for (let index = 0; index < legacyBlockedSources.length; index += 1) {
@@ -608,6 +737,7 @@ export default [
           await markSourceStatus(canvas, legacyBlockedSources[index], 'blocked', 140 + index, {
             expectedRunId: runId,
             nodeId,
+            expectedOperationAuthority: operationAuthority,
             recoveryDisposition: 'manual',
           });
         }
@@ -675,6 +805,7 @@ export default [
         const finish = await finishRunWithSavedListings(canvas, {
           expectedRunId: runId,
           nodeId,
+          expectedOperationAuthority: operationAuthority,
           now: 250,
         });
         const finishedState = await readRunState(canvas, 251, { nodeId });
@@ -729,6 +860,29 @@ export default [
         },
       };
       const root = { id: 'group', type: 'group', data: { canvasData: { nodes: [node], edges: [] } } };
+      const careerSnapshotId = 'c'.repeat(64);
+      node.data.careerSnapshotId = careerSnapshotId;
+      const authorityForRun = new Map();
+      const startCurrentFixtureRun = async (runId, startedAt, sourceIds) => {
+        const admitted = await claimJobAnalysisOperationAuthority({
+          canvasFilePath: canvas,
+          hubId: nodeId,
+          operationId: `startup-fixture-${runId}`,
+          semanticBase: {
+            kind: 'fixture-fresh', careerSnapshotId, runId,
+            fingerprint: profileFingerprint, analysisRevisionId: null,
+            continuationId: null, sourceArtifactFingerprint: null,
+          },
+        });
+        assert(admitted?.admitted === true && admitted?.receipt,
+          `fixture run ${runId} must have a current durable authority`);
+        authorityForRun.set(runId, admitted.receipt);
+        return startRun(canvas, {
+          runId, startedAt, queries, profileFingerprint, careerSnapshotId,
+          operationAuthority: admitted.receipt, requireCareerSnapshot: true,
+          canonicalLocation: 'Toronto, ON', nodeId, sourceIds,
+        });
+      };
 
       const offerFromState = (state) => {
         const sourceSummary = Object.entries(state.manifest.sources || {}).map(([id, source]) => ({
@@ -746,6 +900,8 @@ export default [
           canonicalLocation: 'Toronto, ON',
           locationRecorded: true,
           profileFingerprint,
+          careerSnapshotId: state.manifest.inputs.careerSnapshotId,
+          operationAuthority: state.manifest.inputs.operationAuthority,
           searchWindow: state.manifest.inputs.searchWindow,
           sourceSummary,
           unfinishedSourceIds: sourceSummary
@@ -771,12 +927,9 @@ export default [
       };
 
       try {
-        await startRun(canvas, {
-          runId: 'all-terminal', startedAt: 100, queries, profileFingerprint,
-          canonicalLocation: 'Toronto, ON', nodeId, sourceIds: ['remoteok', 'indeed'],
-        });
-        await markSourceStatus(canvas, 'remoteok', 'done', 101, { expectedRunId: 'all-terminal', nodeId });
-        await markSourceStatus(canvas, 'indeed', 'skipped', 102, { expectedRunId: 'all-terminal', nodeId });
+        await startCurrentFixtureRun('all-terminal', 100, ['remoteok', 'indeed']);
+        await markSourceStatus(canvas, 'remoteok', 'done', 101, { expectedRunId: 'all-terminal', nodeId, expectedOperationAuthority: authorityForRun.get('all-terminal') });
+        await markSourceStatus(canvas, 'indeed', 'skipped', 102, { expectedRunId: 'all-terminal', nodeId, expectedOperationAuthority: authorityForRun.get('all-terminal') });
         const terminalPlan = await startup();
         assert(dispatches.length === 0
           && terminalPlan.some(entry => entry.kind === 'jobhub' && entry.state === 'awaiting-mounted-recovery'),
@@ -785,13 +938,10 @@ export default [
         // Replace the completed fixture with a new exact run: Indeed is
         // terminal, while the HTTP-only RemoteOK source is the sole safe
         // unfinished provider. This models a real crash after partial work.
-        const reset = await clearRunWithResult(canvas, { expectedRunId: 'all-terminal', expectedNodeId: nodeId });
+        const reset = await clearRunWithResult(canvas, { expectedRunId: 'all-terminal', expectedNodeId: nodeId, expectedOperationAuthority: authorityForRun.get('all-terminal') });
         assert(reset?.cleared === true, 'the all-terminal fixture must clear before installing the partial run');
-        await startRun(canvas, {
-          runId: 'safe-partial', startedAt: 200, queries, profileFingerprint,
-          canonicalLocation: 'Toronto, ON', nodeId, sourceIds: ['remoteok', 'indeed'],
-        });
-        await markSourceStatus(canvas, 'indeed', 'done', 201, { expectedRunId: 'safe-partial', nodeId });
+        await startCurrentFixtureRun('safe-partial', 200, ['remoteok', 'indeed']);
+        await markSourceStatus(canvas, 'indeed', 'done', 201, { expectedRunId: 'safe-partial', nodeId, expectedOperationAuthority: authorityForRun.get('safe-partial') });
         const safePlan = await startup();
         assert(dispatches.length === 1
           && safePlan.filter(entry => entry.kind === 'jobhub' && entry.state === 'ready').length === 1
@@ -804,18 +954,15 @@ export default [
         // Persisting the terminal transition is the important second-startup
         // boundary: a new coordinator must not replay the request it issued
         // before the app stopped again.
-        await markSourceStatus(canvas, 'remoteok', 'done', 202, { expectedRunId: 'safe-partial', nodeId });
+        await markSourceStatus(canvas, 'remoteok', 'done', 202, { expectedRunId: 'safe-partial', nodeId, expectedOperationAuthority: authorityForRun.get('safe-partial') });
         const secondStartupPlan = await startup();
         assert(dispatches.length === 1
           && secondStartupPlan.some(entry => entry.kind === 'jobhub' && entry.state === 'awaiting-mounted-recovery'),
         'after the safe source is durably done, a second startup must make zero provider calls');
 
-        const safeReset = await clearRunWithResult(canvas, { expectedRunId: 'safe-partial', expectedNodeId: nodeId });
+        const safeReset = await clearRunWithResult(canvas, { expectedRunId: 'safe-partial', expectedNodeId: nodeId, expectedOperationAuthority: authorityForRun.get('safe-partial') });
         assert(safeReset?.cleared === true, 'the safe partial fixture must clear before installing the browser-only run');
-        await startRun(canvas, {
-          runId: 'browser-only', startedAt: 300, queries, profileFingerprint,
-          canonicalLocation: 'Toronto, ON', nodeId, sourceIds: ['google', 'indeed', 'ziprecruiter', 'glassdoor'],
-        });
+        await startCurrentFixtureRun('browser-only', 300, ['google', 'indeed', 'ziprecruiter', 'glassdoor']);
         const browserPlan = await startup();
         assert(dispatches.length === 2
           && browserPlan.filter(entry => entry.kind === 'jobhub' && entry.state === 'ready').length === 1
@@ -838,6 +985,7 @@ export default [
       const startedAt = Date.now();
       const preferences = 'Software engineering roles';
       const preferredLocation = 'Toronto, Ontario, Canada';
+      const careerSnapshotId = 'a'.repeat(64);
       const nextChild = {
         id: 'child-next',
         type: 'jobhub',
@@ -845,11 +993,14 @@ export default [
           hubState: 'empty',
           resumeProfile: { name: 'Candidate' },
           resumeFingerprint: profileFingerprint,
+          careerSnapshotId,
+          careerDerivedSnapshotId: careerSnapshotId,
+          queryCareerSnapshotId: careerSnapshotId,
           jobPreferences: preferences,
           searchBriefPlan: { titles: ['Software Engineer'] },
           jobPreferencePlan: { titles: ['Software Engineer'] },
           resolvedRoles: ['Software Engineer'],
-          resolvedRolesMeta: { derivedAt: '2026-10-01T00:00:00.000Z' },
+          resolvedRolesMeta: { derivedAt: '2026-10-01T00:00:00.000Z', careerSnapshotId },
           queries: {
             targetRoleQueries: ['software engineer'],
             titleQueries: ['backend engineer'],
@@ -857,7 +1008,8 @@ export default [
             skillsOnlyQueries: [],
           },
           queryCacheKey: JSON.stringify({
-            strategyVersion: 6,
+            strategyVersion: 7,
+            careerSnapshotId,
             resumeFingerprint: profileFingerprint,
             jobPreferences: preferences,
             preferredLocation,
@@ -1015,6 +1167,20 @@ export default [
         mode: 'retry-descriptions',
         jobs: [{ key: 'job-1', title: 'Engineer', url: 'https://example.test/job-1' }],
       };
+      const careerSnapshotId = 'd'.repeat(64);
+      const admitted = await claimJobAnalysisOperationAuthority({
+        canvasFilePath: canvas,
+        hubId: 'child',
+        operationId: 'hidden-continuation-fixture-operation',
+        semanticBase: {
+          kind: 'fixture-fresh', careerSnapshotId, runId: 'child-run',
+          fingerprint: profileFingerprint, analysisRevisionId: null,
+          continuationId: null, sourceArtifactFingerprint: null,
+        },
+      });
+      assert(admitted?.admitted === true && admitted?.receipt,
+        'the hidden continuation fixture must begin with a current durable authority');
+      const operationAuthority = admitted.receipt;
       const hubData = {
         resumeProfile: { name: 'Candidate' },
         resumeFingerprint: profileFingerprint,
@@ -1028,6 +1194,8 @@ export default [
         resultDisposition: 'incomplete',
         scoredJobs: [],
         pendingJobs: [{ id: 'pending' }],
+        careerSnapshotId,
+        analysisOperation: { operationId: operationAuthority.operationId, authority: operationAuthority },
       };
       const progress = {
         jobRunId: 'child-run',
@@ -1035,7 +1203,7 @@ export default [
         warning: { code: 'description-missing', severity: 'block', resumeState },
       };
       const collectionLimits = normalizeJobCollectionLimits(hubData.collectionLimits);
-      const identity = {
+      const identityInput = {
         nodeId: 'child',
         parentRunId: 'child-run',
         profileFingerprint,
@@ -1053,6 +1221,7 @@ export default [
           preferredLocation: hubData.canonicalLocation,
         },
       };
+      const identity = await sealContinuationIdentity(canvas, identityInput, { careerSnapshotId });
       const board = {
         id: 'board', type: 'jobboard', data: { boardScanResume: {
           version: 1,
@@ -1108,6 +1277,9 @@ export default [
         const checkpoint = await checkpointJobContinuationResult(canvas, {
           nodeId: 'child', parentRunId: 'child-run', intentId: begun.intent.intentId,
           leaseToken: claimed.leaseToken, operation: 'resume-job-source',
+          careerSnapshotId: identity.careerSnapshotId,
+          operationAuthority: identity.operationAuthority,
+          parentArtifactFingerprint: identity.parentArtifactFingerprint,
           result: { resolved: true, items: [{ id: 'recovered' }], replaceMatchingItems: true },
         }, { sender: runner });
         releaseJobContinuationExecution(begun.intent.intentId, claimed.leaseToken, runner);

@@ -16,10 +16,301 @@ import { exactInterruptedRecoveryAdmission, exactInterruptedRecoveryBackendFailu
 import { cancelJobBoardChildrenSequentially, promoteJobBoardPausedSourceResolution, runJobBoardChildFanout } from '../../src/utils/jobBoardChildFanout.js';
 import { classifyJobBoardSourceAdmission, completedJobSearchOutcomeMatches, jobSearchOutcomeReceiptMatches, partitionJobBoardSourceAdmissions } from '../../src/utils/jobBoardSourceAdmission.js';
 import { jobCareerImportBoardAdmission, jobCareerImportConsumptionPatch, retryableUnstartedJobCareerImportCapability } from '../../src/utils/jobCareerImportCapability.js';
+import { approveCareerImportCompilation, approvedCareerImportCompilation, beginCareerImportCompilation, careerImportCompilationAdmission, careerImportCompilationMatches, compileBeforeCareerProvider, currentApprovedCareerImportSnapshot, failCareerImportCompilation, resumableCareerImportCompilation } from '../../src/utils/jobCareerCompilationReceipt.js';
+import { buildJobCareerQueryCacheKey, careerSnapshotBindingMatches } from '../../src/utils/jobCareerSnapshotBinding.js';
+import { prepareBackgroundBoardChildRequest } from '../../src/utils/jobBoardBackgroundRecovery.js';
 import { buildJobHubCareerClearPatch } from '../../src/utils/hubDropEligibility.js';
 import { providerTotalShortfallRecoveryReceipt, resolveManualSourceStopReason, zipRecruiterProviderShortfallRecoveryOutcome, zipRecruiterProviderTotalShortfallWarning } from '../../electron/ipc/browser/manualScraper.js';
 
 export default [
+  {
+    name: 'Career-derived retained state is bound to one exact approved snapshot',
+    run() {
+      const firstSnapshotId = 'a'.repeat(64);
+      const replacementSnapshotId = 'b'.repeat(64);
+      const resumeFingerprint = 'c'.repeat(64);
+      const jobPreferences = 'Backend engineering roles';
+      const preferredLocation = 'Toronto, Ontario, Canada';
+      const queryCacheKey = buildJobCareerQueryCacheKey({
+        careerSnapshotId: firstSnapshotId,
+        resumeFingerprint,
+        jobPreferences,
+        preferredLocation,
+      });
+      const node = {
+        id: 'snapshot-bound-child',
+        type: 'jobhub',
+        data: {
+          hubState: 'empty',
+          resumeProfile: { name: 'Candidate' },
+          resumeFingerprint,
+          careerSnapshotId: firstSnapshotId,
+          careerDerivedSnapshotId: firstSnapshotId,
+          queryCareerSnapshotId: firstSnapshotId,
+          jobPreferences,
+          searchBriefPlan: { titles: ['Backend Engineer'] },
+          resolvedRolesMeta: { briefFingerprint: jobPreferences, careerSnapshotId: firstSnapshotId },
+          queries: { targetRoleQueries: ['backend engineer'], titleQueries: [], suggestedRoleQueries: [], skillsOnlyQueries: [] },
+          queryCacheKey,
+          preferredLocation,
+          canonicalLocation: preferredLocation,
+          canonicalCountry: 'Canada',
+          enabledSourceIds: ['usajobs'],
+          collectionLimits: { jobsPerPlatform: 25, pagesPerPlatform: 1 },
+        },
+      };
+      const prepared = prepareBackgroundBoardChildRequest({
+        node, boardNodeId: 'board', boardRunId: 'run', startedAt: Date.now(), canvasFilePath: '/tmp/snapshot-bound.json',
+      });
+      const replaced = {
+        ...node,
+        data: { ...node.data, careerSnapshotId: replacementSnapshotId },
+      };
+      assert(
+        prepared?.request?.careerSnapshotId === firstSnapshotId
+          && careerSnapshotBindingMatches(node.data.resolvedRolesMeta, firstSnapshotId)
+          && !careerSnapshotBindingMatches(node.data.resolvedRolesMeta, replacementSnapshotId)
+          && prepareBackgroundBoardChildRequest({
+            node: replaced, boardNodeId: 'board', boardRunId: 'run', startedAt: Date.now(), canvasFilePath: '/tmp/snapshot-bound.json',
+          }) === null,
+        'a retained query bundle, role plan, canonical location, and unattended Board request must become unusable when its career snapshot id changes',
+      );
+      const renderer = readFileSync(new URL('../../src/nodes/JobSearchNode.jsx', import.meta.url), 'utf8');
+      assert(renderer.includes('roleLockMatchesBrief(laneTurnData, pinnedCareerSnapshotId)')
+        && renderer.includes('queryCareerSnapshotId: pinnedCareerSnapshotId')
+        && renderer.includes('pendingCareerSnapshotId: pinnedCareerSnapshotId')
+        && renderer.includes('preferenceCareerSnapshotId: resolvedCareerSnapshotId')
+        && renderer.includes('scoringCareerSnapshotId: resolvedCareerSnapshotId'),
+      'the renderer must persist exact snapshot metadata for reusable role, query/location, paused preference, and scored artifacts');
+      const countryBranchStart = renderer.indexOf('const canonicalCountry = canReuseQueries');
+      const countryBranchEnd = renderer.indexOf('// Step 3: Search', countryBranchStart);
+      const countryBranch = renderer.slice(countryBranchStart, countryBranchEnd);
+      assert(countryBranchStart >= 0
+        && countryBranch.includes("? (laneTurnData.canonicalCountry || '')")
+        && countryBranch.includes(": (queriesResult.canonicalCountry || '')")
+        && !countryBranch.includes('|| laneTurnData.canonicalCountry'),
+      'a fresh remote-only result with an empty canonical country must not inherit a country retained for a replaced snapshot');
+      assert(renderer.includes('const admittedCareerSnapshotId = normalizedJobCareerSnapshotId(careerSnapshotId)')
+        && renderer.includes('careerSnapshotId: admittedCareerSnapshotId')
+        && renderer.includes('let scoringCommitAccepted = false')
+        && renderer.includes('if (!careerSnapshotIsStillCurrent()) return searchRunOutcome(\'superseded\', { runId: jobRunId });'),
+      'a scorer started under snapshot A must retain A at IPC and reject its terminal commit if the live node changes to B');
+      const mainJobs = readFileSync(new URL('../../electron/ipc/jobs.js', import.meta.url), 'utf8');
+      assert(mainJobs.includes('careerSnapshotId: careerSnapshotId || null')
+        && mainJobs.includes('careerSnapshotId: state.manifest.inputs?.careerSnapshotId || null'),
+      'a crash-resume manifest must persist and return the exact admitted career snapshot instead of inferring one from live renderer state');
+      return {
+        exactReuseOnly: true,
+        retainedReplacementRejected: true,
+        freshEmptyCountryWins: true,
+        activeRunReplacementRejected: true,
+      };
+    },
+  },
+  {
+    name: 'Career aliases compile before provider admission and expose no raw paths to the provider',
+    run: async () => {
+      const order = [];
+      const result = await compileBeforeCareerProvider({
+        compile: async () => {
+          order.push('compile');
+          return {
+            status: 'compiled', profile: { titles: ['Engineer'] }, careerSnapshotId: 'snapshot-1', fingerprint: 'fingerprint-1',
+            // A compiler may internally receive paths; this field proves the
+            // provider adapter does not forward arbitrary compiler output.
+            filePaths: ['/private/candidate.pdf'],
+          };
+        },
+        provider: async (input) => {
+          order.push('provider');
+          assert(input.careerSnapshotId === 'snapshot-1' && !('filePaths' in input),
+            'provider admission must receive only the immutable snapshot projection, never raw file paths');
+          return { status: 'started' };
+        },
+      });
+      assert(JSON.stringify(order) === JSON.stringify(['compile', 'provider']) && result.status === 'started',
+        'the provider must not start before compilation settles successfully');
+      const blocked = await compileBeforeCareerProvider({
+        compile: async () => ({ status: 'failed', error: 'source changed' }),
+        provider: async () => { throw new Error('provider must not run after compile failure'); },
+      });
+      assert(blocked.status === 'failed', 'failed compilation must remain a compiler-only retry and not enter provider work');
+      // Model the renderer CAS boundary: a clear/re-import replaces the live
+      // receipt while the compiler is awaiting its final parse result. Its late
+      // approval must be discarded and cannot be handed to a provider.
+      const oldAttempt = beginCareerImportCompilation({ generation: 'career-import:race:old', attemptId: 'old-attempt' });
+      let liveReceipt = oldAttempt;
+      liveReceipt = beginCareerImportCompilation({ generation: 'career-import:race:new', attemptId: 'new-attempt' });
+      const lateApproval = approveCareerImportCompilation(oldAttempt, {
+        generation: oldAttempt.generation, attemptId: oldAttempt.attemptId, careerSnapshotId: 'old-snapshot',
+      });
+      if (careerImportCompilationMatches(liveReceipt, oldAttempt)) liveReceipt = lateApproval;
+      assert(liveReceipt.generation === 'career-import:race:new' && liveReceipt.status === 'compiling',
+        'a clear/re-import mutation must fence a late old compiler approval before provider admission');
+      return { exactOrder: true, rawPathsExcluded: true, failedCompileBlocksProvider: true, lateApprovalFenced: true };
+    },
+  },
+  {
+    name: 'Career compilation receipt fences provider admission until the exact generation is approved',
+    run() {
+      const generation = 'career-import:search-1:generation-a';
+      const first = beginCareerImportCompilation({ generation, attemptId: 'attempt-a', manualAiRunId: 'manual-a' });
+      const replacement = beginCareerImportCompilation({ generation: 'career-import:search-1:generation-b', attemptId: 'attempt-b' });
+      assert(careerImportCompilationAdmission({ careerImportCompilation: first }, { generation }).kind === 'compiling',
+        'a Board/provider turn must defer while the exact career import is compiling');
+      assert(!careerImportCompilationMatches(replacement, first),
+        'a late compiler settlement cannot match a replacement generation/attempt');
+      assert(approveCareerImportCompilation(replacement, {
+        generation, attemptId: first.attemptId, careerSnapshotId: 'snapshot-wrong',
+      }) === null,
+      'completion CAS must reject a stale generation rather than publishing over a re-drop');
+      const approvedSnapshotId = 'a'.repeat(64);
+      const approved = approveCareerImportCompilation(first, {
+        generation, attemptId: first.attemptId, careerSnapshotId: approvedSnapshotId, profileFingerprint: 'profile-fingerprint',
+      });
+      assert(careerImportCompilationAdmission({ careerImportCompilation: approved, careerSnapshotId: approvedSnapshotId }, { generation }).kind === 'approved',
+        'only the exact approved receipt admits provider work');
+      const failed = failCareerImportCompilation(first, {
+        generation, attemptId: first.attemptId, error: 'source changed during compile',
+      });
+      assert(careerImportCompilationAdmission({ careerImportCompilation: failed }, { generation }).kind === 'failed',
+        'source mutation/compile failure remains a compiler retry state and cannot consume provider admission');
+      const renderer = readFileSync(new URL('../../src/nodes/JobSearchNode.jsx', import.meta.url), 'utf8');
+      assert(renderer.includes("careerImportCompilation?.status === 'compiling'")
+        && renderer.includes("reason: 'career-compiling'"),
+      'a Job Board must defer its child during compilation instead of consuming a fresh import or treating it as provider-busy');
+      return { compilingDeferred: true, staleCompletionFenced: true, approvedPinned: true, failedRetryable: true, boardWaits: true };
+    },
+  },
+  {
+    name: 'Saved career compilation resumes its exact compiler run without a provider search window',
+    run() {
+      const generation = 'career-import:resume-route:generation';
+      const runId = 'manual-career-resume';
+      const compiling = beginCareerImportCompilation({
+        generation,
+        attemptId: 'initial-attempt',
+        manualAiRunId: runId,
+      });
+      const failed = failCareerImportCompilation(compiling, {
+        generation,
+        attemptId: 'initial-attempt',
+        error: 'The audit handoff was interrupted.',
+      });
+      const recoveryData = {
+        careerImportGeneration: generation,
+        careerImportCompilation: failed,
+        manualAiResume: { runId, task: 'career-profile-audit-conflicts', jobRunId: null },
+        careerFilePaths: ['/private/work-experience.md'],
+      };
+      const restarted = beginCareerImportCompilation({
+        generation,
+        attemptId: 'restart-attempt',
+        manualAiRunId: runId,
+      });
+      const approved = approveCareerImportCompilation(restarted, {
+        generation,
+        attemptId: 'restart-attempt',
+        careerSnapshotId: 'd'.repeat(64),
+      });
+      assert(
+        resumableCareerImportCompilation(recoveryData, { generation, manualAiRunId: runId })?.attemptId === 'initial-attempt'
+          && resumableCareerImportCompilation({ ...recoveryData, careerImportCompilation: compiling }, { generation, manualAiRunId: runId })?.status === 'compiling'
+          && resumableCareerImportCompilation(recoveryData, { generation, manualAiRunId: 'other-run' }) === null
+          && resumableCareerImportCompilation({ ...recoveryData, careerImportCompilation: approved }, { generation, manualAiRunId: runId }) === null
+          && careerImportCompilationMatches(restarted, { generation, attemptId: 'restart-attempt' })
+          && restarted.manualAiRunId === runId,
+        'only the current failed/compiling receipt may restart the exact career handoff; wrong-run, approved, and replacement states cannot be reinterpreted as a compiler recovery',
+      );
+      const renderer = readFileSync(new URL('../../src/nodes/JobSearchNode.jsx', import.meta.url), 'utf8');
+      const careerRouteStart = renderer.indexOf('if (isCareerCompilationTask(resume?.task)) {');
+      const sidecarRouteStart = renderer.indexOf('if (!canvasFilePath || !window.electronAPI?.peekJobRun)', careerRouteStart);
+      const careerRoute = renderer.slice(careerRouteStart, sidecarRouteStart);
+      const preSearchRouteStart = renderer.indexOf('const preSearchRecovery = manualAiPreSearchRecoveryForResume', sidecarRouteStart);
+      const compilerStart = renderer.indexOf('const compileCareerFiles = useCallback');
+      const compilerEnd = renderer.indexOf('  useEffect(() => {\n    compileCareerFilesRef.current = compileCareerFiles;', compilerStart);
+      const compiler = renderer.slice(compilerStart, compilerEnd);
+      assert(
+        careerRouteStart >= 0
+          && sidecarRouteStart > careerRouteStart
+          && careerRoute.includes('resumableCareerImportCompilation(liveData')
+          && careerRoute.includes('const compile = compileCareerFilesRef.current;')
+          && careerRoute.includes('generation: compilation.generation')
+          && careerRoute.includes('manualAiRunId: resume.runId')
+          && !careerRoute.includes('startProcessingRef.current')
+          && preSearchRouteStart > sidecarRouteStart
+          && compiler.includes('const manualAiRunId = requestedManualAiRunId || createManualAiRunId(id);')
+          && compiler.includes('const exactRecoveryStillOwns')
+          && compiler.includes('!exactRecoveryMarkerStillOwns(getNode(id)?.data || {})')
+          && compiler.includes('!exactRecoveryStillOwns(current)'),
+        'a verified career checkpoint reaches compiler-only restart before job-sidecar/search-window routing, reuses its run id, and CAS-fences every restart write against a cleared or replaced marker',
+      );
+      return { receiptOwned: true, compilerOnly: true, noSearchWindowRequired: true, exactRunReused: true };
+    },
+  },
+  {
+    name: 'Job Board fingerprint changes when an otherwise identical row is pinned to another career snapshot',
+    run() {
+      const row = {
+        title: 'Engineer', company: 'Example', location: 'Toronto',
+        url: 'https://jobs.example.test/engineer', matchScore: 80,
+        originHubId: 'search-1', careerSnapshotId: 'career-profile-old',
+      };
+      const changed = { ...row, careerSnapshotId: 'career-profile-new' };
+      assert(moduleFingerprint([row]) !== moduleFingerprint([changed]),
+        'an immutable career snapshot change must make the Board stale even when the listing and score are unchanged');
+      return { snapshotPinned: true };
+    },
+  },
+  {
+    name: 'Job Board never treats retained files as fresh until one exact approved snapshot pin exists',
+    run() {
+      const nodeId = 'career-approval-gate';
+      const generation = `career-import:${nodeId}:approval-gate`;
+      const snapshotId = 'b'.repeat(64);
+      const compiling = beginCareerImportCompilation({ generation, attemptId: 'attempt' });
+      const failed = failCareerImportCompilation(compiling, { generation, attemptId: 'attempt', error: 'compiler rejected draft' });
+      const base = {
+        hubState: 'empty', inputLocked: true, careerFilePaths: ['/private/work.md'],
+        careerImportGeneration: generation, careerImportFreshCapability: generation,
+      };
+      const failedNode = { id: nodeId, type: 'jobhub', data: { ...base, careerImportCompilation: failed } };
+      const malformedApproved = approveCareerImportCompilation(compiling, {
+        generation, attemptId: 'attempt', careerSnapshotId: 'not-a-canonical-snapshot',
+      });
+      const forgedMalformedReceipt = {
+        ...compiling,
+        status: 'approved',
+        careerSnapshotId: 'not-a-canonical-snapshot',
+      };
+      const mismatchNode = { id: nodeId, type: 'jobhub', data: {
+        ...base, careerSnapshotId: 'c'.repeat(64), careerImportCompilation: malformedApproved,
+      } };
+      const approved = approveCareerImportCompilation(compiling, {
+        generation, attemptId: 'attempt', careerSnapshotId: snapshotId,
+      });
+      const approvedNode = { id: nodeId, type: 'jobhub', data: {
+        ...base, careerSnapshotId: snapshotId, careerImportCompilation: approved,
+      } };
+      assert(malformedApproved === null
+        && approvedCareerImportCompilation({ careerImportCompilation: forgedMalformedReceipt }, { generation }) === null
+        && classifyJobBoardSourceAdmission(failedNode).kind === 'career-import-failed'
+        && classifyJobBoardSourceAdmission(mismatchNode).kind === 'career-import-requires-approval'
+        && !currentApprovedCareerImportSnapshot(mismatchNode.data, { generation })
+        && classifyJobBoardSourceAdmission(approvedNode).kind === 'fresh-imported-input'
+        && careerImportCompilationAdmission(approvedNode.data, { generation }).kind === 'approved',
+      'failed, malformed, or mismatched compiler receipts must block Board readiness even when retained files and a fresh capability survive; malformed ids cannot even mint an approved receipt, and only the exact approved canonical pin is fresh');
+      const renderer = readFileSync(new URL('../../src/nodes/JobSearchNode.jsx', import.meta.url), 'utf8');
+      assert(renderer.includes('Retry Career Compilation')
+        && renderer.includes('currentApprovedCareerImportSnapshot(data')
+        && renderer.includes('const careerCompilationRetryOwnsBanner = careerCompilationFailed')
+        && renderer.includes('onRetry={careerCompilationRetryOwnsBanner || boardRecoveryOwnsActions ? null : handleRetryFailed}')
+        && renderer.includes('onDismiss={careerCompilationRetryOwnsBanner || data.terminalFinalizationRecovery ? null : handleDismissError}')
+        && (renderer.match(/>\s*Retry Career Compilation\s*<\/button>/gu) || []).length === 1,
+      'the retained-input UI must show one compiler-retry action, never an inert dismiss or duplicate generic retry, and must not advertise a profile/path projection as runnable authority');
+      return { failedBlocked: true, mismatchedBlocked: true, exactApprovedReady: true };
+    },
+  },
   {
     name: 'Job Board preserves a valid cascade only during same-topology connected search activity',
     run() {
@@ -167,6 +458,10 @@ export default [
           careerImportGeneration: 'career-import:fresh-search:one',
           careerImportFreshCapability: 'career-import:fresh-search:one',
           careerImportConsumption: null,
+          careerSnapshotId: 'd'.repeat(64),
+          careerImportCompilation: {
+            version: 1, generation: 'career-import:fresh-search:one', attemptId: 'approved-fresh', status: 'approved', careerSnapshotId: 'd'.repeat(64),
+          },
         },
       };
       const freshImport = classifyJobBoardSourceAdmission(freshSource);
@@ -195,6 +490,46 @@ export default [
           scoredJobs: [{ title: 'Legacy Product Manager', company: 'Example', url: 'https://jobs.example.test/legacy', matchScore: 71 }],
         },
       };
+      const scoredNoRunId = {
+        id: 'scored-no-run-id',
+        type: 'jobhub',
+        data: {
+          hubState: 'done', resultDisposition: 'scored', jobRunId: null, errorMessage: null,
+          scoredJobs: [{ title: 'Scored No Run Id', company: 'Example', url: 'https://jobs.example.test/scored-no-run', matchScore: 75 }],
+        },
+      };
+      const changedScoredNoRunId = {
+        ...scoredNoRunId,
+        data: { ...scoredNoRunId.data, scoredJobs: [{ ...scoredNoRunId.data.scoredJobs[0], matchScore: 74 }] },
+      };
+      const blockedTerminalShapes = [
+        {
+          id: 'incomplete-no-run',
+          type: 'jobhub',
+          data: { hubState: 'done', jobRunId: null, errorMessage: null, resultDisposition: 'incomplete', scoredJobs: [{ title: 'Incomplete', company: 'Example', url: 'https://jobs.example.test/incomplete', matchScore: 60 }] },
+        },
+        {
+          id: 'collection-only-no-run',
+          type: 'jobhub',
+          data: { hubState: 'done', jobRunId: null, errorMessage: null, resultDisposition: 'collection-only', collectionOnly: true, scoredJobs: [] },
+        },
+        {
+          id: 'empty-complete-no-run',
+          type: 'jobhub',
+          data: { hubState: 'done', jobRunId: null, errorMessage: null, resultDisposition: 'empty-complete', scoredJobs: [] },
+        },
+        {
+          id: 'scored-error-no-run',
+          type: 'jobhub',
+          data: { hubState: 'done', jobRunId: null, resultDisposition: 'scored', errorMessage: 'x', scoredJobs: [{ title: 'Scored Error', company: 'Example', url: 'https://jobs.example.test/scored-error', matchScore: 60 }] },
+        },
+        {
+          id: 'scored-empty-no-run',
+          type: 'jobhub',
+          data: { hubState: 'done', jobRunId: null, errorMessage: null, resultDisposition: 'scored', scoredJobs: [] },
+        },
+      ];
+      const scoredNoRunIdAdmission = classifyJobBoardSourceAdmission(scoredNoRunId);
       const reanalysisPreserved = {
         id: 'reanalysis-preserved-search',
         type: 'jobhub',
@@ -282,6 +617,16 @@ export default [
         && !completedJobSearchOutcomeMatches(partialModernReceipt, legacyReceipt)
         && jobSearchOutcomeReceiptMatches({ ...legacyAdmission.outcome, legacyPositiveResult: true }, legacyReceipt),
       'a completed source must match its recorded fingerprint as well as run id/disposition before Combine; only an exact null/null legacy receipt bridges normalized legacy provenance');
+      assert(scoredNoRunIdAdmission.kind === 'reuse-terminal'
+        && scoredNoRunIdAdmission.outcome.runId === null
+        && scoredNoRunIdAdmission.outcome.resultDisposition === 'legacy-scored'
+        && scoredNoRunIdAdmission.outcome.legacyPositiveResult === true
+        && completedJobSearchOutcomeMatches(scoredNoRunId, scoredNoRunIdAdmission.outcome)
+        && completedJobSearchOutcomeMatches(scoredNoRunId, { runId: null, resultDisposition: 'legacy-scored', legacyPositiveResult: true, fingerprint: scoredNoRunIdAdmission.outcome.fingerprint })
+        && !completedJobSearchOutcomeMatches(changedScoredNoRunId, scoredNoRunIdAdmission.outcome)
+        && partitionJobBoardSourceAdmissions([scoredNoRunId]).reusable.length === 1
+        && blockedTerminalShapes.every(shape => classifyJobBoardSourceAdmission(shape).kind === 'terminal-requires-fresh-input'),
+      'a scored legacy receipt without a run id brands as legacy-scored and is reusable; malformed/blocked terminal shapes stay fail-closed');
       const continuationReadiness = jobBoardModuleReadiness({
         hubState: 'sources-ready', ready: true, boardAction: 'continue', statusLabel: 'Resume saved scoring',
       });
@@ -334,6 +679,10 @@ export default [
           careerImportGeneration: capability,
           careerImportFreshCapability: capability,
           careerImportConsumption: null,
+          careerSnapshotId: 'e'.repeat(64),
+          careerImportCompilation: {
+            version: 1, generation: capability, attemptId: 'approved-capability', status: 'approved', careerSnapshotId: 'e'.repeat(64),
+          },
         },
       };
       const admitted = classifyJobBoardSourceAdmission(fresh);
@@ -368,6 +717,8 @@ export default [
       const preflightPoisoned = {
         ...claimedData,
         hubState: 'empty',
+        careerSnapshotId: null,
+        careerImportCompilation: null,
         careerImportConsumption: legacyConsumption,
         // Setup bookkeeping was written before the old login gate. Neither
         // field proves parsing or provider work, and errorMessage is absent
@@ -425,7 +776,7 @@ export default [
       const allStartedShapesBlocked = poisonedStartedShapes.every((patch) => {
         const candidate = { ...preflightPoisoned, ...patch };
         return retryableUnstartedJobCareerImportCapability(candidate, { nodeId: fresh.id }) === null
-          && classifyJobBoardSourceAdmission({ ...fresh, data: candidate }).kind === 'fresh-import-requires-clear'
+          && classifyJobBoardSourceAdmission({ ...fresh, data: candidate }).kind === 'career-import-requires-approval'
           && jobCareerImportBoardAdmission(candidate, {
             capability,
             boardRunId: reclaimBoardRunId,
@@ -465,6 +816,10 @@ export default [
           careerImportGeneration: colonCapability,
           careerImportFreshCapability: colonCapability,
           careerImportConsumption: null,
+          careerSnapshotId: 'f'.repeat(64),
+          careerImportCompilation: {
+            version: 1, generation: colonCapability, attemptId: 'approved-colon', status: 'approved', careerSnapshotId: 'f'.repeat(64),
+          },
         },
       };
       const delimiterCollisionSource = { ...colonOwnedSource, id: 'a' };
@@ -497,12 +852,16 @@ export default [
           careerImportGeneration: 'career-import:capability-search:two',
           careerImportFreshCapability: 'career-import:capability-search:two',
           careerImportConsumption: null,
+          careerSnapshotId: '1'.repeat(64),
+          careerImportCompilation: {
+            version: 1, generation: 'career-import:capability-search:two', attemptId: 'approved-reimport', status: 'approved', careerSnapshotId: '1'.repeat(64),
+          },
         },
       });
       const search = readFileSync(new URL('../../src/nodes/JobSearchNode.jsx', import.meta.url), 'utf8');
       const loginPreflightAt = search.indexOf('// Authenticate before spending a fresh-import capability.');
-      const freshCapabilityClaimAt = search.indexOf('// A retained profile/files field is not a fresh Board capability.');
-      const freshCapabilityConsumptionAt = search.indexOf("origin: 'job-board',", freshCapabilityClaimAt);
+      const compilationApprovalAt = search.indexOf('const pinnedCareerSnapshotId = providerCompilation.receipt.careerSnapshotId;');
+      const freshCapabilityConsumptionAt = search.indexOf("origin: 'job-board',", compilationApprovalAt);
       assert(admitted.kind === 'fresh-imported-input'
         && admitted.freshImportCapability === capability
         && initialBoardClaim.kind === 'fresh'
@@ -519,20 +878,17 @@ export default [
         && reimported.kind === 'fresh-imported-input',
       'only one newly imported capability may start a fresh Board search; failed/reset retained inputs, copied/tampered tokens, and delimiter-prefix custom node IDs fail closed, the same durable Board plan may recover its claim, terminal results remain dispatch-free, and Clear + re-import mints the next capability');
       assert(preflightRetryCapability === capability
-        && preflightRetryAdmission.kind === 'fresh-imported-input'
-        && preflightRetryAdmission.freshImportCapability === capability
-        && preflightReclaim.kind === 'reclaimable-unstarted'
-        && reclaimedPreflightClaim.kind === 'owned'
+        && preflightRetryAdmission.kind === 'career-import-requires-approval'
+        && preflightReclaim.kind === 'missing'
+        && reclaimedPreflightClaim.kind === 'missing'
         && reclaimedPreflightData.careerImportConsumption.admissionVersion === 2
         && allStartedShapesBlocked,
-      'only the legacy pre-fix Board-owned, file-retaining, wholly unstarted login-gate shape may move its import capability to a new Board run; setup metadata is allowed, while parsed, provider-started, manual, pending, terminal, standalone, versioned, malformed, and fileless shapes stay blocked');
+      'a retained legacy preflight capability remains identifiable for migration diagnostics, but it cannot start a Board run without an exact approved career snapshot; parsed, provider-started, manual, pending, terminal, standalone, versioned, malformed, and fileless shapes stay blocked');
       assert(loginPreflightAt >= 0
-        && freshCapabilityClaimAt > loginPreflightAt
-        && freshCapabilityConsumptionAt > loginPreflightAt,
-      'the browser-login preflight must complete before a Job Board spends a fresh career-import capability, so signing in after a rejected attempt leaves the Board retryable');
-      assert(search.includes('Reclaimed legacy unstarted Board import for post-login retry board=${boardRunId}'),
-        'a successful legacy capability reclaim must emit a compact Job Search event proving the compatibility path and new Board run without logging career data');
-      return { startsOnce: true, exactRecovery: true, resetBlocked: true, copiedCapabilityBlocked: true, delimiterCollisionBlocked: true, reimportEnabled: true, loginGateRetryable: true, preFixImportReclaimed: true };
+        && compilationApprovalAt > loginPreflightAt
+        && freshCapabilityConsumptionAt > compilationApprovalAt,
+      'the browser-login preflight and immutable career compilation must complete before a Job Board spends a fresh career-import capability, so parsing never burns a provider admission');
+      return { startsOnce: true, exactRecovery: true, resetBlocked: true, copiedCapabilityBlocked: true, delimiterCollisionBlocked: true, reimportEnabled: true, loginGateRequiresApproval: true };
     },
   },
   {
@@ -1126,7 +1482,7 @@ export default [
     name: 'Job Board primary action makes enabled and disabled idle states distinct',
     run() {
       const selection = readFileSync(new URL('../../src/nodes/jobboard/JobBoardSearchSelection.jsx', import.meta.url), 'utf8');
-      assert(selection.includes('const primaryActionDisabledReason = !running && !recoveryError && !canRun')
+      assert(selection.includes('const primaryActionDisabledReason = !running && !recoveryError && !boardUpToDate && !canRun')
         && selection.includes('aria-describedby={primaryActionDisabledReason ? actionDisabledReasonId : undefined}')
         && selection.includes('data-action-state={running ? \'running\' : (canRun ? \'enabled\' : \'disabled\')}')
         && selection.includes('id={actionDisabledReasonId}')
@@ -2413,6 +2769,10 @@ export default [
           careerImportGeneration: 'career-import:report-fresh-after-clear:one',
           careerImportFreshCapability: 'career-import:report-fresh-after-clear:one',
           careerImportConsumption: null,
+          careerSnapshotId: '2'.repeat(64),
+          careerImportCompilation: {
+            version: 1, generation: 'career-import:report-fresh-after-clear:one', attemptId: 'approved-report-fresh', status: 'approved', careerSnapshotId: '2'.repeat(64),
+          },
         },
       };
       const tokenlessPaused = {
@@ -2774,7 +3134,7 @@ export default [
         && !rerun.includes("deferDirectSearchToBoard('Direct re-run')")
         && search.includes("if (!queueManagedByBoard && deferDirectSearchToBoard('Interrupted-run resume')) {")
         && search.includes("if (!queueManagedByBoard && deferDirectSearchToBoard('Saved-scrape resume')) {")
-        && search.includes("deferDirectSearchToBoard(\n      'Career-file drop'")
+        && search.includes("'Career-file drop'")
         && search.includes('if (managedByJobBoard || activeBoardRecoveryOwnerKey) {\n      EventLogger.log(`[JobSearch][${id}] Legacy file auto-start suppressed')
         && search.includes('This Job Search is reserved by an interrupted Job Board run.')
         && search.includes('This interrupted Search is reserved by its Job Board.')
@@ -2783,7 +3143,7 @@ export default [
         && search.includes('const pausedBoardContinuationOwnerKey = useStore(')
         && search.includes('findJobSearchBoardPausedContinuationOwner(\n        id,\n        jobRunId,\n        store.nodeLookup,\n        store.edges,')
         && search.includes('dedupeKey: `job-search-run-from-board:${id}`,')
-        && search.includes('onRetry={boardRecoveryOwnsActions ? null : handleRetryFailed}')
+        && search.includes('onRetry={careerCompilationRetryOwnsBanner || boardRecoveryOwnsActions ? null : handleRetryFailed}')
         && search.includes('onRerun={activeBoardRecoveryOwnerKey || data.terminalFinalizationRecovery || resumeOffer?.incomplete ? null : handleRerun}')
         && search.includes('onReanalyze={boardRecoveryOwnsActions || data.terminalFinalizationRecovery ? null : handleReanalyze}')
         && search.includes('{hasRunnableCareerInput && !controlsLocked && !boardRecoveryOwnsActions && !resumeOffer?.incomplete && (')
@@ -5094,6 +5454,74 @@ export default [
         && rerun.includes("...(queueManagedByBoard ? { transientReason: 'platforms-verifying' } : {}),"),
       'fresh, interrupted, and rerun paths must preserve the verification tag through their later queue-turn gates when their caller is a Job Board');
       return { queuedFreshVerificationFence: true, interruptedResumeUsesLiveVerification: true, boardSavedReplayBypassesProviderGate: true, verificationRefusalTagged: true, lateGateTagsPreserved: true };
+    },
+  },
+  {
+    name: 'Job Search accepts native and document-node career drops while connections verify, compiling before provider work',
+    run() {
+      const search = readFileSync(new URL('../../src/nodes/JobSearchNode.jsx', import.meta.url), 'utf8');
+      const compileStart = search.indexOf('const compileCareerFiles = useCallback');
+      const compileEnd = search.indexOf('const startProcessingWithProfile = useCallback', compileStart);
+      const compile = search.slice(compileStart, compileEnd);
+      const acceptStart = search.indexOf('const acceptCareerFiles = useCallback');
+      const nativeDropStart = search.indexOf('const handleDrop = useCallback', acceptStart);
+      const nativeDropEnd = search.indexOf('\n  useEffect(() => {', nativeDropStart);
+      const nativeDrop = search.slice(nativeDropStart, nativeDropEnd);
+      const documentDropStart = nativeDropEnd;
+      const documentDropEnd = search.indexOf('const cancelActiveBoardChild = useCallback', documentDropStart);
+      const documentDrop = search.slice(documentDropStart, documentDropEnd);
+      const accept = search.slice(acceptStart, nativeDropStart);
+      const hubRenderStart = search.indexOf('return (\n    <HubContainer');
+      const hubRenderEnd = search.indexOf('{/* Processing state */}', hubRenderStart);
+      const hubRender = search.slice(hubRenderStart, hubRenderEnd);
+      const pipelineStart = search.indexOf('const runPipeline = useCallback');
+      const pipelineEnd = search.indexOf('const startProcessing = useCallback', pipelineStart);
+      const pipeline = search.slice(pipelineStart, pipelineEnd);
+
+      assert(compileStart >= 0 && compileEnd > compileStart
+        && compile.includes('window.electronAPI.parseCareerData({ filePaths, nodeId: id, manualAiRunId })')
+        && compile.includes('careerSnapshotId: typeof parseResult.careerSnapshotId')
+        && compile.includes("hubState: 'empty'")
+        && compile.includes("status: 'compiled'"),
+      'career ingestion must compile and retain the v5 snapshot without entering a source-search state');
+      const parseCall = compile.indexOf('const parseResult = await window.electronAPI.parseCareerData');
+      const successCleanup = compile.indexOf("await completeManualAiRun(manualAiRunId, {\n        retirementReason: 'career-snapshot-compiled',");
+      const deferredResult = compile.indexOf("status: 'compiled'");
+      const failureCatch = compile.indexOf('} catch (error) {');
+      const activeOwnershipClear = compile.indexOf('if (activeManualAiRunIdRef.current === manualAiRunId)');
+      assert(compile.indexOf('activeManualAiRunIdRef.current = manualAiRunId;') < parseCall
+        && successCleanup > parseCall
+        && deferredResult > successCleanup
+        && failureCatch > deferredResult
+        && activeOwnershipClear > failureCatch
+        && compile.slice(failureCatch, activeOwnershipClear).includes("return searchRunOutcome('failed'")
+        && !compile.slice(failureCatch, activeOwnershipClear).includes('completeManualAiRun(manualAiRunId'),
+      'a successful parser-only run must retire only its exact manual-AI marker before a non-error deferred result, while failed/cancelled work retains its recovery marker and finally releases only matching in-memory ownership');
+      assert(accept.includes('if (platformsVerifyingRef.current)')
+        && accept.includes('compileCareerFilesRef.current?.(valid, careerImportCapability)')
+        && accept.indexOf('compileCareerFilesRef.current?.(valid, careerImportCapability)') < accept.indexOf('if (deferDirectSearchToBoard('),
+      'a verifying connection check must route an accepted career drop to compilation before any Board/search admission');
+      assert(nativeDropStart >= 0 && nativeDropEnd > nativeDropStart
+        && !nativeDrop.includes("'platforms-verifying'")
+        && !nativeDrop.includes('platformsVerifying')
+        && nativeDrop.includes('acceptCareerFiles(payloads.map(file => file.path)'),
+      'a native Finder/file-input drop must remain an import target while platform verification runs');
+      assert(documentDropEnd > documentDropStart
+        && !documentDrop.includes("'platforms-verifying'")
+        && !documentDrop.includes('platformsVerifying')
+        && documentDrop.includes("acceptCanvasDocumentCareerFiles(e.detail?.files || [], 'Document-node drop')")
+        && search.includes('const acceptCanvasDocumentCareerFiles = useCallback')
+        && search.includes('return acceptCareerFiles(\n      droppedFiles.map(file => file.filePath),'),
+      'a document-node career-file drop must take the same verification-time import path as a native drop');
+      assert(hubRender.includes('dropsBlocked={inputDropsBlocked || controlsLocked}')
+        && !hubRender.includes('dropsBlocked={platformsVerifying ||')
+        && hubRender.includes('Add résumé, portfolio, or project files while connections finish checking.'),
+      'the empty hub must keep its career-file invitation and pointer drop target visible during connection checks');
+      assert(pipeline.includes('if (platformsVerifyingRef.current)')
+        && pipeline.includes("error: 'Its selected platform connections are still being checked.'")
+        && pipeline.indexOf('if (platformsVerifyingRef.current)') < pipeline.indexOf('window.electronAPI.searchJobs({'),
+      'the ordinary start pipeline must still recheck live source readiness before it can call searchJobs after a deferred compilation');
+      return { nativeIngressOpen: true, documentNodeIngressOpen: true, v5SnapshotCompiled: true, searchStillFenced: true };
     },
   },
   {

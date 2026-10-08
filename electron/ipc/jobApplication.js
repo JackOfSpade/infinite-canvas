@@ -691,6 +691,55 @@ export async function readRegisteredApplicationArtifact(workDir, filePath, {
   }
 }
 
+// Current-authority disposition pages are intentionally a directory of
+// individually bounded immutable receipts, not an aggregate export blob.  A
+// save copies them one at a time after reading the compact index through the
+// same workspace-identity fence as every other registered artifact.
+async function copyRegisteredDispositionSidecar(workDir, sourceDir, destinationDir, workspaceIdentity) {
+  const source = path.resolve(sourceDir);
+  const root = path.resolve(workDir);
+  if (!isWithinDirectory(root, source) || source === root) return null;
+  const stat = await fs.promises.lstat(source).catch(error => error?.code === 'ENOENT' ? null : Promise.reject(error));
+  if (!stat) return null;
+  if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error('Generation Audit disposition sidecar must be a regular directory.');
+  const indexPath = path.join(source, 'index.json');
+  const indexRaw = await readRegisteredApplicationArtifact(root, indexPath, { encoding: 'utf8', workspaceIdentity });
+  let index;
+  try { index = JSON.parse(indexRaw); } catch { throw new Error('Generation Audit disposition sidecar index is not JSON.'); }
+  if (!index || index.version !== 1 || !/^[a-f0-9]{64}$/u.test(index.rootDigest || '')
+    || !/^[a-f0-9]{64}$/u.test(index.documentDigest || '') || !/^[a-z][a-z0-9-]{0,39}$/u.test(index.stream || '')
+    || !Number.isSafeInteger(index.pageCount) || index.pageCount < 1 || !/^[a-f0-9]{64}$/u.test(index.pageDigest || '')) {
+    throw new Error('Generation Audit disposition sidecar index is invalid.');
+  }
+  const target = path.resolve(destinationDir);
+  const parent = path.dirname(target);
+  const temporary = await fs.promises.mkdtemp(path.join(parent, '.generation-audit-dispositions-'));
+  try {
+    for (let pageIndex = 0; pageIndex < index.pageCount; pageIndex += 1) {
+      const fileName = `page-${String(pageIndex).padStart(12, '0')}.json`;
+      const raw = await readRegisteredApplicationArtifact(root, path.join(source, fileName), { workspaceIdentity });
+      let page;
+      try { page = JSON.parse(raw.toString('utf8')); } catch { throw new Error('Generation Audit disposition sidecar page is not JSON.'); }
+      if (!page || page.stream !== index.stream || page.number !== pageIndex || !/^[a-f0-9]{64}$/u.test(page.digest || '')) {
+        throw new Error('Generation Audit disposition sidecar page is missing, substituted, or out of order.');
+      }
+      await fs.promises.writeFile(path.join(temporary, fileName), raw, { mode: 0o600, flag: 'wx' });
+    }
+    await fs.promises.writeFile(path.join(temporary, 'index.json'), indexRaw, { encoding: 'utf8', mode: 0o600, flag: 'wx' });
+    const existing = await fs.promises.lstat(target).catch(error => error?.code === 'ENOENT' ? null : Promise.reject(error));
+    if (existing?.isSymbolicLink()) throw new Error('Generation Audit disposition destination is a symbolic link.');
+    const retired = existing ? path.join(parent, `.generation-audit-dispositions-retired-${crypto.randomUUID()}`) : null;
+    if (retired) await fs.promises.rename(target, retired);
+    try { await fs.promises.rename(temporary, target); }
+    catch (error) { if (retired) await fs.promises.rename(retired, target).catch(() => {}); throw error; }
+    if (retired) await fs.promises.rm(retired, { recursive: true, force: true });
+    return target;
+  } catch (error) {
+    await fs.promises.rm(temporary, { recursive: true, force: true }).catch(() => {});
+    throw error;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Shared pure page-fit helpers used by Local AI import and deterministic tests.
 // ---------------------------------------------------------------------------
@@ -705,8 +754,6 @@ export function targetPageCountForJob() {
   return 1;
 }
 
-const INK_MONO_COMPANIES = /\b(?:ibm|accenture|deloitte|pwc|ey|ernst\s*&?\s*young|kpmg|mckinsey|boston\s+consulting|bain)\b/i;
-const INK_ONLY_COMPANIES = /\b(?:google|meta|amazon|microsoft|apple|salesforce|oracle|atlassian|shopify)\b/i;
 const CONSERVATIVE_RECIPIENT_SIGNALS = /\b(?:regulated|audit|clearance|fedramp|underwriting|actuarial|defen[cs]e|government|public sector|banking)\b/gi;
 const ENTERPRISE_RECIPIENT_SIGNALS = /\b(?:enterprise[- ]scale|governance|compliance|stakeholders?|matrix(?:ed)?\s+organi[sz]ation|global)\b/gi;
 const A4_LOCATION_SIGNALS = /\b(?:canada|united kingdom|england|scotland|wales|ireland|germany|france|spain|italy|netherlands|belgium|switzerland|austria|sweden|norway|denmark|finland|poland|australia|new zealand|singapore|india|japan|south korea)\b/i;
@@ -722,14 +769,11 @@ function matchingSignalCount(pattern, text) {
  * dual-pdf when the recipient cannot be classified confidently.
  */
 export function applicationVariantAttrsForJob(job = {}) {
-  const company = String(job?.company || '');
-  const recipientText = [company, job?.title, job?.snippet, job?.description]
+  const recipientText = [job?.title, job?.snippet, job?.description]
     .filter(Boolean)
     .join('\n');
-  const conservative = INK_MONO_COMPANIES.test(company)
-    || matchingSignalCount(CONSERVATIVE_RECIPIENT_SIGNALS, recipientText) > 0;
-  const enterprise = INK_ONLY_COMPANIES.test(company)
-    || matchingSignalCount(ENTERPRISE_RECIPIENT_SIGNALS, recipientText) >= 5;
+  const conservative = matchingSignalCount(CONSERVATIVE_RECIPIENT_SIGNALS, recipientText) > 0;
+  const enterprise = matchingSignalCount(ENTERPRISE_RECIPIENT_SIGNALS, recipientText) >= 5;
   const attrs = [`data-print="${conservative || enterprise ? 'ink-only' : 'dual-pdf'}"`];
   if (conservative) attrs.push('data-mono');
   if (A4_LOCATION_SIGNALS.test(String(job?.location || ''))) attrs.push('data-page="a4"');
@@ -918,19 +962,40 @@ export function retainedResumeRolesWithoutBullets(mainHtml) {
   return roles;
 }
 
-export function assertRetainedResumeRoleBullets(mainHtml) {
+export function assertRetainedResumeRoleBullets(mainHtml, { expectedRoleCount = null } = {}) {
+  // A current-authority selection is a stronger structural contract than the
+  // legacy markup-only check below. In particular, an approved profile can be
+  // project-, education-, or certification-led and deliberately select zero
+  // work-history roles. Do not make that truthful absence indistinguishable
+  // from a renderer that lost a role: callers that have the selected source
+  // roles pass their exact count, while legacy callers retain the historical
+  // fail-closed "at least one recognized role" contract.
+  if (expectedRoleCount !== null
+    && (!Number.isSafeInteger(expectedRoleCount) || expectedRoleCount < 0)) {
+    throw new Error('Résumé structural validation failed: expectedRoleCount must be a nonnegative integer or null.');
+  }
+  const html = String(mainHtml || '');
   // A zero-match result is not proof that every role has evidence. It means the
   // design-system role contract was not recognized at all (for example, after
   // its owner renamed `.role` or changed the article structure). Fail loudly
   // and distinctly so this safety net cannot silently open during a reconnect.
   ROLE_ARTICLE_RE.lastIndex = 0;
-  const matchedRole = ROLE_ARTICLE_RE.test(String(mainHtml || ''));
+  const matchedRoles = [];
+  let roleMatch;
+  while ((roleMatch = ROLE_ARTICLE_RE.exec(html))) matchedRoles.push(roleMatch[0]);
   ROLE_ARTICLE_RE.lastIndex = 0;
-  if (!matchedRole) {
+  if (expectedRoleCount === 0) {
+    if (!matchedRoles.length) return html;
+    throw new Error(`Résumé structural validation failed: the selected authority contains zero work-history roles, but the rendered résumé contains ${matchedRoles.length} <article class="role"> element(s).`);
+  }
+  if (!matchedRoles.length) {
     throw new Error('Résumé structural validation failed: no role elements matched the expected <article class="role"> contract. The design-system role markup may have changed.');
   }
+  if (expectedRoleCount !== null && matchedRoles.length !== expectedRoleCount) {
+    throw new Error(`Résumé structural validation failed: the selected authority contains ${expectedRoleCount} work-history role(s), but the rendered résumé contains ${matchedRoles.length} <article class="role"> element(s).`);
+  }
   const missing = retainedResumeRolesWithoutBullets(mainHtml);
-  if (!missing.length) return String(mainHtml || '');
+  if (!missing.length) return html;
   const labels = missing.map((role, index) => role.company || role.title || `role ${index + 1}`).join(', ');
   throw new Error(`Every retained résumé role must include at least one factual bullet; missing evidence for ${labels}.`);
 }
@@ -938,7 +1003,7 @@ export function assertRetainedResumeRoleBullets(mainHtml) {
 // A role's employment location has two legal homes (STYLE.md §5.2b): its own
 // `.role-location` cell, or — when the role carries no `.role-summary` to share
 // that row with — folded into the `.role-dates` cell after the standard `·`
-// separator, `May 2023 – Jun 2026 · Loveland, CO`. Read both so every consumer
+// separator, `May 2023 – Jun 2026 · Example City, CO`. Read both so every consumer
 // sees the same fact regardless of which shape the writer chose, and so the
 // fold does not read as a missing location to the gate below.
 function resumeRoleDatesAndLocation(roleHtml) {
@@ -1009,11 +1074,11 @@ function careerDataRegionCode(region) {
 
 /**
  * Do two written forms of an employer name refer to the same employer? The
- * résumé legitimately shortens or extends what the corpus wrote — `FliteX` for
- * `FliteX (Plan de Vol International)`, `Thomson School District (K-12)` for
- * `Thomson School District` — so one name must be a WHOLE-WORD prefix of the
- * other. A bare substring test is what made `Horizon Health` read its city out
- * of `Alliance — Getzville`, rejecting a correct résumé and telling the writer
+ * résumé legitimately shortens or extends what the corpus wrote — `Example Systems` for
+ * `Example Systems (International)`, `Example Systems (Regional)` for
+ * `Example Systems` — so one name must be a WHOLE-WORD prefix of the
+ * other. A bare substring test is what made `Example Health` read its city out
+ * of `Alliance — Example City`, rejecting a correct résumé and telling the writer
  * to render that string. `Health` matches neither name.
  */
 function careerDataNamesMatch(a, b) {
@@ -1054,8 +1119,8 @@ function careerDataLocationHeadings(careerData) {
 
 /**
  * Find the employment location the career data states for one employer, by
- * reading the employer's own heading line — `Thomson School District —
- * Loveland, Colorado`. Returns `null` unless the corpus names this employer
+ * reading the employer's own heading line — `Example Employer —
+ * Example City, Colorado`. Returns `null` unless the corpus names this employer
  * UNAMBIGUOUSLY AND gives it a `City, Region` whose region is recognized, so a
  * role the corpus never located produces no requirement.
  */
@@ -1288,7 +1353,7 @@ export function resumeRoleLocationFailures(roles, careerData) {
     // The city is matched by the same whole-word prefix relation as the
     // employer, which DELIBERATELY tolerates one name extending the other
     // ("New York" for a stated "New York City"). That also lets a fabricated
-    // neighbour through ("Loveland Heights" for "Loveland"), and that trade is
+    // neighbour through ("Example City Heights" for "Example City"), and that trade is
     // intended: the alternative rejects a correct résumé and tells the writer
     // its own city is wrong, which is the worse failure for this gate to have.
     const shownRegion = comma < 0 ? '' : careerDataRegionCode(shown.slice(comma + 1));
@@ -1427,6 +1492,22 @@ export function extractResumeEvidence(mainHtml) {
     const line = resumeTextFromHtml(educationMatch[1]);
     if (line && !education.includes(line)) education.push(line);
   }
+  // v5 structured résumés render selected education and certifications as
+  // semantic definition-list rows, rather than the legacy `.edu-line` div.
+  // Read the rendered rows instead of the authored object so the letter
+  // evidence base and APPOUTPUT describe the same final artifact. Keeping the
+  // flattened `education` array is intentional compatibility: its consumers
+  // already treat it as the résumé's non-role credential evidence, and now it
+  // retains both visible Education and Certifications rows.
+  const credentialDocument = resumeTextDocument(html);
+  for (const section of credentialDocument.querySelectorAll('section.education, section.certifications')) {
+    for (const item of section.querySelectorAll('.credentials-list .credential-item')) {
+      const label = item.querySelector('dt')?.textContent?.replace(/[\s\u00a0]+/g, ' ').trim() || '';
+      const detail = item.querySelector('dd')?.textContent?.replace(/[\s\u00a0]+/g, ' ').trim() || '';
+      const line = [label, detail].filter(Boolean).join(' · ');
+      if (line && !education.includes(line)) education.push(line);
+    }
+  }
 
   return {
     identity: {
@@ -1563,6 +1644,8 @@ export function checkResumeBulletLength(mainHtml) {
 // when a page must shed a line, and a floor in this battery would deadlock
 // that move against the very check meant to let it through.
 export const RESUME_ROLE_BULLET_CEILING = 6;
+export const MAX_RESUME_BULLET_OPENING_REPETITIONS = 2;
+export const RESUME_BULLET_OPENING_VARIETY_RULE = `within one role, no opening action word begins more than ${MAX_RESUME_BULLET_OPENING_REPETITIONS} bullets. Choose the most exact source-supported verb for each accomplishment; vary the verb only where the underlying action differs, and never invent a result merely to create variety`;
 
 export function checkResumeRoleBulletBudget(mainHtml) {
   const evidence = extractResumeEvidence(mainHtml);
@@ -1579,6 +1662,37 @@ export function checkResumeRoleBulletBudget(mainHtml) {
     : { id: 'resume-role-bullet-budget', passed: true, detail: `${evidence.roles.length} résumé role(s) fit the ${RESUME_ROLE_BULLET_CEILING}-bullet ceiling` };
 }
 
+/** Rejects the high-confidence “Built … Built … Built …” résumé pattern. */
+export function checkResumeBulletOpeningVariety(mainHtml) {
+  const evidence = extractResumeEvidence(mainHtml);
+  const observations = [];
+  evidence.roles.forEach((role, roleIndex) => {
+    const openings = new Map();
+    (Array.isArray(role.bullets) ? role.bullets : []).forEach((bullet, bulletIndex) => {
+      const value = String(bullet?.text || '').replace(/\s+/g, ' ').trim();
+      const match = /^[\s“”"'‘’([{]*([\p{L}][\p{L}’'-]*)/u.exec(value);
+      if (!match) return;
+      const opening = match[1].toLocaleLowerCase('en-US');
+      // This gate measures the résumé convention where the action verb is the
+      // first token. A sentence-style bullet beginning with a subject pronoun
+      // has no opening action word to compare and belongs to broader editorial
+      // review instead of being mislabeled as four uses of “I”.
+      if (opening === 'i' || opening === 'we' || opening === 'my' || opening === 'our') return;
+      const occurrences = openings.get(opening) || [];
+      occurrences.push(bulletIndex + 1);
+      openings.set(opening, occurrences);
+    });
+    const label = role.company || role.title || `role ${roleIndex + 1}`;
+    for (const [opening, bulletNumbers] of openings) {
+      if (bulletNumbers.length <= MAX_RESUME_BULLET_OPENING_REPETITIONS) continue;
+      observations.push(`${label} opens bullets ${bulletNumbers.join(', ')} with “${opening}” (${bulletNumbers.length} uses; ceiling ${MAX_RESUME_BULLET_OPENING_REPETITIONS}); use the most exact source-supported action verb for each distinct accomplishment without inventing a result`);
+    }
+  });
+  return observations.length
+    ? { id: 'resume-bullet-opening-variety', passed: false, detail: resumeCheckDetail(observations) }
+    : { id: 'resume-bullet-opening-variety', passed: true, detail: `${evidence.roles.length} résumé role(s) avoid a repeated opening-verb pattern` };
+}
+
 /** Shared pre-publication prose checks for the résumé's generated copy. */
 export function evaluateResumeProseChecks(mainHtml) {
   const evidence = extractResumeEvidence(mainHtml);
@@ -1591,6 +1705,7 @@ export function evaluateResumeProseChecks(mainHtml) {
     checkResumeBulletFocus(mainHtml),
     checkResumeBulletLength(mainHtml),
     checkResumeRoleBulletBudget(mainHtml),
+    checkResumeBulletOpeningVariety(mainHtml),
     checkCompoundHyphenation(prose),
     checkParallelStructure(prose),
     checkReferenceClarity(prose),
@@ -2030,11 +2145,24 @@ function updateApplicationTelemetryForAttempt(attemptId, changes = {}) {
  * different one.
  *
  * The check above and the write it gates are only atomic if the CALLER holds
- * a lock across both, keyed on `baseDir` (the deterministic sanitized path,
- * before disambiguation) — this function only ever reads what is on disk at
- * the instant it is called, so two unsynchronized calls for two different
- * jobs that share a baseDir can both observe it as empty/matching and both
- * "safely" choose it. See save-application's own comment at its call site.
+ * a lock across both, keyed on this function's PARENT NAMESPACE
+ * `path.dirname(baseDir)` — the company/location directory every sibling
+ * candidate this function can return lives in. This function only ever reads
+ * what is on disk at the instant it is called, so two unsynchronized calls for
+ * two different jobs that share a baseDir can both observe it as empty/matching
+ * and both "safely" choose it. See save-application's own comment at its call
+ * site.
+ *
+ * The namespace key is deliberately the DIRECTORY, not `baseDir` itself. Two
+ * different jobs can target different base names that are still siblings under
+ * one namespace: a job whose literal sanitized title equals another job's
+ * hash-disambiguated sibling — job one is stored at `Role (deadbeef)` and job
+ * two's own literal title sanitizes to exactly `Role (deadbeef)`. Locking
+ * `baseDir` alone would give those two savers two different lock keys for the
+ * SAME directory, so they could resolve and write concurrently and one would
+ * silently replace the other. The namespace lock is acquired BEFORE the exact
+ * resolved-dir lock (the keys are distinct, and this is the only fixed order),
+ * while unrelated company/location namespaces still save in parallel.
  *
  * Returns `{ dir, abandonedCandidates }`: every candidate directory this
  * call created-or-touched (via ensureCandidateDir) that was NOT the one
@@ -2179,6 +2307,10 @@ export function registerJobApplicationHandlers() {
     let exportPhase = 'validating generated sources';
     let exportDir = null;
     let exportRoot = null;
+    // The parent namespace (path.dirname(baseDir)) this attempt's destination
+    // resolution and write ran under, tracked so the catch path can re-acquire
+    // it before pruning.
+    let exportNamespaceDir = null;
     try {
     // Local-AI workspaces bind this one-shot save capability to the exact
     // result bytes that were rendered. Recheck after the synchronous claim and
@@ -2239,26 +2371,50 @@ export function registerJobApplicationHandlers() {
     }
     const baseDir = path.join(applicationOutputRoot, where, whereLocation, role);
     exportRoot = applicationOutputRoot;
+    // The parent namespace this job's candidates live in, recorded for the
+    // catch path below, which re-acquires it (namespace first, then the exact
+    // resolved dir) before any pruning.
+    exportNamespaceDir = path.dirname(baseDir);
     // Collision resolution and the destination write must be ONE atomic unit
-    // under a single lock keyed on this deterministic BASE path (the
-    // sanitized company/location/title, before disambiguation) — not on
-    // whichever directory resolveApplicationExportDirectory ends up
-    // choosing. That function's occupant check only reads whatever is on
+    // under a single PARENT-NAMESPACE lock keyed on path.dirname(baseDir) —
+    // the company/location directory holding every candidate
+    // resolveApplicationExportDirectory can return — not on this
+    // deterministic BASE path alone and not on whichever directory that
+    // function ends up choosing. Its occupant check only reads whatever is on
     // disk at the instant it runs, so resolving it outside a lock (the prior
-    // design) left the read-then-decide window unlocked: two concurrent
-    // saves of two DIFFERENT jobs sharing this baseDir could both observe
-    // the destination as empty or matching and both "safely" choose to
-    // write there, and the later writer would silently overwrite the
-    // earlier one's already-saved bundle — exactly the collision this whole
-    // mechanism exists to close (see resolveApplicationExportDirectory's own
-    // header). The dock runs up to the shared handoff capacity concurrently, so that window
-    // is reachable, not theoretical. Locking only the final write (below, as
-    // before) closed nothing: both savers would already have committed to
-    // the same `dir` before either one ever reached it.
+    // design) left the read-then-decide window unlocked: two concurrent saves
+    // of two DIFFERENT jobs sharing this baseDir could both observe the
+    // destination as empty or matching and both "safely" choose to write
+    // there, and the later writer would silently overwrite the earlier one's
+    // already-saved bundle — exactly the collision this whole mechanism
+    // exists to close (see resolveApplicationExportDirectory's own header).
+    // The dock runs up to the shared handoff capacity concurrently, so that
+    // window is reachable, not theoretical. Locking only the final write
+    // (below, as before) closed nothing: both savers would already have
+    // committed to the same `dir` before either one ever reached it.
+    //
+    // The namespace key must be the DIRECTORY rather than baseDir because two
+    // different jobs can target two DIFFERENT base names that are still
+    // siblings under it: one job's literal sanitized title can equal another
+    // job's hash-disambiguated sibling (`Role (deadbeef)`). Keying on baseDir
+    // would hand those two savers different keys for the same directory,
+    // letting them resolve and write concurrently — the same silent
+    // overwrite. Two savers under unrelated companies/locations sit in
+    // different namespaces and still proceed in parallel.
+    //
+    // Inside that namespace, acquire the EXACT resolved directory's lock
+    // around writeBundle, so Application Sync stays serialized against a Sync
+    // edit already in flight on this job's saved folder (the resolved sibling
+    // can differ from baseDir, and Application Sync only serializes callers
+    // sharing one directory key). The namespace and resolved-dir keys are
+    // distinct, so this order — namespace first, exact dir second — is the
+    // only one this flow uses; since the namespace is a strict ancestor and
+    // is always taken first, no holder of the exact-dir key can be waiting on
+    // a namespace this callback holds.
     let dir, applicationFile, resumeFile, coverLetterFile, jobListingFile,
       generationAuditFile, generationLogFile, hasPdf, hasCoverLetterPdf,
       hasListing, hasGenerationAudit;
-    const manifest = await withApplicationSyncWorkspaceLock(baseDir, async () => {
+    const manifest = await withApplicationSyncWorkspaceLock(exportNamespaceDir, async () => {
     // resolveApplicationExportDirectory both validates/creates whichever
     // candidate it returns and disambiguates it from a different job's
     // bundle already sitting at the sanitized path — see its own comment for
@@ -2379,7 +2535,7 @@ export function registerJobApplicationHandlers() {
     exportPhase = 'writing and verifying destination bundle';
     const writeBundle = async () => {
       const finalizedGenerationLogData = await mergeApplicationGenerationLogs(generationLogFile, generationLogData);
-      return replaceApplicationBundleAtomically([
+      const saved = await replaceApplicationBundleAtomically([
         { destination: applicationFile, data: generatedHtml },
         { destination: resumeFile, data: resumePdfData },
         { destination: coverLetterFile, data: coverLetterPdfData },
@@ -2420,16 +2576,28 @@ export function registerJobApplicationHandlers() {
           return readback;
         },
       });
+      // A current-authority export has a sibling sidecar only when the
+      // importer staged a complete disposition receipt.  Its deterministic
+      // location avoids adding another renderer-controlled path capability.
+      if (generationAuditPath) {
+        await copyRegisteredDispositionSidecar(
+          resolvedWorkDir,
+          path.join(path.dirname(generationAuditPath), 'Generation Audit.dispositions'),
+          path.join(dir, 'Generation Audit.dispositions'),
+          pending.workspaceIdentity,
+        );
+      }
+      return saved;
     };
-    // `dir` equals `baseDir` whenever this save did not need to disambiguate
-    // (the common case) — the outer acquire above already serializes that
-    // exact key, and calling withApplicationSyncWorkspaceLock again with the
-    // SAME key from inside its own still-pending callback would await a
-    // tail that cannot settle until this very callback returns: a permanent
-    // self-deadlock. Only a genuinely disambiguated `dir` (a different key)
-    // needs its own acquire here, to still serialize against a Sync edit
-    // already in flight on that sibling job's existing saved folder.
-    return dir === baseDir ? await writeBundle() : await withApplicationSyncWorkspaceLock(dir, writeBundle);
+    // `dir` is the exact resolved destination: the resolved sibling can differ
+    // from `baseDir` whenever this save had to disambiguate (the namespace
+    // lock above is keyed on their common parent, so it never covers this
+    // exact key). Acquiring the resolved directory's own lock here keeps this
+    // write serialized against an Application Sync edit already in flight on
+    // that saved folder, and, because the two keys are always taken in the
+    // fixed namespace-then-exact-dir order, this nested acquire inside its own
+    // namespace tail cannot self-deadlock.
+    return await withApplicationSyncWorkspaceLock(dir, writeBundle);
     });
     const missingFiles = [!hasPdf && 'résumé PDF', !hasCoverLetterPdf && 'cover-letter PDF', !hasListing && 'original job listing'].filter(Boolean);
     const syncStatus = applicationSyncStatusSnapshot();
@@ -2523,8 +2691,30 @@ export function registerJobApplicationHandlers() {
       logger.error(`[JobApplication] save-application failed during "${exportPhase}": ${error?.stack || error?.message || error}`);
       // Telemetry above has already recorded the destination this attempt
       // chose, so the empty tree has nothing left to report and a retry
-      // recreates it deterministically.
-      await pruneEmptyExportDirectories(exportRoot, exportDir);
+      // recreates it deterministically. Pruning writes to the filesystem, so
+      // it must re-acquire BOTH keys the happy path held — the parent
+      // namespace FIRST, then this attempt's exact exportDir — always in that
+      // order (they are distinct keys, and the namespace is a strict
+      // ancestor). Without the namespace lock a saver queued behind this
+      // failed attempt could be mid-write in a SIBLING directory (including
+      // the suffix-shaped alias of this very destination), and pruning the
+      // parent recursively while it writes could race its mkdir. Holding both
+      // means the queued saver finishes first, so pruning observes its
+      // non-empty bundle and becomes a safe no-op instead of removing it.
+      //
+      // Both keys must be real: resolution can fail AFTER the namespace is
+      // recorded but BEFORE exportDir is assigned (e.g. the resolver itself
+      // throws), and locking a null key would poison the shared lock table for
+      // every later saver under a bogus entry. When either is missing there is
+      // no resolved destination to protect, so pruning falls back to its
+      // unguarded form.
+      if (exportNamespaceDir && exportDir) {
+        await withApplicationSyncWorkspaceLock(exportNamespaceDir, async () => {
+          await withApplicationSyncWorkspaceLock(exportDir, () => pruneEmptyExportDirectories(exportRoot, exportDir));
+        });
+      } else {
+        await pruneEmptyExportDirectories(exportRoot, exportDir);
+      }
       // A Local-AI import has already consumed and measured one exact result
       // hash before this follow-up save begins. Give that trusted producer a
       // best-effort failure hook so it can publish hash-bound retry evidence;

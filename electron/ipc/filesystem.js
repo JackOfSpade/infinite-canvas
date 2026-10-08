@@ -235,7 +235,12 @@ export function createFileWatchRegistry({
   realpath = fs.promises.realpath,
   retryMs = 1000,
   pollInterval = 1000,
-  verificationInterval = 30_000,
+  // A directory watcher can remain open while silently dropping one rename on
+  // a virtual, networked, or heavily loaded filesystem. One bounded stat per
+  // second is still low-frequency beside the 20ms failure fallback, but keeps
+  // an atomic save from becoming invisible to an otherwise healthy watcher for
+  // half a minute.
+  verificationInterval = 1_000,
   onError = (error, filePath) => logger.warn(`[FileSystem] Watcher error for ${filePath}:`, error),
 } = {}) {
   const activeWatchers = new Map();
@@ -1323,21 +1328,21 @@ async function rebindJobRecoveryOwnersForCanvasPath(oldPath, newPath) {
   return withCanvasRecoveryRebind(oldPath, newPath, async ({ oldPath: oldOwner, newPath: newOwner, installAlias }) => {
     const marketplace = await prepareCanvasRecoveryRebind(oldOwner, newOwner);
     if (!marketplace?.success) return { success: false, reason: marketplace?.reason || 'marketplace-migration-prepare-failed' };
-    const analysis = await rebindJobAnalysisRecoveryOwners(oldOwner, newOwner);
+    const analysis = await rebindJobAnalysisRecoveryOwners(oldOwner, newOwner, { alreadyExclusive: true });
     if (!analysis?.success) {
       await marketplace.rollback?.();
       return { success: false, reason: analysis?.reason || 'analysis-migration-failed' };
     }
     const continuation = await rebindJobContinuationOwners(oldOwner, newOwner);
     if (!continuation?.success) {
-      await rebindJobAnalysisRecoveryOwners(newOwner, oldOwner);
+      await rebindJobAnalysisRecoveryOwners(newOwner, oldOwner, { alreadyExclusive: true });
       await marketplace.rollback?.();
       return { success: false, reason: continuation?.reason || 'continuation-migration-failed' };
     }
     const staging = await rebindJobRunRecoveryOwners(oldOwner, newOwner);
     if (!staging?.success) {
       await rebindJobContinuationOwners(newOwner, oldOwner);
-      await rebindJobAnalysisRecoveryOwners(newOwner, oldOwner);
+      await rebindJobAnalysisRecoveryOwners(newOwner, oldOwner, { alreadyExclusive: true });
       await marketplace.rollback?.();
       return { success: false, reason: staging.reason || 'staging-migration-failed' };
     }
@@ -1345,7 +1350,7 @@ async function rebindJobRecoveryOwnersForCanvasPath(oldPath, newPath) {
     if (!marketplaceCommit?.success) {
       await rebindJobRunRecoveryOwners(newOwner, oldOwner);
       await rebindJobContinuationOwners(newOwner, oldOwner);
-      await rebindJobAnalysisRecoveryOwners(newOwner, oldOwner);
+      await rebindJobAnalysisRecoveryOwners(newOwner, oldOwner, { alreadyExclusive: true });
       await marketplace.rollback?.();
       return { success: false, reason: marketplaceCommit?.reason || 'marketplace-migration-commit-failed' };
     }

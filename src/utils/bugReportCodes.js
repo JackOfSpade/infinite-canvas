@@ -182,10 +182,10 @@ export const CODE_DEFINITIONS = {
   },
 
   CAREERCACHE: {
-    label: 'Career File Parse Cache',
-    description: 'Career-file parse cache behavior — parse/cache hits and misses, key/fingerprint mismatch cases, stored profile reuse boundaries, and parser/model/schema invalidation reasons.',
+    label: 'Approved Career Snapshot Cache',
+    description: 'Approved immutable career-snapshot lookup behavior — ordered-input hits and misses, descriptor/fingerprint mismatches, validation boundaries, and atomic publication outcomes.',
     logFilter: line =>
-      /career-file-parse|career file parse cache|career parse cache|parse cache|cache miss|cache hit/i.test(line),
+      /approved career snapshot|career snapshot.*(?:hit|miss|published)|snapshot cache/i.test(line),
   },
 
   CARDWALK: {
@@ -297,6 +297,11 @@ export const CODE_DEFINITIONS = {
     logFilter: line =>
       /\[LocalAI(?:-Fallback)?\]|queue-local-application|get-local-application-status|import-local-application|save-application|ApplicationSync|JobApplication.*(?:Saved|import)|fit-feedback|result\.json|résumé|resume|cover.?letter|PDF|render.?fit/i.test(line),
     excludeSections: ['nodes', 'edges', 'drawings', 'nodeInternals', 'nodeComponentStates', 'imageState', 'mediaState'],
+  },
+
+  APPOUTPUT: {
+    label: 'Application Output',
+    description: 'Complete, sanitized in-memory projection of final cover-letter and résumé output so prose quality can be reviewed. Included automatically in FULL; this narrow code selects it directly. It never reads artifact paths, raw career source, hidden files, or job-listing text. Use while the output is still available in this app process.',
   },
 
   HANDOFF: {
@@ -420,7 +425,7 @@ export const CODE_DEFINITIONS = {
 
   FULL: {
     label: 'Full Report',
-    description: 'All currently retained report sections and renderer event-log lines, without filter-code reduction (for complex or unclear issues). It cannot restore history from an earlier app process.',
+    description: 'All currently retained report sections and renderer event-log lines, including the complete sanitized final résumé and cover-letter projection while it is available in this app process, without filter-code reduction (for complex or unclear issues). It cannot restore history from an earlier app process.',
     preset: 'full',
   },
 };

@@ -1,80 +1,69 @@
 import { CONSTANTS } from './constants.js';
+import { resolveHandoffConcurrency } from '../../../src/utils/handoffScheduler.js';
 
 // Main-process-only worker-pool sizing.  It intentionally consumes only
 // aggregate task metadata: a recommendation must never copy a prompt, a
 // handoff code, a canvas path, or a ChatGPT session key into status.
 
 export const MAX_WORKER_POOL_SIZE = CONSTANTS.MAX_LANES;
-// This is deliberately an aggregate planning bound, not a handoff or chat
-// limit. It only prevents untrusted/adaptor status metadata from causing the
-// pure sizing helper to count an unbounded number of planned/forecast work
-// units. Above
-// this count the configured worker-cap recommendation is already saturated.
-export const MAX_WORKER_POOL_PLANNING_UNITS = 10_000;
+// Deprecated compatibility name. Planning no longer uses a unit-count cap;
+// its only retained value is the largest exact count JavaScript can represent.
+export const MAX_WORKER_POOL_PLANNING_UNITS = Number.MAX_SAFE_INTEGER;
 
 function whole(value, fallback = 0) {
   return Number.isInteger(value) && value >= 0 ? value : fallback;
 }
 
-function boundedWorkers(value) {
-  return Math.max(1, Math.min(MAX_WORKER_POOL_SIZE, whole(value, MAX_WORKER_POOL_SIZE) || MAX_WORKER_POOL_SIZE));
+function boundedWorkers(value, capability) {
+  const supported = resolveHandoffConcurrency(capability);
+  return Math.max(1, Math.min(MAX_WORKER_POOL_SIZE, supported, whole(value, supported) || supported));
 }
 
-export function buildWorkerPoolUnits({ tasks = [], applicationCount = 0, applicationForecastCount = applicationCount } = {}) {
-  const units = [];
-  let budget = MAX_WORKER_POOL_PLANNING_UNITS;
+// Planning needs only the minimum of work and live capacity.  Do not build an
+// array per forecast item: sources may honestly report millions of later-wave
+// descriptors, and those descriptors remain in their own durable queues.
+export function countWorkerPoolUnits({ tasks = [], applicationCount = 0, applicationForecastCount = applicationCount } = {}) {
+  // Keep aggregate progress truthful even when it is far larger than the
+  // active pool. Number.MAX_SAFE_INTEGER is a representation guard, not a
+  // work/call ceiling; only `recommended` is constrained by live capacity.
+  const add = (left, right) => Math.min(Number.MAX_SAFE_INTEGER, left + right);
+  let queued = 0;
+  let materialized = 0;
   for (const entry of Array.isArray(tasks) ? tasks : []) {
-    if (budget < 1) break;
-    // A source may know a bounded future-wave forecast (for example a job
-    // preference run that exposes a full handoff roster). Use it only for
-    // sizing the one-time starter pool; live assignment still comes solely
-    // from currently released handoffs.
-    const count = Math.min(budget, Math.max(whole(entry?.forecast), whole(entry?.pending)));
-    for (let index = 0; index < count; index += 1) units.push(1);
-    budget -= count;
+    queued = add(queued, Math.max(whole(entry?.forecast), whole(entry?.pending)));
+    materialized = add(materialized, whole(entry?.pending));
   }
-  // Each unfinished application lane is independently claimable work.
-  const applicationUnits = Math.min(budget, whole(applicationForecastCount));
-  for (let index = 0; index < applicationUnits; index += 1) units.push(1);
-  return units;
+  queued = add(queued, whole(applicationForecastCount));
+  materialized = add(materialized, whole(applicationCount));
+  return Object.freeze({ queued, materialized });
 }
 
-// Materialized units are handoffs that exist in the registry right now. They
-// are intentionally separate from the forecast used to prewarm the worker
-// pool: a workflow can publish a small concurrent wave while accurately
-// estimating hundreds of later units. Treating that forecast as current work
-// made an otherwise healthy roster of waiting workers look like a dispatcher
-// failure.
-export function countMaterializedWorkerPoolUnits({ tasks = [], applicationCount = 0 } = {}) {
-  let count = 0;
-  let budget = MAX_WORKER_POOL_PLANNING_UNITS;
-  for (const entry of Array.isArray(tasks) ? tasks : []) {
-    if (budget < 1) break;
-    const pending = Math.min(budget, whole(entry?.pending));
-    count += pending;
-    budget -= pending;
-  }
-  const applications = Math.min(budget, whole(applicationCount));
-  return count + applications;
+// Compatibility exports keep test/seam callers from allocating a giant unit
+// array while moving the planning API to a saturating count.
+export function buildWorkerPoolUnits(options = {}) {
+  const { queued } = countWorkerPoolUnits(options);
+  return Object.freeze({ length: queued });
+}
+
+export function countMaterializedWorkerPoolUnits(options = {}) {
+  return countWorkerPoolUnits(options).materialized;
 }
 
 /**
- * Prewarm one worker for each bounded planned unit, up to the shared worker
- * ceiling. Forecast units reserve later-wave capacity; only `materialized`
- * units are claimable now. The user confirmed copying starters is fast, so
- * duration estimates must never reduce this count: X = min(Y, capacity), where Y
- * is the bounded count returned by buildWorkerPoolUnits. `maxWorkers` remains
- * an explicit caller safety cap for test/seam callers.
+ * Prewarm one worker for each available planned unit, up to negotiated live
+ * capacity. Forecast units reserve later-wave capacity; only `materialized`
+ * units are claimable now. `maxWorkers` is a caller restriction; `capability`
+ * is the explicit host/plugin source of the supported live parallelism.
  */
 export function recommendWorkerPool({
   tasks = [],
   applicationCount = 0,
   applicationForecastCount = applicationCount,
   maxWorkers = MAX_WORKER_POOL_SIZE,
+  capability = null,
 } = {}) {
-  const units = buildWorkerPoolUnits({ tasks, applicationCount, applicationForecastCount });
-  const queued = units.length;
-  const materialized = countMaterializedWorkerPoolUnits({ tasks, applicationCount });
+  const capacity = boundedWorkers(maxWorkers, capability);
+  const { queued, materialized } = countWorkerPoolUnits({ tasks, applicationCount, applicationForecastCount, capacity });
   if (queued === 0) {
     return Object.freeze({
       recommended: 0,
@@ -84,7 +73,7 @@ export function recommendWorkerPool({
       reason: 'empty',
     });
   }
-  const recommended = Math.min(boundedWorkers(maxWorkers), queued);
+  const recommended = Math.min(capacity, queued);
   return Object.freeze({
     recommended,
     max: recommended,

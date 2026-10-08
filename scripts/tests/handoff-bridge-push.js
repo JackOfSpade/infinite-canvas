@@ -525,6 +525,26 @@ export default [
     assert((await source.submit({ epoch: 'validation-race', handoffCode: CODE, response: '{"handoffCode":"HANDOFF-ABCDEF","corrected":true}' })).status === 'accepted' && submissions === 2,
       'the retained code route accepts the correction after the refresh race');
   } },
+  { name: 'handoff bridge: push: a paced rejection releases its served route and reports the persisted retry wait', run: async () => {
+    let cooled = false;
+    const source = createPushSource({
+      seam: {
+        list: async () => cooled
+          ? { handoffs: [], excluded: { cooldown: 1 }, retryAfterMs: 1_250 }
+          : { handoffs: [entry], excluded: {} },
+        read: async item => ({ ok: true, requestId: item.requestId, handoffCode: item.handoffCode, task: item.task, prompt: 'Synthetic prompt', attempt: 1 }),
+        submit: async () => { cooled = true; return { outcome: 'rejected', retryAfterMs: 1_250, isCorrection: true, correction: 'Repair the cited segment.' }; },
+      }, windows: new Map([[71, { __canvasFilePath: '/tmp/ada.canvas' }]]), hubKey: testHubKey,
+    });
+    source.selectHub({ windowId: 71, canvasFilePath: '/tmp/ada.canvas', nodeId: 'node-ada' });
+    await source.get({ epoch: 'paced-rejection' });
+    const rejected = await source.submit({ epoch: 'paced-rejection', handoffCode: CODE, response: '{"handoffCode":"HANDOFF-ABCDEF","first":true}' });
+    const waiting = await source.get({ epoch: 'paced-rejection', keepWaiting: true });
+    assert(rejected.status === 'waiting' && rejected.retryAfterSeconds === 2
+      && source.status('paced-rejection').claimed.length === 0
+      && waiting.status === 'waiting' && waiting.retryAfterSeconds === 2,
+    'a paced rejection removes the old submit route and gives every later get a bounded round-up retry deadline');
+  } },
   { name: 'handoff bridge: push: cancelled settling work still releases its bridge claim', run: async () => {
     const { source } = makeSource({ submit: async () => ({ outcome: 'cancelled_during_save' }) });
     await source.get({ epoch: 'cancelled-cleanup' });
@@ -677,7 +697,14 @@ export default [
   { name: 'handoff bridge: push: policy covers every LLM task and every reviewed text task is release-one', run: () => { const known = getKnownTaskIds(); assert(Object.keys(PUSH_TASK_POLICY).length === known.size, 'policy must contain each known task'); assert(assertPushTaskPolicy(known), 'policy must verify exact known set'); for (const task of known) assert(Object.hasOwn(PUSH_TASK_POLICY, task), `missing ${task}`); const releaseOne = new Set(Object.entries(PUSH_TASK_POLICY).filter(([, row]) => row.mode === 'release_one').map(([task]) => task));
     // The whole job pipeline rides the bridge; what stays behind is what
     // structurally cannot cross, not what merely has not been reviewed.
-    for (const task of ['job-scoring', 'job-query-generation', 'job-taxonomy-plan', 'job-role-screen', 'job-preference-evaluation', 'job-compensation-assessment', 'resume-parse', 'job-compensation-research', 'job-preference-research']) {
+    for (const task of [
+      'job-scoring', 'job-query-generation', 'job-taxonomy-plan', 'job-role-screen',
+      'job-preference-evaluation', 'job-compensation-assessment', 'resume-parse',
+      'job-compensation-research', 'job-preference-research', 'career-profile-compile',
+      'career-profile-audit-completeness', 'career-profile-audit-grounding',
+      'career-profile-audit-attribution', 'career-profile-audit-metrics',
+      'career-profile-audit-skills', 'career-profile-audit-conflicts', 'career-profile-repair',
+    ]) {
       assert(releaseOne.has(task), `${task} has a reviewed text response contract, so it must ride the bridge`);
     }
     for (const task of BRIDGE_RAW_RESEARCH_TASKS) {
@@ -685,13 +712,17 @@ export default [
     }
     // Photos (callLLMVision) and the file->text step itself (callLLMDocument)
     // need attachment bytes that the MCP text surface cannot carry.
-    for (const task of ['vision-product-analysis', 'marketplace-hub-scan', 'marketplace-hub-scan-batch', 'career-file-extract']) {
+    for (const task of [
+      'vision-product-analysis', 'marketplace-hub-scan', 'marketplace-hub-scan-batch',
+      'career-file-inventory', 'career-file-inventory-audit', 'career-file-boundary-audit',
+      'career-file-extract', 'career-file-transcription-audit',
+    ]) {
       assert(!PUSH_TASK_POLICY[task].bridgeable && PUSH_TASK_POLICY[task].mode === 'never', `${task} cannot cross an MCP text tool`);
     }
-    // Only photos and the file->text step remain. Nothing else is held back
+    // Only photos and attachment-backed document checks remain. Nothing else is held back
     // for want of review -- if a row is not release_one it must name a real
     // reason, so a future task cannot quietly inherit paste-only status.
-    assert(Object.values(PUSH_TASK_POLICY).filter(row => row.mode === 'never').length === 4,
+    assert(Object.values(PUSH_TASK_POLICY).filter(row => row.mode === 'never').length === 8,
       'the never list is exactly the work that cannot cross a text tool');
     // Marketplace pricing rides the bridge now that scope.marketplace is the
     // consent boundary for listing data; engine.js fences it on that scope
@@ -744,7 +775,7 @@ export default [
   { name: 'handoff bridge: push: seam list receives only the release-one task and selected node', run: async () => { let args; const { source } = makeSource({ read: async item => ({ ok: true, requestId: item.requestId, handoffCode: item.handoffCode, task: item.task, prompt: 'Synthetic prompt', attempt: 1 }) }); const original = source.get; assert(typeof original === 'function', 'source get surface exists'); const captured = createPushSource({ seam: { list: async value => { args = value; return { handoffs: [entry], excluded: {} }; }, read: async item => ({ ok: true, requestId: item.requestId, handoffCode: item.handoffCode, task: item.task, prompt: 'Synthetic prompt', attempt: 1 }), submit: async () => ({ outcome: 'accepted' }) }, windows: new Map([[71, { __canvasFilePath: '/tmp/ada.canvas' }]]), hubKey: testHubKey }); captured.selectHub({ windowId: 71, canvasFilePath: '/tmp/ada.canvas', nodeId: 'node-ada' }); await captured.get(); assert(args.allowTasks.has('job-scoring') && args.allowNodeIds.has('node-ada'), 'coarse seam gate is defence in depth');
     // The allow-list is the release_one set exactly -- never a task the policy
     // holds back, however the table grows.
-    for (const task of ['vision-product-analysis', 'career-file-extract', 'marketplace-hub-scan', 'marketplace-hub-scan-batch']) {
+    for (const task of ['vision-product-analysis', 'career-file-extract', 'career-file-transcription-audit', 'marketplace-hub-scan', 'marketplace-hub-scan-batch']) {
       assert(!args.allowTasks.has(task), `${task} must never reach the seam allow-list`);
     }
     assert([...args.allowTasks].every(task => PUSH_TASK_POLICY[task]?.mode === 'release_one'), 'the seam allow-list must be exactly the release-one rows'); } },

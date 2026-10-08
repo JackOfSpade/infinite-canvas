@@ -23,15 +23,17 @@ import { CONSTANTS as HANDOFF_BRIDGE_CONSTANTS } from './handoffBridge/constants
 import { closeReportDiagnostic, redactReportLogSecrets, redactReportPath, redactReportLocalPathsInText, redactReportOpaqueIds, redactReportUrl, redactReportUrlsInText, redactReportEventHistoryLine, renderSessionRows, renderSessionTraceBlocks } from './bugReport/helpers.js';
 import { buildMainProcessLogsMarkdown, buildReverseChronologicalLogBlock, EVENT_HISTORY_HEADING, enforceClipboardMarkdownCap } from './bugReport/clipboardCap.js';
 import { buildFilterSummaryMarkdown, codeIncludesFull } from './bugReport/filterSummary.js';
+import { codeIncludesApplicationOutput } from './bugReport/applicationOutput.js';
 import { buildPasteHandoffDiagnosticsMarkdown } from './pasteHandoffDiagnostics.js';
 import { buildPasteRejectionTraceMarkdown } from './bugReport/pasteRejectionTraceRollup.js';
+import { buildWindowSizeLine, buildPointerProbeMarkdown } from './bugReport/pointerProbeMarkdown.js';
 import { writeSavedBugReport, buildClipboardPointer } from './bugReport/reportFile.js';
 import { resolveNodePresence } from '../../src/utils/nodePresence.js';
 import { canAttemptJobSourceResolve, isJobSourceWarningGating } from '../../src/utils/jobSourceWarningPolicy.js';
 import { findJobSearchBoardActiveRecoveryOwner } from '../../src/utils/jobBoardSearchSelection.js';
 import { jobSearchNextAnchor, normalizeJobSearchInitialLookbackDays, resolveJobSearchDateWindow } from '../../src/utils/jobSearchDateWindow.js';
 import { isGoogleJobsInternalUrl, normalizeJobListingExternalUrl } from '../../src/utils/jobListingUrl.js';
-import { buildJobBoardDiagnostics, buildJobCompletionAssessment, buildJobLinkSnapshot, buildJobRecoveryOfferSnapshot, buildJobRecoverySnapshot, buildJobsConfigSnapshot, buildJobsPipelineSnapshot, buildNonApiAiHandoffLifecycleMarkdown } from './bugReport/jobsSnapshot.js';
+import { buildApplicationOutputReportSnapshot, buildJobBoardDiagnostics, buildJobCompletionAssessment, buildJobLinkSnapshot, buildJobRecoveryOfferSnapshot, buildJobRecoverySnapshot, buildJobsConfigSnapshot, buildJobsPipelineSnapshot, buildNonApiAiHandoffLifecycleMarkdown } from './bugReport/jobsSnapshot.js';
 import { buildMarketplacePipelineSnapshot } from './bugReport/marketplaceSnapshot.js';
 import { buildMarketplaceModuleRollup } from './bugReport/marketplaceModuleRollup.js';
 import { buildSellHubPriceDropRollup } from './bugReport/sellHubPriceDropRollup.js';
@@ -2294,15 +2296,13 @@ function buildHandoffBridgeDiagnosticsMarkdown() {
       `  - worker ${worker.ordinal}: ${workerStates[worker.state]} · ${worker.completed} completed${workerDetail(worker) ? ` · ${workerDetail(worker)}` : ''}`).join('\n')}`;
     const closedPoolRows = closedPoolHistory.length === 0 ? '' : `\n- Recent closed worker pools (bounded to 3):\n${closedPoolHistory.map(pool =>
       `  - ${exactTime(pool.endedAt)} · close \`${pool.reason}\` · ${pool.workerCount} worker${pool.workerCount === 1 ? '' : 's'}${pool.workers.length ? ` · ${pool.workers.map(worker => `#${worker.ordinal} ${worker.state}/${worker.completed}${worker.lastOutcome ? `/${worker.lastOutcome}` : ''}${worker.quietReason ? `/${worker.quietReason}` : ''}${worker.restarts ? `/restarted-${worker.restarts}` : ''}`).join(', ')}` : ''}`).join('\n')}`;
-    const byteBudget = queue.chat.byteBudget > 0
-      ? `${queue.chat.bytes}/${queue.chat.byteBudget} bytes (configured rollover)`
-      : `${queue.chat.bytes} bytes (no bridge rollover)`;
+    const byteBudget = `${queue.chat.bytes} bytes (diagnostic only; no bridge rollover)`;
     queueMarkdown = `
 - Application lanes (as of ${new Date(queue.at).toISOString()}): bridge \`${queue.enabled ? 'enabled' : 'disabled'}\` · serving \`${queue.serving}\` · auto-release \`${queue.autoRelease ? 'on' : 'off'}\` · paused \`${queue.paused || 'no'}\` · fault \`${queue.fault || 'none'}\`
 - Delivery readiness: tunnel \`${queue.readiness.tunnelReachable ? 'reachable' : 'not-reachable'}\` · ChatGPT link \`${queue.readiness.linked ? 'linked' : 'not-linked'}\` · chat \`${queue.chat.state}\` · selected-text route \`${dockReason}\` · auto-release applies to application bundles only; selecting text work does not itself start a ChatGPT MCP client.
 - MCP chat calls: ${queue.chat.calls} · started ${exactTime(queue.chat.startedAt)} · first tool call ${exactTime(queue.chat.firstCallAt)} · latest ${queue.chat.lastCallKind ? `\`${queue.chat.lastCallKind}\` at ${exactTime(queue.chat.lastCallAt)}` : 'none recorded'}
-- Application lanes: ready ${queue.applications.ready} · working ${queue.applications.working} · needs you ${queue.applications.needsYou} (held ${queue.applications.held}) · finished ${queue.applications.done} · live lanes ${liveLanes}/${HANDOFF_BRIDGE_CONSTANTS.MAX_LANES}
-- Chat delivery: \`${queue.chat.state}\` · traffic ${byteBudget} · application bundles assigned ${queue.chat.jobsAssigned}/${queue.chat.jobsCap}
+- Application lanes: ready ${queue.applications.ready} · working ${queue.applications.working} · needs you ${queue.applications.needsYou} (held ${queue.applications.held}) · finished ${queue.applications.done} · live lanes ${liveLanes}/${queue.liveLaneCapacity}
+- Chat delivery: \`${queue.chat.state}\` · traffic ${byteBudget} · application bundles assigned ${queue.chat.jobsAssigned} (no per-chat assignment cap)
 - Worker lifecycle: ${workerLifecycle}${workerRosterRows}${closedPoolRows}
 - Worker pool planner: ${workerPoolPlan}
 - Push/MCP consent: scoring \`${queue.scope.scoring ? 'on' : 'off'}\` · marketplace \`${queue.scope.marketplace ? 'on' : 'off'}\` · application lanes \`${queue.scope.applications ? 'on' : 'off'}\`
@@ -2417,6 +2417,10 @@ export function generateMarkdown(payload, reportWindowId = null, options = {}) {
   const reportCode = String(payload.filterCode || '').trim().toUpperCase();
   const isFullReport = !reportCode || codeIncludesFull(reportCode);
   const reportCodes = new Set(reportCode.split(/[+\s,]+/).filter(Boolean));
+  // Generated application prose carries direct identifiers and work history.
+  // Only an explicit FULL or APPOUTPUT code consents to its export. The legacy
+  // empty/default broad report intentionally remains metadata-only.
+  const wantsApplicationOutput = codeIncludesApplicationOutput(reportCode);
   // AUTH implies PERSIST. "I logged in but it still says logged out" is an AUTH-
   // shaped question whose answer lives entirely in the persistence section: the
   // close-lifecycle table's Store-checkpointed / Executable / Profile columns and
@@ -2818,6 +2822,15 @@ export function generateMarkdown(payload, reportWindowId = null, options = {}) {
     catch { /* never break the report on diagnostic failure */ }
   }
 
+  // FULL is the broad report selection, and APPOUTPUT is the narrow output
+  // selector. Both render the already-retained, typed Local-AI projection;
+  // neither accepts or dereferences a renderer path to reconstruct a document.
+  let applicationOutputMarkdown = '';
+  if (wantsApplicationOutput) {
+    try { applicationOutputMarkdown = buildApplicationOutputReportSnapshot(currentNodeIds, reportWindowId); }
+    catch { applicationOutputMarkdown = '\n## Application Output Evidence (APPOUTPUT)\n- Unavailable/removed: application output could not be safely projected. It was not audited.\n'; }
+  }
+
   let jobLinkMarkdown = '';
   if (isFullReport || reportCodes.has('JOBLINK')) {
     try { jobLinkMarkdown = buildJobLinkSnapshot(nodes); }
@@ -3014,10 +3027,17 @@ export function generateMarkdown(payload, reportWindowId = null, options = {}) {
   // ── Viewport section ───────────────────────────────────────────────────────
   const vp = frontEndState?.viewport;
   const viewportLine = vp ? `- Viewport: zoom=${vp.zoom} x=${vp.x} y=${vp.y}` : '';
+  // One block so a report without a window size keeps the exact spacing it
+  // always had (an empty extra template line would add a blank row).
+  const viewportBlock = [viewportLine, buildWindowSizeLine(frontEndState)].filter(Boolean).join('\n');
   const filterSummaryMarkdown = buildFilterSummaryMarkdown(payload);
 
+  let pointerProbeMarkdown = '';
+  try { pointerProbeMarkdown = buildPointerProbeMarkdown(frontEndState); }
+  catch { pointerProbeMarkdown = ''; }
 
-  let baseMarkdown = `At the end of your debug, assess whether new bug reporting filter codes need to be implemented (which will all be included in the "FULL" filter code). This occurs when even if the user used the "FULL" filter code, it would not have been enough reporting data to debug this issue smoothly.
+
+  let baseMarkdown = `At the end of your debug, assess whether a new bug-report filter code is needed. This occurs when even if the user used the "FULL" filter code, it would not have been enough reporting data to debug this issue smoothly. Every new diagnostic filter code must be included by FULL; a narrow code may still select just its relevant section.
 
 # Bug Report
 
@@ -3031,14 +3051,14 @@ ${filterSummaryMarkdown}
 - Drawings: ${sectionOmitted('drawings') ? '*(omitted by filter code)*' : (drawings ? drawings.length : 0)}
 - Active Tool: ${frontEndState?.activeTool || 'None'}
 - OS: ${systemInfo.platform} ${systemInfo.arch}
-${viewportLine}
+${viewportBlock}
 
 ## Runtime Identity
 - App: ${systemInfo.appVersion} · ${systemInfo.packaged ? 'packaged' : 'development'}
 - Runtime: Electron ${systemInfo.electronVersion || '?'} · Chromium ${systemInfo.chromiumVersion || '?'} · Node ${systemInfo.nodeVersion || '?'}
 - OS release: ${systemInfo.osRelease}
 - Report generated: ${systemInfo.generatedAt} · timezone ${systemInfo.timezone} · UTC offset ${systemInfo.utcOffsetMinutes >= 0 ? '+' : ''}${systemInfo.utcOffsetMinutes} min
-${buildFreshnessMarkdown}${persistedWorkspaceMarkdown}${missingPreviewRelinkMarkdown}${activeTasksMarkdown}${handoffBridgeDiagnosticsMarkdown}${sellHubResolveMarkdown}${aiConfigMarkdown}${jobsConfigMarkdown}${jobCompletionAssessmentMarkdown}${jobBoardDiagnosticsMarkdown}${nonApiHandoffMarkdown}${pasteHandoffMarkdown}${pasteRejectionTraceMarkdown}${jobLinkMarkdown}${jobRecoveryOfferMarkdown}${jobRecoveryMarkdown}${issueReporterDraftMarkdown}${jobsPipelineMarkdown}${marketplacePipelineMarkdown}${marketplaceModuleRollupMarkdown}${sellHubPriceDropRollupMarkdown}${sessionPersistenceMarkdown}${marketplaceSessionsMarkdown}${jobSessionsMarkdown}${verifyTimingMarkdown}${authWindowMarkdown}${scraperAdaptationMarkdown}${activeEditableMarkdown}${lastSaveErrorMarkdown}${nodeDiagMarkdown}${mediaMarkdown}${imageMarkdown}
+${buildFreshnessMarkdown}${pointerProbeMarkdown}${persistedWorkspaceMarkdown}${missingPreviewRelinkMarkdown}${activeTasksMarkdown}${handoffBridgeDiagnosticsMarkdown}${sellHubResolveMarkdown}${aiConfigMarkdown}${jobsConfigMarkdown}${jobCompletionAssessmentMarkdown}${jobBoardDiagnosticsMarkdown}${nonApiHandoffMarkdown}${pasteHandoffMarkdown}${pasteRejectionTraceMarkdown}${applicationOutputMarkdown}${jobLinkMarkdown}${jobRecoveryOfferMarkdown}${jobRecoveryMarkdown}${issueReporterDraftMarkdown}${jobsPipelineMarkdown}${marketplacePipelineMarkdown}${marketplaceModuleRollupMarkdown}${sellHubPriceDropRollupMarkdown}${sessionPersistenceMarkdown}${marketplaceSessionsMarkdown}${jobSessionsMarkdown}${verifyTimingMarkdown}${authWindowMarkdown}${scraperAdaptationMarkdown}${activeEditableMarkdown}${lastSaveErrorMarkdown}${nodeDiagMarkdown}${mediaMarkdown}${imageMarkdown}
 `;
 
   const events = payload.eventLogs || [];

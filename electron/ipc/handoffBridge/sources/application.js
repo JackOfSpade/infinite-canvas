@@ -17,22 +17,51 @@ export function subscribeApplicationDiscards(listener) {
 
 const WATCHDOG_MS = 8_000;
 const CONFIRM_TEXT_MAX_CHARS = 60;
+// Authority matching deliberately exposes one bounded live wave. Keep this
+// projection bounded too: injected adapters must not turn one handoff into an
+// unbounded number of durable bridge lanes.
+const MAX_APPLICATION_PARALLEL_TASKS = 10;
 const INTEGRITY_MESSAGE = 'This application needs attention before it can continue.';
 const CONTROL_OR_BIDI = new RegExp(String.raw`[\u0000-\u001F\u007F-\u009F\u061C\u200B-\u200F\u202A-\u202E\u2060\u2066-\u2069\uFEFF]`, 'g');
+const FRESH_CONTEXT_KEY = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 
 function nonEmptyString(value) {
   return typeof value === 'string' && value.length > 0;
 }
 
+function validFreshContextKey(value) {
+  return typeof value === 'string' && FRESH_CONTEXT_KEY.test(value);
+}
+
 function operationKey(lane) {
-  return `${String(lane?.jobId || '')}\u0000${String(lane?.canvasFilePath || '')}`;
+  return `${String(lane?.jobId || '')}\u0000${String(lane?.canvasFilePath || '')}\u0000${String(lane?.matchTaskId || '')}`;
+}
+
+function copyParallelTaskForecast(value, parallelTaskCount) {
+  if (!value || typeof value !== 'object') return null;
+  const { totalUnits, completedUnits, remainingUnits, activeWaveUnits } = value;
+  if (![totalUnits, completedUnits, remainingUnits, activeWaveUnits]
+    .every(unit => Number.isSafeInteger(unit) && unit >= 0)
+    || completedUnits > totalUnits
+    || remainingUnits !== totalUnits - completedUnits
+    || activeWaveUnits > totalUnits
+    || activeWaveUnits > MAX_APPLICATION_PARALLEL_TASKS
+    || parallelTaskCount > activeWaveUnits) return null;
+  return { totalUnits, completedUnits, remainingUnits, activeWaveUnits };
 }
 
 function copyHandoff(value) {
   const handoff = value && typeof value === 'object' ? value : null;
   const code = handoff?.handoffCode ?? handoff?.code;
   if (!nonEmptyString(code) || !nonEmptyString(handoff?.stage) || !nonEmptyString(handoff?.prompt)) return null;
-  return {
+  if (handoff.freshContextKey !== undefined && !validFreshContextKey(handoff.freshContextKey)) return null;
+  const parallelTasks = Array.isArray(handoff.parallelTasks)
+    ? handoff.parallelTasks.slice(0, MAX_APPLICATION_PARALLEL_TASKS)
+      .map(task => typeof task?.id === 'string' ? { id: task.id } : null)
+      .filter(Boolean)
+    : null;
+  const parallelTaskForecast = copyParallelTaskForecast(handoff.parallelTaskForecast, parallelTasks?.length || 0);
+  const copied = {
     code,
     stage: handoff.stage,
     revision: Number.isInteger(handoff.revision) ? handoff.revision : 0,
@@ -41,7 +70,29 @@ function copyHandoff(value) {
     correctionPrompt: typeof handoff.correctionPrompt === 'string' ? handoff.correctionPrompt : '',
     recovered: Boolean(handoff.correctionsRecovered),
     draftBytes: Buffer.byteLength(typeof handoff.draft === 'string' ? handoff.draft : '', 'utf8'),
+    // Task ids are opaque queue-claim identities. They deliberately never
+    // appear in the public handoff body; the engine uses them only to route a
+    // virtual career-match lane back to the app.
+    ...(nonEmptyString(handoff.matchTaskId) ? { matchTaskId: handoff.matchTaskId } : {}),
+    ...(parallelTasks ? { parallelTasks } : {}),
+    // Aggregate work remains app-owned; the bridge only materializes the
+    // bounded live wave. Preserve the exact forecast for pool telemetry
+    // without turning a large Cartesian plan into lanes.
+    ...(parallelTaskForecast ? { parallelTaskForecast } : {}),
   };
+  // Main-process-only transition metadata: non-enumerable so object spreads,
+  // JSON audits, and persistence cannot publish the chat-boundary request.
+  if (handoff.freshContextRequired === true) {
+    Object.defineProperty(copied, 'freshContextRequired', {
+      value: true, enumerable: false, configurable: false, writable: false,
+    });
+  }
+  if (validFreshContextKey(handoff.freshContextKey)) {
+    Object.defineProperty(copied, 'freshContextKey', {
+      value: handoff.freshContextKey, enumerable: false, configurable: false, writable: false,
+    });
+  }
+  return copied;
 }
 
 /**
@@ -130,17 +181,22 @@ export function createApplicationSource({
 
     async read(lane) {
       const key = operationKey(lane);
-      const outcome = await bounded('read', key, () => getHandoff({ jobId: lane?.jobId, canvasFilePath: lane?.canvasFilePath }));
+      const outcome = await bounded('read', key, () => getHandoff({ jobId: lane?.jobId, canvasFilePath: lane?.canvasFilePath, matchTaskId: lane?.matchTaskId }));
       if (outcome.timeout) return { kind: 'busy' };
       if (outcome.error) return { kind: 'threw', ...classifyApplicationThrow(outcome.error) };
       if (outcome.result?.completed === true) return { kind: 'host' };
       const handoff = copyHandoff(outcome.result?.handoff);
-      return handoff ? { kind: 'open', handoff } : { kind: 'threw', shape: true };
+      return handoff ? {
+        kind: 'open', handoff,
+        ...(nonEmptyString(handoff.matchTaskId) ? { matchTaskId: handoff.matchTaskId } : {}),
+        ...(Array.isArray(handoff.parallelTasks) ? { parallelTasks: handoff.parallelTasks } : {}),
+        ...(handoff.parallelTaskForecast ? { parallelTaskForecast: handoff.parallelTaskForecast } : {}),
+      } : { kind: 'threw', shape: true };
     },
 
     async status(lane) {
       const key = operationKey(lane);
-      const outcome = await bounded('status', key, () => getStatus(lane?.jobId, lane?.canvasFilePath, { absentRootIsGone: true }));
+      const outcome = await bounded('status', key, () => getStatus(lane?.jobId, lane?.canvasFilePath, { absentRootIsGone: true, matchTaskId: lane?.matchTaskId }));
       if (outcome.timeout) return { kind: 'busy' };
       if (outcome.error) return { kind: 'threw', ...classifyApplicationThrow(outcome.error) };
       return mapApplicationStatus(outcome.result);
@@ -156,6 +212,7 @@ export function createApplicationSource({
         const result = await callOnce('submit', key, () => submitHandoff({
           jobId: lane?.jobId,
           canvasFilePath: lane?.canvasFilePath,
+          matchTaskId: lane?.matchTaskId,
           handoffCode: code,
           response: text,
         }));

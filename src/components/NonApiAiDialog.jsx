@@ -2,14 +2,18 @@ import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useSta
 import { createPortal } from 'react-dom';
 import { AlertTriangle, ArrowLeft, Check, ChevronDown, ChevronUp, ClipboardCopy, FolderOpen, LoaderCircle, Paperclip, Send, XCircle } from 'lucide-react';
 import { ConfirmDialog } from './ConfirmDialog';
+import { useModalStackCount } from './modalStack';
 import { EventLogger } from '../utils/EventLogger';
 // Read-only: which jobIds the ChatGPT bridge already holds. Same hook
 // HandoffBridgePanel uses, no new IPC channel — see isBridgeHeldApplication
 // below for the one thing this dock does with it.
 import { useHandoffBridgeStatus } from '../hooks/useHandoffBridgeStatus';
 import { BridgeProgress } from './BridgeProgress';
+import { BridgeApplicationsPage } from './BridgeApplicationsPage';
 // The bridge-held rule is shared with the job card so the two cannot disagree.
 import { isBridgeHeldJob } from '../utils/bridgeHeldApplication';
+// Which bridge-held bundles share ONE page instead of one chip/page each.
+import { buildDockNav, isGroupOnlyNav } from '../utils/applicationBridgePage';
 import { isBridgeHeldPush } from '../utils/bridgeHeldPush';
 import { isWorkflowSuccessor, selectionAfterHandoffSettlement, successorPreferenceAfterSettlement } from '../utils/nonApiAiNavigation';
 import { assessPastedResponse, responseFingerprint } from '../utils/pasteIdentityGuard';
@@ -171,6 +175,13 @@ const dockItemSummary = (request) => {
   return requestLabel(request);
 };
 
+// The header line of the shared page that every bridge-held application lives
+// on. The open request's own stage/subject would name ONE bundle on a page that
+// is about all of them.
+const applicationsPageSummary = (count) => (
+  `${count} ${count === 1 ? 'application' : 'applications'} with ChatGPT`
+);
+
 // Single source of truth for "which check ids does this escalation actually
 // name" — every caller below (the gate, the headline, and the singular/plural
 // wording in the panel banner) must agree on this list, because a
@@ -294,8 +305,9 @@ const ownerBadgeForNode = (nodeId) => {
 };
 
 // Only Job Search's own manual-AI runs understand the saved-stop event below.
-// A Job Search may pause during profile parsing too, so retain those two
-// pre-search tasks alongside the job-* stages. The mounted node re-checks the
+// A Job Search may pause during file extraction or any compiler/audit/repair
+// stage, so retain the whole `career-profile-*` family alongside the job-*
+// stages. The mounted node re-checks the
 // exact run id before it acts; this is merely the dock's narrow UI eligibility
 // gate, not an authorization boundary.
 const isJobSearchPauseEligible = (request) => (
@@ -304,7 +316,9 @@ const isJobSearchPauseEligible = (request) => (
   && typeof request?.runId === 'string' && request.runId.length > 0
   && (
     request.task === 'career-file-extract'
+    || request.task === 'career-file-transcription-audit'
     || request.task === 'resume-parse'
+    || (typeof request.task === 'string' && request.task.startsWith('career-profile-'))
     || (typeof request.task === 'string' && request.task.startsWith('job-'))
   )
 );
@@ -337,6 +351,10 @@ export function NonApiAiDialog() {
   // is async and a settled event can swap the active request underneath it, so
   // the prompt must act on what the user was actually looking at.
   const [cancelConfirmTarget, setCancelConfirmTarget] = useState(null);
+  // Read-only: any modal (Settings, a dialog, the photo lightbox, a context
+  // menu) registers here while open. The dock only READS the count — it must
+  // stay non-modal, so it never registers itself (see the render below).
+  const modalCount = useModalStackCount();
   // Application-bundle items, published by discovery outside the canvas
   // provider tree (see applicationHandoffDock.js). Kept separate from the
   // push `requests` state and merged only for rendering, so the push
@@ -415,6 +433,24 @@ export function NonApiAiDialog() {
       : applicationItems.filter(item => !dismissedBrokenRequestIds.has(item.requestId))
   ), [applicationItems, dismissedBrokenRequestIds]);
   const mergedRequests = useMemo(() => mergeDockQueue(requests, visibleApplicationItems), [requests, visibleApplicationItems]);
+  // Every application the ChatGPT bridge holds shares ONE page (its rows carry
+  // each bundle's own evidence-plan -> resume -> ... progress, and its worker
+  // block is the single place to spawn workers). Only requests that still need
+  // the person (manual paste, kept, handed back, broken, blocked) keep a chip.
+  const dockNav = useMemo(() => buildDockNav(mergedRequests, bridgeStatus), [mergedRequests, bridgeStatus]);
+  const groupEntryByRequestId = useMemo(() => new Map(dockNav.flatMap(entry => (
+    entry.type === 'applications' ? entry.requests.map(request => [request.requestId, entry]) : []
+  ))), [dockNav]);
+  const applicationsPageOnly = isGroupOnlyNav(dockNav);
+  // A bug report cannot otherwise tell "one shared page" from "N separate
+  // pages" — the layout is derived from live bridge status and is not
+  // persisted — so record the composition whenever it changes.
+  const sharedPageRows = groupEntryByRequestId.size;
+  const separateChipCount = mergedRequests.length - sharedPageRows;
+  useEffect(() => {
+    if (sharedPageRows + separateChipCount === 0) return;
+    EventLogger.log(`[Manual AI] dock layout: shared application page rows=${sharedPageRows} · separate chips=${separateChipCount}`);
+  }, [sharedPageRows, separateChipCount]);
   // Run before paint: after a manual Minimize, a newly populated queue must
   // not flash its compact button for one frame before reopening.
   useLayoutEffect(() => {
@@ -429,6 +465,8 @@ export function NonApiAiDialog() {
   }, [dismissedBrokenRequestIds]);
   const activeRequest = mergedRequests.find(request => request.requestId === selectedRequestId) || mergedRequests[0] || null;
   const activeRequestId = activeRequest?.requestId || null;
+  // The shared application page, when the open request is one of its rows.
+  const activeGroupEntry = activeRequestId ? groupEntryByRequestId.get(activeRequestId) || null : null;
   // Async clipboard/IPC completions must never update whichever queued prompt
   // happened to become active while they were in flight.
   activeRequestIdRef.current = activeRequestId;
@@ -1484,23 +1522,31 @@ export function NonApiAiDialog() {
     });
   }, [activeRequest, activeRequestId, isAccepted, isCancelling, isSteppingBack, isSubmitting]);
 
-  const requestApplicationDiscardConfirm = useCallback(() => {
-    if (!activeRequestId || !isApplicationRequest || isSubmitting || isDiscarding || isAccepted) return;
-    if (actionRequestIdsRef.current.has(activeRequestId)) return;
+  // `target` is a dock request: the shared application page discards one of
+  // its ROWS, which is not necessarily the request that is open. Without one
+  // (the panel's own Discard buttons, which pass a click event) it acts on the
+  // open request, exactly as before. The in-flight guards read the per-request
+  // sets so a row is judged by its own state, never the open request's.
+  const requestApplicationDiscardConfirm = useCallback((target) => {
+    const request = target?.kind === 'application' ? target : activeRequest;
+    const requestId = request?.requestId || null;
+    if (!requestId || request.kind !== 'application') return;
+    if (submittingRequestIds.has(requestId) || discardingRequestIds.has(requestId) || acceptedRequestIds.has(requestId)) return;
+    if (actionRequestIdsRef.current.has(requestId)) return;
     if (!window.electronAPI?.discardLocalApplication) {
-      setErrors(previous => ({ ...previous, [activeRequestId]: 'Discarding this application bundle is unavailable.' }));
+      setErrors(previous => ({ ...previous, [requestId]: 'Discarding this application bundle is unavailable.' }));
       return;
     }
     EventLogger.log('ConfirmDialog requested: title="Discard this application bundle?"');
     setCancelConfirmTarget({
       kind: 'application',
-      requestId: activeRequestId,
-      jobId: activeRequest.jobId,
-      canvasFilePath: activeRequest.canvasFilePath,
-      nodeId: activeRequest.nodeId || null,
-      label: activeRequest.subject || activeRequest.label || '',
+      requestId,
+      jobId: request.jobId,
+      canvasFilePath: request.canvasFilePath,
+      nodeId: request.nodeId || null,
+      label: request.subject || request.label || '',
     });
-  }, [activeRequest, activeRequestId, isAccepted, isApplicationRequest, isDiscarding, isSubmitting]);
+  }, [acceptedRequestIds, activeRequest, discardingRequestIds, submittingRequestIds]);
 
   // Self-dismiss if the item settles (push) or leaves the dock (application)
   // while the confirm is open, so Confirm can never act on a request id that
@@ -1609,23 +1655,45 @@ export function NonApiAiDialog() {
   const dockLabel = savingCount === 0
     ? (isAutomaticMcpQueue
       ? (waitingCount === 1 ? '1 handoff released now' : `${waitingCount} handoffs released now`)
-      : (waitingCount === 1 ? '1 handoff waiting' : `${waitingCount} handoffs waiting`))
+      : applicationsPageOnly
+        ? applicationsPageSummary(waitingCount)
+        : (waitingCount === 1 ? '1 handoff waiting' : `${waitingCount} handoffs waiting`))
     : waitingCount === 0
       ? (savingCount === 1 ? '1 bundle saving' : `${savingCount} bundles saving`)
       : `${waitingCount} waiting · ${savingCount} saving`;
 
+  // While ANY modal is open the dock drops below it. The cancel confirmation
+  // is the synchronous case (its own state, so the dock yields on the very
+  // render that mounts it); the modal-stack count covers everything else.
+  const yieldsToModal = Boolean(cancelConfirmTarget) || modalCount > 0;
+
   return createPortal(
-    // The dock normally sits above everything (z-11000/11001). ConfirmDialog
-    // self-portals to the body at z-10000, so while the cancel confirmation is
-    // open the dock must drop BELOW it — otherwise the opaque dock panel covers
-    // the confirm card (entirely, on a narrow viewport) and its buttons cannot
-    // be clicked. Dropping the dock is preferable to raising ConfirmDialog,
-    // which would change the stacking of every other call site.
+    // The dock normally sits above everything (z-11000/11001). Modals
+    // self-portal to the body at z-9999 (Settings) / z-10000 (ConfirmDialog,
+    // dialogs, lightbox), so while one is open the dock must drop BELOW it —
+    // otherwise the opaque dock panel covers the modal (the right edge of
+    // Settings, including its close button, on a window under ~1300px; all of
+    // a confirm card on a narrow viewport) and its controls cannot be clicked.
+    // Dropping the dock is preferable to raising every modal, which would
+    // change the stacking of every other call site. The wrapper's z-index is
+    // the one that counts: a fixed element with a z-index is a stacking
+    // context, so the panel's own z only orders it inside the wrapper.
     <div
-      className={`pointer-events-none fixed inset-0 ${cancelConfirmTarget ? 'z-[9998]' : 'z-[11000]'}`}
+      className={`pointer-events-none fixed inset-0 ${yieldsToModal ? 'z-[9998]' : 'z-[11000]'}`}
       role="presentation"
     >
-      <div className={`pointer-events-auto fixed bottom-4 right-4 ${cancelConfirmTarget ? 'z-[9999]' : 'z-[11001]'} w-[min(32rem,calc(100vw-2rem))]`}>
+      {/* The canvas toolbar (Settings is its right-most button) is a
+          bottom-centre row 74px tall (16px margin + 58px bar). The dock is far
+          wider than the space a normal window leaves beside it, so anchored to
+          the corner it sat on top of that row and Settings could not be
+          clicked while any handoff existed. bottom-[5.5rem] (88px) parks the
+          dock above the row instead; the panel's height caps below subtract
+          the same offset so it still fits the viewport. The data attribute is
+          what the bug report's pointer-occlusion probe reads. */}
+      <div
+        data-handoff-dock={isExpanded ? 'expanded' : 'collapsed'}
+        className={`pointer-events-auto fixed bottom-[5.5rem] right-4 ${yieldsToModal ? 'z-[9999]' : 'z-[11001]'} w-[min(32rem,calc(100vw-2rem))]`}
+      >
         {!isExpanded ? (
           <button
             ref={dockButtonRef}
@@ -1657,7 +1725,7 @@ export function NonApiAiDialog() {
         // so the dock jumped around under the pointer. The floor is capped by
         // the viewport rather than set flat, because a min-height that beats
         // max-height would push the submit button off a short screen.
-        className="min-h-[min(47rem,calc(100vh-2rem))] max-h-[calc(100vh-2rem)] overflow-hidden rounded-2xl border border-violet-400/25 bg-neutral-900 shadow-2xl flex flex-col"
+        className="min-h-[min(47rem,calc(100vh-6.5rem))] max-h-[calc(100vh-6.5rem)] overflow-hidden rounded-2xl border border-violet-400/25 bg-neutral-900 shadow-2xl flex flex-col"
       >
         <header className="shrink-0 px-5 py-4 border-b border-white/10">
           <div className="flex items-start gap-3">
@@ -1681,7 +1749,7 @@ export function NonApiAiDialog() {
                     {ownerBadgeForNode(activeRequest.nodeId)}
                   </span>
                 )}
-                {dockItemSummary(activeRequest)}
+                {activeGroupEntry ? applicationsPageSummary(activeGroupEntry.requests.length) : dockItemSummary(activeRequest)}
               </p>
             </div>
             <div className="flex shrink-0 items-center gap-2">
@@ -1699,10 +1767,41 @@ export function NonApiAiDialog() {
               </button>
             </div>
           </div>
-          {!isAutomaticMcpQueue && (
+          {/* Bridge-held applications are rows of ONE page, so a queue made only
+              of them has nothing to choose between — same as an automatic queue. */}
+          {!isAutomaticMcpQueue && !applicationsPageOnly && (
           <nav aria-label="Pending AI handoff batches" className="mt-3">
             <div className="grid grid-cols-5 gap-1 sm:grid-cols-10">
               {mergedRequests.map((request, index) => {
+                const groupEntry = groupEntryByRequestId.get(request.requestId);
+                if (groupEntry) {
+                  // One shared chip stands in for every bridge-held bundle. It
+                  // renders where the first of them sat, and only once.
+                  if (groupEntry.requestId !== request.requestId) return null;
+                  const groupSelected = activeGroupEntry === groupEntry;
+                  const groupDescription = `${applicationsPageSummary(groupEntry.requests.length)}: each application's progress and the worker chats share this page`;
+                  return (
+                    <button
+                      key="applications-page"
+                      type="button"
+                      onClick={() => {
+                        awaitingSuccessorRef.current = null;
+                        pendingFocusJobIdsRef.current.clear();
+                        setSelectedRequestId(groupEntry.requestId);
+                        EventLogger.log('[Manual AI] user selected the shared application page');
+                      }}
+                      disabled={!!cancelConfirmTarget}
+                      aria-current={groupSelected ? 'page' : undefined}
+                      aria-label={groupDescription}
+                      title={groupDescription}
+                      className={`col-span-2 inline-flex min-w-0 items-center justify-center gap-1 rounded-md border px-1.5 py-1.5 text-xs font-medium tabular-nums transition-colors ${groupSelected
+                        ? 'border-violet-300/60 bg-violet-500/20 text-violet-100'
+                        : 'border-white/10 bg-black/20 text-white/60 hover:border-violet-400/35 hover:text-white/85'}`}
+                    >
+                      <span className="truncate">{`ChatGPT · ${groupEntry.requests.length}`}</span>
+                    </button>
+                  );
+                }
                 const selected = request.requestId === activeRequestId;
                 const hasDraft = Boolean(drafts[request.requestId]?.trim());
                 const hasError = Boolean(errors[request.requestId]);
@@ -1830,6 +1929,21 @@ export function NonApiAiDialog() {
                 </button>
               </div>
             </div>
+          ) : activeGroupEntry ? (
+            // Every application the ChatGPT bridge holds is a row of this ONE
+            // page: its own evidence-plan -> resume -> ... progress, and its own
+            // Discard. The worker chats are managed once, in the block under the
+            // rows, instead of once per bundle. Nothing here can take a paste —
+            // a bundle that needs one stops being "held" and gets its own chip.
+            <BridgeApplicationsPage
+              status={bridgeStatus}
+              held={activeGroupEntry.requests}
+              ordinalFor={request => applicationOrdinalsRef.current.get(request.jobId) ?? null}
+              activeRequestId={activeRequestId}
+              discardingRequestIds={discardingRequestIds}
+              discardDisabled={!!cancelConfirmTarget}
+              onDiscard={requestApplicationDiscardConfirm}
+            />
           ) : applicationWorkingState ? (
             // The response was accepted and the app is finishing the bundle:
             // rendering it, measuring the pages, writing the files. Nothing

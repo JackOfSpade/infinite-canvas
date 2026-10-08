@@ -1,11 +1,29 @@
-// One concurrency policy for AI handoffs. Automatic bridge workers should keep
-// every available slot busy; manual-only docks keep a stable visible wave so a
-// just-completed prompt is not replaced beneath the person answering siblings.
-export const HANDOFF_CONCURRENCY = 10;
+// One concurrency policy for AI handoffs.  This is a *live worker* bound, not
+// a total-work budget: a long run may contain any number of queued descriptors
+// and refills this many slots as they settle.  A host/plugin capability may
+// lower or raise the default, but never past the reviewed hard safety bound.
+// Ten is the reviewed safe fallback for hosts which do not advertise a
+// capability. It is a live-concurrency default, never a total-work limit.
+export const DEFAULT_HANDOFF_CONCURRENCY = 10;
+export const MAX_HANDOFF_CONCURRENCY = 64;
+
+export function resolveHandoffConcurrency(capability = null) {
+  const source = capability && typeof capability === 'object' ? capability : {};
+  const requested = source.maxConcurrentHandoffs ?? source.maxWorkers ?? source.parallelism;
+  const count = Math.floor(Number(requested));
+  return Number.isFinite(count) && count >= 1
+    ? Math.min(MAX_HANDOFF_CONCURRENCY, count)
+    : DEFAULT_HANDOFF_CONCURRENCY;
+}
+
+// The default is intentionally conservative for callers which have no host
+// capability (local automatic handoffs and the renderer dock). Bridge engines
+// pass their persisted host capability to resolveHandoffConcurrency instead.
+export const HANDOFF_CONCURRENCY = resolveHandoffConcurrency();
 
 function workerCountFor(workerCount) {
   const requested = Math.floor(Number(workerCount));
-  return Math.max(1, Number.isFinite(requested) ? requested : 1);
+  return Math.max(1, Math.min(MAX_HANDOFF_CONCURRENCY, Number.isFinite(requested) ? requested : 1));
 }
 
 function abortError(signal) {
@@ -57,44 +75,12 @@ function abortRace(signal) {
 }
 
 /**
- * Keep a manual-only dock visually stable while sharing the same failure and
- * cleanup contract as automatic workers. A failed item aborts its visible
- * siblings, waits for their pending requests to leave the dock, and only then
- * rejects; the next wave is never revealed after failure.
+ * Keep manual handoffs in deterministic input order while refilling an open
+ * slot immediately. A failed item aborts active siblings, drains them, and
+ * only then rejects; no later queue entry is issued after that failure.
  */
 export async function mapManualHandoffWaves(items, limit, work, { signal, abortController } = {}) {
-  const source = Array.isArray(items) ? items : [];
-  const output = new Array(source.length);
-  const width = workerCountFor(limit);
-  const controller = abortController || new AbortController();
-  const combined = combinedAbortSignal([signal, controller.signal]);
-  const workerSignal = combined.signal;
-
-  try {
-    for (let start = 0; start < source.length; start += width) {
-      if (workerSignal.aborted) throw abortError(workerSignal);
-      let firstError = null;
-      const wave = source.slice(start, start + width);
-      const pending = wave.map(async (item, offset) => {
-        try {
-          const value = await work(item, start + offset, { signal: workerSignal });
-          output[start + offset] = value;
-        } catch (error) {
-          if (!firstError) {
-            firstError = error;
-            if (!controller.signal.aborted) controller.abort(error);
-          }
-          throw error;
-        }
-      });
-      await Promise.allSettled(pending);
-      if (firstError) throw firstError;
-      if (workerSignal.aborted) throw abortError(workerSignal);
-    }
-    return output;
-  } finally {
-    combined.dispose();
-  }
+  return mapAutomaticHandoffs(items, limit, work, { signal, abortController });
 }
 
 /**
@@ -262,6 +248,17 @@ export async function mapAutomaticHandoffs(items, limit, work, { signal, abortCo
     work: async ({ item, index }, context) => { output[index] = await work(item, index, context); },
   });
   return output;
+}
+
+/**
+ * Attachment-oriented manual handoffs retain deterministic result ordering,
+ * but no longer impose a barrier between fixed visible waves.  A completed
+ * slot immediately starts the next queued attachment; abort/failure still
+ * stops future claims and drains already-issued work through the same shared
+ * automatic scheduler.
+ */
+export async function mapStableHandoffQueue(items, limit, work, options = {}) {
+  return mapAutomaticHandoffs(items, limit, work, options);
 }
 
 // Generic aliases keep non-AI bounded work on the same proven scheduler

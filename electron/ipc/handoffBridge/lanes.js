@@ -71,6 +71,15 @@ function makeCounters(value = {}) {
   };
 }
 
+function normalizeParallelTaskForecast(value) {
+  if (!value || typeof value !== 'object') return null;
+  const keys = ['totalUnits', 'completedUnits', 'remainingUnits', 'activeWaveUnits'];
+  if (!keys.every(key => Number.isSafeInteger(value[key]) && value[key] >= 0)
+    || value.completedUnits > value.totalUnits || value.remainingUnits !== value.totalUnits - value.completedUnits
+    || value.activeWaveUnits > 10 || value.activeWaveUnits > value.remainingUnits) return null;
+  return Object.freeze(Object.fromEntries(keys.map(key => [key, value[key]])));
+}
+
 export function normalizeCurrentHandoff(handoff, readAt = 0) {
   if (!handoff) return null;
   const code = handoff.code ?? handoff.handoffCode;
@@ -90,16 +99,20 @@ export function normalizeCurrentHandoff(handoff, readAt = 0) {
       : Buffer.byteLength(typeof handoff.draft === 'string' ? handoff.draft : '', 'utf8'),
     readAt,
     attempt: Number.isInteger(handoff.attempt) && handoff.attempt > 0 ? handoff.attempt : 1,
+    ...(normalizeParallelTaskForecast(handoff.parallelTaskForecast) ? { parallelTaskForecast: normalizeParallelTaskForecast(handoff.parallelTaskForecast) } : {}),
   };
 }
 
-export function createApplicationLane({ ord, jobId, canvasFilePath, releasedAt = 0, handoff = null, phase, codeGuard = createHandoffCodeGuard() } = {}) {
+export function createApplicationLane({ ord, jobId, canvasFilePath, matchTaskId = null, releasedAt = 0, handoff = null, phase, codeGuard = createHandoffCodeGuard() } = {}) {
   if (!Number.isInteger(ord) || ord < 1 || typeof jobId !== 'string' || !jobId || typeof canvasFilePath !== 'string' || !canvasFilePath) {
     throw new TypeError('A lane requires an ordinal, job and canvas path');
   }
   const current = normalizeCurrentHandoff(handoff, releasedAt);
   const lanePhase = phase ?? (current ? 'awaiting' : 'unread');
   if (!LANE_PHASES.includes(lanePhase)) throw new TypeError('Invalid lane phase');
+  if (matchTaskId !== null && (typeof matchTaskId !== 'string' || !matchTaskId || matchTaskId.length > 256)) {
+    throw new TypeError('Invalid match task id');
+  }
   const issuedCodes = new Map();
   if (current?.code) issuedCodes.set(codeGuard.key(current.code), codeGuard.digest(current.code));
   return {
@@ -107,6 +120,7 @@ export function createApplicationLane({ ord, jobId, canvasFilePath, releasedAt =
     kind: 'application',
     jobId,
     canvasFilePath,
+    ...(matchTaskId ? { matchTaskId } : {}),
     releasedAt,
     phase: lanePhase,
     reason: null,
@@ -134,6 +148,12 @@ export function createApplicationLane({ ord, jobId, canvasFilePath, releasedAt =
     // stage or terminal result. This is memory-only: pool aliases disappear
     // on restart and restored lanes are deliberately re-read before serving.
     servedWorkerId: null,
+    // A replacement chat keeps its worker ordinal. Bind a fresh-context
+    // boundary to the exact in-memory capability incarnation instead.
+    servedWorkerContextIncarnation: null,
+    // The app may distinguish equal-named successor tracks (for example two
+    // blind reviews). It is host-only transition state and never serialized.
+    freshContextKey: null,
     // A short-lived application-pool reservation held while the engine checks
     // that a candidate bundle still exists. It is memory-only and never
     // survives a save/restart; without it concurrent workers can all probe the
@@ -157,12 +177,14 @@ export function rehydrateApplicationLane(value, now = 0) {
     ord: value.ord,
     jobId: value.jobId,
     canvasFilePath: value.canvasFilePath,
+    matchTaskId: value.matchTaskId ?? null,
     releasedAt: value.releasedAt,
     phase: LANE_PHASES.includes(value.phase) ? value.phase : 'unread',
   });
   lane.reason = LANE_REASONS.includes(value.reason) ? value.reason : null;
   lane.heldFrom = LANE_PHASES.includes(value.heldFrom) ? value.heldFrom : null;
   lane.counters = makeCounters(value.counters);
+  if (normalizeParallelTaskForecast(value.applicationForecast)) lane.applicationForecast = normalizeParallelTaskForecast(value.applicationForecast);
   if (!['held', 'needs_user'].includes(lane.phase)) holdLane(lane, 'restart', now);
   // `changedAt` is memory only, so every restored lane (including one already
   // held on disk) starts its "in this phase" clock at the restore.
@@ -178,6 +200,7 @@ export function holdLane(lane, reason = 'user_hold', now = 0) {
   lane.awaitingAnswer = false;
   lane.servedAt = null;
   lane.servedWorkerId = null;
+  lane.servedWorkerContextIncarnation = null;
   lane.pendingWorkerId = null;
   // ...and the serve that just ended is not a "repeat" if the same code goes out
   // again after the hold.

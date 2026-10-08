@@ -14,6 +14,7 @@ import {
 } from './resultCaps.js';
 import { NON_API_AI_TRANSPORT, durableRunExactStepStatus, durableRunHasExactStep, materializeNonApiPrompt, requestNonApiAi } from './nonApiAi.js';
 import { logger } from '../logger.js';
+import { CAREER_SNAPSHOT_TASK_OUTPUT_TOKEN_LIMITS } from './careerSnapshot.js';
 
 /**
  * Per-task manual-handoff routing.
@@ -45,11 +46,24 @@ const KNOWN_TASKS = new Set([
   'marketplace-hub-scan-batch',
   'resume-parse',
   'career-file-extract',
+  'career-file-inventory',
+  'career-file-inventory-audit',
+  'career-file-transcription-audit',
+  'career-file-boundary-audit',
+  'career-profile-compile',
+  'career-profile-audit-completeness',
+  'career-profile-audit-grounding',
+  'career-profile-audit-attribution',
+  'career-profile-audit-metrics',
+  'career-profile-audit-skills',
+  'career-profile-audit-conflicts',
+  'career-profile-repair',
   'job-query-generation',
   'job-scoring',
   'job-taxonomy-plan',
   'job-taxonomy-classify',
   'job-taxonomy-classify-batch',
+  'job-location-consolidation-confirmation',
   'job-compensation-research',
   'job-compensation-assessment',
   'job-compensation-research-batch',
@@ -141,6 +155,23 @@ const TASK_MAX_TOKENS = {
   // downstream (queries, scoring, the generated résumé). Caps are billed on
   // actual output, so the headroom is free insurance, not a cost.
   'career-file-extract':       MANUAL_AI_USABLE_OUTPUT_TOKENS,
+  'career-file-inventory':     MANUAL_AI_USABLE_OUTPUT_TOKENS,
+  'career-file-inventory-audit': MANUAL_AI_USABLE_OUTPUT_TOKENS,
+  // The independent attachment audit returns a complete replacement only if
+  // needed, so it needs the same no-truncation ceiling as extraction.
+  'career-file-transcription-audit': MANUAL_AI_USABLE_OUTPUT_TOKENS,
+  'career-file-boundary-audit': MANUAL_AI_USABLE_OUTPUT_TOKENS,
+  // Career-profile compilation is a bounded structured evidence index.  Its
+  // independent audit passes return discrepancy rows rather than copies of the
+  // corpus, while repair returns the complete corrected candidate snapshot.
+  'career-profile-compile': CAREER_SNAPSHOT_TASK_OUTPUT_TOKEN_LIMITS['career-profile-compile'],
+  'career-profile-audit-completeness': CAREER_SNAPSHOT_TASK_OUTPUT_TOKEN_LIMITS['career-profile-audit-completeness'],
+  'career-profile-audit-grounding': CAREER_SNAPSHOT_TASK_OUTPUT_TOKEN_LIMITS['career-profile-audit-grounding'],
+  'career-profile-audit-attribution': CAREER_SNAPSHOT_TASK_OUTPUT_TOKEN_LIMITS['career-profile-audit-attribution'],
+  'career-profile-audit-metrics': CAREER_SNAPSHOT_TASK_OUTPUT_TOKEN_LIMITS['career-profile-audit-metrics'],
+  'career-profile-audit-skills': CAREER_SNAPSHOT_TASK_OUTPUT_TOKEN_LIMITS['career-profile-audit-skills'],
+  'career-profile-audit-conflicts': CAREER_SNAPSHOT_TASK_OUTPUT_TOKEN_LIMITS['career-profile-audit-conflicts'],
+  'career-profile-repair': CAREER_SNAPSHOT_TASK_OUTPUT_TOKEN_LIMITS['career-profile-repair'],
   // Reasoning can consume the same cap as visible output on some models —
   // real-world: thoughts=979, visible=31 at cap=1024 truncated the JSON
   // mid-output. 4096 matches resume-parse and gives ~3000 headroom over
@@ -162,6 +193,12 @@ const TASK_MAX_TOKENS = {
   // exactly fills 1,024 + 32*448 = 15,360 without crossing the usable ceiling.
   'job-taxonomy-classify-batch': ({ itemCount = 1 } = {}) =>
     Math.min(MANUAL_AI_USABLE_OUTPUT_TOKENS, 1024 + Math.max(1, itemCount) * 32),
+  // One tiny yes/no verdict per near-match pair. The full descriptions are
+  // input evidence; the response deliberately has no prose/reason field, so
+  // it stays compact and every idle bridge worker can finish a four-pair batch
+  // without reserving capacity needed by scoring or taxonomy.
+  'job-location-consolidation-confirmation': ({ itemCount = 1 } = {}) =>
+    Math.min(2048, 512 + Math.max(1, itemCount) * 128),
   // One grounded search is shared by a role/seniority/location cohort.
   'job-compensation-research': 4096,
   // Location-based cohort consolidation makes this per-job structured output

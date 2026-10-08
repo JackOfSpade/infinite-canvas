@@ -18,6 +18,7 @@ import { CONSTANTS } from '../../electron/ipc/handoffBridge/constants.js';
 import { createHandoffEngine } from '../../electron/ipc/handoffBridge/engine.js';
 import { createLaneStore } from '../../electron/ipc/handoffBridge/laneStore.js';
 import { createHandoffBridgeLog } from '../../electron/ipc/handoffBridge/log.js';
+import { DEFAULT_HANDOFF_CONCURRENCY, MAX_HANDOFF_CONCURRENCY } from '../../src/utils/handoffScheduler.js';
 import {
   redactReportUrl,
   redactReportUrlsInText,
@@ -776,6 +777,11 @@ export default [{
     assert(finishedRows.length === 15 && finishedRows[0].job === uuid(24).slice(0, 8) && finishedRows.every((lane, position) => position === 0 || lane.ageSeconds >= finishedRows[position - 1].ageSeconds),
       'the room left over goes to the most recently changed finished lanes, newest first');
     assert(reduced.liveLanes === 5 && reduced.lanes.length === 19, `live lanes come from the queue counts (5), not from the rows that could be listed, got ${reduced.liveLanes}`);
+    assert(reduced.liveLaneCapacity === DEFAULT_HANDOFF_CONCURRENCY,
+      'a queue which has no configured host capability reports the reviewed default live-worker limit');
+    const reviewedMaximum = reduceBridgeQueue({ ...raw, limits: { maxConcurrentHandoffs: MAX_HANDOFF_CONCURRENCY + 1 } });
+    assert(reviewedMaximum.liveLaneCapacity === MAX_HANDOFF_CONCURRENCY,
+      'untrusted diagnostic input cannot turn the reviewed worker maximum into an unbounded report value');
     try {
       setBridgeQueueDiagnosticProvider(() => raw);
       const full = generateMarkdown({ ...base, filterCode: 'FULL' }).markdown;

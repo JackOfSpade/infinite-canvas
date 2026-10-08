@@ -15,6 +15,7 @@ import { hasProviderGatheredBoundary, jobRunPathScopeForCanvas, lastRunReceiptPa
 import { JOB_SEARCH_TEST_MODE } from '../../../src/utils/jobSourceScope.js';
 import { isGoogleJobsInternalUrl } from '../../../src/utils/jobListingUrl.js';
 import { ago, closeReportDiagnostic, modelTag, pipelineScope, formatAge, projectReportDiagnostic, redactReportLocalPathsInText, redactReportOpaqueIds, redactReportPath, redactReportUrl, redactReportUrlsInText } from './helpers.js';
+import { buildApplicationOutputMarkdown } from './applicationOutput.js';
 import { classifyUnparseableSalary, hasMojibake, mojibakeExcerpt } from './jobQualityChecks.js';
 // The real annualizer the app buckets jobs with (JobSearchNode's Job Tree +
 // electron/ipc/jobs.js both use it) — imported directly rather than
@@ -24,6 +25,7 @@ import { classifyUnparseableSalary, hasMojibake, mojibakeExcerpt } from './jobQu
 // jobs.js line ~50 already does the same for this exact module).
 import { parseSalaryToNumeric } from '../../../src/nodes/jobsearch/buildJobTree.js';
 import { JOB_COLLECTION_AUTO_LIMITS, normalizeJobCollectionLimits } from '../../../src/utils/jobCollectionLimits.js';
+import { consolidateBoardCascadeNodes, summarizeConsolidation } from '../../../src/utils/jobLocationConsolidation.js';
 import { classifyJobBoardSourceAdmission } from '../../../src/utils/jobBoardSourceAdmission.js';
 import { jobSearchNextAnchor, normalizeJobSearchInitialLookbackDays, resolveJobSearchDateWindow } from '../../../src/utils/jobSearchDateWindow.js';
 // Legacy/synthetic snapshots can still contain title-drop telemetry from older
@@ -37,6 +39,28 @@ import { jobSearchNextAnchor, normalizeJobSearchInitialLookbackDays, resolveJobS
 function reportCorrelationDigest(value, fallback = 'not recorded') {
   if (typeof value !== 'string' || !value) return fallback;
   return `#${crypto.createHash('sha256').update(value).digest('hex').slice(0, 10)}`;
+}
+
+// Keep APPOUTPUT on the same card/window attribution boundary as the regular
+// Application Generation receipt. The last application record is process-wide;
+// a report must never borrow another window's opt-in prose sample.
+export function buildApplicationOutputReportSnapshot(currentNodeIds, reportWindowId) {
+  let application = null;
+  try { application = getApplicationTelemetry(); } catch { /* optional receipt */ }
+  // Application output is full candidate prose. Unlike aggregate pipeline
+  // telemetry it must never survive as a reportable orphan after its card is
+  // absent from this report's canvas: the main-process receipt is shared by
+  // windows and cannot establish that a node-less report owns it. Requiring
+  // the current card correlation also prevents a prior test/window's output
+  // from being appended to an unrelated diagnostic report.
+  const ownsCurrentCard = typeof application?.nodeId === 'string'
+    && currentNodeIds?.has?.(application.nodeId) === true;
+  if (!ownsCurrentCard) return buildApplicationOutputMarkdown(null);
+  const scope = application ? pipelineScope(application.nodeId, application.windowId, currentNodeIds, reportWindowId, {
+    label: 'Application card',
+    deletedNoun: 'card',
+  }) : null;
+  return buildApplicationOutputMarkdown(scope?.foreign ? null : application);
 }
 
 export function buildJobsConfigSnapshot() {
@@ -2771,6 +2795,20 @@ export function buildJobCompletionAssessment(
   const receiptUnscored = nonnegativeCount(receiptScoring?.unscored);
   const receiptFailedBatches = nonnegativeCount(receiptScoring?.failedBatches);
   const receiptCappedForBudget = nonnegativeCount(receiptScoring?.cappedForBudget);
+  // State WHY there is no single receipt to quote: "not retained" is only true
+  // when none exists. Several retained receipts with no live owner are ambiguous
+  // (the Recovery Diagnostics section prints each one), and a live run with no
+  // terminal receipt yet is simply unfinished.
+  const sourceReceiptFactFor = () => {
+    if (receipt) {
+      return `${receiptCompleted ? 'completed' : receipt.terminal?.status || 'unknown'} · terminal score-ready ${receiptScoreReady ?? '?'} · cleanup ${receiptCleanupConfirmed ? 'confirmed' : 'not confirmed'}`;
+    }
+    if (receiptState?.ambiguous) {
+      return `not selected — ${receiptState.count || 2} hub receipts are retained and none is attributable to this operation without a live run`;
+    }
+    if (receiptState?.liveOwnerWithoutTerminalReceipt) return 'not recorded for the selected live run';
+    return 'not retained';
+  };
   // An old source-search receipt can be ambiguous while a current saved-job
   // reanalysis is still uniquely owner/revision-bound. Keep the operations
   // independent instead of letting receipt ambiguity hide this snapshot.
@@ -2779,9 +2817,7 @@ export function buildJobCompletionAssessment(
     canvasFilePath, hubIds, reanalysisSnapshot, telemetry,
   );
   if (reanalysisSnapshot.state === 'legacy-header') {
-    const sourceReceiptFact = !receipt
-      ? 'not retained'
-      : `${receiptCompleted ? 'completed' : receipt.terminal?.status || 'unknown'} · terminal score-ready ${receiptScoreReady ?? '?'} · cleanup ${receiptCleanupConfirmed ? 'confirmed' : 'not confirmed'}`;
+    const sourceReceiptFact = sourceReceiptFactFor();
     return `
 ## Job Completion Assessment
 > Separate compatibility assessment for a legacy saved-job reanalysis header. The bounded header is not a payload, ownership, count, or scoring-completion receipt.
@@ -2799,9 +2835,7 @@ export function buildJobCompletionAssessment(
     const completionInput = nonnegativeCount(completion?.scoringInputCount ?? completion?.selectedForScoring ?? completion?.input);
     const completionScored = nonnegativeCount(completion?.scoredJobCount ?? completion?.scored);
     const evidenceSource = reanalysisEvidence.lifecycle ? 'durable lifecycle receipt' : 'live scoring telemetry';
-    const sourceReceiptFact = !receipt
-      ? 'not retained'
-      : `${receiptCompleted ? 'completed' : receipt.terminal?.status || 'unknown'} · terminal score-ready ${receiptScoreReady ?? '?'} · cleanup ${receiptCleanupConfirmed ? 'confirmed' : 'not confirmed'}`;
+    const sourceReceiptFact = sourceReceiptFactFor();
     const verdict = completion
       ? `✅ **SAVED-JOB REANALYSIS SCORING COMPLETE** — ${completionInput} input → ${completionScored} scored with no placeholders, unscored rows, or failed batches.`
       : '⚠️ **INDETERMINATE** — saved-job reanalysis has a current owned snapshot, but no matching clean scoring completion evidence was retained.';
@@ -3637,7 +3671,9 @@ const JOB_BOARD_DIAGNOSTIC_ACTIVE_SEARCH_STATES = new Set([
 const JOB_BOARD_DIAGNOSTIC_ADMISSION_KINDS = new Set([
   'invalid', 'reuse-terminal', 'terminal-requires-fresh-input',
   'fresh-imported-input', 'fresh-import-requires-clear', 'continue-existing',
-  'continuation-requires-run-token', 'intermediate-or-setup',
+  'continuation-requires-run-token', 'career-import-compiling',
+  'career-import-failed', 'career-import-requires-approval',
+  'intermediate-or-setup',
 ]);
 
 function diagnosticSourceData(source) {
@@ -3699,6 +3735,12 @@ function sourceSelectorAdmissionDiagnostic(source, admissionKind) {
   }
   if (admissionKind === 'continuation-requires-run-token') {
     return { ready: false, status: 'Paused run needs attention', reason: 'admission:continuation-requires-run-token' };
+  }
+  if (admissionKind === 'career-import-compiling') {
+    return { ready: false, status: 'Auditing career data', reason: 'admission:career-import-compiling' };
+  }
+  if (admissionKind === 'career-import-failed' || admissionKind === 'career-import-requires-approval') {
+    return { ready: false, status: 'Career compilation required', reason: `admission:${admissionKind}` };
   }
   if (admissionKind === 'fresh-imported-input') {
     return {
@@ -4013,6 +4055,7 @@ const JOB_BOARD_SELECTOR_REASONS = new Set([
   'no-selection',
   'selected-source-unready',
   'run-handler-unavailable',
+  'board-up-to-date',
 ]);
 const JOB_BOARD_SELECTOR_ACTION_LABELS = new Set([
   'Search & combine',
@@ -4048,6 +4091,9 @@ function boardSelectorRuntimeDiagnostic(value) {
     actionEligible: boardDiagnosticValue(value, 'actionEligible') === true
       ? true
       : boardDiagnosticValue(value, 'actionEligible') === false ? false : null,
+    actionVisible: boardDiagnosticValue(value, 'actionVisible') === true
+      ? true
+      : boardDiagnosticValue(value, 'actionVisible') === false ? false : null,
     actionLabel: JOB_BOARD_SELECTOR_ACTION_LABELS.has(boardDiagnosticValue(value, 'actionLabel'))
       ? boardDiagnosticValue(value, 'actionLabel')
       : null,
@@ -4079,7 +4125,7 @@ function selectorBoundsSummary(bounds) {
 function boardSelectorRuntimeSummary(snapshot) {
   if (!snapshot) return 'not retained';
   const reasons = snapshot.reasons.length > 0 ? snapshot.reasons.join(',') : 'none';
-  return `rows=${snapshot.rowCount ?? 'not retained'} · selected=${snapshot.selectedCount ?? 'not retained'} · action=${snapshot.actionEligible === true ? 'enabled' : snapshot.actionEligible === false ? 'disabled' : 'not retained'}${snapshot.actionLabel ? ` (${snapshot.actionLabel})` : ''} · reasons=${reasons} · selector=${selectorBoundsSummary(snapshot.selectorBounds)} · source-list=${selectorBoundsSummary(snapshot.sourceListBounds)}`;
+  return `rows=${snapshot.rowCount ?? 'not retained'} · selected=${snapshot.selectedCount ?? 'not retained'} · action=${snapshot.actionVisible === false ? 'hidden (board up to date)' : `${snapshot.actionEligible === true ? 'enabled' : snapshot.actionEligible === false ? 'disabled' : 'not retained'}${snapshot.actionLabel ? ` (${snapshot.actionLabel})` : ''}`} · reasons=${reasons} · selector=${selectorBoundsSummary(snapshot.selectorBounds)} · source-list=${selectorBoundsSummary(snapshot.sourceListBounds)}`;
 }
 
 /**
@@ -4159,6 +4205,9 @@ function collectBoardDiagnosticRows(nodes, edges) {
           cards: 0,
           groups: 0,
           hiddenChildren: 0,
+          // Raw card nodes owned by this Board, kept only to derive metadata-only
+          // consolidation facts (never emitted verbatim in the report).
+          cardNodes: [],
           bounded: levelBounded,
           ambiguousOwnership: false,
         };
@@ -4181,7 +4230,7 @@ function collectBoardDiagnosticRows(nodes, edges) {
         if (owners.length > 1) owners.forEach(owner => { owner.ambiguousOwnership = true; });
         continue;
       }
-      if (nodeType === 'jobcard') owners[0].cards++;
+      if (nodeType === 'jobcard') { owners[0].cards++; owners[0].cardNodes.push(node); }
       else owners[0].groups++;
       if (boardDiagnosticValue(node, 'hidden') === true) owners[0].hiddenChildren++;
     }
@@ -4270,6 +4319,33 @@ function collectBoardDiagnosticRows(nodes, edges) {
 }
 
 /**
+ * Metadata-only consolidation facts for one Board. Derives eligible group /
+ * represented posting / protected-card counts, plus the hypothetical migration
+ * stats, WITHOUT exposing any title, description, URL, location, fingerprint, or
+ * application id — only enum-shaped booleans and integer counts leave here.
+ */
+function boardConsolidationDiagnosticFacts(boardNode, cardNodes) {
+  const cards = boardDiagnosticArray(cardNodes) || [];
+  const rows = cards.map((node) => {
+    const data = boardDiagnosticValue(node, 'data');
+    return data && typeof data === 'object' ? data : {};
+  });
+  const summary = summarizeConsolidation(rows);
+  const migration = consolidateBoardCascadeNodes([boardNode, ...cards]);
+  const migrationStats = migration.stats && typeof migration.stats === 'object' ? migration.stats : {};
+  return {
+    eligibleExactDescriptionMultiLocationGroups: summary.eligibleExactDescriptionMultiLocationGroups,
+    alreadyConsolidated: summary.alreadyConsolidated,
+    representedPostings: summary.representedPostings,
+    linkedCards: summary.protectedCards,
+    protectedConstraintApplied: summary.protectedCards > 0,
+    migrationEligibleGroups: nonnegativeCount(migrationStats.eligibleGroups) ?? 0,
+    migrationPostingsCollapsed: nonnegativeCount(migrationStats.postingsCollapsed) ?? 0,
+    migrationProtectedRetained: nonnegativeCount(migrationStats.protectedRetained) ?? 0,
+  };
+}
+
+/**
  * Bounded, metadata-only Job Board transaction/display facts for FULL and
  * focused JOBBOARD reports.
  * This intentionally avoids job rows, titles, prompts, error text, signatures,
@@ -4346,10 +4422,15 @@ export function buildJobBoardDiagnostics(nodes, edges, nodeComponentStates = [])
     const selectorRuntime = typeof boardId === 'string' && boardIdCounts.get(boardId) === 1
       ? componentStateById.get(boardId) || null
       : null;
+    const consolidation = boardDiagnosticSafely(
+      () => boardConsolidationDiagnosticFacts(entry.board, entry.cardNodes),
+      null,
+    );
     return {
       board, data, resume, selected, connectedIds, connectedNodes, combined, cards, groups,
       hiddenChildren, resultCount, combineSourceRuns, resumeFacts, clear,
-      clearCount, cancellation, recoverableFailure, selectorRuntime, bounded, ambiguousOwnership, scope,
+      clearCount, cancellation, recoverableFailure, selectorRuntime, consolidation,
+      bounded, ambiguousOwnership, scope,
     };
   });
   const claimsBySourceId = recoveryClaimMap(normalizedRows);
@@ -4369,7 +4450,8 @@ export function buildJobBoardDiagnostics(nodes, edges, nodeComponentStates = [])
     const {
       board, data, resume, selected, connectedIds, connectedNodes, combined, cards, groups,
       hiddenChildren, resultCount, combineSourceRuns, resumeFacts, clear,
-      clearCount, cancellation, recoverableFailure, selectorRuntime, bounded, ambiguousOwnership, scope,
+      clearCount, cancellation, recoverableFailure, selectorRuntime, consolidation,
+      bounded, ambiguousOwnership, scope,
     } = row;
     const countQualification = bounded ? ' · counts may be partial (input bounded)' : '';
     const ownershipQualification = ambiguousOwnership ? ' · ⚠️ duplicate Board id in this canvas level; child/connectivity ownership ambiguous' : '';
@@ -4390,6 +4472,16 @@ export function buildJobBoardDiagnostics(nodes, edges, nodeComponentStates = [])
     lines.push(`  - Resume: ${boardResumeSummary(resumeFacts, labelContext)}.`);
     lines.push(`  - Recovery provenance: recoverable-failure=${recoverableFailure ? 'recorded' : 'none'} · cancellation=${cancellation ? 'recorded' : 'none'} · clear=${clear ? `recorded${clearCount != null ? ` (prior results ${clearCount})` : ''}` : 'none'}.`);
     lines.push(`  - Selector runtime: ${boardSelectorRuntimeSummary(selectorRuntime)}.`);
+    if (consolidation) {
+      lines.push(
+        '  - Location consolidation (metadata only): '
+        + `eligible-exact-description-multi-location-groups=${consolidation.eligibleExactDescriptionMultiLocationGroups} · `
+        + `represented-postings=${consolidation.representedPostings} · already-consolidated=${consolidation.alreadyConsolidated} · `
+        + `linked-cards=${consolidation.linkedCards} · protected-constraint=${consolidation.protectedConstraintApplied ? 'applied' : 'none'} · `
+        + `migration-eligible-groups=${consolidation.migrationEligibleGroups} · migration-postings-collapsed=${consolidation.migrationPostingsCollapsed} · `
+        + `migration-protected-retained=${consolidation.migrationProtectedRetained}.`,
+      );
+    }
   }
   return `\n${lines.join('\n')}\n`;
 }
@@ -4469,6 +4561,107 @@ ${rows.join('\n')}
  * this is strictly metadata/counts required to establish whether a restart can
  * recover an interrupted collection/scoring handoff.
  */
+const AUTHORITY_SUMMARY_IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/;
+const AUTHORITY_SUMMARY_SHA256 = /^[a-f0-9]{64}$/;
+const AUTHORITY_SUMMARY_SLOT = /^(?:current|success:[1-3]|checkpoint:[a-f0-9]{24})$/;
+const AUTHORITY_SUMMARY_FIELDS = new Set([
+  'version', 'canvasFilePath', 'hubId', 'operationId', 'semanticBase', 'revision',
+  'status', 'updatedAt', 'publications', 'pendingPublications', 'predecessor',
+]);
+
+function authoritySummaryIdentifier(value) {
+  return typeof value === 'string' && AUTHORITY_SUMMARY_IDENTIFIER.test(value) ? value : null;
+}
+
+function authoritySummaryBase(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const allowed = ['kind', 'careerSnapshotId', 'runId', 'analysisRevisionId', 'fingerprint', 'continuationId', 'sourceArtifactFingerprint'];
+  if (Object.keys(value).some(key => !allowed.includes(key))) return null;
+  const kind = authoritySummaryIdentifier(value.kind);
+  const careerSnapshotId = typeof value.careerSnapshotId === 'string' && AUTHORITY_SUMMARY_SHA256.test(value.careerSnapshotId)
+    ? value.careerSnapshotId : null;
+  const optional = (key) => value[key] == null ? null : authoritySummaryIdentifier(value[key]);
+  const runId = optional('runId');
+  const analysisRevisionId = optional('analysisRevisionId');
+  const fingerprint = optional('fingerprint');
+  const continuationId = optional('continuationId');
+  const sourceArtifactFingerprint = optional('sourceArtifactFingerprint');
+  if (!kind || !careerSnapshotId
+    || (value.runId != null && !runId) || (value.analysisRevisionId != null && !analysisRevisionId)
+    || (value.fingerprint != null && !fingerprint) || (value.continuationId != null && !continuationId)
+    || (value.sourceArtifactFingerprint != null && !sourceArtifactFingerprint)) return null;
+  return { kind, careerSnapshotId, runId, analysisRevisionId, fingerprint, continuationId, sourceArtifactFingerprint };
+}
+
+function authoritySummaryReceipt(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const allowed = ['operationId', 'semanticBase', 'revision'];
+  if (Object.keys(value).some(key => !allowed.includes(key))) return null;
+  const operationId = authoritySummaryIdentifier(value.operationId);
+  const semanticBase = authoritySummaryBase(value.semanticBase);
+  const revision = Number.isSafeInteger(value.revision) && value.revision > 0 ? value.revision : null;
+  return operationId && semanticBase && revision ? { operationId, semanticBase, revision } : null;
+}
+
+function authoritySummaryPublications(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const entries = Object.entries(value);
+  if (entries.length > 64) return null;
+  const output = {};
+  for (const [slot, publication] of entries) {
+    if (!AUTHORITY_SUMMARY_SLOT.test(slot) || !publication || typeof publication !== 'object' || Array.isArray(publication)
+      || Object.keys(publication).some(key => !['slot', 'digest', 'receipt'].includes(key))
+      || publication.slot !== slot || typeof publication.digest !== 'string' || !AUTHORITY_SUMMARY_SHA256.test(publication.digest)
+      || !authoritySummaryReceipt(publication.receipt)) return null;
+    output[slot] = true;
+  }
+  return output;
+}
+
+function canonicalAuthoritySummary(record, expectedCanvasPath, expectedHubId) {
+  if (!record || typeof record !== 'object' || Array.isArray(record)
+    || Object.keys(record).some(key => !AUTHORITY_SUMMARY_FIELDS.has(key))
+    || record.version !== 1 || record.canvasFilePath !== expectedCanvasPath || record.hubId !== expectedHubId
+    || !authoritySummaryIdentifier(record.operationId) || !authoritySummaryBase(record.semanticBase)
+    || !Number.isSafeInteger(record.revision) || record.revision < 1
+    || !['active', 'revoked'].includes(record.status)
+    || typeof record.updatedAt !== 'string' || !Number.isFinite(Date.parse(record.updatedAt))) return null;
+  const publications = authoritySummaryPublications(record.publications);
+  const pending = record.pendingPublications == null ? null : authoritySummaryPublications(record.pendingPublications);
+  const predecessor = record.predecessor == null ? null : authoritySummaryReceipt(record.predecessor);
+  if (publications == null || (record.pendingPublications != null && pending == null)
+    || (record.predecessor != null && !predecessor)) return null;
+  return {
+    status: record.status,
+    revision: record.revision,
+    kind: record.semanticBase.kind,
+    publicationCount: Object.keys(publications).length,
+    pendingCount: pending ? Object.keys(pending).length : 0,
+  };
+}
+
+function operationAuthorityRecoverySummary(canvasFilePath, ownerIds) {
+  const owners = [...new Set((ownerIds instanceof Set ? [...ownerIds] : Array.isArray(ownerIds) ? ownerIds : [])
+    .filter(owner => typeof owner === 'string' && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/.test(owner)))].slice(0, MAX_RECOVERY_ARTIFACT_SCOPES);
+  const lines = [];
+  for (const owner of owners) {
+    try {
+      const paths = getJobAnalysisPaths(canvasFilePath, null, owner);
+      const authorityPath = paths?.operationAuthorityPath;
+      if (!authorityPath) continue;
+      const read = boundedRegularFileRead(authorityPath, 256 * 1024);
+      if (!read.exists) { lines.push(`- Authority ${reportCorrelationDigest(owner)}: absent.`); continue; }
+      if (read.errorCode || read.truncated) { lines.push(`- Authority ${reportCorrelationDigest(owner)}: unavailable safely.`); continue; }
+      const record = canonicalAuthoritySummary(JSON.parse(read.text), paths.canvasPath, owner);
+      if (!record) { lines.push(`- Authority ${reportCorrelationDigest(owner)}: invalid or unavailable.`); continue; }
+      lines.push(`- Authority ${reportCorrelationDigest(owner)}: status=\`${record.status}\` · revision=${record.revision} · kind=\`${record.kind}\` · sealed slots=${record.publicationCount} · pending slots=${record.pendingCount}.`);
+    } catch {
+      lines.push(`- Authority ${reportCorrelationDigest(owner)}: invalid or unavailable.`);
+    }
+  }
+  return lines.length ? [`### Durable operation authority`, ...lines] : ['### Durable operation authority', '- No active Job Search hub authority sidecars were eligible for this report.'];
+}
+
 export function buildJobRecoverySnapshot(canvasFilePath, currentNodeIds = new Set(), currentJobHubIds = currentNodeIds, reportWindowId = null) {
   const paths = recoveryPathsForCanvas(canvasFilePath, currentJobHubIds);
   if (!paths) {
@@ -4546,6 +4739,7 @@ export function buildJobRecoverySnapshot(canvasFilePath, currentNodeIds = new Se
   lines.push(...ownedSnapshotLines('Successful saved scrape generation 2', canvasFilePath, currentNodeIds, currentJobHubIds, 'last-success-2'));
   lines.push(...ownedSnapshotLines('Successful saved scrape generation 3 (oldest)', canvasFilePath, currentNodeIds, currentJobHubIds, 'last-success-3'));
   lines.push(...descriptionRecoveryCheckpointLines(canvasFilePath, currentNodeIds));
+  lines.push(...operationAuthorityRecoverySummary(canvasFilePath, currentJobHubIds));
   const lifecycleMarkdown = formatJobAnalysisRecoveryLifecycleMarkdown(
     readJobAnalysisRecoveryLifecycle(path.join(app.getPath('userData'), 'job-search', 'analysis-recovery-lifecycle.json'), {
       canvasFilePath,
@@ -5387,29 +5581,30 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
   } catch { /* cache absent is fine — treat all platforms as unconfirmed */ }
 
   const lines = [];
-  if (t.careerParseCache) {
-    const cache = t.careerParseCache;
+  if (t.careerSnapshotCache) {
+    const cache = t.careerSnapshotCache;
     // currentNodeIds is a Set (see receiptHubCorrelation/recoveryHubCorrelation
     // above) — this used to test Array.isArray/.includes, which is never true
     // for a Set, so the scope check was a permanent no-op and every window's
-    // parse-cache stamp leaked into every other window's report.
+    // snapshot-cache stamp leaked into every other window's report.
     const cacheScope = !cache.nodeId || currentNodeIds?.has?.(cache.nodeId);
     if (cacheScope) {
       const outcomes = {
         checking: 'checking',
-        hit: 'hit — reused the prior parsed career data',
-        miss: 'miss — parsing was started',
-        saved: 'miss → saved — the completed parse was accepted by the local cache store',
-        'save-failed': 'miss → cache write failed — parse results were still returned',
+        hit: 'hit — reused the prior approved career snapshot',
+        miss: 'miss — compilation was started',
+        published: 'miss → published — the approved career snapshot was atomically stored',
       };
-      lines.push('\n### Career Parse Cache');
+      lines.push('\n### Approved Career Snapshot Cache');
       lines.push(`- ${outcomes[cache.outcome] || cache.outcome || 'unknown'} · ${cache.fileCount || 0} file(s) · fingerprint \`${cache.fingerprint || 'unknown'}\`${ago(cache.ts)}`);
       // Only present on a parse that actually ran pass 1 (a cache hit never sets
       // them), which is why this reads the counts rather than assuming a split.
       if (Number.isFinite(cache.readVerbatim) || Number.isFinite(cache.transcribed)) {
         lines.push(`- Pass 1: ${cache.readVerbatim || 0} file(s) read verbatim (no AI handoff) · ${cache.transcribed || 0} transcribed · ${cache.careerDataChars || 0} chars of career data`);
       }
-      if (cache.error) lines.push(`- ⚠️ Cache write error: \`${projectReportDiagnostic(cache.error, 'recorded')}\``);
+      if (Number.isFinite(cache.transcriptionAudited)) {
+        lines.push(`- Attachment transcription audit: ${cache.transcriptionAudited || 0} independently checked · ${cache.transcriptionRevised || 0} complete replacement${cache.transcriptionRevised === 1 ? '' : 's'}`);
+      }
     }
   }
   if (visibleLocalApplications.length) {
@@ -5465,10 +5660,10 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
       // occurred — 'fresh-files' means file paths were supplied (JobSearchNode.jsx:
       // profileInputMode: paths.length > 0 ? 'fresh-files' : 'stored-profile'),
       // and whether those files were actually re-parsed or served from the
-      // fingerprint cache is a SEPARATE fact reported by "Career Parse Cache"
+      // snapshot lookup is a SEPARATE fact reported by "Approved Career Snapshot Cache"
       // above. Labelling this 'career files reparsed' asserted the parse
-      // happened even on a cache HIT, contradicting a "Career Parse Cache: hit
-      // — reused the prior parsed career data" line printed one section earlier.
+      // happened even on a cache HIT, contradicting its snapshot-reuse line
+      // printed one section earlier.
       const profileInputLabel = {
         'fresh-files': 'career files supplied',
         'stored-profile': 'stored career profile reused',
@@ -7937,7 +8132,7 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
     const c = t.compensation;
     const rec = (v) => (v === null || v === undefined) ? 'not recorded' : v;
     lines.push(`\n### Competitive salary check${ago(c.ts)}`);
-    lines.push('> What this answers: whether the competitive-salary check is what exhausted this run\'s AI quota. Every fit-qualified job proceeds through role/seniority/experience/employment type/location/currency preparation — a job needs only a resolvable comparison location and market currency, not an advertised salary. An uncached role-family ladder can use two handoffs (grounded research + structured assessment) before any market cohort exists; each uncached market cohort can use another two. Cached ladder or market evidence can reduce those calls. Cohorts can fragment by location, so a broad multi-employer search can multiply into many cohorts. The numbers below describe what happened this run, not a diagnosis of why.');
+    lines.push('> What this answers: whether the competitive-salary check is what exhausted this run\'s AI quota. Every fit-qualified job proceeds through role/seniority/experience/employment type/location/currency preparation — a job needs only a resolvable comparison location and market currency, not an advertised salary. An uncached role-family ladder can use two handoffs (grounded research + structured assessment) before any market cohort exists; each uncached market cohort can use another two. A fit-qualified job whose listing names no usable place can add up to one batched grounded lookup of the employer\'s own posting before role-band preparation. Cached ladder or market evidence can reduce those calls. Cohorts can fragment by location, so a broad multi-employer search can multiply into many cohorts. The numbers below describe what happened this run, not a diagnosis of why.');
     // `eligible` is deliberately the *fit-gate* pass count, not the number
     // that ultimately reached market research. Salary and location checks run
     // afterward, so presenting every number as a peer "Skipped" count makes
@@ -7977,6 +8172,24 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
         : `- Role-band lookup work (separate from market cohorts): ${rec(c.roleBandLookups)} lookup(s) · ${rec(c.roleBandResearches)} researched · ${rec(c.roleBandCacheHits)} cache hit(s)${roleBandFailures != null ? ` · ${roleBandFailures} researched lookup(s) failed` : ''}.`);
     } else {
       lines.push(`- Of the fit-qualified jobs, skipped before market research: ${rec(c.skippedNoLocation)} with no resolvable location, ${rec(c.skippedNoCurrency)} with no resolvable market currency; ${rec(c.preResearchCandidates)} passed to experience-band/cohort preparation`);
+    }
+    // Employer-posting location lookup (one batched grounded handoff, run
+    // before the location gate). Counts and enum codes only: no URL, title or
+    // company ever reaches this report. Absent on telemetry recorded before
+    // the lookup existed, in which case nothing is rendered.
+    const lookup = c.locationLookup && typeof c.locationLookup === 'object' ? c.locationLookup : null;
+    if (lookup) {
+      const n = (v) => nonnegativeCount(v) ?? 'not recorded';
+      if (!nonnegativeCount(lookup.postings)) {
+        lines.push(`- Employer-posting location lookup: no posting was sent${nonnegativeCount(lookup.noIdentityJobs) ? ` (${n(lookup.noIdentityJobs)} job(s) lacked a title or company to look up)` : ''}.`);
+      } else {
+        lines.push(`- Employer-posting location lookup: ${n(lookup.jobs)} job(s) / ${n(lookup.postings)} posting(s) sent in ${n(lookup.handoffs)} handoff(s)${lookup.cacheHit ? ' (answered from the in-memory cache)' : ''} → ${n(lookup.resolved)} now have a comparison location, ${n(lookup.foundUnresolved)} found a posting but still no market location, ${n(lookup.rejected)} rejected by host checks, ${n(lookup.notFound)} not found, ${n(lookup.failed)} failed, ${n(lookup.interrupted)} interrupted.`);
+        const reasons = Object.entries(lookup.rejectionReasons && typeof lookup.rejectionReasons === 'object' ? lookup.rejectionReasons : {})
+          .filter(([code, count]) => /^[A-Z_]{3,40}$/.test(code) && nonnegativeCount(count))
+          .map(([code, count]) => `${code}=${count}`);
+        if (reasons.length) lines.push(`  - host-check rejections: ${reasons.join(', ')}`);
+        if (nonnegativeCount(lookup.overflowPostings)) lines.push(`  - ${n(lookup.overflowPostings)} further posting(s) were not sent because one handoff is capped; those jobs kept the no-location fallback.`);
+      }
     }
     lines.push(`- Missing/unusable advertised salary: ${rec(c.missingOffer)} · market recommendations produced: ${rec(c.recommendedNoOffer)}`);
     lines.push(hasRoleBandTelemetry
@@ -8484,6 +8697,51 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
     }
     if (a.variantAttrs) lines.push(`- Résumé variant: \`${String(a.variantAttrs).slice(0, 200)}\``);
     lines.push(`- Résumé markup: ${a.resumeHtmlLen || 0} chars${a.resumeHtmlSample ? ' · sample captured (content withheld)' : ''}`);
+    // Whether the generated résumé's Skills block missed any technology name
+    // the listing quotes and the career evidence also states. Metadata-only:
+    // groups/items are clamped counts and required/absent are canonical
+    // technology names, so a hostile telemetry value cannot smuggle a heading,
+    // newline, or long content into the report.
+    if (a.resumeSkillsCoverage != null && typeof a.resumeSkillsCoverage === 'object' && !Array.isArray(a.resumeSkillsCoverage)) {
+      const cov = a.resumeSkillsCoverage;
+      const boundedCount = value => Number.isInteger(value) && value >= 0
+        ? Math.min(value, 999)
+        : '?';
+      const SKILL_NAME = /^[A-Za-z0-9][A-Za-z0-9.+#-]*(?: [A-Za-z0-9][A-Za-z0-9.+#-]*)?$/u;
+      const sanitizeNames = input => {
+        if (!Array.isArray(input)) return [];
+        const kept = [];
+        for (const name of input) {
+          if (kept.length >= 10) break;
+          if (typeof name !== 'string') continue;
+          if (name.length > 24 || !SKILL_NAME.test(name)) continue;
+          kept.push(name);
+        }
+        return kept;
+      };
+      const groups = boundedCount(cov.groups);
+      const items = boundedCount(cov.items);
+      const required = sanitizeNames(cov.required);
+      const absent = sanitizeNames(cov.absent);
+      // New telemetry names the whole bounded index separately; old retained
+      // attempts carried only the posting-named subset, so fall back without
+      // making historical reports unreadable.
+      const indexed = sanitizeNames(cov.indexed);
+      const indexAbsent = sanitizeNames(cov.indexAbsent);
+      const effectiveIndex = indexed.length ? indexed : required;
+      const effectiveAbsent = indexed.length || Array.isArray(cov.indexAbsent) ? indexAbsent : absent;
+      const absentSuffix = effectiveAbsent.length
+        ? `⚠️ absent from the skills block: ${effectiveAbsent.join(', ')}`
+        : 'none absent';
+      // A block with zero rows cannot be told apart from "the posting named
+      // nothing" by the counts above, so state the one observation that does:
+      // how many recognised technology names the plan's career evidence states.
+      const attested = sanitizeNames(cov.attested);
+      const presenceSuffix = groups === 0 && attested.length
+        ? ` · ⚠️ no skills block although the career evidence states ${attested.length} recognised technology name(s): ${attested.join(', ')}`
+        : '';
+      lines.push(`- Résumé skills block: ${groups} group(s) · ${items} item(s) · prioritized career-attested index: ${effectiveIndex.length} name(s) (${required.length} posting-named) · ${absentSuffix}${presenceSuffix}`);
+    }
     if (cl.needsAvailable != null || Array.isArray(cl.checks)) {
       const checks = Array.isArray(cl.checks) ? cl.checks : [];
       const unmet = checks.filter(check => check?.passed === false);

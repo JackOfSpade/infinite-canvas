@@ -31,9 +31,16 @@ import {
   RESULT_NOTES,
   supersededStageNote,
 } from './framing.js';
-import { MAX_WORKER_POOL_PLANNING_UNITS, MAX_WORKER_POOL_SIZE, recommendWorkerPool } from './workerPool.js';
+import { MAX_WORKER_POOL_SIZE, recommendWorkerPool } from './workerPool.js';
+import { resolveHandoffConcurrency } from '../../../src/utils/handoffScheduler.js';
 
 const JOB_ID_RE = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i;
+const MATCH_TASK_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/;
+const FRESH_CONTEXT_KEY_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+// Sources are pluggable, so enforce the application authority protocol's
+// bounded live wave here too. One malformed source response must not produce
+// an unbounded persisted fanout.
+const MAX_APPLICATION_MATCH_LIVE_WAVE = 10;
 // Push tasks whose prompt/response carries marketplace listing or pricing
 // data rather than job-scoring content. This is deliberately a literal list
 // rather than an import from a concrete push source: the engine is written
@@ -48,13 +55,16 @@ const MARKETPLACE_PUSH_TASKS = new Set([
 // telemetry. This is the release_one policy vocabulary from sources/push.js.
 const STATUS_PUSH_TASKS = new Set([
   'price-synthesis', 'price-synthesis-batch', 'bundle-price-synthesis', 'platform-fit-assessment',
-  'resume-parse', 'job-compensation-research', 'job-compensation-research-batch',
+  'resume-parse', 'career-profile-compile', 'career-profile-audit-completeness', 'career-profile-audit-grounding',
+  'career-profile-audit-attribution', 'career-profile-audit-metrics', 'career-profile-audit-skills',
+  'career-profile-audit-conflicts', 'career-profile-repair',
+  'job-compensation-research', 'job-compensation-research-batch',
   'job-preference-research', 'job-preference-research-batch', 'job-query-generation', 'job-scoring',
   'job-taxonomy-plan', 'job-taxonomy-classify', 'job-taxonomy-classify-batch',
   'job-compensation-assessment', 'job-compensation-assessment-batch',
   'job-preference-interpretation', 'job-preference-evaluation',
   'job-preference-research-assessment', 'job-preference-research-batch-assessment',
-  'job-role-audit', 'job-role-screen', 'job-role-screen-batch',
+  'job-location-consolidation-confirmation', 'job-role-audit', 'job-role-screen', 'job-role-screen-batch',
 ]);
 const SCORING_PUSH_TASKS = new Set([...STATUS_PUSH_TASKS].filter(task => !MARKETPLACE_PUSH_TASKS.has(task)));
 const PUSH_EXCLUSION_REASONS = ['ending', 'settling', 'attachment', 'free_text', 'task_not_allowed', 'node_not_allowed', 'person_editing'];
@@ -148,6 +158,7 @@ function makeSemaphore(limit) {
 
 function normalizeSourceResult(result) {
   if (!result || typeof result !== 'object') return { kind: 'threw', code: 'internal_error' };
+  if ((result.handoff || result.next) && invalidFreshContextKey((result.handoff ?? result.next)?.freshContextKey)) return { kind: 'threw', code: 'internal_error' };
   if (result.kind === 'phase' && typeof result.phase === 'string') return { ...result, kind: result.phase };
   if (typeof result.kind === 'string') return result;
   if (result.completed === true && !result.handoff) return { kind: 'host', completed: true };
@@ -157,6 +168,7 @@ function normalizeSourceResult(result) {
 
 function normalizeSubmitResult(result) {
   if (!result || typeof result !== 'object') return { kind: 'threw', code: 'internal_error' };
+  if ((result.handoff || result.next) && invalidFreshContextKey((result.handoff ?? result.next)?.freshContextKey)) return { kind: 'threw', code: 'internal_error' };
   if (typeof result.kind === 'string') {
     if (result.kind === 'accepted' && !result.handoff && result.next) return { ...result, handoff: result.next };
     return result;
@@ -176,16 +188,37 @@ function isAbsoluteCanvasPath(value) {
   return typeof value === 'string' && value.startsWith('/') && value.length <= 4096 && !value.includes('\0');
 }
 
+function laneIdentity(jobId, canvasFilePath, matchTaskId = null) {
+  return `${jobId}\u0000${canvasFilePath}\u0000${matchTaskId ?? ''}`;
+}
+
+function validMatchTaskId(value) {
+  return typeof value === 'string' && MATCH_TASK_ID_RE.test(value);
+}
+
+function freshContextKey(value) {
+  return typeof value === 'string' && FRESH_CONTEXT_KEY_RE.test(value) ? value : null;
+}
+
+function invalidFreshContextKey(value) {
+  return value !== undefined && freshContextKey(value) === null;
+}
+
+// Context keys are opaque internal boundaries. Compare their fixed-size
+// digests so a future caller cannot turn this branch into a raw-key compare.
+function sameFreshContextKey(left, right) {
+  return typeof left === 'string' && typeof right === 'string'
+    && sameDigest(sha256(left), sha256(right));
+}
+
 function normalizeLimits(value = {}) {
   return {
     releaseTtlHours: Number.isFinite(value.releaseTtlHours) ? Math.max(0, value.releaseTtlHours) : CONSTANTS.RELEASE_TTL_HOURS,
     chatKeyMaxAgeHours: Number.isFinite(value.chatKeyMaxAgeHours) ? Math.max(0, value.chatKeyMaxAgeHours) : CONSTANTS.CHAT_KEY_MAX_AGE_HOURS,
     idlePauseMinutes: Number.isFinite(value.idlePauseMinutes) ? Math.max(0, value.idlePauseMinutes) : CONSTANTS.IDLE_PAUSE_MINUTES,
-    jobsPerChat: Number.isInteger(value.jobsPerChat)
-      ? Math.max(CONSTANTS.JOBS_PER_CHAT_MIN, Math.min(CONSTANTS.JOBS_PER_CHAT_MAX, value.jobsPerChat))
-      : CONSTANTS.JOBS_PER_CHAT,
-    epochSoftBytes: Number.isFinite(value.epochSoftBytes) ? Math.max(0, value.epochSoftBytes) : CONSTANTS.EPOCH_SOFT_BYTES,
-    epochHardBytes: Number.isFinite(value.epochHardBytes) ? Math.max(0, value.epochHardBytes) : CONSTANTS.EPOCH_HARD_BYTES,
+    // The plugin/host states how many simultaneous chats it supports. This is
+    // deliberately distinct from the number of queued application lanes.
+    maxConcurrentHandoffs: resolveHandoffConcurrency(value),
   };
 }
 
@@ -243,19 +276,9 @@ export function createHandoffEngine({
   const ownsPushDiscovery = () => !pushOwner || PUSH_DISCOVERY_OWNERS.get(push) === pushOwner;
 
   let limits = normalizeLimits(initialLimits);
-  // A zero byte budget means "do not force a chat rollover". This keeps the
-  // bridge's old context-management guard available as an explicit safety
-  // setting without pretending it is a ChatGPT-imposed limit. Per-response
-  // and MCP transport caps remain enforced independently.
-  function workerByteTotal(worker) {
-    return Math.max(0, Number(worker?.bytesServed) || 0) + Math.max(0, Number(worker?.bytesReceived) || 0);
-  }
-  function atSoftByteBudget(worker) {
-    return limits.epochSoftBytes > 0 && workerByteTotal(worker) >= limits.epochSoftBytes;
-  }
-  function atHardByteBudget(worker) {
-    return limits.epochHardBytes > 0 && workerByteTotal(worker) >= limits.epochHardBytes;
-  }
+  // Traffic remains measured for diagnostics, but it never becomes a
+  // lifetime conversation budget. Payload safety is enforced at each tool
+  // request/response boundary, not by forcing a healthy worker to restart.
   // Scope is an engine-owned serving fence, rather than a UI-only release
   // preference.  It is checked immediately before every source call so an
   // already-released lane or selected hub cannot survive a scope downgrade.
@@ -399,10 +422,18 @@ export function createHandoffEngine({
     for (const worker of epochWorkers(target)) {
       if (sameDigest(epochHash(boundLinkId, presented), worker.keyHash)) return worker;
     }
-    return null;
+  }
+  function workerIsLive(worker) {
+    return Boolean(worker) && worker.retiring !== true;
+  }
+  function liveEpochWorkers(target = epoch) {
+    return epochWorkers(target).filter(workerIsLive);
   }
   function poolWorkerCount(target = epoch) {
-    return Math.max(1, Math.min(MAX_WORKER_POOL_SIZE, epochWorkers(target).length || 1));
+    return Math.max(1, Math.min(workerCapacity(), liveEpochWorkers(target).length || 1));
+  }
+  function workerCapacity() {
+    return Math.max(1, Math.min(MAX_WORKER_POOL_SIZE, resolveHandoffConcurrency(limits)));
   }
   function clearLaneWorkerAssignment(lane) {
     if (!lane) return;
@@ -421,6 +452,7 @@ export function createHandoffEngine({
       }
     }
     lane.servedWorkerId = null;
+    lane.servedWorkerContextIncarnation = null;
     lane.pendingWorkerId = null;
   }
   function makeWorker({ ordinal, sessionCode, linkId, kind, stamp }) {
@@ -474,6 +506,12 @@ export function createHandoffEngine({
       lastOutcome: null,
       lastOutcomeAt: null,
       restarts: 0,
+      // Worker ordinals survive a deliberate replacement. This process-local
+      // incarnation identifies the exact chat capability that served a stage.
+      contextIncarnation: 1,
+      // Internal-only boundary state. The public projection is the closed
+      // quiet reason, never this flag or a capability/exclusion token.
+      freshContextRequired: false,
       focusLaneOrd: null,
       servedPrompt: new Map(),
       assignedLaneOrds: new Set(),
@@ -487,10 +525,14 @@ export function createHandoffEngine({
       // one is selecting, proving, and serving work. Never persisted or
       // exposed in status.
       getInFlight: null,
+      // A live capability reduction never revokes a served handoff or an
+      // admitted submit. It instead retires this ordinal from future claims;
+      // its existing session can settle its owned answer but cannot take more.
+      retiring: false,
     };
   }
   function attachWorkers(primary, { workerCount = 1, linkId } = {}) {
-    const count = Math.max(1, Math.min(MAX_WORKER_POOL_SIZE, Number.isInteger(workerCount) ? workerCount : 1));
+    const count = Math.max(1, Math.min(workerCapacity(), Number.isInteger(workerCount) ? workerCount : 1));
     // Expanding a live ordinary chat into a pool must preserve worker 1 and
     // every already-issued sibling. Replacing the map here would strand an
     // in-flight handoff or silently invalidate a starter the person copied.
@@ -510,6 +552,7 @@ export function createHandoffEngine({
     primary.poolSize = Math.max(count, workers.size);
     primary.poolGeneration = primary.n;
     for (const worker of workers.values()) {
+      worker.retiring = worker.workerOrdinal > workerCapacity();
       worker.getInFlight = null;
       worker.activeTask = worker.activeTask === true;
       worker.activeTaskKind = worker.activeTaskKind === 'application' || worker.activeTaskKind === 'push'
@@ -528,6 +571,9 @@ export function createHandoffEngine({
       worker.lastOutcomeAt = Number.isFinite(worker.lastOutcomeAt) ? worker.lastOutcomeAt : null;
       worker.restarts = Number.isSafeInteger(worker.restarts) && worker.restarts >= 0 ? worker.restarts : 0;
       worker.restartPending = worker.restartPending === true;
+      worker.contextIncarnation = Number.isSafeInteger(worker.contextIncarnation) && worker.contextIncarnation > 0
+        ? worker.contextIncarnation : 1;
+      worker.freshContextRequired = worker.freshContextRequired === true;
     }
     return primary;
   }
@@ -607,6 +653,8 @@ export function createHandoffEngine({
       ord: lane.ord,
       jobId: lane.jobId,
       canvasFilePath: lane.canvasFilePath,
+      ...(lane.matchTaskId ? { matchTaskId: lane.matchTaskId } : {}),
+      ...(lane.applicationForecast ? { applicationForecast: { ...lane.applicationForecast } } : {}),
       releasedAt: lane.releasedAt,
       phase: lane.phase,
       reason: lane.reason ?? null,
@@ -916,6 +964,7 @@ export function createHandoffEngine({
     // worker-1 assignment or be blocked by its pending source call.
     for (const lane of lanes) {
       lane.servedWorkerId = null;
+      lane.servedWorkerContextIncarnation = null;
       lane.pendingWorkerId = null;
     }
     const retiringPushEpoch = pushEpochId(epoch);
@@ -1079,6 +1128,111 @@ export function createHandoffEngine({
     return true;
   }
 
+  // An application transition can require a completely fresh chat.  The
+  // worker ordinal is deliberately insufficient here because a replacement
+  // retains it; only the exact in-memory capability incarnation that served
+  // the predecessor is retired from claims. Nothing from this marker reaches
+  // lane persistence, tool framing, logs, or audits.
+  function requireFreshContextForSuccessor(lane, predecessorWorker, predecessorIncarnation) {
+    if (!lane || !predecessorWorker || lane.servedWorkerId !== predecessorWorker.id
+        || lane.servedWorkerContextIncarnation !== predecessorIncarnation
+        || predecessorWorker.contextIncarnation !== predecessorIncarnation) return false;
+    clearLaneWorkerAssignment(lane);
+    predecessorWorker.freshContextRequired = true;
+    predecessorWorker.idleSince = null;
+    predecessorWorker.waitingSince = null;
+    predecessorWorker.activeTask = false;
+    predecessorWorker.activeTaskKind = null;
+    predecessorWorker.activeTaskSince = null;
+    return true;
+  }
+
+  // A human hold may clear lane ownership while an already-admitted submit is
+  // still settling. The submit captured this exact serving incarnation before
+  // its source call, so a flagged successor can still retire that old chat
+  // without restoring any lane assignment through the hold.
+  function requireFreshContextForSubmittedPredecessor(worker, predecessorIncarnation) {
+    if (!worker || worker.contextIncarnation !== predecessorIncarnation) return false;
+    worker.freshContextRequired = true;
+    worker.idleSince = null;
+    worker.waitingSince = null;
+    worker.activeTask = false;
+    worker.activeTaskKind = null;
+    worker.activeTaskSince = null;
+    return true;
+  }
+
+  function adoptFreshContextKey(lane, handoff) {
+    const prior = freshContextKey(lane?.freshContextKey);
+    const next = freshContextKey(handoff?.freshContextKey);
+    if (lane) lane.freshContextKey = next;
+    return { prior, next };
+  }
+
+  function requiresFreshContextBoundary(handoff, { priorStage, nextStage, priorContext, nextContext } = {}) {
+    if (handoff?.freshContextRequired !== true) return false;
+    // A valid key is an explicit internal track boundary, even when a workflow
+    // intentionally reuses its public stage name. Absent keys retain the
+    // established stage-change fallback; malformed keys never become identity.
+    if (nextContext !== null) return typeof priorStage === 'string' && !sameFreshContextKey(nextContext, priorContext);
+    return typeof priorStage === 'string' && nextStage !== priorStage;
+  }
+
+  function updateApplicationForecast(lane, current = lane.current) {
+    const family = lanes.filter(item => item.jobId === lane.jobId && item.canvasFilePath === lane.canvasFilePath);
+    for (const item of family) delete item.applicationForecast;
+    const forecast = current?.parallelTaskForecast;
+    if (!forecast || current?.stage !== 'career-match') return;
+    const owner = family.reduce((first, item) => !first || item.ord < first.ord ? item : first, null);
+    if (owner) owner.applicationForecast = { ...forecast };
+  }
+
+  // A recovered/app-side-finalized queue can surface a resume handoff from a
+  // read, not just from submit. Collapse all virtual siblings at either
+  // boundary so one application bundle never serves duplicate resume prompts.
+  function collapseVirtualApplicationFamily(lane, stamp = safeNow(now)) {
+    if (!lane.matchTaskId || lane.current?.stage === 'career-match' || lane.current?.matchTaskId) return false;
+    const family = lanes.filter(item => item !== lane && item.jobId === lane.jobId
+      && item.canvasFilePath === lane.canvasFilePath && item.matchTaskId);
+    for (const sibling of family) {
+      for (const [key, entry] of codeIndex) {
+        if (entry.lane !== sibling) continue;
+        codeIndex.delete(key);
+        tombstoneCode(tombstones, sibling.current?.code, 'rotated', { laneOrd: sibling.ord, at: stamp }, CONSTANTS.TOMBSTONES_PER_ENGINE, codeGuard);
+      }
+      epoch?.assignedLaneOrds.delete(sibling.ord);
+      clearLaneWorkerAssignment(sibling);
+      clearLaneHint(sibling);
+      lanes.splice(lanes.indexOf(sibling), 1);
+      touchLane(sibling);
+    }
+    delete lane.matchTaskId;
+    updateApplicationForecast(lane);
+    return true;
+  }
+
+  // A current-authority match queue only hands a successor task to the last
+  // completion in a wave. Its completed siblings have already been retired by
+  // the app (they are host lanes with no current handoff), so keeping their
+  // opaque task identities here would make the next wave look like it had
+  // already consumed the ten-lane cap. Remove only those retired siblings:
+  // awaiting siblings still represent live claims and are never inferred away.
+  function retireCompletedVirtualMatchSiblings(lane) {
+    if (!lane.matchTaskId) return false;
+    let removed = false;
+    for (const sibling of [...lanes]) {
+      if (sibling === lane || sibling.jobId !== lane.jobId || sibling.canvasFilePath !== lane.canvasFilePath
+        || !sibling.matchTaskId || sibling.phase !== 'host' || sibling.current) continue;
+      epoch?.assignedLaneOrds.delete(sibling.ord);
+      clearLaneWorkerAssignment(sibling);
+      clearLaneHint(sibling);
+      lanes.splice(lanes.indexOf(sibling), 1);
+      touchLane(sibling);
+      removed = true;
+    }
+    return removed;
+  }
+
   // A lane the person (or a cap) held while a call for it was in flight. Calls
   // are only ever started for lanes that are not held, so a held lane when the
   // result lands was held DURING the call: the result must not un-hold it.
@@ -1099,8 +1253,8 @@ export function createHandoffEngine({
   // only an AWAITING lane still owes: a renderer hint (or one that landed while
   // the lane was awaiting) leaves the flag behind on a host, held or finished
   // lane, where nothing consumes it, so counting it there made a saved job read
-  // as pending work forever and get() answered 'waiting' until the wait limit
-  // instead of 'queue_empty'. A held lane that resumes to awaiting keeps its flag
+  // as pending work forever and get() answered 'waiting' instead of
+  // 'queue_empty'. A held lane that resumes to awaiting keeps its flag
   // and is counted again from that moment.
   function laneBusy(item) {
     return (item.needsRefresh === true && item.phase === 'awaiting')
@@ -1190,6 +1344,7 @@ export function createHandoffEngine({
 
   function workerQuietReason(worker, stamp = safeNow(now)) {
     if (worker?.submitInFlight > 0) return null;
+    if (worker?.freshContextRequired === true) return 'fresh_context_required';
     if (workerAnswerSilent(worker, stamp)) return 'answer_silent';
     if (paused || !worker || worker.getInFlight != null || !Number.isFinite(worker.waitingSince)) return null;
     const anchors = [worker.waitingSince, worker.quietFrom].filter(Number.isFinite);
@@ -1297,7 +1452,7 @@ export function createHandoffEngine({
   // when the job already has a lane again (a keep-alive release ran meanwhile).
   function reinstateLane(lane, expectedRevision = null) {
     if (expectedRevision !== null && laneRevision(lane) !== expectedRevision) return false;
-    if (lanes.includes(lane) || lanes.some(item => item.jobId === lane.jobId)) return false;
+    if (lanes.includes(lane) || lanes.some(item => laneIdentity(item.jobId, item.canvasFilePath, item.matchTaskId) === laneIdentity(lane.jobId, lane.canvasFilePath, lane.matchTaskId))) return false;
     // Ordinals are never rewound, but a reinstated lane must never sit at or
     // above the counter, or the next release would hand out its ordinal again.
     laneOrdinal = Math.max(laneOrdinal, lane.ord);
@@ -1333,8 +1488,54 @@ export function createHandoffEngine({
           keepHoldOverResult(lane);
           persist = true;
         } else {
+          // The seed claim identifies its own queue task.  A career-match
+          // response may also advertise peer claims; materialize each as a
+          // durable virtual lane so distinct pool workers can claim them.
+          const claimedTaskId = result.handoff?.matchTaskId ?? result.matchTaskId;
+          const replacedTaskId = validMatchTaskId(claimedTaskId) && lane.matchTaskId != null
+            && claimedTaskId !== lane.matchTaskId;
+          if (validMatchTaskId(claimedTaskId) && lane.matchTaskId == null) lane.matchTaskId = claimedTaskId;
+          const priorStage = lane.current?.stage;
+          const predecessorWorker = workerForId(epoch, lane.servedWorkerId);
+          const predecessorIncarnation = lane.servedWorkerContextIncarnation;
           adoptCurrent(lane, result.handoff);
+          const { prior: priorContext, next: nextContext } = adoptFreshContextKey(lane, result.handoff);
+          if (requiresFreshContextBoundary(result.handoff, {
+            priorStage, nextStage: lane.current?.stage, priorContext, nextContext,
+          })) {
+            requireFreshContextForSuccessor(lane, predecessorWorker, predecessorIncarnation);
+          }
+          updateApplicationForecast(lane);
+          if (collapseVirtualApplicationFamily(lane, stamp)) persist = true;
           lane.counters.errStreak = 0;
+          if (result.handoff?.stage === 'career-match') {
+            // A successor proves the preceding bounded wave completed. Free
+            // its host siblings before applying the new fanout, otherwise the
+            // old task ids permanently occupy the live-wave ceiling.
+            if (replacedTaskId && retireCompletedVirtualMatchSiblings(lane)) persist = true;
+            const advertised = Array.isArray(result.parallelTasks)
+              ? result.parallelTasks
+              : (Array.isArray(result.handoff?.parallelTasks) ? result.handoff.parallelTasks : []);
+            const seen = new Set();
+            for (const item of advertised) {
+              const familySize = lanes.filter(existing => existing.jobId === lane.jobId
+                && existing.canvasFilePath === lane.canvasFilePath && existing.matchTaskId).length;
+              if (familySize >= MAX_APPLICATION_MATCH_LIVE_WAVE) break;
+              const taskId = typeof item?.id === 'string' ? item.id : null;
+              if (!validMatchTaskId(taskId) || taskId === lane.matchTaskId || seen.has(taskId)) continue;
+              seen.add(taskId);
+              if (lanes.some(existing => laneIdentity(existing.jobId, existing.canvasFilePath, existing.matchTaskId) === laneIdentity(lane.jobId, lane.canvasFilePath, taskId))) continue;
+              lanes.push(createApplicationLane({
+                ord: ++laneOrdinal,
+                jobId: lane.jobId,
+                canvasFilePath: lane.canvasFilePath,
+                matchTaskId: taskId,
+                releasedAt: stamp,
+                codeGuard,
+              }));
+              persist = true;
+            }
+          }
         }
       } else if (result.kind === 'host') {
         setPhase(lane, 'host', stamp);
@@ -1419,7 +1620,7 @@ export function createHandoffEngine({
     const { promise } = await startLaneCall(
       lane,
       'read',
-      () => application.read({ jobId: lane.jobId, canvasFilePath: lane.canvasFilePath }),
+      () => application.read({ jobId: lane.jobId, canvasFilePath: lane.canvasFilePath, matchTaskId: lane.matchTaskId ?? undefined }),
       (result, revision) => sourceCurrent(generation)
         ? applyReadResult(lane, result, { recoveryStage, generation, expectedRevision: revision })
         : { kind: 'retry' },
@@ -1480,7 +1681,7 @@ export function createHandoffEngine({
     const { promise } = await startLaneCall(
       lane,
       'status',
-      () => application.status({ jobId: lane.jobId, canvasFilePath: lane.canvasFilePath }),
+      () => application.status({ jobId: lane.jobId, canvasFilePath: lane.canvasFilePath, matchTaskId: lane.matchTaskId ?? undefined }),
       (result, revision) => sourceCurrent(generation)
         ? applyStatusResult(lane, result, { readAfterAwaiting, generation, expectedRevision: revision })
         : { kind: 'retry' },
@@ -1490,17 +1691,15 @@ export function createHandoffEngine({
   }
 
   function canAssign(lane, worker = epoch) {
-    if (!epoch || !worker || (lane.servedWorkerId && lane.servedWorkerId !== worker.id)
+    if (!epoch || !worker || worker.freshContextRequired === true || (lane.servedWorkerId && lane.servedWorkerId !== worker.id)
       // A pending source-proof reservation is never shareable. Duplicate GETs
       // attach at the worker boundary; distinct workers choose another lane.
       || lane.pendingWorkerId) return false;
     if (worker.assignedLaneOrds.has(lane.ord)) return true;
-    // A manually started pool promises that each worker keeps pulling later
-    // handoffs. Keep the per-worker byte ceilings and the lane ownership fence,
-    // but do not apply the legacy two-job single-chat cap to a pool worker.
-    // A non-pool chat retains that conservative context-management limit.
-    return (epoch.poolStarted === true || worker.assignedLaneOrds.size < limits.jobsPerChat)
-      && !atSoftByteBudget(worker);
+    // Lane assignment is not a conversation budget. A worker may drain every
+    // sequential handoff it can safely complete; live worker capacity and
+    // per-call validation bound work, not a lifetime chat quota.
+    return true;
   }
 
   function chooseApplicationContinuation(worker = epoch) {
@@ -1553,7 +1752,7 @@ export function createHandoffEngine({
         // than leak served content: never expose the prompt to the client.
         return makeResultBody('held', { reason: 'scope_disabled', remaining });
       }
-      if (!worker || atHardByteBudget(worker)) {
+      if (!worker) {
         return makeResultBody('session_full', { remaining });
       }
       const body = {
@@ -1688,9 +1887,6 @@ export function createHandoffEngine({
       || lane.phase !== 'awaiting' || !lane.current || lane.needsRefresh) return makeResultBody('retry');
     if (claimId && lane.pendingWorkerId === claimId) lane.pendingWorkerId = null;
     if (!canAssign(lane, worker)) return makeResultBody('retry');
-    if (atHardByteBudget(worker)) {
-      return makeResultBody('session_full', { remaining: combinedRemaining() });
-    }
     const marker = worker.servedPrompt.get(lane.ord);
     const servedBefore = marker?.stage === lane.current.stage
       && codeGuard.sameDigest(marker?.codeDigest, codeGuard.digest(lane.current.code));
@@ -1703,6 +1899,7 @@ export function createHandoffEngine({
     lane.awaitingAnswer = true;
     lane.servedEpochN = expectedEpoch.n;
     lane.servedWorkerId = worker.id;
+    lane.servedWorkerContextIncarnation = worker.contextIncarnation;
     lane.serves++;
     // The same handoff code going out again (not a new stage after an accepted
     // answer) is what `servedTwice` reports.
@@ -1791,7 +1988,7 @@ export function createHandoffEngine({
   // happen. `alive` is a conclusive answer that the bundle still exists.
   async function probeBundle(lane, generation = sourceGeneration, { includeSaved = false } = {}) {
     if (!scope.applications || !sourceCurrent(generation)) return { cause: null, alive: false, ran: false };
-    const target = { jobId: lane.jobId, canvasFilePath: lane.canvasFilePath };
+    const target = { jobId: lane.jobId, canvasFilePath: lane.canvasFilePath, matchTaskId: lane.matchTaskId ?? undefined };
     const timedOut = Symbol('bundle-probe-timeout');
     let raw;
     try {
@@ -1916,9 +2113,10 @@ export function createHandoffEngine({
     // worker can have two transport requests in flight, and they must attach to
     // that one GET instead of both being allowed through a worker-scoped claim.
     if (typeof claimId !== 'string' || !claimId) return { retry: true };
-    for (let attempt = 0; attempt <= CONSTANTS.MAX_LANES; attempt += 1) {
+    const attempted = new Set();
+    for (;;) {
       const lane = choose(worker);
-      if (!lane) return null;
+      if (!lane || attempted.has(lane.ord)) return null;
       const claim = await mutateLanes(() => {
         if (!epochCurrent(expectedEpoch, generation) || !lanes.includes(lane) || !canAssign(lane, worker)) return null;
         lane.pendingWorkerId = claimId;
@@ -1949,10 +2147,13 @@ export function createHandoffEngine({
         continue;
       }
       await releaseClaim();
+      // Only a lane proven gone is skipped on the next selection. A path
+      // adoption or status revision must be re-probed, not mistaken for a
+      // failed candidate merely because it retained its ordinal.
+      attempted.add(lane.ord);
       await dropProvenGoneLane(lane, cause, generation, claim.revision);
       if (!epochCurrent(expectedEpoch, generation)) return { retry: true };
     }
-    return null;
   }
 
   function terminalDrain(remaining = null) {
@@ -2111,20 +2312,13 @@ export function createHandoffEngine({
         if (closeReason) retireEpoch(closeReason);
         return drained;
       }
-      worker.consecutiveWaits = Math.min(1_000_000, worker.consecutiveWaits + 1);
-      // The pool path is explicitly meant to bridge future upstream waves.
-      // Only legacy single-chat sessions end on the app-owned wait counter.
+      // This is a diagnostic poll count, never a stop condition. Bound only
+      // at JavaScript's safe-integer maximum so an arbitrarily long healthy
+      // run cannot overflow telemetry or force a new chat.
+      worker.consecutiveWaits = Math.min(Number.MAX_SAFE_INTEGER, worker.consecutiveWaits + 1);
       // A `waiting` result is an explicit durable instruction to poll again.
-      // Stopping a legacy chat after an arbitrary count contradicted that
-      // contract and was the direct cause of users having to type Continue.
-      // Silence after that instruction is surfaced as a quiet worker instead
-      // of silently retiring or invalidating a possibly still-writing chat.
-      const waitLimit = Infinity;
-      if (worker.consecutiveWaits >= waitLimit) {
-        counts.getPaused++;
-        markChatStopped(worker);
-        return makeResultBody('paused', { reason: 'waiting_limit', remaining: combinedRemaining(pushDecision?.remaining) });
-      }
+      // Silence is surfaced as a quiet worker for manual recovery, never by
+      // silently retiring or invalidating a possibly still-writing chat.
       counts.getWaiting++;
       markWorkerWaiting(worker);
       return makeResultBody('waiting', {
@@ -2166,6 +2360,14 @@ export function createHandoffEngine({
     if (args.signal?.aborted) return makeResultBody('retry');
     const expectedEpoch = epoch;
     const worker = admission.worker;
+    if (worker?.freshContextRequired === true) {
+      recordWorkerOutcome(worker, 'session_full');
+      return makeResultBody('session_full', { remaining: combinedRemaining() });
+    }
+    if (worker?.retiring === true) {
+      recordWorkerOutcome(worker, 'session_full');
+      return makeResultBody('session_full', { remaining: combinedRemaining() });
+    }
     const callAt = safeNow(now);
     // Count each authenticated request for diagnostics, even when it attaches
     // to an existing GET. The work itself, including bytes and served counts,
@@ -2188,7 +2390,6 @@ export function createHandoffEngine({
     // caller receives the exact one result and one serve mutation is charged.
     const existing = worker.getInFlight;
     if (existing?.epoch === expectedEpoch && existing.generation === generation && existing.promise) return existing.promise;
-    if (atHardByteBudget(worker)) return makeResultBody('session_full');
 
     // `worker.id` repeats across pools, but the epoch and monotonic sequence
     // make this memory-only reservation unique across every stale async path.
@@ -2256,7 +2457,7 @@ export function createHandoffEngine({
     const submitEligible = () => epochCurrent(expectedEpoch, generation) && lanes.includes(lane)
       && lane.phase === 'awaiting' && codeGuard.equal(lane.current?.code, code);
     const task = Promise.resolve().then(() => submitEligible()
-      ? application.submit({ jobId: lane.jobId, canvasFilePath: lane.canvasFilePath }, { code, text })
+      ? application.submit({ jobId: lane.jobId, canvasFilePath: lane.canvasFilePath, matchTaskId: lane.matchTaskId ?? undefined }, { code, text })
       : skipped);
     const reserved = await mutateLanes(() => {
       if (!submitEligible()) return false;
@@ -2333,7 +2534,7 @@ export function createHandoffEngine({
     return detachedSubmitResult(result, code);
   }
 
-  async function mapSubmitResult(lane, text, result, retryCount = 0, generation = sourceGeneration, expectedEpoch = epoch, submittedCode = null, worker = expectedEpoch) {
+  async function mapSubmitResult(lane, text, result, retryCount = 0, generation = sourceGeneration, expectedEpoch = epoch, submittedCode = null, worker = expectedEpoch, submittedWorkerIncarnation = null) {
     if (!epochCurrent(expectedEpoch, generation)) return makeResultBody('retry');
     const stamp = safeNow(now);
     const currentCode = submittedCode ?? lane.current?.code;
@@ -2407,9 +2608,15 @@ export function createHandoffEngine({
           return { persist: true, body: makeResultBody('accepted', { jobComplete: true, next: null }) };
         }
         const priorStage = lane.current?.stage;
+        const predecessorWorker = worker;
+        const predecessorIncarnation = lane.servedWorkerContextIncarnation;
         if (heldOnLanding) {
           const held = normalizeCurrentHandoff(result.handoff, stamp);
           lane.current = held;
+          const { prior: priorContext, next: nextContext } = adoptFreshContextKey(lane, result.handoff);
+          if (requiresFreshContextBoundary(result.handoff, {
+            priorStage, nextStage: held?.stage, priorContext, nextContext,
+          })) requireFreshContextForSubmittedPredecessor(worker, submittedWorkerIncarnation);
           keepHoldOverResult(lane);
           if (held) {
             rememberIssuedCode(lane, held.code, codeGuard);
@@ -2422,13 +2629,38 @@ export function createHandoffEngine({
           holdLane(lane, 'write_failed', safeNow(now));
           return { persist: true, body: makeResultBody('needs_user', { reason: 'write_failed' }) };
         }
+        const { prior: priorContext, next: nextContext } = adoptFreshContextKey(lane, result.handoff);
+        const freshContextBoundary = requiresFreshContextBoundary(result.handoff, {
+          priorStage, nextStage: lane.current.stage, priorContext, nextContext,
+        }) && requireFreshContextForSuccessor(lane, predecessorWorker, predecessorIncarnation);
+        if (result.handoff?.stage === 'career-match') {
+          const claimedTaskId = result.handoff.matchTaskId;
+          const replacedTaskId = validMatchTaskId(claimedTaskId) && lane.matchTaskId != null
+            && claimedTaskId !== lane.matchTaskId;
+          if (validMatchTaskId(claimedTaskId)) lane.matchTaskId = claimedTaskId;
+          if (replacedTaskId) retireCompletedVirtualMatchSiblings(lane);
+          const advertised = Array.isArray(result.parallelTasks)
+            ? result.parallelTasks : (Array.isArray(result.handoff.parallelTasks) ? result.handoff.parallelTasks : []);
+          const seen = new Set();
+          for (const item of advertised) {
+            const taskId = typeof item?.id === 'string' ? item.id : null;
+            const familySize = lanes.filter(existing => existing.jobId === lane.jobId && existing.canvasFilePath === lane.canvasFilePath && existing.matchTaskId).length;
+            if (familySize >= MAX_APPLICATION_MATCH_LIVE_WAVE) break;
+            if (!validMatchTaskId(taskId) || taskId === lane.matchTaskId || seen.has(taskId)
+              || lanes.some(existing => existing !== lane && laneIdentity(existing.jobId, existing.canvasFilePath, existing.matchTaskId) === laneIdentity(lane.jobId, lane.canvasFilePath, taskId))) continue;
+            seen.add(taskId);
+            lanes.push(createApplicationLane({ ord: ++laneOrdinal, jobId: lane.jobId, canvasFilePath: lane.canvasFilePath, matchTaskId: taskId, releasedAt: stamp, codeGuard }));
+          }
+        }
+        updateApplicationForecast(lane);
+        collapseVirtualApplicationFamily(lane, stamp);
         notifyJobChanged(lane, generation);
         // Review-to-review accepts are authoring progress.  The Local AI
         // application workflow deliberately has no revision limit, so keep
         // this counter for telemetry/persistence but never turn it into an
         // unattended bridge hold.
         if (priorStage === 'review' && lane.current.stage === 'review') lane.counters.revisedRounds++;
-        return { persist: true, serve: true };
+        return { persist: true, serve: true, freshContextBoundary };
       });
       if (!staged?.persist) return staged;
       if (!await persistLanes(generation)) reconcileLanes(generation);
@@ -2436,7 +2668,9 @@ export function createHandoffEngine({
         if (!epochCurrent(expectedEpoch, generation)) return makeResultBody('retry');
         wake();
         if (staged.body) return staged.body;
-        return makeResultBody('accepted', { jobComplete: false, next: serveLaneOp(lane, generation, expectedEpoch, worker) });
+        return makeResultBody('accepted', { jobComplete: false, next: staged.freshContextBoundary
+          ? makeResultBody('session_full', { remaining: combinedRemaining() })
+          : serveLaneOp(lane, generation, expectedEpoch, worker) });
       });
     }
 
@@ -2461,6 +2695,7 @@ export function createHandoffEngine({
             codeIndex.delete(codeGuard.key(currentCode));
           }
           lane.current = returned;
+          adoptFreshContextKey(lane, result.handoff);
           rememberIssuedCode(lane, returned.code, codeGuard);
           indexLaneCode(codeIndex, lane, { epochN: expectedEpoch.n, servedAt: null }, CONSTANTS.CODE_INDEX_PER_LANE, codeGuard);
         }
@@ -2523,7 +2758,7 @@ export function createHandoffEngine({
           if (isHeldPhase(lane)) return makeResultBody(lane.phase, { reason: lane.reason });
           const recoveryCode = lane.current.code;
           const retried = await callApplicationSubmit(lane, recoveryCode, text, generation, expectedEpoch);
-          return mapSubmitResult(lane, text, retried, retryCount + 1, generation, expectedEpoch, recoveryCode, worker);
+          return mapSubmitResult(lane, text, retried, retryCount + 1, generation, expectedEpoch, recoveryCode, worker, submittedWorkerIncarnation);
         }
         if (lane.phase === 'host') return makeResultBody('superseded');
         // The reread proved the bundle is gone, or saved elsewhere ('done' is
@@ -2583,17 +2818,20 @@ export function createHandoffEngine({
           code: submittedCode,
           key: verdictKey(codeGuard.key(submittedCode), text),
           retained: lane.retained,
+          submittedWorkerIncarnation: lane.servedWorkerId === worker?.id
+            && lane.servedWorkerContextIncarnation === worker?.contextIncarnation
+            ? worker.contextIncarnation : null,
         };
       });
       if (claimed.body) return claimed.body;
-      const { code, key, retained } = claimed;
+      const { code, key, retained, submittedWorkerIncarnation } = claimed;
       if (codeGuard.sameDigest(retained?.codeDigest, codeGuard.digest(code)) && retained.sha256 !== key) {
         const recovered = await callApplicationSubmit(lane, code, retained.text, generation, expectedEpoch);
         // A was durably retained before the crash; it owns this recovery
         // attempt. Never fall through and stamp/send incoming B after *any*
         // recovered outcome (including throw/retry): map it as A so only a
         // definitive result can clear or replace the retained record.
-        return mapSubmitResult(lane, retained.text, recovered, 2, generation, expectedEpoch, code, worker);
+        return mapSubmitResult(lane, retained.text, recovered, 2, generation, expectedEpoch, code, worker, submittedWorkerIncarnation);
       }
       await mutateLanes(() => {
         if (!epochCurrent(expectedEpoch, generation) || !lanes.includes(lane)
@@ -2605,7 +2843,7 @@ export function createHandoffEngine({
       if (!epochCurrent(expectedEpoch, generation) || !lanes.includes(lane)
           || lane.phase !== 'awaiting' || !codeGuard.equal(lane.current?.code, submittedCode)) return makeResultBody('retry');
       const result = await callApplicationSubmit(lane, code, text, generation, expectedEpoch);
-      return await mapSubmitResult(lane, text, result, 0, generation, expectedEpoch, code, worker);
+      return await mapSubmitResult(lane, text, result, 0, generation, expectedEpoch, code, worker, submittedWorkerIncarnation);
     } finally {
       semaphore.release();
       if (epochCurrent(expectedEpoch, generation)) wake();
@@ -2976,7 +3214,6 @@ export function createHandoffEngine({
       return false;
     }
     if (paused) return false;
-    if (atHardByteBudget(target)) return false;
     return !(limits.chatKeyMaxAgeHours > 0
       && safeNow(now) - target.mintedAt >= limits.chatKeyMaxAgeHours * 3_600_000);
   }
@@ -3110,10 +3347,14 @@ export function createHandoffEngine({
     return { copied: true, sessionCode: prepared.sessionCode, chatOrdinal: prepared.chatOrdinal };
   }
 
-  function workerPoolRecommendation(maxWorkers = MAX_WORKER_POOL_SIZE) {
-    let pushState = {};
-    try { pushState = push?.status?.(pushEpochId()) || {}; } catch { pushState = {}; }
+  function workerPoolRecommendation(maxWorkers = workerCapacity()) {
     const pushEnabled = scope.scoring || scope.marketplace;
+    // Only consult the push source when its inventory can count: an
+    // application-only pool now runs this on every authenticated worker call.
+    let pushState = {};
+    if (pushEnabled) {
+      try { pushState = push?.status?.(pushEpochId()) || {}; } catch { pushState = {}; }
+    }
     // Production push status exposes the selected opaque hub keys. Discovery
     // intentionally also remembers opted-out hubs for the chooser, but those
     // must not inflate the pool plan. Test seams without selection metadata
@@ -3127,31 +3368,41 @@ export function createHandoffEngine({
         .filter(hub => !selectedKnown || selected.has(hub?.key))
         .flatMap(hub => Array.isArray(hub?.tasks) ? hub.tasks : [])
       : [];
-    let plannerBudget = MAX_WORKER_POOL_PLANNING_UNITS;
     const tasks = [];
     for (const entry of rawTasks) {
-      if (!STATUS_PUSH_TASKS.has(entry?.task) || plannerBudget < 1) continue;
+      if (!STATUS_PUSH_TASKS.has(entry?.task)) continue;
       const pending = Number.isSafeInteger(entry.pending) && entry.pending > 0 ? entry.pending : 0;
       const forecast = Number.isSafeInteger(entry.forecast) && entry.forecast > 0 ? entry.forecast : 0;
       // Forecast covers the active wave plus later units in its UUID-scoped
-      // scheduler. It may grow the plan, never hide currently materialized
-      // handoffs, and must stay within the aggregate planner bound.
-      const count = Math.min(plannerBudget, Math.max(pending, forecast));
-      if (count < 1) continue;
+      // scheduler. The pool helper saturates it at live capacity, so this
+      // planner never allocates one unit per forecast descriptor.
+      if (Math.max(pending, forecast) < 1) continue;
       tasks.push({ task: entry.task, pending, forecast });
-      plannerBudget -= count;
     }
     // A host lane is still planned work (the app may release its next
     // handoff), but it is document-building work owned by the app right now,
     // not a handoff a ChatGPT worker can claim. Keep the two counts separate
     // so the UI never labels it "released now".
+    const applicationFamilies = new Map();
+    if (scope.applications) for (const lane of lanes) {
+      if (!['awaiting', 'unread', 'host'].includes(lane.phase)) continue;
+      const key = `${lane.jobId}\u0000${lane.canvasFilePath}`;
+      const family = applicationFamilies.get(key) || { live: 0, forecast: 0 };
+      family.live += 1;
+      // Forecast is written once per application family and means remaining
+      // queue units, not materialized lanes. A corrupt/stale sibling can only
+      // understate itself; max preserves the newest monotonic queue view.
+      family.forecast = Math.max(family.forecast, Number.isSafeInteger(lane.applicationForecast?.remainingUnits)
+        ? lane.applicationForecast.remainingUnits : 0);
+      applicationFamilies.set(key, family);
+    }
     const applicationForecastCount = scope.applications
-      ? lanes.filter(lane => ['awaiting', 'unread', 'host'].includes(lane.phase)).length
+      ? [...applicationFamilies.values()].reduce((total, family) => Math.min(Number.MAX_SAFE_INTEGER, total + Math.max(family.live, family.forecast, 1)), 0)
       : 0;
     const applicationCount = scope.applications
       ? lanes.filter(lane => ['awaiting', 'unread'].includes(lane.phase)).length
       : 0;
-    return recommendWorkerPool({ tasks, applicationCount, applicationForecastCount, maxWorkers });
+    return recommendWorkerPool({ tasks, applicationCount, applicationForecastCount, maxWorkers, capability: limits });
   }
 
   // The source status is refreshed by authenticated get/submit work.  Grow a
@@ -3160,13 +3411,16 @@ export function createHandoffEngine({
   function maybeExpandWorkerPool(expectedEpoch = epoch, generation = sourceGeneration, linkId = null) {
     if (!epochCurrent(expectedEpoch, generation) || expectedEpoch?.poolStarted !== true
       || typeof linkId !== 'string' || !linkId) return false;
-    // Application lanes are already counted when the pool is explicitly
-    // started, but they are not a refreshed upstream forecast.  Restrict
-    // automatic later expansion to the selected push inventory that this
-    // authenticated worker call just refreshed; otherwise an application-only
-    // pool could unexpectedly mint sibling starters mid-run.
-    if (!scope.scoring && !scope.marketplace) return false;
-    const recommendation = workerPoolRecommendation(MAX_WORKER_POOL_SIZE);
+    // An application-only pool grows too. The pool is sized once, when the
+    // first bundle is released, and the dock then releases further bundles one
+    // at a time (up to the shared ten-slot cap) as each is created. Without
+    // growth every later bundle would funnel through the first worker chat.
+    // Growth only mints copyable starters for the person to paste into new
+    // ChatGPT chats; it never opens a chat, retires a worker, or exceeds
+    // MAX_WORKER_POOL_SIZE. The lane list is the engine's own live state, so
+    // an authenticated worker call that finds more unfinished lanes than live
+    // workers is all the evidence needed.
+    const recommendation = workerPoolRecommendation(workerCapacity());
     const before = poolWorkerCount(expectedEpoch);
     const target = Math.max(before, recommendation.recommended);
     expectedEpoch.poolRecommendation = Object.freeze({
@@ -3196,6 +3450,17 @@ export function createHandoffEngine({
     return true;
   }
 
+  // A release is the moment new work appears. A worker busy with its bundle
+  // makes no get/submit for minutes, so waiting for its next call left every
+  // later bundle queued behind it (sequential, not parallel). The controller
+  // names the link now in force; starters are bound to the link their pool was
+  // minted under, so a different link mints nothing (relink retires the chat).
+  function growPoolForRelease(linkId, generation) {
+    if (typeof linkId !== 'string' || !linkId || epoch?.poolStarted !== true
+      || !sameHex(epoch.linkDigest, epochLinkDigest(linkId))) return false;
+    return maybeExpandWorkerPool(epoch, generation, linkId);
+  }
+
   async function startWorkerPoolInternal({ linkId, requestedWorkers } = {}) {
     if (typeof linkId !== 'string' || !linkId) return { started: false, status: 'unlinked' };
     if (!await confirmRestartIfNeeded()) return { started: false, status: 'paused', reason: 'restart' };
@@ -3209,12 +3474,12 @@ export function createHandoffEngine({
     // workflow waves find already-waiting workers.  The recommendation always
     // still observes all safely known work, including a source forecast.
     const requestedTarget = Number.isInteger(requestedWorkers)
-      ? Math.max(1, Math.min(MAX_WORKER_POOL_SIZE, requestedWorkers))
+      ? Math.max(1, Math.min(workerCapacity(), requestedWorkers))
       : null;
     // Refresh once before planning. A newly selected hub can otherwise look
     // empty even though it has already queued handoffs.
     if (scope.scoring || scope.marketplace) await refreshPushHubs();
-    const recommendation = workerPoolRecommendation(MAX_WORKER_POOL_SIZE);
+    const recommendation = workerPoolRecommendation(workerCapacity());
     // A fresh empty queue has nothing to start.  A live pool is different:
     // its current units may all be claimed/in-flight during this refresh, yet
     // the person can deliberately add waiting workers for the next wave.
@@ -3306,7 +3571,23 @@ export function createHandoffEngine({
     if (typeof linkId !== 'string' || !linkId) return { copied: false, status: 'unlinked' };
     if (!Number.isInteger(workerOrdinal) || workerOrdinal < 1 || workerOrdinal > MAX_WORKER_POOL_SIZE) return { copied: false, status: 'session_ended' };
     const worker = workerForId(epoch, workerId(workerOrdinal));
-    if (worker?.starterExported === true) return { copied: false, status: 'starter_copied' };
+    if (worker?.retiring === true) return { copied: false, status: 'session_ended' };
+    // A copied pool starter that has never been presented is just as safe to
+    // copy again as the ordinary new-chat starter.  It is still the exact
+    // same worker capability: do not rotate it, allocate another ordinal, or
+    // create a second chat for it.  `recopiable` closes this path as soon as
+    // the key is presented, called, paused, relinked, or expired.
+    if (worker?.starterExported === true) {
+      if (!recopiable(worker, linkId)) return { copied: false, status: worker.presented ? 'session_started' : 'starter_copied' };
+      return {
+        copied: true,
+        recopied: true,
+        sessionCode: worker.starterKey,
+        generation: epoch.poolGeneration,
+        workerOrdinal: worker.workerOrdinal,
+        workerCount: epoch.poolSize,
+      };
+    }
     if (!worker || !recopiable(worker, linkId)) {
       return { copied: false, status: worker?.presented ? 'session_started' : 'session_ended' };
     }
@@ -3341,6 +3622,7 @@ export function createHandoffEngine({
     if (!epoch?.poolStarted || !Number.isInteger(generation) || generation !== epoch.poolGeneration) return { copied: false, status: 'session_ended' };
     if (typeof linkId !== 'string' || !linkId || !Number.isInteger(workerOrdinal) || workerOrdinal < 1 || workerOrdinal > MAX_WORKER_POOL_SIZE) return { copied: false, status: 'session_ended' };
     const worker = workerForId(epoch, workerId(workerOrdinal));
+    if (worker?.retiring === true) return { copied: false, status: 'session_ended' };
     if (!worker || !workerIsQuiet(worker)) return { copied: false, status: 'not_quiet' };
     const stamp = safeNow(now);
     // The live ledger already contains this digest, but stamp it again before
@@ -3354,6 +3636,9 @@ export function createHandoffEngine({
     worker.starterKey = sessionCode;
     worker.starterExported = true;
     worker.restartPending = true;
+    worker.contextIncarnation = Math.min(Number.MAX_SAFE_INTEGER,
+      (Number.isSafeInteger(worker.contextIncarnation) ? worker.contextIncarnation : 0) + 1);
+    worker.freshContextRequired = false;
     worker.mintedBy = 'new';
     worker.presented = false;
     worker.mintedAt = stamp;
@@ -3389,15 +3674,16 @@ export function createHandoffEngine({
   // Unrelease and the probe-proven drops stay reversible.
   const REMOVED_BUNDLES_CAP = 256;
   const removedBundles = new Set();
+  const removedBundleKey = (jobId, canvasFilePath) => `${jobId}\u0000${canvasFilePath}`;
 
-  async function release({ jobs = [] } = {}) {
+  async function release({ jobs = [], linkId = null } = {}) {
     // Source adoption is intentionally outside the state queue. Its result is
     // applied only if the same lane/path still wins the queued state turn.
     const generation = sourceGeneration;
     const adoptionResults = new Map();
     if (Array.isArray(jobs) && typeof application.adoptCanvasPath === 'function') {
       for (const item of jobs) {
-        if (!item || !JOB_ID_RE.test(String(item.jobId || '')) || !isAbsoluteCanvasPath(item.canvasFilePath)) continue;
+        if (!item || item.matchTaskId != null || !JOB_ID_RE.test(String(item.jobId || '')) || !isAbsoluteCanvasPath(item.canvasFilePath)) continue;
         const claim = await mutateLanes(() => {
           if (!sourceCurrent(generation)) return null;
           const lane = lanes.find(value => value.jobId === item.jobId);
@@ -3422,18 +3708,20 @@ export function createHandoffEngine({
         if (!item || !JOB_ID_RE.test(String(item.jobId || '')) || !isAbsoluteCanvasPath(item.canvasFilePath)) {
           return { ok: false, code: 'invalid_arguments' };
         }
-        unique.set(item.jobId, { jobId: item.jobId, canvasFilePath: item.canvasFilePath });
+        if (item.matchTaskId != null && !validMatchTaskId(item.matchTaskId)) return { ok: false, code: 'invalid_arguments' };
+        const taskId = item.matchTaskId ?? null;
+        unique.set(laneIdentity(item.jobId, item.canvasFilePath, taskId), { jobId: item.jobId, canvasFilePath: item.canvasFilePath, matchTaskId: taskId });
       }
       counts.releaseCalls++;
       // A bundle the app already discarded or pruned can never be answered. A
       // release that was in flight across that event (the manual sheet's confirm
       // dialog can stay open) must not resurrect a lane for it.
-      for (const jobId of [...unique.keys()]) if (removedBundles.has(jobId)) unique.delete(jobId);
+      for (const [key, item] of unique) if (removedBundles.has(item.jobId) || removedBundles.has(removedBundleKey(item.jobId, item.canvasFilePath))) unique.delete(key);
       if (unique.size === 0) return { ok: false, code: 'unknown_job' };
-      const additions = [...unique.values()].filter(item => !lanes.some(lane => lane.jobId === item.jobId));
-      if (lanes.filter(lane => !['done', 'gone'].includes(lane.phase)).length + additions.length > CONSTANTS.MAX_LANES) {
-        return { ok: false, code: 'lane_limit' };
-      }
+      // Lanes are durable backlog, not worker slots.  A release may contain
+      // more work than the live chat roster can serve; workers claim it in
+      // order as they refill. File/schema bounds remain enforced by the lane
+      // store and each individual release item is fully validated above.
       // Rollback is lane-precise: a save can fail while another release, an
       // Unrelease or a discard changes the list, so only what THIS call did is
       // undone. The lane ordinal is never rewound (ordinals may have gaps).
@@ -3442,7 +3730,7 @@ export function createHandoffEngine({
       const added = [];
       let adoptedPath = false;
       for (const item of unique.values()) {
-        const existing = lanes.find(lane => lane.jobId === item.jobId);
+        const existing = lanes.find(lane => laneIdentity(lane.jobId, lane.canvasFilePath, lane.matchTaskId) === laneIdentity(item.jobId, item.canvasFilePath, item.matchTaskId));
         if (existing) {
           const adoption = adoptionResults.get(item.jobId);
           if (adoption && existing === adoption.lane && laneRevision(existing) === adoption.revision
@@ -3458,6 +3746,7 @@ export function createHandoffEngine({
           ord: ++laneOrdinal,
           jobId: item.jobId,
           canvasFilePath: item.canvasFilePath,
+          matchTaskId: item.matchTaskId,
           releasedAt: safeNow(now),
           codeGuard,
         });
@@ -3515,18 +3804,20 @@ export function createHandoffEngine({
       return { ok: true, count: staged.added.length, added: staged.added };
     });
     if (!saved) reconcileLanes(staged.generation);
+    else if (finished?.ok === true && finished.count > 0) growPoolForRelease(linkId, staged.generation);
     return finished;
   }
 
   // Removes one lane. `cause` is a closed enum: 'user' is the person's own
   // Unrelease (a human action); the others are the app noticing the bundle
   // itself stopped existing, which is bookkeeping, never human activity.
-  async function removeLane(jobId, cause, { expectedLane = null, expectedRevision = null } = {}) {
+  async function removeLane(jobId, cause, { expectedLane = null, expectedRevision = null, expectedCanvasFilePath = null } = {}) {
     const staged = await mutateLanes(() => {
       const generation = sourceGeneration;
       if (!sourceCurrent(generation)) return { ok: false, code: 'not_ready' };
-      const index = lanes.findIndex(lane => lane.jobId === jobId);
+      const index = lanes.findIndex(lane => lane.jobId === jobId && (!expectedLane || lane === expectedLane));
       if (index < 0) return { ok: false, code: 'not_found' };
+      if (expectedCanvasFilePath !== null && lanes[index].canvasFilePath !== expectedCanvasFilePath) return { ok: false, code: 'not_found' };
       if (expectedLane && (lanes[index] !== expectedLane
           || (expectedRevision !== null && laneRevision(lanes[index]) !== expectedRevision))) {
         return { ok: false, code: 'not_found' };
@@ -3591,25 +3882,113 @@ export function createHandoffEngine({
     return finished;
   }
 
+  async function removeApplicationFamily(jobId, cause, canvasFilePath = null) {
+    const staged = await mutateLanes(() => {
+      const generation = sourceGeneration;
+      const members = lanes.filter(lane => lane.jobId === jobId && (canvasFilePath === null || lane.canvasFilePath === canvasFilePath));
+      if (!members.length) return { ok: false, code: 'not_found' };
+      const removed = members.map(lane => {
+        lanes.splice(lanes.indexOf(lane), 1);
+        const codes = []; for (const [key, entry] of codeIndex) if (entry.lane === lane) { codes.push([key, entry]); codeIndex.delete(key); }
+        const hadSlot = epoch?.assignedLaneOrds.delete(lane.ord) === true; const workerId = lane.servedWorkerId;
+        clearLaneWorkerAssignment(lane); clearLaneHint(lane); touchLane(lane);
+        return { lane, codes, hadSlot, workerId };
+      });
+      return { generation, removed, persist: true };
+    });
+    if (!staged?.persist) return staged;
+    const saved = await persistLanes(staged.generation);
+    const finished = await mutateLanes(() => {
+      if (!sourceCurrent(staged.generation)) return { ok: false, code: 'not_ready' };
+      if (!saved) {
+        for (const item of staged.removed) if (reinstateLane(item.lane)) {
+          for (const [key, entry] of item.codes) if (!codeIndex.has(key)) codeIndex.set(key, entry);
+          if (item.hadSlot) epoch?.assignedLaneOrds.add(item.lane.ord);
+          const worker = workerForId(epoch, item.workerId); if (worker) worker.assignedLaneOrds.add(item.lane.ord);
+          item.lane.servedWorkerId = item.workerId || null; settleAcceptedElsewhere(item.lane);
+        }
+        return { ok: false, code: 'persist_failed' };
+      }
+      for (const { lane } of staged.removed) if (cause !== 'user' && lane.current?.code) {
+        tombstoneCode(tombstones, lane.current.code, 'rotated', { laneOrd: lane.ord, at: safeNow(now) }, CONSTANTS.TOMBSTONES_PER_ENGINE, codeGuard);
+      }
+      if (cause === 'user') { counts.unreleaseCalls++; humanAction(); auditEvent('unrelease'); log('unrelease', { kind: 'application', count: staged.removed.length }); }
+      else { counts.lanesDropped += staged.removed.length; const counter = DROP_COUNTER[cause]; if (counter) counts[counter] += staged.removed.length; auditEvent('unrelease', { cause }); log('unrelease', { kind: 'application', count: staged.removed.length, cause }); }
+      wake(); return { ok: true };
+    });
+    if (!saved) reconcileLanes(staged.generation);
+    return finished;
+  }
+
   async function unrelease(jobId) {
+    // The dock acts on a bundle, never an individual authority-match claim.
+    // Preserve the legacy single-lane path, but retire every virtual sibling
+    // when the selected bundle has been fanned out.
+    const family = await mutateLanes(() => {
+      const seed = lanes.find(item => item.jobId === jobId);
+      return seed?.matchTaskId
+        ? lanes.filter(item => item.jobId === jobId && item.canvasFilePath === seed.canvasFilePath)
+        : [];
+    });
+    if (family.length > 0) {
+      return removeApplicationFamily(jobId, 'user', family[0].canvasFilePath);
+    }
     return removeLane(jobId, 'user');
   }
 
   // The app tells the bridge its bundle was discarded or pruned. Only closed
   // causes are accepted, so nothing derived from job content can reach a log.
-  async function dropLane(jobId, cause = 'bundle_discarded') {
+  async function dropLane(jobId, cause = 'bundle_discarded', canvasFilePath = null) {
     const safeCause = ['bundle_discarded', 'bundle_pruned', 'bundle_missing', 'bundle_saved'].includes(cause) ? cause : 'bundle_discarded';
-    await mutateLanes(() => {
+    const scopedPath = isAbsoluteCanvasPath(canvasFilePath) ? canvasFilePath : null;
+    const marked = await mutateLanes(() => {
+      // An application id is not a global capability: a stale event from one
+      // canvas must not retire (or fence a later release of) the same id on a
+      // different canvas. Keep the check inside the state turn so path
+      // adoption cannot race a validated event into deleting the new owner.
+      const lane = lanes.find(item => item.jobId === jobId);
+      if (scopedPath !== null && lane && lane.canvasFilePath !== scopedPath) return false;
       if ((safeCause === 'bundle_discarded' || safeCause === 'bundle_pruned') && typeof jobId === 'string') {
-        removedBundles.delete(jobId);
-        removedBundles.add(jobId);
+        const key = scopedPath === null ? jobId : removedBundleKey(jobId, scopedPath);
+        removedBundles.delete(key);
+        removedBundles.add(key);
         while (removedBundles.size > REMOVED_BUNDLES_CAP) removedBundles.delete(removedBundles.values().next().value);
       }
+      return true;
     });
-    return removeLane(jobId, safeCause);
+    if (!marked) return { ok: false, code: 'not_found' };
+    // A bundle discard retires every virtual claim for that bundle. Removing
+    // only the first sibling would leave task-specific lanes pointed at a
+    // queue the app has already destroyed.
+    const targets = await mutateLanes(() => lanes.filter(item => item.jobId === jobId
+      && (scopedPath === null || item.canvasFilePath === scopedPath)));
+    if (targets.length === 0) return removeLane(jobId, safeCause, { ...(scopedPath === null ? {} : { expectedCanvasFilePath: scopedPath }) });
+    return removeApplicationFamily(jobId, safeCause, scopedPath);
   }
 
   async function hold(jobId, reason = 'user_hold') {
+    const virtualFamily = await mutateLanes(() => {
+      const seed = lanes.find(item => item.jobId === jobId);
+      return seed?.matchTaskId ? lanes.filter(item => item.jobId === jobId && item.canvasFilePath === seed.canvasFilePath) : [];
+    });
+    if (virtualFamily.length > 0) {
+      const stagedFamily = await mutateLanes(() => {
+        const targetPhase = ['job_broken', 'render_retry', 'app_fix_required', 'canvas_unavailable', 'read_failed', 'write_failed', 'submit_stuck', 'host_silent'].includes(reason)
+          ? 'needs_user' : 'held';
+        const members = virtualFamily.filter(lane => lanes.includes(lane));
+        if (members.length === 0) return { ok: false, code: 'not_found' };
+        try {
+          for (const lane of members) if (lane.phase !== targetPhase || lane.reason !== reason) {
+            holdLane(lane, reason, safeNow(now));
+            touchLane(lane);
+          }
+        } catch { return { ok: false, code: 'invalid_arguments' }; }
+        return { generation: sourceGeneration, persist: true };
+      });
+      if (!stagedFamily?.persist) return stagedFamily;
+      if (!await persistLanes(stagedFamily.generation)) { reconcileLanes(stagedFamily.generation); return { ok: false, code: 'persist_failed' }; }
+      humanAction(); wake(); return { ok: true };
+    }
     const staged = await mutateLanes(() => {
       const lane = lanes.find(item => item.jobId === jobId);
       if (!lane) return { ok: false, code: 'not_found' };
@@ -3817,7 +4196,8 @@ export function createHandoffEngine({
         // as a held 'restart' lane made the person Resume a dead job.
         if (['done', 'gone'].includes(value?.phase)) continue;
         const lane = rehydrateApplicationLane(value, safeNow(now));
-        if (lanes.some(existing => existing.ord === lane.ord || existing.jobId === lane.jobId)) continue;
+        if (lanes.some(existing => existing.ord === lane.ord
+          || laneIdentity(existing.jobId, existing.canvasFilePath, existing.matchTaskId) === laneIdentity(lane.jobId, lane.canvasFilePath, lane.matchTaskId))) continue;
         lane.restoreProbes = RESTORE_PROBE_ATTEMPTS;
         lane.restoreProbeAt = 0;
         lanes.push(lane);
@@ -3864,12 +4244,30 @@ export function createHandoffEngine({
     // first served to THIS chat with no accepted answer since.
     const outstandingLane = lanes.find(lane => laneStall(lane, stamp)) ?? lanes.find(laneAwaitingAnswer);
     const outstandingStall = outstandingLane ? laneStall(outstandingLane, stamp) : null;
+    // A career-match family is one application bundle with several claimable
+    // handoffs. Keep bundle telemetry truthful while exposing materialized
+    // work separately for worker-pool diagnostics.
+    const applicationBundles = new Map();
+    for (const lane of lanes) {
+      const key = `${lane.jobId}\u0000${lane.canvasFilePath}`;
+      const family = applicationBundles.get(key) || [];
+      family.push(lane); applicationBundles.set(key, family);
+    }
+    const bundleState = family => {
+      const phases = family.map(lane => lane.phase);
+      if (phases.some(phase => phase === 'needs_user' || phase === 'held')) return phases.includes('held') ? 'held' : 'needs_user';
+      if (phases.includes('awaiting')) return 'awaiting';
+      if (phases.some(phase => phase === 'unread' || phase === 'host')) return 'working';
+      return phases.every(phase => ['done', 'gone'].includes(phase)) ? 'done' : 'working';
+    };
+    const bundleStates = [...applicationBundles.values()].map(bundleState);
     const applications = {
-      ready: lanes.filter(lane => lane.phase === 'awaiting').length,
-      working: lanes.filter(lane => ['unread', 'host'].includes(lane.phase)).length,
-      needsYou: lanes.filter(lane => ['held', 'needs_user'].includes(lane.phase)).length,
-      held: lanes.filter(lane => lane.phase === 'held').length,
-      done: lanes.filter(lane => ['done', 'gone'].includes(lane.phase)).length,
+      ready: bundleStates.filter(state => state === 'awaiting').length,
+      working: bundleStates.filter(state => state === 'working').length,
+      needsYou: bundleStates.filter(state => state === 'held' || state === 'needs_user').length,
+      held: bundleStates.filter(state => state === 'held').length,
+      done: bundleStates.filter(state => state === 'done').length,
+      materialized: lanes.length,
     };
     const safeSelectedHubs = Array.isArray(pushState.selectedHubs)
       ? pushState.selectedHubs.filter(key => typeof key === 'string' && /^[a-f0-9]{64}$/.test(key)).slice(0, 50)
@@ -3951,7 +4349,10 @@ export function createHandoffEngine({
     // starter has its own request/byte counters. Project the aggregate here
     // so a quiet primary worker cannot make nine actively serving workers look
     // like an untouched or full single chat.
-    const statusWorkers = epochWorkers(epoch);
+    // Retired workers remain internally authenticated only long enough to
+    // submit an already-issued answer. They are not live capacity and must not
+    // inflate the roster, counts, or visible parallelism after a downshift.
+    const statusWorkers = liveEpochWorkers(epoch);
     const chatCalls = statusWorkers.reduce((total, worker) => total + Math.max(0, Number(worker?.calls) || 0), 0);
     const firstWorkerCallAt = statusWorkers.reduce((earliest, worker) => {
       const stamp = worker?.firstCallAt;
@@ -3962,14 +4363,11 @@ export function createHandoffEngine({
       if (!Number.isFinite(stamp) || stamp < 0) return latest;
       return !latest || stamp > latest.stamp ? { worker, stamp } : latest;
     }, null);
-    const allWorkersAtHardBudget = statusWorkers.length > 0 && statusWorkers.every(worker => atHardByteBudget(worker));
     const anyWorkerStillServing = statusWorkers.some(worker => worker?.idleSince == null);
     const anyWorkerPresented = statusWorkers.some(worker => worker?.presented === true);
     const chatState = !epoch
       ? 'none'
-      : allWorkersAtHardBudget
-        ? 'full'
-        : chatCalls === 0
+      : chatCalls === 0
           ? (anyWorkerPresented ? 'reached' : 'awaiting-first-call')
           : anyWorkerStillServing ? 'working' : 'idle';
     // A legacy primary can retain an older bookkeeping reference while a
@@ -3995,10 +4393,13 @@ export function createHandoffEngine({
     const poolPlan = poolGeneration === null
       ? { recommended: 0, queued: 0, materialized: 0, expandBy: 0, reason: 'empty', expansionCount: 0, lastExpansionAt: null, lastExpansionAdded: 0 }
       : (() => {
-        const planned = epoch?.poolRecommendation || workerPoolRecommendation(MAX_WORKER_POOL_SIZE);
-        const recommended = Math.max(0, Math.min(MAX_WORKER_POOL_SIZE, Number.isInteger(planned?.recommended) ? planned.recommended : workerCount));
-        const queued = Math.max(0, Math.min(MAX_WORKER_POOL_PLANNING_UNITS, Number.isInteger(planned?.queued) ? planned.queued : 0));
-        const materialized = Math.max(0, Math.min(MAX_WORKER_POOL_PLANNING_UNITS, Number.isInteger(planned?.materialized) ? planned.materialized : queued));
+        const planned = epoch?.poolRecommendation || workerPoolRecommendation(workerCapacity());
+        const recommended = Math.max(0, Math.min(workerCapacity(), Number.isInteger(planned?.recommended) ? planned.recommended : workerCount));
+        // Counts are aggregate backlog telemetry and saturate only at the
+        // exact-integer representation limit. They must not be confused with
+        // worker capacity: a small live pool can truthfully drain a huge run.
+        const queued = Math.max(0, Math.min(Number.MAX_SAFE_INTEGER, Number.isSafeInteger(planned?.queued) ? planned.queued : 0));
+        const materialized = Math.max(0, Math.min(queued, Number.isSafeInteger(planned?.materialized) ? planned.materialized : queued));
         const expandBy = Math.max(0, recommended - workerCount);
         const reason = ['empty', 'one_work_item', 'maximum_parallelism', 'preserved_live_workers'].includes(planned?.reason)
           ? planned.reason
@@ -4074,7 +4475,6 @@ export function createHandoffEngine({
         calls: Number.isSafeInteger(chatCalls) ? chatCalls : 0,
         state: chatState,
         jobsAssigned,
-        jobsCap: limits.jobsPerChat,
           pool: Object.freeze({
             active: poolGeneration !== null && workerCount > 0,
             generation: poolGeneration,
@@ -4188,6 +4588,11 @@ export function createHandoffEngine({
 
   function setLimits(next) {
     limits = normalizeLimits({ ...limits, ...next });
+    // Retire excess ordinals in place. Existing session keys stay recognised
+    // solely so an already-served answer or admitted submit can settle; get()
+    // gates retired workers before they can claim another handoff. Raising the
+    // persisted capability reactivates the same safely bounded ordinal roster.
+    for (const worker of epochWorkers()) worker.retiring = worker.workerOrdinal > workerCapacity();
     return { ...limits };
   }
 

@@ -58,6 +58,15 @@ export function useLocalAiFallbackManager({ navigation, getCurrentFile, addToast
   // driveJob re-asserts the terminal 'saved' patch above every tick until it
   // sticks, which would otherwise ask again on every retry of that write.
   const revealedOutputRef = useRef(new Set());
+  // jobId → this session has completed a hidden/unmounted 'saved' card check.
+  // selectFallbackLocalAiJobs deliberately skips idle 'saved' cards (a healthy
+  // save is terminal and must not be polled forever), but the saved bundle
+  // folder can be deleted between sessions while the card is hidden or
+  // unmounted, so each such card is probed until one status read SUCCEEDS and
+  // then never re-probed. A transient failed/thrown IPC read leaves the id
+  // absent so a later tick retries it. Only a changed, non-saved verdict is
+  // written back; a healthy save is left byte-for-byte alone.
+  const savedProbedRef = useRef(new Set());
   // Throttle re-offers after a user closes the persistent action or another
   // toast evicts it. The notice remains recoverable this session without
   // flashing back into view every 2.5-second status tick.
@@ -91,8 +100,14 @@ export function useLocalAiFallbackManager({ navigation, getCurrentFile, addToast
     // a write that lands only in navigation-stack state never passes through
     // the dirty-flag effect (it watches active nodes only), and without the
     // nudge a terminal 'saved' could miss the canvas file entirely.
-    const writeState = (nodeId, jobId, patch, { terminal = false, generation } = {}) => {
+    const writeState = (nodeId, jobId, patch, { terminal = false, generation, allowSavedReconciliation = false } = {}) => {
       if (disposed || !isCurrentQuitGeneration(generation)) return false;
+      // reconcileSaved is the ONE narrow authorization to move a card out of
+      // 'saved' — the saved bundle folder it names was verified gone. It is
+      // still refused for a mounted card (the card's own probe owns that) and
+      // still re-approved against live state in the updater below, so it can
+      // never downgrade a newer/replaced handoff.
+      const reconcileSaved = allowSavedReconciliation === true && patch?.status === 'failed';
       if (!terminal && isJobCardMounted(nodeId)) return false;
       const nav = ctxRef.current.navigation;
       if (!nav?.updateNodeDataGlobally) return false;
@@ -100,12 +115,13 @@ export function useLocalAiFallbackManager({ navigation, getCurrentFile, addToast
       // against the node state at apply time and is the race-proof authority.
       const liveNode = findLiveJobNode(nodeId, jobId);
       const current = liveNode?.data?.localApplication;
-      if (!current || current.status === 'saved') return false;
+      if (!current) return false;
+      if (current.status === 'saved' && !reconcileSaved) return false;
       if (JSON.stringify({ ...current, ...patch }) === JSON.stringify(current)) return false;
       nav.updateNodeDataGlobally(nodeId, (node) => {
         const live = node?.data?.localApplication;
         if (!live || live.id !== jobId) return null;
-        if (live.status === 'saved') return null;
+        if (live.status === 'saved' && !reconcileSaved) return null;
         const next = { ...live, ...patch };
         if (JSON.stringify(next) === JSON.stringify(live)) return null;
         return { localApplication: next };
@@ -473,6 +489,75 @@ export function useLocalAiFallbackManager({ navigation, getCurrentFile, addToast
       }
     };
 
+    // One-time, per-session reconciliation for SAVED cards the manager would
+    // otherwise never look at: selectFallbackLocalAiJobs skips idle 'saved'
+    // (a healthy save is terminal), and the mounted card's own startup probe
+    // covers visible cards. A hidden/unmounted saved card can therefore carry
+    // a durable receipt whose app-authored output directory was deleted
+    // between sessions. Probe each such card exactly once — a healthy save is
+    // marked probed with NO write, NO polling, and NO Finder reveal; only a
+    // changed, non-saved verdict (the missing-output 'failed' reconciliation)
+    // is written back through the guarded functional update, which nudges
+    // persistence. Ownership/race contracts are re-checked at every async
+    // boundary so a card that mounts, a replaced handoff, or a newer quit
+    // generation abandons the probe.
+    const reconcileHiddenSavedCards = async (allNodes, generation) => {
+      const candidates = [];
+      for (const node of Array.isArray(allNodes) ? allNodes : []) {
+        if (node?.type !== 'jobcard') continue;
+        const local = node?.data?.localApplication;
+        if (!local?.id || local.status !== 'saved') continue;
+        if (isJobCardMounted(node.id)) continue;
+        if (savedProbedRef.current.has(local.id)) continue;
+        candidates.push(node);
+      }
+      if (!candidates.length) return;
+      await Promise.allSettled(candidates.map(async (node) => {
+        const jobId = node.data.localApplication.id;
+        const nodeId = node.id;
+        try {
+          const result = await window.electronAPI.getLocalApplicationStatus({
+            jobId,
+            canvasFilePath: node.data.localApplication.canvasFilePath
+              || (ctxRef.current.getCurrentFile ? ctxRef.current.getCurrentFile() : null),
+          });
+          if (disposed || !isCurrentQuitGeneration(generation)) return;
+          // The card may have mounted (its own probe now owns it) or the
+          // handoff may have been replaced/deleted while the status read was
+          // in flight. Re-read live state and abandon unless this is still the
+          // same unmounted saved job.
+          if (isJobCardMounted(nodeId)) return;
+          const live = findLiveJobNode(nodeId, jobId);
+          const liveLocal = live?.data?.localApplication;
+          if (!liveLocal || liveLocal.id !== jobId || liveLocal.status !== 'saved') return;
+          if (!result?.success || !result.localJob) {
+            // A transient probe failure writes nothing AND stays unprobed, so
+            // a later tick retries it (tickBusyRef already prevents overlap).
+            // Marking it probed here would strand the card permanently on
+            // 'saved' after one dropped IPC read.
+            EventLogger.log(`[LocalAI] hidden saved-card probe failed job=${jobId} card=${nodeId}: ${result?.error || 'no local job'}`);
+            return;
+          }
+          // Only a fully successful, valid status read mutates the session's
+          // probed set — this card is now terminal for the session.
+          savedProbedRef.current.add(jobId);
+          const next = result.localJob;
+          // Healthy (or legacy v1) saved: nothing to reconcile — no write, no
+          // reveal, no continuous poll.
+          if (next.status === 'saved') return;
+          // Only a genuine change away from saved — the missing-output failed
+          // reconciliation — is adopted, and only through the narrow
+          // authorized path.
+          writeState(nodeId, jobId, { ...next }, { generation, allowSavedReconciliation: true });
+        } catch (error) {
+          // A thrown IPC read is transient too: leave the card unprobed so the
+          // next tick can retry it.
+          if (disposed || !isCurrentQuitGeneration(generation)) return;
+          EventLogger.log(`[LocalAI] hidden saved-card probe error job=${jobId} card=${nodeId}: ${error?.message || error}`);
+        }
+      }));
+    };
+
     const tick = async () => {
       if (disposed || tickBusyRef.current) return;
       const generation = currentQuitGeneration();
@@ -482,6 +567,11 @@ export function useLocalAiFallbackManager({ navigation, getCurrentFile, addToast
       tickBusyRef.current = true;
       try {
         const allNodes = nav.enumerateAllNodes();
+        // Fold the one-time hidden/unmounted saved-card reconciliation into
+        // the same tick, before the pending-job driver: it is a bounded, once-
+        // per-session check per saved card and never loops.
+        await reconcileHiddenSavedCards(allNodes, generation);
+        if (!isCurrentQuitGeneration(generation)) return;
         const pending = selectFallbackLocalAiJobs(allNodes);
         // Drive every pending job's status poll CONCURRENTLY rather than one
         // `await` per node in sequence. A poll is a cheap per-jobId read (the

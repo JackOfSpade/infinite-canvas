@@ -234,6 +234,9 @@ function hostileResume() {
       id: 'role-1', title: 'Engineer', company: 'Example Co', dates: '', location: '',
       bullets: [{ id: 'bullet-1', text: HOSTILE_DOCUMENT_TEXT, evidenceIds: ['hostile-proof'] }],
     }],
+    // The hostile quote spells "javascript:" in a URL scheme, which the host's
+    // technology vocabulary reads as an attested name, so the résumé owes a block.
+    skills: [{ id: 'skill-1', group: 'languages', items: ['JavaScript'], evidenceIds: ['hostile-proof'] }],
   };
 }
 

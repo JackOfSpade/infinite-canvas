@@ -84,6 +84,7 @@ export function JobBoardSearchSelection({
   recoveryActionLabel = 'Retry recovery',
   recoveryCanCancel = true,
   onRuntimeSnapshot = null,
+  upToDate = false,
 }) {
   const fieldsetId = useId();
   const fieldsetRef = useRef(null);
@@ -130,7 +131,12 @@ export function JobBoardSearchSelection({
   const presentation = jobBoardSelectionPresentation(selectedRows.map(({ module }) => module));
   const { runLabel } = presentation;
   const controlsDisabled = disabled || running || !!recoveryError;
-  const canRun = !controlsDisabled
+  // `upToDate` is the Board's verdict that it is done, current and complete.
+  // It never applies while running or recovering: those states own the live
+  // Cancel / Retry controls.
+  const boardUpToDate = upToDate === true && !running && !recoveryError;
+  const canRun = !boardUpToDate
+    && !controlsDisabled
     && typeof onRun === 'function'
     && selectedRows.length > 0
     && !hasUnreadySelection;
@@ -142,7 +148,7 @@ export function JobBoardSearchSelection({
   // missing callback. Keep a real explanation beside the native disabled
   // control: colour alone made the prior low-opacity indigo state easy to
   // mistake for an available action.
-  const primaryActionDisabledReason = !running && !recoveryError && !canRun
+  const primaryActionDisabledReason = !running && !recoveryError && !boardUpToDate && !canRun
     ? disabled
       ? 'Unlock this Job Board before starting or continuing searches.'
       : selectedRows.length === 0
@@ -155,10 +161,11 @@ export function JobBoardSearchSelection({
     disabled ? 'board-disabled' : null,
     running ? 'board-running' : null,
     recoveryError ? 'recovery-error' : null,
+    boardUpToDate ? 'board-up-to-date' : null,
     selectedRows.length === 0 ? 'no-selection' : null,
     hasUnreadySelection ? 'selected-source-unready' : null,
     typeof onRun !== 'function' ? 'run-handler-unavailable' : null,
-  ].filter(Boolean), [disabled, hasUnreadySelection, recoveryError, running, selectedRows.length, onRun]);
+  ].filter(Boolean), [boardUpToDate, disabled, hasUnreadySelection, recoveryError, running, selectedRows.length, onRun]);
   const eligibilityReasonKey = eligibilityReasons.join('|');
 
   // The action predicate is split between Board state and selector state. Keep
@@ -170,6 +177,7 @@ export function JobBoardSearchSelection({
       rowCount: rows.length,
       selectedCount: selectedRows.length,
       actionEligible: canRun,
+      actionVisible: !boardUpToDate,
       actionLabel: String(runLabel || '').slice(0, 80),
       eligibilityReasons: eligibilityReasonKey ? eligibilityReasonKey.split('|') : [],
       selectorBounds: layoutBounds(fieldsetRef.current),
@@ -181,7 +189,7 @@ export function JobBoardSearchSelection({
     if (fieldsetRef.current) observer.observe(fieldsetRef.current);
     if (sourceListRef.current) observer.observe(sourceListRef.current);
     return () => observer.disconnect();
-  }, [canRun, eligibilityReasonKey, onRuntimeSnapshot, rows.length, runLabel, selectedRows.length]);
+  }, [boardUpToDate, canRun, eligibilityReasonKey, onRuntimeSnapshot, rows.length, runLabel, selectedRows.length]);
 
   return (
     <fieldset
@@ -349,6 +357,14 @@ export function JobBoardSearchSelection({
             Cancel
           </button>
         </div>
+      ) : boardUpToDate ? (
+        <p
+          role="status"
+          data-action-state="up-to-date"
+          className="text-center text-[9px] leading-snug text-emerald-300/70"
+        >
+          Board is up to date — every connected search is combined. Change a source or add one to combine again.
+        </p>
       ) : (
       <div className="flex w-full gap-1.5">
         <button

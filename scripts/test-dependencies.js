@@ -1,9 +1,75 @@
 // Shared imports for the deterministic test groups. Keep application imports here so
 // individual area files declare only the bindings their tests actually exercise.
 export { default as fs } from 'node:fs';
+// Shared authority seams keep the registered continuation contract in the
+// normal dependency audit rather than letting it bypass host boundaries.
+export {
+  claimJobAnalysisOperationAuthority,
+  withCurrentJobAnalysisOperationAuthority,
+} from '../electron/ipc/jobAnalysisOperationAuthorityStore.js';
+import { claimJobAnalysisOperationAuthority as claimFixtureJobAnalysisOperationAuthority } from '../electron/ipc/jobAnalysisOperationAuthorityStore.js';
+export {
+  beginJobContinuation,
+  claimJobContinuation,
+  checkpointJobContinuationResult,
+  releaseJobContinuationExecution,
+} from '../electron/ipc/jobContinuation.js';
 export { default as path } from 'node:path';
+// Snapshot-authority persistence and workflow primitives are shared test
+// dependencies.  Keeping these exports here makes the runner's dependency
+// graph explicit rather than letting the two focused suites bypass it with
+// private production-module imports.
+export {
+  __setAuthorityLedgerStoreFaultHookForTests,
+  __setAuthorityLedgerProcessIdentityHookForTests,
+  createAuthorityLedgerStore,
+  openAuthorityLedgerStore,
+} from '../electron/ipc/applicationAuthorityLedgerStore.js';
+export {
+  APPLICATION_AUTHORITY_MATCH_PAGE_EVIDENCE,
+  APPLICATION_AUTHORITY_WORKFLOW_VERSION,
+  aggregateBlindFindings,
+  assertDispositionCoverage,
+  assertMatchCoverage,
+  assertReviewConverges,
+  authorityDigest,
+  createAuthorityWorkflowRoot,
+  createBlindReviewerReceipt,
+  createBlindReviewerScopes,
+  createDispositionPlan,
+  createDispositionReceipt,
+  createMatchReceipt,
+  createStoreAuthorityWorkflowRoot,
+  createStoreDispositionReceipt,
+  createStoreMatchReceipt,
+  createStoreReductionPage,
+  createStoreReductionPageFromReceiptAt,
+  enumerateRequirementCatalogPairs,
+  invalidateBlindReviewerReceipts,
+  reduceRequirementMatches,
+  reviewConvergenceState,
+  selectDraftEvidence,
+  selectDraftRoles,
+  selectDraftSkills,
+  storeRequirementCatalogPairDescriptor,
+  validateBlindReviewCoverage,
+} from '../electron/ipc/applicationAuthorityWorkflow.js';
+export {
+  acceptApplicationBlindReviewCursorResponse,
+  applicationBlindReviewScopeCount,
+  applicationBlindReviewWorkAt,
+  createApplicationBlindReviewPlan,
+  createApplicationBlindReviewSourceAccessor,
+} from '../electron/ipc/applicationBlindReview.js';
 export { runJobApiProbe } from './run-api-tests.js';
-export { __discardJobAnalysisSnapshotForTests, __getJobAnalysisRetirementStateForTests, __saveJobAnalysisSnapshotForTests, buildResolvedDescriptionWarning, buildRoleFamilyBatchResearchPrompt, getJobSourceResolveConfig, mergeRecoveredScoreRows, packCompensationAssessmentBatches, packCompensationResearchBatches, planPartialScoreRecovery, planRoleFamilyAssessmentBatches, planRoleFamilyResearchBatches, reconcileSearchFunnel, validateJobScoringSubmission } from '../electron/ipc/jobs.js';
+export { __discardJobAnalysisSnapshotForTests, __getJobAnalysisRetirementStateForTests, buildResolvedDescriptionWarning, buildRoleFamilyBatchResearchPrompt, getJobSourceResolveConfig, mergeRecoveredScoreRows, packCompensationAssessmentBatches, packCompensationResearchBatches, planPartialScoreRecovery, planRoleFamilyAssessmentBatches, planRoleFamilyResearchBatches, reconcileSearchFunnel, validateJobScoringSubmission } from '../electron/ipc/jobs.js';
+import { __saveJobAnalysisSnapshotForTests as saveJobAnalysisSnapshotFixture } from '../electron/ipc/jobs.js';
+// Historical fixtures are deliberately marked at their shared test-only
+// boundary. The production-shaped seam itself rejects a missing receipt, so
+// direct authority tests cannot accidentally exercise an obsolete upgrade.
+export const __saveJobAnalysisSnapshotForTests = snapshot => (
+  saveJobAnalysisSnapshotFixture(snapshot, { allowLegacyFixtureUpgrade: true })
+);
 export { JSDOM } from 'jsdom';
 export * as PDFLib from 'pdf-lib';
 export { PDFDocument } from 'pdf-lib';
@@ -43,13 +109,14 @@ export { planJobCardDeletionCleanup } from '../src/utils/jobCardDeletionCleanup.
 export { buildGeoTermSet, extractIndeedJobsFromHtml, extractSalaryFromText, filterWholeFeedJobsByTitleRelevance, jobRelevanceMatch, jobRelevanceEvidence, jobRelevanceRejection, reverbListingsToComps, parsePriceChartingHtml, filterPriceChartingByRelevance, dicePostedBucket, fetchDiceListings, extractJobPostingDescription, extractJobPostingBaseSalary, formatDiceBaseSalary, extractDiceSalaryBadge, formatUSAJobsSalary, formatRemoteOkSalary, fetchLinkedInJobs, fetchRemoteOKJobs, linkedInApiRequestPacing, linkedInDescriptionPacing, linkedInPacingWaitMs, linkedInPageStopReason, remoteOkTagsFromQueries, runApiTransportRetry, shouldRetryApiTransportFailure, wwrCategoriesFromQueries, parseAptDecoComps, extractAlgoliaHits, linkedInBrowserUnavailableResult, isRemoteOkSponsoredPlacement, isPlaceholderIndeedJobKey } from '../electron/extractors/apiExtractors.js';
 export { isPriceChartingApplicable, isAptDecoApplicable } from '../src/utils/compSourceScope.js';
 export { assertCandidateDashPunctuation, buildResumeDocument, buildCoverLetterDocument, embedApplicationSyncConfig, extractVariantAttrs, getDesignSystemDir, isDualMode, decodeTextEscapes, normaliseResumeDownloadBundle, sanitizeDocumentMainHtml, webFontFacesReadyExpression } from '../electron/ipc/resumeHtml.js';
+export { enDashIsRange } from '../electron/ipc/dashRanges.js';
 export { applyDualPdf, atsSafePdfFontExpression, fixedPageTypeAreaHeight, pageTextMeasurementExpression, pdfContainsType3Fonts } from '../electron/ipc/resumeRender.js';
 export { __applicationSyncStatePathForTests, __captureApplicationSyncWorkspaceIdentityForTests, __loadApplicationSyncWorkspacesForTests, __normaliseApplicationSyncWorkspaceForTests, __readApplicationSyncWorkspaceHtmlForTests, __reconcileApplicationSyncWorkspaceForTests, __resetApplicationSyncWorkspacesForTests, __syncApplicationSyncWorkspaceForTests, __verifyApplicationSyncWorkspaceIdentityForTests, __withApplicationSyncWorkspaceLockForTests, __withSyncedGenerationAuditSavedArtifactsForTests, applicationSyncConfig, getApplicationSyncTelemetry, inspectApplicationSyncRevision, mergeSelectedApplicationPanel, recordApplicationSyncTelemetry, registerApplicationSyncWorkspace } from '../electron/ipc/applicationSync.js';
 export { formatOriginalJobListingMarkdown, sanitizeApplicationBundlePart } from '../electron/ipc/applicationBundle.js';
-export { GENERATION_AUDIT_VERSION, RESUME_ROLE_BULLET_CEILING, applicationVariantAttrsForJob, assertRetainedResumeRoleBullets, checkResumeBulletFocus, checkResumeBulletLength, checkResumeRoleBulletBudget, careerDataRoleLocation, evaluateResumeProseChecks, extractResumeEvidence, formatTypeAreaUtilization, inspectApplicationExport, inspectGeneratedApplicationPdf, isPendingApplicationWorkspaceSaveInFlight, normalizeApplicationAdditionalNotes, readRegisteredApplicationArtifact, registerJobApplicationHandlers, registerPendingApplicationWorkspace, resumeProjectProvenanceFailures, resumeRoleBlockSample, resumeRoleLocationFailures, retainedResumeRolesWithoutBullets, getApplicationTelemetry, recordApplicationTelemetry, resolvePendingApplicationWorkspaceForOwner, targetPageCountForJob, resumeTypeAreaUtilization, withUnregisteredApplicationWorkspacePruneClaim } from '../electron/ipc/jobApplication.js';
+export { GENERATION_AUDIT_VERSION, RESUME_ROLE_BULLET_CEILING, applicationVariantAttrsForJob, assertRetainedResumeRoleBullets, checkResumeBulletFocus, checkResumeBulletLength, checkResumeBulletOpeningVariety, checkResumeRoleBulletBudget, careerDataRoleLocation, evaluateResumeProseChecks, extractResumeEvidence, formatTypeAreaUtilization, inspectApplicationExport, inspectGeneratedApplicationPdf, isPendingApplicationWorkspaceSaveInFlight, normalizeApplicationAdditionalNotes, readRegisteredApplicationArtifact, registerJobApplicationHandlers, registerPendingApplicationWorkspace, resumeProjectProvenanceFailures, resumeRoleBlockSample, resumeRoleLocationFailures, retainedResumeRolesWithoutBullets, getApplicationTelemetry, recordApplicationTelemetry, resolvePendingApplicationWorkspaceForOwner, targetPageCountForJob, resumeTypeAreaUtilization, withUnregisteredApplicationWorkspacePruneClaim } from '../electron/ipc/jobApplication.js';
 export { projectContactChannels, projectTrustedIdentity, renderStructuredApplicationResume, ROLE_BULLET_EVIDENCE_EXCLUSIVITY_RULE, STRUCTURED_RESUME_SCHEMA_VERSION, validateStructuredApplicationResume } from '../electron/ipc/structuredResume.js';
 export { applicationConvergenceInstruction, createApplicationConvergenceTracker, expectedApplicationQualityDecision } from '../electron/ipc/applicationConvergence.js';
-export { LOCAL_AI_APPLICATION_VERSION, assertSourceQuoteLinksFinalText, sanitizeQualityReview, buildLocalGenerationAuditArtifact, getLocalApplicationHandoff, queueLocalApplicationJob, discardLocalApplicationJob, discoverLocalApplicationJobs, localApplicationStatus, importLocalApplicationJob, registerLocalAiApplicationHandlers, resolveLocalOutputBundleRoot, submitLocalApplicationHandoff, validateLocalApplicationResult, withLocalAiJobPruneClaim } from '../electron/ipc/localAiApplication.js';
+export { LOCAL_AI_APPLICATION_VERSION, __validateStoredBlindReviewCoverageForTests, assertSourceQuoteLinksFinalText, pasteAttributionScopeErrors, sanitizeQualityReview, buildLocalGenerationAuditArtifact, getLocalApplicationHandoff, projectEvidenceCoverageGaps, projectedCareerProjectEvidenceBlocks, queueLocalApplicationJob, discardLocalApplicationJob, discoverLocalApplicationJobs, localApplicationStatus, importLocalApplicationJob, registerLocalAiApplicationHandlers, resolveLocalOutputBundleRoot, submitLocalApplicationHandoff, validateLocalApplicationResult, withLocalAiJobPruneClaim } from '../electron/ipc/localAiApplication.js';
 export { LOCAL_AI_FALLBACK_IDLE_STATUSES, LOCAL_AI_CARD_POLL_IDLE_STATUSES, LOCAL_AI_JOB_INTEGRITY_ERROR_CODE, brokenLocalAiJobDriveState, jobIntegrityFailureMessage, registerMountedJobCard, unregisterMountedJobCard, isJobCardMounted, selectFallbackLocalAiJobs, selectOrphanedLocalAiJobs } from '../src/utils/localAiFallback.js';
 export { canRegenerateLocalApplication, canSaveImportedLocalApplication, queuedLocalApplicationSettlement, replacedLocalApplicationForCleanup } from '../src/utils/localAiApplicationLifecycle.js';
 export { collectNodesDeep } from '../src/utils/navigationUtils.js';
@@ -134,14 +201,95 @@ export { createAggregatingProgress } from '../electron/ipc/compProgressAggregato
 export { buildFinalListingTitle, buildRefreshResearchItems, buildResearchItems, computeBundleTotal, recoverRefreshExtraItems, selectBundleHeadline, selectListingPriceTiers, buildItemQuery, bundleSynergyForPrices, deriveBundlePricingResult, normalizeBundlePricingResult } from '../src/utils/bundlePricing.js';
 export { clearMissingPreviewRelinkCache, clearMissingPreviewRelinkDiagnostics, clearMissingPreviewSearchRoots, findExactFilenameBelow, getMissingPreviewRelinkDiagnostics, rememberMissingPreviewSearchRoot, resolveMissingPreviewPath } from '../electron/ipc/missingPreviewRelink.js';
 export { __recoveryRebindJournalForTests, assertDeleteTargetNotRepresented, atomicWriteFile, cleanupStaleOwnedTempFiles, createFileWatchRegistry, readValidatedTextFile, registerFilesystemHandlers, resolveAllowedOpenFilePath, resolvePortableFilePaths, resolvePortableImagePath, isAllowedOpenFileExt, syncTextParentDirectory, validateMutablePath, writeValidatedTextFile } from '../electron/ipc/filesystem.js';
-export { __runWithIpcRequestContextForTests, abortNodeTasks, abortNodeTasksAndWait, handleSafe, snapshotActiveNodeTasks } from '../electron/ipc/ipcUtils.js';
+export { __compactErrorStackForTests, __runWithIpcRequestContextForTests, abortNodeTasks, abortNodeTasksAndWait, handleSafe, snapshotActiveNodeTasks } from '../electron/ipc/ipcUtils.js';
 export { isTrustedCanvasNavigation } from '../electron/canvasNavigation.js';
 export { decodeLocalFileRequestPath } from '../electron/localFileProtocol.js';
 export { getBrowserPoolQueueState, pauseBrowserPool, queueScrape, readPageContentBounded } from '../electron/ipc/browserPool.js';
 export { buildTrustedNativeLoginVerdict, getSoftLoginWallMatch, getStatusCacheSync, isConfirmedDisconnectedVerdict, clearAllSessionStatusCache, selectRestorableStatuses, isTrustedNativeLoginResult, writeStatusCache } from '../electron/ipc/accounts.js';
 export { closeOwnedBrowserProcess, getIndeedSessionResetOrigins, getJobLoginConfig, getJobLoginPlatforms, getSellMonitorConfig, isIndeedCookieDomain, reserveSharedProfile, toPuppeteerExtraAbortSignal } from '../electron/ipc/stealthBrowser.js';
 export { default as os } from 'node:os';
-export { startRun, recordSourcePage, markSourceStatus, setStage, readStagedJobs, readRunState, clearRun, clearRunWithResult, completeRunWithReceipt, computeResumeStartPage, computeResumeStartPagesByQuery, jobRunPathScopeForCanvas, lastRunReceiptPathForCanvas, readLastRunReceipt, normalizeJobRunProfileFingerprint, sanitizeJobPreferencePlan, sanitizeJobPreferences, sanitizeLastRunReceipt, writeLastRunReceipt, pauseRunForManualResume, activateRunForResume, isJobRunAutomaticRecoveryEligible, RESUMABLE_MAX_AGE_MS } from '../electron/ipc/jobRunStaging.js';
+// Legacy staging fixtures intentionally predate immutable career authority.
+// Keep their compatibility path explicit and test-only; production code never
+// imports this adapter and cannot pass the private option through IPC.
+import {
+  startRun as startRunRaw,
+  recordSourcePage as recordSourcePageRaw,
+  markSourceStatus as markSourceStatusRaw,
+  setStage as setStageRaw,
+  markProviderGathered as markProviderGatheredRaw,
+  readStagedJobs, readRunState, clearRun, clearRunWithResult,
+  completeRunWithReceipt as completeRunWithReceiptRaw,
+  computeResumeStartPage, computeResumeStartPagesByQuery, jobRunPathScopeForCanvas,
+  lastRunReceiptPathForCanvas, readLastRunReceipt, normalizeJobRunProfileFingerprint,
+  sanitizeJobPreferencePlan, sanitizeJobPreferences, sanitizeLastRunReceipt,
+  writeLastRunReceipt, pauseRunForManualResume,
+  activateRunForResume as activateRunForResumeRaw,
+  isJobRunAutomaticRecoveryEligible, RESUMABLE_MAX_AGE_MS,
+} from '../electron/ipc/jobRunStaging.js';
+
+const legacyStagingFixtureOption = value => ({ ...(value || {}), __testOnlyAllowUnpinned: true });
+async function admittedStagingFixtureOption(canvasFilePath, value = {}) {
+  // Historical unit fixtures predate career pins.  Upgrade their in-memory
+  // setup through the real durable claim, rather than letting production
+  // staging accept an unpinned manifest.  This module is test-only and no IPC
+  // path can set the private option below.
+  if (value.operationAuthority && value.careerSnapshotId) return value;
+  const nodeId = typeof value.nodeId === 'string' && value.nodeId.trim() ? value.nodeId.trim() : null;
+  const runId = typeof value.runId === 'string' && value.runId.trim() ? value.runId.trim() : null;
+  if (!canvasFilePath || !nodeId || !runId) return legacyStagingFixtureOption(value);
+  const careerSnapshotId = typeof value.careerSnapshotId === 'string' && /^[a-f0-9]{64}$/.test(value.careerSnapshotId)
+    ? value.careerSnapshotId
+    : 'a'.repeat(64);
+  const claimed = await claimFixtureJobAnalysisOperationAuthority({
+    canvasFilePath,
+    hubId: nodeId,
+    operationId: `test-staging-${runId}`,
+    semanticBase: {
+      kind: 'test-staging', careerSnapshotId, runId,
+      analysisRevisionId: null, fingerprint: null, continuationId: null, sourceArtifactFingerprint: null,
+    },
+  });
+  return claimed.admitted
+    ? { ...value, careerSnapshotId, operationAuthority: claimed.receipt }
+    : legacyStagingFixtureOption(value);
+}
+async function stagedFixtureOption(canvasFilePath, options = {}) {
+  if (options.expectedOperationAuthority) return options;
+  const state = await readRunState(canvasFilePath, Date.now(), { nodeId: options.nodeId ?? null });
+  const authority = state?.manifest?.inputs?.operationAuthority;
+  // Pinned test fixtures take the same exact receipt route as production.
+  if (authority) return { ...options, expectedOperationAuthority: authority };
+  return legacyStagingFixtureOption(options);
+}
+export const startRun = async (canvasFilePath, options) => startRunRaw(
+  canvasFilePath,
+  await admittedStagingFixtureOption(canvasFilePath, options),
+);
+export const recordSourcePage = async (canvasFilePath, options) => recordSourcePageRaw(canvasFilePath, await stagedFixtureOption(canvasFilePath, options));
+export const markSourceStatus = async (canvasFilePath, sourceId, status, now, options) => markSourceStatusRaw(canvasFilePath, sourceId, status, now, await stagedFixtureOption(canvasFilePath, options));
+export const setStage = async (canvasFilePath, stage, now, options) => setStageRaw(canvasFilePath, stage, now, await stagedFixtureOption(canvasFilePath, options));
+export const markProviderGathered = async (canvasFilePath, now, options) => markProviderGatheredRaw(canvasFilePath, now, await stagedFixtureOption(canvasFilePath, options));
+export const activateRunForResume = async (canvasFilePath, options) => activateRunForResumeRaw(canvasFilePath, await stagedFixtureOption(canvasFilePath, options));
+export const completeRunWithReceipt = async (canvasFilePath, receipt, options = {}) => {
+  // Terminal cleanup is a state-changing transition too. Modern fixtures use
+  // the same exact immutable pin as production; only genuinely legacy,
+  // unpinned fixtures take the private compatibility branch.
+  const nodeId = options.expectedNodeId || receipt?.nodeId || null;
+  const state = await readRunState(canvasFilePath, Date.now(), { nodeId });
+  const manifestPin = state?.manifest?.inputs?.careerSnapshotId;
+  if (manifestPin) {
+    return completeRunWithReceiptRaw(canvasFilePath, receipt, {
+      ...options,
+      expectedCareerSnapshotId: manifestPin,
+    });
+  }
+  const priorReceipt = await readLastRunReceipt(canvasFilePath, { nodeId });
+  const receiptPin = priorReceipt?.careerSnapshotId;
+  return completeRunWithReceiptRaw(canvasFilePath, receipt, receiptPin
+    ? { ...options, expectedCareerSnapshotId: receiptPin }
+    : legacyStagingFixtureOption(options));
+};
+export { readStagedJobs, readRunState, clearRun, clearRunWithResult, computeResumeStartPage, computeResumeStartPagesByQuery, jobRunPathScopeForCanvas, lastRunReceiptPathForCanvas, readLastRunReceipt, normalizeJobRunProfileFingerprint, sanitizeJobPreferencePlan, sanitizeJobPreferences, sanitizeLastRunReceipt, writeLastRunReceipt, pauseRunForManualResume, isJobRunAutomaticRecoveryEligible, RESUMABLE_MAX_AGE_MS };
 export { selectIndeedResumePlan } from '../electron/ipc/jobs.js';
 export { blankJobPreferencePlan, evaluateJobPreferences, hasJobPreferences, interpretJobPreferences, isValidJobPreferencePlanSubmission, listingIdsForRootBatch, normalizeJobPreferencePlan, normalizeJobRoleAudit, resolveSearchRoles, screenJobRolesByTitle, validateJobPreferenceListingSubmission, validateJobPreferencePlanSubmission, validateJobPreferenceResearchSubmission, validateJobRoleAuditSubmission } from '../electron/ipc/jobPreferences.js';
 export { dedupAgainstHistory, dedupKeysFor, filterHistoryForResume, appendJobsHistory, loadJobsHistory } from '../electron/ipc/jobsHistory.js';
@@ -189,9 +337,9 @@ export { createModuleRunQueue } from '../src/utils/moduleRunQueue.js';
 export { deleteChildrenByHubId } from '../src/nodes/_shared/hubChildCleanup.js';
 export { getConnectedHubCards } from '../src/utils/connectedHubCards.js';
 export { getCanonicalDomain, extractDomain, effectiveConcurrency, isCoolingDown, recordOutcome, getRateLimiterSnapshot, _resetRateLimiter } from '../electron/ipc/rateLimiter.js';
-export { encryptSecret, decryptSecret, getRoleFamilyExperienceBandCache, normalizeRoleFamilyExperienceBandCache, roleFamilyExperienceBandCacheEntry, saveRoleFamilyExperienceBandsBatch, mergeSettingsSection, getGlassdoorLocIdCache, saveGlassdoorLocId, tryGetStore } from '../electron/ipc/settings.js';
+export { encryptSecret, decryptSecret, getRoleFamilyExperienceBandCache, normalizeRoleFamilyExperienceBandCache, roleFamilyExperienceBandCacheEntry, saveRoleFamilyExperienceBandsBatch, mergeSettingsSection, mergeRendererJobsSettingsUpdate, rendererJobsSettingsSnapshot, rendererJobsSettingsUpdate, rendererStoreSnapshot, getGlassdoorLocIdCache, saveGlassdoorLocId, tryGetStore } from '../electron/ipc/settings.js';
 export { callLLMText, callLLMRaw, callLLMVision, callLLMDocument, checkPromptFits, getKnownTaskIds, taskMaxTokensFor, taskModelRoutingSnapshot } from '../electron/ipc/llm.js';
-export { NON_API_AI_TRANSPORT, HANDOFF_CODE_ALPHABET, SAFE_NON_API_AI_LOG_ERROR_CODES, SAFE_VALIDATION_DIAGNOSTIC_REASONS, __durableStepKeysForTests, __selectDurableStepForTests, __selectUniqueAcceptedLegacyStepForTests, __nonApiAiProgressScopeSnapshotForTests, __pruneInactiveEphemeralProgressScopesForTests, canonicalizeGeneratedUntrustedBoundaryNonces, deriveHandoffCode, durableRunHasAnyTask, durableRunSettlementSummary, hardenStructuredTaskPrompt, NonApiAiCodeMismatchError, _resetNonApiAiHandoffLifecycle, getNonApiAiHandoffLifecycle, materializeNonApiPrompt, registerNonApiAiHandlers, requestNonApiAi, validateNonApiAiSubmission } from '../electron/ipc/nonApiAi.js';
+export { NON_API_AI_TRANSPORT, HANDOFF_CODE_ALPHABET, SAFE_NON_API_AI_LOG_ERROR_CODES, SAFE_VALIDATION_DIAGNOSTIC_REASONS, __durableStepKeysForTests, __reloadDurableStateForTests, __selectDurableStepForTests, __selectUniqueAcceptedLegacyStepForTests, __nonApiAiProgressScopeSnapshotForTests, __pruneInactiveEphemeralProgressScopesForTests, canonicalizeGeneratedUntrustedBoundaryNonces, deriveHandoffCode, durableRunHasAnyTask, durableRunSettlementSummary, hardenStructuredTaskPrompt, NonApiAiCodeMismatchError, _resetNonApiAiHandoffLifecycle, getNonApiAiHandoffLifecycle, materializeNonApiPrompt, registerNonApiAiHandlers, requestNonApiAi, validateNonApiAiSubmission } from '../electron/ipc/nonApiAi.js';
 export { default as electronPkg, ipcMain } from 'electron';
 export { wrapUntrustedText } from '../electron/ipc/promptSafety.js';
 export { PRODUCT_CONDITIONS, CONDITION_VALUES, DEFAULT_CONDITION, getConditionDef, formatConditionForPricingPrompt, formatConditionGuideForPrompt, stripConditionFromGeneratedTitle } from '../src/utils/productConditions.js';
@@ -212,7 +360,7 @@ export { FINGERPRINT_PROFILES, getSessionProfile, getRandomUA } from '../electro
 export { ensureDirectoryWithinRoot, isWithinDirectory, isExistingFile, isSensitivePath } from '../electron/utils/pathSafety.js';
 export { resetManualSolveTracking, markManualSolveRequired, wasManualSolveRequired } from '../electron/ipc/scrapeVerification.js';
 export { checkAdjacentEmployerRepetition } from '../electron/ipc/coverLetterChecks.js';
-export { BANNED_GENERIC_PHRASES, BANNED_GENERIC_PATTERNS, COMPOUND_HYPHENATION_RULES, MAX_HYPHENATION_OBSERVATIONS, MAX_LETTER_FIGURES, MAX_LOGISTICS_CONTAINMENT_OBSERVATIONS, MAX_SENTENCE_WORDS, MIN_ANCHOR_RELEVANCE_CORPUS_WORDS, STACK_TOOL_LEXICON, authorCoverLetterEnvelope, checkAdditiveSeam, checkAllNeedDisposition, checkAnchorRelevance, checkClaimedEquivalence, checkCandidateAgency, checkCompanySpecificity, checkCompoundHyphenation, checkContainerizationTechnologyRoles, checkDanglingParagraphTransition, checkDetachedRelevanceClaim, checkDirectWelcomeClosing, checkEligibilityNeedDisposition, checkEntailedPremise, checkEvidenceGrounding, checkExperienceInfinitiveGrammar, checkFigureDiscipline, checkGenericPhrases, checkInterestFraming, checkIntroductoryWorkplaceComma, checkLogisticsContainment, checkLogisticsExclusion, checkLogisticsGrounding, checkLowInformationToolBuild, checkModifierAttachment, checkNamedArtifactIntroduction, checkNeedGrounding, checkNeedsPortfolio, checkOpeningArtifactContext, checkOpeningDemonstrative, checkOpeningEmployerShorthand, ARGUMENT_MAPPING_REQUIRED_RULE, ARGUMENT_RELEVANCE_ANAPHORA_RULE, ARGUMENT_RELEVANCE_MECHANISM_RULE, checkParagraphArgumentLinks, paragraphArgumentSpanGaps, paragraphHasCandidatePastProof, checkParallelStructure, checkPlainRegister, checkPlanGate, checkPostingReference, checkPriorEmployerOpening, checkPunctuationStyle, checkProspectiveContributionTense, checkRedundancy, checkReferenceClarity, checkRepeatedPhrase, MIN_SAME_PARAGRAPH_REPEAT_WORDS, MIN_CROSS_PARAGRAPH_REPEAT_WORDS, checkRepeatedSentenceShape, sharedSentenceShapeCeiling, MIN_SHARED_SHAPE_PARAGRAPHS, SENTENCE_SHAPE_FRAME_WORDS, SHARED_SENTENCE_SHAPE_CEILING_RULE, checkResponsibilityTransition, checkSalientPhraseEcho, checkRequestedWorkSampleLink, checkRoleThesis, checkSentenceLength, checkShape, checkTargetClaimScope, checkToolCallsGardenPath, checkTopNeedDisposition, checkVagueDomainWorkLabel, checkVisualReferencePrecision, evaluateCoverLetterChecks, formatCoverLetterDate, selectBetterLetterNeeds, sentences } from '../electron/ipc/coverLetterChecks.js';
+export { BANNED_GENERIC_PHRASES, BANNED_GENERIC_PATTERNS, COMPOUND_HYPHENATION_RULES, MAX_HYPHENATION_OBSERVATIONS, MAX_LETTER_FIGURES, MAX_LOGISTICS_CONTAINMENT_OBSERVATIONS, MAX_SENTENCE_WORDS, MIN_ANCHOR_RELEVANCE_CORPUS_WORDS, STACK_TOOL_LEXICON, authorCoverLetterEnvelope, checkAdditiveSeam, checkAllNeedDisposition, checkAnchorRelevance, checkClaimedEquivalence, checkCandidateAgency, checkCompanySpecificity, checkCompoundHyphenation, checkContainerizationTechnologyRoles, checkDanglingParagraphTransition, checkDetachedRelevanceClaim, checkDirectWelcomeClosing, checkEligibilityNeedDisposition, checkEntailedPremise, checkEvidenceGrounding, checkExperienceInfinitiveGrammar, checkFigureDiscipline, checkGenericPhrases, checkInterestFraming, checkIntroductoryWorkplaceComma, checkLogisticsContainment, checkLogisticsExclusion, checkLogisticsGrounding, checkLowInformationToolBuild, checkMigrationObjectClarity, checkModifierAttachment, checkNamedArtifactIntroduction, checkNeedGrounding, checkNeedsPortfolio, checkOpeningArtifactContext, checkOpeningDemonstrative, checkOpeningEmployerShorthand, checkOpeningJobSummaryScaffolding, checkOpeningPostingRestatement, ARGUMENT_MAPPING_REQUIRED_RULE, ARGUMENT_RELEVANCE_ANAPHORA_RULE, ARGUMENT_RELEVANCE_MECHANISM_RULE, checkParagraphArgumentLinks, paragraphArgumentSpanGaps, paragraphHasCandidatePastProof, checkParallelStructure, checkPlainRegister, checkPlanGate, checkPostingReference, checkPriorEmployerOpening, checkPunctuationStyle, checkProspectiveContributionTense, checkRedundancy, checkReferenceClarity, checkRepeatedPhrase, MIN_SAME_PARAGRAPH_REPEAT_WORDS, MIN_CROSS_PARAGRAPH_REPEAT_WORDS, checkRepeatedSentenceShape, sharedSentenceShapeCeiling, MIN_SHARED_SHAPE_PARAGRAPHS, SENTENCE_SHAPE_FRAME_WORDS, SHARED_SENTENCE_SHAPE_CEILING_RULE, checkResponsibilityTransition, checkSalientPhraseEcho, checkRequestedWorkSampleLink, checkRoleThesis, checkSentenceLength, checkShape, checkTargetClaimScope, checkToolCallsGardenPath, checkTopNeedDisposition, checkVagueDomainWorkLabel, checkVisualReferencePrecision, evaluateCoverLetterChecks, formatCoverLetterDate, selectBetterLetterNeeds, sentences } from '../electron/ipc/coverLetterChecks.js';
 export { assert, runExtractorFixtureTest, runZeroResultFixtureTest } from './tests/testHelpers.js';
 export { ABSORB_EXCLUDED_TYPES, buildGroupHoverState, collectAbsorptionClosure, findSeveredRelations, getAbsorptionRejection, partitionEdgesForMove } from '../src/utils/nestedCanvasAbsorption.js';
 export { isJobWorkflowDeletionPending, isJobWorkflowRelocationPending, markJobWorkflowDeletionPending, markJobWorkflowRelocationPending, settleJobWorkflowDeletion, settleJobWorkflowRelocation } from '../src/utils/nodeDeletionLifecycle.js';

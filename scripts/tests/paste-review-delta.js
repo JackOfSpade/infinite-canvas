@@ -58,6 +58,25 @@ function noChange() {
 
 export default [
   {
+    name: 'mergePasteReviewDelta: current authority refuses an injected model jobPriorities field on every delta path',
+    run: () => {
+      const baseline = {
+        checklist: [],
+        qualityReview: { checklistVersion: 1, criteria: [], resume: { decision: 'drafted', rationale: 'Existing résumé review.' }, coverLetter: { decision: 'drafted', rationale: 'Existing cover review.' } },
+        generationAudit: { version: 1, resumePlan: { strategy: 'Existing strategy.', selectionRationale: 'Existing selection.' }, coverLetterPlan: { controllingThesis: 'Existing thesis.', paragraphs: [] }, finalDecisionSummary: 'Existing summary.' },
+      };
+      const injected = mergePasteReviewDelta(baseline, {
+        decision: 'pass', findings: [], patches: [],
+        generationAudit: {
+          jobPriorities: [{ requirement: 'Invented authority', priority: 'highest', disposition: 'addressed-both', justification: 'This model-authored aggregate must never become current authority.' }],
+        },
+      }, noChange(), [], { currentAuthority: true });
+      assert(injected.review === null && injected.errors.some(error => /current-authority deltas.*jobPriorities/i.test(error)),
+        `current authority must reject injected jobPriorities before any carry-forward, got ${JSON.stringify(injected)}`);
+      return { rejected: true };
+    },
+  },
+  {
     name: 'applyPasteDocumentPatches: replace covers every target kind, updates changed precisely, and a no-op replace reports nothing changed',
     run: () => {
       const documents = baseDocuments();

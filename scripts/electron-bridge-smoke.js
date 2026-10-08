@@ -30,7 +30,7 @@ const BRIDGE_KEYS = [
   'handoffBridgePause', 'handoffBridgeResume', 'handoffBridgeRevokeAll',
   'handoffBridgeForgetSetup', 'handoffBridgeRelease', 'handoffBridgeUnrelease', 'handoffBridgeReleasePush',
   'handoffBridgeUnreleasePush', 'handoffBridgeHoldJob', 'handoffBridgeAckAlarm', 'handoffBridgeGetActivity',
-  'handoffBridgePublishJobs', 'onHandoffBridgeStatus', 'onHandoffBridgeJobChanged', 'onHandoffBridgeOpenPanel',
+  'handoffBridgePublishJobs', 'onHandoffBridgeStatus', 'onHandoffBridgeJobChanged', 'onHandoffBridgeCanvasFileReady', 'onHandoffBridgeOpenPanel',
 ].sort();
 
 // Electron canonicalises macOS /var through /private. Seed and launch from
@@ -781,7 +781,7 @@ try {
 
   const chat = await page.evaluate(() => window.electronAPI.handoffBridgeNewChat());
   assert.equal(chat.success, true, `New chat must mint a session after a link: ${JSON.stringify(chat)}`);
-  const starter = await app.evaluate(({ clipboard }) => clipboard.readText());
+  const starter = await app.evaluate(() => globalThis.__icHandoffBridgeTest?.readStarterClipboard?.() || '');
   const session = /\bwith session ([23456789ABCDEFGHJKLMNPQRSTUVWXYZ]{26})\./.exec(starter)?.[1];
   assert.ok(session, 'main-owned clipboard starter must contain the 26-character session code after "with session"');
   const humanHandoff = await mcpToolCall(accessToken, 3, 'get_handoff', { session }, 'human-paste initial get_handoff');

@@ -379,8 +379,16 @@ function compactErrorStack(error, maxFrames = 6) {
     .map(line => line.trim())
     .filter(line => line.startsWith('at '))
     .slice(0, maxFrames)
-    .map(frame => frame.replace(/(?:file:\/\/)?(?:[^\s()]*[\\/])([^\\/\s():]+:\d+(?::\d+)?)/g, '$1'));
+    // The directory part may contain spaces ("My Apps", "Application Support"),
+    // so it cannot be matched as a non-space run: that left a stray path prefix
+    // that the report's path redactor then swallowed together with the whole
+    // rest of the line, reducing every frame to `at <local-path>`.
+    .map(frame => frame.replace(/(^at (?:async )?|\()(?:file:\/\/)?[^()]*[\\/]([^\\/():]+:\d+(?::\d+)?)(?=\)?$)/, '$1$2'));
   return frames.join(' ← ');
+}
+
+export function __compactErrorStackForTests(error, maxFrames) {
+  return compactErrorStack(error, maxFrames);
 }
 
 /**

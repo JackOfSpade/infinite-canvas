@@ -1,6 +1,7 @@
 // Deterministic, dependency-free checks for the cover-letter argument harness.
 // Keep this module free of Electron/LLM/fs imports: the checks are deliberately
 // usable from the Node smoke suite and from the application pipeline.
+import { enDashIsRange } from './dashRanges.js';
 
 const MIN_EVIDENCE_SHINGLE_WORDS = 5;
 const MIN_EVIDENCE_TOKEN_OVERLAP = 0.6;
@@ -630,14 +631,37 @@ export const ARGUMENT_SPAN_ALIGNMENT_RULE = 'each of those three spans is copied
   + 'comma, or entering a hyphenated compound at its second half, is fine — and a span that begins or ends inside a '
   + 'word is rejected even though its letters do appear there';
 
-function relevanceNamesNeed(relevance, jobNeedQuote) {
+function relevanceNeedOverlap(relevance, jobNeedQuote) {
   const needTerms = new Set(argumentContentWords(jobNeedQuote));
   const relevanceTerms = argumentContentWords(relevance);
   // Two shared content words make accidental overlap unlikely. One unusually
   // specific shared term is enough for short requirement quotes such as
   // “Identity Center” or “authorization”.
   const matches = [...new Set(relevanceTerms.filter(term => needTerms.has(term)))];
+  return { needTerms: [...needTerms], matches };
+}
+
+function relevanceNamesNeed(relevance, jobNeedQuote) {
+  const { matches } = relevanceNeedOverlap(relevance, jobNeedQuote);
   return matches.length >= 2 || matches.some(term => term.length >= 9);
+}
+
+// The rule above is lexical by design: it prevents an audit from calling a
+// generic “this role” bridge an argument to a particular responsibility. A
+// bare failure, however, makes a writer guess which literal terms the host
+// kept after stop-word filtering and singularization. That was enough to
+// repeat an otherwise-identical review correction. Keep the explanation
+// generated from the same overlap calculation rather than maintaining a
+// second list of target words or weakening the semantic floor.
+function relevanceNeedRepairHint(relevance, jobNeedQuote) {
+  const { needTerms, matches } = relevanceNeedOverlap(relevance, jobNeedQuote);
+  // The input audit field is already bounded to 1,000 characters. Bound this
+  // presentation too: it is a correction aid, not a copy of the listing.
+  const eligible = needTerms.slice(0, 16);
+  const displayed = eligible.length ? eligible.map(term => JSON.stringify(term)).join(', ') : '(none after the standard content-word filter)';
+  const current = matches.length ? matches.map(term => JSON.stringify(term)).join(', ') : 'none';
+  const omitted = needTerms.length - eligible.length;
+  return ` Its exact jobNeedQuote yields these eligible responsibility terms after the same content-word filter: ${displayed}${omitted > 0 ? ` (${omitted} more omitted)` : ''}; this relevance currently matches ${current}. Include at least two distinct eligible terms, or one eligible term of nine or more letters, in the exact relevance span.`;
 }
 
 const DIRECT_PROOF_ANAPHORA = /\b(?:(?:that|this)\s+(?:experience|work)|(?:those|these)\s+patterns)\b/iu;
@@ -716,6 +740,86 @@ function relevanceSharesMechanism(relevance, claim, proof, paragraph = '') {
 // rejection sends the writer back to the copy the gate never reads.
 const DEFAULT_POSTING_QUOTE_LABEL = 'the job posting';
 
+// The plan's verb matters. “Use a tool” is not evidence that the candidate
+// would be hired to build, introduce, or integrate that tool. These are
+// deliberately ordinary verb families rather than a product-name lexicon, and
+// the check reads only the target-facing relevance span that already names the
+// mapped need.
+const REQUIREMENT_USE_CUE = /\b(?:use|using|used|leverage|leveraging|work(?:ing)?\s+with|experience\s+with|proficien(?:t|cy)\s+(?:with|in)|familiar(?:ity)?\s+with)\b/iu;
+const REQUIREMENT_TOOL_WORKFLOW_SUBJECT_CUE = /\b(?:tool|platform|workflow|framework|technology|software)\b/iu;
+const REQUIREMENT_CONSTRUCTION_CUE = /\b(?:build|built|building|develop|developed|developing|implement|implemented|implementing|integrat(?:e|ed|ing|ion)|introduc(?:e|ed|ing|tion)|creat(?:e|ed|ing|ion))\b/iu;
+const TARGET_CONSTRUCTION_CUE = /\b(?:build|building|develop|developing|implement|implementing|integrat(?:e|ing)|introduc(?:e|ing)|creat(?:e|ing))\b/iu;
+
+function requirementUseOnly(jobNeedQuote) {
+  return REQUIREMENT_USE_CUE.test(jobNeedQuote)
+    && REQUIREMENT_TOOL_WORKFLOW_SUBJECT_CUE.test(jobNeedQuote)
+    && !REQUIREMENT_CONSTRUCTION_CUE.test(jobNeedQuote);
+}
+
+// Narrow product-scope guard: AI-assisted development is valid experience,
+// but it is not, by itself, proof of shipping an AI-powered interaction or an
+// inference integration. A direct candidate build with the same product scope
+// remains valid. The routine covers the broader judgment; this catches the
+// high-confidence overclaim without guessing at tool brands.
+const AI_ASSISTED_DEVELOPMENT_CUE = /\bai[- ]assisted\s+(?:coding|software\s+development|development|programming|workflow(?:s)?)\b/iu;
+const AI_PRODUCT_SCOPE_CUE = /\b(?:ai[- ]powered|llm|inference|machine[- ]learning)\b[^.!?]{0,80}\b(?:interaction|interface|product|application|feature|integration|experience)s?\b|\b(?:interaction|interface|product|application|feature|integration|experience)s?\b[^.!?]{0,80}\b(?:ai[- ]powered|llm|inference|machine[- ]learning)\b/iu;
+const DIRECT_AI_PRODUCT_BUILD_CUE = /\b(?:i|we)\s+(?:built|developed|designed|implemented|shipped|created)\b[^.!?]{0,100}\b(?:ai[- ]powered|llm|inference|machine[- ]learning)\b[^.!?]{0,80}\b(?:interaction|interface|product|application|feature|integration|experience)s?\b|\b(?:i|we)\s+(?:built|developed|designed|implemented|shipped|created)\b[^.!?]{0,100}\b(?:interaction|interface|product|application|feature|integration|experience)s?\b[^.!?]{0,80}\b(?:ai[- ]powered|llm|inference|machine[- ]learning)\b/iu;
+
+function requirementUseObjectPhrases(jobNeedQuote) {
+  const tokens = words(jobNeedQuote);
+  const starts = [];
+  for (let index = 0; index < tokens.length; index++) {
+    if (['use', 'using', 'used', 'leverage', 'leveraging'].includes(tokens[index])) starts.push(index + 1);
+    if (['with', 'in'].includes(tokens[index]) && index > 0
+      && ['work', 'working', 'experience', 'proficient', 'proficiency', 'familiar', 'familiarity'].includes(tokens[index - 1])) starts.push(index + 1);
+  }
+  const stop = new Set(['to', 'for', 'with', 'in', 'on', 'at', 'from', 'by', 'and', 'or', 'that', 'which', 'who']);
+  const articles = new Set(['the', 'a', 'an', 'this', 'that', 'these', 'those', 'your', 'our']);
+  const phrases = new Set();
+  for (const start of starts) {
+    const parts = [];
+    for (let index = start; index < tokens.length && parts.length < 3; index++) {
+      if (stop.has(tokens[index])) break;
+      if (!parts.length && articles.has(tokens[index])) continue;
+      parts.push(tokens[index]);
+    }
+    if (parts.length) phrases.add(parts.join(' '));
+  }
+  return [...phrases];
+}
+
+function constructionGovernsRequirementObject(relevance, jobNeedQuote) {
+  const source = normalized(relevance);
+  for (const phrase of requirementUseObjectPhrases(jobNeedQuote)) {
+    const phraseWords = phrase.split(' ');
+    const object = phraseWords.map(escapeRegExp).join('\\s+');
+    // A bare “tool” is too ambiguous: “build review tools” need not mean build
+    // the tool the posting asks the candidate to use. Its determiner is what
+    // makes the old tool itself the grammatical object.
+    const modifier = phraseWords.length === 1 && /^(?:tool|tools|platform|workflow|framework|technology|software)$/u.test(phrase)
+      ? '(?:the|this|that|these|those|same)\\s+'
+      : '(?:(?:the|a|an|this|that|these|those|your|our)\\s+)?';
+    const pattern = new RegExp(`\\b(?:build|building|develop|developing|implement|implementing|integrat(?:e|ing)|introduc(?:e|ing)|creat(?:e|ing))\\s+${modifier}(?:[\\p{L}\\p{N}'’-]+\\s+){0,3}${object}\\b`, 'iu');
+    if (pattern.test(source)) return true;
+  }
+  return false;
+}
+
+const AI_PRODUCT_SHIPMENT_CLAIM = /\b(?:my|that|this|the)\s+(?:experience|capability|background|track\s+record|work)\b[^.!?]{0,80}\b(?:build(?:ing|s|t)?|ship(?:ping|ped|s)?|develop(?:ing|ed|s)?)\b[^.!?]{0,80}\b(?:ai[- ]powered|llm|inference|machine[- ]learning)\b|\b(?:ai[- ]powered|llm|inference|machine[- ]learning)\b[^.!?]{0,80}\b(?:build(?:ing|s|t)?|ship(?:ping|ped|s)?|develop(?:ing|ed|s)?)\b[^.!?]{0,80}\b(?:experience|capability|background|track\s+record|work)\b/iu;
+
+function requirementModalityObservation(label, jobNeedQuote, relevance) {
+  if (!requirementUseOnly(jobNeedQuote) || !TARGET_CONSTRUCTION_CUE.test(relevance)
+    || !constructionGovernsRequirementObject(relevance, jobNeedQuote)) return '';
+  return `${label} argumentMapping.relevance turns a use/workflow requirement into building or integrating it; preserve the posting’s modality unless its own quoted need separately asks for construction or integration`;
+}
+
+function evidenceScopeObservation(label, claim, proof, relevance) {
+  if (!AI_ASSISTED_DEVELOPMENT_CUE.test(proof)) return '';
+  if (DIRECT_AI_PRODUCT_BUILD_CUE.test(proof)) return '';
+  if (![claim, proof, relevance].some(value => AI_PRODUCT_SCOPE_CUE.test(value) && AI_PRODUCT_SHIPMENT_CLAIM.test(value))) return '';
+  return `${label} argumentMapping.relevance treats AI-assisted development as evidence of shipping an AI-powered product or inference interaction; keep the transfer at the supported development-practice scope unless a cited proof directly describes building that product capability`;
+}
+
 /**
  * Verify a Local-AI generation-audit paragraph mapping.
  *
@@ -787,8 +891,12 @@ export function checkParagraphArgumentLinks({
       if (GENERIC_ARGUMENT_RELEVANCE.test(relevance)) observations.push(`${label} argumentMapping.relevance uses a generic relevance label instead of explaining the transfer to target work`);
       if (VACUOUS_TARGET_WORK.test(relevance)) observations.push(`${label} argumentMapping.relevance names only a vacuous target label; state the actual responsibility or mechanism`);
       if (!ARGUMENT_TRANSFER_CUE.test(relevance)) observations.push(`${label} argumentMapping.relevance does not explicitly state how the candidate would transfer the proof to the target responsibility`);
-      if (jobNeedQuote && !relevanceNamesNeed(relevance, jobNeedQuote)) observations.push(`${label} argumentMapping.relevance does not name a concrete responsibility from its jobNeedQuote`);
+      if (jobNeedQuote && !relevanceNamesNeed(relevance, jobNeedQuote)) observations.push(`${label} argumentMapping.relevance does not name a concrete responsibility from its jobNeedQuote.${relevanceNeedRepairHint(relevance, jobNeedQuote)}`);
       if (!relevanceSharesMechanism(relevance, claim, proof, paragraph)) observations.push(`${label} argumentMapping.relevance does not name the shared capability or mechanism that connects the proof to target work`);
+      const modality = requirementModalityObservation(label, jobNeedQuote, relevance);
+      if (modality) observations.push(modality);
+      const scope = evidenceScopeObservation(label, claim, proof, relevance);
+      if (scope) observations.push(scope);
     }
   });
   const mappedCount = plannedParagraphs.filter(item => item?.argumentMapping != null).length;
@@ -1144,6 +1252,136 @@ export function checkGenericPhrases(paragraphs = []) {
       `generic phrasing observations: ${visible.join('; ')}${observations.length > visible.length ? `; ${observations.length - visible.length} additional observation(s) omitted` : ''}`);
   }
   return result('generic-phrases', true, `${list.length} paragraph(s) contain no banned generic phrase or opener`);
+}
+
+// A good opening interprets the target work and connects it to the candidate;
+// it does not spend its first sentence lightly rewriting one sentence from the
+// advertisement. Keep this detector conservative: it ignores function words,
+// compares against each posting sentence independently, and fires only when
+// nearly all of an opening's substantive terms map to one listing sentence.
+const OPENING_RESTATEMENT_STOP_WORDS = new Set([
+  'a', 'an', 'and', 'are', 'as', 'at', 'be', 'been', 'being', 'but', 'by',
+  'can', 'could', 'did', 'do', 'does', 'each', 'for', 'from', 'had', 'has',
+  'have', 'i', 'in', 'into', 'is', 'it', 'its', 'more', 'most', 'my', 'of',
+  'on', 'or', 'our', 'should', 'that', 'the', 'their', 'these', 'they', 'this',
+  'those', 'to', 'was', 'we', 'were', 'which', 'who', 'will', 'with', 'would',
+  'you', 'your',
+]);
+// A compressed job-listing sentence can be persuasive-looking at only four
+// content terms.  Requiring seven terms before comparing it left exactly that
+// weak form unexamined.  The comparison therefore starts at four terms, but
+// demands that nearly all of them map to one substantive listing sentence.
+const MIN_OPENING_RESTATEMENT_TERMS = 4;
+const MIN_OPENING_RESTATEMENT_SHARED_TERMS = 4;
+const MIN_OPENING_RESTATEMENT_OPENING_SHARE = 0.75;
+const MIN_OPENING_RESTATEMENT_POSTING_SHARE = 0.15;
+const MIN_OPENING_RESTATEMENT_FUZZY_TERM_CHARS = 5;
+const MIN_OPENING_RESTATEMENT_FUZZY_TERM_SIMILARITY = 0.6;
+
+// Inflection changes such as "validate" / "validates" must not make a
+// sentence copied from a posting look original.  Do not hand-maintain suffix
+// rewrites: they are English-specific, brittle, and made a direct paraphrase
+// invisible.  Character trigrams provide a narrow spelling-similarity bridge
+// only for longer content words; short/acronym terms still require an exact
+// match, which keeps the comparison conservative.
+function termTrigrams(value) {
+  const bounded = `^${value}$`;
+  const grams = new Set();
+  for (let index = 0; index <= bounded.length - 3; index++) grams.add(bounded.slice(index, index + 3));
+  return grams;
+}
+
+function termSimilarity(left, right) {
+  if (left === right) return 1;
+  if (left.length < MIN_OPENING_RESTATEMENT_FUZZY_TERM_CHARS
+    || right.length < MIN_OPENING_RESTATEMENT_FUZZY_TERM_CHARS) return 0;
+  const leftTrigrams = termTrigrams(left);
+  const rightTrigrams = termTrigrams(right);
+  let shared = 0;
+  for (const gram of leftTrigrams) if (rightTrigrams.has(gram)) shared += 1;
+  return (2 * shared) / (leftTrigrams.size + rightTrigrams.size);
+}
+
+function openingRestatementTerms(value) {
+  return [...new Set(genericWords(value)
+    .filter(word => !OPENING_RESTATEMENT_STOP_WORDS.has(word))
+    .filter(word => word.length >= 3))];
+}
+
+function matchedRestatementTerms(openingTerms, postingTerms) {
+  // Match one term at most once.  Exact matches win, then the few high-signal
+  // spelling-near pairs left by ordinary inflection.  Greedy ordering is safe
+  // here because both sides are unique, tiny term sets from a single sentence.
+  const candidates = [];
+  for (let openingIndex = 0; openingIndex < openingTerms.length; openingIndex++) {
+    for (let postingIndex = 0; postingIndex < postingTerms.length; postingIndex++) {
+      const similarity = termSimilarity(openingTerms[openingIndex], postingTerms[postingIndex]);
+      if (similarity >= MIN_OPENING_RESTATEMENT_FUZZY_TERM_SIMILARITY) {
+        candidates.push({ openingIndex, postingIndex, similarity });
+      }
+    }
+  }
+  candidates.sort((left, right) => right.similarity - left.similarity);
+  const openingMatched = new Set();
+  const postingMatched = new Set();
+  for (const candidate of candidates) {
+    if (openingMatched.has(candidate.openingIndex) || postingMatched.has(candidate.postingIndex)) continue;
+    openingMatched.add(candidate.openingIndex);
+    postingMatched.add(candidate.postingIndex);
+  }
+  return openingMatched.size;
+}
+
+export function checkOpeningPostingRestatement(paragraphs = [], jobText = '') {
+  const opening = sentences(Array.isArray(paragraphs) ? paragraphs[0] : '')[0] || '';
+  const openingTerms = openingRestatementTerms(opening);
+  if (openingTerms.length < MIN_OPENING_RESTATEMENT_TERMS) {
+    return result('opening-posting-restatement', true, 'opening sentence is too short for a reliable posting-restatement comparison');
+  }
+  let strongest = null;
+  for (const postingSentence of sentences(jobText)) {
+    const postingTerms = openingRestatementTerms(postingSentence);
+    if (postingTerms.length < MIN_OPENING_RESTATEMENT_TERMS) continue;
+    const sharedCount = matchedRestatementTerms(openingTerms, postingTerms);
+    const candidate = {
+      postingSentence,
+      sharedCount,
+      openingShare: sharedCount / openingTerms.length,
+      postingShare: sharedCount / postingTerms.length,
+    };
+    if (!strongest || candidate.openingShare > strongest.openingShare
+      || (candidate.openingShare === strongest.openingShare && candidate.postingShare > strongest.postingShare)) strongest = candidate;
+  }
+  const restates = strongest
+    && strongest.sharedCount >= MIN_OPENING_RESTATEMENT_SHARED_TERMS
+    && strongest.openingShare >= MIN_OPENING_RESTATEMENT_OPENING_SHARE
+    && strongest.postingShare >= MIN_OPENING_RESTATEMENT_POSTING_SHARE;
+  if (!restates) {
+    return result('opening-posting-restatement', true, 'opening sentence synthesizes the target work rather than closely paraphrasing one posting sentence');
+  }
+  return result('opening-posting-restatement', false,
+    `opening sentence closely restates one posting sentence (${strongest.sharedCount} matched content terms); replace the advertisement paraphrase with a candidate-specific observation and supported capability`);
+}
+
+// A sentence can avoid a near-verbatim advertisement paraphrase while still
+// making the advertisement, rather than the candidate, do the opening work.
+// Keep this to paragraph openings: a source attribution in the middle of a
+// sentence can be necessary when a listing-only employer assertion needs its
+// provenance stated plainly. The prefix itself is enough — report/reporting
+// verbs vary too much to make “Company's posting places …” an escape hatch.
+const OPENING_JOB_SUMMARY_SCAFFOLD = /^(?:(?:the|this)\s+(?:(?:job|role|position)\s+)?(?:posting|listing|description)\b|(?:[\p{L}][\p{L}&.'’-]*(?:\s+[\p{L}][\p{L}&.'’-]*){0,5})['’]s\s+(?:posting|listing|job\s+description)\b|(?:this|the)\s+(?:role|position|job)\s+(?:calls?\s+for|requires?|asks?\s+for|seeks?|highlights?))\b/iu;
+
+/** Keeps the opening candidate-first instead of using requirement-reporting scaffolding. */
+export function checkOpeningJobSummaryScaffolding(paragraphs = []) {
+  const list = Array.isArray(paragraphs) ? paragraphs : [];
+  const observations = [];
+  list.forEach((paragraph, index) => {
+    const opening = sentences(paragraph)[0] || '';
+    const match = OPENING_JOB_SUMMARY_SCAFFOLD.exec(text(opening));
+    if (match) observations.push(`paragraph ${index + 1} begins with job-summary scaffolding (“${boundedDetailValue(match[0])}”)`);
+  });
+  return observationResult('opening-job-summary-scaffolding', observations, MAX_GENERIC_OBSERVATIONS,
+    `${list.length} paragraph(s) begin with a candidate capability, evidence, or target-work thesis rather than requirement-reporting scaffolding`);
 }
 
 // The letter should demonstrate interest through a concrete view of the target
@@ -1765,6 +2003,32 @@ export function checkModifierAttachment(passages = []) {
   });
   return observationResult('modifier-attachment', observations, MAX_REFERENCE_CLARITY_OBSERVATIONS,
     `${list.length} passage(s) attach temporal modifiers to the intended action`);
+}
+
+// Slash shorthand is common in raw notes, but in a migration sentence it can
+// leave a reader unsure whether a system, its tracking function, or the data
+// moved. This detects only the high-confidence movement shape; conventional
+// paired actions such as “check-in/check-out system” already name one clear
+// artifact and remain outside the rule.
+const AMBIGUOUS_MIGRATION_SLASH_OBJECT = /\b[\p{L}-]+\/[\p{L}-]+(?:\s+[\p{L}-]+){0,2}\s+(?:moved|migrated|transitioned|transferred)\b/iu;
+const AMBIGUOUS_MIGRATION_ABSTRACT_OBJECT = /\b(?:tracking|management|processing|reporting)\s+(?:moved|migrated|transitioned|transferred)\b/iu;
+const CONVENTIONAL_PAIRED_SLASH_ACTION = /\b([\p{L}]+)-in\s*\/\s*\1-out\b/iu;
+
+/** Requires migration copy to name the systems or data that moved. */
+export function checkMigrationObjectClarity(passages = []) {
+  const list = Array.isArray(passages) ? passages : [];
+  const observations = [];
+  list.forEach((passage, index) => {
+    const source = text(passage);
+    const slash = AMBIGUOUS_MIGRATION_SLASH_OBJECT.exec(source);
+    const match = slash && !CONVENTIONAL_PAIRED_SLASH_ACTION.test(slash[0])
+      ? slash
+      : AMBIGUOUS_MIGRATION_ABSTRACT_OBJECT.exec(source);
+    if (!match) return;
+    observations.push(`passage ${index + 1} leaves a migration object ambiguous (“${boundedDetailValue(match[0])}”); name the systems and/or data that moved, and rewrite slash shorthand as natural coordination`);
+  });
+  return observationResult('migration-object-clarity', observations, MAX_COPY_PRECISION_OBSERVATIONS,
+    `${list.length} passage(s) name the systems or data affected by migration`);
 }
 
 // Widely recognized stack tokens only. Technologies whose names are ordinary
@@ -2476,6 +2740,14 @@ const CLAIMED_EQUIVALENCE_CARRIERS = Object.freeze([
   { disclosure: '“translates directly to” or “translates directly into”', source: String.raw`\btranslates?\s+directly\s+(?:to|into)\b` },
   { disclosure: '“is exactly what” or “is precisely what”', source: String.raw`\bis\s+(?:exactly|precisely)\s+what\b` },
   {
+    disclosure: '“a/the/another side, form, version, facet, aspect, expression or manifestation of the same … problem, challenge, decision, question or issue”',
+    source: String.raw`\b(?:a|the|another)\s+(?:side|form|version|facet|aspect|expression|manifestation)\s+of\s+the\s+same\s+(?:(?:[\p{L}-]+)\s+){0,3}(?:problem|challenge|decision|question|issue)\b`,
+  },
+  {
+    disclosure: 'calling a prior and target domain the same … problem, challenge, decision, question or issue in another/different context, setting, domain, environment, form or guise',
+    source: String.raw`\b(?:is|are|represents?|reflects?|recreates?|repeats?)\s+(?:the\s+)?same\s+(?:(?:[\p{L}-]+)\s+){0,3}(?:problem|challenge|decision|question|issue)\s+(?:in|under|within|through)\s+(?:another|a\s+different)\s+(?:context|setting|domain|environment|form|guise)\b`,
+  },
+  {
     disclosure: 'and calling two things two (or both) answers, responses, sides or forms to one, or to the same, decision, question, call or choice',
     source: String.raw`\b[^.!?]{1,80}\s+and\s+[^.!?]{1,80}\s+are\s+(?:two|both)\s+(?:answers?|responses?|sides?|forms?)\s+(?:to|of)\s+(?:one|the\s+same)\s+(?:(?:[\p{L}-]+)\s+){0,4}(?:decision|question|call|choice)\b`,
   },
@@ -2548,21 +2820,9 @@ export function checkSentenceLength(paragraphs = []) {
     `${list.length} paragraph(s) keep every sentence under ${MAX_SENTENCE_WORDS + 1} words`);
 }
 
-// Range semantics copied from the design-system hard gate (enDashIsRange in
-// electron/ipc/resumeHtml.js, which throws during document build). A range may
-// be spaced and may name the month on both sides (“May 2023 – June 2026”), and
-// the gate blesses every such form, so a stricter soft rule here would send
-// shipping-safe copy back for a revision round that could only damage it. The
-// predicate is duplicated rather than imported because this module must stay
-// free of the document builder's Electron/fs/jsdom imports; the harness asserts
-// the two agree on a shared corpus.
-const RANGE_MONTH = '(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)';
-const RANGE_RIGHT_ENDPOINT = new RegExp(`^\\s*(?:\\d|present\\b|${RANGE_MONTH}\\.?\\s+\\d{4}\\b)`, 'i');
-
-function enDashIsRange(raw, index) {
-  return /\d\s*$/.test(raw.slice(Math.max(0, index - 32), index))
-    && RANGE_RIGHT_ENDPOINT.test(raw.slice(index + 1, index + 34));
-}
+// Range semantics come from the dependency-free dashRanges.js grammar shared
+// with the document hard gate. A softer cover-letter rule must not send a
+// shipping-safe range back for revision.
 
 /**
  * Every dash form the document gate rejects, so each one becomes a revisable
@@ -2754,8 +3014,8 @@ function certifiedClosingInvitation(value) {
 //   2. it points that asset at the employer's work.
 //
 // Requiring one fused `my … <modal> <verb>` pattern made the check a template
-// after all: “applying my MCP server experience to the agent integrations this
-// role owns” and “the connector work I built would fit the systems this team
+// after all: “applying my systems-integration experience to the connected
+// systems this role owns” and “the connector work I built would fit the systems this team
 // runs” are exactly the closings the guidance asks for, and both were rejected.
 // Ownership still has to be explicit — a bare demonstrative (“that work”)
 // leans on an earlier paragraph instead of standing up in the invitation.
@@ -2777,7 +3037,7 @@ const CANDIDATE_ARTIFACT_NOUNS = 'server|service|tool|tooling|pipeline|pipelines
   + '|app|application|dashboard|parser|extractor|renderer|agent|api';
 // Three ways to mark an asset as the candidate's, in decreasing explicitness:
 // a possessive; an authorship clause; or a demonstrative that carries its own
-// descriptor. The third exists because “that MCP server experience” does name
+// descriptor. The third exists because “that systems-integration experience” does name
 // the asset — it is a bare demonstrative (“that work”) that names nothing and
 // leans entirely on an earlier paragraph, so the descriptor is required.
 // Demonstratives only, never “the”: “the engineering practice this team uses”
@@ -3033,7 +3293,7 @@ function contributionHalfRequirement(half, companyName) {
   switch (half) {
     case 'asset':
       return 'name the candidate’s asset with a possessive, an authorship clause, or a demonstrative that carries '
-        + 'its own descriptor (“my integration work”, “the connector I built”, “that MCP server experience”), '
+        + 'its own descriptor (“my integration work”, “the connector I built”, “that systems-integration experience”), '
         + 'never a bare demonstrative (“that work”)';
     case 'action':
       return 'say what that asset does for the target work (“…could support…”, “…supports…”, “applying … to …”)';
@@ -3373,7 +3633,7 @@ export function checkOpeningDemonstrative(paragraphs = []) {
     `${list.length} paragraph(s) anchor their opening references in the preceding paragraph`);
 }
 
-// At a paragraph boundary, “The district” after “Thomson School District”
+// At a paragraph boundary, “The department” after a named employer
 // makes the prior employer sound like generic context rather than the named
 // source of the next evidence. This is intentionally narrower than a ban on
 // definite descriptions: only organization labels that match a known employer
@@ -4521,6 +4781,9 @@ export function evaluateCoverLetterChecks({ plan = {}, paragraphs = [], evidence
     checkVagueDomainWorkLabel(paragraphs),
     checkReferenceClarity(paragraphs),
     checkModifierAttachment(paragraphs),
+    checkMigrationObjectClarity(paragraphs),
+    checkOpeningPostingRestatement(paragraphs, jobText),
+    checkOpeningJobSummaryScaffolding(paragraphs),
     checkAnchorRelevance(paragraphs, jobText, researchText),
     checkTargetClaimScope(plan, paragraphs, evidence, jobText),
     checkDetachedRelevanceClaim(paragraphs),

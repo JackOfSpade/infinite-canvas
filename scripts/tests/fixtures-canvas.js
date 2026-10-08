@@ -5410,7 +5410,10 @@ export default [
 
       assert(clear.indexOf('const runId =') >= 0 && clear.indexOf('const runId =') < clear.indexOf('updateGlobal('),
         'the run token must be captured before updateGlobal nulls jobRunId, otherwise the recovery sidecars are orphaned on disk forever');
-      assert(clear.includes('discardJobAnalysisSnapshot({ canvasFilePath, nodeId: id, runId: jobAnalysisClearedRunId, clearedAt: jobAnalysisClearedAt })'),
+      assert(clear.includes('discardJobAnalysisSnapshot({')
+        && clear.includes('canvasFilePath, nodeId: id, runId: jobAnalysisClearedRunId,')
+        && clear.includes('clearedAt: jobAnalysisClearedAt')
+        && clear.includes('operationAuthority: clearAuthority'),
         'clearing career files must send the captured normalized run token, clear watermark, and exact canvas/hub ownership so a late same-run snapshot cannot resurrect');
       assert(clear.includes('Promise.allSettled(cleanupPromises.map(entry => entry.promise))')
         && clear.includes('Career Files Cleared with a Warning')
@@ -5436,6 +5439,9 @@ export default [
       assert(clear.includes('const ownedResumeOfferRunId = resumeOffer?.nodeId === id')
         && clear.includes('|| ownedResumeOfferRunId || null'),
       'an empty persisted hub still discards a recovery manifest only when peekJobRun proved that offer belongs to this exact hub');
+      const recoveryEffectStart = source.indexOf('// ── Crash/quit recovery: detect an incomplete prior run');
+      const recoveryEffectEnd = source.indexOf('// A prior build could finish every pre-search handoff', recoveryEffectStart);
+      const recoveryEffect = source.slice(recoveryEffectStart, recoveryEffectEnd);
       assert(source.includes('const careerClearWatermarkRef = useRef(normalizeJobAnalysisClearWatermark(data.jobAnalysisClearedAt))')
         && source.includes('careerClearWatermarkRef.current = jobAnalysisClearedAt')
         && source.includes('const recoveryPeekKey = JSON.stringify([')
@@ -5446,9 +5452,10 @@ export default [
         && source.includes('const staleClearedOwnedRun = info?.found')
         && source.includes('info?.nodeId === id')
         && source.includes('startedAt <= clearedAt')
-        && source.includes('discardJobRun?.({ canvasFilePath, nodeId: id, runId: info.runId })')
+        && recoveryEffect.includes('setResumeOffer(null);')
+        && !recoveryEffect.includes('discardJobRun')
         && source.includes('[canvasFilePath, id, recoveryPeekKey]'),
-      'startup recovery waits for its keyed exact checkpoint inspection and quietly retires only an owned manifest older than the persisted Clear boundary');
+      'startup recovery waits for its keyed exact checkpoint inspection, hides only an owned manifest older than the persisted Clear boundary, and never issues a receipt-less destructive retry');
 
       // An owner-unknown legacy offer has no safe resume owner. It remains
       // visible only so Clear career data can retire it deliberately; a failed
@@ -5510,10 +5517,13 @@ export default [
       const generationStart = source.indexOf('const generateApplication = useCallback');
       const generationEnd = source.indexOf('\n  return (', generationStart);
       const generationScope = source.slice(generationStart, generationEnd);
-      assert(generationScope.includes('const cachedAchievements = originHub.data?.achievements || null;')
-        && generationScope.includes('achievements: cachedAchievements,')
-        && generationScope.includes('mineAllowed,'),
-      'the local handoff must receive the hub ledger and an explicit signal when no cached ledger exists');
+      // Snapshot-pinned cards may legitimately outlive their origin Job Search
+      // node. The immutable snapshot remains authoritative for the career
+      // data, while an absent origin simply means there is no legacy ledger to
+      // pass through.
+      assert(generationScope.includes('const cachedAchievements = originHub?.data?.achievements || null;')
+        && generationScope.includes('...(!careerSnapshotId ? { achievements: cachedAchievements, mineAllowed } : {})'),
+      'legacy local handoffs must receive the hub ledger and an explicit signal, while snapshot-pinned applications reject mutable hub achievements');
       assert(!generationScope.includes('achievementsMining')
         && !generationScope.includes('generateApplication({')
         && !generationScope.includes('updateGlobal(originHubId, { achievements:'),
@@ -5632,7 +5642,7 @@ export default [
         && collectionWriter.includes('partialCollectionRunId: runId')
         && collectionWriter.includes('partialCollectionRunId: null')
         && collectionWriter.includes('pendingCollectionCompletion: {')
-        && collectionWriter.includes('runId: searchResult?.runId || null')
+        && collectionWriter.includes('runId,')
         && collectionWriter.includes('collectionStartedAt,')
         && !collectionWriter.includes('lastCompletedRunAt')
         && collectionWriter.includes('isCancelled?.()')
@@ -5703,7 +5713,8 @@ export default [
         && reset.includes('...resetSearchHistoryPatch')
         && reset.includes('initialDropAcceptedRef.current = resetHasReusableCareerProfile')
         && reset.includes('const resetRunId = jobRunIdRef.current || resetData.jobRunId || null')
-        && reset.includes('discardJobRun?.({ canvasFilePath, nodeId: id, runId: resetRunId })'),
+        && reset.includes('discardJobRun?.({')
+        && reset.includes('canvasFilePath, nodeId: id, runId: resetRunId, operationAuthority: resetClearAuthority,'),
       'cancel clears partial buffers, retains parsed careers, and unlocks an initial cancellation with no reusable profile');
       // The presence checks above hold for either arm of the ternary; pin the
       // DIRECTION separately.
@@ -5746,13 +5757,18 @@ export default [
       assert(!jobsSource.includes('deleteJobBatchSidecar')
         && !jobsSource.includes('expectedBatchId'),
       'the Batch API sidecar/finalizer machinery must not linger now that there is no async batch transport to reconcile');
+      const finalAbortCheckAt = jobsSource.indexOf('await throwIfSearchAborted();', jobsSource.indexOf('const throwIfSearchAborted = async () =>'));
+      const finalAuthorityCheckAt = jobsSource.indexOf('await assertSearchCurrent();', finalAbortCheckAt);
+      const gatheredTimestampAt = jobsSource.indexOf('const gatheredStageUpdatedAt = Date.now();', finalAuthorityCheckAt);
       assert(jobsSource.includes('const throwIfSearchAborted = async () =>')
         && jobsSource.includes('if (shouldDiscardJobRunAfterAbort(reason) && activeRunId)')
         && jobsSource.includes("const CHECKPOINT_PRESERVING_ABORT_CAUSES = new Set([")
         && jobsSource.includes("'job-source-card-removed'")
         && jobsSource.includes('!CHECKPOINT_PRESERVING_ABORT_CAUSES.has(reason?.cancelCause)')
         && jobsSource.includes("phase: 'aborted'")
-        && jobsSource.indexOf('await throwIfSearchAborted();\n    const gatheredStageUpdatedAt = Date.now();\n    const collectionCompletedAt = collectionDisposition') >= 0
+        && finalAbortCheckAt >= 0
+        && finalAuthorityCheckAt > finalAbortCheckAt
+        && gatheredTimestampAt > finalAuthorityCheckAt
         && jobsSource.includes("collectionDisposition === 'user-finished-partial'")
         && jobsSource.includes("setJobRunStage(canvasFilePath, 'gathered', gatheredStageUpdatedAt")
         && jobsSource.includes('if (hasExactResumeToken && gatheredStageAdvanced !== true)'),

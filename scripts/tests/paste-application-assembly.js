@@ -2,13 +2,13 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { assert, extractResumeEvidence, projectContactChannels, projectTrustedIdentity, resumeRoleLocationFailures, validateLocalApplicationResult } from '../test-dependencies.js';
-import { FROZEN_COMPLETED_PACKAGE, LOCAL_AI_JOB_INTEGRITY_CODE, MAX_FROZEN_SOURCE_CHARS, MAX_UNIT_CAREER_DATA_QUOTES, assemblePasteApplicationResult, isJobIntegrityFault, normalizeBoundDocumentText } from '../../electron/ipc/pasteApplicationAssembly.js';
+import { assert, buildResumeDocument, extractResumeEvidence, projectContactChannels, projectTrustedIdentity, resumeRoleLocationFailures, validateLocalApplicationResult } from '../test-dependencies.js';
+import { FROZEN_COMPLETED_PACKAGE, LOCAL_AI_JOB_INTEGRITY_CODE, MAX_FROZEN_SOURCE_CHARS, MAX_UNIT_CAREER_DATA_QUOTES, assemblePasteApplicationResult, assertAuthorityDraftSelection, isJobIntegrityFault, normalizeBoundDocumentText } from '../../electron/ipc/pasteApplicationAssembly.js';
 import { APPLICATION_QUALITY_CHECKLIST_VERSION, APPLICATION_QUALITY_CRITERIA, LOCAL_AI_GENERATION_AUDIT_VERSION, pasteRejectionChangeDocuments, queueLocalApplicationJob, sanitizeQualityReview, stampPasteQualityReviewFromFit } from '../../electron/ipc/localAiApplication.js';
-import { NEUTRAL_SKILL_GROUP_LABELS, renderStructuredApplicationResume, SKILLS_BLOCK_BUDGET_RULE, STRUCTURED_RESUME_LIMITS, STRUCTURED_RESUME_SCHEMA_VERSION, STRUCTURED_RESUME_SKILLS_BUDGET, validateStructuredApplicationResume } from '../../electron/ipc/structuredResume.js';
+import { CAREER_SNAPSHOT_HISTORICAL_SKILL_EVIDENCE_VERSION, CAREER_SNAPSHOT_SKILL_EVIDENCE_VERSION, careerAttestedSkillTerms, formatRoleDateForPresentation, MAX_REQUIRED_CAREER_SKILL_TERMS, MAX_REQUIRED_POSTING_SKILL_TERMS, missingPostingNamedSkillTerms, missingRequiredCareerSkillTerms, NEUTRAL_SKILL_GROUP_LABELS, POSTING_NAMED_SKILL_TERMS, postingNamedAttestedSkillTerms, requiredCareerAttestedSkillTerms, renderStructuredApplicationResume, SKILLS_BLOCK_BUDGET_RULE, STRUCTURED_RESUME_LIMITS, STRUCTURED_RESUME_SCHEMA_VERSION, STRUCTURED_RESUME_SKILLS_BUDGET, validateStructuredApplicationResume } from '../../electron/ipc/structuredResume.js';
 import { careerDataProjectProvenanceHeadingForName } from '../../electron/ipc/jobApplication.js';
 
-const careerData = 'Ada Lovelace\nada@example.test\nSoftware Engineer\nBuilt reporting systems that reduced manual work.';
+const careerData = 'Ada Lovelace\nada@example.test\n## Analytical Engines\nSoftware Engineer\n\nBuilt reporting systems that reduced manual work.';
 const sourceRoles = [{ id: 'role-1', title: 'Software Engineer', company: 'Analytical Engines', dates: '2020 – 2024', location: '' }];
 
 // `overrides` replaces fields of the pasted package; `frozen` replaces the
@@ -20,14 +20,14 @@ function fixture(overrides = {}, frozen = {}) {
     jobListing: 'Build reliable reporting systems.',
     ...frozen,
     paste: {
-      trustedIdentity: { name: 'Ada Lovelace', contact: ['ada@example.test'], subtitleRole: 'Software Engineer', credential: '' },
+      trustedIdentity: { name: 'Ada Lovelace', contact: ['ada@example.test'], subtitleRole: '', credential: '' },
       evidencePlan: { evidence: [
         { id: 'career-proof', sourceId: 'career-data', quote: 'Built reporting systems that reduced manual work.' },
         { id: 'job-need', sourceId: 'job-listing', quote: 'Build reliable reporting systems.' },
       ] },
       resume: {
         schemaVersion: 'structured-resume.v1',
-        identity: { name: 'Ada Lovelace', contact: ['ada@example.test'], subtitleRole: 'Software Engineer', credential: '' },
+        identity: { name: 'Ada Lovelace', contact: ['ada@example.test'], subtitleRole: '', credential: '' },
         roles: [{ id: 'role-1', title: 'Software Engineer', company: 'Analytical Engines', dates: '2020 – 2024', location: '', bullets: [{ id: 'bullet-1', text: 'Built reporting systems that reduced manual work.', evidenceIds: ['career-proof'] }] }],
       },
       coverLetter: {
@@ -36,7 +36,7 @@ function fixture(overrides = {}, frozen = {}) {
         coverLetterArgument: { roleThesis: 'I can apply reporting-system experience to this reliable reporting work.', primaryEvidence: { evidence: 'Built reporting systems that reduced manual work.', evidenceRole: 'Software Engineer', relationToThesis: 'It proves direct reporting-system delivery.' } },
         generationAudit: { version: 1, finalDecisionSummary: 'The final review retained only source-supported reporting evidence.', coverLetterPlan: { paragraphs: [{ paragraph: 'I built reporting systems that reduced manual work.' }] } },
       },
-      finalReview: { decision: 'pass', findings: [], qualityReview: { checklistVersion: 3, criteria: [], resume: { decision: 'approved', rationale: 'The résumé keeps direct source-supported reporting evidence.' }, coverLetter: { decision: 'approved', rationale: 'One controlling argument uses minimum-sufficient evidence for target reporting work.' } } },
+      finalReview: { decision: 'pass', findings: [], qualityReview: { checklistVersion: APPLICATION_QUALITY_CHECKLIST_VERSION, criteria: [], resume: { decision: 'approved', rationale: 'The résumé keeps direct source-supported reporting evidence.' }, coverLetter: { decision: 'approved', rationale: 'One controlling argument uses minimum-sufficient evidence for target reporting work.' } } },
       ...overrides,
     },
   };
@@ -73,6 +73,30 @@ export default [
     },
   },
   {
+    name: 'Structured résumé date presentation only removes the proven Month, YYYY comma without changing source authority',
+    run() {
+      const sourceDate = 'May, 2023 – Present';
+      const sourceRole = { id: 'role-date-display', title: 'Engineer', company: 'Example Co', dates: sourceDate, location: '' };
+      const resume = {
+        schemaVersion: STRUCTURED_RESUME_SCHEMA_VERSION,
+        identity: { name: 'Candidate', contact: ['candidate@example.test'] },
+        roles: [{ ...sourceRole, bullets: [{ id: 'date-display-bullet', text: 'Built a supported workflow.', evidenceIds: ['career-proof'] }] }],
+      };
+      const html = renderStructuredApplicationResume(resume, {
+        sourceRoles: [sourceRole], evidenceCatalog: [{ id: 'career-proof', sourceId: 'career-data', quote: 'At Example Co, built a supported workflow.' }],
+        careerData: 'Candidate\nExample Co\nAt Example Co, built a supported workflow.',
+      });
+      const document = buildResumeDocument({ resumeMainHtml: html, trustedRenderedRoleDates: [formatRoleDateForPresentation(sourceDate)] });
+      assert(html.includes('May 2023 – Present') && !html.includes('May, 2023')
+        && sourceRole.dates === sourceDate && resume.roles[0].dates === sourceDate
+        && document.includes('May 2023 – Present')
+        && formatRoleDateForPresentation('2023, May') === '2023, May'
+        && formatRoleDateForPresentation('May 2023') === 'May 2023',
+      'the renderer presents only exact written month-year commas conventionally, keeps the source/draft date byte-for-byte intact, and the trusted date gate recognizes that host-owned display projection');
+      return { sourceDateUnchanged: true, displayDate: 'May 2023 – Present' };
+    },
+  },
+  {
     name: 'Paste application assembly renders host-owned HTML and exact evidence grounding',
     run() {
       const result = assemblePasteApplicationResult(fixture());
@@ -87,6 +111,100 @@ export default [
       assert(result.qualityReview.resume.decision === 'drafted' && result.qualityReview.coverLetter.decision === 'drafted',
         'the first legacy import remains a host-owned initial rendering snapshot while preserving the AI review rationale');
       return { rendered: true };
+    },
+  },
+  {
+    name: 'Current authority draft selection derives project permission from typed selected evidence and ignores hostile unknown nesting',
+    run() {
+      const fullAuthority = {
+        catalog: [
+          { id: 'role-proof', roleId: 'role-1' },
+          { id: 'project-proof', owner: { type: 'project', id: 'project-1' } },
+          { id: 'project-alternate-proof', owner: { type: 'project', id: 'project-1' } },
+          { id: 'project-two-proof', projectId: 'project-2' },
+        ],
+        skills: [],
+      };
+      const selection = {
+        selectedRoleIds: ['role-1'], selectedEvidenceIds: ['role-proof', 'project-proof', 'project-alternate-proof'],
+        selectedProjectIds: ['project-1'], selectedSkillIds: [],
+      };
+      let hostileUnknown = { evidenceIds: ['project-two-proof'] };
+      for (let index = 0; index < 20_000; index += 1) hostileUnknown = { unknown: hostileUnknown };
+      const acceptedResume = {
+        roles: [{ id: 'role-1', bullets: [{ id: 'bullet-1', evidenceIds: ['role-proof'] }] }],
+        projects: [{ id: 'rendered-project', evidenceIds: ['project-proof'] }], skills: [],
+        // Unknown fields are not an alternate citation schema. A deep hostile
+        // object must neither blow the stack nor smuggle an unselected ID.
+        hostileUnknown,
+      };
+      assertAuthorityDraftSelection({ fullAuthority, selection, resume: acceptedResume,
+        coverLetter: { paragraphs: [{ id: 'p1', evidenceIds: ['role-proof'] }] } });
+
+      const obligation = {
+        version: 1, priority: 'highest', projectId: 'project-1',
+        evidenceId: 'project-proof', requirementId: 'highest-requirement',
+      };
+      assertAuthorityDraftSelection({ fullAuthority, selection: { ...selection, resumeProjectObligation: obligation }, resume: acceptedResume,
+        coverLetter: { paragraphs: [{ id: 'p1', evidenceIds: ['role-proof'] }] } });
+      let wrongRequiredEvidenceRejected = false;
+      try {
+        assertAuthorityDraftSelection({ fullAuthority, selection: { ...selection, resumeProjectObligation: obligation },
+          resume: { ...acceptedResume, projects: [{ id: 'wrong-required-project-evidence', evidenceIds: ['project-alternate-proof'] }] },
+          coverLetter: { paragraphs: [{ id: 'p1', evidenceIds: ['role-proof'] }] } });
+      } catch (error) { wrongRequiredEvidenceRejected = /exact host-required project evidence/i.test(String(error?.message || error)); }
+
+      let projectRejected = false;
+      try {
+        assertAuthorityDraftSelection({ fullAuthority, selection,
+          resume: { ...acceptedResume, projects: [{ id: 'synthetic-project', evidenceIds: ['role-proof'] }] },
+          coverLetter: { paragraphs: [{ id: 'p1', evidenceIds: ['role-proof'] }] } });
+      } catch (error) { projectRejected = /selected typed project authority/i.test(String(error?.message || error)); }
+      let tamperedProjectionRejected = false;
+      try {
+        assertAuthorityDraftSelection({ fullAuthority,
+          selection: { ...selection, selectedEvidenceIds: ['role-proof', 'project-two-proof'] },
+          resume: acceptedResume, coverLetter: { paragraphs: [{ id: 'p1', evidenceIds: ['role-proof'] }] } });
+      } catch (error) { tamperedProjectionRejected = /typed project-authority projection/i.test(String(error?.message || error)); }
+      assert(projectRejected && tamperedProjectionRejected && wrongRequiredEvidenceRejected,
+        'a rendered project needs exactly one host-selected project owner, a required project cites its exact selected evidence row, and selectedProjectIds exactly derives from the typed selected evidence');
+      return { typedProject: true, hostileDepth: 20_000, syntheticRejected: projectRejected, exactRequiredEvidence: wrongRequiredEvidenceRejected };
+    },
+  },
+  {
+    name: 'Current authority draft selection permits only host-allowed frozen listing citations',
+    run() {
+      const selectedCareerEvidence = 'host.career.achievement.selected.1';
+      const unselectedCareerEvidence = 'host.career.achievement.unselected.1';
+      const fullAuthority = {
+        catalog: [
+          { id: selectedCareerEvidence, roleId: 'role-1' },
+          { id: unselectedCareerEvidence, roleId: 'role-1' },
+        ],
+        skills: [],
+      };
+      const selection = {
+        selectedRoleIds: ['role-1'], selectedProjectIds: [], selectedEducationIds: [],
+        selectedCertificationIds: [], selectedSkillIds: [], selectedEvidenceIds: [selectedCareerEvidence],
+      };
+      const resume = {
+        roles: [{ id: 'role-1', bullets: [{ id: 'bullet-1', evidenceIds: [selectedCareerEvidence] }] }],
+        projects: [], skills: [],
+      };
+      const coverLetter = evidenceIds => ({ paragraphs: [{ id: 'paragraph-1', evidenceIds }] });
+      const rejected = ({ evidenceIds, acceptedNonAuthorityEvidenceIds = ['p1-e1'] }) => {
+        try {
+          assertAuthorityDraftSelection({ fullAuthority, selection, acceptedNonAuthorityEvidenceIds, resume,
+            coverLetter: coverLetter(evidenceIds) });
+          return false;
+        } catch { return true; }
+      };
+      assert(!rejected({ evidenceIds: [selectedCareerEvidence, 'p1-e1'] })
+        && rejected({ evidenceIds: [selectedCareerEvidence, 'p1-forged'] })
+        && rejected({ evidenceIds: [unselectedCareerEvidence] })
+        && rejected({ evidenceIds: [unselectedCareerEvidence], acceptedNonAuthorityEvidenceIds: [unselectedCareerEvidence] }),
+      'a frozen p1-e listing citation is allowed, while forged listing-looking IDs and unselected pinned career evidence remain closed even if an invalid allowlist attempts to include it');
+      return { acceptedListingCitation: 'p1-e1', forgedListingRejected: true, unselectedCareerRejected: true };
     },
   },
   {
@@ -151,6 +269,57 @@ Personal Projects`;
       assert(html.includes('Loveland, Colorado') && rejectedCrossRoleEvidence && rejectedMixedCareerEvidence && rejectedCrossRoleLocation,
         'plain title-and-employer career sections bind each role to its own evidence and constrain blank trusted-role locations to that section');
       return { rejectedCrossRoleEvidence, rejectedMixedCareerEvidence, rejectedCrossRoleLocation };
+    },
+  },
+  {
+    name: 'Snapshot role-ID headings scope repeated employers to their own career evidence',
+    run() {
+      const repeatedEmployerCareerData = `# Career Profile
+
+## Work Experience
+
+### Software Engineer — Acme [Role ID: role-acme-engineer]
+Acme — Toronto, Ontario
+Dates: January 2020 — Present
+- Built the production Python service for customer reporting.
+
+### Engineering Intern — Acme [Role ID: role-acme-intern]
+Acme — Toronto, Ontario
+Dates: May 2019 — August 2019
+- Built the internal JavaScript dashboard for support teams.
+`;
+      const repeatedEmployerRoles = [
+        { id: 'role-acme-engineer', title: 'Software Engineer', company: 'Acme', dates: 'January 2020 — Present', location: '' },
+        { id: 'role-acme-intern', title: 'Engineering Intern', company: 'Acme', dates: 'May 2019 — August 2019', location: '' },
+      ];
+      const repeatedEmployerResume = {
+        schemaVersion: STRUCTURED_RESUME_SCHEMA_VERSION,
+        identity: { name: 'Ada Lovelace', contact: ['ada@example.test'] },
+        roles: [
+          { id: 'role-acme-engineer', title: 'Software Engineer', company: 'Acme', dates: 'January 2020 — Present', location: '', bullets: [{ id: 'engineer-bullet', text: 'Built the production Python service for customer reporting.', evidenceIds: ['engineer-proof'] }] },
+          { id: 'role-acme-intern', title: 'Engineering Intern', company: 'Acme', dates: 'May 2019 — August 2019', location: '', bullets: [{ id: 'intern-bullet', text: 'Built the internal JavaScript dashboard for support teams.', evidenceIds: ['intern-proof'] }] },
+        ],
+        skills: [{ id: 'skills-languages', group: 'Languages', items: ['Python', 'JavaScript'], evidenceIds: ['engineer-proof', 'intern-proof'] }],
+      };
+      const repeatedEmployerContext = {
+        sourceRoles: repeatedEmployerRoles,
+        careerData: repeatedEmployerCareerData,
+        evidenceCatalog: [
+          { id: 'engineer-proof', sourceId: 'career-data', quote: 'Built the production Python service for customer reporting.' },
+          { id: 'intern-proof', sourceId: 'career-data', quote: 'Built the internal JavaScript dashboard for support teams.' },
+          { id: 'job-need', sourceId: 'job-listing', quote: 'Build reliable customer reporting systems.' },
+        ],
+      };
+      const html = renderStructuredApplicationResume(repeatedEmployerResume, repeatedEmployerContext);
+      let rejectedCrossRoleEvidence = false;
+      try {
+        const invalid = structuredClone(repeatedEmployerResume);
+        invalid.roles[0].bullets[0].evidenceIds = ['intern-proof'];
+        renderStructuredApplicationResume(invalid, repeatedEmployerContext);
+      } catch { rejectedCrossRoleEvidence = true; }
+      assert(html.includes('production Python service') && rejectedCrossRoleEvidence,
+        'exact immutable role-ID markers take precedence over employer-name matching, so one Acme role cannot cite another Acme role’s evidence');
+      return { repeatedEmployerScoped: rejectedCrossRoleEvidence };
     },
   },
   {
@@ -289,7 +458,7 @@ Personal Projects`;
     name: 'Paste application assembly preserves exact multiline source quotes',
     run() {
       const value = fixture();
-      value.careerData = 'Ada Lovelace\nada@example.test\nSoftware Engineer\nBuilt reporting\n systems that reduced manual work.';
+      value.careerData = 'Ada Lovelace\nada@example.test\n## Analytical Engines\nSoftware Engineer\n\nBuilt reporting\n systems that reduced manual work.';
       value.paste.evidencePlan.evidence[0].quote = 'Built reporting\n systems that reduced manual work.';
       const result = assemblePasteApplicationResult(value);
       assert(result.qualityReview.sourceGrounding.resumeBullets[0].careerDataQuotes[0] === 'Built reporting\n systems that reduced manual work.',
@@ -310,7 +479,7 @@ Personal Projects`;
       const context = {
         sourceRoles: [{ id: 'role-1', title: 'Engineer', company: 'Acme', dates: '', location: '' }],
         evidenceCatalog: [{ id: 'career-proof', sourceId: 'career-data', quote: 'Built analytics reporting dashboards that reduced manual work.' }],
-        careerData: 'Ada Lovelace\nada@example.test\n# Personal Projects\n## Dashboards\n- Analytics reporting dashboards\nBuilt analytics reporting dashboards that reduced manual work.\n# Skills\nGoogle',
+        careerData: 'Ada Lovelace\nada@example.test\n# Acme\nEngineer\n\nBuilt analytics reporting dashboards that reduced manual work.\n# Personal Projects\n## Dashboards\n- Analytics reporting dashboards\nBuilt analytics reporting dashboards that reduced manual work.\n# Skills\nGoogle',
       };
       const html = renderStructuredApplicationResume(resume, context);
       let rejectedListingOnlyProject = false;
@@ -679,7 +848,7 @@ Personal Projects`;
       };
       const context = {
         sourceRoles: [{ id: 'role-1', title: 'Engineer', company: 'Acme', dates: '', location: '' }],
-        careerData: 'Ada Lovelace\nada@example.test\n# Personal Projects\n## Dashboards\n- Analytics reporting dashboards\nBuilt analytics reporting dashboards that reduced manual work.',
+        careerData: 'Ada Lovelace\nada@example.test\n# Acme\nEngineer\n\nBuilt analytics reporting dashboards that reduced manual work.\n# Personal Projects\n## Dashboards\n- Analytics reporting dashboards\nBuilt analytics reporting dashboards that reduced manual work.',
       };
       const posting = { id: 'job-analytics', sourceId: 'job-listing', quote: 'analytics reporting ownership' };
       const unrelated = { id: 'job-unrelated', sourceId: 'job-listing', quote: 'warehouse logistics scheduling' };
@@ -829,6 +998,7 @@ Personal Projects`;
           { id: 'r2', title: 'Software Engineer', company: 'Difference Machines', dates: '2018 – 2021', location: '', bullets: [{ id: 'b2', text: 'Shipped the billing service with automated alerts.', evidenceIds: ['e2'] }] },
           { id: 'r3', title: 'Engineer', company: 'Third Works', dates: '2016 – 2018', location: '', bullets: [{ id: 'b3', text: 'Ran the ledger migration for the finance team.', evidenceIds: ['e3'] }] },
         ],
+        skills: [{ id: 's1', group: 'Tools', items: ['JavaScript', 'Docker'], evidenceIds: ['e4'] }],
       });
       const rejection = (resume) => {
         try { renderStructuredApplicationResume(resume, context); return ''; } catch (error) { return String(error?.message || error); }
@@ -901,7 +1071,7 @@ Personal Projects`;
       const longOffendersMessage = rejection(longOffenders);
       assert(longOffendersMessage.includes(longItem(1)) && !longOffendersMessage.includes(longItem(2))
         && longOffendersMessage.includes('skills[0] item "2-Lexicographic') && longOffendersMessage.includes('…')
-        && longOffendersMessage.length < 1_000,
+        && longOffendersMessage.length < 1_500,
       `a sibling offender is clipped to its locating label while the first offender keeps its full wording (${longOffendersMessage.length} chars)`);
       return { rolesBatched: 3, collectionsBatched: 4, pathologicalChars: pathologicalMessage.length, clippedChars: longOffendersMessage.length };
     },
@@ -1062,7 +1232,7 @@ Personal Projects`;
       for (let round = 0; round < rounds; round += 1) {
         const fuzzed = good();
         fuzzed.projects = [{ id: 'p1', name: 'reporting pipeline', description: 'Built the reporting pipeline for nightly batches.', evidenceIds: ['e1'] }];
-        fuzzed.skills = [{ id: 's1', group: 'Tools', items: ['pipeline'], evidenceIds: ['e1'] }];
+        fuzzed.skills = [{ id: 's1', group: 'Tools', items: ['JavaScript', 'Docker'], evidenceIds: ['e4'] }];
         for (let edit = 0; edit < 1 + Math.floor(random() * 4); edit += 1) {
           const all = walk(fuzzed);
           if (!all.length) break;
@@ -1100,7 +1270,7 @@ Personal Projects`;
   {
     name: 'Paste application assembly produces a clean first-import result for the legacy validator',
     run() {
-      const cleanCareerData = 'Ada Lovelace\nada@example.test\nEngineer\nBuilt supported systems.\nI built supported systems for the teams that depend on them. The engineering was in matching the constraints those teams set rather than my own preferences. I would apply that delivery work to the reliable supported systems this role needs.';
+      const cleanCareerData = 'Ada Lovelace\nada@example.test\n## Acme\nEngineer\n\nBuilt supported systems.\nI built supported systems for the teams that depend on them. The engineering was in matching the constraints those teams set rather than my own preferences. I would apply that delivery work to the reliable supported systems this role needs.';
       const sourceRoles = [{ id: 'role-1', title: 'Engineer', company: 'Acme', dates: '', location: '' }];
       const paragraphs = ['I built supported systems for the teams that depend on them. The engineering was in matching the constraints those teams set rather than my own preferences. I would apply that delivery work to the reliable supported systems this role needs.'];
       const audit = {
@@ -1301,7 +1471,7 @@ Personal Projects`;
         'a quote whose corpus form wraps is present for the validator, as it is for the assembly');
       const assembled = (() => {
         try {
-          assemblePasteApplicationResult(fixture({}, { careerData: `${careerData.split('\n').slice(0, 3).join('\n')}\nBuilt reporting systems\nthat reduced manual work.` }));
+          assemblePasteApplicationResult(fixture({}, { careerData: 'Ada Lovelace\nada@example.test\n## Analytical Engines\nSoftware Engineer\n\nBuilt reporting systems\nthat reduced manual work.' }));
           return null;
         } catch (error) { return error; }
       })();
@@ -1421,7 +1591,7 @@ Personal Projects`;
         ['the frozen identity is absent from the corpus', 'candidate identity', () => fixture({ trustedIdentity: { name: 'Someone Else Entirely', contact: ['ada@example.test'], subtitleRole: 'Software Engineer', credential: '' } })],
         ['the frozen identity has no contact list', 'candidate identity', () => fixture({ trustedIdentity: { name: 'Ada Lovelace', contact: 'ada@example.test', subtitleRole: 'Software Engineer', credential: '' } })],
         ['the job input is not a record', 'input record', () => fixture({}, { input: 'job-1' })],
-        ['the job input has no trusted roles', 'input record', () => fixture({}, { input: { version: 1, jobId: 'job-1', sourceRoles: [] } })],
+        ['the job input has no trusted role list', 'input record', () => fixture({}, { input: { version: 1, jobId: 'job-1', sourceRoles: 'not-a-list' } })],
         ['the job input has no job id', 'input record', () => fixture({}, { input: { version: 1, jobId: '   ', sourceRoles } })],
         // The renderer grades this list too, but it reaches it through the
         // résumé, so a defect in it reported there reads as a résumé defect.
@@ -1504,28 +1674,49 @@ Personal Projects`;
     },
   },
   {
-    name: 'Frozen state the queue writes is accepted by the grader that ends the job',
+    name: 'Frozen state rejects oversized evidence without clipping and normalizes bounded queue inputs',
     async run() {
       const root = await fs.promises.realpath(await fs.promises.mkdtemp(path.join(os.tmpdir(), 'paste-frozen-source-')));
       const canvasFilePath = path.join(root, 'Canvas.json');
       await fs.promises.writeFile(canvasFilePath, '{}', 'utf8');
-      // Every value below is one the QUEUE accepts: a corpus past the ceiling
-      // this module grades against, a DEL in both frozen sources, and saved
-      // role text past the renderer's short-text ceiling. Each one used to
-      // reach assembly as a job-integrity fault whose only named action —
-      // press Generate — rebuilt the same files through the same writer and
-      // reproduced it, turning a correction round into a four-handoff loop.
+      // A source past the frozen cap must not become an undisclosed prefix in
+      // the handoff. Bounded sources still receive the normal safe-control and
+      // short role-field normalization before the final grader sees them.
       const del = String.fromCharCode(127);
+      // End the renderer-ceiling prefix at a word boundary. This still
+      // exercises clipping, while leaving a literal role heading that a
+      // legacy text import can safely recognize instead of asking the scope
+      // validator to treat a mid-token truncation as an employer identity.
+      const oversizedRoleTitle = `${'t'.repeat(STRUCTURED_RESUME_LIMITS.chars.shortText)} overflow`;
+      const oversizedRoleEmployer = `${'e'.repeat(STRUCTURED_RESUME_LIMITS.chars.shortText)} overflow`;
+      // This fixture exercises queue-time short-field normalization. Its
+      // source corpus must still describe that fabricated role; otherwise an
+      // attribution failure would hide the intended source-size assertion.
+      const oversizedRoleCareerData = `Ada Lovelace\nada@example.test\n## ${oversizedRoleEmployer}\n${oversizedRoleTitle}\n\nBuilt reporting systems that reduced manual work.`;
       const oversizedCorpus = `${careerData}\nArchive note${del} retained.\n${'Maintained the reporting corpus. '.repeat(9_000)}`;
+      let oversizedError = null;
+      try {
+        await queueLocalApplicationJob({
+          transport: 'paste',
+          canvasFilePath,
+          careerData: oversizedCorpus,
+          job: { title: 'Reporting Engineer', company: 'Acme Reporting', snippet: 'Build reliable reporting systems.' },
+          resumeProfile: { workHistory: [{ id: 'role-1', title: 'Software Engineer', employer: 'Analytical Engines', startDate: '2020', endDate: '2024' }] },
+        });
+      } catch (error) { oversizedError = error; }
+      assert(oversizedCorpus.length > MAX_FROZEN_SOURCE_CHARS
+        && /too large to freeze without omitting evidence/i.test(oversizedError?.message || ''),
+      'an oversized career corpus is rejected before a handoff can silently omit its tail');
+
       const queued = await queueLocalApplicationJob({
         transport: 'paste',
         canvasFilePath,
-        careerData: oversizedCorpus,
+        careerData: `${oversizedRoleCareerData}\nArchive note${del} retained.`,
         job: { title: 'Reporting Engineer', company: 'Acme Reporting', snippet: `Build reliable reporting systems.\nShift${del} coverage.` },
         resumeProfile: { workHistory: [{
           id: 'role-1',
-          title: `Software Engineer ${'and platform reliability specialist '.repeat(12)}`,
-          employer: `Analytical Engines ${'worldwide holdings '.repeat(20)}`,
+          title: oversizedRoleTitle,
+          employer: oversizedRoleEmployer,
           startDate: '2020', endDate: '2024',
         }] },
       });
@@ -1534,8 +1725,8 @@ Personal Projects`;
       const frozenCareerData = await fs.promises.readFile(path.join(queued.folder, 'context', 'career-data.txt'), 'utf8');
       const frozenJobListing = await fs.promises.readFile(path.join(queued.folder, 'context', 'job-listing.md'), 'utf8');
       const frozenRole = frozenInput.sourceRoles[0];
-      assert(oversizedCorpus.length > MAX_FROZEN_SOURCE_CHARS && frozenCareerData.length === MAX_FROZEN_SOURCE_CHARS,
-        `the queue writes a frozen source at the same ceiling this module grades it against (${frozenCareerData.length} of ${MAX_FROZEN_SOURCE_CHARS})`);
+      assert(frozenCareerData.length < MAX_FROZEN_SOURCE_CHARS,
+        `the queue preserves the complete bounded source (${frozenCareerData.length} below ${MAX_FROZEN_SOURCE_CHARS})`);
       assert(frozenRole.title.length === STRUCTURED_RESUME_LIMITS.chars.shortText
         && frozenRole.company.length === STRUCTURED_RESUME_LIMITS.chars.shortText,
       `the queue writes role short text at the renderer's own ceiling (${frozenRole.title.length}/${frozenRole.company.length} of ${STRUCTURED_RESUME_LIMITS.chars.shortText})`);
@@ -1585,7 +1776,7 @@ Personal Projects`;
       // dates and location would satisfy the writer's budget while starving
       // the gate that requires the location, which is why this is the
       // assertion that matters most here, not the render alone.
-      const roundTripCareerData = 'Thomson School District — Loveland, Colorado\nSoftware Engineer\nBuilt attendance reporting for district staff.';
+      const roundTripCareerData = '## Thomson School District — Loveland, Colorado\nSoftware Engineer\n\nBuilt attendance reporting for district staff.';
       const roundTripRoles = [{ id: 'thomson', title: 'Software Engineer', company: 'Thomson School District', dates: '2023-05 – 2026-06', location: '' }];
       const resume = {
         schemaVersion: STRUCTURED_RESUME_SCHEMA_VERSION,
@@ -1726,6 +1917,416 @@ Personal Projects`;
       assert(contactRow.includes('ada@example.test') && !/citizenship/i.test(contactRow) && !/visa/i.test(contactRow) && !/sponsorship/i.test(contactRow),
         `the rendered contact row keeps the reachable channel and drops the application-logistics values (contactRow=${contactRow})`);
       return { contactRow };
+    },
+  },
+  {
+    // Root cause this whole gate exists to prevent: the career corpus wrote
+    // "Tech used: python" (lowercase) and "Typescript" (one quote) while the
+    // posting said "Are proficient in Python and TypeScript". Nothing required
+    // a posting-named, career-attested name to reach the rendered block, and
+    // the résumé prompt claimed items had to occur "verbatim", so a real
+    // generation dropped exactly the two names whose corpus casing disagreed.
+    name: 'Posting-named, career-attested technology names must appear in the skills block',
+    run() {
+      const sourceRoles = [{ id: 'role-1', title: 'Software Engineer', company: 'Analytical Engines', dates: '2020 – 2024', location: '' }];
+      const catalog = () => [
+        { id: 'ev-report', sourceId: 'career-data', quote: 'Built the reporting systems.' },
+        { id: 'ev-python', sourceId: 'career-data', quote: 'Tech used: python' },
+        { id: 'ev-ticketing', sourceId: 'career-data', quote: 'Built the ticketing UI. Tech used: React, Typescript' },
+        { id: 'ev-sql', sourceId: 'career-data', quote: 'Wrote SQL for the reporting database.' },
+        { id: 'ev-need', sourceId: 'job-listing', quote: 'Are proficient in Python and TypeScript', priority: 'highest' },
+      ];
+      const careerData = 'Ada Lovelace\nada@example.test\n## Analytical Engines\nSoftware Engineer\n\nBuilt the reporting systems.\nTech used: python\nWrote SQL for the reporting database.\nBuilt the ticketing UI. Tech used: React, Typescript';
+      const context = () => ({ sourceRoles, evidenceCatalog: catalog(), careerData });
+      const draft = (skills) => ({
+        schemaVersion: STRUCTURED_RESUME_SCHEMA_VERSION,
+        identity: { name: 'Ada Lovelace', contact: ['ada@example.test'] },
+        roles: [{ id: 'role-1', title: 'Software Engineer', company: 'Analytical Engines', dates: '2020 – 2024', location: '', bullets: [{ id: 'bullet-1', text: 'Built the reporting systems.', evidenceIds: ['ev-report'] }] }],
+        skills,
+      });
+      const reject = (skills, overrides = {}) => {
+        try { renderStructuredApplicationResume(draft(skills), { ...context(), ...overrides }); return ''; } catch (error) { return String(error?.message || error); }
+      };
+
+      const onlySqlAndReact = reject([
+        { id: 's1', group: 'languages', items: ['SQL'], evidenceIds: ['ev-sql'] },
+        { id: 's2', group: 'frameworks', items: ['React'], evidenceIds: ['ev-ticketing'] },
+      ]);
+      assert(onlySqlAndReact.includes('Python') && onlySqlAndReact.includes('TypeScript'),
+        `a block that drops the posting-named names is rejected naming Python and TypeScript (got ${onlySqlAndReact})`);
+      assert(!onlySqlAndReact.includes('Typescript') && !onlySqlAndReact.includes('python'),
+        `the rejection names only canonical vocabulary spellings, never the corpus's "Typescript" or lowercase "python" (got ${onlySqlAndReact})`);
+      assert(!onlySqlAndReact.includes(POSTING_NAMED_SKILL_TERMS.join(', ')),
+        'the rejection never prints the full closed vocabulary list');
+
+      const carryingBoth = reject([
+        { id: 's1', group: 'languages', items: ['Python'], evidenceIds: ['ev-python'] },
+        { id: 's2', group: 'frameworks', items: ['TypeScript', 'React'], evidenceIds: ['ev-ticketing'] },
+        { id: 's3', group: 'data', items: ['SQL'], evidenceIds: ['ev-sql'] },
+      ]);
+      assert(carryingBoth === '', `a block carrying every posting-required and prioritized career-attested name in canonical spelling is accepted (got ${carryingBoth})`);
+
+      const carryingPython3 = reject([
+        { id: 's1', group: 'languages', items: ['Python 3'], evidenceIds: ['ev-python3'] },
+        { id: 's2', group: 'frameworks', items: ['TypeScript', 'React'], evidenceIds: ['ev-ticketing'] },
+        { id: 's3', group: 'data', items: ['SQL'], evidenceIds: ['ev-sql'] },
+      ], { evidenceCatalog: [...catalog(), { id: 'ev-python3', sourceId: 'career-data', quote: 'Tooling: Python 3 and pytest.' }] });
+      assert(carryingPython3 === '', `an item that embeds a required whole term (Python 3) still satisfies the rule (got ${carryingPython3})`);
+
+      const noBlock = reject(undefined);
+      assert(noBlock.includes('Python') && noBlock.includes('TypeScript'),
+        `a résumé with no skills block at all is rejected for every required name (got ${noBlock})`);
+
+      return { onlySqlAndReactRejected: true, carryingBothAccepted: true, carryingPython3Accepted: true, noBlockRejected: true };
+    },
+  },
+  {
+    name: 'Posting-named term matching is whole-term and case-sensitive only for ordinary-English-word names',
+    run() {
+      const sourceRoles = [{ id: 'role-1', title: 'Software Engineer', company: 'Analytical Engines', dates: '2020 – 2024', location: '' }];
+      const careerData = 'Ada Lovelace\nada@example.test\n## Analytical Engines\nSoftware Engineer\n\nBuilt the reporting systems.';
+      const draft = () => ({
+        schemaVersion: STRUCTURED_RESUME_SCHEMA_VERSION,
+        identity: { name: 'Ada Lovelace', contact: ['ada@example.test'] },
+        roles: [{ id: 'role-1', title: 'Software Engineer', company: 'Analytical Engines', dates: '2020 – 2024', location: '', bullets: [{ id: 'bullet-1', text: 'Built the reporting systems.', evidenceIds: ['ev-report'] }] }],
+      });
+      // The career quote in each case below attests a recognised technology, so
+      // the résumé owes a skills block; each case carries the one row its own
+      // quote states, which leaves the posting-named rule under test the only
+      // thing that can reject it.
+      const accept = (evidenceCatalog, skills) => {
+        try {
+          renderStructuredApplicationResume({ ...draft(), skills }, { sourceRoles, evidenceCatalog, careerData });
+          return true;
+        } catch (error) { return String(error?.message || error); }
+      };
+
+      const spring = accept([
+        { id: 'ev-report', sourceId: 'career-data', quote: 'Built the reporting systems.' },
+        { id: 'ev-spring', sourceId: 'career-data', quote: 'Primary framework: Spring' },
+        { id: 'ev-need', sourceId: 'job-listing', quote: 'a spring release' },
+      ], [{ id: 's1', group: 'frameworks', items: ['Spring'], evidenceIds: ['ev-spring'] }]);
+      assert(spring === true, 'a lowercase "spring" in the posting never requires the case-sensitive framework Spring');
+
+      const java = accept([
+        { id: 'ev-report', sourceId: 'career-data', quote: 'Built the reporting systems.' },
+        { id: 'ev-js', sourceId: 'career-data', quote: 'JavaScript front-ends' },
+        { id: 'ev-need', sourceId: 'job-listing', quote: 'Java services' },
+      ], [{ id: 's1', group: 'languages', items: ['JavaScript'], evidenceIds: ['ev-js'] }]);
+      assert(java === true, 'a listing naming Java is not satisfied by "JavaScript" in career data (whole-term, no substring match)');
+
+      const sql = accept([
+        { id: 'ev-report', sourceId: 'career-data', quote: 'Built the reporting systems.' },
+        { id: 'ev-pg', sourceId: 'career-data', quote: 'PostgreSQL reporting' },
+        { id: 'ev-need', sourceId: 'job-listing', quote: 'SQL queries' },
+      ], [{ id: 's1', group: 'databases', items: ['PostgreSQL'], evidenceIds: ['ev-pg'] }]);
+      assert(sql === true, 'a listing naming SQL is not satisfied by "PostgreSQL" in career data (whole-term, no substring match)');
+
+      return { springCaseSensitive: spring === true, javaWholeTerm: java === true, sqlWholeTerm: sql === true };
+    },
+  },
+  {
+    name: 'Posting-named term requirement stands down without a source-tagged catalog',
+    run() {
+      const sourceRoles = [{ id: 'role-1', title: 'Software Engineer', company: 'Analytical Engines', dates: '2020 – 2024', location: '' }];
+      const careerData = 'Ada Lovelace\nada@example.test\n## Analytical Engines\nSoftware Engineer\n\nBuilt the reporting systems.';
+      const draft = () => ({
+        schemaVersion: STRUCTURED_RESUME_SCHEMA_VERSION,
+        identity: { name: 'Ada Lovelace', contact: ['ada@example.test'] },
+        roles: [{ id: 'role-1', title: 'Software Engineer', company: 'Analytical Engines', dates: '2020 – 2024', location: '', bullets: [{ id: 'bullet-1', text: 'Built the reporting systems.', evidenceIds: ['ev-report'] }] }],
+      });
+      const accept = (evidenceCatalog) => {
+        try { renderStructuredApplicationResume(draft(), { sourceRoles, evidenceCatalog, careerData }); return ''; } catch (error) { return String(error?.message || error); }
+      };
+
+      const careerOnly = accept([
+        { id: 'ev-report', sourceId: 'career-data', quote: 'Built the reporting systems.' },
+        { id: 'ev-python', sourceId: 'career-data', quote: 'Tech used: python' },
+      ]);
+      assert(careerOnly === '', 'a catalog with no job-listing source stands the rule down rather than guessing (career-only catalogue)');
+
+      const stringIds = accept(['ev-report']);
+      assert(stringIds === '', 'a plain string-id catalog cannot say which quotes came from the posting, so the rule stands down');
+
+      return { careerOnlyStandsDown: careerOnly === '', stringIdsStandDown: stringIds === '' };
+    },
+  },
+  {
+    // Root cause this gate exists to prevent: a "Full Stack Developer" posting
+    // that names no technology made the posting-named rule demand nothing, and
+    // a real generation shipped a résumé with only Python while the accepted
+    // career evidence also stated React, Django and Docker Compose. Presence
+    // alone is not quality: ATS skill fields are extracted off this index.
+    name: 'A résumé must carry the bounded prioritized career-attested skill index, not merely one token',
+    run() {
+      const sourceRoles = [{ id: 'role-1', title: 'Software Engineer', company: 'Analytical Engines', dates: '2020 – 2024', location: '' }];
+      const genericListing = { id: 'ev-need', sourceId: 'job-listing', quote: 'Participates in agile development teams to build and maintain software solutions.', priority: 'highest' };
+      const catalog = () => [
+        { id: 'ev-report', sourceId: 'career-data', quote: 'Built the reporting systems.' },
+        { id: 'ev-python', sourceId: 'career-data', quote: 'Tech used: python' },
+        { id: 'ev-hub', sourceId: 'career-data', quote: 'Built the internal hub with React, Django and Docker Compose.' },
+        genericListing,
+      ];
+      const careerData = 'Ada Lovelace\nada@example.test\n## Analytical Engines\nSoftware Engineer\n\nBuilt the reporting systems.\nTech used: python\nBuilt the internal hub with React, Django and Docker Compose.';
+      const draft = (skills) => ({
+        schemaVersion: STRUCTURED_RESUME_SCHEMA_VERSION,
+        identity: { name: 'Ada Lovelace', contact: ['ada@example.test'] },
+        roles: [{ id: 'role-1', title: 'Software Engineer', company: 'Analytical Engines', dates: '2020 – 2024', location: '', bullets: [{ id: 'bullet-1', text: 'Built the reporting systems.', evidenceIds: ['ev-report'] }] }],
+        ...(skills === undefined ? {} : { skills }),
+      });
+      const attempt = (skills, evidenceCatalog = catalog()) => {
+        try { renderStructuredApplicationResume(draft(skills), { sourceRoles, evidenceCatalog, careerData }); return ''; } catch (error) { return String(error?.message || error); }
+      };
+
+      assert(postingNamedAttestedSkillTerms(catalog()).length === 0, 'precondition: the generic posting names no attested technology, so the coverage rule demands nothing');
+      const absent = attempt(undefined);
+      assert(absent.includes('skills omits Python, Docker Compose, React, Django') && absent.includes('bounded career-attested index'),
+        `a draft with no skills key is rejected with the complete bounded index it owes (got ${absent})`);
+      const emptyArray = attempt([]);
+      assert(emptyArray.includes('skills omits Python, Docker Compose, React, Django'), `an empty skills array owes the same complete index (got ${emptyArray})`);
+
+      const oneRow = attempt([{ id: 's1', group: 'languages', items: ['Python'], evidenceIds: ['ev-python'] }]);
+      assert(oneRow.includes('skills omits Docker Compose, React, Django'), `a one-item compliance gesture is rejected with the evidence-backed terms it dropped (got ${oneRow})`);
+      const complete = attempt([
+        { id: 's1', group: 'languages', items: ['Python'], evidenceIds: ['ev-python'] },
+        { id: 's2', group: 'frameworks', items: ['React', 'Django'], evidenceIds: ['ev-hub'] },
+        { id: 's3', group: 'infrastructure', items: ['Docker Compose'], evidenceIds: ['ev-hub'] },
+      ]);
+      assert(complete === '', `the complete, source-grounded four-term index passes (got ${complete})`);
+
+      // Satisfiable by construction: nothing to index means nothing demanded.
+      const nothingAttested = attempt(undefined, [
+        { id: 'ev-report', sourceId: 'career-data', quote: 'Built the reporting systems.' },
+        genericListing,
+      ]);
+      assert(nothingAttested === '', `a plan whose career quotes state no recognised technology stands the floor down (got ${nothingAttested})`);
+
+      // Same stand-downs as the coverage rule: without both halves of a
+      // source-tagged catalog the rule cannot tell it is in the paste workflow.
+      const careerOnly = attempt(undefined, catalog().filter(entry => entry.sourceId === 'career-data'));
+      assert(careerOnly === '', `a catalog with no job-listing source stands the floor down (got ${careerOnly})`);
+      const stringIds = attempt(undefined, ['ev-report']);
+      assert(stringIds === '', `a string-id catalog stands the floor down (got ${stringIds})`);
+
+      // The posting-specific wording remains for its own omission while the
+      // breadth rule names only the additional career-attested terms.
+      const postingNamed = attempt(undefined, [...catalog(), { id: 'ev-need-py', sourceId: 'job-listing', quote: 'Proficient in Python', priority: 'highest' }]);
+      assert(postingNamed.includes('skills omits Python')
+        && postingNamed.includes('skills omits Docker Compose, React, Django from the bounded career-attested index'),
+      `posting-named and additional career coverage are both actionable without duplicating Python (got ${postingNamed})`);
+
+      return { absentRejected: true, emptyArrayRejected: true, oneRowRejected: true, completeAccepted: true, standsDown: true };
+    },
+  },
+  {
+    name: 'requiredCareerAttestedSkillTerms prioritizes posting matches, then evidence priority and order, within the bounded index',
+    run() {
+      const catalog = [
+        { id: 'l', sourceId: 'job-listing', quote: 'Python services for dependable identity decisions.', priority: 'highest' },
+        { id: 'c-low', sourceId: 'career-data', quote: 'Built a React interface with TypeScript.', priority: 'supporting' },
+        { id: 'c-high', sourceId: 'career-data', quote: 'Operated Django, Nginx, Gunicorn and Docker Compose services.', priority: 'high' },
+        { id: 'c-python', sourceId: 'career-data', quote: 'Automated Python and SQL reporting.', priority: 'supporting' },
+      ];
+      const required = requiredCareerAttestedSkillTerms(catalog);
+      assert(JSON.stringify(required) === JSON.stringify(['Python', 'Docker Compose', 'Nginx', 'Gunicorn', 'Django', 'TypeScript', 'React', 'SQL']),
+        `posting matches lead, then career terms follow evidence priority/order without redundant Docker (got ${JSON.stringify(required)})`);
+      const missing = missingRequiredCareerSkillTerms([{ items: ['Python', 'Docker Compose', 'Django'] }], catalog);
+      assert(JSON.stringify(missing) === JSON.stringify(['Nginx', 'Gunicorn', 'TypeScript', 'React', 'SQL']),
+        `the missing-index helper reports every required name the rendered block lacks (got ${JSON.stringify(missing)})`);
+      assert(required.length <= MAX_REQUIRED_CAREER_SKILL_TERMS, 'the prioritized index stays inside its published cap');
+      return { required, cap: MAX_REQUIRED_CAREER_SKILL_TERMS };
+    },
+  },
+  {
+    name: 'careerAttestedSkillTerms lists vocabulary names in vocabulary order under the per-name case rule and stands down without both sources',
+    run() {
+      const catalog = [
+        { id: 'l', sourceId: 'job-listing', quote: 'Build software.' },
+        { id: 'c1', sourceId: 'career-data', quote: 'Built it with Django and React; also Tech used: python' },
+        { id: 'c2', sourceId: 'career-data', quote: 'A swift migration during a spring release.' },
+        { id: 'c3', sourceId: 'career-data', quote: 'Wrote reports for the Javascript front-end.' },
+      ];
+      assert(JSON.stringify(careerAttestedSkillTerms(catalog)) === JSON.stringify(['Python', 'JavaScript', 'React', 'Django']),
+        `names come back in vocabulary order, matched whole-term; lowercase "swift" and "spring" attest nothing (got ${JSON.stringify(careerAttestedSkillTerms(catalog))})`);
+      assert(careerAttestedSkillTerms(catalog.filter(entry => entry.sourceId === 'career-data')).length === 0, 'no job-listing source: stands down');
+      assert(careerAttestedSkillTerms(catalog.filter(entry => entry.sourceId === 'job-listing')).length === 0, 'no career-data source: nothing attested');
+      assert(careerAttestedSkillTerms(undefined).length === 0 && careerAttestedSkillTerms(['a']).length === 0, 'non-catalog input yields no names and never throws');
+      return { vocabularyOrder: true };
+    },
+  },
+  {
+    name: 'postingNamedAttestedSkillTerms orders by priority then listing order and caps at ten',
+    run() {
+      const career = { id: 'c', sourceId: 'career-data', quote: 'Tech used: TypeScript, Python, JavaScript, Java, Kotlin, Swift, Scala, Ruby, PHP, Rust' };
+      const listing = [
+        { id: 'l1', sourceId: 'job-listing', quote: 'Python scripting', priority: 'high' },
+        { id: 'l2', sourceId: 'job-listing', quote: 'TypeScript UI', priority: 'highest' },
+        { id: 'l3', sourceId: 'job-listing', quote: 'JavaScript runtime', priority: 'high' },
+        { id: 'l4', sourceId: 'job-listing', quote: 'Java services', priority: 'supporting' },
+      ];
+      assert(JSON.stringify(postingNamedAttestedSkillTerms([...listing, career])) === JSON.stringify(['TypeScript', 'Python', 'JavaScript', 'Java']),
+        'higher priority is listed first, then the first listing entry, no matter the vocabulary order');
+
+      const twelve = ['Python', 'TypeScript', 'JavaScript', 'Java', 'Kotlin', 'Swift', 'Scala', 'Ruby', 'PHP', 'Rust', 'Golang', 'C++'];
+      const cappedCatalog = [
+        { id: 'need', sourceId: 'job-listing', quote: `Required: ${twelve.join(', ')}`, priority: 'highest' },
+        { id: 'c', sourceId: 'career-data', quote: `Tech used: ${twelve.join(', ')}` },
+      ];
+      assert(postingNamedAttestedSkillTerms(cappedCatalog).length === MAX_REQUIRED_POSTING_SKILL_TERMS
+        && JSON.stringify(postingNamedAttestedSkillTerms(cappedCatalog)) === JSON.stringify(twelve.slice(0, MAX_REQUIRED_POSTING_SKILL_TERMS)),
+        'twelve posting-named, career-attested names are capped to exactly ten, in priority/listing order');
+
+      const missing = missingPostingNamedSkillTerms(
+        [{ items: ['Python', 'SQL'] }, { items: ['TypeScript'] }],
+        [...listing, career],
+      );
+      assert(JSON.stringify(missing) === JSON.stringify(['JavaScript', 'Java']),
+        'missingPostingNamedSkillTerms returns only the required names no item carries');
+
+      const noCatalog = postingNamedAttestedSkillTerms(undefined);
+      assert(JSON.stringify(noCatalog) === JSON.stringify([]), 'a non-array catalog yields no required names');
+      return { ordering: true, cap: MAX_REQUIRED_POSTING_SKILL_TERMS, missing: 2 };
+    },
+  },
+  {
+    name: 'Snapshot skill evidence uses approved novel names and keeps short ambiguous names source-limited',
+    run() {
+      const snapshotSkills = {
+        version: 'career-snapshot-skills.v1',
+        skills: [
+          { id: 'skill-novel', name: 'ZyzzyvaDB', indexEligible: true, evidenceSegmentIds: ['segment-0001'] },
+          { id: 'skill-c', name: 'C', indexEligible: true, evidenceSegmentIds: ['segment-0002'] },
+        ],
+      };
+      const catalog = [
+        { id: 'listing-novel', sourceId: 'job-listing', quote: 'Operate ZyzzyvaDB storage.', priority: 'highest' },
+        { id: 'listing-prose', sourceId: 'job-listing', quote: 'Candidates can communicate clearly.', priority: 'highest' },
+        { id: 'career-novel', sourceId: 'career-data', quote: 'Built ZyzzyvaDB storage migrations.', priority: 'high' },
+        { id: 'career-c', sourceId: 'career-data', quote: 'Maintained C services for embedded devices.', priority: 'supporting' },
+      ];
+      assert(JSON.stringify(postingNamedAttestedSkillTerms(catalog, snapshotSkills)) === JSON.stringify(['ZyzzyvaDB']),
+        'a snapshot-backed run requires an approved novel technology without falling back to the closed list or mistaking lowercase prose for C');
+      assert(JSON.stringify(requiredCareerAttestedSkillTerms(catalog, snapshotSkills)) === JSON.stringify(['ZyzzyvaDB', 'C']),
+        'the complete snapshot index retains only names the accepted career evidence actually states');
+      assert(JSON.stringify(missingRequiredCareerSkillTerms([{ items: ['ZyzzyvaDB'] }], catalog, snapshotSkills)) === JSON.stringify(['C']),
+        'dynamic missing-term checks use the frozen approved set rather than the legacy vocabulary');
+      const lowercaseContext = {
+        sourceRoles: [{ id: 'role-npm', title: 'Engineer', company: 'Acme', dates: '2020 – 2024', location: '' }],
+        careerData: 'Ada Lovelace\nada@example.test\n## Acme\nEngineer\n\nBuilt npm packages for internal services.',
+        evidenceCatalog: [
+          { id: 'career-npm', sourceId: 'career-data', quote: 'Built npm packages for internal services.' },
+          { id: 'listing-npm', sourceId: 'job-listing', quote: 'Maintain package tooling.' },
+        ],
+        careerSkillEvidence: {
+          version: 'career-snapshot-skills.v1',
+          skills: [{ id: 'skill-npm', name: 'npm', indexEligible: null, evidenceSegmentIds: ['segment-0003'] }],
+        },
+      };
+      const lowercaseDraft = {
+        schemaVersion: STRUCTURED_RESUME_SCHEMA_VERSION,
+        identity: { name: 'Ada Lovelace', contact: ['ada@example.test'] },
+        roles: [{ id: 'role-npm', title: 'Engineer', company: 'Acme', dates: '2020 – 2024', location: '', bullets: [{ id: 'bullet-npm', text: 'Built npm packages for internal services.', evidenceIds: ['career-npm'] }] }],
+        skills: [{ id: 'skills-npm', group: 'tools', items: ['npm'], evidenceIds: ['career-npm'] }],
+      };
+      assert(renderStructuredApplicationResume(lowercaseDraft, lowercaseContext).includes('npm'),
+        'an exact lowercase approved snapshot name bypasses the legacy uppercase-or-digit heuristic');
+      let normalizedAliasRejected = false;
+      try { renderStructuredApplicationResume({ ...lowercaseDraft, skills: [{ ...lowercaseDraft.skills[0], items: ['NPM'] }] }, lowercaseContext); } catch { normalizedAliasRejected = true; }
+      assert(normalizedAliasRejected, 'snapshot mode rejects a capitalization-normalized alias instead of inventing a new skill spelling');
+      return { novelRequired: true, shortTokenSourceLimited: true, lowercaseApproved: true };
+    },
+  },
+  {
+    name: 'Snapshot skill evidence v2 is a direct-only inventory and v1 remains an isolated historical reader',
+    run() {
+      const catalog = [
+        { id: 'listing-cedar', sourceId: 'job-listing', quote: 'Operate Cedar infrastructure.', priority: 'highest' },
+        { id: 'career-cedar', sourceId: 'career-data', quote: 'Maintained Cedar infrastructure directly.' },
+      ];
+      const directInventory = {
+        version: CAREER_SNAPSHOT_SKILL_EVIDENCE_VERSION,
+        skills: [{
+          id: 'skill-cedar', name: 'Cedar', capabilityKind: 'platform', supportMode: 'direct',
+          directEvidenceSegmentIds: ['segment-0001'], indexEligible: true, evidenceSegmentIds: ['segment-0001'],
+        }],
+      };
+      const historical = {
+        version: CAREER_SNAPSHOT_HISTORICAL_SKILL_EVIDENCE_VERSION,
+        skills: [{ id: 'skill-elm', name: 'Elm', indexEligible: true, evidenceSegmentIds: ['segment-0002'] }],
+      };
+      let qualifiedRejected = false;
+      try {
+        postingNamedAttestedSkillTerms(catalog, {
+          version: CAREER_SNAPSHOT_SKILL_EVIDENCE_VERSION,
+          skills: [{
+            id: 'skill-juniper', name: 'Juniper', capabilityKind: 'platform', supportMode: 'relationship-qualified',
+            directEvidenceSegmentIds: [], indexEligible: false, evidenceSegmentIds: ['segment-0003'],
+          }],
+        });
+      } catch { qualifiedRejected = true; }
+      assert(JSON.stringify(postingNamedAttestedSkillTerms(catalog, directInventory)) === JSON.stringify(['Cedar'])
+        && JSON.stringify(postingNamedAttestedSkillTerms(catalog, historical)) === JSON.stringify([])
+        && qualifiedRejected,
+      'v2 accepts only direct, index-eligible inventory rows, rejects relation-qualified rows instead of flattening them into keyword matching, and keeps the explicit v1 reader separate');
+      return { v2DirectOnly: true, v1Historical: true };
+    },
+  },
+  {
+    name: 'POSTING_NAMED_SKILL_TERMS is a frozen duplicate-free filterable vocabulary',
+    run() {
+      assert(Object.isFrozen(POSTING_NAMED_SKILL_TERMS), 'the vocabulary is frozen against drift');
+      assert(new Set(POSTING_NAMED_SKILL_TERMS).size === POSTING_NAMED_SKILL_TERMS.length, 'the vocabulary has no duplicate names');
+      const filterable = /[\p{Lu}\p{N}]/u;
+      assert(POSTING_NAMED_SKILL_TERMS.every(name => filterable.test(name)),
+        'every vocabulary name carries an uppercase letter or digit, so the filterable-item rule can always accept it');
+      const caseSensitive = ['Ruby', 'Swift', 'Rust', 'Dart', 'Julia', 'Spark', 'Spring', 'Flask', 'Angular', 'Azure', 'Groovy'];
+      assert(caseSensitive.every(name => POSTING_NAMED_SKILL_TERMS.includes(name)),
+        'every case-sensitive name is a member of the closed vocabulary');
+      assert(MAX_REQUIRED_POSTING_SKILL_TERMS === 10, 'the cap is exactly ten');
+      return { terms: POSTING_NAMED_SKILL_TERMS.length, caseSensitive: caseSensitive.length };
+    },
+  },
+  {
+    // The whole-term/case tests above only prove the NEGATIVE side (nothing is
+    // required), which would also hold if the rule never fired in those
+    // fixtures. These are their positive controls: the same shape, but with the
+    // posting and the career evidence naming the term in matching form.
+    name: 'Posting-named term matching requires the name when listing and career evidence state it in matching form',
+    run() {
+      const sourceRoles = [{ id: 'role-1', title: 'Software Engineer', company: 'Analytical Engines', dates: '2020 – 2024', location: '' }];
+      const careerData = 'Ada Lovelace\nada@example.test\nSoftware Engineer\nBuilt the reporting systems.';
+      const draft = () => ({
+        schemaVersion: STRUCTURED_RESUME_SCHEMA_VERSION,
+        identity: { name: 'Ada Lovelace', contact: ['ada@example.test'] },
+        roles: [{ id: 'role-1', title: 'Software Engineer', company: 'Analytical Engines', dates: '2020 – 2024', location: '', bullets: [{ id: 'bullet-1', text: 'Built the reporting systems.', evidenceIds: ['ev-report'] }] }],
+      });
+      const rejection = (listingQuote, careerQuote) => {
+        try {
+          renderStructuredApplicationResume(draft(), {
+            sourceRoles,
+            evidenceCatalog: [
+              { id: 'ev-report', sourceId: 'career-data', quote: 'Built the reporting systems.' },
+              { id: 'ev-career', sourceId: 'career-data', quote: careerQuote },
+              { id: 'ev-need', sourceId: 'job-listing', quote: listingQuote },
+            ],
+            careerData,
+          });
+          return '';
+        } catch (error) { return String(error?.message || error); }
+      };
+
+      const spring = rejection('Spring services', 'Primary framework: Spring');
+      assert(spring.includes('skills omits Spring:'),
+        `a capitalised "Spring" in the posting and in career data does require the case-sensitive framework (got ${spring})`);
+      const java = rejection('Java services', 'Java and JavaScript');
+      assert(java.includes('skills omits Java:')
+        && !java.slice(0, java.indexOf('skills omits JavaScript')).includes('JavaScript'),
+      `the posting-specific rule requires whole-term Java without mistaking JavaScript for that posting match; the separate bounded career index may still retain JavaScript (got ${java})`);
+      const sql = rejection('SQL queries', 'SQL and PostgreSQL reporting');
+      assert(sql.includes('skills omits SQL:')
+        && !sql.slice(0, sql.indexOf('skills omits PostgreSQL')).includes('PostgreSQL'),
+      `the posting-specific rule requires whole-term SQL without mistaking PostgreSQL for that posting match; the separate bounded career index may still retain PostgreSQL (got ${sql})`);
+      return { spring: true, java: true, sql: true };
     },
   },
 ];

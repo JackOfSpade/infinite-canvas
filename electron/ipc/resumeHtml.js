@@ -57,6 +57,19 @@ import { ledgerById, derivationTooltip } from '../../src/utils/achievementLedger
 // because importing structuredResume.js from here closes a cycle back through
 // jobApplication.js → resumeRender.js → this file.
 import { titleCaseSkillGroupLabel } from './skillGroupLabel.js';
+import { enDashIsRange } from './dashRanges.js';
+// Posting-variant bounds and the URL policy have exactly ONE definition, in
+// applicationBundle.js — the same module that renders the Markdown companion.
+// The workspace bundle JSON and the rendered link list must not drift from it,
+// so this file re-uses the shared normalizer instead of a second copy.
+import {
+  normaliseJobPostingVariants,
+  normalizeJobListingExternalUrl,
+  MAX_POSTING_VARIANTS,
+  MAX_POSTING_VARIANT_URL_LENGTH,
+  MAX_POSTING_VARIANT_FIELD_LENGTH,
+  MAX_POSTING_VARIANT_LOCATION_LENGTH,
+} from './applicationBundle.js';
 
 const { app } = electronPkg;
 
@@ -401,14 +414,31 @@ function candidateText(value) {
     .trim();
 }
 
-function enDashIsRange(text, index) {
-  const before = text.slice(Math.max(0, index - 32), index);
-  const after = text.slice(index + 1, index + 34);
-  // A date range may name the month on both sides ("May 2023 – June 2026"),
-  // not only use a bare year or "Present" as the right endpoint.
-  const month = '(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)';
-  return /\d\s*$/.test(before)
-    && new RegExp(`^\\s*(?:\\d|present\\b|${month}\\.?\\s+\\d{4}\\b)`, 'i').test(after);
+function candidateResumeText(value, trustedRenderedRoleDates) {
+  const document = new JSDOM(String(value || '')).window.document;
+  // A class name alone is not authority. The host may provide a source-locked
+  // date set only after the structured résumé's exact sourceRoles comparison;
+  // then, and only then, mask the exact date portion of a documented role
+  // header cell. A folded location remains candidate copy and cannot hide a
+  // dash behind its cell's trusted date prefix.
+  const trustedDates = [...new Set(
+    Array.isArray(trustedRenderedRoleDates)
+      ? trustedRenderedRoleDates.map((date) => String(date || '').replace(/\s+/g, ' ').trim()).filter(Boolean)
+      : [],
+  )].sort((left, right) => right.length - left.length);
+  if (trustedDates.length) {
+    document.querySelectorAll('article.role > .role-header > p.role-dates')
+      .forEach((element) => {
+        const visible = String(element.textContent || '').replace(/\s+/g, ' ').trim();
+        const trustedDate = trustedDates.find((date) => {
+          if (visible === date) return true;
+          return visible.startsWith(date) && /^\s*·\s*/u.test(visible.slice(date.length));
+        });
+        if (!trustedDate) return;
+        element.textContent = visible.slice(trustedDate.length);
+      });
+  }
+  return candidateText(document.body.innerHTML);
 }
 
 // Collected, not thrown one at a time. Each dash problem is independent of the
@@ -433,9 +463,9 @@ function dashPunctuationProblems(text, surface) {
 }
 
 /** Enforce the design system's candidate-copy dash gate before document build. */
-export function assertCandidateDashPunctuation({ resumeMainHtml = '', coverLetter = null } = {}) {
+export function assertCandidateDashPunctuation({ resumeMainHtml = '', coverLetter = null, trustedRenderedRoleDates = null } = {}) {
   const problems = [];
-  const resume = candidateText(resumeMainHtml);
+  const resume = candidateResumeText(resumeMainHtml, trustedRenderedRoleDates);
   if (resume) problems.push(...dashPunctuationProblems(resume, 'Résumé copy'));
   if (coverLetter && typeof coverLetter === 'object') {
     const cover = candidateText([
@@ -861,6 +891,8 @@ const INJECTED_CHROME_CSS = `
 .ic-workspace-title { margin: 0; color: inherit; font: 600 24px/1.1 Georgia, "Times New Roman", serif; }
 .ic-workspace-context { margin: 8px 0 18px; color: #cfc2b0; font-size: 12px; }
 .ic-job-posting-link { display: inline-flex; align-items: center; margin: -8px 0 18px; color: #f7f1e6; font-size: 12px; font-weight: 600; text-underline-offset: 3px; }
+.ic-job-posting-links { display: flex; flex-direction: column; gap: 6px; margin: -8px 0 18px; }
+.ic-job-posting-links .ic-job-posting-link { margin: 0; }
 .ic-job-posting-link:hover { color: #fffaf0; }
 .ic-workspace-sidebar .ic-toolbar { position: static; display: grid; grid-template-columns: 1fr; gap: 8px; padding: 0; background: transparent; }
 .ic-workspace-sidebar .ic-toolbar .ic-btn { min-height: 34px; text-align: left; }
@@ -1167,6 +1199,28 @@ function safeJobPostingUrl(value) {
   } catch { return ''; }
 }
 
+// ---------------------------------------------------------------------------
+// Posting variants (multi-location consolidation targets)
+// ---------------------------------------------------------------------------
+//
+// A consolidated card carries `job.postingVariants`: one bounded entry per
+// safe mirror of the SAME posting. These are application TARGETS for the one
+// shared description — the renderer lists them beside a single résumé and
+// cover letter, never as separate documents. Bounds, plain-object gating,
+// control-character stripping, URL canonicalisation, and dedup all come from
+// the single shared definition in applicationBundle.js; this module re-exports
+// the limits and aliases the normalizer so callers/tests have one place to
+// look and the two artifacts cannot drift.
+export {
+  MAX_POSTING_VARIANTS,
+  MAX_POSTING_VARIANT_URL_LENGTH,
+  MAX_POSTING_VARIANT_FIELD_LENGTH,
+  MAX_POSTING_VARIANT_LOCATION_LENGTH,
+};
+
+/** Bound and de-duplicate posting variants for the inert bundle JSON. */
+export const normalisePostingVariants = normaliseJobPostingVariants;
+
 // A résumé HTML file is intentionally standalone: people routinely open it
 // directly from its application folder. A browser cannot write that file, so
 // Sync uses a narrowly-scoped localhost capability created by the Electron
@@ -1281,6 +1335,7 @@ export function normaliseResumeDownloadBundle(raw = {}) {
     candidateName: safePart(raw.candidateName, 'Application'),
     jobUrl: safeJobPostingUrl(raw.jobUrl),
     jobMarkdown: String(raw.jobMarkdown || '').replace(/\r\n/g, '\n'),
+    postingVariants: normalisePostingVariants(raw.postingVariants),
     resumePdfBase64,
     coverLetterPdfBase64,
     sync,
@@ -1563,7 +1618,7 @@ function injectInferredSkills(mainHtml, insights, showAllVerifySkills = false) {
   return mainHtml.replace(/<\/main>\s*$/i, `${fallback}</main>`);
 }
 
-function buildSkillWorkspace({ skillInsights, skillHistogram, jobContext, jobUrl, skillOpportunityError, coverLetterCheckSummary }) {
+function buildSkillWorkspace({ skillInsights, skillHistogram, jobContext, jobUrl, postingVariants, skillOpportunityError, coverLetterCheckSummary }) {
   const insights = normaliseSkillInsights(skillInsights);
   const rawRole = skillInsights?.role && typeof skillInsights.role === 'object' ? skillInsights.role : {};
   const matchedRoleId = String(rawRole.matchedRoleId || '').trim();
@@ -1586,9 +1641,27 @@ function buildSkillWorkspace({ skillInsights, skillHistogram, jobContext, jobUrl
   const context = [title, company].filter(Boolean).join(' · ')
     || (contextRoles.length ? `Tailored for ${contextRoles.join(' · ')}` : 'Review high-value adjacent skills before export.');
   const safeOriginalJobUrl = safeJobPostingUrl(jobUrl);
-  const originalJobLink = safeOriginalJobUrl
-    ? `<a class="ic-job-posting-link" href="${escapeHtml(safeOriginalJobUrl)}" target="_blank" rel="noopener noreferrer">View original job posting</a>`
+  // Multi-location consolidation: a card may carry several safe mirror
+  // targets for the ONE shared posting. Render one link per target, labelled
+  // with its location, and keep the exact legacy label for a single/legacy
+  // URL so already-generated callers and tests are untouched. Unsafe URLs are
+  // dropped rather than rendered. All links stay target=_blank with noopener
+  // noreferrer and inherit the print-neutral .ic-job-posting-link styling.
+  const safePostingVariants = normalisePostingVariants(postingVariants);
+  const postingLinkTargets = safePostingVariants
+    .map(variant => ({
+      url: normalizeJobListingExternalUrl(variant.url) || normalizeJobListingExternalUrl(variant.googleCardUrl),
+      location: String(variant.location || '').trim(),
+    }))
+    .filter(target => target.url);
+  const postingLinks = postingLinkTargets.length > 1
+    ? postingLinkTargets.map(target => `<a class="ic-job-posting-link" href="${escapeHtml(target.url)}" target="_blank" rel="noopener noreferrer">View original job posting — ${escapeHtml(target.location || 'Unspecified location')}</a>`)
+    : [];
+  const singlePostingUrl = safeOriginalJobUrl || (postingLinkTargets.length === 1 ? postingLinkTargets[0].url : '');
+  const originalJobLink = singlePostingUrl
+    ? `<a class="ic-job-posting-link" href="${escapeHtml(singlePostingUrl)}" target="_blank" rel="noopener noreferrer">View original job posting</a>`
     : '';
+  const postingLinksBlock = postingLinks.length ? `<div class="ic-job-posting-links">${postingLinks.join('\n')}</div>` : '';
   const card = (item) => `<article class="ic-insight-card${item.kind === 'learn' ? ' ic-learn-card' : ''}" data-ic-insight="${escapeHtml(item.id)}" data-ic-kind="${item.kind}">
   <p class="ic-insight-skill">${escapeHtml(item.skill)}</p>
   <p class="ic-insight-meta">${escapeHtml(item.importance || 'high')} impact · ${item.kind === 'verify' ? 'nearby — verify first' : 'learn first'}</p>
@@ -1629,7 +1702,7 @@ function buildSkillWorkspace({ skillInsights, skillHistogram, jobContext, jobUrl
   <p class="ic-workspace-kicker">Application workspace</p>
   <h1 class="ic-workspace-title">Application, with receipts.</h1>
   <p class="ic-workspace-context">${escapeHtml(context)}</p>
-  ${originalJobLink}
+  ${postingLinksBlock || originalJobLink}
   ${coverLetterCheckSummary ? `<p class="ic-panel-note" role="status">${escapeHtml(coverLetterCheckSummary)}</p>` : ''}
   <div id="ic-skill-workspace-data" data-ic-workspace="${escapeHtml(json)}" hidden></div>
   <div class="ic-toolbar" role="toolbar" aria-label="Document controls">
@@ -2351,6 +2424,8 @@ ${editableRuntimeSanitizerSource()}
  * @param {string} args.resumeMainHtml  the model's raw `<main class="page">…</main>` output
  * @param {string} [args.variantAttrs]  override for the resolved data-print/data-mono/data-page attrs
  * @param {Array}  [args.ledger]        the hub's achievement ledger (or null — receipts degrade to stripped ids)
+ * @param {string[]} [args.trustedRenderedRoleDates] Host-derived sourceRole
+ *   dates, supplied only after exact structured-role validation.
  * @param {string} [args.docId]         stable id for this document, namespaces localStorage autosave (§5.5)
  * @param {Array|object} [args.skillInsights] High-impact `verify` / `learn`
  *   candidates generated for this job. Verify candidates require a user
@@ -2371,7 +2446,7 @@ ${editableRuntimeSanitizerSource()}
  *   Final interactive documents leave this false and require explicit review.
  * @returns {string}
  */
-export function buildResumeDocument({ resumeMainHtml, variantAttrs, ledger, docId, skillInsights, skillHistogram, jobContext, skillOpportunityError, coverLetterCheckSummary, showAllVerifySkills = false, downloadBundle, coverLetter } = {}) {
+export function buildResumeDocument({ resumeMainHtml, variantAttrs, ledger, docId, skillInsights, skillHistogram, jobContext, skillOpportunityError, coverLetterCheckSummary, showAllVerifySkills = false, downloadBundle, coverLetter, trustedRenderedRoleDates = null } = {}) {
   let main = String(resumeMainHtml || '').trim();
   // Defensive: accept a fenced response, but let the DOM-based sanitizer find
   // the one real <main> element. Regex extraction is unsafe here: a script or
@@ -2384,12 +2459,13 @@ export function buildResumeDocument({ resumeMainHtml, variantAttrs, ledger, docI
   main = sanitizeDocumentMainHtml(main, { documentKind: 'resume', allowHostState: false });
   main = stripMainVariantAttrs(main);
   main = neutralizeHighlightTextEmphasis(main);
-  assertCandidateDashPunctuation({ resumeMainHtml: main, coverLetter });
+  assertCandidateDashPunctuation({ resumeMainHtml: main, coverLetter, trustedRenderedRoleDates });
   // Resolve/strip receipts BEFORE anything else touches the markup (§4.3 step 3).
   main = injectReceipts(main, ledger);
   const bundle = normaliseResumeDownloadBundle(downloadBundle);
   const workspace = buildSkillWorkspace({
     skillInsights, skillHistogram, jobContext, jobUrl: bundle.jobUrl,
+    postingVariants: bundle.postingVariants,
     skillOpportunityError, coverLetterCheckSummary,
   });
   main = injectInferredSkills(main, workspace.insights, showAllVerifySkills);
@@ -2757,7 +2833,7 @@ ${letterMain}
 
 /**
  * Startup assertion for the résumé design-system coupling surface (§9).
- * `Job Application Design System/` is owned by Claude design, read-only from this
+ * `Job Application Design System/` is owned by an external design source, read-only from this
  * repo's side, and may be replaced wholesale — reconnection is done manually
  * and deliberately. This function's job is NOT to heal anything; it exists to
  * say "a reconnect is needed" instead of letting the app silently generate

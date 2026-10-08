@@ -1,4 +1,4 @@
-import { HANDOFF_CONCURRENCY } from '../../../src/utils/handoffScheduler.js';
+import { DEFAULT_HANDOFF_CONCURRENCY, MAX_HANDOFF_CONCURRENCY } from '../../../src/utils/handoffScheduler.js';
 
 // The bridge deliberately keeps operational values in one inert module.  The
 // names carry their units so callers do not accidentally compare milliseconds
@@ -59,7 +59,6 @@ export const CONSTANTS = Object.freeze({
   SNAPSHOT_TTL_MS: 15_000,
   HOST_POLL_MS: 4_000,
   HOST_SILENT_MS: 10 * 60_000,
-  MAX_CONSECUTIVE_WAITS: 10,
   WAIT_COUNTER_RESET_IDLE_MS: 90_000,
   VERDICT_CACHE_MS: 60_000,
   RETAINED_BYTES_TTL_MS: 10 * 60_000,
@@ -74,31 +73,17 @@ export const CONSTANTS = Object.freeze({
   VALIDATION_ERROR_MAX_ITEMS: 30,
   VALIDATION_ERROR_MAX_CHARS: 1500,
 
-  // Keep the bridge's chat roster and the workflow scheduler on the same
-  // single source of truth. A worker cap change must not require hunting down
-  // a second numeric limit in transport policy.
-  MAX_LANES: HANDOFF_CONCURRENCY,
+  // A hard validation fence for worker ordinals. Actual live parallelism is
+  // negotiated from limits.maxConcurrentHandoffs; it defaults conservatively
+  // to HANDOFF_CONCURRENCY and can never exceed this reviewable bound.
+  MAX_LANES: MAX_HANDOFF_CONCURRENCY,
+  DEFAULT_MAX_CONCURRENT_HANDOFFS: DEFAULT_HANDOFF_CONCURRENCY,
   CODE_INDEX_PER_LANE: 16,
   APPLICATION_MAX_JUNK_STREAK: 5,
   APPLICATION_ERROR_STREAK: 3,
   SUBMIT_CONCURRENCY: 2,
   TOMBSTONES_PER_ENGINE: 64,
   PUSH_TOMBSTONE_RING: 500,
-  JOBS_PER_CHAT: 2,
-  JOBS_PER_CHAT_MIN: 1,
-  // A count cap sitting on top of a byte budget that already adapts to payload
-  // size. The bytes are the real fence -- canAssign() checks both -- so a hard
-  // ceiling of 3 only meant a new chat every three application bundles however
-  // small they were. Raised to the lane ceiling; the default stays 2, so this
-  // widens what can be chosen rather than changing anyone's behaviour.
-  JOBS_PER_CHAT_MAX: HANDOFF_CONCURRENCY,
-  // Conversation-byte rollover is deliberately opt-in. It used to force a
-  // fresh ChatGPT starter after roughly 900 KB of otherwise valid bridge
-  // traffic, which made a worker pool unable to drain a long-lived run. The
-  // transport and per-response caps above remain the security boundary; a
-  // positive persisted value still enables an operator's explicit rollover.
-  EPOCH_SOFT_BYTES: 0,
-  EPOCH_HARD_BYTES: 0,
   STALL_NOTICE_MS: 5 * 60_000,
   // Ended chats remembered by digest (in memory, and persisted as retired-chats.json
   // so a chat from before a restart still reads as ended). Matches MAX_RETIRED_CHATS

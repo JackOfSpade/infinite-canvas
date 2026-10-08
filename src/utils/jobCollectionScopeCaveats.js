@@ -45,7 +45,20 @@ export function collectionScopeCaveatsFromCompletedManifestSources(sources) {
 export function hydrateCollectionScopeCaveatsIntoSourceResults(sourceResults, caveats) {
   const target = sourceResults && typeof sourceResults === 'object' ? sourceResults : {};
   if (!hasGlassdoorCountryScopeCaveat(caveats)) return target;
-  target.glassdoor = { ...(target.glassdoor || {}), locationScopeUnenforced: true };
+  // A done Glassdoor that staged no rows has no entry yet (recovery only seeds
+  // sources that own staged jobs), so this creates it. Give it the full
+  // per-source result shape: the Glassdoor gate and every later stage read
+  // `jobs`/`warnings`/`stopReasons` unguarded, and a caveat-only stub crashed
+  // the resume with "Cannot read properties of undefined (reading 'length')".
+  target.glassdoor = {
+    jobs: [],
+    errors: 0,
+    warnings: [],
+    pagesWalked: 0,
+    stopReasons: new Set(),
+    ...(target.glassdoor || {}),
+    locationScopeUnenforced: true,
+  };
   return target;
 }
 

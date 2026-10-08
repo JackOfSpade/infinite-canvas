@@ -905,7 +905,7 @@ function mergeGradedCriteria(priorList, deltaList, criteriaCatalog, staleSinceBa
  * real final documents. requiredPasteReviewDeltaEntries is what keeps that
  * caught case rare, not what makes it safe.
  */
-export function mergePasteReviewDelta(baselineReview, delta, staleSinceBaseline, criteria) {
+export function mergePasteReviewDelta(baselineReview, delta, staleSinceBaseline, criteria, { currentAuthority = false } = {}) {
   const errors = [];
   const prior = baselineReview && typeof baselineReview === 'object' ? baselineReview : {};
   const deltaObj = delta && typeof delta === 'object' ? delta : {};
@@ -947,6 +947,9 @@ export function mergePasteReviewDelta(baselineReview, delta, staleSinceBaseline,
 
   const priorAudit = prior.generationAudit || {};
   const deltaAudit = deltaObj.generationAudit || {};
+  if (currentAuthority && Object.prototype.hasOwnProperty.call(deltaAudit, 'jobPriorities')) {
+    errors.push('Current-authority deltas must not include generationAudit.jobPriorities; immutable disposition receipts are host-owned.');
+  }
   // jobPriorities cannot be scoped to "its own" document the way the other
   // unverifiable fields can — a disposition may name EITHER document
   // regardless of which one a patch touched — so it cannot be merged
@@ -956,10 +959,10 @@ export function mergePasteReviewDelta(baselineReview, delta, staleSinceBaseline,
   // (localAiApplication.js) additionally checks the supplied array actually
   // COVERS every requirement the baseline covered, before this function ever
   // runs; this function only guards against an empty or missing one.
-  const jobPriorities = eitherStale
+  const jobPriorities = currentAuthority ? null : eitherStale
     ? (Array.isArray(deltaAudit.jobPriorities) && deltaAudit.jobPriorities.length ? deltaAudit.jobPriorities : null)
     : (deltaAudit.jobPriorities ?? priorAudit.jobPriorities ?? null);
-  if (jobPriorities == null) {
+  if (!currentAuthority && jobPriorities == null) {
     errors.push(eitherStale
       ? 'generationAudit.jobPriorities must be resupplied whole because a patch changed a document its dispositions describe; a prior disposition cannot be verified against the changed document and none of them can be carried forward piecemeal.'
       : 'generationAudit.jobPriorities was not supplied by the delta and the prior review has none to carry forward.');
@@ -1022,7 +1025,7 @@ export function mergePasteReviewDelta(baselineReview, delta, staleSinceBaseline,
       qualityReview: { checklistVersion, criteria: criteriaEntries, resume: resumeReview, coverLetter: coverLetterReview },
       generationAudit: {
         version: auditVersion,
-        jobPriorities,
+        ...(currentAuthority ? {} : { jobPriorities }),
         resumePlan,
         coverLetterPlan: { controllingThesis, paragraphs },
         finalDecisionSummary,

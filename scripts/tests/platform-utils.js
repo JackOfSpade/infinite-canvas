@@ -1,4 +1,4 @@
-import { _resetLaunchCollisions, _resetRateLimiter, appendJobsHistory, applyRefuteVerdicts, assert, atsSafePdfFontExpression, autosaveDebounceMs, beginMarketplaceStatusRun, bestMarketplaceStatusColumnCount, buildCoverLetterDocument, buildResumeDocument, buildScoredJob, cancelNodeTasksRecursively, cancelTimeout, clamp, CODE_EXT_RE, collectMarketplaceListings, completeMarketplaceStatusPlatform, computeLedger, CONDITION_VALUES, decryptSecret, dedupAgainstHistory, deepAddElements, deepUpdateNode, DEFAULT_CONDITION, derivationTooltip, deriveTimeoutBudget, detectAntiBotSignal, detectApiAntiBotSignal, docSaveDebounceMs, effectiveConcurrency, electronPkg, encryptSecret, extractDomain, filterJobsByAge, FINGERPRINT_PROFILES, finishMarketplaceStatusRun, formatConditionForPricingPrompt, formatConditionGuideForPrompt, fs, generateId, getCanonicalDomain, getCanvasData, getConditionDef, getEnvValue, getKnownTaskIds, getLaunchCollisions, getMarketplaceStatusActiveRuns, getNodeDims, getNodesBounds, getRandomUA, getRateLimiterSnapshot, getSessionProfile, isAllowedOpenFileExt, isCoolingDown, isExistingFile, isProfileLockCollision, isSensitivePath, isWithinDirectory, LANGUAGE_LABELS, languageLabel, LEDGER_CAP, ledgerById, loadJobsHistory, MARKETPLACE_STATUS_GRID, marketplaceListingsSignature, marketplaceStatusCheckingIds, marketplaceStatusNodeWidth, markManualSolveRequired, matchesNoResultsSentinel, maxUndoHistory, mergeMarketplaceStatusResults, mergeSettingsSection, mergeSourceIntoComps, MINING_TARGET, normalizeQuoteText, normalizeRoleFamilyExperienceBandCache, os, parseAiJson, parsePostedDate, parseScopeEnvBoolean, path, pdfContainsType3Fonts, PDFDocument, PDFLib, pickEdgeHandles, PLAIN_TEXT_EXT, PRODUCT_CONDITIONS, PRODUCT_IMAGE_EXT_RE, publishMarketplaceStatusCheckingIds, readPlainTextDocument, recordLaunchCollision, recordOutcome, replaceTimeout, resetManualSolveTracking, retryWarningRequiringAction, roleFamilyExperienceBandCacheEntry, splitCareerDataByFile, stripConditionFromGeneratedTitle, strokePoints, structuralEdge, subscribeMarketplaceStatusCheckingIds, taskModelRoutingSnapshot, TIMINGS, updateResolvedSourceWarning, wasManualSolveRequired, wrapUntrustedText } from '../test-dependencies.js';
+import { _resetLaunchCollisions, _resetRateLimiter, appendJobsHistory, applyRefuteVerdicts, assert, atsSafePdfFontExpression, autosaveDebounceMs, beginMarketplaceStatusRun, bestMarketplaceStatusColumnCount, buildCoverLetterDocument, buildResumeDocument, buildScoredJob, cancelNodeTasksRecursively, cancelTimeout, clamp, CODE_EXT_RE, collectMarketplaceListings, completeMarketplaceStatusPlatform, computeLedger, CONDITION_VALUES, decryptSecret, dedupAgainstHistory, deepAddElements, deepUpdateNode, DEFAULT_CONDITION, derivationTooltip, deriveTimeoutBudget, detectAntiBotSignal, detectApiAntiBotSignal, docSaveDebounceMs, effectiveConcurrency, electronPkg, encryptSecret, extractDomain, filterJobsByAge, FINGERPRINT_PROFILES, finishMarketplaceStatusRun, formatConditionForPricingPrompt, formatConditionGuideForPrompt, fs, generateId, getCanonicalDomain, getCanvasData, getConditionDef, getEnvValue, getKnownTaskIds, getLaunchCollisions, getMarketplaceStatusActiveRuns, getNodeDims, getNodesBounds, getRandomUA, getRateLimiterSnapshot, getSessionProfile, isAllowedOpenFileExt, isCoolingDown, isExistingFile, isProfileLockCollision, isSensitivePath, isWithinDirectory, LANGUAGE_LABELS, languageLabel, LEDGER_CAP, ledgerById, loadJobsHistory, MARKETPLACE_STATUS_GRID, marketplaceListingsSignature, marketplaceStatusCheckingIds, marketplaceStatusNodeWidth, markManualSolveRequired, matchesNoResultsSentinel, maxUndoHistory, mergeMarketplaceStatusResults, mergeRendererJobsSettingsUpdate, mergeSettingsSection, mergeSourceIntoComps, MINING_TARGET, normalizeQuoteText, normalizeRoleFamilyExperienceBandCache, os, parseAiJson, parsePostedDate, parseScopeEnvBoolean, path, pdfContainsType3Fonts, PDFDocument, PDFLib, pickEdgeHandles, PLAIN_TEXT_EXT, PRODUCT_CONDITIONS, PRODUCT_IMAGE_EXT_RE, publishMarketplaceStatusCheckingIds, readPlainTextDocument, recordLaunchCollision, recordOutcome, rendererJobsSettingsSnapshot, rendererJobsSettingsUpdate, rendererStoreSnapshot, replaceTimeout, resetManualSolveTracking, retryWarningRequiringAction, roleFamilyExperienceBandCacheEntry, splitCareerDataByFile, stripConditionFromGeneratedTitle, strokePoints, structuralEdge, subscribeMarketplaceStatusCheckingIds, taskModelRoutingSnapshot, TIMINGS, updateResolvedSourceWarning, wasManualSolveRequired, wrapUntrustedText } from '../test-dependencies.js';
 import { NON_API_AI_TRANSPORT } from '../test-dependencies.js';
 
 export default [
@@ -1388,6 +1388,87 @@ export default [
         assert(calls === 1, `repeat decrypts of the SAME ciphertext A must not re-hit safeStorage (got ${calls} calls)`);
         assert(decryptSecret(encryptedB) === 'sk-cache-test-bbbbbbbbbbbbbbbbbbbbbbbb', 'a DIFFERENT ciphertext (B) still decrypts correctly');
         assert(calls === 2, `a genuinely different ciphertext still hits safeStorage (got ${calls} calls)`);
+        return { ok: true };
+      } finally {
+        electronPkg.safeStorage.decryptString = realDecrypt;
+      }
+    },
+  },
+{
+    name: 'settings: renderer snapshots never decrypt, expose, or accept the main-process Dice secret',
+    run: () => {
+      const realDecrypt = electronPkg.safeStorage.decryptString;
+      const hiddenDice = encryptSecret('dice-hidden-key-aaaaaaaaaaaaaaaaaaaaaaaa');
+      const visibleUsaJobs = encryptSecret('usajobs-visible-key-bbbbbbbbbbbbbbbbbbbb');
+      let calls = 0;
+      electronPkg.safeStorage.decryptString = (...args) => { calls++; return realDecrypt(...args); };
+      try {
+        // A renderer read with only a hidden encrypted Dice credential must not
+        // touch safeStorage at all. This is the startup regression: macOS can
+        // block in SecItemCopyMatching even though the renderer cannot use Dice.
+        const hiddenOnly = rendererStoreSnapshot({
+          unrelatedSetting: true,
+          jobs: { diceApiKey: hiddenDice, glassdoorLocIds: { toronto: { locId: '1' } } },
+        });
+        assert(calls === 0, `a hidden Dice key must cause zero renderer safeStorage decrypts (got ${calls})`);
+        assert(Object.prototype.hasOwnProperty.call(hiddenOnly, 'unrelatedSetting') === false,
+          'renderer snapshot excludes unapproved persisted sections by default');
+        assert(JSON.stringify(hiddenOnly).includes('dice-hidden-key-') === false,
+          'renderer snapshot never contains the hidden Dice plaintext');
+        assert(JSON.stringify(hiddenOnly.jobs) === JSON.stringify({ usajobsApiKey: '', usajobsEmail: '' }),
+          `renderer jobs snapshot is an explicit safe projection (got ${JSON.stringify(hiddenOnly.jobs)})`);
+
+        const snapshot = rendererJobsSettingsSnapshot({
+          usajobsApiKey: visibleUsaJobs,
+          usajobsEmail: 'jack@example.com',
+          diceApiKey: hiddenDice,
+        });
+        assert(calls === 1, `only the renderer-visible USAJobs key may decrypt (got ${calls} safeStorage calls)`);
+        assert(JSON.stringify(snapshot) === JSON.stringify({
+          usajobsApiKey: 'usajobs-visible-key-bbbbbbbbbbbbbbbbbbbb',
+          usajobsEmail: 'jack@example.com',
+        }), `renderer snapshot exposes only its documented jobs fields (got ${JSON.stringify(snapshot)})`);
+
+        const update = rendererJobsSettingsUpdate({
+          usajobsEmail: 'new@example.com',
+          diceApiKey: 'renderer-must-not-overwrite-this',
+          glassdoorLocIds: { attacker: true },
+        });
+        assert(JSON.stringify(update) === JSON.stringify({ usajobsEmail: 'new@example.com' }),
+          `renderer updates cannot overwrite main-process job state (got ${JSON.stringify(update)})`);
+
+        // Every possible renderer input shape routes through the same
+        // fail-closed jobs write seam. None may fall through to a raw
+        // electron-store `set('jobs', value)` and erase the Dice credential.
+        const storedJobs = {
+          diceApiKey: hiddenDice,
+          usajobsApiKey: visibleUsaJobs,
+          usajobsEmail: 'old@example.com',
+          glassdoorLocIds: { toronto: { locId: '1' } },
+        };
+        for (const hostile of [null, ['not', 'a', 'settings', 'object'], 'not-an-object', { diceApiKey: 'overwrite-attempt' }]) {
+          assert(mergeRendererJobsSettingsUpdate(storedJobs, hostile) === null,
+            `malformed or Dice-only jobs update must be a no-op (${JSON.stringify(hostile)})`);
+        }
+        for (const hostile of [
+          { usajobsApiKey: { nested: 'not-a-key' } },
+          { usajobsApiKey: null },
+          { usajobsEmail: ['not-an-email'] },
+          { usajobsEmail: () => 'not-serializable' },
+        ]) {
+          assert(mergeRendererJobsSettingsUpdate(storedJobs, hostile) === null,
+            'allowed job field names still reject non-string values');
+        }
+        const merged = mergeRendererJobsSettingsUpdate(storedJobs, { usajobsEmail: 'new@example.com' });
+        assert(merged?.diceApiKey === hiddenDice && merged?.glassdoorLocIds === storedJobs.glassdoorLocIds
+          && merged?.usajobsEmail === 'new@example.com' && merged?.usajobsApiKey === visibleUsaJobs,
+        'a one-field USAJobs update preserves every main-process-owned jobs field');
+        const mixed = mergeRendererJobsSettingsUpdate(storedJobs, {
+          usajobsEmail: 'mixed-valid@example.com',
+          usajobsApiKey: { reject: 'this' },
+        });
+        assert(mixed?.usajobsEmail === 'mixed-valid@example.com' && mixed?.usajobsApiKey === visibleUsaJobs,
+          'a mixed update applies its valid field while preserving an invalid field\'s stored value');
         return { ok: true };
       } finally {
         electronPkg.safeStorage.decryptString = realDecrypt;

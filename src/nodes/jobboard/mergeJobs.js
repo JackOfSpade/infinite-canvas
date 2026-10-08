@@ -384,6 +384,9 @@ export function moduleFingerprint(scoredJobs) {
     fold(j.posted);
     fold(j.language);
     fold(j.originHubId);
+    // A change in the career snapshot changes what this card is allowed to
+    // generate, even if the listing and score happen to be identical.
+    fold(j.careerSnapshotId);
     // These fields are consumed by the downstream compensation pipeline even
     // when they are not rendered directly on a card. A paused Combine must be
     // invalidated if its role/work-mode/experience cohort inputs change.
@@ -441,6 +444,29 @@ export function moduleFingerprint(scoredJobs) {
       fold(range?.max ?? range?.high ?? range?.maximum);
       fold(range?.currency ?? range?.currencyCode);
       fold(range?.period ?? range?.payPeriod ?? range?.unit);
+    }
+    // Consolidated multi-location rows carry a bounded variant union whose
+    // location/URL/source mix is card-visible. Variant rows are folded only when
+    // present, so an ordinary variant-less board keeps its previous fingerprint
+    // (no spurious mass staleness) while any change to a consolidated row's
+    // variants deterministically changes the signature. Fields fold in a fixed
+    // order so property insertion order cannot create false updates.
+    if (Array.isArray(j.postingVariants) && j.postingVariants.length > 0) {
+      fold(j.postingVariants.length);
+      fold(Number.isFinite(j.consolidatedLocationCount) ? j.consolidatedLocationCount : null);
+      fold(Number.isFinite(j.consolidatedPostingCount) ? j.consolidatedPostingCount : null);
+      for (const variant of j.postingVariants) {
+        if (!variant || typeof variant !== 'object') { fold(variant); continue; }
+        fold(variant.location);
+        fold(variant.url);
+        fold(variant.googleCardUrl);
+        fold(variant.applyUrl);
+        fold(variant.source);
+        fold(variant.posted);
+        fold(variant.salary);
+        fold(variant.applySource);
+        fold(variant.jobkey);
+      }
     }
   }
   const signature = `7:${arr.length}:${h >>> 0}`;

@@ -53,7 +53,10 @@ const TASK_IDS = new Set([
   'job-compensation-research', 'job-compensation-research-batch', 'job-preference-evaluation',
   'job-preference-interpretation', 'job-preference-research', 'job-preference-research-assessment',
   'job-preference-research-batch', 'job-preference-research-batch-assessment', 'job-query-generation',
-  'job-role-audit', 'job-role-screen', 'job-role-screen-batch', 'job-scoring', 'job-taxonomy-classify',
+  'career-profile-compile', 'career-profile-audit-completeness', 'career-profile-audit-grounding',
+  'career-profile-audit-attribution', 'career-profile-audit-metrics', 'career-profile-audit-skills',
+  'career-profile-audit-conflicts', 'career-profile-repair',
+  'job-location-consolidation-confirmation', 'job-role-audit', 'job-role-screen', 'job-role-screen-batch', 'job-scoring', 'job-taxonomy-classify',
   'job-taxonomy-classify-batch', 'job-taxonomy-plan', 'platform-fit-assessment', 'price-synthesis',
   'price-synthesis-batch', 'resume-parse',
 ]);
@@ -156,9 +159,7 @@ function defaultConfig() {
       releaseTtlHours: CONSTANTS.RELEASE_TTL_HOURS,
       chatKeyMaxAgeHours: CONSTANTS.CHAT_KEY_MAX_AGE_HOURS,
       idlePauseMinutes: CONSTANTS.IDLE_PAUSE_MINUTES,
-      jobsPerChat: CONSTANTS.JOBS_PER_CHAT,
-      epochSoftBytes: CONSTANTS.EPOCH_SOFT_BYTES,
-      epochHardBytes: CONSTANTS.EPOCH_HARD_BYTES,
+      maxConcurrentHandoffs: CONSTANTS.DEFAULT_MAX_CONCURRENT_HANDOFFS,
     },
     prefs: { sourcePolicy: CONSTANTS.SOURCE_POLICY, pairingNetworkCheck: true },
     telemetryInBugReports: false,
@@ -184,9 +185,9 @@ function cleanConfig(value) {
       releaseTtlHours: Number.isFinite(limits.releaseTtlHours) ? Math.max(0, limits.releaseTtlHours) : fallback.limits.releaseTtlHours,
       chatKeyMaxAgeHours: Number.isFinite(limits.chatKeyMaxAgeHours) ? Math.max(0, limits.chatKeyMaxAgeHours) : fallback.limits.chatKeyMaxAgeHours,
       idlePauseMinutes: Number.isFinite(limits.idlePauseMinutes) ? Math.max(0, limits.idlePauseMinutes) : fallback.limits.idlePauseMinutes,
-      jobsPerChat: Number.isFinite(limits.jobsPerChat) ? limits.jobsPerChat : fallback.limits.jobsPerChat,
-      epochSoftBytes: Number.isFinite(limits.epochSoftBytes) ? limits.epochSoftBytes : fallback.limits.epochSoftBytes,
-      epochHardBytes: Number.isFinite(limits.epochHardBytes) ? limits.epochHardBytes : fallback.limits.epochHardBytes,
+      maxConcurrentHandoffs: Number.isSafeInteger(limits.maxConcurrentHandoffs) && limits.maxConcurrentHandoffs >= 1
+        ? Math.min(CONSTANTS.MAX_LANES, limits.maxConcurrentHandoffs)
+        : fallback.limits.maxConcurrentHandoffs,
     },
     prefs: {
       sourcePolicy: ['enforce', 'alert', 'off'].includes(prefs.sourcePolicy) ? prefs.sourcePolicy : fallback.prefs.sourcePolicy,
@@ -602,9 +603,13 @@ export function createHandoffBridgeController(options = {}) {
       rawPlan = isObject(rawPlan) ? rawPlan : {};
       const recommended = Number.isSafeInteger(rawPlan.recommended) && rawPlan.recommended >= 0 && rawPlan.recommended <= CONSTANTS.MAX_LANES
         ? rawPlan.recommended : fallbackWorkers;
-      const queued = Number.isSafeInteger(rawPlan.queued) && rawPlan.queued >= 0 && rawPlan.queued <= 10_000
+      // Backlog telemetry is an aggregate count, not an IPC list or a worker
+      // allocation. Preserve every safe integer so a large durable queue is
+      // not silently rendered as empty; the renderer still receives only its
+      // separately bounded job/worker arrays.
+      const queued = Number.isSafeInteger(rawPlan.queued) && rawPlan.queued >= 0
         ? rawPlan.queued : 0;
-      const materialized = Number.isSafeInteger(rawPlan.materialized) && rawPlan.materialized >= 0 && rawPlan.materialized <= 10_000
+      const materialized = Number.isSafeInteger(rawPlan.materialized) && rawPlan.materialized >= 0
         ? Math.min(queued, rawPlan.materialized) : queued;
       const expandBy = Number.isSafeInteger(rawPlan.expandBy) && rawPlan.expandBy >= 0 && rawPlan.expandBy <= CONSTANTS.MAX_LANES
         ? rawPlan.expandBy : 0;
@@ -629,7 +634,7 @@ export function createHandoffBridgeController(options = {}) {
         lastCallKind: oneOf(rawWorker.lastCallKind, new Set(['get', 'submit']), null),
         lastOutcome: oneOf(rawWorker.lastOutcome, new Set(['served', 'waiting', 'queue_empty', 'paused', 'session_full', 'needs_user', 'retry', 'accepted', 'rejected', 'held', 'unknown_handoff', 'session_ended']), null),
         lastOutcomeAt: finite(rawWorker.lastOutcomeAt),
-        quietReason: oneOf(rawWorker.quietReason, new Set(['polling_stopped', 'answer_silent']), null),
+        quietReason: oneOf(rawWorker.quietReason, new Set(['polling_stopped', 'answer_silent', 'fresh_context_required']), null),
         restarts: Number.isSafeInteger(rawWorker.restarts) && rawWorker.restarts >= 0 ? Math.min(999_999, rawWorker.restarts) : 0,
       };
     };
@@ -651,7 +656,7 @@ export function createHandoffBridgeController(options = {}) {
       startedAt: finite(rawChat.startedAt), firstCallAt: finite(rawChat.firstCallAt), lastCallAt: finite(rawChat.lastCallAt),
       lastCallKind: oneOf(rawChat.lastCallKind, new Set(['get', 'submit']), null), calls: Math.max(0, finite(rawChat.calls, 0)),
       state: oneOf(rawChat.state, CHAT_STATES, base.chat.state), jobsAssigned: Math.max(0, finite(rawChat.jobsAssigned, 0)),
-      jobsCap: Math.max(0, finite(rawChat.jobsCap, config.limits.jobsPerChat)), expiresInMs: finite(rawChat.expiresInMs),
+      expiresInMs: finite(rawChat.expiresInMs),
       pool: {
         active: poolActive,
         generation: poolActive ? poolGeneration : null,
@@ -690,7 +695,7 @@ export function createHandoffBridgeController(options = {}) {
       base.push.selectedHubs = arrayOf(rawPush.selectedHubs, 20).map(value => typeof value === 'string' && HUB_KEY.test(value) ? value : null).filter(Boolean);
       base.push.discovered = arrayOf(rawPush.discovered, 20).flatMap(item => isObject(item) && typeof item.key === 'string'
         && HUB_KEY.test(item.key)
-        ? [{ key: item.key, pending: Math.max(0, finite(item.pending, 0)), tasks: safeTasks(item.tasks), excluded: Object.fromEntries(['ending', 'settling', 'attachment', 'free_text', 'task_not_allowed', 'node_not_allowed', 'person_editing'].map(reason => [reason, Math.max(0, finite(item.excluded?.[reason], 0))])) }] : []);
+        ? [{ key: item.key, pending: Math.max(0, finite(item.pending, 0)), tasks: safeTasks(item.tasks), excluded: Object.fromEntries(['ending', 'settling', 'cooldown', 'attachment', 'free_text', 'task_not_allowed', 'node_not_allowed', 'person_editing'].map(reason => [reason, Math.max(0, finite(item.excluded?.[reason], 0))])) }] : []);
       // Claim IDs are random UUIDs minted with each renderer request. They
       // provide exact UI correlation only; request ids/codes stay private.
       base.push.claimed = arrayOf(rawPush.claimed, 100).filter(value => typeof value === 'string' && UUID.test(value));
@@ -1493,7 +1498,12 @@ export function createHandoffBridgeController(options = {}) {
       // required by the engine.  Do not accept an id-only release shape here.
       const activeEngine = engine;
       if (!servingGeneration(generation)) return { ok: false, code: 'NOT_READY' };
-      const result = await call(activeEngine, 'release', { jobs: jobs.map(item => ({ jobId: item.jobId, canvasFilePath: item.canvasFilePath })) });
+      // The link lets the engine grow a live worker pool the moment a bundle is
+      // released, instead of after a busy worker's next call.
+      const result = await call(activeEngine, 'release', {
+        jobs: jobs.map(item => ({ jobId: item.jobId, canvasFilePath: item.canvasFilePath })),
+        linkId: currentLinkId(),
+      });
       if (!servingGeneration(generation) || activeEngine !== engine) return { ok: false, code: 'NOT_READY' };
       // The engine reports which jobs it actually added. A job that already
       // had a lane keeps its ORIGINAL release time: re-stamping it on every
@@ -1518,6 +1528,11 @@ export function createHandoffBridgeController(options = {}) {
   async function onBundleDiscarded(event) {
     const jobId = event?.jobId;
     if (typeof jobId !== 'string' || !UUID.test(jobId)) return { ok: false, code: 'invalid_arguments' };
+    // The local-application event carries the canonical canvas owner. Never
+    // reduce that capability to an id-only delete: the same id observed from
+    // another canvas is a stale/forged event, not proof this lane is gone.
+    const canvasFilePath = event?.canvasFilePath;
+    if (typeof canvasFilePath !== 'string' || !canvasFilePath.startsWith('/') || canvasFilePath.includes('\0')) return { ok: false, code: 'not_found' };
     // Deliberately NOT gated on `serving`: a runtime that is composed but not
     // (or no longer) serving still holds the restored lanes in memory and
     // would write the dead one back the next time it persists.
@@ -1525,7 +1540,7 @@ export function createHandoffBridgeController(options = {}) {
     const activeEngine = engine;
     if (!activeEngine) return { ok: false, code: 'NOT_READY' };
     try {
-      const result = await call(activeEngine, 'dropLane', jobId, event?.cause);
+      const result = await call(activeEngine, 'dropLane', jobId, event?.cause, canvasFilePath);
       if (generation !== lifecycleGeneration || activeEngine !== engine) return { ok: false, code: 'NOT_READY' };
       if (result?.ok) { releaseTimes.delete(jobId); change(); }
       return result || { ok: false, code: 'not_found' };

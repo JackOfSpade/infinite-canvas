@@ -1,4 +1,5 @@
 import { assert, fetchLinkedInJobs, fetchRemoteOKJobs, formatRemoteOkSalary, linkedInApiRequestPacing, linkedInDescriptionPacing, linkedInPacingWaitMs, linkedInPageStopReason, remoteOkTagsFromQueries, runApiTransportRetry, shouldRetryApiTransportFailure, wwrCategoriesFromQueries } from '../test-dependencies.js';
+import { fetchUSAJobs } from '../../electron/extractors/apiExtractors.js';
 import { detectQueryOperators } from '../../src/utils/jobTitleMatch.js';
 
 export default [
@@ -20,7 +21,7 @@ export default [
     },
   },
   {
-    name: 'LinkedIn walk: cross-query overlap is not exhaustion',
+    name: 'LinkedIn walk: cross-query overlap is not exhaustion or a fixed 150-result ceiling',
     run: () => {
       const walk = (cardsOnPage, newToThisQuery, nextStart = 50, maxResults = 150) =>
         linkedInPageStopReason({ cardsOnPage, newToThisQuery, nextStart, maxResults });
@@ -38,9 +39,52 @@ export default [
       assert(walk(25, 25, 150, 150) === 'result-ceiling', 'the offset budget bound the walk, not the data');
       assert(walk(25, 25, 175, 150) === 'result-ceiling', 'past the budget is still ceiling-bound');
 
+      // Current collection is no longer capped at LinkedIn's historical
+      // 150-offset budget. An actual empty/repeated/no-progress page remains
+      // the only stop signal for an otherwise productive long walk.
+      assert(walk(25, 25, 175, Infinity) === null,
+        'a productive page beyond 150 results remains eligible for collection');
+      assert(linkedInPageStopReason({ cardsOnPage: 25, newToThisQuery: 25, unproductiveStreak: 2, nextStart: 175, maxResults: Infinity }) === 'redundant-query',
+        'a no-output pager still halts after its explicit no-progress streak without restoring a total result cap');
+
       // Exhaustion outranks the ceiling: an empty page is empty regardless of offset.
       assert(walk(0, 0, 150, 150) === 'exhausted', 'an empty final page reports exhaustion, not a ceiling');
-      return { ok: true };
+      return { uncappedBeyond150: true, noProgressStopped: true };
+    },
+  },
+  {
+    name: 'USAJobs walks page 11 and stops only on provider totals, short pages, or a repeated page',
+    run: async () => {
+      const nativeFetch = globalThis.fetch;
+      const pageSize = 500;
+      const row = id => ({ MatchedObjectId: `position-${id}`, MatchedObjectDescriptor: { PositionID: `position-${id}`, PositionTitle: `Engineer ${id}`, OrganizationName: 'Agency', PositionLocationDisplay: 'Remote', PositionURI: `https://www.usajobs.gov/job/${id}` } });
+      const responseFor = (items, total) => new Response(JSON.stringify({ SearchResult: { SearchResultCountAll: total, SearchResultItems: items } }), { status: 200, headers: { 'content-type': 'application/json' } });
+      try {
+        let calls = 0;
+        globalThis.fetch = async (url) => {
+          calls += 1;
+          const page = Number(new URL(url).searchParams.get('Page'));
+          const count = page === 11 ? 1 : pageSize;
+          const start = (page - 1) * pageSize;
+          return responseFor(Array.from({ length: count }, (_unused, index) => row(start + index)), 5_001);
+        };
+        const pageEleven = await fetchUSAJobs('engineer', 'test-key', 'test@example.com', null, 30, '', Infinity);
+        assert(calls === 11 && pageEleven.items.length === 5_001 && pageEleven.providerTotal === 5_001 && !pageEleven.truncated,
+          'a provider total beyond ten 500-row pages reaches page 11 and retains every mapped result');
+
+        calls = 0;
+        const repeated = Array.from({ length: pageSize }, (_unused, index) => row(index));
+        globalThis.fetch = async () => {
+          calls += 1;
+          return responseFor(repeated, 2_000);
+        };
+        const stalled = await fetchUSAJobs('engineer', 'test-key', 'test@example.com', null, 30, '', Infinity);
+        assert(calls === 2 && stalled.truncated && stalled.warning?.code === 'provider-pagination-stalled' && stalled.items.length === pageSize,
+          'a repeated provider page stops the walk as partial rather than treating a no-progress pager as permission for unbounded requests');
+        return { pageElevenCalls: 11, repeatedPageCalls: calls };
+      } finally {
+        globalThis.fetch = nativeFetch;
+      }
     },
   },
   {

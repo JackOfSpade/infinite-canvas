@@ -279,7 +279,7 @@ function computeMetricArithmetic(metric) {
 // prose drifts toward), that model-authored number flows into the résumé
 // prompt as claim text, gets copied to the output, and — because it didn't
 // come through `computed.display` — carries no data-achievement-id and so no
-// receipt/tooltip. Under Jack's stated review model (a light wording glance,
+// receipt/tooltip. Under the stated review model (a light wording glance,
 // not a numbers audit), a plausible-looking wrong number with no tooltip is
 // invisible. This is the one place that failure can be caught, so it is
 // measured here even though — per the design's "nothing gates" rule, which
@@ -611,4 +611,3 @@ export function derivationTooltip(item) {
   const caveats = String(item.caveats || '').trim();
   return [figure, derivation, caveats].filter(Boolean).join(' — ');
 }
-

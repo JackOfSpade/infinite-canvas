@@ -18,7 +18,7 @@ function hasItems(value) {
 // drifting from buildJobHubCareerClearPatch (the WRITER) share one list instead
 // of two hand-maintained copies. `inputLocked` is deliberately NOT here: it is
 // hub-type-agnostic and handled ahead of every per-type branch.
-export const JOBHUB_CAREER_IDENTITY_FIELDS = ['careerData', 'resumeProfile', 'filePath', 'filePaths', 'careerFilePaths'];
+export const JOBHUB_CAREER_IDENTITY_FIELDS = ['careerSnapshotId', 'careerData', 'resumeProfile', 'filePath', 'filePaths', 'careerFilePaths'];
 
 // Arrays count only when they hold something; scalars count on truthiness.
 function hasIdentityValue(value) {
@@ -71,6 +71,14 @@ export function buildJobHubCareerClearPatch({ jobAnalysisClearedAt = null, jobAn
     careerImportGeneration: null,
     careerImportFreshCapability: null,
     careerImportConsumption: null,
+    // A compiling/approved receipt is bound to the old generation.  Leaving
+    // it behind would let a late compiler settlement or old snapshot cross a
+    // deliberate Clear + re-import boundary.
+    careerImportCompilation: null,
+    // This points to an immutable approved career snapshot held outside the
+    // canvas. Clear it with the legacy projections so a new drop can never
+    // silently reuse an earlier person's audited source of truth.
+    careerSnapshotId: null,
     resumeProfile: null,
     careerData: null,
     resumeSummary: null,
@@ -83,6 +91,7 @@ export function buildJobHubCareerClearPatch({ jobAnalysisClearedAt = null, jobAn
     achievementsMining: null,
     queries: null,
     queryCacheKey: null,
+    queryCareerSnapshotId: null,
     queryModel: null,
     queryCount: null,
     jobPreferencePlan: null,
@@ -92,10 +101,14 @@ export function buildJobHubCareerClearPatch({ jobAnalysisClearedAt = null, jobAn
     pendingJobPreferences: null,
     pendingJobPreferencesInterpretation: null,
     pendingJobPreferencePlan: null,
+    pendingCareerSnapshotId: null,
     preferenceMatchedCount: null,
     preferenceFilteredCount: null,
     preferenceEvaluation: null,
     preferenceCandidatePool: null,
+    preferenceCareerSnapshotId: null,
+    scoringCareerSnapshotId: null,
+    careerDerivedSnapshotId: null,
     canonicalLocation: null,
     locationSnapshot: null,
     terminalFinalizationRecovery: null,

@@ -40,7 +40,7 @@ const BRIDGE_PRELOAD_KEYS = [
   'handoffBridgePause', 'handoffBridgeResume', 'handoffBridgeRevokeAll',
   'handoffBridgeForgetSetup', 'handoffBridgeRelease', 'handoffBridgeUnrelease', 'handoffBridgeReleasePush',
   'handoffBridgeUnreleasePush', 'handoffBridgeHoldJob', 'handoffBridgeAckAlarm', 'handoffBridgeGetActivity',
-  'handoffBridgePublishJobs', 'onHandoffBridgeStatus', 'onHandoffBridgeJobChanged', 'onHandoffBridgeOpenPanel',
+  'handoffBridgePublishJobs', 'onHandoffBridgeStatus', 'onHandoffBridgeJobChanged', 'onHandoffBridgeCanvasFileReady', 'onHandoffBridgeOpenPanel',
 ].sort();
 
 // Codex and some CI environments use Electron as a Node runtime. Playwright

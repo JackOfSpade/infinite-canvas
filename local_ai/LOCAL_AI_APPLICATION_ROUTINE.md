@@ -121,8 +121,21 @@ Use any local coding agent with filesystem and shell access. The routine is prov
    highest-priority requirements by reading for emphasis as well as enumeration
    (repetition across sections, opening placement, unusual specificity,
    explicit priority, broad ownership, and hard-screen wording), without
-   treating any one signal as automatically decisive; rank the candidate's
-   truthful evidence by how much it improves the chance of an interview;
+   treating any one signal as automatically decisive; scan the entire supplied
+   career corpus, including standalone and personal-project sections, before
+   calling a requirement unsupported or omitted. Rank roles and projects
+   together by interview value: a concrete built or shipped artifact that
+   directly demonstrates an emphasized need outranks a generic workflow,
+   tool inventory, or merely adjacent role evidence when both are supported;
+   then rank the remaining truthful evidence by how much it improves the
+   chance of an interview;
+   cataloguing a project makes it available for comparison, not mandatory in
+   the final application. For every highest or high need, compare the direct
+   artifact evidence from projects with role evidence before selecting prose:
+   a built or shipped artifact that directly establishes the capability beats
+   vague benefit language, a generic workflow, or tool use alone. Tool use is
+   not product shipment. Omit a project only after that comparison finds it
+   irrelevant to the posting.
    choose one controlling throughline at the intersection of an emphasized
    employer need cluster and a distinctive supported candidate capability;
    select the minimum sufficient evidence to establish that argument. The
@@ -166,9 +179,9 @@ Use any local coding agent with filesystem and shell access. The routine is prov
    run one adversarial critique for relevance, specificity, factual support,
    argument continuity, minimum-sufficient evidence, redundancy, concision,
    grammatical parallelism, and any misleading inference. For the cover letter,
-   explicitly verify that the opening paragraph adds information beyond the application context,
-   shows interest implicitly through a precise observation about concrete target
-   work and a credible candidate connection, and previews the transferable
+   explicitly verify that the opening paragraph adds information beyond the
+   application context that is candidate-specific, may lead with a supported capability or
+   thesis tied to concrete target work, and previews the transferable
    capability before the first source-specific proof; use the detailed
    opening rule in step 5 rather than an administrative
    application announcement. Also reject unclear antecedents,
@@ -360,7 +373,7 @@ Use any local coding agent with filesystem and shell access. The routine is prov
    audit inside `result.json`; Infinite Canvas validates it and writes any
    durable audit companion in the final application folder itself.
 
-   For checklist version 3, each final cover-letter paragraph that states a
+   For checklist version 3 or 4, each final cover-letter paragraph that states a
    completed candidate action must carry an `argumentMapping` in its matching
    `generationAudit.coverLetterPlan.paragraphs` entry. Copy four exact final
    text spans: `claim` (the capability asserted), `proof` (the concrete past
@@ -375,7 +388,7 @@ Use any local coding agent with filesystem and shell access. The routine is prov
    draft commentary: every non-null span must occur in its final paragraph and
    the job quote must occur in the selected listing.
 
-   Canonical checklist, version 3:
+   Canonical checklist, version 4:
 
    - `resume-source-grounding`
    - `resume-priority-alignment`
@@ -404,7 +417,7 @@ Use any local coding agent with filesystem and shell access. The routine is prov
 
    Use the full requirements in steps 3–5 and the design-system references to
    decide each item. The identifiers are an index, not a replacement for those
-   rules. Confirm that `input.json.qualityChecklist` is version 3 and contains
+   rules. Confirm that `input.json.qualityChecklist` is version 4 and contains
    this exact ordered set; if it differs, use the app-owned input contract and
    do not silently omit an item. `result.json` must include every identifier exactly once, all with
    `status: "pass"` and a specific verification note. Infinite Canvas rejects
@@ -609,6 +622,11 @@ Use any local coding agent with filesystem and shell access. The routine is prov
    industry, feature, or tool into a requirement of the target role. Do not
    catalog features: explain the shared mechanism that makes the selected proof
    useful for the responsibility named in this posting.
+   Preserve the posting's modality: a requirement to use a tool or workflow is
+   not a responsibility to build, introduce, or integrate it unless the posting
+   separately says so. Tool use, including AI-assisted development, is not
+   evidence of shipping a product built around that tool; absent direct product
+   evidence, keep the transfer at the narrower supported capability.
    State completed work with yourself as the grammatical subject of the
    action. An artifact, project, pipeline, or system named as the actor
    describes something that exists rather than work a person did. It also
@@ -663,7 +681,9 @@ Use any local coding agent with filesystem and shell access. The routine is prov
    outcome; adjacency and “the same job” are not a bridge. If no supported
    relationship exists, split the paragraph or omit the weaker proof. When a
    sentence announces a migration, move, or change, land it in
-   the same sentence by naming both the origin and destination. Open a
+   the same sentence by naming both the origin and destination, plus the
+   systems and/or data that moved; rewrite raw slash shorthand as natural,
+   unambiguous coordination. Open a
    paragraph with a demonstrative noun phrase only when the immediately
    preceding paragraph establishes its referent; a demonstrative never reaches past the previous
    paragraph, so either restate the referent in full or open with the new
@@ -707,9 +727,9 @@ Use any local coding agent with filesystem and shell access. The routine is prov
    read the résumé first. When an opening uses completed work as proof, make
    its prior-work setting clear at that first mention: give the supported role
    and employer when useful, or a concise prior-role cue when the employer's
-   name would distract. For example, `my work building a district tools hub`
+   name would distract. For example, `my work building an internal tools hub`
    leaves the employment context unstated; `in my previous software
-   engineering role, I built a district tools hub` supplies it when
+   engineering role, I built an internal tools hub` supplies it when
    the source supports that role and chronology. Keep the target need first,
    then situate the evidence without adding an unsupported employer, role, or
    timeline. Name a specific tool, framework, or product
@@ -722,8 +742,10 @@ Use any local coding agent with filesystem and shell access. The routine is prov
    most two tool names may be off-posting, even when each one is its own
    paragraph's only anchor. A tour spread one name per paragraph is still a
    tour. Do not assert a cross-domain
-   equivalence with `maps onto`, `translates directly to`, or `mirrors`, and
-   do not quote the employer's phrasing back as the second half of an analogy:
+   equivalence with `maps onto`, `translates directly to`, or `mirrors`; never
+   call prior work a side, form, version, facet, or aspect of the same problem,
+   or the same challenge in another context; and do not quote the employer's
+   phrasing back as the second half of an analogy:
    state the transferable capability and the shared mechanism (such as
    interaction design or data flow) explicitly, while preserving the boundary
    between the prior domain and the target work. Do not state application
@@ -745,13 +767,13 @@ Use any local coding agent with filesystem and shell access. The routine is prov
    that sentence, and a demonstrative pointing back at an earlier paragraph
    satisfies neither: name the candidate's asset with a possessive, an
    authorship clause, or a demonstrative that carries its own descriptor
-   (`my integration work`, `the connector I built`, `that MCP server
+   (`my integration work`, `the connector I built`, `that systems-integration
    experience`), and say what that asset does for the target work
    (`... could support ...`, `... supports ...`, `applying ... to ...`).
    A bare demonstrative names nothing, and an employer-facing phrase is not a
    candidate asset: `I welcome a conversation about applying that work` is
-   rejected; `I welcome a conversation about applying my MCP server
-   experience to the agent integrations this role owns` is accepted, and so is
+   rejected; `I welcome a conversation about applying my integration
+   experience to the connected systems this role owns` is accepted, and so is
    `I welcome a conversation about where the connector work I built would fit
    the systems this team already runs`. The final paragraph may synthesize only
    evidence and relationships already established in the letter. It must not
@@ -759,13 +781,15 @@ Use any local coding agent with filesystem and shell access. The routine is prov
    decision, or ask the employer to choose between products, prototypes, or
    initiatives; close with the candidate's contribution to the work.
    Hyphenate compound modifiers (`in-house`, `end-to-end ownership`,
-   `full-stack engineer`, `district-wide`, `third-party integrations`,
+   `full-stack engineer`, `organization-wide`, `third-party integrations`,
    `real-time data`, `open-source project`) and use one spelling of a compound
    throughout both documents.
    The opening paragraph must demonstrate interest implicitly: lead with a
-   precise observation about concrete employer, team, or role work, then make a
-   credible candidate connection through the transferable capability. Let that
-   understanding and connection show why the work merits attention. Preview the
+   supported candidate capability or thesis tied to concrete target work; where
+   useful, frame it with a precise observation about concrete employer, team,
+   or role work, then make a credible candidate connection through the
+   transferable capability.
+   Let that connection show why the work merits attention. Preview the
    transferable capability before the first source-specific proof. Use a
    separate sentence when the observation and connection each need room; combine
    them only when one sentence is simpler and equally clear.
@@ -781,6 +805,10 @@ Use any local coding agent with filesystem and shell access. The routine is prov
    apply`, `I’m writing to apply`, `I am applying for`, `I'm applying for`,
    `I’m applying for`, `I am writing to express my interest`, `Please accept
    my application`, and equivalent administrative throat-clearing.
+   Do not open with job-summary scaffolding such as `the posting requires`,
+   `this role calls for`, or `<company>'s posting/listing calls for`. A
+   listing attribution may appear later only when it is actually needed to
+   source an unverified employer assertion.
    Infinite Canvas also rejects the entire result when the letter contains any
    of these stock phrases, so avoid them outright: `proven track record`
    (including a `proven ... track record` split by up to three words),
@@ -844,8 +872,10 @@ Use any local coding agent with filesystem and shell access. The routine is prov
    response exists. Do not substitute `stat`, file mtime,
    shell arithmetic, a deadline, an iteration count, `|| true`, or a
    hand-written loop. A successful save deliberately removes the private job
-   folder only after writing the matching receipt. If the folder disappears
-   without a matching receipt, that is an unconfirmed cancellation or cleanup,
+   folder only after writing the matching receipt. If the folder disappears,
+   the helper keeps checking only that hash-bound receipt for a fixed
+   15-second settlement window at its normal 3-second cadence. If no matching
+   receipt appears in that bounded window, that is an unconfirmed cancellation or cleanup,
    never acceptance: do not claim the bundle was saved or infer page counts.
    `fit-feedback.json` is never deleted while a job remains, so the previous
    round's file is still on disk the moment you overwrite `result.json`; treat
@@ -1020,32 +1050,32 @@ more.
     "finalDecisionSummary": "The final documents use the strongest supported evidence without adding a second cover-letter argument."
   },
   "qualityReview": {
-    "checklistVersion": 3,
+    "checklistVersion": 4,
     "criteria": [
       { "id": "resume-source-grounding", "status": "pass", "evidence": "All résumé claims and provenance-bearing project categories were traced to supplied career evidence without broadening scope." },
       { "id": "resume-priority-alignment", "status": "pass", "evidence": "Direct evidence for the highest-priority role needs appears first." },
       { "id": "resume-role-completeness", "status": "pass", "evidence": "Every documented role remains and carries factual evidence." },
-      { "id": "resume-evidence-quality", "status": "pass", "evidence": "Highlights prioritize concrete actions, judgment, outcomes, and differentiators." },
+      { "id": "resume-evidence-quality", "status": "pass", "evidence": "Highlights lead with the strongest supported result, constraint, operational effect, or differentiating mechanism without inventing impact." },
       { "id": "resume-bullet-independence", "status": "pass", "evidence": "Each highlight names its own concrete subject and referents." },
       { "id": "resume-concision", "status": "pass", "evidence": "Redundant and generic copy was removed without losing stronger evidence." },
-      { "id": "resume-copy-editing", "status": "pass", "evidence": "Grammar, compounds, parallel forms, modifiers, and references were checked." },
+      { "id": "resume-copy-editing", "status": "pass", "evidence": "Grammar, compounds, parallel forms, modifiers, references, and opening-verb variety were checked." },
       { "id": "resume-structure", "status": "pass", "evidence": "The result uses one bare design-system main with valid role and section structure." },
-      { "id": "resume-ats-safety", "status": "pass", "evidence": "Markup contains no unsafe or non-parseable presentation technique." },
+      { "id": "resume-ats-safety", "status": "pass", "evidence": "Markup is parseable and the Skills section carries the complete bounded prioritized index supported by accepted evidence." },
       { "id": "cover-source-grounding", "status": "pass", "evidence": "Every factual letter claim remains within supplied evidence and its attribution." },
       { "id": "cover-single-argument", "status": "pass", "evidence": "One specific controlling argument organizes every paragraph." },
-      { "id": "cover-minimum-evidence", "status": "pass", "evidence": "Only evidence necessary to establish and support that argument remains." },
+      { "id": "cover-minimum-evidence", "status": "pass", "evidence": "The primary proof establishes the thesis, and a distinct secondary proof is retained only where it materially adds an operational effect, constraint, tradeoff, or emphasized responsibility." },
       { "id": "cover-priority-alignment", "status": "pass", "evidence": "The argument explicitly connects a supported transferable capability to an actual emphasized posting responsibility without projecting prior-project mechanics onto the target work." },
-      { "id": "cover-opening", "status": "pass", "evidence": "The opening shows interest implicitly through a precise observation about target work and a credible candidate connection, then previews the transferable capability before later proof." },
-      { "id": "cover-continuity", "status": "pass", "evidence": "Every paragraph advances the same argument with relevance stated before detail, using implicit references only where their same-paragraph antecedent is clear." },
+      { "id": "cover-opening", "status": "pass", "evidence": "The opening interprets the target work in original language rather than paraphrasing or compressing the posting, adds a credible candidate connection, and previews the transferable capability before later proof." },
+      { "id": "cover-continuity", "status": "pass", "evidence": "The target frame is stated once; every later paragraph adds evidence, mechanism, judgment, constraint, or result with clear references." },
       { "id": "cover-reference-clarity", "status": "pass", "evidence": "Opening proof is situated in its supported prior-work setting, actors and systems are explicit, the selected position is referenced proximally, and reporting verbs belong to their source documents." },
-      { "id": "cover-register", "status": "pass", "evidence": "The letter uses direct natural prose without generic or bureaucratic language." },
+      { "id": "cover-register", "status": "pass", "evidence": "The letter uses specific, confident prose, states past evidence directly, and reserves conditional language for genuinely prospective contribution." },
       { "id": "cover-sentence-craft", "status": "pass", "evidence": "Sentences are concise and grammatical with no semicolon or dash clause splices." },
       { "id": "cover-figure-discipline", "status": "pass", "evidence": "Every retained figure is necessary and present in selected résumé evidence." },
       { "id": "cover-logistics-exclusion", "status": "pass", "evidence": "No application logistics statement appears in the letter." },
       { "id": "cover-envelope", "status": "pass", "evidence": "Identity and contact fields match the résumé and no envelope fact was inferred." },
       { "id": "cross-document-consistency", "status": "pass", "evidence": "Résumé, letter, and argument contract agree on identity, facts, and scope." },
       { "id": "requirement-coverage", "status": "pass", "evidence": "High-priority requirements were addressed or honestly omitted without invention." },
-      { "id": "adversarial-final-review", "status": "pass", "evidence": "The final adversarial pass found no concrete defect in either document." }
+      { "id": "adversarial-final-review", "status": "pass", "evidence": "A skeptical hiring-reviewer pass identified the weakest bullet and sentence, improved every material defect, and found no remaining persuasion or compliance issue." }
     ],
     "sourceGrounding": {
       "resumeBullets": [

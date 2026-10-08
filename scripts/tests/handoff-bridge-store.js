@@ -3,7 +3,6 @@ import os from 'node:os';
 import path from 'node:path';
 import { assert } from './testHelpers.js';
 import { CONSTANTS } from '../../electron/ipc/handoffBridge/constants.js';
-import { JOBS_PER_CHAT_RANGE } from '../../src/utils/handoffBridgeConfig.js';
 import { configPathFor, emptyConfig, forgetConfig, readConfig, writeConfig } from '../../electron/ipc/handoffBridge/store.js';
 
 function withStore(run) {
@@ -152,15 +151,13 @@ export default [
     }),
   },
   {
-    name: 'handoff bridge: store: every limit validates and persists including the 1440-minute default',
+    name: 'handoff bridge: store: active limits validate and persist including live concurrency',
     run: () => withStore(async userData => {
       const badValues = {
         releaseTtlHours: -1,
         chatKeyMaxAgeHours: 1.5,
         idlePauseMinutes: '1440',
-        jobsPerChat: 4,
-        epochSoftBytes: -1,
-        epochHardBytes: Infinity,
+        maxConcurrentHandoffs: 65,
       };
       const invalid = await save(userData, { limits: badValues });
       assert(invalid.code === 'INVALID' && Object.keys(invalid.fieldErrors).some(key => key.startsWith('limits.')),
@@ -169,9 +166,7 @@ export default [
         releaseTtlHours: 24,
         chatKeyMaxAgeHours: 12,
         idlePauseMinutes: 1440,
-        jobsPerChat: 3,
-        epochSoftBytes: 600_000,
-        epochHardBytes: 900_000,
+        maxConcurrentHandoffs: 32,
       };
       const accepted = await save(userData, { limits });
       const stored = persisted(userData).limits;
@@ -180,38 +175,38 @@ export default [
     }),
   },
   {
-    name: 'handoff bridge: store: default byte rollover is disabled and the retired invisible default migrates safely',
+    name: 'handoff bridge: store: retired lifetime quotas migrate away regardless of their old values',
     run: () => withStore(userData => {
       const base = emptyConfig();
-      assert(base.limits.epochSoftBytes === 0 && base.limits.epochHardBytes === 0,
-        'new bridge configs must not impose an undocumented chat rollover');
+      assert(!Object.hasOwn(base.limits, 'epochSoftBytes') && !Object.hasOwn(base.limits, 'epochHardBytes'),
+        'new bridge configs must not expose a conversation-lifetime rollover');
       const file = configPathFor(userData);
       fs.mkdirSync(path.dirname(file), { recursive: true });
       const writeLegacy = limits => fs.writeFileSync(file, JSON.stringify({ ...base, limits: { ...base.limits, ...limits } }));
-      // This exact pair was the historical hidden default, not a user-visible
-      // setting. Reading it must upgrade the policy without rewriting the
-      // file merely to inspect it.
+      // Read migration stays non-mutating, but all historical quota values
+      // are intentionally ignored: a user can have an arbitrarily long
+      // healthy worker session after upgrading.
       writeLegacy({ epochSoftBytes: 500_000, epochHardBytes: 900_000 });
       const migrated = readConfig(userData);
-      assert(migrated.state === 'ok' && migrated.config.limits.epochSoftBytes === 0 && migrated.config.limits.epochHardBytes === 0,
-        'the old invisible byte ceiling must become opt-in rollover on read');
+      assert(migrated.state === 'ok' && !Object.hasOwn(migrated.config.limits, 'epochSoftBytes') && !Object.hasOwn(migrated.config.limits, 'epochHardBytes'),
+        'the old invisible byte ceiling must become a non-operational legacy field on read');
       const stillOnDisk = JSON.parse(fs.readFileSync(file, 'utf8'));
       assert(stillOnDisk.limits.epochHardBytes === 900_000,
         'read migration must stay non-mutating until a person saves settings');
-      // A non-default positive pair remains an intentional configured safety
-      // budget rather than being mistaken for the legacy default.
+      // A non-default pair is retired too; response payload caps remain the
+      // live safety boundary, not a hidden per-chat call/byte limit.
       writeLegacy({ epochSoftBytes: 500_001, epochHardBytes: 900_000 });
       const explicit = readConfig(userData);
-      assert(explicit.state === 'ok' && explicit.config.limits.epochSoftBytes === 500_001 && explicit.config.limits.epochHardBytes === 900_000,
-        'a deliberately distinct positive byte budget must survive migration');
+      assert(explicit.state === 'ok' && !Object.hasOwn(explicit.config.limits, 'epochSoftBytes') && !Object.hasOwn(explicit.config.limits, 'epochHardBytes'),
+        'a deliberately distinct retired byte quota cannot survive migration as an active cap');
     }),
   },
   {
-    name: 'handoff bridge: store: limit relationships and unknown nested fields are rejected',
+    name: 'handoff bridge: store: retired quota relationship is ignored while unknown nested fields are rejected',
     run: () => withStore(async userData => {
       const relationship = await save(userData, { limits: { epochSoftBytes: 900_001 } });
-      assert(relationship.code === 'INVALID' && relationship.fieldErrors.limits,
-        'soft budget above hard budget must fail');
+      assert(relationship.ok && !Object.hasOwn(persisted(userData).limits, 'epochSoftBytes'),
+        'a legacy quota-only patch must succeed but must never persist a renewed lifetime cap');
       const unknown = await save(userData, { limits: { arbitrary: 1 } });
       assert(unknown.code === 'INVALID' && unknown.fieldErrors.limits, 'unknown limit must fail closed');
     }),
@@ -483,23 +478,17 @@ export default [
     }),
   },
   {
-    // The range was written out twice -- once in constants.js, once as bare
-    // numbers inside the validator -- and a renderer control now offers a third
-    // copy. Any drift shows up as a value the UI lets you pick and the save
-    // path then rejects.
-    name: 'handoff bridge: store: the jobsPerChat range is one value shared by the validator, the engine and the control',
+    name: 'handoff bridge: store: a legacy jobsPerChat value migrates away without rejecting the rest of the config',
     run: () => withStore(async (userData) => {
-      assert(CONSTANTS.JOBS_PER_CHAT_MIN === JOBS_PER_CHAT_RANGE.min && CONSTANTS.JOBS_PER_CHAT_MAX === JOBS_PER_CHAT_RANGE.max,
-        'the renderer control and the engine constants must describe the same range');
-      assert(CONSTANTS.JOBS_PER_CHAT >= CONSTANTS.JOBS_PER_CHAT_MIN && CONSTANTS.JOBS_PER_CHAT <= CONSTANTS.JOBS_PER_CHAT_MAX,
-        'the default must sit inside its own range');
-      for (const value of [CONSTANTS.JOBS_PER_CHAT_MIN, CONSTANTS.JOBS_PER_CHAT_MAX]) {
-        const result = await save(userData, { limits: { ...emptyConfig().limits, jobsPerChat: value } });
-        assert(result.ok === true, `the validator must accept ${value}, which the control offers`);
-        assert(persisted(userData).limits.jobsPerChat === value, `${value} must persist`);
-      }
-      const tooHigh = await save(userData, { limits: { ...emptyConfig().limits, jobsPerChat: CONSTANTS.JOBS_PER_CHAT_MAX + 1 } });
-      assert(tooHigh.ok === false, 'a value past the ceiling must still be refused');
+      const legacy = { ...emptyConfig(), limits: { ...emptyConfig().limits, jobsPerChat: 64 } };
+      fs.mkdirSync(path.dirname(configPathFor(userData)), { recursive: true });
+      fs.writeFileSync(configPathFor(userData), JSON.stringify(legacy));
+      const loaded = readConfig(userData);
+      assert(loaded.state === 'ok' && !Object.hasOwn(loaded.config.limits, 'jobsPerChat'),
+        'a persisted legacy count cap must parse but must not reappear in runtime limits');
+      const saved = await save(userData, { limits: { ...loaded.config.limits, jobsPerChat: 1, epochHardBytes: 1_000 } });
+      assert(saved.ok && !Object.hasOwn(persisted(userData).limits, 'jobsPerChat') && !Object.hasOwn(persisted(userData).limits, 'epochHardBytes'),
+        'an older renderer may submit its full limits object, but the next write removes every retired lifetime cap');
     }),
   },
 ];

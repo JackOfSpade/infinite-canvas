@@ -134,9 +134,10 @@ export function selectApplicationHandoffCandidates(allNodes) {
 }
 
 /**
- * How many application bundles currently hold a dock slot. Generate is refused
- * at the limit: an eleventh prompt cannot be worked on and would only make the
- * chip strip lie about what is actionable.
+ * How many application bundles currently hold a dock slot. At the limit
+ * Generate queues instead of starting (see JobCardNode's canStart): an eleventh
+ * prompt cannot be worked on and would only make the chip strip lie about what
+ * is actionable.
  */
 export function countActiveApplicationHandoffs(allNodes, dismissedRequestIds = null) {
   const candidates = selectApplicationHandoffCandidates(allNodes);
@@ -150,7 +151,7 @@ export function countActiveApplicationHandoffs(allNodes, dismissedRequestIds = n
 }
 
 export function applicationLimitMessage(limit = APPLICATION_HANDOFF_LIMIT) {
-  return `${limit} application bundles are already in progress or waiting for a pasted response. Finish or discard one of them, then press Generate again.`;
+  return `${limit} application bundles are already in progress or waiting for a pasted response. This one is queued and starts automatically when one of them finishes or is discarded.`;
 }
 
 /**

@@ -1,5 +1,4 @@
 export const JOB_CONTINUATION_RECEIPTS_FIELD = 'jobContinuationAppliedReceipts';
-const MAX_RECEIPTS = 32;
 
 function token(value, max = 300) {
   const normalized = typeof value === 'string' ? value.trim() : '';
@@ -31,7 +30,6 @@ export function jobContinuationAppliedReceipts(data) {
   return (Array.isArray(data?.[JOB_CONTINUATION_RECEIPTS_FIELD])
     ? data[JOB_CONTINUATION_RECEIPTS_FIELD]
     : [])
-    .slice(-MAX_RECEIPTS)
     .map(normalizeJobContinuationAppliedReceipt)
     .filter(Boolean);
 }
@@ -64,6 +62,5 @@ export function upsertJobContinuationAppliedReceipt(data, receipt) {
   return [
     ...prior.filter(candidate => candidate.intentId !== normalized.intentId),
     normalized,
-  ].slice(-MAX_RECEIPTS);
+  ];
 }
-

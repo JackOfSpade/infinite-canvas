@@ -51,8 +51,15 @@ import { normalizeCollectionScopeCaveats } from '../../src/utils/jobCollectionSc
 import { JOB_SEARCH_MAX_PROVIDER_LOOKBACK_DAYS } from '../../src/utils/jobSearchDateWindow.js';
 import { JOB_PREFERENCE_CRITERION_MAX_LENGTH, JOB_PREFERENCE_TITLE_MAX_LENGTH } from './aiSchemas.js';
 import { rawCanvasRecoveryPath, resolveCanvasRecoveryPath, withCanvasRecoveryRead } from './canvasRecoveryPaths.js';
+import { getJobDescriptionRecoveryCheckpointPath } from './jobAnalysisPaths.js';
+import { jobAnalysisOperationAuthorityReceipt, withCurrentJobAnalysisOperationAuthority } from './jobAnalysisOperationAuthorityStore.js';
 
 const MANIFEST_VERSION = 2;
+// A Solve checkpoint can contain the full saved candidate universe; it is not
+// subject to the small metadata-only discovery bound. Keep adoption aligned
+// with the maximum recovery artifact size accepted by Save As, while still
+// refusing an unbounded read from the canvas-adjacent user-writable folder.
+const MAX_DESCRIPTION_RECOVERY_CHECKPOINT_ADOPTION_BYTES = 64 * 1024 * 1024;
 // An explicit user choice to stop collection and carry the durable ledger into
 // preference/scoring.  This is intentionally distinct from `stage: 'gathered'`:
 // the latter normally means every provider completed, while this marker means
@@ -98,6 +105,12 @@ function normalizeNodeId(nodeIdOrOptions) {
 export function normalizeJobRunProfileFingerprint(value) {
   const fingerprint = typeof value === 'string' ? value.trim() : '';
   return /^[a-f0-9]{64}$/.test(fingerprint) ? fingerprint : null;
+}
+
+function normalizeCareerSnapshotId(value) {
+  if (typeof value !== 'string') return null;
+  const normalized = value.trim();
+  return /^[a-f0-9]{64}$/u.test(normalized) ? normalized : null;
 }
 
 function pathHash(value, length = 24) {
@@ -671,6 +684,11 @@ export function sanitizeLastRunReceipt(receipt = {}) {
     ? receipt.terminal.outcome
     : 'unknown';
   const completedAt = receiptTimestamp(receipt.completedAt);
+  const careerSnapshotId = normalizeCareerSnapshotId(receipt.careerSnapshotId);
+  // This is a compact host-issued capability receipt, never the authority
+  // sidecar. Keeping it in the terminal receipt makes a post-cleanup retry
+  // prove it owns this exact run rather than borrowing a later hub operation.
+  const operationAuthority = jobAnalysisOperationAuthorityReceipt(receipt.operationAuthority);
   // The initial search funnel can legitimately be smaller than the terminal
   // score-ready set when a post-search source resume contributes additional
   // rows. Preserve the terminal count independently rather than implying that
@@ -719,6 +737,8 @@ export function sanitizeLastRunReceipt(receipt = {}) {
     version: JOB_RUN_RECEIPT_VERSION,
     runId,
     nodeId,
+    ...(careerSnapshotId ? { careerSnapshotId } : {}),
+    ...(operationAuthority ? { operationAuthority } : {}),
     startedAt: receiptTimestamp(receipt.startedAt),
     completedAt,
     updatedAt: receiptTimestamp(receipt.updatedAt, completedAt),
@@ -1200,10 +1220,20 @@ export function sanitizeJobSearchWindow(value) {
  * staging file. `runId`/`startedAt` are passed in (callers stamp time, since the
  * test runner forbids Date.now()). Returns the manifest, or null if no canvas.
  */
-async function startRunRaw(canvasFilePath, { runId, startedAt, queries = [], profileFingerprint = null, targetRole = null, jobPreferences = '', jobPreferencePlan = null, canonicalLocation = '', searchWindow = null, maxAgeDays = null, collectionLimits = null, nodeId = null, sourceIds = [] }) {
+async function startRunRaw(canvasFilePath, { runId, startedAt, queries = [], profileFingerprint = null, careerSnapshotId = null, targetRole = null, jobPreferences = '', jobPreferencePlan = null, canonicalLocation = '', searchWindow = null, maxAgeDays = null, collectionLimits = null, nodeId = null, sourceIds = [], operationAuthority = null, __testOnlyAllowUnpinned = false }) {
   const ownerNodeId = normalizeNodeId(nodeId);
   const files = runFilesForCanvas(canvasFilePath, ownerNodeId);
   if (!files) return null;
+  const normalizedCareerSnapshotId = normalizeCareerSnapshotId(careerSnapshotId);
+  // Every production collection must begin pinned. The sole exception is an
+  // explicit test-only store seam used to exercise legacy-file migration;
+  // production IPC never forwards this private parameter.
+  if (!normalizedCareerSnapshotId && !__testOnlyAllowUnpinned) {
+    return { rejected: true, careerSnapshotMissing: true };
+  }
+  if (!__testOnlyAllowUnpinned && !jobAnalysisOperationAuthorityReceipt(operationAuthority)) {
+    return { rejected: true, operationAuthorityMissing: true };
+  }
   const sources = {};
   for (const id of sourceIds) sources[id] = { status: 'pending', queries: {} };
   const manifest = {
@@ -1213,6 +1243,7 @@ async function startRunRaw(canvasFilePath, { runId, startedAt, queries = [], pro
     inputs: {
       queries,
       profileFingerprint: normalizeJobRunProfileFingerprint(profileFingerprint),
+      careerSnapshotId: normalizedCareerSnapshotId,
       targetRole,
       jobPreferences: sanitizeJobPreferences(jobPreferences),
       jobPreferencePlan: sanitizeJobPreferencePlan(jobPreferencePlan),
@@ -1221,6 +1252,9 @@ async function startRunRaw(canvasFilePath, { runId, startedAt, queries = [], pro
       maxAgeDays,
       collectionLimits,
       nodeId: ownerNodeId,
+      // Main validated this compact host-issued receipt immediately before
+      // creating the manifest. Resume/provider paths compare it exactly.
+      operationAuthority,
     },
     sources,
   };
@@ -1321,23 +1355,290 @@ async function startRunRaw(canvasFilePath, { runId, startedAt, queries = [], pro
   return result?.started ? manifest : null;
 }
 
+function sameOperationAuthorityReceipt(left, right) {
+  const normalized = value => value && typeof value === 'object'
+    && typeof value.operationId === 'string'
+    && Number.isSafeInteger(value.revision) && value.revision > 0
+    && value.semanticBase && typeof value.semanticBase === 'object'
+    ? JSON.stringify({ operationId: value.operationId, revision: value.revision, semanticBase: value.semanticBase })
+    : null;
+  const a = normalized(left);
+  const b = normalized(right);
+  return !!a && a === b;
+}
+
+function sameAuthorityReceipt(left, right) {
+  return sameOperationAuthorityReceipt(left, right);
+}
+
+function checkpointPublicationForReceipt(authorityRecord, slot, digest, expectedReceipt) {
+  const candidates = [authorityRecord?.publications?.[slot], authorityRecord?.pendingPublications?.[slot]];
+  return candidates.some(candidate => candidate?.digest === digest
+    && sameAuthorityReceipt(candidate?.receipt, expectedReceipt));
+}
+
+function checkpointMatchesRun(snapshot, { canvasFilePath, nodeId, runId, careerSnapshotId } = {}) {
+  if (!snapshot || typeof snapshot !== 'object' || Array.isArray(snapshot)) return false;
+  const snapshotCanvas = typeof snapshot.canvasFilePath === 'string' ? resolvedCanvasPath(snapshot.canvasFilePath) : null;
+  return snapshotCanvas === resolvedCanvasPath(canvasFilePath)
+    && snapshot.sourceHubId === nodeId
+    && snapshot.nodeId === nodeId
+    && snapshot.runId === runId
+    && snapshot.careerSnapshotId === careerSnapshotId;
+}
+
+async function writeCheckpointAtomically(filePath, snapshot) {
+  // The checkpoint envelope is intentionally retained as parsed. Newer
+  // checkpoint writers put reportMetadata first, and JSON preserves that key
+  // insertion order when we only replace the authority receipt below.
+  const temporary = `${filePath}.${process.pid}.${crypto.randomUUID()}.tmp`;
+  try {
+    const handle = await fs.promises.open(temporary, 'wx', 0o600);
+    try {
+      await handle.writeFile(`${JSON.stringify(snapshot, null, 2)}\n`, 'utf8');
+      await handle.sync();
+    } finally { await handle.close(); }
+    await fs.promises.rename(temporary, filePath);
+    const directory = await fs.promises.open(path.dirname(filePath), 'r').catch(() => null);
+    if (directory) {
+      try { await directory.sync(); } finally { await directory.close(); }
+    }
+  } finally { await fs.promises.unlink(temporary).catch(() => {}); }
+}
+
+/**
+ * Read one exact checkpoint through a regular, no-follow descriptor. The
+ * checkpoint directory sits beside the canvas and must be treated as hostile:
+ * a pathname lstat followed by readFile would allow a swap to a symlink/FIFO
+ * or an arbitrary large file. Read only the fstat-bounded descriptor and
+ * reject truncation/replacement-style short reads fail-closed.
+ */
+async function readBoundedRegularRunCheckpoint(filePath) {
+  const noFollow = fs.constants?.O_NOFOLLOW;
+  const nonBlocking = fs.constants?.O_NONBLOCK;
+  if (!Number.isInteger(noFollow) || !Number.isInteger(nonBlocking)) {
+    return { errorCode: 'UNSAFE_FILE' };
+  }
+  let handle;
+  try {
+    handle = await fs.promises.open(filePath, fs.constants.O_RDONLY | noFollow | nonBlocking);
+    const before = await handle.stat();
+    if (!before.isFile()) return { errorCode: 'UNSAFE_FILE' };
+    const size = Math.max(0, Number(before.size) || 0);
+    if (size > MAX_DESCRIPTION_RECOVERY_CHECKPOINT_ADOPTION_BYTES) return { errorCode: 'TOO_LARGE' };
+    const buffer = Buffer.alloc(size);
+    let offset = 0;
+    while (offset < size) {
+      const { bytesRead } = await handle.read(buffer, offset, size - offset, offset);
+      if (!bytesRead) return { errorCode: 'UNSAFE_FILE' };
+      offset += bytesRead;
+    }
+    const after = await handle.stat();
+    // The descriptor itself cannot be redirected after O_NOFOLLOW open, but
+    // a concurrent truncate/write must not give adoption a partial or stale
+    // byte sequence. Stable dev/ino/size makes the digest below meaningful.
+    if (!after.isFile() || after.dev !== before.dev || after.ino !== before.ino || after.size !== before.size) {
+      return { errorCode: 'UNSAFE_FILE' };
+    }
+    return { text: new TextDecoder('utf-8', { fatal: true }).decode(buffer) };
+  } catch (error) {
+    return { errorCode: error?.code === 'ENOENT' ? 'MISSING' : 'UNSAFE_FILE' };
+  } finally { await handle?.close().catch(() => {}); }
+}
+
+/**
+ * Re-stamp the optional Solve checkpoint as part of the same authority
+ * transaction that adopts the manifest.  A checkpoint is not merely a
+ * run-keyed file: it must be the exact sealed predecessor artifact.  The
+ * write is deliberately checkpoint-first. If power fails before the manifest
+ * rename, replay sees a S2-stamped sealed checkpoint plus S1 manifest and
+ * deterministically completes the one legal S1 -> S2 adoption.
+ */
+async function adoptRunCheckpoint({
+  canvasFilePath, expectedNodeId, expectedRunId, careerSnapshotId,
+  currentAuthorityRecord, currentAuthority, predecessorAuthority, stagePublication,
+} = {}) {
+  const checkpointPath = getJobDescriptionRecoveryCheckpointPath(canvasFilePath, expectedRunId, null);
+  if (!checkpointPath) return { ok: false, reason: 'checkpoint-path-invalid' };
+  const read = await readBoundedRegularRunCheckpoint(checkpointPath);
+  if (read.errorCode === 'MISSING') return { ok: true, absent: true };
+  if (read.errorCode) return { ok: false, reason: 'checkpoint-invalid' };
+  const serialized = read.text;
+  let checkpoint;
+  try { checkpoint = JSON.parse(serialized); }
+  catch { return { ok: false, reason: 'checkpoint-invalid' }; }
+  if (!checkpointMatchesRun(checkpoint, {
+    canvasFilePath, nodeId: expectedNodeId, runId: expectedRunId, careerSnapshotId,
+  })) return { ok: false, reason: 'checkpoint-mismatch' };
+
+  const slotToken = path.basename(checkpointPath).match(/description-recovery-([a-f0-9]{24})\.json$/)?.[1];
+  if (!slotToken) return { ok: false, reason: 'checkpoint-path-invalid' };
+  const slot = `checkpoint:${slotToken}`;
+  const actualAuthority = jobAnalysisOperationAuthorityReceipt(checkpoint.operationAuthority
+    ?? checkpoint.snapshotContext?.operationAuthority);
+  const digest = crypto.createHash('sha256').update(serialized, 'utf8').digest('hex');
+
+  if (sameAuthorityReceipt(actualAuthority, currentAuthority)) {
+    if (!checkpointPublicationForReceipt(currentAuthorityRecord, slot, digest, currentAuthority)) {
+      return { ok: false, reason: 'checkpoint-unsealed' };
+    }
+    return { ok: true, idempotent: true };
+  }
+  if (!sameAuthorityReceipt(actualAuthority, predecessorAuthority)
+    || !checkpointPublicationForReceipt(currentAuthorityRecord, slot, digest, predecessorAuthority)) {
+    return { ok: false, reason: 'checkpoint-predecessor-mismatch' };
+  }
+
+  // Preserve every evidence field verbatim; only the host-issued capability
+  // changes. A legacy nested receipt is updated too when present, preventing
+  // a future reader from selecting an old fallback field after S2 adoption.
+  checkpoint.operationAuthority = currentAuthority;
+  if (checkpoint.snapshotContext && typeof checkpoint.snapshotContext === 'object'
+    && !Array.isArray(checkpoint.snapshotContext)
+    && Object.hasOwn(checkpoint.snapshotContext, 'operationAuthority')) {
+    checkpoint.snapshotContext = { ...checkpoint.snapshotContext, operationAuthority: currentAuthority };
+  }
+  const rewritten = `${JSON.stringify(checkpoint, null, 2)}\n`;
+  await stagePublication({ publications: [{ slot, digest: crypto.createHash('sha256').update(rewritten, 'utf8').digest('hex') }] });
+  await writeCheckpointAtomically(checkpointPath, checkpoint);
+  return { ok: true, adopted: true };
+}
+
+/**
+ * Atomically adopt one immediate host-authorized resume receipt into an exact
+ * manifest and its optional sealed Solve checkpoint. This function owns the
+ * authority transaction; callers must not wrap it in `withCurrent...`, or a
+ * rebind would self-deadlock on the per-hub durable authority lock. A manifest
+ * from S1 can move to S2 only when S2 names S1 as predecessor; S3 therefore
+ * cannot skip S2 and rebind S1 directly.
+ */
+export async function rebindRunOperationAuthority(canvasFilePath, {
+  expectedRunId, expectedNodeId, careerSnapshotId, currentAuthority, predecessorAuthority,
+} = {}) {
+  const files = runFilesForCanvas(canvasFilePath, expectedNodeId);
+  const authority = jobAnalysisOperationAuthorityReceipt(currentAuthority);
+  const predecessor = jobAnalysisOperationAuthorityReceipt(predecessorAuthority);
+  if (!files || !expectedRunId || !expectedNodeId || !normalizeCareerSnapshotId(careerSnapshotId) || !authority
+    || (predecessorAuthority != null && !predecessor)) {
+    return { ok: false, reason: 'invalid-rebind-request' };
+  }
+  // A receipt is not interchangeable merely because it currently owns this
+  // hub. Resume adoption is bound to the exact immutable career corpus and
+  // durable scrape run. Check both sides before taking any authority/artifact
+  // lock, so a forged receipt cannot use a same-hub manifest as an oracle.
+  // A newly-started renderer operation is claimed before the main process
+  // allocates the durable run id.  Its S1 receipt therefore legitimately has
+  // `runId: null`; startRun binds that exact receipt into the sealed manifest.
+  // Permit that one narrow bridge on the predecessor only.  The current
+  // resume receipt must already name the allocated run, and the manifest
+  // comparison below must prove the null-run predecessor is the exact
+  // receipt that owns this node/career/run tuple.  Never coerce or accept a
+  // different non-null predecessor run id.
+  const predecessorRunMatches = predecessor
+    && (predecessor.semanticBase?.runId === expectedRunId
+      || predecessor.semanticBase?.runId === null);
+  if (authority.semanticBase?.careerSnapshotId !== careerSnapshotId
+    || authority.semanticBase?.runId !== expectedRunId
+    || (predecessor && (predecessor.semanticBase?.careerSnapshotId !== careerSnapshotId
+      || !predecessorRunMatches))) {
+    return { ok: false, reason: 'authority-semantic-mismatch' };
+  }
+  const admission = await withCurrentJobAnalysisOperationAuthority({
+    canvasFilePath, hubId: expectedNodeId, ...authority,
+  }, async (currentAuthorityRecord, stagePublication) => {
+    // Re-check the explicit predecessor under the exact S2 lock. The claim
+    // helper validates this at admission, but this also rejects a forged
+    // direct caller and makes the S1->S3 skip rule local to the rebind.
+    const immediatePredecessor = predecessor || currentAuthorityRecord.predecessor;
+    if (!immediatePredecessor || (predecessor && !sameAuthorityReceipt(currentAuthorityRecord.predecessor, predecessor))) {
+      return { ok: false, reason: 'authority-predecessor-mismatch' };
+    }
+    const immediatePredecessorRunMatches = immediatePredecessor.semanticBase?.runId === expectedRunId
+      || immediatePredecessor.semanticBase?.runId === null;
+    if (immediatePredecessor.semanticBase?.careerSnapshotId !== careerSnapshotId
+      || !immediatePredecessorRunMatches) {
+      return { ok: false, reason: 'authority-semantic-mismatch' };
+    }
+    return withManifestLock(files.manifest, async () => {
+      const manifest = await readManifestFromFiles(files);
+      if (!manifest || manifest.runId !== expectedRunId || manifest.inputs?.nodeId !== expectedNodeId
+        || manifest.inputs?.careerSnapshotId !== careerSnapshotId) return { ok: false, reason: 'manifest-mismatch' };
+      const recorded = manifest.inputs?.operationAuthority;
+      // When callers omit the optional predecessor argument, the durable S2
+      // record is still the authoritative immediate predecessor. Compare the
+      // manifest against that resolved receipt—not the null optional input.
+      if (!sameAuthorityReceipt(recorded, authority) && !sameAuthorityReceipt(recorded, immediatePredecessor)) {
+        return { ok: false, reason: 'manifest-predecessor-mismatch' };
+      }
+      const checkpoint = await adoptRunCheckpoint({
+        canvasFilePath, expectedNodeId, expectedRunId, careerSnapshotId,
+        currentAuthorityRecord, currentAuthority: authority, predecessorAuthority: immediatePredecessor, stagePublication,
+      });
+      if (!checkpoint.ok) return checkpoint;
+      if (sameAuthorityReceipt(recorded, authority)) return { ok: true, idempotent: true, checkpoint, manifest };
+      manifest.inputs = { ...manifest.inputs, operationAuthority: authority };
+      await atomicWriteJson(files.manifest, manifest);
+      return { ok: true, rebound: true, checkpoint, manifest };
+    });
+  });
+  return admission.admitted ? admission.value : { ok: false, reason: admission.reason || 'operation-superseded' };
+}
+
+/**
+ * Provider/staging mutations are an authority→manifest transaction.  The
+ * preliminary manifest read only discovers the compact receipt; the receipt
+ * is checked again under the manifest lock while the authority lock is held,
+ * so an S2 claim or manifest rebind cannot admit a late S1 provider result.
+ */
+async function withLiveManifestOperationAuthority(canvasFilePath, files, nodeId, expectedRunId, expectedOperationAuthority, write, { __testOnlyAllowUnpinned = false } = {}) {
+  const observed = await readManifestFromFiles(files);
+  // This capability belongs to the provider callback that initiated this
+  // mutation. Never read it from a mutable replacement manifest: doing so
+  // would let delayed S1 work borrow S2's receipt after a rebind.
+  const authority = jobAnalysisOperationAuthorityReceipt(expectedOperationAuthority);
+  const owner = normalizeNodeId(nodeId) || normalizeNodeId(observed?.inputs?.nodeId);
+  // This private branch is only reached by the deterministic test dependency
+  // adapter. It exists to retain fixtures for pre-authority sidecars without
+  // teaching any production IPC how to mutate an unpinned manifest.
+  if (__testOnlyAllowUnpinned
+    && observed?.inputs?.careerSnapshotId == null
+    && observed?.inputs?.operationAuthority == null) {
+    return withManifestLock(files.manifest, async () => {
+      const manifest = await readManifestFromFiles(files);
+      if (!manifest || (expectedRunId != null && manifest.runId !== expectedRunId)
+        || (owner && normalizeNodeId(manifest.inputs?.nodeId) !== owner)
+        || manifest.inputs?.careerSnapshotId != null || manifest.inputs?.operationAuthority != null) return false;
+      return write(manifest);
+    });
+  }
+  if (!authority || !owner || !sameOperationAuthorityReceipt(observed?.inputs?.operationAuthority, authority)) return false;
+  const admission = await withCurrentJobAnalysisOperationAuthority({
+    canvasFilePath, hubId: owner, ...authority,
+  }, () => withManifestLock(files.manifest, async () => {
+    const manifest = await readManifestFromFiles(files);
+    if (!manifest || (expectedRunId != null && manifest.runId !== expectedRunId)
+      || normalizeNodeId(manifest.inputs?.nodeId) !== owner
+      || !sameOperationAuthorityReceipt(manifest.inputs?.operationAuthority, authority)) return false;
+    return write(manifest);
+  }));
+  return admission.admitted ? admission.value : false;
+}
+
 /**
  * Flush one page's raw jobs to staging and bump the (source,query) ledger.
  * `now` is the caller-stamped timestamp. `expectedRunId` makes late work from
  * a cancelled predecessor a no-op after a fresh run has replaced the manifest.
  * No-op when there is no canvas/manifest.
  */
-async function recordSourcePageRaw(canvasFilePath, { sourceId, query = '', queryIndex = null, page = 0, jobs = [], terminal = false, now, expectedRunId = null, nodeId = null }) {
+async function recordSourcePageRaw(canvasFilePath, { sourceId, query = '', queryIndex = null, page = 0, jobs = [], terminal = false, now, expectedRunId = null, nodeId = null, expectedOperationAuthority = null, __testOnlyAllowUnpinned = false }) {
   const located = await locateRun(canvasFilePath, nodeId);
   const { files } = located;
   if (!files) return;
-  return withManifestLock(files.manifest, async () => {
+  return withLiveManifestOperationAuthority(canvasFilePath, files, nodeId, expectedRunId, expectedOperationAuthority, async manifest => {
     try {
       // Check the token BEFORE appending: a manifest write is atomic, whereas
       // staging is append-only and cannot be rolled back after an old run has
       // leaked rows into its successor's file.
-      const manifest = await readManifestFromFiles(files);
-      if (!manifest || (expectedRunId != null && manifest.runId !== expectedRunId)) return false;
       if (Array.isArray(jobs) && jobs.length > 0) {
         const lines = jobs.map(j => JSON.stringify({ sourceId, query, page, job: j })).join('\n') + '\n';
         // Never advance the manifest page cursor until the staged rows have
@@ -1361,13 +1662,15 @@ async function recordSourcePageRaw(canvasFilePath, { sourceId, query = '', query
       // here because this boundary is also used by best-effort enrichment paths.
       logger.warn(`[JobRunStaging] recordSourcePage(${sourceId}) failed: ${e?.message || e}`);
     }
-  });
+  }, { __testOnlyAllowUnpinned });
 }
 
 /** Set a source's terminal status ('done' | 'skipped' | 'blocked') for the expected run. */
 async function markSourceStatusRaw(canvasFilePath, sourceId, status, now, {
   expectedRunId = null,
   nodeId = null,
+  expectedOperationAuthority = null,
+  __testOnlyAllowUnpinned = false,
   // Omitted preserves older/source-only status writes. A supplied value is
   // normalized at this durable boundary so recovery never trusts provider data.
   collectionScopeCaveats = undefined,
@@ -1381,9 +1684,7 @@ async function markSourceStatusRaw(canvasFilePath, sourceId, status, now, {
   const located = await locateRun(canvasFilePath, nodeId);
   const { files } = located;
   if (!files) return;
-  return withManifestLock(files.manifest, async () => {
-    const manifest = await readManifestFromFiles(files);
-    if (!manifest || (expectedRunId != null && manifest.runId !== expectedRunId)) return false;
+  return withLiveManifestOperationAuthority(canvasFilePath, files, nodeId, expectedRunId, expectedOperationAuthority, async manifest => {
     const src = manifest.sources[sourceId] || (manifest.sources[sourceId] = { status: 'pending', queries: {} });
     src.status = status;
     if (status === 'done' || status === 'skipped') {
@@ -1399,21 +1700,21 @@ async function markSourceStatusRaw(canvasFilePath, sourceId, status, now, {
     manifest.lastUpdated = now ?? manifest.lastUpdated;
     try { await atomicWriteJson(files.manifest, manifest); return true; }
     catch (e) { logger.warn(`[JobRunStaging] markSourceStatus failed: ${e?.message || e}`); }
-  });
+  }, { __testOnlyAllowUnpinned });
 }
 
 /** Advance the pipeline stage ('searching'→'gathered'; see the header). */
 async function setStageRaw(canvasFilePath, stage, now, {
   expectedRunId = null,
   nodeId = null,
+  expectedOperationAuthority = null,
+  __testOnlyAllowUnpinned = false,
   collectionCompletedAt = null,
 } = {}) {
   const located = await locateRun(canvasFilePath, nodeId);
   const { files } = located;
   if (!files) return;
-  return withManifestLock(files.manifest, async () => {
-    const manifest = await readManifestFromFiles(files);
-    if (!manifest || (expectedRunId != null && manifest.runId !== expectedRunId)) return false;
+  return withLiveManifestOperationAuthority(canvasFilePath, files, nodeId, expectedRunId, expectedOperationAuthority, async manifest => {
     // A deliberate partial finish is an irreversible collection decision for
     // this run.  Never let a later/general resume caller quietly demote the
     // manifest back to `searching`: a crash after that demotion would make the
@@ -1437,22 +1738,21 @@ async function setStageRaw(canvasFilePath, stage, now, {
     manifest.lastUpdated = now ?? manifest.lastUpdated;
     try { await atomicWriteJson(files.manifest, manifest); return true; }
     catch (e) { logger.warn(`[JobRunStaging] setStage failed: ${e?.message || e}`); }
-  });
+  }, { __testOnlyAllowUnpinned });
 }
 
 /** Mark the one-way provider-I/O boundary without claiming semantic processing is complete. */
 async function markProviderGatheredRaw(canvasFilePath, now, {
   expectedRunId = null,
   nodeId = null,
+  expectedOperationAuthority = null,
+  __testOnlyAllowUnpinned = false,
   requiredSourceIds = [],
 } = {}) {
   const located = await locateRun(canvasFilePath, nodeId);
   const { files } = located;
   if (!files) return false;
-  return withManifestLock(files.manifest, async () => {
-    const manifest = await readManifestFromFiles(files);
-    if (!manifest || (expectedRunId != null && manifest.runId !== expectedRunId)) return false;
-    if (nodeId && normalizeNodeId(manifest.inputs?.nodeId) !== normalizeNodeId(nodeId)) return false;
+  return withLiveManifestOperationAuthority(canvasFilePath, files, nodeId, expectedRunId, expectedOperationAuthority, async manifest => {
     const terminal = new Set(['done', 'skipped', 'blocked']);
     const sourceIds = Array.isArray(requiredSourceIds)
       ? requiredSourceIds.filter(id => typeof id === 'string' && id)
@@ -1466,7 +1766,7 @@ async function markProviderGatheredRaw(canvasFilePath, now, {
     manifest.lastUpdated = now ?? manifest.lastUpdated;
     try { await atomicWriteJson(files.manifest, manifest); return true; }
     catch (error) { logger.warn(`[JobRunStaging] markProviderGathered failed: ${error?.message || error}`); return false; }
-  });
+  }, { __testOnlyAllowUnpinned });
 }
 
 /**
@@ -1518,6 +1818,8 @@ async function pauseRunForManualResumeRaw(canvasFilePath, {
 async function activateRunForResumeRaw(canvasFilePath, {
   expectedRunId = null,
   nodeId = null,
+  expectedOperationAuthority = null,
+  __testOnlyAllowUnpinned = false,
   now = null,
 } = {}) {
   const expectedRunToken = typeof expectedRunId === 'string' && expectedRunId.trim()
@@ -1530,9 +1832,15 @@ async function activateRunForResumeRaw(canvasFilePath, {
   const located = await locateRun(canvasFilePath, expectedNodeId);
   const { files } = located;
   if (!files) return { ok: false, activated: false, absent: true, reason: 'missing-canvas' };
-  return withManifestLock(files.manifest, async () => {
-    const manifest = await readManifestFromFiles(files);
-    if (!manifest) return { ok: false, activated: false, absent: true, reason: 'run-absent' };
+  // Report an already-replaced run as an ownership mismatch before attempting
+  // authority admission. This read makes no mutation; the authoritative
+  // receipt is still rechecked under the write lock below.
+  const observed = await readManifestFromFiles(files);
+  if (observed && (observed.runId !== expectedRunToken
+    || normalizeNodeId(observed.inputs?.nodeId) !== expectedNodeId)) {
+    return { ok: false, activated: false, tokenMismatch: true, reason: 'ownership-mismatch' };
+  }
+  return withLiveManifestOperationAuthority(canvasFilePath, files, expectedNodeId, expectedRunToken, expectedOperationAuthority, async manifest => {
     if (
       manifest.runId !== expectedRunToken
       || normalizeNodeId(manifest.inputs?.nodeId) !== expectedNodeId
@@ -1560,7 +1868,7 @@ async function activateRunForResumeRaw(canvasFilePath, {
       logger.warn(`[JobRunStaging] activateRunForResume failed: ${error?.message || error}`);
       return { ok: false, activated: false, reason: 'write-failed' };
     }
-  });
+  }, { __testOnlyAllowUnpinned });
 }
 
 /**
@@ -1577,6 +1885,7 @@ async function activateRunForResumeRaw(canvasFilePath, {
 async function finishRunWithSavedListingsRaw(canvasFilePath, {
   expectedRunId = null,
   nodeId = null,
+  expectedOperationAuthority = null,
   now = null,
 } = {}) {
   const expectedRunToken = typeof expectedRunId === 'string' && expectedRunId.trim()
@@ -1595,9 +1904,7 @@ async function finishRunWithSavedListingsRaw(canvasFilePath, {
   const located = await locateRun(canvasFilePath, nodeId);
   const { files } = located;
   if (!files) return { ok: false, marked: false, absent: true, reason: 'missing-canvas' };
-  return withManifestLock(files.manifest, async () => {
-    const manifest = await readManifestFromFiles(files);
-    if (!manifest) return { ok: false, marked: false, absent: true, reason: 'run-absent' };
+  return withLiveManifestOperationAuthority(canvasFilePath, files, expectedNodeId, expectedRunToken, expectedOperationAuthority, async manifest => {
     if (
       manifest.runId !== expectedRunToken
       || normalizeNodeId(manifest.inputs?.nodeId) !== expectedNodeId
@@ -1849,7 +2156,7 @@ async function clearRunFiles(files, trashItem = null) {
  * checked under the same lock as startRun/clearRun, so a delayed completion from
  * an older hub run cannot overwrite a newer run's receipt or delete its files.
  */
-async function completeRunWithReceiptRaw(canvasFilePath, receipt, { trashItem = null, expectedNodeId = null } = {}) {
+async function completeRunWithReceiptRaw(canvasFilePath, receipt, { trashItem = null, expectedNodeId = null, expectedCareerSnapshotId = null, __testOnlyAllowUnpinned = false } = {}) {
   const located = await locateRun(canvasFilePath, expectedNodeId || receipt?.nodeId || null);
   const { files } = located;
   const receiptPath = lastRunReceiptPathForCanvas(canvasFilePath, files?.nodeId);
@@ -1877,6 +2184,37 @@ async function completeRunWithReceiptRaw(canvasFilePath, receipt, { trashItem = 
     )) {
       return { ok: false, cleared: false, receipt: null, tokenMismatch: true };
     }
+    // Compare immutable career authority under this exact manifest lock, before
+    // a delayed terminal callback can create a receipt or delete sidecars.
+    const suppliedCareerSnapshotId = normalizeCareerSnapshotId(expectedCareerSnapshotId);
+    const persistedCareerSnapshotId = normalizeCareerSnapshotId(manifest?.inputs?.careerSnapshotId);
+    if (manifest) {
+      const legacyFixture = __testOnlyAllowUnpinned
+        && manifest.inputs?.careerSnapshotId == null
+        && manifest.inputs?.operationAuthority == null;
+      if (!persistedCareerSnapshotId && !legacyFixture) {
+        return { ok: false, cleared: false, receipt: null, careerSnapshotMissing: true };
+      }
+      if (!legacyFixture && (!suppliedCareerSnapshotId || suppliedCareerSnapshotId !== persistedCareerSnapshotId)) {
+        return { ok: false, cleared: false, receipt: null, careerSnapshotMismatch: true };
+      }
+    }
+
+    // A receipt-only retry occurs after a prior exact terminal transaction
+    // removed its sidecars. Keep that idempotence, but bind it to the receipt's
+    // persisted authority instead of accepting an unpinned replay.
+    const receiptCareerSnapshotId = normalizeCareerSnapshotId(existingReceipt?.careerSnapshotId);
+    if (!manifest && exactExistingReceipt) {
+      const legacyFixture = __testOnlyAllowUnpinned
+        && existingReceipt?.careerSnapshotId == null
+        && existingReceipt?.operationAuthority == null;
+      if (!receiptCareerSnapshotId && !legacyFixture) {
+        return { ok: false, cleared: false, receipt: existingReceipt, careerSnapshotMissing: true };
+      }
+      if (!legacyFixture && (!suppliedCareerSnapshotId || suppliedCareerSnapshotId !== receiptCareerSnapshotId)) {
+        return { ok: false, cleared: false, receipt: existingReceipt, careerSnapshotMismatch: true };
+      }
+    }
 
     // A prior completion can have removed the manifest and staging successfully,
     // then failed only while updating the receipt, or it can have left a single
@@ -1898,6 +2236,7 @@ async function completeRunWithReceiptRaw(canvasFilePath, receipt, { trashItem = 
           startedAt: receipt?.startedAt ?? manifest?.startedAt,
           stagingStarted: true,
           cleanup: { attempted: false, cleared: null },
+          ...(suppliedCareerSnapshotId ? { careerSnapshotId: suppliedCareerSnapshotId } : {}),
         });
     if (!exactExistingReceipt) {
       try {

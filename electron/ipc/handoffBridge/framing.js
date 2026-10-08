@@ -24,7 +24,6 @@ export const RESULT_NOTES = Object.freeze({
   rejected: 'Nothing was saved. Submit the complete corrected answer with the same handoffCode.',
   // status 'paused' carries a reason. Only a real pause (no reason) is "paused";
   // the two below used to say so too, which was false: the bridge was serving.
-  waitingLimit: 'Nothing new became ready while you waited. Stop now and tell the user this chat is idle; they will send Continue when there is more work.',
   needsAttention: 'A job needs attention in Infinite Canvas. Stop now and tell the user.',
 });
 
@@ -138,7 +137,7 @@ export function makeResultBody(status, fields = {}) {
     // about a ChatGPT product or context-window limit. The normal adaptive
     // worker plan leaves that budget disabled, so avoid telling a person that
     // every long-lived run inherently needs a fresh chat.
-    case 'session_full': return { status, note: 'This chat reached a configured bridge safety budget. Prepare the worker plan to continue.', ...fields };
+    case 'session_full': return { status, note: 'This worker session is no longer live. Prepare a replacement worker to continue.', ...fields };
     case 'app_unavailable': return { status, note: 'Open the Infinite Canvas window that owns these handoffs and try again.', ...fields };
     case 'retry': return { status, note: 'The handoff is still being processed. Retry the same call.', ...fields };
     // A pool may have finished its current wave while another source is still
@@ -147,7 +146,6 @@ export function makeResultBody(status, fields = {}) {
     // alive without requiring the person to send another prompt.
     case 'waiting': return { status, note: 'Infinite Canvas is still preparing the next handoff. Wait the retryAfterSeconds value in this result, then call get_handoff again with the same session. Keep doing that until the status is queue_empty or paused; do not stop on waiting.', ...fields };
     case 'paused':
-      if (fields.reason === 'waiting_limit') return { status, note: RESULT_NOTES.waitingLimit, ...fields };
       if (fields.reason === 'needs_user') return { status, note: RESULT_NOTES.needsAttention, ...fields };
       return { status, note: 'The bridge is paused. Stop and tell the user.', ...fields };
     case 'held': return { status, note: 'This handoff is on hold. Stop and tell the user.', ...fields };

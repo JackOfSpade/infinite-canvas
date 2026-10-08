@@ -168,9 +168,8 @@ function deriveInner({ job: rawJob, chat: rawChat, item: rawItem, bridge: rawBri
   const ordinal = time(chat.ordinal);
   const hasChat = state !== 'none' && ordinal !== null && ordinal > 0;
   const lastHeard = hasChat ? ownerLastHeard(chat, ownerWorker) : null;
-  // Given a slot in this chat (it may have been answered since) vs proven to be
-  // waiting on ChatGPT's answer right now.
-  const served = !unread && time(job.servedToChat) !== null;
+  // `awaitingAnswer` is the per-job proof that this exact stage was handed to
+  // ChatGPT and has not yet received an accepted answer.
   const awaiting = !unread && job.awaitingAnswer === true;
 
   // 3. Nobody to hand the job to yet.
@@ -223,11 +222,7 @@ function deriveInner({ job: rawJob, chat: rawChat, item: rawItem, bridge: rawBri
   // never handed it, or it answered the previous stage and this one is not
   // served yet. Both are "ready, waiting for ChatGPT's next request".
   if (!awaiting) {
-    const cap = time(chat.jobsCap) ?? 0;
-    const assigned = time(chat.jobsAssigned) ?? 0;
-    const [headline, detail] = !served && cap > 0 && assigned >= cap
-      ? BRIDGE_PROGRESS_COPY.queuedChatFull(cap)
-      : BRIDGE_PROGRESS_COPY.queued(label);
+    const [headline, detail] = BRIDGE_PROGRESS_COPY.queued(label);
     return build({ kind: 'queued', steps }, { headline, detail, tone: 'working', lastHeard });
   }
 

@@ -221,6 +221,13 @@ export function describeJobRow(job = {}) {
   if (job.phase === 'held') {
     return { text: job.reason === 'answered_in_dock' || job.reason === 'human_advance' ? JOB_ROW_COPY.answered_in_dock : JOB_ROW_COPY.held, action: 'resume' };
   }
+  // A read failure leaves the immutable released lane intact. Retrying its
+  // existing per-job resume route asks the bridge to read that same job again;
+  // it neither recreates the job nor changes its release scope. Other
+  // needs-user reasons require the recovery their own status describes.
+  if (job.phase === 'needs_user' && job.reason === 'read_failed') {
+    return { text: JOB_ROW_COPY.read_failed, action: 'retry-reading' };
+  }
   return { text: JOB_ROW_COPY[job.reason] || JOB_ROW_COPY.unreadable, action: 'dock' };
 }
 

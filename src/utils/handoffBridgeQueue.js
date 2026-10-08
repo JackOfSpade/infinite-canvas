@@ -1,4 +1,7 @@
-import { APPLICATION_HANDOFF_LIMIT } from './applicationHandoffDock.js';
+// This module's publication batches are bounded at the IPC edge, but the
+// projected list itself is a durable backlog and must never be cut to worker
+// capacity.
+export const BRIDGE_JOB_PUBLICATION_BATCH_SIZE = 50;
 
 const JOB_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const ABSOLUTE_PATH_RE = /^(?:\/|[A-Za-z]:[\\/])/;
@@ -66,17 +69,61 @@ export function projectDockItemsForBridge(items) {
     const previous = found.get(item.jobId);
     if (!previous || JSON.stringify(projected) < JSON.stringify(previous)) found.set(item.jobId, projected);
   }
-  return Object.freeze([...found.values()]
-    .sort((a, b) => a.jobId.localeCompare(b.jobId))
-    .slice(0, APPLICATION_HANDOFF_LIMIT));
+  return Object.freeze([...found.values()].sort((a, b) => a.jobId.localeCompare(b.jobId)));
 }
 export function startBridgeJobPublisher({ api, subscribe, getItems, setTimer = setTimeout, clearTimer = clearTimeout, setIntervalFn = setInterval, clearIntervalFn = clearInterval, debounceMs = 250, keepAliveMs = 30000 } = {}) {
-  const bridgeApi = api || globalThis.window?.electronAPI; let stopped = false; let timer = null; let sequence = 0; let lastKey = null;
-  const send = (jobs, force = false, unmount = false) => { if (stopped && !unmount) return; const key = JSON.stringify(jobs); if (!force && key === lastKey) return; lastKey = key; const publish = bridgeApi?.handoffBridgePublishJobs; if (typeof publish !== 'function') return; try { publish.call(bridgeApi, { v: 1, seq: ++sequence, jobs, ...(unmount ? { unmount: true } : {}) }); } catch { /* optional IPC surface */ } };
+  const bridgeApi = api || globalThis.window?.electronAPI; let stopped = false; let timer = null; let sequence = 0; let publicationSet = 0; let lastKey = null;
+  const send = (jobs, force = false, unmount = false) => {
+    if (stopped && !unmount) return;
+    const key = JSON.stringify(jobs);
+    if (!force && key === lastKey) return;
+    lastKey = key;
+    const publish = bridgeApi?.handoffBridgePublishJobs;
+    if (typeof publish !== 'function') return;
+    // The IPC schema intentionally bounds one message. Split only transport
+    // messages, never the source queue: every chunk is published in stable
+    // order and the main process durably accepts/releases it before workers
+    // drain it with rolling refill.
+    const count = unmount ? 1 : Math.max(1, Math.ceil(jobs.length / BRIDGE_JOB_PUBLICATION_BATCH_SIZE));
+    const setId = `jobs-${++publicationSet}`;
+    // Do not allocate a second array with one item per IPC page. A queue can be
+    // arbitrarily long; only each transport message is bounded. Main applies
+    // pages in order and removes stale entries only after the final page.
+    for (let index = 0; index < count; index += 1) {
+      const chunk = unmount ? [] : jobs.slice(index * BRIDGE_JOB_PUBLICATION_BATCH_SIZE, (index + 1) * BRIDGE_JOB_PUBLICATION_BATCH_SIZE);
+      try {
+        publish.call(bridgeApi, {
+          v: 1,
+          seq: ++sequence,
+          jobs: chunk,
+          ...(!unmount && count > 1 ? { snapshot: { id: setId, index, final: index + 1 === count } } : {}),
+          ...(unmount ? { unmount: true } : {}),
+        });
+      } catch { /* optional IPC surface */ }
+    }
+  };
   const flush = force => { timer = null; send(projectDockItemsForBridge(typeof getItems === 'function' ? getItems() : []), force); };
   const schedule = () => { if (stopped || timer !== null) return; timer = setTimer(() => flush(false), debounceMs); };
   const unsubscribe = typeof subscribe === 'function' ? subscribe(schedule) : () => {};
+  // The first publication can race app startup: the dock has recovered the
+  // on-disk job, but main has not yet bound this BrowserWindow to its canvas
+  // path and must reject that unbound message. Main emits this payload-free
+  // edge after its binding is durable. Clear the de-dup key so an unchanged
+  // recovered queue is actually sent again instead of waiting for the normal
+  // keep-alive interval.
+  let unsubscribeCanvasReady = () => {};
+  try {
+    const onCanvasReady = bridgeApi?.onHandoffBridgeCanvasFileReady;
+    if (typeof onCanvasReady === 'function') {
+      const result = onCanvasReady.call(bridgeApi, () => {
+        if (stopped) return;
+        lastKey = null;
+        flush(true);
+      });
+      if (typeof result === 'function') unsubscribeCanvasReady = result;
+    }
+  } catch { /* older or incomplete preload surfaces remain optional */ }
   flush(true);
   const keepAlive = setIntervalFn(() => flush(true), keepAliveMs);
-  return () => { if (stopped) return; stopped = true; if (timer !== null) clearTimer(timer); try { unsubscribe(); } catch { /* optional subscription cleanup */ } clearIntervalFn(keepAlive); send([], true, true); };
+  return () => { if (stopped) return; stopped = true; if (timer !== null) clearTimer(timer); try { unsubscribe(); } catch { /* optional subscription cleanup */ } try { unsubscribeCanvasReady(); } catch { /* optional preload listener cleanup */ } clearIntervalFn(keepAlive); send([], true, true); };
 }

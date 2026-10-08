@@ -5,6 +5,8 @@
 // exact recovery, but that retained identity is not permission to start a new
 // generation.
 
+import { currentApprovedCareerImportSnapshot } from './jobCareerCompilationReceipt.js';
+
 function nonEmptyString(value) {
   return typeof value === 'string' && value.trim() ? value.trim() : null;
 }
@@ -153,6 +155,12 @@ export function jobCareerImportBoardAdmission(data, {
 } = {}) {
   const expectedCapability = nonEmptyString(capability);
   if (!expectedCapability || !boardRunId || !capabilityBelongsToNode(expectedCapability, nodeId)) {
+    return { kind: 'missing' };
+  }
+  // Capability ownership is necessary but not sufficient. Retained paths and
+  // an unspent token can survive a failed or interrupted compiler; provider
+  // work may begin only from the exact immutable snapshot it published.
+  if (!currentApprovedCareerImportSnapshot(data, { generation: expectedCapability })) {
     return { kind: 'missing' };
   }
   if (freshJobCareerImportCapability(data, { nodeId }) === expectedCapability) {

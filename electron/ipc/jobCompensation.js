@@ -266,7 +266,7 @@ export function compensationMarketCurrency(comparisonLocation = null) {
   return resolveCompensationMarketCurrency({}, comparisonLocation).currency;
 }
 
-export function compensationAssessment({ offer, competitiveRanges, marketCurrency = '', currencyInferredFromLocation = false, comparisonLocation = null, justification = '', sourceLinks = [], researchedAt = new Date().toISOString(), reasonCode = '' } = {}) {
+export function compensationAssessment({ offer, competitiveRanges, marketCurrency = '', currencyInferredFromLocation = false, comparisonLocation = null, justification = '', sourceLinks = [], researchedAt = new Date().toISOString(), reasonCode = '', researchAttempted = false } = {}) {
   const base = {
     schemaVersion: 1,
     status: 'not_evaluated',
@@ -299,6 +299,10 @@ export function compensationAssessment({ offer, competitiveRanges, marketCurrenc
       };
     }
     if (!base.justification) base.justification = 'No stated guaranteed recurring cash salary was available to compare.';
+    // 'no_cash_salary' is the default for "nothing was looked up". When market
+    // research ran and found no comparable range, say so instead of implying the
+    // listing was the only thing examined.
+    if (researchAttempted && !reasonCode) return { ...base, reasonCode: 'market_range_unavailable' };
     return base;
   }
   if (!merged) {
@@ -449,6 +453,35 @@ export function compensationResidencesForJob(job = {}, fallback = {}) {
   return scoped && typeof scoped === 'object' && !Array.isArray(scoped) ? scoped : fallback;
 }
 
+/**
+ * Which saved remote residence a Remote posting maps to ('usa' | 'canada' |
+ * 'other'), or '' when the posting states no usable region/country.
+ * Shared by the resolver and by the career-site lookup gate so the two can
+ * never disagree about what "bare Remote" means.
+ */
+function remoteResidenceKeyFor(context = {}, rawLocation = '') {
+  const region = String(context.remoteRegion || '').trim().toLowerCase();
+  // Structured restrictions are authoritative. Only an absent/unknown
+  // structured restriction may be repaired from an explicit raw form such as
+  // "Remote - Canada"; bare "Remote" remains intentionally unresolved.
+  const structuredPermittedCountry = normalizeCountry(context.remoteCountry);
+  const permittedCountry = structuredPermittedCountry || recognizedRemoteLocationCountry(rawLocation);
+  const key = region === 'usa' || region === 'us'
+    ? 'usa'
+    : region === 'canada' || region === 'ca'
+      ? 'canada'
+      : region === 'other' || /^(?:worldwide|global|anywhere)$/i.test(region)
+        ? 'other'
+        : /^(?:united states(?: of america)?|usa|us)$/i.test(permittedCountry)
+          ? 'usa'
+          : /^canada$/i.test(permittedCountry)
+            ? 'canada'
+            : permittedCountry
+              ? 'other'
+              : '';
+  return { key, permittedCountry };
+}
+
 export function resolveCompensationLocation(job = {}, context = {}, remoteResidences = {}) {
   const rawLocation = String(job.location || '').trim();
   const statedWorkMode = String(context.workMode || '').trim().toLowerCase();
@@ -472,25 +505,7 @@ export function resolveCompensationLocation(job = {}, context = {}, remoteReside
     if (/^(?:remote|hybrid|on[-\s]?site|onsite|anywhere|worldwide|global)$/i.test(location)) return null;
     return location ? canonicalizeCompensationLocation({ kind: 'job_location', display: location }) : null;
   }
-  const region = String(context.remoteRegion || '').trim().toLowerCase();
-  // Structured restrictions are authoritative. Only an absent/unknown
-  // structured restriction may be repaired from an explicit raw form such as
-  // "Remote - Canada"; bare "Remote" remains intentionally unresolved.
-  const structuredPermittedCountry = normalizeCountry(context.remoteCountry);
-  const permittedCountry = structuredPermittedCountry || recognizedRemoteLocationCountry(rawLocation);
-  const key = region === 'usa' || region === 'us'
-    ? 'usa'
-    : region === 'canada' || region === 'ca'
-      ? 'canada'
-      : region === 'other' || /^(?:worldwide|global|anywhere)$/i.test(region)
-        ? 'other'
-        : /^(?:united states(?: of america)?|usa|us)$/i.test(permittedCountry)
-          ? 'usa'
-          : /^canada$/i.test(permittedCountry)
-            ? 'canada'
-            : permittedCountry
-              ? 'other'
-              : '';
+  const { key, permittedCountry } = remoteResidenceKeyFor(context, rawLocation);
   const value = key ? remoteResidences?.[key] : null;
   const country = normalizeCountry(value?.country || value?.countryCode);
   // A malformed saved residence must only make this optional comparison
@@ -504,6 +519,27 @@ export function resolveCompensationLocation(job = {}, context = {}, remoteReside
     kind: `remote_${key}_residence`, key, country, city: value.city, subdivision: value.subdivision,
     countryConflict: value?.countryConflict, display: bits.join(', '),
   });
+}
+
+/**
+ * Why a job has no comparison location, as far as a lookup of the employer's
+ * own posting could change it.
+ *   'fixable'  — the listing gave no usable place (empty, "Hybrid", "Multiple
+ *                Locations", bare "Remote" with no stated country). The
+ *                posting itself may name one.
+ *   'residence' — the posting IS remote with a stated region, so the missing
+ *                piece is the candidate's saved residence (or it excludes the
+ *                candidate). Nothing on a career site can supply that.
+ *   null       — a location already resolves; no lookup needed.
+ * PURE; mirrors resolveCompensationLocation's branches.
+ */
+export function classifyCompensationLocationGap(job = {}, context = {}, remoteResidences = {}) {
+  if (resolveCompensationLocation(job, context, remoteResidences)) return null;
+  const rawLocation = String(job.location || '').trim();
+  const rawRemote = job.remote === true || /\bremote\b/i.test(rawLocation);
+  const statedWorkMode = String(context.workMode || '').trim().toLowerCase();
+  if (!rawRemote && statedWorkMode !== 'remote') return 'fixable';
+  return remoteResidenceKeyFor(context, rawLocation).key ? 'residence' : 'fixable';
 }
 
 /**
@@ -720,7 +756,7 @@ export function isAuditableCompensationSource(source) {
   return Boolean(title && canonicalHttpUrl(source?.sourceUrl || source?.url));
 }
 
-function canonicalHttpUrl(value) {
+export function canonicalHttpUrl(value) {
   try {
     const parsed = new URL(String(value || '').trim());
     // Grounded evidence is shown back to the user and may be persisted on a

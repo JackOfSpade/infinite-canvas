@@ -6,6 +6,12 @@ import { resolveMissingPreviewPath } from './ipc/missingPreviewRelink.js';
 import { decodeLocalFileRequestPath } from './localFileProtocol.js';
 import { isProductImageExtension } from '../src/utils/fileExtensions.js';
 import { isExistingFile, isSensitivePath } from './utils/pathSafety.js';
+import {
+  initialCanvasWindowSpec,
+  openOrFocusCanvasWindow,
+  resolveSafeCanvasFilePath,
+  secondInstanceCanvasWindowSpec,
+} from './canvasCommandLine.js';
 import { isTrustedCanvasNavigation } from './canvasNavigation.js';
 import { logger } from './logger.js';
 import { registerJobsHandlers } from './ipc/jobs.js';
@@ -23,6 +29,7 @@ import { registerNetworkHandlers } from './ipc/network.js';
 import { registerSettingsHandlers } from './ipc/settings.js';
 import { flushNonApiAiPersistence, hasPendingNonApiAiRequestsForSender, registerNonApiAiHandlers } from './ipc/nonApiAi.js';
 import { holdHandoffBridgeForQuit, registerHandoffBridgeHandlers, resumeHandoffBridgeAfterQuitCancel, scheduleHandoffBridgeLaunch, startHandoffBridge, stopHandoffBridge } from './ipc/handoffBridge/index.js';
+import { IPC_EVENTS as HANDOFF_BRIDGE_IPC_EVENTS } from './ipc/handoffBridge/contracts.js';
 import { readTunnelState, writeTunnelState } from './ipc/handoffBridge/tunnel/files.js';
 import { prepareBinary } from './ipc/handoffBridge/tunnel/binary.js';
 import { inspectCredentials } from './ipc/handoffBridge/tunnel/credentials.js';
@@ -34,9 +41,32 @@ import { Readable } from 'node:stream';
 import { execFile as execFileCb, execFileSync, spawnSync } from 'node:child_process';
 import { promisify } from 'node:util';
 import { isBackgroundE2E as isBackgroundE2ERuntime, runBackgroundE2EShutdownCleanup } from './utils/backgroundE2e.js';
+import { acceptanceActivationPolicy, shouldSuppressNativeApplicationMenu } from './utils/acceptanceNoNativeMenu.js';
 import { createPendingGlobalQuitDeferral } from './utils/quitDeferral.js';
 
 const execFile = promisify(execFileCb);
+
+// The bridge smoke exercises copy-starter flows. Its Electron process shares
+// the person's system clipboard by default, so a synthetic starter could
+// survive the test and be pasted into a real ChatGPT chat later. Keep that
+// capability entirely in memory in the deliberately narrow, unpackaged smoke
+// environment. Production and ordinary development always receive Electron's
+// real clipboard below.
+function createBridgeSmokeClipboard() {
+  let text = '';
+  return Object.freeze({
+    writeText(value) { text = String(value ?? ''); },
+    readText() { return text; },
+    clear() { text = ''; },
+  });
+}
+
+function bridgeSmokeClipboardFor(appInstance, env = process.env) {
+  if (env?.INFINITE_CANVAS_E2E !== '1'
+    || env?.INFINITE_CANVAS_HANDOFF_BRIDGE_TEST !== '1'
+    || appInstance?.isPackaged === true) return null;
+  return createBridgeSmokeClipboard();
+}
 const handoffBridgeSetupSessions = new Map();
 const HANDOFF_BRIDGE_ERROR_NAMES = new Set(['Error', 'TypeError', 'RangeError', 'ReferenceError', 'SyntaxError']);
 
@@ -297,10 +327,17 @@ export function createHandoffBridgeTunnelSetup(userData, {
 // automation can still opt into normal windows, whereas the Playwright smoke
 // explicitly requests a background-only renderer.
 const isBackgroundE2E = isBackgroundE2ERuntime();
+// Unlike background smoke this remains a visible, focusable, fully bridged
+// application.  It suppresses only the native menu for the disposable
+// computer-use acceptance fixture (see acceptanceNoNativeMenu.js).
+const suppressNativeApplicationMenu = shouldSuppressNativeApplicationMenu({ isBackgroundE2E, commandLine: process.argv });
 // This must happen before app readiness/window construction: hiding the Dock
 // after ready can still allow a launch-time activation flash on macOS.
 if (isBackgroundE2E && process.platform === 'darwin') {
   app.setActivationPolicy?.('prohibited');
+} else {
+  const acceptancePolicy = acceptanceActivationPolicy({ commandLine: process.argv });
+  if (acceptancePolicy) app.setActivationPolicy?.(acceptancePolicy);
 }
 
 // Minimal extension → MIME map for media types served via local-file://.
@@ -824,9 +861,14 @@ function createWindow(initSpec = { mode: 'auto' }) {
       preload: path.join(__dirname, 'preload.js'),
       nodeIntegration: false,
       contextIsolation: true,
-      // A hidden test window may otherwise have timers and animation frames
-      // throttled, which makes Playwright polling nondeterministic.
-      backgroundThrottling: !isBackgroundE2E,
+      // Never throttle: this app runs long renderer-driven work (job pipelines,
+      // handoff import/settle polls, startup recovery) and is often launched
+      // behind other windows. MEASURED 2026-10-06: a packaged relaunch at 16:57
+      // sat occluded and its canvas "ready" step — gated on requestAnimationFrame
+      // — did not fire until the window was first shown at 19:30 (elapsed
+      // 9133588ms), stalling startup recovery for 2.5h. Also keeps the hidden
+      // Playwright window's timers and frames deterministic.
+      backgroundThrottling: false,
     },
   });
   if (isBackgroundE2E) win.setAlwaysOnTop(false);
@@ -1003,19 +1045,9 @@ async function openCanvasInNewWindow() {
     : await electronPkg.dialog.showOpenDialog(dialogOpts);
   if (canceled || !filePaths || filePaths.length === 0) return;
 
-  const filePath = filePaths[0];
-  // If this canvas is already open in a window, just focus it rather than
-  // opening a duplicate that would fight over the same file on auto-save.
-  for (const win of canvasWindows) {
-    if (win.isDestroyed()) continue;
-    if (win.__canvasFilePath && win.__canvasFilePath === filePath) {
-      if (win.isMinimized()) win.restore();
-      win.focus();
-      return;
-    }
-  }
-
-  createWindow({ mode: 'file', filePath });
+  const filePath = resolveSafeCanvasFilePath(filePaths[0]);
+  if (!filePath) return;
+  openOrFocusCanvasWindow(filePath, { canvasWindows, createWindow });
 }
 
 // ── Application menu ─────────────────────────────────────────────────────────
@@ -1046,7 +1078,7 @@ function setupApplicationMenu() {
   // A native menu brings back macOS roles such as About, Services, Unhide,
   // fullscreen, and Close. None are meaningful for the hidden smoke renderer,
   // and several can surface/focus desktop UI.
-  if (isBackgroundE2E) {
+  if (suppressNativeApplicationMenu) {
     Menu.setApplicationMenu(null);
     return;
   }
@@ -1163,12 +1195,17 @@ if (!gotTheLock) {
     }
   ]);
 
-  app.on('second-instance', () => {
+  app.on('second-instance', (_event, commandLine) => {
     // The single-instance lock funnels every relaunch (e.g. double-clicking the
-    // app again) into this one process. Instead of just focusing the existing
-    // window, open a fresh blank canvas window so relaunching gives the user a
-    // genuinely new workspace alongside what they already have open.
-    if (!isBackgroundE2E) createWindow({ mode: 'blank' });
+    // app again) into this one process. A supplied canvas opens (or focuses) its
+    // canonical file window; an ordinary relaunch still creates a blank canvas.
+    if (isBackgroundE2E) return;
+    const initSpec = secondInstanceCanvasWindowSpec(commandLine);
+    if (initSpec.mode === 'file') {
+      openOrFocusCanvasWindow(initSpec.filePath, { canvasWindows, createWindow });
+    } else {
+      createWindow(initSpec);
+    }
   });
 
   // ── Chromium flags ──────────────────────────────────────────────────────────
@@ -1179,6 +1216,12 @@ if (!gotTheLock) {
   // correctly. This flag has no meaningful quality/performance impact at typical
   // canvas-preview sizes and is only applied when the app actually starts.
   app.commandLine.appendSwitch('disable-accelerated-video-decode');
+  // Keep renderers at full speed when the window is occluded/backgrounded (see
+  // the backgroundThrottling note in createWindow). These are process-wide, so
+  // they also cover timers and frames that webPreferences alone does not.
+  app.commandLine.appendSwitch('disable-renderer-backgrounding');
+  app.commandLine.appendSwitch('disable-background-timer-throttling');
+  app.commandLine.appendSwitch('disable-backgrounding-occluded-windows');
 
   app.whenReady().then(() => {
     // macOS otherwise creates/activates a Dock presence even for a hidden
@@ -1444,9 +1487,11 @@ if (!gotTheLock) {
     try {
       bridgeUserData = app.getPath('userData');
       const tunnelSetup = createHandoffBridgeTunnelSetup(bridgeUserData);
+      const bridgeSmokeClipboard = bridgeSmokeClipboardFor(app);
       bridgeRegistered = registerHandoffBridgeHandlers({ ipcMain: electronPkg.ipcMain, deps: {
         ...bridgeBootContext,
         getCanvasWindows: () => [...canvasWindows], readTunnelState,
+        ...(bridgeSmokeClipboard ? { clipboard: bridgeSmokeClipboard } : {}),
         // The bridge factory receives the app logger through its composed
         // dependency graph, so both direct and scheduled starts share the
         // production bug-report ring without a second logger import.
@@ -1466,7 +1511,7 @@ if (!gotTheLock) {
     }
 
     // Startup assertion for the résumé design-system coupling surface (design
-    // doc §9). Job Application Design System/ is owned by Claude design and replaced
+    // doc §9). Job Application Design System/ is owned by an external design source and replaced
     // wholesale from time to time; this never throws or blocks startup — its
     // only job is to log "a reconnect is needed" instead of letting the app
     // silently generate résumés/cover letters against a stale contract.
@@ -1484,11 +1529,22 @@ if (!gotTheLock) {
     // right window. Tracked directly on the BrowserWindow instance.
     electronPkg.ipcMain.on('window:set-current-file', (event, filePath) => {
       const win = BrowserWindow.fromWebContents(event.sender);
-      if (win && !win.isDestroyed()) win.__canvasFilePath = filePath || null;
+      if (win && !win.isDestroyed()) {
+        win.__canvasFilePath = filePath || null;
+        // A restored canvas may finish identifying its BrowserWindow after
+        // the dock's first bridge publication. That early publication is
+        // deliberately rejected because main cannot yet bind it to this
+        // window; ask the publisher to replay only after the binding exists.
+        // The event has no path/job payload, so it cannot turn renderer data
+        // into authority or expose the window's filesystem state.
+        if (typeof filePath === 'string' && filePath) {
+          try { win.webContents?.send?.(HANDOFF_BRIDGE_IPC_EVENTS.CANVAS_FILE_READY); } catch { /* the renderer may be closing */ }
+        }
+      }
     });
 
     setupApplicationMenu();
-    createWindow({ mode: 'auto' });
+    createWindow(initialCanvasWindowSpec(process.argv));
     scheduleRegisteredHandoffBridgeLaunch({
       registered: bridgeRegistered,
       options: {

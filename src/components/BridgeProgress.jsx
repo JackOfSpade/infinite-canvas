@@ -2,25 +2,14 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Check } from 'lucide-react';
 import { BRIDGE_PROGRESS_COPY, BRIDGE_UI_COPY, ipcErrorMessage } from '../utils/handoffBridgeCopy';
 import { deriveBridgeJobProgress, deriveBridgePushProgress, progressTimeLines } from '../utils/bridgeJobProgress';
-import { HANDOFF_CONCURRENCY } from '../utils/handoffScheduler';
+import { MAX_HANDOFF_CONCURRENCY } from '../utils/handoffScheduler';
+import { HEADLINE_CLASS, TONE_CLASS } from '../utils/bridgeProgressStyles';
 
 // Live progress for an application the bridge holds or a selected push handoff
 // awaiting/holding an exact claim. Its start action prepares the same adaptive
 // worker plan as the bridge panel, then exposes only per-worker copy controls
 // (never a session code) right where the person sees the pending handoffs.
 
-const TONE_CLASS = Object.freeze({
-  neutral: 'border-white/10 bg-white/[0.03]',
-  working: 'border-violet-400/25 bg-violet-500/10',
-  attention: 'border-amber-400/35 bg-amber-500/10',
-  problem: 'border-red-400/35 bg-red-500/10',
-});
-const HEADLINE_CLASS = Object.freeze({
-  neutral: 'text-white',
-  working: 'text-white',
-  attention: 'text-amber-50',
-  problem: 'text-red-100',
-});
 const STEP_CLASS = Object.freeze({
   done: 'border-emerald-400/40 bg-emerald-500/15 text-emerald-100',
   current: 'border-violet-300/60 bg-violet-500/25 text-white',
@@ -28,14 +17,14 @@ const STEP_CLASS = Object.freeze({
 });
 const NO_COPIED_WORKERS = new Set();
 const WORKER_STATES = new Set(['available', 'ready', 'working', 'quiet', 'waiting', 'idle']);
-const QUIET_REASONS = new Set(['answer_silent', 'polling_stopped']);
+const QUIET_REASONS = new Set(['answer_silent', 'polling_stopped', 'fresh_context_required']);
 
 function bridgeApi() {
   try { return globalThis.window?.electronAPI || null; } catch { return null; }
 }
 
 function workerOrdinal(value) {
-  return Number.isSafeInteger(value) && value >= 1 && value <= HANDOFF_CONCURRENCY ? value : null;
+  return Number.isSafeInteger(value) && value >= 1 && value <= MAX_HANDOFF_CONCURRENCY ? value : null;
 }
 
 function workerOrdinals(value) {
@@ -173,6 +162,30 @@ function invoke(method, payload) {
   }
 }
 
+// The shared four-stage application stepper. Extracted so the grouped
+// applications page can render each row's own step list with markup identical
+// to the single-item dock page.
+export function BridgeStepList({ steps }) {
+  if (!Array.isArray(steps) || steps.length === 0) return null;
+  return (
+    <ol aria-label={BRIDGE_PROGRESS_COPY.stepper} className="flex flex-wrap items-center gap-1.5">
+      {steps.map((step, index) => (
+        <li
+          key={step.key}
+          aria-current={step.state === 'current' ? 'step' : undefined}
+          className={`flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-[11px] ${STEP_CLASS[step.state]}`}
+        >
+          {step.state === 'done'
+            ? <Check size={11} aria-hidden="true" />
+            : <span aria-hidden="true" className="font-mono text-[10px]">{index + 1}</span>}
+          <span>{step.label}</span>
+          <span className="sr-only">{`, ${BRIDGE_PROGRESS_COPY.stepState[step.state]}`}</span>
+        </li>
+      ))}
+    </ol>
+  );
+}
+
 export function BridgeProgress({
   status,
   item,
@@ -180,6 +193,8 @@ export function BridgeProgress({
   awaitingClaim = false,
   canPauseAndSave = false,
   onPauseAndSave,
+  observedReleased,
+  workersOnly = false,
 }) {
   const [now, setNow] = useState(() => Date.now());
   const [notice, setNotice] = useState('');
@@ -201,8 +216,13 @@ export function BridgeProgress({
   const pluginName = status?.config?.pluginName;
   // The dock has an active released push request even if its status snapshot
   // lags the registry's materialized count. Do not show "0 released" beside
-  // a visible worker-owned handoff.
-  const reportedPool = poolFromChat(chat, isPush && item ? 1 : 0);
+  // a visible worker-owned handoff. A page-level worker block instead passes
+  // the number of rows it represents so the materialized count is never
+  // understated while rows are still loading in or the snapshot is stale.
+  const observedReleasedCount = Number.isSafeInteger(observedReleased) && observedReleased >= 0
+    ? observedReleased
+    : (isPush && item ? 1 : 0);
+  const reportedPool = poolFromChat(chat, observedReleasedCount);
   const expandedWorkerPool = workerPool && reportedPool
     && workerPool.generation === reportedPool.generation
     && reportedPool.workerCount >= workerPool.workerCount
@@ -242,7 +262,9 @@ export function BridgeProgress({
     }, ownerWorker, awaitingClaim })
     : deriveBridgeJobProgress({ job, chat, item, ownerWorker, now, bridge: { paused: status?.paused === true, pluginName } });
   const lines = progressTimeLines(view, now);
-  const ticking = view.since !== null || view.lastHeard !== null;
+  // The page-level worker block never prints the timer lines, so it must not
+  // re-render once a second for them either.
+  const ticking = !workersOnly && (view.since !== null || view.lastHeard !== null);
 
   useEffect(() => {
     statusRef.current = status;
@@ -326,9 +348,9 @@ export function BridgeProgress({
 
   const copyWorkerStarter = async ordinal => {
     const worker = activeWorkerProgress?.byOrdinal.get(ordinal);
-    if (!activeWorkerPool || worker?.state !== 'available' || busyRef.current || activeCopyingWorker !== null) return;
+    if (!activeWorkerPool || !['available', 'ready'].includes(worker?.state) || busyRef.current || activeCopyingWorker !== null) return;
     const currentStatus = statusRef.current;
-    if (!poolStillCurrent(activeWorkerPool, currentStatus, poolFromChat(currentStatus?.chat))) return;
+    if (!poolStillCurrent(activeWorkerPool, currentStatus, poolFromChat(currentStatus?.chat, observedReleasedCount))) return;
     const copyStatusSeq = statusSequence(currentStatus);
     busyRef.current = true;
     setCopyingWorker(ordinal);
@@ -339,7 +361,7 @@ export function BridgeProgress({
       });
       if (!mountedRef.current) return;
       const latestStatus = statusRef.current;
-      if (!poolStillCurrent(activeWorkerPool, latestStatus, poolFromChat(latestStatus?.chat))) return;
+      if (!poolStillCurrent(activeWorkerPool, latestStatus, poolFromChat(latestStatus?.chat, observedReleasedCount))) return;
       setWorkerPool(previous => workerPoolMatches(previous, activeWorkerPool)
           ? previous
           : {
@@ -353,7 +375,9 @@ export function BridgeProgress({
       if (result.success) {
         setCopiedWorkers(previous => new Set([...previous, ordinal]));
         setCopiedWorkerStatusSeqs(previous => new Map([...previous, [ordinal, copyStatusSeq]]));
-        setNotice(BRIDGE_UI_COPY.workerStarterCopied(ordinal, activeWorkerPool.workerCount));
+        setNotice(result?.recopied === true
+          ? BRIDGE_UI_COPY.workerStarterRecopied(ordinal, activeWorkerPool.workerCount)
+          : BRIDGE_UI_COPY.workerStarterCopied(ordinal, activeWorkerPool.workerCount));
       } else {
         if (result.code === 'SESSION_STARTED' || result.code === 'STARTER_COPIED') {
           setCopiedWorkers(previous => new Set([...previous, ordinal]));
@@ -371,7 +395,7 @@ export function BridgeProgress({
     const worker = activeWorkerProgress?.byOrdinal.get(ordinal);
     if (!activeWorkerPool || worker?.state !== 'quiet' || busyRef.current || activeCopyingWorker !== null) return;
     const currentStatus = statusRef.current;
-    if (!poolStillCurrent(activeWorkerPool, currentStatus, poolFromChat(currentStatus?.chat))) return;
+    if (!poolStillCurrent(activeWorkerPool, currentStatus, poolFromChat(currentStatus?.chat, observedReleasedCount))) return;
     const copyStatusSeq = statusSequence(currentStatus);
     busyRef.current = true;
     setCopyingWorker(ordinal);
@@ -382,7 +406,7 @@ export function BridgeProgress({
       });
       if (!mountedRef.current) return;
       const latestStatus = statusRef.current;
-      if (!poolStillCurrent(activeWorkerPool, latestStatus, poolFromChat(latestStatus?.chat))) return;
+      if (!poolStillCurrent(activeWorkerPool, latestStatus, poolFromChat(latestStatus?.chat, observedReleasedCount))) return;
       if (result.success) {
         setCopiedWorkers(previous => new Set([...previous, ordinal]));
         setCopiedWorkerStatusSeqs(previous => new Map([...previous, [ordinal, copyStatusSeq]]));
@@ -425,45 +449,44 @@ export function BridgeProgress({
   const actionDisabled = busy || !canStartChat || (view.action === 'continue-chat' && !chat.ordinal);
   const toneLabel = BRIDGE_PROGRESS_COPY.toneLabel[view.tone];
 
+  // A page-level worker block shows no per-row progress chrome: no stepper,
+  // no elapsed/last-heard lines, no pause-and-save. It only explains why a
+  // worker chat is needed (when there is an actionable chat), then exposes the
+  // shared worker pool and its start/continue control plus any transient
+  // notice. Nothing to show means nothing is rendered.
+  if (workersOnly && !view.action && !activeWorkerPool && !notice) return null;
+
   return (
     <section
       aria-label={BRIDGE_PROGRESS_COPY.region}
       data-progress-kind={view.kind}
+      data-workers-only={workersOnly ? 'true' : undefined}
       className={`min-w-0 rounded-lg border px-3 py-3 text-xs leading-relaxed ${TONE_CLASS[view.tone] || TONE_CLASS.neutral}`}
     >
-      {!isPush && view.steps.length > 0 && (
-        <ol aria-label={BRIDGE_PROGRESS_COPY.stepper} className="flex flex-wrap items-center gap-1.5">
-          {view.steps.map((step, index) => (
-            <li
-              key={step.key}
-              aria-current={step.state === 'current' ? 'step' : undefined}
-              className={`flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-[11px] ${STEP_CLASS[step.state]}`}
-            >
-              {step.state === 'done'
-                ? <Check size={11} aria-hidden="true" />
-                : <span aria-hidden="true" className="font-mono text-[10px]">{index + 1}</span>}
-              <span>{step.label}</span>
-              <span className="sr-only">{`, ${BRIDGE_PROGRESS_COPY.stepState[step.state]}`}</span>
-            </li>
-          ))}
-        </ol>
+      {!workersOnly && !isPush && view.steps.length > 0 && <BridgeStepList steps={view.steps} />}
+
+      {(!workersOnly || view.action) && (
+        <div
+          role="status"
+          aria-live="polite"
+          aria-atomic="true"
+          className={(isPush || workersOnly) ? '' : 'mt-2.5'}
+        >
+          <div className={`font-semibold ${HEADLINE_CLASS[view.tone] || 'text-white'}`}>
+            {toneLabel ? <span className="mr-1.5 text-[10px] font-semibold uppercase tracking-wide opacity-75">{toneLabel}</span> : null}
+            {view.headline}
+          </div>
+          <div className="mt-1 text-white/70">{view.detail}</div>
+        </div>
       )}
 
-      <div role="status" aria-live="polite" aria-atomic="true" className={isPush ? '' : 'mt-2.5'}>
-        <div className={`font-semibold ${HEADLINE_CLASS[view.tone] || 'text-white'}`}>
-          {toneLabel ? <span className="mr-1.5 text-[10px] font-semibold uppercase tracking-wide opacity-75">{toneLabel}</span> : null}
-          {view.headline}
-        </div>
-        <div className="mt-1 text-white/70">{view.detail}</div>
-      </div>
-
-      {(lines.elapsed || lines.heard) && (
+      {!workersOnly && (lines.elapsed || lines.heard) && (
         <p className="mt-2 text-[11px] text-white/50">
           {[lines.elapsed, lines.heard].filter(Boolean).join(' · ')}
         </p>
       )}
 
-      {canPauseAndSave && typeof onPauseAndSave === 'function' && (
+      {!workersOnly && canPauseAndSave && typeof onPauseAndSave === 'function' && (
         <div className="mt-2.5 flex flex-wrap items-center gap-2 rounded-md border border-amber-300/20 bg-amber-300/[0.06] p-2">
           <button
             type="button"
@@ -513,7 +536,7 @@ export function BridgeProgress({
                       </button>
                     </>
                   )}
-                  {worker.state === 'available' && (
+                  {['available', 'ready'].includes(worker.state) && (
                     <button
                       type="button"
                       disabled={busy || activeCopyingWorker !== null}
@@ -523,7 +546,9 @@ export function BridgeProgress({
                     >
                       {activeCopyingWorker === worker.ordinal
                         ? BRIDGE_UI_COPY.copyingWorker(worker.ordinal)
-                        : BRIDGE_UI_COPY.copyWorkerStarter(worker.ordinal)}
+                        : worker.state === 'ready'
+                          ? BRIDGE_UI_COPY.copyWorkerStarterAgain(worker.ordinal)
+                          : BRIDGE_UI_COPY.copyWorkerStarter(worker.ordinal)}
                     </button>
                   )}
                 </li>

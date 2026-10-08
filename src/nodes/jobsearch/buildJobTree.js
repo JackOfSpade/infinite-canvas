@@ -40,7 +40,9 @@ const ROW_H = { group: 70, job: 280 }; // module-local: only used within this fi
 // post-hydration ResizeObserver measurement from immediately replacing that
 // arrangement with the deterministic tree layout. It is cleared by the next
 // explicit hierarchy action (expand/collapse/Show more), which is intentionally
-// allowed to organize the tree again.
+// allowed to organize the tree again. A manual card drag also sets the flag
+// (see markJobTreeLayoutUserArranged) so a bundle banner growing the card keeps
+// the user's dropped positions until the next explicit hierarchy action.
 export const JOB_TREE_LAYOUT_RESTORE_KEY = '_preserveTreeLayoutOnRestore';
 
 /**
@@ -57,6 +59,25 @@ export function clearRestoredJobTreeLayout(nodes, hubId) {
     changed = true;
     const { [JOB_TREE_LAYOUT_RESTORE_KEY]: _restoreLayout, ...data } = node.data;
     return { ...node, data };
+  });
+  return changed ? out : nodes;
+}
+
+/**
+ * Mark every jobcard owned by `hubId` as user-arranged so a later measured-height
+ * reflow (e.g. a saved application bundle banner making the card taller) keeps the
+ * user's dropped positions. Returns the same array when there is nothing to mark,
+ * preserving React Flow's no-op path.
+ */
+export function markJobTreeLayoutUserArranged(nodes, hubId) {
+  if (!Array.isArray(nodes) || !hubId) return nodes;
+  let changed = false;
+  const out = nodes.map((node) => {
+    if (node.type !== 'jobcard'
+        || node.data?.hubId !== hubId
+        || node.data?.[JOB_TREE_LAYOUT_RESTORE_KEY]) return node;
+    changed = true;
+    return { ...node, data: { ...node.data, [JOB_TREE_LAYOUT_RESTORE_KEY]: 'user-arranged' } };
   });
   return changed ? out : nodes;
 }
@@ -892,6 +913,10 @@ export function buildJobTreeNodes({
   originalPos,
   hubId,
   baseNodeId,
+  // Existing jobcard nodes keyed by id. A consolidated row reuses the id AND
+  // persisted data of its protected representative so an application-linked
+  // card keeps its localApplication/additionalNotes/notes across a Combine.
+  protectedCards = [],
 }) {
   // A board must never manufacture cards from an absent or partial provider
   // response. Normalization below is limited to a successful taxonomy's
@@ -908,14 +933,28 @@ export function buildJobTreeNodes({
 
   const pushEdge = (s, t) => newEdges.push({ id: `edge-${s}-${t}`, source: s, target: t, ...edgeProps });
 
+  // Existing jobcard nodes keyed by id. A consolidated row reuses the id AND
+  // persisted data of its protected representative so an application-linked
+  // card keeps its localApplication/additionalNotes/notes across a Combine.
+  const protectedCardById = new Map();
+  for (const card of (Array.isArray(protectedCards) ? protectedCards : [])) {
+    if (card?.id) protectedCardById.set(card.id, card);
+  }
+
   const pushCard = (job) => {
-    const id = `${baseNodeId}-job-${nextJobIdx++}`;
+    // Reuse the protected representative's node id (and its persisted data) so
+    // an application-linked card is neither dropped nor re-created. An
+    // unmatched consolidated row mints a fresh id as before.
+    const reuse = job?.reuseCardId ? protectedCardById.get(job.reuseCardId) : null;
+    const id = reuse ? reuse.id : `${baseNodeId}-job-${nextJobIdx++}`;
+    const reusedData = reuse?.data && typeof reuse.data === 'object' ? reuse.data : null;
     newNodes.push({
       id,
       type: 'jobcard',
-      position: { x: originalPos.x + COL_X.job, y: originalPos.y },
+      position: reuse?.position || { x: originalPos.x + COL_X.job, y: originalPos.y },
       hidden: true,
       data: {
+        ...(reusedData || {}),
         hubId,
         title: job.title, company: job.company, location: job.location,
         salary: job.salary, snippet: job.snippet, matchScore: job.matchScore,
@@ -942,12 +981,36 @@ export function buildJobTreeNodes({
         preferenceAssessment: job.preferenceAssessment,
         source: job.source, url: job.url, googleCardUrl: job.googleCardUrl,
         applySource: job.applySource, posted: job.posted, language: job.language,
+        // Consolidated multi-location rows persist their bounded variant union;
+        // ordinary cards omit the field entirely.
+        ...(Array.isArray(job.postingVariants) && job.postingVariants.length > 0
+          ? {
+            postingVariants: job.postingVariants,
+            consolidatedLocationCount: job.consolidatedLocationCount,
+            consolidatedPostingCount: job.consolidatedPostingCount,
+          }
+          : {
+            // Clear a reused protected card's stale consolidation metadata if
+            // its latest source row is no longer a multi-location cluster.
+            postingVariants: undefined,
+            consolidatedLocationCount: undefined,
+            consolidatedPostingCount: undefined,
+          }),
         // The ORIGIN search module's id (the board merges cards from several
         // modules, each with its own career data) — the card's "Generate
         // Résumé" reads careerData from this hub. A string reference, not a
         // copy: the old per-card resumeProfile clone persisted N identical
         // profile objects into the canvas file and nothing ever read it.
-        originHubId: job.originHubId || null, isNew: false,
+        originHubId: job.originHubId || null,
+        // A card owns this immutable snapshot reference, rather than looking
+        // up whichever profile the source hub happens to hold later.
+        // A protected card already owns a frozen application audit trail.
+        // Never retarget that trail just because the Board's current winning
+        // source row happens to have a different career snapshot.
+        careerSnapshotId: reusedData?.localApplication
+          ? (reusedData.careerSnapshotId || job.careerSnapshotId || null)
+          : (job.careerSnapshotId || null),
+        isNew: false,
       },
     });
     return id;

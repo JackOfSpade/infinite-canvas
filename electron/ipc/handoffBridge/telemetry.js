@@ -1,5 +1,8 @@
 import { sanitizeActivityItem } from './log.js';
-import { HANDOFF_CONCURRENCY } from '../../../src/utils/handoffScheduler.js';
+import {
+  DEFAULT_HANDOFF_CONCURRENCY,
+  MAX_HANDOFF_CONCURRENCY,
+} from '../../../src/utils/handoffScheduler.js';
 
 // A single redacted failed-start receipt survives runtime disposal so a FULL
 // bug report can distinguish a rejected tunnel configuration from a readiness
@@ -332,19 +335,22 @@ const QUEUE_MAX_LANES = 20;
 // work without turning the report into a transcript.
 const QUEUE_WORKER_STATES = new Set(['available', 'ready', 'working', 'quiet', 'waiting', 'idle']);
 const QUEUE_WORKER_OUTCOMES = new Set(['served', 'waiting', 'queue_empty', 'paused', 'session_full', 'needs_user', 'retry', 'accepted', 'rejected', 'held', 'unknown_handoff', 'session_ended']);
-const QUEUE_WORKER_QUIET_REASONS = new Set(['polling_stopped', 'answer_silent']);
+const QUEUE_WORKER_QUIET_REASONS = new Set(['polling_stopped', 'answer_silent', 'fresh_context_required']);
 const QUEUE_POOL_CLOSE_REASONS = new Set(['drained', 'source_ended', 'continued', 'rotated', 'link_changed', 'revoked', 'quit', 'disabled', 'other']);
-const QUEUE_MAX_WORKERS = HANDOFF_CONCURRENCY;
+const QUEUE_MAX_WORKERS = MAX_HANDOFF_CONCURRENCY;
 const QUEUE_ACTIVITY_LIMIT = 20;
 const QUEUE_PUSH_TASKS = new Set([
   'price-synthesis', 'price-synthesis-batch', 'bundle-price-synthesis', 'platform-fit-assessment',
-  'resume-parse', 'job-compensation-research', 'job-compensation-research-batch',
+  'resume-parse', 'career-profile-compile', 'career-profile-audit-completeness', 'career-profile-audit-grounding',
+  'career-profile-audit-attribution', 'career-profile-audit-metrics', 'career-profile-audit-skills',
+  'career-profile-audit-conflicts', 'career-profile-repair',
+  'job-compensation-research', 'job-compensation-research-batch',
   'job-preference-research', 'job-preference-research-batch', 'job-query-generation', 'job-scoring',
   'job-taxonomy-plan', 'job-taxonomy-classify', 'job-taxonomy-classify-batch',
   'job-compensation-assessment', 'job-compensation-assessment-batch',
   'job-preference-interpretation', 'job-preference-evaluation',
   'job-preference-research-assessment', 'job-preference-research-batch-assessment',
-  'job-role-audit', 'job-role-screen', 'job-role-screen-batch',
+  'job-location-consolidation-confirmation', 'job-role-audit', 'job-role-screen', 'job-role-screen-batch',
 ]);
 const QUEUE_PUSH_EXCLUSION_REASONS = ['ending', 'settling', 'attachment', 'free_text', 'task_not_allowed', 'node_not_allowed', 'person_editing'];
 const QUEUE_MAX_PUSH_HUBS = 50;
@@ -393,9 +399,12 @@ function reduceWorkerPool(rawPool) {
   const connected = stateCounts.working + stateCounts.quiet + stateCounts.waiting + stateCounts.idle;
   const rawPlan = pool.plan && typeof pool.plan === 'object' ? pool.plan : {};
   const recommended = Math.min(QUEUE_MAX_WORKERS, smallInt(rawPlan.recommended));
-  const queued = smallInt(rawPlan.queued);
+  // Backlog is a durable diagnostic total, not a live-worker allocation.
+  // Preserve every safe integer; only recommended/expand values below are
+  // constrained by the live-worker ceiling.
+  const queued = smallInt(rawPlan.queued, Number.MAX_SAFE_INTEGER);
   const materialized = Number.isSafeInteger(rawPlan.materialized) && rawPlan.materialized >= 0
-    ? Math.min(queued, QUEUE_MAX_WORKERS * 1000, rawPlan.materialized)
+    ? Math.min(queued, Number.MAX_SAFE_INTEGER, rawPlan.materialized)
     : queued;
   const expandBy = Math.min(QUEUE_MAX_WORKERS, smallInt(rawPlan.expandBy));
   const reason = ['empty', 'one_work_item', 'maximum_parallelism', 'preserved_live_workers'].includes(rawPlan.reason)
@@ -442,6 +451,10 @@ export function reduceBridgeQueue(raw) {
   const applications = raw.queue && typeof raw.queue === 'object' ? raw.queue : {};
   const chat = raw.chat && typeof raw.chat === 'object' ? raw.chat : {};
   const limits = raw.limits && typeof raw.limits === 'object' ? raw.limits : {};
+  const liveLaneCapacity = Number.isSafeInteger(limits.maxConcurrentHandoffs)
+    && limits.maxConcurrentHandoffs >= 1
+    ? Math.min(QUEUE_MAX_WORKERS, limits.maxConcurrentHandoffs)
+    : DEFAULT_HANDOFF_CONCURRENCY;
   const setup = raw.setup && typeof raw.setup === 'object' ? raw.setup : {};
   const lanes = [];
   // Live lanes are what a report is FOR, so they are kept first and in full;
@@ -524,6 +537,9 @@ export function reduceBridgeQueue(raw) {
     serving: enumOr(raw.serving, QUEUE_SERVING, 'unknown'),
     // Counted from the whole queue, never from the (possibly truncated) list.
     liveLanes: smallInt(smallInt(applications.ready) + smallInt(applications.working) + smallInt(applications.needsYou)),
+    // This is a live scheduler capacity, never a total-backlog limit. It is
+    // closed numeric diagnostic data, constrained by the reviewed hard cap.
+    liveLaneCapacity,
     autoRelease: raw.autoRelease === true,
     paused: raw.paused === null || raw.paused === undefined ? null : enumOr(raw.paused, QUEUE_PAUSE_CAUSES, 'other'),
     fault: raw.fault === null || raw.fault === undefined ? null : enumOr(raw.fault, QUEUE_FAULTS, 'other'),
@@ -533,13 +549,15 @@ export function reduceBridgeQueue(raw) {
     }),
     chat: Object.freeze({
       state: enumOr(chat.state, QUEUE_CHAT_STATES, 'none'),
-      jobsAssigned: smallInt(chat.jobsAssigned, 99), jobsCap: smallInt(chat.jobsCap, 99),
+      jobsAssigned: smallInt(chat.jobsAssigned, 99),
       startedAt: finite(chat.startedAt), firstCallAt: finite(chat.firstCallAt), lastCallAt: finite(chat.lastCallAt),
       lastCallKind: chat.lastCallKind === 'get' || chat.lastCallKind === 'submit' ? chat.lastCallKind : null,
       calls: smallInt(chat.calls),
       pool: reduceWorkerPool(chat.pool),
       bytes: smallInt(smallInt(chat.bytesServed, 100_000_000) + smallInt(chat.bytesReceived, 100_000_000), 100_000_000),
-      byteBudget: smallInt(limits.epochHardBytes, 100_000_000),
+      // Cumulative traffic is diagnostic-only. A response-size limit protects
+      // each call, but no per-chat traffic budget may retire a healthy worker.
+      byteBudget: null,
     }),
     activity: Object.freeze(activity),
     lanes: Object.freeze(lanes),

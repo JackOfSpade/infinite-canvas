@@ -14,8 +14,12 @@ import { useEscapeToClose } from '../hooks/useEscapeToClose';
  *   title    — dialog title string
  *   children — dialog body content
  *   onClose  — called when Escape pressed or outside clicked
+ *   probePassthrough — marks the backdrop and panel so the bug report's
+ *     pointer-occlusion probe sees THROUGH them. Only the issue reporter sets
+ *     it: its invisible full-screen backdrop is open at the instant the report
+ *     is captured and would otherwise be reported as covering every control.
  */
-export function Dialog({ title, children, onClose }) {
+export function Dialog({ title, children, onClose, probePassthrough = false }) {
   // null = centered via CSS transform; once dragged, holds { x, y } top-left
   const [pos, setPos] = useState(null);
   const dialogRef = useRef(null);
@@ -100,6 +104,7 @@ export function Dialog({ title, children, onClose }) {
       {/* Invisible backdrop — captures outside clicks to dismiss, no visual overlay */}
       <div
         style={{ position: 'fixed', inset: 0, zIndex: 9999 }}
+        data-pointer-probe-ignore={probePassthrough ? '' : undefined}
         onPointerDown={(e) => { 
           e.stopPropagation(); 
           if (closingRef.current) return;
@@ -112,6 +117,7 @@ export function Dialog({ title, children, onClose }) {
       <div
         ref={dialogRef}
         style={dialogStyle}
+        data-pointer-probe-ignore={probePassthrough ? '' : undefined}
         className="bg-neutral-900 border border-white/20 rounded-xl shadow-2xl flex flex-col min-w-[220px]"
         onPointerDown={(e) => e.stopPropagation()}
       >

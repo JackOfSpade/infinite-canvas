@@ -23,6 +23,13 @@ const { BrowserWindow, safeStorage } = electronPkg;
 // through as-is.
 const ENC_PREFIX = 'safeStorage:v1:';
 const JOBS_SECRET_KEYS = ['usajobsApiKey', 'diceApiKey'];
+// `get-settings` is renderer-facing.  Keep its job-settings surface explicit:
+// Dice is acquired and refreshed by the main process, and neither the Settings
+// panel nor the job-search renderer has a reason to read or write it.  In
+// particular, do not turn a renderer request into an OS Keychain read for a
+// credential it cannot use.  New renderer-visible job fields must be added to
+// this list deliberately rather than inheriting the whole persisted section.
+const RENDERER_JOB_SETTINGS_KEYS = ['usajobsApiKey', 'usajobsEmail'];
 
 // Bootstrap Dice key: used until the app captures a live one from dice.com. It
 // is ALSO the settings-schema default, so its presence in the store proves
@@ -158,17 +165,56 @@ export function tryGetStore() {
   }
 }
 
-// The renderer's Settings UI round-trips the actual key value into an
-// editable input (not a masked placeholder), so both get-settings and
-// update-settings's return value must hand back DECRYPTED secrets — only
-// the on-disk representation (what electron-store actually persists) is
-// encrypted. IPC to the renderer is a much lower bar of trust than a
-// plaintext file any other local process could read.
-function decryptedStoreSnapshot(s) {
-  const data = s.store;
+// Project persisted job settings onto the small renderer contract.  This is
+// intentionally a projection rather than `decryptSectionSecrets(...)`: the
+// persisted section also contains main-process-only state (Dice's credential,
+// Glassdoor caches, and future private source state).  USAJobs is presently
+// the sole renderer-editable secret, so it is the only secret this boundary is
+// permitted to decrypt.
+export function rendererJobsSettingsSnapshot(jobs) {
+  const snapshot = {};
+  for (const key of RENDERER_JOB_SETTINGS_KEYS) {
+    const value = jobs?.[key];
+    snapshot[key] = key === 'usajobsApiKey' ? (decryptSecret(value) || '') : (value || '');
+  }
+  return snapshot;
+}
+
+// Keep non-renderer job fields out of renderer-originated updates as well.
+// This prevents a stale or compromised renderer from overwriting a
+// main-process-owned credential merely because it can invoke update-settings.
+export function rendererJobsSettingsUpdate(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+  const update = {};
+  for (const key of RENDERER_JOB_SETTINGS_KEYS) {
+    // Both renderer-visible jobs fields are text inputs.  Do not let a
+    // renderer-provided object/null/function corrupt the persisted shape just
+    // because it uses an allowed property name; empty strings are legitimate
+    // (they clear a configured USAJobs value), so retain them.
+    if (Object.prototype.hasOwnProperty.call(value, key) && typeof value[key] === 'string') {
+      update[key] = value[key];
+    }
+  }
+  return update;
+}
+
+// The sole write path for renderer-originated `jobs` updates. Returning null
+// means "do not write" rather than an empty jobs object: malformed input and
+// hidden-only updates must preserve every main-process-owned field verbatim.
+export function mergeRendererJobsSettingsUpdate(current, value) {
+  const update = rendererJobsSettingsUpdate(value);
+  if (Object.keys(update).length === 0) return null;
+  return encryptSectionSecrets(JOBS_SECRET_KEYS, mergeSettingsSection('jobs', current, update));
+}
+
+export function rendererStoreSnapshot(data) {
+  const storeData = data && typeof data === 'object' ? data : {};
   return {
-    ...data,
-    jobs: decryptSectionSecrets(JOBS_SECRET_KEYS, data.jobs),
+    // Do not spread the persisted store into IPC. The current renderer only
+    // consumes these two sections; an allowlist means a future main-process
+    // credential cannot leak merely because it was added to electron-store.
+    marketplaceWatchUrls: storeData.marketplaceWatchUrls || {},
+    jobs: rendererJobsSettingsSnapshot(storeData.jobs),
   };
 }
 
@@ -185,7 +231,7 @@ export function mergeSettingsSection(section, current, value) {
 
 export function registerSettingsHandlers() {
   handleSafe('get-settings', async () => {
-    return decryptedStoreSnapshot(getStore());
+    return rendererStoreSnapshot(getStore().store);
   });
 
   // Shallow-merges per top-level section so a partial update (e.g. only
@@ -193,9 +239,18 @@ export function registerSettingsHandlers() {
   handleSafe('update-settings', async (_event, updates) => {
     const s = getStore();
     for (const [section, value] of Object.entries(updates || {})) {
+      // `jobs` is the one section that carries main-process-only secrets.
+      // Route every shape through its renderer allowlist before the generic
+      // setter below: null, arrays, and primitives must be harmless no-ops,
+      // never a way to replace the whole persisted jobs section.
+      if (section === 'jobs') {
+        const merged = mergeRendererJobsSettingsUpdate(s.get(section), value);
+        if (!merged) continue;
+        s.set(section, merged);
+        continue;
+      }
       if (value && typeof value === 'object' && !Array.isArray(value)) {
-        let merged = mergeSettingsSection(section, s.get(section), value);
-        if (section === 'jobs') merged = encryptSectionSecrets(JOBS_SECRET_KEYS, merged);
+        const merged = mergeSettingsSection(section, s.get(section), value);
         s.set(section, merged);
       } else {
         s.set(section, value);
@@ -208,7 +263,7 @@ export function registerSettingsHandlers() {
     broadcastToAllRenderers('settings-changed', {
       changedSections: Object.keys(updates || {}),
     });
-    return decryptedStoreSnapshot(s);
+    return rendererStoreSnapshot(s.store);
   });
 }
 

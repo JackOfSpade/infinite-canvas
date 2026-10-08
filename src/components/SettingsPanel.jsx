@@ -461,11 +461,10 @@ export function SettingsPanel({ isOpen, onClose, settings, updateSetting, update
   const updateJobsSetting = useCallback((key, value) => {
     if (!window.electronAPI?.updateSettings || !jobsSettings) return;
     setJobsSettings(prev => ({ ...prev, [key]: value }));
-    // Send ONLY the changed key: the panel's `jobsSettings`
-    // snapshot is taken once on open and never re-synced, so it can hold a stale
-    // diceApiKey / glassdoorLocIds that the main process refreshed at runtime
-    // (saveDiceApiKey on a Dice 500, saveGlassdoorLocId on a location resolve).
-    // Posting the full snapshot would revert those; a single-key payload doesn't.
+    // Send ONLY the changed key: the panel's `jobsSettings` snapshot is taken
+    // once on open and never re-synced, so it can become stale while the main
+    // process refreshes other job-source state (for example Glassdoor location
+    // IDs). Posting the full snapshot would revert that state.
     persistSettings({ jobs: { [key]: value } });
   }, [jobsSettings, persistSettings]);
 

@@ -763,7 +763,7 @@ function consentConfigFingerprint(config) {
     prefs.pairingNetworkCheck].every(value => typeof value === 'boolean')
     || !['enforce', 'alert', 'off'].includes(prefs.sourcePolicy)
     || typeof config.pluginName !== 'string'
-    || !['releaseTtlHours', 'chatKeyMaxAgeHours', 'idlePauseMinutes', 'jobsPerChat', 'epochSoftBytes', 'epochHardBytes']
+    || !['releaseTtlHours', 'chatKeyMaxAgeHours', 'idlePauseMinutes', 'maxConcurrentHandoffs']
       .every(key => Number.isSafeInteger(limits[key]) && limits[key] >= 0)) return null;
   return JSON.stringify({
     hostname: config.hostname,
@@ -775,9 +775,7 @@ function consentConfigFingerprint(config) {
       releaseTtlHours: limits.releaseTtlHours,
       chatKeyMaxAgeHours: limits.chatKeyMaxAgeHours,
       idlePauseMinutes: limits.idlePauseMinutes,
-      jobsPerChat: limits.jobsPerChat,
-      epochSoftBytes: limits.epochSoftBytes,
-      epochHardBytes: limits.epochHardBytes,
+      maxConcurrentHandoffs: limits.maxConcurrentHandoffs,
     },
     prefs: { sourcePolicy: prefs.sourcePolicy, pairingNetworkCheck: prefs.pairingNetworkCheck },
   });
@@ -1287,7 +1285,17 @@ function removePairingTestHook(current = null) {
 
 function installPairingTestHook(current) {
   pairingTestHookRuntime = current;
-  globalThis.__icHandoffBridgeTest = Object.freeze({ readPairingCode: () => current.readPairingCode?.() ?? null });
+  // Test-mode only: the bridge smoke uses an injected memory clipboard so it
+  // never writes a synthetic starter to the person's system clipboard. Keep
+  // this raw capability confined to the existing main-process test hook; it
+  // is unavailable in packaged/normal runs and never crosses renderer IPC.
+  globalThis.__icHandoffBridgeTest = Object.freeze({
+    readPairingCode: () => current.readPairingCode?.() ?? null,
+    readStarterClipboard: () => {
+      try { return bootstrapContext?.deps?.clipboard?.readText?.() ?? null; }
+      catch { return null; }
+    },
+  });
 }
 
 function invokeOwner(port, methods) {
@@ -1608,6 +1616,10 @@ async function invalidateRuntimeForMutation({ clearOAuthDiagnostics = false } = 
 export async function handleApplicationBundleRemoved(event) {
   const jobId = event?.jobId;
   if (typeof jobId !== 'string' || !JOB_ID_RE.test(jobId)) return { ok: false, code: 'invalid_arguments' };
+  // Both the app event and lanes carry the main-owned canonical canvas path.
+  // An id is scoped to that path, never a cross-canvas deletion capability.
+  const canvasFilePath = event?.canvasFilePath;
+  const ownsDiscardedBundle = lane => lane?.jobId === jobId && lane?.canvasFilePath === canvasFilePath;
   try {
     const live = await runtime?.controller?.onBundleDiscarded?.(event);
     if (live?.ok === true || live?.code === 'not_found') return { ok: true, durable: false };
@@ -1617,8 +1629,8 @@ export async function handleApplicationBundleRemoved(event) {
   try {
     const store = createLaneStore({ userDataPath: userData, fsImpl: bootstrapContext?.deps?.fsImpl });
     const stored = store.readLanes();
-    if (!stored.some(lane => lane.jobId === jobId)) return { ok: true, durable: true, removed: false };
-    const saved = await store.saveLanes(stored.filter(lane => lane.jobId !== jobId));
+    if (!stored.some(ownsDiscardedBundle)) return { ok: true, durable: true, removed: false };
+    const saved = await store.saveLanes(stored.filter(lane => !ownsDiscardedBundle(lane)));
     return saved ? { ok: true, durable: true, removed: true } : { ok: false, code: 'persist_failed' };
   } catch { return { ok: false, code: 'internal_error' }; }
 }

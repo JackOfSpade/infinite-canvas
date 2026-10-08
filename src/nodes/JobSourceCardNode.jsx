@@ -18,6 +18,7 @@ import { findJobSearchBoardActiveRecoveryOwner, findJobSearchBoardCancellablePau
 import { isJobWorkflowDeletionPending } from '../utils/nodeDeletionLifecycle';
 import { useUnmountEffect } from '../hooks/useUnmountEffect';
 import { moduleFingerprint } from './jobboard/mergeJobs';
+import { normalizedJobCareerSnapshotId } from '../utils/jobCareerSnapshotBinding';
 import {
   JOB_CONTINUATION_RECEIPTS_FIELD,
   findJobContinuationAppliedReceipt,
@@ -676,6 +677,26 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
       hubDataAtClick,
       data.sourceId,
     );
+    // A persisted continuation is the authority for its own replay. Do not
+    // reconstruct that tuple from mutable hub data after a remount.
+    const persistedContinuation = continuation?.intentId ? continuation : null;
+    const operationAuthority = persistedContinuation?.operationAuthority
+      || hubDataAtClick.analysisOperation?.authority || null;
+    const careerSnapshotId = persistedContinuation?.careerSnapshotId
+      || normalizedJobCareerSnapshotId(hubDataAtClick.careerSnapshotId);
+    // A fresh begin deliberately omits this value: main derives it from the
+    // sealed artifact under its durable authority lock. A replay sends only
+    // the fingerprint persisted in the continuation sidecar.
+    const parentArtifactFingerprint = persistedContinuation?.parentArtifactFingerprint || null;
+    if (!operationAuthority || !careerSnapshotId || (persistedContinuation && !parentArtifactFingerprint)) {
+      addToast({
+        title: 'Search Updated',
+        description: 'This source recovery has no current protected Job Search generation. Resume the search again before resolving this source.',
+        type: 'info',
+      });
+      finishSolveRequest('stale-authority');
+      return;
+    }
     // A fresh search does not receive its run token until its first source
     // progress event, while the durable provider boundary already proves this
     // card's token belongs to that exact in-flight run. Retain the click on the
@@ -739,7 +760,12 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
     // run that created that warning.
     const capturedRunIsCurrent = () => {
       const hub = getNode(data.hubId);
-      return !!hub && (hub.data?.jobRunId || null) === (jobRunId || null);
+      const currentAuthority = hub?.data?.analysisOperation?.authority || null;
+      return !!hub
+        && (hub.data?.jobRunId || null) === (jobRunId || null)
+        && currentAuthority?.operationId === operationAuthority.operationId
+        && currentAuthority?.revision === operationAuthority.revision
+        && JSON.stringify(currentAuthority?.semanticBase || null) === JSON.stringify(operationAuthority.semanticBase || null);
     };
     let lease = null;
     let resolveQueueCancelled = false;
@@ -831,6 +857,9 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
       const continuationIdentity = {
         canvasFilePath: nav?.currentFile || null,
         nodeId: data.hubId,
+        operationAuthority,
+        careerSnapshotId,
+        parentArtifactFingerprint,
         parentRunId: jobRunId,
         profileFingerprint: hubData.resumeFingerprint,
         kind: 'source-recovery',
@@ -853,7 +882,7 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
       }
       if (continuationIntent?.intentId) {
         const claimed = await window.electronAPI.claimJobContinuation?.({
-          ...continuationIdentity,
+          ...continuationIntent,
           intentId: continuationIntent.intentId,
           autoResume: true,
           automaticOperation: continuationIntent.terminalResultAvailable ? 'replay' : 'execute',
@@ -863,8 +892,12 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
             await window.electronAPI.completeJobContinuation?.({
               canvasFilePath: continuationIdentity.canvasFilePath,
               nodeId: data.hubId,
+              careerSnapshotId: continuationIntent.careerSnapshotId,
+              operationAuthority: continuationIntent.operationAuthority,
+              parentArtifactFingerprint: continuationIntent.parentArtifactFingerprint,
               parentRunId: continuationIntent.parentRunId,
               intentId: continuationIntent.intentId,
+              operation: continuationIntent.operation,
               superseded: true,
             });
             retireContinuationAsSuperseded = true;
@@ -895,7 +928,7 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
         }
         continuationIntent = begun.intent;
         const claimed = await window.electronAPI.claimJobContinuation?.({
-          ...continuationIdentity,
+          ...continuationIntent,
           intentId: continuationIntent.intentId,
           allowManualResume: true,
         });
@@ -926,6 +959,9 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
           parentRunId: continuationIntent.parentRunId,
           intentId: continuationIntent.intentId,
           leaseToken: continuationLeaseToken,
+          careerSnapshotId: continuationIntent.careerSnapshotId,
+          operationAuthority: continuationIntent.operationAuthority,
+          parentArtifactFingerprint: continuationIntent.parentArtifactFingerprint,
         });
         if (replay?.success !== true || replay?.found !== true || !replay.result) {
           throw new Error('The saved source recovery result could not be read for exact replay.');
@@ -977,10 +1013,13 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
           sourceId: data.sourceId,
           nodeId: data.hubId,
           canvasFilePath: nav?.currentFile || null,
+          careerSnapshotId,
+          parentArtifactFingerprint: continuationIntent.parentArtifactFingerprint,
           searchWindow: hubData.searchWindow || null,
           collectionLimits,
           enabledSourceIds: hubData.enabledSourceIds,
           jobRunId,
+          operationAuthority: continuationIntent.operationAuthority,
           preferredLocation: getNode(data.hubId)?.data?.canonicalLocation || '',
           // Legacy snapshot/display data only — the deterministic post-search
           // title gate this used to feed (jobTitleMatch.js) is gone. Role
@@ -1008,10 +1047,13 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
           sourceId: data.sourceId,
           nodeId: data.hubId,
           canvasFilePath: nav?.currentFile || null,
+          careerSnapshotId,
+          parentArtifactFingerprint: continuationIntent.parentArtifactFingerprint,
           searchWindow: hubData.searchWindow || null,
           collectionLimits,
           enabledSourceIds: hubData.enabledSourceIds,
           jobRunId,
+          operationAuthority: continuationIntent.operationAuthority,
           secondTabUrl: pendingWarning?.openSecondTab ? pendingUrl : null,
           // Legacy snapshot/display data only — see the resumeJobSource
           // branch above; the gate this used to feed is gone.
@@ -1031,6 +1073,14 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
       // actionable copy so a Puppeteer stderr blob is never persisted.
       if (!resolverAlive()) { solveOutcome = 'interrupted'; return; }
       if (!capturedRunIsCurrent()) {
+        retireContinuationAsSuperseded = true;
+        solveOutcome = 'fenced';
+        return;
+      }
+      // The host authority check is final. A stale resolve/resume is an
+      // expected supersession, never a browser/Solve failure to surface on a
+      // newly admitted generation.
+      if (result?.operationSuperseded === true) {
         retireContinuationAsSuperseded = true;
         solveOutcome = 'fenced';
         return;
@@ -1534,8 +1584,12 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
           await window.electronAPI?.completeJobContinuation?.({
             canvasFilePath: nav?.currentFile || null,
             nodeId: data.hubId,
+            careerSnapshotId: continuationIntent.careerSnapshotId,
+            operationAuthority: continuationIntent.operationAuthority,
+            parentArtifactFingerprint: continuationIntent.parentArtifactFingerprint,
             parentRunId: continuationIntent.parentRunId,
             intentId: continuationIntent.intentId,
+            operation: continuationIntent.operation,
             superseded: true,
           });
         } catch (error) {
@@ -1638,8 +1692,12 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
             await window.electronAPI.completeJobContinuation?.({
               canvasFilePath: nav.currentFile,
               nodeId: data.hubId,
+              careerSnapshotId: intent.careerSnapshotId,
+              operationAuthority: intent.operationAuthority,
+              parentArtifactFingerprint: intent.parentArtifactFingerprint,
               parentRunId: intent.parentRunId,
               intentId: intent.intentId,
+              operation: intent.operation,
               expectedResultKey: appliedReceipt.resultKey,
               appliedProcessEpoch: appliedReceipt.appliedProcessEpoch,
             });

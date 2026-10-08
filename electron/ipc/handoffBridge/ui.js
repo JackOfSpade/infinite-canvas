@@ -9,9 +9,13 @@ import { recordBridgeChatCopyResult } from './telemetry.js';
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const DOCK_STATES = new Set(['awaiting', 'working', 'blocked', 'broken', 'unreadable']);
 const MAX_JOBS = 50;
+const PUBLICATION_SET_ID = /^[a-z0-9-]{1,64}$/;
 const KEEP_ALIVE_MS = 30_000;
 const STATUS_INTERVAL_MS = 250;
-const LIMIT_KEYS = Object.freeze(['releaseTtlHours', 'chatKeyMaxAgeHours', 'idlePauseMinutes', 'jobsPerChat', 'epochSoftBytes', 'epochHardBytes']);
+const LIMIT_KEYS = Object.freeze(['releaseTtlHours', 'chatKeyMaxAgeHours', 'idlePauseMinutes', 'maxConcurrentHandoffs']);
+// Accept an older renderer's full limits object once so a pre-upgrade panel
+// can save another setting. The store discards this retired field on write.
+const LEGACY_LIMIT_KEYS = Object.freeze([...LIMIT_KEYS, 'jobsPerChat', 'epochSoftBytes', 'epochHardBytes']);
 const HUB_KEY = /^[a-f0-9]{64}$/;
 const ALARM_ID = /^[a-z0-9][a-z0-9_.:-]{0,99}$/i;
 const WORKER_SESSION_CODE = /^[23456789ABCDEFGHJKLMNPQRSTUVWXYZ]{26}$/;
@@ -98,7 +102,7 @@ function validPatch(payload, hostnameValid = fallbackHostname) {
   if (Object.hasOwn(patch, 'autoRelease') && typeof patch.autoRelease !== 'boolean') return null;
   if (Object.hasOwn(patch, 'telemetryInBugReports') && typeof patch.telemetryInBugReports !== 'boolean') return null;
   if (Object.hasOwn(patch, 'scope') && (!plain(patch.scope) || Object.keys(patch.scope).some(key => !['applications', 'scoring', 'marketplace'].includes(key) || typeof patch.scope[key] !== 'boolean'))) return null;
-  if (Object.hasOwn(patch, 'limits') && (!plain(patch.limits) || Object.keys(patch.limits).some(key => !['releaseTtlHours', 'chatKeyMaxAgeHours', 'idlePauseMinutes', 'jobsPerChat', 'epochSoftBytes', 'epochHardBytes'].includes(key) || !Number.isSafeInteger(patch.limits[key]) || patch.limits[key] < 0))) return null;
+  if (Object.hasOwn(patch, 'limits') && (!plain(patch.limits) || Object.keys(patch.limits).some(key => !LEGACY_LIMIT_KEYS.includes(key) || !Number.isSafeInteger(patch.limits[key]) || patch.limits[key] < 0 || (key === 'maxConcurrentHandoffs' && patch.limits[key] < 1)))) return null;
   if (Object.hasOwn(patch, 'prefs') && (!plain(patch.prefs) || Object.keys(patch.prefs).some(key => !['sourcePolicy', 'pairingNetworkCheck'].includes(key)) || (Object.hasOwn(patch.prefs, 'sourcePolicy') && !['enforce', 'alert', 'off'].includes(patch.prefs.sourcePolicy)) || (Object.hasOwn(patch.prefs, 'pairingNetworkCheck') && typeof patch.prefs.pairingNetworkCheck !== 'boolean'))) return null;
   return patch;
 }
@@ -181,6 +185,10 @@ export function registerHandoffBridgeUi({
     try { return validateHostname(value) === true; } catch { return false; }
   };
   const candidates = new Map();
+  // A renderer may have more durable application jobs than fit in one IPC
+  // message. Keep an incomplete snapshot separate from the live candidate map
+  // and swap it atomically only after every ordered, bounded chunk arrives.
+  const publicationChunks = new Map();
   let lastStatusAt = -Infinity;
   let statusTimer = null;
   let clipboardClearTimer = null;
@@ -199,6 +207,21 @@ export function registerHandoffBridgeUi({
   };
   // sender id -> job ids the auto-release pipeline has already handled.
   const autoReleaseHandled = new Map();
+  // The renderer cannot author its own publication generation. Electron gives
+  // every committed main frame a main-process identity; an event from an older
+  // frame is refused after navigation, even when WebContents.id is reused.
+  const frameKey = frame => Number.isInteger(frame?.processId) && Number.isInteger(frame?.routingId)
+    ? `${frame.processId}:${frame.routingId}`
+    : null;
+  const publicationGeneration = (event, sender) => {
+    const current = sender?.mainFrame;
+    const eventFrame = event?.senderFrame;
+    const currentKey = frameKey(current);
+    const eventKey = frameKey(eventFrame);
+    if (currentKey && (!eventKey || eventKey !== currentKey)) return null;
+    if (!currentKey && current && eventFrame && current !== eventFrame) return null;
+    return currentKey || eventKey || `sender:${sender?.id}`;
+  };
   const sweep = () => {
     const stamp = Number(now());
     for (const [id, entry] of candidates) if (!Number.isFinite(stamp) || stamp - entry.at >= KEEP_ALIVE_MS || !windowFor({ id })) { candidates.delete(id); autoReleaseHandled.delete(id); }
@@ -264,18 +287,35 @@ export function registerHandoffBridgeUi({
       if (!job || job.canvasFilePath !== path) return { code: 'UNKNOWN_JOB' };
       jobs.set(id, job);
     }
-    return { senderId: sender.id, window, path, entry, seq: entry.seq, ids: [...ids], jobs };
+    return { senderId: sender.id, window, path, generation: entry.generation, ids: [...ids], jobs };
   };
+  // Publications are deliberately renewed while a native confirmation sheet
+  // is open. Map/object identity and a sequence number are transport facts,
+  // not job identity: rejecting their ordinary replacement made an unchanged
+  // recovered application appear to disappear. Keep the fence on every field
+  // that the renderer projected for this exact job instead.
+  const samePublishedJob = (left, right) => Boolean(left && right
+    && left.jobId === right.jobId
+    && left.canvasFilePath === right.canvasFilePath
+    && left.dockState === right.dockState
+    && left.sig === right.sig);
   const releaseContextCode = context => {
     if (!context) return 'UNKNOWN_JOB';
     sweep();
     const liveWindow = windowFor({ id: context.senderId });
     if (!liveWindow || liveWindow !== context.window || liveWindow.isDestroyed?.() || liveWindow.__canvasFilePath !== context.path) return 'NO_WINDOW';
     const entry = candidates.get(context.senderId);
-    if (entry !== context.entry || entry?.seq !== context.seq || !entry.jobs) return 'UNKNOWN_JOB';
+    if (!entry || entry.generation !== context.generation || !entry.jobs) return 'UNKNOWN_JOB';
+    // A paged replacement is not an authority snapshot until its final page
+    // reconciles removals.  The previous map deliberately remains available
+    // for rendering during that interval, but it must not authorize a release:
+    // a requested job absent from an early page could be removed by the final
+    // page after the person has already confirmed.
+    const pending = publicationChunks.get(context.senderId);
+    if (pending?.generation === context.generation) return 'UNKNOWN_JOB';
     for (const id of context.ids) {
       const captured = context.jobs.get(id);
-      if (!captured || entry.jobs.get(id) !== captured || captured.canvasFilePath !== context.path) return 'UNKNOWN_JOB';
+      if (!captured || !samePublishedJob(entry.jobs.get(id), captured) || captured.canvasFilePath !== context.path) return 'UNKNOWN_JOB';
     }
     return null;
   };
@@ -297,6 +337,16 @@ export function registerHandoffBridgeUi({
       ? [{ item: found.get(jobId), job: { jobId, canvasFilePath } }]
       : []);
   };
+  const sameConfirmationItems = (left, right) => Array.isArray(left) && Array.isArray(right)
+    && left.length === right.length && left.every((value, index) => {
+      const next = right[index];
+      return value?.job?.jobId === next?.job?.jobId
+        && value?.job?.canvasFilePath === next?.job?.canvasFilePath
+        && value?.item?.jobId === next?.item?.jobId
+        && value?.item?.title === next?.item?.title
+        && value?.item?.company === next?.item?.company
+        && value?.item?.createdAt === next?.item?.createdAt;
+    });
   const resultFailure = (result, fallback = 'INTERNAL') => fixed(fixedCode(result?.code, fallback));
   // SET_ENABLED has a deliberately smaller, closed error vocabulary than the
   // internal refusal ladder. Do not relay a refusal detail (which can describe
@@ -741,9 +791,13 @@ export function registerHandoffBridgeUi({
     // handler. Build and write the starter here; a stale or malicious renderer
     // never receives either value in an IPC response, status, event, or audit.
     const result = await safeCall(controller, controllerMethod, { generation, workerOrdinal });
+    // A re-copy did not reserve a new starter.  Its prior exported state must
+    // survive a window race or a clipboard failure; abandoning it here would
+    // make an unpresented worker impossible to start.
+    const recopied = result?.recopied === true;
     const abandon = () => safeCall(controller, 'abandonWorkerStarter', { generation, workerOrdinal });
     if (!stillOwnsWindow(sender, window)) {
-      await abandon();
+      if (!recopied) await abandon();
       return fixed('NO_WINDOW');
     }
     if (!acknowledged(result) && result?.copied !== true) return fixed(fixedCode(result?.code || result?.status, 'NOT_READY'));
@@ -755,7 +809,7 @@ export function registerHandoffBridgeUi({
       : null;
     if (!sessionCode || !workerCount || workerOrdinal > workerCount
       || returnedGeneration !== generation || returnedWorker !== workerOrdinal) {
-      await abandon();
+      if (!recopied) await abandon();
       return fixed('INTERNAL');
     }
     let starter;
@@ -768,18 +822,18 @@ export function registerHandoffBridgeUi({
         resuming: controllerMethod === 'restartWorker',
       });
     } catch {
-      await abandon();
+      if (!recopied) await abandon();
       return fixed('INTERNAL');
     }
     if (typeof starter !== 'string' || starter.length === 0 || starter.length > 16_384) {
-      await abandon();
+      if (!recopied) await abandon();
       return fixed('INTERNAL');
     }
     try {
       if (typeof clipboard?.writeText !== 'function') throw new TypeError('clipboard unavailable');
       clipboard.writeText(starter);
     } catch {
-      await abandon();
+      if (!recopied) await abandon();
       return fixed('CLIPBOARD_FAILED');
     }
     if (clipboardClearTimer !== null) { try { timers.clearTimeout?.(clipboardClearTimer); } catch { /* optional */ } clipboardClearTimer = null; }
@@ -791,10 +845,10 @@ export function registerHandoffBridgeUi({
       clipboardClearTimer = timer ?? null;
       timer?.unref?.();
     } catch { /* a completed copy is still valid if cleanup is unavailable */ }
-    return success({ generation, workerCount, workerOrdinal, copied: true });
+    return success({ generation, workerCount, workerOrdinal, copied: true, ...(recopied ? { recopied: true } : {}) });
   }
   async function release(sender, window, payload) {
-    if (!window || !plain(payload) || !Array.isArray(payload.items) || payload.items.length === 0 || payload.items.length > CONSTANTS.MAX_LANES || new Set(payload.items.map(item => item?.jobId)).size !== payload.items.length || payload.items.some(item => !plain(item) || typeof item.jobId !== 'string' || Object.keys(item).some(key => key !== 'jobId'))) return fixed(window ? 'INVALID' : 'NO_WINDOW');
+    if (!window || !plain(payload) || !Array.isArray(payload.items) || payload.items.length === 0 || payload.items.length > MAX_JOBS || new Set(payload.items.map(item => item?.jobId)).size !== payload.items.length || payload.items.some(item => !plain(item) || typeof item.jobId !== 'string' || Object.keys(item).some(key => key !== 'jobId'))) return fixed(window ? 'INVALID' : 'NO_WINDOW');
     const ids = payload.items.map(item => item.jobId);
     sweep();
     const context = captureReleaseContext(sender, window, ids);
@@ -810,62 +864,37 @@ export function registerHandoffBridgeUi({
     const afterConfirm = releaseContextCode(context);
     if (afterConfirm) return fixed(afterConfirm);
     if (!releaseAvailable()) return fixed('NOT_READY');
+    // The native sheet may have remained open long enough for the app-owned
+    // job description to change. Re-read it before release, and require the
+    // same main-owned confirmation facts the person saw; a renderer keepalive
+    // with an identical projection is allowed, a changed job is not.
+    const refreshedDescription = await safeCall(application, 'describeForConfirm', context.path, context.ids);
+    const afterRefresh = releaseContextCode(context);
+    if (afterRefresh) return fixed(afterRefresh);
+    const refreshed = refreshedDescription?.ok ? describedJobs(refreshedDescription, context.ids, context.path) : null;
+    if (!refreshed || !sameConfirmationItems(described, refreshed)) return fixed('UNKNOWN_JOB');
+    if (!releaseAvailable()) return fixed('NOT_READY');
     const beforeRelease = releaseContextCode(context);
     if (beforeRelease) return fixed(beforeRelease);
     const result = await safeCall(controller, 'release', { jobs: canonicalJobs });
     if (!acknowledged(result)) return resultFailure(result, 'INVALID');
     return success({ released: Number.isFinite(result?.released ?? result?.count) ? (result.released ?? result.count) : canonicalJobs.length });
   }
-  function publish(event, payload) {
-    const checked = guard(event, false); if (checked.code || !plain(payload)) return;
-    sweep(); const sender = checked.sender;
-    if (payload.unmount === true) { candidates.delete(sender.id); autoReleaseHandled.delete(sender.id); return; }
-    if (payload.v !== 1 || !Number.isInteger(payload.seq) || !Array.isArray(payload.jobs) || payload.jobs.length > MAX_JOBS || new Set(payload.jobs.map(item => item?.jobId)).size !== payload.jobs.length || payload.jobs.some(item => !validJob(item))) return;
-    const window = windowFor(sender); if (!window || payload.jobs.some(item => item.canvasFilePath !== window.__canvasFilePath)) return;
-    const previous = candidates.get(sender.id); if (previous && payload.seq <= previous.seq) return;
-    const jobs = new Map(payload.jobs.map(item => [item.jobId, { jobId: item.jobId, canvasFilePath: item.canvasFilePath, dockState: item.dockState, sig: item.sig }]));
-    const entry = { seq: payload.seq, jobs, at: Number(now()) };
-    candidates.set(sender.id, entry);
-    // Renderer publication is advisory and must never manufacture a
-    // job-changed event.  Only a bridge-caused engine mutation may do that.
-    const changed = [...jobs.values()].filter(item => {
-      const before = previous?.jobs?.get(item.jobId);
-      return !before || before.sig !== item.sig || before.dockState !== item.dockState || before.canvasFilePath !== item.canvasFilePath;
-    });
-    for (const item of changed) { try { engine.hint?.({ jobId: item.jobId }); } catch { /* a hint is best effort */ } }
-    // A job that left the publication (its bundle was discarded or saved) is
-    // also a state change. Without this a released lane for it was never
-    // re-read until a chat happened to poll, so it kept occupying capacity.
-    if (previous) {
-      for (const jobId of previous.jobs.keys()) {
-        if (!jobs.has(jobId)) { try { engine.hint?.({ jobId }); } catch { /* a hint is best effort */ } }
-      }
-    }
-    // This is deliberately based on the disk adapter's createdAt view, not on
-    // renderer publication time.  It is an opt-in convenience and never makes
-    // an earlier job available after a relaunch.
+  function startAutoRelease(sender, window, entry) {
+    const jobs = entry.jobs;
     if (currentStatus()?.autoRelease !== true || !autoReleaseAvailable()) { autoReleaseHandled.delete(sender.id); return; }
     void (async () => {
-      // One-shot per job per enabled session. The renderer republishes every
-      // job on each state change and on a 30 s keep-alive, so without this
-      // memory the whole describe (a disk discover) + release pipeline re-ran
-      // for every awaiting card indefinitely, re-stamped the release TTL and
-      // the idle-pause clock, and silently undid a user's Unrelease.
       let handled = autoReleaseHandled.get(sender.id);
       if (!handled) { handled = new Set(); autoReleaseHandled.set(sender.id, handled); }
       for (const id of [...handled]) if (!jobs.has(id)) handled.delete(id);
-      // A job that already holds a live lane needs no release (a finished or
-      // gone lane does not block a new one), and each one used to
-      // cost a disk discover plus a no-op release: a card leaves the publication
-      // between stages (dockState null while it is neither working nor awaiting),
-      // which dropped it from `handled`, so every stage re-ran the pipeline.
       const laned = new Set((Array.isArray(currentStatus()?.queue?.jobs) ? currentStatus().queue.jobs : []).filter(lane => lane?.phase !== 'done' && lane?.phase !== 'gone').map(lane => lane?.jobId).filter(id => typeof id === 'string'));
       const candidatesNow = [...jobs.values()].filter(item => item.dockState === 'awaiting' && !handled.has(item.jobId));
       for (const item of candidatesNow) if (laned.has(item.jobId)) handled.add(item.jobId);
       const ids = candidatesNow.filter(item => !laned.has(item.jobId)).map(item => item.jobId);
       if (!ids.length) return;
-      // Claim before the first await so an overlapping publication cannot
-      // start a second run for the same ids.
+      // Claim before the first await so overlapping publications cannot start a
+      // duplicate release. A later failed page releases only its own ids for a
+      // future retry; completed earlier pages remain handled.
       for (const id of ids) handled.add(id);
       const retry = list => { for (const id of list) handled.delete(id); };
       const context = captureReleaseContext(sender, window, ids);
@@ -875,18 +904,89 @@ export function registerHandoffBridgeUi({
       const confirmed = described?.ok ? describedJobs(described, context.ids, context.path, { requireAll: false }) : null;
       if (!confirmed) { retry(ids); return; }
       const confirmedIds = new Set(confirmed.map(value => value.job.jobId));
-      // A job the disk no longer lists has nothing to release; try again only
-      // if it is still published on a later pass.
       retry(ids.filter(id => !confirmedIds.has(id)));
       const eligible = confirmed.filter(value => Number(new Date(value.item?.createdAt)) > Number(processStartedAt));
       if (!eligible.length) return;
-      if (releaseContextCode(context) || !autoReleaseAvailable()) { retry(eligible.map(value => value.job.jobId)); return; }
-      // Re-check in the same turn immediately before the mutating controller
-      // port. There is no renderer-controlled await between this check and
-      // release, so a stale publication cannot cross the boundary.
-      const result = await safeCall(controller, 'release', { jobs: eligible.map(value => value.job), auto: true });
-      if (!acknowledged(result)) retry(eligible.map(value => value.job.jobId));
+      for (let start = 0; start < eligible.length; start += MAX_JOBS) {
+        const batch = eligible.slice(start, start + MAX_JOBS);
+        const batchIds = batch.map(value => value.job.jobId);
+        if (releaseContextCode(context) || !autoReleaseAvailable()) { retry(eligible.slice(start).map(value => value.job.jobId)); return; }
+        // Keep the controller's fixed <=50 IPC/domain boundary while draining
+        // arbitrary durable backlogs in deterministic order.
+        const result = await safeCall(controller, 'release', { jobs: batch.map(value => value.job), auto: true });
+        if (!acknowledged(result)) retry(batchIds);
+      }
     })();
+  }
+  function publish(event, payload) {
+    const checked = guard(event, false); if (checked.code || !plain(payload)) return;
+    sweep(); const sender = checked.sender; const generation = publicationGeneration(event, sender);
+    if (!generation) return;
+    if (payload.unmount === true) {
+      if (candidates.get(sender.id)?.generation === generation) { candidates.delete(sender.id); autoReleaseHandled.delete(sender.id); }
+      if (publicationChunks.get(sender.id)?.generation === generation) publicationChunks.delete(sender.id);
+      return;
+    }
+    if (payload.v !== 1 || !Number.isInteger(payload.seq) || !Array.isArray(payload.jobs) || payload.jobs.length > MAX_JOBS || new Set(payload.jobs.map(item => item?.jobId)).size !== payload.jobs.length || payload.jobs.some(item => !validJob(item))) return;
+    const window = windowFor(sender); if (!window || payload.jobs.some(item => item.canvasFilePath !== window.__canvasFilePath)) return;
+    const snapshot = payload.snapshot;
+    const hint = jobId => { try { engine.hint?.({ jobId }); } catch { /* a hint is best effort */ } };
+    if (snapshot !== undefined) {
+      if (!plain(snapshot) || !PUBLICATION_SET_ID.test(snapshot.id || '') || !Number.isInteger(snapshot.index)
+          || typeof snapshot.final !== 'boolean' || snapshot.index < 0) return;
+      let pending = publicationChunks.get(sender.id);
+      if (snapshot.index === 0) {
+        const previous = candidates.get(sender.id);
+        if (previous?.generation === generation && payload.seq <= previous.seq) return;
+        // Keep prior candidates visible while a same-frame page set arrives.
+        // Each received page marks its rows; final reconciliation removes only
+        // rows absent from the completed set, so no total page-count ceiling or
+        // second giant staging array is needed.
+        const entry = previous?.generation === generation
+          ? previous
+          : { seq: 0, generation, jobs: new Map(), at: Number(now()) };
+        candidates.set(sender.id, entry);
+        pending = { id: snapshot.id, generation, nextIndex: 0, seq: entry.seq, entry };
+        publicationChunks.set(sender.id, pending);
+      } else {
+        if (!pending || pending.id !== snapshot.id || pending.generation !== generation || pending.nextIndex !== snapshot.index) return;
+      }
+      if (payload.seq <= pending.seq) return;
+      const entry = pending.entry;
+      for (const item of payload.jobs) {
+        const before = entry.jobs.get(item.jobId);
+        entry.jobs.set(item.jobId, { jobId: item.jobId, canvasFilePath: item.canvasFilePath, dockState: item.dockState, sig: item.sig, publicationSet: snapshot.id });
+        if (!before || before.sig !== item.sig || before.dockState !== item.dockState || before.canvasFilePath !== item.canvasFilePath) hint(item.jobId);
+      }
+      entry.seq = payload.seq; entry.at = Number(now()); pending.seq = payload.seq; pending.nextIndex += 1;
+      if (!snapshot.final) return;
+      for (const [jobId, item] of entry.jobs) if (item.publicationSet !== snapshot.id) { entry.jobs.delete(jobId); hint(jobId); }
+      publicationChunks.delete(sender.id);
+      startAutoRelease(sender, window, entry);
+      return;
+    } else {
+      publicationChunks.delete(sender.id);
+    }
+    const previous = candidates.get(sender.id); if (previous?.generation === generation && payload.seq <= previous.seq) return;
+    const jobs = new Map(payload.jobs.map(item => [item.jobId, { jobId: item.jobId, canvasFilePath: item.canvasFilePath, dockState: item.dockState, sig: item.sig }]));
+    const entry = { seq: payload.seq, generation, jobs, at: Number(now()) };
+    candidates.set(sender.id, entry);
+    // Renderer publication is advisory and must never manufacture a
+    // job-changed event.  Only a bridge-caused engine mutation may do that.
+    const changed = [...jobs.values()].filter(item => {
+      const before = previous?.jobs?.get(item.jobId);
+      return !before || before.sig !== item.sig || before.dockState !== item.dockState || before.canvasFilePath !== item.canvasFilePath;
+    });
+    for (const item of changed) hint(item.jobId);
+    // A job that left the publication (its bundle was discarded or saved) is
+    // also a state change. Without this a released lane for it was never
+    // re-read until a chat happened to poll, so it kept occupying capacity.
+    if (previous) {
+      for (const jobId of previous.jobs.keys()) {
+        if (!jobs.has(jobId)) hint(jobId);
+      }
+    }
+    startAutoRelease(sender, window, entry);
   }
   // Registration is a closed all-or-nothing fact.  A partial Electron stub is
   // useful in isolated tests, but it is not a working bridge: reporting it as

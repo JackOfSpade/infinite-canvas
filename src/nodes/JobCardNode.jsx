@@ -28,6 +28,7 @@ import {
 } from '../utils/applicationHandoffDock';
 import { useBridgeHeldKey } from '../hooks/useBridgeHeldKey';
 import { bridgeHeldCardLine } from '../utils/bridgeHeldApplication';
+import { applicationBundleIndicator, APPLICATION_BUNDLE_TONES } from '../utils/jobCardBundleIndicator';
 
 // Accent color encodes the hiring-fit band: a compact evidence-based assessment
 // of full-process fit, not a guaranteed hiring outcome.
@@ -42,6 +43,7 @@ const COMPENSATION_BORDER_COLORS = {
   competitive: '#22c55e',
   below_market: '#ef4444',
 };
+const COMPENSATION_NEUTRAL_BORDER = 'rgba(255,255,255,0.12)';
 
 function compensationLabel(status, currency = '') {
   if (status === 'competitive') return 'Competitive cash pay';
@@ -190,7 +192,8 @@ function compactHiringFitAudit(assessment) {
  *   requirementAssessments, materialGaps, strengths, experienceAssessment,
  *   confidence, fitAssessment, rawScore, adjustedScore, adjustments, calibration,
  *   hubId,       // the Job Board that spawned this card (owns the cascade)
- *   originHubId, // the Job Search Module whose search found it (owns careerData)
+ *   originHubId, // the Job Search Module whose search found it (legacy fallback)
+ *   careerSnapshotId, // immutable audited profile that produced this score
  *   language (optional 2-letter code, set only when non-English → shows a chip)
  */
 export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
@@ -388,6 +391,13 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
   // restart so its durable revision fence can replace stale card state, then
   // stop again rather than turning an app-fix block into a polling loop.
   const localRenderRetryProbeRef = useRef(new Set());
+  // A persisted 'saved' card is normally idle, but the saved bundle folder it
+  // names can be deleted between sessions. Probe each mounted saved card ONCE
+  // per mount so a missing-output receipt is adopted, then stop: a healthy
+  // saved response is terminal and must not turn into a 2.5s polling loop that
+  // also keeps rewriting card state. Retries within this one probe follow the
+  // existing bounded status-error streak below.
+  const localSavedProbeRef = useRef(new Set());
   // jobId → already asked main to open this saved bundle's output folder.
   // A poll tick keeps re-observing 'saved' long after the one save that
   // earned it, so this guards the one-time reveal the same way the fallback
@@ -408,10 +418,12 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
   // active entry; activeRuns carries one active entry per lane instead.
   const activeApplicationRun = moduleRunSnapshot.activeRuns?.some((entry) => entry.nodeId === id && entry.kind === 'application');
   const displayedApplicationRun = queuedApplicationRun
-    ? { state: 'queued', position: queuedApplicationRun.position }
+    ? { state: 'queued', position: queuedApplicationRun.position, blocked: queuedApplicationRun.blocked === true }
     : activeApplicationRun ? { state: 'generating', position: null } : applicationRun;
   const hasApplicationRun = displayedApplicationRun.state !== 'idle';
   const localJobPending = !!localApplication && !canRegenerateLocalApplication(localApplication);
+  const bundleIndicator = applicationBundleIndicator(localApplication);
+  const bundleTone = bundleIndicator ? APPLICATION_BUNDLE_TONES[bundleIndicator.tone] : null;
   // Whether the ChatGPT bridge holds this card's application (the dock's own
   // rule, see bridgeHeldApplication.js). A primitive-snapshot subscription to
   // the shared status store: no IPC, and this card re-renders only when its own
@@ -436,12 +448,22 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
 
   const score = data.matchScore || 0;
   const accentColor = scoreColor(score);
-  const compensationBorderColor = COMPENSATION_BORDER_COLORS[compensationAssessment.status] || 'rgba(255,255,255,0.12)';
+  const compensationBorderColor = COMPENSATION_BORDER_COLORS[compensationAssessment.status] || COMPENSATION_NEUTRAL_BORDER;
   const hasExpandedDisclosure = showScoreAudit || showCompensationDetails;
   // NodeHandles is React.memo'd; an inline object literal here would create a
   // new reference every render and defeat that memoization, unlike every
   // other caller of NodeHandles, which pass only a stable className.
   const handleStyle = useMemo(() => ({ backgroundColor: accentColor }), [accentColor]);
+
+  // A consolidated multi-location card keeps the shared display string from
+  // the Board ("Multiple locations") and may add a count, but never enumerates
+  // every posting in the subtitle. Legacy single-location cards are unchanged.
+  const subtitleLocation = useMemo(() => {
+    const variants = Array.isArray(data.postingVariants) ? data.postingVariants : [];
+    if (!variants.length) return data.location || '';
+    const base = String(data.location || 'Multiple locations');
+    return `${base} · ${variants.length} posting${variants.length === 1 ? '' : 's'}`;
+  }, [data.location, data.postingVariants]);
 
   const openJobUrl = useCallback(async () => {
     const url = normalizeJobListingExternalUrl(data);
@@ -753,10 +775,27 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
   // once the result validates.
   useEffect(() => {
     const jobId = localApplication?.id;
+    // Fresh job cards have no Local AI handoff. Check that before examining a
+    // handoff-only field: startup mounts every card at once, so reading
+    // `localApplication.status` here used to crash the whole canvas whenever
+    // any ordinary card had the expected null application state.
+    if (!jobId || !window.electronAPI?.getLocalApplicationStatus) return undefined;
+    const localApplicationStatus = localApplication?.status;
     const needsRenderRetryProbe = localApplication?.status === 'render-retry-required'
       && !localRenderRetryProbeRef.current.has(jobId);
-    if (!jobId || !window.electronAPI?.getLocalApplicationStatus
-      || (LOCAL_AI_CARD_POLL_IDLE_STATUSES.includes(localApplication.status) && !needsRenderRetryProbe)) return undefined;
+    // A mounted 'saved' card gets exactly one startup/remount status probe
+    // (see localSavedProbeRef): if the saved folder still resolves, the probe
+    // marks the job probed, clears the interval, and writes nothing (a healthy
+    // save is not re-merged/persisted); if it was deleted the probe adopts the
+    // terminal missing-output state. Legacy v1 receipts keep reporting
+    // 'saved'. 'failed' stays idle because it is already terminal.
+    const needsSavedProbe = localApplication?.status === 'saved'
+      && !localSavedProbeRef.current.has(jobId);
+    // Keep the shared idle policy intact and just relax it for the two
+    // one-shot probes: a persisted render-retry or an unprobed saved card is
+    // allowed a single status read before returning to the idle policy.
+    const idleStatus = LOCAL_AI_CARD_POLL_IDLE_STATUSES.includes(localApplicationStatus) && !needsRenderRetryProbe;
+    if (idleStatus && !needsSavedProbe) return undefined;
     const canvasFilePath = localApplication?.canvasFilePath
       || (nav?.getCurrentFile ? nav.getCurrentFile() : nav?.currentFile ?? null);
     let cancelled = false;
@@ -793,6 +832,20 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
           localRenderRetryProbeRef.current.add(jobId);
           // State can be byte-for-byte unchanged after a restart probe, so do
           // not depend on a React effect rerun to stop this interval.
+          if (interval !== null) {
+            window.clearInterval(interval);
+            interval = null;
+          }
+        }
+        // A mounted saved card probes once. Mark it probed and stop the
+        // interval here. A healthy 'saved' reply is deliberately NOT merged
+        // into card/canvas state below: the read-only probe never rewrites the
+        // main-process receipt and must not persist (or clobber a newer
+        // handoff with) an unchanged result. Only a changed, non-saved verdict
+        // — the missing-output 'failed' reconciliation — is adopted. No folder
+        // is opened; revealing the folder stays an explicit user click.
+        if (needsSavedProbe) {
+          localSavedProbeRef.current.add(jobId);
           if (interval !== null) {
             window.clearInterval(interval);
             interval = null;
@@ -869,6 +922,17 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
           }
         } else {
           localResultSettlingRef.current.delete(jobId);
+          // A mounted card that began this poll only because it was already
+          // 'saved' and had not been probed yet must not rewrite card or
+          // canvas state when the probe confirms the save is healthy: the
+          // legacy v1 path and an intact v2 folder both keep their existing
+          // savedDir and receipt, and re-merging result.localJob here would
+          // needlessly persist (and could clobber a newer handoff). Only a
+          // CHANGED, non-saved verdict — the missing-output 'failed'
+          // reconciliation — falls through to adoption below. The interval
+          // was already cleared above, so a healthy save is never polled
+          // forever.
+          if (needsSavedProbe && next.status === 'saved') return;
           // A restart can resume polling a job that reads 'saved' only from
           // its terminal receipt (the private folder is already gone). That
           // receipt carries the same durable output directory a live save
@@ -914,11 +978,12 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
     // live read remains the race-safe fence if a Board locks after that render.
     if (effectiveLock || getLiveNode(data.hubId)?.data?.locked) return;
     const originHubId = data.originHubId || data.hubId;
+    const careerSnapshotId = typeof data.careerSnapshotId === 'string' ? data.careerSnapshotId.trim() : '';
     // Fast, non-queued validation prevents a known-invalid card from taking a
     // queue turn. This is intentionally re-read after the lease as well: the
     // preflight is only user feedback, never the data used for generation.
     const preflightOriginHub = getLiveNode(originHubId);
-    if (!preflightOriginHub?.data?.careerData) {
+    if (!careerSnapshotId && !preflightOriginHub?.data?.careerData) {
       addToast({
         title: 'No Career Data',
         description: data.originHubId && !preflightOriginHub
@@ -938,20 +1003,6 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
       });
       return;
     }
-    // The dock caps how many application bundles may wait for a pasted
-    // response at once (see applicationHandoffDock.js) — an eleventh prompt
-    // could never be worked on and would only make the chip strip lie about
-    // what is actionable. Regeneration replaces this card's own bundle rather
-    // than adding a new one, so this card's current bundle is excluded here.
-    const handoffCapNodes = (nav?.enumerateAllNodes?.() || []).filter((node) => node.id !== id);
-    if (countActiveApplicationHandoffs(handoffCapNodes, getDismissedApplicationBundles()) >= APPLICATION_HANDOFF_LIMIT) {
-      addToast({
-        title: 'Too Many Pending Applications',
-        description: applicationLimitMessage(),
-        type: 'error',
-      });
-      return;
-    }
     applicationSubmissionRef.current = true;
     let lease = null;
     let cancelledBeforeStart = false;
@@ -965,13 +1016,30 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
       lease = await acquireModuleRun({
         nodeId: id,
         kind: 'application',
-        // A dedicated lane keeps up to APPLICATION_HANDOFF_LIMIT concurrent
-        // Generate clicks queuing only behind other application creations,
-        // instead of behind the default 'global' lane shared with SellHub
-        // marketplace runs (see moduleRunQueue.js — lanes are independently
-        // FIFO with capacity 1).
+        // A dedicated lane keeps Generate clicks queuing only behind other
+        // application creations (and the slot check below), instead of
+        // behind the default 'global' lane shared with SellHub marketplace
+        // runs (see moduleRunQueue.js — lanes are independently FIFO with
+        // capacity 1).
         lane: 'application',
         label: `Application: ${data.company || data.title || 'job'}`,
+        // The dock caps how many application bundles may hold a slot at once
+        // (see applicationHandoffDock.js) — an eleventh prompt could never be
+        // worked on. Rather than refusing the click, the queue holds this card
+        // until a slot is free, then starts it in FIFO order. The check is the
+        // dock's own countActiveApplicationHandoffs, evaluated by the queue at
+        // admission time (never at click time), so two simultaneous clicks
+        // cannot both pass it: the lane admits one entry at a time and the
+        // previous one's bundle is persisted before its lease is released.
+        // Regeneration replaces this card's own bundle rather than adding a
+        // new one, so this card is excluded from the count. A card removed
+        // while waiting is admitted so onStart can reject it and free the lane
+        // instead of leaving a ghost at the head of the queue.
+        canStart: () => {
+          if (!getLiveNode(idRef.current)) return true;
+          const handoffCapNodes = (nav?.enumerateAllNodes?.() || []).filter((node) => node.id !== idRef.current);
+          return countActiveApplicationHandoffs(handoffCapNodes, getDismissedApplicationBundles()) < APPLICATION_HANDOFF_LIMIT;
+        },
         onQueued: ({ position }) => {
           if (isMountedRef.current) setApplicationRun({ state: 'queued', position });
         },
@@ -1009,7 +1077,7 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
 
       const originHub = getLiveNode(originHubId);
       const careerData = originHub?.data?.careerData;
-      if (!careerData) {
+      if (!careerSnapshotId && !careerData) {
         addToast({
           title: 'No Career Data',
           description: data.originHubId && !originHub
@@ -1023,7 +1091,7 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
       // Preserve an already-mined achievement ledger in the handoff context.
       // Local application generation never runs the API achievement-mining
       // pass; the routine can use this durable context when it is available.
-      const cachedAchievements = originHub.data?.achievements || null;
+      const cachedAchievements = originHub?.data?.achievements || null;
       const mineAllowed = !cachedAchievements;
       // A terminal handoff remains on the card as the audit/repair pointer.
       // Snapshot the exact one this click intends to replace; settlement will
@@ -1049,16 +1117,44 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
             googleCardUrl: data.googleCardUrl,
           }),
           source: data.source, posted: data.posted, language: data.language,
+          // Multi-location consolidation: the Board hands this card a bounded
+          // set of safe mirror targets for the ONE shared description. Carry
+          // them through the handoff so the generated workspace can list every
+          // posting location/URL. Each external URL is normalized with the
+          // same policy as the primary listing before it crosses IPC — the
+          // bundle never receives an unnormalized string from the card.
+          postingVariants: (Array.isArray(data.postingVariants) ? data.postingVariants : [])
+            .filter((variant) => variant && typeof variant === 'object' && !Array.isArray(variant))
+            .map((variant) => ({
+              location: variant.location,
+              url: normalizeJobListingExternalUrl({
+                title: variant.title || data.title,
+                company: variant.company || data.company,
+                location: variant.location,
+                url: variant.url,
+                googleCardUrl: variant.googleCardUrl,
+              }),
+              googleCardUrl: '',
+              source: variant.source,
+              posted: variant.posted,
+              salary: variant.salary,
+              applySource: variant.applySource,
+            })),
         },
-        careerData,
+        // Snapshot-pinned jobs resolve their context exclusively in the main
+        // process; never send a renderer projection alongside that authority.
+        ...(!careerSnapshotId ? { careerData } : {}),
+        // New cards are pinned to the approved snapshot that was active when
+        // they were scored.  The main process resolves it again and rejects a
+        // missing/corrupt record rather than trusting a changed hub projection.
+        careerSnapshotId: careerSnapshotId || null,
         // Paste-mode structured rendering retains this saved-profile role
         // snapshot and rejects any model attempt to alter its metadata.
-        resumeProfile: originHub.data?.resumeProfile || null,
+        ...(!careerSnapshotId ? { resumeProfile: originHub?.data?.resumeProfile || null } : {}),
         additionalNotes: additionalNotes.trim(),
         reasoning: data.reasoning,
         matchScore: data.matchScore,
-        achievements: cachedAchievements,
-        mineAllowed,
+        ...(!careerSnapshotId ? { achievements: cachedAchievements, mineAllowed } : {}),
       });
       if (!queued?.success || !queued.localJob) {
         throw new Error(queued?.error || 'Could not prepare the local application job.');
@@ -1152,13 +1248,34 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
       applicationSubmissionRef.current = false;
       if (isMountedRef.current) setApplicationRun({ state: 'idle', position: null });
     }
-  }, [data.hubId, data.originHubId, data.title, data.company, data.snippet, data.location, data.salary, data.url, data.googleCardUrl, data.source, data.posted, data.language, data.reasoning, data.matchScore, additionalNotes, id, getLiveNode, nav, addToast, isMountedRef, acquireModuleRun, hasApplicationRun, localJobPending, effectiveLock, updateGlobal]);
+  }, [data.hubId, data.originHubId, data.careerSnapshotId, data.title, data.company, data.snippet, data.location, data.salary, data.url, data.googleCardUrl, data.source, data.posted, data.language, data.postingVariants, data.reasoning, data.matchScore, additionalNotes, id, getLiveNode, nav, addToast, isMountedRef, acquireModuleRun, hasApplicationRun, localJobPending, effectiveLock, updateGlobal]);
 
   return (
     <div
-      className={`${hasExpandedDisclosure ? 'w-[420px]' : 'w-[280px]'} rounded-2xl bg-neutral-900/95 border-2 shadow-lg overflow-hidden group`}
+      className={`${hasExpandedDisclosure ? 'w-[420px]' : 'w-[280px]'} relative rounded-2xl bg-neutral-900/95 border-2 shadow-lg overflow-hidden group`}
       style={{ borderColor: compensationBorderColor }}
     >
+      {/* A red X across the whole card marks a saved application bundle. It is
+          purely visual (pointer-events-none) and fades out while the pointer or
+          KEYBOARD focus is anywhere on the card, so the card stays fully usable;
+          it returns when the pointer leaves. Only :focus-visible counts —
+          plain focus-within would keep it hidden after a mouse click on the
+          salary toggle (the clicked button stays focused), so the X never came
+          back after hovering off. It is inset from the card edge so it never
+          touches or covers the salary-verdict border. */}
+      {bundleTone && (
+        <svg
+          role="img"
+          aria-label={bundleIndicator.title}
+          data-testid="job-card-bundle-cross"
+          className={`pointer-events-none absolute inset-2 z-20 h-[calc(100%-1rem)] w-[calc(100%-1rem)] transition-opacity duration-150 group-hover:opacity-0 group-has-[:focus-visible]:opacity-0 ${bundleTone.cross}`}
+          viewBox="0 0 100 100"
+          preserveAspectRatio="none"
+        >
+          <line x1="0" y1="0" x2="100" y2="100" stroke="currentColor" strokeWidth="5" strokeLinecap="round" vectorEffect="non-scaling-stroke" />
+          <line x1="100" y1="0" x2="0" y2="100" stroke="currentColor" strokeWidth="5" strokeLinecap="round" vectorEffect="non-scaling-stroke" />
+        </svg>
+      )}
       <NodeHandles className="w-2 h-2" style={handleStyle} />
 
       {/* Header */}
@@ -1174,7 +1291,7 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
         </div>
         <div className="flex-1 min-w-0 pr-6 relative">
           <div className="text-white/90 text-sm font-semibold leading-tight truncate">{data.title || 'Untitled'}</div>
-          <div className="text-white/50 text-xs mt-0.5 truncate">{data.company}{data.location ? ` · ${data.location}` : ''}</div>
+          <div className="text-white/50 text-xs mt-0.5 truncate">{data.company}{subtitleLocation ? ` · ${subtitleLocation}` : ''}</div>
           {data.salary && (
             <div className="text-emerald-400/80 text-xs mt-0.5">
               <span>{data.salary}</span>
@@ -1231,12 +1348,12 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
         <button
           type="button"
           className={`nodrag w-full px-3 py-1.5 flex items-center justify-between gap-2 text-left text-[11px] transition-colors hover:bg-white/[0.035] ${
-            compensationAssessment.status === 'competitive'
-              ? 'text-emerald-300/90'
-              : compensationAssessment.status === 'below_market'
-                ? 'text-red-300/90'
-                : 'text-white/45'
+            compensationBorderColor === COMPENSATION_NEUTRAL_BORDER ? 'text-white/45' : ''
           }`}
+          // The title is the exact colour of the card's border (green for a
+          // competitive cash verdict, red for below-market) so the two read as
+          // one signal; neutral verdicts keep the muted title.
+          style={compensationBorderColor === COMPENSATION_NEUTRAL_BORDER ? undefined : { color: compensationBorderColor }}
           onClick={(e) => {
             e.stopPropagation();
             const nextExpanded = !showCompensationDetails;
@@ -1544,7 +1661,9 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
           title={localJobPending
             ? bridgeHeldLine ? bridgeHeldLine.pendingTitle : 'A Local AI job is waiting for the local-agent routine or is being imported.'
             : displayedApplicationRun.state === 'queued'
-            ? `Queued at position ${displayedApplicationRun.position} — application generation runs one at a time to protect model quota and document rendering.`
+            ? displayedApplicationRun.blocked
+              ? applicationLimitMessage()
+              : `Queued at position ${displayedApplicationRun.position} — application generation runs one at a time to protect model quota and document rendering, and starts automatically when an application slot is free.`
             : 'Copy app-provided prompts into your local AI chat and paste back structured JSON. Infinite Canvas validates, renders, reviews, and saves the tailored application bundle next to your canvas'}
         >
           <Sparkles size={13} className={hasApplicationRun ? 'animate-pulse' : ''} />
@@ -1554,6 +1673,15 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
             ? `Queued · #${displayedApplicationRun.position}`
             : displayedApplicationRun.state === 'generating' ? 'Generating…' : 'Generate'}
         </button>
+        {displayedApplicationRun.state === 'queued' && (
+          <button
+            onClick={(e) => { e.stopPropagation(); cancelQueuedRunsForNode(id, 'Application generation cancelled before it started'); }}
+            className="shrink-0 py-2 px-2.5 rounded-lg text-xs font-medium text-white/60 bg-white/5 hover:bg-white/10 hover:text-white/85 transition-colors"
+            title="Remove this card from the application queue."
+          >
+            Cancel
+          </button>
+        )}
 
       </div>
     </div>

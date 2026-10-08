@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import os from 'node:os';
 import {
   assert,
   __applicationSyncStatePathForTests,
@@ -1275,7 +1276,7 @@ export default [
     // path already covered by __resolveApplicationExportDirectoryForTests.
     name: 'application save: two different jobs racing onto the same sanitized destination resolve and write as one atomic unit',
     run: async () => {
-      const root = await fs.promises.realpath(await fs.promises.mkdtemp('/tmp/infinite-canvas-export-atomicity-'));
+      const root = await fs.promises.realpath(await fs.promises.mkdtemp(path.join(os.tmpdir(), 'infinite-canvas-export-atomicity-')));
       const outputRoot = path.join(root, 'applications');
       const htmlFor = (label) => `<!doctype html><html><body><section data-ic-document-panel="resume"><main class="page">${label} resume</main></section><section data-ic-document-panel="cover"><main class="page">${label} cover</main></section><script id="ic-application-bundle-data" type="application/json">{}</script></body></html>`;
       const jobs = ['A', 'B'].map(label => ({
@@ -1325,8 +1326,340 @@ export default [
         ]);
         assert(listingAOnDisk === jobs[0].listing && listingBOnDisk === jobs[1].listing,
           'each job’s own saved bundle must retain its own listing bytes — the bug this closes let the later concurrent writer silently overwrite the earlier one’s already-saved Application.html/Resume.pdf/Cover Letter.pdf with no warning');
+        // Listing identity alone is not enough: the overwrite the race caused
+        // clobbered the whole bundle, so the Application.html bodies (the
+        // other half of the same transaction) must also each retain their own
+        // job's label. A regression that only protected the listing file while
+        // still letting the later writer replace Application.html would pass a
+        // listing-only assertion.
+        const [htmlAOnDisk, htmlBOnDisk] = await Promise.all([
+          fs.promises.readFile(path.join(savedA.dir, 'Application.html'), 'utf8'),
+          fs.promises.readFile(path.join(savedB.dir, 'Application.html'), 'utf8'),
+        ]);
+        assert(htmlAOnDisk.includes(`${jobs[0].label} resume`) && !htmlAOnDisk.includes(`${jobs[1].label} resume`),
+          `job A's saved Application.html must still carry A's own rendered résumé body, never B's overwrite (A body first panel: ${htmlAOnDisk.slice(0, 200)})`);
+        assert(htmlBOnDisk.includes(`${jobs[1].label} resume`) && !htmlBOnDisk.includes(`${jobs[0].label} resume`),
+          `job B's saved Application.html must still carry B's own rendered résumé body, never A's overwrite (B body first panel: ${htmlBOnDisk.slice(0, 200)})`);
         return { savedA: savedA.dir, savedB: savedB.dir };
       } finally {
+        await fs.promises.rm(root, { recursive: true, force: true });
+      }
+    },
+  },
+  {
+    // Regression (established fix): the literal-alias case. A job whose own
+    // sanitized name IS another job's disambiguated sibling — a job titled
+    // literally "Role (deadbeef)" while a different job titled "Role" already
+    // owns the unsuffixed "Role" folder and is therefore disambiguated to
+    // exactly "Role (deadbeef)". Keying the namespace lock on `baseDir`
+    // (which this flow no longer does) would hand these two different savers
+    // two different lock keys for the SAME directory, so both could resolve
+    // and write concurrently and one would silently replace the other.
+    //
+    // The ordering is pinned by a promise barrier on a saver's SOURCE read, not
+    // a sleep: readRegisteredApplicationArtifact runs inside the namespace lock
+    // AFTER the saver has selected its destination, so a saver parked there has
+    // already committed `dir` while still holding its lock. The literal-alias
+    // job B starts first and parks after selecting/creating the alias
+    // destination; only then does the plain job A start, racing B for the
+    // shared namespace so that A is forced to decide while that folder exists.
+    name: 'application save: a literal suffix-shaped destination cannot alias another job’s disambiguated destination',
+    run: async () => {
+      const root = await fs.promises.realpath(await fs.promises.mkdtemp(path.join(os.tmpdir(), 'infinite-canvas-export-suffix-alias-')));
+      const outputRoot = path.join(root, 'applications');
+      const htmlFor = (label) => `<!doctype html><html><body><section data-ic-document-panel="resume"><main class="page">${label} resume</main></section><section data-ic-document-panel="cover"><main class="page">${label} cover</main></section><script id="ic-application-bundle-data" type="application/json">{}</script></body></html>`;
+      const company = 'Suffix Alias Co';
+      const whereLocation = 'Toronto, ON';
+      const role = 'Systems Architect';
+      const listingA = `# Systems Architect\n\nJob A — the plain-titled posting that must be disambiguated into a hash-suffixed sibling.\n`;
+      const listingB = `# Systems Architect\n\nJob B — a different posting whose literal sanitized title is exactly job A’s disambiguated sibling name.\n`;
+      const listingOccupant = `# Systems Architect\n\nPre-existing, DIFFERENT occupant of the unsuffixed folder (seed).\n`;
+      // The deterministic disambiguation suffix A lands on; B's own literal
+      // title is synthesized to be EXACTLY this name.
+      const suffix = crypto.createHash('sha256').update(Buffer.from(listingA)).digest('hex').slice(0, 8);
+      const literalRole = `${role} (${suffix})`;
+      assert(sanitizeApplicationBundlePart(literalRole, 'Role') === literalRole,
+        'the synthesized literal alias title must sanitize to itself, or this fixture does not exercise the suffix-shaped alias');
+      const namespaceDir = path.join(outputRoot, company, whereLocation);
+      const unsuffixedDir = path.join(namespaceDir, role);
+      const aliasDir = path.join(namespaceDir, literalRole);
+      const literalJob = { label: 'Literal B', dir: path.join(root, 'source-b'), html: htmlFor('Literal B'), listing: listingB, jobTitle: literalRole };
+      const plainJob = { label: 'Plain A', dir: path.join(root, 'source-a'), html: htmlFor('Plain A'), listing: listingA, jobTitle: role };
+      const senderId = 921;
+      const sender = { id: senderId, isDestroyed: () => false, once: () => {}, on: () => {}, removeListener: () => {} };
+      // Patch the single fs call readRegisteredApplicationArtifact uses to load
+      // each job's SOURCE Application.html. Keyed on exact source paths so
+      // nothing else in the process is affected, and restored in the finally.
+      const originalOpen = fs.promises.open;
+      const sourcePathFor = (job) => path.join(job.dir, 'Application.html');
+      let releaseLiteralRead;
+      const literalReadHeld = new Promise(resolve => { releaseLiteralRead = resolve; });
+      let signalLiteralReadReached;
+      const literalReadReached = new Promise(resolve => { signalLiteralReadReached = resolve; });
+      let signalPlainStalled;
+      const plainStalled = new Promise(resolve => { signalPlainStalled = resolve; });
+      let releasePlain;
+      const plainHeld = new Promise(resolve => { releasePlain = resolve; });
+      let plainReachedRead = false;
+      fs.promises.open = async function patchedOpen(target, ...rest) {
+        const resolvedTarget = path.resolve(String(target));
+        if (resolvedTarget === sourcePathFor(literalJob)) {
+          const handle = await originalOpen.call(this, target, ...rest);
+          signalLiteralReadReached();
+          await literalReadHeld;
+          return handle;
+        }
+        if (resolvedTarget === sourcePathFor(plainJob)) {
+          // A got here, so its destination decision already ran while B's alias
+          // folder existed. Signal that, then yield the event loop so an
+          // unlocked / baseDir-keyed decision has every chance to collide
+          // before A is allowed to continue.
+          plainReachedRead = true;
+          signalPlainStalled();
+          await plainHeld;
+          return originalOpen.call(this, target, ...rest);
+        }
+        return originalOpen.call(this, target, ...rest);
+      };
+      try {
+        await Promise.all([
+          fs.promises.mkdir(outputRoot, { recursive: true }),
+          ...([literalJob, plainJob].map(async job => {
+            await fs.promises.mkdir(job.dir, { recursive: true });
+            await fs.promises.writeFile(sourcePathFor(job), job.html);
+            await fs.promises.writeFile(path.join(job.dir, 'Original Job Listing.md'), job.listing);
+          })),
+          // Pre-seed the UNSUFFIXED Role folder with a real, different bundle.
+          // An empty folder would be "safe to claim"; only a genuine occupant
+          // forces A to disambiguate into `literalRole`.
+          fs.promises.mkdir(unsuffixedDir, { recursive: true }).then(() => Promise.all([
+            fs.promises.writeFile(path.join(unsuffixedDir, 'Application.html'), htmlFor('Occupant')),
+            fs.promises.writeFile(path.join(unsuffixedDir, 'Original Job Listing.md'), listingOccupant),
+          ])),
+        ]);
+        registerJobApplicationHandlers();
+        const saveApplication = ipcMain.__getInvokeHandler('save-application');
+        assert(typeof saveApplication === 'function', 'the save-application handler must be registered for the suffix-alias fixture');
+        const saveArgsFor = (job) => {
+          const resumeHtmlPath = sourcePathFor(job);
+          const jobListingPath = path.join(job.dir, 'Original Job Listing.md');
+          registerPendingApplicationWorkspace({
+            workDir: job.dir, senderId, company, applicationRoot: outputRoot,
+            resumeHtmlPath, jobListingPath,
+            cleanupOnDiscard: false, cleanupOnSaveFailure: false,
+            artifactData: { resumeHtml: job.html, jobListing: job.listing },
+          });
+          return {
+            resumeHtmlPath, resumePdfPath: null, coverLetterPdfPath: null, jobListingPath,
+            generationAuditPath: null, workDir: job.dir,
+            jobTitle: job.jobTitle, location: whereLocation,
+            canvasFilePath: path.join(root, 'canvas.json'), suppressReveal: true,
+          };
+        };
+        // B (literal alias) goes first and parks after selecting `aliasDir` —
+        // still holding the shared namespace — so `aliasDir` now exists on disk
+        // with B's bundle mid-write.
+        const saveB = saveApplication({ sender }, saveArgsFor(literalJob));
+        await literalReadReached;
+        // A starts while B holds the namespace. With the fixed namespace lock A
+        // cannot reach its own source read until B releases; with the old
+        // baseDir-keyed lock A would run concurrently and could pick `aliasDir`.
+        const saveA = saveApplication({ sender }, saveArgsFor(plainJob));
+        // Bounded event-loop drains let any stale concurrent decision surface;
+        // they are not the assertion — the disk state and the read-ordering
+        // check below are.
+        for (let i = 0; i < 5; i += 1) {
+          await new Promise(resolve => setImmediate(resolve));
+        }
+        assert(plainReachedRead === false,
+          'while the literal-alias job holds the namespace, the plain job must NOT have reached its source read — a concurrent (baseDir-keyed) decision would have');
+        // Release B first: it completes its namespace tail, then A acquires the
+        // namespace and reaches its own (now blocked) source read.
+        releaseLiteralRead();
+        await plainStalled;
+        // A got here only after B finished, and it must have chosen a different
+        // destination than B's alias folder.
+        releasePlain();
+        const [savedB, savedA] = await Promise.all([saveB, saveA]);
+        assert(savedA.success && savedA.saved && savedB.success && savedB.saved,
+          `both sibling savers must succeed (A: ${savedA.error || 'ok'}, B: ${savedB.error || 'ok'})`);
+        assert(savedB.dir === aliasDir,
+          `the literal-alias job must keep its own literal folder (got ${path.basename(savedB.dir)})`);
+        assert(savedA.dir !== savedB.dir,
+          `a literal suffix-shaped destination must never alias another job's disambiguated destination (both resolved to ${savedA.dir})`);
+        assert(path.dirname(savedA.dir) === namespaceDir && path.dirname(savedB.dir) === namespaceDir,
+          'both destinations must be siblings under the one shared company/location namespace');
+        const [htmlAOnDisk, htmlBOnDisk, listingAOnDisk, listingBOnDisk, occupantOnDisk] = await Promise.all([
+          fs.promises.readFile(path.join(savedA.dir, 'Application.html'), 'utf8'),
+          fs.promises.readFile(path.join(savedB.dir, 'Application.html'), 'utf8'),
+          fs.promises.readFile(path.join(savedA.dir, 'Original Job Listing.md'), 'utf8'),
+          fs.promises.readFile(path.join(savedB.dir, 'Original Job Listing.md'), 'utf8'),
+          fs.promises.readFile(path.join(unsuffixedDir, 'Original Job Listing.md'), 'utf8'),
+        ]);
+        assert(htmlBOnDisk.includes('Literal B resume') && !htmlBOnDisk.includes('Plain A resume'),
+          'the literal-alias job must retain its own Application.html body, never the plain job’s');
+        assert(htmlAOnDisk.includes('Plain A resume') && !htmlAOnDisk.includes('Literal B resume'),
+          'the plain job must retain its own Application.html body, never the literal-alias job’s');
+        assert(listingBOnDisk === listingB && listingAOnDisk === listingA,
+          'each sibling must retain its own saved listing bytes');
+        assert(occupantOnDisk === listingOccupant,
+          'the pre-seeded unsuffixed occupant must be untouched by both savers');
+        return { savedA: savedA.dir, savedB: savedB.dir, namespaceDir };
+      } finally {
+        fs.promises.open = originalOpen;
+        await fs.promises.rm(root, { recursive: true, force: true });
+      }
+    },
+  },
+  {
+    // Regression (established fix): failure cleanup must WAIT for a saver
+    // already queued for the SAME destination. The catch path prunes the
+    // chosen destination, but a racing saver sits in the shared namespace queue;
+    // pruning without re-acquiring the namespace (then the exact dir) would
+    // recursively delete the parent while that saver is mid-mkdir/write.
+    // Re-acquiring both in the fixed namespace-then-exact order makes the
+    // queued saver finish FIRST, so pruning observes its non-empty bundle and
+    // becomes a safe no-op.
+    //
+    // Interleaving is pinned by patch barriers on each saver's SOURCE file
+    // open — which happens inside the namespace lock, after resolution — never
+    // by onBeforeSave (that hook runs BEFORE resolution, so it cannot observe
+    // the lock) and never by a sleep.
+    name: 'application save: failed-save cleanup waits for a queued writer before pruning its destination',
+    run: async () => {
+      const root = await fs.promises.realpath(await fs.promises.mkdtemp(path.join(os.tmpdir(), 'infinite-canvas-export-fail-prune-')));
+      const outputRoot = path.join(root, 'applications');
+      const htmlFor = (label) => `<!doctype html><html><body><section data-ic-document-panel="resume"><main class="page">${label} resume</main></section><section data-ic-document-panel="cover"><main class="page">${label} cover</main></section><script id="ic-application-bundle-data" type="application/json">{}</script></body></html>`;
+      const company = 'Cleanup Co';
+      const whereLocation = 'Remote';
+      const role = 'Support Engineer';
+      const listingA = `# Support Engineer\n\nJob A — the attempt that fails after locking its destination.\n`;
+      const listingB = `# Support Engineer\n\nJob B — the same-destination attempt queued behind A.\n`;
+      const targetDir = path.join(outputRoot, company, whereLocation, role);
+      const jobA = { label: 'Cleanup A', dir: path.join(root, 'source-a'), html: htmlFor('Cleanup A'), listing: listingA };
+      const jobB = { label: 'Cleanup B', dir: path.join(root, 'source-b'), html: htmlFor('Cleanup B'), listing: listingB };
+      const senderId = 922;
+      const sender = { id: senderId, isDestroyed: () => false, once: () => {}, on: () => {}, removeListener: () => {} };
+      const originalOpen = fs.promises.open;
+      const originalReadFile = fs.promises.readFile;
+      const sourcePathFor = (job) => path.join(job.dir, 'Application.html');
+      const listingPathFor = (job) => path.join(job.dir, 'Original Job Listing.md');
+      let releaseAOpen;
+      const aOpenHeld = new Promise(resolve => { releaseAOpen = resolve; });
+      let signalAOpenReached;
+      const aOpenReached = new Promise(resolve => { signalAOpenReached = resolve; });
+      let releaseBOpen;
+      const bOpenHeld = new Promise(resolve => { releaseBOpen = resolve; });
+      let signalBOpenReached;
+      const bOpenReached = new Promise(resolve => { signalBOpenReached = resolve; });
+      let signalBPrecheckReached;
+      const bPrecheckReached = new Promise(resolve => { signalBPrecheckReached = resolve; });
+      let bPrecheckSignalled = false;
+      const simulatedReadFailure = () => Object.assign(new Error('EIO: simulated source read failure (test barrier)'), { code: 'EIO' });
+      fs.promises.readFile = async function patchedReadFile(target, ...rest) {
+        const data = await originalReadFile.call(this, target, ...rest);
+        if (!bPrecheckSignalled && path.resolve(String(target)) === listingPathFor(jobB)) {
+          bPrecheckSignalled = true;
+          signalBPrecheckReached();
+        }
+        return data;
+      };
+      fs.promises.open = async function patchedOpen(target, ...rest) {
+        const resolvedTarget = path.resolve(String(target));
+        if (resolvedTarget === sourcePathFor(jobA)) {
+          // A is inside namespace + exact-dir locks, past resolution.
+          signalAOpenReached();
+          await aOpenHeld;
+          throw simulatedReadFailure();
+        }
+        if (resolvedTarget === sourcePathFor(jobB)) {
+          // B holds the namespace, past resolution, and is writing now.
+          signalBOpenReached();
+          await bOpenHeld;
+          return originalOpen.call(this, target, ...rest);
+        }
+        return originalOpen.call(this, target, ...rest);
+      };
+      try {
+        await Promise.all([
+          fs.promises.mkdir(outputRoot, { recursive: true }),
+          ...([jobA, jobB].map(async job => {
+            await fs.promises.mkdir(job.dir, { recursive: true });
+            await fs.promises.writeFile(sourcePathFor(job), job.html);
+            await fs.promises.writeFile(path.join(job.dir, 'Original Job Listing.md'), job.listing);
+          })),
+        ]);
+        registerJobApplicationHandlers();
+        const saveApplication = ipcMain.__getInvokeHandler('save-application');
+        assert(typeof saveApplication === 'function', 'the save-application handler must be registered for the cleanup fixture');
+        const saveArgsFor = (job) => {
+          const resumeHtmlPath = sourcePathFor(job);
+          const jobListingPath = path.join(job.dir, 'Original Job Listing.md');
+          registerPendingApplicationWorkspace({
+            workDir: job.dir, senderId, company, applicationRoot: outputRoot,
+            resumeHtmlPath, jobListingPath,
+            cleanupOnDiscard: false, cleanupOnSaveFailure: false,
+            artifactData: { resumeHtml: job.html, jobListing: job.listing },
+          });
+          return {
+            resumeHtmlPath, resumePdfPath: null, coverLetterPdfPath: null, jobListingPath,
+            generationAuditPath: null, workDir: job.dir,
+            jobTitle: role, location: whereLocation,
+            canvasFilePath: path.join(root, 'canvas.json'), suppressReveal: true,
+          };
+        };
+        // A goes first and parks inside its locks, before reading its source.
+        const saveA = saveApplication({ sender }, saveArgsFor(jobA));
+        await aOpenReached;
+        // B starts while A holds the namespace, so B queues behind A for it.
+        const saveB = saveApplication({ sender }, saveArgsFor(jobB));
+        // Wait until B has completed the last asynchronous pre-lock read, then
+        // yield once so its continuation has enqueued the namespace acquire.
+        await bPrecheckReached;
+        await new Promise(resolve => setImmediate(resolve));
+        // A now fails; its catch must not prune until B has come and gone.
+        releaseAOpen();
+        // The handler may reject or may resolve with a failure envelope, so the
+        // real shape is asserted instead of assumed.
+        const outcomeAPromise = saveA.then(
+          result => ({ settled: 'resolved', result }),
+          error => ({ settled: 'rejected', error }),
+        );
+        // B reaching its own source open proves A's cleanup released the
+        // namespace and B acquired it.
+        await bOpenReached;
+        // B is mid-save, so A must still be unsettled: its prune is queued
+        // behind B's namespace lock in the fixed ordering.
+        const settledEarly = await Promise.race([
+          outcomeAPromise.then(() => true),
+          new Promise(resolve => setImmediate(() => resolve(false))),
+        ]);
+        assert(settledEarly === false,
+          'the failing saver must not settle — and therefore must not have pruned — while the queued same-destination saver still holds the namespace');
+        releaseBOpen();
+        const outcomeA = await outcomeAPromise;
+        const outcomeB = await saveB;
+        if (outcomeA.settled === 'resolved') {
+          assert(outcomeA.result && outcomeA.result.success === false,
+            `the failing saver must report failure (got ${JSON.stringify(outcomeA.result)})`);
+        } else {
+          assert(outcomeA.error,
+            'the failing saver rejected, which counts as failing only when an error is present');
+        }
+        assert(outcomeB && outcomeB.success === true && outcomeB.saved,
+          `the queued same-destination saver must succeed (B: ${(outcomeB && outcomeB.error) || 'ok'})`);
+        const bodyB = await fs.promises.readFile(outcomeB.applicationFile, 'utf8');
+        assert(bodyB.includes('Cleanup B resume'),
+          'the queued saver’s Application.html must survive the earlier failure’s cleanup — an unguarded prune would have deleted it');
+        const savedListingB = await fs.promises.readFile(outcomeB.jobListingFile, 'utf8');
+        assert(savedListingB === listingB,
+          'the queued saver’s listing must survive intact for the same reason');
+        assert(outcomeB.dir === targetDir,
+          `the surviving bundle must sit at the shared target destination (got ${outcomeB.dir})`);
+        return { failedA: true, savedB: outcomeB.dir };
+      } finally {
+        fs.promises.open = originalOpen;
+        fs.promises.readFile = originalReadFile;
         await fs.promises.rm(root, { recursive: true, force: true });
       }
     },

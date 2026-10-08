@@ -10,11 +10,18 @@ const DEFAULT_LIMITS = Object.freeze({
   releaseTtlHours: 0,
   chatKeyMaxAgeHours: 0,
   idlePauseMinutes: 1440,
-  jobsPerChat: 2,
-  epochSoftBytes: 0,
-  epochHardBytes: 0,
+  // Explicit host/plugin capability. This controls live worker parallelism,
+  // never how many durable lanes a workflow may queue.
+  maxConcurrentHandoffs: CONSTANTS.DEFAULT_MAX_CONCURRENT_HANDOFFS,
 });
 const LIMIT_KEYS = Object.freeze(Object.keys(DEFAULT_LIMITS));
+// v1 persisted this unused setting. Accept it on read and patch so older
+// renderer/config clients migrate harmlessly, but omit it from every newly
+// written configuration and never let it constrain a chat's backlog.
+// Retired conversation-lifetime limits are accepted solely so an upgrade can
+// read and rewrite an older configuration. They are never re-persisted and
+// never affect scheduling. Per-request payload caps live in constants.js.
+const LEGACY_LIMIT_KEYS = new Set([...LIMIT_KEYS, 'jobsPerChat', 'epochSoftBytes', 'epochHardBytes']);
 const SOURCE_POLICIES = new Set(['enforce', 'alert', 'off']);
 const CONFIG_FIELDS = new Set([
   'hostname', 'pluginName', 'scope', 'autoStart', 'autoRelease', 'limits',
@@ -64,24 +71,15 @@ function isPlainObject(value) {
 
 function normalizeLimits(value) {
   if (value === undefined) return { ...DEFAULT_LIMITS };
-  if (!ownKeysAre(value, new Set(LIMIT_KEYS))) return null;
+  if (!ownKeysAre(value, LEGACY_LIMIT_KEYS)) return null;
   const limits = { ...DEFAULT_LIMITS };
   for (const key of LIMIT_KEYS) {
     if (!Object.hasOwn(value, key)) continue;
     const item = value[key];
-    if (!Number.isSafeInteger(item) || item < 0) return null;
+    if (!Number.isSafeInteger(item) || item < 0 || (key === 'maxConcurrentHandoffs' && item < 1)) return null;
     limits[key] = item;
   }
-  // These two exact values were historical invisible defaults: there was no
-  // settings control that let a person choose them. Treat an existing pair as
-  // a migration to the new opt-in rollover policy, while preserving any
-  // deliberately different positive safety budget.
-  if (limits.epochSoftBytes === 500_000 && limits.epochHardBytes === 900_000) {
-    limits.epochSoftBytes = DEFAULT_LIMITS.epochSoftBytes;
-    limits.epochHardBytes = DEFAULT_LIMITS.epochHardBytes;
-  }
-  if (!Number.isInteger(limits.jobsPerChat) || limits.jobsPerChat < CONSTANTS.JOBS_PER_CHAT_MIN || limits.jobsPerChat > CONSTANTS.JOBS_PER_CHAT_MAX) return null;
-  if (limits.epochSoftBytes > limits.epochHardBytes) return null;
+  if (limits.maxConcurrentHandoffs > CONSTANTS.MAX_LANES) return null;
   return limits;
 }
 
@@ -197,20 +195,15 @@ function mergePatch(current, patch) {
     }
   }
   if (Object.hasOwn(patch, 'limits')) {
-    if (!ownKeysAre(patch.limits, new Set(LIMIT_KEYS))) fieldError(fieldErrors, 'limits');
+    if (!ownKeysAre(patch.limits, LEGACY_LIMIT_KEYS)) fieldError(fieldErrors, 'limits');
     else {
       for (const key of LIMIT_KEYS) {
         if (!Object.hasOwn(patch.limits, key)) continue;
         const value = patch.limits[key];
-        if (!Number.isSafeInteger(value) || value < 0) fieldError(fieldErrors, `limits.${key}`);
+        if (!Number.isSafeInteger(value) || value < 0 || (key === 'maxConcurrentHandoffs' && value < 1)) fieldError(fieldErrors, `limits.${key}`);
         else next.limits[key] = value;
       }
-      // The range lives in constants.js; repeating the numbers here is how the
-      // two drift apart and a legal value starts being rejected on save.
-      if (!Number.isInteger(next.limits.jobsPerChat)
-          || next.limits.jobsPerChat < CONSTANTS.JOBS_PER_CHAT_MIN
-          || next.limits.jobsPerChat > CONSTANTS.JOBS_PER_CHAT_MAX) fieldError(fieldErrors, 'limits.jobsPerChat');
-      if (next.limits.epochSoftBytes > next.limits.epochHardBytes) fieldError(fieldErrors, 'limits');
+      if (next.limits.maxConcurrentHandoffs > CONSTANTS.MAX_LANES) fieldError(fieldErrors, 'limits.maxConcurrentHandoffs');
     }
   }
   if (Object.hasOwn(patch, 'prefs')) {

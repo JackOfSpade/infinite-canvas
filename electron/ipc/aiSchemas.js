@@ -310,6 +310,31 @@ export const JOB_TAXONOMY_CLASSIFY_SCHEMA = {
   },
 };
 
+// ── Job location consolidation: verify deterministic near-matches ──────────
+// The deterministic stage only proposes same-title/company, different-location
+// pairs with substantial lexical overlap. This small positional-free contract
+// makes the AI explicitly opt in to every destructive (card-removing) merge.
+export const JOB_LOCATION_CONSOLIDATION_CONFIRMATION_SCHEMA = {
+  type: 'object',
+  required: ['confirmations'],
+  properties: {
+    confirmations: {
+      type: 'array',
+      minItems: 1,
+      maxItems: 4,
+      description: 'One verdict for every supplied pairId. The application validates exact pair coverage locally.',
+      items: {
+        type: 'object',
+        required: ['pairId', 'sameJob'],
+        properties: {
+          pairId: { type: 'string', minLength: 3, maxLength: 40, description: 'Copy the supplied pairId exactly.' },
+          sameJob: { type: 'boolean', description: 'True only when the two listings are the same underlying requisition offered at different locations.' },
+        },
+      },
+    },
+  },
+};
+
 // ── Resume parse: file → structured profile ────────────────────────────────
 export const RESUME_PARSE_SCHEMA = {
   type: 'object',
@@ -333,8 +358,8 @@ export const RESUME_PARSE_SCHEMA = {
           id: { type: 'string', description: 'Stable role identifier, unique within this profile and derived consistently from the role order/source.' },
           title: { type: 'string', description: 'Job title as stated in the career data.' },
           employer: { type: 'string', description: 'Employer or organization as stated; empty when absent.' },
-          startDate: { type: 'string', description: 'Start date as stated, preferably YYYY-MM when the source clearly supplies month/year; empty when absent.' },
-          endDate: { type: 'string', description: 'End date as stated, preferably YYYY-MM when the source clearly supplies month/year; use "present" only when the source says current/present; empty when absent.' },
+          startDate: { type: 'string', description: 'Start date copied exactly as stated in the source; empty when absent.' },
+          endDate: { type: 'string', description: 'End date copied exactly as stated in the source; empty when absent.' },
         },
       },
     },
@@ -346,11 +371,403 @@ export const RESUME_PARSE_SCHEMA = {
 // (résumé, portfolio, project write-ups, brag doc); each is transcribed to
 // faithful text, then all are merged into one "career data" blob that drives
 // query generation, scoring, and the application generator.
-export const CAREER_FILE_EXTRACT_SCHEMA = {
-  type: 'object',
-  required: ['text'],
+// A page is deliberately much smaller than a complete attachment.  It bounds
+// one manual response, not the amount of information a document may retain.
+// `cursor` is opaque to the host: document workers are the only component
+// that can see PDF/DOCX/image-native pages, so the host must never pretend a
+// byte offset is an attachment page.  The host instead freezes the ordered
+// page ids, rejects repeats, and requires an explicit completion marker.
+export const CAREER_FILE_TRANSCRIPTION_PAGE_CHARS = 60_000;
+
+const CAREER_FILE_PAGED_EXTRACT_SCHEMA = {
+  type: 'object', additionalProperties: false,
+  required: ['documentId', 'pageId', 'pageIndex', 'regionId', 'regionIndex', 'partIndex', 'text', 'completeRegion', 'complete'],
   properties: {
-    text: { type: 'string', description: "A faithful, complete plain-text representation of this document's career-relevant content: roles, employers, dates, bullet points, projects, skills, education, certifications, and contact info. Preserve every fact, number, and the original structure using simple line breaks and \"- \" bullets. Do not summarize away detail and do not invent anything." },
+    documentId: { type: 'string', minLength: 8, maxLength: 96, pattern: '^[a-zA-Z0-9_-]+$' },
+    pageId: { type: 'string', minLength: 1, maxLength: 160, pattern: '^[a-zA-Z0-9_.:-]+$', description: 'Must exactly echo HOST_CONTINUATION.expectedPageId, the host-owned stable region-part identifier.' },
+    pageIndex: { type: 'integer', minimum: 0 },
+    regionId: { type: 'string', minLength: 1, maxLength: 160, pattern: '^[a-zA-Z0-9_.:-]+$', description: 'Must exactly echo HOST_CONTINUATION.expectedRegion.id.' },
+    regionIndex: { type: 'integer', minimum: 0, description: 'Must exactly echo HOST_CONTINUATION.expectedRegion.index.' },
+    partIndex: { type: 'integer', minimum: 0, description: 'Zero-based continuation part within the current host-inventoried region.' },
+    text: { type: 'string', minLength: 1, maxLength: CAREER_FILE_TRANSCRIPTION_PAGE_CHARS, description: 'Faithful transcription of exactly one attachment-native page or table/region continuation.' },
+    completeRegion: { type: 'boolean', description: 'True only when this bounded part exhausts HOST_CONTINUATION.expectedRegion. False requires nextCursor and keeps the same region.' },
+    complete: { type: 'boolean', description: 'True only after this page/region exhausts the attached document.' },
+    nextCursor: { type: 'string', minLength: 1, maxLength: 512, description: 'Opaque continuation token; required when complete is false.' },
+  },
+};
+
+// New v8 extraction calls are strict continuation calls. Legacy transcripts
+// remain readable through their immutable snapshot receipts; accepting a
+// `{ text }` reply to a current request would silently restore a 300k
+// document-wide response cap and bypass explicit page completion.
+export const CAREER_FILE_EXTRACT_SCHEMA = CAREER_FILE_PAGED_EXTRACT_SCHEMA;
+
+// For attachments without a host-readable page tree (for example DOCX and
+// proprietary/image containers), inventory itself is paged. This bounds one
+// response while preserving an unbounded ordered region plan.
+export const CAREER_FILE_INVENTORY_SCHEMA = {
+  type: 'object', additionalProperties: false,
+  required: ['documentId', 'regions', 'complete'],
+  properties: {
+    documentId: { type: 'string', minLength: 8, maxLength: 96, pattern: '^[a-zA-Z0-9_-]+$' },
+    regions: {
+      type: 'array', minItems: 1, maxItems: 100,
+      items: {
+        type: 'object', additionalProperties: false,
+        required: ['id', 'index'],
+        properties: {
+          id: { type: 'string', minLength: 1, maxLength: 160, pattern: '^[a-zA-Z0-9_.:-]+$' },
+          index: { type: 'integer', minimum: 0 },
+          hint: { type: 'string', maxLength: 240 },
+        },
+      },
+    },
+    complete: { type: 'boolean' },
+    nextCursor: { type: 'string', minLength: 1, maxLength: 512 },
+  },
+};
+
+export const CAREER_FILE_INVENTORY_AUDIT_SCHEMA = {
+  type: 'object', additionalProperties: false,
+  required: ['documentId', 'startIndex', 'decision', 'regions', 'complete'],
+  properties: {
+    documentId: { type: 'string', minLength: 8, maxLength: 96, pattern: '^[a-zA-Z0-9_-]+$' },
+    startIndex: { type: 'integer', minimum: 0 },
+    decision: { type: 'string', enum: ['pass', 'revised'] },
+    regions: CAREER_FILE_INVENTORY_SCHEMA.properties.regions,
+    complete: { type: 'boolean', description: 'Must echo whether this host-supplied audit batch contains the final inventory region.' },
+  },
+};
+
+// A non-plain document first receives a faithful transcription, then a second
+// independent attachment worker compares that candidate text against the same
+// original bytes. A pass returns an empty text field (the host retains the
+// candidate unchanged); a revision is a complete replacement, never a patch
+// whose omitted material could be lost at the join boundary. Findings are
+// retained only as compact digest/count and convergence-state metadata in the
+// approved career snapshot.
+const CAREER_FILE_AUDIT_FINDINGS_SCHEMA = { type: 'array', maxItems: 200, items: {
+  type: 'object', additionalProperties: false,
+  required: ['id', 'kind', 'detail'],
+  properties: {
+    id: { type: 'string', minLength: 1, maxLength: 80, pattern: '^[a-zA-Z0-9_-]+$' },
+    kind: { type: 'string', enum: ['omission', 'alteration', 'structure', 'unsupported'] },
+    detail: { type: 'string', minLength: 1, maxLength: 1200 },
+  },
+} };
+
+const CAREER_FILE_PAGED_TRANSCRIPTION_AUDIT_SCHEMA = {
+  type: 'object', additionalProperties: false,
+  required: ['documentId', 'pageId', 'decision', 'text', 'findings'],
+  properties: {
+    documentId: { type: 'string', minLength: 8, maxLength: 96, pattern: '^[a-zA-Z0-9_-]+$' },
+    pageId: { type: 'string', minLength: 1, maxLength: 160, pattern: '^[a-zA-Z0-9_.:-]+$' },
+    decision: { type: 'string', enum: ['pass', 'revised'] },
+    // A revision replaces just this bounded page, never a document-wide body.
+    text: { type: 'string', minLength: 0, maxLength: CAREER_FILE_TRANSCRIPTION_PAGE_CHARS },
+    findings: CAREER_FILE_AUDIT_FINDINGS_SCHEMA,
+  },
+};
+
+export const CAREER_FILE_TRANSCRIPTION_AUDIT_SCHEMA = CAREER_FILE_PAGED_TRANSCRIPTION_AUDIT_SCHEMA;
+
+// A boundary review never repeats either full transcription page.  It may only
+// report a bounded, attributable defect and nominate one or both neighbouring
+// pages for the normal full-page repair/audit loop.
+export const CAREER_FILE_BOUNDARY_AUDIT_SCHEMA = {
+  type: 'object', additionalProperties: false,
+  required: ['documentId', 'leftPageId', 'rightPageId', 'decision', 'affectedPageIds', 'findings'],
+  properties: {
+    documentId: { type: 'string', minLength: 8, maxLength: 96, pattern: '^[a-zA-Z0-9_-]+$' },
+    leftPageId: { type: 'string', minLength: 1, maxLength: 160, pattern: '^[a-zA-Z0-9_.:-]+$' },
+    rightPageId: { type: 'string', minLength: 1, maxLength: 160, pattern: '^[a-zA-Z0-9_.:-]+$' },
+    decision: { type: 'string', enum: ['pass', 'issue'] },
+    affectedPageIds: { type: 'array', maxItems: 2, items: { type: 'string', minLength: 1, maxLength: 160, pattern: '^[a-zA-Z0-9_.:-]+$' } },
+    findings: CAREER_FILE_AUDIT_FINDINGS_SCHEMA,
+  },
+};
+
+// This object, rather than a prose comment, is folded into the immutable
+// career-snapshot compilation contract. Prompt/schema-policy edits must bump a
+// revision so an unchanged file cannot reuse a snapshot made before its
+// attachment fidelity policy existed.
+export const CAREER_FILE_TRANSCRIPTION_POLICY = Object.freeze({
+  revision: 8,
+  extractPromptRevision: 4,
+  auditPromptRevision: 7,
+  // The direct reader is also upstream of compiler segments: changes to its
+  // decoding/normalization or its allowed extension policy must invalidate an
+  // otherwise identical raw input just as an attachment-audit change does.
+  directTextReaderRevision: 1,
+  // Attachment audits deliberately have no quality-round cap. They continue
+  // until a clean independent pass or a repeated candidate/findings state
+  // proves the repair loop cannot converge without human review.
+  convergenceRevision: 1,
+  extractSchema: CAREER_FILE_EXTRACT_SCHEMA,
+  inventorySchema: CAREER_FILE_INVENTORY_SCHEMA,
+  inventoryAuditSchema: CAREER_FILE_INVENTORY_AUDIT_SCHEMA,
+  auditSchema: CAREER_FILE_TRANSCRIPTION_AUDIT_SCHEMA,
+  boundaryAuditSchema: CAREER_FILE_BOUNDARY_AUDIT_SCHEMA,
+});
+
+// ── Career snapshot compiler: free-form corpus → evidence-linked facts ─────
+// This is intentionally not a résumé schema.  It is the closed, auditable
+// contract for the one derived career-fact snapshot shared by search and
+// application generation.  Every non-empty fact must carry segment evidence;
+// the main-process validator additionally proves that the fact occurs in those
+// segments before a snapshot can be approved.
+const CAREER_SNAPSHOT_ID = { type: 'string', pattern: '^[a-z][a-z0-9-]{0,79}$' };
+const CAREER_SNAPSHOT_EVIDENCE_IDS = {
+  type: 'array', minItems: 1, maxItems: 32,
+  items: { type: 'string', pattern: '^segment-[0-9]{4,}$' },
+};
+const CAREER_SNAPSHOT_METRIC_SCHEMA = {
+  type: 'object', additionalProperties: false,
+  required: ['label', 'value', 'unit', 'evidenceSegmentIds'],
+  properties: {
+    label: { type: 'string', maxLength: 160 },
+    value: { type: 'string', maxLength: 80 },
+    unit: { type: 'string', maxLength: 80 },
+    evidenceSegmentIds: CAREER_SNAPSHOT_EVIDENCE_IDS,
+  },
+};
+// Technology labels in an achievement/project are not interchangeable tokens.
+// A source can say that two tools are alternatives, contingent, optional, or
+// genuinely ambiguous.  Keep that interpretation beside the literal label so
+// a downstream document cannot silently turn a choice into simultaneous use.
+// These are relationship *classes*, not a vocabulary of products or vendors.
+export const CAREER_SNAPSHOT_TECHNOLOGY_RELATIONSHIPS = Object.freeze([
+  'independent', 'alternative', 'conditional', 'optional', 'ambiguous',
+]);
+
+// A skill row is a candidate capability/index record, never a catch-all for
+// every proper noun in a source file.  The independent semantic audit checks
+// that this controlled taxonomy truthfully describes a candidate capability;
+// the enum deliberately names capability classes rather than product names.
+export const CAREER_SNAPSHOT_CAPABILITY_KINDS = Object.freeze([
+  'tool', 'technology', 'language', 'framework', 'platform', 'method', 'domain', 'capability',
+]);
+export const CAREER_SNAPSHOT_SKILL_SUPPORT_MODES = Object.freeze([
+  'direct', 'relationship-qualified',
+]);
+
+const CAREER_SNAPSHOT_TECHNOLOGY_REFERENCE_SCHEMA = {
+  type: 'object', additionalProperties: false,
+  required: ['technology', 'disposition', 'relationship', 'relationshipGroup', 'relationshipEvidence', 'evidenceSegmentIds'],
+  properties: {
+    technology: { type: 'string', maxLength: 160, description: 'Exact literal label from a technical/product/platform/interface/data-source/organization-owned system, artifact, output, or candidate capability. Every label that could otherwise be mistaken for candidate capability needs one explicit disposition.' },
+    disposition: { type: 'string', enum: ['skill', 'non-skill'], description: 'skill only for a demonstrated candidate capability; otherwise use the explicit non-skill disposition.' },
+    relationship: { type: 'string', enum: CAREER_SNAPSHOT_TECHNOLOGY_RELATIONSHIPS, description: 'Source-stated usage relationship; alternatives, conditions, options, and ambiguity must not be flattened.' },
+    relationshipGroup: { type: 'string', maxLength: 80, pattern: '^(?:|[a-z][a-z0-9-]{0,79})$', description: 'Opaque local group id shared by labels in one source relationship; empty only for independent labels.' },
+    relationshipEvidence: { type: 'string', maxLength: 2000, description: 'Exact source slice that establishes this label and its relationship.' },
+    evidenceSegmentIds: CAREER_SNAPSHOT_EVIDENCE_IDS,
+    nonSkillReason: { type: 'string', maxLength: 320, description: 'Required semantic disposition when the label is not a candidate tool/capability.' },
+    // skillId is deliberately host-populated only after all paged skill rows
+    // have been reconciled. Responders must not guess or manufacture it.
+    skillId: CAREER_SNAPSHOT_ID,
+  },
+};
+
+const CAREER_SNAPSHOT_ENTITY_SCHEMA = (properties, { optional = [] } = {}) => ({
+  type: 'object', additionalProperties: false,
+  required: ['id', 'evidenceSegmentIds', ...Object.keys(properties).filter(key => !optional.includes(key))],
+  properties: {
+    id: CAREER_SNAPSHOT_ID,
+    evidenceSegmentIds: CAREER_SNAPSHOT_EVIDENCE_IDS,
+    ...properties,
+  },
+});
+
+// This is the common profile shape used for one model response. Its collection limits are
+// deliberately retained as a handoff/output safety bound.  The host merges
+// many such shards with CAREER_PROFILE_COMPILE_SCHEMA below, which removes
+// only array response ceilings; a complete career corpus must not be rejected
+// merely because it is larger than one safe model response.
+const CAREER_PROFILE_PER_PAGE_SCHEMA = {
+  type: 'object', additionalProperties: false,
+  required: ['identity', 'roles', 'achievements', 'projects', 'skills', 'education', 'certifications', 'otherEvidence', 'segmentCoverage'],
+  properties: {
+    identity: {
+      type: 'object', additionalProperties: false,
+      required: ['name', 'contacts', 'evidenceSegmentIds'],
+      properties: {
+        name: { type: 'string', maxLength: 240 },
+        contacts: { type: 'array', maxItems: 24, items: { type: 'string', maxLength: 320 } },
+        evidenceSegmentIds: { type: 'array', maxItems: 32, items: { type: 'string', pattern: '^segment-[0-9]{4,}$' } },
+      },
+    },
+    roles: { type: 'array', maxItems: 100, items: CAREER_SNAPSHOT_ENTITY_SCHEMA({
+      title: { type: 'string', maxLength: 240 }, employer: { type: 'string', maxLength: 240 },
+      startDate: { type: 'string', maxLength: 80 }, endDate: { type: 'string', maxLength: 80 },
+      location: { type: 'string', maxLength: 240 }, achievementIds: { type: 'array', maxItems: 200, items: CAREER_SNAPSHOT_ID },
+      skillIds: { type: 'array', maxItems: 200, items: CAREER_SNAPSHOT_ID },
+    }) },
+    achievements: { type: 'array', maxItems: 500, description: 'Every role-attributed responsibility, action, deliverable, accomplishment, or outcome, including ordinary duties without metrics.', items: CAREER_SNAPSHOT_ENTITY_SCHEMA({
+      roleId: { type: 'string', maxLength: 80 }, claim: { type: 'string', maxLength: 2000, description: 'A verbatim role-attributed responsibility, action, deliverable, accomplishment, or outcome; do not omit ordinary duties.' },
+      technologies: { type: 'array', maxItems: 64, description: 'Literal labels from the claim whose omission could let a downstream reader mistake them for candidate capability; include deliberate non-skills as well as demonstrated skills.', items: { type: 'string', maxLength: 160 } },
+      technologyReferences: { type: 'array', maxItems: 64, items: CAREER_SNAPSHOT_TECHNOLOGY_REFERENCE_SCHEMA },
+      metrics: { type: 'array', maxItems: 32, items: CAREER_SNAPSHOT_METRIC_SCHEMA },
+    }, { optional: ['technologyReferences'] }) },
+    projects: { type: 'array', maxItems: 300, items: CAREER_SNAPSHOT_ENTITY_SCHEMA({
+      name: { type: 'string', maxLength: 240 }, description: { type: 'string', maxLength: 2000 },
+      roleId: { type: 'string', maxLength: 80 }, technologies: { type: 'array', maxItems: 64, description: 'Literal labels from the project whose omission could let a downstream reader mistake them for candidate capability; include deliberate non-skills as well as demonstrated skills.', items: { type: 'string', maxLength: 160 } },
+      technologyReferences: { type: 'array', maxItems: 64, items: CAREER_SNAPSHOT_TECHNOLOGY_REFERENCE_SCHEMA },
+      metrics: { type: 'array', maxItems: 32, items: CAREER_SNAPSHOT_METRIC_SCHEMA },
+    }, { optional: ['technologyReferences'] }) },
+    skills: { type: 'array', maxItems: 500, items: CAREER_SNAPSHOT_ENTITY_SCHEMA({
+      name: { type: 'string', maxLength: 160 }, category: { type: 'string', maxLength: 160 },
+      capabilityKind: { type: 'string', enum: CAREER_SNAPSHOT_CAPABILITY_KINDS, description: 'Controlled capability taxonomy; never classify an artifact, data feed, vendor emission, organization, output, or project label as a candidate skill.' },
+      supportMode: { type: 'string', enum: CAREER_SNAPSHOT_SKILL_SUPPORT_MODES, description: 'direct requires separate literal candidate-capability evidence; relationship-qualified preserves only alternative/conditional/optional/ambiguous use and is never a bare ATS index term.' },
+      directEvidenceSegmentIds: { type: 'array', maxItems: 32, items: { type: 'string', pattern: '^segment-[0-9]{4,}$' }, description: 'Host-audited literal direct-evidence segments. Required for direct supportMode; empty for relationship-qualified.' },
+      // A controlled application-use classification, not a source claim. It
+      // lets downstream résumé/ATS projections select compact index terms
+      // without guessing from spelling, casing, or a hard-coded vocabulary.
+      indexEligible: { type: 'boolean', description: 'True only when this demonstrated skill is a concise, standalone ATS or résumé index term; false for soft, conceptual, prose-only, or otherwise non-indexable capabilities.' },
+      roleIds: { type: 'array', maxItems: 100, items: CAREER_SNAPSHOT_ID },
+    // These fields are optional at the wire-schema layer solely so a retained
+    // v5-or-earlier pin can still pass its historical reader. Current v6
+    // compilation/page validation requires all three semantically; keeping
+    // the compatibility exception here prevents a new schema from rewriting
+    // or invalidating a previously approved immutable snapshot.
+    }, { optional: ['capabilityKind', 'supportMode', 'directEvidenceSegmentIds'] }) },
+    education: { type: 'array', maxItems: 100, items: CAREER_SNAPSHOT_ENTITY_SCHEMA({
+      institution: { type: 'string', maxLength: 320 }, credential: { type: 'string', maxLength: 320 },
+      dates: { type: 'string', maxLength: 160 },
+    }) },
+    certifications: { type: 'array', maxItems: 100, items: CAREER_SNAPSHOT_ENTITY_SCHEMA({
+      name: { type: 'string', maxLength: 320 }, issuer: { type: 'string', maxLength: 320 }, dates: { type: 'string', maxLength: 160 },
+    }) },
+    otherEvidence: { type: 'array', maxItems: 500, items: CAREER_SNAPSHOT_ENTITY_SCHEMA({
+      kind: { type: 'string', maxLength: 120 }, label: { type: 'string', maxLength: 320 }, text: { type: 'string', maxLength: 2000 },
+    }) },
+    segmentCoverage: {
+      type: 'array', maxItems: 5000,
+      // entityIds is deliberately optional model input.  The host derives the
+      // complete inverse evidence index after it has qualified page-local ids
+      // and merged host-owned patches; asking a bounded model response to
+      // enumerate it is both error-prone and mathematically impossible when a
+      // legal page has more than 64 entities citing one segment.
+      items: { type: 'object', additionalProperties: false, required: ['segmentId', 'disposition'], properties: {
+        segmentId: { type: 'string', pattern: '^segment-[0-9]{4,}$' },
+        disposition: { type: 'string', enum: ['identity', 'role-header', 'achievement', 'project', 'skill-evidence', 'education', 'certification', 'context', 'duplicate', 'non-career-content', 'ambiguous'] },
+        entityIds: { type: 'array', items: CAREER_SNAPSHOT_ID },
+      } },
+    },
+  },
+};
+
+// A continuation page must be able to complete an entity whose literal fields
+// are split across physical source lines. Patches are page-local evidence for a
+// host-owned entity declared in an earlier page; they never replace an unseen
+// profile wholesale. The host validates target ownership and field conflicts.
+const CAREER_SNAPSHOT_ROLE_PATCH_SCHEMA = {
+  type: 'object', additionalProperties: false,
+  required: ['targetId', 'evidenceSegmentIds', 'updates'],
+  properties: {
+    targetId: CAREER_SNAPSHOT_ID,
+    evidenceSegmentIds: CAREER_SNAPSHOT_EVIDENCE_IDS,
+    updates: {
+      type: 'object', additionalProperties: false,
+      properties: {
+        title: { type: 'string', maxLength: 240 }, employer: { type: 'string', maxLength: 240 },
+        startDate: { type: 'string', maxLength: 80 }, endDate: { type: 'string', maxLength: 80 },
+        location: { type: 'string', maxLength: 240 },
+      },
+    },
+  },
+};
+const CAREER_SNAPSHOT_PROJECT_PATCH_SCHEMA = {
+  type: 'object', additionalProperties: false,
+  required: ['targetId', 'evidenceSegmentIds', 'updates'],
+  properties: {
+    targetId: CAREER_SNAPSHOT_ID,
+    evidenceSegmentIds: CAREER_SNAPSHOT_EVIDENCE_IDS,
+    updates: {
+      type: 'object', additionalProperties: false,
+      properties: {
+        name: { type: 'string', maxLength: 240 }, description: { type: 'string', maxLength: 2000 },
+        roleId: { type: 'string', maxLength: 80 },
+        technologies: { type: 'array', maxItems: 64, description: 'Literal labels from the project patch whose omission could let a downstream reader mistake them for candidate capability; include deliberate non-skills as well as demonstrated skills.', items: { type: 'string', maxLength: 160 } },
+        technologyReferences: { type: 'array', maxItems: 64, items: CAREER_SNAPSHOT_TECHNOLOGY_REFERENCE_SCHEMA },
+        metrics: { type: 'array', maxItems: 32, items: CAREER_SNAPSHOT_METRIC_SCHEMA },
+      },
+    },
+  },
+};
+const CAREER_SNAPSHOT_CONTINUATION_ITEM_SCHEMA = {
+  type: 'object', additionalProperties: false, required: ['mode', 'ids'],
+  properties: {
+    // `append` is intentionally page-local.  It lets the host-owned active
+    // ledger grow over any number of bounded responses; `ids` never becomes
+    // a hidden whole-career inventory.
+    mode: { type: 'string', enum: ['inherit', 'replace', 'append', 'clear'] },
+    ids: { type: 'array', maxItems: 100, items: CAREER_SNAPSHOT_ID },
+  },
+};
+
+// When an active continuation set no longer fits in one safe prompt, the
+// compiler scans its host-indexed context pages independently.  This is a
+// deliberately narrow response: it may complete only roles/projects supplied
+// on that one page, and every echo is verified by the host before a patch is
+// admitted.  The bounded page schema is never used as an aggregate schema.
+export const CAREER_PROFILE_ACTIVE_CONTEXT_SCAN_SCHEMA = {
+  type: 'object', additionalProperties: false,
+  required: ['activeStateDigest', 'contextPageDigest', 'rolePatches', 'projectPatches'],
+  properties: {
+    activeStateDigest: { type: 'string', pattern: '^[a-f0-9]{64}$' },
+    contextPageDigest: { type: 'string', pattern: '^[a-f0-9]{64}$' },
+    rolePatches: { type: 'array', maxItems: 100, items: CAREER_SNAPSHOT_ROLE_PATCH_SCHEMA },
+    projectPatches: { type: 'array', maxItems: 100, items: CAREER_SNAPSHOT_PROJECT_PATCH_SCHEMA },
+  },
+};
+
+// This is the actual per-call schema. The merged host profile intentionally
+// excludes patch/continuation transport fields below.
+export const CAREER_PROFILE_PAGE_SCHEMA = {
+  ...CAREER_PROFILE_PER_PAGE_SCHEMA,
+  required: [...CAREER_PROFILE_PER_PAGE_SCHEMA.required, 'rolePatches', 'projectPatches', 'continuationState'],
+  properties: {
+    ...CAREER_PROFILE_PER_PAGE_SCHEMA.properties,
+    rolePatches: { type: 'array', maxItems: 100, items: CAREER_SNAPSHOT_ROLE_PATCH_SCHEMA },
+    projectPatches: { type: 'array', maxItems: 100, items: CAREER_SNAPSHOT_PROJECT_PATCH_SCHEMA },
+    continuationState: {
+      type: 'object', additionalProperties: false, required: ['roles', 'projects'],
+      properties: { roles: CAREER_SNAPSHOT_CONTINUATION_ITEM_SCHEMA, projects: CAREER_SNAPSHOT_CONTINUATION_ITEM_SCHEMA },
+    },
+  },
+};
+
+function withoutArrayResponseCaps(value) {
+  if (Array.isArray(value)) return value.map(withoutArrayResponseCaps);
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(Object.entries(value)
+      .filter(([key]) => key !== 'maxItems')
+      .map(([key, child]) => [key, withoutArrayResponseCaps(child)]));
+  }
+  return value;
+}
+
+// Host-side aggregate contracts deliberately remove per-response array caps.
+// Do not use either as a callText responseSchema: doing so would turn a
+// global corpus size into an unsafe single-call output budget again.
+export const CAREER_PROFILE_MERGED_PAGE_SCHEMA = withoutArrayResponseCaps(CAREER_PROFILE_PAGE_SCHEMA);
+export const CAREER_PROFILE_COMPILE_SCHEMA = withoutArrayResponseCaps(CAREER_PROFILE_PER_PAGE_SCHEMA);
+
+export const CAREER_PROFILE_AUDIT_SCHEMA = {
+  type: 'object', additionalProperties: false, required: ['findings'],
+  properties: {
+    findings: { type: 'array', maxItems: 200, items: {
+      type: 'object', additionalProperties: false,
+      required: ['id', 'severity', 'category', 'segmentIds', 'entityIds', 'detail'],
+      properties: {
+        id: CAREER_SNAPSHOT_ID,
+        severity: { type: 'string', enum: ['blocker', 'warning'] },
+        category: { type: 'string', enum: ['coverage', 'grounding', 'attribution', 'metrics', 'skills', 'conflict'] },
+        segmentIds: { type: 'array', maxItems: 32, items: { type: 'string', pattern: '^segment-[0-9]{4,}$' } },
+        entityIds: { type: 'array', maxItems: 64, items: CAREER_SNAPSHOT_ID },
+        detail: { type: 'string', minLength: 1, maxLength: 1200 },
+      },
+    } },
   },
 };
 

@@ -8,6 +8,7 @@ import {
 } from './persistenceTransientState.js';
 import { stripNonRestorableNodeDataForUndo } from './undoNonRestorableState.js';
 import { isRestorableMarketplaceRecovery } from './marketplaceRunRecovery.js';
+import { consolidateBoardCascadeNodes } from './jobLocationConsolidation.js';
 
 /** Stable, pure snapshot fingerprint — no hook needed. */
 export function fingerprint(snap) {
@@ -111,7 +112,7 @@ const JOBCARD_SCORED_FIELDS = [
   'reasoning', 'careerDirection', 'requirementAssessments', 'materialGaps',
   'strengths', 'experienceAssessment', 'confidence', 'fitAssessment', 'rawScore',
   'adjustedScore', 'adjustments', 'calibration', 'source', 'url', 'posted',
-  'language', 'resumeProfile', 'googleCardUrl', 'applySource', 'originHubId',
+  'language', 'resumeProfile', 'googleCardUrl', 'applySource', 'originHubId', 'careerSnapshotId',
   // These arrived after the original on-canvas jobcard shape but can occur in
   // an unversioned/exported legacy canvas. Preserve them during the broad
   // card→hub migration instead of silently turning a preference-filtered or
@@ -253,7 +254,7 @@ export function migrateStaleJobHubInputLock(nodes) {
     if (n.type !== 'jobhub' || !n.data?.inputLocked) return n;
     const d = n.data;
     const hasItem = (v) => Array.isArray(v) && v.some(Boolean);
-    if (d.careerData || d.resumeProfile || d.filePath || hasItem(d.filePaths) || hasItem(d.careerFilePaths)) return n;
+    if (d.careerSnapshotId || d.careerData || d.resumeProfile || d.filePath || hasItem(d.filePaths) || hasItem(d.careerFilePaths)) return n;
     changed = true;
     const { inputLocked: _stranded, ...rest } = d;
     return { ...n, data: rest };
@@ -278,6 +279,8 @@ export function migrateInterruptedJobHubResults(nodes) {
     const d = n.data;
     const hasResults = Array.isArray(d.scoredJobs) && d.scoredJobs.length > 0;
     const hasCareerIdentity = !!(
+      d.careerSnapshotId
+      ||
       (d.resumeProfile && typeof d.resumeProfile === 'object')
       || (typeof d.careerData === 'string' && d.careerData.trim())
       || d.filePath
@@ -508,6 +511,28 @@ export function migrateJobHubTitleSourceSingleMode(nodes) {
   return changed ? out : nodes;
 }
 
+/**
+ * Version 10 — consolidate exact exact-description multi-location Job Board
+ * cards in place.
+ *
+ * Runs at every canvas level (the framework recurses into nested groups). For
+ * each `jobboard` node it delegates to the pure consolidation module, which
+ * preserves every protected (application-linked) card, removes only safely
+ * consolidated unprotected duplicates, rewrites/prunes jobgroup childIds,
+ * recomputes recursive group counts, and refreshes the Board's result/source/
+ * merge counts. Edges to removed nodes are pruned by the established save/load
+ * edge sanitation, so this step only touches nodes.
+ *
+ * Idempotent: a cascade with no consolidatable cluster returns the SAME array
+ * reference (the module short-circuits when nothing is removed), and an
+ * already-consolidated row is never re-expanded.
+ */
+export function migrateConsolidateBoardLocations(nodes) {
+  if (!Array.isArray(nodes)) return nodes;
+  const { nodes: migrated } = consolidateBoardCascadeNodes(nodes);
+  return migrated;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Versioned node-migration framework
 //
@@ -540,6 +565,7 @@ const MIGRATIONS = [
   { version: 7, name: 'jobhub-retired-batch-scoring',    migrate: migrateRetiredBatchScoringState, selfRecursive: false },
   { version: 8, name: 'targetRole→search-brief',         migrate: migrateMergedTargetRoleIntoBrief, selfRecursive: false },
   { version: 9, name: 'jobhub-titlesource→single-mode',  migrate: migrateJobHubTitleSourceSingleMode, selfRecursive: false },
+  { version: 10, name: 'jobboard-location-consolidation', migrate: migrateConsolidateBoardLocations, selfRecursive: false },
 ];
 
 export const CURRENT_SCHEMA_VERSION = MIGRATIONS.length ? MIGRATIONS[MIGRATIONS.length - 1].version : 0;

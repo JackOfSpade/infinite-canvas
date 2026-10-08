@@ -185,7 +185,7 @@ function plainTextFromMarkdown(text) {
 // wraps (`<span hidden>`, `display:none`) and is itself never shown; a character
 // reference (`&shy;`, `&#8203;`, `&amp;`) is drawn as a different character than the
 // one typed. Every one defers rather than being read as career text. An autolink
-// (`<jack@x.com>`, `<https://x.com>`), a bare `&` (`R&D`) and a comparison (`3 < 4`)
+// (`<user@example.test>`, `<https://example.test>`), a bare `&` (`R&D`) and a comparison (`3 < 4`)
 // match none of them. Each is one linear pass: a fixed-width lead, then a run bounded by
 // the line or by one character class.
 const MARKDOWN_HIDDEN_RE = [

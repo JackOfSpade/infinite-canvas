@@ -179,6 +179,17 @@ assert(/\.nowrap\s*\{[^}]*white-space\s*:\s*nowrap/.test(css),
 assert(/font-variant-numeric\s*:\s*normal/.test(css),
   'proportional numerals are pinned (tabular figures would empty the text layer)');
 
+/* Chromium serializes positive letter-spacing as separately positioned glyphs
+   in the PDF text stream. `pdftotext -layout` can then split a section label
+   into separate glyph runs. Section labels are conventional,
+   ATS-relevant words, so the section-heading rule must use the browser's
+   ordinary contiguous text layout. The uppercase label and hairline rule keep
+   the visual hierarchy without asking PDF extraction to reconstruct a word. */
+var sectionHeadRule = /\.section-head\s+h2\s*\{([^}]*)\}/.exec(css);
+assert(sectionHeadRule && /letter-spacing\s*:\s*(?:normal|0(?:\.0+)?(?:px|pt|em|rem|%)?)\s*;/.test(sectionHeadRule[1]),
+  'section headings use contiguous text, not positive letter-spacing',
+  sectionHeadRule ? (sectionHeadRule[1].match(/letter-spacing\s*:[^;]+;/) || ['no letter-spacing declaration'])[0] : 'section heading rule missing');
+
 /* CSS `content` is DECORATIVE ONLY: the bullet glyph, nothing else. Any
    other value is text meaning that copy-paste and PDF extraction drop —
    the exact failure the annotation labels were moved into markup to avoid

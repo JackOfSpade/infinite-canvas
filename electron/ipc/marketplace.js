@@ -14,7 +14,7 @@ import { callLLMVision, callLLMText, hasExactDurableTextHandoff } from './llm.js
 import {
   HANDOFF_CONCURRENCY,
   mapAutomaticHandoffs,
-  mapManualHandoffWaves,
+  mapStableHandoffQueue,
 } from '../../src/utils/handoffScheduler.js';
 import { getCurrentIpcRequestContext, handleSafe } from './ipcUtils.js';
 import { scrapeMultiple } from './browserPool.js';
@@ -3569,10 +3569,10 @@ Be confident — don't mark everything "good." If you're unsure, lean "good" unl
 
     // Pass 2: every platform has now been scraped (or failed/gated out during
     // pass 1). Pack the independent prepared hubs into deterministic, bounded
-    // manual handoffs. Up to the shared handoff capacity is dispatched as one
-    // stable wave;
-    // the next wave is not revealed until that whole set settles. Singleton
-    // batches retain the established one-platform prompt and result contract.
+    // manual handoffs. The stable result order remains, while a freed slot
+    // immediately refills from the durable prepared queue instead of waiting
+    // for an arbitrary fixed wave barrier. Singleton batches retain the
+    // established one-platform prompt and result contract.
     // Startup recovery is allowed to restore only the bounded fetch/prepared
     // phase. The next phase intentionally opens a manual copy/paste handoff,
     // so an unmounted nested Status node must leave its durable prepared pages
@@ -3592,7 +3592,7 @@ Be confident — don't mark everything "good." If you're unsure, lean "good" unl
         sectionsByParent.set(entry.parentScanId, parts);
       };
       const batchesWithProgress = scanBatches.map((entries, index) => ({ entries, batch: index + 1 }));
-      await mapManualHandoffWaves(
+      await mapStableHandoffQueue(
         batchesWithProgress,
         HANDOFF_CONCURRENCY,
         async ({ entries, batch }) => {

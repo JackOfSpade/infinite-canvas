@@ -40,7 +40,7 @@ const EPHEMERAL_PROGRESS_SCOPE_MAX_AGE_MS = 30 * 60 * 1000;
 // A worker-pool planner needs to see beyond the small active wave of a long
 // manual run. Keep that projection strictly aggregate-only and bounded: it is
 // process-local planning metadata, never prompt/durable/renderer/report data.
-const MAX_QUEUED_WORK_FORECAST_UNITS = 10_000;
+const MAX_QUEUED_WORK_FORECAST_UNITS = Number.MAX_SAFE_INTEGER;
 const QUEUED_WORK_FORECAST_SCOPE_RE = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i;
 // Code derivation happens before the first durable write and before a request
 // enters `pendingRequests`. Reserve a selected code synchronously in that gap
@@ -56,7 +56,15 @@ const DURABLE_HANDOFF_VERSION = 1;
 // path needed to replay work made before code enforcement was introduced.
 const HANDOFF_CODE_VERIFICATION_VERSION = 1;
 const DURABLE_HANDOFF_FILE = 'non-api-ai-handoffs.json';
-const DURABLE_RUN_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+// A bridge correction can be generated again and again, but a response which
+// made no semantic progress must not cause a hot, self-feeding poll/reissue
+// loop.  These values govern pacing only -- they are deliberately not a
+// retry-attempt limit.  The first retry remains quick enough for an ordinary
+// correction, while repeated invalid answers quickly yield the bridge to other
+// work.  `retryNotBefore` is persisted on the durable step so a relaunch does
+// not erase the cooling period.
+const DURABLE_REISSUE_BACKOFF_BASE_MS = 750;
+const DURABLE_REISSUE_BACKOFF_MAX_MS = 30_000;
 let durableStatePromise = null;
 let durableMutationTail = Promise.resolve();
 let durableWriteTail = Promise.resolve();
@@ -241,6 +249,7 @@ export const SAFE_NON_API_AI_LOG_ERROR_CODES = new Set([
   'PREFERENCE_RESEARCH_RESPONSE_INVALID',
   'STRUCTURED_OUTPUT_SCHEMA_INVALID',
   'STRUCTURED_OUTPUT_SCHEMA_UNSUPPORTED_KEYWORD',
+  'CAREER_SNAPSHOT_PAGE_INVALID',
   'VALIDATION_FAILED',
 ]);
 
@@ -306,6 +315,12 @@ export const SAFE_VALIDATION_DIAGNOSTIC_REASONS = new Set([
   'INVALID_JSON',
   'SCHEMA_INVALID',
   'SCHEMA_UNSUPPORTED',
+  'CAREER_PAGE_COVERAGE_RECIPROCITY',
+  'CAREER_PAGE_COVERAGE_SEGMENT',
+  'CAREER_PAGE_REFERENCE_INVALID',
+  'CAREER_PAGE_REPAIR_NO_PROGRESS',
+  'CAREER_PAGE_REPAIR_TARGET_MISSED',
+  'CAREER_PAGE_VALIDATION_FAILED',
   'DOMAIN_VALIDATION_FAILED',
   'VALIDATION_FAILED',
 ]);
@@ -340,6 +355,14 @@ function cloneSafeValidationDiagnostic(diagnostic) {
   if (SAFE_RESEARCH_SECTION_REASONS.has(reason) && stage !== 'research-sections') return null;
   if (SAFE_RESEARCH_ASSESSMENT_REASONS.has(reason) && stage !== 'research-assessment') return null;
   if (SAFE_COMPENSATION_ASSESSMENT_REASONS.has(reason) && stage !== 'compensation-assessment') return null;
+  if ([
+    'CAREER_PAGE_COVERAGE_RECIPROCITY',
+    'CAREER_PAGE_COVERAGE_SEGMENT',
+    'CAREER_PAGE_REFERENCE_INVALID',
+    'CAREER_PAGE_REPAIR_NO_PROGRESS',
+    'CAREER_PAGE_REPAIR_TARGET_MISSED',
+    'CAREER_PAGE_VALIDATION_FAILED',
+  ].includes(reason) && stage !== 'domain') return null;
   const counts = {};
   for (const key of SAFE_VALIDATION_DIAGNOSTIC_COUNT_KEYS) {
     const value = safeDiagnosticCount(diagnostic[key] ?? diagnostic.counts?.[key]);
@@ -361,6 +384,7 @@ function defaultSafeValidationDiagnostic(error, validationCode) {
     case 'STRUCTURED_OUTPUT_SCHEMA_UNSUPPORTED_KEYWORD': return { stage: 'schema', reason: 'SCHEMA_UNSUPPORTED', counts: {} };
     case 'JOB_PREFERENCE_RESEARCH_RESPONSE_INVALID':
     case 'PREFERENCE_RESEARCH_RESPONSE_INVALID': return { stage: 'domain', reason: 'DOMAIN_VALIDATION_FAILED', counts: {} };
+    case 'CAREER_SNAPSHOT_PAGE_INVALID': return { stage: 'domain', reason: 'CAREER_PAGE_VALIDATION_FAILED', counts: {} };
     default: return { stage: 'domain', reason: 'VALIDATION_FAILED', counts: {} };
   }
 }
@@ -475,10 +499,11 @@ async function loadDurableState() {
     try {
       const parsed = JSON.parse(await fs.promises.readFile(filePath, 'utf8'));
       const runs = parsed?.runs && typeof parsed.runs === 'object' ? parsed.runs : {};
-      const cutoff = Date.now() - DURABLE_RUN_MAX_AGE_MS;
-      for (const [runId, run] of Object.entries(runs)) {
-        if (!run || Number(run.updatedAt) < cutoff) delete runs[runId];
-      }
+      // A pending manual-AI handoff is the user's resumable work, not a cache.
+      // Never discard it just because a machine was off for a week (or much
+      // longer).  Completion and cancellation own their explicit, atomic
+      // cleanup paths below; silently expiring a run here made recovery depend
+      // on an arbitrary wall-clock deadline.
       // Calibration intentionally does not survive process restart. This
       // transport cannot identify the user's chosen chat model/profile, so a
       // persisted sample could be dangerously applied to a different output
@@ -1140,6 +1165,14 @@ export async function flushNonApiAiPersistence() {
   await durableWriteTail;
 }
 
+// Test-only process-restart seam.  It deliberately keeps the on-disk state
+// and all production cleanup semantics intact; tests use it to prove that an
+// aged pending run is reloaded rather than dropped by a fresh main process.
+export async function __reloadDurableStateForTests() {
+  await flushNonApiAiPersistence();
+  durableStatePromise = null;
+}
+
 const NON_API_AI_STEP_BACK_CODE = 'NON_API_AI_STEP_BACK';
 
 class NonApiAiStepBackError extends Error {
@@ -1462,7 +1495,7 @@ function safeHandoffSettings(value, seen = new WeakSet()) {
 
 function cleanBatchNumber(value) {
   const number = Number(value);
-  return Number.isInteger(number) && number >= 1 && number <= 100_000 ? number : null;
+  return Number.isSafeInteger(number) && number >= 1 ? number : null;
 }
 
 // Like cleanBatchNumber but admits 0: a progress counter legitimately reads
@@ -1470,7 +1503,7 @@ function cleanBatchNumber(value) {
 // and hide the counter for exactly the batch where it is most reassuring.
 function cleanProgressCount(value) {
   const number = Number(value);
-  return Number.isInteger(number) && number >= 0 && number <= 100_000 ? number : null;
+  return Number.isSafeInteger(number) && number >= 0 ? number : null;
 }
 
 function cleanProgressIdentifier(value) {
@@ -2056,6 +2089,24 @@ function safeCorrectionGuidance(diagnostic, validationCode) {
   if (validationCode === 'JOB_PREFERENCE_RESEARCH_RESPONSE_INVALID' || validationCode === 'PREFERENCE_RESEARCH_RESPONSE_INVALID') {
     return 'The prior Job Preference research response did not satisfy its validation contract. Follow the original response format and regenerate the complete answer.';
   }
+  if (safe?.stage === 'domain' && safe?.reason === 'CAREER_PAGE_COVERAGE_RECIPROCITY') {
+    return 'Rebuild the complete career page shard with exact page-local evidenceSegmentIds and one valid segmentCoverage disposition for each source segment. Do not supply or repair segmentCoverage.entityIds: the host derives that inverse index after validating your evidence.';
+  }
+  if (safe?.stage === 'domain' && safe?.reason === 'CAREER_PAGE_COVERAGE_SEGMENT') {
+    return 'Rebuild the complete career page shard so every source segment has exactly one segmentCoverage entry and every listed segment belongs to this page.';
+  }
+  if (safe?.stage === 'domain' && safe?.reason === 'CAREER_PAGE_REFERENCE_INVALID') {
+    return 'Rebuild the complete career page shard using only this page namespace and the supplied active role/project context ids; do not invent or cross-reference another page id.';
+  }
+  if (safe?.stage === 'domain' && safe?.reason === 'CAREER_PAGE_REPAIR_NO_PROGRESS') {
+    return 'Return a complete, source-supported page replacement that actually changes the assembled career profile to resolve the assigned findings. Reordering fields, formatting, or returning the prior canonical shard is not a repair.';
+  }
+  if (safe?.stage === 'domain' && safe?.reason === 'CAREER_PAGE_REPAIR_TARGET_MISSED') {
+    return 'Return a complete, source-supported page replacement that changes an entity or source segment cited by the assigned findings. Do not substitute an unrelated career-data edit.';
+  }
+  if (safe?.stage === 'domain' && safe?.reason === 'CAREER_PAGE_VALIDATION_FAILED') {
+    return 'Rebuild the complete career page shard to satisfy the page evidence, coverage, namespace, and relationship checks in the original prompt.';
+  }
   return '';
 }
 
@@ -2153,8 +2204,81 @@ function send(record, channel, payload) {
   }
 }
 
+function cleanRetryRejectionCount(value) {
+  return Number.isSafeInteger(value) && value >= 0 ? value : 0;
+}
+
+function cleanRetryNotBefore(value, now = Date.now()) {
+  // Do not carry malformed, expired, or absurdly distant timestamps from a
+  // hand-edited/corrupt durable file. The bounded delay calculation below is
+  // the authority for newly created timestamps.
+  if (!Number.isSafeInteger(value) || value <= now) return null;
+  return value <= now + DURABLE_REISSUE_BACKOFF_MAX_MS ? value : null;
+}
+
+function retryAfterMs(record, now = Date.now()) {
+  const retryNotBefore = cleanRetryNotBefore(record?.retryNotBefore, now);
+  return retryNotBefore ? Math.max(0, retryNotBefore - now) : 0;
+}
+
+function durableBridgeReissuePacing(record, validationCode = null, validationDiagnostic = null) {
+  // Keep ordinary human correction UX immediate. The expensive failure mode is
+  // a self-generated career-page repair that validates, changes nothing (or
+  // misses its cited target), and is offered straight back to the same worker.
+  // Those reason codes are safe, stable contract diagnostics rather than free
+  // validator text. More validation families can opt in deliberately later.
+  const noProgressRepair = validationCode === 'CAREER_SNAPSHOT_PAGE_INVALID'
+    && ['CAREER_PAGE_REPAIR_NO_PROGRESS', 'CAREER_PAGE_REPAIR_TARGET_MISSED'].includes(validationDiagnostic?.reason);
+  return noProgressRepair && record?.handoffRoute === 'mcp' && Boolean(record?.runId && record?.stepKey);
+}
+
+function nextRetryDelayMs(rejectionCount) {
+  const exponent = Math.min(16, Math.max(0, cleanRetryRejectionCount(rejectionCount) - 1));
+  return Math.min(DURABLE_REISSUE_BACKOFF_MAX_MS, DURABLE_REISSUE_BACKOFF_BASE_MS * (2 ** exponent));
+}
+
+function clearReissueTimer(record) {
+  if (!record?.retryTimer) return;
+  clearTimeout(record.retryTimer);
+  record.retryTimer = null;
+}
+
+function schedulePacedReissue(record, deliveryKind = 'reissue') {
+  clearReissueTimer(record);
+  if (pendingRequests.get(record.requestId) !== record || record.signal?.aborted) return;
+  const delay = retryAfterMs(record);
+  if (delay <= 0) {
+    record.retryNotBefore = null;
+    void updateDurableStep(record, {
+      status: 'pending', draft: record.initialResponse || '', response: null,
+      retryRejectionCount: cleanRetryRejectionCount(record.retryRejectionCount), retryNotBefore: null,
+    }).catch(error => logger.warn(`[Non-API AI] Could not clear durable reissue pacing for '${record.task || 'unknown'}': ${error?.message || error}`));
+    sendRequest(record, deliveryKind);
+    return;
+  }
+  record.retryTimer = setTimeout(() => {
+    record.retryTimer = null;
+    // Wall clocks can move backwards while a process is suspended. Recompute
+    // rather than assuming this timer alone proves that the deadline elapsed.
+    if (retryAfterMs(record) > 0) {
+      schedulePacedReissue(record, deliveryKind);
+      return;
+    }
+    if (pendingRequests.get(record.requestId) !== record || record.signal?.aborted) return;
+    record.retryNotBefore = null;
+    void updateDurableStep(record, {
+      status: 'pending', draft: record.initialResponse || '', response: null,
+      retryRejectionCount: cleanRetryRejectionCount(record.retryRejectionCount), retryNotBefore: null,
+    }).catch(error => logger.warn(`[Non-API AI] Could not clear durable reissue pacing for '${record.task || 'unknown'}': ${error?.message || error}`));
+    sendRequest(record, deliveryKind);
+  }, delay);
+  record.retryTimer.unref?.();
+  emitNonApiAiEvent();
+}
+
 function settle(record, outcome) {
   if (!pendingRequests.delete(record.requestId)) return;
+  clearReissueTimer(record);
   releaseHandoffCodeReservation(record.handoffCode, record.handoffReservationId);
   if (record.abortListener) record.signal?.removeEventListener?.('abort', record.abortListener);
   // `steppedBack` is a controlled, user-triggered rewind of the handoff (see
@@ -2527,6 +2651,11 @@ export async function requestNonApiAi({
     validationError: null,
     validationCode: null,
     validationDiagnostic: null,
+    // These are restored only from the durable step and are later discarded
+    // for local/manual routes. They carry no prompt or answer content.
+    retryRejectionCount: cleanRetryRejectionCount(effectiveSavedStep?.retryRejectionCount),
+    retryNotBefore: cleanRetryNotBefore(effectiveSavedStep?.retryNotBefore),
+    retryTimer: null,
     signal,
     materializedPrompt,
     resolve: null,
@@ -2544,6 +2673,10 @@ export async function requestNonApiAi({
     && !(typeof record.initialResponse === 'string' && record.initialResponse.trim())
     ? 'mcp'
     : 'manual';
+  if (record.handoffRoute !== 'mcp' || !record.runId || !record.stepKey) {
+    record.retryRejectionCount = 0;
+    record.retryNotBefore = null;
+  }
   record.lifecycle = createHandoffLifecycle(record);
   const progressScope = registerProgressRecord(record);
   // A sibling can arrive after another batch's planned offset. Tell already
@@ -2552,7 +2685,10 @@ export async function requestNonApiAi({
   publishProgressScope(progressScope, record);
 
   try {
-    await updateDurableStep(record, { status: 'pending', draft: record.initialResponse || '', response: null });
+    await updateDurableStep(record, {
+      status: 'pending', draft: record.initialResponse || '', response: null,
+      retryRejectionCount: record.retryRejectionCount, retryNotBefore: record.retryNotBefore,
+    });
   } catch (error) {
     // This request never entered pendingRequests, so settle() cannot own its
     // terminal receipt. Record the failed initial durable admission directly:
@@ -2582,7 +2718,8 @@ export async function requestNonApiAi({
       return;
     }
     signal?.addEventListener?.('abort', record.abortListener, { once: true });
-    sendRequest(record, 'initial');
+    if (retryAfterMs(record) > 0) schedulePacedReissue(record, 'initial');
+    else sendRequest(record, 'initial');
   });
 }
 
@@ -2704,6 +2841,18 @@ export function validateNonApiAiSubmission({
  * that keeps two simultaneous submissions from both committing.
  */
 async function acceptNonApiAiResponse(record, args, { transport = 'local' } = {}) {
+  const coolingForMs = retryAfterMs(record);
+  // The cooldown prevents the bridge from reflexively feeding an ineffective
+  // repair back into the same automated loop. A person who intentionally
+  // supplies a local correction remains able to resolve it immediately.
+  if (transport === 'bridge' && coolingForMs > 0) {
+    return {
+      accepted: false,
+      validationErrors: ['This correction is waiting briefly before it can be submitted again.'],
+      reason: 'cooldown',
+      retryAfterMs: coolingForMs,
+    };
+  }
   // Where the write stands, so the caller can tell a rejected answer from a failed save.
   let phase = 'validate';
   try {
@@ -2727,7 +2876,9 @@ async function acceptNonApiAiResponse(record, args, { transport = 'local' } = {}
     record.validationCode = null;
     record.settling = true;
     phase = 'commit';
-    await updateDurableStep(record, { status: 'accepted', response: args.response, draft: '' });
+    await updateDurableStep(record, { status: 'accepted', response: args.response, draft: '',
+      retryRejectionCount: 0, retryNotBefore: null,
+    });
     phase = 'committed';
     // The durable write yields. Cancellation or Back may settle this record
     // in that interval, in which case its response must not mutate display
@@ -2796,6 +2947,27 @@ async function acceptNonApiAiResponse(record, args, { transport = 'local' } = {}
     // failure. Keep the same request available with no correction-pass budget;
     // a person can cancel it, and phase keeps commit failures distinguishable
     // from ordinary validation failures for callers that enforce save safety.
+    // Durable bridge work additionally cools between failed answers. This is
+    // intentionally unbounded: each new failed attempt is allowed, but cannot
+    // create a zero-delay self-reissue loop or bypass the persisted deadline.
+    if (phase === 'validate' && durableBridgeReissuePacing(record, validationCode, validationDiagnostic)) {
+      record.retryRejectionCount = Math.min(Number.MAX_SAFE_INTEGER, cleanRetryRejectionCount(record.retryRejectionCount) + 1);
+      const retryAfterMs = nextRetryDelayMs(record.retryRejectionCount);
+      record.retryNotBefore = Date.now() + retryAfterMs;
+      try {
+        await updateDurableStep(record, {
+          status: 'pending', draft: record.initialResponse || '', response: null,
+          retryRejectionCount: record.retryRejectionCount, retryNotBefore: record.retryNotBefore,
+        });
+      } catch (writeError) {
+        // Do not drop a valid correction simply because its pacing checkpoint
+        // could not be saved. It remains paced for this process and the normal
+        // durable admission/save error path retains the underlying diagnostic.
+        logger.warn(`[Non-API AI] Could not persist reissue pacing for '${record.task || 'unknown'}': ${writeError?.message || writeError}`);
+      }
+      if (pendingRequests.get(record.requestId) === record && !record.signal?.aborted) schedulePacedReissue(record, 'reissue');
+      return { accepted: false, validationErrors: [message], reason: 'validation', retryAfterMs };
+    }
     sendRequest(record, 'reissue');
     return { accepted: false, validationErrors: [message], reason: phase === 'validate' ? 'validation' : 'commit_failed' };
   }
@@ -2817,7 +2989,7 @@ async function acceptNonApiAiResponse(record, args, { transport = 'local' } = {}
 
 /** Why a pending handoff is not offered to an external session, in precedence order. */
 export const BRIDGE_EXCLUSION_REASONS = Object.freeze([
-  'ending', 'settling', 'attachment', 'free_text',
+  'ending', 'settling', 'cooldown', 'attachment', 'free_text',
   'task_not_allowed', 'node_not_allowed', 'person_editing',
 ]);
 
@@ -2841,7 +3013,10 @@ export const BRIDGE_RELEASE_ONE_TASKS = Object.freeze([
   'job-compensation-research', 'job-compensation-research-batch', 'job-preference-evaluation',
   'job-preference-interpretation', 'job-preference-research', 'job-preference-research-assessment',
   'job-preference-research-batch', 'job-preference-research-batch-assessment', 'job-query-generation',
-  'job-role-audit', 'job-role-screen', 'job-role-screen-batch', 'job-scoring', 'job-taxonomy-classify',
+  'career-profile-compile', 'career-profile-audit-completeness', 'career-profile-audit-grounding',
+  'career-profile-audit-attribution', 'career-profile-audit-metrics', 'career-profile-audit-skills',
+  'career-profile-audit-conflicts', 'career-profile-repair',
+  'job-location-consolidation-confirmation', 'job-role-audit', 'job-role-screen', 'job-role-screen-batch', 'job-scoring', 'job-taxonomy-classify',
   'job-taxonomy-classify-batch', 'job-taxonomy-plan', 'platform-fit-assessment', 'price-synthesis',
   'price-synthesis-batch', 'resume-parse',
 ]);
@@ -2880,6 +3055,7 @@ function bridgeExclusionReason(record, { allowTasks, allowNodeIds, allowWindowNo
   // The window is closing or the workflow was cancelled: the record is about to settle.
   if (!record.sender || record.sender.isDestroyed?.() || record.signal?.aborted) return 'ending';
   if (record.settling) return 'settling';
+  if (retryAfterMs(record) > 0) return 'cooldown';
   if (record.attachmentPaths.length > 0) return 'attachment';
   if (!bridgeResponseFormat(record)) return 'free_text';
   // Preserve the existing local-draft diagnostic before applying the route
@@ -3040,6 +3216,7 @@ function bridgeListEntry(record) {
 export function listBridgeableNonApiAiHandoffs({ allowTasks, allowNodeIds = null, allowWindowNodePairs = null } = {}) {
   const excluded = Object.fromEntries(BRIDGE_EXCLUSION_REASONS.map(reason => [reason, 0]));
   const eligible = [];
+  let earliestRetryAfterMs = 0;
   // This is an internal seam-only reconciliation aid. A settling record is
   // still pending but intentionally absent from `handoffs`; retaining its
   // exact opaque request id lets the push source preserve a bridge route
@@ -3051,12 +3228,19 @@ export function listBridgeableNonApiAiHandoffs({ allowTasks, allowNodeIds = null
     if (reason) {
       excluded[reason] += 1;
       if (reason === 'settling') settlingRequestIds.push(record.requestId);
+      if (reason === 'cooldown') {
+        const remaining = retryAfterMs(record);
+        // The earliest wake-up is enough for a polling bridge. It is timing
+        // metadata only; request ids and prompts remain absent from this view.
+        earliestRetryAfterMs = earliestRetryAfterMs === 0 ? remaining : Math.min(earliestRetryAfterMs, remaining);
+      }
     }
     else eligible.push(record);
   }
   return Object.freeze({
     handoffs: Object.freeze(bridgeDockOrder(eligible).map(bridgeListEntry)),
     excluded: Object.freeze(excluded),
+    retryAfterMs: earliestRetryAfterMs,
     settlingRequestIds: Object.freeze(settlingRequestIds),
     pending: pendingRequests.size,
   });
@@ -3091,7 +3275,7 @@ export function readBridgeableNonApiAiHandoff({ requestId, handoffCode, allowTas
   const record = typeof requestId === 'string' ? pendingRequests.get(requestId) : undefined;
   if (!record || record.handoffCode !== handoffCode) return Object.freeze({ ok: false, reason: 'not_pending' });
   const reason = bridgeExclusionReason(record, { allowTasks, allowNodeIds, allowWindowNodePairs });
-  if (reason) return Object.freeze({ ok: false, reason });
+  if (reason) return Object.freeze({ ok: false, reason, ...(reason === 'cooldown' ? { retryAfterMs: retryAfterMs(record) } : {}) });
   return Object.freeze({
     ok: true,
     requestId: record.requestId,
@@ -3115,6 +3299,7 @@ export async function submitNonApiAiResponseForBridge({ requestId, handoffCode, 
   if (typeof response !== 'string') return bridgeOutcome('invalid_argument');
   const excluded = bridgeExclusionReason(record, { allowTasks, allowNodeIds, allowWindowNodePairs });
   if (excluded === 'settling') return bridgeOutcome('busy');
+  if (excluded === 'cooldown') return bridgeOutcome('cooldown', { retryAfterMs: retryAfterMs(record) });
   if (excluded) return bridgeOutcome('ineligible', { exclusion: excluded });
   // No await between the checks above and this call: acceptNonApiAiResponse sets
   // `settling` synchronously, which is what makes a second submit see `busy`.
@@ -3129,6 +3314,7 @@ export async function submitNonApiAiResponseForBridge({ requestId, handoffCode, 
         isCorrection: view.isCorrection,
         correction: view.correction,
         attempt: view.attempt,
+        retryAfterMs: result.retryAfterMs || 0,
       });
     }
     case 'commit_failed': return bridgeOutcome('commit_failed');

@@ -2,7 +2,7 @@ import { assert, fs, getLocalApplicationHandoff, importLocalApplicationJob, os, 
 import { APPLICATION_QUALITY_CHECKLIST_VERSION, APPLICATION_QUALITY_CRITERIA, ARGUMENT_EVIDENCE_REBIND_RULE, ARGUMENT_JOB_NEED_QUOTE_RULE, COVER_LETTER_SECONDARY_NARRATIVE_ROLES, PASTE_EVIDENCE_PRIORITIES, PASTE_FINDING_DOCUMENTS, COVER_LETTER_ARGUMENT_TEXT_LIMITS, GENERATION_AUDIT_TEXT_MINIMUMS, QUALITY_NOTE_MIN_CHARS, QUALITY_NOTE_MIN_WORDS, QUALITY_NOTE_RULE, EVIDENCE_PLAN_CRITERION_IDS, LOCAL_AI_GENERATION_AUDIT_VERSION, MAX_COVER_LETTER_PARAGRAPH_EVIDENCE_IDS, MAX_EVIDENCE_PLAN_EVIDENCE_ITEMS, MAX_EVIDENCE_PLAN_REQUIREMENT_ITEMS, MAX_SOURCE_GROUNDING_QUOTE_CHARS, MIN_SHARED_SOURCE_TERMS, MIN_SOURCE_GROUNDING_QUOTE_CHARS, MIN_SOURCE_GROUNDING_QUOTE_WORDS, PASTE_BASE_HASH_KEYS, PASTE_CHECK_PROSE_UNITS, PASTE_STABLE_ID_PATTERN, pasteRejectionCheckIds, pasteReportableCheckIds, SOURCE_TERM_OVERLAP_RULE, __setLocalAiRenderPdfForTests, localApplicationStatus, updateLocalApplicationDraft } from '../../electron/ipc/localAiApplication.js';
 import { EMPTY_JOB_LISTING_BODY_NOTE, ORIGINAL_JOB_LISTING_BODY_HEADING } from '../../electron/ipc/applicationBundle.js';
 import { _resetPasteHandoffDiagnostics, getPasteHandoffDiagnosticsSnapshot } from '../../electron/ipc/pasteHandoffDiagnostics.js';
-import { CAREER_DATA_ROLE_SECTION_RULE, CAREER_TERM_OVERLAP_RULE, MIN_SHARED_CAREER_TERMS, NEUTRAL_SKILL_GROUP_LABELS, NEUTRAL_SKILL_GROUP_RULE, renderStructuredApplicationResume, SKILL_ITEM_FILTERABLE_RULE, SKILLS_BLOCK_BUDGET_RULE, STRUCTURED_RESUME_ID_PATTERN, STRUCTURED_RESUME_LIMITS } from '../../electron/ipc/structuredResume.js';
+import { CAREER_DATA_ROLE_SECTION_RULE, CAREER_TERM_OVERLAP_RULE, MIN_SHARED_CAREER_TERMS, careerAttestedSkillTerms, requiredCareerAttestedSkillTerms, NEUTRAL_SKILL_GROUP_LABELS, NEUTRAL_SKILL_GROUP_RULE, POSTING_NAMED_SKILLS_RULE, renderStructuredApplicationResume, SKILL_ITEM_FILTERABLE_RULE, SKILL_ITEM_GROUNDING_RULE, SKILLS_BLOCK_BUDGET_RULE, SKILLS_BLOCK_PRESENCE_RULE, STRUCTURED_RESUME_ID_PATTERN, STRUCTURED_RESUME_LIMITS } from '../../electron/ipc/structuredResume.js';
 import { ADJACENT_SENTENCE_SHAPE_RULE, ARGUMENT_CLAIM_SPAN_RULE, ARGUMENT_MAPPING_REQUIRED_RULE, ARGUMENT_SPAN_ALIGNMENT_RULE, ARGUMENT_PROOF_SPAN_RULE, ARGUMENT_RELEVANCE_ANAPHORA_RULE, ARGUMENT_RELEVANCE_MECHANISM_RULE, ARGUMENT_RELEVANCE_SPAN_RULE, COVER_LETTER_EQUIVALENCE_CARRIERS, COVER_LETTER_LOGISTICS_PROMISE_CLASSES, COVER_LETTER_SALIENT_ECHO_PHRASES, DURATION_CLAIM_SHAPE_RULE, MAX_LETTER_FIGURES, MAX_LETTER_OFF_POSTING_TOOLS, MAX_PARAGRAPH_OFF_POSTING_TOOLS, MAX_SENTENCE_WORDS, MIN_ANCHOR_RELEVANCE_CORPUS_WORDS, MIN_ROLE_THESIS_WORDS, MIN_SHARED_SHAPE_PARAGRAPHS, DANGLING_DEMONSTRATIVE_RULE, REPEATED_PHRASE_RULE, REPEATED_TRANSFER_CARRIER_RULE, SENTENCE_SHAPE_FRAME_WORDS, SHARED_SENTENCE_SHAPE_CEILING_RULE, PAST_PROOF_VERBS, REDUNDANCY_SHINGLE_WORDS } from '../../electron/ipc/coverLetterChecks.js';
 import { assemblePasteApplicationResult, MAX_UNIT_CAREER_DATA_QUOTES } from '../../electron/ipc/pasteApplicationAssembly.js';
 import { extractResumeEvidence, RESUME_BULLET_CHARACTER_BUDGET } from '../../electron/ipc/jobApplication.js';
@@ -26,7 +26,11 @@ function reply(handoff, fields) {
   };
 }
 
-const careerData = 'Ada Lovelace\nada@example.test\nSoftware Engineer\nBuilt reporting systems that reduced manual work.\nBuilt reporting systems and reduced manual work.\nBuilt reporting systems, reducing manual work.';
+// The résumé puts these bullets beneath Analytical Engines, so the frozen
+// legacy corpus needs a deterministic role boundary too.  A bare collection
+// of achievements cannot safely inherit an employer merely because a fixture
+// selected it for that role.
+const careerData = 'Ada Lovelace\nada@example.test\nSoftware Engineer profile\n\n## Analytical Engines\nSoftware Engineer\n2020 – 2024\n\nBuilt reporting systems that reduced manual work.\nBuilt reporting systems and reduced manual work.\nBuilt reporting systems, reducing manual work.';
 const resume = {
   schemaVersion: 'structured-resume.v1',
   identity: { name: 'Ada Lovelace', contact: ['ada@example.test'], subtitleRole: 'Software Engineer', credential: '' },
@@ -59,7 +63,7 @@ const PLAN_COMPANY = 'Acme Reporting';
 const PLAN_ESCAPED_TITLE = 'Intermediate Full-Stack Developer';
 const VERBATIM_CAREER_LINE = 'Owned the reporting pipeline\u2019s nightly injest in Typescript.';
 const VERBATIM_LISTING_LINE = 'We own reporting end to end.What You\u2019ll Bring4+ years of reporting work \u2014 including pipeline ownership.';
-const VERBATIM_CAREER_DATA = ['Ada Lovelace', PLAN_EMAIL, PLAN_PHONE, 'Software Engineer', VERBATIM_CAREER_LINE, 'Ran the quarterly evaulation of reporting coverage.'].join('\n');
+const VERBATIM_CAREER_DATA = ['Ada Lovelace', PLAN_EMAIL, PLAN_PHONE, 'Software Engineer profile', '', '## Analytical Engines', 'Software Engineer', '2020 – 2024', '', VERBATIM_CAREER_LINE, 'Ran the quarterly evaulation of reporting coverage.'].join('\n');
 const PLAN_PROFILE = { workHistory: [{ id: 'role-1', title: 'Software Engineer', employer: 'Analytical Engines', startDate: '2020', endDate: '2024' }] };
 const PLAN_IDENTITY = { name: 'Ada Lovelace', contact: [PLAN_EMAIL], subtitleRole: 'Software Engineer' };
 const PLAN_REQUIREMENT = { id: 'need-1', text: 'Reporting pipeline ownership', priority: 'highest', evidenceIds: ['career-proof', 'job-proof'] };
@@ -111,29 +115,48 @@ const AUDIT_WORDS = Object.freeze(['alpha', 'bravo', 'charlie', 'delta', 'echo',
 const AUDIT_BULLET = 'Maintained internal systems with supported delivery practices.';
 const AUDIT_PARAGRAPH = 'My experience delivering supported systems is a relevant capability. In my engineering role at Acme, I updated supported systems for internal users. I would apply my experience delivering supported systems to reliable system delivery this role requires.';
 const AUDIT_CAREER_DATA = `Ada Lovelace\nada@example.test\nEngineer\n${AUDIT_BULLET}\n${AUDIT_PARAGRAPH}`;
-const AUDIT_LISTING = `Engineer role focused on reliable system delivery. The team values ${AUDIT_WORDS.map(word => `capability ${word}`).join(', ')}.`;
+// Keep the thirteenth requirement on the second source page.  This exercises
+// the production listing cursor rather than smuggling thirteen items through a
+// response whose per-page contract is twelve.
+const AUDIT_LISTING = `Engineer role focused on reliable system delivery. The team values ${AUDIT_WORDS.slice(0, -1).map(word => `capability ${word}`).join(', ')}.\n${'Frozen listing context that does not add a requirement.\n'.repeat(300)}capability lima.`;
 const AUDIT_IDENTITY = { name: 'Ada Lovelace', contact: ['ada@example.test'], subtitleRole: 'Engineer', credential: '' };
 const AUDIT_THESIS = 'Reliable system delivery is the supported capability this engineering role needs.';
+const auditEvidenceId = name => `${name === 'lima' ? 'p2' : 'p1'}-job-${name}`;
+const auditRequirementId = name => `${name === 'lima' ? 'p2' : 'p1'}-need-${name}`;
+const AUDIT_TRANSPORT_IDS = new Map([
+  ['resume-proof', 'p1-resume-proof'], ['letter-proof', 'p1-letter-proof'], ['job-proof', 'p1-job-proof'],
+  ['need-1', 'p1-need-1'],
+  ...AUDIT_WORDS.flatMap(word => [[`job-${word}`, auditEvidenceId(word)], [`need-${word}`, auditRequirementId(word)]]),
+]);
+const auditTransportFields = fields => {
+  const rewrite = value => {
+    if (typeof value === 'string') return AUDIT_TRANSPORT_IDS.get(value) || value;
+    if (Array.isArray(value)) return value.map(rewrite);
+    if (!value || typeof value !== 'object') return value;
+    return Object.fromEntries(Object.entries(value).map(([key, child]) => [key, rewrite(child)]));
+  };
+  return rewrite(fields);
+};
 
 function auditPlanFixture() {
   return {
     identity: AUDIT_IDENTITY,
     evidence: [
-      { id: 'resume-proof', sourceId: 'career-data', quote: AUDIT_BULLET, requirement: 'Reliable system delivery', priority: 'highest' },
-      { id: 'letter-proof', sourceId: 'career-data', quote: AUDIT_PARAGRAPH, requirement: 'Reliable system delivery', priority: 'highest' },
-      { id: 'job-proof', sourceId: 'job-listing', quote: 'reliable system delivery', requirement: 'Reliable system delivery', priority: 'highest' },
-      ...AUDIT_WORDS.map(word => ({ id: `job-${word}`, sourceId: 'job-listing', quote: `capability ${word}`, requirement: `Capability ${word} for the platform`, priority: 'supporting' })),
+      { id: 'p1-resume-proof', sourceId: 'career-data', quote: AUDIT_BULLET, requirement: 'Reliable system delivery', priority: 'highest' },
+      { id: 'p1-letter-proof', sourceId: 'career-data', quote: AUDIT_PARAGRAPH, requirement: 'Reliable system delivery', priority: 'highest' },
+      { id: 'p1-job-proof', sourceId: 'job-listing', quote: 'reliable system delivery', requirement: 'Reliable system delivery', priority: 'highest' },
+      ...AUDIT_WORDS.map(word => ({ id: auditEvidenceId(word), sourceId: 'job-listing', quote: `capability ${word}`, requirement: `Capability ${word} for the platform`, priority: 'supporting' })),
     ],
     // need-1 is the only requirement the plan backs with career evidence, so
     // it is the only one an "omitted-no-evidence" disposition can contradict.
     requirements: [
-      { id: 'need-1', text: 'Reliable system delivery', priority: 'highest', evidenceIds: ['resume-proof', 'job-proof'] },
-      ...AUDIT_WORDS.map(word => ({ id: `need-${word}`, text: `Capability ${word} for the platform`, priority: 'supporting', evidenceIds: [`job-${word}`] })),
+      { id: 'p1-need-1', text: 'Reliable system delivery', priority: 'highest', evidenceIds: ['p1-resume-proof', 'p1-job-proof'] },
+      ...AUDIT_WORDS.map(word => ({ id: auditRequirementId(word), text: `Capability ${word} for the platform`, priority: 'supporting', evidenceIds: [auditEvidenceId(word)] })),
     ],
-    resume: { schemaVersion: 'structured-resume.v1', identity: AUDIT_IDENTITY, roles: [{ id: 'role-1', title: 'Engineer', company: 'Acme', dates: '', location: '', bullets: [{ id: 'bullet-1', text: AUDIT_BULLET, evidenceIds: ['resume-proof'] }] }] },
+    resume: { schemaVersion: 'structured-resume.v1', identity: AUDIT_IDENTITY, roles: [{ id: 'role-1', title: 'Engineer', company: 'Acme', dates: '', location: '', bullets: [{ id: 'bullet-1', text: AUDIT_BULLET, evidenceIds: ['p1-resume-proof'] }] }] },
     coverLetter: {
       name: AUDIT_IDENTITY.name, contact: AUDIT_IDENTITY.contact,
-      paragraphs: [{ id: 'paragraph-1', text: AUDIT_PARAGRAPH, evidenceIds: ['letter-proof', 'job-proof'] }],
+      paragraphs: [{ id: 'paragraph-1', text: AUDIT_PARAGRAPH, evidenceIds: ['p1-letter-proof', 'p1-job-proof'] }],
       roleThesis: AUDIT_THESIS,
       coverLetterArgument: { primaryEvidence: { evidence: AUDIT_BULLET, evidenceRole: 'Engineer at Acme', relationToThesis: 'The systems work establishes the delivery capability named in the thesis.' } },
     },
@@ -141,8 +164,8 @@ function auditPlanFixture() {
     audit: () => ({
       version: LOCAL_AI_GENERATION_AUDIT_VERSION,
       jobPriorities: [
-        { requirement: 'need-1', priority: 'highest', disposition: 'addressed-both', justification: 'The selected systems evidence directly addresses the stated delivery requirement.' },
-        ...AUDIT_WORDS.map(word => ({ requirement: `need-${word}`, priority: 'supporting', disposition: 'omitted-no-evidence', justification: `Career data documents no support for capability ${word}, so the documents claim none.` })),
+        { requirement: 'p1-need-1', priority: 'highest', disposition: 'addressed-both', justification: 'The selected systems evidence directly addresses the stated delivery requirement.' },
+        ...AUDIT_WORDS.map(word => ({ requirement: auditRequirementId(word), priority: 'supporting', disposition: 'omitted-no-evidence', justification: `Career data documents no support for capability ${word}, so the documents claim none.` })),
       ],
       resumePlan: { strategy: 'Lead with the strongest supported systems evidence for the role.', selectionRationale: 'The retained role preserves direct factual support and concise relevance.' },
       coverLetterPlan: { controllingThesis: AUDIT_THESIS, paragraphs: [{
@@ -174,10 +197,61 @@ async function auditJobSteps(project, { careerData = AUDIT_CAREER_DATA, job = AU
   const submit = async (fields) => {
     const handoff = await current();
     prompts[handoff.stage] = handoff.prompt;
-    const result = await submitLocalApplicationHandoff({ jobId: queued.id, canvasFilePath: project.canvasFilePath, handoffCode: handoff.handoffCode, response: JSON.stringify(reply(handoff, fields)) });
+    const result = await submitLocalApplicationHandoff({ jobId: queued.id, canvasFilePath: project.canvasFilePath, handoffCode: handoff.handoffCode, response: JSON.stringify(reply(handoff, auditTransportFields(fields))) });
     return { handoff, result };
   };
   const send = async (fields) => {
+    const initialHandoff = await current();
+    const progress = pasteContext(initialHandoff.prompt).evidencePlanProgress;
+    // A few focused audit tests use a one-requirement plan with this shared,
+    // deliberately two-page listing.  Preserve their small plan, but send it
+    // through the real envelope and explicitly close the remaining source
+    // page instead of relying on the retired implicit-complete path.
+    if (initialHandoff.stage === 'evidence-plan' && progress?.pageCount > 1
+      && fields.evidence && !fields.evidence.some(item => item.id.startsWith('p'))) {
+      const ids = new Map([
+        ...fields.evidence.map(item => [item.id, `p1-${item.id}`]),
+        ...fields.requirements.map(item => [item.id, `p1-${item.id}`]),
+      ]);
+      const first = {
+        ...fields,
+        evidence: fields.evidence.map(item => ({ ...item, id: ids.get(item.id) })),
+        requirements: fields.requirements.map(item => ({ ...item, id: ids.get(item.id), evidenceIds: item.evidenceIds.map(id => ids.get(id) || id) })),
+        complete: false,
+      };
+      const firstSubmission = await submit(first);
+      assert(firstSubmission.result.accepted, `the first small evidence page must be accepted: ${JSON.stringify(firstSubmission.result.validationErrors || [])}`);
+      for (let index = 1; index < progress.pageCount; index++) {
+        const finalPage = await submit({ identity: fields.identity, evidence: [], requirements: [], complete: index === progress.pageCount - 1 });
+        assert(finalPage.result.accepted, `the ${index + 1} small evidence page must be accepted: ${JSON.stringify(finalPage.result.validationErrors || [])}`);
+        if (index === progress.pageCount - 1) return finalPage.result;
+      }
+    }
+    if (fields.evidence && fields.requirements?.length === AUDIT_WORDS.length + 1) {
+      const first = {
+        ...fields,
+        evidence: fields.evidence.filter(item => item.id.startsWith('p1-')),
+        requirements: fields.requirements.filter(item => item.id.startsWith('p1-')),
+        complete: false,
+      };
+      const firstSubmission = await submit(first);
+      assert(firstSubmission.handoff.stage === 'evidence-plan'
+        && pasteContext(firstSubmission.handoff.prompt).evidencePlanProgress?.pageIndex === 0
+        && firstSubmission.result.accepted,
+      `the first evidence page must be accepted at cursor 0: ${JSON.stringify(firstSubmission.result.validationErrors || [])}`);
+      const second = {
+        ...fields,
+        evidence: fields.evidence.filter(item => item.id.startsWith('p2-')),
+        requirements: fields.requirements.filter(item => item.id.startsWith('p2-')),
+        complete: true,
+      };
+      const secondSubmission = await submit(second);
+      assert(secondSubmission.handoff.stage === 'evidence-plan'
+        && pasteContext(secondSubmission.handoff.prompt).evidencePlanProgress?.pageIndex === 1
+        && secondSubmission.result.accepted,
+      `the final evidence page must be accepted at cursor 1: ${JSON.stringify(secondSubmission.result.validationErrors || [])}`);
+      return secondSubmission.result;
+    }
     const { handoff, result } = await submit(fields);
     assert(result.accepted || fields.decision === 'pass', `the ${handoff.stage} stage fixture must be accepted: ${JSON.stringify(result.validationErrors || [])}`);
     return result;
@@ -248,79 +322,13 @@ async function runAuditFlow(project, plan, { careerData = AUDIT_CAREER_DATA, job
 // Degree-gate fixtures. The corpus mirrors the real one: a work-experience
 // section written as prose, and (when a case adds it) a bare "Education"
 // heading whose degree and institution sit on separate lines with no comma.
-const DEGREE_PROSE_CORPUS = 'Jordan Reyes\njordan@example.test\nSoftware Engineer\n\n## Work Experience\n\nSoftware Engineer\nAnalytical Engines\n- Built reporting systems that reduced manual work.\n';
+const DEGREE_PROSE_CORPUS = 'Jordan Reyes\njordan@example.test\nSoftware Engineer profile\n\n## Analytical Engines\nSoftware Engineer\n2020 – 2024\n\n- Built reporting systems that reduced manual work.\n';
 const SEPARATE_LINE_EDUCATION = '\n---\n\nEducation\n\nBachelor of Science in Computer Science\nYork University — Toronto\n*Graduated 2020*\n\n---\n';
 // What a human reader picks out of that section: the degree as career data
 // writes it, with no institution glued on by a dash, no dates, no GPA. The
 // gate never names it — the responder chooses it and the two existing checks
 // (grounding, degree shape) decide whether the choice is admissible.
 const CLEAN_DEGREE = 'Bachelor of Science in Computer Science';
-// Ordinary career-data sentences that name a degree token without documenting
-// a degree. Each one was measured firing the gate, which then quoted the
-// sentence back as the credential to copy.
-const DEGREE_MENTIONING_PROSE = [
-  'Partnered with PhD researchers to ship the ranking model.',
-  'Mentored MBA interns each summer.',
-  'Led the BSc capstone mentorship program at the local college.',
-  'Taught Bachelor of Science students to use the internal data platform.',
-  'Served as Master of Ceremonies at the annual engineering summit.',
-  'Collaborated with Ph.D. data scientists on forecasting.',
-  'Managed the M.A. Smith enterprise account through renewal.',
-  'Ran the MSc internship pipeline with the university partners.',
-  'Drafted the B.Eng. recruiting rubric with the hiring committee.',
-  'Presented to the MBA cohort on platform economics.',
-];
-// Every corpus measured producing a corrupt or unusable named string while
-// the gate still named one. `credential` is the clean text a human reader
-// picks out of that corpus; null means the gate must stay silent on it.
-const DEGREE_BLOCKER_CORPORA = [
-  {
-    label: 'a parenthetical the clause splitter cut in half',
-    tail: '\n## Education\n\nBachelor of Science (Co-op, Honours) in Computer Science\nYork University\n',
-    credential: 'Bachelor of Science (Co-op, Honours) in Computer Science',
-  },
-  {
-    // The wedge: every credential the old gate accepted carried this em dash,
-    // and the Design System throws on any résumé built from one (§5.3.1),
-    // while the clean degree was rejected for not carrying the named string.
-    label: 'an unspaced em dash gluing the institution to the degree',
-    tail: '\n## Education\n\nBachelor of Science in Computer Science—York University\n',
-    credential: CLEAN_DEGREE,
-  },
-  {
-    label: 'an en-dash date range on the degree line',
-    tail: '\n## Education\n\nBachelor of Science in Computer Science 2016–2020, York University\n',
-    credential: CLEAN_DEGREE,
-  },
-  {
-    label: 'a GPA on the degree line',
-    tail: '\n## Education\n\nBachelor of Science in Computer Science GPA 3.9\nYork University\n',
-    credential: CLEAN_DEGREE,
-  },
-  {
-    label: 'another person’s degree inside the education region',
-    tail: '\n## Education\n\nThesis supervised by Dr. Maria Chen, Ph.D. in Statistics, Stanford University\nBachelor of Science in Computer Science\nYork University\n',
-    credential: CLEAN_DEGREE,
-  },
-  { label: 'a degree career data says was not completed', tail: '\n## Education\n\nBachelor of Science in Computer Science, York University (did not complete)\n', credential: null },
-  { label: 'a degree career data says was not finished', tail: '\n## Education\n\nBachelor of Science in Computer Science, York University, did not finish\n', credential: null },
-  { label: 'study with no degree awarded', tail: '\n## Education\n\nBachelor of Science in Computer Science coursework, York University, no degree awarded\n', credential: null },
-  { label: 'an unfinished degree', tail: '\n## Education\n\nUnfinished Bachelor of Science in Computer Science, York University\n', credential: null },
-  { label: 'some college', tail: '\n## Education\n\nSome college toward a Bachelor of Science in Computer Science, York University\n', credential: null },
-  { label: 'a degree dropped out of', tail: '\n## Education\n\nBachelor of Science in Computer Science, York University, dropped out after two years\n', credential: null },
-  { label: 'non-degree study', tail: '\n## Education\n\nNon-degree studies, Bachelor of Science in Computer Science stream, York University\n', credential: null },
-  { label: 'audited classes', tail: '\n## Education\n\nAudited Bachelor of Science in Computer Science classes, York University\n', credential: null },
-  {
-    label: 'a skills-list bullet reading "Education"',
-    tail: '\n## Skills\n\n- Reporting and analytics\n- Education\n- Bachelor of Science mentorship, York University Co-op Program\n',
-    credential: null,
-  },
-  {
-    label: 'a numbered skills item reading "Education"',
-    tail: '\n## Skills\n\n1. Reporting\n2. Education\n3. Bachelor of Science mentorship, York University\n',
-    credential: null,
-  },
-];
 const DEGREE_GATE_RE = /no Education section/;
 
 function normalizedIncludes(source, value) {
@@ -424,6 +432,20 @@ function batterySentenceOf(count) {
   return sentence;
 }
 
+// The résumé stage requires a skills block whenever the accepted plan's career
+// quotes state a technology name the host recognises, so a fixture whose
+// corpus happens to mention one (a scenario paragraph naming a tool) must cite
+// it or the fixture never reaches the stage it is measuring.
+function planSkillsBlock(evidence) {
+  const listing = { sourceId: 'job-listing', quote: 'Build software.' };
+  const names = requiredCareerAttestedSkillTerms([listing, ...evidence]);
+  if (!names.length) return {};
+  const evidenceIds = evidence
+    .filter(item => item.sourceId === 'career-data' && careerAttestedSkillTerms([listing, item]).length)
+    .map(item => item.id);
+  return { skills: [{ id: 'skill-1', group: 'tools', items: names, evidenceIds }] };
+}
+
 // Walks one job to the cover-letter stage over a corpus that quotes each
 // paragraph the scenario will submit, so per-paragraph source grounding is
 // never the variable a battery probe is measuring. The argument cites the
@@ -431,7 +453,10 @@ function batterySentenceOf(count) {
 async function coverLetterBatteryStage(project, { paragraphs, bullets = [BATTERY_BULLET], listing = BATTERY_LISTING, thesis = BATTERY_THESIS, projects = [] }) {
   const queued = await queueLocalApplicationJob({
     transport: 'paste', canvasFilePath: project.canvasFilePath,
-    careerData: ['Ada Lovelace', 'ada@example.test', 'Engineer', ...bullets, ...projects.map(item => item.description), ...paragraphs].join('\n'),
+    // All supplied scenario prose is evidence for Acme.  State that scope in
+    // the source instead of letting the test use an employer-less evidence
+    // corpus to manufacture a résumé attributed to Acme.
+    careerData: ['Ada Lovelace', 'ada@example.test', 'Engineer profile', '', '## Acme', 'Engineer', '', ...bullets, ...projects.map(item => item.description), ...paragraphs].join('\n'),
     // A project now has to answer something the posting says, so a scenario
     // that ships one puts its words in the listing too and cites them below.
     job: { title: 'Engineer', company: 'Acme', snippet: [listing, ...projects.map(item => item.description)].join(' ') },
@@ -446,18 +471,19 @@ async function coverLetterBatteryStage(project, { paragraphs, bullets = [BATTERY
     const result = await submitStage(fields);
     assert(result.accepted, `the battery fixture must reach the letter stage: ${JSON.stringify(result.validationErrors || [])}`);
   };
+  const planEvidence = [
+    ...bullets.map((quote, index) => ({ id: `resume-proof-${index + 1}`, sourceId: 'career-data', quote, requirement: 'Reliable system delivery', priority: 'highest' })),
+    // A named artifact only exists for the letter's checks when the frozen
+    // résumé carries it, so a scenario that needs one ships it through the
+    // same plan-then-résumé path every other fixture field takes.
+    ...projects.map((item, index) => ({ id: `project-proof-${index + 1}`, sourceId: 'career-data', quote: item.description, requirement: 'Reliable system delivery', priority: 'highest' })),
+    ...projects.map((item, index) => ({ id: `project-listing-${index + 1}`, sourceId: 'job-listing', quote: item.description, requirement: 'Reliable system delivery', priority: 'highest' })),
+    ...paragraphs.map((quote, index) => ({ id: `letter-proof-${index + 1}`, sourceId: 'career-data', quote, requirement: 'Reliable system delivery', priority: 'highest' })),
+    { id: 'job-proof', sourceId: 'job-listing', quote: 'reliable system delivery', requirement: 'Reliable system delivery', priority: 'highest' },
+  ];
   await sendStage({
     identity: { name: 'Ada Lovelace', contact: ['ada@example.test'], subtitleRole: 'Engineer' },
-    evidence: [
-      ...bullets.map((quote, index) => ({ id: `resume-proof-${index + 1}`, sourceId: 'career-data', quote, requirement: 'Reliable system delivery', priority: 'highest' })),
-      // A named artifact only exists for the letter's checks when the frozen
-      // résumé carries it, so a scenario that needs one ships it through the
-      // same plan-then-résumé path every other fixture field takes.
-      ...projects.map((item, index) => ({ id: `project-proof-${index + 1}`, sourceId: 'career-data', quote: item.description, requirement: 'Reliable system delivery', priority: 'highest' })),
-      ...projects.map((item, index) => ({ id: `project-listing-${index + 1}`, sourceId: 'job-listing', quote: item.description, requirement: 'Reliable system delivery', priority: 'highest' })),
-      ...paragraphs.map((quote, index) => ({ id: `letter-proof-${index + 1}`, sourceId: 'career-data', quote, requirement: 'Reliable system delivery', priority: 'highest' })),
-      { id: 'job-proof', sourceId: 'job-listing', quote: 'reliable system delivery', requirement: 'Reliable system delivery', priority: 'highest' },
-    ],
+    evidence: planEvidence,
     requirements: [{ id: 'need-1', text: 'Reliable system delivery', priority: 'highest', evidenceIds: ['resume-proof-1', 'job-proof'] }],
   });
   await sendStage({
@@ -466,6 +492,7 @@ async function coverLetterBatteryStage(project, { paragraphs, bullets = [BATTERY
       identity: { name: 'Ada Lovelace', contact: ['ada@example.test'], subtitleRole: 'Engineer', credential: '' },
       roles: [{ id: 'role-1', title: 'Engineer', company: 'Acme', dates: '', location: '', bullets: bullets.map((text, index) => ({ id: `bullet-${index + 1}`, text, evidenceIds: [`resume-proof-${index + 1}`] })) }],
       ...(projects.length ? { projects: projects.map((item, index) => ({ id: `project-${index + 1}`, name: item.name, description: item.description, evidenceIds: [`project-proof-${index + 1}`, `project-listing-${index + 1}`] })) } : {}),
+      ...planSkillsBlock(planEvidence),
     },
   });
   const prompt = (await current()).prompt;
@@ -738,7 +765,11 @@ export default [
     async run() {
       const project = await createCanvasProject();
       try {
-        const unicodeCareerData = `Ada Lovelace\nada@example.test\nSoftware Engineer\nBuilt reporting systems.\n${'😀'.repeat(239_900)}`;
+        // The frozen-source ceiling is enforced in the same JavaScript string
+        // units used by the source grader, so keep this astral-text corpus just
+        // below that byte-safe queue-time boundary rather than relying on a
+        // silent truncation of half its emoji payload.
+        const unicodeCareerData = `Ada Lovelace\nada@example.test\nSoftware Engineer\nBuilt reporting systems.\n${'😀'.repeat(119_900)}`;
         const queued = await queueLocalApplicationJob({
           transport: 'paste', canvasFilePath: project.canvasFilePath, careerData: unicodeCareerData,
           job: { title: 'Reporting Engineer', company: 'Acme', snippet: 'Build reporting systems.' },
@@ -1519,7 +1550,7 @@ export default [
         const shortAudit = plan.audit();
         const shortened = ['alpha', 'charlie'];
         for (const word of shortened) {
-          const decision = shortAudit.jobPriorities.find(entry => entry.requirement === `need-${word}`);
+          const decision = shortAudit.jobPriorities.find(entry => entry.requirement === auditRequirementId(word));
           decision.justification = 'Too short.';
         }
         const audits = await steps.submit(reviewFields({ generationAudit: shortAudit }));
@@ -1615,34 +1646,43 @@ export default [
       }
       const project = await createCanvasProject();
       try {
+        // The plan deliberately contains enough exact evidence to expose eighty
+        // independent defects.  Model that honestly as four listing pages
+        // rather than bypassing the page envelope's 24/12 safety bounds.
+        const pagedListing = `We need a reporting engineer to own delivery.\n${'Frozen listing context.\n'.repeat(1_500)}`;
         const queued = await queueLocalApplicationJob({
           transport: 'paste', canvasFilePath: project.canvasFilePath, careerData: manyDefectCareerData,
-          job: { title: 'Reporting Engineer', company: 'Acme', snippet: 'We need a reporting engineer to own delivery.' },
+          job: { title: 'Reporting Engineer', company: 'Acme', snippet: pagedListing },
           resumeProfile: { workHistory },
         });
         const current = async () => (await getLocalApplicationHandoff({ jobId: queued.id, canvasFilePath: project.canvasFilePath })).handoff;
 
-        const evidence = [];
-        const requirements = [];
+        const planPages = Array.from({ length: 4 }, () => ({ evidence: [], requirements: [] }));
+        const pageForRole = roleNumber => Math.ceil(roleNumber / 4);
+        const evidenceId = (roleNumber, suffix) => `p${pageForRole(roleNumber)}-${suffix}`;
         for (let r = 1; r <= ROLES; r++) {
-          evidence.push({ id: `cd-open-${r}`, sourceId: 'career-data', quote: `Senior Engineer ${r}\nEmployer ${r} — City ${r}, Region\n2018 - 2022`, requirement: `Employer ${r} tenure`, priority: 'supporting' });
+          const page = planPages[pageForRole(r) - 1];
           // One evidence item per bullet, mirroring the career-data line added
           // above: every bullet gets its own career-data ID so twenty bullets
           // in one role read as twenty distinct accomplishments, not one
           // accomplishment fragmented across twenty citations of the same ID.
           for (let b = 1; b <= BULLETS_PER_ROLE; b++) {
-            evidence.push({ id: `cd-body-${r}-${b}`, sourceId: 'career-data', quote: `Improved the reporting pipeline for the engineering team at Employer ${r}, iteration ${b}.`, requirement: `Employer ${r} delivery`, priority: 'highest' });
+            page.evidence.push({ id: evidenceId(r, `cd-body-${r}-${b}`), sourceId: 'career-data', quote: `Improved the reporting pipeline for the engineering team at Employer ${r}, iteration ${b}.`, requirement: `Employer ${r} delivery`, priority: 'highest' });
           }
-          requirements.push({ id: `need-${r}`, text: `Employer ${r} delivery`, priority: 'highest', evidenceIds: [`cd-body-${r}-1`, `cd-open-${r}`, 'job-need'] });
+          page.requirements.push({ id: `p${pageForRole(r)}-need-${r}`, text: `Employer ${r} delivery`, priority: 'highest', evidenceIds: [evidenceId(r, `cd-body-${r}-1`), 'p1-job-need'] });
         }
-        evidence.push({ id: 'job-need', sourceId: 'job-listing', quote: 'own delivery', requirement: 'Delivery ownership', priority: 'highest' });
-        requirements.push({ id: 'need-job', text: 'Delivery ownership', priority: 'highest', evidenceIds: ['job-need'] });
-        const planHandoff = await current();
-        const planResult = await submitLocalApplicationHandoff({
-          jobId: queued.id, canvasFilePath: project.canvasFilePath, handoffCode: planHandoff.handoffCode,
-          response: JSON.stringify(reply(planHandoff, { identity: { name: 'Ada Lovelace', contact: ['ada@example.test'], subtitleRole: 'Senior Engineer' }, evidence, requirements })),
-        });
-        assert(planResult.accepted, `the evidence plan covering every employer is accepted (errors=${JSON.stringify(planResult.validationErrors || [])})`);
+        planPages[0].evidence.push({ id: 'p1-job-need', sourceId: 'job-listing', quote: 'own delivery', requirement: 'Delivery ownership', priority: 'highest' });
+        planPages[0].requirements.push({ id: 'p1-need-job', text: 'Delivery ownership', priority: 'highest', evidenceIds: ['p1-job-need'] });
+        for (let index = 0; index < planPages.length; index++) {
+          const planHandoff = await current();
+          assert(pasteContext(planHandoff.prompt).evidencePlanProgress?.pageIndex === index,
+            `the ${index + 1} of ${planPages.length} evidence page uses its exact cursor`);
+          const planResult = await submitLocalApplicationHandoff({
+            jobId: queued.id, canvasFilePath: project.canvasFilePath, handoffCode: planHandoff.handoffCode,
+            response: JSON.stringify(reply(planHandoff, { identity: { name: 'Ada Lovelace', contact: ['ada@example.test'], subtitleRole: 'Senior Engineer' }, ...planPages[index], complete: index === planPages.length - 1 })),
+          });
+          assert(planResult.accepted, `the ${index + 1} evidence page covering every employer is accepted (errors=${JSON.stringify(planResult.validationErrors || [])})`);
+        }
 
         const resumeHandoff = await current();
         const roles = [];
@@ -1652,7 +1692,7 @@ export default [
             bullets.push({
               id: `bullet-r${r}-b${String(b).padStart(2, '0')}`,
               text: `I improved the reporting pipeline daily for the engineering team at Employer ${r}, iteration ${b}.`,
-              evidenceIds: [`cd-body-${r}-${b}`],
+              evidenceIds: [evidenceId(r, `cd-body-${r}-${b}`)],
             });
           }
           roles.push({ id: `role-${r}`, title: `Senior Engineer ${r}`, company: `Employer ${r}`, dates: '2018 – 2022', location: '', bullets });
@@ -1661,12 +1701,15 @@ export default [
           jobId: queued.id, canvasFilePath: project.canvasFilePath, handoffCode: resumeHandoff.handoffCode,
           response: JSON.stringify(reply(resumeHandoff, { resume: { schemaVersion: 'structured-resume.v1', identity: { name: 'Ada Lovelace', contact: ['ada@example.test'], subtitleRole: 'Senior Engineer' }, roles } })),
         });
-        assert(!resumeResult.accepted && resumeResult.validationErrors.length === ROLES * BULLETS_PER_ROLE,
-          `every bullet's unsupported "daily" qualifier is its own distinct real defect (count=${resumeResult.validationErrors?.length})`);
+        const qualifierErrors = resumeResult.validationErrors.filter(message => message.includes('uses unsupported daily frequency'));
+        const expectedErrors = ROLES * BULLETS_PER_ROLE;
+        assert(!resumeResult.accepted && qualifierErrors.length === expectedErrors
+          && resumeResult.validationErrors.length === expectedErrors,
+        `every bullet's unsupported "daily" qualifier is its own distinct real defect (count=${resumeResult.validationErrors?.length}, qualifierErrors=${qualifierErrors.length})`);
         assert(new Set(resumeResult.validationErrors).size === resumeResult.validationErrors.length,
           'the 80 messages are genuinely distinct, not one message repeated 80 times');
-        assert(resumeResult.handoff.corrections.length === ROLES * BULLETS_PER_ROLE,
-          'the full undeduplicated record still carries every one of the 80 defects, unbounded by either prompt ceiling');
+        assert(resumeResult.handoff.corrections.length === expectedErrors,
+          'the full undeduplicated record still carries all 80 qualifier defects, unbounded by either prompt ceiling');
 
         const correction = resumeResult.handoff.correctionPrompt;
         const stagePromptChars = resumeHandoff.prompt.length;
@@ -1674,9 +1717,9 @@ export default [
           `the correction stays a small fraction of the stage prompt even with 80 real distinct defects (correction=${correction.length}, stage=${stagePromptChars})`);
 
         const numberedLines = correction.split('\n').filter(line => /^\d+\. /.test(line));
-        assert(numberedLines.length > 0 && numberedLines.length < ROLES * BULLETS_PER_ROLE,
-          `the size ceiling packs fewer than all 80 items, not zero and not all of them (shown=${numberedLines.length})`);
-        assert(new RegExp(`The app reported 80 items in total; the ${ROLES * BULLETS_PER_ROLE - numberedLines.length} after this list are not printed here`).test(correction),
+        assert(numberedLines.length > 0 && numberedLines.length < expectedErrors,
+          `the size ceiling packs fewer than all ${expectedErrors} items, not zero and not all of them (shown=${numberedLines.length})`);
+        assert(new RegExp(`The app reported ${expectedErrors} items in total; the ${expectedErrors - numberedLines.length} after this list are not printed here`).test(correction),
           `the disclosed omitted count matches exactly how many of the 80 items this list actually dropped (correction tail=${JSON.stringify(correction.slice(-220))})`);
         // Every included item still names its own bullet id — nothing printed
         // is a fragment with its identifying id sheared off.
@@ -1919,7 +1962,7 @@ export default [
     async run() {
       const project = await createCanvasProject();
       try {
-        const skillsCareerData = 'Ada Lovelace\nada@example.test\nSoftware Engineer\nBuilt reporting systems that reduced manual work.\nBuilt reporting pipelines with Python and TypeScript.\nRan Docker Compose and Nginx for the reporting deployment.';
+        const skillsCareerData = 'Ada Lovelace\nada@example.test\nSoftware Engineer profile\n\n## Analytical Engines\nSoftware Engineer\n2020 – 2024\n\nBuilt reporting systems that reduced manual work.\nBuilt reporting pipelines with Python and TypeScript.\nRan Docker Compose and Nginx for the reporting deployment.';
         const queued = await queueLocalApplicationJob({
           transport: 'paste', canvasFilePath: project.canvasFilePath, careerData: skillsCareerData,
           job: { title: 'Reporting Engineer', company: 'Acme' },
@@ -2128,15 +2171,16 @@ export default [
           && prompt.includes('never mix career evidence from two employers’ sections')
           && prompt.includes('cover a requirement that spans employers with one bullet per employer'),
         'the résumé contract states the bullet-scope gate the validator enforces, including the cross-employer mix and its repair');
-        assert(prompt.includes('can ground no role bullet at all: projects[] and skills[] are its only home'),
-          'the résumé contract says career evidence outside every employer section cannot ground a bullet, and names where it does belong');
+        assert(prompt.includes('can ground no role bullet at all. Render it only in the matching evidence-backed projects[], skills[], education[], or credentials[] section')
+          && !prompt.includes('projects[] and skills[] are its only home'),
+        'the résumé contract says career evidence outside every employer section cannot ground a bullet, and names every evidence-backed section where it may belong');
         assert(prompt.includes('can never become a bullet, because every bullet needs a career-data ID')
           && prompt.includes('the final review accounts for it as omitted-no-evidence'),
         'the résumé contract states that a requirement with no career-data evidence is uncoverable, and what to do instead');
         // Interpolated, never transcribed: a hand-copied ceiling that drifts
         // from the constant the gate reads fails here.
         assert(prompt.includes(`at most ${STRUCTURED_RESUME_LIMITS.roles} roles; 1 to ${STRUCTURED_RESUME_LIMITS.bulletsPerRole} bullets per role`)
-          && prompt.includes(`at most ${STRUCTURED_RESUME_LIMITS.projects} projects; at most ${STRUCTURED_RESUME_LIMITS.skillGroups} skill groups of 1 to ${STRUCTURED_RESUME_LIMITS.skillItemsPerGroup} items`)
+          && prompt.includes(`at most ${STRUCTURED_RESUME_LIMITS.projects} projects; at most ${STRUCTURED_RESUME_LIMITS.education} education items; at most ${STRUCTURED_RESUME_LIMITS.credentials} certifications; at most ${STRUCTURED_RESUME_LIMITS.skillGroups} skill groups of 1 to ${STRUCTURED_RESUME_LIMITS.skillItemsPerGroup} items`)
           && prompt.includes(`1 to ${STRUCTURED_RESUME_LIMITS.contactValues} contact values; at most ${STRUCTURED_RESUME_LIMITS.textChars} characters of bullet text`),
         'the résumé contract states every enforced collection and field ceiling, interpolated from the constants the validator reads');
         // The skills block has TWO sets of numbers and the loose one used to be
@@ -2149,6 +2193,24 @@ export default [
           && prompt.includes(SKILL_ITEM_FILTERABLE_RULE)
           && prompt.includes('which bound a pathological response and nothing else'),
         'the résumé contract states the design system’s own skills-block budget and item rule, and says the structural skill ceilings are outer bounds rather than the budget');
+        // The reported résumé listed only SQL under Programming Languages: the
+        // corpus wrote "Tech used: python", the contract said items must occur
+        // "verbatim" while also demanding an uppercase letter, and the writer
+        // dropped exactly the names whose corpus casing disagreed. The contract
+        // now states the comparison the validator really makes, and the
+        // coverage rule, both interpolated from the constants the gate reads.
+        assert(prompt.includes(`Skill-item grounding: ${SKILL_ITEM_GROUNDING_RULE}.`)
+          && prompt.includes(`Skills-block coverage: ${POSTING_NAMED_SKILLS_RULE}.`),
+        'the résumé contract prints the case-insensitive skill-grounding clause and the posting-named skills-block coverage rule, interpolated from the constants the validator reads');
+        // The T2 Systems résumé shipped with no Skills section: the posting named
+        // no technology, the coverage rule demanded nothing, and the contract
+        // still called skills optional without qualification.
+        assert(prompt.includes(`Skills-block completeness: ${SKILLS_BLOCK_PRESENCE_RULE}.`)
+          && !prompt.includes('Projects and skills are optional:'),
+        'the résumé contract prints the skills-block presence floor and no longer calls skills unconditionally optional');
+        assert(prompt.includes('occurs inside the career-data quotes THAT unit itself cites, matched as a whole term without regard to letter case')
+          && !prompt.includes('occurs verbatim inside the career-data quotes THAT unit itself cites'),
+        'the résumé contract no longer tells the writer a skill item must occur "verbatim" (which contradicts the uppercase-letter rule for a lowercase corpus term)');
         assert(prompt.includes('Nothing may repeat: identity.contact values, the items inside one skills group, bullet ids within their role')
           && prompt.includes('collapsed to single spaces and trimmed before any exact match is compared'),
         'the résumé contract states the uniqueness rules and that whitespace is collapsed before exact-match comparisons');
@@ -2857,8 +2919,8 @@ export default [
 
         const bulk = Array.from({ length: MAX_EVIDENCE_PLAN_EVIDENCE_ITEMS }, (_item, index) => evidenceItem(`bulk-${index}`));
         const tooMany = await submit({ evidence: [evidenceItem('career-proof', { priority: 'highest' }), listingEvidence, ...bulk] });
-        assert(!tooMany.accepted && tooMany.validationErrors.some(message => message.includes(`evidence has ${MAX_EVIDENCE_PLAN_EVIDENCE_ITEMS + 2} items, 2 over the ${MAX_EVIDENCE_PLAN_EVIDENCE_ITEMS}-item limit`)
-          && message.includes('Drop the lowest-priority entries')),
+        assert(!tooMany.accepted && tooMany.validationErrors.some(message => message.includes(`evidence page has ${MAX_EVIDENCE_PLAN_EVIDENCE_ITEMS + 2} items, 2 over the ${MAX_EVIDENCE_PLAN_EVIDENCE_ITEMS}-item response limit`)
+          && message.includes('Continue on another page')),
         `the item-limit rejection names the overflowing array, how far over it is, and the repair (errors=${JSON.stringify(tooMany.validationErrors)})`);
 
         // A plan that obeys the contract as written passes on the first round.
@@ -2925,6 +2987,8 @@ export default [
                 id: 'role-1', title: 'Software Engineer', company: 'Analytical Engines', dates: '2020 – 2024', location: '',
                 bullets: [{ id: 'bullet-1', text: 'Owned the reporting pipeline’s nightly ingest end to end.', evidenceIds: ['career-proof'] }],
               }],
+              // The plan's career quote names TypeScript, so the résumé owes a skills block.
+              skills: [{ id: 'skill-1', group: 'languages', items: ['TypeScript'], evidenceIds: ['career-proof'] }],
             },
           })),
         });
@@ -3056,7 +3120,7 @@ export default [
 
         const dangling = await submit({ requirements: [{ ...PLAN_REQUIREMENT, evidenceIds: ['job-proof', 'career-proof-2'] }] });
         assert(!dangling.accepted && dangling.validationErrors.some(message => message.startsWith('Requirement references unknown evidence career-proof-2.')
-          && message.includes('may only name IDs you returned in evidence[]')),
+          && message.includes('may only name IDs frozen on this or an earlier evidence-plan page')),
         `a dangling evidenceId is rejected by name and points at the ID space (errors=${JSON.stringify(dangling.validationErrors)})`);
 
         // Split the same two values the way career data writes them and the
@@ -3202,7 +3266,11 @@ export default [
       }
     },
   },
-  {
+  /* Retired header-degree gate cases. Education is now an evidence-backed,
+   * relevance-selected resume section; the replacement cases immediately
+   * below exercise that contract through the live paste handoff. Keeping the
+   * old assertions would preserve an actively harmful source-order rule. */
+  /* {
     name: 'Paste evidence plan carries a career-documented degree into identity.credential',
     async run() {
       // The rendered résumé has no Education section, so a dropped credential
@@ -3462,6 +3530,98 @@ export default [
       assert(repaired.accepted && repaired.nextStage === 'resume' && trustedCredential === CLEAN_DEGREE,
         `the real degree past the stray heading is accepted in one round (credential=${JSON.stringify(trustedCredential)}, errors=${JSON.stringify(repaired.errors)})`);
       return { credential: trustedCredential };
+    },
+  }, */
+  {
+    name: 'Paste evidence plan leaves education out of the frozen identity header',
+    async run() {
+      const degreeCareerData = DEGREE_PROSE_CORPUS + SEPARATE_LINE_EDUCATION;
+      const { rounds, prompt, trustedCredential } = await submitDegreePlans(degreeCareerData, [null]);
+      assert(rounds[0].accepted && rounds[0].nextStage === 'resume' && !rounds[0].gate,
+        `a plan with no header credential reaches the resume stage (errors=${JSON.stringify(rounds[0].errors)})`);
+      assert(trustedCredential === null,
+        `a degree is not frozen into identity.credential by source order (credential=${JSON.stringify(trustedCredential)})`);
+      assert(prompt.includes('Education is a first-class evidence-backed résumé section.')
+        && !prompt.includes('The rendered résumé has NO Education section')
+        && !prompt.includes('Omit identity.credential only when careerData documents no completed degree'),
+      'the evidence-plan contract directs degree evidence to resume.education instead of a required header field');
+      return { headerCredential: trustedCredential };
+    },
+  },
+  {
+    name: 'Paste resume accepts cited education, rejects forged education, and preserves legacy headers',
+    async run() {
+      const project = await createCanvasProject();
+      try {
+        const degreeCareerData = DEGREE_PROSE_CORPUS + SEPARATE_LINE_EDUCATION;
+        const queued = await queueLocalApplicationJob({
+          transport: 'paste', canvasFilePath: project.canvasFilePath, careerData: degreeCareerData,
+          job: { title: 'Reporting Engineer', company: 'Acme', snippet: 'Build reporting systems.' },
+          resumeProfile: { workHistory: [{ id: 'role-1', title: 'Software Engineer', employer: 'Analytical Engines', startDate: '2020', endDate: '2024' }] },
+        });
+        const planHandoff = (await getLocalApplicationHandoff({ jobId: queued.id, canvasFilePath: project.canvasFilePath })).handoff;
+        const identity = { name: 'Jordan Reyes', contact: ['jordan@example.test'], subtitleRole: 'Software Engineer' };
+        const plan = {
+          identity,
+          evidence: [
+            { id: 'career-proof', sourceId: 'career-data', quote: 'Built reporting systems that reduced manual work.', requirement: 'Reporting systems', priority: 'highest' },
+            { id: 'education-proof', sourceId: 'career-data', quote: `${CLEAN_DEGREE}\nYork University`, requirement: 'Computer science education', priority: 'supporting' },
+            { id: 'job-proof', sourceId: 'job-listing', quote: '# Reporting Engineer', requirement: 'Reporting systems', priority: 'highest' },
+          ],
+          requirements: [
+            { id: 'need-1', text: 'Reporting systems', priority: 'highest', evidenceIds: ['career-proof', 'job-proof'] },
+            { id: 'need-2', text: 'Computer science education', priority: 'supporting', evidenceIds: ['education-proof', 'job-proof'] },
+          ],
+        };
+        const planned = await submitLocalApplicationHandoff({
+          jobId: queued.id, canvasFilePath: project.canvasFilePath, handoffCode: planHandoff.handoffCode,
+          response: JSON.stringify(reply(planHandoff, plan)),
+        });
+        assert(planned.accepted && planned.handoff?.stage === 'resume',
+          `the cited education plan opens the resume handoff (errors=${JSON.stringify(planned.validationErrors || [])})`);
+
+        const resumeHandoff = planned.handoff;
+        const baseResume = {
+          schemaVersion: 'structured-resume.v1', identity,
+          roles: [{ id: 'role-1', title: 'Software Engineer', company: 'Analytical Engines', dates: '2020 – 2024', location: '', bullets: [{ id: 'bullet-1', text: 'Built reporting systems that reduced manual work.', evidenceIds: ['career-proof'] }] }],
+          education: [{ id: 'education-1', credential: CLEAN_DEGREE, institution: 'York University', evidenceIds: ['education-proof'] }],
+        };
+        const forged = await submitLocalApplicationHandoff({
+          jobId: queued.id, canvasFilePath: project.canvasFilePath, handoffCode: resumeHandoff.handoffCode,
+          response: JSON.stringify(reply(resumeHandoff, { resume: { ...baseResume, education: [{ ...baseResume.education[0], credential: 'Master of Science in Computer Science' }] } })),
+        });
+        assert(!forged.accepted && forged.handoff?.stage === 'resume'
+          && forged.validationErrors.some(error => /education|evidence|career data/i.test(error)),
+        `an education field not supported by its own cited evidence is rejected (errors=${JSON.stringify(forged.validationErrors || [])})`);
+
+        const accepted = await submitLocalApplicationHandoff({
+          jobId: queued.id, canvasFilePath: project.canvasFilePath, handoffCode: resumeHandoff.handoffCode,
+          response: JSON.stringify(reply(resumeHandoff, { resume: baseResume })),
+        });
+        assert(accepted.accepted && accepted.handoff?.stage === 'cover-letter',
+          `the same resume with exact education evidence is accepted (errors=${JSON.stringify(accepted.validationErrors || [])})`);
+        const rendered = renderStructuredApplicationResume(baseResume, {
+          sourceRoles: [{ id: 'role-1', title: 'Software Engineer', company: 'Analytical Engines', dates: '2020 – 2024', location: '' }],
+          evidenceCatalog: plan.evidence,
+          trustedIdentity: identity,
+          careerData: degreeCareerData,
+        });
+        assert(rendered.includes('id="sec-education"') && rendered.includes('<dt>') && rendered.includes(CLEAN_DEGREE),
+          'accepted education renders as a compact semantic credentials list');
+
+        const legacyHeader = { ...baseResume, identity: { ...identity, credential: `${CLEAN_DEGREE}, York University` }, education: [] };
+        const legacyRendered = renderStructuredApplicationResume(legacyHeader, {
+          sourceRoles: [{ id: 'role-1', title: 'Software Engineer', company: 'Analytical Engines', dates: '2020 – 2024', location: '' }],
+          evidenceCatalog: plan.evidence,
+          trustedIdentity: legacyHeader.identity,
+          careerData: degreeCareerData,
+        });
+        assert(legacyRendered.includes(`${CLEAN_DEGREE}, York University`) && !legacyRendered.includes('id="sec-education"'),
+          'a historical accepted header credential remains readable without inventing an Education section');
+        return { education: 'accepted', legacyHeader: 'readable' };
+      } finally {
+        await fs.promises.rm(project.root, { recursive: true, force: true });
+      }
     },
   },
   {
@@ -3856,7 +4016,7 @@ export default [
         const supported = await auditJobSteps(project, { careerData: `${AUDIT_CAREER_DATA}\n${supportingQuote}` });
         const supportedPlan = {
           ...plan,
-          evidence: plan.evidence.map(item => (item.id === 'resume-proof' ? { ...item, quote: supportingQuote } : item)),
+          evidence: plan.evidence.map(item => (item.id === 'p1-resume-proof' ? { ...item, quote: supportingQuote } : item)),
         };
         await supported.send({ identity: plan.identity, evidence: supportedPlan.evidence, requirements: plan.requirements });
         const supportedResult = await supported.submit({
@@ -3935,8 +4095,11 @@ export default [
           'the bullet clause no longer describes its exclusion instead of naming it');
         assert(prompt.includes('Nothing may repeat: identity.contact values, the items inside one skills group, bullet ids within their role, and — each across the whole résumé — role ids, project ids, and skill-group ids.'),
           'the résumé contract names every uniqueness rule the validator enforces, not only the three it used to admit');
-        assert(prompt.includes(`Per-field character ceilings, all measured after whitespace collapsing: ${chars.shortText} for identity.name or subtitleRole, a role’s title, company, dates or location, and a project name; ${chars.longText} for identity.credential, one contact value, or a project’s metrics; ${chars.projectDescription} for a project description; ${chars.skillText} for a skill-group label or one of its items.`),
-          'the résumé contract states every per-field character ceiling text() enforces, interpolated from the same constants');
+        assert(prompt.includes(`Per-field character ceilings, all measured after whitespace collapsing: ${chars.shortText} for identity.name or subtitleRole, a role’s title, company, dates or location, a project name, institution, issuer, degree, or certification name; ${chars.longText} for identity.credential, one contact value, or a project’s metrics; ${chars.projectDescription} for a project description; ${chars.skillText} for a skill-group label or one of its items.`),
+          'the résumé contract states every per-field character ceiling text() enforces, including evidence-backed education and certification fields');
+        assert(prompt.includes('Typed role dates retain source punctuation verbatim, even if their separator would be forbidden in authored prose; never normalize them.')
+          && prompt.includes('The dash-style rule still applies to bullets and every other authored copy.'),
+        'the résumé contract distinguishes source-locked typed dates from authored prose, so it cannot request a normalizing rewrite and then reject the retained source spelling');
         assert(prompt.includes(`inside that one employer’s own careerData section — ${CAREER_DATA_ROLE_SECTION_RULE}`)
           && CAREER_DATA_ROLE_SECTION_RULE.includes('at the line that is exactly this role’s title with that employer named on one of the lines just below it')
           && CAREER_DATA_ROLE_SECTION_RULE.includes('the next horizontal rule')
@@ -4052,7 +4215,7 @@ export default [
         assert(prompt.includes(`a rendered bullet is at most ${RESUME_BULLET_CHARACTER_BUDGET} visible characters`)
           && prompt.includes(`one bullet binds at most ${MAX_UNIT_CAREER_DATA_QUOTES} distinct career-data quotes`),
         'both ceilings are interpolated from the constants the gates read, not transcribed');
-        assert(prompt.includes('any qualifier the bullet adds beyond those quotes — frequency (daily, weekly, monthly, routine, absolute); superiority (comparative); ownership (leadership, direct, management); authority (decision); status (production, at-scale); scope (organization-wide); outcome (improvement, reduction, increase, savings, acceleration, optimization, guaranteed) — must be stated by one of them'),
+        assert(prompt.includes('any qualifier the bullet adds beyond those quotes — frequency (daily, weekly, monthly, routine, absolute); superiority (comparative); ownership (leadership, direct, management); authorship (implementation); authority (decision); status (production, at-scale); scope (organization-wide); outcome (improvement, reduction, increase, savings, acceleration, optimization, guaranteed) — must be stated by one of them'),
           'the qualifier classes are named, grouped from the same rule table assertSupportedSourceQualifiers reads');
 
         const drafted = await steps.submit({ resume: withBullet(overBudgetText) });
@@ -4105,7 +4268,7 @@ export default [
           // A real contiguous slice of the corpus body and a legal plan quote:
           // the plan stage is not made stricter, because a quote no unit
           // ever cites is never measured against this rule.
-          evidence: [...plan.evidence, { id: 'short-proof', sourceId: 'career-data', quote: 'Maintained', requirement: 'Systems maintenance', priority: 'supporting' }],
+          evidence: [...plan.evidence, { id: 'p1-short-proof', sourceId: 'career-data', quote: 'Maintained', requirement: 'Systems maintenance', priority: 'supporting' }],
           requirements: plan.requirements,
         });
 
@@ -4115,7 +4278,7 @@ export default [
           && qualifier.result.validationErrors.some(message => message.startsWith('Résumé bullet "bullet-1": uses unsupported reduction outcome')),
         `a qualifier the cited quote never states is named by bullet id in the round that wrote it (errors=${JSON.stringify(qualifier.result.validationErrors || [])})`);
 
-        const short = await steps.submit({ resume: bullet(AUDIT_BULLET, ['short-proof']) });
+        const short = await steps.submit({ resume: bullet(AUDIT_BULLET, ['p1-short-proof']) });
         assert(!short.result.accepted && short.result.validationErrors.some(message =>
           message.startsWith('Résumé bullet "bullet-1" cites a career-data quote that is too short to bind a claim')
           && message.includes(`at least ${MIN_SOURCE_GROUNDING_QUOTE_CHARS} characters and ${MIN_SOURCE_GROUNDING_QUOTE_WORDS} words`)),
@@ -5401,7 +5564,7 @@ export default [
       const corruptions = [
         {
           label: 'a frozen evidence-plan quote no longer occurs in the frozen career corpus',
-          observation: /evidence resume-proof quote no longer occurs in its frozen career-data source/,
+          observation: /evidence p1-resume-proof quote no longer occurs in its frozen career-data source/,
           corrupt: async (dir) => {
             const careerPath = path.join(dir, 'context', 'career-data.txt');
             const corpus = await fs.promises.readFile(careerPath, 'utf8');
@@ -5638,7 +5801,7 @@ export default [
           // this plan holds, so a quote the corpus no longer contains was
           // reported as the document that cited it.
           label: 'a frozen evidence-plan quote no longer occurs in the frozen career corpus',
-          observation: /evidence resume-proof quote no longer occurs in its frozen career-data source/,
+          observation: /evidence p1-resume-proof quote no longer occurs in its frozen career-data source/,
           corrupt: async (dir) => {
             const careerPath = path.join(dir, 'context', 'career-data.txt');
             const corpus = await fs.promises.readFile(careerPath, 'utf8');
@@ -5674,7 +5837,7 @@ export default [
           // Printed into the review prompt as the number the response must
           // carry back, and then compared against the same raw field.
           label: 'the frozen quality-checklist version is unsupported',
-          observation: /the input record reads quality-checklist version 99 where this app reads 1, 2 or 3/,
+          observation: /the input record reads quality-checklist version 99 where this app reads 1, 2, 3 or 4/,
           corrupt: async (dir) => {
             const input = await readJson(dir, 'input.json');
             await writeJson(dir, 'input.json', { ...input, qualityChecklist: { ...input.qualityChecklist, version: 99 } });
@@ -5913,7 +6076,7 @@ export default [
         // raw field, rejecting the RESPONSE for a number no response chose.
         // The shared frozen-state gate reads it before any of that, in the
         // input record's own voice, at whichever surface reaches the job first.
-        ['frozen input.qualityChecklist.version', /the input record reads quality-checklist version 99 where this app reads 1, 2 or 3/,
+        ['frozen input.qualityChecklist.version', /the input record reads quality-checklist version 99 where this app reads 1, 2, 3 or 4/,
           fields => ({ ...fields, qualityReview: { ...fields.qualityReview, checklistVersion: 99 } }),
           async (job) => {
             const input = await job.readJson('input.json');
@@ -5959,7 +6122,7 @@ export default [
           const { generationAudit: _dropped, ...manifest } = await job.readJson('manifest.json');
           await job.writeJson('manifest.json', manifest);
         }],
-        ['the grade itself', /the input record reads quality-checklist version 99 where this app reads 1, 2 or 3/, async (job) => {
+        ['the grade itself', /the input record reads quality-checklist version 99 where this app reads 1, 2, 3 or 4/, async (job) => {
           const input = await job.readJson('input.json');
           await job.writeJson('input.json', { ...input, qualityChecklist: { ...input.qualityChecklist, version: 99 } });
         }],
@@ -6051,6 +6214,9 @@ export default [
           DANGLING_DEMONSTRATIVE_RULE,
           SKILLS_BLOCK_BUDGET_RULE,
           SKILL_ITEM_FILTERABLE_RULE,
+          SKILL_ITEM_GROUNDING_RULE,
+          POSTING_NAMED_SKILLS_RULE,
+          SKILLS_BLOCK_PRESENCE_RULE,
           `at least ${MIN_ROLE_THESIS_WORDS} words running ${COVER_LETTER_ARGUMENT_TEXT_LIMITS.min} to ${COVER_LETTER_ARGUMENT_TEXT_LIMITS.max} characters`,
           `except evidenceRole at ${COVER_LETTER_ARGUMENT_TEXT_LIMITS.roleMin} to ${COVER_LETTER_ARGUMENT_TEXT_LIMITS.roleMax}`,
           `at most ${STRUCTURED_RESUME_LIMITS.roles} roles`,
@@ -6181,7 +6347,7 @@ export default [
           const plan = auditPlanFixture();
           const replacement = {
             ...plan.resume,
-            roles: [{ ...plan.resume.roles[0], bullets: [{ id: 'bullet-1', text: testCase.bullet, evidenceIds: ['resume-proof'] }] }],
+            roles: [{ ...plan.resume.roles[0], bullets: [{ id: 'bullet-1', text: testCase.bullet, evidenceIds: ['p1-resume-proof'] }] }],
           };
           const flow = await runAuditFlow(project, plan);
           const context = pasteContext(flow.reviewPrompt);
@@ -6420,6 +6586,60 @@ export default [
           && !prompt.includes('${MAX_EVIDENCE_PLAN_EVIDENCE_ITEMS}'),
         `the evidence-item ceiling is interpolated rather than left as a raw template token (prompt has raw token=${prompt.includes('${MAX_EVIDENCE_PLAN_EVIDENCE_ITEMS}')})`);
         return { promptChars: prompt.length, evidenceLimit: MAX_EVIDENCE_PLAN_EVIDENCE_ITEMS };
+      } finally {
+        await fs.promises.rm(project.root, { recursive: true, force: true });
+      }
+    },
+  },
+  {
+    name: 'An employer Markdown heading scopes its following role title and employer-naming accomplishment as one role section',
+    async run() {
+      // The title is deliberately followed by an accomplishment that names
+      // the employer. That is the normal readable Markdown shape which used
+      // to create two candidates (the heading and the title) and therefore
+      // fail closed, even though the heading is the explicit boundary.
+      const project = await createCanvasProject();
+      try {
+        const scopedCareerData = [
+          'Ada Lovelace', 'ada@example.test', 'Platform Engineer profile', '',
+          '## Acme Systems', 'Platform Engineer', '2020 – 2024', '',
+          'Built the Acme Systems reporting pipeline for nightly batches.',
+        ].join('\n');
+        const queued = await queueLocalApplicationJob({
+          transport: 'paste', canvasFilePath: project.canvasFilePath, careerData: scopedCareerData,
+          job: { title: 'Reporting Engineer', company: 'Target', snippet: 'Build and maintain reporting pipelines.' },
+          resumeProfile: { workHistory: [{ id: 'role-1', title: 'Platform Engineer', employer: 'Acme Systems', startDate: '2020', endDate: '2024' }] },
+        });
+        const planHandoff = (await getLocalApplicationHandoff({ jobId: queued.id, canvasFilePath: project.canvasFilePath })).handoff;
+        const planned = await submitLocalApplicationHandoff({
+          jobId: queued.id, canvasFilePath: project.canvasFilePath, handoffCode: planHandoff.handoffCode,
+          response: JSON.stringify(reply(planHandoff, {
+            identity: { name: 'Ada Lovelace', contact: ['ada@example.test'], subtitleRole: 'Platform Engineer' },
+            evidence: [
+              { id: 'career-proof', sourceId: 'career-data', quote: 'Built the Acme Systems reporting pipeline for nightly batches.', requirement: 'Reporting pipelines', priority: 'highest' },
+              { id: 'job-proof', sourceId: 'job-listing', quote: 'reporting pipelines', requirement: 'Reporting pipelines', priority: 'highest' },
+            ],
+            requirements: [{ id: 'need-1', text: 'Reporting pipelines', priority: 'highest', evidenceIds: ['career-proof', 'job-proof'] }],
+          })),
+        });
+        assert(planned.accepted && planned.handoff?.stage === 'resume',
+          `the heading-scoped evidence plan opens the résumé stage (errors=${JSON.stringify(planned.validationErrors || [])})`);
+        const accepted = await submitLocalApplicationHandoff({
+          jobId: queued.id, canvasFilePath: project.canvasFilePath, handoffCode: planned.handoff.handoffCode,
+          response: JSON.stringify(reply(planned.handoff, {
+            resume: {
+              schemaVersion: 'structured-resume.v1',
+              identity: { name: 'Ada Lovelace', contact: ['ada@example.test'], subtitleRole: 'Platform Engineer' },
+              roles: [{
+                id: 'role-1', title: 'Platform Engineer', company: 'Acme Systems', dates: '2020 – 2024', location: '',
+                bullets: [{ id: 'bullet-1', text: 'Built the Acme Systems reporting pipeline for nightly batches.', evidenceIds: ['career-proof'] }],
+              }],
+            },
+          })),
+        });
+        assert(accepted.accepted && accepted.handoff?.stage === 'cover-letter',
+          `the explicit heading, rather than the fallback title scan, owns this role scope (errors=${JSON.stringify(accepted.validationErrors || [])})`);
+        return { scope: 'employer-markdown-heading' };
       } finally {
         await fs.promises.rm(project.root, { recursive: true, force: true });
       }

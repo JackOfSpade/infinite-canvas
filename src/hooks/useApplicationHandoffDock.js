@@ -2,7 +2,6 @@ import { useEffect, useRef } from 'react';
 import { EventLogger } from '../utils/EventLogger';
 import { LOCAL_AI_POLL_INTERVAL_MS, jobIntegrityFailureMessage } from '../utils/localAiFallback';
 import {
-  APPLICATION_HANDOFF_LIMIT,
   selectApplicationHandoffCandidates,
   applicationDockItemState,
   applicationDockRequest,
@@ -13,12 +12,13 @@ import {
   retainUnreadableApplicationItems,
   subscribeApplicationHandoffRefresh,
 } from '../utils/applicationHandoffDock';
+import { HANDOFF_CONCURRENCY, mapAutomaticHandoffs } from '../utils/handoffScheduler';
 
 // getLocalApplicationHandoff takes withLocalAiJobMutationLock on the job folder
 // it reads (electron/ipc/localAiApplication.js) — a real filesystem lock, not an
 // in-memory status check. LOCAL_AI_POLL_INTERVAL_MS (2.5s, localAiFallback.js) is
 // tuned for that cheap in-memory poll; running the SAME cadence here would mean
-// up to APPLICATION_HANDOFF_LIMIT lock round trips every 2.5 seconds even while
+// up to HANDOFF_CONCURRENCY lock round trips every 2.5 seconds even while
 // nobody has touched the dock. Real-time pickup instead comes from the two other
 // triggers below (a refresh event fires the instant a paste actually advances a
 // stage, and the id-set check below reacts within one poll tick to a brand-new
@@ -115,11 +115,6 @@ export function useApplicationHandoffDock({ navigation, getCurrentFile }) {
         const pointedAtIds = new Set(candidates.map((node) => node.data.localApplication.id));
         for (const id of discardedJobIds) if (!pointedAtIds.has(id)) discardedJobIds.delete(id);
         if (discardedJobIds.size) candidates = candidates.filter((node) => !discardedJobIds.has(node.data.localApplication.id));
-        if (candidates.length > APPLICATION_HANDOFF_LIMIT) {
-          EventLogger.log(`[ApplicationDock] ${candidates.length - APPLICATION_HANDOFF_LIMIT} pending application bundle(s) beyond the ${APPLICATION_HANDOFF_LIMIT}-slot dock limit were not read this pass.`);
-          candidates = candidates.slice(0, APPLICATION_HANDOFF_LIMIT);
-        }
-
         // A single-job refresh (the dock just submitted a response and asked
         // to re-read the outcome) only needs that one job re-fetched — every
         // other candidate keeps whatever was published for it last pass, so a
@@ -131,7 +126,10 @@ export function useApplicationHandoffDock({ navigation, getCurrentFile }) {
         const previousItems = getApplicationHandoffs();
         const previousByJobId = new Map(previousItems.map((item) => [item.jobId, item]));
 
-        const fetched = await Promise.all(toFetch.map(async (node) => {
+        // Do not truncate backlog to the visible/live worker count. Reads use
+        // the same rolling scheduler as automatic handoffs: a completed read
+        // refills one slot while every later durable bundle remains queued.
+        const fetched = await mapAutomaticHandoffs(toFetch, HANDOFF_CONCURRENCY, async (node) => {
           const local = node.data.localApplication;
           const canvasFilePath = resolveCanvasFilePath(local);
           try {
@@ -211,7 +209,7 @@ export function useApplicationHandoffDock({ navigation, getCurrentFile }) {
             const stale = previousByJobId.get(local.id);
             return [local.id, stale ? { ...stale, unreadable: true } : null];
           }
-        }));
+        });
         if (disposed) return;
         const fetchedByJobId = new Map(fetched);
 

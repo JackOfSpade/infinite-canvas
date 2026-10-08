@@ -8,6 +8,12 @@ import { clearBridgeChatCopyDiagnostic, getBridgeChatCopyDiagnostic } from '../.
 const JOB = '550e8400-e29b-41d4-a716-446655440000';
 const EXTRA_JOB = '660e8400-e29b-41d4-a716-446655440000';
 const PATH = '/tmp/synthetic.canvas';
+const jobSeries = count => Array.from({ length: count }, (_unused, index) => ({
+  jobId: `00000000-0000-4000-8000-${String(index + 1).padStart(12, '0')}`,
+  canvasFilePath: PATH,
+  dockState: 'awaiting',
+  sig: `series-${index + 1}`,
+}));
 function fakeIpc() { const handlers = new Map(); const listeners = new Map(); return { handlers, listeners, handle: (c, fn) => handlers.set(c, fn), removeHandler: c => handlers.delete(c), on: (c, fn) => listeners.set(c, fn), removeListener: (c, fn) => { if (listeners.get(c) === fn) listeners.delete(c); } }; }
 function fakeClock(start = 0) {
   let stamp = start; const tasks = [];
@@ -46,10 +52,11 @@ function setup({ windows = null, getCanvasWindows = null, controller = {}, dialo
 const invoke = (h, channel, payload) => h.ipc.handlers.get(channel)(h.event, payload);
 
 export default [
-  { name: 'handoff bridge: ipc: contract exposes exactly 27 invokes, one publish send and three events', run: () => {
+  { name: 'handoff bridge: ipc: contract exposes exactly 27 invokes, one publish send and four events', run: () => {
     const channelValues = Object.values(IPC_CHANNELS); assert(channelValues.length === 28 && new Set(channelValues).size === 28, 'IPC channel names must be closed and unique');
     assert(IPC_CHANNELS.PUBLISH_JOBS === 'handoff-bridge:publish-jobs' && channelValues.filter(channel => channel !== IPC_CHANNELS.PUBLISH_JOBS).length === 27, 'publish-jobs is sole send-only channel');
-    assert(Object.values(IPC_EVENTS).length === 3 && new Set(Object.values(IPC_EVENTS)).size === 3, 'main-to-renderer events must be closed'); assert(!JSON.stringify({ IPC_CHANNELS, IPC_EVENTS, PUBLISH_JOBS_EXAMPLE }).includes('label'), 'IPC never carries renderer labels');
+    assert(Object.values(IPC_EVENTS).length === 4 && new Set(Object.values(IPC_EVENTS)).size === 4
+      && IPC_EVENTS.CANVAS_FILE_READY === 'handoff-bridge:canvas-file-ready', 'main-to-renderer events must be closed'); assert(!JSON.stringify({ IPC_CHANNELS, IPC_EVENTS, PUBLISH_JOBS_EXAMPLE }).includes('label'), 'IPC never carries renderer labels');
   } },
   { name: 'handoff bridge: ipc: registers exactly the frozen invokes and one publish listener', run: () => {
     const h = setup(); assert(h.api.registration.ok && h.api.registration.invokes === 27 && h.api.registration.expectedInvokes === 27 && h.api.registration.publish, 'registration exposes a closed complete-route fact'); assert(h.ipc.handlers.size === 27 && h.ipc.listeners.size === 1 && h.ipc.listeners.has(IPC_CHANNELS.PUBLISH_JOBS), 'all and only contract channels register');
@@ -216,11 +223,141 @@ export default [
     const accepted = await invoke(h, IPC_CHANNELS.RELEASE, { items: [{ jobId: JOB }] });
     assert(accepted.success && JSON.stringify(seen[0]) === JSON.stringify({ jobs: [{ jobId: JOB, canvasFilePath: PATH }] }), 'controller receives canonical {jobs:[jobId,canvasFilePath]}');
   } },
+  { name: 'handoff bridge: ipc: recovered application publication replays after canvas binding and can release', async run() {
+    const released = []; const h = setup({ controller: { release: async value => { released.push(value); return { success: true, released: 1 }; } } });
+    const publish = h.ipc.listeners.get(IPC_CHANNELS.PUBLISH_JOBS);
+    // This is the startup ordering: renderer recovered a durable job before
+    // main learned which canvas this BrowserWindow owns. Main correctly grants
+    // no candidate authority to the first unbound publication.
+    h.window.__canvasFilePath = null;
+    publish(h.event, { v: 1, seq: 1, jobs: [{ jobId: JOB, canvasFilePath: PATH, dockState: 'awaiting', sig: 'recovered' }] });
+    assert(h.api.candidates().size === 0, 'an unbound startup publication is rejected rather than trusting a renderer path');
+    // `canvas-file-ready` causes the publisher to send the same snapshot with
+    // a new sequence after main has stored the canonical window identity.
+    h.window.__canvasFilePath = PATH;
+    publish(h.event, { v: 1, seq: 2, jobs: [{ jobId: JOB, canvasFilePath: PATH, dockState: 'awaiting', sig: 'recovered' }] });
+    assert(h.api.candidates().get(h.sender.id)?.jobs.has(JOB), 'the replay registers the recovered application against its bound canvas');
+    const result = await invoke(h, IPC_CHANNELS.RELEASE, { items: [{ jobId: JOB }] });
+    assert(result.success === true && JSON.stringify(released) === JSON.stringify([{ jobs: [{ jobId: JOB, canvasFilePath: PATH }] }]),
+      'the controller receives the recovered job after its bound replay, not UNKNOWN_JOB');
+  } },
+  { name: 'handoff bridge: ipc: an unchanged publication refresh during release confirmation remains releasable', async run() {
+    let resolveConfirm; const confirmation = new Promise(resolve => { resolveConfirm = resolve; });
+    let describes = 0; let releases = 0;
+    const h = setup({
+      application: { describeForConfirm: async () => { describes += 1; return { ok: true, canvasFilePath: PATH, items: [{ jobId: JOB, title: 'Recovered role', company: 'Recovered company', createdAt: '2026-10-08T00:00:00.000Z' }] }; } },
+      dialogs: { ask: async () => confirmation },
+      controller: { release: async () => { releases += 1; return { success: true, released: 1 }; } },
+    });
+    const publish = h.ipc.listeners.get(IPC_CHANNELS.PUBLISH_JOBS);
+    const candidate = { jobId: JOB, canvasFilePath: PATH, dockState: 'awaiting', sig: 'stable-recovered-job' };
+    publish(h.event, { v: 1, seq: 1, jobs: [candidate] });
+    const pending = invoke(h, IPC_CHANNELS.RELEASE, { items: [{ jobId: JOB }] });
+    await settle();
+    // The renderer's scheduled keepalive makes a new map entry while the
+    // native sheet is open. Its semantic job projection is unchanged.
+    publish(h.event, { v: 1, seq: 2, jobs: [candidate] });
+    resolveConfirm({ ok: true });
+    const result = await pending;
+    assert(result.success === true && describes === 2 && releases === 1,
+      'an identical keepalive preserves the release context and rechecks the same main-owned confirmation fields');
+  } },
+  { name: 'handoff bridge: ipc: post-confirm application description drift refuses release', async run() {
+    let resolveConfirm; const confirmation = new Promise(resolve => { resolveConfirm = resolve; });
+    let describes = 0; let releases = 0;
+    const h = setup({
+      application: { describeForConfirm: async () => {
+        describes += 1;
+        return { ok: true, canvasFilePath: PATH, items: [{ jobId: JOB,
+          title: describes === 1 ? 'Role shown for confirmation' : 'Changed role after confirmation',
+          company: 'Stable company', createdAt: '2026-10-08T00:00:00.000Z' }] };
+      } },
+      dialogs: { ask: async () => confirmation },
+      controller: { release: async () => { releases += 1; return { success: true, released: 1 }; } },
+    });
+    const publish = h.ipc.listeners.get(IPC_CHANNELS.PUBLISH_JOBS);
+    publish(h.event, { v: 1, seq: 1, jobs: [{ jobId: JOB, canvasFilePath: PATH, dockState: 'awaiting', sig: 'stable-job' }] });
+    const pending = invoke(h, IPC_CHANNELS.RELEASE, { items: [{ jobId: JOB }] });
+    await settle(); resolveConfirm({ ok: true });
+    const result = await pending;
+    assert(result.code === 'UNKNOWN_JOB' && describes === 2 && releases === 0,
+      'the job cannot release when main-owned title/company/date confirmation facts drift after the sheet opens');
+  } },
+  { name: 'handoff bridge: ipc: an incomplete replacement snapshot cannot release a still-visible prior job', async run() {
+    let resolveConfirm; const confirmation = new Promise(resolve => { resolveConfirm = resolve; });
+    let releases = 0;
+    const h = setup({
+      dialogs: { ask: async () => confirmation },
+      controller: { release: async () => { releases += 1; return { success: true, released: 1 }; } },
+    });
+    const publish = h.ipc.listeners.get(IPC_CHANNELS.PUBLISH_JOBS);
+    publish(h.event, { v: 1, seq: 1, jobs: [{ jobId: JOB, canvasFilePath: PATH, dockState: 'awaiting', sig: 'before-refresh' }] });
+    const pending = invoke(h, IPC_CHANNELS.RELEASE, { items: [{ jobId: JOB }] });
+    await settle();
+    // The first page of a new complete set deliberately leaves the old map
+    // visible until its final page, but this requested id might be removed by
+    // that final page. It is therefore not releasable while reconciliation is
+    // incomplete.
+    publish(h.event, { v: 1, seq: 2, jobs: [{ jobId: EXTRA_JOB, canvasFilePath: PATH, dockState: 'awaiting', sig: 'replacement-page' }], snapshot: { id: 'replacement', index: 0, final: false } });
+    resolveConfirm({ ok: true });
+    const result = await pending;
+    assert(result.code === 'UNKNOWN_JOB' && releases === 0,
+      'an incomplete page set cannot leave a stale requested job authorized after the native sheet opens');
+  } },
+  { name: 'handoff bridge: ipc: a committed-frame change during confirmation refuses release', async run() {
+    let resolveConfirm; const confirmation = new Promise(resolve => { resolveConfirm = resolve; });
+    let releases = 0;
+    const h = setup({
+      dialogs: { ask: async () => confirmation },
+      controller: { release: async () => { releases += 1; return { success: true, released: 1 }; } },
+    });
+    const publish = h.ipc.listeners.get(IPC_CHANNELS.PUBLISH_JOBS);
+    const firstFrame = { processId: 51, routingId: 1 };
+    const secondFrame = { processId: 51, routingId: 2 };
+    h.sender.mainFrame = firstFrame;
+    const firstEvent = { sender: h.sender, senderFrame: firstFrame };
+    publish(firstEvent, { v: 1, seq: 1, jobs: [{ jobId: JOB, canvasFilePath: PATH, dockState: 'awaiting', sig: 'before-navigation' }] });
+    const pending = h.ipc.handlers.get(IPC_CHANNELS.RELEASE)(firstEvent, { items: [{ jobId: JOB }] });
+    await settle();
+    h.sender.mainFrame = secondFrame;
+    const secondEvent = { sender: h.sender, senderFrame: secondFrame };
+    publish(secondEvent, { v: 1, seq: 1, jobs: [{ jobId: JOB, canvasFilePath: PATH, dockState: 'awaiting', sig: 'same-job-new-frame' }] });
+    resolveConfirm({ ok: true });
+    const result = await pending;
+    assert(result.code === 'UNKNOWN_JOB' && releases === 0,
+      'a navigation cannot reuse the WebContents id to release a prior frame\'s confirmation');
+  } },
   { name: 'handoff bridge: ipc: publication is per sender, monotonic and cleans up on unmount', run: () => {
     const hints = []; const h = setup({ engine: { hint: value => hints.push(value) } }); const publish = h.ipc.listeners.get(IPC_CHANNELS.PUBLISH_JOBS);
     publish(h.event, { v: 1, seq: 2, jobs: [{ jobId: JOB, canvasFilePath: PATH, dockState: 'awaiting', sig: 's' }] }); assert(h.api.candidates().size === 1 && h.sender.sent.length === 0 && JSON.stringify(hints) === JSON.stringify([{ jobId: JOB }]), 'publication hints a new job but never emits a renderer job-change');
     publish(h.event, { v: 1, seq: 1, jobs: [] }); assert(h.api.candidates().get(h.sender.id).seq === 2, 'older sequence cannot replace candidates');
     publish(h.event, { v: 1, unmount: true }); assert(h.api.candidates().size === 0, 'unmount removes sender candidates, never completes a job');
+  } },
+  { name: 'handoff bridge: ipc: a prior navigated frame cannot replay over the current publication', run: () => {
+    const h = setup(); const publish = h.ipc.listeners.get(IPC_CHANNELS.PUBLISH_JOBS);
+    const firstFrame = { processId: 41, routingId: 1 };
+    const secondFrame = { processId: 41, routingId: 2 };
+    h.sender.mainFrame = firstFrame;
+    const firstEvent = { sender: h.sender, senderFrame: firstFrame };
+    publish(firstEvent, { v: 1, seq: 1, jobs: [{ jobId: JOB, canvasFilePath: PATH, dockState: 'awaiting', sig: 'prior' }] });
+    h.sender.mainFrame = secondFrame;
+    const secondEvent = { sender: h.sender, senderFrame: secondFrame };
+    publish(secondEvent, { v: 1, seq: 1, jobs: [{ jobId: EXTRA_JOB, canvasFilePath: PATH, dockState: 'awaiting', sig: 'current' }] });
+    // A delayed message remains bound to its old main-frame identity and must
+    // not replace a fresh mount even though the WebContents id is unchanged.
+    publish(firstEvent, { v: 1, seq: 2, jobs: [{ jobId: JOB, canvasFilePath: PATH, dockState: 'awaiting', sig: 'replayed' }] });
+    const jobs = h.api.candidates().get(h.sender.id)?.jobs;
+    assert(jobs?.size === 1 && jobs.has(EXTRA_JOB) && !jobs.has(JOB), 'a delayed prior-frame publication cannot overwrite the current mount');
+  } },
+  { name: 'handoff bridge: ipc: incremental publication accepts a snapshot beyond the former ten-thousand-page ceiling', run: () => {
+    const h = setup(); const publish = h.ipc.listeners.get(IPC_CHANNELS.PUBLISH_JOBS);
+    const job = { jobId: JOB, canvasFilePath: PATH, dockState: 'awaiting', sig: 'long-page-set' };
+    for (let index = 0; index <= 10_000; index += 1) {
+      publish(h.event, { v: 1, seq: index + 1, jobs: [job], snapshot: { id: 'jobs-long', index, final: index === 10_000 } });
+    }
+    const entry = h.api.candidates().get(h.sender.id);
+    assert(entry?.jobs.size === 1 && entry.jobs.has(JOB) && entry.seq === 10_001,
+      'a bounded page protocol accepts arbitrarily many ordered pages without allocating a count-sized staging array');
   } },
   { name: 'handoff bridge: ipc: candidate keep-alive expires at 30 seconds and live-window loss removes it immediately', run: () => {
     const clock = fakeClock(); const windows = []; const h = setup({ now: clock.now, timers: clock.timers, getCanvasWindows: () => windows });
@@ -276,6 +413,35 @@ export default [
       ['copy', { generation: 7, workerOrdinal: 2 }],
     ]), 'worker pool IPC sends the controller only closed, main-owned operation shapes');
   } },
+  { name: 'handoff bridge: ipc: re-copy preserves an already-exported worker starter when clipboard writing fails', async run() {
+    const calls = [];
+    const h = setup({
+      controller: {
+        copyWorkerStarter: async value => {
+          calls.push(['copy', value]);
+          return { copied: true, recopied: true, generation: 7, workerOrdinal: 1, workerCount: 1, sessionCode: '2ABCDEFGHJKLMNPQRSTUVWXYZ2' };
+        },
+        abandonWorkerStarter: async value => { calls.push(['abandon', value]); return true; },
+      },
+      clipboard: { writeText() { throw new Error('denied'); } },
+    });
+    const failed = await invoke(h, IPC_CHANNELS.COPY_WORKER_STARTER, { generation: 7, workerOrdinal: 1 });
+    assert(failed.code === 'CLIPBOARD_FAILED' && JSON.stringify(calls) === JSON.stringify([['copy', { generation: 7, workerOrdinal: 1 }]]),
+      'a failed re-copy must not abandon the previously exported same-key worker starter');
+  } },
+  { name: 'handoff bridge: ipc: worker starter re-copy returns only recopied bounded metadata', async run() {
+    const h = setup({
+      controller: {
+        copyWorkerStarter: async () => ({ copied: true, recopied: true, generation: 7, workerOrdinal: 1, workerCount: 1, sessionCode: '2ABCDEFGHJKLMNPQRSTUVWXYZ2' }),
+      },
+      clipboard: { writeText() {}, readText: () => '', clear() {} },
+    });
+    const copied = await invoke(h, IPC_CHANNELS.COPY_WORKER_STARTER, { generation: 7, workerOrdinal: 1 });
+    assert(copied.success === true && copied.copied === true && copied.recopied === true
+      && copied.generation === 7 && copied.workerOrdinal === 1 && copied.workerCount === 1
+      && !Object.hasOwn(copied, 'sessionCode'),
+    'the renderer learns that the same safe worker action was re-copied but never receives its capability');
+  } },
   { name: 'handoff bridge: ipc: worker-pool expansion forwards only a bounded requested target', async run() {
     const calls = [];
     const h = setup({ controller: {
@@ -290,7 +456,7 @@ export default [
     assert(expanded.success && expanded.workerCount === 10 && expanded.recommended === 6 && expanded.materialized === 6
       && invalidLow.code === 'INVALID' && invalidExtra.code === 'INVALID'
       && JSON.stringify(calls) === JSON.stringify([{ requestedWorkers: 10 }]),
-    'only the exact 1–10 requested target reaches the controller; invalid renderer payloads cannot alter pool capacity');
+    'only an exact request inside the reviewed worker ceiling reaches the controller; invalid renderer payloads cannot alter pool capacity');
   } },
   { name: 'handoff bridge: ipc: worker-pool copy rejects forged shapes and reports an already-started worker without retrying it', async run() {
     let copies = 0;
@@ -298,10 +464,10 @@ export default [
       copyWorkerStarter: async () => { copies += 1; return { copied: false, status: 'session_started' }; },
     } });
     const malformed = await invoke(h, IPC_CHANNELS.COPY_WORKER_STARTER, { generation: 3, workerOrdinal: 1, extra: true });
-    const outOfRange = await invoke(h, IPC_CHANNELS.COPY_WORKER_STARTER, { generation: 3, workerOrdinal: 11 });
+    const outOfRange = await invoke(h, IPC_CHANNELS.COPY_WORKER_STARTER, { generation: 3, workerOrdinal: 65 });
     const started = await invoke(h, IPC_CHANNELS.COPY_WORKER_STARTER, { generation: 3, workerOrdinal: 1 });
     assert(malformed.code === 'INVALID' && outOfRange.code === 'INVALID' && started.code === 'SESSION_STARTED' && copies === 1,
-      'only an exact bounded generation/worker pair reaches the controller, and a live worker is not copied again');
+    'only an exact bounded generation/worker pair reaches the controller, and a live worker is not copied again');
   } },
   { name: 'handoff bridge: ipc: restarting a quiet worker copies its new starter only in main and abandons it on clipboard failure', async run() {
     const calls = []; let clipboardText = '';
@@ -352,6 +518,24 @@ export default [
     assert(result.code === 'NO_WINDOW' && writes === 0
       && JSON.stringify(abandoned) === JSON.stringify([{ generation: 9, workerOrdinal: 1 }]),
     'a canvas that closed during pool preparation cannot write or strand a reserved starter');
+  } },
+  { name: 'handoff bridge: ipc: a closed canvas never abandons a previously exported worker re-copy', async run() {
+    const gate = deferred(); let windows = []; const abandoned = [];
+    const h = setup({
+      getCanvasWindows: () => windows,
+      controller: {
+        copyWorkerStarter: async () => gate.promise,
+        abandonWorkerStarter: async value => { abandoned.push(value); return true; },
+      },
+      clipboard: { writeText() { throw new Error('must not write after window loss'); }, readText: () => '', clear() {} },
+    });
+    windows = [h.window];
+    const pending = invoke(h, IPC_CHANNELS.COPY_WORKER_STARTER, { generation: 9, workerOrdinal: 1 });
+    await settle(); windows = [];
+    gate.resolve({ copied: true, recopied: true, generation: 9, workerOrdinal: 1, workerCount: 1, sessionCode: '2ABCDEFGHJKLMNPQRSTUVWXYZ2' });
+    const result = await pending;
+    assert(result.code === 'NO_WINDOW' && abandoned.length === 0,
+      'a window race leaves the already-exported re-copy state intact instead of abandoning its starter');
   } },
   { name: 'handoff bridge: ipc: a re-copied starter is reported as recopied with its ordinal, and a rotated one is not', async run() {
     const calls = [];
@@ -574,10 +758,11 @@ export default [
     first.api.dispose(); assert(ipc.listeners.size === 1, 'disposing an old registration must not remove the active listener');
     second.api.dispose(); assert(ipc.listeners.size === 0, 'dispose removes the active publish listener and candidates');
   } },
-  { name: 'handoff bridge: ipc: hold-job preserves boolean intent and activity/status are bounded', async run() {
+  { name: 'handoff bridge: ipc: hold-job reuses the per-job resume route and activity/status are bounded', async run() {
     const calls = []; const h = setup({ engine: { hold: async (...args) => { calls.push(['hold', ...args]); return { ok: true }; }, resume: async (...args) => { calls.push(['resume', ...args]); return { ok: true }; } }, controller: { getActivity: async () => Array.from({ length: 250 }, () => ({ at: 1, kind: 'get-served', outcome: 'served', message: 'secret' })) } });
     assert((await invoke(h, IPC_CHANNELS.HOLD_JOB, { jobId: JOB, held: true })).success && (await invoke(h, IPC_CHANNELS.HOLD_JOB, { jobId: JOB, held: false })).success, 'hold state accepts a real boolean');
-    assert(calls[0][0] === 'hold' && calls[1][0] === 'resume', 'false resumes rather than holding again'); const activity = await invoke(h, IPC_CHANNELS.GET_ACTIVITY);
+    assert(JSON.stringify(calls) === JSON.stringify([['hold', JOB, 'user_hold'], ['resume', { jobId: JOB }]]),
+      'false reuses the existing scoped engine.resume IPC route rather than unreleasing, requeuing, or editing job files'); const activity = await invoke(h, IPC_CHANNELS.GET_ACTIVITY);
     assert(activity.items.length === 200 && activity.items.every(item => item.kind === 'get-served' && item.outcome === 'served') && !JSON.stringify(activity).includes('secret'), 'hyphenated closed activity is capped and strips arbitrary fields');
   } },
   { name: 'handoff bridge: ipc: Activity rejects unknown kinds instead of coercing them to renderer copy', async run() {
@@ -1059,6 +1244,25 @@ export default [
     publish(h.event, { v: 1, seq: 6, jobs: [] }); await settle(12);
     publish(h.event, { v: 1, seq: 7, jobs }); await settle(12);
     assert(released.length === 2, 'after the job left the publication it is a fresh candidate again');
+  } },
+  { name: 'handoff bridge: ipc: auto-release drains more than fifty jobs in ordered independent batches', async run() {
+    const startedAt = Date.parse('2026-01-01T00:00:00.000Z');
+    const status = { enabled: true, serving: 'live', config: { hostname: 'bridge.example.com' }, prefs: {}, autoRelease: true };
+    const jobs = jobSeries(51); const releases = []; let firstPass = true;
+    const h = setup({ processStartedAt: startedAt,
+      controller: { snapshot: () => status, release: async value => { releases.push(value); const failed = firstPass && releases.length === 1; return failed ? { success: false, code: 'lane_limit' } : { success: true, ok: true, count: value.jobs.length }; } },
+      application: { describeForConfirm: async () => ({ ok: true, canvasFilePath: PATH, items: jobs.map(job => ({ jobId: job.jobId, createdAt: '2026-01-01T00:00:00.001Z' })) }) },
+    });
+    const publish = h.ipc.listeners.get(IPC_CHANNELS.PUBLISH_JOBS);
+    const sendSnapshot = (id, seq) => {
+      publish(h.event, { v: 1, seq, jobs: jobs.slice(0, 50), snapshot: { id, index: 0, final: false } });
+      publish(h.event, { v: 1, seq: seq + 1, jobs: jobs.slice(50), snapshot: { id, index: 1, final: true } });
+    };
+    sendSnapshot('jobs-first', 1); await settle(20);
+    assert(JSON.stringify(releases.map(value => value.jobs.length)) === JSON.stringify([50, 1]), 'the 51st job is released in a second <=50 batch even when the first batch fails');
+    firstPass = false;
+    sendSnapshot('jobs-retry', 3); await settle(20);
+    assert(JSON.stringify(releases.map(value => value.jobs.length)) === JSON.stringify([50, 1, 50]), 'only the failed first batch is retried; the successful 51st job remains handled');
   } },
   { name: 'handoff bridge: ipc: a job that already holds a lane is never re-described or re-released when its card leaves and re-enters the publication between stages', async run() {
     const startedAt = Date.parse('2026-01-01T00:00:00.000Z');

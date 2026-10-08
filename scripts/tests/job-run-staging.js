@@ -1,4 +1,4 @@
-import { __getJobsTelemetryForReportForTests, __queryFanOutForTests, __resetJobsTelemetryForTests, __runWithIpcRequestContextForTests, activateRunForResume, assert, appendJobsHistory, blankJobPreferencePlan, buildExactTargetRoleQueryBundle, buildJobAnalysisSnapshot, buildJobRunCompletionReceipt, careerInputFingerprint, careerProfileFingerprint, clearRun, clearRunWithResult, completeRunWithReceipt, createModuleRunQueue, evaluateJobPreferences, fs, getJobsTelemetry, ipcMain, isJobRunAutomaticRecoveryEligible, jobRunPathScopeForCanvas, lastRunReceiptPathForCanvas, normalizeJobPreferencePlan, normalizeJobRunProfileFingerprint, os, path, pauseRunForManualResume, readLastRunReceipt, readRunState, readStagedJobs, recordLinkedinResolveAttempt, recordResolveMergeOutcome, recordSourcePage, sanitizeJobPreferencePlan, sanitizeJobPreferences, sanitizeLastRunReceipt, startRun, validateExactResumeRun, validateJobPreferenceListingSubmission, validateJobPreferencePlanSubmission, validateJobPreferenceResearchSubmission, writeLastRunReceipt } from '../test-dependencies.js';
+import { __getJobsTelemetryForReportForTests, __queryFanOutForTests, __resetJobsTelemetryForTests, __runWithIpcRequestContextForTests, activateRunForResume, assert, appendJobsHistory, blankJobPreferencePlan, buildExactTargetRoleQueryBundle, buildJobAnalysisSnapshot, buildJobRunCompletionReceipt, careerInputFingerprint, careerProfileFingerprint, clearRun, clearRunWithResult, completeRunWithReceipt, createModuleRunQueue, evaluateJobPreferences, fs, getJobsTelemetry, ipcMain, isJobRunAutomaticRecoveryEligible, jobRunPathScopeForCanvas, lastRunReceiptPathForCanvas, markProviderGathered, markSourceStatus, normalizeJobPreferencePlan, normalizeJobRunProfileFingerprint, os, path, pauseRunForManualResume, readLastRunReceipt, readRunState, readStagedJobs, recordLinkedinResolveAttempt, recordResolveMergeOutcome, recordSourcePage, sanitizeJobPreferencePlan, sanitizeJobPreferences, sanitizeLastRunReceipt, setStage, startRun, validateExactResumeRun, validateJobPreferenceListingSubmission, validateJobPreferencePlanSubmission, validateJobPreferenceResearchSubmission, writeLastRunReceipt } from '../test-dependencies.js';
 // The bug-report builders under test. test-dependencies.js already re-exports
 // all three; they are imported on their own line so the shared bundle import
 // above stays untouched while other sessions edit it.
@@ -16,17 +16,114 @@ import { JOB_SEARCH_MAX_PROVIDER_LOOKBACK_DAYS } from '../test-dependencies.js';
 import { validateResponseSchema } from '../test-dependencies.js';
 import { canAutomaticallyResolveJobSourceWarning, jobSourceWarningAction, jobSourceAuthPreflightScope } from '../test-dependencies.js';
 import { __canPerformJobSourceActionForTests, __createDescriptionRecoveryCheckpointForTests, __jobSourceActionAuthorizationForTests, __pruneSupersededDescriptionRecoveryCheckpointsForTests, authoritativeFreshJobSearchWindow, claimExactJobRunExecution, effectiveJobSearchWindow, filterAndDedupJobsByPostedSince, freshJobSearchWindow, jobSourceRecoveryDisposition, legacyJobSearchWindow, manualAiPreSearchRecoveryWindow, mergeJobSourceCollectionCap, mergeRoleScreenedJobs, registerJobsHandlers, shouldDiscardJobRunAfterAbort } from '../../electron/ipc/jobs.js';
-import { collectionCompletedAtForManifest, markProviderGathered, markSourceStatus, providerGatheredAtForManifest, rebindJobRunRecoveryOwners, sanitizeJobSearchWindow, setStage } from '../../electron/ipc/jobRunStaging.js';
+import { collectionCompletedAtForManifest, providerGatheredAtForManifest, rebindJobRunRecoveryOwners, sanitizeJobSearchWindow } from '../../electron/ipc/jobRunStaging.js';
 import { beginJobContinuation, claimJobContinuation, completeJobContinuation, listJobContinuations, pauseJobContinuations, rebindJobContinuationOwners, releaseJobContinuationExecution } from '../../electron/ipc/jobContinuation.js';
 import { acquireCanvasRecoveryRead, __canvasRecoveryPathsForTests, withCanvasRecoveryOwner, withCanvasRecoveryRebind } from '../../electron/ipc/canvasRecoveryPaths.js';
 import { claimJobBoardRunExecution, releaseJobBoardRunExecution } from '../../electron/ipc/jobBoardRunLease.js';
 import { getJobAnalysisPaths, getJobDescriptionRecoveryCheckpointPath, rebindJobAnalysisRecoveryOwners } from '../../electron/ipc/jobAnalysisPaths.js';
+import { claimJobAnalysisOperationAuthority, withCurrentJobAnalysisOperationAuthority } from '../../electron/ipc/jobAnalysisOperationAuthorityStore.js';
+import crypto from 'node:crypto';
 import { JOB_PREFERENCE_CRITERION_MAX_LENGTH, JOB_PREFERENCE_PLAN_SCHEMA, JOB_PREFERENCE_RESEARCH_BATCH_ASSESSMENT_SCHEMA, JOB_PREFERENCE_TITLE_MAX_LENGTH, JOB_ROLE_AUDIT_SCHEMA } from '../../electron/ipc/aiSchemas.js';
 import { parseJobPreferenceResearchSections } from '../../electron/ipc/jobPreferences.js';
 import { HANDOFF_CONCURRENCY, mapAutomaticHandoffs, runAutomaticHandoffWorkers } from '../../src/utils/handoffScheduler.js';
+import { canClaimJobRunCollectionCompletion, exactJobRunCareerSnapshotBindingMatches } from '../../src/utils/jobCareerSnapshotBinding.js';
 import electronPkg from 'electron';
+import { writeApprovedCareerSnapshotFixture } from './careerSnapshotFixture.mjs';
+
+const continuationSha = value => crypto.createHash('sha256').update(value).digest('hex');
+
+async function claimStagingAuthority(canvasFilePath, nodeId, runId, careerSnapshotId, { kind = 'search', predecessor = null } = {}) {
+  const claimed = await claimJobAnalysisOperationAuthority({
+    canvasFilePath,
+    hubId: nodeId,
+    operationId: `fixture-staging-${continuationSha(`${canvasFilePath}:${nodeId}:${runId}:${kind}:${predecessor?.revision || 0}`).slice(0, 24)}`,
+    semanticBase: {
+      kind, careerSnapshotId, runId: kind === 'search' ? null : runId,
+      analysisRevisionId: null, fingerprint: null, continuationId: null, sourceArtifactFingerprint: null,
+    },
+    ...(predecessor ? { predecessor } : {}),
+  });
+  if (!claimed.admitted || !claimed.receipt) throw new Error(`fixture staging authority was not admitted: ${claimed.reason || 'unknown'}`);
+  return claimed.receipt;
+}
+
+// Fixture continuations use the same sealed parent snapshot contract as the
+// production IPC. The host—not a test-provided module fingerprint—publishes
+// the digest that beginJobContinuation verifies.
+async function sealContinuationFixture(canvasFilePath, identity, { careerSnapshotId = 'a'.repeat(64), operationAuthority = null } = {}) {
+  const authority = operationAuthority || (await claimJobAnalysisOperationAuthority({
+    canvasFilePath,
+    hubId: identity.nodeId,
+    operationId: `fixture-cont-${continuationSha(`${canvasFilePath}:${identity.nodeId}:${identity.parentRunId}:${identity.generationFingerprint || ''}`).slice(0, 24)}`,
+    semanticBase: {
+      kind: 'search', careerSnapshotId, runId: null, analysisRevisionId: null,
+      fingerprint: null, continuationId: null, sourceArtifactFingerprint: null,
+    },
+  })).receipt;
+  if (!authority) throw new Error('fixture continuation authority was not admitted');
+  const snapshot = {
+    canvasFilePath,
+    nodeId: identity.nodeId,
+    sourceHubId: identity.nodeId,
+    runId: identity.parentRunId,
+    careerSnapshotId,
+    operationAuthority: authority,
+  };
+  const serialized = `${JSON.stringify(snapshot)}\n`;
+  const parentArtifactFingerprint = continuationSha(serialized);
+  const paths = getJobAnalysisPaths(canvasFilePath, null, identity.nodeId);
+  const sealed = await withCurrentJobAnalysisOperationAuthority({
+    canvasFilePath, hubId: identity.nodeId, ...authority,
+  }, async (_record, stage) => {
+    await stage({ publications: [{ slot: 'current', digest: parentArtifactFingerprint }] });
+    await fs.promises.writeFile(paths.jsonPath, serialized, { mode: 0o600 });
+    return { ok: true };
+  });
+  if (!sealed.admitted) throw new Error('fixture continuation parent snapshot was not sealed');
+  return { ...identity, careerSnapshotId, operationAuthority: authority, parentArtifactFingerprint };
+}
 
 export default [
+  {
+    name: 'job run staging: late terminal and recovery callbacks are fenced by exact run plus career snapshot',
+    run: () => {
+      const s1 = 'a'.repeat(64);
+      const s2 = 'b'.repeat(64);
+      const admitted = { jobRunId: 'run-1', careerSnapshotId: s1 };
+      const snapshotChangedWhileAwaitingTerminal = { jobRunId: 'run-1', careerSnapshotId: s2 };
+      const successorRunOnSameHub = { jobRunId: 'run-2', careerSnapshotId: s1 };
+      const missingDescriptorPin = { jobRunId: 'run-1', careerSnapshotId: null };
+      const freshSearchingHub = { hubState: 'searching', jobRunId: null, careerSnapshotId: s1 };
+      const staleProviderAfterSnapshotSwap = { hubState: 'searching', jobRunId: null, careerSnapshotId: s2 };
+      const successorAlreadyClaimed = { hubState: 'searching', jobRunId: 'run-2', careerSnapshotId: s1 };
+
+      assert(exactJobRunCareerSnapshotBindingMatches(admitted, { runId: 'run-1', careerSnapshotId: s1 })
+        && !exactJobRunCareerSnapshotBindingMatches(snapshotChangedWhileAwaitingTerminal, { runId: 'run-1', careerSnapshotId: s1 })
+        && !exactJobRunCareerSnapshotBindingMatches(successorRunOnSameHub, { runId: 'run-1', careerSnapshotId: s1 })
+        && !exactJobRunCareerSnapshotBindingMatches(missingDescriptorPin, { runId: 'run-1', careerSnapshotId: s1 }),
+      'terminal/recovery CAS must reject a career swap during await, a successor run, and an unpinned descriptor');
+      assert(canClaimJobRunCollectionCompletion(freshSearchingHub, { runId: 'run-1', careerSnapshotId: s1 })
+        && !canClaimJobRunCollectionCompletion(staleProviderAfterSnapshotSwap, { runId: 'run-1', careerSnapshotId: s1 })
+        && !canClaimJobRunCollectionCompletion(successorAlreadyClaimed, { runId: 'run-1', careerSnapshotId: s1 }),
+      'a fresh provider completion may atomically claim its null run token, while a stale snapshot or successor token cannot stage coverage');
+
+      const source = fs.readFileSync(path.resolve('src/nodes/JobSearchNode.jsx'), 'utf8');
+      const stagingStart = source.indexOf('const recordCollectionCompletion = useCallback');
+      const retryStart = source.indexOf('const retryTerminalFinalization = useCallback', stagingStart);
+      const staging = source.slice(stagingStart, retryStart);
+      const retry = source.slice(retryStart, source.indexOf('const [savedAnalysisMeta', retryStart));
+      assert(staging.includes('canClaimJobRunCollectionCompletion(node?.data')
+        && staging.includes("...(node?.data?.jobRunId == null ? { jobRunId: runId } : {})")
+        && staging.includes('runId,')
+        && staging.includes('careerSnapshotId: admittedCareerSnapshotId')
+        && retry.includes('exactJobRunCareerSnapshotBindingMatches(before')
+        && retry.includes('exactJobRunCareerSnapshotBindingMatches(after')
+        && retry.includes('let recoveryCommitAccepted = false')
+        && retry.includes('exactJobRunCareerSnapshotBindingMatches(node?.data'),
+      'collection staging and terminal recovery must use the exact executable CAS predicate at each late renderer write');
+      return { snapshotSwapRejected: true, successorRejected: true, recoveryCommitFenced: true };
+    },
+  },
   {
     name: 'provider-gather boundary queues same-run Source Solve before downstream manual-AI processing finishes',
     run: async () => {
@@ -226,21 +323,33 @@ export default [
       try {
         await fs.promises.writeFile(oldCanvas, '{}');
         await fs.promises.writeFile(newCanvas, '{}');
-        await startRun(oldCanvas, { runId, startedAt: 100, queries: ['engineer'], nodeId, sourceIds: ['indeed'] });
-        await recordSourcePage(oldCanvas, { nodeId, expectedRunId: runId, sourceId: 'indeed', query: 'engineer', page: 1, jobs: [{ id: 'exact-staged-row' }], now: 101 });
-        const begun = await beginJobContinuation(oldCanvas, continuationArgs);
+        const sealedContinuationArgs = await sealContinuationFixture(oldCanvas, continuationArgs);
+        await startRun(oldCanvas, {
+          runId, startedAt: 100, queries: ['engineer'], nodeId, sourceIds: ['indeed'],
+          profileFingerprint: sealedContinuationArgs.profileFingerprint,
+          careerSnapshotId: sealedContinuationArgs.careerSnapshotId,
+          operationAuthority: sealedContinuationArgs.operationAuthority,
+        });
+        await recordSourcePage(oldCanvas, {
+          nodeId, expectedRunId: runId, expectedOperationAuthority: sealedContinuationArgs.operationAuthority,
+          sourceId: 'indeed', query: 'engineer', page: 1, jobs: [{ id: 'exact-staged-row' }], now: 101,
+        });
+        const begun = await beginJobContinuation(oldCanvas, sealedContinuationArgs);
         assert(begun.ok, 'the exact continuation is durable before the path adoption');
-        const claimed = await claimJobContinuation(oldCanvas, { ...continuationArgs, intentId: begun.intent.intentId }, { sender: senderA });
+        const claimed = await claimJobContinuation(oldCanvas, { ...sealedContinuationArgs, intentId: begun.intent.intentId }, { sender: senderA });
         assert(claimed.ok && claimed.leaseToken, 'the first window owns the live continuation lease');
 
         let migrationEntered = false;
         const migration = withCanvasRecoveryRebind(oldCanvas, newCanvas, async ({ oldPath, newPath, installAlias }) => {
           migrationEntered = true;
-          const continuationMove = await rebindJobContinuationOwners(oldPath, newPath);
+          const analysisMove = await rebindJobAnalysisRecoveryOwners(oldPath, newPath, { alreadyExclusive: true });
+          const continuationMove = analysisMove.success
+            ? await rebindJobContinuationOwners(oldPath, newPath)
+            : { success: false, reason: 'analysis-migration-failed' };
           const runMove = await rebindJobRunRecoveryOwners(oldPath, newPath);
-          if (!runMove.success || !continuationMove.success) return { success: false, runMove, continuationMove };
+          if (!runMove.success || !continuationMove.success) return { success: false, runMove, continuationMove, analysisMove };
           installAlias();
-          return { success: true, runMove, continuationMove };
+          return { success: true, runMove, continuationMove, analysisMove };
         });
         await Promise.resolve();
         assert(migrationEntered === false,
@@ -254,12 +363,13 @@ export default [
         const rows = await readStagedJobs(newCanvas, { nodeId });
         assert(recovered?.manifest?.runId === runId && recovered.manifest.inputs?.nodeId === nodeId
           && rows.length === 1 && rows[0]?.job?.id === 'exact-staged-row',
-        'new path retains the exact run/node and staged JSONL rows');
+        `new path retains the exact run/node and staged JSONL rows: ${JSON.stringify({ moved, recovered, rows })}`);
         assert((await readRunState(oldCanvas, 102, { nodeId }))?.manifest?.runId === runId,
           'the shared adoption gate resolves a captured old spelling to the moved exact owner only after every store commits');
-        const secondClaim = await claimJobContinuation(newCanvas, { ...continuationArgs, intentId: begun.intent.intentId }, { sender: senderB });
+        const reboundIntent = (await listJobContinuations(newCanvas, nodeId))[0];
+        const secondClaim = await claimJobContinuation(newCanvas, { ...reboundIntent, intentId: reboundIntent.intentId }, { sender: senderB });
         assert(secondClaim.ok === true
-          && releaseJobContinuationExecution(begun.intent.intentId, secondClaim.leaseToken, senderB) === true,
+          && releaseJobContinuationExecution(reboundIntent.intentId, secondClaim.leaseToken, senderB) === true,
           'after a drained migration, the adopted path can claim the exact continuation without retaining a stale process lock');
       } finally {
         await fs.promises.rm(root, { recursive: true, force: true });
@@ -803,6 +913,7 @@ export default [
       registerJobsHandlers();
       const searchJobs = ipcMain.__getInvokeHandler('search-jobs');
       const fingerprint = 'c'.repeat(64);
+      const { snapshotId: careerSnapshotId } = await writeApprovedCareerSnapshotFixture();
       const cases = [
         { label: 'modern', removeDedicatedBoundary: false },
         { label: 'legacy', removeDedicatedBoundary: true },
@@ -819,16 +930,19 @@ export default [
         const firstGatheredAt = startedAt + 30_000;
         const searchWindow = freshJobSearchWindow(null, new Date(startedAt));
         try {
+          const initialAuthority = await claimStagingAuthority(canvasPath, nodeId, runId, careerSnapshotId);
           await startRun(canvasPath, {
             runId,
             startedAt,
             queries: ['platform engineer'],
             profileFingerprint: fingerprint,
+            careerSnapshotId,
             canonicalLocation: '',
             nodeId,
             sourceIds: ['indeed'],
             searchWindow,
             maxAgeDays: searchWindow.providerLookbackDays,
+            operationAuthority: initialAuthority,
           });
           await recordSourcePage(canvasPath, {
             nodeId,
@@ -873,6 +987,9 @@ export default [
             removeListener: () => {},
             send: () => {},
           };
+          const resumeAuthority = await claimStagingAuthority(canvasPath, nodeId, runId, careerSnapshotId, {
+            kind: 'resume', predecessor: initialAuthority,
+          });
           const result = await searchJobs({ sender }, {
             nodeId,
             canvasFilePath: canvasPath,
@@ -881,6 +998,8 @@ export default [
             resume: true,
             resumeRunId: runId,
             profileFingerprint: fingerprint,
+            careerSnapshotId,
+            operationAuthority: resumeAuthority,
           });
           const after = await readRunState(canvasPath, Date.now(), { nodeId });
           assert(result?.success === true
@@ -3284,7 +3403,7 @@ export default [
       const lockBlock = search.slice(lockStart, lockEnd);
       // Reuse remains free for an unchanged brief, but a brief edit must
       // invalidate its old roles without unlocking locations/limits/sources.
-      const hasLockedAt = lockBlock.indexOf('const hasLockedRoles = roleLockMatchesBrief(laneTurnData);');
+      const hasLockedAt = lockBlock.indexOf('const hasLockedRoles = roleLockMatchesBrief(laneTurnData, pinnedCareerSnapshotId);');
       const guardAt = lockBlock.indexOf('if (!hasLockedRoles && window.electronAPI?.resolveSearchRoles) {');
       const callAt = lockBlock.indexOf('window.electronAPI.resolveSearchRoles({');
       assert(hasLockedAt >= 0 && guardAt > hasLockedAt && callAt > guardAt,
@@ -3330,7 +3449,7 @@ export default [
       const search = await fs.promises.readFile(path.resolve('src/nodes/JobSearchNode.jsx'), 'utf8');
       // Clear career files: the canonical unlock. Must ship the lock-clearing
       // fields in the SAME updateGlobal patch as the rest of the career wipe.
-      const clearStart = search.indexOf('const handleClearCareerFiles = useCallback((e) => {');
+      const clearStart = search.indexOf('const handleClearCareerFiles = useCallback(async (e) => {');
       const clearEnd = search.indexOf('\n  }, [', clearStart);
       assert(clearStart >= 0 && clearEnd > clearStart, 'handleClearCareerFiles must exist');
       const clearBody = search.slice(clearStart, clearEnd);
@@ -3366,7 +3485,7 @@ export default [
       // and freezes every setting permanently, alongside — but distinct
       // from — the transient controlsLocked busy-state.
       assert(search.includes("const resolvedRoles = Array.isArray(data.resolvedRoles) ? data.resolvedRoles : [];")
-        && search.includes('const settingsFrozen = hasResolvedRoleLock(data);')
+        && search.includes('const settingsFrozen = hasResolvedRoleLock(data)')
         && search.includes('disabled={controlsLocked || settingsFrozen}'),
       'JobSearchNode.jsx must derive settingsFrozen from hasResolvedRoleLock(data) and disable the Search Brief textarea once it is populated');
       // Every other empty-state setting must also freeze, not just the brief:
@@ -3585,7 +3704,7 @@ export default [
       // FIX2: settingsFrozen is keyed on hasResolvedRoleLock(data) — i.e.
       // resolvedRolesMeta presence — not `resolvedRoles.length > 0` (which
       // cannot distinguish "never locked" from "locked with zero titles").
-      assert(search.includes('const settingsFrozen = hasResolvedRoleLock(data);'),
+      assert(search.includes('const settingsFrozen = hasResolvedRoleLock(data)'),
       'settingsFrozen must derive only from hasResolvedRoleLock(data) — not controlsLocked, errorControlsLocked, data.locked, or data.queuedModuleRun');
       // JobSearchDoneState.jsx receives `locked` as an independent prop
       // (the caller's controlsLocked, renamed at the boundary) and computes
@@ -3885,6 +4004,8 @@ export default [
   {
     name: 'job run staging: exact-token recovery fails closed when its manifest is gone or terminal',
     run: async () => {
+      const snapshotA = 'c'.repeat(64);
+      const snapshotB = 'd'.repeat(64);
       const missing = validateExactResumeRun(null, 'run-observed-by-renderer');
       const terminal = validateExactResumeRun({
         incomplete: false,
@@ -3900,8 +4021,8 @@ export default [
       }, 'run-observed-by-renderer');
       const exact = validateExactResumeRun({
         incomplete: true,
-        manifest: { runId: 'run-observed-by-renderer', inputs: { profileFingerprint: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' } },
-      }, 'run-observed-by-renderer', 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa');
+        manifest: { runId: 'run-observed-by-renderer', inputs: { profileFingerprint: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', careerSnapshotId: snapshotA } },
+      }, 'run-observed-by-renderer', 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', snapshotA);
       const missingProfile = validateExactResumeRun({
         incomplete: true,
         manifest: { runId: 'run-observed-by-renderer', inputs: {} },
@@ -3911,6 +4032,14 @@ export default [
         manifest: { runId: 'run-observed-by-renderer', inputs: { profileFingerprint: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' } },
       }, 'run-observed-by-renderer', 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb');
       const legacy = validateExactResumeRun(null, null);
+      const missingCareerSnapshot = validateExactResumeRun({
+        incomplete: true,
+        manifest: { runId: 'run-observed-by-renderer', inputs: { profileFingerprint: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' } },
+      }, 'run-observed-by-renderer', 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', snapshotA);
+      const mismatchedCareerSnapshot = validateExactResumeRun({
+        incomplete: true,
+        manifest: { runId: 'run-observed-by-renderer', inputs: { profileFingerprint: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', careerSnapshotId: snapshotA } },
+      }, 'run-observed-by-renderer', 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', snapshotB);
       assert(missing?.resumeRunMissing === true
         && terminal?.resumeRunMissing === true
         && malformed?.resumeRunMissing === true
@@ -3918,12 +4047,16 @@ export default [
         && exact === null
         && missingProfile?.resumeProfileMissing === true
         && mismatchedProfile?.resumeProfileMismatch === true
+        && missingCareerSnapshot?.resumeCareerSnapshotMissing === true
+        && mismatchedCareerSnapshot?.resumeCareerSnapshotMismatch === true
         && legacy === null,
-      `an exact recovery token must also bind the persisted profile fingerprint, while tokenless legacy resume retains its compatibility path: ${JSON.stringify({ missing, terminal, malformed, mismatch, exact, missingProfile, mismatchedProfile, legacy })}`);
+      `an exact recovery token must bind profile plus immutable career snapshot, while tokenless legacy resume retains its compatibility path: ${JSON.stringify({ missing, terminal, malformed, mismatch, exact, missingProfile, mismatchedProfile, missingCareerSnapshot, mismatchedCareerSnapshot, legacy })}`);
 
       const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'ic-exact-resume-missing-'));
       const canvasPath = path.join(root, 'workspace.json');
       try {
+        const { snapshotId: careerSnapshotId } = await writeApprovedCareerSnapshotFixture();
+        const authority = await claimStagingAuthority(canvasPath, 'exact-resume-hub', 'run-observed-by-renderer', careerSnapshotId);
         registerJobsHandlers();
         const searchJobs = ipcMain.__getInvokeHandler('search-jobs');
         const sender = {
@@ -3941,6 +4074,8 @@ export default [
           resume: true,
           resumeRunId: 'run-observed-by-renderer',
           profileFingerprint: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+          careerSnapshotId,
+          operationAuthority: authority,
         });
         const after = await readRunState(canvasPath, Date.now(), { nodeId: 'exact-resume-hub' });
         assert(result.success === false && result.resumeRunMissing === true && after == null,
@@ -3952,12 +4087,16 @@ export default [
       const mismatchRoot = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'ic-exact-resume-profile-'));
       const mismatchCanvasPath = path.join(mismatchRoot, 'workspace.json');
       try {
+        const { snapshotId: careerSnapshotId } = await writeApprovedCareerSnapshotFixture();
+        const authority = await claimStagingAuthority(mismatchCanvasPath, 'exact-resume-hub', 'profile-bound-run', careerSnapshotId);
         await startRun(mismatchCanvasPath, {
           runId: 'profile-bound-run',
           startedAt: Date.now(),
           nodeId: 'exact-resume-hub',
           queries: ['platform engineer'],
           profileFingerprint: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+          careerSnapshotId,
+          operationAuthority: authority,
           canonicalLocation: '',
           sourceIds: ['indeed'],
         });
@@ -3977,6 +4116,8 @@ export default [
           resume: true,
           resumeRunId: 'profile-bound-run',
           profileFingerprint: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+          careerSnapshotId,
+          operationAuthority: authority,
         });
         const after = await readRunState(mismatchCanvasPath, Date.now(), { nodeId: 'exact-resume-hub' });
         assert(result.success === false && result.resumeProfileMismatch === true
@@ -3989,11 +4130,11 @@ export default [
       const jobsSource = await fs.promises.readFile(path.resolve('electron/ipc/jobs.js'), 'utf8');
       const handlerStart = jobsSource.indexOf("handleSafe('search-jobs'");
       const priorReadAt = jobsSource.indexOf("readRunState(canvasFilePath, Date.now(), { nodeId })", handlerStart);
-      const exactGuardAt = jobsSource.indexOf('const exactResumeFailure = validateExactResumeRun(prior, resumeRunId, normalizedProfileFingerprint);', priorReadAt);
+      const exactGuardAt = jobsSource.indexOf('const exactResumeFailure = validateExactResumeRun(', priorReadAt);
       const exactReturnAt = jobsSource.indexOf('return { success: false, ...exactResumeFailure };', exactGuardAt);
       const freshSourceDerivationAt = jobsSource.indexOf('activeSourceIds = resumeSourceIds || getRunnableJobSourceIds(', exactReturnAt);
-      const freshStartAt = jobsSource.indexOf('await startJobRun(canvasFilePath, {', handlerStart);
-      const providerDispatchAt = jobsSource.indexOf('fetchHttpSources(', handlerStart);
+      const freshStartAt = jobsSource.indexOf('startJobRun(canvasFilePath, {', handlerStart);
+      const providerDispatchAt = jobsSource.indexOf('runHttpSources(queries,', handlerStart);
       assert(handlerStart >= 0
         && priorReadAt > handlerStart
         && exactGuardAt > priorReadAt
@@ -4006,13 +4147,14 @@ export default [
     },
   },
   {
-    name: 'job run staging: exact-token recovery stops at a replaced searching-stage checkpoint before provider dispatch',
+    name: 'job run staging: exact-token recovery restores its sealed predecessor over an un-authorized sidecar substitution',
     run: async () => {
       const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'ic-exact-resume-stage-race-'));
       const canvasPath = path.join(root, 'workspace.json');
       const nodeId = 'exact-stage-race-hub';
       const runId = 'observed-exact-run';
       const replacementRunId = 'replacement-after-peek';
+      const { snapshotId: careerSnapshotId } = await writeApprovedCareerSnapshotFixture();
       const sender = {
         id: 66_002,
         isDestroyed: () => false,
@@ -4026,14 +4168,17 @@ export default [
       let manifestReads = 0;
       let replacedAtStageBoundary = false;
       try {
+        const initialAuthority = await claimStagingAuthority(canvasPath, nodeId, runId, careerSnapshotId);
         await startRun(canvasPath, {
           runId,
           startedAt: 1,
           queries: ['platform engineer'],
           profileFingerprint: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+          careerSnapshotId,
           canonicalLocation: '',
           nodeId,
           sourceIds: ['remoteok'],
+          operationAuthority: initialAuthority,
         });
         manifestPath = path.join(root, (await fs.promises.readdir(root)).find(name => (
           /^workspace\.jobs-run\..+\.json$/.test(name)
@@ -4062,6 +4207,9 @@ export default [
         __resetJobsTelemetryForTests();
         registerJobsHandlers();
         const searchJobs = ipcMain.__getInvokeHandler('search-jobs');
+        const resumeAuthority = await claimStagingAuthority(canvasPath, nodeId, runId, careerSnapshotId, {
+          kind: 'resume', predecessor: initialAuthority,
+        });
         const result = await searchJobs({ sender }, {
           nodeId,
           canvasFilePath: canvasPath,
@@ -4069,18 +4217,69 @@ export default [
           resume: true,
           resumeRunId: runId,
           profileFingerprint: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+          careerSnapshotId,
+          operationAuthority: resumeAuthority,
         });
         const after = await readRunState(canvasPath, Date.now(), { nodeId });
         const remoteDispatches = getJobsTelemetry()?.sourceRunHistory?.remoteok || [];
         assert(replacedAtStageBoundary
-          && result.success === false
-          && result.resumeRunMismatch === true
-          && after?.manifest?.runId === replacementRunId
-          && remoteDispatches.every(entry => entry.dispatchedAt == null),
-        `a replacement at the searching-stage CAS must return exact-token mismatch before provider dispatch or fresh replacement, got ${JSON.stringify({ replacedAtStageBoundary, result, after: after?.manifest?.runId, remoteDispatches })}`);
-        return { stageFence: true, providerDispatches: 0, replacementPreserved: true };
+          && result.success === true
+          && after?.manifest?.runId === runId
+          && remoteDispatches.some(entry => entry.dispatchedAt != null),
+        `an un-authorized sidecar substitution must not become a synthetic successor: the sealed S2 adoption restores its exact run before any provider is admitted, got ${JSON.stringify({ replacedAtStageBoundary, result, after: after?.manifest?.runId, remoteDispatches })}`);
+        return { sealedResumeRestored: true, providerDispatches: remoteDispatches.length, substitutionDidNotSupersede: true };
       } finally {
         fs.promises.readFile = originalReadFile;
+        await fs.promises.rm(root, { recursive: true, force: true });
+      }
+    },
+  },
+  {
+    name: 'complete-job-run preserves the exact admitted career snapshot through staging and terminal cleanup',
+    run: async () => {
+      const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'ic-complete-pinned-snapshot-'));
+      const canvasPath = path.join(root, 'workspace.json');
+      const nodeId = 'complete-pinned-snapshot-hub';
+      const runId = 'complete-pinned-snapshot-run';
+      const { snapshotId: careerSnapshotId } = await writeApprovedCareerSnapshotFixture();
+      const sender = { id: 66_004, isDestroyed: () => false, once: () => {}, on: () => {}, removeListener: () => {}, send: () => {} };
+      const originalTrashItem = electronPkg.shell.trashItem;
+      try {
+        const authority = await claimStagingAuthority(canvasPath, nodeId, runId, careerSnapshotId);
+        await startRun(canvasPath, {
+          runId, startedAt: Date.now() - 1_000, nodeId, queries: ['platform engineer'],
+          profileFingerprint: 'a'.repeat(64), careerSnapshotId, canonicalLocation: '', sourceIds: ['remoteok'],
+          operationAuthority: authority,
+        });
+        const staged = await readRunState(canvasPath, Date.now(), { nodeId });
+        assert(staged?.manifest?.inputs?.careerSnapshotId === careerSnapshotId,
+          'startRun must persist the normalized immutable snapshot pin that jobs.js passes at new-run admission');
+        registerJobsHandlers();
+        const complete = ipcMain.__getInvokeHandler('complete-job-run');
+        const missing = await complete({ sender }, { canvasFilePath: canvasPath, nodeId, runId, terminalStatus: 'completed', terminalOutcome: 'zero', operationAuthority: authority });
+        const mismatch = await complete({ sender }, { canvasFilePath: canvasPath, nodeId, runId, terminalStatus: 'completed', terminalOutcome: 'zero', careerSnapshotId: 'f'.repeat(64), operationAuthority: authority });
+        assert(missing.success === true && missing.ok === false && missing.careerSnapshotMismatch === true
+          && mismatch.success === true && mismatch.ok === false && mismatch.careerSnapshotMismatch === true
+          && (await readRunState(canvasPath, Date.now(), { nodeId }))?.manifest?.runId === runId,
+        'missing or mismatched terminal snapshot pins must reject before sidecar cleanup and retain the exact staged run');
+        electronPkg.shell.trashItem = async filePath => fs.promises.unlink(filePath);
+        const completed = await complete({ sender }, {
+          canvasFilePath: canvasPath, nodeId, runId, terminalStatus: 'completed', terminalOutcome: 'zero', careerSnapshotId, operationAuthority: authority,
+        });
+        const exactRetry = await complete({ sender }, {
+          canvasFilePath: canvasPath, nodeId, runId, terminalStatus: 'completed', terminalOutcome: 'zero', careerSnapshotId, operationAuthority: authority,
+        });
+        const replayMismatch = await complete({ sender }, {
+          canvasFilePath: canvasPath, nodeId, runId, terminalStatus: 'completed', terminalOutcome: 'zero', careerSnapshotId: 'b'.repeat(64), operationAuthority: authority,
+        });
+        assert(completed.success === true && completed.ok === true && completed.cleared === true
+          && exactRetry.success === true && exactRetry.ok === true && exactRetry.cleared === true
+          && replayMismatch.success === true && replayMismatch.ok === false && replayMismatch.operationAuthorityMismatch === true
+          && (await readRunState(canvasPath, Date.now(), { nodeId })) === null,
+        `only the exact persisted snapshot pin may commit or idempotently retry terminal receipt cleanup: ${JSON.stringify({ missing, mismatch, completed, exactRetry, replayMismatch })}`);
+        return { persisted: true, missingRejected: true, mismatchRejected: true, completed: true, exactRetry: true };
+      } finally {
+        electronPkg.shell.trashItem = originalTrashItem;
         await fs.promises.rm(root, { recursive: true, force: true });
       }
     },
@@ -5340,10 +5539,10 @@ export default [
 
       const contracts = [
         ['scored settlement', 'const completion = completeRun && jobRunId', 'updateGlobal(id, {'],
-        ['post-search zero', "? await completeJobRun(jobRunId, 'completed', 'zero', cfp, 0, moduleFingerprint([]), cancelled)", 'updateGlobal(currentId, {'],
-        ['preference-filtered zero', "? await completeJobRun(searchResult.runId, 'completed', 'preference-filtered', canvasFilePath, 0, moduleFingerprint([]), cancelled)", 'updateGlobal(currentId, {'],
-        ['collection-only', "? await completeJobRun(searchResult.runId, 'completed', 'collection-only', canvasFilePath, 0, moduleFingerprint([]), cancelled)", 'updateGlobal(currentId, {'],
-        ['paused zero', "? await completeJobRun(activeJobRunId, 'completed', 'zero', canvasFilePath, 0, moduleFingerprint([]), cancelled)", 'updateGlobal(id, {'],
+        ['post-search zero', "? await completeJobRun(jobRunId, 'completed', 'zero', cfp, 0, moduleFingerprint([]), cancelled, admittedCareerSnapshotId,", 'updateGlobal(currentId, (node) =>'],
+        ['preference-filtered zero', "? await completeJobRun(searchResult.runId, 'completed', 'preference-filtered', canvasFilePath, 0, moduleFingerprint([]), cancelled, pinnedCareerSnapshotId,", 'updateGlobal(currentId, (node) =>'],
+        ['collection-only', "? await completeJobRun(searchResult.runId, 'completed', 'collection-only', canvasFilePath, 0, moduleFingerprint([]), cancelled, pinnedCareerSnapshotId,", 'updateGlobal(currentId, (node) =>'],
+        ['paused zero', "? await completeJobRun(activeJobRunId, 'completed', 'zero', canvasFilePath, 0, moduleFingerprint([]), cancelled, admittedPausedCareerSnapshotId,", 'updateGlobal(id, (node) =>'],
       ];
       for (const [label, awaitMarker, doneMarker] of contracts) {
         const begin = source.indexOf(awaitMarker);
@@ -5351,7 +5550,7 @@ export default [
         assert(begin >= 0 && done > begin,
           `${label} must await the receipt/cleanup transaction before it publishes its terminal hub state`);
         const section = source.slice(begin, done);
-        assert(section.includes('if (cancelled())'),
+        assert(section.includes('cancelled()'),
           `${label} must discard a stale terminal update when Reset/unmount lands during finalization`);
       }
       assert(source.includes('function terminalFinalizationError(')
@@ -5378,14 +5577,14 @@ export default [
       // candidate. It must not bless that timestamp as the durable anchor
       // while scoring and the backend completion receipt can still fail.
       assert(staging.includes('pendingCollectionCompletion: {')
-        && staging.includes('runId: searchResult?.runId || null,')
+        && staging.includes('runId,')
         && staging.includes('collectionStartedAt,')
         && staging.includes('collectionCompletedAt,')
         && !staging.includes('lastCompletedRunAt'),
       'collection settlement must stage the exact run/timestamp without advancing lastCompletedRunAt');
       const freshPipelineStart = source.indexOf('const runPipeline = useCallback');
       const searchResultAt = source.indexOf('const searchResult = await window.electronAPI.searchJobs({', freshPipelineStart);
-      const stageCallAt = source.indexOf('recordCollectionCompletion(searchResult, cancelled);', searchResultAt);
+      const stageCallAt = source.indexOf('recordCollectionCompletion(searchResult, cancelled, pinnedCareerSnapshotId, analysisOperation);', searchResultAt);
       const lastFailureGuardAt = source.lastIndexOf('if (!searchResult.success) {', stageCallAt);
       const failureThrowAt = source.indexOf("throw new Error(searchResult.error || 'Job search failed');", lastFailureGuardAt);
       assert(freshPipelineStart >= 0 && searchResultAt > freshPipelineStart
@@ -5397,9 +5596,9 @@ export default [
       assert(freshSearchPayload.includes('initialLookbackDays: initialJobSearchLookbackDays(laneTurnData)')
         && freshSearchPayload.includes('searchWindow: runSearchWindow')
         && searchHandlerStart >= 0
-        && backend.slice(searchHandlerStart, searchHandlerStart + 7_000).includes('initialLookbackDays = null')
-        && backend.slice(searchHandlerStart, searchHandlerStart + 7_000).includes('searchWindow: requestedSearchWindow = null')
-        && backend.slice(searchHandlerStart, searchHandlerStart + 7_000).includes('authoritativeFreshJobSearchWindow(')
+        && backend.slice(searchHandlerStart, searchHandlerStart + 8_000).includes('initialLookbackDays = null')
+        && backend.slice(searchHandlerStart, searchHandlerStart + 8_000).includes('searchWindow: requestedSearchWindow = null')
+        && backend.slice(searchHandlerStart, searchHandlerStart + 8_000).includes('authoritativeFreshJobSearchWindow(')
         && backend.includes("const appliedInitialLookbackDays = !resume"),
       'the renderer must send its persisted first-scan range and frozen window, and the fresh IPC handler must validate and apply both');
 
@@ -5683,6 +5882,7 @@ export default [
     run: async () => {
       registerJobsHandlers();
       const generateJobQueries = ipcMain.__getInvokeHandler('generate-job-queries');
+      const { snapshotId: careerSnapshotId } = await writeApprovedCareerSnapshotFixture();
       const sender = {
         id: 66_010,
         isDestroyed: () => false,
@@ -5715,7 +5915,7 @@ export default [
         titles: ['Software Engineer', '  software engineer  ', 'Data Scientist'],
       };
       const rung2 = await generateJobQueries({ sender }, {
-        profile: {}, careerData: '', targetRole: '', preferredLocation: 'Toronto, ON',
+        profile: {}, careerData: '', careerSnapshotId, targetRole: '', preferredLocation: 'Toronto, ON',
         jobPreferences: '', preferencePlan: titlesPlan,
       }, undefined);
       assert(rung2.success === true, `rung 2 must succeed, got ${JSON.stringify(rung2)}`);
@@ -5739,7 +5939,7 @@ export default [
       // must keep taking the original single-exact-query path, unchanged,
       // even now that a titles-producing plan sits right next to it.
       const rung1 = await generateJobQueries({ sender }, {
-        profile: {}, careerData: '', targetRole: 'Product Manager', preferredLocation: 'Toronto, ON',
+        profile: {}, careerData: '', careerSnapshotId, targetRole: 'Product Manager', preferredLocation: 'Toronto, ON',
         jobPreferences: '', preferencePlan: titlesPlan,
       }, undefined);
       assert(rung1.success === true, `rung 1 must succeed, got ${JSON.stringify(rung1)}`);
@@ -5751,7 +5951,7 @@ export default [
       // (the shape every pre-Phase-A caller sent) must still work exactly as
       // before — same bundle, no AI call.
       const legacyOnly = await generateJobQueries({ sender }, {
-        profile: {}, careerData: '', targetRole: 'Backend Engineer', preferredLocation: 'Toronto, ON',
+        profile: {}, careerData: '', careerSnapshotId, targetRole: 'Backend Engineer', preferredLocation: 'Toronto, ON',
       }, undefined);
       assert(legacyOnly.success === true && legacyOnly.queryModel === null
         && JSON.stringify(legacyOnly.queries) === JSON.stringify(buildExactTargetRoleQueryBundle('Backend Engineer')),
@@ -5776,6 +5976,7 @@ export default [
       // plan outright — never silently re-interpret or null it out.
       registerJobsHandlers();
       const generateJobQueries = ipcMain.__getInvokeHandler('generate-job-queries');
+      const { snapshotId: careerSnapshotId } = await writeApprovedCareerSnapshotFixture();
       const sender = {
         id: 66_030,
         isDestroyed: () => false,
@@ -5798,7 +5999,7 @@ export default [
       // rejection there is itself part of the regression signal, on top of
       // the explicit assertions below.
       const result = await generateJobQueries({ sender }, {
-        profile: {}, careerData: '', targetRole: '', preferredLocation: 'Toronto, ON',
+        profile: {}, careerData: '', careerSnapshotId, targetRole: '', preferredLocation: 'Toronto, ON',
         jobPreferences: briefText, preferencePlan: validPlan,
       }, undefined);
       assert(result.success === true, `a validly-shaped plan must resolve without error, got ${JSON.stringify(result)}`);
@@ -5820,7 +6021,7 @@ export default [
     },
   },
   {
-    name: 'REGRESSION: the v8 targetRole→search-brief migration remains registered, and v9 (jobhub-titlesource→single-mode) is now the current schema version',
+    name: 'REGRESSION: v8/v9 migrations remain registered, and v10 jobboard location consolidation is current',
     run: async () => {
       // Cheap guard against a future migration silently renumbering over v8
       // or v9 (e.g. inserting a new step without bumping its own version, or
@@ -5833,8 +6034,8 @@ export default [
       // deletion) and the v9 entry (migrateJobHubTitleSourceSingleMode, the
       // migration THIS round of changes added) are actually present there,
       // not merely defined-but-unregistered.
-      assert(CURRENT_SCHEMA_VERSION === 9,
-        `CURRENT_SCHEMA_VERSION must be 9 after the jobhub-titlesource→single-mode migration lands, got ${CURRENT_SCHEMA_VERSION}`);
+      assert(CURRENT_SCHEMA_VERSION === 10,
+        `CURRENT_SCHEMA_VERSION must be 10 after jobboard location consolidation lands, got ${CURRENT_SCHEMA_VERSION}`);
       const source = await fs.promises.readFile(path.resolve('src/utils/serializationUtils.js'), 'utf8');
       const migrationsStart = source.indexOf('const MIGRATIONS = [');
       const migrationsEnd = source.indexOf('\n];', migrationsStart);
@@ -5844,13 +6045,15 @@ export default [
         'the v8 step must remain registered in MIGRATIONS, wired to migrateMergedTargetRoleIntoBrief, not merely exist as an unregistered function');
       assert(migrationsBlock.includes('{ version: 9,') && migrationsBlock.includes('migrate: migrateJobHubTitleSourceSingleMode'),
         'the v9 step must be registered in MIGRATIONS, wired to migrateJobHubTitleSourceSingleMode, not merely exist as an unregistered function');
-      // v9 must be the LAST entry — CURRENT_SCHEMA_VERSION is derived
-      // from MIGRATIONS[last].version, so a v9 entry registered anywhere
+      assert(migrationsBlock.includes('{ version: 10,') && migrationsBlock.includes('migrate: migrateConsolidateBoardLocations'),
+        'the v10 step must be registered in MIGRATIONS and wired to migrateConsolidateBoardLocations');
+      // v10 must be the LAST entry — CURRENT_SCHEMA_VERSION is derived
+      // from MIGRATIONS[last].version, so a v10 entry registered anywhere
       // other than last would silently desync the two.
       const lastEntryAt = migrationsBlock.lastIndexOf('{ version:');
-      assert(migrationsBlock.slice(lastEntryAt, lastEntryAt + '{ version: 9,'.length) === '{ version: 9,',
-        'the v9 step must be the LAST entry in MIGRATIONS so CURRENT_SCHEMA_VERSION stays derived correctly');
-      return { schemaVersion: CURRENT_SCHEMA_VERSION, v8Registered: true, v9Registered: true };
+      assert(migrationsBlock.slice(lastEntryAt, lastEntryAt + '{ version: 10,'.length) === '{ version: 10,',
+        'the v10 step must be the LAST entry in MIGRATIONS so CURRENT_SCHEMA_VERSION stays derived correctly');
+      return { schemaVersion: CURRENT_SCHEMA_VERSION, v8Registered: true, v9Registered: true, v10Registered: true };
     },
   },
   {
@@ -6007,10 +6210,12 @@ export default [
       };
       const originalTrashItem = electronPkg.shell.trashItem;
       try {
+        const { snapshotId: careerSnapshotId } = await writeApprovedCareerSnapshotFixture();
         const staleRun = 'completion-gc-stale-run';
         const successorRun = 'completion-gc-successor-run';
         const foreignRun = 'completion-gc-foreign-run';
         await __createDescriptionRecoveryCheckpointForTests(snapshot(canvas, staleRun, startedAt - 30_000));
+        const authority = await claimStagingAuthority(canvas, hubId, runId, careerSnapshotId);
         const manifest = await startRun(canvas, {
           runId,
           startedAt,
@@ -6018,9 +6223,11 @@ export default [
           queries: ['exact transaction test'],
           canonicalLocation: 'Toronto, ON',
           sourceIds: ['google'],
+          careerSnapshotId,
+          operationAuthority: authority,
         });
         assert(manifest?.runId === runId, 'fixture creates the exact owned run manifest that completion must consume');
-        const continuation = await beginJobContinuation(canvas, {
+        const continuationIdentity = await sealContinuationFixture(canvas, {
           nodeId: hubId,
           parentRunId: runId,
           profileFingerprint: 'c'.repeat(64),
@@ -6031,11 +6238,14 @@ export default [
           canonicalLocation: 'Toronto, ON',
           generationFingerprint: 'completion-fixture',
           recoveryMode: 'automatic',
+        }, { careerSnapshotId, operationAuthority: authority });
+        const continuation = await beginJobContinuation(canvas, {
+          ...continuationIdentity,
           now: startedAt + 1,
         });
         assert(continuation.ok === true, 'fixture creates a same-run continuation that terminal completion must retire');
-        await __createDescriptionRecoveryCheckpointForTests(snapshot(canvas, runId, startedAt + 1));
-        await __createDescriptionRecoveryCheckpointForTests(snapshot(canvas, successorRun, startedAt + 2));
+        await __createDescriptionRecoveryCheckpointForTests({ ...snapshot(canvas, runId, startedAt + 1), careerSnapshotId, operationAuthority: authority });
+        await __createDescriptionRecoveryCheckpointForTests({ ...snapshot(canvas, successorRun, startedAt + 2), careerSnapshotId, operationAuthority: authority });
         await __createDescriptionRecoveryCheckpointForTests(snapshot(canvas, foreignRun, startedAt - 30_000, foreignHubId));
         const currentPath = getJobDescriptionRecoveryCheckpointPath(canvas, runId, path.join(dir, 'unsaved-analysis'));
         const stalePath = getJobDescriptionRecoveryCheckpointPath(canvas, staleRun, path.join(dir, 'unsaved-analysis'));
@@ -6052,6 +6262,8 @@ export default [
           terminalStatus: 'completed',
           terminalOutcome: 'populated',
           scoreReadyCount: 1,
+          careerSnapshotId,
+          operationAuthority: authority,
         });
         const receipt = await readLastRunReceipt(canvas, hubId);
         const runState = await readRunState(canvas, Date.now(), { nodeId: hubId });
@@ -6078,7 +6290,7 @@ export default [
           terminalOutcome: 'populated',
           scoreReadyCount: 1,
         });
-        assert(failed.success === true && failed.ok === false && failed.tokenMismatch === true
+        assert(failed.success === true && failed.ok === false && failed.operationAuthorityMismatch === true
           && fs.existsSync(failedPath),
         'a missing/token-mismatched terminal transaction does not invoke checkpoint GC or remove the only recoverable stale checkpoint');
         return { terminalGcRemoved: completed.supersededCheckpointCleanup.removed, failedGcSkipped: true };
@@ -6179,8 +6391,9 @@ export default [
       const senderA = { once: () => {} };
       const senderB = { once: () => {} };
       try {
+        const sealedIdentity = await sealContinuationFixture(canvas, identity);
         const begun = await beginJobContinuation(canvas, {
-          ...identity,
+          ...sealedIdentity,
           recoveryMode: 'automatic',
           now: Date.now(),
         });
@@ -6191,11 +6404,11 @@ export default [
         'the acknowledged sidecar persists one redacted exact intent before network work starts');
 
         const leaseA = await claimJobContinuation(canvas, {
-          ...identity,
+          ...sealedIdentity,
           intentId: begun.intent.intentId,
         }, { sender: senderA });
         const duplicate = await claimJobContinuation(canvas, {
-          ...identity,
+          ...sealedIdentity,
           intentId: begun.intent.intentId,
         }, { sender: senderB });
         assert(leaseA.ok === true && typeof leaseA.leaseToken === 'string'
@@ -6206,34 +6419,84 @@ export default [
         'a continuation lease is sender/token scoped and releases without leaving a durable crash lock');
 
         const mismatch = await claimJobContinuation(canvas, {
-          ...identity,
+          ...sealedIdentity,
           canonicalLocation: 'Ottawa, ON',
           intentId: begun.intent.intentId,
         }, { sender: senderA });
-        assert(mismatch.ok === false && mismatch.tokenMismatch === true,
+        assert(mismatch.ok === false,
         'location/window/profile/generation mismatch cannot claim an old continuation');
 
         const paused = await pauseJobContinuations(canvas, {
           nodeId: identity.nodeId,
           parentRunId: identity.parentRunId,
+          intentId: begun.intent.intentId,
+          careerSnapshotId: sealedIdentity.careerSnapshotId,
+          operationAuthority: sealedIdentity.operationAuthority,
+          parentArtifactFingerprint: sealedIdentity.parentArtifactFingerprint,
           now: Date.now(),
         });
         const automaticClaim = await claimJobContinuation(canvas, {
-          ...identity,
+          ...sealedIdentity,
           intentId: begun.intent.intentId,
         }, { sender: senderA });
         assert(paused.ok === true && paused.paused === 1
           && automaticClaim.ok === false && automaticClaim.manual === true,
         'explicit Stop makes the exact continuation manual before cancellation');
+        const manualClaim = await claimJobContinuation(canvas, {
+          ...sealedIdentity,
+          intentId: begun.intent.intentId,
+          allowManualResume: true,
+        }, { sender: senderA });
         const removed = await completeJobContinuation(canvas, {
           nodeId: identity.nodeId,
           parentRunId: identity.parentRunId,
           intentId: begun.intent.intentId,
-        });
-        assert(removed.ok === true && removed.removed === true
+          operation: identity.operation,
+          leaseToken: manualClaim.leaseToken,
+          careerSnapshotId: sealedIdentity.careerSnapshotId,
+          operationAuthority: sealedIdentity.operationAuthority,
+          parentArtifactFingerprint: sealedIdentity.parentArtifactFingerprint,
+          superseded: true,
+        }, { sender: senderA });
+        assert(manualClaim.ok === true && removed.ok === true && removed.removed === true
           && (await listJobContinuations(canvas, identity.nodeId)).length === 0,
         'success/input supersession removes only the exact continuation');
         return { duplicateWindowBlocked: true, exactInputGuarded: true, manualPauseDurable: true };
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  },
+  {
+    name: 'job continuation receipts remain exhaustive beyond the former 32-intent ceiling',
+    run: async () => {
+      const dir = fs.mkdtempSync(path.join('/tmp', 'ic-job-continuation-uncapped-'));
+      const canvas = path.join(dir, 'canvas.json');
+      const total = 40;
+      try {
+        for (let index = 0; index < total; index += 1) {
+          const identity = await sealContinuationFixture(canvas, {
+            nodeId: 'uncapped-continuations',
+            parentRunId: 'uncapped-run',
+            profileFingerprint: 'c'.repeat(64),
+            kind: 'late-source-refresh',
+            operation: 'search-jobs-single-source',
+            sourceId: 'usajobs',
+            searchWindow: { startTimestamp: 1_700_000_000_000, anchorTimestamp: 1_700_000_000_000, completionTimestamp: null, capped: false, capReason: null, providerLookbackDays: 30 },
+            canonicalLocation: 'Toronto, ON',
+            generationFingerprint: `generation-${index}`,
+            recoveryMode: 'automatic',
+          });
+          const begun = await beginJobContinuation(canvas, {
+            ...identity,
+            now: 1_700_000_000_000 + index,
+          });
+          assert(begun.ok, `continuation ${index + 1} must persist rather than hit an old count ceiling`);
+        }
+        const listed = await listJobContinuations(canvas, 'uncapped-continuations');
+        assert(listed.length === total && new Set(listed.map(intent => intent.intentId)).size === total,
+          'every durable continuation receipt survives past 32; only the retained 32 MiB sidecar safety envelope limits storage');
+        return { continuationReceipts: listed.length };
       } finally {
         fs.rmSync(dir, { recursive: true, force: true });
       }

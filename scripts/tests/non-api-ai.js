@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { EventEmitter } from 'node:events';
-import { _resetNonApiAiHandoffLifecycle, abortNodeTasksAndWait, applyBugReportCode, assert, buildNonApiAiHandoffLifecycleMarkdown, callLLMDocument, callLLMRaw, callLLMText, callLLMVision, checkPromptFits, __durableStepKeysForTests, __nonApiAiProgressScopeSnapshotForTests, __pruneInactiveEphemeralProgressScopesForTests, __selectDurableStepForTests, __selectUniqueAcceptedLegacyStepForTests, canonicalizeGeneratedUntrustedBoundaryNonces, deriveHandoffCode, durableRunHasAnyTask, durableRunSettlementSummary, fs, generateMarkdown, getKnownTaskIds, getNonApiAiHandoffLifecycle, handleSafe, HANDOFF_CODE_ALPHABET, hardenStructuredTaskPrompt, ipcMain, listingIdsForRootBatch, materializeNonApiPrompt, NON_API_AI_TRANSPORT, NonApiAiCodeMismatchError, registerNonApiAiHandlers, requestNonApiAi, runBoundedJobTaxonomy, runRewindableGroundedHandoff, SAFE_NON_API_AI_LOG_ERROR_CODES, SAFE_VALIDATION_DIAGNOSTIC_REASONS, taskModelRoutingSnapshot, validateCompensationEvidenceSubmission, validateJobPreferenceListingSubmission, validateNonApiAiSubmission, validateRoleFamilyExperienceBandsSubmission, wrapUntrustedText } from '../test-dependencies.js';
+import { _resetNonApiAiHandoffLifecycle, abortNodeTasksAndWait, applyBugReportCode, assert, buildNonApiAiHandoffLifecycleMarkdown, callLLMDocument, callLLMRaw, callLLMText, callLLMVision, checkPromptFits, __durableStepKeysForTests, __reloadDurableStateForTests, __nonApiAiProgressScopeSnapshotForTests, __pruneInactiveEphemeralProgressScopesForTests, __selectDurableStepForTests, __selectUniqueAcceptedLegacyStepForTests, canonicalizeGeneratedUntrustedBoundaryNonces, deriveHandoffCode, durableRunHasAnyTask, durableRunSettlementSummary, electronPkg, fs, generateMarkdown, getKnownTaskIds, getNonApiAiHandoffLifecycle, handleSafe, HANDOFF_CODE_ALPHABET, hardenStructuredTaskPrompt, ipcMain, listingIdsForRootBatch, materializeNonApiPrompt, NON_API_AI_TRANSPORT, NonApiAiCodeMismatchError, registerNonApiAiHandlers, requestNonApiAi, runBoundedJobTaxonomy, runRewindableGroundedHandoff, SAFE_NON_API_AI_LOG_ERROR_CODES, SAFE_VALIDATION_DIAGNOSTIC_REASONS, taskModelRoutingSnapshot, validateCompensationEvidenceSubmission, validateJobPreferenceListingSubmission, validateNonApiAiSubmission, validateRoleFamilyExperienceBandsSubmission, wrapUntrustedText } from '../test-dependencies.js';
 import { pendingManualHandoffsForActiveTasks } from '../../electron/ipc/bugReport.js';
 import { __claimAcceptedResponseFingerprintForTests, __defaultSafeValidationDiagnosticForTests, __nonApiAiHandoffLifecycleAggregateCountForTests, __nonApiAiLogErrorCodeForTests, __promptForRetryForTests, DUPLICATE_RESPONSE_MIN_LENGTH, getNonApiAiHandoffLifecycleSnapshot, NonApiAiCodeMissingError, NonApiAiDuplicateResponseError, submitNonApiAiResponseForBridge } from '../../electron/ipc/nonApiAi.js';
 import { getRecentLogs, logger } from '../../electron/logger.js';
@@ -25,6 +25,25 @@ const MARKETPLACE_AND_WORKSPACE_TASKS = [
 
 export default [
   {
+    name: 'non-API AI: every career-profile compiler stage can be paused with its Job Search',
+    run: () => {
+      const dialogSource = readFileSync(new URL('../../src/components/NonApiAiDialog.jsx', import.meta.url), 'utf8');
+      const searchSource = readFileSync(new URL('../../src/nodes/JobSearchNode.jsx', import.meta.url), 'utf8');
+      const careerRecoveryGate = searchSource.indexOf('isCareerCompilationTask(resume?.task)');
+      const jobRunInspection = searchSource.indexOf('window.electronAPI.peekJobRun', careerRecoveryGate);
+      assert(dialogSource.includes("request.task.startsWith('career-profile-')")
+        && searchSource.includes("task.startsWith('career-profile-')")
+        // The optional access is intentional: a malformed/stale renderer
+        // marker must not throw before the recovery path can fail closed.
+        && careerRecoveryGate >= 0
+        // Career work owns no job-run sidecar, so it must be routed before
+        // normal saved-job recovery tries to inspect one.
+        && careerRecoveryGate < jobRunInspection,
+      'compile, every parallel audit, and repair must be pause/resume eligible as one pre-search career-profile workflow, before job-run recovery inspection');
+      return { compilerTaskFamily: 'career-profile-*' };
+    },
+  },
+  {
     name: 'handoff scheduler: every multi-item AI phase declares its centralized automatic or manual policy',
     run: () => {
       const scheduler = readFileSync(new URL('../../src/utils/handoffScheduler.js', import.meta.url), 'utf8');
@@ -34,7 +53,8 @@ export default [
         taxonomy: readFileSync(new URL('../../electron/ipc/jobTaxonomy.js', import.meta.url), 'utf8'),
         marketplace: readFileSync(new URL('../../electron/ipc/marketplace.js', import.meta.url), 'utf8'),
       };
-      assert(scheduler.includes('export const HANDOFF_CONCURRENCY = 10;')
+      assert(scheduler.includes('export const DEFAULT_HANDOFF_CONCURRENCY = 10;')
+        && scheduler.includes('export function resolveHandoffConcurrency(')
         && scheduler.includes('export async function mapAutomaticHandoffs(')
         && scheduler.includes('export async function mapManualHandoffWaves(')
         && scheduler.includes('export async function runAutomaticHandoffWorkers('),
@@ -57,12 +77,12 @@ export default [
       'role-family research, compensation, and scoring must refill the central automatic roster');
       assert(sources.taxonomy.includes('mapAutomaticHandoffs(\n      descriptors,\n      HANDOFF_CONCURRENCY,')
         && sources.marketplace.includes('resolved = await mapAutomaticHandoffs(')
-        && sources.marketplace.includes('await mapManualHandoffWaves('),
-      'taxonomy and price synthesis must roll automatically while manual-only marketplace hub scans retain explicit stable waves');
+        && sources.marketplace.includes('await mapStableHandoffQueue('),
+      'taxonomy, price synthesis, and prepared marketplace scans must refill the central roster');
       assert(sources.jobs.includes('Career-file extraction carries a local document attachment')
         && sources.jobs.includes('await mapManualHandoffWaves(')
         && !sources.jobs.includes('wavePromises = wave.map'),
-      'manual attachment extraction must use the central stable-wave policy and its orphan-cleanup contract');
+      'attachment extraction must use the central rolling policy and its orphan-cleanup contract');
       return { automaticOwners: 4, manualOwners: 2 };
     },
   },
@@ -315,8 +335,8 @@ export default [
       // back when the next prompt arrived. Capped by the viewport, because a
       // min-height that beats max-height pushes the submit button off a short
       // screen.
-      assert(dialogSource.includes('min-h-[min(47rem,calc(100vh-2rem))] max-h-[calc(100vh-2rem)]'),
-      'the dock panel keeps one height across every state instead of collapsing onto a short one');
+      assert(dialogSource.includes('min-h-[min(47rem,calc(100vh-6.5rem))] max-h-[calc(100vh-6.5rem)]'),
+      'the dock panel keeps one height across every state instead of collapsing onto a short one, and its viewport cap subtracts the toolbar clearance');
       // The chip carries the same fact, and carries it as motion: a static dot
       // would read as one more settled state rather than as work still running.
       assert(dialogSource.includes('const isBundleSaving = Boolean(request.working);')
@@ -449,8 +469,8 @@ export default [
       'pool progress counts merged batches, not the position of whichever prompt is on screen');
 
       assert(transportSource.includes('function cleanProgressCount(value)')
-        && transportSource.includes('number >= 0 && number <= 100_000'),
-      'the progress counter admits 0 rather than reusing the 1-based batch-number sanitizer');
+        && transportSource.includes('Number.isSafeInteger(number) && number >= 0'),
+      'the progress counter admits zero and every safe total rather than reusing the 1-based batch-number sanitizer');
       // THE resume invariant: these are display-only. Hashing them would change
       // the step key and make a resumed run re-ask for answers already pasted.
       const stepKeyStart = transportSource.indexOf('function durableStepKey(');
@@ -468,7 +488,8 @@ export default [
         && dialogSource.includes('Expand')
         && dialogSource.includes('Minimize')
         && dialogSource.includes('pointer-events-none fixed inset-0')
-        && dialogSource.includes('pointer-events-auto fixed bottom-4 right-4')
+        && dialogSource.includes('pointer-events-auto fixed bottom-[5.5rem] right-4')
+        && dialogSource.includes("data-handoff-dock={isExpanded ? 'expanded' : 'collapsed'}")
         && dialogSource.includes('role="region"')
         && !dialogSource.includes('aria-modal="true"')
         && !dialogSource.includes('aria-controls="non-api-ai-handoff-panel"')
@@ -2031,6 +2052,48 @@ export default [
     },
   },
   {
+    name: 'non-API AI: an aged pending durable run survives a simulated main-process restart',
+    run: async () => {
+      ipcMain.__clearInvokeHandlers();
+      registerNonApiAiHandlers();
+      const sent = [];
+      const sender = new EventEmitter();
+      sender.id = 713;
+      sender.isDestroyed = () => false;
+      sender.send = (channel, payload) => sent.push({ channel, payload });
+      const runId = `aged-pending-${process.pid}-${Date.now()}`;
+      const nodeId = `aged-pending-node-${process.pid}`;
+      handleSafe('non-api-aged-pending-test', async (_event, _args, signal) => ({
+        result: await callLLMText('Return a result.', {
+          signal,
+          task: 'test-manual-replay',
+          cachedPrefix: 'STATIC CACHED RUBRIC',
+          responseSchema: { type: 'object', required: ['result'], properties: { result: { type: 'string' } } },
+        }),
+      }));
+      const invocation = ipcMain.__getInvokeHandler('non-api-aged-pending-test')(
+        { sender }, { nodeId, manualAiRunId: runId },
+      );
+      let request = null;
+      for (let attempt = 0; attempt < 100 && !request; attempt += 1) {
+        request = sent.find(item => item.channel === 'non-api-ai-request')?.payload || null;
+        if (!request) await new Promise(resolve => setTimeout(resolve, 5));
+      }
+      assert(request?.requestId && request.runId === runId, 'the pending handoff must have reached durable storage');
+      await ipcMain.__getInvokeHandler('flush-non-api-ai-persistence')({ sender });
+      const durablePath = `${electronPkg.app.getPath('userData')}/non-api-ai-handoffs.json`;
+      const durable = JSON.parse(fs.readFileSync(durablePath, 'utf8'));
+      durable.runs[runId].updatedAt = Date.now() - (366 * 24 * 60 * 60 * 1000);
+      fs.writeFileSync(durablePath, JSON.stringify(durable));
+      await __reloadDurableStateForTests();
+      assert(await durableRunHasAnyTask(runId, ['test-manual-replay']),
+        'an arbitrarily old pending run must remain recoverable after the next process loads it');
+      await ipcMain.__getInvokeHandler('cancel-non-api-ai-request')({ sender }, { requestId: request.requestId });
+      await invocation;
+      await ipcMain.__getInvokeHandler('complete-non-api-ai-run')({ sender }, { runId });
+    },
+  },
+  {
     name: 'non-API AI: dialog cancellation falls back to only the pending request without a node',
     run: async () => {
       const sent = [];
@@ -2444,6 +2507,122 @@ export default [
       'a current request consumes only the accepted exact v1 alias with its explicit historical null batchTotal, without issuing a legacy-shaped fresh prompt');
       await ipcMain.__getInvokeHandler('complete-non-api-ai-run')({ sender }, { runId });
       return { acceptedLegacyReplayed: true, freshV2PromptNotIssued: true };
+    },
+  },
+  {
+    name: 'non-API AI: current and legacy durable replay revalidate domain rules before returning a cached response',
+    run: async () => {
+      ipcMain.__clearInvokeHandlers();
+      _resetNonApiAiHandoffLifecycle();
+      registerNonApiAiHandlers();
+      const schema = {
+        type: 'object', required: ['answer'], additionalProperties: false,
+        properties: { answer: { type: 'string' } },
+      };
+      const waitForRequest = async (sent, count = 1) => {
+        for (let attempt = 0; attempt < 100; attempt += 1) {
+          const requests = sent.filter(item => item.channel === 'non-api-ai-request').map(item => item.payload);
+          if (requests.length >= count) return requests.at(-1);
+          await new Promise(resolve => setTimeout(resolve, 5));
+        }
+        return null;
+      };
+      const sender = new EventEmitter();
+      const sent = [];
+      sender.id = 810;
+      sender.isDestroyed = () => false;
+      sender.send = (channel, payload) => sent.push({ channel, payload });
+      const submitBridge = (request, response) => submitNonApiAiResponseForBridge({
+        requestId: request.requestId,
+        handoffCode: request.handoffCode,
+        response,
+        allowTasks: new Set(['career-profile-compile']),
+        allowNodeIds: new Set(['validator-replay-node']),
+      });
+
+      const currentRunId = `current-validator-replay-${process.pid}-${Date.now()}`;
+      const currentPrompt = 'CURRENT DURABLE VALIDATOR REPLAY';
+      handleSafe('current-validator-replay-seed', async (_event, _args, signal) => ({
+        value: await callLLMText(currentPrompt, {
+          signal, task: 'career-profile-compile', responseSchema: schema,
+          responseValidator: () => undefined,
+        }),
+      }));
+      handleSafe('current-validator-replay-resume', async (_event, _args, signal) => ({
+        value: await callLLMText(currentPrompt, {
+          signal, task: 'career-profile-compile', responseSchema: schema,
+          responseValidator: value => {
+            if (value?.answer === 'stale') throw new Error('current durable response is domain-invalid');
+          },
+        }),
+      }));
+      const seededCurrent = ipcMain.__getInvokeHandler('current-validator-replay-seed')(
+        { sender }, { nodeId: 'validator-replay-node', manualAiRunId: currentRunId },
+      );
+      const currentSeedRequest = await waitForRequest(sent);
+      await submitBridge(currentSeedRequest, JSON.stringify({ handoffCode: currentSeedRequest.handoffCode, answer: 'stale' }));
+      await seededCurrent;
+      sent.length = 0;
+      const resumedCurrent = ipcMain.__getInvokeHandler('current-validator-replay-resume')(
+        { sender }, { nodeId: 'validator-replay-node', manualAiRunId: currentRunId },
+      );
+      const currentCorrection = await waitForRequest(sent);
+      assert(currentCorrection?.requestId && currentCorrection.isCorrection === false
+        && currentCorrection.prompt.includes(currentPrompt)
+        && !sent.some(item => item.channel === 'non-api-ai-settled'),
+      'a current accepted durable row whose validator now rejects is reissued, never returned as stale output');
+      await submitBridge(currentCorrection, JSON.stringify({ handoffCode: currentCorrection.handoffCode, answer: 'fixed' }));
+      const currentCompleted = await resumedCurrent;
+      assert(currentCompleted.success === true && currentCompleted.value?.answer === 'fixed',
+        'the current durable replay completes only after its replacement passes the current domain validator');
+      await ipcMain.__getInvokeHandler('complete-non-api-ai-run')({ sender }, { runId: currentRunId });
+
+      const legacyRunId = `legacy-validator-replay-${process.pid}-${Date.now()}`;
+      const legacyPrompt = 'LEGACY DURABLE VALIDATOR REPLAY';
+      const currentLegacyPrompt = 'CURRENT AFTER LEGACY VALIDATOR REPLAY';
+      handleSafe('legacy-validator-replay-seed', async (_event, _args, signal) => ({
+        value: await callLLMText(legacyPrompt, {
+          signal, task: 'career-profile-compile', responseSchema: schema,
+          responseValidator: () => undefined,
+        }),
+      }));
+      handleSafe('legacy-validator-replay-resume', async (_event, _args, signal) => ({
+        value: await callLLMText(currentLegacyPrompt, {
+          signal, task: 'career-profile-compile', responseSchema: schema,
+          responseValidator: value => {
+            if (value?.answer !== 'fixed') throw new Error('replacement must satisfy the current contract');
+          },
+          legacyReplay: {
+            prompt: legacyPrompt,
+            responseSchema: schema,
+            responseValidator: value => {
+              if (value?.answer === 'stale') throw new Error('legacy durable response is domain-invalid');
+            },
+          },
+        }),
+      }));
+      sent.length = 0;
+      const seededLegacy = ipcMain.__getInvokeHandler('legacy-validator-replay-seed')(
+        { sender }, { nodeId: 'validator-replay-node', manualAiRunId: legacyRunId },
+      );
+      const legacySeedRequest = await waitForRequest(sent);
+      await submitBridge(legacySeedRequest, JSON.stringify({ handoffCode: legacySeedRequest.handoffCode, answer: 'stale' }));
+      await seededLegacy;
+      sent.length = 0;
+      const resumedLegacy = ipcMain.__getInvokeHandler('legacy-validator-replay-resume')(
+        { sender }, { nodeId: 'validator-replay-node', manualAiRunId: legacyRunId },
+      );
+      const legacyReplacement = await waitForRequest(sent);
+      assert(legacyReplacement?.requestId && legacyReplacement.prompt.includes(currentLegacyPrompt)
+        && !legacyReplacement.prompt.includes(legacyPrompt)
+        && !sent.some(item => item.channel === 'non-api-ai-settled'),
+      'an invalid accepted legacy alias is not returned and falls through to the current replacement contract');
+      await submitBridge(legacyReplacement, JSON.stringify({ handoffCode: legacyReplacement.handoffCode, answer: 'fixed' }));
+      const legacyCompleted = await resumedLegacy;
+      assert(legacyCompleted.success === true && legacyCompleted.value?.answer === 'fixed',
+        'the legacy replay completes only after a response passes a live validator');
+      await ipcMain.__getInvokeHandler('complete-non-api-ai-run')({ sender }, { runId: legacyRunId });
+      return { currentReissued: true, legacyReissued: true };
     },
   },
   {
@@ -3964,10 +4143,10 @@ export default [
         jobsSource.indexOf('const scoreBatch = async (batch, context = {}) => {'),
         jobsSource.indexOf('\n    // Live per-batch scoring progress'),
       );
-      assert(scoreBatchBody.length > 0
-        && /\n\s*let fit = null;\n\s*try \{\n\s*fit = await checkPromptFits\(/.test(scoreBatchBody)
-        && !/if \(batch\.length > 1\) \{[\s\S]*await checkPromptFits\(/.test(scoreBatchBody),
-      'the context-window preflight await runs for EVERY batch size, so no batch can skip a microtask turn and issue its handoff early');
+      const preflightCalls = [...scoreBatchSource.matchAll(/await checkPromptFits\(/g)];
+      assert(scoreBatchSource.length > 0 && preflightCalls.length === 1
+        && !/if \(batch\.length > 1\) \{[\s\S]*await checkPromptFits\(/.test(scoreBatchSource),
+      'every scoring batch has exactly one context-window preflight; concurrent dispatch order is intentionally not an invocation-order contract');
       assert(/if \(fit && !fit\.fits && batch\.length > 1\) \{/.test(scoreBatchBody),
         'the SPLIT stays guarded on batch.length > 1 — at length 1 mid is 1, the right half is empty, and scoreBatch would recurse forever');
       // A retry/split is causally dependent on the parent response. Keep its
@@ -4731,6 +4910,46 @@ export default [
       } catch (err) { missingThrown = err; }
       assert(missingThrown?.message === missing.message, 'validateNonApiAiSubmission still throws the exact unchanged missing-code message');
       return { unchanged: true };
+    },
+  },
+  {
+    // Bug report 2026-10-07: "i cant click settings button while ai handoffs
+    // exist". The dock is a 32rem-wide panel pinned bottom-right; the canvas
+    // toolbar (Settings is its LAST button) is a bottom-centre row. On any
+    // window narrower than ~1700px the corner-anchored dock sat on top of that
+    // row. The dock must stay above the toolbar row, so this derives the row's
+    // height from the toolbar's own classes rather than trusting a number.
+    name: 'non-API AI: the handoff dock is parked above the canvas toolbar row so Settings stays clickable',
+    async run() {
+      const dialogSource = readFileSync(new URL('../../src/components/NonApiAiDialog.jsx', import.meta.url), 'utf8');
+      const toolbarSource = readFileSync(new URL('../../src/components/CanvasToolbar.jsx', import.meta.url), 'utf8');
+      const spacingPx = (step) => Number(step) * 4; // Tailwind: 1 step = 0.25rem = 4px
+      const panelMargin = toolbarSource.match(/<Panel position="bottom-center" className="[^"]*\bmb-(\d+)\b/);
+      const barPadding = toolbarSource.match(/className="[^"]*\bglass-card rounded-full p-(\d+)\b/);
+      const settingsButton = toolbarSource.match(/data-testid="canvas-settings-button"[\s\S]{0,200}?className="[^"]*\bp-(\d+)\b/);
+      const settingsIcon = toolbarSource.match(/<Settings size=\{(\d+)\} \/>/);
+      assert(panelMargin && barPadding && settingsButton && settingsIcon,
+        'the toolbar row geometry (panel margin, bar padding, button padding, icon size) is still derivable from CanvasToolbar.jsx');
+      const toolbarTopPx = spacingPx(panelMargin[1])
+        + spacingPx(barPadding[1]) * 2
+        + spacingPx(settingsButton[1]) * 2
+        + Number(settingsIcon[1]);
+      assert(toolbarTopPx === 74, `the toolbar row is 74px tall from the window bottom (derived ${toolbarTopPx}px) — if this changed, re-size the dock's bottom offset`);
+
+      const dockOffset = dialogSource.match(/data-handoff-dock=\{[^}]+\}\s+className=\{`pointer-events-auto fixed bottom-\[([\d.]+)rem\] right-4/);
+      assert(dockOffset, 'the dock container declares its bottom offset in rem next to its data-handoff-dock attribute');
+      const dockBottomPx = Number(dockOffset[1]) * 16;
+      const clears = (bottomPx) => bottomPx > toolbarTopPx;
+      assert(clears(dockBottomPx), `the dock's bottom edge (${dockBottomPx}px) clears the toolbar row (${toolbarTopPx}px)`);
+      assert(!clears(16), 'the check is not vacuous: the old corner anchor (bottom-4 = 16px) overlaps the toolbar row');
+
+      // The panel's height caps must subtract the same offset plus the 1rem top
+      // gap, or the taller-than-viewport case pushes the dock's header offscreen.
+      const capRem = Number(dockOffset[1]) + 1;
+      assert(dialogSource.includes(`max-h-[calc(100vh-${capRem}rem)]`) && dialogSource.includes(`min-h-[min(47rem,calc(100vh-${capRem}rem))]`),
+        'the dock panel height caps subtract the bottom offset plus a 1rem top gap');
+      assert(!dialogSource.includes('fixed bottom-4 right-4'), 'no dock container is anchored to the bottom-right corner any more');
+      return { toolbarTopPx, dockBottomPx };
     },
   },
 ];

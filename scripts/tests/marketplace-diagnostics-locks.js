@@ -152,9 +152,9 @@ export default [
       const marketplaceSource = fs.readFileSync(path.join(process.cwd(), 'electron/ipc/marketplace.js'), 'utf8');
       assert(marketplaceSource.includes('resolved = await mapAutomaticHandoffs(')
         && marketplaceSource.includes('batchMetadata,\n        HANDOFF_CONCURRENCY,')
-        && marketplaceSource.includes('await mapManualHandoffWaves(')
+        && marketplaceSource.includes('await mapStableHandoffQueue(')
         && marketplaceSource.includes('batchesWithProgress,\n        HANDOFF_CONCURRENCY,'),
-      'automatic price synthesis refills the shared ten-slot roster, while manual hub scans keep their stable bounded work sets');
+      'automatic price synthesis and prepared hub scans both refill the shared live roster while preserving deterministic result order');
       return { batches: batches.length, provenanceBound: true };
     },
   },

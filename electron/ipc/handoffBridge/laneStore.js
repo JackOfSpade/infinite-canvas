@@ -1,7 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { HANDOFF_CONCURRENCY } from '../../../src/utils/handoffScheduler.js';
 
 export const LANE_STORE_VERSION = 1;
 export const LANES_FILE_NAME = 'lanes.json';
@@ -77,42 +76,56 @@ function copyCounters(value, { strict = true } = {}) {
   return counters;
 }
 
+function copyApplicationForecast(value) {
+  if (!isObject(value)) return null;
+  const fields = ['totalUnits', 'completedUnits', 'remainingUnits', 'activeWaveUnits'];
+  if (!ownKeysAre(value, new Set(fields)) || !fields.every(key => Number.isSafeInteger(value[key]) && value[key] >= 0)
+    || value.completedUnits > value.totalUnits || value.remainingUnits !== value.totalUnits - value.completedUnits
+    || value.activeWaveUnits > 10 || value.activeWaveUnits > value.remainingUnits) return null;
+  return Object.fromEntries(fields.map(key => [key, value[key]]));
+}
+
 function copyLane(value, { strict = true } = {}) {
-  const fields = new Set(['ord', 'jobId', 'canvasFilePath', 'releasedAt', 'phase', 'reason', 'heldFrom', 'counters']);
+  const fields = new Set(['ord', 'jobId', 'canvasFilePath', 'matchTaskId', 'releasedAt', 'phase', 'reason', 'heldFrom', 'counters', 'applicationForecast']);
   if (!isObject(value) || (strict && !ownKeysAre(value, fields))
       || !Number.isSafeInteger(value.ord) || value.ord < 1
       || typeof value.jobId !== 'string' || value.jobId.length < 1 || value.jobId.length > 256
       || typeof value.canvasFilePath !== 'string' || value.canvasFilePath.length < 1 || value.canvasFilePath.length > 4096
+      || (Object.hasOwn(value, 'matchTaskId') && (typeof value.matchTaskId !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/.test(value.matchTaskId)))
       || !Number.isSafeInteger(value.releasedAt) || value.releasedAt < 0
       || !LANE_PHASES.has(value.phase)
       || (value.reason !== null && !LANE_REASONS.has(value.reason))
       || (value.heldFrom !== null && !LANE_PHASES.has(value.heldFrom))) return null;
   const counters = copyCounters(value.counters, { strict });
   if (Object.keys(value.counters || {}).length > 0 && Object.keys(counters).length === 0) return null;
+  const applicationForecast = Object.hasOwn(value, 'applicationForecast') ? copyApplicationForecast(value.applicationForecast) : null;
+  if (Object.hasOwn(value, 'applicationForecast') && !applicationForecast) return null;
   return {
     ord: value.ord,
     jobId: value.jobId,
     canvasFilePath: value.canvasFilePath,
+    ...(Object.hasOwn(value, 'matchTaskId') ? { matchTaskId: value.matchTaskId } : {}),
     releasedAt: value.releasedAt,
     phase: value.phase,
     reason: value.reason,
     heldFrom: value.heldFrom,
     counters,
+    ...(applicationForecast ? { applicationForecast } : {}),
   };
 }
 
 // Finished ('done') and vanished ('gone') lanes hold nothing worth keeping:
 // there is no bundle left to serve. They are never persisted, and one found in
-// an older file is dropped rather than resurrected as a held 'restart' lane
-// the person would have to Resume (which produced a snapshot-less lane that
-// never aged out). The store cap is therefore the SAME rule the engine
-// enforces on release: at most MAX_LIVE_LANES live lanes.
-export const MAX_LIVE_LANES = HANDOFF_CONCURRENCY;
+// an older file is dropped rather than resurrected as a held 'restart' lane.
+// A lane is durable backlog, not a chat slot: byte-limited atomic persistence
+// is the safety boundary, so a later wave is never discarded just because the
+// currently negotiated worker roster is full.
+export const MAX_LIVE_LANES = Number.MAX_SAFE_INTEGER;
 const TERMINAL_PHASES = new Set(['done', 'gone']);
 const isLiveLane = lane => !TERMINAL_PHASES.has(lane?.phase);
 
 function normalizeLanes(value) {
-  if (!isObject(value) || value.v !== LANE_STORE_VERSION || !Array.isArray(value.lanes) || value.lanes.length > MAX_LIVE_LANES * 2) return [];
+  if (!isObject(value) || value.v !== LANE_STORE_VERSION || !Array.isArray(value.lanes)) return [];
   const seen = new Set();
   const lanes = [];
   for (const item of value.lanes) {
@@ -121,7 +134,7 @@ function normalizeLanes(value) {
     seen.add(lane.ord);
     if (isLiveLane(lane)) lanes.push(lane);
   }
-  return lanes.length > MAX_LIVE_LANES ? [] : lanes;
+  return lanes;
 }
 
 function rehydrateLane(lane, now) {
@@ -297,7 +310,6 @@ export function createLaneStore({
   const saveLanes = lanes => enqueue(() => {
     if (!Array.isArray(lanes)) return false;
     const live = lanes.filter(isLiveLane);
-    if (live.length > MAX_LIVE_LANES) return false;
     const persisted = [];
     const seen = new Set();
     for (const candidate of live) {

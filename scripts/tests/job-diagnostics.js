@@ -4,7 +4,7 @@ import { __canWriteJobResolveTelemetryForTests, __recordJobSourceResolvePassForT
 import { buildNativeChallengeHistoryEvidence } from '../test-dependencies.js';
 import { redactNodeForIssueReport } from '../test-dependencies.js';
 import { collapseConsecutiveIdentical, postPipelineRecoveryAttemptCount } from '../test-dependencies.js';
-import { __createDescriptionRecoveryCheckpointForTests, __loadDescriptionRecoveryCheckpointForTests, __loadJobAnalysisSnapshotForTests, ipcMain, registerBugReportHandlers } from '../test-dependencies.js';
+import { __createDescriptionRecoveryCheckpointForTests, __loadDescriptionRecoveryCheckpointForTests, __loadJobAnalysisSnapshotForTests, __saveJobAnalysisSnapshotForTests, ipcMain, registerBugReportHandlers } from '../test-dependencies.js';
 import { buildMainProcessLogsMarkdown, newestFirstLogLines, timestampedLogLines } from '../test-dependencies.js';
 import { formatEventLogEntry, localIsoTimestampWithOffset } from '../../src/utils/EventLogger.js';
 import { descriptionPanelFailureAttribution, selectManualSourcePageJobs } from '../../electron/ipc/browser/manualScraper.js';
@@ -58,6 +58,7 @@ import { boundedCombinedSourceRuns, normalizeBoardResultCount } from '../../src/
 import { collectCompactJobBoardTopology } from '../../src/utils/jobBoardReportTopology.js';
 import os from 'node:os';
 import { appendJobsHistory, loadJobsHistory } from '../../electron/ipc/jobsHistory.js';
+import { claimJobAnalysisOperationAuthority } from '../../electron/ipc/jobAnalysisOperationAuthorityStore.js';
 
 export default [
   {
@@ -2806,13 +2807,28 @@ export default [
       const canvas = path.join(dir, 'canvas.json');
       const nodeId = 'checkpoint-retain-hub';
       const runId = 'checkpoint-retain-run';
+      const careerSnapshotId = 'a'.repeat(64);
       try {
+        const authority = await claimJobAnalysisOperationAuthority({
+          canvasFilePath: canvas,
+          hubId: nodeId,
+          operationId: 'checkpoint-retain-operation',
+          semanticBase: {
+            kind: 'description-recovery', careerSnapshotId, runId,
+            fingerprint: 'checkpoint-retain-fixture', analysisRevisionId: null,
+            continuationId: null, sourceArtifactFingerprint: null,
+          },
+        });
+        assert(authority.admitted,
+          'fixture claims a current durable operation before writing its checkpoint');
         const created = await __createDescriptionRecoveryCheckpointForTests({
           version: 1,
           canvasFilePath: canvas,
           sourceHubId: nodeId,
           nodeId,
           runId,
+          careerSnapshotId,
+          operationAuthority: authority.receipt,
           createdAt: new Date().toISOString(),
           jobs: [{ title: 'recoverable row' }],
           descriptionRecoveryJobs: [{ title: 'deferred row' }],
@@ -2838,13 +2854,12 @@ export default [
           terminalStatus: 'completed',
           terminalOutcome: 'populated',
           scoreReadyCount: 1,
+          careerSnapshotId,
         });
         const retained = await __loadDescriptionRecoveryCheckpointForTests(canvas, nodeId, runId);
-        assert(result.success === true && result.ok === false && result.tokenMismatch === true
-          && result.checkpointCleanup?.removed === false
-          && result.checkpointCleanup?.reason === 'terminal-not-finalized'
+        assert(result?.operationAuthorityMismatch === true
           && retained?.snapshot?.runId === runId,
-        'a token/receipt failure leaves the current-run recovery checkpoint usable rather than retiring it');
+        'an untrusted terminal completion is rejected before it can retire the current sealed recovery checkpoint');
       } finally {
         fs.rmSync(dir, { recursive: true, force: true });
       }
@@ -5289,6 +5304,117 @@ export default [
       } finally {
         recordApplicationTelemetry(prior);
       }
+  },
+},
+{
+    name: 'FULL includes complete typed application output, while APPOUTPUT remains narrow and missing output is honest',
+    run: () => {
+      const prior = getApplicationTelemetry();
+      const nodeId = 'application-output-report-card';
+      const rawCareerSource = 'RAW-CAREER-SOURCE-MUST-NEVER-REACH-A-REPORT';
+      const secret = 'not-a-real-api-key-but-private-123456789';
+      try {
+        recordApplicationTelemetry({
+          source: 'local-ai', attemptId: 'application-output-report', nodeId, windowId: 901,
+          status: 'completed', phase: 'imported',
+          applicationOutput: {
+            version: 2, state: 'available', rawCareerSource,
+            documents: {
+              resume: {
+                identity: { name: 'Example Candidate', credential: 'B.Sc. Computer Science', contact: ['candidate@example.test'] },
+                roles: [
+                  { title: 'Engineer', company: 'Acme', dates: '2024 – Present', bullets: ['resume-0: Built a release pipeline. /Users/private/Resume.md must be redacted.', 'resume-1: Reduced ambiguity through explicit ownership.'] },
+                  { title: 'Developer', company: 'Beta', dates: '2022 – 2024', bullets: ['resume-2: Made recovery ownership observable.'] },
+                ],
+                projects: [{ name: 'Project Delta', description: 'resume-project: Built a diagnostic workflow.', metrics: 'resume-metric: 40% faster triage.' }],
+                skills: [{ group: 'Engineering', items: ['TypeScript', 'testing', 'systems design', 'resume-last: complete skill evidence'] }],
+                education: ['B.Sc. Computer Science — Example University', 'Certificate: Cloud Systems'],
+              },
+              coverLetter: {
+                name: 'Letter Candidate', contact: ['letter.candidate@example.test', 'Toronto, ON'], date: 'January 2, 2026',
+                recipient: 'Hiring Team', salutation: 'Dear Hiring Team,',
+                paragraphs: [
+                  'cover-0: I built reliable release systems.',
+                  `cover-1: API_KEY=${secret} and https://example.test/jobs/private?token=secret.`,
+                  'cover-2: I made operational tradeoffs explicit.',
+                  'cover-3: I can explain the result clearly.',
+                  'cover-4: final paragraph must survive; # forged heading\n```forged fence\n- forged list',
+                ],
+                closing: 'Sincerely,', signatureTitle: 'Software Engineer',
+              },
+            },
+            metadata: {
+              retainedBytes: 2400,
+              resume: { roleCount: 2, bulletCount: 3, projectCount: 1, skillGroupCount: 1, skillItemCount: 4, educationCount: 2 },
+              coverLetter: { paragraphCount: 5 },
+              digests: { resume: 'a'.repeat(64), coverLetter: 'b'.repeat(64) },
+            },
+          },
+        });
+        const payload = {
+          description: 'Please assess whether my documents have prose-quality defects.',
+          nodes: [{ id: nodeId, type: 'jobcard', data: {} }],
+          edges: [], drawings: [], frontEndState: {}, nodeInternals: [], nodeComponentStates: [], eventLogs: [],
+        };
+        const full = generateMarkdown({ ...payload, filterCode: 'FULL' }, 901).markdown;
+        const defaultBroad = generateMarkdown(payload, 901).markdown;
+        const optedIn = generateMarkdown({ ...payload, filterCode: 'APPOUTPUT' }, 901).markdown;
+        const narrow = generateMarkdown({ ...payload, filterCode: 'APPLICATION' }, 901).markdown;
+        assert(full.includes('## Application Output Evidence (APPOUTPUT)')
+          && full.includes('cover-0: I built reliable release systems.')
+          && full.includes('cover-4: final paragraph must survive')
+          && full.includes('resume-0: Built a release pipeline.')
+          && full.includes('resume-last: complete skill evidence')
+          && full.includes('B.Sc. Computer Science — Example University')
+          && full.includes('Letter Candidate')
+          && full.includes('letter.candidate@example.test')
+          && full.includes('January 2, 2026')
+          && full.includes('Résumé visible-text digest (SHA-256): `aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa`')
+          && !full.includes(rawCareerSource)
+          && !full.includes(secret),
+        'FULL must include every final typed prose field and metadata/digests while excluding unprojected source and secrets');
+        assert(optedIn.includes('## Application Output Evidence (APPOUTPUT)')
+          && optedIn.includes('cover-0: I built reliable release systems.')
+          && optedIn.includes('resume-0: Built a release pipeline.')
+          && optedIn.includes('credential=<redacted>')
+          && optedIn.includes('<local-path>')
+          && !optedIn.includes(rawCareerSource)
+          && !optedIn.includes(secret)
+          && optedIn.includes('cover-4: final paragraph must survive')
+          && optedIn.includes('resume-last: complete skill evidence')
+          && optedIn.includes('Letter Candidate')
+          && optedIn.includes('letter.candidate@example.test')
+          && optedIn.includes('January 2, 2026')
+          && !optedIn.includes('\n# forged heading')
+          && !optedIn.includes('\n```forged fence'),
+        'APPOUTPUT must include the same complete final prose and make model-controlled Markdown inert while re-sanitizing secrets and paths');
+        assert(!narrow.includes('## Application Output Evidence (APPOUTPUT)')
+          && !narrow.includes('cover-0: I built reliable release systems.')
+          && !narrow.includes('Letter Candidate')
+          && !narrow.includes('letter.candidate@example.test')
+          && !narrow.includes('January 2, 2026'),
+        'narrow filters other than APPOUTPUT must not include application prose');
+        assert(!defaultBroad.includes('## Application Output Evidence (APPOUTPUT)')
+          && !defaultBroad.includes('cover-0: I built reliable release systems.')
+          && !defaultBroad.includes('Example Candidate')
+          && !defaultBroad.includes('Letter Candidate')
+          && !defaultBroad.includes('letter.candidate@example.test')
+          && !defaultBroad.includes('January 2, 2026'),
+        'the empty/default broad-report path must remain private; only explicit FULL or APPOUTPUT consents to application prose');
+
+        recordApplicationTelemetry({ source: 'local-ai', attemptId: 'application-output-gone', nodeId, windowId: 901, status: 'completed' });
+        const unavailable = generateMarkdown({ ...payload, filterCode: 'APPOUTPUT' }, 901).markdown;
+        assert(unavailable.includes('Unavailable/removed: no final application-output snapshot is retained')
+          && unavailable.includes('It was not audited.')
+          && !unavailable.includes('cover-0: I built reliable release systems.'),
+        'an output that is no longer retained must be called unavailable rather than implied to have been audited');
+        const filter = applyBugReportCode([], {}, 'APPOUTPUT');
+        assert(filter.matchedCodes.includes('APPOUTPUT') && !filter.unknownCodes.includes('APPOUTPUT'),
+          'APPOUTPUT must be a first-class filter code rather than an unrecognized manual override');
+      } finally {
+        recordApplicationTelemetry(prior);
+      }
+      return { fullIncludesOutput: true, outputNarrow: true, unavailableHonest: true };
     },
   },
 {
@@ -6766,6 +6892,7 @@ export default [
       const dir = fs.mkdtempSync(path.join('/tmp', 'ic-saved-scrape-counter-report-'));
       const canvas = path.join(dir, 'canvas.json');
       const analysisPaths = getJobAnalysisPaths(canvas, path.join(dir, 'unsaved-analysis'));
+      const careerSnapshotId = 'b'.repeat(64);
       try {
         fs.writeFileSync(analysisPaths.jsonPath, JSON.stringify({
           ...current,
@@ -6780,10 +6907,26 @@ export default [
           sourceGatheredCount: undefined,
           sourceHubId: 'saved-scrape-counter-fixture',
           canvasFilePath: canvas,
+          careerSnapshotId,
           searchFunnel: { relevanceKept: 60, raw: 60 },
         };
-        fs.writeFileSync(analysisPaths.jsonPath, JSON.stringify(legacyFunnelSnapshot), 'utf8');
-        const loadedLegacy = await __loadJobAnalysisSnapshotForTests(canvas);
+        const authority = await claimJobAnalysisOperationAuthority({
+          canvasFilePath: canvas,
+          hubId: 'saved-scrape-counter-fixture',
+          operationId: 'saved-scrape-counter-operation',
+          semanticBase: {
+            kind: 'saved-scrape', careerSnapshotId, runId: null,
+            fingerprint: 'saved-scrape-counter-fixture', analysisRevisionId: null,
+            continuationId: null, sourceArtifactFingerprint: null,
+          },
+        });
+        assert(authority.admitted,
+          'fixture claims a current durable operation before publishing its recovery artifact');
+        await __saveJobAnalysisSnapshotForTests({
+          ...legacyFunnelSnapshot,
+          operationAuthority: authority.receipt,
+        });
+        const loadedLegacy = await __loadJobAnalysisSnapshotForTests(canvas, 'saved-scrape-counter-fixture');
         const restoredFound = loadedLegacy.snapshot.sourceGatheredCount
           ?? loadedLegacy.snapshot.searchFunnel?.relevanceKept
           ?? loadedLegacy.snapshot.searchFunnel?.raw
@@ -7205,7 +7348,7 @@ export default [
         windowId: telemetry.windowId,
         pipeline: telemetry.pipeline,
         search: telemetry.search,
-        careerParseCache: telemetry.careerParseCache,
+        careerSnapshotCache: telemetry.careerSnapshotCache,
       };
       Object.assign(telemetry, {
         nodeId: 'rerun-provenance-diagnostics',
@@ -7219,10 +7362,10 @@ export default [
           pendingSources: [],
         },
         search: null,
-        // A fingerprint-cache HIT means the supplied files were NOT actually
-        // re-parsed this run — reusing the prior parse instead. The Trigger
+        // A snapshot-cache HIT means the supplied files were NOT actually
+        // recompiled this run — reusing the prior approved snapshot instead. The Trigger
         // line below must not contradict this by claiming a parse happened.
-        careerParseCache: { outcome: 'hit', fileCount: 1, fingerprint: 'de11f2a6acec' },
+        careerSnapshotCache: { outcome: 'hit', fileCount: 1, fingerprint: 'de11f2a6acec' },
       });
       try {
         const report = buildJobsPipelineSnapshot(new Set(['rerun-provenance-diagnostics']), null, null);
@@ -7231,16 +7374,16 @@ export default [
           && !report.includes('career files reparsed')
           && !report.includes('run age 5s'),
         'a completed run reports its actual duration and explicit button origin instead of an ever-growing run age');
-        assert(report.includes('Career Parse Cache')
-          && report.includes('hit — reused the prior parsed career data')
+        assert(report.includes('Approved Career Snapshot Cache')
+          && report.includes('hit — reused the prior approved career snapshot')
           && report.includes('fingerprint `de11f2a6acec`'),
-        'the parse-cache outcome line is unchanged by this fix');
+        'the approved-snapshot-cache outcome line is unchanged by this fix');
         // The actual bug: "career files reparsed" next to "hit — reused the
-        // prior parsed career data" asserted two contradictory things about the
+        // prior approved career snapshot" asserted two contradictory things about the
         // same run. "career files supplied" describes the INPUT (fresh files
         // were given to this run) and is true regardless of the cache outcome.
         assert(!report.includes('career files reparsed'),
-        'a fingerprint-cache hit and the Trigger line no longer contradict each other — the Trigger line describes input, not an asserted parse action');
+        'a snapshot-cache hit and the Trigger line no longer contradict each other — the Trigger line describes input, not an asserted compile action');
       } finally {
         Object.assign(telemetry, saved);
       }
@@ -7965,7 +8108,7 @@ export default [
       const resumePath = searchRenderer.slice(resumeStart, resumeEnd);
       assert(resumePath.includes('const requestedJobRunId = jobRunIdRef.current || requestedData.jobRunId || null')
         && resumePath.includes('activeJobRunId = continuationRunId;')
-        && resumePath.includes("completeJobRun(activeJobRunId, 'completed', 'zero', canvasFilePath, 0, moduleFingerprint([]), cancelled)")
+        && resumePath.includes("completeJobRun(activeJobRunId, 'completed', 'zero', canvasFilePath, 0, moduleFingerprint([]), cancelled, admittedPausedCareerSnapshotId, () => !cancelled(), null, pausedAuthority)")
         && resumePath.includes('jobRunId: activeJobRunId'),
       'same-tick source resolution scopes both empty completion and resumed scoring to the live run ref');
 
@@ -8840,11 +8983,13 @@ export default [
         && sourceCard.includes("detail: `Waiting to resolve (${position})…`"),
       'a provider-boundary Solve retains the click behind the shared job-workflow lane while downstream handoffs finish, rather than rejecting it as a stale pre-return run');
       const jobsIpc = fs.readFileSync(path.resolve('electron/ipc/jobs.js'), 'utf8');
-      assert(jobsIpc.includes('if (canvasFilePath && !providerPhaseOnly) {\n      const providerGathered = await markProviderGathered(canvasFilePath, Date.now(), {')
+      assert(jobsIpc.includes("if (canvasFilePath && !providerPhaseOnly) {")
+        && jobsIpc.includes('const providerGathered = await markProviderGathered(canvasFilePath, Date.now(), {')
         && jobsIpc.includes('requiredSourceIds: activeSourceIds')
         && jobsIpc.includes('providerGathered: providerGatheredAtForManifest(state.manifest) != null')
         && jobsIpc.includes("if (state.manifest.stage === 'gathered') return { authorized: true, reason: 'gathered' };")
-        && jobsIpc.includes('raw provider\n    // rows have not yet crossed the deterministic age/history/preference'),
+        && jobsIpc.includes('rows have not yet crossed the deterministic age/history/preference')
+        && jobsIpc.includes("return { authorized: false, reason: 'provider-boundary-awaiting-final-checkpoint' };"),
       'the provider receipt admits a same-run Solve to the shared queue, while the backend requires the normal post-filter gathered checkpoint before mutation');
       assert(jobsIpc.includes("sourceActionAuthorization.reason === 'provider-boundary-awaiting-final-checkpoint'")
         && jobsIpc.includes("'live-run-checkpoint-not-ready'"),
@@ -8973,8 +9118,14 @@ export default [
       const completionStart = hub.indexOf('const completeJobRun = useCallback');
       const completionEnd = hub.indexOf('const [savedAnalysisMeta', completionStart);
       const completion = hub.slice(completionStart, completionEnd);
+      // Destructive calls are deliberately formatted across lines now that
+      // they carry the host-issued clear authority. Check their semantics,
+      // not the incidental one-line object layout.
+      const compactHub = hub.replace(/\s+/g, ' ');
       assert(completion.includes('nodeId: id,')
-        && (hub.match(/discardJobRun\?\.\(\{ canvasFilePath[^}]*nodeId: id/g) || []).length >= 2,
+        && completion.includes('operationAuthority: operationAuthority || operationAuthorityFor(analysisOperation)')
+        && compactHub.includes('discardJobRun?.({ canvasFilePath, nodeId: id, runId')
+        && compactHub.includes('discardJobRun({ canvasFilePath, nodeId: id, runId'),
       'run completion and discard requests identify the owning hub so checkpoint cleanup cannot cross multi-hub boundaries');
 
       return { zipAction: jobSourceWarningAction(zipPartial), remaining: finalWarnings.map(w => w.sourceId) };
@@ -9097,21 +9248,15 @@ export default [
         'every renderer score handoff, including saved-job re-analysis, includes raw career evidence alongside the compact profile');
       assert(snapshotWrites.length >= 3 && snapshotWrites.every(call => /\bcareerData\b/.test(call)),
         'saved-scrape snapshots retain raw career evidence for resumed scoring');
-      const parseStart = search.indexOf('const parseResult = await window.electronAPI.parseCareerData');
-      const queryStart = search.indexOf('// Step 2: Query construction', parseStart);
-      const freshCareerWindow = search.slice(parseStart, queryStart);
-      // ROLE LOCKING replaced the per-run interpretJobPreferences call in this
-      // window with resolveSearchRoles (the one-time, lock-establishing
-      // resolver) — see the ROLE LOCKING comment above Step 2 in
-      // JobSearchNode.jsx. The underlying guarantee this assertion protects
-      // (fresh parsed career data, not stale React state) still applies to
-      // that call.
-      const interpretationStart = search.indexOf('window.electronAPI.resolveSearchRoles', queryStart);
-      const interpretationEnd = search.indexOf("if (cancelled()) return searchRunOutcome('cancelled'", interpretationStart);
-      const interpretation = search.slice(interpretationStart, interpretationEnd);
-      assert(freshCareerWindow.includes("activeCareerData = parseResult.careerData || ''")
-        && interpretation.includes('careerData: activeCareerData'),
-      'a fresh career-file parse must pass its newly extracted career data to Job Role resolution instead of waiting for React state to commit');
+      const compileStart = search.indexOf('const compileCareerFiles = useCallback');
+      const providerStart = search.indexOf('const runPipeline = useCallback');
+      const compiler = search.slice(compileStart, search.indexOf('const startProcessingWithProfile', compileStart));
+      const provider = search.slice(providerStart, search.indexOf('const startProcessing = useCallback', providerStart));
+      assert(compiler.includes('const parseResult = await window.electronAPI.parseCareerData')
+        && compiler.includes("status: 'compiled'")
+        && provider.includes('careerSnapshotId: pinnedCareerSnapshotId')
+        && provider.includes('suppliedCareerSnapshotId !== pinnedCareerSnapshotId'),
+      'fresh career files must compile into an approved snapshot before the provider pipeline uses that pinned snapshot, rather than exposing parsed mutable data through React state');
       assert(search.includes('const careerData = snapshot?.careerData || laneTurnData.careerData || \'\';')
         && search.includes('if (!snapshot || !profile || savedJobs.length === 0')
         && !search.includes('if (!snapshot || !profile || !careerData || savedJobs.length === 0)')
@@ -9119,11 +9264,11 @@ export default [
         && search.includes('jobs: jobsToEvaluate,'),
       'resuming a saved scrape restores raw career evidence when available while keeping legacy profile-only snapshots resumable');
       assert(search.includes('function isSavedAnalysisForCurrentHub')
-        && search.includes('isSavedAnalysisForCurrentHub(res.snapshot, res.meta, id, canvasFilePath, data.jobAnalysisClearedAt, data.jobAnalysisClearedRunId)')
-        && /isSavedAnalysisForCurrentHub\(\s*snapshot,\s*res\?\.meta,\s*id,\s*canvasFilePath,\s*laneTurnData\.jobAnalysisClearedAt,\s*laneTurnData\.jobAnalysisClearedRunId,?\s*\)/.test(search)
+        && search.includes('isSavedAnalysisForCurrentHub(res.snapshot, res.meta, id, canvasFilePath, data.careerSnapshotId, data.jobAnalysisClearedAt, data.jobAnalysisClearedRunId)')
+        && search.includes('laneTurnData.careerSnapshotId,')
         && search.includes('isJobAnalysisSnapshotAfterClear(snapshot, meta, jobAnalysisClearedAt, jobAnalysisClearedRunId)')
         && !search.includes('if (!SKIP_AI_FOR_TESTING) return;'),
-      'saved-scrape recovery is available for production manual-AI runs only when both the source hub and canvas match');
+      'saved-scrape recovery is available only when source hub, canvas, and immutable career snapshot all match');
       assert(search.includes('jobRunId: snapshot.runId || null')
         && search.includes('let completeSnapshotRun = false;')
         && search.includes('completeSnapshotRun = runInfo?.found === true')
@@ -9161,7 +9306,7 @@ export default [
         && /sourceGatheredCount:\s*sourceRecoverySnapshot\.sourceGatheredCount\s*\?\?\s*sourceRecoverySnapshot\.searchFunnel\?\.relevanceKept\s*\?\?\s*sourceRecoverySnapshot\.searchFunnel\?\.raw\s*\?\?\s*sourceRecoverySnapshot\.gatheredJobCount/.test(googleRebuild),
       'LinkedIn and Google description-recovery snapshot rebuilds preserve the original source-found count rather than replacing it with the current score-ready subset');
       assert(search.includes("|| !hasReusableCareerProfile")
-        && search.includes("[hubState, canvasFilePath, hasReusableCareerProfile, id, data.jobAnalysisClearedAt, data.jobAnalysisClearedRunId]"),
+        && search.includes("[hubState, canvasFilePath, hasReusableCareerProfile, id, data.careerSnapshotId, data.jobAnalysisClearedAt, data.jobAnalysisClearedRunId]"),
       'saved-scrape recovery never reintroduces a profile deliberately cleared from this hub');
       assert(tree.includes('requirementAssessments: job.requirementAssessments')
         && tree.includes('fitAssessment: job.fitAssessment')
@@ -9358,7 +9503,7 @@ export default [
       const resumeSnapshot = resumed.indexOf('const snapshotReceipt = await window.electronAPI?.saveJobAnalysisSnapshot?.({');
       const resumePreferences = resumed.indexOf('const preferenceResult = await evaluatePreferencesForRun({');
       const resumeCompletion = resumed.indexOf("await completeJobRun(resumedRunId, 'completed', 'preference-filtered'");
-      assert(resumeStart >= 0 && resumed.includes('recordCollectionCompletion({ ...searchResult, runId: resumedRunId }, cancelled);')
+      assert(resumeStart >= 0 && resumed.includes('recordCollectionCompletion({ ...searchResult, runId: resumedRunId }, cancelled, admittedResumeCareerSnapshotId, resumeOperation);')
         && resumeSnapshot >= 0 && resumePreferences > resumeSnapshot && resumeCompletion > resumePreferences
         && resumed.includes('runId: resumedRunId,')
         && resumed.includes('jobs: foundJobs,')
@@ -12716,8 +12861,8 @@ export default [
     run: () => {
       assert(extractVariantAttrs('<html data-print="ink-only" data-mono data-page="a4"><body><main class="page"></main></body></html>') === 'data-print="ink-only" data-mono data-page="a4"', 'root variants are preserved');
       assert(extractVariantAttrs('<main class="page" data-print="ink-only" data-mono data-page="a4"></main>') === 'data-print="dual-pdf"', 'main-level variants are ignored');
-      assert(applicationVariantAttrsForJob({ company: 'Google', location: 'Mountain View, CA' }) === 'data-print="ink-only"', 'big-co host classification selects ink-only');
-      assert(applicationVariantAttrsForJob({ company: 'Accenture', location: 'Toronto, Canada' }) === 'data-print="ink-only" data-mono data-page="a4"', 'conservative non-US host classification composes ink-only, mono, and A4');
+      assert(applicationVariantAttrsForJob({ company: 'Google', location: 'Mountain View, CA' }) === applicationVariantAttrsForJob({ company: 'Arbitrary Co', location: 'Mountain View, CA' }), 'company names alone never choose a visual or print variant');
+      assert(applicationVariantAttrsForJob({ company: 'Accenture', location: 'Toronto, Canada', description: 'regulated audit clearance' }) === 'data-print="ink-only" data-mono data-page="a4"', 'content-derived conservative signals compose ink-only, mono, and A4 for every company');
       assert(applicationVariantAttrsForJob({ company: 'Linear', location: 'Remote (US)' }) === 'data-print="dual-pdf"', 'design-conscious recipients retain the dual-pdf default');
       // isDualMode gates the OCG cream post-process.
       assert(isDualMode('data-print="dual-pdf"') === true, 'isDualMode: dual-pdf → true');
@@ -15470,6 +15615,55 @@ export default [
       assert(sanitized.includes('Selector runtime: rows=not retained · selected=not retained · action=not retained')
         && !sanitized.includes(privateText),
       'malformed component state must be fail-closed and never leak arbitrary selector text');
+
+      const hidden = buildJobBoardDiagnostics([
+        { id: boardId, type: 'jobboard', data: { hubState: 'empty' } },
+      ], [], [{
+        id: boardId,
+        jobBoardSelector: {
+          rowCount: 2,
+          selectedCount: 2,
+          actionEligible: true,
+          actionVisible: false,
+          actionLabel: 'Combine saved results',
+          eligibilityReasons: ['board-up-to-date', 'not-an-allowed-reason'],
+        },
+      }]);
+      assert(hidden.includes('Selector runtime: rows=2 · selected=2 · action=hidden (board up to date)')
+        && hidden.includes('reasons=board-up-to-date')
+        && !hidden.includes('not-an-allowed-reason')
+        && !hidden.includes('Combine saved results'),
+      `a hidden up-to-date Board action must read as hidden (board up to date) with no label, got:\n${hidden}`);
+
+      const visibleGate = buildJobBoardDiagnostics([
+        { id: boardId, type: 'jobboard', data: {} },
+      ], [], [{
+        id: boardId,
+        jobBoardSelector: { rowCount: 4, actionEligible: true, actionVisible: true, actionLabel: 'Combine saved results' },
+      }]);
+      assert(visibleGate.includes('Selector runtime: rows=4 · selected=not retained · action=enabled (Combine saved results)'),
+      'a visible action must render the same enabled label as legacy snapshots');
+
+      const bogusVisibility = buildJobBoardDiagnostics([
+        { id: boardId, type: 'jobboard', data: {} },
+      ], [], [{
+        id: boardId,
+        jobBoardSelector: { actionVisible: 'yes', eligibilityReasons: ['board-up-to-date', 42] },
+      }]);
+      assert(bogusVisibility.includes('action=not retained')
+        && bogusVisibility.includes('reasons=board-up-to-date'),
+      'a non-boolean actionVisible must fall back to not retained while known reasons survive');
+
+      const numericVisibility = buildJobBoardDiagnostics([
+        { id: boardId, type: 'jobboard', data: {} },
+      ], [], [{
+        id: boardId,
+        jobBoardSelector: { rowCount: 1, actionVisible: 0, actionEligible: false },
+      }]);
+      assert(numericVisibility.includes('Selector runtime: rows=1 · selected=not retained · action=disabled')
+        && !numericVisibility.includes('action=hidden'),
+      'a numeric actionVisible must be dropped and never mistaken for hidden');
+
       return { selectorRows: 3, verticalOverflow: true };
     },
   },
@@ -15546,9 +15740,8 @@ export default [
       assert(report.includes('Connected source admission:')
         && report.includes('selected=no') && report.includes('selected=yes')
         && report.includes('hub-state=empty')
-        && report.includes('admission=fresh-imported-input')
-        && report.includes('admission=fresh-import-requires-clear')
-        && report.includes('selector-ready=no · selector-status=Clear + import required · selector-reason=admission:fresh-import-requires-clear')
+        && report.includes('admission=career-import-requires-approval')
+        && report.includes('selector-ready=no · selector-status=Career compilation required · selector-reason=admission:career-import-requires-approval')
         && report.includes('fresh-capability=present') && report.includes('fresh-capability=absent')
         && report.includes('consumption-origin=job-board')
         && report.includes('admission-version=absent') && report.includes('admission-version=2')
@@ -15560,7 +15753,7 @@ export default [
         && !report.includes(freshCapability) && !report.includes(legacyCapability)
         && !report.includes(blockedCapability) && !report.includes(privatePath),
       'connected-source diagnostics must never export opaque IDs, capabilities, or file paths');
-      return { sourceFacts: 3, legacyPreflightClaim: true };
+      return { sourceFacts: 3, unapprovedInputsBlocked: true };
     },
   },
   {
@@ -15699,6 +15892,215 @@ export default [
         && full.includes('Connected source admission:'),
       'JOBBOARD and FULL both render the enhanced Board section from retained nodes, edges, and selector state');
       return { focusedTimeline: filtered.filteredLogs.length, fullBoardDiagnostics: true };
+    },
+  },
+  {
+    name: 'Application report renders the résumé skills coverage line after the résumé markup line',
+    run: () => {
+      const prior = getApplicationTelemetry();
+      try {
+        recordApplicationTelemetry({
+          attemptId: 'application-skills-coverage-report-test',
+          nodeId: 'application-skills-coverage-card',
+          jobTitle: 'Platform Engineer',
+          company: 'Example Co',
+          status: 'completed',
+          stage: 'completed',
+          resumeSkillsCoverage: {
+            groups: 3,
+            items: 9,
+            required: ['Python', 'TypeScript', 'SQL'],
+            absent: ['Python', 'TypeScript'],
+          },
+        });
+        const report = generateMarkdown({
+          description: 'Generate completed with résumé skills coverage.',
+          nodes: [{ id: 'application-skills-coverage-card', type: 'jobcard', data: {} }],
+          edges: [], drawings: [], frontEndState: {}, nodeInternals: [], nodeComponentStates: [],
+        }).markdown;
+        const lines = report.split('\n');
+        const markupIndex = lines.findIndex(line => line.startsWith('- Résumé markup:'));
+        const coverageIndex = lines.findIndex(line => line.startsWith('- Résumé skills block:'));
+        assert(markupIndex !== -1, 'report must include the résumé markup line');
+        assert(coverageIndex === markupIndex + 1,
+          'résumé skills block line must appear immediately after the résumé markup line');
+        assert(lines[coverageIndex] === '- Résumé skills block: 3 group(s) · 9 item(s) · prioritized career-attested index: 3 name(s) (3 posting-named) · ⚠️ absent from the skills block: Python, TypeScript',
+          `unexpected skills coverage line: ${lines[coverageIndex]}`);
+      } finally {
+        recordApplicationTelemetry(prior);
+      }
+      return { orderedLineRendered: true };
+    },
+  },
+  {
+    name: 'Application report renders "none absent" when the required skills all made it into the block',
+    run: () => {
+      const prior = getApplicationTelemetry();
+      try {
+        recordApplicationTelemetry({
+          attemptId: 'application-skills-coverage-none-absent-test',
+          nodeId: 'application-skills-coverage-card',
+          jobTitle: 'Platform Engineer',
+          company: 'Example Co',
+          status: 'completed',
+          stage: 'completed',
+          resumeSkillsCoverage: {
+            groups: 3,
+            items: 9,
+            required: ['Python', 'TypeScript', 'SQL'],
+            absent: [],
+          },
+        });
+        const report = generateMarkdown({
+          description: 'Generate completed with no absent skills.',
+          nodes: [{ id: 'application-skills-coverage-card', type: 'jobcard', data: {} }],
+          edges: [], drawings: [], frontEndState: {}, nodeInternals: [], nodeComponentStates: [],
+        }).markdown;
+        const lines = report.split('\n');
+        const coverageIndex = lines.findIndex(line => line.startsWith('- Résumé skills block:'));
+        assert(coverageIndex !== -1, 'report must include the résumé skills block line');
+        assert(lines[coverageIndex] === '- Résumé skills block: 3 group(s) · 9 item(s) · prioritized career-attested index: 3 name(s) (3 posting-named) · none absent',
+          `unexpected skills coverage line: ${lines[coverageIndex]}`);
+      } finally {
+        recordApplicationTelemetry(prior);
+      }
+      return { noneAbsentRendered: true };
+    },
+  },
+  {
+    name: 'Application report flags a zero-row skills block when the career evidence attests technology names',
+    run: () => {
+      const prior = getApplicationTelemetry();
+      try {
+        const render = (coverage) => {
+          recordApplicationTelemetry({
+            attemptId: 'application-skills-presence-test',
+            nodeId: 'application-skills-presence-card',
+            jobTitle: 'Full Stack Developer',
+            company: 'Example Co',
+            status: 'completed',
+            stage: 'completed',
+            resumeSkillsCoverage: coverage,
+          });
+          const lines = generateMarkdown({
+            description: 'Generate completed with no skills block.',
+            nodes: [{ id: 'application-skills-presence-card', type: 'jobcard', data: {} }],
+            edges: [], drawings: [], frontEndState: {}, nodeInternals: [], nodeComponentStates: [],
+          }).markdown.split('\n');
+          return lines.find(line => line.startsWith('- Résumé skills block:'));
+        };
+        const flagged = render({ groups: 0, items: 0, required: [], absent: [], attested: ['Python', 'React', 'Django'] });
+        assert(flagged === '- Résumé skills block: 0 group(s) · 0 item(s) · prioritized career-attested index: 0 name(s) (0 posting-named) · none absent · ⚠️ no skills block although the career evidence states 3 recognised technology name(s): Python, React, Django',
+          `a zero-row block with attested names must say so (got ${flagged})`);
+        const populated = render({ groups: 2, items: 5, required: [], absent: [], attested: ['Python', 'React'] });
+        assert(!populated.includes('no skills block'), `a populated block is never flagged (got ${populated})`);
+        const nothingAttested = render({ groups: 0, items: 0, required: [], absent: [], attested: [] });
+        assert(!nothingAttested.includes('no skills block'), `nothing attested means nothing to flag (got ${nothingAttested})`);
+        const legacy = render({ groups: 0, items: 0, required: [], absent: [] });
+        assert(legacy === '- Résumé skills block: 0 group(s) · 0 item(s) · prioritized career-attested index: 0 name(s) (0 posting-named) · none absent',
+          `a record from before this field renders exactly as it did (got ${legacy})`);
+      } finally {
+        recordApplicationTelemetry(prior);
+      }
+      return { flagged: true, legacyUnchanged: true };
+    },
+  },
+  {
+    name: 'Application report sanitizes hostile résumé skills coverage values and renders unknown counts as question marks',
+    run: () => {
+      const prior = getApplicationTelemetry();
+      try {
+        recordApplicationTelemetry({
+          attemptId: 'application-skills-coverage-hostile-test',
+          nodeId: 'application-skills-coverage-card',
+          jobTitle: 'Platform Engineer',
+          company: 'Example Co',
+          status: 'completed',
+          stage: 'completed',
+          resumeSkillsCoverage: {
+            groups: 'not-an-integer',
+            items: 1500,
+            required: [
+              'Python',
+              'Java\n## Injected',
+              'x'.repeat(500),
+              42,
+              'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K',
+            ],
+            absent: 'not-an-array',
+          },
+        });
+        const report = generateMarkdown({
+          description: 'Generate completed with hostile skills coverage metadata.',
+          nodes: [{ id: 'application-skills-coverage-card', type: 'jobcard', data: {} }],
+          edges: [], drawings: [], frontEndState: {}, nodeInternals: [], nodeComponentStates: [],
+        }).markdown;
+        assert(!report.includes('## Injected') && !report.includes('Java\n## Injected'),
+          'a newline-injected name must not create a heading or split into a new line');
+        assert(!report.includes('x'.repeat(500)),
+          'an over-long name must never reach the report');
+        const lines = report.split('\n');
+        const coverageIndex = lines.findIndex(line => line.startsWith('- Résumé skills block:'));
+        assert(coverageIndex !== -1, 'report must include the résumé skills block line');
+        // groups is non-integer → '?'; items 1500 clamps to 999. required
+        // keeps only 'Python' (newline/over-long/non-string dropped) plus
+        // 'A'..'J' until the 10-entry cap (the 11th 'K' is dropped); absent is
+        // a non-array → empty → 'none absent'.
+        assert(lines[coverageIndex] === '- Résumé skills block: ? group(s) · 999 item(s) · prioritized career-attested index: 10 name(s) (10 posting-named) · none absent',
+          `unexpected skills coverage line: ${lines[coverageIndex]}`);
+      } finally {
+        recordApplicationTelemetry(prior);
+      }
+      return { hostileSanitized: true, countsRenderedAsUnknown: true };
+    },
+  },
+  {
+    name: 'Application report omits the résumé skills coverage line when the field is absent',
+    run: () => {
+      const prior = getApplicationTelemetry();
+      try {
+        recordApplicationTelemetry({
+          attemptId: 'application-skills-coverage-absent-test',
+          nodeId: 'application-skills-coverage-card',
+          jobTitle: 'Platform Engineer',
+          company: 'Example Co',
+          status: 'completed',
+          stage: 'completed',
+        });
+        const report = generateMarkdown({
+          description: 'Generate completed without skills coverage metadata.',
+          nodes: [{ id: 'application-skills-coverage-card', type: 'jobcard', data: {} }],
+          edges: [], drawings: [], frontEndState: {}, nodeInternals: [], nodeComponentStates: [],
+        }).markdown;
+        assert(!report.includes('Résumé skills block:'),
+          'a record without resumeSkillsCoverage must render no skills block line');
+      } finally {
+        recordApplicationTelemetry(prior);
+      }
+      return { lineOmitted: true };
+    },
+  },
+  {
+    name: 'Job Search treats host authority supersession as a quiet outcome across score, provider, and source-resolve UI',
+    run: () => {
+      const hub = fs.readFileSync(path.resolve('src/nodes/JobSearchNode.jsx'), 'utf8');
+      const sourceCard = fs.readFileSync(path.resolve('src/nodes/JobSourceCardNode.jsx'), 'utf8');
+      const jobs = fs.readFileSync(path.resolve('electron/ipc/jobs.js'), 'utf8');
+      const progressStart = hub.indexOf('const [scoringProgress, setScoringProgress] = useState(null);');
+      const progressEnd = hub.indexOf('const scheduleCleanSourceCardDismiss', progressStart);
+      const progress = hub.slice(progressStart, progressEnd);
+      assert(progress.includes('const incomingAuthority = payload?.operationAuthority;')
+        && progress.includes('expectedAuthority.operationId !== incomingAuthority.operationId')
+        && progress.includes('expectedAuthority.revision !== incomingAuthority.revision')
+        && progress.includes('JSON.stringify(expectedAuthority.semanticBase) !== JSON.stringify(incomingAuthority.semanticBase)'),
+      'same-hub scoring progress must require the exact host-issued operation receipt, not merely nodeId');
+      assert(jobs.includes('operationAuthority: scoringAuthority,')
+        && hub.includes("if (scoreResult?.operationSuperseded === true) return searchRunOutcome('superseded'")
+        && hub.includes("if (searchResult?.operationSuperseded === true) return searchRunOutcome('superseded'")
+        && sourceCard.includes('if (result?.operationSuperseded === true) {')
+        && sourceCard.includes("solveOutcome = 'fenced';"),
+      'host authority supersession must not become a generic score/provider/Solve failure or publish into a newer UI generation');
+      return { exactProgressReceiptRequired: true, quietSupersession: true };
     },
   },
 ];

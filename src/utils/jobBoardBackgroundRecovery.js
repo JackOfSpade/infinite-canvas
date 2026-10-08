@@ -8,6 +8,7 @@ import {
 } from './jobSearchDateWindow.js';
 import { getSearchLocation, locationToLegacyText } from './jobSearchLocations.js';
 import { getRunnableJobSourceIds, normalizeEnabledJobSourceIds } from './jobPlatformSelection.js';
+import { buildJobCareerQueryCacheKey, careerSnapshotBindingMatches, normalizedJobCareerSnapshotId } from './jobCareerSnapshotBinding.js';
 
 const BACKGROUND_SAFE_SOURCE_IDS = new Set([
   'linkedin', 'remoteok', 'weworkremotely', 'dice', 'usajobs',
@@ -24,20 +25,16 @@ function profileFingerprint(value) {
   return /^[a-f0-9]{64}$/.test(normalized) ? normalized : null;
 }
 
-function queryCacheKey(data, preferredLocation) {
-  return JSON.stringify({
-    strategyVersion: 6,
-    resumeFingerprint: String(data?.resumeFingerprint || ''),
-    jobPreferences: String(data?.jobPreferences || '').trim(),
-    preferredLocation: String(preferredLocation || '').trim(),
-  });
-}
-
 export function backgroundBoardChildInputKey(node) {
   const data = node?.data || {};
   return stableJson({
     id: node?.id || null,
     locked: !!data.locked,
+    careerSnapshotId: data.careerSnapshotId || null,
+    careerDerivedSnapshotId: data.careerDerivedSnapshotId || null,
+    queryCareerSnapshotId: data.queryCareerSnapshotId || null,
+    preferenceCareerSnapshotId: data.preferenceCareerSnapshotId || null,
+    scoringCareerSnapshotId: data.scoringCareerSnapshotId || null,
     resumeFingerprint: data.resumeFingerprint || null,
     hasResumeProfile: !!(data.resumeProfile && typeof data.resumeProfile === 'object'),
     jobPreferences: data.jobPreferences || '',
@@ -75,6 +72,7 @@ export function prepareBackgroundBoardChildRequest({
 } = {}) {
   const data = node?.data || {};
   const fingerprint = profileFingerprint(data.resumeFingerprint);
+  const careerSnapshotId = normalizedJobCareerSnapshotId(data.careerSnapshotId);
   const clock = Number.isSafeInteger(startedAt) && startedAt > 0 ? new Date(startedAt) : null;
   const searchLocation = getSearchLocation(data);
   const preferredLocation = locationToLegacyText(searchLocation);
@@ -100,11 +98,23 @@ export function prepareBackgroundBoardChildRequest({
     || data.terminalFinalizationRecovery
     || !(data.resumeProfile && typeof data.resumeProfile === 'object')
     || !fingerprint
-    || !(data.resolvedRolesMeta && typeof data.resolvedRolesMeta === 'object')
+    || !careerSnapshotId
+    || !careerSnapshotBindingMatches({ careerSnapshotId: data.careerDerivedSnapshotId }, careerSnapshotId)
+    || !careerSnapshotBindingMatches({ careerSnapshotId: data.queryCareerSnapshotId }, careerSnapshotId)
+    || !careerSnapshotBindingMatches(data.resolvedRolesMeta, careerSnapshotId)
+    || (Array.isArray(data.scoredJobs) && data.scoredJobs.length > 0 && (
+      !careerSnapshotBindingMatches({ careerSnapshotId: data.scoringCareerSnapshotId }, careerSnapshotId)
+      || data.scoredJobs.some(job => normalizedJobCareerSnapshotId(job?.careerSnapshotId) !== careerSnapshotId)
+    ))
     || queries.length === 0
     || !preferredLocation
     || !data.queryCacheKey
-    || data.queryCacheKey !== queryCacheKey(data, preferredLocation)
+    || data.queryCacheKey !== buildJobCareerQueryCacheKey({
+      careerSnapshotId,
+      resumeFingerprint: data.resumeFingerprint,
+      jobPreferences: data.jobPreferences,
+      preferredLocation,
+    })
     || (String(data.jobPreferences || '').trim() && !preferencePlan)
     || runnableSourceIds.length === 0
     || runnableSourceIds.some(sourceId => !BACKGROUND_SAFE_SOURCE_IDS.has(sourceId))
@@ -134,6 +144,7 @@ export function prepareBackgroundBoardChildRequest({
     request: {
       queries,
       nodeId: node.id,
+      careerSnapshotId,
       lastCompletedRunAt: anchor.timestamp,
       initialLookbackDays,
       searchWindow,
@@ -161,6 +172,7 @@ export function validateBackgroundBoardChildRequest(prepared, node, boardPlan, c
     || prepared.boardRunId !== boardPlan?.boardRunId
     || prepared.childNodeId !== node?.id
     || prepared.request.nodeId !== node?.id
+    || prepared.request.careerSnapshotId !== normalizedJobCareerSnapshotId(node?.data?.careerSnapshotId)
     || typeof canvasFilePath !== 'string'
     || !canvasFilePath
     || prepared.inputKey !== backgroundBoardChildInputKey(node)

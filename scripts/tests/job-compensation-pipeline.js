@@ -723,6 +723,13 @@ Model prose happens to mention https://prose.example.test/untrusted.`);
     });
     assert(unsafeEvidence.sourceLinks.length === 1 && unsafeEvidence.sourceLinks[0] === 'https://example.test/pay',
       'credential-bearing compensation links must be removed before assessments are persisted');
+    const noOfferNoResearch = compensationAssessment({ offer: parseGuaranteedCashOffer({ salary: '' }), competitiveRanges: [] });
+    const noOfferResearchEmpty = compensationAssessment({ offer: parseGuaranteedCashOffer({ salary: '' }), competitiveRanges: [], researchAttempted: true });
+    const noOfferResearchEmptyExplicit = compensationAssessment({ offer: parseGuaranteedCashOffer({ salary: '' }), competitiveRanges: [], researchAttempted: true, reasonCode: 'market_evidence_unavailable' });
+    assert(noOfferNoResearch.reasonCode === 'no_cash_salary'
+      && noOfferResearchEmpty.reasonCode === 'market_range_unavailable' && noOfferResearchEmpty.status === 'not_evaluated'
+      && noOfferResearchEmptyExplicit.reasonCode === 'market_evidence_unavailable',
+      'a no-offer job whose market research found no range must not be labelled as if nothing was researched; explicit codes still win');
     const missingOfferRecommendation = compensationAssessment({
       offer: parseGuaranteedCashOffer({ salary: '' }),
       competitiveRanges: [merged],

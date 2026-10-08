@@ -3,6 +3,17 @@ import { pathToFileURL } from 'node:url';
 import { getRecentLogs } from '../../electron/logger.js';
 import { createPendingGlobalQuitDeferral } from '../../electron/utils/quitDeferral.js';
 import {
+  initialCanvasWindowSpec,
+  openOrFocusCanvasWindow,
+  resolveSafeCanvasFilePath,
+  secondInstanceCanvasWindowSpec,
+} from '../../electron/canvasCommandLine.js';
+import {
+  ACCEPTANCE_NO_NATIVE_MENU_FLAG,
+  acceptanceActivationPolicy,
+  shouldSuppressNativeApplicationMenu,
+} from '../../electron/utils/acceptanceNoNativeMenu.js';
+import {
   abortNodeTasks,
   abortNodeTasksAndWait,
   __recoveryRebindJournalForTests,
@@ -54,6 +65,91 @@ const waitFor = async (predicate, description, timeoutMs = 3000) => {
 
 export default [
   {
+    name: 'command-line canvas paths canonicalize safely and preserve first/second-instance behavior',
+    run: async () => {
+      // `/tmp` canonically resolves below `/private/var` on macOS, a deliberately
+      // blocked system root. Keep this fixture under the workspace so it models
+      // a normal user canvas rather than accidentally exercising that guard.
+      const root = await fs.promises.mkdtemp(path.join(process.cwd(), '.ic-command-line-canvas-'));
+      const canvasPath = path.join(root, 'career snapshot with spaces.json');
+      const textPath = path.join(root, 'not-a-canvas.txt');
+      const directoryPath = path.join(root, 'folder.json');
+      const missingPath = path.join(root, 'missing.json');
+      const sensitiveRoot = path.join(root, '.ssh');
+      const sensitiveCanvas = path.join(sensitiveRoot, 'credentials.json');
+      const sensitiveAlias = path.join(root, 'looks-safe.json');
+      try {
+        await fs.promises.writeFile(canvasPath, '{"nodes":[]}');
+        await fs.promises.writeFile(textPath, '{"nodes":[]}');
+        await fs.promises.mkdir(directoryPath);
+        await fs.promises.mkdir(sensitiveRoot);
+        await fs.promises.writeFile(sensitiveCanvas, '{"nodes":[]}');
+        await fs.promises.symlink(sensitiveCanvas, sensitiveAlias);
+        const canonicalCanvas = await fs.promises.realpath(canvasPath);
+
+        assert(resolveSafeCanvasFilePath(canvasPath) === canonicalCanvas,
+          'a real JSON canvas with spaces must be accepted under its canonical spelling');
+        assert(initialCanvasWindowSpec(['Infinite Canvas', canvasPath]).mode === 'file'
+          && initialCanvasWindowSpec(['Infinite Canvas', canvasPath]).filePath === canonicalCanvas,
+        'first launch must pass a supplied canvas to the renderer instead of auto-restoring a workspace');
+        assert(secondInstanceCanvasWindowSpec(['Infinite Canvas', canvasPath]).mode === 'file',
+          'second instance must recognize a supplied canvas file');
+        assert(initialCanvasWindowSpec(['Infinite Canvas', ACCEPTANCE_NO_NATIVE_MENU_FLAG, canvasPath]).mode === 'file'
+          && secondInstanceCanvasWindowSpec(['Infinite Canvas', ACCEPTANCE_NO_NATIVE_MENU_FLAG, canvasPath]).mode === 'file',
+        'the acceptance-only native-menu flag must not be mistaken for, or displace, the supplied canvas path');
+        assert(shouldSuppressNativeApplicationMenu({ commandLine: ['Infinite Canvas', canvasPath] }) === false
+          && shouldSuppressNativeApplicationMenu({ commandLine: ['Infinite Canvas', ACCEPTANCE_NO_NATIVE_MENU_FLAG, canvasPath] }) === true
+          && shouldSuppressNativeApplicationMenu({ isBackgroundE2E: true, commandLine: ['Infinite Canvas', canvasPath] }) === true,
+        'ordinary headed launches must retain their native menu while only explicit acceptance and background modes suppress it');
+        assert(acceptanceActivationPolicy({ platform: 'darwin', commandLine: ['Infinite Canvas', canvasPath] }) === null
+          && acceptanceActivationPolicy({ platform: 'darwin', commandLine: ['Infinite Canvas', ACCEPTANCE_NO_NATIVE_MENU_FLAG, canvasPath] }) === 'accessory'
+          && acceptanceActivationPolicy({ platform: 'linux', commandLine: ['Infinite Canvas', ACCEPTANCE_NO_NATIVE_MENU_FLAG, canvasPath] }) === null,
+        'only the explicit macOS acceptance fixture can select accessory activation; normal and non-mac launches retain their default policy');
+        assert(initialCanvasWindowSpec(['Infinite Canvas', '--inspect', textPath]).mode === 'auto'
+          && secondInstanceCanvasWindowSpec(['Infinite Canvas', '--inspect', textPath]).mode === 'blank',
+        'flags and non-JSON files must leave the normal first/second-instance defaults intact');
+        assert(resolveSafeCanvasFilePath(missingPath) === null
+          && resolveSafeCanvasFilePath(directoryPath) === null
+          && resolveSafeCanvasFilePath('--canvas.json') === null
+          && resolveSafeCanvasFilePath(sensitiveCanvas) === null
+          && resolveSafeCanvasFilePath(sensitiveAlias) === null,
+        'missing paths, directories, flags, and sensitive JSON locations (including aliases) must all be rejected');
+        for (const rejected of [missingPath, directoryPath, '--canvas.json', sensitiveCanvas, sensitiveAlias]) {
+          assert(initialCanvasWindowSpec(['Infinite Canvas', rejected]).mode === 'auto'
+            && secondInstanceCanvasWindowSpec(['Infinite Canvas', rejected]).mode === 'blank',
+          'every rejected candidate must preserve both normal launch defaults');
+        }
+
+        const existing = {
+          __canvasFilePath: canonicalCanvas,
+          minimized: true,
+          restored: 0,
+          focused: 0,
+          isDestroyed: () => false,
+          isMinimized() { return this.minimized; },
+          restore() { this.restored += 1; },
+          focus() { this.focused += 1; },
+        };
+        let opened = 0;
+        const duplicate = openOrFocusCanvasWindow(canonicalCanvas, {
+          canvasWindows: new Set([existing]),
+          createWindow: () => { opened += 1; },
+        });
+        assert(duplicate.action === 'focused' && existing.restored === 1 && existing.focused === 1 && opened === 0,
+          'a second invocation of an already-open canonical canvas must restore and focus it without a duplicate window');
+        const distinct = openOrFocusCanvasWindow(path.join(root, 'other.json'), {
+          canvasWindows: new Set([existing]),
+          createWindow: spec => { opened += 1; return { spec }; },
+        });
+        assert(distinct.action === 'opened' && opened === 1 && distinct.window.spec.mode === 'file',
+          'a different accepted canvas must use the shared new-file-window route');
+        return { spacedPathAccepted: true, invalidInputsRejected: true, duplicateFocused: true };
+      } finally {
+        await fs.promises.rm(root, { recursive: true, force: true });
+      }
+    },
+  },
+  {
     name: 'recovery rebind journals reject unsafe slots and reconcile old/new launch paths deterministically',
     run: async () => {
       const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'ic-rebind-journal-'));
@@ -67,6 +163,7 @@ export default [
       const oldBytes = Buffer.from('{"version":1}\n');
       const nextBytes = Buffer.from('{"version":2}\n');
       const digest = async (bytes) => (await import('node:crypto')).createHash('sha256').update(bytes).digest('hex');
+      let loadEvent = null;
       try {
         await fs.promises.writeFile(finderCanvas, oldBytes);
         const finderStat = await fs.promises.lstat(finderCanvas);
@@ -108,7 +205,8 @@ export default [
         electronPkg.ipcMain.__clearInvokeHandlers();
         registerFilesystemHandlers();
         const loadWorkspace = electronPkg.ipcMain.__getInvokeHandler('load-workspace');
-        const loaded = await loadWorkspace(senderEvent(), { filePath: staleLaunchCanvas });
+        loadEvent = senderEvent();
+        const loaded = await loadWorkspace(loadEvent, { filePath: staleLaunchCanvas });
         assert(loaded?.filePath === adoptedLaunchCanvas && Array.isArray(loaded?.data?.nodes),
           'opening a stale last-opened spelling must adopt only the journal-attested new canvas before reading it');
 
@@ -138,6 +236,10 @@ export default [
           'a preexisting unrelated Save As target only clears its prepared journal and is never adopted as another canvas');
         return { finderReconciled: finder.finderRename, sourceLaunchReconciled: cross.reconciled, staleLaunchAdopted: loaded.filePath === adoptedLaunchCanvas, unsafeRejected, saveAsRolledBack: saveAs.rolledBack };
       } finally {
+        // load-workspace registers a production canvas-directory watcher that
+        // only a sender 'destroyed' event closes; without this the open
+        // fs.watch keeps the runner process alive after its summary prints.
+        loadEvent?.sender.emit('destroyed');
         await fs.promises.rm(root, { recursive: true, force: true });
       }
     },

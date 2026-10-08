@@ -1,7 +1,7 @@
 // Renderer-side crash shield for the bridge IPC snapshot.  This is deliberately
 // dependency-free: it must remain safe to import before Electron's preload is
 // present (and against an older preload).
-import { HANDOFF_CONCURRENCY } from './handoffScheduler.js';
+import { HANDOFF_CONCURRENCY, MAX_HANDOFF_CONCURRENCY } from './handoffScheduler.js';
 export const BRIDGE_STATUS_VERSION = 1;
 
 export const AVAILABILITY_REASONS = Object.freeze(['e2e', 'env-disabled', 'dev-build']);
@@ -12,7 +12,7 @@ export const TUNNEL_STATES = Object.freeze(['off', 'blocked', 'needs-setup', 'ne
 export const LINK_STATES = Object.freeze(['unlinked', 'pairing', 'linked', 'needs-renewal', 'unknown']);
 export const CHAT_STATES = Object.freeze(['none', 'awaiting-first-call', 'reached', 'working', 'idle', 'full', 'ended', 'unknown']);
 export const POOL_WORKER_STATES = Object.freeze(['available', 'ready', 'working', 'quiet', 'waiting', 'idle']);
-export const POOL_WORKER_QUIET_REASONS = Object.freeze(['answer_silent', 'polling_stopped']);
+export const POOL_WORKER_QUIET_REASONS = Object.freeze(['answer_silent', 'polling_stopped', 'fresh_context_required']);
 export const JOB_PHASES = Object.freeze(['unread', 'awaiting', 'host', 'done', 'needs_user', 'held', 'gone', 'unknown']);
 export const JOB_REASONS = Object.freeze([
   'user_hold', 'human_advance', 'rejection_cap', 'junk_cap', 'review_round_cap',
@@ -62,7 +62,7 @@ const MAX_JOBS = 50;
 const MAX_ALARMS = 5;
 const MAX_PREVIOUS = 5;
 const MAX_TASKS = 20;
-const MAX_POOL_WORKERS = HANDOFF_CONCURRENCY;
+const MAX_POOL_WORKERS = MAX_HANDOFF_CONCURRENCY;
 
 const isObject = value => value !== null && typeof value === 'object' && !Array.isArray(value);
 const object = value => isObject(value) ? value : {};
@@ -99,11 +99,11 @@ export const EMPTY_BRIDGE_STATUS = Object.freeze({
   enabled: false, autoStart: false, autoRelease: false, serving: 'off', paused: false,
   pauseCause: null, hold: null, fault: null,
   config: Object.freeze({ hostname: null, pluginName: 'infinite_canvas', mcpUrl: null, scope: Object.freeze({ applications: false, scoring: false, marketplace: false }), telemetryInBugReports: false }),
-  limits: Object.freeze({ releaseTtlHours: 0, chatKeyMaxAgeHours: 0, idlePauseMinutes: 1440, jobsPerChat: 2, epochSoftBytes: 0, epochHardBytes: 0 }), prefs: Object.freeze({ sourcePolicy: 'enforce', pairingNetworkCheck: true }),
+  limits: Object.freeze({ releaseTtlHours: 0, chatKeyMaxAgeHours: 0, idlePauseMinutes: 1440, maxConcurrentHandoffs: HANDOFF_CONCURRENCY }), prefs: Object.freeze({ sourcePolicy: 'enforce', pairingNetworkCheck: true }),
   setup: Object.freeze({ hostnameOk: false, binaryApproved: false, credentialsOk: false, consentCurrent: false, tunnelReachable: false, linked: false, toolsListed: false, firstCallSeen: false }),
   tunnel: Object.freeze({ state: 'off', binary: null, tunnelId: null, credentialsMode: null, certPemPresent: false, restarts: 0, lastExit: null, nextRetryAt: null, probe: Object.freeze({ state: 'unknown', okAt: null, failingSince: null, consecutiveFailures: 0, reason: null }) }),
   link: Object.freeze({ state: 'unlinked', pairing: Object.freeze({ open: false, expiresAt: null }), progress: Object.freeze({ discoveryFetched: null, authorizeRequested: null, approved: null, tokenIssued: null, toolsListed: null }), linkedAt: null, lastUsedAt: null, expiresAt: null, clientAuth: null, expiresSoon: false, renewalCause: null, unarmedRequests: Object.freeze({ count: 0, lastAt: null }), toolsStale: false, sources: Object.freeze([]) }),
-  chat: Object.freeze({ ordinal: null, startedAt: null, firstCallAt: null, lastCallAt: null, lastCallKind: null, calls: 0, state: 'none', jobsAssigned: 0, jobsCap: 0, expiresInMs: 0, pool: Object.freeze({ active: false, generation: null, workerCount: 0, workers: Object.freeze([]), plan: Object.freeze({ recommended: 0, queued: 0, materialized: 0, expandBy: 0, reason: 'empty' }) }), outstanding: null, servedTwice: false, previous: Object.freeze([]) }),
+  chat: Object.freeze({ ordinal: null, startedAt: null, firstCallAt: null, lastCallAt: null, lastCallKind: null, calls: 0, state: 'none', jobsAssigned: 0, expiresInMs: 0, pool: Object.freeze({ active: false, generation: null, workerCount: 0, workers: Object.freeze([]), plan: Object.freeze({ recommended: 0, queued: 0, materialized: 0, expandBy: 0, reason: 'empty' }) }), outstanding: null, servedTwice: false, previous: Object.freeze([]) }),
   queue: Object.freeze({ applications: Object.freeze({ ready: 0, working: 0, needsYou: 0, held: 0, done: 0 }), scoring: Object.freeze({ pending: 0, withChat: 0, tasks: Object.freeze([]) }), jobs: Object.freeze([]) }),
   push: Object.freeze({ selectedHubs: Object.freeze([]), optedOutHubs: 0, discovered: Object.freeze([]), claimed: Object.freeze([]), available: Object.freeze([]), claimWorkers: Object.freeze([]) }), alarms: Object.freeze([]), counts: Object.freeze(blankCounts()), activityVersion: 0, windows: Object.freeze({ canvasOpen: false }), power: Object.freeze({ keepAwake: false }),
 });
@@ -134,11 +134,11 @@ export function normalizeBridgeStatus(raw) {
       availability: { ok: availabilityOk, reason: availabilityOk ? null : nullableOneOf(availability.reason, AVAILABILITY_REASONS) || 'dev-build' },
       enabled: bool(value.enabled), autoStart: bool(value.autoStart), autoRelease: bool(value.autoRelease), serving: oneOf(value.serving, SERVING_STATES, 'off'), paused: bool(value.paused), pauseCause: nullableOneOf(value.pauseCause, PAUSE_CAUSES), hold: nullableOneOf(value.hold, HOLDS), fault: isObject(value.fault) && nullableOneOf(value.fault.code, FAULT_CODES) ? { code: value.fault.code } : null,
       config: { hostname: typeof config.hostname === 'string' ? string(config.hostname) : null, pluginName: string(config.pluginName, '') || 'infinite_canvas', mcpUrl: typeof config.mcpUrl === 'string' ? string(config.mcpUrl) : null, scope: { applications: bool(scope.applications), scoring: bool(scope.scoring), marketplace: bool(scope.marketplace) }, telemetryInBugReports: bool(config.telemetryInBugReports) },
-      limits: { releaseTtlHours: number(limits.releaseTtlHours), chatKeyMaxAgeHours: number(limits.chatKeyMaxAgeHours), idlePauseMinutes: number(limits.idlePauseMinutes, 1440), jobsPerChat: number(limits.jobsPerChat, 2), epochSoftBytes: number(limits.epochSoftBytes, 0), epochHardBytes: number(limits.epochHardBytes, 0) }, prefs: { sourcePolicy: oneOf(prefs.sourcePolicy, ['enforce', 'alert', 'off'], 'enforce'), pairingNetworkCheck: prefs.pairingNetworkCheck !== false },
+      limits: { releaseTtlHours: number(limits.releaseTtlHours), chatKeyMaxAgeHours: number(limits.chatKeyMaxAgeHours), idlePauseMinutes: number(limits.idlePauseMinutes, 1440), maxConcurrentHandoffs: Number.isSafeInteger(limits.maxConcurrentHandoffs) && limits.maxConcurrentHandoffs >= 1 && limits.maxConcurrentHandoffs <= MAX_POOL_WORKERS ? limits.maxConcurrentHandoffs : HANDOFF_CONCURRENCY }, prefs: { sourcePolicy: oneOf(prefs.sourcePolicy, ['enforce', 'alert', 'off'], 'enforce'), pairingNetworkCheck: prefs.pairingNetworkCheck !== false },
       setup: { hostnameOk: bool(setup.hostnameOk), binaryApproved: bool(setup.binaryApproved), credentialsOk: bool(setup.credentialsOk), consentCurrent: bool(setup.consentCurrent), tunnelReachable: bool(setup.tunnelReachable), linked: bool(setup.linked), toolsListed: bool(setup.toolsListed), firstCallSeen: bool(setup.firstCallSeen) },
       tunnel: { state: oneOf(tunnel.state, TUNNEL_STATES, 'unknown'), binary: isObject(tunnel.binary) ? { path: null, version: typeof tunnel.binary.version === 'string' && SAFE_KEY_RE.test(tunnel.binary.version) ? string(tunnel.binary.version) : null, sha256Prefix: typeof tunnel.binary.sha256Prefix === 'string' && /^[a-f0-9]{8,64}$/i.test(tunnel.binary.sha256Prefix) ? string(tunnel.binary.sha256Prefix) : null, approved: bool(tunnel.binary.approved) } : null, tunnelId: typeof tunnel.tunnelId === 'string' && TUNNEL_ID_RE.test(tunnel.tunnelId) ? tunnel.tunnelId : null, credentialsMode: nullableOneOf(tunnel.credentialsMode, ['ok', 'too-open', 'unknown']), certPemPresent: bool(tunnel.certPemPresent), restarts: number(tunnel.restarts), lastExit: nullableOneOf(tunnel.lastExit, TUNNEL_EXIT_CODES), nextRetryAt: nullableNumber(tunnel.nextRetryAt), probe: { state: oneOf(probe.state, PROBE_STATES, 'unknown'), okAt: nullableNumber(probe.okAt), failingSince: nullableNumber(probe.failingSince), consecutiveFailures: number(probe.consecutiveFailures), reason: nullableOneOf(probe.reason, PROBE_REASONS) } },
       link: { state: oneOf(link.state, LINK_STATES, 'unknown'), pairing: { open: bool(pairing.open), expiresAt: nullableNumber(pairing.expiresAt) }, progress: { discoveryFetched: progressValue(progress.discoveryFetched), authorizeRequested: progressValue(progress.authorizeRequested), approved: progressValue(progress.approved), tokenIssued: progressValue(progress.tokenIssued), toolsListed: progressValue(progress.toolsListed) }, linkedAt: nullableNumber(link.linkedAt), lastUsedAt: nullableNumber(link.lastUsedAt), expiresAt: nullableNumber(link.expiresAt), clientAuth: nullableOneOf(link.clientAuth, ['none', 'assertion']), expiresSoon: bool(link.expiresSoon), renewalCause: nullableOneOf(link.renewalCause, RENEWAL_CAUSES), unarmedRequests: { count: number(object(link.unarmedRequests).count), lastAt: nullableNumber(object(link.unarmedRequests).lastAt) }, toolsStale: bool(link.toolsStale), sources: list(link.sources, MAX_TASKS).map(safeSourcePrefix).filter(Boolean) },
-      chat: { ordinal: nullableNumber(chat.ordinal), startedAt: nullableNumber(chat.startedAt), firstCallAt: nullableNumber(chat.firstCallAt), lastCallAt: nullableNumber(chat.lastCallAt), lastCallKind: nullableOneOf(chat.lastCallKind, ['get', 'submit']), calls: number(chat.calls), state: oneOf(chat.state, CHAT_STATES, 'unknown'), jobsAssigned: number(chat.jobsAssigned), jobsCap: number(chat.jobsCap), expiresInMs: number(chat.expiresInMs), pool: (() => {
+      chat: { ordinal: nullableNumber(chat.ordinal), startedAt: nullableNumber(chat.startedAt), firstCallAt: nullableNumber(chat.firstCallAt), lastCallAt: nullableNumber(chat.lastCallAt), lastCallKind: nullableOneOf(chat.lastCallKind, ['get', 'submit']), calls: number(chat.calls), state: oneOf(chat.state, CHAT_STATES, 'unknown'), jobsAssigned: number(chat.jobsAssigned), expiresInMs: number(chat.expiresInMs), pool: (() => {
         const generation = Number.isSafeInteger(pool.generation) && pool.generation > 0 ? pool.generation : null;
         const workerCount = Number.isSafeInteger(pool.workerCount) && pool.workerCount >= 1 && pool.workerCount <= MAX_POOL_WORKERS
           ? pool.workerCount
@@ -171,9 +171,9 @@ export function normalizeBridgeStatus(raw) {
         const planInput = object(pool.plan);
         const recommended = Number.isSafeInteger(planInput.recommended) && planInput.recommended >= 0 && planInput.recommended <= MAX_POOL_WORKERS
           ? planInput.recommended : workerCount;
-        const queued = Number.isSafeInteger(planInput.queued) && planInput.queued >= 0 && planInput.queued <= 10_000
+        const queued = Number.isSafeInteger(planInput.queued) && planInput.queued >= 0
           ? planInput.queued : 0;
-        const materialized = Number.isSafeInteger(planInput.materialized) && planInput.materialized >= 0 && planInput.materialized <= 10_000
+        const materialized = Number.isSafeInteger(planInput.materialized) && planInput.materialized >= 0
           ? Math.min(queued, planInput.materialized) : queued;
         const expandBy = Number.isSafeInteger(planInput.expandBy) && planInput.expandBy >= 0 && planInput.expandBy <= MAX_POOL_WORKERS
           ? planInput.expandBy : 0;

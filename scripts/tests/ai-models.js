@@ -41,6 +41,16 @@ export default [
         && taskMaxTokensFor('resume-parse', { promptLength: 60000 }) === 11776
         && taskMaxTokensFor('resume-parse', { promptLength: 5_000_000 }) === 12288,
         'resume-parse scales its cap with the merged career corpus and stops at a bounded ceiling');
+      const careerCompilerTasks = [
+        'career-profile-compile', 'career-profile-audit-completeness',
+        'career-profile-audit-grounding', 'career-profile-audit-attribution',
+        'career-profile-audit-metrics', 'career-profile-audit-skills',
+        'career-profile-audit-conflicts', 'career-profile-repair',
+      ];
+      assert(careerCompilerTasks.every(task => getKnownTaskIds().has(task)
+        && Number.isInteger(taskMaxTokensFor(task, { promptLength: 80_000, itemCount: 100 }))
+        && taskMaxTokensFor(task, { promptLength: 80_000, itemCount: 100 }) > 0),
+      'every career compiler, independent audit, and repair handoff is registered with a positive bounded output budget');
       return { scoringCap: taskMaxTokensFor('job-scoring', { itemCount: 100 }), compensationCap: taskMaxTokensFor('job-compensation-assessment', { itemCount: 100 }) };
     },
   },

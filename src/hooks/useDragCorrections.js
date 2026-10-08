@@ -9,6 +9,7 @@ import { buildHubHoverState, filePayloadFromDraggedNodes, fileSupportedByHub } f
 import { appendPhotoFiles } from '../utils/photoPathList';
 import { collectAbsorptionClosure, partitionEdgesForMove, buildGroupHoverState } from '../utils/nestedCanvasAbsorption';
 import { markJobWorkflowRelocationPending, settleJobWorkflowRelocation } from '../utils/nodeDeletionLifecycle';
+import { markJobTreeLayoutUserArranged } from '../nodes/jobsearch/buildJobTree';
 
 // ────────────────────────────────────────────────────────────────────────────
 
@@ -490,6 +491,19 @@ export function useDragCorrections({ setNodes, setEdges, getNodes, getEdges, get
         EventLogger.log(`Rejected non-file node drop [${draggedSummary}] onto ${targetHub.type} ${targetHub.id}; restored drag position`);
         return;
       }
+    }
+
+    // A card the user just dropped is an arrangement they own. Without this, a
+    // bundle finishing grows that card (saved banner), the measured-height
+    // reflow runs the deterministic tree layout, and every dragged position is
+    // overwritten. Flagging the hub's cards reuses the restore-time guard, which
+    // the next expand/collapse/Show more clears so the tree can organize again.
+    const droppedCards = (draggedNodes && draggedNodes.length > 0) ? draggedNodes : [node];
+    const arrangedHubIds = new Set(
+      droppedCards.filter(n => n.type === 'jobcard' && n.data?.hubId).map(n => n.data.hubId),
+    );
+    for (const hubId of arrangedHubIds) {
+      setNodes(nds => markJobTreeLayoutUserArranged(nds, hubId));
     }
 
     // Snapshot the final resting canvas state for ordinary drags only. Hub-input

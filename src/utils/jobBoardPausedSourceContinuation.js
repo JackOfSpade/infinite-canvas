@@ -63,13 +63,17 @@ export function terminalJobSearchOutcome(source) {
     && sourceData.resultDisposition !== ''
     && !hasDispositionProvenance;
   const scoredCount = Array.isArray(sourceData.scoredJobs) ? sourceData.scoredJobs.length : 0;
-  // Older canvases stored completed positive scored rows before run receipts
-  // were introduced.  They are valid display inputs, never authoritative
-  // empties: preserve and fingerprint them rather than routing a Board click
-  // into a replacement scrape just because provenance fields are absent.
-  // A partial modern receipt is not legacy data.  Treat it as untrusted rather
-  // than silently upgrading it to a reusable terminal result.
-  const legacyPositiveResult = scoredCount > 0 && !hasRunProvenance && !hasDispositionProvenance;
+  // Legacy positives are completed scored rows with no run id: either no
+  // disposition (pre-receipt canvases) or disposition 'scored' (older
+  // finishScoringAndSpawn never stamped jobRunId, and re-analysis stamps
+  // 'scored'). They are valid display inputs, never authoritative empties:
+  // preserve and fingerprint them rather than routing a Board click into a
+  // replacement scrape. Incomplete/collection-only/empty-complete/
+  // preference-filtered with no run id, malformed fields, partial modern
+  // receipts (run id without disposition), and errorMessage stay fail-closed.
+  const legacyPositiveResult = scoredCount > 0
+    && !hasRunProvenance
+    && (!hasDispositionProvenance || resultDisposition === 'scored');
   if (
     source?.type !== 'jobhub'
     || sourceData.hubState !== 'done'
@@ -82,7 +86,7 @@ export function terminalJobSearchOutcome(source) {
   ) return null;
   return {
     runId,
-    resultDisposition: resultDisposition || 'legacy-scored',
+    resultDisposition: legacyPositiveResult ? 'legacy-scored' : resultDisposition,
     legacyPositiveResult,
     fingerprint: moduleCombineFingerprint(
       sourceData.scoredJobs,

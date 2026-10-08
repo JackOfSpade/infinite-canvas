@@ -97,7 +97,7 @@ export function IssueReporterDialog({ isOpen, onClose, onSubmit }) {
   const descriptionValidation = validateIssueReportDescription(description);
 
   return (
-    <Dialog onClose={handleClose} title="Report an Issue">
+    <Dialog onClose={handleClose} title="Report an Issue" probePassthrough>
       <form
         onSubmit={e => { e.preventDefault(); submit('clipboard'); }}
         className="flex flex-col gap-3"

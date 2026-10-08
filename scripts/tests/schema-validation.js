@@ -3,6 +3,19 @@ import * as responseSchemas from '../../electron/ipc/aiSchemas.js';
 
 export default [
   {
+    name: 'RESUME_PARSE_SCHEMA: work-history dates preserve exact source spelling instead of requesting normalization',
+    run: () => {
+      const fields = responseSchemas.RESUME_PARSE_SCHEMA.properties.workHistory.items.properties;
+      assert(fields.startDate.description.includes('copied exactly as stated in the source')
+        && fields.endDate.description.includes('copied exactly as stated in the source')
+        && !fields.startDate.description.includes('preferably YYYY-MM')
+        && !fields.endDate.description.includes('preferably YYYY-MM')
+        && !fields.endDate.description.includes('use "present"'),
+      'resume parsing must retain authoritative month, punctuation, and year spelling rather than asking the model to normalize it');
+      return { startDate: fields.startDate.description, endDate: fields.endDate.description };
+    },
+  },
+  {
     name: 'Claude structured-output validation: original response schema constraints remain enforced locally',
     run: () => {
       const schema = {

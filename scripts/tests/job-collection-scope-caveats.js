@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { assert } from './testHelpers.js';
-import { buildJobTasks, fs, markSourceStatus, os, path, readRunState, startRun } from '../test-dependencies.js';
+import { __compactErrorStackForTests, buildJobTasks, claimJobAnalysisOperationAuthority, fs, ipcMain, markSourceStatus, os, path, readRunState, recordSourcePage, setStage, startRun } from '../test-dependencies.js';
+import { registerJobsHandlers } from '../../electron/ipc/jobs.js';
 import {
   COLLECTION_SCOPE_CAVEAT,
   collectionScopeCaveatsForSavedJobReanalysis,
@@ -11,6 +12,7 @@ import {
   normalizeCollectionScopeCaveats,
 } from '../../src/utils/jobCollectionScopeCaveats.js';
 import { classifyLayoutWarning } from '../../src/utils/EventLogger.js';
+import { writeApprovedCareerSnapshotFixture } from './careerSnapshotFixture.mjs';
 
 export default [
   {
@@ -306,6 +308,147 @@ export default [
         && classifyLayoutWarning('TypeError: boom') === null,
       'nearby observer/application failures remain ordinary JS errors rather than being suppressed');
       return { classified: 2 };
+    },
+  },
+  {
+    name: 'Resume hydrating a Glassdoor caveat onto a source with no staged rows leaves a complete source result',
+    run: () => {
+      const caveats = [{ sourceId: 'glassdoor', code: COLLECTION_SCOPE_CAVEAT.GLASSDOOR_COUNTRY_SCOPE_UNENFORCED }];
+      const empty = hydrateCollectionScopeCaveatsIntoSourceResults({}, caveats).glassdoor;
+      assert(Array.isArray(empty.jobs) && empty.jobs.length === 0
+        && Array.isArray(empty.warnings) && empty.errors === 0
+        && empty.pagesWalked === 0 && empty.stopReasons instanceof Set
+        && empty.locationScopeUnenforced === true,
+      `a caveat-only Glassdoor entry must carry the full per-source shape the Glassdoor gate and finalizer read unguarded, got ${JSON.stringify(empty)}`);
+      const rows = [{ title: 'kept' }];
+      const merged = hydrateCollectionScopeCaveatsIntoSourceResults({ glassdoor: { jobs: rows, errors: 2, warnings: [{ code: 'x' }] } }, caveats).glassdoor;
+      assert(merged.jobs === rows && merged.errors === 2 && merged.warnings.length === 1 && merged.locationScopeUnenforced === true,
+        'hydration must add the caveat without replacing a result that already owns rows, errors, or warnings');
+      return { shape: true };
+    },
+  },
+  {
+    name: 'Exact resume of a gathered run whose done Glassdoor staged no rows passes the Glassdoor gate',
+    run: async () => {
+      const root = await fs.promises.mkdtemp(path.join('/tmp', 'ic-resume-empty-glassdoor-'));
+      const canvasPath = path.join(root, 'workspace.json');
+      const nodeId = 'resume-empty-glassdoor-hub';
+      const runId = 'resume-empty-glassdoor-run';
+      const queries = ['data engineer'];
+      const fingerprint = 'a'.repeat(64);
+      const startedAt = Date.now() - 60_000;
+      let destroy = () => {};
+      const seen = [];
+      const { snapshotId: careerSnapshotId } = await writeApprovedCareerSnapshotFixture();
+      const sender = {
+        id: 98_223,
+        isDestroyed: () => false,
+        once: (name, callback) => { if (name === 'destroyed') destroy = callback; },
+        on: () => {},
+        removeListener: () => {},
+        send: (channel) => {
+          seen.push(channel);
+          // Safety net only: a regression that reaches a manual-AI handoff must
+          // abort instead of waiting forever for a paste.
+          if (channel === 'non-api-ai-request') destroy();
+        },
+      };
+      try {
+        await startRun(canvasPath, {
+          runId,
+          startedAt,
+          nodeId,
+          queries,
+          profileFingerprint: fingerprint,
+          careerSnapshotId,
+          canonicalLocation: 'Canada',
+          sourceIds: ['glassdoor', 'remoteok'],
+        });
+        await recordSourcePage(canvasPath, {
+          expectedRunId: runId,
+          nodeId,
+          sourceId: 'remoteok',
+          query: '',
+          page: 0,
+          jobs: [{ id: 'rok-1', title: 'Data Engineer', company: 'Acme', url: 'https://remoteok.com/remote-jobs/rok-1', posted: new Date().toISOString(), description: 'Build data pipelines. '.repeat(20) }],
+          now: startedAt + 100,
+        });
+        await markSourceStatus(canvasPath, 'remoteok', 'done', startedAt + 200, { expectedRunId: runId, nodeId });
+        // Glassdoor finished with the nation-tier caveat but yielded no rows, so
+        // recovery has nothing to seed its source result from.
+        await markSourceStatus(canvasPath, 'glassdoor', 'done', startedAt + 300, {
+          expectedRunId: runId,
+          nodeId,
+          collectionScopeCaveats: [{ sourceId: 'glassdoor', code: COLLECTION_SCOPE_CAVEAT.GLASSDOOR_COUNTRY_SCOPE_UNENFORCED }],
+        });
+        await setStage(canvasPath, 'gathered', startedAt + 400, { expectedRunId: runId, nodeId });
+        const stagedState = await readRunState(canvasPath, Date.now(), { nodeId });
+        const stagedAuthority = stagedState?.manifest?.inputs?.operationAuthority;
+        assert(stagedAuthority,
+          'the exact-resume fixture must carry the durable authority receipt issued with its staged manifest');
+        const resumeClaim = await claimJobAnalysisOperationAuthority({
+          canvasFilePath: canvasPath,
+          hubId: nodeId,
+          operationId: 'resume-empty-glassdoor-operation',
+          semanticBase: {
+            kind: 'resume',
+            careerSnapshotId,
+            runId,
+            analysisRevisionId: null,
+            fingerprint: null,
+            continuationId: null,
+            sourceArtifactFingerprint: null,
+          },
+          predecessor: stagedAuthority,
+        });
+        assert(resumeClaim?.admitted === true && resumeClaim.receipt,
+          'the exact-resume fixture must make a successor authority claim that names the staged receipt as its immediate predecessor');
+        const operationAuthority = resumeClaim.receipt;
+        registerJobsHandlers();
+        const searchJobs = ipcMain.__getInvokeHandler('search-jobs');
+        const guard = setTimeout(() => destroy(), 20_000);
+        let result;
+        try {
+          result = await searchJobs({ sender }, {
+            nodeId,
+            canvasFilePath: canvasPath,
+            queries,
+            preferredLocation: 'Canada',
+            resume: true,
+            resumeRunId: runId,
+            profileFingerprint: fingerprint,
+            careerSnapshotId,
+            operationAuthority,
+            profileInputMode: 'stored-profile',
+          });
+        } finally {
+          clearTimeout(guard);
+        }
+        assert(!/Cannot read properties/.test(String(result?.error || '')),
+          `a done Glassdoor with a caveat and no staged rows must not crash the resume, got ${JSON.stringify(result)}`);
+        assert(result?.success === true && result.jobs?.some(job => job.id === 'rok-1'),
+          `the resume must finish past the Glassdoor gate with its staged rows, saw ${JSON.stringify(seen)} and ${JSON.stringify(result)?.slice(0, 400)}`);
+        return { resumed: true };
+      } finally {
+        await fs.promises.rm(root, { recursive: true, force: true });
+      }
+    },
+  },
+  {
+    name: 'IPC failure stack frames survive report path redaction when the install path contains spaces',
+    run: () => {
+      const error = new Error('boom');
+      error.stack = [
+        'Error: boom',
+        '    at /Users/jack/Desktop/My Apps/infinite-canvas/electron/ipc/jobs.js:10956:31',
+        '    at async Object.handler (/Applications/Infinite Canvas.app/Contents/Resources/app.asar/dist-electron/main.cjs:777:12)',
+        '    at async file:///Users/jack/Desktop/My Apps/x/ipcUtils.js:417:22',
+        '    at C:\\Program Files\\Infinite Canvas\\main.cjs:5:9',
+      ].join('\n');
+      const compact = __compactErrorStackForTests(error);
+      assert(compact === 'at jobs.js:10956:31 ← at async Object.handler (main.cjs:777:12) ← at async ipcUtils.js:417:22 ← at main.cjs:5:9',
+        `frames must reduce to basename:line:col with the leading text intact, got ${compact}`);
+      return { compact };
     },
   },
 ];

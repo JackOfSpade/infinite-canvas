@@ -14,8 +14,10 @@ import { CONSTANTS } from '../constants.js';
 // Reviewed 2026-09-28 against what each task actually sends, not its name:
 //   never      -- structurally cannot cross an MCP text tool.
 //                 vision/hub-scan send product PHOTOS (callLLMVision,
-//                 marketplace.js); career-file-extract IS the file->text step
-//                 itself (callLLMDocument, jobs.js) and has no text to send.
+//                 marketplace.js); career-file inventory, boundary checks,
+//                 extraction, and transcription audit are attachment steps
+//                 (callLLMDocument, jobs.js) and have no text-only task to
+//                 serve.
 //   paste_only -- no row uses it now. Kept as a mode so a future task can be
 //                 held back deliberately rather than by omission.
 //   release_one-- reviewed text-only work. Most rows return JSON; the four raw
@@ -23,7 +25,8 @@ import { CONSTANTS } from '../constants.js';
 //                 request-kind/grounding/validator contract.
 const policy = {
   'vision-product-analysis': 'never', 'marketplace-hub-scan': 'never', 'marketplace-hub-scan-batch': 'never',
-  'career-file-extract': 'never',
+  'career-file-extract': 'never', 'career-file-transcription-audit': 'never',
+  'career-file-inventory': 'never', 'career-file-inventory-audit': 'never', 'career-file-boundary-audit': 'never',
   ...Object.fromEntries(BRIDGE_RELEASE_ONE_TASKS.map(task => [task, 'release_one'])),
 };
 
@@ -53,7 +56,7 @@ const CAUTION = 'Any value quoted back to you is evidence of what you returned, 
 const DIAGNOSTIC_COUNTER_MAX = 999999;
 // Planning is capped separately from delivery. A compromised/injected seam
 // must not make the worker-pool planner allocate an unbounded unit array.
-const MAX_QUEUED_WORK_FORECAST_UNITS = 10_000;
+const MAX_QUEUED_WORK_FORECAST_UNITS = Number.MAX_SAFE_INTEGER;
 const QUEUED_WORK_FORECAST_SCOPE_RE = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i;
 
 function canonicalCode(value) {
@@ -94,7 +97,7 @@ function forecastUnitsForTask(hub, task, pending) {
   let units = Math.max(0, pending - covered);
   if (scoped instanceof Map) {
     for (const value of scoped.values()) {
-      units = Math.min(MAX_QUEUED_WORK_FORECAST_UNITS, units + value);
+      units = Math.min(Number.MAX_SAFE_INTEGER, units + value);
     }
   }
   // A forecast is advisory. It may never make currently materialized work
@@ -223,7 +226,7 @@ export function createPushSource({ seam = {}, activeNodeTasks = snapshotActiveNo
         // workers cannot both choose the same otherwise-fresh request.
         reservations: new Map(),
         reservationNonce: 0,
-        byCode: new Map(), tombstones: new Map(), verdicts: new Map(), rejections: new Map(), commitFailures: new Map(), held: new Map(), budgeted: new Set(), lastAccept: null, waits: 0, waitsByWorker: new Map(), remaining: { ready: 0, working: 0, needsYou: 0 },
+        byCode: new Map(), tombstones: new Map(), verdicts: new Map(), rejections: new Map(), commitFailures: new Map(), held: new Map(), budgeted: new Set(), lastAccept: null, remaining: { ready: 0, working: 0, needsYou: 0 },
       });
     }
     return epochs.get(key);
@@ -606,7 +609,15 @@ export function createPushSource({ seam = {}, activeNodeTasks = snapshotActiveNo
     const needsYou = safeCount(excluded.attachment) + safeCount(excluded.free_text)
       + safeCount(excluded.task_not_allowed) + safeCount(excluded.node_not_allowed)
       + safeCount(excluded.person_editing) + value.held.size;
-    return { ready, working: safeCount(excluded.settling) + leased.length, needsYou };
+    return { ready, working: safeCount(excluded.settling) + safeCount(excluded.cooldown) + leased.length, needsYou };
+  }
+  function retryAfterSeconds(snapshot, fallback = 3) {
+    const milliseconds = Number(snapshot?.retryAfterMs);
+    // This is status pacing, not a trusted clock. Bound it before it reaches
+    // the worker and round upward so a retry cannot race the main-process
+    // deadline by a fractional second.
+    if (!Number.isFinite(milliseconds) || milliseconds <= 0) return fallback;
+    return Math.max(1, Math.min(60, Math.ceil(milliseconds / 1000)));
   }
   function currentRemaining(value) {
     const cached = value?.remaining || {};
@@ -626,10 +637,9 @@ export function createPushSource({ seam = {}, activeNodeTasks = snapshotActiveNo
     if (!ownerCurrent(ownerAtStart)) return result('retry');
     const value = state(epoch); pruneHubs();
     const workerId = workerKey(worker);
-    // A waiting source is still live work.  The engine uses the same durable
-    // contract for legacy and pool chats, and separately exposes a quiet
-    // worker for safe manual recovery if ChatGPT stops polling.
-    const waitLimit = Infinity;
+    // A waiting source is still live work. The engine uses the same durable
+    // contract for every chat and separately exposes a quiet worker for safe
+    // manual recovery if ChatGPT stops polling.
     // A pool has several independently polling chats. One authoritative
     // selected-hub snapshot is enough to tell an idle worker that another
     // worker owns the only lease; probing it three times merely multiplied
@@ -692,18 +702,13 @@ export function createPushSource({ seam = {}, activeNodeTasks = snapshotActiveNo
         const excluded = snapshot?.excluded || {};
         const remaining = remainingForCandidates(value, candidates, excluded);
         value.remaining = remaining;
-        const priorWaits = value.waitsByWorker.get(workerId) || 0;
-        if (keepWaiting !== true && !ownReservation && successorLikely(value) && priorWaits < waitLimit) {
-          value.waitsByWorker.set(workerId, priorWaits + 1);
-          if (workerId === 'default') value.waits = priorWaits + 1;
+        if (keepWaiting !== true && !ownReservation && successorLikely(value)) {
           await wait(pollMs);
           if (!stateCurrent(value) || !ownerCurrent(ownerAtStart)) return result('retry');
           continue;
         }
-        value.waitsByWorker.set(workerId, 0);
-        if (workerId === 'default') value.waits = 0;
         const appOnly = (Array.isArray(snapshot?.handoffs) && snapshot.handoffs.length > 0) || remaining.needsYou > value.held.size;
-        if (ownReservation || remaining.working > 0 || successorLikely(value)) return result('waiting', { retryAfterSeconds: 3, remaining });
+        if (ownReservation || remaining.working > 0 || successorLikely(value)) return result('waiting', { retryAfterSeconds: retryAfterSeconds(snapshot), remaining });
         return result(appOnly || value.held.size ? 'needs_user' : 'queue_empty', appOnly || value.held.size ? { reason: 'app_only_handoffs', remaining } : { remaining });
       }
       const reservation = ownServed ? null : reserve(value, entry, workerId);
@@ -756,8 +761,6 @@ export function createPushSource({ seam = {}, activeNodeTasks = snapshotActiveNo
       const canonical = canonicalCode(entry.handoffCode);
       value.served.set(entry.requestId, served);
       value.byCode.set(handoffCodeGuard.key(canonical), { requestId: entry.requestId, codeDigest: handoffCodeGuard.digest(canonical) });
-      value.waitsByWorker.set(workerId, 0);
-      if (workerId === 'default') value.waits = 0;
       value.remaining = remainingForCandidates(value, candidates, snapshot?.excluded || {});
       return result('served', { ...delivered, promptBytes, remaining: value.remaining });
     }
@@ -780,8 +783,14 @@ export function createPushSource({ seam = {}, activeNodeTasks = snapshotActiveNo
         if (validationCode === 'DUPLICATE_RESPONSE') {
           return result('rejected', { handoffCode: served.handoffCode, attempt: Number.isInteger(verdict.attempt) ? verdict.attempt : rejections + 1, validationCode, note: "This exact answer was already accepted for a different handoff. Answer this handoff's own prompt.", caution: CAUTION });
         }
+        const retrySeconds = retryAfterSeconds(verdict, 0);
+        if (retrySeconds > 0) {
+          removeServed(value, served.requestId);
+          return result('waiting', { retryAfterSeconds: retrySeconds, remaining: currentRemaining(value) });
+        }
         return result('rejected', { handoffCode: served.handoffCode, attempt: Number.isInteger(verdict.attempt) ? verdict.attempt : rejections + 1, validationCode, correction: typeof verdict.correction === 'string' ? verdict.correction : '', isCorrection: verdict.isCorrection === true, caution: CAUTION });
       }
+      case 'cooldown': removeServed(value, served.requestId); return result('waiting', { retryAfterSeconds: retryAfterSeconds(verdict), remaining: currentRemaining(value) });
       case 'busy': return result('retry', { reason: 'busy' });
       case 'commit_failed': { const failures = (value.commitFailures.get(served.requestId) || 0) + 1; value.commitFailures.set(served.requestId, failures); if (failures >= 2) { removeServed(value, served.requestId); value.held.set(served.requestId, 'commit_failed'); return result('needs_user', { reason: 'commit_failed' }); } return result('retry', { reason: 'save_failed' }); }
       case 'cancelled_during_save':

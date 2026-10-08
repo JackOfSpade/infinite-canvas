@@ -159,6 +159,49 @@ export default [
     },
   },
   {
+    name: 'handoff bridge: render: recoverable read failures offer Retry reading through the existing scoped resume IPC only',
+    async run() {
+      const directory = await fsPromises.mkdtemp(path.join(os.tmpdir(), 'ic-handoff-retry-reading-'));
+      const entry = path.join(directory, 'RetryReadingProbe.jsx'); const panel = path.resolve('src/components/HandoffBridgePanel.jsx'); const store = path.resolve('src/utils/handoffBridgeStore.js'); const uiStore = path.resolve('src/utils/handoffBridgeUiStore.js');
+      await fsPromises.writeFile(entry, `import React from 'react';\nimport { HandoffBridgePanel } from ${JSON.stringify(panel)};\nexport { applyHandoffBridgeStatus, __resetHandoffBridgeStoreForTests } from ${JSON.stringify(store)};\nexport { openBridgePopover, __resetBridgeUiForTests } from ${JSON.stringify(uiStore)};\nexport function RetryReadingProbe() { return <HandoffBridgePanel />; }\n`);
+      const controller = new AbortController(); let bundle;
+      try {
+        bundle = await withTimeout(bundleComponent(entry, { signal: controller.signal }), 5000);
+        await withDom(async window => withConsoleCollector(async entries => {
+          const calls = [];
+          window.electronAPI = {
+            handoffBridgeGetStatus: async () => ({ status: status(1) }),
+            onHandoffBridgeStatus: () => () => {},
+            handoffBridgeGetActivity: async () => ({ items: [] }),
+            handoffBridgePublishJobs: () => undefined,
+            handoffBridgeHoldJob: async payload => { calls.push(payload); return { success: true }; },
+          };
+          bundle.module.__resetHandoffBridgeStoreForTests(); bundle.module.__resetBridgeUiForTests(); const rootNode = bundle.module.createRoot(window.document.getElementById('root'));
+          try {
+            await bundle.module.act(async () => {
+              rootNode.render(bundle.module.React.createElement(bundle.module.RetryReadingProbe));
+              bundle.module.applyHandoffBridgeStatus(status(2, { queue: { applications: { needsYou: 2 }, jobs: [
+                { jobId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', phase: 'needs_user', stage: 'resume', reason: 'read_failed' },
+                { jobId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', phase: 'needs_user', stage: 'review', reason: 'app_fix_required' },
+              ] } }));
+              bundle.module.openBridgePopover(); await Promise.resolve(); await Promise.resolve();
+            });
+            const retry = [...window.document.querySelectorAll('button')].filter(button => button.textContent.trim() === 'Retry reading');
+            assert(retry.length === 1 && !retry[0].disabled,
+              'only the read_failed application exposes an enabled Retry reading action in the Applications/Workers panel');
+            assert(window.document.body.textContent.includes('update the app before this layout check can continue')
+              && !window.document.body.textContent.includes('Retry layout check'),
+            'a deterministic app-fix block remains visible but gets no retry-reading affordance');
+            await bundle.module.act(async () => { retry[0].click(); await Promise.resolve(); await Promise.resolve(); });
+            assert(JSON.stringify(calls) === JSON.stringify([{ jobId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', held: false }]),
+              'Retry reading uses only the existing per-job resume IPC payload; it does not unrelease, requeue, or edit a bundle');
+          } finally { await bundle.module.act(async () => rootNode.unmount()); }
+          assert(entries.length === 0, `the retry-reading panel must render without console output: ${entries.map(entry => entry.args.join(' ')).join(' | ')}`);
+        }));
+      } finally { controller.abort(); await bundle?.dispose(); await fsPromises.rm(directory, { recursive: true, force: true }); __resetHandoffBridgeStoreForTests(); __resetBridgeUiForTests(); }
+    },
+  },
+  {
     name: 'handoff bridge: render: the worker-pool planner copies only opaque worker metadata through the renderer',
     async run() {
       const directory = await fsPromises.mkdtemp(path.join(os.tmpdir(), 'ic-handoff-worker-pool-'));
@@ -192,7 +235,8 @@ export default [
               calls.push(['copy', payload]);
               // A hostile or accidentally widened preload must not make this
               // capability observable in the rendered document/state.
-              return { success: true, generation: 41, workerCount: 3, workerOrdinal: payload.workerOrdinal, copied: true, sessionCode: 'PRIVATE-WORKER-SESSION-CODE' };
+              const copiesForWorker = calls.filter(call => call[0] === 'copy' && call[1]?.workerOrdinal === payload.workerOrdinal).length;
+              return { success: true, generation: 41, workerCount: 3, workerOrdinal: payload.workerOrdinal, copied: true, recopied: copiesForWorker > 1, sessionCode: 'PRIVATE-WORKER-SESSION-CODE' };
             },
             handoffBridgeRestartWorker: async payload => {
               calls.push(['restart', payload]);
@@ -220,6 +264,13 @@ export default [
               ['copy', { generation: 41, workerOrdinal: 2 }],
             ]), 'the renderer returns only its numeric generation/worker coordinates to main');
             assert(!window.document.body.textContent.includes('PRIVATE-WORKER-SESSION-CODE') && window.document.body.textContent.includes('Copied worker 2 of 3.'), 'the UI confirms the copy without ever rendering a session code or starter');
+            const copyAgain = [...window.document.querySelectorAll('button')].find(button => button.textContent.trim() === 'Copy worker 2 starter again');
+            assert(copyAgain && !copyAgain.disabled, 'an unpresented ready worker retains a visible same-starter re-copy action');
+            await bundle.module.act(async () => { copyAgain.click(); await Promise.resolve(); await Promise.resolve(); });
+            assert(JSON.stringify(calls.at(-1)) === JSON.stringify(['copy', { generation: 41, workerOrdinal: 2 }])
+              && window.document.body.textContent.includes('Copied worker 2 of 3 again.')
+              && !window.document.body.textContent.includes('PRIVATE-WORKER-SESSION-CODE'),
+            'the panel sends only worker coordinates for re-copy and confirms it without rendering a capability');
 
             // The component is permanently mounted. Its local pool shape must
             // be reconciled with the main-owned status identity when a pool
@@ -356,6 +407,10 @@ export default [
       assert(panel.includes('copyReplacementStarter') && source('src/components/BridgeProgress.jsx').includes('copyReplacementStarter')
         && source('src/utils/handoffBridgeCopy.js').includes('If this waiting chat is gone'),
       'both worker surfaces offer a clearly named replacement-starter path when a quiet ChatGPT chat has no usable composer');
+      assert(panel.includes("'fresh_context_required'") && source('src/components/BridgeProgress.jsx').includes("'fresh_context_required'")
+        && source('src/utils/handoffBridgeCopy.js').includes('Fresh chat needed')
+        && !panel.includes('freshContextRequired') && !source('src/components/BridgeProgress.jsx').includes('freshContextRequired'),
+      'renderer worker views may render only the closed fresh-chat reason, never the private handoff metadata');
       assert(!panel.includes("setConfirm('new')") && !panel.includes('confirm === \'new\'')
         && !source('src/components/BridgeProgress.jsx').includes('confirmNew')
         && panel.includes('BRIDGE_PROGRESS_COPY.copiedAgain(result.chatOrdinal, pluginName)') && panel.includes('result.recopied === true'),
@@ -1479,9 +1534,10 @@ export default [
           async check({ window, act }) {
             await act(async () => { button(window, 'Prepare worker plan').click(); await Promise.resolve(); await Promise.resolve(); });
             const available = button(window, 'Copy worker 2 starter');
-            assert(!button(window, 'Copy worker 1 starter') && available && !available.disabled
+            const ready = button(window, 'Copy worker 1 starter again');
+            assert(ready && !ready.disabled && available && !available.disabled
               && text(window).includes('Worker 1') && text(window).includes('Starter copied'),
-            'main-owned copied workers become a visible status row while only uncopied starters retain a copy action');
+            'main-owned unpresented copied workers retain a visible same-starter re-copy action while uncopied workers retain their first-copy action');
             assert(!text(window).includes('Copied again:'), 'the worker plan never claims to have copied a legacy chat starter');
           },
         });
@@ -1680,10 +1736,10 @@ export default [
             assert(!window.document.querySelector('button'), 'a job behind a working chat needs no button');
           },
         });
-        await scenario('a full chat that holds the job keeps the working line and offers no new chat', {
+        await scenario('a retiring chat that holds the job keeps the working line and offers no new chat', {
           status: view({}, { state: 'full' }),
           async check({ window }) {
-            assert(live(window).textContent.includes('ChatGPT is working on: Résumé') && live(window).textContent.includes('safety budget'), live(window).textContent);
+            assert(live(window).textContent.includes('ChatGPT is working on: Résumé') && live(window).textContent.includes('This worker is retiring'), live(window).textContent);
             assert(!window.document.querySelector('button'), 'no worker-plan action while ChatGPT may be answering');
           },
         });
@@ -1867,7 +1923,9 @@ export default [
               assert(window.document.querySelector('#non-api-ai-handoff-panel'), 'an empty-to-nonempty queue transition reopens the dock');
               assert(!window.document.querySelector('button[aria-expanded="false"]'), 'the new queue is not hidden behind an expand button');
               const text = window.document.body.textContent;
-              seen[phase] = { working: text.includes('Handed to ChatGPT'), noPasteWording: !/No paste/i.test(text), chip: text.includes('CODE-123'), paste: text.includes('SYNTHETIC_STAGE_PROMPT') || Boolean(window.document.querySelector('textarea')) };
+              // A held bundle is a row of the ONE shared application page (its own
+              // progress, no paste UI), not a per-bundle "Handed to ChatGPT" page.
+              seen[phase] = { working: Boolean(window.document.querySelector('[data-applications-page] [data-application-row]')), noPasteWording: !/No paste/i.test(text), chip: text.includes('CODE-123'), paste: text.includes('SYNTHETIC_STAGE_PROMPT') || Boolean(window.document.querySelector('textarea')) };
             } finally {
               await bundle.module.act(async () => rootNode.unmount());
               if (priorCustomEvent) Object.defineProperty(globalThis, 'CustomEvent', priorCustomEvent); else delete globalThis.CustomEvent;

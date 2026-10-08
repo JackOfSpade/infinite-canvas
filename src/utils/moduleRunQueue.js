@@ -17,6 +17,9 @@ function describeEntry(entry, position = 0) {
     label: entry.label || 'Module run',
     lane: entry.lane,
     position,
+    // True while this entry heads its lane but its admission check (canStart)
+    // refuses it, e.g. no free application slot. Pure observation for the UI.
+    blocked: entry.blocked === true,
   };
 }
 
@@ -29,7 +32,17 @@ function safeCall(fn, arg) {
   }
 }
 
-export function createModuleRunQueue({ onChange = null } = {}) {
+// How often a lane whose head entry is refused by its admission check is
+// re-evaluated. The check reads state the queue does not own (canvas nodes), so
+// polling is what makes every release path — a bundle finishing, a dismissal, a
+// deleted card — free the head without each one having to know about the queue.
+const ADMISSION_RECHECK_MS = 1000;
+
+export function createModuleRunQueue({
+  onChange = null,
+  admissionRecheckMs = ADMISSION_RECHECK_MS,
+  timers = { setTimeout, clearTimeout },
+} = {}) {
   // A lane is independently FIFO. Callers that share a resource (for example
   // the single job-search manual-AI handoff) use one common lane; unrelated
   // lanes retain independent scheduling.
@@ -75,6 +88,31 @@ export function createModuleRunQueue({ onChange = null } = {}) {
     safeCall(onChange, snapshot());
   };
 
+  // Admission is separate from lane capacity: an entry may carry canStart(), a
+  // synchronous predicate that must hold before it takes the lane. A throwing
+  // predicate admits the entry and fails it loudly from startEntry — a broken
+  // check must never leave an entry waiting forever with no explanation.
+  const admits = (entry) => {
+    if (typeof entry.canStart !== 'function') return true;
+    try {
+      return entry.canStart() !== false;
+    } catch (error) {
+      entry.admissionError = error;
+      return true;
+    }
+  };
+
+  let recheckTimer = null;
+  const scheduleRecheck = () => {
+    if (recheckTimer !== null) return;
+    recheckTimer = timers.setTimeout(() => {
+      recheckTimer = null;
+      [...lanes.keys()].forEach(drain);
+    }, admissionRecheckMs);
+    // A pending recheck must never keep a headless process (tests) alive.
+    recheckTimer?.unref?.();
+  };
+
   const updateQueuedPositions = (lane) => {
     const state = lanes.get(lane);
     if (!state) return;
@@ -106,6 +144,7 @@ export function createModuleRunQueue({ onChange = null } = {}) {
         // this microtask. Keep that tiny admission window cancellable rather
         // than allowing a removed node to open a worker after its queue entry
         // was already considered active.
+        if (entry.admissionError) throw entry.admissionError;
         entry.started = true;
         if (typeof entry.onStart === 'function') {
           entry.onStart({ ...describeEntry(entry, 0), wasQueued: !!entry.wasQueued });
@@ -126,6 +165,17 @@ export function createModuleRunQueue({ onChange = null } = {}) {
   function drain(lane) {
     const state = lanes.get(lane);
     if (!state || state.active) return;
+    const head = state.queued[0];
+    if (head && !admits(head)) {
+      // Strict FIFO: a refused head holds everything behind it, so a later
+      // entry can never overtake an earlier Generate click.
+      if (head.blocked !== true) {
+        head.blocked = true;
+        emitChange();
+      }
+      scheduleRecheck();
+      return;
+    }
     const next = state.queued.shift();
     updateQueuedPositions(lane);
     if (!next) {
@@ -133,6 +183,7 @@ export function createModuleRunQueue({ onChange = null } = {}) {
       emitChange();
       return;
     }
+    next.blocked = false;
     next.wasQueued = true;
     startEntry(next);
   }
@@ -157,6 +208,9 @@ export function createModuleRunQueue({ onChange = null } = {}) {
       onStart: options.onStart,
       onFinish: options.onFinish,
       onCancel: options.onCancel,
+      canStart: options.canStart,
+      blocked: false,
+      admissionError: null,
       continuationPriority: options.priority === 'continuation',
       resolve,
       reject,
@@ -168,7 +222,9 @@ export function createModuleRunQueue({ onChange = null } = {}) {
     };
     const [, state] = getLane(lane);
 
-    if (state.active) {
+    // An idle lane still queues the entry when an earlier one is waiting on its
+    // admission check, or when this entry's own check refuses it.
+    if (state.active || state.queued.length > 0 || !admits(entry)) {
       entry.wasQueued = true;
       if (entry.continuationPriority) {
         // A user-resolved paused source is the continuation of work that has
@@ -185,6 +241,8 @@ export function createModuleRunQueue({ onChange = null } = {}) {
       safeCall(entry.onQueued, { ...describeEntry(entry, position), position });
       updateQueuedPositions(lane);
       emitChange();
+      // An idle lane has no active run whose release would drain it.
+      if (!state.active) drain(lane);
       return;
     }
 

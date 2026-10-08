@@ -33,6 +33,14 @@ secrets.json
 coverage/
 .nyc_output/
 
+# Local black-box acceptance state. Keep the reusable harness and its docs,
+# but never commit copied workspaces, career data, generated bundles, or PDFs.
+.test-artifacts/*
+!.test-artifacts/blackbox-run/
+.test-artifacts/blackbox-run/*
+!.test-artifacts/blackbox-run/*.mjs
+!.test-artifacts/blackbox-run/README*.md
+
 # Build caches and scratch dirs
 *.tsbuildinfo
 main.cjs

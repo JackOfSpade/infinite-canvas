@@ -8,22 +8,160 @@
  * output locations, source-grounding quotes, or invented checklist evidence.
  */
 import { assertTrustedSourceRoles, isUnsafeControlCharacter, projectContactChannels, projectTrustedIdentity, renderStructuredResume } from './structuredResume.js';
+import { resolveAuthorityEvidence, resolveAuthorityRole } from './applicationCareerAuthority.js';
+export { MAX_FROZEN_SOURCE_CHARS } from './applicationSourceLimits.js';
+import { MAX_FROZEN_SOURCE_CHARS } from './applicationSourceLimits.js';
 
 const DEFAULT_OUTPUT_BUNDLE_ROOT = 'Applied Jobs';
+
+/** Enforces the host-selected drafting view without discarding the complete
+ * pinned authority catalog used for source verification. */
+export function assertAuthorityDraftSelection({ fullAuthority, selection, acceptedNonAuthorityEvidenceIds = [], resume, coverLetter } = {}) {
+  const selectedRoles = new Set(selection?.selectedRoleIds || []);
+  const selectedEvidence = new Set(selection?.selectedEvidenceIds || []);
+  const selectedProjects = new Set(selection?.selectedProjectIds || []);
+  const resumeProjectObligation = selection?.resumeProjectObligation ?? null;
+  const selectedEducation = new Set(selection?.selectedEducationIds || []);
+  const selectedCredentials = new Set(selection?.selectedCertificationIds || []);
+  const selectedSkillIds = new Set(selection?.selectedSkillIds || []);
+  const catalogById = new Map((fullAuthority?.catalog || []).map(item => [item?.id, item]));
+  // The current-authority selection is deliberately about the pinned career
+  // catalog. A frozen draft plan may additionally carry host-accepted listing
+  // evidence, but it must arrive as an explicit allowlist rather than through
+  // an ID shape or a fallback that makes every unknown citation permissible.
+  if (!Array.isArray(acceptedNonAuthorityEvidenceIds)
+    || acceptedNonAuthorityEvidenceIds.some(id => typeof id !== 'string' || !id)
+    || new Set(acceptedNonAuthorityEvidenceIds).size !== acceptedNonAuthorityEvidenceIds.length
+    || acceptedNonAuthorityEvidenceIds.some(id => catalogById.has(id))) {
+    throw new Error('Application non-authority evidence allowlist is invalid.');
+  }
+  const acceptedNonAuthorityEvidence = new Set(acceptedNonAuthorityEvidenceIds);
+  const projectIdForEvidence = (evidenceId) => {
+    const item = catalogById.get(evidenceId);
+    return typeof item?.projectId === 'string' && item.projectId
+      ? item.projectId
+      : item?.owner?.type === 'project' && typeof item.owner.id === 'string' && item.owner.id
+        ? item.owner.id
+        : null;
+  };
+  const typedEntityIdForEvidence = (evidenceId, type) => {
+    const item = catalogById.get(evidenceId);
+    const match = new RegExp(`^host\\.career\\.${type}\\.([a-z][a-z0-9-]{0,79})\\.`).exec(String(item?.id || ''));
+    return match?.[1] || (item?.owner?.type === type && typeof item.owner.id === 'string' ? item.owner.id : null);
+  };
+  if ([...selectedEvidence].some(id => !catalogById.has(id))) throw new Error('Application selection references evidence outside pinned authority.');
+  // Project authority is host-derived from typed selected evidence, never a
+  // model-authored project/source ID.  Its ordered projection is persisted in
+  // the selection receipt and checked here again before final assembly.
+  const derivedSelectedProjectIds = [];
+  for (const evidenceId of selection?.selectedEvidenceIds || []) {
+    const projectId = projectIdForEvidence(evidenceId);
+    if (projectId && !derivedSelectedProjectIds.includes(projectId)) derivedSelectedProjectIds.push(projectId);
+  }
+  if (JSON.stringify(derivedSelectedProjectIds) !== JSON.stringify(selection?.selectedProjectIds || [])
+    || selectedProjects.size !== derivedSelectedProjectIds.length) {
+    throw new Error('Application selection has an invalid typed project-authority projection.');
+  }
+  if (resumeProjectObligation !== null) {
+    if (!resumeProjectObligation || typeof resumeProjectObligation !== 'object'
+      || resumeProjectObligation.version !== 1
+      || resumeProjectObligation.priority !== 'highest'
+      || !['projectId', 'evidenceId', 'requirementId'].every(key => typeof resumeProjectObligation[key] === 'string' && resumeProjectObligation[key])) {
+      throw new Error('Application selection has an invalid host-required résumé project obligation.');
+    }
+    if (!selectedProjects.has(resumeProjectObligation.projectId)
+      || !selectedEvidence.has(resumeProjectObligation.evidenceId)
+      || projectIdForEvidence(resumeProjectObligation.evidenceId) !== resumeProjectObligation.projectId) {
+      throw new Error('Application selection has an unbound host-required résumé project obligation.');
+    }
+  }
+  // Like project authority, education and certification authority is derived
+  // from the selected evidence stream. A response may choose phrasing and
+  // order, but cannot smuggle in an unselected credential or a source-order
+  // item that never matched this job.
+  const deriveTypedSelection = type => [...new Set((selection?.selectedEvidenceIds || []).map(id => typedEntityIdForEvidence(id, type)).filter(Boolean))];
+  const derivedEducationIds = deriveTypedSelection('education');
+  const derivedCertificationIds = deriveTypedSelection('certification');
+  if (JSON.stringify(derivedEducationIds) !== JSON.stringify(selection?.selectedEducationIds || [])
+    || selectedEducation.size !== derivedEducationIds.length
+    || JSON.stringify(derivedCertificationIds) !== JSON.stringify(selection?.selectedCertificationIds || [])
+    || selectedCredentials.size !== derivedCertificationIds.length) {
+    throw new Error('Application selection has an invalid typed education or certification authority projection.');
+  }
+  const roles = Array.isArray(resume?.roles) ? resume.roles : [];
+  // Structured résumés use the immutable source role ID as role.id; unknown
+  // response properties are intentionally discarded by their normalizer.
+  if (roles.some(role => !selectedRoles.has(role?.id))) throw new Error('Application draft contains an unselected source role.');
+  const projects = Array.isArray(resume?.projects) ? resume.projects : [];
+  for (const project of projects) {
+    const projectEvidenceIds = Array.isArray(project?.evidenceIds) ? project.evidenceIds : [];
+    const typedProjectIds = [...new Set(projectEvidenceIds.map(projectIdForEvidence).filter(Boolean))];
+    if (typedProjectIds.length !== 1 || !selectedProjects.has(typedProjectIds[0])) {
+      throw new Error('Application draft contains a project without one selected typed project authority.');
+    }
+  }
+  if (resumeProjectObligation !== null) {
+    // The project ID alone is not sufficient here: a selected project can
+    // have several evidence rows, only one of which may be the direct match
+    // for the highest-priority requirement. Requiring that exact immutable
+    // citation keeps the rendered project tied to the match receipt rather
+    // than letting another selected row from the same project satisfy it.
+    const renderedRequiredProject = projects.some(project => {
+      const evidenceIds = Array.isArray(project?.evidenceIds) ? project.evidenceIds : [];
+      return evidenceIds.includes(resumeProjectObligation.evidenceId)
+        && projectIdForEvidence(resumeProjectObligation.evidenceId) === resumeProjectObligation.projectId;
+    });
+    if (!renderedRequiredProject) {
+      throw new Error('Application draft omits the exact host-required project evidence selected for a highest-priority requirement.');
+    }
+  }
+  for (const education of (Array.isArray(resume?.education) ? resume.education : [])) {
+    const typed = [...new Set((education?.evidenceIds || []).map(id => typedEntityIdForEvidence(id, 'education')).filter(Boolean))];
+    if (typed.length !== 1 || !selectedEducation.has(typed[0])) throw new Error('Application draft contains education without one selected typed education authority.');
+  }
+  for (const credential of (Array.isArray(resume?.credentials) ? resume.credentials : [])) {
+    const typed = [...new Set((credential?.evidenceIds || []).map(id => typedEntityIdForEvidence(id, 'certification')).filter(Boolean))];
+    if (typed.length !== 1 || !selectedCredentials.has(typed[0])) throw new Error('Application draft contains a credential without one selected typed certification authority.');
+  }
+  // An empty current-authority skill selection is meaningful: no selected
+  // evidence supports an ATS skill row, so the truthful bounded document
+  // omits that block. Do not treat an empty set as "unrestricted" and let
+  // source-order inventory terms leak back into the draft.
+  if (Array.isArray(selection?.selectedSkillIds)) {
+    const allowedTerms = new Set((fullAuthority?.skills || []).filter(skill => selectedSkillIds.has(skill.id)).map(skill => String(skill.name || skill.term || '').normalize('NFKC').toLocaleLowerCase()).filter(Boolean));
+    const renderedTerms = (Array.isArray(resume?.skills) ? resume.skills : []).flatMap(group => Array.isArray(group?.items) ? group.items : []).map(item => String(item).normalize('NFKC').toLocaleLowerCase());
+    if (renderedTerms.some(term => !allowedTerms.has(term))) throw new Error('Application draft contains an unselected skill term.');
+  }
+  // Read citations only from the response schema's known, bounded leaves.
+  // Arbitrary recursion made a hostile nested object both a stack/memory risk
+  // and an implicit alternate citation channel outside the document schema.
+  const citations = [];
+  const addEvidenceIds = (value, label) => {
+    if (value == null || !Object.hasOwn(value, 'evidenceIds')) return;
+    if (!Array.isArray(value.evidenceIds)) throw new Error(`${label}.evidenceIds must be an array.`);
+    citations.push(...value.evidenceIds);
+  };
+  const boundedRoles = Array.isArray(resume?.roles) ? resume.roles : [];
+  for (const role of boundedRoles) for (const bullet of (Array.isArray(role?.bullets) ? role.bullets : [])) addEvidenceIds(bullet, 'resume role bullet');
+  for (const project of (Array.isArray(resume?.projects) ? resume.projects : [])) addEvidenceIds(project, 'resume project');
+  for (const education of (Array.isArray(resume?.education) ? resume.education : [])) addEvidenceIds(education, 'resume education');
+  for (const credential of (Array.isArray(resume?.credentials) ? resume.credentials : [])) addEvidenceIds(credential, 'resume credential');
+  for (const group of (Array.isArray(resume?.skills) ? resume.skills : [])) addEvidenceIds(group, 'resume skill group');
+  for (const paragraph of (Array.isArray(coverLetter?.paragraphs) ? coverLetter.paragraphs : [])) addEvidenceIds(paragraph, 'cover letter paragraph');
+  if (citations.some(id => !selectedEvidence.has(id) && !acceptedNonAuthorityEvidence.has(id))) throw new Error('Application draft cites unselected authority evidence.');
+}
 
 /**
  * The character ceiling this module grades a frozen source against.
  *
  * Exported because the queue WRITES those sources: localAiApplication.js
- * truncates the career corpus and the listing companion to this same number
- * before freezing them beside the job. The two numbers used to be chosen
- * independently — 240,000 written, 120,000 accepted — so a corpus between them
- * froze a job that no response could finish and that pressing Generate
- * reproduced exactly, because regenerating rebuilds the same file through the
- * same writer. One constant read by the writer and by this grader cannot
- * disagree with itself.
+ * rejects an oversized career corpus or listing before freezing it beside the
+ * job. The two numbers used to be chosen independently — 240,000 written,
+ * 120,000 accepted — so a corpus between them froze a job that no response
+ * could finish and that pressing Generate reproduced exactly. One constant
+ * read by the writer and by this grader keeps the accepted envelope aligned
+ * without silently omitting evidence.
  */
-export const MAX_FROZEN_SOURCE_CHARS = 240_000;
 
 // `repairs` names what a defect requires a change to, in the host's repair
 // vocabulary, and travels on the error the way every other paste validator
@@ -272,6 +410,33 @@ function careerQuotesForIds(ids, evidenceById, occursInCareerData, label) {
   return quotes;
 }
 
+// A renderer still needs a small text surface for legacy presentation/prose
+// helpers. Never hand it the approved snapshot projection: derive this
+// ephemeral, citation-bounded surface from the authority IDs the accepted
+// documents actually cite. Authority validation above remains the source of
+// truth for ownership and exact quote membership.
+function authorityRenderCareerData(authority, sourceRoles, evidenceById) {
+  const quoteByRole = new Map((sourceRoles || []).map(role => [role.id, []]));
+  const otherQuotes = [];
+  for (const evidence of evidenceById.values()) {
+    if (evidence.sourceId !== 'career-data') continue;
+    const unit = resolveAuthorityEvidence(authority, evidence.id, evidence.quote);
+    let owners = [];
+    if (unit.kind === 'role') owners = [unit.entityId];
+    else if (unit.kind === 'achievement') owners = (sourceRoles || []).filter(role => (resolveAuthorityRole(authority, role.id).achievementIds || []).includes(unit.entityId)).map(role => role.id);
+    else if (unit.kind === 'skill') owners = (sourceRoles || []).filter(role => (resolveAuthorityRole(authority, role.id).skillIds || []).includes(unit.entityId)).map(role => role.id);
+    if (owners.length) owners.forEach(id => quoteByRole.get(id)?.push(unit.quote));
+    else otherQuotes.push(unit.quote);
+  }
+  const sections = (sourceRoles || []).map(role => [
+    `### ${role.title} — ${role.company} [Role ID: ${role.id}]`,
+    ...(role.location ? [`${role.company} — ${role.location}`] : []),
+    `Dates: ${role.dates}`,
+    ...[...new Set(quoteByRole.get(role.id) || [])],
+  ].join('\n'));
+  return [...sections, ...(otherQuotes.length ? ['## Selected authority evidence', ...new Set(otherQuotes)] : [])].join('\n\n');
+}
+
 // The frozen state this module grades, named once. A subject completes the
 // sentence "The value it names is held in …" in LocalAiJobIntegrityError, so
 // each one names WHERE the value sits and when this job fixed it — never who
@@ -322,13 +487,16 @@ const FROZEN_PASTE_RECORD = "this job's own stored paste record";
  * already require, so this changes WHICH failure is raised, never whether one
  * is.
  */
-export function assertFrozenTrustedIdentity(trustedIdentity, frozenCareerData) {
+export function assertFrozenTrustedIdentity(trustedIdentity, frozenCareerData, { authority = null } = {}) {
   frozenState(FROZEN_IDENTITY, () => {
     const trusted = record(trustedIdentity, 'trusted candidate identity');
     text(trusted.name, 'trusted candidate identity name');
     if (!Array.isArray(trusted.contact)) fail('trusted candidate identity contact must be a list.');
     trusted.contact.forEach((value, index) => text(value, `trusted candidate identity contact[${index}]`));
-    assertTrustedIdentity(trustedIdentity, frozenCareerData, 'trusted candidate identity');
+    if (authority) {
+      const expected = projectTrustedIdentity(authority.identity);
+      if (JSON.stringify(trustedIdentity) !== JSON.stringify(expected)) fail('trusted candidate identity does not exactly match pinned career authority identity.');
+    } else assertTrustedIdentity(trustedIdentity, frozenCareerData, 'trusted candidate identity');
   });
 }
 
@@ -346,11 +514,12 @@ export function assertFrozenTrustedIdentity(trustedIdentity, frozenCareerData) {
  * handoffs earlier. The plan is frozen state at all three surfaces, so all
  * three ask this one function.
  */
-export function assertFrozenEvidencePlan(evidencePlan, careerData, jobListing) {
-  return frozenState(FROZEN_EVIDENCE_PLAN, () => evidenceCatalog(evidencePlan, careerData, jobListing));
+export function assertFrozenEvidencePlan(evidencePlan, careerData, jobListing, { authority = null, authorityListingReceiptValidated = false } = {}) {
+  return frozenState(FROZEN_EVIDENCE_PLAN, () => evidenceCatalog(evidencePlan, careerData, jobListing, authority, authorityListingReceiptValidated));
 }
 
-function evidenceCatalog(evidencePlan, careerData, jobListing) {
+function evidenceCatalog(evidencePlan, careerData, jobListing, authority = null, authorityListingReceiptValidated = false) {
+  if (authorityListingReceiptValidated && !authority) fail('authorityListingReceiptValidated requires a pinned career authority.');
   const plan = record(evidencePlan, 'evidencePlan');
   if (!Array.isArray(plan.evidence) || !plan.evidence.length) fail('evidencePlan.evidence must be nonempty.');
   const occursInCareerData = frozenSourceQuoteTest(careerData);
@@ -362,9 +531,17 @@ function evidenceCatalog(evidencePlan, careerData, jobListing) {
     if (result.has(id)) fail(`evidencePlan repeats ID "${id}".`);
     if (!['career-data', 'job-listing'].includes(evidence.sourceId)) fail(`evidence ${id} has an invalid sourceId.`);
     const quote = sourceQuote(evidence.quote, `evidence ${id} quote`);
-    const occursInSource = evidence.sourceId === 'career-data' ? occursInCareerData : occursInJobListing;
-    assertFrozenPlanQuoteOccursIn(occursInSource, quote, `evidence ${id} quote no longer occurs in its frozen ${evidence.sourceId} source.`);
-    result.set(id, { id, sourceId: evidence.sourceId, quote });
+    if (evidence.sourceId === 'career-data' && authority) {
+      // Authority quotes are byte-exact catalog values. sourceQuote() above
+      // validates shape/limits, but its display-oriented trim must not turn a
+      // legitimate terminal space in a canonical projection row into a new
+      // quote before this exact comparison.
+      frozenState(FROZEN_EVIDENCE_PLAN, () => resolveAuthorityEvidence(authority, id, evidence.quote));
+    } else if (!(authorityListingReceiptValidated && evidence.sourceId === 'job-listing')) {
+      const occursInSource = evidence.sourceId === 'career-data' ? occursInCareerData : occursInJobListing;
+      assertFrozenPlanQuoteOccursIn(occursInSource, quote, `evidence ${id} quote no longer occurs in its frozen ${evidence.sourceId} source.`);
+    }
+    result.set(id, { id, sourceId: evidence.sourceId, quote: evidence.sourceId === 'career-data' && authority ? evidence.quote : quote });
   }
   return result;
 }
@@ -464,18 +641,31 @@ export function assemblePasteApplicationResult({
   paste,
   careerData,
   jobListing,
+  authority = null,
+  // Current-authority requirements are checked quote-by-quote against the
+  // immutable bounded listing pages before their receipt can advance.  Final
+  // assembly must not concatenate those pages merely to repeat that check.
+  // This opt-in is accepted only alongside a pinned authority; callers use it
+  // only after their current-authority store validator has checked the exact
+  // receipt root and every page.
+  authorityListingReceiptValidated = false,
   outputBundleRoot = DEFAULT_OUTPUT_BUNDLE_ROOT,
 } = {}) {
   const jobInput = frozenState(FROZEN_JOB_RECORD, () => record(input, 'input'));
   const state = frozenState(FROZEN_PASTE_RECORD, () => record(paste, 'paste'));
   // Preserve source whitespace for exact evidence quote membership. Display
   // fields are normalized separately by their own validators.
-  const frozenCareerData = gradeFrozenSource(careerData, 'careerData', FROZEN_CAREER_DATA);
-  const frozenJobListing = gradeFrozenSource(jobListing, 'jobListing', FROZEN_JOB_LISTING);
+  const frozenCareerData = authority ? String(careerData || '') : gradeFrozenSource(careerData, 'careerData', FROZEN_CAREER_DATA);
+  if (authorityListingReceiptValidated && !authority) {
+    frozenState(FROZEN_JOB_RECORD, () => { throw new Error('authorityListingReceiptValidated requires a pinned career authority.'); });
+  }
+  const frozenJobListing = authorityListingReceiptValidated
+    ? '[current-authority listing validated in immutable paged receipt]'
+    : gradeFrozenSource(jobListing, 'jobListing', FROZEN_JOB_LISTING);
   // The accepted résumé, which a review answers by returning a replacement.
   const resume = withRepairs(['resume:authored'], () => record(state.resume, 'paste.resume'));
   const sourceRoles = frozenState(FROZEN_JOB_RECORD, () => {
-    if (!Array.isArray(jobInput.sourceRoles) || !jobInput.sourceRoles.length) fail('input.sourceRoles must be a nonempty trusted role list.');
+    if (!Array.isArray(jobInput.sourceRoles)) fail('input.sourceRoles must be a trusted role list.');
     // Graded here as well as inside the renderer, because the renderer reaches
     // this list through a résumé: a malformed frozen role reported there reads
     // as a résumé defect and asks for a document change that cannot reach it.
@@ -486,24 +676,43 @@ export function assemblePasteApplicationResult({
   // fragments to expose, and this is where that projection is applied: the row
   // is narrowed to values that are ways to reach the candidate. Exact
   // career-data membership still rejects arbitrary values on top of it.
-  const trustedIdentity = projectTrustedIdentity(jobInput.trustedIdentity ?? state.trustedIdentity ?? null);
+  const trustedIdentity = authority
+    ? projectTrustedIdentity(authority.identity)
+    : projectTrustedIdentity(jobInput.trustedIdentity ?? state.trustedIdentity ?? null);
   // Graded here, before the renderer and the letter envelope grade it again,
   // because both of those reach it through a document and would report a
   // malformed frozen identity as that document's defect. The same call runs at
   // every earlier stage through the host's frozen-state gate, so reaching this
   // line means it has already passed once.
-  if (trustedIdentity != null) assertFrozenTrustedIdentity(trustedIdentity, frozenCareerData);
+  if (trustedIdentity != null) assertFrozenTrustedIdentity(trustedIdentity, frozenCareerData, { authority });
   // The résumé's own identity block renders, and a replacement résumé carries
   // it again, so a defect here is repaired in that document. The separately
   // asserted trustedIdentity above is app-projected: no response can repair it,
   // and it is raised as a job-integrity fault so it does not claim otherwise.
-  withRepairs(['resume:authored'], () => assertTrustedIdentity(resume.identity, frozenCareerData));
+  withRepairs(['resume:authored'], () => {
+    if (authority) {
+      if (JSON.stringify(projectTrustedIdentity(resume.identity)) !== JSON.stringify(trustedIdentity)) fail('resume identity does not exactly match pinned career authority identity.');
+    } else assertTrustedIdentity(resume.identity, frozenCareerData);
+  });
 
-  const evidenceById = assertFrozenEvidencePlan(state.evidencePlan, frozenCareerData, frozenJobListing);
+  const evidenceById = assertFrozenEvidencePlan(state.evidencePlan, frozenCareerData, frozenJobListing, { authority, authorityListingReceiptValidated });
+  const renderedEvidenceIds = new Set([
+    ...(resume.roles || []).flatMap(role => (role.bullets || []).flatMap(bullet => bullet.evidenceIds || [])),
+    ...(resume.projects || []).flatMap(project => project.evidenceIds || []),
+    ...(resume.education || []).flatMap(item => item.evidenceIds || []),
+    ...(resume.credentials || []).flatMap(item => item.evidenceIds || []),
+    ...(resume.skills || []).flatMap(group => group.evidenceIds || []),
+  ]);
+  const renderEvidenceById = authority
+    ? new Map([...evidenceById].filter(([id]) => renderedEvidenceIds.has(id)))
+    : evidenceById;
+  const renderCareerData = authority ? authorityRenderCareerData(authority, sourceRoles, renderEvidenceById) : frozenCareerData;
   const rendered = withRepairs(['resume:authored'], () => renderStructuredResume(resume, {
     sourceRoles,
     evidenceCatalog: [...evidenceById.values()],
-    careerData: frozenCareerData,
+    careerData: renderCareerData,
+    careerSkillEvidence: jobInput.careerSkillEvidence ?? null,
+    authorityMode: Boolean(authority),
     ...(trustedIdentity != null ? { trustedIdentity } : {}),
   }));
   // The letter's envelope and its paragraph evidence citations: a defect in
@@ -519,7 +728,12 @@ export function assemblePasteApplicationResult({
   // Which evidence each rendered part cites is a property of the document that
   // cites it, and citing different evidence is one of the two ways either
   // document is repaired.
-  const occursInCareerData = frozenSourceQuoteTest(frozenCareerData);
+  const occursInCareerData = authority
+    ? quote => {
+      try { return [...evidenceById.values()].some(item => item.sourceId === 'career-data' && item.quote === quote && Boolean(resolveAuthorityEvidence(authority, item.id, quote))); }
+      catch { return false; }
+    }
+    : frozenSourceQuoteTest(frozenCareerData);
   const resumeBullets = withRepairs(['resume:authored'], () => rendered.draft.roles.flatMap(role => role.bullets.map(bullet => ({
     bullet: bullet.text,
     careerDataQuotes: careerQuotesForIds(bullet.evidenceIds, evidenceById, occursInCareerData, `résumé bullet ${bullet.id}`),

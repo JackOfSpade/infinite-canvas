@@ -137,9 +137,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
   searchJobs: (args) => ipcRenderer.invoke('search-jobs', args),
   searchJobsSingleSource: (args) => ipcRenderer.invoke('search-jobs-single-source', args),
   scoreJobs: (args) => ipcRenderer.invoke('score-jobs', args),
+  claimJobAnalysisOperation: (args) => ipcRenderer.invoke('claim-job-analysis-operation', args),
+  revokeJobAnalysisOperation: (args) => ipcRenderer.invoke('revoke-job-analysis-operation', args),
+  clearJobAnalysisOperation: (args) => ipcRenderer.invoke('clear-job-analysis-operation', args),
   saveJobAnalysisSnapshot: (args) => ipcRenderer.invoke('save-job-analysis-snapshot', args),
   getLastJobAnalysisSnapshot: (args) => ipcRenderer.invoke('get-last-job-analysis-snapshot', args),
   discardJobAnalysisSnapshot: (args) => ipcRenderer.invoke('discard-job-analysis-snapshot', args),
+  discardBoardJobRun: (args) => ipcRenderer.invoke('discard-board-job-run', args),
   parseCareerData: (args) => ipcRenderer.invoke('parse-career-data', args),
   // New Local AI application jobs use an app-owned copy/paste handoff. Legacy
   // filesystem coding-agent jobs remain supported for existing job folders.
@@ -158,6 +162,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   saveApplication: (args) => ipcRenderer.invoke('save-application', args),
   discardApplication: (args) => ipcRenderer.invoke('discard-application', args),
   appendJobsHistory: (args) => ipcRenderer.invoke('append-jobs-history', args),
+  prepareBoardJobsHistory: (args) => ipcRenderer.invoke('prepare-board-jobs-history', args),
 
   onJobSourceProgress: createListener('job-source-progress'),
   // Per-batch AI-scoring progress (real-time path). Payload: { nodeId, scored, total, batch, batchTotal }.
@@ -184,6 +189,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   discardJobRun:  (args) => ipcRenderer.invoke('discard-job-run', args),
   discardUnknownOwnerJobRun: (args) => ipcRenderer.invoke('discard-unknown-owner-job-run', args),
   recordResolveMerge: (args) => ipcRenderer.invoke('record-resolve-merge', args),
+  // Board-only safety check for non-identical, high-similarity descriptions.
+  // The main process queues its batches on the existing AI handoff worker pool.
+  confirmJobLocationConsolidations: (args) => ipcRenderer.invoke('confirm-job-location-consolidations', args),
   bucketJobs: (args) => ipcRenderer.invoke('bucket-jobs', args),
   // Board Combine runs this after global taxonomy validation and before cards
   // are built, so compensation context is still available on the full jobs.
@@ -298,7 +306,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // ── ChatGPT handoff bridge ──────────────────────────────────────────────
   // This closed surface mirrors contracts.js: 27 invoke channels, one
-  // renderer-to-main publisher, and the three main-to-renderer notifications.
+  // renderer-to-main publisher, and the four main-to-renderer notifications.
   handoffBridgeGetStatus: () => ipcRenderer.invoke('handoff-bridge:get-status'),
   handoffBridgeSetEnabled: (payload) => ipcRenderer.invoke('handoff-bridge:set-enabled', payload),
   handoffBridgeSaveConfig: (payload) => ipcRenderer.invoke('handoff-bridge:save-config', payload),
@@ -332,5 +340,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   handoffBridgePublishJobs: (payload) => ipcRenderer.send('handoff-bridge:publish-jobs', payload),
   onHandoffBridgeStatus: createListener('handoff-bridge:status'),
   onHandoffBridgeJobChanged: createListener('handoff-bridge:job-changed'),
+  // Main sends this after it has bound this BrowserWindow to a restored canvas
+  // path. It contains no path or job detail; the renderer only republishes
+  // its existing bounded application snapshot.
+  onHandoffBridgeCanvasFileReady: createListener('handoff-bridge:canvas-file-ready'),
   onHandoffBridgeOpenPanel: createListener('handoff-bridge:open-panel'),
 });

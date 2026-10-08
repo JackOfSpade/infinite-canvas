@@ -417,6 +417,9 @@ export function useWorkspaceStartupRecovery({ canvasFilePath, rootNodes, hydrate
           const completed = await window.electronAPI?.completeJobContinuation?.({
             canvasFilePath,
             nodeId: entry.nodeId,
+            careerSnapshotId: entry.careerSnapshotId,
+            operationAuthority: entry.operationAuthority,
+            parentArtifactFingerprint: entry.parentArtifactFingerprint,
             parentRunId: entry.intent?.parentRunId,
             intentId: entry.intent?.intentId,
             expectedResultKey: entry.receipt?.resultKey,
@@ -432,6 +435,32 @@ export function useWorkspaceStartupRecovery({ canvasFilePath, rootNodes, hydrate
           let continuationClaim = null;
           let boardClaim = null;
           try {
+            const operationId = globalThis.crypto?.randomUUID?.();
+            if (!operationId || !entry.operationAuthority || !entry.operationSemanticBase) {
+              return { ...entry, state: 'operation-authority-deferred', error: 'The hidden continuation has no exact current analysis authority.' };
+            }
+            // A hidden workspace has no mounted JobSearchNode to adopt a local
+            // capability. Claim a fresh host lineage receipt before it can
+            // replay provider I/O; the predecessor proves it extends the exact
+            // sealed/current generation discovered from canvas state.
+            const operationClaim = await window.electronAPI?.claimJobAnalysisOperation?.({
+              canvasFilePath,
+              hubId: entry.nodeId,
+              operationId,
+              semanticBase: entry.operationSemanticBase,
+              predecessor: entry.operationAuthority,
+            });
+            if (operationClaim?.admitted !== true || !operationClaim?.receipt) {
+              return { ...entry, state: 'operation-authority-deferred', error: operationClaim?.reason || 'The hidden continuation was superseded before admission.' };
+            }
+            const operationAuthority = operationClaim.receipt;
+            updateNodeDataGlobally?.(entry.nodeId, (node) => ({
+              analysisOperation: {
+                ...(node?.data?.analysisOperation || {}),
+                operationId: operationAuthority.operationId,
+                authority: operationAuthority,
+              },
+            }));
             if (entry.boardOwner) {
               boardClaim = await window.electronAPI?.claimJobBoardRun?.({
                 canvasFilePath,
@@ -456,6 +485,7 @@ export function useWorkspaceStartupRecovery({ canvasFilePath, rootNodes, hydrate
             if (cancelled) return { ...entry, state: 'cancelled' };
             continuationClaim = await window.electronAPI?.claimJobContinuation?.({
               ...entry.identity,
+              operationAuthority,
               intentId: entry.intent?.intentId,
               autoResume: true,
               automaticOperation: 'execute',
@@ -473,6 +503,7 @@ export function useWorkspaceStartupRecovery({ canvasFilePath, rootNodes, hydrate
             }
             const request = {
               ...entry.request,
+              operationAuthority,
               continuationIntentId: entry.intent.intentId,
               continuationLeaseToken: continuationClaim.leaseToken,
             };
@@ -480,6 +511,9 @@ export function useWorkspaceStartupRecovery({ canvasFilePath, rootNodes, hydrate
               ? await window.electronAPI?.searchJobsSingleSource?.(request)
               : await window.electronAPI?.resumeJobSource?.(request);
             if (cancelled) return { ...entry, state: 'cancelled' };
+            if (result?.operationSuperseded === true) {
+              return { ...entry, state: 'operation-superseded' };
+            }
             if (!result || result.success === false) {
               return { ...entry, state: 'provider-deferred', error: result?.error || 'The saved provider continuation did not settle.' };
             }

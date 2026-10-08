@@ -286,7 +286,10 @@
   font-family: var(--ff-body);
   font-size: var(--fs-h2);
   font-weight: var(--fw-medium);
-  letter-spacing: var(--tr-h2);
+  /* Chromium emits tracked glyphs as separately positioned PDF text. Keep
+     heading copy contiguous for ATS/PDF extraction; uppercase + the rule
+     retain the visual section marker without synthetic character spacing. */
+  letter-spacing: normal;
   text-transform: uppercase;
   color: var(--ink-body);
   margin: 0;
@@ -577,6 +580,37 @@
   font-family: var(--ff-body);
   font-size: var(--fs-small);
   color: var(--ink-body);
+  line-height: var(--lh-snug);
+  text-wrap: pretty;
+}
+
+/* =========================================================
+   Education + Certifications
+   These are optional, evidence-backed application sections. They use a
+   definition list so assistive technology retains the term/detail relation,
+   while the visual rhythm matches the compact skills index rather than
+   creating a second, oversized experience treatment.
+   =========================================================*/
+.credentials-list {
+  margin: 0;
+  display: grid;
+  grid-template-columns: var(--col-meta-w) 1fr;
+  column-gap: var(--col-gap);
+  row-gap: var(--s-3);
+}
+.credential-item { display: contents; }
+.credentials-list dt {
+  font-size: var(--fs-small);
+  color: var(--ink-body);
+  font-weight: var(--fw-semibold);
+  letter-spacing: var(--tr-tight);
+  break-after: avoid;
+}
+.credentials-list dd {
+  margin: 0;
+  font-family: var(--ff-body);
+  font-size: var(--fs-small);
+  color: var(--ink-meta);
   line-height: var(--lh-snug);
   text-wrap: pretty;
 }

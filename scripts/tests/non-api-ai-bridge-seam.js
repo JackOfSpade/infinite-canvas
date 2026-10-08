@@ -4,7 +4,7 @@
 import fs, { readFileSync } from 'node:fs';
 import path from 'node:path';
 import {
-  _resetNonApiAiHandoffLifecycle, assert, callLLMText, electronPkg, getNonApiAiHandoffLifecycle, handleSafe, ipcMain,
+  _resetNonApiAiHandoffLifecycle, __reloadDurableStateForTests, assert, callLLMText, electronPkg, getNonApiAiHandoffLifecycle, handleSafe, ipcMain,
   registerNonApiAiHandlers, requestNonApiAi,
 } from '../test-dependencies.js';
 import { getRecentLogs } from '../../electron/logger.js';
@@ -573,6 +573,62 @@ export default [
     },
   },
   {
+    name: 'non-API AI bridge seam: a domain rejection remains pending and reissues before any accepted receipt or successor drain',
+    run: async () => {
+      const { sender, waitFor, sent } = freshHarness();
+      const nodeId = 'bridge-seam-validator-transaction';
+      const runId = `bridge-seam-validator-transaction-${process.pid}-${Date.now()}`;
+      const allow = { ...ALLOW, allowNodeIds: new Set([nodeId]) };
+      const run = startWorkflow({
+        sender,
+        nodeId,
+        runId,
+        handoffs: [{
+          prompt: 'VALIDATOR TRANSACTION', batch: 1, batchTotal: 1, itemCount: 1,
+          itemsDone: 0, itemsTotal: 1, progressScopeId: 'validator-transaction', progressUnitId: 'only', progressUnits: 1,
+          responseValidator: value => {
+            if (value?.answer === 'stale') throw new Error(PRIVATE);
+          },
+        }],
+      });
+      const [request] = await waitFor(1);
+      const rejected = await submitNonApiAiResponseForBridge({
+        requestId: request.requestId,
+        handoffCode: request.handoffCode,
+        response: answer(request, 'stale'),
+        ...allow,
+      });
+      const rejectedSteps = await durableSteps(runId);
+      const rejectedLifecycle = getNonApiAiHandoffLifecycle({ windowId: sender.id });
+      const reissue = sent.filter(item => item.channel === 'non-api-ai-request').at(-1)?.payload;
+      const listed = listBridgeableNonApiAiHandoffs(allow);
+      assert(rejected.outcome === 'rejected' && rejected.accepted === false && rejected.isCorrection === true
+        && !JSON.stringify(rejected).includes(PRIVATE),
+      'the bridge exposes a safe correction instead of acknowledging a domain-invalid answer');
+      assert(rejectedSteps.length === 1 && rejectedSteps[0].status === 'pending'
+        && rejectedLifecycle.length === 1 && rejectedLifecycle[0].acceptedAt == null && rejectedLifecycle[0].settledAt == null
+        && !sent.some(item => item.channel === 'non-api-ai-settled'),
+      'a validator rejection leaves the durable row, lifecycle, and progress settlement unaccepted');
+      assert(reissue?.requestId === request.requestId && reissue?.handoffCode === request.handoffCode
+        && reissue?.isCorrection === true && reissue?.itemsDone === 0
+        && listed.pending === 1 && listed.handoffs.length === 1 && listed.handoffs[0].requestId === request.requestId,
+      'the same bridge request is reissued and remains queueable rather than draining to queue_empty');
+
+      const accepted = await submitNonApiAiResponseForBridge({
+        requestId: request.requestId,
+        handoffCode: request.handoffCode,
+        response: answer(request, 'fixed'),
+        ...allow,
+      });
+      const completed = await run;
+      const acceptedSteps = await durableSteps(runId);
+      assert(accepted.outcome === 'accepted' && completed.values?.[0]?.answer === 'fixed'
+        && acceptedSteps.length === 1 && acceptedSteps[0].status === 'accepted',
+      'only the corrected response reaches the durable acceptance point');
+      await handler('complete-non-api-ai-run')({ sender }, { runId });
+    },
+  },
+  {
     name: 'non-API AI bridge seam: a queued-work forecast crosses only the main-process planning seam',
     run: async () => {
       const { sender, waitFor } = freshHarness();
@@ -766,6 +822,96 @@ export default [
       });
       assert(acceptedOldest.accepted === true, 'the oldest remaining listing batch still settles normally');
       await run;
+    },
+  },
+  {
+    name: 'non-API AI bridge seam: durable no-progress career repairs cool, persist, and remain cancellable',
+    run: async () => {
+      const { sender, sent, waitFor } = freshHarness();
+      const runId = `bridge-paced-repair-${process.pid}-${Date.now()}`;
+      const allow = { allowTasks: new Set(['career-profile-repair']) };
+      handleSafe('bridge-paced-repair-workflow', async (_event, _args, signal) => ({
+        value: await callLLMText('REPAIR ONLY THE ASSIGNED CAREER PAGE', {
+          signal,
+          task: 'career-profile-repair',
+          responseSchema: SCHEMA,
+          responseValidator: () => {
+            const error = new Error('A repair must make canonical progress.');
+            error.code = 'CAREER_SNAPSHOT_PAGE_INVALID';
+            error.validationDiagnostic = { stage: 'domain', reason: 'CAREER_PAGE_REPAIR_NO_PROGRESS', counts: {} };
+            throw error;
+          },
+        }),
+      }));
+      const run = handler('bridge-paced-repair-workflow')({ sender }, { manualAiRunId: runId });
+      const [request] = await waitFor(1);
+      const rejected = await submitNonApiAiResponseForBridge({
+        requestId: request.requestId, handoffCode: request.handoffCode, response: answer(request, 'unchanged'), ...allow,
+      });
+      const listed = listBridgeableNonApiAiHandoffs(allow);
+      const read = readBridgeableNonApiAiHandoff({ requestId: request.requestId, handoffCode: request.handoffCode, ...allow });
+      const bypass = await submitNonApiAiResponseForBridge({
+        requestId: request.requestId, handoffCode: request.handoffCode, response: answer(request, 'unchanged again'), ...allow,
+      });
+      const [step] = await durableSteps(runId);
+      assert(rejected.outcome === 'rejected' && rejected.retryAfterMs >= 1
+        && listed.handoffs.length === 0 && listed.excluded.cooldown === 1 && listed.retryAfterMs >= 1
+        && read.ok === false && read.reason === 'cooldown' && read.retryAfterMs >= 1
+        && bypass.outcome === 'cooldown' && bypass.retryAfterMs >= 1
+        && step?.status === 'pending' && step.retryRejectionCount === 1 && step.retryNotBefore > Date.now(),
+      'a no-progress repair leaves a durable, timed checkpoint; list/read/submit cannot re-offer or bypass it');
+      await handler('cancel-non-api-ai-request')({ sender }, { requestId: request.requestId });
+      await new Promise(resolve => setTimeout(resolve, 850));
+      assert(sent.filter(item => item.channel === 'non-api-ai-request').length === 1,
+        'cancelling during a retry cooldown clears its timer instead of delivering a delayed reissue');
+      await run.catch(() => {});
+      return { persistedBackoff: true, cancellable: true };
+    },
+  },
+  {
+    name: 'non-API AI bridge seam: a recovered durable no-progress repair retains its retry deadline',
+    run: async () => {
+      const { sender, sent, waitFor } = freshHarness();
+      const runId = `bridge-recovered-paced-repair-${process.pid}-${Date.now()}`;
+      const allow = { allowTasks: new Set(['career-profile-repair']) };
+      const firstAbort = new AbortController();
+      const rejectNoProgress = () => {
+        const error = new Error('A repair must make canonical progress.');
+        error.code = 'CAREER_SNAPSHOT_PAGE_INVALID';
+        error.validationDiagnostic = { stage: 'domain', reason: 'CAREER_PAGE_REPAIR_TARGET_MISSED', counts: {} };
+        throw error;
+      };
+      handleSafe('bridge-recovered-paced-repair-seed', async () => ({
+        value: await callLLMText('RECOVERED REPAIR', { signal: firstAbort.signal, task: 'career-profile-repair', responseSchema: SCHEMA, responseValidator: rejectNoProgress }),
+      }));
+      const seedRun = handler('bridge-recovered-paced-repair-seed')({ sender }, { manualAiRunId: runId });
+      const [request] = await waitFor(1);
+      await submitNonApiAiResponseForBridge({ requestId: request.requestId, handoffCode: request.handoffCode, response: answer(request, 'missed target'), ...allow });
+      firstAbort.abort(new Error('simulated restart'));
+      await seedRun.catch(() => {});
+      // Drop the in-memory durable cache after the old record has settled. The
+      // next workflow therefore proves the persisted checkpoint, not an old
+      // record or timer, is what keeps the replacement handoff cooling.
+      await __reloadDurableStateForTests();
+      sent.length = 0;
+      const resumedAbort = new AbortController();
+      handleSafe('bridge-recovered-paced-repair-resume', async () => ({
+        value: await callLLMText('RECOVERED REPAIR', { signal: resumedAbort.signal, task: 'career-profile-repair', responseSchema: SCHEMA, responseValidator: rejectNoProgress }),
+      }));
+      const resumed = handler('bridge-recovered-paced-repair-resume')({ sender }, { manualAiRunId: runId });
+      let recovered = listBridgeableNonApiAiHandoffs(allow);
+      for (let attempt = 0; recovered.pending !== 1 && attempt < 100; attempt += 1) {
+        await new Promise(resolve => setTimeout(resolve, 2));
+        recovered = listBridgeableNonApiAiHandoffs(allow);
+      }
+      assert(sent.length === 0 && recovered.handoffs.length === 0 && recovered.excluded.cooldown === 1 && recovered.retryAfterMs >= 1,
+        'a new process-equivalent durable read does not immediately replay a no-progress repair before its saved deadline');
+      // An owning-operation abort remains immediate even though the request is
+      // intentionally absent from the bridge's list/read projections.
+      resumedAbort.abort(new Error('end recovered cooldown test'));
+      await resumed.catch(() => {});
+      await handler('complete-non-api-ai-run')({ sender }, { runId });
+      return { recoveredCooldown: true };
     },
   },
   {

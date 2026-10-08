@@ -148,8 +148,8 @@ const dockTests = [
       // prompts, and the chip strip is laid out for that many. If either
       // number moves, the other must move with it.
       const scheduler = readFileSync(new URL('../../src/utils/handoffScheduler.js', import.meta.url), 'utf8');
-      const declared = /export const HANDOFF_CONCURRENCY = (\d+);/.exec(scheduler);
-      assert(declared, 'HANDOFF_CONCURRENCY must remain a literal export in the shared handoff scheduler');
+      const declared = /export const DEFAULT_HANDOFF_CONCURRENCY = (\d+);/.exec(scheduler);
+      assert(declared && scheduler.includes('resolveHandoffConcurrency'), 'the scheduler must expose a conservative default plus negotiated live capacity');
       assert(
         Number(declared[1]) === APPLICATION_HANDOFF_LIMIT,
         `APPLICATION_HANDOFF_LIMIT (${APPLICATION_HANDOFF_LIMIT}) must equal HANDOFF_CONCURRENCY (${declared[1]})`,
@@ -1635,7 +1635,7 @@ const bridgeJobProgressTests = [
     },
   },
   {
-    name: 'bridge progress: no chat, awaiting-first-call, full and ended each tell the person what to press',
+    name: 'bridge progress: no chat, awaiting-first-call, retired and ended each tell the person what to press',
     run: () => {
       const none = progress({ job: progressJob({ servedToChat: null }), chat: { ordinal: 0, state: 'none' } });
       assert(none.kind === 'no-chat' && none.action === 'start-chat' && none.actionLabel === 'Prepare worker plan' && none.tone === 'attention', 'no chat -> sized worker plan');
@@ -1643,7 +1643,7 @@ const bridgeJobProgressTests = [
       assert(first.kind === 'first-call' && first.headline === 'Waiting for chat 1' && first.action === 'start-chat' && first.actionLabel === 'Prepare worker plan', 'awaiting-first-call uses the worker-plan label');
       assert(first.lastHeard === null, 'a chat that has never called has nothing to report as last heard');
       const full = progress({ job: progressJob({ servedToChat: null }), chat: progressChat({ state: 'full' }) });
-      assert(full.kind === 'chat-full' && full.action === 'start-chat' && full.headline === 'Chat limit reached', 'a full chat that was never handed this job needs fresh workers');
+      assert(full.kind === 'chat-full' && full.action === 'start-chat' && full.headline === 'Chat no longer live', 'a retired chat that was never handed this job needs fresh workers');
       assert(full.lastHeard === PROGRESS_NOW - 20000, 'a full chat reports its last call');
       const ended = progress({ chat: progressChat({ state: 'ended' }) });
       assert(ended.kind === 'chat-ended' && ended.action === 'continue-chat' && ended.actionLabel === 'Copy Continue' && ended.detail.includes('Send Continue there, or prepare fresh workers.'), 'an ended chat is continued');
@@ -1680,13 +1680,13 @@ const bridgeJobProgressTests = [
     },
   },
   {
-    name: 'bridge progress: queued vs served-and-waiting, and a chat at its bundle limit',
+    name: 'bridge progress: queued vs served-and-waiting without a per-chat bundle limit',
     run: () => {
       const queued = progress({ job: progressJob({ servedToChat: null }) });
       assert(queued.kind === 'queued' && queued.tone === 'working' && queued.headline === 'Queued for ChatGPT' && queued.since === null, 'not yet served -> queued, no invented timer');
       assert(queued.detail.includes('résumé step'), 'queued names the step');
-      const capped = progress({ job: progressJob({ servedToChat: null }), chat: progressChat({ jobsAssigned: 2, jobsCap: 2 }) });
-      assert(capped.headline === 'Queued for the next chat' && capped.detail.includes('limit of 2 bundles'), 'a chat at its limit hands this job over in a later chat');
+      const concurrent = progress({ job: progressJob({ servedToChat: null }), chat: progressChat({ jobsAssigned: 2, jobsCap: 2 }) });
+      assert(concurrent.headline === 'Queued for ChatGPT' && concurrent.detail.includes('résumé step'), 'assignment telemetry never invents a retired per-chat bundle limit');
       const writing = progress();
       assert(writing.kind === 'writing' && writing.tone === 'working' && writing.headline === 'ChatGPT is working on: Résumé', writing.headline);
       assert(writing.detail.includes('has not arrived yet') && writing.lastHeard === PROGRESS_NOW - 20000, 'served -> waiting for the answer with the last call');
@@ -1867,7 +1867,7 @@ const bridgeHeldCardTests = [
         'first call not made yet': build({ servedToChat: null }, progressChat({ state: 'awaiting-first-call', calls: 0, lastCallAt: null })),
         'chat ended': build({ servedToChat: null, awaitingAnswer: false }, progressChat({ state: 'ended' })),
         'chat full, job never handed over': build({ servedToChat: null, awaitingAnswer: false }, progressChat({ state: 'full' })),
-        'queued behind the chat limit': build({ servedToChat: null, awaitingAnswer: false }, progressChat({ jobsAssigned: 2, jobsCap: 2 })),
+        'queued alongside other bundles': build({ servedToChat: null, awaitingAnswer: false }, progressChat({ jobsAssigned: 2, jobsCap: 2 })),
       };
       const lines = {};
       for (const [name, status] of Object.entries(states)) {
@@ -1886,7 +1886,7 @@ const bridgeHeldCardTests = [
       assert(lines['awaiting with an active chat (working)'].title === 'ChatGPT is working on: Résumé' && !lines['awaiting with an active chat (working)'].needsYou, 'an active chat that was served: working, no call to action');
       assert(lines.paused.title === 'Paused' && lines.paused.needsYou, 'paused: attention');
       assert(lines['host (the app is saving)'].title === 'The app is saving this' && !lines['host (the app is saving)'].needsYou, 'host: the app is saving');
-      assert(lines['queued behind the chat limit'].title === 'Queued for the next chat', 'queued behind the limit says so');
+      assert(lines['queued alongside other bundles'].title === 'Queued for ChatGPT', 'other assignments do not impose a retired per-chat limit');
       assert(lines['chat ended'].needsYou && lines['first call not made yet'].needsYou && lines['chat full, job never handed over'].needsYou, 'ended, first-call and full chats need the person');
 
       // A legacy stale marker must not make a slow application look abandoned.

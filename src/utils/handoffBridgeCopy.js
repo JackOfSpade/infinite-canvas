@@ -15,7 +15,7 @@ export const BRIDGE_COPY = Object.freeze({
     'needs-you': ['Needs you', 'One or more jobs need your attention in the dock.'],
     'response-overdue': ['No recent response from a worker', 'This worker has made no bridge call for at least 5 min while a handoff awaits its response. It may still be writing or may have stopped. Use that worker’s Copy replacement starter control in the roster to resume the exact handoff.'],
     'duplicate-serve': ['Two chats are using one code', 'Start a fresh chat so only one chat is serving this work.'],
-    'chat-full': ['Chat limit reached', 'This chat reached its safety budget. Prepare fresh workers to continue.'],
+    'chat-full': ['Chat no longer live', 'This worker was replaced or retired. Prepare a fresh worker to continue.'],
     working: ['ChatGPT is working', 'A handoff is currently with ChatGPT.'],
     saving: ['The app is saving this', 'The app is applying a finished answer.'],
     'first-call': ['Waiting for chat', 'Check the plugin appeared as a chip and the message was sent.'],
@@ -127,13 +127,13 @@ export const BRIDGE_PROGRESS_COPY = Object.freeze({
   done: Object.freeze(['Saved', 'Every step of this application is finished.']),
   unread: Object.freeze(['Not read yet', 'The app reads this job when ChatGPT asks for its next handoff.']),
   host: Object.freeze([JOB_ROW_COPY.host, 'The app is building the documents.']),
-  chatFullNote: 'This chat reached its safety budget; fresh workers are needed to continue.',
+  chatFullNote: 'This worker is retiring. It can still submit this answer, while a replacement handles later work.',
   needsYou: 'This job needs you',
   needsYouFallback: 'Open the job card to see what it needs.',
   kept: 'The bridge is not giving this job to ChatGPT. Choose Resume serving in the bridge panel to hand it back.',
   noChat: pluginName => Object.freeze(['No worker chats yet', `Prepare the worker plan, then copy each starter into a separate ChatGPT chat with ${bridgePluginRef(pluginName)} selected.`]),
   queued: label => ['Queued for ChatGPT', `${label ? `The ${label.toLowerCase()} step is ready.` : 'This job is ready.'} ChatGPT gets it when it asks for its next handoff.`],
-  queuedChatFull: cap => ['Queued for the next chat', `This chat is already carrying its limit of ${cap} ${cap === 1 ? 'bundle' : 'bundles'}. This one is handed over in a later chat.`],
+  queuedChatFull: () => ['Queued while a worker is retired', 'A replacement worker will claim this bundle when it is ready.'],
   writing: label => [`ChatGPT is working on: ${label}`, `${label} was handed to ChatGPT. Its answer has not arrived yet.`],
   writingUnknownStage: Object.freeze(['ChatGPT is working on this', 'This job was handed to ChatGPT. Its answer has not arrived yet.']),
   responseOverdue: Object.freeze([
@@ -219,9 +219,11 @@ export const BRIDGE_UI_COPY = Object.freeze({
     : 'Copy each starter into a separate pinned ChatGPT chat.',
   workerPoolGrowing: (count, recommended) => `${recommended - count} more ${recommended - count === 1 ? 'worker chat is' : 'worker chats are'} being prepared automatically.`,
   copyWorkerStarter: ordinal => `Copy worker ${ordinal} starter`,
+  copyWorkerStarterAgain: ordinal => `Copy worker ${ordinal} starter again`,
   copyingWorker: ordinal => `Copying worker ${ordinal}…`,
   workerStarterLocked: ordinal => `Worker ${ordinal} already ready`,
   workerStarterCopied: (ordinal, count) => `Copied worker ${ordinal} of ${count}. Paste, send, and pin that ChatGPT chat before copying the next starter.`,
+  workerStarterRecopied: (ordinal, count) => `Copied worker ${ordinal} of ${count} again. Paste and send it in that worker's ChatGPT chat.`,
   // A worker's starter is one-time. These are deliberately status labels, not
   // replacement actions: a connected worker remains part of the pool even
   // while a later queue wave arrives.
@@ -229,14 +231,18 @@ export const BRIDGE_UI_COPY = Object.freeze({
     available: 'Ready to start',
     ready: 'Starter copied',
     working: 'Working',
-    quiet: quietReason === 'answer_silent' ? 'Response overdue' : 'Stopped polling after wait',
+    quiet: quietReason === 'answer_silent' ? 'Response overdue'
+      : quietReason === 'fresh_context_required' ? 'Fresh chat needed'
+        : 'Stopped polling after wait',
     waiting: 'Ready for later work',
     idle: 'Idle',
   })[state] || 'Worker active',
   workerDone: count => `${count} ${count === 1 ? 'handoff completed' : 'handoffs completed'}`,
   workerQuiet: quietReason => quietReason === 'answer_silent'
     ? 'This worker has not made a bridge call for at least 5 min while it owns a handoff response. It may still be writing or may have stopped. Copy a replacement starter to resume the exact handoff.'
-    : 'This chat was told to poll again but has made no bridge call for at least 5 min. If this waiting chat is gone, copy a replacement starter and send it in a new ChatGPT chat.',
+    : quietReason === 'fresh_context_required'
+      ? 'This completed stage requires a fresh ChatGPT chat before the next stage can be served. Copy a replacement starter and send it in a new ChatGPT chat.'
+      : 'This chat was told to poll again but has made no bridge call for at least 5 min. If this waiting chat is gone, copy a replacement starter and send it in a new ChatGPT chat.',
   copyReplacementStarter: 'Copy replacement starter',
   applications: 'Applications',
   sendAll: 'Send all pending',
@@ -244,6 +250,7 @@ export const BRIDGE_UI_COPY = Object.freeze({
   readyToRelease: 'Ready to release',
   keepForMe: 'Keep for me',
   resumeServing: 'Resume serving',
+  retryReading: 'Retry reading',
   openDock: 'Open in dock',
   otherWindows: value => `and ${value} in other windows`,
   scoring: 'Scoring and research',
@@ -280,7 +287,6 @@ export const BRIDGE_UI_COPY = Object.freeze({
   autoStart: 'Turn on when the app starts',
   renewConsentToStart: 'This bridge needs your confirmation again before it can turn on automatically. Select Turn on the ChatGPT bridge to review and start it.',
   autoRelease: 'Automatically release new application handoffs this session',
-  jobsPerChat: 'Application bundles one chat may carry',
   dangerZone: 'Danger zone',
   forget: 'Forget setup…',
   cancel: 'Cancel',

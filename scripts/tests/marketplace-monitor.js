@@ -474,7 +474,7 @@ export default [
         && resultsDeclIndex < lockCallIndex && pendingScansDeclIndex < lockCallIndex,
         'results/pendingScans must be declared OUTSIDE (before) the withStatusCheckLock callback so pass 2 can still use them after release');
       const releaseMarkerIndex = marketplaceSource.indexOf('statusCheckLock released above', lockCallIndex);
-      const pass2Index = marketplaceSource.indexOf('await mapManualHandoffWaves(', releaseMarkerIndex);
+      const pass2Index = marketplaceSource.indexOf('await mapStableHandoffQueue(', releaseMarkerIndex);
       const returnResultsIndex = marketplaceSource.lastIndexOf('return { results };');
       assert(releaseMarkerIndex > lockCallIndex && pass2Index > releaseMarkerIndex && returnResultsIndex > pass2Index,
         'pass 2 (the bounded AI handoff pool) and the final return must sit textually AFTER the lock is released, never inside the withStatusCheckLock callback');

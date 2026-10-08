@@ -6,6 +6,15 @@ export function codeIncludesFull(filterCode) {
     .includes('FULL');
 }
 
+function codeIncludesApplicationOutput(filterCode) {
+  const codes = String(filterCode || '')
+    .trim()
+    .toUpperCase()
+    .split(/[+\s,]+/)
+    .filter(Boolean);
+  return codes.includes('APPOUTPUT');
+}
+
 function cleanInlineCode(value) {
   return String(value || '').replace(/`/g, "'");
 }
@@ -21,6 +30,7 @@ export function buildFilterSummaryMarkdown(payload = {}) {
     ? stats.omittedSections.filter(Boolean)
     : [];
   const isFull = codeIncludesFull(filterCode);
+  const includesApplicationOutput = codeIncludesApplicationOutput(filterCode);
 
   const detailParts = [];
   if (stats) {
@@ -38,9 +48,11 @@ export function buildFilterSummaryMarkdown(payload = {}) {
 
   let guidance;
   if (isFull && omittedSections.length > 0) {
-    guidance = 'FULL was combined with section exclusions; all currently retained event lines are selected. Use plain `FULL` if omitted sections matter.';
+    guidance = 'FULL was combined with section exclusions; all currently retained event lines are selected. The complete sanitized final application-output projection remains included while available; it never reads artifact paths or raw career source. Use plain `FULL` if omitted sections matter.';
   } else if (isFull) {
-    guidance = 'All currently retained report sections and event lines are selected — no filter-code reduction was applied. Copy and Save to file use the same uncapped rendering policy and content scope; their separately generated snapshots can differ in timestamps or live state. Copy writes its snapshot to an app-managed file and clipboards a path pointer to it; Save to file opens a save dialog to a location you choose. This does not restore history from an earlier app process.';
+    guidance = 'All currently retained report sections and event lines are selected — no filter-code reduction was applied. The complete sanitized final application-output projection is included while available, so résumé and cover-letter quality can be reviewed; it never reads artifact paths or raw career source. Copy and Save to file use the same uncapped rendering policy and content scope; their separately generated snapshots can differ in timestamps or live state. Copy writes its snapshot to an app-managed file and clipboards a path pointer to it; Save to file opens a save dialog to a location you choose. This does not restore history from an earlier app process.';
+  } else if (includesApplicationOutput) {
+    guidance = 'APPOUTPUT selects the complete, sanitized final application-output projection still retained in this app process. It never reads artifact paths or raw career source.';
   } else if (stats && Number(stats.eventsShown) === Number(stats.eventsTotal) && omittedSections.length === 0) {
     guidance = 'Filter code applied, but it did not remove any currently captured event lines.';
   } else {

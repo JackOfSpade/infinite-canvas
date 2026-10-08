@@ -1,0 +1,964 @@
+import crypto from 'node:crypto';
+import { execFile } from 'node:child_process';
+import fs from 'node:fs';
+import path from 'node:path';
+import { promisify } from 'node:util';
+
+// The store intentionally has no application-schema knowledge.  It is the
+// durable append-only substrate for requirements now and match/review receipts
+// later.  Its root never contains a list of pages or records.
+// v2 adds a bounded Merkle-mountain-range index for receipt pages.  A stream
+// root holds at most one peak per safe-integer bit, while an arbitrary page is
+// proved from one peak in logarithmic reads.  v1 roots remain readable and
+// writable with their historical reverse-chain lookup; they are deliberately
+// never silently rewritten because their digest is part of existing jobs.
+export const AUTHORITY_LEDGER_STORE_VERSION = 2;
+const AUTHORITY_LEDGER_STORE_LEGACY_VERSION = 1;
+export const AUTHORITY_LEDGER_STORE_PAGE_BYTES = 256 * 1024;
+// A held journal atomically binds both bounded root snapshots. It is not a
+// receipt page, so permit those two roots plus fixed metadata while retaining
+// a small, explicit denial-of-service envelope on every read and write.
+const AUTHORITY_LEDGER_STORE_JOURNAL_BYTES = AUTHORITY_LEDGER_STORE_PAGE_BYTES * 3;
+const AUTHORITY_LEDGER_STORE_MAX_INDEX_PEAKS = 53;
+const AUTHORITY_LEDGER_STORE_MUTATION_LOCK_BYTES = 4 * 1024;
+const AUTHORITY_LEDGER_STORE_OPEN_SNAPSHOT_ATTEMPTS = 4;
+
+const hash = value => crypto.createHash('sha256').update(typeof value === 'string' ? value : stable(value)).digest('hex');
+let faultHook = null;
+export function __setAuthorityLedgerStoreFaultHookForTests(hook) { faultHook = typeof hook === 'function' ? hook : null; }
+let processIdentityHook = null;
+let localProcessStartIdentity = null;
+export function __setAuthorityLedgerProcessIdentityHookForTests(hook) {
+  processIdentityHook = typeof hook === 'function' ? hook : null;
+  localProcessStartIdentity = null;
+}
+async function step(name) { if (faultHook) await faultHook(name); }
+const execFileAsync = promisify(execFile);
+let linuxBootIdentity = null;
+function stable(value) {
+  if (Array.isArray(value)) return `[${value.map(stable).join(',')}]`;
+  if (value && typeof value === 'object') return `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${stable(value[key])}`).join(',')}}`;
+  return JSON.stringify(value);
+}
+function assert(condition, message) { if (!condition) throw new Error(`Authority ledger store: ${message}`); }
+// `stable` is deliberately a tiny canonical JSON encoder, rather than a
+// general JavaScript serializer. Reject values it could stringify
+// ambiguously (or not at all) before they can become an immutable page that
+// a later open cannot parse.
+function assertJsonValue(value, ancestors = new Set()) {
+  if (value === null || typeof value === 'string' || typeof value === 'boolean') return;
+  if (typeof value === 'number') {
+    assert(Number.isFinite(value), 'value is not JSON serializable');
+    return;
+  }
+  assert(value && typeof value === 'object', 'value is not JSON serializable');
+  assert(!ancestors.has(value), 'value is not JSON serializable');
+  ancestors.add(value);
+  try {
+    if (Array.isArray(value)) {
+      assert(Object.getPrototypeOf(value) === Array.prototype && Object.getOwnPropertySymbols(value).length === 0,
+        'value is not JSON serializable');
+      const names = Object.getOwnPropertyNames(value);
+      assert(names.length === value.length + 1 && names.at(-1) === 'length', 'value is not JSON serializable');
+      for (let index = 0; index < value.length; index += 1) {
+        const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
+        assert(descriptor && descriptor.enumerable && Object.hasOwn(descriptor, 'value'), 'value is not JSON serializable');
+        assertJsonValue(descriptor.value, ancestors);
+      }
+      return;
+    }
+    const prototype = Object.getPrototypeOf(value);
+    assert((prototype === Object.prototype || prototype === null) && Object.getOwnPropertySymbols(value).length === 0,
+      'value is not JSON serializable');
+    for (const name of Object.getOwnPropertyNames(value)) {
+      const descriptor = Object.getOwnPropertyDescriptor(value, name);
+      assert(descriptor?.enumerable && Object.hasOwn(descriptor, 'value'), 'value is not JSON serializable');
+      assertJsonValue(descriptor.value, ancestors);
+    }
+  } finally { ancestors.delete(value); }
+}
+function isAuthorityLedgerNamespace(value) { return typeof value === 'string' && /^[a-z][a-z0-9-]{0,39}$/u.test(value); }
+function assertAuthorityLedgerNamespace(value) { assert(isAuthorityLedgerNamespace(value), 'namespace is invalid'); }
+// Receipt pages, MMR nodes, and ID buckets share one immutable directory.
+// Keep the two non-receipt filename families unreachable through a stream
+// name: `ids-ab-000...` and `index-a-000...-000...` can otherwise be
+// generated by valid-looking receipt streams and strand a prepared page.
+function isAuthorityLedgerStream(value) {
+  return typeof value === 'string' && /^[a-z][a-z0-9-]{0,39}$/u.test(value)
+    && !value.startsWith('ids-') && !value.startsWith('index-');
+}
+function assertAuthorityLedgerStream(value) { assert(isAuthorityLedgerStream(value), 'stream name is invalid'); }
+function pageFile(kind, number) { assertAuthorityLedgerStream(kind); return `${kind}-${String(number).padStart(12, '0')}.json`; }
+function indexFile(kind, start, span) { assertAuthorityLedgerStream(kind); return `index-${kind}-${String(start).padStart(12, '0')}-${String(span).padStart(12, '0')}.json`; }
+function pagePath(store, file) { return path.join(store.root, `${store.namespace}-pages`, file); }
+function rootPath(root, namespace) { assertAuthorityLedgerNamespace(namespace); return path.join(root, `${namespace}.root.json`); }
+function journalPath(root, namespace) { assertAuthorityLedgerNamespace(namespace); return path.join(root, `${namespace}.journal.json`); }
+function mutationLockPath(root, namespace) { assertAuthorityLedgerNamespace(namespace); return path.join(root, `${namespace}.mutation.lock`); }
+function isDigest(value) { return typeof value === 'string' && /^[a-f0-9]{64}$/u.test(value); }
+function isPowerOfTwo(value) { return Number.isSafeInteger(value) && value > 0 && Number.isInteger(Math.log2(value)); }
+function sameFileIdentity(left, right) {
+  return Boolean(left && right && left.dev === right.dev && left.ino === right.ino
+    && left.size === right.size && left.contentDigest === right.contentDigest);
+}
+
+async function rootDir(dir) {
+  const stat = await fs.promises.lstat(dir);
+  assert(stat.isDirectory() && !stat.isSymbolicLink(), 'root is not a regular directory');
+  return fs.promises.realpath(dir);
+}
+async function readSafeSnapshot(root, target, max = AUTHORITY_LEDGER_STORE_PAGE_BYTES) {
+  const resolved = path.resolve(target); assert(resolved.startsWith(`${root}${path.sep}`), 'path escaped root');
+  const before = await fs.promises.lstat(resolved);
+  assert(before.isFile() && !before.isSymbolicLink() && before.size <= max, 'page is not a bounded regular file');
+  const fd = await fs.promises.open(resolved, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0));
+  try {
+    const opened = await fd.stat(); assert(opened.ino === before.ino && opened.dev === before.dev, 'page changed while opening');
+    const text = await fd.readFile({ encoding: 'utf8' }); const afterRead = await fd.stat();
+    assert(afterRead.ino === opened.ino && afterRead.dev === opened.dev && afterRead.size === opened.size, 'page changed while reading');
+    const after = await fs.promises.lstat(resolved);
+    assert(after.isFile() && !after.isSymbolicLink() && after.ino === before.ino && after.dev === before.dev && after.size === before.size,
+      'page changed while reading');
+    return { text, identity: { dev: before.dev, ino: before.ino, size: before.size, contentDigest: hash(text) } };
+  }
+  finally { await fd.close(); }
+}
+async function readSafe(root, target, max = AUTHORITY_LEDGER_STORE_PAGE_BYTES) { return (await readSafeSnapshot(root, target, max)).text; }
+async function writeSafe(root, target, value, { immutable = false, maxBytes = AUTHORITY_LEDGER_STORE_PAGE_BYTES } = {}) {
+  const resolved = path.resolve(target); assert(resolved.startsWith(`${root}${path.sep}`), 'path escaped root');
+  const parent = path.dirname(resolved); const parentStat = await fs.promises.lstat(parent);
+  assert(parentStat.isDirectory() && !parentStat.isSymbolicLink() && await fs.promises.realpath(parent) === parent, 'parent is not trusted');
+  assertJsonValue(value);
+  const text = `${stable(value)}\n`; assert(Buffer.byteLength(text) <= maxBytes, 'page exceeds bounded envelope');
+  if (immutable) {
+    try {
+      const existing = await readSafe(root, resolved);
+      if (existing === text) return; // verified byte-identical orphan retry
+      throw new Error('immutable page already exists');
+    } catch (error) { if (error?.code !== 'ENOENT') throw error; }
+  }
+  const temp = path.join(parent, `.${path.basename(resolved)}.${crypto.randomUUID()}.tmp`);
+  const base = path.basename(resolved);
+  const kind = base.endsWith('.root.json') ? 'root' : base.endsWith('.journal.json') ? 'journal' : base.startsWith('ids-') ? 'bucket' : immutable ? 'page' : 'pointer';
+  let fd;
+  try {
+    await step(`${kind}:temp`);
+    fd = await fs.promises.open(temp, fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_WRONLY | (fs.constants.O_NOFOLLOW || 0), 0o600);
+    await fd.writeFile(text); await step(`${kind}:write`); await fd.sync(); await step(`${kind}:fsync`); await fd.close(); fd = null;
+    const stat = await fs.promises.lstat(temp); assert(stat.isFile() && !stat.isSymbolicLink(), 'temporary page substituted');
+    // Page names are immutable capabilities. rename(2) replaces an existing
+    // destination on POSIX, so it cannot publish these files: another writer
+    // can create the final path after the precondition above. A hard link is
+    // an atomic create-only publication in this directory instead. The temp
+    // and final names share an inode briefly; removing the temp leaves the
+    // immutable final in place without ever replacing a prior capability.
+    if (immutable) {
+      try {
+        await fs.promises.link(temp, resolved);
+      } catch (error) {
+        if (error?.code !== 'EEXIST') throw error;
+        // A retry may race an earlier identical publication. Re-open it via
+        // the hardened reader before accepting that retry; a divergent or
+        // unreadable collision fails closed and the catch below removes temp.
+        const existing = await readSafe(root, resolved);
+        if (existing !== text) throw new Error('immutable page already exists');
+        await fs.promises.unlink(temp); return;
+      }
+      await fs.promises.unlink(temp);
+    } else await fs.promises.rename(temp, resolved);
+    await step(`${kind}:rename`);
+    const directory = await fs.promises.open(parent, fs.constants.O_RDONLY); try { await directory.sync(); await step(`${kind}:dir-fsync`); } finally { await directory.close(); }
+  } catch (error) { await fd?.close().catch(() => {}); await fs.promises.unlink(temp).catch(() => {}); throw error; }
+}
+async function readJson(root, target, max) { return JSON.parse(await readSafe(root, target, max)); }
+async function readJsonSnapshot(root, target, max) {
+  const snapshot = await readSafeSnapshot(root, target, max);
+  return { value: JSON.parse(snapshot.text), identity: snapshot.identity };
+}
+function rootDigest(root) { const { digest: _digest, ...unsigned } = root; return hash(unsigned); }
+
+function isCurrentStore(state) { return state?.version === AUTHORITY_LEDGER_STORE_VERSION; }
+function indexReference(stream, start, span, digest) {
+  return { start, span, file: indexFile(stream, start, span), digest };
+}
+function assertIndexShape(index, stream, count) {
+  assertAuthorityLedgerStream(stream);
+  assert(index && index.version === 1 && Array.isArray(index.peaks) && index.peaks.length <= AUTHORITY_LEDGER_STORE_MAX_INDEX_PEAKS, 'stream page index is invalid');
+  let cursor = 0;
+  for (const peak of index.peaks) {
+    assert(Number.isSafeInteger(peak?.start) && peak.start === cursor && isPowerOfTwo(peak?.span)
+      && peak.start + peak.span <= count && peak.file === indexFile(stream, peak.start, peak.span) && isDigest(peak.digest), 'stream page index has an invalid peak');
+    cursor += peak.span;
+  }
+  assert(cursor === count, 'stream page index does not cover every page exactly once');
+}
+async function writeIndexNode(store, node) {
+  node.digest = hash(node);
+  await writeSafe(store.root, pagePath(store, indexFile(node.stream, node.start, node.span)), node, { immutable: true });
+  await step('transaction:index');
+  return indexReference(node.stream, node.start, node.span, node.digest);
+}
+async function appendIndexedPage(store, prior, { stream, number, file, digest }) {
+  const index = prior?.index ? structuredClone(prior.index) : { version: 1, peaks: [] };
+  assertIndexShape(index, stream, number);
+  let carry = await writeIndexNode(store, { version: 1, kind: 'authority-ledger-receipt-index', stream, start: number, span: 1,
+    page: { file, digest } });
+  while (index.peaks.length && index.peaks.at(-1).span === carry.span) {
+    const left = index.peaks.pop();
+    carry = await writeIndexNode(store, { version: 1, kind: 'authority-ledger-receipt-index', stream, start: left.start, span: left.span + carry.span,
+      left: { file: left.file, digest: left.digest }, right: { file: carry.file, digest: carry.digest } });
+  }
+  index.peaks.push(carry); assertIndexShape(index, stream, number + 1);
+  return index;
+}
+
+function assertJournalRootState(state, namespace, label) {
+  assert(state && typeof state === 'object' && state.namespace === namespace
+    && [AUTHORITY_LEDGER_STORE_LEGACY_VERSION, AUTHORITY_LEDGER_STORE_VERSION].includes(state.version)
+    && Number.isSafeInteger(state.revision) && state.revision >= 0
+    && state.digest === rootDigest(state), `${label} root is invalid`);
+}
+
+function assertJournalTransition(previous, next, namespace) {
+  assertJournalRootState(previous, namespace, 'journal previous');
+  assertJournalRootState(next, namespace, 'journal next');
+  assert(previous.version === next.version && next.revision === previous.revision + 1, 'journal root transition is invalid');
+  for (const stream of Object.keys(previous.streams || {})) {
+    assertAuthorityLedgerStream(stream);
+    const before = previous.streams[stream]; const after = next.streams?.[stream];
+    assert(after && Number.isSafeInteger(before?.count) && Number.isSafeInteger(after.count) && after.count >= before.count,
+      'journal stream transition is invalid');
+    if (after.count === before.count) assert(stable(after) === stable(before), 'journal stream changed without appended pages');
+  }
+  for (const stream of Object.keys(next.streams || {})) assertAuthorityLedgerStream(stream);
+  for (const bucket of Object.keys(previous.idBuckets || {})) {
+    const before = previous.idBuckets[bucket]; const after = next.idBuckets?.[bucket];
+    assert(after && Number.isSafeInteger(before?.count) && Number.isSafeInteger(after.count) && after.count >= before.count,
+      'journal index transition is invalid');
+    if (after.count === before.count) assert(stable(after) === stable(before), 'journal index changed without appended pages');
+  }
+}
+
+function isJournalTransactionId(value) {
+  return typeof value === 'string' && /^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,127}$/u.test(value);
+}
+function journalContentDigest(journal) { return hash(stable(journal)); }
+function journalTransactionId(journal) { return journal.transactionId || `legacy:${journalContentDigest(journal)}`; }
+function assertJournal(journal, namespace) {
+  assert(journal?.version === 1 && isDigest(journal.previous) && isDigest(journal.next), 'journal is invalid');
+  if (Object.hasOwn(journal, 'transactionId')) assert(isJournalTransactionId(journal.transactionId), 'journal transaction identity is invalid');
+  if (journal.hold === true) {
+    assert(journal.previousState && journal.nextState
+      && journal.previous === rootDigest(journal.previousState) && journal.next === rootDigest(journal.nextState),
+    'held journal roots are invalid');
+    assertJournalTransition(journal.previousState, journal.nextState, namespace);
+  }
+}
+function journalOwner(journal, file) {
+  return { transactionId: journalTransactionId(journal), journalDigest: journalContentDigest(journal), file };
+}
+function sameJournalOwner(left, right) {
+  return Boolean(left && right && left.transactionId === right.transactionId
+    && left.journalDigest === right.journalDigest && sameFileIdentity(left.file, right.file));
+}
+async function readRootSnapshot(root, namespace) {
+  const snapshot = await readJsonSnapshot(root, rootPath(root, namespace));
+  assertJournalRootState(snapshot.value, namespace, 'root');
+  return { state: snapshot.value, file: snapshot.identity };
+}
+async function readJournalSnapshot(root, namespace) {
+  try {
+    const snapshot = await readJsonSnapshot(root, journalPath(root, namespace), AUTHORITY_LEDGER_STORE_JOURNAL_BYTES);
+    assertJournal(snapshot.value, namespace);
+    return { journal: snapshot.value, owner: journalOwner(snapshot.value, snapshot.identity) };
+  } catch (error) { if (error?.code === 'ENOENT') return null; throw error; }
+}
+function assertOwnedRoot(snapshot, state, owner, label = 'root') {
+  assert(snapshot?.state && stable(snapshot.state) === stable(state), `${label} changed; reopen and retry`);
+  if (owner) assert(sameFileIdentity(snapshot.file, owner), `${label} ownership changed; reopen and retry`);
+}
+async function assertOwnedJournal(root, namespace, journal, owner, label = 'held journal') {
+  const snapshot = await readJournalSnapshot(root, namespace);
+  assert(snapshot && stable(snapshot.journal) === stable(journal) && sameJournalOwner(snapshot.owner, owner),
+    `${label} ownership changed; reopen and retry`);
+  return snapshot;
+}
+async function syncDirectory(directoryPath) {
+  const directory = await fs.promises.open(directoryPath, fs.constants.O_RDONLY);
+  try { await directory.sync(); } finally { await directory.close(); }
+}
+async function unlinkOwnedFile(root, target, owner, max, label) {
+  const snapshot = await readSafeSnapshot(root, target, max);
+  assert(sameFileIdentity(snapshot.identity, owner), `${label} ownership changed; reopen and retry`);
+  const before = await fs.promises.lstat(target);
+  assert(before.isFile() && !before.isSymbolicLink() && before.ino === owner.ino && before.dev === owner.dev && before.size === owner.size,
+    `${label} changed while being verified; reopen and retry`);
+  await fs.promises.unlink(target); await syncDirectory(path.dirname(target));
+}
+
+async function tryPublishMutationLock(root, namespace, lock) {
+  const target = mutationLockPath(root, namespace); const resolved = path.resolve(target);
+  assert(resolved.startsWith(`${root}${path.sep}`), 'path escaped root');
+  const parent = path.dirname(resolved); const parentStat = await fs.promises.lstat(parent);
+  assert(parentStat.isDirectory() && !parentStat.isSymbolicLink() && await fs.promises.realpath(parent) === parent, 'parent is not trusted');
+  const text = `${stable(lock)}\n`; assert(Buffer.byteLength(text) <= AUTHORITY_LEDGER_STORE_MUTATION_LOCK_BYTES, 'mutation lock exceeds bounded envelope');
+  const temp = path.join(parent, `.${path.basename(target)}.${crypto.randomUUID()}.tmp`); let fd;
+  try {
+    fd = await fs.promises.open(temp, fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_WRONLY | (fs.constants.O_NOFOLLOW || 0), 0o600);
+    await fd.writeFile(text); await fd.sync(); await fd.close(); fd = null;
+    try { await fs.promises.link(temp, target); }
+    catch (error) {
+      if (error?.code === 'EEXIST') { await step('mutation-lock:exists'); return false; }
+      throw error;
+    }
+    await fs.promises.unlink(temp); await syncDirectory(parent); return true;
+  } catch (error) { await fd?.close().catch(() => {}); throw error; }
+  finally { await fs.promises.unlink(temp).catch(() => {}); }
+}
+async function readMutationLock(root, namespace) {
+  try {
+    const snapshot = await readJsonSnapshot(root, mutationLockPath(root, namespace), AUTHORITY_LEDGER_STORE_MUTATION_LOCK_BYTES);
+    const lock = snapshot.value;
+    assert(lock?.version === 1 && lock.namespace === namespace && Number.isSafeInteger(lock.pid) && lock.pid > 0
+      && isJournalTransactionId(lock.token)
+      && (lock.ownerStartIdentity === undefined || (typeof lock.ownerStartIdentity === 'string' && lock.ownerStartIdentity.length > 0 && lock.ownerStartIdentity.length <= 512)), 'mutation lock is invalid');
+    return { lock, file: snapshot.identity };
+  } catch (error) { if (error?.code === 'ENOENT') return null; throw error; }
+}
+async function linuxProcessStartIdentity(pid) {
+  if (linuxBootIdentity === null) linuxBootIdentity = (await fs.promises.readFile('/proc/sys/kernel/random/boot_id', 'utf8')).trim();
+  const stat = await fs.promises.readFile(`/proc/${pid}/stat`, 'utf8');
+  // `comm` may contain spaces and parentheses, so fields before starttime must
+  // be skipped from the final closing parenthesis rather than by whitespace.
+  const closing = stat.lastIndexOf(')');
+  if (closing < 0) throw new Error('process stat is malformed');
+  const fields = stat.slice(closing + 1).trim().split(/\s+/u);
+  const startTicks = fields[19]; // proc(5) field 22; fields starts at field 3.
+  if (!/^[0-9]+$/u.test(startTicks) || !linuxBootIdentity) throw new Error('process start identity is malformed');
+  return `linux:${linuxBootIdentity}:${startTicks}`;
+}
+async function darwinProcessStartIdentity(pid) {
+  // `lstart` is rendered in the locale of the process running ps.  A lock can
+  // be created by the GUI and checked by a CLI/worker with different LANG or
+  // LC_TIME settings, so pin the formatter to C before treating this string
+  // as a cross-process identity.
+  const { stdout } = await execFileAsync('/bin/ps', ['-o', 'lstart=', '-p', String(pid)], {
+    encoding: 'utf8',
+    maxBuffer: 4 * 1024,
+    env: { ...process.env, LC_ALL: 'C', LANG: 'C' },
+  });
+  const started = String(stdout || '').trim().replace(/\s+/gu, ' ');
+  if (!started) throw new Error('process start identity is unavailable');
+  return `darwin:${started}`;
+}
+async function windowsProcessStartIdentity(pid) {
+  const command = `(Get-Process -Id ${Number(pid)} -ErrorAction Stop).StartTime.ToUniversalTime().ToString('o')`;
+  const { stdout } = await execFileAsync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', command], { encoding: 'utf8', maxBuffer: 4 * 1024 });
+  const started = String(stdout || '').trim();
+  if (!started) throw new Error('process start identity is unavailable');
+  return `win32:${started}`;
+}
+async function processStartIdentity(pid) {
+  if (!Number.isSafeInteger(pid) || pid <= 0) throw new Error('process id is invalid');
+  let identity;
+  if (processIdentityHook) identity = await processIdentityHook(pid);
+  else if (process.platform === 'linux') identity = await linuxProcessStartIdentity(pid);
+  else if (process.platform === 'darwin') identity = await darwinProcessStartIdentity(pid);
+  else if (process.platform === 'win32') identity = await windowsProcessStartIdentity(pid);
+  else throw new Error(`process start identity is unavailable on ${process.platform}`);
+  if (typeof identity !== 'string' || !identity || identity.length > 512) throw new Error('process start identity is invalid');
+  return identity;
+}
+async function currentProcessStartIdentity() {
+  if (localProcessStartIdentity) return localProcessStartIdentity;
+  // The process start identity cannot change during this process's lifetime.
+  // Cache only a successful self lookup: errors remain retryable and lock
+  // owners from other PIDs must always be inspected live for PID reuse.
+  const identity = await processStartIdentity(process.pid);
+  localProcessStartIdentity = identity;
+  return identity;
+}
+async function mutationLockOwnerState(lock) {
+  try { process.kill(lock.pid, 0); }
+  catch (error) {
+    if (error?.code === 'ESRCH') return 'dead';
+    return 'unknown';
+  }
+  // v1 locks created before ownerStartIdentity are still safely reapable once
+  // their PID is dead, but a live legacy PID can never be proven to be the
+  // original owner. Fail closed instead of risking a takeover on PID reuse.
+  if (typeof lock.ownerStartIdentity !== 'string' || !lock.ownerStartIdentity) return 'unknown';
+  try {
+    return (await processStartIdentity(lock.pid)) === lock.ownerStartIdentity ? 'live' : 'reused';
+  } catch {
+    return 'unknown';
+  }
+}
+async function acquireMutationLease(root, namespace) {
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const lock = { version: 1, namespace, pid: process.pid, token: crypto.randomUUID(), ownerStartIdentity: await currentProcessStartIdentity() };
+    if (await tryPublishMutationLock(root, namespace, lock)) {
+      const published = await readMutationLock(root, namespace);
+      assert(published && published.lock.token === lock.token, 'mutation lock publication changed unexpectedly');
+      return {
+        async release() {
+          const current = await readMutationLock(root, namespace);
+          assert(current && current.lock.token === lock.token && sameFileIdentity(current.file, published.file),
+            'mutation lock ownership changed; reopen and retry');
+          await unlinkOwnedFile(root, mutationLockPath(root, namespace), published.file, AUTHORITY_LEDGER_STORE_MUTATION_LOCK_BYTES, 'mutation lock');
+        },
+      };
+    }
+    const existing = await readMutationLock(root, namespace);
+    // The owner can release after our create-only link observed EEXIST but
+    // before this follow-up snapshot. That is a normal handoff, not a
+    // corrupted lock; retry publication against the now-free pathname.
+    if (!existing) continue;
+    const ownerState = await mutationLockOwnerState(existing.lock);
+    if (ownerState === 'live') assert(false, 'transaction is busy; reopen and retry');
+    if (ownerState === 'unknown') assert(false, 'transaction owner cannot be identified safely; reopen and retry');
+    try {
+      await unlinkOwnedFile(root, mutationLockPath(root, namespace), existing.file, AUTHORITY_LEDGER_STORE_MUTATION_LOCK_BYTES, 'stale mutation lock');
+    } catch (error) {
+      // Another contender may have reaped the same dead owner first. Its
+      // disappearance is likewise a safe reason to attempt publication once
+      // more; ownership or content changes still fail closed.
+      if (error?.code !== 'ENOENT') throw error;
+    }
+  }
+  assert(false, 'could not acquire transaction lease; reopen and retry');
+}
+async function withMutationLease(root, namespace, operation) {
+  const lease = await acquireMutationLease(root, namespace);
+  let operationCompleted = false;
+  try {
+    const result = await operation(); operationCompleted = true;
+    await lease.release(); return result;
+  } catch (error) {
+    if (!operationCompleted) await lease.release().catch(() => {});
+    throw error;
+  }
+}
+async function publishRootCas(store, expectedState, expectedOwner, next, label) {
+  const live = await readRootSnapshot(store.root, store.namespace);
+  assertOwnedRoot(live, expectedState, expectedOwner, label);
+  await writeSafe(store.root, rootPath(store.root, store.namespace), next);
+  const published = await readRootSnapshot(store.root, store.namespace);
+  assertOwnedRoot(published, next, null, label);
+  return published;
+}
+
+async function orphanExists(store, file) {
+  try {
+    const stat = await fs.promises.lstat(pagePath(store, file));
+    assert(stat.isFile() && !stat.isSymbolicLink(), 'rollback orphan is not a regular page');
+    return stat;
+  } catch (error) { if (error?.code === 'ENOENT') return false; throw error; }
+}
+
+async function removeVerifiedRollbackOrphan(store, file, verify, assertTransaction) {
+  // A missing file is an already-completed part of a previously interrupted
+  // cleanup. Anything still present must prove it is the exact page named by
+  // the journal's next root before unlinking it.
+  await assertTransaction();
+  const before = await orphanExists(store, file);
+  if (!before) return;
+  const verified = await verify();
+  await assertTransaction();
+  const target = pagePath(store, file); const snapshot = await readSafeSnapshot(store.root, target);
+  assert(snapshot.identity.ino === before.ino && snapshot.identity.dev === before.dev,
+    'rollback orphan changed while being verified');
+  assert(stable(JSON.parse(snapshot.text)) === stable(verified), 'rollback orphan changed while being verified');
+  await assertTransaction();
+  await unlinkOwnedFile(store.root, target, snapshot.identity, AUTHORITY_LEDGER_STORE_PAGE_BYTES, 'rollback orphan');
+  await step('rollback:orphan-removed');
+}
+
+async function indexedReferenceForRange(store, next, stream, start, span) {
+  const state = next.streams?.[stream];
+  assert(state && isCurrentStore(next), 'rollback indexed stream is invalid');
+  assertIndexShape(state.index, stream, state.count);
+  let reference = state.index.peaks.find(peak => start >= peak.start && start + span <= peak.start + peak.span);
+  assert(reference, 'rollback index has no target range');
+  while (reference.start !== start || reference.span !== span) {
+    assert(reference.span > span, 'rollback index target range is invalid');
+    const node = await store.readIndexedNode(stream, reference); const half = node.span / 2;
+    const left = { start: node.start, span: half, file: indexFile(stream, node.start, half), digest: node.left?.digest };
+    const right = { start: node.start + half, span: half, file: indexFile(stream, node.start + half, half), digest: node.right?.digest };
+    assert(node.left?.file === left.file && node.right?.file === right.file && isDigest(left.digest) && isDigest(right.digest), 'rollback index branch is invalid');
+    reference = start < node.start + half ? left : right;
+  }
+  return reference;
+}
+
+async function verifyRollbackBucketPage(store, previous, next, bucket, number) {
+  const before = previous.idBuckets?.[bucket] || { count: 0, head: null, digest: hash([]) };
+  const after = next.idBuckets?.[bucket];
+  assert(after && Number.isSafeInteger(before.count) && Number.isSafeInteger(after.count)
+    && number >= before.count && number < after.count, 'rollback bucket range is invalid');
+  let file = after.head; let digest = after.digest;
+  for (let cursor = after.count - 1; cursor >= number; cursor -= 1) {
+    assert(file === `ids-${bucket}-${String(cursor).padStart(12, '0')}.json` && isDigest(digest), 'rollback bucket chain is invalid');
+    const page = await readJson(store.root, pagePath(store, file)); const { digest: _digest, ...unsigned } = page;
+    assert(page?.version === 1 && page.bucket === bucket && page.number === cursor && Array.isArray(page.ids)
+      && page.digest === digest && page.digest === hash(unsigned), 'rollback bucket orphan is substituted or invalid');
+    if (cursor === number) {
+      if (cursor === before.count) assert(page.previous === before.head && page.previousDigest === (before.head ? before.digest : null), 'rollback bucket does not join the previous root');
+      return page;
+    }
+    file = page.previous; digest = page.previousDigest;
+  }
+}
+
+// Held transactions publish immutable pages before their root can be pointed
+// to by the manifest. Rollback resets that pointer first, with the journal
+// still present, then removes only pages proved by the journal's next root.
+// Thus a crash during cleanup reopens the previous complete root and resumes
+// rather than trying to verify a root whose own head was just unlinked.
+async function removeHeldTransactionOrphans(store, previous, next, assertTransaction) {
+  const verifier = new AuthorityLedgerStore(store.root, store.namespace, next);
+  const streams = new Set([...Object.keys(previous.streams || {}), ...Object.keys(next.streams || {})]);
+  for (const stream of streams) {
+    assertAuthorityLedgerStream(stream);
+    const from = previous.streams?.[stream]?.count || 0; const to = next.streams?.[stream]?.count || 0;
+    assert(Number.isSafeInteger(from) && Number.isSafeInteger(to) && to >= from, 'rollback stream range is invalid');
+    // Keep every index node until all receipt pages have been authenticated.
+    // A later receipt can traverse a new earlier branch in the next MMR root.
+    for (let number = from; number < to; number += 1) {
+      await removeVerifiedRollbackOrphan(store, pageFile(stream, number), () => verifier.getReceiptPage(stream, number), assertTransaction);
+    }
+    if (isCurrentStore(next)) {
+      // Remove index nodes bottom-up. Larger parent nodes remain available to
+      // locate and authenticate every smaller node after a restart.
+      for (let span = 1; span <= to; span *= 2) for (let start = 0; start + span <= to; start += span) {
+        if (start + span <= from || !isPowerOfTwo(span) || start % span) continue;
+        const file = indexFile(stream, start, span);
+        if (!await orphanExists(store, file)) continue;
+        const reference = await indexedReferenceForRange(store, next, stream, start, span);
+        await removeVerifiedRollbackOrphan(store, file, () => store.readIndexedNode(stream, reference), assertTransaction);
+      }
+    }
+  }
+  const buckets = new Set([...Object.keys(previous.idBuckets || {}), ...Object.keys(next.idBuckets || {})]);
+  for (const bucket of buckets) {
+    const from = previous.idBuckets?.[bucket]?.count || 0; const to = next.idBuckets?.[bucket]?.count || 0;
+    assert(Number.isSafeInteger(from) && Number.isSafeInteger(to) && to >= from, 'rollback bucket range is invalid');
+    for (let number = from; number < to; number += 1) {
+      const file = `ids-${bucket}-${String(number).padStart(12, '0')}.json`;
+      await removeVerifiedRollbackOrphan(store, file, () => verifyRollbackBucketPage(store, previous, next, bucket, number), assertTransaction);
+    }
+  }
+}
+
+export async function createAuthorityLedgerStore(dir, { namespace = 'authority-ledger', genesis = {} } = {}) {
+  assertAuthorityLedgerNamespace(namespace);
+  assertJsonValue(genesis);
+  const root = await rootDir(dir); const pages = path.join(root, `${namespace}-pages`);
+  await fs.promises.mkdir(pages, { recursive: false, mode: 0o700 });
+  const state = { version: AUTHORITY_LEDGER_STORE_VERSION, namespace, revision: 0, genesis, streams: {}, digest: '' };
+  state.digest = rootDigest(state); await writeSafe(root, rootPath(root, namespace), state);
+  const snapshot = await readRootSnapshot(root, namespace); return new AuthorityLedgerStore(root, namespace, snapshot.state, null, snapshot.file);
+}
+
+function sameOptionalJournalSnapshot(left, right) {
+  return (!left && !right) || Boolean(left && right && sameJournalOwner(left.owner, right.owner));
+}
+function assertJournalMatchesRoot(root, journal) {
+  assert(root.state.digest === journal.journal.previous || root.state.digest === journal.journal.next, 'journal and root disagree');
+}
+async function readStableOpenSnapshot(root, namespace) {
+  for (let attempt = 0; attempt < AUTHORITY_LEDGER_STORE_OPEN_SNAPSHOT_ATTEMPTS; attempt += 1) {
+    const firstRoot = await readRootSnapshot(root, namespace); const firstJournal = await readJournalSnapshot(root, namespace);
+    if (firstJournal) assertJournalMatchesRoot(firstRoot, firstJournal);
+    const secondRoot = await readRootSnapshot(root, namespace); const secondJournal = await readJournalSnapshot(root, namespace);
+    if (secondJournal) assertJournalMatchesRoot(secondRoot, secondJournal);
+    if (sameFileIdentity(firstRoot.file, secondRoot.file) && sameOptionalJournalSnapshot(firstJournal, secondJournal)) {
+      return { root: secondRoot, journal: secondJournal };
+    }
+  }
+  assert(false, 'store changed while opening; reopen and retry');
+}
+async function recoverNonHeldJournal(root, namespace) {
+  return withMutationLease(root, namespace, async () => {
+    const snapshot = await readStableOpenSnapshot(root, namespace);
+    if (!snapshot.journal || snapshot.journal.journal.hold === true) return { ...snapshot, recovered: false };
+    // A non-held journal is a crash marker, not permission to discard the
+    // only witness for a root that may already point at its next state. Scan
+    // every referenced path while the journal/root lease is still owned, so a
+    // corrupt next root leaves its marker available for diagnosis/retry.
+    const verifier = new AuthorityLedgerStore(root, namespace, snapshot.root.state, null, snapshot.root.file);
+    await verifier.verifyCompleteHistory();
+    await assertOwnedJournal(root, namespace, snapshot.journal.journal, snapshot.journal.owner, 'journal');
+    const currentRoot = await readRootSnapshot(root, namespace);
+    assertOwnedRoot(currentRoot, snapshot.root.state, snapshot.root.file, 'root');
+    await unlinkOwnedFile(root, journalPath(root, namespace), snapshot.journal.owner.file, AUTHORITY_LEDGER_STORE_JOURNAL_BYTES, 'journal');
+    return { root: snapshot.root, journal: null, recovered: true, completeHistoryVerified: true };
+  });
+}
+
+export async function openAuthorityLedgerStore(dir, { namespace = 'authority-ledger', verifyAll = false } = {}) {
+  assertAuthorityLedgerNamespace(namespace);
+  const root = await rootDir(dir);
+  for (let attempt = 0; attempt < AUTHORITY_LEDGER_STORE_OPEN_SNAPSHOT_ATTEMPTS; attempt += 1) {
+    let snapshot = await readStableOpenSnapshot(root, namespace); let recovered = false;
+    if (snapshot.journal && snapshot.journal.journal.hold !== true) {
+      try {
+        const result = await recoverNonHeldJournal(root, namespace); snapshot = result; recovered = result.recovered;
+      } catch (error) {
+        if (String(error?.message || error).includes('transaction is busy') && attempt + 1 < AUTHORITY_LEDGER_STORE_OPEN_SNAPSHOT_ATTEMPTS) continue;
+        throw error;
+      }
+    }
+    const pendingJournal = snapshot.journal?.journal.hold === true ? snapshot.journal.journal : null;
+    const pendingJournalOwner = snapshot.journal?.journal.hold === true ? snapshot.journal.owner : null;
+    const store = new AuthorityLedgerStore(root, namespace, snapshot.root.state, pendingJournal, snapshot.root.file, pendingJournalOwner);
+    // Ordinary poll-path opens retain an authenticated head probe. Journal
+    // recovery/held state and explicit integrity callers walk all references.
+    for (const stream of Object.keys(store.state.streams)) if (store.state.streams[stream].count) await store.getReceiptPage(stream, store.state.streams[stream].count - 1);
+    if (verifyAll || pendingJournal || (recovered && !snapshot.completeHistoryVerified)) await store.verifyCompleteHistory();
+    return store;
+  }
+  assert(false, 'store changed while opening; reopen and retry');
+}
+
+export class AuthorityLedgerStore {
+  constructor(root, namespace, state, pendingJournal = null, rootOwner = null, pendingJournalOwner = null) {
+    assertAuthorityLedgerNamespace(namespace);
+    assertJsonValue(state);
+    if (pendingJournal !== null) assertJsonValue(pendingJournal);
+    this.root = root; this.namespace = namespace; this.state = state; this.pendingJournal = pendingJournal;
+    this.rootOwner = rootOwner; this.pendingJournalOwner = pendingJournalOwner;
+  }
+  receipt() { return { version: this.state.version, revision: this.state.revision, digest: this.state.digest, streams: Object.fromEntries(Object.entries(this.state.streams).map(([key, value]) => [key, { count: value.count, head: value.head, digest: value.digest }])) }; }
+  async assertPreparedTransactionBase() {
+    const liveRoot = await readRootSnapshot(this.root, this.namespace);
+    assertOwnedRoot(liveRoot, this.state, this.rootOwner || liveRoot.file, 'root');
+    assert(!await readJournalSnapshot(this.root, this.namespace), 'a transaction journal is already active; reopen and retry');
+  }
+  async publishPreparedTransaction(next, holdJournal) {
+    const liveRoot = await readRootSnapshot(this.root, this.namespace);
+    assertOwnedRoot(liveRoot, this.state, this.rootOwner || liveRoot.file, 'root');
+    assert(!await readJournalSnapshot(this.root, this.namespace), 'a transaction journal is already active; reopen and retry');
+    const pending = { version: 1, transactionId: crypto.randomUUID(), previous: this.state.digest, next: next.digest, revision: next.revision,
+      ...(holdJournal ? { hold: true, previousState: this.state, nextState: next } : {}) };
+    await writeSafe(this.root, journalPath(this.root, this.namespace), pending, { maxBytes: AUTHORITY_LEDGER_STORE_JOURNAL_BYTES });
+    const writtenJournal = await readJournalSnapshot(this.root, this.namespace);
+    assert(writtenJournal && stable(writtenJournal.journal) === stable(pending), 'journal publication changed unexpectedly');
+    const journal = await assertOwnedJournal(this.root, this.namespace, pending, writtenJournal.owner, 'journal');
+    await step('journal-published');
+    await assertOwnedJournal(this.root, this.namespace, pending, journal.owner, 'journal');
+    const publishedRoot = await publishRootCas(this, this.state, this.rootOwner || liveRoot.file, next, 'root');
+    await step('root-published');
+    if (!holdJournal) {
+      await assertOwnedJournal(this.root, this.namespace, pending, journal.owner, 'journal');
+      const currentRoot = await readRootSnapshot(this.root, this.namespace);
+      assertOwnedRoot(currentRoot, next, publishedRoot.file, 'root');
+      await unlinkOwnedFile(this.root, journalPath(this.root, this.namespace), journal.owner.file, AUTHORITY_LEDGER_STORE_JOURNAL_BYTES, 'journal');
+      await step('journal-removed');
+    }
+    return { pending, pendingJournalOwner: journal.owner, rootOwner: publishedRoot.file };
+  }
+  async appendReceiptPages(entries, options = {}) {
+    assert(entries && (typeof entries[Symbol.iterator] === 'function' || typeof entries[Symbol.asyncIterator] === 'function'), 'transaction needs receipt pages');
+    if (Array.isArray(entries)) for (const entry of entries) {
+      const { stream, records } = entry || {};
+      assert(isAuthorityLedgerStream(stream) && Array.isArray(records), 'transaction has an invalid stream or records');
+      assertJsonValue(records);
+    }
+    return withMutationLease(this.root, this.namespace, () => this.appendReceiptPagesUnderLease(entries, options));
+  }
+  async appendReceiptPagesUnderLease(entries, { holdJournal = false } = {}) {
+    assert(!this.pendingJournal, 'a held transaction must be finalized or rolled back before another transaction');
+    assert(entries && (typeof entries[Symbol.iterator] === 'function' || typeof entries[Symbol.asyncIterator] === 'function'), 'transaction needs receipt pages');
+    await this.assertPreparedTransactionBase();
+    const next = structuredClone(this.state); const pages = path.join(this.root, `${this.namespace}-pages`);
+    // Existing array callers retain their historical return shape.  Streaming
+    // callers use the compact count/last receipt so an unbounded selection
+    // transaction never retains one descriptor per immutable page.
+    const written = Array.isArray(entries) ? [] : null; let writtenCount = 0; let lastWritten = null;
+    for await (const entry of entries) {
+      const { stream, records } = entry || {}; assert(isAuthorityLedgerStream(stream) && Array.isArray(records), 'transaction has an invalid stream or records');
+      assertJsonValue(records);
+      const prior = next.streams[stream] || { count: 0, head: null, digest: hash([]) }; const number = prior.count;
+      const page = { version: next.version, stream, number, previous: prior.head, previousDigest: prior.head ? prior.digest : null, records, recordsDigest: hash(records) }; page.digest = hash(page);
+      const file = pageFile(stream, number); await writeSafe(this.root, path.join(pages, file), page, { immutable: true }); await step('transaction:page');
+      next.streams[stream] = { count: number + 1, head: file, digest: page.digest,
+        ...(next.version === AUTHORITY_LEDGER_STORE_VERSION ? { index: await appendIndexedPage(this, prior, { stream, number, file, digest: page.digest }) } : {}) };
+      lastWritten = { stream, file, digest: page.digest, number }; writtenCount += 1;
+      if (written) written.push(lastWritten);
+      const buckets = next.idBuckets || {}; next.idBuckets = buckets;
+      for (const record of records) for (const key of [
+        ...(typeof record?.id === 'string' ? [`id:${record.id}`] : []),
+        ...(Array.isArray(record?.indexKeys) ? record.indexKeys.filter(key => typeof key === 'string' && key.length <= 512).map(key => `key:${key}`) : []),
+      ]) {
+        const bucket = hash(key).slice(0, 2); const priorBucket = buckets[bucket] || { count: 0, head: null, digest: hash([]) };
+        const bucketPage = { version: 1, bucket, number: priorBucket.count, previous: priorBucket.head, previousDigest: priorBucket.head ? priorBucket.digest : null, ids: [key] }; bucketPage.digest = hash(bucketPage);
+        const bucketFile = `ids-${bucket}-${String(priorBucket.count).padStart(12, '0')}.json`; await writeSafe(this.root, path.join(pages, bucketFile), bucketPage, { immutable: true }); await step('transaction:bucket');
+        buckets[bucket] = { count: priorBucket.count + 1, head: bucketFile, digest: bucketPage.digest };
+      }
+    }
+    assert(writtenCount > 0, 'transaction needs receipt pages');
+    next.revision += 1; next.digest = rootDigest(next);
+    const publication = await this.publishPreparedTransaction(next, holdJournal);
+    this.state = next; this.rootOwner = publication.rootOwner;
+    this.pendingJournal = holdJournal ? publication.pending : null;
+    this.pendingJournalOwner = holdJournal ? publication.pendingJournalOwner : null;
+    return written || { count: writtenCount, last: lastWritten };
+  }
+  async appendReceiptPage(stream, records, options = {}) {
+    assert(isAuthorityLedgerStream(stream) && Array.isArray(records), 'invalid stream or records');
+    assertJsonValue(records);
+    return withMutationLease(this.root, this.namespace, () => this.appendReceiptPageUnderLease(stream, records, options));
+  }
+  async appendReceiptPageUnderLease(stream, records, { holdJournal = false } = {}) {
+    assert(!this.pendingJournal, 'a held transaction must be finalized or rolled back before another transaction');
+    assert(isAuthorityLedgerStream(stream) && Array.isArray(records), 'invalid stream or records');
+    assertJsonValue(records);
+    await this.assertPreparedTransactionBase();
+    const prior = this.state.streams[stream] || { count: 0, head: null, digest: hash([]) };
+    const number = prior.count; const previous = prior.head; const page = { version: this.state.version, stream, number, previous, previousDigest: prior.head ? prior.digest : null, records, recordsDigest: hash(records) };
+    page.digest = hash(page); const file = pageFile(stream, number);
+    const pages = path.join(this.root, `${this.namespace}-pages`); await writeSafe(this.root, path.join(pages, file), page, { immutable: true });
+    const next = structuredClone(this.state); next.revision += 1; next.streams[stream] = { count: number + 1, head: file, digest: page.digest,
+      ...(next.version === AUTHORITY_LEDGER_STORE_VERSION ? { index: await appendIndexedPage(this, prior, { stream, number, file, digest: page.digest }) } : {}) };
+    const buckets = next.idBuckets || {}; for (const record of records) {
+      const keys = [
+        ...(typeof record?.id === 'string' ? [`id:${record.id}`] : []),
+        ...(Array.isArray(record?.indexKeys) ? record.indexKeys.filter(key => typeof key === 'string' && key.length <= 512).map(key => `key:${key}`) : []),
+      ];
+      for (const key of keys) {
+      const bucket = hash(key).slice(0, 2); const priorBucket = buckets[bucket] || { count: 0, head: null, digest: hash([]) };
+      const bucketFile = `ids-${bucket}-${String(priorBucket.count).padStart(12, '0')}.json`;
+      const bucketPage = { version: 1, bucket, number: priorBucket.count, previous: priorBucket.head, previousDigest: priorBucket.head ? priorBucket.digest : null, ids: [key] }; bucketPage.digest = hash(bucketPage);
+      await writeSafe(this.root, path.join(pages, bucketFile), bucketPage, { immutable: true }); buckets[bucket] = { count: priorBucket.count + 1, head: bucketFile, digest: bucketPage.digest };
+      }
+    }
+    next.idBuckets = buckets; next.digest = rootDigest(next);
+    const publication = await this.publishPreparedTransaction(next, holdJournal);
+    this.state = next; this.rootOwner = publication.rootOwner;
+    this.pendingJournal = holdJournal ? publication.pending : null;
+    this.pendingJournalOwner = holdJournal ? publication.pendingJournalOwner : null;
+    return { file, digest: page.digest, number };
+  }
+  async assertLiveHeldTransaction(pending, expectedState, expectedRootOwner) {
+    const observed = await readJournalSnapshot(this.root, this.namespace);
+    const owner = this.pendingJournalOwner || observed?.owner;
+    assert(observed && owner && stable(observed.journal) === stable(pending) && sameJournalOwner(observed.owner, owner),
+      'held journal ownership changed; reopen and retry');
+    await assertOwnedJournal(this.root, this.namespace, pending, owner);
+    const root = await readRootSnapshot(this.root, this.namespace);
+    assertOwnedRoot(root, expectedState, expectedRootOwner || root.file, 'root');
+    await assertOwnedJournal(this.root, this.namespace, pending, owner);
+    return { root, owner };
+  }
+  async finalizePendingJournal() {
+    if (!this.pendingJournal) return;
+    const pending = this.pendingJournal;
+    assert(pending.nextState && pending.next === rootDigest(pending.nextState)
+      && pending.next === this.state.digest, 'held journal does not describe the current root');
+    return withMutationLease(this.root, this.namespace, async () => {
+      const live = await this.assertLiveHeldTransaction(pending, this.state, this.rootOwner);
+      if (!this.rootOwner) this.rootOwner = live.root.file;
+      if (!this.pendingJournalOwner) this.pendingJournalOwner = live.owner;
+      await this.verifyCompleteHistory();
+      await this.assertLiveHeldTransaction(pending, this.state, this.rootOwner);
+      await unlinkOwnedFile(this.root, journalPath(this.root, this.namespace), live.owner.file, AUTHORITY_LEDGER_STORE_JOURNAL_BYTES, 'held journal');
+      this.pendingJournal = null; this.pendingJournalOwner = null;
+    });
+  }
+  async rollbackPendingJournal() {
+    if (!this.pendingJournal) return;
+    const pending = this.pendingJournal;
+    assert(pending.previousState && pending.nextState
+      && pending.previous === rootDigest(pending.previousState) && pending.next === rootDigest(pending.nextState),
+    'held journal roots are invalid');
+    assertJournalTransition(pending.previousState, pending.nextState, this.namespace);
+    assert([pending.previous, pending.next].includes(this.state.digest), 'held journal root is not recoverable');
+    return withMutationLease(this.root, this.namespace, async () => {
+      const live = await this.assertLiveHeldTransaction(pending, this.state, this.rootOwner);
+      if (!this.rootOwner) this.rootOwner = live.root.file;
+      if (!this.pendingJournalOwner) this.pendingJournalOwner = live.owner;
+      await this.verifyCompleteHistory();
+      // Make the previous complete root durable before removing an immutable
+      // page. If cleanup is interrupted, reopening sees this root plus the
+      // held journal and can safely resume instead of verifying a head we
+      // have just unlinked.
+      if (this.state.digest !== pending.previous) {
+        await this.assertLiveHeldTransaction(pending, this.state, this.rootOwner);
+        const restored = await publishRootCas(this, this.state, this.rootOwner, pending.previousState, 'root');
+        this.state = pending.previousState; this.rootOwner = restored.file;
+      }
+      await step('rollback:root-restored');
+      const assertRollbackOwnership = () => this.assertLiveHeldTransaction(pending, pending.previousState, this.rootOwner);
+      await removeHeldTransactionOrphans(this, pending.previousState, pending.nextState, assertRollbackOwnership);
+      const confirmed = await assertRollbackOwnership();
+      await unlinkOwnedFile(this.root, journalPath(this.root, this.namespace), confirmed.owner.file, AUTHORITY_LEDGER_STORE_JOURNAL_BYTES, 'held journal');
+      this.pendingJournal = null; this.pendingJournalOwner = null;
+    });
+  }
+  async readIndexedNode(stream, reference) {
+    assertAuthorityLedgerStream(stream);
+    await step('read:index');
+    const node = await readJson(this.root, pagePath(this, reference.file)); const { digest: _digest, ...unsigned } = node;
+    assert(node?.version === 1 && node.kind === 'authority-ledger-receipt-index'
+      && node.stream === stream && node.start === reference.start && node.span === reference.span
+      && node.digest === reference.digest && node.digest === hash(unsigned), 'page index inclusion proof is invalid');
+    return node;
+  }
+  async readReceiptPage(stream, number, expectedFile, expectedDigest) {
+    assertAuthorityLedgerStream(stream);
+    await step('read:page');
+    const page = await readJson(this.root, pagePath(this, expectedFile)); const { digest: _digest, ...unsigned } = page;
+    assert(page.stream === stream && page.number === number && page.recordsDigest === hash(page.records)
+      && page.digest === hash(unsigned) && page.digest === expectedDigest, 'page inclusion proof is invalid');
+    if (number === 0) assert(page.previous === null && page.previousDigest === null, 'first page previous link is invalid');
+    else assert(page.previous === pageFile(stream, number - 1) && isDigest(page.previousDigest), 'page previous link is invalid');
+    return page;
+  }
+  async getIndexedReceiptPage(stream, state, number) {
+    assertAuthorityLedgerStream(stream);
+    assertIndexShape(state.index, stream, state.count);
+    assert(state.head === pageFile(stream, state.count - 1) && isDigest(state.digest), 'root indexed stream head is invalid');
+    let reference = state.index.peaks.find(peak => number >= peak.start && number < peak.start + peak.span);
+    assert(reference, 'page index has no target peak');
+    while (true) {
+      const node = await this.readIndexedNode(stream, reference);
+      if (node.span === 1) {
+        assert(node.page?.file === pageFile(stream, number) && isDigest(node.page?.digest), 'page index leaf is invalid');
+        const page = await this.readReceiptPage(stream, number, node.page.file, node.page.digest);
+        if (number === state.count - 1) assert(page.digest === state.digest, 'root indexed stream head does not bind its final page');
+        return page;
+      }
+      const half = node.span / 2;
+      const left = { start: node.start, span: half, file: indexFile(stream, node.start, half), digest: node.left?.digest };
+      const right = { start: node.start + half, span: half, file: indexFile(stream, node.start + half, half), digest: node.right?.digest };
+      assert(node.left?.file === left.file && node.right?.file === right.file && isDigest(left.digest) && isDigest(right.digest), 'page index branch is invalid');
+      reference = number < node.start + half ? left : right;
+    }
+  }
+  async getReceiptPage(stream, number) {
+    assertAuthorityLedgerStream(stream);
+    const state = this.state.streams[stream]; assert(state && Number.isInteger(number) && number >= 0 && number < state.count, 'unknown page');
+    if (isCurrentStore(this.state)) return this.getIndexedReceiptPage(stream, state, number);
+    let expectedFile = state.head; let expectedDigest = state.digest;
+    for (let cursor = state.count - 1; cursor >= number; cursor -= 1) {
+      assert(expectedFile === pageFile(stream, cursor), 'root chain page order is invalid');
+      const page = await this.readReceiptPage(stream, cursor, expectedFile, expectedDigest);
+      if (cursor === number) return page;
+      expectedFile = page.previous; expectedDigest = page.previousDigest;
+      assert(typeof expectedFile === 'string' && /^[a-z][a-z0-9-]{0,39}-\d{12}\.json$/u.test(expectedFile) && /^[a-f0-9]{64}$/u.test(expectedDigest), 'page previous link is invalid');
+    }
+    throw new Error('page chain ended before requested page');
+  }
+  async *iterateIndexedNode(stream, reference) {
+    assertAuthorityLedgerStream(stream);
+    const node = await this.readIndexedNode(stream, reference);
+    if (node.span === 1) {
+      assert(node.page?.file === pageFile(stream, node.start) && isDigest(node.page?.digest), 'page index leaf is invalid');
+      yield { number: node.start, file: node.page.file, digest: node.page.digest };
+      return;
+    }
+    const half = node.span / 2;
+    const left = { start: node.start, span: half, file: indexFile(stream, node.start, half), digest: node.left?.digest };
+    const right = { start: node.start + half, span: half, file: indexFile(stream, node.start + half, half), digest: node.right?.digest };
+    assert(node.left?.file === left.file && node.right?.file === right.file && isDigest(left.digest) && isDigest(right.digest), 'page index branch is invalid');
+    yield* this.iterateIndexedNode(stream, left); yield* this.iterateIndexedNode(stream, right);
+  }
+  async *iterateReceiptPages(stream) {
+    assertAuthorityLedgerStream(stream);
+    const state = this.state.streams[stream]; if (!state?.count) return;
+    if (!isCurrentStore(this.state)) { for (let index = 0; index < state.count; index += 1) yield this.getReceiptPage(stream, index); return; }
+    assertIndexShape(state.index, stream, state.count);
+    let previous = null; let expectedNumber = 0;
+    for (const peak of state.index.peaks) for await (const leaf of this.iterateIndexedNode(stream, peak)) {
+      assert(leaf.number === expectedNumber, 'page index traversal skipped or duplicated a page');
+      const page = await this.readReceiptPage(stream, leaf.number, leaf.file, leaf.digest);
+      if (previous) assert(page.previousDigest === previous.digest, 'page index traversal has a broken chain link');
+      previous = page; expectedNumber += 1; yield page;
+    }
+    assert(expectedNumber === state.count && previous?.digest === state.digest, 'page index traversal does not bind the stream head');
+  }
+  async verifyLegacyStream(stream, state) {
+    assertAuthorityLedgerStream(stream);
+    assert(Number.isSafeInteger(state?.count) && state.count >= 0, 'root legacy stream is invalid');
+    if (!state.count) {
+      assert(state.head === null && state.digest === hash([]), 'empty legacy stream is invalid');
+      return;
+    }
+    let expectedFile = state.head; let expectedDigest = state.digest;
+    for (let number = state.count - 1; number >= 0; number -= 1) {
+      assert(expectedFile === pageFile(stream, number) && isDigest(expectedDigest), 'root legacy stream head is invalid');
+      const page = await this.readReceiptPage(stream, number, expectedFile, expectedDigest);
+      expectedFile = page.previous; expectedDigest = page.previousDigest;
+    }
+    assert(expectedFile === null && expectedDigest === null, 'legacy stream chain does not end at genesis');
+  }
+  async verifyIndexedStream(stream, state) {
+    assertAuthorityLedgerStream(stream);
+    assert(Number.isSafeInteger(state?.count) && state.count >= 0, 'root indexed stream is invalid');
+    if (!state.count) {
+      assert(state.head === null && state.digest === hash([]), 'empty indexed stream is invalid');
+      assertIndexShape(state.index, stream, 0); return;
+    }
+    assertIndexShape(state.index, stream, state.count);
+    assert(state.head === pageFile(stream, state.count - 1) && isDigest(state.digest), 'root indexed stream head is invalid');
+    let previous = null; let expectedNumber = 0;
+    for (const peak of state.index.peaks) for await (const leaf of this.iterateIndexedNode(stream, peak)) {
+      assert(leaf.number === expectedNumber, 'page index traversal skipped or duplicated a page');
+      const page = await this.readReceiptPage(stream, leaf.number, leaf.file, leaf.digest);
+      if (previous) assert(page.previousDigest === previous.digest, 'page index traversal has a broken chain link');
+      previous = page; expectedNumber += 1;
+    }
+    assert(expectedNumber === state.count && previous?.digest === state.digest, 'page index traversal does not bind the stream head');
+  }
+  async verifyIdBucket(bucket, state) {
+    assert(/^[a-f0-9]{2}$/u.test(bucket) && Number.isSafeInteger(state?.count) && state.count >= 0, 'root ID bucket is invalid');
+    if (!state.count) {
+      assert(state.head === null && state.digest === hash([]), 'empty ID bucket is invalid');
+      return;
+    }
+    let file = state.head; let digest = state.digest;
+    for (let number = state.count - 1; number >= 0; number -= 1) {
+      assert(file === `ids-${bucket}-${String(number).padStart(12, '0')}.json` && isDigest(digest), 'ID bucket chain is invalid');
+      const page = await readJson(this.root, pagePath(this, file)); const { digest: _digest, ...unsigned } = page;
+      assert(page?.version === 1 && page.bucket === bucket && page.number === number && Array.isArray(page.ids)
+        && page.digest === digest && page.digest === hash(unsigned), 'ID bucket inclusion proof is invalid');
+      if (!number) assert(page.previous === null && page.previousDigest === null, 'first ID bucket page previous link is invalid');
+      else assert(page.previous === `ids-${bucket}-${String(number - 1).padStart(12, '0')}.json` && isDigest(page.previousDigest), 'ID bucket previous link is invalid');
+      file = page.previous; digest = page.previousDigest;
+    }
+    assert(file === null && digest === null, 'ID bucket chain does not end at genesis');
+  }
+  async verifyCompleteHistory() {
+    const before = await readRootSnapshot(this.root, this.namespace); const rootOwner = this.rootOwner || before.file;
+    assertOwnedRoot(before, this.state, rootOwner, 'root');
+    assert(this.state.streams && typeof this.state.streams === 'object' && !Array.isArray(this.state.streams), 'root streams are invalid');
+    for (const [stream, state] of Object.entries(this.state.streams)) {
+      assertAuthorityLedgerStream(stream);
+      if (isCurrentStore(this.state)) await this.verifyIndexedStream(stream, state);
+      else await this.verifyLegacyStream(stream, state);
+    }
+    const buckets = this.state.idBuckets || {};
+    assert(buckets && typeof buckets === 'object' && !Array.isArray(buckets), 'root ID buckets are invalid');
+    for (const [bucket, state] of Object.entries(buckets)) await this.verifyIdBucket(bucket, state);
+    const after = await readRootSnapshot(this.root, this.namespace);
+    assertOwnedRoot(after, this.state, rootOwner, 'root');
+    return { streams: Object.keys(this.state.streams).length, buckets: Object.keys(buckets).length };
+  }
+  async hasPriorId(_stream, id) { return this.hasPriorIndexKey(`id:${id}`, { encoded: true }); }
+  async hasPriorIndexKey(key, { encoded = false } = {}) {
+    key = encoded ? key : `key:${key}`;
+    const bucket = hash(key).slice(0, 2); const state = this.state.idBuckets?.[bucket]; if (!state) return false;
+    let file = state.head; let digest = state.digest;
+    for (let number = state.count - 1; number >= 0; number -= 1) {
+      const page = await readJson(this.root, path.join(this.root, `${this.namespace}-pages`, file)); const { digest: _digest, ...unsigned } = page;
+      assert(page.bucket === bucket && page.number === number && page.digest === digest && page.digest === hash(unsigned), 'ID bucket inclusion proof is invalid');
+      if (page.ids.includes(key)) return true; file = page.previous; digest = page.previousDigest;
+    }
+    return false;
+  }
+  async listingSlice(page) { const record = await this.getReceiptPage('listing', page); assert(record.records.length === 1 && typeof record.records[0]?.text === 'string', 'listing page is malformed'); return record.records[0]; }
+  async *listingRange(firstPage, lastPage) {
+    assert(Number.isInteger(firstPage) && Number.isInteger(lastPage) && firstPage >= 0 && lastPage >= firstPage, 'listing range is invalid');
+    for (let page = firstPage; page <= lastPage; page += 1) yield this.listingSlice(page);
+  }
+}

@@ -12,6 +12,14 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 export const LOCAL_AI_HANDOFF_POLL_MS = 3 * 1000;
+// Receipt publication and removal of the writer-visible job folder occur in
+// one app-side save transaction, but those observations can cross a process
+// scheduling or durable-filesystem boundary. A save already takes place over
+// normal three-second handoff polls, so allow five such observations for its
+// receipt to settle after disappearance. This is a fixed 15-second terminal
+// window--not an authoring deadline--so a discarded or stale job still has a
+// definite unconfirmed result rather than an unbounded post-cleanup wait.
+export const LOCAL_AI_HANDOFF_RECEIPT_GRACE_MS = 5 * LOCAL_AI_HANDOFF_POLL_MS;
 
 function sha256(value) {
   return crypto.createHash('sha256').update(value, 'utf8').digest('hex');
@@ -37,7 +45,9 @@ async function directoryExists(dir) {
 }
 
 function matchingReceipt(receipt, jobId, resultSha256) {
-  return receipt?.version === 1
+  // Version 2 is the current app-written receipt schema. Keep version 1 for
+  // already-issued receipts; both versions bind the same terminal fields.
+  return (receipt?.version === 1 || receipt?.version === 2)
     && receipt?.jobId === jobId
     && receipt?.status === 'imported'
     && receipt?.resultSha256 === resultSha256;
@@ -49,13 +59,18 @@ function matchingFeedback(feedback, jobId, resultSha256) {
     : null;
 }
 
+async function readMatchingReceipt(receiptFile, jobId, resultSha256) {
+  const receipt = await readJsonIfFile(receiptFile);
+  return matchingReceipt(receipt, jobId, resultSha256) ? receipt : null;
+}
+
 /**
  * Observe a handoff once. Receipt intentionally comes before the directory
  * probe: it preserves final app measurements when cleanup has already run.
  */
 export async function inspectLocalAiHandoff({ jobFolder, receiptFile, jobId, resultSha256 }) {
-  const receipt = await readJsonIfFile(receiptFile);
-  if (matchingReceipt(receipt, jobId, resultSha256)) {
+  const receipt = await readMatchingReceipt(receiptFile, jobId, resultSha256);
+  if (receipt) {
     return { outcome: 'imported', receipt };
   }
 
@@ -108,6 +123,7 @@ export async function waitForLocalAiHandoff({
   resultSha256,
   deadlineMs = null,
   pollMs = LOCAL_AI_HANDOFF_POLL_MS,
+  receiptGraceMs = LOCAL_AI_HANDOFF_RECEIPT_GRACE_MS,
   now = () => Date.now(),
   sleep = ms => new Promise(resolve => setTimeout(resolve, ms)),
 }) {
@@ -118,8 +134,28 @@ export async function waitForLocalAiHandoff({
   // A finite deadline is solely a deterministic-test seam.
   if (deadlineMs != null && !Number.isFinite(deadlineMs)) throw new Error('deadlineMs must be a finite wall-clock timestamp.');
   if (!Number.isFinite(pollMs) || pollMs <= 0) throw new Error('pollMs must be a finite positive number.');
+  if (!Number.isFinite(receiptGraceMs) || receiptGraceMs < 0) throw new Error('receiptGraceMs must be a finite non-negative number.');
   while (true) {
     const observed = await inspectLocalAiHandoff({ jobFolder, receiptFile, jobId, resultSha256 });
+    if (observed.outcome === 'job-folder-gone-unconfirmed') {
+      // Re-read immediately: this closes the read-receipt -> probe-folder
+      // time-of-check/time-of-use window without delaying a real discard.
+      // Then poll only through a fixed settlement budget at the configured
+      // normal cadence. Never treat any other job/hash's retained receipt as
+      // terminal success. Count requested sleeps rather than
+      // wall-clock readings so clock adjustments (or deterministic no-op test
+      // sleeps) cannot turn this terminal path into an unbounded loop.
+      let remainingGraceMs = receiptGraceMs;
+      while (true) {
+        const receipt = await readMatchingReceipt(receiptFile, jobId, resultSha256);
+        if (receipt) return { outcome: 'imported', receipt };
+        if (remainingGraceMs <= 0) break;
+        const delay = Math.min(Math.max(1, pollMs), remainingGraceMs);
+        await sleep(delay);
+        remainingGraceMs -= delay;
+      }
+      return observed;
+    }
     if (observed.outcome !== 'waiting') return observed;
     if (deadlineMs != null) {
       const remaining = deadlineMs - now();

@@ -285,6 +285,16 @@ export default [
     assert(rejected.active === false && rejected.generation === null && rejected.workerCount === 0,
       'a malformed engine pool marker fails closed instead of keeping stale renderer controls alive');
   } },
+  { name: 'handoff bridge: controls: large durable backlog telemetry is not clamped to live worker capacity or a legacy display ceiling', run() {
+    const engine = enginePort({ status: () => ({
+      queue: { applications: { ready: 0, working: 0, needsYou: 0, held: 0, done: 0 }, jobs: [] },
+      chat: { state: 'working', jobsCap: 2, pool: { active: true, generation: 9, workerCount: 1,
+        plan: { recommended: 1, queued: Number.MAX_SAFE_INTEGER, materialized: 500_001, expandBy: 0, reason: 'maximum_parallelism' } } }, counts: {},
+    }) });
+    const plan = controllerHarness({ engine }).controller.snapshot(false).chat.pool.plan;
+    assert(plan.recommended === 1 && plan.queued === Number.MAX_SAFE_INTEGER && plan.materialized === 500_001,
+      'aggregate queue counts survive status projection while worker recommendations remain safely bounded');
+  } },
   { name: 'handoff bridge: controls: closed worker-pool history crosses the controller only as bounded lifecycle evidence', run() {
     const secret = 'PRIVATE-CLOSED-WORKER-STARTER';
     const engine = enginePort({ status: () => ({
@@ -1231,6 +1241,73 @@ export default [
     await h.controller.tick();
     assert(h.controller.snapshot(false).pauseCause !== 'idle', 'an explicit confirmation counts as the person acting, so 25h from the first release is not yet 24h idle');
   } },
+  { name: 'handoff bridge: controls: release names the current link so the engine can grow a live worker pool', async run() {
+    const engine = enginePort();
+    const h = controllerHarness({
+      engine,
+      oauth: {
+        linkStatus: () => [{ linkId: 'link-revoked', revoked: true }, { linkId: 'link-live', revoked: false }],
+        pairingStatus: () => ({}),
+        async revokeAll() { return { ok: true }; },
+        async closePairing() { return { ok: true }; },
+        async flush() { return { ok: true }; },
+      },
+    });
+    await h.controller.enable();
+    const request = { jobs: [{ jobId: JOB, canvasFilePath: '/tmp/synthetic.canvas' }] };
+    await h.controller.release(request);
+    assert(h.engine.calls.release.length === 1, 'one release call reaches the engine');
+    assert(h.engine.calls.release[0].linkId === 'link-live', 'the live (non-revoked) link id is named');
+    assert(h.engine.calls.release[0].jobs.length === 1, 'the one job reaches the engine');
+    assert(h.engine.calls.release[0].jobs[0].jobId === JOB, 'the job id is exact');
+    assert(h.engine.calls.release[0].jobs[0].canvasFilePath === '/tmp/synthetic.canvas', 'the canvas path is exact');
+    assert(JSON.stringify(Object.keys(h.engine.calls.release[0].jobs[0]).sort()) === JSON.stringify(['canvasFilePath', 'jobId']), 'no extra job fields leak into the engine call');
+  } },
+  { name: 'handoff bridge: controls: release passes a null link when no live link exists', async run() {
+    const cases = [
+      { linkStatus: () => [] },
+      { linkStatus: () => [{ linkId: 'link-revoked', revoked: true }] },
+    ];
+    for (const oauth of cases) {
+      const engine = enginePort();
+      const h = controllerHarness({
+        engine,
+        oauth: {
+          ...oauth,
+          pairingStatus: () => ({}),
+          async revokeAll() { return { ok: true }; },
+          async closePairing() { return { ok: true }; },
+          async flush() { return { ok: true }; },
+        },
+      });
+      await h.controller.enable();
+      const request = { jobs: [{ jobId: JOB, canvasFilePath: '/tmp/synthetic.canvas' }] };
+      const result = await h.controller.release(request);
+      assert(h.engine.calls.release.length === 1, 'one release call reaches the engine');
+      assert(h.engine.calls.release[0].linkId === null, 'no live link means a null link id');
+      assert(result.ok === true, 'the release is never refused for lack of a link');
+    }
+  } },
+  { name: 'handoff bridge: controls: release survives a link lookup that throws', async run() {
+    let broken = false;
+    const engine = enginePort();
+    const h = controllerHarness({
+      engine,
+      oauth: {
+        linkStatus: () => { if (broken) throw new Error('synthetic link store fault'); return []; },
+        pairingStatus: () => ({}),
+        async revokeAll() { return { ok: true }; },
+        async closePairing() { return { ok: true }; },
+        async flush() { return { ok: true }; },
+      },
+    });
+    await h.controller.enable();
+    broken = true;
+    const request = { jobs: [{ jobId: JOB, canvasFilePath: '/tmp/synthetic.canvas' }] };
+    const result = await h.controller.release(request);
+    assert(result.ok === true, 'the release survives a throwing link lookup');
+    assert(h.engine.calls.release[0].linkId === null, 'a link lookup that throws resolves to null');
+  } },
   { name: 'handoff bridge: controls: a lane crossing the quiet threshold, or dropped by the engine, republishes status on the tick, an idle tick stays silent, and the per-job answer fields reach the status', async run() {
     let stalled = false; let jobs = [{ jobId: JOB, phase: 'awaiting', stage: 'resume', servedToChat: 1, changedAt: 1, servedAt: 5, answeredAt: 3, awaitingAnswer: true, stalled: false, stalledSince: null, leak: 'PRIVATE_PROMPT' }];
     const engine = enginePort({
@@ -1293,16 +1370,28 @@ export default [
     await h.controller.enable();
     await h.controller.release({ jobs: [{ jobId: JOB, canvasFilePath: '/tmp/synthetic.canvas' }] });
     assert((await h.controller.onBundleDiscarded({ jobId: JOB, canvasFilePath: '/tmp/synthetic.canvas', cause: 'bundle_discarded' })).ok === true
-      && JSON.stringify(calls) === JSON.stringify([[JOB, 'bundle_discarded']]), 'the discard reaches the engine with its closed cause');
+      && JSON.stringify(calls) === JSON.stringify([[JOB, 'bundle_discarded', '/tmp/synthetic.canvas']]), 'the discard reaches the engine with its closed cause and canonical canvas owner');
     h.setNow(h.now() + 30 * 3_600_000); await h.controller.tick();
     assert(holds.every(call => call[0] !== JOB), 'a dropped lane no longer has a release deadline to lapse');
     assert((await h.controller.onBundleDiscarded({ jobId: 'not-a-uuid' })).code === 'invalid_arguments' && calls.length === 1, 'a malformed id never reaches the engine');
+  } },
+  { name: 'handoff bridge: controls: a same-id discard from another canvas cannot retire the live lane', async run() {
+    const h = realEngineHarness();
+    const owner = '/tmp/owner.canvas'; const foreign = '/tmp/foreign.canvas';
+    await h.controller.enable();
+    assert((await h.controller.release({ jobs: [{ jobId: JOB, canvasFilePath: owner }] })).ok, 'the owner canvas releases its lane');
+    const forged = await h.controller.onBundleDiscarded({ jobId: JOB, canvasFilePath: foreign, cause: 'bundle_discarded' });
+    assert(forged.code === 'not_found' && h.engine.restartJobs().some(lane => lane.jobId === JOB && lane.canvasFilePath === owner),
+      'a stale same-id event from another canvas leaves the live owner lane intact');
+    assert((await h.controller.onBundleDiscarded({ jobId: JOB, canvasFilePath: owner, cause: 'bundle_discarded' })).ok
+      && !h.engine.restartJobs().some(lane => lane.jobId === JOB), 'only the canonical owner canvas can retire its lane');
   } },
   { name: 'handoff bridge: controls: discarding a bundle while the bridge is off frees its durable lane, so it cannot come back as a restart hold', async run() {
     await stopHandoffBridge();
     const root = nodeFs.realpathSync(nodeFs.mkdtempSync(nodePath.join(nodeOs.tmpdir(), 'ic-bridge-discard-')));
     const userData = nodePath.join(root, 'user-data'); nodeFs.mkdirSync(userData, { recursive: true });
     const canvasFilePath = nodePath.join(root, 'My Canvas.json'); nodeFs.writeFileSync(canvasFilePath, '{"version":1}', 'utf8');
+    const foreignCanvasFilePath = nodePath.join(root, 'Other Canvas.json'); nodeFs.writeFileSync(foreignCanvasFilePath, '{"version":1}', 'utf8');
     const handlers = new Map();
     const ipc = { handle: (channel, fn) => handlers.set(channel, fn), removeHandler: channel => handlers.delete(channel), on: NOOP, removeListener: NOOP, __getInvokeHandler: channel => handlers.get(channel) };
     try {
@@ -1312,6 +1401,9 @@ export default [
       const lane = (ord, jobId) => ({ ord, jobId, canvasFilePath, releasedAt: ord, phase: 'unread', reason: null, heldFrom: null, counters: {} });
       const other = '99999999-9999-4999-8999-999999999999';
       assert(await store.saveLanes([lane(1, queued.id), lane(2, other)]), 'two released lanes are on disk');
+      const forged = await handleApplicationBundleRemoved({ jobId: queued.id, canvasFilePath: foreignCanvasFilePath, cause: 'bundle_discarded' });
+      assert(forged.ok && forged.removed === false && store.readLanes().some(item => item.jobId === queued.id && item.canvasFilePath === canvasFilePath),
+        'a stale same-id event from another canvas cannot delete the durable owner lane');
       await discardLocalApplicationJob(queued.id, canvasFilePath);
       await settle(40); await store.flush();
       const after = store.readLanes();
@@ -1870,6 +1962,21 @@ export default [
     await h.controller.pause('anomaly');
     const blocked = await h.controller.prepareChat({ kind: 'continue' });
     assert(blocked.status === 'paused' && blocked.reason === 'anomaly' && engine.calls.get === 0, 'anomaly pause cannot be bypassed by chat preparation');
+  } },
+  { name: 'handoff bridge: controls: worker starter re-copy preserves the engine same-key decision', async run() {
+    const calls = [];
+    const engine = enginePort({
+      async copyWorkerStarter(value) {
+        calls.push(value);
+        return { copied: true, recopied: true, generation: 4, workerOrdinal: 1, workerCount: 1, sessionCode: 'SYNTHETIC' };
+      },
+    });
+    const h = controllerHarness({ engine, oauth: { linkStatus: () => [{ linkId: 'worker-recopy-link', revoked: false }], pairingStatus: () => ({}) } });
+    await h.controller.enable();
+    const result = await h.controller.copyWorkerStarter({ generation: 4, workerOrdinal: 1 });
+    assert(result.copied === true && result.recopied === true && result.sessionCode === 'SYNTHETIC'
+      && JSON.stringify(calls) === JSON.stringify([{ linkId: 'worker-recopy-link', generation: 4, workerOrdinal: 1 }]),
+    'the controller forwards a valid same-key re-copy intact to the main-only clipboard boundary');
   } },
   { name: 'handoff bridge: controls: twenty unrecognised chat keys raise no alarm, no notification and no pause, the next valid call is served, and the re-copy still works', async run() {
     const h = realEngineHarness(); await h.controller.enable();

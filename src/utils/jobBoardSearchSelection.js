@@ -978,3 +978,25 @@ export function jobBoardSelectionPresentation(selectedModules) {
     : 'Finish setting up the selected sources before running this board. Completed searches are reused here; to refresh one, choose Re-scan for New Jobs on its Job Search card, then return to the Board.';
   return { freshCount, reusableCount, hasContinuation, hasTokenlessPaused, runLabel, title, unreadyMessage };
 }
+
+/**
+ * Decide whether a finished Board is current and complete, so its primary
+ * combine action can give way to a non-interactive "up to date" status.
+ *
+ * Deliberately conservative: malformed or missing input yields `false`, so the
+ * action stays visible whenever we are unsure. The Board must be `done`, not
+ * `stale`, have connected sources that are all complete, and its persisted
+ * combine signature must equal the live signature of those sources.
+ */
+export function isJobBoardUpToDate(state) {
+  const {
+    hubState, stale, connectedCount, completedCount, combineSignature, liveSignature,
+  } = state && typeof state === 'object' ? state : {};
+  return hubState === 'done'
+    && stale !== true
+    && Number.isSafeInteger(connectedCount) && connectedCount > 0
+    && completedCount === connectedCount
+    && typeof combineSignature === 'string' && combineSignature !== ''
+    && typeof liveSignature === 'string' && liveSignature !== ''
+    && combineSignature === liveSignature;
+}

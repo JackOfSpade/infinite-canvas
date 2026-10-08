@@ -8,11 +8,30 @@ rendering, source validation, and final files.
 
 The normal sequence is:
 
-1. Evidence plan: source quotes, priorities, and stable evidence IDs.
+1. Evidence plan: source quotes, priorities, and stable evidence IDs. Large
+   listings are acquired as cursor-bound pages: each reply is bounded, quotes
+   only its assigned frozen listing slice, and uses `complete:false` until the
+   final slice. The app durably merges unique page IDs, so reopening after a
+   restart continues at the next slice rather than discarding prior evidence.
 2. Résumé: structured roles and bullets bound to accepted evidence IDs.
 3. Cover letter: structured paragraphs and argument bound to those IDs.
 4. Review and edit: the AI reviews both documents, makes every needed edit in
    that same JSON response, then the app presents another review prompt.
+
+For newly queued snapshot-authority jobs, an internal passing review is not
+completion. The host first freezes the exact accepted document hashes and
+starts five independent blind checks (fact fidelity, résumé quality, letter
+editorial quality, tailoring/ATS, and cross-document coherence). Each handoff
+contains one UTF-8-bounded, host-projected scope only; it never includes the
+authoring rules, a prior reviewer’s findings, or another track’s conclusion.
+Finding pages continue without a total-page limit and are stored as immutable
+receipt pages. A full bounded finding page must explicitly continue; it cannot
+declare the scope complete. Before the normal repair review opens, Infinite
+Canvas presents every host-signed correction page in turn and requires an
+exact acknowledgement of each finding ID. A clean, digest-bound receipt for
+every scope is required before assembly/import. Findings return through the
+ordinary typed review revision; any document change reruns requirement
+dispositions and all five blind tracks.
 
 There is no fixed revision cap. A review cycle continues until the AI returns
 its complete passing quality review and Infinite Canvas accepts all structural,
@@ -29,6 +48,14 @@ one: it records the job as failed, states what it observed and that no response
 repairs it, and names the one action that resolves it — generating the
 application again from the job card. The job hands out no further prompt, and
 its workspace keeps a `job-integrity-fault` event describing what was observed.
+
+An approved career snapshot can contain more roles than one résumé layout can
+show. The frozen job retains the whole catalog. Its final evidence-plan page
+must explicitly select the job-relevant role IDs that fit the layout and give
+a concise reason for every omitted ID; later résumé and review stages use that
+frozen selection exactly. Skill catalogs are likewise retained in full: the
+final skills block is a traceable layout selection, not deletion from the
+career record.
 
 Every response must be one JSON object containing the prompt's handoff code,
 job ID, stage, and base hashes. The app rejects stale, malformed, mismatched,

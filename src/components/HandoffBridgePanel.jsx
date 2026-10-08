@@ -34,7 +34,7 @@ import {
   sanitizeBridgeLabel,
   startBridgeJobPublisher,
 } from '../utils/handoffBridgeQueue';
-import { HANDOFF_CONCURRENCY } from '../utils/handoffScheduler';
+import { MAX_HANDOFF_CONCURRENCY } from '../utils/handoffScheduler';
 
 const TONE_CLASS = Object.freeze({
   off: 'bg-slate-400',
@@ -45,10 +45,10 @@ const TONE_CLASS = Object.freeze({
   error: 'bg-red-400',
   nudge: 'bg-sky-400',
 });
-const MAX_POOL_WORKERS = HANDOFF_CONCURRENCY;
+const MAX_POOL_WORKERS = MAX_HANDOFF_CONCURRENCY;
 const NO_COPIED_WORKERS = new Set();
 const WORKER_STATES = new Set(['available', 'ready', 'working', 'quiet', 'waiting', 'idle']);
-const QUIET_REASONS = new Set(['answer_silent', 'polling_stopped']);
+const QUIET_REASONS = new Set(['answer_silent', 'polling_stopped', 'fresh_context_required']);
 
 function bridgeApi() {
   try { return globalThis.window?.electronAPI || null; } catch { return null; }
@@ -432,7 +432,7 @@ export function HandoffBridgePanel() {
 
   const copyWorkerStarter = useCallback(async workerOrdinal => {
     const worker = activeWorkerProgress?.byOrdinal.get(workerOrdinal);
-    if (!activeWorkerPool || worker?.state !== 'available' || activeCopyingWorker !== null) return null;
+    if (!activeWorkerPool || !['available', 'ready'].includes(worker?.state) || activeCopyingWorker !== null) return null;
     if (!poolStillCurrent(activeWorkerPool, statusRef.current)) return null;
     const copyStatusSeq = statusSequence(statusRef.current);
     setCopyingWorker(workerOrdinal);
@@ -465,7 +465,9 @@ export function HandoffBridgePanel() {
       } else {
         setCopiedWorkers(previous => new Set([...previous, workerOrdinal]));
         setCopiedWorkerStatusSeqs(previous => new Map([...previous, [workerOrdinal, copyStatusSeq]]));
-        setNotice(BRIDGE_UI_COPY.workerStarterCopied(workerOrdinal, activeWorkerPool.workerCount));
+        setNotice(result?.recopied === true
+          ? BRIDGE_UI_COPY.workerStarterRecopied(workerOrdinal, activeWorkerPool.workerCount)
+          : BRIDGE_UI_COPY.workerStarterCopied(workerOrdinal, activeWorkerPool.workerCount));
       }
     }
     return result;
@@ -542,7 +544,9 @@ export function HandoffBridgePanel() {
   );
   const candidates = dockItems
     .filter(item => item?.kind === 'application' && releasableIds.has(item.jobId))
-    .slice(0, MAX_POOL_WORKERS);
+    // One release request has a bounded IPC schema; later durable backlog is
+    // still visible and becomes the next deterministic release batch.
+    .slice(0, 50);
 
   let dialog = null;
   if (confirm === 'revoke') {
@@ -679,7 +683,7 @@ export function HandoffBridgePanel() {
                                 </button>
                               </>
                             )}
-                            {worker.state === 'available' && (
+                            {['available', 'ready'].includes(worker.state) && (
                               <button
                                 type="button"
                                 disabled={activeCopyingWorker !== null}
@@ -689,7 +693,9 @@ export function HandoffBridgePanel() {
                               >
                                 {activeCopyingWorker === worker.ordinal
                                   ? BRIDGE_UI_COPY.copyingWorker(worker.ordinal)
-                                  : BRIDGE_UI_COPY.copyWorkerStarter(worker.ordinal)}
+                                  : worker.state === 'ready'
+                                    ? BRIDGE_UI_COPY.copyWorkerStarterAgain(worker.ordinal)
+                                    : BRIDGE_UI_COPY.copyWorkerStarter(worker.ordinal)}
                               </button>
                             )}
                           </li>
@@ -754,6 +760,16 @@ export function HandoffBridgePanel() {
                           className="text-sky-300 disabled:cursor-not-allowed disabled:opacity-40"
                         >
                           {BRIDGE_UI_COPY.resumeServing}
+                        </button>
+                      )}
+                      {row.action === 'retry-reading' && (
+                        <button
+                          type="button"
+                          disabled={!canRelease}
+                          onClick={() => void call('handoffBridgeHoldJob', { jobId: job.jobId, held: false })}
+                          className="text-sky-300 disabled:cursor-not-allowed disabled:opacity-40"
+                        >
+                          {BRIDGE_UI_COPY.retryReading}
                         </button>
                       )}
                       <button

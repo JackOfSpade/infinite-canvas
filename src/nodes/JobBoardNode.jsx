@@ -16,16 +16,19 @@ import { hubCardFilter } from '../utils/jobCardFilters';
 import { buildJobTreeNodes, computeJobTreeView } from './jobsearch/buildJobTree';
 import { deleteChildrenByHubId } from './_shared/hubChildCleanup';
 import { ACTIVE_JOB_SEARCH_STATES, attachCompensationRemoteResidences, unionScoredJobs, moduleCombineFingerprint, moduleFingerprint, combineSignature, normalizeJobMatchScore, staleReason, isLegacyCombineSignature, emptyReplacementIneligibilityReason, shouldKeepCompletedBoardSnapshotVisible } from './jobboard/mergeJobs';
+import { attachProtectedCards, consolidateJobLocations, isProtectedJobCard } from '../utils/jobLocationConsolidation';
+// Shown only for a restored marker: 'Saved AI handoff ready. Choose Continue saved AI handoff…'
+import { SAVED_HANDOFF_READY_MESSAGE, isLiveCombineOwnedMarker, combineCommitMismatchReason } from './jobboard/boardRecoveryNotice';
 import { JobBoardDoneState } from './jobboard/JobBoardDoneState';
 import { JobBoardSearchSelection } from './jobboard/JobBoardSearchSelection';
 import { isJobBoardUserCancellation, isLegacyUnbucketedJobBoard, validateJobBoardTaxonomy } from '../utils/jobBoardAiProvider';
 import { boundedCombinedSourceRuns, normalizeBoardResultCount } from '../utils/jobBoardProvenance';
-import { allocateJobBoardAdmissionOrder, findJobSearchBoardActiveRecoveryOwner, findJobSearchBoardRecoveryOwner, getConnectedJobSearchIds, getSelectedConnectedJobSearchIds, moveJobSearchExecutionOrder, normalizeJobBoardAdmissionOrder, normalizeJobBoardRecoveryTimestamp, orderJobSearchIds, toggleSelectedJobSearchId } from '../utils/jobBoardSearchSelection';
+import { allocateJobBoardAdmissionOrder, findJobSearchBoardActiveRecoveryOwner, findJobSearchBoardRecoveryOwner, getConnectedJobSearchIds, getSelectedConnectedJobSearchIds, isJobBoardUpToDate, moveJobSearchExecutionOrder, normalizeJobBoardAdmissionOrder, normalizeJobBoardRecoveryTimestamp, orderJobSearchIds, toggleSelectedJobSearchId } from '../utils/jobBoardSearchSelection';
 import { hubHasAcceptedInitialDrop } from '../utils/hubDropEligibility';
 import { getSearchLocation, hasRequiredLocations, locationValidationMessage } from '../utils/jobSearchLocations';
 import { exactInterruptedRecoveryAdmission } from '../utils/jobBoardRecoveryAdmission';
 import { cancelJobBoardChildrenSequentially, promoteJobBoardPausedSourceResolution, runJobBoardChildFanout } from '../utils/jobBoardChildFanout';
-import { classifyJobBoardSourceAdmission, completedJobSearchOutcomeMatches, jobSearchOutcomeReceiptMatches, partitionJobBoardSourceAdmissions } from '../utils/jobBoardSourceAdmission';
+import { classifyJobBoardSourceAdmission, combineSourceRunEntry, completedJobSearchOutcomeMatches, describeReceiptMismatch, jobSearchOutcomeReceiptMatches, partitionJobBoardSourceAdmissions } from '../utils/jobBoardSourceAdmission';
 import { getRunnableJobSourceIds, normalizeEnabledJobSourceIds } from '../utils/jobPlatformSelection';
 import { normalizeJobCollectionLimits } from '../utils/jobCollectionLimits';
 import { getJobAuthPreflightSourceIds } from '../utils/jobAuthPreflight';
@@ -329,6 +332,21 @@ function moduleSearchReadiness(node, verifyingPlatforms = null, {
       statusLabel: 'Clear + import required',
     };
   }
+  if (sourceAdmission.kind === 'career-import-compiling') {
+    return {
+      ready: false,
+      readinessReason: sourceAdmission.reason,
+      statusLabel: 'Auditing career data',
+    };
+  }
+  if (sourceAdmission.kind === 'career-import-failed'
+    || sourceAdmission.kind === 'career-import-requires-approval') {
+    return {
+      ready: false,
+      readinessReason: sourceAdmission.reason,
+      statusLabel: 'Career compilation required',
+    };
+  }
   // A source-ready Search owns already-gathered rows and its exact source-card
   // continuation. Current platform toggles govern only a *fresh* scrape; they
   // must not relabel this intermediate generation as "Needs platform" or make
@@ -573,19 +591,29 @@ function liveCombineInputs(boardId, nodes, edges) {
       const data = node.data || {};
       const terminal = terminalJobSearchOutcome(node);
       const scoredJobs = Array.isArray(data.scoredJobs) ? data.scoredJobs : [];
+      const careerSnapshotId = typeof data.careerSnapshotId === 'string' ? data.careerSnapshotId.trim() : '';
+      const operationAuthority = data.analysisOperation?.authority || null;
+      // Scope a module's rows to the profile currently pinned on that module
+      // before computing its Combine fingerprint. This also upgrades saved
+      // rows from before per-row pinning, without duplicating the profile.
+      const snapshotScopedJobs = careerSnapshotId
+        ? scoredJobs.map(job => ({ ...job, careerSnapshotId }))
+        : scoredJobs;
       const remoteResidences = data.locationSnapshot?.remoteResidences || data.remoteResidences || {};
-      const count = scoredJobs.length;
+      const count = snapshotScopedJobs.length;
       const authoritativeEmpty = !isExplicitlyUnscoredModule(data)
         && (data.resultDisposition === 'empty-complete' || data.resultDisposition === 'preference-filtered');
       return {
         id: node.id,
         runId: terminal?.runId || null,
+        careerSnapshotId,
+        operationAuthority,
         resultDisposition: terminal?.resultDisposition || null,
         legacyPositiveResult: terminal?.legacyPositiveResult === true,
         label: moduleLabel(data),
         count,
-        fingerprint: moduleCombineFingerprint(scoredJobs, remoteResidences),
-        scoredJobs,
+        fingerprint: moduleCombineFingerprint(snapshotScopedJobs, remoteResidences),
+        scoredJobs: snapshotScopedJobs,
         remoteResidences,
         hubState: data.hubState || 'empty',
         include: !!terminal && isMergeableTerminalJobSearchOutcome(node, terminal)
@@ -868,6 +896,15 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
             careerImportAdmission: {
               generation: n.data?.careerImportGeneration || null,
               freshCapability: n.data?.careerImportFreshCapability || null,
+              compilation: n.data?.careerImportCompilation && typeof n.data.careerImportCompilation === 'object'
+                ? {
+                  generation: n.data.careerImportCompilation.generation || null,
+                  attemptId: n.data.careerImportCompilation.attemptId || null,
+                  status: n.data.careerImportCompilation.status || null,
+                  careerSnapshotId: n.data.careerImportCompilation.careerSnapshotId || null,
+                }
+                : null,
+              careerSnapshotId: n.data?.careerSnapshotId || null,
               consumption: n.data?.careerImportConsumption && typeof n.data.careerImportConsumption === 'object'
                 ? {
                   generation: n.data.careerImportConsumption.generation || null,
@@ -1160,7 +1197,7 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
     const signature = [
       selectorRuntimeSnapshot.rowCount,
       selectorRuntimeSnapshot.selectedCount,
-      selectorRuntimeSnapshot.actionEligible ? 'ready' : 'blocked',
+      selectorRuntimeSnapshot.actionVisible === false ? 'hidden' : selectorRuntimeSnapshot.actionEligible ? 'ready' : 'blocked',
       Array.isArray(selectorRuntimeSnapshot.eligibilityReasons)
         ? selectorRuntimeSnapshot.eligibilityReasons.join(',')
         : '',
@@ -1170,7 +1207,7 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
     EventLogger.log(
       `[JobBoard] selector eligibility id=${id} rows=${selectorRuntimeSnapshot.rowCount ?? 0} `
       + `selected=${selectorRuntimeSnapshot.selectedCount ?? 0} `
-      + `action=${selectorRuntimeSnapshot.actionEligible ? 'enabled' : 'disabled'} `
+      + `action=${selectorRuntimeSnapshot.actionVisible === false ? 'hidden' : selectorRuntimeSnapshot.actionEligible ? 'enabled' : 'disabled'} `
       + `reasons=${Array.isArray(selectorRuntimeSnapshot.eligibilityReasons) && selectorRuntimeSnapshot.eligibilityReasons.length > 0
         ? selectorRuntimeSnapshot.eligibilityReasons.join(',')
         : 'none'}`,
@@ -1267,6 +1304,17 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
     [completedModules, connectedModules],
   );
   const stale = hubState === 'done' && !!data.stale;
+  // The Combine action is only useful when the cached board is out of date or
+  // a connected source is incomplete; a done, current, fully complete board
+  // shows a status line instead of an inert-looking button.
+  const boardUpToDate = isJobBoardUpToDate({
+    hubState,
+    stale,
+    connectedCount: connectedModules.length,
+    completedCount: completedModules.length,
+    combineSignature: data.combineSignature,
+    liveSignature,
+  });
   const staleReasonText = useMemo(
     () => (stale ? (data.staleReason || staleReason(data.combineSignature, completedModules, connectedModules)) : ''),
     [stale, data.staleReason, data.combineSignature, completedModules, connectedModules]
@@ -1608,15 +1656,11 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
             throw new Error(info.error || 'Could not inspect the removed Job Search recovery files.');
           }
           if (info?.found && info.nodeId === sourceId && info.runId) {
-            const [runCleanup, analysisCleanup] = await Promise.all([
-              window.electronAPI?.discardJobRun?.({ canvasFilePath, nodeId: sourceId, runId: info.runId }),
-              window.electronAPI?.discardJobAnalysisSnapshot?.({ canvasFilePath, nodeId: sourceId, runId: info.runId }),
-            ]);
-            const runRetired = runCleanup?.ok === true
-              && (runCleanup.cleared === true || runCleanup.absent === true);
-            if (!runRetired || analysisCleanup?.ok !== true) {
-              throw new Error('The removed Job Search recovery files could not be retired safely.');
-            }
+            // A removed renderer cannot safely reconstruct the exact durable
+            // authority receipt.  Do not fall back to global/receiptless
+            // deletion: leave the sealed recovery for an explicit Clear or a
+            // mounted owner retry rather than risking another generation.
+            throw new Error('The removed Job Search recovery needs its exact cancellation receipt; it was kept safely.');
           }
           return { status: 'cancelled', cancelled: true, fallback: true };
         })();
@@ -2787,12 +2831,7 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
         addToast({ title: 'No current jobs to combine', description: 'Connected Job Search results changed while this board was queued.', type: 'info' });
         return { status: 'superseded' };
       }
-      const exactSourceRunsAtCombine = completedAtCombine.map(module => ({
-        sourceId: module.id,
-        runId: module.runId || null,
-        resultDisposition: module.resultDisposition || null,
-        fingerprint: module.fingerprint,
-      }));
+      const exactSourceRunsAtCombine = completedAtCombine.map(combineSourceRunEntry);
       const sourceRunsAtCombine = boundedCombinedSourceRuns(completedAtCombine);
       if (activeCombineManualAiRunRef.current?.token === combineToken) {
         activeCombineManualAiRunRef.current = {
@@ -2819,6 +2858,50 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
       );
       const mergeStats = {};
       let union = unionScoredJobs(jobArrays, mergeStats);
+      // Location consolidation runs BEFORE taxonomy so a four-location
+      // posting becomes one "Multiple locations" row. Exact descriptions are
+      // deterministic; non-identical ≥75%-similar descriptions receive an AI
+      // same-requisition confirmation before they may merge. Existing board
+      // cards are snapshotted as protected anchors: their ids/state are reused
+      // and application-linked cards are never dropped.
+      const existingBoardCards = (getNodes() || []).filter(
+        n => n?.type === 'jobcard' && n?.data?.hubId === id,
+      );
+      const protectedBoardCards = existingBoardCards.filter(isProtectedJobCard);
+      let locationStats = {
+        candidateGroups: 0, postingsCollapsed: 0, protectedRetained: 0,
+        representedPostings: 0, alreadyConsolidated: 0,
+      };
+      if (union.length > 0) {
+        const attached = attachProtectedCards(union, protectedBoardCards);
+        const confirmation = await window.electronAPI.confirmJobLocationConsolidations({
+          jobs: attached.jobs,
+          nodeId: id,
+          manualAiRunId,
+        });
+        if (cancelled() || !getNode(id)) {
+          EventLogger.log(`[JobBoard] combine cancelled during location confirmation id=${id}`);
+          return { status: 'cancelled' };
+        }
+        if (!confirmation?.success) {
+          throw new Error(confirmation?.error || 'Job-location consolidation confirmation failed.');
+        }
+        const consolidated = consolidateJobLocations(attached.jobs, {
+          protectedIds: new Set(protectedBoardCards.map(card => card.id)),
+          confirmedSimilarPairIds: new Set(confirmation.confirmedPairIds || []),
+        });
+        // Protected cards with no union counterpart must still render: append
+        // them so an application-linked card is never lost to a Combine.
+        union = consolidated.jobs.concat(attached.unmatchedProtected);
+        locationStats = consolidated.stats;
+        if (locationStats.candidateGroups > 0) {
+          EventLogger.log(
+            `[JobBoard] location consolidation id=${id} groups=${locationStats.candidateGroups} `
+            + `postingsCollapsed=${locationStats.postingsCollapsed} protected=${locationStats.protectedRetained} `
+            + `aiConfirmed=${confirmation.confirmedPairIds?.length || 0}/${confirmation.candidateCount || 0}`,
+          );
+        }
+      }
       const perModule = completedAtCombine.map((m) => ({ label: m.label, count: m.count }));
       EventLogger.log(`[JobBoard] combine started id=${id} signature=${sigAtCombine} incoming=${union.length}`);
       EventLogger.log(
@@ -2957,14 +3040,20 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
         );
         return { status: 'cancelled' };
       }
-      if (
+      const signatureMatches = (
         boardInputSignature(
           liveInputsBeforeCommit,
           liveStateBeforeCommit.all,
-        ) !== sigAtCombine
-        || !selectedRunsMatchExpected(liveInputsBeforeCommit, expectedSourceRuns)
-        || !combineInputsMatchExpected(liveInputsBeforeCommit, exactSourceRunsAtCombine)
-      ) {
+        ) === sigAtCombine
+      );
+      const selectedRunsMatch = selectedRunsMatchExpected(liveInputsBeforeCommit, expectedSourceRuns);
+      const exactSourceRunsMatch = combineInputsMatchExpected(liveInputsBeforeCommit, exactSourceRunsAtCombine);
+      const mismatchReason = combineCommitMismatchReason({
+        signatureMatches,
+        selectedRunsMatch,
+        exactSourceRunsMatch,
+      });
+      if (mismatchReason !== null) {
         const reason = 'Connected Job Search results changed while Combine was running';
         const preserveCompletedSnapshot = keepCompletedSnapshotDuringActiveSearch({
           boardData: getNode(id)?.data || {},
@@ -2981,7 +3070,14 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
         // strand the Board in "Recovering" or revive the obsolete union later.
         autoResumedManualAiRunRef.current = null;
         await completeManualAiRun(manualAiRunId);
-        EventLogger.log(`[JobBoard] combine superseded before commit id=${id} signature=${sigAtCombine}`);
+        // Name the receipt SHAPE that failed per input (fixed codes, no ids) so
+        // a report can tell real input drift from a receipt-normalization bug.
+        const liveById = new Map(liveInputsBeforeCommit.map(module => [module.id, module]));
+        const receiptDetail = exactSourceRunsAtCombine
+          .map((expected, index) => `#${index + 1}=${describeReceiptMismatch(liveById.get(expected.sourceId), expected) || 'match'}`)
+          .join(',');
+        EventLogger.log(`[JobBoard] combine superseded before commit id=${id} signature=${sigAtCombine} reason=${mismatchReason} receipts=${receiptDetail}`);
+        addToast({ title: 'Combine discarded', description: 'Connected Job Search results changed while Combine was running, so nothing was combined. Run Combine saved results again.', type: 'info' });
         return { status: 'superseded' };
       }
 
@@ -2993,7 +3089,45 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
         originalPos,
         hubId: id,
         baseNodeId,
+        // Reuse protected card ids/state so an application-linked card survives
+        // a live Combine unchanged (same node id, localApplication preserved).
+        protectedCards: protectedBoardCards,
       });
+
+      // Prepare, but do not consume, the durable seen-history capability
+      // before this Board's visible cascade is committed. The host binds it to
+      // the exact source receipts/current artifacts; a later source change or
+      // cancellation makes the pending token unusable rather than recording
+      // listings that were never displayed.
+      const historyRows = union.flatMap((j) => {
+        if (Array.isArray(j.postingVariants) && j.postingVariants.length > 0) {
+          return j.postingVariants.map((variant) => ({
+            source: variant.source || j.source,
+            company: j.company,
+            title: j.title,
+            location: variant.location || j.location,
+            url: variant.url || j.url,
+          }));
+        }
+        return [{ source: j.source, company: j.company, title: j.title, location: j.location, url: j.url }];
+      });
+      let historyToken = null;
+      if (newNodes.length > 0 && canvasFilePath) {
+        const prepared = await window.electronAPI?.prepareBoardJobsHistory?.({
+          canvasFilePath,
+          jobs: historyRows,
+          sources: completedAtCombine.map((module) => ({
+            hubId: module.id,
+            runId: module.runId,
+            careerSnapshotId: module.careerSnapshotId,
+            operationAuthority: module.operationAuthority,
+          })),
+        });
+        if (prepared?.success !== true || !prepared.historyToken || cancelled() || !getNode(id)) {
+          return { status: 'superseded', error: prepared?.error || 'Board inputs changed before display commit.' };
+        }
+        historyToken = prepared.historyToken;
+      }
 
       // Replace the prior combine only now that the new cascade is BUILT — the
       // clear used to run before the multi-second bucketing await, so any
@@ -3043,8 +3177,19 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
           // reload state describe the hierarchy the provider actually generated.
           jobTaxonomy: { likelihoodBands: taxonomy.likelihoodBands, salaryRanges: taxonomy.salaryRanges },
           finalSourceCounts,
-          // Merge provenance for the bug report — the dedup is otherwise invisible.
-          mergeStats: { ...mergeStats, modules: completedAtCombine.length, perModule },
+          // Merge provenance for the bug report — the dedup is otherwise
+          // invisible. Location consolidation is reported separately from the
+          // cross-source dedup so neither count is silently folded into the
+          // other: one removed identical postings, the other collapsed exact
+          // multi-location duplicates.
+          mergeStats: {
+            ...mergeStats,
+            modules: completedAtCombine.length,
+            perModule,
+            locationVariantGroups: locationStats.candidateGroups,
+            locationVariantPostingsCollapsed: locationStats.postingsCollapsed,
+            locationVariantProtectedRetained: locationStats.protectedRetained,
+          },
           // Baseline for staleness detection (connection/data drift vs. this combine).
           combineSignature: sigAtCombine,
           combineSourceRuns: sourceRunsAtCombine,
@@ -3071,16 +3216,13 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
       // completed and displayed its cards. Search/scoring completion — even
       // while connected to this board — is intentionally not enough.
       if (newNodes.length > 0 && canvasFilePath) {
-        const historyRows = union.map((j) => ({
-          source: j.source, company: j.company, title: j.title, location: j.location, url: j.url,
-        }));
         // The visible Board is already committed and cannot be rolled back by
         // Cancel. Do not keep the run in its cancellable UI state merely while a
         // diagnostic/history write drains; finish the transaction synchronously
         // and report any persistence failure out-of-band.
         try {
           const historyWrite = window.electronAPI?.appendJobsHistory?.({
-            canvasFilePath, jobs: historyRows, nodeId: id, historyStage: 'boardDisplay',
+            canvasFilePath, jobs: historyRows, nodeId: id, historyStage: 'boardDisplay', historyToken,
           });
           void Promise.resolve(historyWrite).then((historyResult) => {
             if (!historyResult?.success || historyResult?.error) {
@@ -3093,7 +3235,7 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
           EventLogger.error('[JobBoard] Displayed-results history append failed:', error);
         }
       }
-      EventLogger.log(`[JobBoard] combine completed id=${id} signature=${sigAtCombine} results=${union.length} children=${newNodes.length}`);
+      EventLogger.log(`[JobBoard] combine completed id=${id} signature=${sigAtCombine} results=${union.length} children=${newNodes.length} locationGroups=${locationStats.candidateGroups} locationCollapsed=${locationStats.postingsCollapsed}`);
       await completeManualAiRun(manualAiRunId);
       return { status: 'completed' };
     } catch (err) {
@@ -4892,13 +5034,7 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
       // This is transaction authority, not the bounded diagnostic summary kept
       // on a completed Board. Every connected input must remain represented so
       // a 26th+ Search cannot change runs undetected during crash recovery.
-      const combineSourceRuns = combineInputs.map(module => ({
-        sourceId: module.id,
-        runId: module.runId || null,
-        resultDisposition: module.resultDisposition || null,
-        legacyPositiveResult: module.legacyPositiveResult === true,
-        fingerprint: module.fingerprint,
-      }));
+      const combineSourceRuns = combineInputs.map(combineSourceRunEntry);
       const combineManualAiRunId = createManualAiRunId(id);
       persistScanResume({
         activeSourceId: null,
@@ -5834,10 +5970,17 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
       return;
     }
     if (!canvasFilePath) return;
+    // The durable marker is legitimate while THIS mount's own combine is
+    // running; only a marker restored from disk (no live owner) is an
+    // interruption that needs the resume notice. Do not flag or claim it here.
+    if (isLiveCombineOwnedMarker(resume.runId, activeCombineManualAiRunRef.current?.runId)) return;
     if (resume.retirementPending !== true) {
-      const message = 'Saved AI handoff ready. Choose Continue saved AI handoff to resume this exact Board run.';
+      const message = SAVED_HANDOFF_READY_MESSAGE;
       autoResumedManualAiRunRef.current = null;
-      if (recoveryError !== message) setRecoveryError(message);
+      if (recoveryError !== message) {
+        EventLogger.log(`[JobBoard] recovery notice set: saved-handoff-ready id=${id} run=${resume.runId} liveCombine=${!!combineRunRef.current}`);
+        setRecoveryError(message);
+      }
       return;
     }
     if (combineRunRef.current || data.boardCancellation || data.locked || recoveryError) return;
@@ -5865,6 +6008,16 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
       return;
     }
   }, [canvasFilePath, combining, data.boardCancellation, data.boardScanResume, data.manualAiResume, data.locked, deletionLifecycleRevision, handleCombine, id, readyModules.length, recoveryError, retireBoardCleanupReceipt, settleRecoveredCombine, updateGlobal]);
+
+  // Once the marker that produced the "Saved AI handoff ready" notice is
+  // retired (no marker, and no live combine left to own it), the selector
+  // must not stay disabled behind a stale recoveryError forever.
+  useEffect(() => {
+    if (recoveryError !== SAVED_HANDOFF_READY_MESSAGE) return;
+    if (data.manualAiResume?.runId) return;
+    if (combineRunRef.current) return;
+    setRecoveryError(null);
+  }, [data.manualAiResume?.runId, recoveryError]);
 
   const handleRetryRecovery = useCallback(() => {
     const liveData = getNode(id)?.data || {};
@@ -5995,6 +6148,7 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
           onMove={moveSearchModule}
           disabled={!!data.locked}
           running={boardRunVisible}
+          upToDate={boardUpToDate}
           progress={finalizingCommittedCombine
             ? { label: 'Board updated — finalizing saved recovery cleanup…' }
             : scanning

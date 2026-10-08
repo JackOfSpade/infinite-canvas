@@ -19,7 +19,7 @@ import { createApplicationSource } from '../../electron/ipc/handoffBridge/source
 import { createPushSource } from '../../electron/ipc/handoffBridge/sources/push.js';
 import { reduceBridgeQueue } from '../../electron/ipc/handoffBridge/telemetry.js';
 import { SURFACE_PIN, TOOLS_LIST, surfaceHash } from '../../electron/ipc/handoffBridge/tools.js';
-import { MAX_WORKER_POOL_PLANNING_UNITS, recommendWorkerPool } from '../../electron/ipc/handoffBridge/workerPool.js';
+import { recommendWorkerPool } from '../../electron/ipc/handoffBridge/workerPool.js';
 
 const JOB_A = '11111111-1111-4111-8111-111111111111';
 const JOB_B = '22222222-2222-4222-8222-222222222222';
@@ -75,6 +75,272 @@ function cleanDirectory() { return fs.mkdtempSync(path.join(os.tmpdir(), 'ic-han
 
 const tests = [
   {
+    name: 'handoff bridge: an accepted fresh-context successor excludes only its serving worker and admits a sibling immediately',
+    run: async () => {
+      let accepted = false;
+      const engine = createHandoffEngine({
+        source: source({
+          read: async ({ jobId }) => ({ kind: 'open', handoff: handoff({ jobId, code: jobId === JOB_A ? 'FRESH-A' : 'OTHER-B', stage: 'resume' }) }),
+          submit: async () => {
+            accepted = true;
+            return { kind: 'accepted', completed: false, handoff: { ...handoff({ code: 'FRESH-COVER', stage: 'cover-letter' }), freshContextRequired: true } };
+          },
+        }).api,
+        holdMs: 0,
+      });
+      await engine.release({ jobs: [{ jobId: JOB_A, canvasFilePath: PATH_A }, { jobId: JOB_B, canvasFilePath: PATH_B }] });
+      const pool = await engine.startWorkerPool({ linkId: LINK, requestedWorkers: 2 });
+      const one = engine.copyWorkerStarter({ linkId: LINK, generation: pool.generation, workerOrdinal: 1 });
+      const two = engine.copyWorkerStarter({ linkId: LINK, generation: pool.generation, workerOrdinal: 2 });
+      const first = await engine.get({ session: one.sessionCode, linkId: LINK });
+      assert(first.status === 'served' && first.handoffCode === 'FRESH-A', 'worker one must serve the predecessor stage');
+      const result = await engine.submit({ session: one.sessionCode, linkId: LINK, handoffCode: first.handoffCode, response: answer({ code: first.handoffCode, stage: first.stage }) });
+      assert(accepted && result.status === 'accepted' && result.next?.status === 'session_full'
+        && !JSON.stringify(result).includes('freshContextRequired'), 'the accepted transition must close its prior worker without leaking internal metadata');
+      const after = engine.snapshot();
+      assert(after.chat.pool.workers[0]?.state === 'quiet' && after.chat.pool.workers[0]?.quietReason === 'fresh_context_required'
+        && !JSON.stringify(after).includes('freshContextRequired'), 'the status exposes only the closed restartable reason, never the transition flag');
+      assert((await engine.get({ session: one.sessionCode, linkId: LINK })).status === 'session_full', 'the excluded worker can never immediately reclaim its successor');
+      const sibling = await engine.get({ session: two.sessionCode, linkId: LINK });
+      assert(sibling.status === 'served' && sibling.handoffCode === 'FRESH-COVER' && sibling.stage === 'cover-letter',
+        'another live worker may claim the successor immediately');
+      assert(!JSON.stringify(engine.snapshot().queue).includes('freshContextRequired'), 'lane persistence/status projections must omit the private flag');
+      await engine.close();
+    },
+  },
+  {
+    name: 'handoff bridge: one-worker fresh-context replacement rotates once and correction rounds retain that fresh chat',
+    run: async () => {
+      let submits = 0;
+      const cover = { ...handoff({ code: 'REPLACED-COVER', stage: 'cover-letter' }), freshContextRequired: true };
+      const engine = createHandoffEngine({
+        source: source({
+          read: async () => ({ kind: 'open', handoff: handoff({ code: 'REPLACED-RESUME', stage: 'resume' }) }),
+          submit: async () => {
+            submits += 1;
+            if (submits === 1) return { kind: 'accepted', completed: false, handoff: cover };
+            if (submits === 2) return { kind: 'rejected', validationErrors: ['Synthetic correction'], handoff: cover };
+            if (submits === 3) return { kind: 'accepted', completed: false, handoff: { ...handoff({ code: 'REPLACED-REVIEW', stage: 'review' }), freshContextRequired: true } };
+            return { kind: 'accepted', completed: true };
+          },
+        }).api,
+        holdMs: 0,
+      });
+      await engine.release({ jobs: [{ jobId: JOB_A, canvasFilePath: PATH_A }] });
+      const pool = await engine.startWorkerPool({ linkId: LINK, requestedWorkers: 1 });
+      const original = engine.copyWorkerStarter({ linkId: LINK, generation: pool.generation, workerOrdinal: 1 });
+      const resume = await engine.get({ session: original.sessionCode, linkId: LINK });
+      await engine.submit({ session: original.sessionCode, linkId: LINK, handoffCode: resume.handoffCode, response: answer({ code: resume.handoffCode, stage: resume.stage }) });
+      const replacement = engine.restartWorker({ linkId: LINK, generation: pool.generation, workerOrdinal: 1 });
+      assert(replacement.copied && replacement.sessionCode !== original.sessionCode && engine.snapshot().chat.pool.workers[0]?.restarts === 1,
+        'a forced-quiet worker must be immediately restartable with a rotated credential');
+      assert((await engine.get({ session: original.sessionCode, linkId: LINK })).status === 'session_ended', 'the old credential is invalid after replacement');
+      const fresh = await engine.get({ session: replacement.sessionCode, linkId: LINK });
+      const rejected = await engine.submit({ session: replacement.sessionCode, linkId: LINK, handoffCode: fresh.handoffCode, response: answer({ code: fresh.handoffCode, stage: fresh.stage }) });
+      assert(fresh.status === 'served' && fresh.stage === 'cover-letter' && rejected.status === 'rejected'
+        && engine.snapshot().chat.pool.workers[0]?.quietReason !== 'fresh_context_required',
+      'the fresh chat owns correction rounds and a correction cannot request another swap');
+      const corrected = await engine.submit({ session: replacement.sessionCode, linkId: LINK, handoffCode: rejected.handoffCode, response: answer({ code: rejected.handoffCode, stage: fresh.stage, extra: { corrected: true } }) });
+      assert(corrected.status === 'accepted' && corrected.next?.status === 'session_full' && submits === 3,
+        'the same replacement worker submits the corrected fresh-stage answer, then only a new flagged successor rotates it again');
+      const secondReplacement = engine.restartWorker({ linkId: LINK, generation: pool.generation, workerOrdinal: 1 });
+      const review = await engine.get({ session: secondReplacement.sessionCode, linkId: LINK });
+      assert(secondReplacement.copied && secondReplacement.sessionCode !== replacement.sessionCode && review.stage === 'review'
+        && engine.snapshot().chat.pool.workers[0]?.restarts === 2,
+      'successive generic fresh-context stages exclude their immediately prior incarnation, not the worker ordinal forever');
+      const terminal = await engine.submit({ session: secondReplacement.sessionCode, linkId: LINK, handoffCode: review.handoffCode, response: answer({ code: review.handoffCode, stage: review.stage }) });
+      assert(terminal.status === 'accepted' && submits === 4, 'the second fresh chat can complete its own successor normally');
+      await engine.close();
+    },
+  },
+  {
+    name: 'handoff bridge: a fresh-context boundary becomes restartable only after its admitted submit settles',
+    run: async () => {
+      const saveGate = deferred(); let holdBoundarySave = false;
+      const engine = createHandoffEngine({
+        source: source({
+          read: async () => ({ kind: 'open', handoff: handoff({ code: 'SETTLING-RESUME', stage: 'resume' }) }),
+          submit: async () => ({ kind: 'accepted', completed: false, handoff: { ...handoff({ code: 'SETTLING-COVER', stage: 'cover-letter' }), freshContextRequired: true } }),
+        }).api,
+        store: { saveLanes: async () => (holdBoundarySave ? saveGate.promise : true) },
+        holdMs: 0,
+      });
+      await engine.release({ jobs: [{ jobId: JOB_A, canvasFilePath: PATH_A }] });
+      const pool = await engine.startWorkerPool({ linkId: LINK, requestedWorkers: 1 });
+      const starter = engine.copyWorkerStarter({ linkId: LINK, generation: pool.generation, workerOrdinal: 1 });
+      const prior = await engine.get({ session: starter.sessionCode, linkId: LINK });
+      holdBoundarySave = true;
+      const pending = engine.submit({ session: starter.sessionCode, linkId: LINK, handoffCode: prior.handoffCode, response: answer({ code: prior.handoffCode, stage: prior.stage }) });
+      await settle();
+      const during = engine.snapshot().chat.pool.workers[0];
+      assert(during?.quietReason === null && engine.restartWorker({ linkId: LINK, generation: pool.generation, workerOrdinal: 1 }).status === 'not_quiet',
+        'a boundary staged during an admitted submit must not expose a replacement starter yet');
+      holdBoundarySave = false;
+      saveGate.resolve(true);
+      const accepted = await pending;
+      const settled = engine.snapshot().chat.pool.workers[0];
+      assert(accepted.status === 'accepted' && settled?.quietReason === 'fresh_context_required'
+        && engine.restartWorker({ linkId: LINK, generation: pool.generation, workerOrdinal: 1 }).copied,
+      'the exact worker becomes restartable only after the accepted boundary fully settles');
+      await engine.close();
+    },
+  },
+  {
+    name: 'handoff bridge: keyed fresh-context boundaries separate equal-stage tracks but preserve same-key corrections',
+    run: async () => {
+      let submissions = 0;
+      const track = (code, key) => ({ ...handoff({ code, stage: 'blind-review' }), freshContextRequired: true, freshContextKey: key });
+      const engine = createHandoffEngine({
+        source: source({
+          read: async () => ({ kind: 'open', handoff: track('BLIND-A', 'track-a') }),
+          submit: async () => {
+            submissions += 1;
+            if (submissions === 1) return { kind: 'accepted', completed: false, handoff: track('BLIND-B', 'track-b') };
+            if (submissions === 2) return { kind: 'rejected', validationErrors: ['Synthetic same-track correction'], handoff: track('BLIND-B', 'track-b') };
+            if (submissions === 3) return { kind: 'accepted', completed: false, handoff: track('BLIND-C', 'track-c') };
+            return { kind: 'accepted', completed: true };
+          },
+        }).api,
+        holdMs: 0,
+      });
+      await engine.release({ jobs: [{ jobId: JOB_A, canvasFilePath: PATH_A }] });
+      const pool = await engine.startWorkerPool({ linkId: LINK, requestedWorkers: 1 });
+      const firstStarter = engine.copyWorkerStarter({ linkId: LINK, generation: pool.generation, workerOrdinal: 1 });
+      const a = await engine.get({ session: firstStarter.sessionCode, linkId: LINK });
+      const aAccepted = await engine.submit({ session: firstStarter.sessionCode, linkId: LINK, handoffCode: a.handoffCode, response: answer({ code: a.handoffCode, stage: a.stage }) });
+      assert(aAccepted.next?.status === 'session_full' && engine.snapshot().chat.pool.workers[0]?.quietReason === 'fresh_context_required',
+        'a keyed A-to-B blind-review successor must exclude the worker despite sharing its stage name');
+      const secondStarter = engine.restartWorker({ linkId: LINK, generation: pool.generation, workerOrdinal: 1 });
+      const b = await engine.get({ session: secondStarter.sessionCode, linkId: LINK });
+      const correction = await engine.submit({ session: secondStarter.sessionCode, linkId: LINK, handoffCode: b.handoffCode, response: answer({ code: b.handoffCode, stage: b.stage }) });
+      assert(b.stage === 'blind-review' && correction.status === 'rejected' && engine.snapshot().chat.pool.workers[0]?.quietReason !== 'fresh_context_required',
+        'a same-key correction stays in the fresh chat and does not request another swap');
+      const cAccepted = await engine.submit({ session: secondStarter.sessionCode, linkId: LINK, handoffCode: correction.handoffCode, response: answer({ code: correction.handoffCode, stage: b.stage, extra: { corrected: true } }) });
+      assert(cAccepted.next?.status === 'session_full', 'a successive B-to-C keyed boundary excludes only its immediately prior replacement chat');
+      const thirdStarter = engine.restartWorker({ linkId: LINK, generation: pool.generation, workerOrdinal: 1 });
+      const c = await engine.get({ session: thirdStarter.sessionCode, linkId: LINK });
+      assert(c.handoffCode === 'BLIND-C' && c.stage === 'blind-review' && engine.snapshot().chat.pool.workers[0]?.restarts === 2
+        && !JSON.stringify(c).includes('freshContextKey'), 'successive keyed boundaries remain private and restart the same ordinal safely');
+      await engine.close();
+    },
+  },
+  {
+    name: 'handoff bridge: an accepted same-stage same-key successor stays with its current worker',
+    run: async () => {
+      const key = 'same-track';
+      const engine = createHandoffEngine({
+        source: source({
+          read: async () => ({ kind: 'open', handoff: { ...handoff({ code: 'SAME-A', stage: 'blind-review' }), freshContextKey: key } }),
+          submit: async () => ({ kind: 'accepted', completed: false, handoff: { ...handoff({ code: 'SAME-B', stage: 'blind-review' }), freshContextRequired: true, freshContextKey: key } }),
+        }).api,
+        holdMs: 0,
+      });
+      await engine.release({ jobs: [{ jobId: JOB_A, canvasFilePath: PATH_A }] });
+      const pool = await engine.startWorkerPool({ linkId: LINK, requestedWorkers: 1 });
+      const starter = engine.copyWorkerStarter({ linkId: LINK, generation: pool.generation, workerOrdinal: 1 });
+      const a = await engine.get({ session: starter.sessionCode, linkId: LINK });
+      const accepted = await engine.submit({ session: starter.sessionCode, linkId: LINK, handoffCode: a.handoffCode, response: answer({ code: a.handoffCode, stage: a.stage }) });
+      assert(accepted.status === 'accepted' && accepted.next?.status === 'served' && accepted.next?.handoffCode === 'SAME-B'
+        && engine.snapshot().chat.pool.workers[0]?.quietReason !== 'fresh_context_required',
+      'the exact same track key must not rotate a same-stage successor chat');
+      await engine.close();
+    },
+  },
+  {
+    name: 'handoff bridge: a first valid fresh-context key fences an unkeyed predecessor but not an initial read',
+    run: async () => {
+      const keyed = { ...handoff({ code: 'FIRST-KEYED-AUDIT', stage: 'blind-review' }), freshContextRequired: true, freshContextKey: 'first-audit' };
+      const engine = createHandoffEngine({
+        source: source({
+          read: async () => ({ kind: 'open', handoff: handoff({ code: 'UNKEYED-AUTHORING', stage: 'review' }) }),
+          submit: async () => ({ kind: 'accepted', completed: false, handoff: keyed }),
+        }).api,
+        holdMs: 0,
+      });
+      await engine.release({ jobs: [{ jobId: JOB_A, canvasFilePath: PATH_A }] });
+      const pool = await engine.startWorkerPool({ linkId: LINK, requestedWorkers: 1 });
+      const starter = engine.copyWorkerStarter({ linkId: LINK, generation: pool.generation, workerOrdinal: 1 });
+      const authoring = await engine.get({ session: starter.sessionCode, linkId: LINK });
+      const accepted = await engine.submit({ session: starter.sessionCode, linkId: LINK, handoffCode: authoring.handoffCode, response: answer({ code: authoring.handoffCode, stage: authoring.stage }) });
+      assert(accepted.next?.status === 'session_full' && engine.snapshot().chat.pool.workers[0]?.quietReason === 'fresh_context_required',
+        'the first key must fence a predecessor that had no key of its own');
+      const replacement = engine.restartWorker({ linkId: LINK, generation: pool.generation, workerOrdinal: 1 });
+      const audit = await engine.get({ session: replacement.sessionCode, linkId: LINK });
+      assert(replacement.copied && audit.handoffCode === 'FIRST-KEYED-AUDIT', 'the replacement owns the keyed successor');
+      await engine.close();
+
+      const initial = createHandoffEngine({
+        source: source({ read: async () => ({ kind: 'open', handoff: keyed }) }).api,
+        holdMs: 0,
+      });
+      await initial.release({ jobs: [{ jobId: JOB_A, canvasFilePath: PATH_A }] });
+      const initialPool = await initial.startWorkerPool({ linkId: LINK, requestedWorkers: 1 });
+      const initialStarter = initial.copyWorkerStarter({ linkId: LINK, generation: initialPool.generation, workerOrdinal: 1 });
+      const initialRead = await initial.get({ session: initialStarter.sessionCode, linkId: LINK });
+      assert(initialRead.status === 'served' && initialRead.handoffCode === 'FIRST-KEYED-AUDIT'
+        && initial.snapshot().chat.pool.workers[0]?.quietReason !== 'fresh_context_required',
+      'an initial keyed read has no predecessor and must remain normally serveable');
+      await initial.close();
+    },
+  },
+  {
+    name: 'handoff bridge: a held in-flight submit still retires its exact predecessor for a fresh successor',
+    run: async () => {
+      const gate = deferred();
+      let advanced = false;
+      const successor = { ...handoff({ code: 'HELD-BLIND', stage: 'blind-review' }), freshContextRequired: true, freshContextKey: 'held-blind-track' };
+      const engine = createHandoffEngine({
+        source: source({
+          read: async () => ({ kind: 'open', handoff: advanced ? successor : handoff({ code: 'HELD-REVIEW', stage: 'review' }) }),
+          submit: async () => gate.promise,
+        }).api,
+        holdMs: 0,
+      });
+      await engine.release({ jobs: [{ jobId: JOB_A, canvasFilePath: PATH_A }] });
+      const pool = await engine.startWorkerPool({ linkId: LINK, requestedWorkers: 1 });
+      const starter = engine.copyWorkerStarter({ linkId: LINK, generation: pool.generation, workerOrdinal: 1 });
+      const review = await engine.get({ session: starter.sessionCode, linkId: LINK });
+      const pending = engine.submit({ session: starter.sessionCode, linkId: LINK, handoffCode: review.handoffCode, response: answer({ code: review.handoffCode, stage: review.stage }) });
+      await settle();
+      assert((await engine.hold(JOB_A)).ok && engine.snapshot().queue.jobs[0]?.phase === 'held', 'the lane can be held while its predecessor submit is in flight');
+      advanced = true;
+      gate.resolve({ kind: 'accepted', completed: false, handoff: successor });
+      const accepted = await pending;
+      assert(accepted.status === 'accepted' && accepted.next === null && engine.snapshot().chat.pool.workers[0]?.quietReason === 'fresh_context_required',
+        'a hold preserves the accepted successor but still excludes the exact prior chat');
+      assert((await engine.resume({ jobId: JOB_A })).ok && (await engine.get({ session: starter.sessionCode, linkId: LINK })).status === 'session_full',
+        'resuming a held fresh successor cannot return it to the old worker');
+      const replacement = engine.restartWorker({ linkId: LINK, generation: pool.generation, workerOrdinal: 1 });
+      const blind = await engine.get({ session: replacement.sessionCode, linkId: LINK });
+      assert(replacement.copied && blind.handoffCode === 'HELD-BLIND', 'the replacement alone can serve the held successor after resume');
+      await engine.close();
+    },
+  },
+  {
+    name: 'handoff bridge: a flagged lazy-read stage transition applies the same fresh-context boundary',
+    run: async () => {
+      let stage = 'resume';
+      const engine = createHandoffEngine({
+        source: source({
+          read: async () => ({ kind: 'open', handoff: stage === 'resume'
+            ? handoff({ code: 'LAZY-RESUME', stage })
+            : { ...handoff({ code: 'LAZY-RESUME', stage: 'review' }), freshContextRequired: true } }),
+        }).api,
+        holdMs: 0,
+      });
+      await engine.release({ jobs: [{ jobId: JOB_A, canvasFilePath: PATH_A }] });
+      const pool = await engine.startWorkerPool({ linkId: LINK, requestedWorkers: 1 });
+      const starter = engine.copyWorkerStarter({ linkId: LINK, generation: pool.generation, workerOrdinal: 1 });
+      assert((await engine.get({ session: starter.sessionCode, linkId: LINK })).stage === 'resume', 'the first lazy-read stage is served');
+      stage = 'review';
+      assert(engine.hint({ jobId: JOB_A }) === true, 'the synthetic application change must schedule a lazy re-read');
+      const next = await engine.get({ session: starter.sessionCode, linkId: LINK });
+      assert(next.status === 'session_full' && engine.snapshot().chat.pool.workers[0]?.quietReason === 'fresh_context_required',
+        'a lazy stage successor never returns to the old chat');
+      await engine.close();
+    },
+  },
+  {
     name: 'handoff bridge: worker pool planner deploys the maximum safe work count up to ten',
     run: () => {
       // Copying starters is cheap enough that every safe available work item
@@ -100,6 +366,12 @@ const tests = [
       });
       assert(restricted.queued === 6 && restricted.max === 4 && restricted.recommended === 4,
         'an explicit per-start cap remains a valid restriction on the maximum worker count');
+      const negotiated = recommendWorkerPool({
+        tasks: [{ task: 'job-scoring', pending: 17, forecast: 500_000 }],
+        capability: { maxConcurrentHandoffs: 3 },
+      });
+      assert(negotiated.queued === 500_000 && negotiated.materialized === 17 && negotiated.recommended === 3,
+        'a host/plugin capability changes only live parallelism, never truncates aggregate backlog telemetry');
     },
   },
   {
@@ -117,6 +389,165 @@ const tests = [
       assert(pool.started && pool.queued === 1 && pool.materialized === 0
         && engine.snapshot().chat.pool.plan.queued === 1 && engine.snapshot().chat.pool.plan.materialized === 0,
       `a host lane forecasts one later worker unit without claiming it is available now (${JSON.stringify(pool)})`);
+      await engine.close();
+    },
+  },
+  {
+    name: 'handoff bridge: unpresented worker re-copy is same-key only and closes on presentation, link change, pause, or expiry',
+    run: async () => {
+      const clock = createFakeClock();
+      const freshPool = async () => {
+        const engine = createHandoffEngine({
+          source: source().api, now: clock.now, timers: clock, holdMs: 0,
+          limits: { chatKeyMaxAgeHours: 1 }, random: () => Buffer.alloc(26, 9),
+        });
+        assert((await engine.release({ jobs: [{ jobId: JOB_A, canvasFilePath: PATH_A }] })).ok, 'a released application seeds the worker pool');
+        const pool = await engine.startWorkerPool({ linkId: LINK, requestedWorkers: 1 });
+        const starter = engine.copyWorkerStarter({ linkId: LINK, generation: pool.generation, workerOrdinal: 1 });
+        assert(pool.started && starter.copied, 'the fresh worker starter is exported once before re-copy checks');
+        return { engine, pool, starter };
+      };
+      const presented = await freshPool();
+      assert((await presented.engine.get({ session: presented.starter.sessionCode, linkId: LINK })).status === 'served'
+        && presented.engine.copyWorkerStarter({ linkId: LINK, generation: presented.pool.generation, workerOrdinal: 1 }).status === 'session_started',
+      'a worker that presented its starter cannot re-copy it');
+      await presented.engine.close();
+
+      const relinked = await freshPool();
+      const wrongLink = relinked.engine.copyWorkerStarter({ linkId: 'other-link', generation: relinked.pool.generation, workerOrdinal: 1 });
+      assert(wrongLink.copied === false && wrongLink.status === 'starter_copied'
+        && relinked.engine.copyWorkerStarter({ linkId: LINK, generation: relinked.pool.generation, workerOrdinal: 1 }).copied === false,
+      'a different link cannot recover or reuse an exported worker capability');
+      await relinked.engine.close();
+
+      const paused = await freshPool();
+      paused.engine.pause('user');
+      assert(paused.engine.copyWorkerStarter({ linkId: LINK, generation: paused.pool.generation, workerOrdinal: 1 }).copied === false,
+        'a paused engine rejects worker starter re-copy rather than bypassing its serving fence');
+      await paused.engine.close();
+
+      const expired = await freshPool();
+      clock.advance(3_600_000);
+      assert(expired.engine.copyWorkerStarter({ linkId: LINK, generation: expired.pool.generation, workerOrdinal: 1 }).copied === false,
+        'an expired worker starter cannot be re-copied');
+      await expired.engine.close();
+    },
+  },
+  {
+    name: 'handoff bridge: career-match fanout creates durable task-keyed lanes for parallel workers',
+    run: async () => {
+      const routed = [];
+      const application = source({
+        read: async lane => {
+          routed.push(['read', lane.matchTaskId ?? null]);
+          const task = lane.matchTaskId ?? 'match-01';
+          return {
+            kind: 'open',
+            handoff: { ...handoff({ code: `MATCH-${task}`, stage: 'career-match' }), matchTaskId: task },
+            ...(lane.matchTaskId ? {} : { parallelTasks: [{ id: 'match-01' }, { id: 'match-02' }, { id: 'match-03' }] }),
+          };
+        },
+        submit: async (lane) => {
+          routed.push(['submit', lane.matchTaskId]);
+          return lane.matchTaskId === 'match-02'
+            ? { kind: 'accepted', completed: false, handoff: handoff({ code: 'RESUME-AFTER-MATCH', stage: 'resume' }) }
+            : { kind: 'accepted', completed: true };
+        },
+      });
+      const persisted = [];
+      const engine = createHandoffEngine({
+        source: application.api, holdMs: 0,
+        store: { saveLanes: async rows => { persisted.push(rows); return true; } },
+      });
+      await engine.release({ jobs: [{ jobId: JOB_A, canvasFilePath: PATH_A }] });
+      const pool = await engine.startWorkerPool({ linkId: LINK, requestedWorkers: 1 });
+      const first = engine.copyWorkerStarter({ linkId: LINK, generation: pool.generation, workerOrdinal: 1 });
+      const one = await engine.get({ session: first.sessionCode, linkId: LINK });
+      const second = engine.copyWorkerStarter({ linkId: LINK, generation: pool.generation, workerOrdinal: 2 });
+      const two = await engine.get({ session: second.sessionCode, linkId: LINK });
+      assert(one.status === 'served' && two.status === 'served' && one.handoffCode !== two.handoffCode, 'separate workers claim separate career-match handoffs');
+      assert(engine.snapshot().queue.applications.ready === 1 && engine.snapshot().queue.applications.materialized === 3,
+        'status counts one application bundle while retaining the three materialized claims');
+      assert(routed.some(row => row[0] === 'read' && row[1] === 'match-02'), `the virtual lane must call the app with its task id (${JSON.stringify(routed)})`);
+      assert(persisted.some(rows => rows.filter(row => row.jobId === JOB_A).length === 3 && rows.every(row => Object.hasOwn(row, 'matchTaskId'))), 'every fanout lane is durable and task-keyed');
+      const accepted = await engine.submit({ session: second.sessionCode, linkId: LINK, handoffCode: two.handoffCode, response: answer({ code: two.handoffCode, stage: two.stage }) });
+      const surviving = engine.snapshot().queue.jobs.filter(job => job.jobId === JOB_A);
+      assert(accepted.status === 'accepted' && routed.some(row => row[0] === 'submit' && row[1] === 'match-02')
+        && surviving.length === 1 && surviving[0].stage === 'resume'
+        && persisted.at(-1).filter(row => row.jobId === JOB_A).length === 1
+        && !Object.hasOwn(persisted.at(-1)[0], 'matchTaskId'), 'the final receipt atomically collapses task lanes into one ordinary resume lane');
+      await engine.close();
+    },
+  },
+  {
+    name: 'handoff bridge: career-match fanout never persists more than one bounded live wave from a hostile source',
+    run: async () => {
+      const application = source({
+        read: async lane => ({
+          kind: 'open',
+          handoff: { ...handoff({ code: `MATCH-${lane.matchTaskId || '0'}`, stage: 'career-match' }), matchTaskId: lane.matchTaskId || '0' },
+          parallelTasks: Array.from({ length: 100 }, (_unused, index) => ({ id: String(index) })),
+        }),
+      });
+      const persisted = [];
+      const engine = createHandoffEngine({
+        source: application.api, holdMs: 0,
+        store: { saveLanes: async rows => { persisted.push(rows); return true; } },
+      });
+      await engine.release({ jobs: [{ jobId: JOB_A, canvasFilePath: PATH_A }] });
+      const chat = await engine.newChat({ linkId: LINK });
+      await engine.get({ session: chat.sessionCode, linkId: LINK });
+      const family = engine.snapshot().queue.jobs.filter(job => job.jobId === JOB_A);
+      assert(family.length === 10 && persisted.some(rows => rows.filter(row => row.jobId === JOB_A).length === 10),
+        'a malformed source cannot inflate one authority-match wave beyond ten durable virtual lanes');
+      await engine.close();
+    },
+  },
+  {
+    name: 'handoff bridge: a 25-million-unit authority forecast stays aggregate while only one live wave becomes lanes',
+    run: async () => {
+      const application = source({
+        read: async lane => ({
+          kind: 'open',
+          handoff: {
+            ...handoff({ code: `MATCH-${lane.matchTaskId || '0'}`, stage: 'career-match' }),
+            matchTaskId: lane.matchTaskId || '0',
+            parallelTaskForecast: { totalUnits: 25_000_000, completedUnits: 0, remainingUnits: 25_000_000, activeWaveUnits: 10 },
+          },
+          parallelTasks: Array.from({ length: 10 }, (_unused, index) => ({ id: String(index) })),
+        }),
+      });
+      const engine = createHandoffEngine({ source: application.api, holdMs: 0 });
+      await engine.release({ jobs: [{ jobId: JOB_A, canvasFilePath: PATH_A }] });
+      const chat = await engine.newChat({ linkId: LINK });
+      await engine.get({ session: chat.sessionCode, linkId: LINK });
+      await engine.startWorkerPool({ linkId: LINK });
+      const snapshot = engine.snapshot();
+      assert(snapshot.queue.applications.materialized === 10
+        && snapshot.chat.pool.plan.queued === 25_000_000
+        && snapshot.chat.pool.plan.recommended === 10,
+      `one bundle exposes its exact backlog without materializing it (${JSON.stringify(snapshot.chat.pool.plan)})`);
+      await engine.close();
+    },
+  },
+  {
+    name: 'handoff bridge: mixed virtual-lane phases report one bundle as ready when any sibling is claimable',
+    run: async () => {
+      const application = source({
+        read: async lane => lane.matchTaskId === 'host-task'
+          ? { kind: 'host' }
+          : { kind: 'open', handoff: { ...handoff({ code: 'MATCH-READY', stage: 'career-match' }), matchTaskId: 'ready-task' } },
+      });
+      const engine = createHandoffEngine({ source: application.api, holdMs: 0 });
+      await engine.release({ jobs: [
+        { jobId: JOB_A, canvasFilePath: PATH_A, matchTaskId: 'host-task' },
+        { jobId: JOB_A, canvasFilePath: PATH_A, matchTaskId: 'ready-task' },
+      ] });
+      const first = await engine.newChat({ linkId: LINK }); await engine.get({ session: first.sessionCode, linkId: LINK });
+      const second = await engine.newChat({ linkId: LINK }); await engine.get({ session: second.sessionCode, linkId: LINK });
+      const apps = engine.snapshot().queue.applications;
+      assert(apps.ready === 1 && apps.working === 0 && apps.materialized === 2,
+        `one host sibling cannot hide its family's ready handoff (${JSON.stringify(apps)})`);
       await engine.close();
     },
   },
@@ -156,9 +587,9 @@ const tests = [
       const direct = recommendWorkerPool({ tasks: [task] });
       assert(direct.recommended === 10 && direct.queued === 209 && direct.max === 10,
         `the full forecast must justify the ten-worker maximum (${JSON.stringify(direct)})`);
-      const capped = recommendWorkerPool({ tasks: [{ ...task, forecast: MAX_WORKER_POOL_PLANNING_UNITS * 2 }] });
-      assert(capped.queued === MAX_WORKER_POOL_PLANNING_UNITS && capped.recommended === 10,
-        'a malformed/adaptor-sized forecast must stay bounded before planner expansion');
+      const enormous = recommendWorkerPool({ tasks: [{ ...task, forecast: Number.MAX_SAFE_INTEGER }] });
+      assert(enormous.queued === Number.MAX_SAFE_INTEGER && enormous.recommended === 10,
+        'an enormous forecast stays an aggregate count and never allocates one planning unit per descriptor');
       const push = {
         refreshHubs: async () => true,
         status: () => ({ discovered: [{ tasks: [task] }], working: 0 }),
@@ -258,14 +689,21 @@ const tests = [
         starters.push(copied.sessionCode);
       }
       assert(new Set(starters).size === pool.workerCount, 'every worker starter must carry a distinct session capability');
-      assert(engine.copyWorkerStarter({ linkId: LINK, generation: pool.generation, workerOrdinal: 1 }).status === 'starter_copied',
-        'a worker starter must be exported at most once before its chat connects');
+      const recopied = engine.copyWorkerStarter({ linkId: LINK, generation: pool.generation, workerOrdinal: 1 });
+      assert(recopied.copied === true && recopied.recopied === true && recopied.sessionCode === starters[0]
+        && recopied.workerOrdinal === 1 && recopied.workerCount === pool.workerCount,
+      'an exported but unpresented worker starter is re-copied with the same worker capability');
+      const presented = engine.notePresented({ session: recopied.sessionCode, linkId: LINK });
+      assert(presented === true
+        && engine.copyWorkerStarter({ linkId: LINK, generation: pool.generation, workerOrdinal: 1 }).copied === false,
+      'presentation permanently closes the worker re-copy path');
       const poolStatus = engine.snapshot().chat.pool;
       assert(poolStatus?.active === true && poolStatus.generation === pool.generation && poolStatus.workerCount === pool.workerCount,
         'status must expose only the bounded live-pool identity needed to retire stale renderer controls');
       assert(Array.isArray(poolStatus.workers) && poolStatus.workers.length === pool.workerCount
-        && poolStatus.workers.every((worker, index) => worker.ordinal === index + 1 && worker.state === 'ready' && worker.completed === 0),
-      'a copied-but-not-yet-connected starter is reported as ready without exposing its capability');
+        && poolStatus.workers[0].ordinal === 1 && poolStatus.workers[0].state !== 'ready'
+        && poolStatus.workers.slice(1).every((worker, index) => worker.ordinal === index + 2 && worker.state === 'ready' && worker.completed === 0),
+      'a copied-but-not-yet-connected starter is reported as ready without exposing its capability, while presentation changes only its own worker');
       const serializedStatus = JSON.stringify(engine.snapshot());
       assert(starters.every(sessionCode => !serializedStatus.includes(sessionCode)), 'worker session codes must never reach status');
       assert((await engine.newChat({ linkId: LINK })).status === 'pool_active'
@@ -758,6 +1196,30 @@ const tests = [
     },
   },
   {
+    name: 'handoff bridge: lowering live capacity retires excess workers without stranding their admitted submit',
+    run: async () => {
+      const app = source({
+        read: async ({ jobId }) => ({ kind: 'open', handoff: handoff({ jobId, code: jobId === JOB_A ? 'HANDOFF-A' : 'HANDOFF-B' }) }),
+      });
+      const engine = createHandoffEngine({ source: app.api, scope: { applications: true, scoring: false, marketplace: false }, holdMs: 0 });
+      assert((await engine.release({ jobs: [{ jobId: JOB_A, canvasFilePath: PATH_A }, { jobId: JOB_B, canvasFilePath: PATH_B }] })).ok, 'two lanes must release');
+      const first = await engine.newChat({ linkId: LINK });
+      const servedFirst = await engine.get({ session: first.sessionCode, linkId: LINK });
+      const pool = await engine.startWorkerPool({ linkId: LINK });
+      const second = engine.copyWorkerStarter({ linkId: LINK, generation: pool.generation, workerOrdinal: 2 });
+      const servedSecond = await engine.get({ session: second.sessionCode, linkId: LINK });
+      assert(servedFirst.status === 'served' && servedSecond.status === 'served', 'both workers must own work before the downshift');
+      engine.setLimits({ maxConcurrentHandoffs: 1 });
+      const status = engine.snapshot().chat.pool;
+      assert(status.workerCount === 1 && status.workers.length === 1 && status.workers[0].ordinal === 1, 'status exposes only the negotiated live worker capacity after a reduction');
+      assert((await engine.get({ session: second.sessionCode, linkId: LINK })).status === 'session_full', 'a retired worker cannot claim another handoff');
+      const accepted = await engine.submit({ session: second.sessionCode, linkId: LINK, handoffCode: servedSecond.handoffCode, response: answer({ jobId: JOB_B, code: servedSecond.handoffCode, stage: servedSecond.stage }) });
+      assert(accepted.status === 'accepted', 'a worker retired after it was served may safely settle that in-flight answer');
+      assert(engine.copyWorkerStarter({ linkId: LINK, generation: pool.generation, workerOrdinal: 2 }).status === 'session_ended', 'retired capacity cannot mint/re-copy a new worker starter');
+      await engine.close();
+    },
+  },
+  {
     name: 'handoff bridge: pool workers own distinct application handoffs and keep rolling past the single-chat job cap',
     run: async () => {
       const app = source({
@@ -795,10 +1257,15 @@ const tests = [
         });
         assert(accepted.status === 'accepted', `pool worker must finish ${expected}`);
       }
+      // The forced one-worker start is only the INITIAL size: the three live
+      // application lanes grow the pool (worker 2 and 3 are minted as copyable
+      // starters; nothing opens a chat). Worker one still rolls through every
+      // lane on its own and reports each as completed.
       const workerProgress = engine.snapshot().chat.pool.workers;
-      assert(workerProgress.length === 1 && workerProgress[0].ordinal === 1
-        && workerProgress[0].state === 'waiting' && workerProgress[0].completed === 3,
-      'one connected worker reports every accepted handoff as completed after its rolling queue drains');
+      assert(workerProgress.length === 3 && workerProgress[0].ordinal === 1
+        && workerProgress[0].state === 'waiting' && workerProgress[0].completed === 3
+        && workerProgress.slice(1).every(worker => worker.state === 'available' && worker.completed === 0),
+      'one connected worker reports every accepted handoff as completed after its rolling queue drains; grown siblings stay unstarted starters');
       await engine.close();
     },
   },
@@ -1410,155 +1877,50 @@ const tests = [
     },
   },
   {
-    name: 'handoff bridge: engine: soft job cap sessions full only when another lane is ready',
+    name: 'handoff bridge: engine: a legacy per-chat count setting is ignored at construction',
     run: async () => {
-      // 'done' is a saved job: it is only reported once the job has been answered and finished.
-      let finished = false;
-      const { engine, session, clock } = await started({ sourceOverrides: { status: async () => ({ kind: finished ? 'done' : 'host' }) }, engineOptions: { limits: { jobsPerChat: 1 } } }); await engine.release({ jobs: [{ jobId: JOB_B, canvasFilePath: PATH_B }] });
-      const first = await engine.get({ session, linkId: LINK }); await engine.submit({ session, linkId: LINK, handoffCode: first.handoffCode, response: answer({ code: first.handoffCode, stage: first.stage }) }); finished = true;
-      clock.advance(CONSTANTS.HOST_POLL_MS);
-      await engine.get({ session, linkId: LINK });
-      assert((await engine.get({ session, linkId: LINK })).status === 'session_full', 'next ready lane must observe per-chat cap');
-    },
-  },
-  {
-    name: 'handoff bridge: engine: an explicitly enabled hard byte budget stops the next handoff after it is spent',
-    run: async () => {
-      const { engine, session } = await started({ engineOptions: { limits: { epochHardBytes: 1 } } });
-      assert((await engine.get({ session, linkId: LINK })).status === 'served', 'the first prompt spends the explicitly enabled byte budget');
-      assert((await engine.get({ session, linkId: LINK })).status === 'session_full', 'the explicit hard byte budget must fence the next handoff');
-    },
-  },
-  {
-    name: 'handoff bridge: engine: the default zero byte budget never rolls a healthy chat over',
-    run: async () => {
-      let reads = 0;
-      const push = {
-        get: async () => ({
-          status: 'served',
-          handoffCode: `PUSH-ZERO-BUDGET-${++reads}`,
-          task: 'job-scoring',
-          prompt: 'Synthetic scoring prompt.',
-          // Cross the old invisible 900 KB fence in one otherwise valid
-          // response. A second GET proves zero is disabled rather than a
-          // literal zero-byte ceiling or an implicit legacy default.
-          promptBytes: 900_001,
-          remaining: { ready: 1, working: 0, needsYou: 0 },
-        }),
-        submit: async () => ({ status: 'unknown_handoff' }),
-      };
-      const engine = createHandoffEngine({
-        sources: { application: source().api, push },
-        scope: { applications: false, scoring: true, marketplace: false },
-        limits: { epochSoftBytes: 0, epochHardBytes: 0 },
-        holdMs: 0,
-      });
-      const chat = await engine.newChat({ linkId: LINK });
-      const first = await engine.get({ session: chat.sessionCode, linkId: LINK });
-      const second = await engine.get({ session: chat.sessionCode, linkId: LINK });
-      assert(first.status === 'served' && second.status === 'served' && reads === 2
-        && engine.snapshot().chat.bytesServed > 900_000,
-      'a zero budget must leave rollover off after traffic exceeds the retired default');
+      const { engine, session } = await started({ engineOptions: { limits: { jobsPerChat: 1 } } });
+      assert((await engine.get({ session, linkId: LINK })).status === 'served',
+        'a legacy per-chat count setting must not make the first healthy handoff unavailable');
       await engine.close();
     },
   },
   {
-    name: 'handoff bridge: engine: an accepted application successor cannot bypass the hard byte budget',
+    name: 'handoff bridge: engine: a non-pool chat drains more than 64 distinct sequential lanes',
     run: async () => {
-      const response = answer({ extra: { text: 'x'.repeat(12_000) } });
-      let reads = 0;
-      const state = await served({
-        sourceOverrides: {
-          read: async () => ({
-            kind: 'open',
-            handoff: handoff({
-              code: ++reads === 1 ? 'HANDOFF-A' : 'HANDOFF-APPLICATION-RESUMED',
-              revision: reads,
-              prompt: 'Synthetic resumed application prompt.',
-            }),
-          }),
-          submit: async () => ({
-            kind: 'accepted',
-            completed: false,
-            handoff: handoff({ code: 'HANDOFF-APPLICATION-RESUMED', revision: 2, prompt: 'Synthetic resumed application prompt.' }),
-          }),
-        },
-        engineOptions: { limits: { epochHardBytes: 10_000 } },
-      });
-      const accepted = await state.engine.submit({
-        session: state.session,
-        linkId: LINK,
-        handoffCode: state.result.handoffCode,
-        response,
-      });
-      assert(accepted.status === 'accepted' && accepted.next?.status === 'session_full',
-        'an accepted application commit may finish, but its inline successor must hit the hard budget fence');
-      const full = state.engine.snapshot();
-      assert(reads === 1 && full.counts.getServed === 1 && full.chat.bytesReceived >= 12_000,
-        'the fenced inline successor must not read or charge a second application prompt');
-      assert((await state.engine.get({ session: state.session, linkId: LINK })).status === 'session_full',
-        'the original full chat must not serve the successor on a later poll');
-      const resumed = await state.engine.newChat({ linkId: LINK });
-      const next = await state.engine.get({ session: resumed.sessionCode, linkId: LINK });
-      assert(next.status === 'served' && next.kind === 'application',
-        'a replacement chat must be able to resume application work with a fresh epoch budget');
-    },
-  },
-  {
-    name: 'handoff bridge: engine: an accepted push successor cannot bypass the hard byte budget',
-    run: async () => {
-      let gets = 0; let successors = 0;
-      const push = {
-        async get() {
-          gets++;
-          return {
-            status: 'served',
-            handoffCode: gets === 1 ? 'PUSH-HARD-BUDGET-A' : 'PUSH-HARD-BUDGET-RESUMED',
-            task: 'job-scoring',
-            prompt: 'Synthetic scoring prompt.',
-            promptBytes: 1,
-            remaining: { ready: 0, working: 0, needsYou: 0 },
-          };
-        },
-        async submit() { return { status: 'accepted' }; },
-        async nextAfterAccept() {
-          successors++;
-          return {
-            status: 'served',
-            handoffCode: 'PUSH-HARD-BUDGET-SUCCESSOR',
-            task: 'job-scoring',
-            prompt: 'Synthetic successor scoring prompt.',
-            promptBytes: 1,
-            remaining: { ready: 0, working: 0, needsYou: 0 },
-          };
-        },
-      };
+      const jobs = Array.from({ length: 65 }, (_unused, index) => ({
+        jobId: `${String(index + 10).padStart(8, '0')}-1111-4111-8111-111111111111`,
+        canvasFilePath: `/tmp/unlimited-${index}.canvas`,
+      }));
       const engine = createHandoffEngine({
-        sources: { application: source().api, push },
-        scope: { applications: false, scoring: true },
+        source: source({
+          read: async ({ jobId }) => ({ kind: 'open', handoff: handoff({ jobId, code: `HANDOFF-${jobId}` }) }),
+          submit: async () => ({ kind: 'accepted', completed: true }),
+        }).api,
         holdMs: 0,
-        limits: { epochHardBytes: 100 },
+        // Old clients can still present either retired quota; both must be
+        // ignored while the per-response payload boundary remains elsewhere.
+        limits: { jobsPerChat: 1, epochHardBytes: 1 },
       });
+      assert((await engine.release({ jobs })).ok, 'all synthetic lanes must release');
       const chat = await engine.newChat({ linkId: LINK });
-      const first = await engine.get({ session: chat.sessionCode, linkId: LINK });
-      assert(first.status === 'served' && first.kind === 'push', 'fixture must first serve the synthetic scoring handoff');
-      const accepted = await engine.submit({
-        session: chat.sessionCode,
-        linkId: LINK,
-        handoffCode: first.handoffCode,
-        response: 'y'.repeat(128),
-      });
-      assert(accepted.status === 'accepted' && accepted.next?.status === 'session_full',
-        'an accepted push commit may finish, but its inline successor must hit the hard budget fence');
-      const full = engine.snapshot();
-      assert(gets === 1 && successors === 1 && full.counts.getServed === 1 && full.chat.bytesServed === 1 && full.chat.bytesReceived === 128,
-        'the fenced inline successor must not be charged or counted as a second served push prompt');
-      assert((await engine.get({ session: chat.sessionCode, linkId: LINK })).status === 'session_full',
-        'the original full chat must not serve the push successor on a later poll');
-      const resumed = await engine.newChat({ linkId: LINK });
-      const next = await engine.get({ session: resumed.sessionCode, linkId: LINK });
-      assert(next.status === 'served' && next.handoffCode === 'PUSH-HARD-BUDGET-RESUMED' && gets === 2,
-        'a replacement chat must be able to resume scoring work with a fresh epoch budget');
+      let current = await engine.get({ session: chat.sessionCode, linkId: LINK });
+      for (let index = 0; index < jobs.length; index++) {
+        assert(current.status === 'served', `lane ${index + 1} must remain in the original chat`);
+        const accepted = await engine.submit({
+          session: chat.sessionCode,
+          linkId: LINK,
+          handoffCode: current.handoffCode,
+          response: answer({ jobId: jobs[index].jobId, code: current.handoffCode, stage: current.stage }),
+        });
+        assert(accepted.status === 'accepted', `lane ${index + 1} must accept`);
+        current = index + 1 < jobs.length
+          ? await engine.get({ session: chat.sessionCode, linkId: LINK })
+          : current;
+      }
+      assert(engine.snapshot().chat.calls >= 65 && engine.snapshot().chat.state !== 'full',
+        'lifetime lane counts and retired byte budgets must never make a healthy chat full');
+      await engine.close();
     },
   },
   {
@@ -1687,17 +2049,55 @@ const tests = [
     },
   },
   {
-    name: 'handoff bridge: engine: release validates UUID paths deduplicates and enforces lane cap',
+    name: 'handoff bridge: engine: release validates UUID paths, deduplicates, and retains later-wave backlog',
     run: async () => {
       const fake = source(); const engine = createHandoffEngine({ source: fake.api });
       assert((await engine.release({ jobs: [{ jobId: 'not-a-uuid', canvasFilePath: PATH_A }] })).code === 'invalid_arguments', 'invalid release must fail closed');
       assert((await engine.release({ jobs: [{ jobId: JOB_A, canvasFilePath: PATH_A }, { jobId: JOB_A, canvasFilePath: PATH_A }] })).count === 1, 'duplicate release must collapse');
       const jobs = Array.from({ length: 9 }, (_, index) => { const digit = (index + 3).toString(16); return { jobId: `${digit.repeat(8)}-${digit.repeat(4)}-4${digit.repeat(3)}-8${digit.repeat(3)}-${digit.repeat(12)}`, canvasFilePath: `/tmp/${index}.canvas` }; });
-      assert((await engine.release({ jobs })).ok && (await engine.release({ jobs: [{ jobId: JOB_B, canvasFilePath: PATH_B }] })).code === 'lane_limit', 'ten live lanes is hard cap');
+      const later = await engine.release({ jobs: [{ jobId: JOB_B, canvasFilePath: PATH_B }] });
+      assert((await engine.release({ jobs })).ok && later.ok && engine.snapshot().queue.jobs.length === 11, 'work beyond the live worker count must remain as durable later-wave backlog');
     },
   },
   {
-    name: 'handoff bridge: engine: power resume aborts a held get and refreshes stale awaiting state',
+    name: 'handoff bridge: engine: one non-pool chat drains more than 64 sequential application lanes',
+    run: async () => {
+      const jobs = Array.from({ length: 65 }, (_, index) => {
+        const serial = String(index + 1).padStart(12, '0');
+        return {
+          jobId: `${String(index + 1).padStart(8, '0')}-0000-4000-8000-${serial}`,
+          canvasFilePath: `/tmp/unbounded-chat-${index}.canvas`,
+        };
+      });
+      const engine = createHandoffEngine({
+        source: source({
+          read: async ({ jobId }) => ({ kind: 'open', handoff: handoff({ code: jobId, jobId }) }),
+        }).api,
+        holdMs: 0,
+        // This is accepted as a legacy persisted setting and intentionally has
+        // no operational effect.
+        limits: { jobsPerChat: 1 },
+      });
+      assert((await engine.release({ jobs })).ok, 'all sequential test lanes must release');
+      const chat = await engine.newChat({ linkId: LINK });
+      for (const job of jobs) {
+        const next = await engine.get({ session: chat.sessionCode, linkId: LINK });
+        assert(next.status === 'served' && next.handoffCode === job.jobId,
+          `lane ${job.jobId} must be served by the same chat without a count rollover`);
+        const accepted = await engine.submit({
+          session: chat.sessionCode,
+          linkId: LINK,
+          handoffCode: next.handoffCode,
+          response: answer({ jobId: job.jobId, code: next.handoffCode, stage: next.stage }),
+        });
+        assert(accepted.status === 'accepted', `lane ${job.jobId} must settle`);
+      }
+      assert(engine.snapshot().chat.jobsAssigned === 65,
+        'the diagnostic assignment count must remain truthful after more than 64 sequential lanes');
+    },
+  },
+  {
+    name: 'handoff bridge: engine: power resume aborts a held poll and refreshes stale awaiting state',
     run: async () => {
       const clock = createFakeClock();
       const state = await started({ clock, engineOptions: { holdMs: 10_000, limits: { jobsPerChat: 1 } } });
@@ -1708,18 +2108,45 @@ const tests = [
         && JSON.stringify(Object.keys(initialPower).sort()) === JSON.stringify(['awaiting', 'hostCanvasPaths', 'lastCallAt']),
       'private power state must expose awaiting work without leaking lane metadata');
       await state.engine.submit({ session: state.session, linkId: LINK, handoffCode: first.handoffCode, response: answer({ code: first.handoffCode, stage: first.stage }) });
+      // A sequential chat is deliberately no longer capped at one job. Serve
+      // B first so the resume fence invalidates a real, already-awaiting
+      // application rather than relying on the former jobs-per-chat cap to
+      // make an unread B look unavailable.
+      const second = await state.engine.get({ session: state.session, linkId: LINK });
+      assert(second.status === 'served' && second.handoffCode === 'HANDOFF-B',
+        'the same healthy chat must be able to take its next sequential lane');
       state.engine.hint({ jobId: JOB_B }); clock.advance(CONSTANTS.HINT_MIN_INTERVAL_MS);
-      const held = state.engine.get({ session: state.session, linkId: LINK });
-      await new Promise(resolve => setImmediate(resolve));
-      assert(state.engine.debugState().waiters === 1, 'second poll must be held before resume');
       assert(state.engine.onPowerResume(), 'resume fence must be accepted');
-      const result = await held;
-      assert(result.status === 'retry' && state.fake.calls.read === 2, 'pre-resume held get must wake retry without continuing source work');
       const lanes = state.engine.snapshot().queue.jobs;
       assert(lanes.some(lane => lane.jobId === JOB_B && lane.phase === 'awaiting'), 'resume must preserve the awaiting lane rather than serve stale work');
-      const refreshed = state.engine.get({ session: state.session, linkId: LINK });
-      await new Promise(resolve => setImmediate(resolve)); clock.advance(10_000);
-      assert((await refreshed).status === 'waiting' && state.fake.calls.read === 3, 'next get must refresh the invalidated awaiting lane');
+      const refreshed = await state.engine.get({ session: state.session, linkId: LINK });
+      assert(refreshed.status === 'served' && refreshed.handoffCode === 'HANDOFF-B' && state.fake.calls.read === 3,
+        'the next get must refresh the invalidated awaiting lane before serving it again');
+
+      // Test a genuine held poll independently. Application work is no longer
+      // artificially held behind a lifetime chat quota, while an upstream
+      // push source that explicitly reports work-in-progress still owns a
+      // cancellable long-poll wait.
+      let polls = 0;
+      const push = {
+        async get() { polls++; return { status: 'waiting', remaining: { ready: 0, working: 1, needsYou: 0 } }; },
+        async submit() { return { status: 'unknown_handoff' }; },
+      };
+      const heldEngine = createHandoffEngine({
+        sources: { application: source().api, push },
+        scope: { applications: false, scoring: true, marketplace: false },
+        now: clock.now,
+        timers: clock,
+        holdMs: 10_000,
+      });
+      const heldChat = await heldEngine.newChat({ linkId: LINK });
+      const held = heldEngine.get({ session: heldChat.sessionCode, linkId: LINK });
+      await new Promise(resolve => setImmediate(resolve));
+      assert(heldEngine.debugState().waiters === 1 && polls === 1, 'an explicit upstream wait must register one held poll');
+      assert(heldEngine.onPowerResume(), 'resume must fence the held poll generation');
+      const result = await held;
+      assert(result.status === 'retry' && heldEngine.debugState().waiters === 0 && polls === 1,
+        'pre-resume held get must wake retry without continuing source work');
     },
   },
   {
@@ -2684,18 +3111,18 @@ tests.push(
 
 tests.push(
   {
-    name: 'handoff bridge: engine: the lane store persists live lanes only, under the same cap the engine enforces',
+    name: 'handoff bridge: engine: the lane store persists every live backlog lane and omits terminal ones',
     run: async () => {
-      assert(MAX_LIVE_LANES === CONSTANTS.MAX_LANES, 'the store cap and the engine release cap are one rule');
+      assert(MAX_LIVE_LANES === Number.MAX_SAFE_INTEGER, 'the lane count is not reused as a worker-cap policy');
       const directory = cleanDirectory();
       try {
         const store = createLaneStore({ userDataPath: directory });
         const lane = (ord, phase) => ({ ord, jobId: `bbbbbbbb-bbbb-4bbb-8bbb-${String(ord).padStart(12, '0')}`, canvasFilePath: PATH_A, releasedAt: ord, phase, reason: null, heldFrom: null, counters: {} });
-        const live = Array.from({ length: MAX_LIVE_LANES }, (_, index) => lane(index + 1, 'awaiting'));
+        const live = Array.from({ length: CONSTANTS.MAX_LANES + 3 }, (_, index) => lane(index + 1, 'awaiting'));
         const dead = Array.from({ length: 5 }, (_, index) => lane(100 + index, index % 2 ? 'done' : 'gone'));
         assert(await store.saveLanes([...live, ...dead]) === true, 'dead lanes beside a full set of live ones must not make the save fail');
-        assert(store.readLanes().length === MAX_LIVE_LANES && store.readLanes().every(item => item.phase === 'awaiting'), 'only live lanes reach disk');
-        assert(await store.saveLanes([...live, lane(50, 'unread')]) === false, 'more live lanes than the cap is still refused');
+        assert(store.readLanes().length === live.length && store.readLanes().every(item => item.phase === 'awaiting'), 'only live lanes reach disk, even beyond the active worker roster');
+        assert(await store.saveLanes([...live, lane(1000, 'unread')]) === true, 'a later-wave live lane is not refused by a worker-count cap');
         // A file written by an older build holds a gone lane beside 10 live ones.
         fs.writeFileSync(store.lanesPath, `${JSON.stringify({ v: 1, lanes: [...live.slice(0, 9), lane(200, 'gone'), lane(201, 'done')] })}\n`);
         const loaded = store.loadLanes(5);
@@ -4230,8 +4657,8 @@ tests.push(
       ]);
       const snapshot = engine.snapshot().chat;
       assert(chatA.status === 'served' && chatB.status === 'served' && chatA.handoffCode === chatB.handoffCode
-        && snapshot.ordinal === 1 && snapshot.jobsAssigned === 1 && snapshot.jobsAssigned <= snapshot.jobsCap,
-      'two chats holding one key are both handed the same single outstanding handoff, never a second job past the epoch cap');
+        && snapshot.ordinal === 1 && snapshot.jobsAssigned === 1,
+      'two chats holding one key are both handed the same single outstanding handoff, never a second concurrent job');
       assert(snapshot.servedTwice === false && snapshot.calls === 2 && engine.snapshot().counts.getServed === 1,
         'the epoch counts both transport calls but coalesces their one handoff serve');
     },
@@ -4693,7 +5120,7 @@ tests.push(
 
 // ---- get() must not wait on a finished job (first live ChatGPT bridge run) ----
 // Live evidence: the last job was saved, yet every get answered 'waiting' for
-// ~3 minutes until the wait limit said "paused". The renderer's job-changed hint
+// until an arbitrary wait counter stopped the chat. The renderer's job-changed hint
 // had set needsRefresh on the HOST lane; nothing consumes that flag off an
 // awaiting lane, and `working` counted it, so a saved job read as pending work.
 function liveBridgeHarness({ scope = { applications: true, scoring: true, marketplace: true } } = {}) {
@@ -4729,7 +5156,7 @@ async function liveBridgeServedAndSubmitted(harness) {
 
 tests.push(
   {
-    name: 'handoff bridge: engine: a job saved after a renderer hint ends the chat with queue_empty, not waiting until the wait limit',
+    name: 'handoff bridge: engine: a job saved after a renderer hint ends the chat with queue_empty, not a stale waiting result',
     run: async () => {
       const harness = liveBridgeHarness();
       const { engine, clock } = harness;
@@ -4787,14 +5214,15 @@ tests.push(
       const { engine, clock } = harness;
       const session = await liveBridgeServedAndSubmitted(harness);
       let last = null; let polls = 0;
+      const durablePolls = 12; // Deliberately exceeds the retired wait-count cap.
       // The import genuinely never finishes: every poll is a legitimate wait.
-      for (; polls < CONSTANTS.MAX_CONSECUTIVE_WAITS + 2; polls += 1) {
+      for (; polls < durablePolls; polls += 1) {
         clock.advance(CONSTANTS.HOST_POLL_MS + 1);
         last = await engine.get({ session, linkId: LINK });
         if (last.status !== 'waiting') break;
         assert(engine.snapshot().chat.state === 'working', 'a waiting chat is working');
       }
-      assert(polls === CONSTANTS.MAX_CONSECUTIVE_WAITS + 2 && last.status === 'waiting',
+      assert(polls === durablePolls && last.status === 'waiting',
         `legacy waits remain an explicit poll instruction, got ${last?.status}/${last?.reason} after ${polls}`);
       assert(engine.snapshot().paused === false, 'the bridge itself is not paused');
       assert(engine.snapshot().chat.state === 'working', `a waiting chat stays working, got ${engine.snapshot().chat.state}`);
@@ -4834,13 +5262,14 @@ tests.push(
       const starter = engine.copyWorkerStarter({ linkId: LINK, generation: pool.generation, workerOrdinal: 1 });
       assert(pool.started && starter.copied, 'the one-worker adaptive plan must produce a persistent pool starter');
       let last = null;
-      for (let poll = 0; poll < CONSTANTS.MAX_CONSECUTIVE_WAITS + 4; poll += 1) {
+      const durablePolls = 14; // Deliberately exceeds the retired wait-count cap.
+      for (let poll = 0; poll < durablePolls; poll += 1) {
         last = await engine.get({ session: starter.sessionCode, linkId: LINK });
         assert(last.status === 'waiting', `pool poll ${poll + 1} must keep draining later waves, got ${last.status}/${last.reason ?? ''}`);
       }
-      assert(calls.length > CONSTANTS.MAX_CONSECUTIVE_WAITS && calls.every(value => value === true)
+      assert(calls.length >= durablePolls && calls.every(value => value === true)
         && engine.snapshot().chat.pool.active === true && engine.snapshot().chat.state === 'working',
-      'pool workers must pass the durable-wait mode to the source and never hit the legacy waiting_limit');
+      'pool workers must pass the durable-wait mode to the source without a lifetime wait cap');
       await engine.close();
     },
   },
@@ -5127,7 +5556,8 @@ tests.push(
       const harness = liveBridgeHarness();
       const { engine, clock } = harness;
       const session = await liveBridgeServedAndSubmitted(harness);
-      for (let polls = 0; polls < CONSTANTS.MAX_CONSECUTIVE_WAITS + 2; polls += 1) {
+      const durablePolls = 12; // Deliberately exceeds the retired wait-count cap.
+      for (let polls = 0; polls < durablePolls; polls += 1) {
         clock.advance(CONSTANTS.HOST_POLL_MS + 1);
         if ((await engine.get({ session, linkId: LINK })).status !== 'waiting') break;
       }
@@ -5155,7 +5585,7 @@ tests.push(
         status: async () => building ? { kind: 'host' } : { kind: 'awaiting', read: true },
         submit: async () => { building = true; n += 1; return { kind: 'accepted', completed: true }; },
       } });
-      const rounds = CONSTANTS.MAX_CONSECUTIVE_WAITS + 4;
+      const rounds = 14; // More round trips than the retired wait-count cap.
       for (let round = 1; round <= rounds; round += 1) {
         clock.advance(10_000);
         const got = await engine.get({ session, linkId: LINK });
@@ -5187,7 +5617,7 @@ tests.push(
       const call = { session: chat.sessionCode, linkId: LINK };
       for (let round = 1; round <= 3; round += 1) {
         mode = 'waiting';
-        for (let poll = 1; poll <= CONSTANTS.MAX_CONSECUTIVE_WAITS - 2; poll += 1) {
+        for (let poll = 1; poll <= 8; poll += 1) {
           clock.advance(1000);
           const wait = await engine.get(call);
           assert(wait.status === 'waiting', `round ${round} poll ${poll}: expected waiting, got ${wait.status}/${wait.reason ?? ''}`);
@@ -5242,6 +5672,12 @@ tests.push(
       const engine = createHandoffEngine({ source: source().api, now: clock.now, timers: clock, random: () => Buffer.alloc(26, 7), holdMs: 0 });
       assert(engine.restore([{ ord: 1, jobId: JOB_A, canvasFilePath: PATH_A, releasedAt: 10, phase: 'needs_user', reason: 'read_failed', heldFrom: 'unread' }]) === 1, 'restored');
       assert(engine.snapshot().queue.jobs[0].changedAt === clock.now(), 'the dock and bug report age a restored lane from the restore, not from its release');
+      const chat = await engine.newChat({ linkId: LINK });
+      assert((await engine.get({ session: chat.sessionCode, linkId: LINK })).status === 'paused',
+        'a restored read failure remains held until the person explicitly retries it');
+      assert((await engine.resume({ jobId: JOB_A })).ok
+        && (await engine.get({ session: chat.sessionCode, linkId: LINK })).status === 'served',
+      'the existing scoped resume route rereads and serves the retained job after restart without unreleasing or requeuing it');
     },
   },
   {

@@ -39,6 +39,11 @@ export const IPC_EVENTS = Object.freeze({
   STATUS: 'handoff-bridge:status',
   JOB_CHANGED: 'handoff-bridge:job-changed',
   OPEN_PANEL: 'handoff-bridge:open-panel',
+  // The renderer's first job publication can run before main has received the
+  // window's restored canvas identity. This carries no path or job data: it
+  // only asks the already-mounted publisher to replay its current snapshot
+  // now that main can bind it to the owning window.
+  CANVAS_FILE_READY: 'handoff-bridge:canvas-file-ready',
 });
 
 export const ENGINE_PORT_SHAPE = Object.freeze(['get', 'submit', 'snapshot', 'close']);
@@ -51,7 +56,7 @@ export const STATUS_SNAPSHOT_EXAMPLE = deepFreeze({
   enabled: false, autoStart: true, autoRelease: true, serving: 'off', paused: false,
   pauseCause: null, hold: null, fault: null,
   config: { hostname: null, pluginName: 'infinite_canvas', mcpUrl: null, scope: { applications: true, scoring: true, marketplace: true }, telemetryInBugReports: false },
-  limits: { releaseTtlHours: 0, chatKeyMaxAgeHours: 0, idlePauseMinutes: 1440, jobsPerChat: 2, epochSoftBytes: 0, epochHardBytes: 0 },
+  limits: { releaseTtlHours: 0, chatKeyMaxAgeHours: 0, idlePauseMinutes: 1440, maxConcurrentHandoffs: 10 },
   prefs: { sourcePolicy: 'enforce', pairingNetworkCheck: true },
   // consentCurrent is deliberately only a boolean. It tells Settings why a
   // fully configured auto-start did not run without exposing a receipt,
@@ -63,7 +68,7 @@ export const STATUS_SNAPSHOT_EXAMPLE = deepFreeze({
   // correlation values. They deliberately contain no worker/session code,
   // prompt, or clipboard contents, but let a persistent renderer keep an
   // already-started worker out of its copy controls after a remount.
-  chat: { ordinal: 0, startedAt: null, firstCallAt: null, lastCallAt: null, lastCallKind: null, calls: 0, state: 'none', jobsAssigned: 0, jobsCap: 2, expiresInMs: null, pool: { active: false, generation: null, workerCount: 0, workers: [], plan: { recommended: 0, queued: 0, materialized: 0, expandBy: 0, reason: 'empty' } }, outstanding: null, servedTwice: false, previous: [] },
+  chat: { ordinal: 0, startedAt: null, firstCallAt: null, lastCallAt: null, lastCallKind: null, calls: 0, state: 'none', jobsAssigned: 0, expiresInMs: null, pool: { active: false, generation: null, workerCount: 0, workers: [], plan: { recommended: 0, queued: 0, materialized: 0, expandBy: 0, reason: 'empty' } }, outstanding: null, servedTwice: false, previous: [] },
   queue: { applications: { ready: 0, working: 0, needsYou: 0, held: 0, done: 0 }, scoring: { pending: 0, withChat: 0, tasks: [] }, jobs: [] },
   push: { selectedHubs: [], optedOutHubs: 0, discovered: [], claimed: [], claimWorkers: [], available: [] }, alarms: [],
   counts: {

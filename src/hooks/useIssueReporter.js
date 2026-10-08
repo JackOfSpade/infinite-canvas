@@ -6,6 +6,7 @@ import { isJobNodeType, isSellNodeType } from '../utils/nodePresence';
 import { buildSellHubResolveSnapshot } from '../utils/sellHubResolveSnapshot';
 import { redactNodeForIssueReport } from '../utils/issueReportRedaction';
 import { collectCompactJobBoardTopology } from '../utils/jobBoardReportTopology';
+import { collectPointerProbes } from '../utils/pointerOcclusionProbe';
 import { useIsMountedRef } from './useIsMountedRef';
 
 function reportBoardCount(value) {
@@ -347,6 +348,7 @@ export function useIssueReporter({
           snapToGrid,
           windowInnerWidth: window.innerWidth,
           windowInnerHeight: window.innerHeight,
+          pointerProbes: collectPointerProbes(),
           viewport: {
             x:    parseFloat(viewport.x.toFixed(2)),
             y:    parseFloat(viewport.y.toFixed(2)),

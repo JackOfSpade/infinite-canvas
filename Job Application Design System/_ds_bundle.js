@@ -1,4 +1,4 @@
-/* @ds-bundle: {"format":4,"namespace":"JobApplicationDesignSystem_895a4b","components":[],"sourceHashes":{"build/annotation-budget-test.js":"645527f59d68","build/annotation-typography-test.js":"45b5e4e71b74","build/ats-parse-test.js":"af76ec3b3614","build/bullet-redundancy-gate-doc-test.js":"49389a6e6d00","build/css-tokens.js":"cd9a99afed16","build/dual-mode-pdf.js":"2baecfd80478","build/education-placement-test.js":"4f7e567ccf91","build/fixture-safety-test.js":"1d283c401808","build/harness.js":"ed3529261dc9","build/page-policy-doc-test.js":"ed9f21c03ff5","build/parallelism-gate-doc-test.js":"97da1de7fa75","build/synthesis-scope-gate-doc-test.js":"58c28bf21c4f","build/test.js":"3b6f0b1d06e0","build/token-sync-test.js":"0c4b05fcada9","handoff/pagination-contract-check.js":"ea0805ee741d"},"inlinedExternals":[],"unexposedExports":[]} */
+/* @ds-bundle: {"format":4,"namespace":"JobApplicationDesignSystem_895a4b","components":[],"sourceHashes":{"build/annotation-budget-test.js":"645527f59d68","build/annotation-typography-test.js":"45b5e4e71b74","build/ats-parse-test.js":"225855c96a52","build/bullet-redundancy-gate-doc-test.js":"49389a6e6d00","build/css-tokens.js":"cd9a99afed16","build/dual-mode-pdf.js":"2baecfd80478","build/education-placement-test.js":"4f7e567ccf91","build/fixture-safety-test.js":"1d283c401808","build/harness.js":"ed3529261dc9","build/page-policy-doc-test.js":"ed9f21c03ff5","build/parallelism-gate-doc-test.js":"97da1de7fa75","build/synthesis-scope-gate-doc-test.js":"58c28bf21c4f","build/test.js":"3b6f0b1d06e0","build/token-sync-test.js":"0c4b05fcada9","handoff/pagination-contract-check.js":"ea0805ee741d"},"inlinedExternals":[],"unexposedExports":[]} */
 
 (() => {
 
@@ -672,6 +672,8 @@ header('resume.css — parse-safe rules are in place');
 var css = read('resume.css').replace(/\/\*[\s\S]*?\*\//g, '');
 assert(/\.nowrap\s*\{[^}]*white-space\s*:\s*nowrap/.test(css), '.nowrap utility exists (the parse-safe replacement for &nbsp;)');
 assert(/font-variant-numeric\s*:\s*normal/.test(css), 'proportional numerals are pinned (tabular figures would empty the text layer)');
+var sectionHeadRule = /\.section-head\s+h2\s*\{([^}]*)\}/.exec(css);
+assert(sectionHeadRule && /letter-spacing\s*:\s*(?:normal|0(?:\.0+)?(?:px|pt|em|rem|%)?)\s*;/.test(sectionHeadRule[1]), 'section headings use contiguous text, not positive letter-spacing', sectionHeadRule ? (sectionHeadRule[1].match(/letter-spacing\s*:[^;]+;/) || ['no letter-spacing declaration'])[0] : 'section heading rule missing');
 
 /* CSS `content` is DECORATIVE ONLY: the bullet glyph, nothing else. Any
    other value is text meaning that copy-paste and PDF extraction drop —

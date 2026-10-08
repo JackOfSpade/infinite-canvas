@@ -4,6 +4,10 @@ import {
   retryableUnstartedJobCareerImportCapability,
 } from './jobCareerImportCapability.js';
 import {
+  careerImportCompilationAdmission,
+  currentApprovedCareerImportSnapshot,
+} from './jobCareerCompilationReceipt.js';
+import {
   isMergeableTerminalJobSearchOutcome,
   terminalJobSearchOutcome,
 } from './jobBoardPausedSourceContinuation.js';
@@ -35,6 +39,27 @@ export function classifyJobBoardSourceAdmission(source) {
   }
 
   if (data.hubState === 'empty' && hubHasAcceptedInitialDrop(source)) {
+    const compilation = careerImportCompilationAdmission(data, {
+      generation: data.careerImportGeneration,
+    });
+    if (compilation.kind === 'compiling') {
+      return {
+        kind: 'career-import-compiling',
+        reason: 'Career files are still being compiled and audited.',
+      };
+    }
+    if (compilation.kind === 'failed') {
+      return {
+        kind: 'career-import-failed',
+        reason: 'Career compilation failed. Retry the career compilation on the Job Search card before searching.',
+      };
+    }
+    if (!currentApprovedCareerImportSnapshot(data, { generation: data.careerImportGeneration })) {
+      return {
+        kind: 'career-import-requires-approval',
+        reason: 'Career files have not produced a current approved snapshot. Retry compilation on the Job Search card before searching.',
+      };
+    }
     const freshImportCapability = freshJobCareerImportCapability(data, { nodeId: source.id })
       // Compatibility only: a pre-fix login rejection spent the import before
       // any parser/provider work began.  The capability helper proves that
@@ -96,7 +121,11 @@ export function jobSearchOutcomeReceiptMatches(actual, expected) {
     && !actualRunId
     && actualDisposition === 'legacy-scored';
   const expectedLegacyReceipt = isAbsent(expected.runId) && isAbsent(expected.resultDisposition);
-  const expectedBrandedLegacyReceipt = expected.legacyPositiveResult === true
+  // A persisted entry may omit the brand flag (an interrupted Combine saved
+  // by an earlier build): 'legacy-scored' is only ever minted by
+  // terminalJobSearchOutcome for a run-less positive result, so the pair
+  // (no run id, 'legacy-scored') is the brand.  An explicit false still fails.
+  const expectedBrandedLegacyReceipt = expected.legacyPositiveResult !== false
     && !expectedRunId
     && expectedDisposition === 'legacy-scored';
   const actualInvalidModernReceipt = !actualLegacyReceipt
@@ -114,6 +143,42 @@ export function jobSearchOutcomeReceiptMatches(actual, expected) {
     || actualPartialModernReceipt || expectedPartialModernReceipt) return false;
   if (actualLegacyReceipt && (expectedLegacyReceipt || expectedBrandedLegacyReceipt)) return true;
   return actualRunId === expectedRunId && actualDisposition === expectedDisposition;
+}
+
+/**
+ * The exact-run entry a Combine records for one terminal input and later
+ * re-checks with `jobSearchOutcomeReceiptMatches`.  Every construction site
+ * must use this builder: dropping `legacyPositiveResult` turns a legitimate
+ * run-less saved result into an "invalid modern receipt" and discards a
+ * Combine whose inputs never changed.
+ */
+export function combineSourceRunEntry(module) {
+  return {
+    sourceId: module.id,
+    runId: module.runId || null,
+    resultDisposition: module.resultDisposition || null,
+    legacyPositiveResult: module.legacyPositiveResult === true,
+    fingerprint: module.fingerprint,
+  };
+}
+
+/**
+ * Fixed, redacted reason code for why `jobSearchOutcomeReceiptMatches` rejects
+ * a live receipt against a recorded one (null when it matches).  Diagnostic
+ * only: it names the receipt SHAPE that failed, never ids or job content.
+ */
+export function describeReceiptMismatch(actual, expected) {
+  if (jobSearchOutcomeReceiptMatches(actual, expected)) return null;
+  if (!actual) return 'live-receipt-missing';
+  if (!expected) return 'recorded-receipt-missing';
+  if (actual.fingerprint !== expected.fingerprint) return 'fingerprint-changed';
+  const isAbsent = value => value === null || value === undefined || value === '';
+  if (!isAbsent(actual.runId) && !isAbsent(expected.runId) && actual.runId !== expected.runId) {
+    return 'run-id-changed';
+  }
+  if (isAbsent(actual.runId) !== isAbsent(expected.runId)) return 'run-id-presence-changed';
+  if (actual.resultDisposition !== expected.resultDisposition) return 'disposition-changed';
+  return 'receipt-shape-invalid';
 }
 
 /**
@@ -135,7 +200,10 @@ export function partitionJobBoardSourceAdmissions(sources) {
       partition.continuations.push(entry);
     } else if (admission.kind === 'continuation-requires-run-token'
       || admission.kind === 'fresh-import-requires-clear'
-      || admission.kind === 'terminal-requires-fresh-input') {
+      || admission.kind === 'terminal-requires-fresh-input'
+      || admission.kind === 'career-import-compiling'
+      || admission.kind === 'career-import-failed'
+      || admission.kind === 'career-import-requires-approval') {
       partition.blocked.push(entry);
     } else {
       partition.other.push(entry);
