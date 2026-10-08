@@ -387,20 +387,45 @@ function extractTargetCard(canvas, card) {
 
 // These checks deliberately validate the *test inputs*, not the application
 // generator.  The live fixture deep-clones each saved card without changing
-// its data, so a
-// title-only or accidentally duplicated saved card would otherwise turn an
-// apparently two-listing black-box exercise into a weak, misleading test.
-// Keep this content-agnostic: it must not encode facts about a particular
-// employer, role, or candidate.
-function listingText(card) {
+// its data, so a title-only or accidentally duplicated saved card would
+// otherwise turn an apparently two-listing black-box exercise into a weak,
+// misleading test. Keep this content-agnostic: it must not encode facts about
+// a particular employer, role, or candidate.
+export function rawSavedListingText(card) {
   const text = card?.data?.snippet;
   if (typeof text !== 'string') throw new Error(`Target ${card?.id || 'card'} has no textual job listing.`);
+  return text;
+}
+
+// This is deliberately presentation-only. It lets the anti-overfitting guard
+// compare semantic listing vocabulary across ordinary layout differences; it
+// is not the byte/character representation frozen into input.json.
+export function normalizedListingTextForAcceptance(card) {
+  const text = rawSavedListingText(card);
   const normalized = text.normalize('NFC').replace(/\s+/g, ' ').trim();
   if (normalized.length < 1_500) {
     throw new Error(`Target ${card.id} has only ${normalized.length} listing characters; choose a saved listing with a complete description.`);
   }
   return normalized;
 }
+
+// The production queue owns safety normalization through safeJob(). The
+// acceptance harness must compare that exact queue-safe projection to the raw
+// selected-card body, then compare every projected field with input.json.
+// Never substitute normalizedListingTextForAcceptance here: it intentionally
+// erases layout whitespace for anti-overfitting only.
+export function assertFrozenQueuedJobMatchesSavedCard(card, queuedInput) {
+  const rawListing = rawSavedListingText(card);
+  const expectedQueuedJob = projectSavedJobCardForAcceptanceHarness(card?.data);
+  if (expectedQueuedJob.snippet !== rawListing) {
+    throw new Error('Queue-safe projection did not preserve the exact selected saved job listing text.');
+  }
+  if (JSON.stringify(queuedInput?.job) !== JSON.stringify(expectedQueuedJob)) {
+    throw new Error('Production queue did not preserve the exact selected saved job listing in its frozen input.');
+  }
+  return expectedQueuedJob;
+}
+
 function listingVocabulary(text) {
   // Terms rather than raw characters make this robust to formatting and
   // boilerplate.  The minimum token length excludes punctuation fragments and
@@ -409,11 +434,11 @@ function listingVocabulary(text) {
 }
 function assertMeaningfullyDifferentSavedListings(canvas) {
   const selected = Object.values(CARDS).map(card => ({ card, node: extractTargetCard(canvas, card) }));
-  for (const { node } of selected) listingText(node);
+  for (const { node } of selected) normalizedListingTextForAcceptance(node);
   for (let left = 0; left < selected.length; left += 1) {
     for (let right = left + 1; right < selected.length; right += 1) {
       const first = selected[left]; const second = selected[right];
-      const firstText = listingText(first.node); const secondText = listingText(second.node);
+      const firstText = normalizedListingTextForAcceptance(first.node); const secondText = normalizedListingTextForAcceptance(second.node);
       if (firstText === secondText) {
         throw new Error(`Saved listings ${first.card.id} and ${second.card.id} have identical descriptions; select materially different listings for black-box acceptance.`);
       }
@@ -616,13 +641,10 @@ async function prepare({ id, cardName }) {
     // The acceptance exercise is only meaningful when generation receives the
     // exact saved listing selected above. The card identity checks alone would
     // still pass if an adapter later dropped, replaced, or shortened its
-    // listing body while queuing. Compare the queue-time safe projection,
-    // rather than duplicating the Local-AI normalizer in this wrapper.
-    const expectedQueuedJob = projectSavedJobCardForAcceptanceHarness(exactCard.data);
-    if (expectedQueuedJob.snippet !== listingText(exactCard)
-      || JSON.stringify(queuedInput?.job) !== JSON.stringify(expectedQueuedJob)) {
-      throw new Error('Production queue did not preserve the exact selected saved job listing in its frozen input.');
-    }
+    // listing body while queuing. Compare the queue-time safe projection and
+    // its full frozen payload, rather than the presentation-normalized text
+    // used only by the anti-overfitting input guard.
+    assertFrozenQueuedJobMatchesSavedCard(exactCard, queuedInput);
     const root = fs.realpathSync(paths.root);
     if (canonical(queuedManifest?.canvasFilePath) !== paths.canvas || canonical(queuedInput?.canvasFilePath) !== paths.canvas
       || canonical(queuedManifest?.canvasRoot) !== root || queuedManifest?.transport !== 'paste'
