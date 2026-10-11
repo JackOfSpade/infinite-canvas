@@ -1234,6 +1234,14 @@ export default [
       const unchanged = reconcileApplicationHtmlFromPdfBlocks({ html: source, documentKind: 'resume', blocks: visualResumeLines('Maya builds systems safely.') });
       assert(unchanged.success && unchanged.status === 'unchanged' && !unchanged.changed,
         `generated PDF-only presentation text must normalize to an unchanged résumé, got ${JSON.stringify(unchanged)}`);
+      const untrackedUppercase = visualResumeLines('Maya builds systems safely.').map(line => ({
+        ...line,
+        text: line.text === 'E X P E R I E N C E' ? 'EXPERIENCE'
+          : (line.text === 'S K I L L S' ? 'SKILLS' : line.text),
+      }));
+      const uppercase = reconcileApplicationHtmlFromPdfBlocks({ html: source, documentKind: 'resume', blocks: untrackedUppercase });
+      assert(uppercase.success && uppercase.status === 'unchanged' && !uppercase.changed,
+        `CSS-uppercased heading labels must match their trusted DOM text, got ${JSON.stringify(uppercase)}`);
       const changed = reconcileApplicationHtmlFromPdfBlocks({ html: source, documentKind: 'resume', blocks: visualResumeLines('Maya ships systems safely.') });
       assert(changed.success && changed.status === 'updated' && changed.changed && changed.html.includes('Maya ships systems safely.'),
         `one semantic token change should retain conservative importability, got ${JSON.stringify(changed)}`);
@@ -1386,6 +1394,40 @@ export default [
         caseChanged: caseChanged.status,
         reordered: reordered.status,
       };
+    },
+  },
+  {
+    name: 'Application PDF reconcile: wrapped left role header restores exact two-column reading order',
+    run: () => {
+      const html = '<!doctype html><html><body><section data-ic-document-panel="resume"><main class="page"><h1 class="name">Maya Chen</h1><section class="section"><div class="section-head"><h2>Experience</h2></div><div class="role-header meta-row"><p class="role-title-line"><span class="title">Engineer</span><span class="sep">·</span><span class="company">North Valley Research Cooperative</span></p><p class="role-dates">2021 – 2023<span class="sep">·</span>Ottawa</p></div><ul><li>Built reliable tools.</li></ul></section></main></section></body></html>';
+      const head = [
+        { page: 1, x: 56, y: 700, text: 'Maya Chen' },
+        { page: 1, x: 56, y: 670, text: 'E X P E R I E N C E' },
+      ];
+      const first = {
+        page: 1, x: 56, y: 640, height: 11,
+        items: [
+          { x: 56, width: 44, text: 'Engineer' },
+          { x: 104, width: 4, text: '·' },
+          { x: 112, width: 103, text: 'North Valley Research' },
+          { x: 350, width: 100, text: '2021 – 2023 · Ottawa' },
+        ],
+        text: 'Engineer · North Valley Research 2021 – 2023 · Ottawa',
+      };
+      const continuation = { page: 1, x: 56, y: 624, height: 11, items: [{ x: 56, width: 65, text: 'Cooperative' }], text: 'Cooperative' };
+      const blocks = [...head, first, continuation, { page: 1, x: 56, y: 595, text: '• Built reliable tools.' }];
+      const unchanged = reconcileApplicationHtmlFromPdfBlocks({ html, documentKind: 'resume', blocks });
+      assert(unchanged.success && unchanged.status === 'unchanged',
+        `an exact wrapped role header must reconcile unchanged, got ${JSON.stringify(unchanged)}`);
+      for (const changed of [
+        { ...continuation, text: 'Foundation', items: [{ x: 56, width: 65, text: 'Foundation' }] },
+        { ...continuation, text: 'Cooperative', x: 350, items: [{ x: 350, width: 65, text: 'Cooperative' }] },
+      ]) {
+        const mismatch = reconcileApplicationHtmlFromPdfBlocks({ html, documentKind: 'resume', blocks: [...head, first, changed, blocks.at(-1)] });
+        assert(!mismatch.success && mismatch.status === 'conflict' && mismatch.html === html,
+          `altered or wrong-column company continuation must conflict, got ${JSON.stringify(mismatch)}`);
+      }
+      return { unchanged: unchanged.status, sabotage: 2 };
     },
   },
   {

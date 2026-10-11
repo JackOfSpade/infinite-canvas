@@ -1,5 +1,7 @@
 import fs from 'node:fs';
 import { assert } from './testHelpers.js';
+import { importLocalApplicationJob, PDFDocument } from '../test-dependencies.js';
+import { __setLocalAiRenderPdfForTests } from '../../electron/ipc/localAiApplication.js';
 import { FLOW_SPECS, createFlow, runBlindCycle } from './gapfix-repair-convergence.js';
 
 async function promoteEditorialCandidate(flow, spec) {
@@ -65,6 +67,23 @@ export default [{
           && JSON.stringify(manifest.paste.resume) === JSON.stringify(flow.original.resume)
           && JSON.stringify(manifest.paste.coverLetter) === JSON.stringify(flow.original.coverLetter),
         `${spec.id}: judge loss leaves incumbent documents byte-identical`);
+        if (spec === FLOW_SPECS[0]) {
+          const pdf = await PDFDocument.create(); pdf.addPage([612, 792]);
+          const bytes = Buffer.from(await pdf.save());
+          __setLocalAiRenderPdfForTests(async () => ({ bytes, pageCount: 2, fontsLoaded: true,
+            missingFontFaces: [], layout: { contentHeightPx: 900, typeAreaHeightPx: 800 } }));
+          try {
+            const imported = await importLocalApplicationJob({ jobId: flow.queued.id,
+              canvasFilePath: flow.project.canvasFilePath, senderId: 9911 });
+            const reopened = await flow.manifest();
+            assert(imported.status === 'revision-required' && reopened.status === 'queued'
+              && reopened.paste.stage === 'review' && !reopened.paste.refinementOutcome,
+            'a measured fit failure reopens a judged incumbent without a completed-only refinement outcome');
+            const handoff = await flow.current();
+            assert(handoff.stage === 'review' && handoff.prompt.includes('requiredChangeDocuments'),
+              'the reopened fit handoff remains readable and requires a measured document repair');
+          } finally { __setLocalAiRenderPdfForTests(null); }
+        }
       } finally { await flow.cleanup(); }
     }
   },

@@ -11,7 +11,7 @@ const PDF_TEXT_TOKEN = /[\p{L}\p{N}][\p{L}\p{N}\p{M}'’.-]*|[^\s]/gu;
 const MAX_RECONCILE_TOKENS = 4_000;
 // Bump when trusted HTML ↔ PDF comparison semantics change so a previously
 // deterministic retry verdict is not reused against a repaired comparator.
-export const APPLICATION_PDF_RECONCILE_REVISION = 3;
+export const APPLICATION_PDF_RECONCILE_REVISION = 5;
 // pdfjs-dist chooses its Node implementation (including the adjacent worker)
 // only when Node loads its native ESM file. A static import lets Vite inline its
 // browser build into Electron's CJS main bundle, where worker setup falls back
@@ -507,6 +507,11 @@ function foldedText(value) {
 
 function collapsedTrackedHeading(text, knownHeadings) {
   const normalized = normalizeReconcileText(text);
+  // Chromium may apply the section label's uppercase styling without
+  // inter-character tracking. Match only an entire trusted heading; other
+  // all-caps PDF text must still pass the ordinary token comparison.
+  const exactHeading = knownHeadings.find(heading => foldedText(heading) === foldedText(normalized));
+  if (exactHeading) return exactHeading;
   // PDF text extraction represents the design-system's tracked section labels
   // as `E X P E R I E N C E`.  Only collapse a form that matches a heading we
   // already trust in the DOM; arbitrary all-caps résumé content is untouched.
@@ -768,6 +773,57 @@ function resumeContentBlocks(blocks) {
  * headings and skill labels, so it cannot invent a structure from a foreign
  * or damaged PDF.
  */
+function canonicalizeWrappedRoleHeaders(lines, main) {
+  const ordered = [...lines];
+  for (const header of main.querySelectorAll('.role-header.meta-row')) {
+    const left = textTokens(header.querySelector('.role-title-line')?.textContent);
+    const right = textTokens(header.querySelector('.role-dates')?.textContent);
+    if (!left.length || !right.length) continue;
+    const matches = [];
+    for (let index = 0; index < ordered.length; index += 1) {
+      const line = ordered[index];
+      const items = Array.isArray(line.items) ? line.items : [];
+      if (items.length < 2) continue;
+      const rightItem = items.at(-1);
+      const leftItems = items.slice(0, -1);
+      const prefix = leftItems.flatMap(item => textTokens(item.text));
+      const leftEdge = Math.min(...leftItems.map(item => Number(item.x)));
+      const leftEnd = Math.max(...leftItems.map(item => Number(item.x) + Number(item.width)));
+      if (!Number.isFinite(leftEdge) || !Number.isFinite(leftEnd)
+        || !Number.isFinite(rightItem?.x) || rightItem.x - leftEnd < 16
+        || !sameTokenSequence(textTokens(rightItem.text), right)
+        || !prefix.length || prefix.length >= left.length
+        || !sameTokenSequence(prefix, left.slice(0, prefix.length))) continue;
+      let offset = prefix.length;
+      let cursor = index + 1;
+      let priorY = Number(line.y);
+      while (offset < left.length && cursor < ordered.length) {
+        const continuation = ordered[cursor];
+        const tokens = textTokens(continuation.text);
+        const y = Number(continuation.y);
+        if (continuation.page !== line.page || !Number.isFinite(y)
+          || !Number.isFinite(continuation.x) || Math.abs(continuation.x - leftEdge) > 12
+          || !(priorY > y) || priorY - y > Math.max(24, Number(line.height || 0) * 2)
+          || !tokens.length || offset + tokens.length > left.length
+          || !sameTokenSequence(tokens, left.slice(offset, offset + tokens.length))) break;
+        offset += tokens.length;
+        priorY = y;
+        cursor += 1;
+      }
+      if (offset === left.length) matches.push({ index, cursor });
+    }
+    // Only a unique, exact two-column match may repair reading order. A
+    // missing or altered token leaves the original lines for the truth gate.
+    if (matches.length !== 1) continue;
+    const { index, cursor } = matches[0];
+    ordered.splice(index, cursor - index, {
+      ...ordered[index],
+      text: `${header.querySelector('.role-title-line').textContent} ${header.querySelector('.role-dates').textContent}`,
+    });
+  }
+  return ordered;
+}
+
 function canonicalizeResumePdfLines(lines, main) {
   const knownHeadings = [...main.querySelectorAll('.section-head h2')].map(element => normalizeReconcileText(element.textContent));
   const normalized = resumeContentBlocks(lines)
@@ -776,16 +832,17 @@ function canonicalizeResumePdfLines(lines, main) {
       // `•` is a visual list marker, never a text node in the generated HTML.
       text: collapsedTrackedHeading(normalizeReconcileText(line.text).replace(/^•\s*/, ''), knownHeadings),
     }));
+  const roleOrdered = canonicalizeWrappedRoleHeaders(normalized, main);
   const skillsHeading = knownHeadings.find(heading => foldedText(heading) === 'skills');
-  const skillsIndex = normalized.findIndex(line => skillsHeading && foldedText(line.text) === foldedText(skillsHeading));
+  const skillsIndex = roleOrdered.findIndex(line => skillsHeading && foldedText(line.text) === foldedText(skillsHeading));
   const rows = skillRows(main);
-  if (skillsIndex < 0 || !rows.length) return normalized;
-  const nextSection = nextResumeSectionIndex(normalized, skillsIndex, knownHeadings, skillsHeading);
-  const skillLines = normalized.slice(skillsIndex + 1, nextSection);
+  if (skillsIndex < 0 || !rows.length) return roleOrdered;
+  const nextSection = nextResumeSectionIndex(roleOrdered, skillsIndex, knownHeadings, skillsHeading);
+  const skillLines = roleOrdered.slice(skillsIndex + 1, nextSection);
   const reordered = semanticSkillLines(skillLines, rows) || exactSeparatedSkillColumns(skillLines, rows);
   return reordered
-    ? [...normalized.slice(0, skillsIndex + 1), ...reordered, ...normalized.slice(nextSection)]
-    : normalized;
+    ? [...roleOrdered.slice(0, skillsIndex + 1), ...reordered, ...roleOrdered.slice(nextSection)]
+    : roleOrdered;
 }
 
 function isPresentationalToken(token) {

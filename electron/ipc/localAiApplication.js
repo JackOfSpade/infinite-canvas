@@ -10745,6 +10745,7 @@ async function reopenPastePreflightHostValidation({ jobId, dir, manifest, input,
     })),
     logCount: (state.logCount || 0) + 1,
   };
+  delete recovery.refinementOutcome;
   await appendPasteGenerationLog(dir, {
     type: 'host-validation-failed', jobId, sequence: recovery.logCount,
     revision: recovery.revision, stage: 'review', detail: details,
@@ -11220,6 +11221,9 @@ async function recoverPasteMeasuredFitHandoff({ root, dir, manifest, input, stat
     baseHashes: pasteBaseHashesFor(persisted),
     logCount,
   };
+  // Measured fit can change the judged document pair. The signed outcome
+  // remains in history, but it cannot describe an active repair round.
+  delete recovered.refinementOutcome;
   await fs.promises.writeFile(path.join(dir, 'paste-draft.json'), '', { encoding: 'utf8', mode: 0o600 });
   const updatedManifest = { ...manifest, status: 'queued', paste: recovered };
   await atomicJson(path.join(dir, 'manifest.json'), updatedManifest);
@@ -11303,6 +11307,7 @@ async function recoverPasteHostValidationHandoff({ root, dir, manifest, input, s
     } : {}),
     baseHashes: pasteBaseHashesFor(persisted), logCount,
   };
+  delete recovered.refinementOutcome;
   await fs.promises.writeFile(path.join(dir, 'paste-draft.json'), '', { encoding: 'utf8', mode: 0o600 });
   const updatedManifest = { ...manifest, status: 'queued', paste: recovered };
   await atomicJson(path.join(dir, 'manifest.json'), updatedManifest);
@@ -12795,6 +12800,7 @@ export async function submitLocalApplicationHandoff({ jobId, canvasFilePath, han
           ...(rejectedFinalReview ? { rejectedResponseSha256: pasteResponseContentHash(rejectedFinalReview) } : {}),
           logCount: (state.logCount || 0) + 1,
         };
+        delete recovery.refinementOutcome;
         await appendPasteGenerationLog(dir, withHostCanonicalizationRecord({
           type: 'host-validation-failed', jobId, sequence: recovery.logCount,
           revision: recovery.revision, stage: 'review', detail: details,
@@ -21156,6 +21162,7 @@ async function importLocalApplicationJobAttempt({ jobId, canvasFilePath, senderI
           ...(!coverLetterTargetMet ? ['coverLetter:rendered'] : []),
         ],
       };
+      delete paste.refinementOutcome;
       paste.baseHashes = pasteBaseHashesFor(paste);
       paste.logCount = (Number(paste.logCount) || 0) + 1;
       await appendPasteGenerationLog(dir, {
