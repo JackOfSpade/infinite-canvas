@@ -1308,7 +1308,7 @@ export const APPLICATION_COVER_LETTER_SCHEMA = {
   type: 'object',
   required: ['paragraphs'],
   properties: {
-    paragraphs: { type: 'array', items: { type: 'string' }, description: 'Body paragraphs only: plain prose derived from the approved argument plan, with no markdown or envelope fields. Give each paragraph one argumentative job, not a prescribed number of sentences. Use as many sentences as clarity requires; no fixed claim-proof-relevance sentence pattern applies.' },
+    paragraphs: { type: 'array', items: { type: 'string' }, description: 'Body paragraphs only: plain prose derived from the approved argument plan, with no markdown or envelope fields. Give each paragraph one argumentative job, not a prescribed number of sentences. Use the sentences the proof needs, usually two to four; no fixed claim-proof-relevance sentence pattern applies, and no single detail of the evidence gets a paragraph of its own. Each paragraph adds what its résumé bullet cannot, the reason, constraint, decision or outcome that the career-data quote behind it states, and never restates the bullet or adds a fact that quote does not state.' },
   },
 };
 
@@ -1319,7 +1319,7 @@ export const APPLICATION_DIRECT_COVER_LETTER_SCHEMA = {
   type: 'object',
   required: ['paragraphs', 'argumentContract'],
   properties: {
-    paragraphs: { type: 'array', items: { type: 'string' }, description: 'Body paragraphs only: plain prose, with no markdown or envelope fields. Give each paragraph one argumentative job, not a prescribed number of sentences. Use as many sentences as clarity requires; no fixed claim-proof-relevance sentence pattern applies.' },
+    paragraphs: { type: 'array', items: { type: 'string' }, description: 'Body paragraphs only: plain prose, with no markdown or envelope fields. Give each paragraph one argumentative job, not a prescribed number of sentences. Use the sentences the proof needs, usually two to four; no fixed claim-proof-relevance sentence pattern applies, and no single detail of the evidence gets a paragraph of its own. Each paragraph adds what its résumé bullet cannot, the reason, constraint, decision or outcome that the career-data quote behind it states, and never restates the bullet or adds a fact that quote does not state.' },
     argumentContract: {
       type: 'object',
       required: ['roleThesis', 'primaryEvidence', 'primaryRelationToThesis', 'secondaryNarrativeRole', 'secondaryEvidence', 'secondaryRelationToPrimary'],

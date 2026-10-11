@@ -121,6 +121,70 @@ export function resumableCareerImportCompilation(data, {
   return receipt;
 }
 
+// The retained career input a saved compile checkpoint would re-read.  Shared by
+// the resume itself and the banner that describes it, so what is explained is
+// exactly what Continue would submit.
+export function careerResumeInputPaths(data) {
+  return [...new Set([
+    ...(Array.isArray(data?.filePaths) ? data.filePaths : []),
+    ...(Array.isArray(data?.careerFilePaths) ? data.careerFilePaths : []),
+    data?.filePath,
+  ].filter(value => typeof value === 'string' && value))];
+}
+
+// The verdict the saved-compilation banner shows.  A marker whose card has no
+// retained input paths can never be inspected (there is nothing to stage), so
+// it gets a terminal `missing-input` state rather than waiting on a check that
+// will never run; any other marker shows the inspected verdict once it exists
+// for exactly this run and these paths, and `checking` until then.
+export function careerResumeBannerStatus({ markerRunId = null, paths = [], inspected = null, key = '' } = {}) {
+  if (!markerRunId) return null;
+  if (!Array.isArray(paths) || paths.length === 0) return { state: 'missing-input' };
+  return inspected && inspected.key === key ? inspected : { state: 'checking' };
+}
+
+// Plain-language account of what Continue will really do for a saved career
+// compilation, from the main process's content-level verdict
+// (`inspect-career-compile-resume`).  The wording never claims an exact resume
+// unless the verdict proves one; `exact` is returned so a caller/test can assert
+// that no other state is ever presented as exact.
+export function careerCompileResumeExplanation(status, { paused = false } = {}) {
+  const lead = paused ? 'You paused this career compilation. ' : 'This career compilation was interrupted. ';
+  const title = 'Saved career compilation';
+  const reuse = 'Continue re-runs compilation and reuses each earlier answer whose prompt is unchanged; anything else is asked again. It does not claim to resume at an exact step.';
+  switch (status?.state) {
+    case 'checking':
+      return { title, exact: false, body: `${lead}Checking whether it can resume exactly…` };
+    case 'snapshot-ready':
+      return { title, exact: false, body: `${lead}An approved snapshot already exists for the current career files, so Continue adopts it and asks nothing more.` };
+    case 'exact': {
+      const count = Number.isFinite(status.acceptedSteps) && status.acceptedSteps > 0 ? Math.floor(status.acceptedSteps) : 0;
+      return {
+        title, exact: true,
+        body: count > 0
+          ? `${lead}Your career files and the compiler are unchanged since it was saved. Continue replays the ${count} answer${count === 1 ? '' : 's'} you already gave for them, in order, and stops at the first one still needed.`
+          : `${lead}Your career files and the compiler are unchanged since it was saved, but no answer was accepted for these exact files yet, so Continue starts with the first question.`,
+      };
+    }
+    case 'missing-input':
+      return {
+        title, exact: false,
+        body: `${lead}This card no longer records the career files it was compiling, so it cannot be resumed. Use Clear career data before choosing new input.`,
+      };
+    case 'restart':
+      return {
+        title, exact: false,
+        body: status.reason === 'run-missing'
+          ? `${lead}Its saved answers are no longer on disk, so Continue will restart compilation from the beginning.`
+          : `${lead}Your career files or the compiler changed after it was saved, so the earlier answers no longer apply. Continue will restart compilation from the beginning.`,
+      };
+    case 'unverified':
+      return { title, exact: false, body: `${lead}It was saved before change tracking existed, so an exact resume cannot be verified. ${reuse}` };
+    default:
+      return { title, exact: false, body: `${lead}It could not be checked just now. ${reuse}` };
+  }
+}
+
 // Tiny orchestration seam used by every legacy path alias: provider admission
 // receives the compiler's immutable output, never the original file paths.
 export async function compileBeforeCareerProvider({ compile, provider } = {}) {

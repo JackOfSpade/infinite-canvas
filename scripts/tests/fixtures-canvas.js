@@ -602,8 +602,8 @@ export default [
         glassdoorCheckpoint: glassdoorCheckpointPacing.checkpointCooldownMs,
         googleCheckpoint: googleCheckpointPacing.checkpointCooldownMs,
       };
+    },
   },
-},
 {
     // One panel 429 used to disable description enrichment for the WHOLE
     // remaining source: 19 more pages were walked with no descriptions, 275 of
@@ -1741,7 +1741,7 @@ export default [
     // DOM test harness.  Lock the integration seams down here instead: these
     // are the ordering and guard invariants that cannot be established by the
     // generic queue unit test alone.
-    name: 'Job Card application integration acquires before mutable reads, releases after local handoff, and guards duplicate/deleted calls',
+    name: 'Job Card application integration validates its snapshot before queueing, releases after local handoff, and guards duplicate/deleted calls',
     run: () => {
       const source = fs.readFileSync(path.resolve('src/nodes/JobCardNode.jsx'), 'utf8');
       const indexOf = (needle) => source.indexOf(needle);
@@ -1753,12 +1753,8 @@ export default [
       const latchSet = generationIndexOf('applicationSubmissionRef.current = true;');
       const acquire = generationIndexOf('lease = await acquireModuleRun({');
       const currentCanvasRead = generationIndexOf('const canvasFilePath = nav?.getCurrentFile ? nav.getCurrentFile() : nav?.currentFile ?? null;');
-      // getLiveNode, not getNode: the origin Job Search can sit on another
-      // canvas level once a module has been absorbed into a sub-canvas, and a
-      // level-scoped miss here reads as "the module was deleted". The ordering
-      // invariant this line anchors (re-read AFTER owning the lease) is
-      // unchanged — only the resolver widened.
-      const originRead = generationIndexOf('const originHub = getLiveNode(originHubId);');
+      const snapshotPin = generationIndexOf("const careerSnapshotId = typeof data.careerSnapshotId === 'string' ? data.careerSnapshotId.trim() : '';");
+      const snapshotGuard = generationIndexOf('if (!careerSnapshotId) {');
       const queueIpc = generationIndexOf('await window.electronAPI.queueLocalApplication({');
       const release = generationIndexOf('lease?.release();');
       const canvasSource = fs.readFileSync(path.resolve('src/Canvas.jsx'), 'utf8');
@@ -1768,19 +1764,28 @@ export default [
 
       assert(latchGuard >= 0 && latchSet > latchGuard && acquire > latchSet,
         'a synchronous per-card latch must reject duplicate clicks before a queue lease is requested');
-      assert(acquire >= 0 && currentCanvasRead > acquire && originRead > currentCanvasRead,
-        'queued cards must re-read the current canvas path, career data, and achievement cache after owning their FIFO lease');
+      assert(snapshotPin >= 0 && snapshotGuard > snapshotPin && snapshotGuard < acquire
+        && currentCanvasRead > acquire && queueIpc > currentCanvasRead,
+      'Generate must reject an unpinned card before its FIFO lease, then re-read the current canvas path after owning the lease before queueing');
       assert(source.includes('nav?.getCurrentFile ? nav.getCurrentFile() : nav?.currentFile'),
         'a null latest canvas path must not fall back to a stale closure-captured path while queued');
       assert(generationScope.includes('queueLocalApplication({')
         && generationScope.includes('canvasFilePath,'),
       'a Local AI handoff must receive the post-lease saved canvas path, so its job folder is canvas-local');
+      assert(generationScope.includes('careerSnapshotId,')
+        && !/\bcareerData\s*:/.test(generationScope)
+        && !/\bresumeProfile\s*:/.test(generationScope)
+        && !/\bachievements\s*:/.test(generationScope)
+        && !/\bmineAllowed\s*:/.test(generationScope)
+        && !generationScope.includes('originHubId')
+        && !generationScope.includes('const originHub ='),
+      'the queue payload must carry only the immutable career snapshot pin, never mutable hub authority or an origin-hub recovery path');
       assert(source.includes('getLocalApplicationStatus({ jobId, canvasFilePath })')
         && source.includes('canvasFilePath: queuedCanvasFilePath || canvasFilePath')
         && source.includes('expectedResultSha256')
         && source.includes('openLocalApplicationFolder({ jobId: localApplication.id, canvasFilePath })'),
       'poll, import, and open operations must keep using the canvas path that owns the queued job');
-      assert(queueIpc > originRead && release > queueIpc,
+      assert(release > queueIpc,
         'the lease must cover creation of the durable local handoff, then release after the queue write settles');
       assert(!generationScope.includes('generateApplication({') && !generationScope.includes('saveApplication({'),
         'Application Generate must never enter the retired remote generation/save path');
@@ -1817,7 +1822,7 @@ export default [
       assert(!preloadSource.includes("ipcRenderer.invoke('generate-application'")
         && !applicationIpcSource.includes("handleSafe('generate-application'"),
       'remote application generation must not be exposed through preload or registered in the main process');
-      return { lifecycleOrdered: true, remountSafe: true, currentCanvasAtLease: true, hiddenCardContinues: true, localOnly: true };
+      return { lifecycleOrdered: true, snapshotPinned: true, remountSafe: true, currentCanvasAtLease: true, hiddenCardContinues: true, localOnly: true };
     },
   },
 {
@@ -2032,6 +2037,144 @@ export default [
         && !hasActiveExternalRunState([{ id: 'settled', type: 'jobhub', data: { hubState: 'done', pendingJobs: null } }]),
       'paused and pending Search transactions must remain protected from snapshot, undo, and navigation even outside a processing hubState');
       return { settingsRestored: 9, lockedModePreserved: true, liveRunPreserved: true, retiredAgeSettingNotRestored: true, pausedRunGuarded: true };
+    },
+  },
+{
+    name: 'Interview Helper undo keeps setup undoable while isolating live worker lifecycle and outputs',
+    run: () => {
+      const snapshotA = 'a'.repeat(64);
+      const snapshotB = 'b'.repeat(64);
+      const historical = {
+        id: 'interview-undo', type: 'interviewhelper', position: { x: 10, y: 20 },
+        data: {
+          interviewHelperSourceNodeId: 'historical-source',
+          interviewHelperSourceSnapshotId: snapshotA,
+          interviewHelperCareerMode: 'job-search',
+          interviewHelperCareerFilenames: ['historical-career.md'],
+          interviewHelperJobUrl: 'https://jobs.example.test/historical',
+          interviewHelperApplicationBundle: { artifactId: 'historical-bundle', digest: snapshotA, label: 'Historical application' },
+          locked: true,
+          interviewHelperCareerGeneration: 'historical-generation',
+          interviewHelperCareerCompilation: { status: 'failed', manualAiRunId: 'career-historical' },
+          interviewHelperCareerSnapshotId: snapshotA,
+          interviewHelperCareerFingerprint: 'historical-fingerprint',
+          interviewHelperPreparation: { briefId: 'historical-brief' },
+          interviewHelperPreparationInputBinding: 'historical-binding',
+          interviewHelperPreparationInputDigest: 'historical-digest',
+          interviewHelperPreparationRunId: 'preparation-historical',
+          interviewHelperManualAiCleanup: { version: 1, kind: 'career', runId: 'cleanup-historical', status: 'failed' },
+          interviewHelperManualAiRetirementReceipts: [{ runId: 'retirement-historical', retirementPending: true }],
+          interviewHelperLockedPlan: { stale: true },
+          interviewHelperCurrentStep: 4,
+        },
+      };
+      const live = {
+        ...historical,
+        position: { x: 80, y: 90 },
+        data: {
+          ...historical.data,
+          interviewHelperSourceNodeId: 'live-source',
+          interviewHelperSourceSnapshotId: snapshotB,
+          interviewHelperJobUrl: 'https://jobs.example.test/live',
+          interviewHelperApplicationBundle: { artifactId: 'live-bundle', digest: snapshotB, label: 'Live application' },
+          locked: false,
+          interviewHelperCareerGeneration: 'live-generation',
+          interviewHelperCareerCompilation: { status: 'approved', careerSnapshotId: snapshotB },
+          interviewHelperCareerSnapshotId: snapshotB,
+          interviewHelperCareerFingerprint: 'live-fingerprint',
+          interviewHelperPreparation: { briefId: 'live-brief' },
+          interviewHelperPreparationInputBinding: 'live-binding',
+          interviewHelperPreparationInputDigest: 'live-digest',
+          interviewHelperPreparationRunId: null,
+          interviewHelperManualAiCleanup: { version: 1, kind: 'preparation', runId: 'cleanup-live', status: 'failed' },
+          interviewHelperManualAiRetirementReceipts: [{ runId: 'retirement-live', retirementPending: true }],
+          interviewHelperLockedPlan: { live: true },
+          interviewHelperCurrentStep: 2,
+        },
+      };
+
+      const restored = mergeNonRestorableNodeDataFromLive([historical], [live])[0];
+      for (const field of ['interviewHelperSourceNodeId', 'interviewHelperSourceSnapshotId', 'interviewHelperCareerMode', 'interviewHelperCareerFilenames', 'interviewHelperJobUrl', 'interviewHelperApplicationBundle', 'locked']) {
+        assert(JSON.stringify(restored.data[field]) === JSON.stringify(historical.data[field]),
+          `Interview Helper undo must restore the user setup field ${field}`);
+      }
+      for (const field of [
+        'interviewHelperCareerGeneration', 'interviewHelperCareerCompilation', 'interviewHelperCareerSnapshotId',
+        'interviewHelperCareerFingerprint', 'interviewHelperPreparation', 'interviewHelperPreparationInputBinding',
+        'interviewHelperPreparationInputDigest', 'interviewHelperPreparationRunId', 'interviewHelperLockedPlan',
+        'interviewHelperCurrentStep',
+      ]) {
+        assert(!Object.prototype.hasOwnProperty.call(restored.data, field),
+          `changed Interview Helper setup must clear incompatible live ${field} instead of resurrecting a stale snapshot`);
+      }
+      assert(restored.data.interviewHelperManualAiCleanup?.runId === 'cleanup-live'
+        && restored.data.interviewHelperManualAiRetirementReceipts?.[0]?.runId === 'retirement-live',
+      'Interview Helper undo must retain the exact live terminal-cleanup marker and retained retirement receipt');
+
+      const sameSetupLive = {
+        ...live,
+        data: {
+          ...live.data,
+          interviewHelperSourceNodeId: historical.data.interviewHelperSourceNodeId,
+          interviewHelperSourceSnapshotId: historical.data.interviewHelperSourceSnapshotId,
+          interviewHelperJobUrl: historical.data.interviewHelperJobUrl,
+          interviewHelperApplicationBundle: historical.data.interviewHelperApplicationBundle,
+          locked: false,
+          interviewHelperCareerSnapshotId: snapshotA,
+          interviewHelperPreparation: { briefId: 'live-brief-for-same-inputs' },
+        },
+      };
+      const sameSetupRestored = mergeNonRestorableNodeDataFromLive([historical], [sameSetupLive])[0];
+      assert(sameSetupRestored.data.interviewHelperPreparation?.briefId === 'live-brief-for-same-inputs'
+        && sameSetupRestored.data.interviewHelperCareerSnapshotId === snapshotA
+        && sameSetupRestored.data.interviewHelperLockedPlan?.live === true,
+      'matching Interview Helper setup must keep live output fields, never the historical brief/snapshot/plan');
+
+      const lifecycleOnly = {
+        ...historical,
+        data: {
+          ...historical.data,
+          interviewHelperCareerGeneration: 'another-generation',
+          interviewHelperPreparation: { briefId: 'another-brief' },
+          interviewHelperManualAiCleanup: { version: 1, kind: 'preparation', runId: 'another-cleanup', status: 'failed' },
+          interviewHelperManualAiRetirementReceipts: [{ runId: 'another-retirement' }],
+        },
+      };
+      const setupEdited = { ...historical, data: { ...historical.data, interviewHelperJobUrl: 'https://jobs.example.test/edited' } };
+      assert(fingerprint({ nodes: [historical], edges: [], drawings: [] })
+          === fingerprint({ nodes: [lifecycleOnly], edges: [], drawings: [] })
+        && fingerprint({ nodes: [historical], edges: [], drawings: [] })
+          !== fingerprint({ nodes: [setupEdited], edges: [], drawings: [] }),
+      'Interview Helper fingerprints must omit output/lifecycle state while retaining user setup');
+
+      const [withoutLiveNode] = mergeNonRestorableNodeDataFromLive([historical], []);
+      for (const field of [
+        'interviewHelperCareerCompilation', 'interviewHelperCareerSnapshotId', 'interviewHelperPreparation',
+        'interviewHelperManualAiCleanup', 'interviewHelperManualAiRetirementReceipts', 'interviewHelperLockedPlan',
+      ]) {
+        assert(!Object.prototype.hasOwnProperty.call(withoutLiveNode.data, field),
+          `restoring an Interview Helper without a live node must not resurrect ${field}`);
+      }
+
+      const careerRun = { id: 'career-run', type: 'interviewhelper', data: { interviewHelperCareerCompilation: { status: 'compiling', manualAiRunId: 'career-run' } } };
+      const careerFailure = { id: 'career-failure', type: 'interviewhelper', data: { interviewHelperCareerCompilation: { status: 'failed', manualAiRunId: 'career-failure' } } };
+      const preparationRun = { id: 'preparation-run', type: 'interviewhelper', data: { interviewHelperPreparation: { status: 'preparing' }, interviewHelperPreparationRunId: 'preparation-run' } };
+      const preparationFailure = { id: 'preparation-failure', type: 'interviewhelper', data: { interviewHelperPreparation: { status: 'failed' }, interviewHelperPreparationRunId: 'preparation-failure' } };
+      const cleanup = { id: 'cleanup-run', type: 'interviewhelper', data: { interviewHelperManualAiCleanup: { version: 1, kind: 'career', runId: 'cleanup-run', status: 'failed' } } };
+      const receipts = { id: 'retained-receipt', type: 'interviewhelper', data: { interviewHelperManualAiRetirementReceipts: [{ runId: 'retained-run', retirementPending: true, retirementReason: 'node-deleted', cancellationPending: false, cancellationReason: 'node-deleted' }] } };
+      const malformedCleanup = { id: 'malformed-cleanup', type: 'interviewhelper', data: { interviewHelperManualAiCleanup: { version: 1, kind: 'career', runId: 'cleanup-run', status: 'failed', extra: true } } };
+      const malformedReceipts = { id: 'malformed-receipts', type: 'interviewhelper', data: { interviewHelperManualAiRetirementReceipts: [{ runId: 'not a ui run id' }, { runId: 'extra-field', retirementPending: true, retirementReason: 'node-deleted', cancellationPending: false, cancellationReason: 'node-deleted', extra: true }] } };
+      const missingRun = { id: 'missing-run', type: 'interviewhelper', data: { interviewHelperCareerCompilation: { status: 'compiling' } } };
+      const nested = { id: 'group', type: 'group', data: { canvasData: { nodes: [preparationFailure], edges: [], drawings: [] } } };
+      assert([careerRun, careerFailure, preparationRun, preparationFailure, cleanup, receipts]
+        .every(node => hasActiveExternalRunState([node]))
+        && !hasActiveExternalRunState([malformedCleanup])
+        && !hasActiveExternalRunState([malformedReceipts])
+        && !hasActiveExternalRunState([missingRun])
+        && hasActiveExternalRunState([nested])
+        && !hasActiveExternalRunState([nested], { recursive: false }),
+      'recoverable Interview Helper runs, strict cleanup, and retained receipts must guard undo/navigation/absorption recursively');
+      return { setupFields: 7, lifecycleFields: 12, nestedGuarded: true, strictReceipts: true, absentLiveFieldsCleared: true };
     },
   },
 {
@@ -5511,24 +5654,25 @@ export default [
     },
   },
 {
-    name: 'Application Generate preserves an existing achievement ledger without starting API mining',
+    name: 'Application Generate relies on current snapshot authority without starting API mining',
     run: () => {
       const source = fs.readFileSync(path.resolve('src/nodes/JobCardNode.jsx'), 'utf8');
       const generationStart = source.indexOf('const generateApplication = useCallback');
       const generationEnd = source.indexOf('\n  return (', generationStart);
       const generationScope = source.slice(generationStart, generationEnd);
-      // Snapshot-pinned cards may legitimately outlive their origin Job Search
-      // node. The immutable snapshot remains authoritative for the career
-      // data, while an absent origin simply means there is no legacy ledger to
-      // pass through.
-      assert(generationScope.includes('const cachedAchievements = originHub?.data?.achievements || null;')
-        && generationScope.includes('...(!careerSnapshotId ? { achievements: cachedAchievements, mineAllowed } : {})'),
-      'legacy local handoffs must receive the hub ledger and an explicit signal, while snapshot-pinned applications reject mutable hub achievements');
+      assert(generationScope.includes('const careerSnapshotId = typeof data.careerSnapshotId')
+        && generationScope.includes('careerSnapshotId,')
+        && !generationScope.includes('originHubId')
+        && !/\bcareerData\s*:/.test(generationScope)
+        && !/\bresumeProfile\s*:/.test(generationScope)
+        && !/\bachievements\s*:/.test(generationScope)
+        && !/\bmineAllowed\s*:/.test(generationScope),
+      'new applications must rely on their immutable snapshot pin and never send mutable hub authority');
       assert(!generationScope.includes('achievementsMining')
         && !generationScope.includes('generateApplication({')
         && !generationScope.includes('updateGlobal(originHubId, { achievements:'),
       'the renderer must not start or write back remote achievement mining during local-only generation');
-      return { cachedLedgerPassedThrough: true, apiMiningDisabled: true };
+      return { snapshotAuthorityOnly: true, apiMiningDisabled: true };
     },
   },
 {

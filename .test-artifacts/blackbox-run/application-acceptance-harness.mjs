@@ -15,6 +15,7 @@ import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import readline from 'node:readline';
 import { fileURLToPath } from 'node:url';
 import { app } from 'electron';
 import { JSDOM } from 'jsdom';
@@ -32,6 +33,7 @@ import {
 import {
   __projectLocalApplicationJobForAcceptanceHarness,
   __reserveNextLocalApplicationJobIdForAcceptanceHarness,
+  discardLocalApplicationJob,
   discoverLocalApplicationJobs,
   localApplicationStatus,
   queueLocalApplicationJob,
@@ -111,7 +113,7 @@ Commands:
   backup --run-id NAME --execute
   pin-and-queue --run-id NAME --card snowflake|retool|anthropic|affirm --snapshot-id SHA256 --execute
   repair-held-authority-receipt --run-id NAME --job-id UUID --execute
-  inspect --run-id NAME --job-id UUID
+  inspect --run-id NAME --job-id UUID [--validate]
   restore --run-id NAME [--keep-published-snapshot] --execute
   self-test
 
@@ -124,6 +126,16 @@ Live safety: every mutating command requires --execute, --canvas must be the
 exact production canvas path, and --user-data must be the exact production
 Infinite Canvas user-data path.  The test-only --allow-nonproduction option is
 accepted only by self-test helpers and is never needed for a live run.
+
+inspect is PASSIVE by default: for a job folder that exists it reads
+manifest.json, the terminal receipt and the Generation Log (counts and
+last-entry metadata only) and never calls the repo-source production
+validators. Those validators run in THIS process, from the repository
+source, and a status poll that fails them can end the job on disk; a live app
+may be writing the job, and a source tree that differs from the packaged build
+fails an intact job (a live job was ended exactly that way). --validate opts in
+to the production localApplicationStatus: use it only when no app is writing
+the job AND this source tree is the build that wrote it.
 
 Before a live restore, fully quit Infinite Canvas. Application Sync keeps its
 capability registry in memory; a running app could otherwise later persist a
@@ -154,7 +166,7 @@ function parseArgs(argv) {
     const token = rest[i];
     if (!token.startsWith('--')) throw new Error(`Unexpected argument: ${token}`);
     const key = token.slice(2);
-    if (['execute', 'allow-nonproduction', 'include-document', 'connected-board', 'keep-published-snapshot'].includes(key)) options[key] = true;
+    if (['execute', 'allow-nonproduction', 'include-document', 'connected-board', 'keep-published-snapshot', 'validate'].includes(key)) options[key] = true;
     else {
       const value = rest[++i];
       if (!value || value.startsWith('--')) throw new Error(`Missing value for --${key}`);
@@ -1496,7 +1508,90 @@ function statusProjection(result) {
     id: local.id, status: local.status, mode: local.mode || null, stage: local.stage || null,
     message: local.message || null, resultSha256: local.resultSha256 || null,
     receipt: local.receipt ? { status: local.receipt.status, outputDir: local.receipt.outputDir, resultSha256: local.receipt.resultSha256 } : null,
+    ...(local.inspection ? { inspection: local.inspection } : {}),
   } : null;
+}
+
+// PASSIVE INSPECTION. localApplicationStatus is not a read: it validates the
+// job's frozen state with the validators of whatever source tree this process
+// imported, and a failure ends the job on disk (manifest status 'failed' plus a
+// Generation Log event). Inspecting a job a live app is still writing, from a
+// source tree that is not the build that wrote it, therefore fails an intact
+// job. These readers answer the same question from the files alone: the
+// manifest, the terminal receipt, and the Generation Log reduced to counts and
+// last-entry metadata (it holds the full pasted responses, which this report
+// must never carry). They write nothing and call no production validator.
+const PASSIVE_RECEIPT_DIR = 'handoff-receipts';
+const PASSIVE_GENERATION_LOG = 'Generation Log.jsonl';
+const PASSIVE_JOB_ID = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i;
+function passiveText(value, max = 120) {
+  return typeof value === 'string' ? value.replace(/[\u0000-\u001f\u007f]/gu, ' ').slice(0, max) : null;
+}
+function passiveCount(value) { return Number.isSafeInteger(value) && value >= 0 ? value : null; }
+async function passiveGenerationLogSummary(file) {
+  const stat = lstatIfPresent(file);
+  if (!stat) return { present: false };
+  if (!stat.isFile() || stat.isSymbolicLink()) throw new Error('Generation Log is not a trusted regular file.');
+  let entries = 0; let integrityFaults = 0; let unparseable = 0; let last = null;
+  const lines = readline.createInterface({ input: fs.createReadStream(file, { encoding: 'utf8' }), crlfDelay: Infinity });
+  for await (const line of lines) {
+    if (!line.trim()) continue;
+    entries += 1;
+    try {
+      const entry = JSON.parse(line);
+      if (entry?.type === 'job-integrity-fault') integrityFaults += 1;
+      last = { type: passiveText(entry?.type), stage: passiveText(entry?.stage), sequence: passiveCount(entry?.sequence), revision: passiveCount(entry?.revision) };
+    } catch { unparseable += 1; last = { unparseable: true }; }
+  }
+  return { present: true, bytes: stat.size, entries, integrityFaults, unparseable, last };
+}
+function passiveTerminalReceipt({ canvas, jobId }) {
+  const file = path.join(path.dirname(canvas), '.local-ai', PASSIVE_RECEIPT_DIR, `${jobId}.json`);
+  const stat = lstatIfPresent(file);
+  if (!stat) return null;
+  if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 64_000) throw new Error('Terminal receipt is not a trusted regular file.');
+  let receipt;
+  try { receipt = JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return null; }
+  // The same acceptance test production applies to a receipt, minus its
+  // directory-resolution step: another job's, another canvas's or a
+  // non-import receipt is not this job's terminal state.
+  return (receipt?.version === 1 || receipt?.version === 2) && receipt?.jobId === jobId && receipt?.status === 'imported'
+    && typeof receipt?.canvasFilePath === 'string' && sameExistingPath(receipt.canvasFilePath, canvas)
+    && typeof receipt?.resultSha256 === 'string' && /^[a-f0-9]{64}$/i.test(receipt.resultSha256)
+    ? receipt : null;
+}
+export async function passiveJobStatus({ canvas, jobFolder, jobId }) {
+  if (!PASSIVE_JOB_ID.test(String(jobId || ''))) throw new Error('A passive inspection needs a UUID job id.');
+  assertRegularDirectory(jobFolder, 'Local-AI job folder');
+  const manifestPath = path.join(jobFolder, 'manifest.json');
+  assertRegularFile(manifestPath, 'Job manifest');
+  const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+  // The ownership the production validator asks first, from the files alone.
+  if (manifest?.id !== jobId) throw new Error('Job manifest names another job.');
+  if (typeof manifest.canvasFilePath !== 'string' || !sameExistingPath(manifest.canvasFilePath, canvas)) throw new Error('Job manifest belongs to another canvas.');
+  const paste = manifest.transport === 'paste' && manifest.paste && typeof manifest.paste === 'object' ? manifest.paste : null;
+  const generationLog = paste ? await passiveGenerationLogSummary(path.join(jobFolder, PASSIVE_GENERATION_LOG)) : { present: false };
+  const receipt = passiveTerminalReceipt({ canvas, jobId });
+  const fault = paste?.integrityFault && typeof paste.integrityFault === 'object' ? paste.integrityFault : null;
+  const stage = passiveText(paste?.stage);
+  return {
+    id: jobId,
+    status: receipt ? 'saved' : passiveText(manifest.status, 40),
+    mode: paste ? 'paste' : (manifest.transport ? passiveText(manifest.transport, 40) : null),
+    stage,
+    message: receipt ? 'Terminal receipt present (read passively).'
+      : fault ? passiveText(fault.message, 400)
+        : `Passive read of manifest.json${stage ? ` (stage ${stage})` : ''}; production validators were not called.`,
+    resultSha256: null,
+    ...(receipt ? { receipt } : {}),
+    inspection: {
+      mode: 'passive', validators: 'not-called', manifestStatus: passiveText(manifest.status, 40),
+      revision: passiveCount(paste?.revision), logCount: passiveCount(paste?.logCount),
+      integrityFault: fault ? { stage: passiveText(fault.stage), observedAt: passiveText(fault.observedAt, 40) } : null,
+      validatorStamp: typeof manifest.validatorStamp === 'string' ? passiveText(manifest.validatorStamp, 64) : null,
+      generationLog,
+    },
+  };
 }
 
 export async function publishSnapshot({ snapshotFile = null, snapshotId: requestedId, userData, destination = null, execute = false, allowNonproduction = false }) {
@@ -1701,14 +1796,26 @@ export async function pinAndQueue({ canvas, userData, destination, cardName, req
   return receipt;
 }
 
-export async function inspectJob({ canvas, userData, destination, jobId }) {
+export async function inspectJob({ canvas, userData, destination, jobId, validate = false, statusReader = localApplicationStatus }) {
   patchStubUserData(userData);
-  const status = await localApplicationStatus(jobId, canvas);
   const jobFolder = path.join(path.dirname(canvas), '.local-ai', 'jobs', jobId);
-  const files = fs.existsSync(jobFolder) ? treeManifest(jobFolder) : { present: false, entries: [] };
-  // Status is deliberately read first: it is the production ownership and
-  // frozen-input validator.  This report then exposes only manifest metadata
-  // and artifact hashes/counts, never private career or generated prose.
+  // PASSIVE unless asked. Only two cases reach the production status reader
+  // without --validate: nothing is left to validate because the private job
+  // folder is gone (the reader then answers from the terminal receipt alone),
+  // or the caller opted in. Every job folder that exists is read from its
+  // files, because the production reader would run its validators over a job a
+  // live app may still be writing, and could end it (see passiveJobStatus).
+  const folderPresent = lstatIfPresent(jobFolder) !== null;
+  const validated = validate === true || !folderPresent;
+  const production = validated ? await statusReader(jobId, canvas) : null;
+  const status = validated
+    ? { ...(production?.localJob || production?.localApplication || production || {}), inspection: { mode: 'validated', validators: 'repo-source-production', requestedExplicitly: validate === true } }
+    : await passiveJobStatus({ canvas, jobFolder, jobId });
+  const files = folderPresent ? treeManifest(jobFolder) : { present: false, entries: [] };
+  // The default path never lets a repo-source validator judge the job; the
+  // opt-in path does, and says so in the report. Either way this report
+  // exposes only manifest metadata and artifact hashes/counts, never private
+  // career or generated prose.
   let manifest = null;
   if (files.present) {
     const manifestPath = path.join(jobFolder, 'manifest.json');
@@ -2462,8 +2569,105 @@ export async function heldAuthorityReceiptRepairSelfTest() {
   }
 }
 
+// Proves the passive-by-default inspect contract with no production validator
+// in the loop: a spy stands in for localApplicationStatus, so a single call on
+// the default path fails the test, and the opt-in path must reach it exactly
+// once. The job folder is byte-compared across every passive read.
+export async function passiveInspectSelfTest() {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ic-passive-inspect-'));
+  try {
+    const userData = path.join(root, 'user-data'); fs.mkdirSync(userData);
+    const canvas = path.join(root, 'canvas.json'); fs.writeFileSync(canvas, '{}\n');
+    const jobId = crypto.randomUUID();
+    const jobFolder = path.join(root, '.local-ai', 'jobs', jobId);
+    fs.mkdirSync(jobFolder, { recursive: true });
+    const canary = `PRIVATE-PASTED-RESPONSE-${crypto.randomUUID()}`;
+    const manifestFile = path.join(jobFolder, 'manifest.json');
+    const writeManifest = patch => fs.writeFileSync(manifestFile, `${JSON.stringify({
+      version: 1, id: jobId, status: 'queued', transport: 'paste', createdAt: '2026-01-01T00:00:00.000Z', canvasFilePath: canvas,
+      validatorStamp: 'a'.repeat(64), paste: { stage: 'review', revision: 3, logCount: 2 }, ...patch,
+    })}\n`);
+    writeManifest({});
+    fs.writeFileSync(path.join(jobFolder, PASSIVE_GENERATION_LOG), [
+      JSON.stringify({ type: 'accepted', sequence: 1, revision: 2, stage: 'resume', response: { text: canary } }),
+      JSON.stringify({ type: 'rejected', sequence: 2, revision: 3, stage: 'review', response: { text: canary } }),
+    ].map(line => `${line}\n`).join(''));
+    let productionCalls = 0;
+    const spy = async (...args) => { productionCalls += 1; return { id: jobId, status: 'queued', mode: 'paste', stage: 'review', spyArgs: args.length }; };
+    const tree = () => JSON.stringify(treeManifest(jobFolder));
+
+    const before = tree();
+    const passive = await inspectJob({ canvas, userData, destination: null, jobId, statusReader: spy });
+    assert.equal(productionCalls, 0, 'the default inspection must never reach the production status reader for an existing job folder');
+    assert.equal(tree(), before, 'a passive inspection must leave every byte of the job folder untouched (content, mode, mtime)');
+    assert.equal(passive.status.status, 'queued');
+    assert.equal(passive.status.stage, 'review');
+    assert.equal(passive.status.inspection.mode, 'passive');
+    assert.equal(passive.status.inspection.validators, 'not-called');
+    assert.equal(passive.status.inspection.generationLog.entries, 2);
+    assert.deepEqual(passive.status.inspection.generationLog.last, { type: 'rejected', stage: 'review', sequence: 2, revision: 3 });
+    assert.equal(passive.status.inspection.validatorStamp, 'a'.repeat(64));
+    assert.equal(JSON.stringify(passive).includes(canary), false, 'the report must carry counts and last-entry metadata only, never a pasted response');
+    await inspectJob({ canvas, userData, destination: null, jobId, statusReader: spy });
+    assert.equal(productionCalls, 0, 'repeated passive inspections stay passive');
+
+    // Opt-in: the explicit flag is the only way an existing job reaches the validators.
+    const validated = await inspectJob({ canvas, userData, destination: null, jobId, validate: true, statusReader: spy });
+    assert.equal(productionCalls, 1);
+    assert.deepEqual(validated.status.inspection, { mode: 'validated', validators: 'repo-source-production', requestedExplicitly: true });
+
+    // A job a previous app run ended: the recorded fault sentence is reported without re-validating.
+    writeManifest({ status: 'failed', paste: { stage: 'review', revision: 3, logCount: 3, integrityFault: { message: 'recorded sentence', stage: 'review', observedAt: '2026-01-01T00:00:01.000Z' } } });
+    const failed = await inspectJob({ canvas, userData, destination: null, jobId, statusReader: spy });
+    assert.equal(productionCalls, 1);
+    assert.equal(failed.status.status, 'failed');
+    assert.equal(failed.status.message, 'recorded sentence');
+    assert.equal(failed.status.inspection.integrityFault.stage, 'review');
+
+    // A terminal receipt is read from the file; a receipt for another canvas is nobody's terminal state.
+    const receiptDir = path.join(root, '.local-ai', PASSIVE_RECEIPT_DIR); fs.mkdirSync(receiptDir, { recursive: true });
+    const outputDir = path.join(root, 'Applied Jobs', 'Role');
+    const receipt = { version: 2, jobId, status: 'imported', canvasFilePath: canvas, resultSha256: 'b'.repeat(64), outputDir };
+    fs.writeFileSync(path.join(receiptDir, `${jobId}.json`), JSON.stringify({ ...receipt, canvasFilePath: path.join(root, 'other.json') }));
+    assert.equal((await inspectJob({ canvas, userData, destination: null, jobId, statusReader: spy })).status.status, 'failed', 'a receipt for another canvas is ignored');
+    fs.writeFileSync(path.join(receiptDir, `${jobId}.json`), JSON.stringify(receipt));
+    const saved = await inspectJob({ canvas, userData, destination: null, jobId, statusReader: spy });
+    assert.equal(saved.status.status, 'saved');
+    assert.equal(saved.status.receipt.outputDir, outputDir);
+    assert.equal(productionCalls, 1);
+    fs.rmSync(path.join(receiptDir, `${jobId}.json`));
+
+    // Ownership is still checked, from the files alone, and an unsafe entry fails closed.
+    writeManifest({ id: crypto.randomUUID() });
+    await assert.rejects(() => inspectJob({ canvas, userData, destination: null, jobId, statusReader: spy }), /another job/i);
+    writeManifest({ canvasFilePath: path.join(root, 'other.json') });
+    await assert.rejects(() => inspectJob({ canvas, userData, destination: null, jobId, statusReader: spy }), /another canvas/i);
+    writeManifest({});
+    fs.renameSync(manifestFile, path.join(root, 'moved-manifest.json'));
+    fs.symlinkSync(path.join(root, 'moved-manifest.json'), manifestFile);
+    await assert.rejects(() => inspectJob({ canvas, userData, destination: null, jobId, statusReader: spy }), /regular non-link|trusted regular/i);
+    assert.equal(productionCalls, 1);
+    fs.rmSync(manifestFile);
+
+    // With no job folder there is nothing to validate; the production reader answers from the receipt alone.
+    fs.rmSync(jobFolder, { recursive: true });
+    await inspectJob({ canvas, userData, destination: null, jobId, statusReader: spy });
+    assert.equal(productionCalls, 2, 'a removed job folder is answered by the production reader (receipt or gone)');
+
+    // The CLI contract.
+    assert.equal(parseArgs(['inspect', '--run-id', 'x', '--job-id', jobId, '--validate']).options.validate, true);
+    assert.equal(parseArgs(['inspect', '--run-id', 'x', '--job-id', jobId]).options.validate, undefined);
+    assert.match(usage(), /inspect --run-id NAME --job-id UUID \[--validate\]/);
+    assert.match(usage(), /PASSIVE by default/);
+    return { ok: true, passiveByDefault: true, optInValidates: true, reportCarriesNoResponseText: true };
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true, maxRetries: 3, retryDelay: 50 });
+  }
+}
+
 async function selfTest() {
   await heldAuthorityReceiptRepairSelfTest();
+  await passiveInspectSelfTest();
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ic-acceptance-harness-'));
   const userData = path.join(root, 'user-data'); fs.mkdirSync(userData);
   const canvas = path.join(root, 'canvas.json');
@@ -2474,22 +2678,6 @@ async function selfTest() {
     }, position: { x: 0, y: 0 },
   }] } } }], edges: [], drawings: [] };
   fs.writeFileSync(canvas, JSON.stringify(fixture), { mode: 0o600 });
-  // The direct-only reservation must not become a global "next queue id": a
-  // normal queue invocation (the route used by renderer IPC) cannot consume
-  // it, while an exact opaque capability consumes it even if queue validation
-  // then fails before writing anything.
-  const nonInterceptableReservation = __reserveNextLocalApplicationJobIdForAcceptanceHarness(crypto.randomUUID());
-  await assert.rejects(() => queueLocalApplicationJob({ canvasFilePath: path.join(root, 'not-a-canvas.json'), transport: 'paste' }));
-  assert.throws(() => __reserveNextLocalApplicationJobIdForAcceptanceHarness(crypto.randomUUID()), /already reserved/i);
-  await assert.rejects(() => queueLocalApplicationJob({
-    canvasFilePath: path.join(root, 'not-a-canvas.json'), transport: 'paste',
-    __acceptanceHarnessReservationCapability: nonInterceptableReservation.capability,
-  }));
-  const consumedReservation = __reserveNextLocalApplicationJobIdForAcceptanceHarness(crypto.randomUUID());
-  await assert.rejects(() => queueLocalApplicationJob({
-    canvasFilePath: path.join(root, 'not-a-canvas.json'), transport: 'paste',
-    __acceptanceHarnessReservationCapability: consumedReservation.capability,
-  }));
   const localFixtureDirectory = path.join(root, '.local-ai', 'restricted', 'nested');
   fs.mkdirSync(localFixtureDirectory, { recursive: true, mode: 0o700 });
   fs.chmodSync(path.join(root, '.local-ai'), 0o700);
@@ -2566,6 +2754,69 @@ async function selfTest() {
   const destination = path.join(root, 'run');
   let completed = false;
   try {
+    // Reservation capability checks intentionally create real paste jobs so
+    // they exercise the current-approved authority gate. Keep them outside
+    // the main fixture: a discarded current job legitimately leaves its
+    // host-owned anchor/key and phase stamp, and none may become an implicit
+    // baseline artifact for the rollback scenario below.
+    const reservationRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'ic-acceptance-reservation-'));
+    const reservationUserData = path.join(reservationRoot, 'user-data');
+    const reservationCanvas = path.join(reservationRoot, 'canvas.json');
+    try {
+      fs.mkdirSync(reservationUserData, { mode: 0o700 });
+      fs.writeFileSync(reservationCanvas, JSON.stringify(fixture), { mode: 0o600 });
+      patchStubUserData(reservationUserData);
+      await writeCareerSnapshotAtomically(careerSnapshotStorageRoot(reservationUserData), snapshot);
+      const reservationSmokeJob = {
+        title: TARGETS.snowflake.title, company: TARGETS.snowflake.company, location: 'Toronto, ON',
+        snippet: 'Build reliable systems.', url: 'https://example.test/jobs/reservation-smoke', source: 'fixture', posted: 'today', language: 'en',
+      };
+      // A direct-only reservation is never a global "next queue id": normal
+      // renderer-style calls cannot consume it. More importantly, a request
+      // that has not passed the current-approved snapshot gate cannot consume
+      // it even with the opaque capability; its later valid queue must still
+      // own the reserved UUID.
+      const preAuthorityReservation = __reserveNextLocalApplicationJobIdForAcceptanceHarness(crypto.randomUUID());
+      await assert.rejects(() => queueLocalApplicationJob({ canvasFilePath: reservationCanvas, transport: 'paste' }));
+      assert.throws(() => __reserveNextLocalApplicationJobIdForAcceptanceHarness(crypto.randomUUID()), /already reserved/i);
+      await assert.rejects(() => queueLocalApplicationJob({
+        canvasFilePath: reservationCanvas, transport: 'paste',
+        __acceptanceHarnessReservationCapability: preAuthorityReservation.capability,
+      }));
+      assert.throws(() => __reserveNextLocalApplicationJobIdForAcceptanceHarness(crypto.randomUUID()), /already reserved/i);
+      const preAuthorityQueue = await queueLocalApplicationJob({
+        canvasFilePath: reservationCanvas, transport: 'paste', careerSnapshotId: snapshot.snapshotId, job: reservationSmokeJob,
+        __acceptanceHarnessReservationCapability: preAuthorityReservation.capability,
+      });
+      assert.equal(preAuthorityQueue.id, preAuthorityReservation.id,
+        'a valid current-approved queue must consume the earlier pre-authority reservation, proving that failed pre-authority requests did not consume it');
+      await discardLocalApplicationJob(preAuthorityQueue.id, reservationCanvas);
+      assert.equal(fs.existsSync(preAuthorityQueue.folder), false, 'the isolated reservation smoke queue must be discarded immediately');
+      const postAuthorityReservation = __reserveNextLocalApplicationJobIdForAcceptanceHarness(crypto.randomUUID());
+      await assert.rejects(() => queueLocalApplicationJob({
+        canvasFilePath: path.join(reservationRoot, 'not-a-canvas.json'), transport: 'paste', careerSnapshotId: snapshot.snapshotId,
+        __acceptanceHarnessReservationCapability: postAuthorityReservation.capability,
+      }));
+      const reservationAfterConsumedFailure = __reserveNextLocalApplicationJobIdForAcceptanceHarness(crypto.randomUUID());
+      const finalReservationSmokeQueue = await queueLocalApplicationJob({
+        canvasFilePath: reservationCanvas, transport: 'paste', careerSnapshotId: snapshot.snapshotId, job: reservationSmokeJob,
+        __acceptanceHarnessReservationCapability: reservationAfterConsumedFailure.capability,
+      });
+      assert.equal(finalReservationSmokeQueue.id, reservationAfterConsumedFailure.id,
+        'after the current-approved gate, a failed direct queue consumes its opaque reservation before canvas filesystem work');
+      await discardLocalApplicationJob(finalReservationSmokeQueue.id, reservationCanvas);
+      assert.equal(fs.existsSync(finalReservationSmokeQueue.folder), false, 'the final isolated reservation smoke queue must be discarded immediately');
+    } finally {
+      // The whole root was allocated solely for this capability exercise.
+      // Reset Electron first, then remove it as one exact scoped cleanup.
+      patchStubUserData(userData);
+      fs.rmSync(reservationRoot, { recursive: true, force: true, maxRetries: 3, retryDelay: 50 });
+      assert.equal(fs.existsSync(reservationRoot), false, 'reservation capability smoke root must be removed immediately');
+    }
+    assert.equal(fs.existsSync(authorityAnchorStorageRoot(userData)), false,
+      'reservation capability smoke jobs must not leave authority anchors in the main fixture user-data root');
+    assert.equal(fs.existsSync(path.join(root, '.local-ai', 'phase-stamps')), false,
+      'reservation capability smoke jobs must not leave phase stamps in the main fixture canvas root');
     patchStubUserData(userData);
     await __resetApplicationSyncWorkspacesForTests();
     await registerApplicationSyncWorkspace(syncWorkspace, syncToken);
@@ -2588,6 +2839,16 @@ async function selfTest() {
     assert.equal(fs.existsSync(queuedAuthorityAnchor), true, 'queue must materialize its job-keyed authority anchor inside the reserved host sidecar path');
     const report = await inspectJob({ canvas, userData, destination, jobId: queued.localJob.id });
     assert.equal(report.status.status, 'queued');
+    // The default inspection of this real queued job is passive: it reports the
+    // same state from its files and leaves the job folder byte-identical. The
+    // production validators run only on the explicit opt-in.
+    assert.equal(report.status.inspection.mode, 'passive');
+    const queuedJobTree = JSON.stringify(treeManifest(queued.localJob.folder));
+    assert.equal((await inspectJob({ canvas, userData, destination, jobId: queued.localJob.id })).status.inspection.mode, 'passive');
+    assert.equal(JSON.stringify(treeManifest(queued.localJob.folder)), queuedJobTree, 'passive inspection must not change the live job');
+    const validatedReport = await inspectJob({ canvas, userData, destination, jobId: queued.localJob.id, validate: true });
+    assert.equal(validatedReport.status.status, 'queued');
+    assert.equal(validatedReport.status.inspection.mode, 'validated');
     // The app can advance only the selected card's pointer while the worker is
     // active. Simulate that durable progress, including the pre-fix manifest
     // shape with no explicit pointer reservation, then prove inspect adopts
@@ -2980,6 +3241,7 @@ async function main() {
   }
   if (command === 'self-test') { process.stdout.write(`${JSON.stringify(await selfTest(), null, 2)}\n`); return; }
   if (!['publish-snapshot', 'backup', 'pin-and-queue', 'repair-held-authority-receipt', 'inspect', 'restore'].includes(command)) throw new Error(`Unknown command: ${command}`);
+  if (options.validate && command !== 'inspect') throw new Error('--validate is valid only with inspect.');
   const target = assertLiveTarget(options, { mutate: MUTATING_COMMANDS.has(command) });
   const destination = runDirectory(options);
   let result;
@@ -2987,7 +3249,7 @@ async function main() {
   if (command === 'backup') result = backupRun({ canvas: target.canvas, userData: target.userData, destination, execute: options.execute });
   if (command === 'pin-and-queue') result = await pinAndQueue({ canvas: target.canvas, userData: target.userData, destination, cardName: required(options, 'card'), requestedSnapshotId: required(options, 'snapshot-id'), execute: options.execute });
   if (command === 'repair-held-authority-receipt') result = await repairHeldAuthorityReceipt({ canvas: target.canvas, userData: target.userData, destination, jobId: required(options, 'job-id'), execute: options.execute });
-  if (command === 'inspect') result = await inspectJob({ canvas: target.canvas, userData: target.userData, destination, jobId: required(options, 'job-id') });
+  if (command === 'inspect') result = await inspectJob({ canvas: target.canvas, userData: target.userData, destination, jobId: required(options, 'job-id'), validate: options.validate === true });
   if (command === 'restore') result = await restoreRun({ canvas: target.canvas, userData: target.userData, destination, keepPublishedSnapshot: options['keep-published-snapshot'] === true, execute: options.execute });
   process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
 }

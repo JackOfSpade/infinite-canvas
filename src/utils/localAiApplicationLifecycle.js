@@ -11,6 +11,10 @@ const REPLACEABLE_LOCAL_APPLICATION_STATUSES = new Set([
   'invalid',
   'failed',
   'revision-exhausted',
+  // The status poll's non-terminal answer for a job written by another app
+  // build: nothing is recorded against the job, and its message names
+  // Generate as one of the two ways forward.
+  'blocked',
 ]);
 
 export function canRegenerateLocalApplication(localApplication) {

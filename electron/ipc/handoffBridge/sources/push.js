@@ -20,7 +20,7 @@ import { CONSTANTS } from '../constants.js';
 //                 serve.
 //   paste_only -- no row uses it now. Kept as a mode so a future task can be
 //                 held back deliberately rather than by omission.
-//   release_one-- reviewed text-only work. Most rows return JSON; the four raw
+//   release_one-- reviewed text-only work. Most rows return JSON; the reviewed raw
 //                 grounded-research rows additionally require the seam's exact
 //                 request-kind/grounding/validator contract.
 const policy = {

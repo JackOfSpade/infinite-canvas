@@ -772,6 +772,16 @@ export function HandoffBridgePanel() {
                           {BRIDGE_UI_COPY.retryReading}
                         </button>
                       )}
+                      {row.removable === true && (
+                        <button
+                          type="button"
+                          disabled={!status.enabled}
+                          onClick={() => void call('handoffBridgeUnrelease', { jobId: job.jobId })}
+                          className="text-sky-300 disabled:cursor-not-allowed disabled:opacity-40"
+                        >
+                          {BRIDGE_UI_COPY.removeFromBridge}
+                        </button>
+                      )}
                       <button
                         type="button"
                         onClick={() => requestApplicationHandoffFocus(job.jobId)}

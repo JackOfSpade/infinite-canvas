@@ -203,7 +203,7 @@ const PLAIN_TEXT_MAX_BYTES = 4 * 1024 * 1024;
  * every caller already has a working fallback, so a surprising file degrades to
  * the previous behaviour instead of failing the drop.
  */
-export async function readPlainTextDocument(filePath) {
+export async function readPlainTextDocument(filePath, { readUtf8 = null, includeAppPrivate = true } = {}) {
   // The coercion is inside the guard: an argument whose toString throws (or a
   // null-prototype object) is a refusal like any other, not a rejection.
   let resolved;
@@ -216,12 +216,26 @@ export async function readPlainTextDocument(filePath) {
   // Deferring rather than throwing keeps ONE copy of this rule: the attachment
   // path (llm.js callLLMDocument) raises the canonical refusal for a sensitive
   // path, and it is where this file was already headed.
-  if (isSensitivePath(resolved)) return null;
+  //
+  // `includeAppPrivate: false` is for the one caller that owns an app-private
+  // store: the career compiler classifies its OWN privately staged copy of the
+  // user's file.  Renderer-denied app namespaces (career-input-staging among
+  // them) would otherwise make every staged .md/.txt look sensitive, silently
+  // demoting a plain-text file to AI attachment transcription.  System and
+  // credential paths stay denied either way, and such a caller must also pass
+  // `readUtf8`, a reader bound to the already-owned staged inode, so the
+  // classification reads exactly the bytes the compiler will use.
+  if (isSensitivePath(resolved, { includeAppPrivate })) return null;
   let text;
   try {
-    const stats = await fs.stat(resolved);
-    if (!stats.isFile() || stats.size > PLAIN_TEXT_MAX_BYTES) return null;
-    text = await fs.readFile(resolved, 'utf8');
+    if (typeof readUtf8 === 'function') {
+      text = await readUtf8(resolved);
+      if (typeof text !== 'string' || Buffer.byteLength(text, 'utf8') > PLAIN_TEXT_MAX_BYTES) return null;
+    } else {
+      const stats = await fs.stat(resolved);
+      if (!stats.isFile() || stats.size > PLAIN_TEXT_MAX_BYTES) return null;
+      text = await fs.readFile(resolved, 'utf8');
+    }
   } catch {
     return null;
   }

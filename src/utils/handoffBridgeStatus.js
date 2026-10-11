@@ -16,8 +16,8 @@ export const POOL_WORKER_QUIET_REASONS = Object.freeze(['answer_silent', 'pollin
 export const JOB_PHASES = Object.freeze(['unread', 'awaiting', 'host', 'done', 'needs_user', 'held', 'gone', 'unknown']);
 export const JOB_REASONS = Object.freeze([
   'user_hold', 'human_advance', 'rejection_cap', 'junk_cap', 'review_round_cap',
-  'job_broken', 'render_retry', 'app_fix_required', 'canvas_unavailable', 'read_failed', 'write_failed',
-  'submit_stuck', 'host_silent', 'lapsed', 'restart', 'app_only_handoffs',
+  'job_broken', 'render_retry', 'app_fix_required', 'canvas_unavailable', 'canvas_missing', 'read_failed', 'write_failed',
+  'submit_stuck', 'host_silent', 'lapsed', 'restart', 'review_stop', 'app_only_handoffs',
   'commit_failed', 'person_editing', 'hub_not_selected', 'task_disabled',
   // Renderer-local compatibility values used by the existing dock projector.
   'integrity_fault', 'failed', 'render_retry_required', 'user', 'answered_in_dock',
@@ -56,7 +56,12 @@ export const PROBE_REASONS = Object.freeze([
 ]);
 const RENEWAL_CAUSES = Object.freeze(['refresh_expired', 'invalid_grant', 'revoked']);
 const ALARM_KINDS = Object.freeze(['unknown_key', 'unknown_handoff', 'refresh_reuse', 'code_reuse', 'rate_limited', 'held_caps']);
-const APPLICATION_STAGES = Object.freeze(['evidence-plan', 'resume', 'cover-letter', 'review']);
+// These are fixed workflow identifiers, not user content. The post-letter
+// stages all project to the dock's final review step in bridgeJobProgress.
+const APPLICATION_STAGES = Object.freeze([
+  'evidence-plan', 'resume', 'cover-letter', 'requirement-disposition',
+  'review', 'blind-review', 'blind-repair-context',
+]);
 const MAX_STRING = 200;
 const MAX_JOBS = 50;
 const MAX_ALARMS = 5;

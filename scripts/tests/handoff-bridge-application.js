@@ -91,7 +91,17 @@ export default [
       } finally { await fs.promises.rm(root, { recursive: true, force: true }); }
     },
   },
-  { name: 'handoff bridge: application: completed read becomes host', run: async () => assert((await source({ api: { getLocalApplicationHandoff: async () => ({ completed: true }) } }).read(lane)).kind === 'host', 'completed app state must become host') },
+  {
+    name: 'handoff bridge: application: ordinary completed read becomes host while a virtual claim stays bridge-private',
+    run: async () => {
+      const adapter = source({ api: { getLocalApplicationHandoff: async () => ({ completed: true }) } });
+      const ordinary = await adapter.read(lane);
+      const virtual = await adapter.read({ ...lane, matchTaskId: 'match-01' });
+      assert(ordinary.kind === 'host' && virtual.kind === 'virtual_done'
+        && Object.keys(virtual).join(',') === 'kind',
+      'only a completed task-keyed authority read may emit the engine-private virtual completion signal');
+    },
+  },
   {
     name: 'handoff bridge: application: fresh-context handoff metadata remains main-only and non-enumerable',
     run: async () => {
@@ -147,6 +157,40 @@ export default [
         'an adapter cannot expand the live wave or publish a forecast whose remaining total is false');
     },
   },
+  {
+    name: 'handoff bridge: application: an oversized authority wave keeps only a private overflow fact',
+    run: async () => {
+      const career = {
+        ...handoff,
+        stage: 'career-match',
+        matchTaskId: 'match-0',
+        parallelTasks: Array.from({ length: 11 }, (_unused, index) => ({ id: `match-${index}` })),
+      };
+      const opened = await source({ api: { getLocalApplicationHandoff: async () => ({ handoff: career }) } })
+        .read({ ...lane, matchTaskId: 'match-0' });
+      assert(opened.parallelTasks.length === 10 && opened.handoff.parallelTasksOverflow === true
+        && !Object.keys(opened.handoff).includes('parallelTasksOverflow')
+        && !JSON.stringify(opened).includes('parallelTasksOverflow') && !JSON.stringify(opened).includes('match-10'),
+      'the adapter exposes neither the overflow flag nor the eleventh task id, while preserving a private rejection signal for the engine');
+    },
+  },
+  {
+    name: 'handoff bridge: application: malformed authority entries keep only a private rejection fact',
+    run: async () => {
+      const career = {
+        ...handoff,
+        stage: 'career-match',
+        matchTaskId: 'match-0',
+        parallelTasks: [{ id: 'match-0' }, { id: 'bad id with spaces' }, null],
+      };
+      const opened = await source({ api: { getLocalApplicationHandoff: async () => ({ handoff: career }) } })
+        .read({ ...lane, matchTaskId: 'match-0' });
+      assert(opened.parallelTasks.length === 1 && opened.handoff.parallelTasksMalformed === true
+        && !Object.keys(opened.handoff).includes('parallelTasksMalformed')
+        && !JSON.stringify(opened).includes('parallelTasksMalformed') && !JSON.stringify(opened).includes('bad id with spaces'),
+      'the adapter drops malformed opaque task ids but preserves a private signal so the engine will not reconcile from a sanitized subset');
+    },
+  },
   { name: 'handoff bridge: application: malformed handoff is a fixed shape failure', run: async () => assert((await source({ api: { getLocalApplicationHandoff: async () => ({ handoff: { prompt: 'only prompt' } }) } }).read(lane)).shape === true, 'bad app handoff must not be copied') },
   {
     name: 'handoff bridge: application: read watchdog returns busy and preserves the shared call',
@@ -161,6 +205,29 @@ export default [
     },
   },
   { name: 'handoff bridge: application: terminal status mapping is field-based', run: () => { assert(mapApplicationStatus({ status: 'saved' }).phase === 'done', 'saved must be done'); assert(mapApplicationStatus({ status: 'failed', folder: null }).phase === 'gone', 'removed folders must be gone'); assert(mapApplicationStatus({ status: 'failed', folder: '/safe' }).reason === 'job_broken', 'trusted failed folders must be integrity failures'); } },
+  {
+    name: 'handoff bridge: application: the review human stop is its own needs-you reason, recognised by the app\'s marker and by nothing else',
+    run: async () => {
+      // The three jobs below all fail with the SAME stage and a message; only the app\'s stop status carries the marker.
+      const stop = { status: 'failed', folder: '/safe', stage: 'blind-review-human-stop', message: 'Independent reviewers flagged a unit.', terminalKind: 'blind-review-human-stop' };
+      const mapped = mapApplicationStatus(stop);
+      assert(mapped.kind === 'needs_user' && mapped.phase === 'needs_user' && mapped.reason === 'review_stop' && Object.keys(mapped).sort().join() === 'kind,phase,reason',
+        `the stop is a needs-you item with a closed reason and no free text (${JSON.stringify(mapped)})`);
+      const { terminalKind: _marker, ...integrityAfterStop } = stop;
+      assert(mapApplicationStatus(integrityAfterStop).reason === 'job_broken', 'a job that failed an integrity check after the stop keeps the stage and is still a broken job');
+      assert(mapApplicationStatus({ status: 'failed', folder: '/safe', stage: 'requirements-audit-disagreement', message: 'Audit disagreed.' }).reason === 'job_broken', 'the other typed terminal maps as before');
+      assert(mapApplicationStatus({ ...stop, terminalKind: 'requirements-audit-disagreement' }).reason === 'job_broken' && mapApplicationStatus({ ...stop, terminalKind: 'anything-else' }).reason === 'job_broken',
+        'another marker value is not the stop');
+      assert(mapApplicationStatus({ ...stop, folder: null }).phase === 'gone', 'a removed folder is gone whatever it was');
+      assert(mapApplicationStatus({ status: 'queued', terminalKind: 'blind-review-human-stop' }).reason === undefined && mapApplicationStatus({ status: 'saved', terminalKind: 'blind-review-human-stop' }).phase === 'done',
+        'the marker means nothing on a job that did not fail');
+      assert(mapApplicationStatus({ status: 'failed', folder: '/safe' }).reason === 'job_broken' && mapApplicationStatus({ status: 'failed', folder: '/safe', message: 'x' }).reason === 'job_broken', 'an ordinary failed job is unchanged');
+      // Through the adapter the engine reads, with the status watchdog and single flight.
+      const adapter = source({ api: { localApplicationStatus: async () => stop } });
+      const viaAdapter = await adapter.status(lane);
+      assert(viaAdapter.kind === 'needs_user' && viaAdapter.reason === 'review_stop' && !JSON.stringify(viaAdapter).includes('Independent reviewers'), 'the adapter hands the engine the closed reason only');
+    },
+  },
   { name: 'handoff bridge: application: queued status requests a fresh read', run: () => assert(mapApplicationStatus({ status: 'queued' }).read === true, 'queued status must kick a read') },
   { name: 'handoff bridge: application: completed and importing status are host', run: () => { for (const status of ['completed', 'importing']) assert(mapApplicationStatus({ status }).phase === 'host', `${status} must be host`); } },
   { name: 'handoff bridge: application: recoverable host statuses request a bounded read', run: () => { for (const status of ['revision-required', 'invalid']) assert(mapApplicationStatus({ status }).read === true, `${status} must be read-recovered`); } },

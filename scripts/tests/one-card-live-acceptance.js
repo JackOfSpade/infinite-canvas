@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { runCurrentSnapshotResolutionSelfTest } from '../acceptance/currentCareerSnapshotResolver.mjs';
 import { deferOwnedBridgeLaneCleanup } from '../acceptance/bridgeLaneCleanup.mjs';
-import { projectSavedJobCardForAcceptanceHarness } from '../../.test-artifacts/blackbox-run/application-acceptance-harness.mjs';
+import { passiveInspectSelfTest, projectSavedJobCardForAcceptanceHarness } from '../../.test-artifacts/blackbox-run/application-acceptance-harness.mjs';
 import {
   assertFrozenQueuedJobMatchesSavedCard,
   normalizedListingTextForAcceptance,
@@ -87,6 +87,17 @@ export default [
       } finally {
         fs.rmSync(root, { recursive: true, force: true });
       }
+    },
+  },
+  {
+    name: 'application acceptance harness inspects an existing job passively by default (no repo-source validator, no write, no pasted text) and validates only on the explicit opt-in',
+    run: async () => {
+      // A status poll that fails validation ends the job on disk, and the harness imports its validators from the source tree rather than
+      // the packaged build that a live app is writing the job with. The default must therefore read the files only.
+      const result = await passiveInspectSelfTest();
+      assert(result.ok && result.passiveByDefault && result.optInValidates && result.reportCarriesNoResponseText,
+        'the passive-inspect contract proof did not cover its required cases');
+      return result;
     },
   },
 ];

@@ -1,5 +1,5 @@
 import React from 'react';
-import { Briefcase, LayoutGrid } from 'lucide-react';
+import { Briefcase, CircleHelp, LayoutGrid } from 'lucide-react';
 import { DraggableModuleCard } from './DraggableModuleCard';
 
 export const JobsTab = React.memo(function JobsTab({ handleModuleDragStart }) {
@@ -26,6 +26,17 @@ export const JobsTab = React.memo(function JobsTab({ handleModuleDragStart }) {
         footerText="Run and merge searches from different locations in one place"
         hoverBorderClass="hover:border-indigo-500/30"
         hoverBgClass="hover:bg-indigo-500/5"
+        handleModuleDragStart={handleModuleDragStart}
+      />
+      <DraggableModuleCard
+        title="Interview"
+        nodeType="interviewhelper"
+        icon={<CircleHelp size={22} className="text-violet-400/50" />}
+        moduleName="Interview Helper"
+        instructions="Prepare a private, grounded interview workspace"
+        subInstructions="Use an approved or independently compiled career snapshot, job listing, and submitted bundle; it never invents career evidence"
+        hoverBorderClass="hover:border-violet-500/30"
+        hoverBgClass="hover:bg-violet-500/5"
         handleModuleDragStart={handleModuleDragStart}
       />
     </div>

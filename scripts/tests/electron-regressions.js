@@ -152,7 +152,9 @@ export default [
   {
     name: 'recovery rebind journals reject unsafe slots and reconcile old/new launch paths deterministically',
     run: async () => {
-      const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'ic-rebind-journal-'));
+      // macOS canonicalizes os.tmpdir() under the intentionally restricted
+      // /private/var system root; this fixture needs an ordinary user path.
+      const root = await fs.promises.mkdtemp(path.join(process.cwd(), '.ic-rebind-journal-'));
       const oldCanvas = path.join(root, 'before.json');
       const finderCanvas = path.join(root, 'finder.json');
       const saveAsCanvas = path.join(root, 'save-as.json');
@@ -1306,7 +1308,8 @@ export default [
   {
     name: 'OS document opening validates the canonical target behind a symlink',
     run: async () => {
-      const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'ic-open-file-'));
+      // Keep this normal-document fixture outside the restricted system temp root.
+      const root = await fs.promises.mkdtemp(path.join(process.cwd(), '.ic-open-file-'));
       const safeTarget = path.join(root, 'actual.txt');
       const activeTarget = path.join(root, 'payload.app');
       const disguisedLink = path.join(root, 'innocent.txt');

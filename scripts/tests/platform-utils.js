@@ -868,14 +868,14 @@ export default [
         // because jobApplication.js anchors its heading regexes to whole lines.
         const md = await readPlainTextDocument(write('resume.md', [
           '## Personal Projects',
-          '**Acme Health — Getzville, New York**',
+          '**Acme Health — Ashgrove, New York**',
           '* Built an ETL pipeline',
           '+ Kept snake_case and 3 * 4 intact',
           '### Education ###',
         ].join('\n')));
         assert(md === [
           'Personal Projects',
-          'Acme Health — Getzville, New York',
+          'Acme Health — Ashgrove, New York',
           '- Built an ETL pipeline',
           '- Kept snake_case and 3 * 4 intact',
           'Education',
@@ -1177,6 +1177,25 @@ export default [
         calls.length = 0;
         cancelNodeTasksRecursively([{ id: 'a' }, { id: 'b' }, { id: 'c' }], new Set(['b']));
         assert(calls.join(',') === 'a,c', 'skipIds excludes a node');
+
+        calls.length = 0;
+        const alreadyAcknowledged = new Set(['search', 'board', 'helper', 'nested-helper']);
+        cancelNodeTasksRecursively([
+          { id: 'search', type: 'jobhub' },
+          { id: 'board', type: 'jobboard' },
+          { id: 'helper', type: 'interviewhelper' },
+          { id: 'ordinary' },
+          {
+            id: 'deleted-group', type: 'group', data: {
+              canvasData: { nodes: [{ id: 'nested-helper', type: 'interviewhelper' }] },
+            },
+          },
+        ], alreadyAcknowledged, { notifySkippedInterviewHelpers: true });
+        assert(calls.join(',') === 'helper,ordinary,deleted-group,nested-helper',
+          'post-commit deletion must notify exact skipped Interview Helpers, including nested helpers, without re-aborting skipped Job Search or Board roots');
+        const deletionHook = fs.readFileSync(path.resolve('src/hooks/useCanvasOSDeletion.js'), 'utf8');
+        assert(deletionHook.includes('cancelNodeTasksRecursively(deletedNodes, deletedWorkflowIds, {\n      notifySkippedInterviewHelpers: true,'),
+          'the committed React Flow deletion boundary must opt into the narrow Interview Helper notification');
 
         // Guard: missing electronAPI must NOT throw mid-tree (partial-cancellation fix).
         globalThis.window = {};

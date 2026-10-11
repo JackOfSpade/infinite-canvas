@@ -38,10 +38,20 @@ export const PROGRESS_STAGES = Object.freeze(['evidence-plan', 'resume', 'cover-
 export const PROGRESS_TONES = Object.freeze(['neutral', 'working', 'attention', 'problem']);
 export const PROGRESS_ACTIONS = Object.freeze(['start-chat', 'continue-chat']);
 
+// The current-authority workflow has verification and independent-review
+// handoffs after it writes the cover letter. They all belong to the final
+// user-facing review step; unknown stage names still make no progress claim.
+const REVIEW_PROGRESS_STAGES = new Set(['requirement-disposition', 'blind-review', 'blind-repair-context']);
+
 const isObject = value => value !== null && typeof value === 'object' && !Array.isArray(value);
 const object = value => (isObject(value) ? value : {});
 const time = value => (Number.isFinite(value) && value >= 0 ? value : null);
 const upperFirst = text => `${text.charAt(0).toUpperCase()}${text.slice(1)}`;
+
+function progressStage(value) {
+  if (PROGRESS_STAGES.includes(value)) return value;
+  return REVIEW_PROGRESS_STAGES.has(value) ? 'review' : null;
+}
 
 function stepsFor(stage, allDone) {
   const current = PROGRESS_STAGES.indexOf(stage);
@@ -111,9 +121,7 @@ function deriveInner({ job: rawJob, chat: rawChat, item: rawItem, bridge: rawBri
   const phase = job.phase;
   if (!JOB_PHASES.includes(phase) || phase === 'unknown') return generic();
 
-  const stage = PROGRESS_STAGES.includes(job.stage)
-    ? job.stage
-    : PROGRESS_STAGES.includes(item.stage) ? item.stage : null;
+  const stage = progressStage(job.stage) || progressStage(item.stage);
   const label = stage ? applicationStageLabel(stage) : null;
   const finished = phase === 'done';
   const base = steps => ({ steps, kind: phase });

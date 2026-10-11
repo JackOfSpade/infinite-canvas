@@ -14,7 +14,21 @@ import {
   APPLICATION_QUALITY_CHECKLIST_VERSION,
   APPLICATION_QUALITY_CRITERIA,
   LOCAL_AI_GENERATION_AUDIT_VERSION,
+  __queueLegacyLocalApplicationFixtureForTests,
 } from '../electron/ipc/localAiApplication.js';
+import {
+  CAREER_SNAPSHOT_COMPILATION_CONTRACT,
+  CAREER_SNAPSHOT_SCHEMA_VERSION,
+  CAREER_SNAPSHOT_STATUS_APPROVED,
+  buildCareerSourceCorpus,
+  canonicalCareerProfileDigest,
+  careerSnapshotId,
+  careerSnapshotStorageRoot,
+  emptyCareerReconciliationReceipt,
+  partitionCareerSourcePages,
+  verbatimCareerTranscriptionAuditReceipt,
+  writeCareerSnapshotAtomically,
+} from '../electron/ipc/careerSnapshot.js';
 import { BACKGROUND_E2E_SHUTDOWN_TIMEOUT_MS } from '../electron/utils/backgroundE2e.js';
 import { readConfig } from '../electron/ipc/handoffBridge/store.js';
 import { readTunnelState } from '../electron/ipc/handoffBridge/tunnel/files.js';
@@ -40,12 +54,17 @@ const socketPath = path.join(userDataDir, SOCKET_RELATIVE_PATH);
 const tunnelRoot = path.join(userDataDir, 'handoff-bridge', 'tunnel');
 const credentialsPath = path.join(userDataDir, 'credentials', `${TUNNEL_ID}.json`);
 const fakeSourceRoot = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'ic-b-fake-')));
+// Renderer filesystem IPC must reject private application-data paths. Keep the
+// canvas fixture outside Electron userData so this smoke exercises the same
+// permitted saved-canvas route a user takes.
+const canvasFixtureRoot = await fs.realpath(await fs.mkdtemp(path.join(process.cwd(), '.tmp-bridge-canvas-')));
 const fakeProgramPath = path.join(fakeSourceRoot, 'fake-cloudflared.js');
 const fakeLauncherPath = path.join(fakeSourceRoot, 'fake-cloudflared');
 const rendererErrors = [];
 let app;
 let copiedBinaryPath = null;
 let binaryPin = null;
+let syntheticCareerSnapshotId = '';
 const tunnelSecretField = ['Tunnel', 'Secret'].join('');
 const CLIENT_ID = 'https://chatgpt.com/oauth/client.json';
 const REDIRECT_URI = 'https://chatgpt.com/connector_platform_oauth_redirect';
@@ -61,7 +80,7 @@ const SYNTHETIC_LETTER_SENTENCES = Object.freeze([
 const SYNTHETIC_LETTER = SYNTHETIC_LETTER_SENTENCES.join(' ');
 const SYNTHETIC_THESIS = 'Reliable system delivery is the supported capability this engineering role needs.';
 const SYNTHETIC_CAREER_DATA = [
-  SYNTHETIC_IDENTITY.name, SYNTHETIC_IDENTITY.contact[0], SYNTHETIC_IDENTITY.subtitleRole,
+  SYNTHETIC_IDENTITY.name, SYNTHETIC_IDENTITY.contact[0], '## Example Co', SYNTHETIC_IDENTITY.subtitleRole,
   SYNTHETIC_EVIDENCE, SYNTHETIC_LETTER,
 ].join('\n');
 const SYNTHETIC_JOB = Object.freeze({
@@ -71,6 +90,89 @@ const SYNTHETIC_JOB = Object.freeze({
 // Reserve a high local sequence range so this explicit smoke fixture cannot be
 // discarded as an older renderer publication.
 const SMOKE_PUBLISH_SEQUENCE_BASE = 1_000;
+
+const canonicalJson = value => {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
+  if (value && typeof value === 'object') return `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(',')}}`;
+  return JSON.stringify(value);
+};
+
+const sha256 = value => crypto.createHash('sha256').update(value, 'utf8').digest('hex');
+
+function cleanCareerSnapshotAuditHistory(corpus, profile) {
+  const pages = partitionCareerSourcePages(corpus);
+  const deterministicFailureDigest = sha256(canonicalJson([]));
+  const audits = [
+    ['coverage', 'career-profile-audit-completeness'], ['grounding', 'career-profile-audit-grounding'],
+    ['attribution', 'career-profile-audit-attribution'], ['metrics', 'career-profile-audit-metrics'],
+    ['skills', 'career-profile-audit-skills'], ['conflict', 'career-profile-audit-conflicts'],
+  ].map(([category, task]) => {
+    let chainDigest = sha256(canonicalJson({ category, task, seed: 'career-page-audit-v1' }));
+    const findingDigest = sha256(canonicalJson([]));
+    const pageAudits = pages.map(page => {
+      chainDigest = sha256(canonicalJson({ prior: chainDigest, pageId: page.id, pageIndex: page.index, findingCount: 0, findingDigest }));
+      return { pageId: page.id, pageIndex: page.index, findingCount: 0, findingDigest, chainDigest };
+    });
+    const parts = pageAudits.map(({ pageId, pageIndex, findingCount, findingDigest: pageFindingDigest, chainDigest: pageChainDigest }) => ({ pageId, pageIndex, findingCount, findingDigest: pageFindingDigest, chainDigest: pageChainDigest }));
+    return { category, task, findingCount: 0, findingDigest: sha256(canonicalJson(parts)), findings: [], pageAudits };
+  });
+  const profileDigest = canonicalCareerProfileDigest(profile);
+  const unresolvedFindingDigest = sha256(canonicalJson({
+    deterministicFailureDigest,
+    audits: audits.map(audit => ({ category: audit.category, findingCount: audit.findingCount, findingDigest: audit.findingDigest })),
+  }));
+  return [{
+    round: 0, profileDigest, unresolvedFindingDigest,
+    stateDigest: sha256(canonicalJson({ profileDigest, unresolvedFindingDigest })),
+    deterministicFailureCount: 0, deterministicFailureDigest, deterministicFailures: [], audits, unresolvedCount: 0,
+  }];
+}
+
+async function seedSyntheticCareerSnapshot() {
+  const corpus = buildCareerSourceCorpus([{
+    name: 'Synthetic Career.md', contentHash: sha256(SYNTHETIC_CAREER_DATA),
+    text: SYNTHETIC_CAREER_DATA, legacyText: SYNTHETIC_CAREER_DATA,
+    transcriptionAudit: verbatimCareerTranscriptionAuditReceipt(),
+  }]);
+  const segmentIds = corpus.segments.map(segment => segment.id);
+  const profile = {
+    identity: { name: SYNTHETIC_IDENTITY.name, contacts: [...SYNTHETIC_IDENTITY.contact], evidenceSegmentIds: segmentIds },
+    roles: [{
+      id: 'role-example-co', title: 'Engineer', employer: 'Example Co', startDate: '', endDate: '', location: '',
+      achievementIds: ['achievement-systems'], skillIds: [], evidenceSegmentIds: segmentIds,
+    }],
+    achievements: [{
+      id: 'achievement-systems', roleId: 'role-example-co', claim: SYNTHETIC_EVIDENCE,
+      technologies: [], metrics: [], evidenceSegmentIds: segmentIds,
+    }],
+    projects: [], skills: [], education: [], certifications: [], otherEvidence: [],
+    segmentCoverage: segmentIds.map(segmentId => ({
+      segmentId, disposition: 'achievement', entityIds: ['identity', 'role-example-co', 'achievement-systems'],
+    })),
+  };
+  const snapshotId = careerSnapshotId(corpus);
+  const pages = partitionCareerSourcePages(corpus);
+  const snapshotRoot = careerSnapshotStorageRoot(userDataDir);
+  await writeCareerSnapshotAtomically(snapshotRoot, {
+    schemaVersion: CAREER_SNAPSHOT_SCHEMA_VERSION,
+    status: CAREER_SNAPSHOT_STATUS_APPROVED,
+    snapshotId,
+    inputFingerprint: corpus.inputFingerprint,
+    sourceFingerprint: corpus.sourceFingerprint,
+    compilationContract: CAREER_SNAPSHOT_COMPILATION_CONTRACT,
+    pagePlan: {
+      maxSegments: 32, maxSourceChars: 48_000, pageCount: pages.length,
+      pageDigest: sha256(canonicalJson(pages.map(page => ({ id: page.id, index: page.index, segmentIds: page.segmentIds })))),
+    },
+    reconciliation: emptyCareerReconciliationReceipt(),
+    approvedAt: '2026-10-08T00:00:00.000Z',
+    sources: corpus.sources,
+    segments: corpus.segments,
+    profile,
+    auditHistory: cleanCareerSnapshotAuditHistory(corpus, profile),
+  });
+  return snapshotId;
+}
 
 async function exists(target) {
   try { await fs.lstat(target); return true; } catch (error) { if (error?.code === 'ENOENT') return false; throw error; }
@@ -274,14 +376,31 @@ async function mcpToolCall(accessToken, id, name, args, label) {
 }
 
 async function queueSyntheticApplication(page, canvasFilePath, label) {
-  const queued = await page.evaluate(async ({ filePath, job, careerData }) => window.electronAPI.queueLocalApplication({
-    canvasFilePath: filePath, transport: 'paste', job, careerData,
+  const queued = await page.evaluate(async ({ filePath, job, careerSnapshotId }) => window.electronAPI.queueLocalApplication({
+    canvasFilePath: filePath, transport: 'paste', job, careerSnapshotId,
     additionalNotes: 'Synthetic smoke fixture only.',
-    resumeProfile: { workHistory: [{ id: 'role-1', title: 'Engineer', employer: 'Example Co', startDate: '', endDate: '' }] },
-  }), { filePath: canvasFilePath, job: SYNTHETIC_JOB, careerData: SYNTHETIC_CAREER_DATA });
+  }), { filePath: canvasFilePath, job: SYNTHETIC_JOB, careerSnapshotId: syntheticCareerSnapshotId });
   assert.equal(queued.success, true, `${label}: synthetic application must queue through the frozen app IPC: ${JSON.stringify(queued)}`);
   assert.match(queued.localJob?.id || '', /^[0-9a-f-]{36}$/i, `${label}: queueLocalApplication must return its durable localJob id`);
   return queued;
+}
+
+// The bridge response fixture below intentionally covers the retained
+// evidence-plan/resume/cover-letter/review protocol. Keep that compatibility
+// coverage host-side: it must never be an alternate renderer or IPC creation
+// path for an unpinned application.
+async function seedLegacyBridgeFlowApplication(canvasFilePath, label) {
+  const localJob = await __queueLegacyLocalApplicationFixtureForTests({
+    canvasFilePath,
+    transport: 'paste',
+    job: SYNTHETIC_JOB,
+    careerData: SYNTHETIC_CAREER_DATA,
+    resumeProfile: {
+      workHistory: [{ id: 'role-1', title: 'Engineer', employer: 'Example Co', startDate: '', endDate: '' }],
+    },
+  });
+  assert.match(localJob?.id || '', /^[0-9a-f-]{36}$/i, `${label}: legacy bridge fixture must create a durable test job`);
+  return { localJob };
 }
 
 async function publishApplicationJobs(page, seq, jobs, label) {
@@ -455,6 +574,8 @@ async function waitForFakeAlive(label) {
 
 async function seedTestState() {
   assert(Buffer.byteLength(socketPath) <= 100, `TEST socket path exceeds Unix limit: ${socketPath}`);
+  syntheticCareerSnapshotId = await seedSyntheticCareerSnapshot();
+  assert.match(syntheticCareerSnapshotId, /^[a-f0-9]{64}$/, 'synthetic smoke career snapshot must be a current immutable id');
   await fs.mkdir(path.dirname(credentialsPath), { recursive: true, mode: 0o700 });
   await fs.mkdir(path.join(tunnelRoot, 'bin'), { recursive: true, mode: 0o700 });
   await fs.writeFile(credentialsPath, JSON.stringify({
@@ -762,12 +883,21 @@ try {
   assert.deepEqual(JSON.parse(listed.body).result.tools.map(tool => tool.name), ['get_handoff', 'submit_handoff'],
     'MCP must expose the frozen two-tool golden surface exactly');
 
-  const canvasPath = path.join(userDataDir, 'synthetic-application.canvas');
-  await page.evaluate(async filePath => {
+  const canvasPath = path.join(canvasFixtureRoot, 'synthetic-application.canvas');
+  const savedCanvas = await page.evaluate(async filePath => {
     const data = { schemaVersion: 3, nodes: [], edges: [], drawings: [] };
     return window.electronAPI.saveWorkspace({ data, filePath });
   }, canvasPath);
-  const humanPasteJob = await queueSyntheticApplication(page, canvasPath, 'human-paste fixture');
+  assert.equal(savedCanvas?.success, true, `synthetic application canvas must save through renderer IPC: ${JSON.stringify(savedCanvas)}`);
+  assert.equal(savedCanvas.filePath, canvasPath, 'synthetic application canvas must retain its non-private fixture path');
+  const strictIpcJob = await queueSyntheticApplication(page, canvasPath, 'current-authority IPC fixture');
+  const discardedStrictIpcJob = await page.evaluate(args => window.electronAPI.discardLocalApplication(args), {
+    jobId: strictIpcJob.localJob.id,
+    canvasFilePath: canvasPath,
+  });
+  assert.equal(discardedStrictIpcJob.success, true,
+    `current-authority IPC fixture must be discarded through production IPC before legacy bridge-flow setup: ${JSON.stringify(discardedStrictIpcJob)}`);
+  const humanPasteJob = await seedLegacyBridgeFlowApplication(canvasPath, 'human-paste fixture');
   const published = await app.evaluate(({ BrowserWindow }, filePath) => {
     const window = BrowserWindow.getAllWindows()[0];
     window.__canvasFilePath = filePath;
@@ -826,7 +956,7 @@ try {
 
   // Keep the held human lane intact, then prove a second all-synthetic job
   // drains every application stage through the real OAuth/MCP/main/app path.
-  const fullDrainJob = await queueSyntheticApplication(page, canvasPath, 'full-drain fixture');
+  const fullDrainJob = await seedLegacyBridgeFlowApplication(canvasPath, 'full-drain fixture');
   await publishApplicationJobs(page, SMOKE_PUBLISH_SEQUENCE_BASE + 3, [
     { jobId: humanPasteJob.localJob.id, canvasFilePath: canvasPath, dockState: 'awaiting', sig: 'synthetic-human-v2' },
     { jobId: fullDrainJob.localJob.id, canvasFilePath: canvasPath, dockState: 'awaiting', sig: 'synthetic-full-drain-v1' },
@@ -841,7 +971,7 @@ try {
     const accepted = await mcpToolCall(accessToken, rpcId++, 'submit_handoff', {
       session, handoffCode: served.handoffCode, response: syntheticResponseForServedHandoff(served),
     }, `full-drain ${stage} submit_handoff`);
-    assert.equal(accepted.status, 'accepted', `full-drain ${stage}: real MCP submit_handoff must accept the synthetic stage response`);
+    assert.equal(accepted.status, 'accepted', `full-drain ${stage}: real MCP submit_handoff must accept the synthetic stage response: ${JSON.stringify(accepted)}`);
     assert.equal(accepted.jobComplete, index === applicationStages.length - 1,
       `full-drain ${stage}: completion must occur only after the final review stage`);
     if (index < applicationStages.length - 1) {
@@ -925,11 +1055,12 @@ try {
   } catch (error) {
     cleanupFailures.push(error);
   }
-  // The fake connector and Electron verification may each fail, but both
+  // The fake connector, canvas fixture, and Electron verification may each fail, but all
   // unique fixture roots are always attempted and rejected removals are fatal.
   const removals = await Promise.allSettled([
     fs.rm(userDataDir, { recursive: true, force: true }),
     fs.rm(fakeSourceRoot, { recursive: true, force: true }),
+    fs.rm(canvasFixtureRoot, { recursive: true, force: true }),
   ]);
   for (const result of removals) {
     if (result.status === 'rejected') cleanupFailures.push(result.reason);

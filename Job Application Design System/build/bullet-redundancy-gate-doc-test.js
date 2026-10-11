@@ -57,15 +57,18 @@ assert(/applies to a project entry against the bullet corpus, applied here bulle
 assert(/subject is the previous bullet's object/.test(skillN),
   'SKILL.md names the "subject is the previous bullet\'s object" tell',
   'the previous-bullet-object symptom check is missing from SKILL.md');
-assert(/internal-tools hub/.test(skillN),
-  'SKILL.md cites the shipped internal-tools-hub case as the worked example',
-  'the internal-tools-hub example is missing from SKILL.md');
+assert(/one that built it, one that packaged it for deployment, one that added a feature to it/.test(skillN),
+  'SKILL.md describes the build / deployment / feature split of one artifact as the worked example',
+  'the build / deployment / feature worked example is missing from SKILL.md');
+assert(/"<Packaged> \*\*<the artifact>\*\*…" right after the bullet that built it/.test(skillN),
+  'SKILL.md gives the previous-bullet-object tell in placeholder form, with no candidate-specific artifact',
+  'the placeholder-form tell is missing from SKILL.md');
 assert(/Splitting a bullet is never the repair for a short page/i.test(skillN),
   'SKILL.md states that splitting a bullet is never the repair for a short page',
   'no "never the repair for a short page" language found in SKILL.md');
-assert(/74\.1%/.test(skillN),
-  'SKILL.md cites the measured 74.1% type-area figure from the real case',
-  'the 74.1% figure is missing from SKILL.md');
+assert(/the repair is the unused career data, not a second and third bullet about a system the page already covered/.test(skillN),
+  'SKILL.md names unused career data, not a split bullet, as the repair for a short page',
+  'the unused-career-data repair is missing from SKILL.md');
 
 console.log('\nSKILL.md — negative-space line');
 var negSpaceStart = skillN.indexOf('## Negative space');
@@ -110,9 +113,9 @@ assert(/One accomplishment gets one bullet/.test(roSection),
 assert(/Do not let a project section restate the bullets/.test(roSection),
   'CONTENT_RULES.md cross-references SKILL.md\'s "Do not let a project section restate the bullets"',
   'no cross-reference to the project-restatement test found in CONTENT_RULES.md');
-assert(/internal-tools hub/.test(roSection),
-  'CONTENT_RULES.md cites the shipped internal-tools-hub case as the worked example',
-  'the internal-tools-hub example is missing from CONTENT_RULES.md');
+assert(/one that built it, one that packaged it for deployment, one that added a feature to it/.test(roSection),
+  'CONTENT_RULES.md describes the build / deployment / feature split of one artifact as the worked example',
+  'the build / deployment / feature worked example is missing from CONTENT_RULES.md');
 assert(/subject is the previous bullet's object/.test(roSection),
   'CONTENT_RULES.md names the "subject is the previous bullet\'s object" tell',
   'the previous-bullet-object symptom check is missing from CONTENT_RULES.md');

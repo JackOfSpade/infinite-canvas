@@ -106,7 +106,7 @@ export default [
       'final audit separates bounded factual violations from exact-span cohesion observations');
       const faultyParallelismFixture = {
         kind: 'faulty-parallelism',
-        claim: 'from the quote request through presenting findings',
+        claim: 'from the intake form through reviewing results',
         reason: 'The process span coordinates a noun phrase with a verb-ing phrase.',
         repair: 'Use parallel nouns or parallel actions.',
       };

@@ -12,6 +12,7 @@ import { BridgeProgress } from './BridgeProgress';
 import { BridgeApplicationsPage } from './BridgeApplicationsPage';
 // The bridge-held rule is shared with the job card so the two cannot disagree.
 import { isBridgeHeldJob } from '../utils/bridgeHeldApplication';
+import { isCareerCompilerTask } from '../utils/careerCompilerTasks';
 // Which bridge-held bundles share ONE page instead of one chip/page each.
 import { buildDockNav, isGroupOnlyNav } from '../utils/applicationBridgePage';
 import { isBridgeHeldPush } from '../utils/bridgeHeldPush';
@@ -315,10 +316,7 @@ const isJobSearchPauseEligible = (request) => (
   && typeof request?.nodeId === 'string' && request.nodeId.length > 0
   && typeof request?.runId === 'string' && request.runId.length > 0
   && (
-    request.task === 'career-file-extract'
-    || request.task === 'career-file-transcription-audit'
-    || request.task === 'resume-parse'
-    || (typeof request.task === 'string' && request.task.startsWith('career-profile-'))
+    isCareerCompilerTask(request.task)
     || (typeof request.task === 'string' && request.task.startsWith('job-'))
   )
 );

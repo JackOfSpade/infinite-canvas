@@ -400,6 +400,11 @@ export function __compactErrorStackForTests(error, maxFrames) {
  * @param {number|object} timeoutOrOptions - Optional timeout, or lifecycle hooks.
  * Set `logTaskRegistration: false` only for high-frequency routine probes;
  * node-task registration and cancellation remain active.
+ * Set `validateArgs(args, event)` for a synchronous route-specific boundary
+ * check. It runs before `args.nodeId` is read, registered, or logged, making
+ * it safe for routes whose node ID grammar is stricter than the generic task
+ * registry. Throws use the normal IPC error payload and cleanup path. Do not
+ * return a Promise: registration must not begin until validation has settled.
  */
 export function handleSafe(channel, handler, timeoutOrOptions = 0) {
   const options = timeoutOrOptions && typeof timeoutOrOptions === 'object'
@@ -408,20 +413,32 @@ export function handleSafe(channel, handler, timeoutOrOptions = 0) {
   const timeoutMs = Number.isFinite(timeoutOrOptions) ? timeoutOrOptions : 0;
   ipcMain.handle(channel, async (event, args) => {
     const { ac, signal, cleanup } = createSenderAbortController(event, timeoutMs);
-    const nodeId = args?.nodeId;
-    
-    if (nodeId) {
-      registerNodeTask(
-        event.sender,
-        nodeId,
-        ac,
-        channel,
-        typeof args?.manualAiRunId === 'string' ? args.manualAiRunId : null,
-        options.logTaskRegistration !== false,
-      );
-    }
+    let nodeId = null;
 
     try {
+      // This must stay ahead of every `args.nodeId` read. Node IDs feed the
+      // task registry and its diagnostic logging, so route-owned validation
+      // belongs at this generic lifecycle boundary rather than only inside a
+      // route handler (which runs after registration).
+      if (typeof options.validateArgs === 'function') {
+        const validationResult = options.validateArgs(args, event);
+        if (validationResult && typeof validationResult.then === 'function') {
+          throw new TypeError('IPC argument validation must be synchronous.');
+        }
+      }
+
+      nodeId = args?.nodeId;
+      if (nodeId) {
+        registerNodeTask(
+          event.sender,
+          nodeId,
+          ac,
+          channel,
+          typeof args?.manualAiRunId === 'string' ? args.manualAiRunId : null,
+          options.logTaskRegistration !== false,
+        );
+      }
+
       const result = await ipcRequestContext.run(
         {
           sender: event.sender,

@@ -14,8 +14,8 @@ import { assert } from './testHelpers.js';
 
 // A long, exact-description body. Reused verbatim so two postings fingerprint
 // identically; any character-level change makes them a near-match non-merge.
-const LONG_DESCRIPTION = `We are looking for a senior platform engineer to join the payments infrastructure team.
-You will design, build, and operate distributed services that move money for millions of customers,
+const LONG_DESCRIPTION = `We are looking for a senior platform engineer to join the fleet scheduling team.
+You will design, build, and operate distributed services that coordinate deliveries for millions of customers,
 own reliability and observability, mentor engineers, and partner with product and security teams to
 ship safe incremental changes. The role requires deep experience with Go or Java, Kubernetes, and
 cloud networking, along with a track record of leading cross-team technical programs. You will be
@@ -24,13 +24,13 @@ Candidates should be comfortable operating production systems on call, debugging
 under time pressure, and communicating clearly with both technical and non-technical partners.`;
 
 // The same body with one wording change — similar but NOT an exact match.
-const NEAR_MATCH_DESCRIPTION = LONG_DESCRIPTION.replace('payments infrastructure team', 'payments platform group');
+const NEAR_MATCH_DESCRIPTION = LONG_DESCRIPTION.replace('fleet scheduling team', 'fleet planning group');
 
 function makeJob(overrides = {}) {
   return {
     title: 'Senior Platform Engineer',
-    company: 'Affirm',
-    url: 'https://jobs.example.com/affirm/senior-platform-engineer',
+    company: 'Brightfield',
+    url: 'https://jobs.example.com/brightfield/senior-platform-engineer',
     description: LONG_DESCRIPTION,
     matchScore: 80,
     source: 'greenhouse',
@@ -38,12 +38,12 @@ function makeJob(overrides = {}) {
   };
 }
 
-function affirmStyleFourLocation() {
+function brightfieldStyleFourLocation() {
   return [
-    makeJob({ location: 'Remote - US', url: 'https://jobs.example.com/affirm/a', posted: '2026-02-01' }),
-    makeJob({ location: 'New York, NY', url: 'https://jobs.example.com/affirm/b', posted: '2026-02-02' }),
-    makeJob({ location: 'San Francisco, CA', url: 'https://jobs.example.com/affirm/c', posted: '2026-02-03' }),
-    makeJob({ location: 'Remote - Canada', url: 'https://jobs.example.com/affirm/d', posted: '2026-02-04' }),
+    makeJob({ location: 'Remote - US', url: 'https://jobs.example.com/brightfield/a', posted: '2026-02-01' }),
+    makeJob({ location: 'New York, NY', url: 'https://jobs.example.com/brightfield/b', posted: '2026-02-02' }),
+    makeJob({ location: 'San Francisco, CA', url: 'https://jobs.example.com/brightfield/c', posted: '2026-02-03' }),
+    makeJob({ location: 'Remote - Canada', url: 'https://jobs.example.com/brightfield/d', posted: '2026-02-04' }),
   ];
 }
 
@@ -53,9 +53,9 @@ function snapshot(jobs) {
 
 export default [
   {
-    name: 'consolidation: Affirm-style four-location exact-description postings collapse to one Multiple locations row',
+    name: 'consolidation: Brightfield-style four-location exact-description postings collapse to one Multiple locations row',
     run: () => {
-      const jobs = affirmStyleFourLocation();
+      const jobs = brightfieldStyleFourLocation();
       const { jobs: out, groups, stats } = consolidateJobLocations(jobs);
       assert(out.length === 1, `four same-description locations must collapse to one row, got ${out.length}`);
       assert(out[0].location === MULTIPLE_LOCATIONS_LABEL, `displayed location must be "${MULTIPLE_LOCATIONS_LABEL}"`);
@@ -74,9 +74,9 @@ export default [
     name: 'consolidation: input order is preserved and the inputs are never mutated',
     run: () => {
       const jobs = [
-        makeJob({ location: 'Boston, MA', url: 'https://jobs.example.com/affirm/x1' }),
+        makeJob({ location: 'Boston, MA', url: 'https://jobs.example.com/brightfield/x1' }),
         { title: 'Data Analyst', company: 'Acme', location: 'Remote', description: 'short', matchScore: 50, url: 'https://jobs.example.com/acme/1' },
-        makeJob({ location: 'Austin, TX', url: 'https://jobs.example.com/affirm/x2' }),
+        makeJob({ location: 'Austin, TX', url: 'https://jobs.example.com/brightfield/x2' }),
       ];
       const before = snapshot(jobs);
       const { jobs: out } = consolidateJobLocations(jobs);
@@ -90,7 +90,7 @@ export default [
   {
     name: 'consolidation: repeated consolidation is idempotent',
     run: () => {
-      const first = consolidateJobLocations(affirmStyleFourLocation()).jobs;
+      const first = consolidateJobLocations(brightfieldStyleFourLocation()).jobs;
       const firstSnapshot = snapshot(first);
       const second = consolidateJobLocations(first).jobs;
       assert(snapshot(second) === firstSnapshot, 're-running consolidation over its own output changes nothing');
@@ -104,29 +104,29 @@ export default [
     name: 'consolidation: different descriptions, same location, and short text never merge',
     run: () => {
       const differentDescription = [
-        makeJob({ location: 'Remote - US', url: 'https://jobs.example.com/affirm/d1' }),
-        makeJob({ location: 'New York, NY', description: NEAR_MATCH_DESCRIPTION, url: 'https://jobs.example.com/affirm/d2' }),
+        makeJob({ location: 'Remote - US', url: 'https://jobs.example.com/brightfield/d1' }),
+        makeJob({ location: 'New York, NY', description: NEAR_MATCH_DESCRIPTION, url: 'https://jobs.example.com/brightfield/d2' }),
       ];
       const diffOut = consolidateJobLocations(differentDescription).jobs;
       assert(diffOut.length === 2, `a near-match description must not merge, got ${diffOut.length}`);
 
       const sameLocation = [
-        makeJob({ location: 'Remote - US', url: 'https://jobs.example.com/affirm/s1' }),
-        makeJob({ location: 'Remote - US', url: 'https://jobs.example.com/affirm/s2' }),
+        makeJob({ location: 'Remote - US', url: 'https://jobs.example.com/brightfield/s1' }),
+        makeJob({ location: 'Remote - US', url: 'https://jobs.example.com/brightfield/s2' }),
       ];
       const sameOut = consolidateJobLocations(sameLocation).jobs;
       assert(sameOut.length === 2, `same-location requisitions must not merge, got ${sameOut.length}`);
 
       const shortText = [
-        makeJob({ location: 'Remote - US', description: 'Short snippet only.', url: 'https://jobs.example.com/affirm/t1' }),
-        makeJob({ location: 'New York, NY', description: 'Short snippet only.', url: 'https://jobs.example.com/affirm/t2' }),
+        makeJob({ location: 'Remote - US', description: 'Short snippet only.', url: 'https://jobs.example.com/brightfield/t1' }),
+        makeJob({ location: 'New York, NY', description: 'Short snippet only.', url: 'https://jobs.example.com/brightfield/t2' }),
       ];
       const shortOut = consolidateJobLocations(shortText).jobs;
       assert(shortOut.length === 2, `short snippets below the ${MIN_DESCRIPTION_ALNUM}-char floor must not merge, got ${shortOut.length}`);
 
       const missingCompany = [
-        makeJob({ company: '', location: 'Remote - US', url: 'https://jobs.example.com/affirm/m1' }),
-        makeJob({ company: '', location: 'New York, NY', url: 'https://jobs.example.com/affirm/m2' }),
+        makeJob({ company: '', location: 'Remote - US', url: 'https://jobs.example.com/brightfield/m1' }),
+        makeJob({ company: '', location: 'New York, NY', url: 'https://jobs.example.com/brightfield/m2' }),
       ];
       assert(consolidateJobLocations(missingCompany).jobs.length === 2,
         'rows missing a normalized company must never merge');
@@ -137,8 +137,8 @@ export default [
     name: 'consolidation: high deterministic similarity is only an AI-confirmable candidate, never an automatic merge',
     run: () => {
       const jobs = [
-        makeJob({ location: 'Remote - US', url: 'https://jobs.example.com/affirm/similar-a' }),
-        makeJob({ location: 'New York, NY', description: NEAR_MATCH_DESCRIPTION, url: 'https://jobs.example.com/affirm/similar-b' }),
+        makeJob({ location: 'Remote - US', url: 'https://jobs.example.com/brightfield/similar-a' }),
+        makeJob({ location: 'New York, NY', description: NEAR_MATCH_DESCRIPTION, url: 'https://jobs.example.com/brightfield/similar-b' }),
       ];
       const similarity = descriptionSimilarity(jobs[0], jobs[1]);
       const candidates = findSimilarLocationCandidates(jobs);
@@ -160,8 +160,8 @@ export default [
     run: async () => {
       const jobs = Array.from({ length: 6 }, (_, index) => makeJob({
         location: `City ${index}, ST`,
-        url: `https://jobs.example.com/affirm/candidate-${index}`,
-        description: LONG_DESCRIPTION.replace('payments infrastructure team', `payments infrastructure team variant${index}`),
+        url: `https://jobs.example.com/brightfield/candidate-${index}`,
+        description: LONG_DESCRIPTION.replace('fleet scheduling team', `fleet scheduling team variant${index}`),
       }));
       let active = 0;
       let peak = 0;
@@ -189,10 +189,10 @@ export default [
     name: 'consolidation: URL union is bounded, deduplicated, and drops unsafe URLs',
     run: () => {
       const jobs = [
-        makeJob({ location: 'Remote - US', url: 'https://jobs.example.com/affirm/a', applyUrl: 'https://apply.example.com/a' }),
-        makeJob({ location: 'Remote - US', url: 'https://jobs.example.com/affirm/a' }), // duplicate variant
+        makeJob({ location: 'Remote - US', url: 'https://jobs.example.com/brightfield/a', applyUrl: 'https://apply.example.com/a' }),
+        makeJob({ location: 'Remote - US', url: 'https://jobs.example.com/brightfield/a' }), // duplicate variant
         makeJob({ location: 'New York, NY', url: 'javascript:alert(1)', googleCardUrl: 'https://g.example.com/ny' }),
-        makeJob({ location: 'San Francisco, CA', url: 'https://user:pass@jobs.example.com/affirm/secret' }),
+        makeJob({ location: 'San Francisco, CA', url: 'https://user:pass@jobs.example.com/brightfield/secret' }),
       ];
       const { jobs: out } = consolidateJobLocations(jobs);
       assert(out.length === 1, 'the cluster consolidates despite unsafe/duplicate URLs');
@@ -207,7 +207,7 @@ export default [
         'the safe-URL predicate rejects non-http(s) and opaque schemes');
       const dense = [];
       for (let i = 0; i < 200; i += 1) {
-        dense.push(makeJob({ location: `City ${i}`, url: `https://jobs.example.com/affirm/v${i}` }));
+        dense.push(makeJob({ location: `City ${i}`, url: `https://jobs.example.com/brightfield/v${i}` }));
       }
       const bounded = consolidateJobLocations(dense).jobs[0].postingVariants;
       assert(bounded.length <= 64, `postingVariants must stay bounded, got ${bounded.length}`);
@@ -217,15 +217,15 @@ export default [
   {
     name: 'consolidation: zero or one protected card collapses and the protected card is reused',
     run: () => {
-      const unprotected = affirmStyleFourLocation();
+      const unprotected = brightfieldStyleFourLocation();
       const zero = consolidateJobLocations(unprotected).jobs;
       assert(zero.length === 1 && !zero[0].reuseCardId, 'a cluster with no protected card collapses to one fresh row');
 
       const state = { localApplication: { status: 'draft', appliedAt: '2026-01-01' } };
-      const cardData = { ...affirmStyleFourLocation()[1], hubId: 'board-1' };
+      const cardData = { ...brightfieldStyleFourLocation()[1], hubId: 'board-1' };
       const protectedRow = { ...cardData, cardId: 'card-protected', protected: true, cardData: { ...cardData, localApplication: state } };
       const withProtected = consolidateJobLocations(
-        [affirmStyleFourLocation()[0], protectedRow, affirmStyleFourLocation()[2]],
+        [brightfieldStyleFourLocation()[0], protectedRow, brightfieldStyleFourLocation()[2]],
         { protectedIds: new Set(['card-protected']) },
       );
       const out = withProtected.jobs;
@@ -241,7 +241,7 @@ export default [
     run: () => {
       const stateA = { localApplication: { applicationId: 'app-a' } };
       const stateB = { localApplication: { applicationId: 'app-b' } };
-      const base = affirmStyleFourLocation();
+      const base = brightfieldStyleFourLocation();
       const protectedA = { ...base[0], cardId: 'card-a', protected: true, cardData: { ...base[0], localApplication: stateA } };
       const protectedB = { ...base[1], cardId: 'card-b', protected: true, cardData: { ...base[1], localApplication: stateB } };
       const unprotected = [base[2], base[3]];
@@ -267,7 +267,7 @@ export default [
     name: 'migration: version 10 consolidates a saved cascade, prunes emptied groups, and is idempotent',
     run: () => {
       assert(CURRENT_SCHEMA_VERSION === 10, `current schema version must be 10, got ${CURRENT_SCHEMA_VERSION}`);
-      const base = affirmStyleFourLocation();
+      const base = brightfieldStyleFourLocation();
       const boardId = 'board-1';
       const nodes = [
         { id: boardId, type: 'jobboard', data: { hubState: 'done', resultCount: 4, finalSourceCounts: { greenhouse: 4 }, mergeStats: { removedDuplicates: 0 } } },
@@ -317,7 +317,7 @@ export default [
   {
     name: 'migration: protected cards and localApplication state survive consolidation',
     run: () => {
-      const base = affirmStyleFourLocation();
+      const base = brightfieldStyleFourLocation();
       const boardId = 'board-p';
       const state = { localApplication: { applicationId: 'app-keep', status: 'submitted' } };
       const nodes = [
@@ -337,10 +337,10 @@ export default [
   {
     name: 'migration: multiple boards keep isolated stats and unrelated groups untouched',
     run: () => {
-      const a = affirmStyleFourLocation().slice(0, 2);
-      const b = affirmStyleFourLocation().slice(0, 3).map(job => ({
+      const a = brightfieldStyleFourLocation().slice(0, 2);
+      const b = brightfieldStyleFourLocation().slice(0, 3).map(job => ({
         ...job, title: 'Staff Backend Engineer', company: 'Example Co',
-        url: job.url.replace('/affirm/', '/example/'),
+        url: job.url.replace('/brightfield/', '/example/'),
       }));
       const unrelated = { id: 'unrelated-group', type: 'jobgroup', data: { hubId: 'other-board', childIds: [], count: 0 } };
       const nodes = [
@@ -365,7 +365,7 @@ export default [
   {
     name: 'tree: buildJobTreeNodes reuses protected ids/state and persists postingVariants with valid edges',
     run: () => {
-      const base = affirmStyleFourLocation();
+      const base = brightfieldStyleFourLocation();
       const { jobs: consolidated } = consolidateJobLocations(base);
       const protectedNode = {
         id: 'card-protected', type: 'jobcard',
@@ -422,8 +422,8 @@ export default [
   {
     name: 'fingerprint: postingVariants deterministically change the module fingerprint',
     run: () => {
-      const base = affirmStyleFourLocation();
-      const plain = [makeJob({ location: 'Remote - US', url: 'https://jobs.example.com/affirm/p' })];
+      const base = brightfieldStyleFourLocation();
+      const plain = [makeJob({ location: 'Remote - US', url: 'https://jobs.example.com/brightfield/p' })];
       const before = moduleFingerprint(plain);
       assert(moduleFingerprint(plain) === before, 'the fingerprint is stable for identical input');
 
@@ -444,18 +444,18 @@ export default [
     name: 'diagnostics: summarizeConsolidation is metadata-only (no titles, descriptions, URLs, locations, or fingerprints)',
     run: () => {
       const jobs = [
-        ...affirmStyleFourLocation(),
-        makeJob({ location: 'Remote - US', description: NEAR_MATCH_DESCRIPTION, url: 'https://jobs.example.com/affirm/near' }),
-        { ...affirmStyleFourLocation()[0], location: 'Remote - US' },
+        ...brightfieldStyleFourLocation(),
+        makeJob({ location: 'Remote - US', description: NEAR_MATCH_DESCRIPTION, url: 'https://jobs.example.com/brightfield/near' }),
+        { ...brightfieldStyleFourLocation()[0], location: 'Remote - US' },
       ];
       const facts = summarizeConsolidation(jobs);
       assert(facts.eligibleExactDescriptionMultiLocationGroups === 1,
-        `exactly the Affirm cluster is eligible (near-match is excluded), got ${facts.eligibleExactDescriptionMultiLocationGroups}`);
+        `exactly the Brightfield cluster is eligible (near-match is excluded), got ${facts.eligibleExactDescriptionMultiLocationGroups}`);
       assert(facts.representedPostings === 0 && facts.alreadyConsolidated === 0, 'an unconsumed cluster reports zero consolidated rows');
 
       const serialized = JSON.stringify(facts);
       const forbidden = [
-        'Senior Platform Engineer', 'Affirm', 'payments infrastructure', 'Remote - US',
+        'Senior Platform Engineer', 'Brightfield', 'fleet scheduling', 'Remote - US',
         'New York', 'San Francisco', 'https://jobs.example.com', descriptionFingerprint(jobs[0]),
       ];
       for (const needle of forbidden) {
@@ -476,7 +476,7 @@ export default [
     name: 'diagnostics: Board report exposes accurate metadata-only migration facts',
     run: () => {
       const board = { id: 'board-report', type: 'jobboard', data: { hubState: 'done', resultCount: 4 } };
-      const cards = affirmStyleFourLocation().map((job, index) => ({
+      const cards = brightfieldStyleFourLocation().map((job, index) => ({
         id: `report-${index}`, type: 'jobcard',
         data: { ...job, hubId: board.id, ...(index === 0 ? { localApplication: { applicationId: 'private-app' } } : {}) },
       }));
@@ -485,7 +485,7 @@ export default [
         'the diagnostic reports the eligible exact-description group');
       assert(report.includes('migration-postings-collapsed=3') && report.includes('migration-protected-retained=1'),
         'the diagnostic dry-run reports accurate collapse/protection counts');
-      for (const secret of ['Senior Platform Engineer', 'Affirm', 'Remote - US', 'jobs.example.com', 'private-app']) {
+      for (const secret of ['Senior Platform Engineer', 'Brightfield', 'Remote - US', 'jobs.example.com', 'private-app']) {
         assert(!report.includes(secret), `the diagnostic must not leak ${secret}`);
       }
       return true;
@@ -503,7 +503,7 @@ export default [
       assert(!isConsolidationCandidate({ ...a, company: '   ' }), 'a whitespace-only company is not a candidate');
       assert(isConsolidationCandidate(a), 'a full exact-description row is a candidate');
 
-      const caseOnly = makeJob({ title: '  SENIOR   platform engineer ', company: 'AFFIRM', location: 'New York, NY' });
+      const caseOnly = makeJob({ title: '  SENIOR   platform engineer ', company: 'BRIGHTFIELD', location: 'New York, NY' });
       assert(descriptionFingerprint(caseOnly) === descriptionFingerprint(a)
         && isConsolidationCandidate(caseOnly),
       'title/company normalization ignores case and surrounding whitespace');

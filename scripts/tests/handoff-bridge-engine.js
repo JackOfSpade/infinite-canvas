@@ -17,7 +17,7 @@ import { classifyThrow, fixedError } from '../../electron/ipc/handoffBridge/erro
 import { createHandoffBridgeLog, makeLogRecord } from '../../electron/ipc/handoffBridge/log.js';
 import { createApplicationSource } from '../../electron/ipc/handoffBridge/sources/application.js';
 import { createPushSource } from '../../electron/ipc/handoffBridge/sources/push.js';
-import { reduceBridgeQueue } from '../../electron/ipc/handoffBridge/telemetry.js';
+import { APPLICATION_QUEUE_STAGES, reduceBridgeQueue } from '../../electron/ipc/handoffBridge/telemetry.js';
 import { SURFACE_PIN, TOOLS_LIST, surfaceHash } from '../../electron/ipc/handoffBridge/tools.js';
 import { recommendWorkerPool } from '../../electron/ipc/handoffBridge/workerPool.js';
 
@@ -498,8 +498,343 @@ const tests = [
       const chat = await engine.newChat({ linkId: LINK });
       await engine.get({ session: chat.sessionCode, linkId: LINK });
       const family = engine.snapshot().queue.jobs.filter(job => job.jobId === JOB_A);
-      assert(family.length === 10 && persisted.some(rows => rows.filter(row => row.jobId === JOB_A).length === 10),
-        'a malformed source cannot inflate one authority-match wave beyond ten durable virtual lanes');
+      assert(family.length === 1 && persisted.every(rows => rows.filter(row => row.jobId === JOB_A).length <= 1),
+        'an over-cap authority declaration is rejected without destructively materializing a partial virtual wave');
+      await engine.close();
+    },
+  },
+  {
+    name: 'handoff bridge: production application adapter does not let a truncated oversized wave reconcile lanes',
+    run: async () => {
+      const rawHandoff = {
+        ...handoff({ code: 'MATCH-0', stage: 'career-match' }),
+        matchTaskId: '0',
+        parallelTasks: Array.from({ length: 11 }, (_unused, index) => ({ id: String(index) })),
+      };
+      const application = createApplicationSource({
+        api: {
+          getLocalApplicationHandoff: async () => ({ handoff: rawHandoff }),
+          localApplicationStatus: async () => ({ status: 'queued' }),
+          submitLocalApplicationHandoff: async () => ({ accepted: true, completed: true }),
+        },
+        watchdogMs: 0,
+      });
+      const persisted = [];
+      const engine = createHandoffEngine({
+        source: application, holdMs: 0,
+        store: { saveLanes: async rows => { persisted.push(rows); return true; } },
+      });
+      await engine.release({ jobs: [{ jobId: JOB_A, canvasFilePath: PATH_A }] });
+      const chat = await engine.newChat({ linkId: LINK });
+      const served = await engine.get({ session: chat.sessionCode, linkId: LINK });
+      const finalRows = persisted.at(-1).filter(row => row.jobId === JOB_A);
+      assert(served.status === 'served' && finalRows.length === 1 && finalRows[0].matchTaskId === '0'
+        && !JSON.stringify(served).includes('parallelTasksOverflow'),
+      'the production adapter preserves overflow only privately, so an eleven-task declaration cannot partially reconcile the durable wave');
+      await engine.close();
+    },
+  },
+  {
+    name: 'handoff bridge: production application adapter does not reconcile a sanitized malformed wave',
+    run: async () => {
+      const rawHandoff = {
+        ...handoff({ code: 'MATCH-MALFORMED-0', stage: 'career-match' }),
+        matchTaskId: '0',
+        parallelTasks: [{ id: '0' }, { id: 'not a valid task id' }],
+      };
+      const application = createApplicationSource({
+        api: {
+          getLocalApplicationHandoff: async () => ({ handoff: rawHandoff }),
+          localApplicationStatus: async () => ({ status: 'queued' }),
+          submitLocalApplicationHandoff: async () => ({ accepted: true, completed: true }),
+        },
+        watchdogMs: 0,
+      });
+      const persisted = [];
+      const engine = createHandoffEngine({
+        source: application, holdMs: 0,
+        store: { saveLanes: async rows => { persisted.push(rows); return true; } },
+      });
+      await engine.release({ jobs: [{ jobId: JOB_A, canvasFilePath: PATH_A }] });
+      const chat = await engine.newChat({ linkId: LINK });
+      const served = await engine.get({ session: chat.sessionCode, linkId: LINK });
+      const finalRows = persisted.at(-1).filter(row => row.jobId === JOB_A);
+      assert(served.status === 'served' && finalRows.length === 1 && finalRows[0].matchTaskId === '0'
+        && !JSON.stringify(served).includes('parallelTasksMalformed'),
+      'a mixed valid/malformed authority declaration cannot become a destructive singleton after adapter sanitization');
+      await engine.close();
+    },
+  },
+  {
+    name: 'handoff bridge: virtual completion stays private, avoids a duplicate claim, and a seed resume collapses every sibling',
+    run: async () => {
+      let seedReads = 0;
+      let resume = false;
+      const application = source({
+        read: async lane => {
+          if (!lane.matchTaskId) {
+            seedReads += 1;
+            if (resume) return { kind: 'open', handoff: handoff({ code: 'SEED-RESUME', stage: 'resume' }) };
+            return {
+              kind: 'open',
+              handoff: { ...handoff({ code: 'MATCH-ONE', stage: 'career-match' }), matchTaskId: 'one' },
+              parallelTasks: [{ id: 'one' }, { id: 'two' }],
+            };
+          }
+          if (lane.matchTaskId === 'two') return { kind: 'virtual_done' };
+          return { kind: 'open', handoff: { ...handoff({ code: 'MATCH-ONE', stage: 'career-match' }), matchTaskId: 'one' } };
+        },
+      });
+      const persisted = [];
+      const engine = createHandoffEngine({
+        source: application.api, holdMs: 0,
+        store: { saveLanes: async rows => { persisted.push(rows); return true; } },
+      });
+      await engine.release({ jobs: [{ jobId: JOB_A, canvasFilePath: PATH_A }] });
+      const pool = await engine.startWorkerPool({ linkId: LINK, requestedWorkers: 2 });
+      const one = engine.copyWorkerStarter({ linkId: LINK, generation: pool.generation, workerOrdinal: 1 });
+      const first = await engine.get({ session: one.sessionCode, linkId: LINK });
+      const expanded = await engine.startWorkerPool({ linkId: LINK, requestedWorkers: 2 });
+      const two = engine.copyWorkerStarter({ linkId: LINK, generation: expanded.generation, workerOrdinal: 2 });
+      const duplicatePass = await engine.get({ session: two.sessionCode, linkId: LINK });
+      assert(first.status === 'served' && first.stage === 'career-match'
+        && !JSON.stringify(duplicatePass).includes('virtual_done') && !JSON.stringify(engine.snapshot()).includes('virtual_done')
+        && persisted.at(-1).filter(row => row.jobId === JOB_A && row.matchTaskId === 'one').length === 1,
+      'a virtual completion is internal-only and a discovery seed must not duplicate an already-owned task');
+      resume = true;
+      const resumed = await engine.get({ session: two.sessionCode, linkId: LINK });
+      const finalRows = persisted.at(-1).filter(row => row.jobId === JOB_A);
+      const stale = await engine.submit({
+        session: one.sessionCode, linkId: LINK, handoffCode: first.handoffCode,
+        response: answer({ code: first.handoffCode, stage: first.stage }),
+      });
+      assert(seedReads >= 3 && resumed.status === 'served' && resumed.stage === 'resume'
+        && finalRows.length === 1 && !Object.hasOwn(finalRows[0], 'matchTaskId') && stale.status === 'superseded',
+      'an ordinary handoff read through an unkeyed seed retires every virtual sibling before it can be served again');
+      await engine.close();
+    },
+  },
+  {
+    name: 'handoff bridge: a keyed read that contradicts a live sibling never adopts a duplicate task id',
+    run: async () => {
+      let aReads = 0;
+      const application = source({
+        read: async lane => {
+          if (!lane.matchTaskId) return {
+            kind: 'open',
+            handoff: { ...handoff({ code: 'MATCH-A', stage: 'career-match' }), matchTaskId: 'A' },
+            parallelTasks: [{ id: 'A' }, { id: 'B' }],
+          };
+          if (lane.matchTaskId === 'A') {
+            aReads += 1;
+            return {
+              kind: 'open',
+              handoff: { ...handoff({ code: 'MATCH-B-COLLISION', stage: 'career-match' }), matchTaskId: 'B' },
+              parallelTasks: [{ id: 'A' }, { id: 'B' }],
+            };
+          }
+          return { kind: 'open', handoff: { ...handoff({ code: 'MATCH-B', stage: 'career-match' }), matchTaskId: 'B' } };
+        },
+      });
+      const persisted = [];
+      const engine = createHandoffEngine({
+        source: application.api, holdMs: 0,
+        store: { saveLanes: async rows => { persisted.push(rows); return true; } },
+      });
+      await engine.release({ jobs: [{ jobId: JOB_A, canvasFilePath: PATH_A }] });
+      const chat = await engine.newChat({ linkId: LINK });
+      const first = await engine.get({ session: chat.sessionCode, linkId: LINK });
+      assert(first.status === 'served' && first.handoffCode === 'MATCH-A' && engine.hint({ jobId: JOB_A }), 'the A claim must be live before its contradictory refresh');
+      const afterCollision = await engine.get({ session: chat.sessionCode, linkId: LINK });
+      const finalRows = persisted.at(-1).filter(row => row.jobId === JOB_A);
+      assert(aReads === 1 && afterCollision.status === 'served' && afterCollision.handoffCode === 'MATCH-B'
+        && finalRows.filter(row => row.matchTaskId === 'B').length === 1
+        && finalRows.some(row => row.matchTaskId === 'A' && row.phase === 'needs_user' && row.reason === 'read_failed'),
+      'a contradictory keyed read holds its own live claim and leaves the existing B lane as the sole task owner');
+      await engine.close();
+    },
+  },
+  {
+    name: 'handoff bridge: an accepted keyed successor that names a live sibling never duplicates its task id',
+    run: async () => {
+      const application = source({
+        read: async lane => ({
+          kind: 'open',
+          handoff: { ...handoff({ code: 'MATCH-SUBMIT-A', stage: 'career-match' }), matchTaskId: lane.matchTaskId || 'A' },
+          ...(lane.matchTaskId ? {} : { parallelTasks: [{ id: 'A' }, { id: 'B' }] }),
+        }),
+        submit: async () => ({
+          kind: 'accepted',
+          completed: false,
+          handoff: {
+            ...handoff({ code: 'MATCH-SUBMIT-B-COLLISION', stage: 'career-match' }),
+            matchTaskId: 'B',
+            parallelTasks: [{ id: 'B' }],
+          },
+        }),
+      });
+      const persisted = [];
+      const engine = createHandoffEngine({
+        source: application.api, holdMs: 0,
+        store: { saveLanes: async rows => { persisted.push(rows); return true; } },
+      });
+      await engine.release({ jobs: [{ jobId: JOB_A, canvasFilePath: PATH_A }] });
+      const chat = await engine.newChat({ linkId: LINK });
+      const first = await engine.get({ session: chat.sessionCode, linkId: LINK });
+      const accepted = await engine.submit({
+        session: chat.sessionCode, linkId: LINK, handoffCode: first.handoffCode,
+        response: answer({ code: first.handoffCode, stage: first.stage }),
+      });
+      const finalRows = persisted.at(-1).filter(row => row.jobId === JOB_A);
+      assert(accepted.status === 'accepted' && accepted.next === null && finalRows.length === 1
+        && finalRows[0].matchTaskId === 'B' && !JSON.stringify(accepted).includes('MATCH-SUBMIT-B-COLLISION'),
+      'an accepted predecessor retires rather than adopting or indexing the already-owned B successor');
+      await engine.close();
+    },
+  },
+  {
+    name: 'handoff bridge: an explicit next wave retires stale terminal claims and makes task 79 servable',
+    run: async () => {
+      let terminalReads = 0;
+      let seedReads = 0;
+      const initialWave = ['63', ...Array.from({ length: 9 }, (_unused, offset) => String(70 + offset))];
+      const application = source({
+        read: async lane => {
+          if (!lane.matchTaskId) {
+            seedReads += 1;
+            if (seedReads === 1) return {
+              kind: 'open',
+              handoff: { ...handoff({ code: 'MATCH-63', stage: 'career-match' }), matchTaskId: '63' },
+              parallelTasks: initialWave.map(id => ({ id })),
+            };
+            if (terminalReads >= 9) return {
+              kind: 'open',
+              handoff: { ...handoff({ code: 'MATCH-79', stage: 'career-match' }), matchTaskId: '79' },
+              parallelTasks: [{ id: '79' }],
+            };
+            return { kind: 'host' };
+          }
+          if (/^7[0-8]$/.test(lane.matchTaskId)) {
+            terminalReads += 1;
+            return { kind: 'virtual_done' };
+          }
+          return { kind: 'open', handoff: { ...handoff({ code: 'MATCH-63', stage: 'career-match' }), matchTaskId: '63' } };
+        },
+        submit: async lane => lane.matchTaskId === '63'
+          ? { kind: 'accepted', completed: true }
+          : { kind: 'threw', code: 'internal_error' },
+      });
+      const persisted = [];
+      const engine = createHandoffEngine({
+        source: application.api, holdMs: 0,
+        store: { saveLanes: async rows => { persisted.push(rows); return true; } },
+      });
+      await engine.release({ jobs: [{ jobId: JOB_A, canvasFilePath: PATH_A }] });
+      const pool = await engine.startWorkerPool({ linkId: LINK, requestedWorkers: 10 });
+      const firstStarter = engine.copyWorkerStarter({ linkId: LINK, generation: pool.generation, workerOrdinal: 1 });
+      const first = await engine.get({ session: firstStarter.sessionCode, linkId: LINK });
+      const accepted = await engine.submit({
+        session: firstStarter.sessionCode, linkId: LINK, handoffCode: first.handoffCode,
+        response: answer({ code: first.handoffCode, stage: first.stage }),
+      });
+      const expanded = await engine.startWorkerPool({ linkId: LINK, requestedWorkers: 10 });
+      const starters = Array.from({ length: 9 }, (_unused, index) => engine.copyWorkerStarter({
+        linkId: LINK, generation: expanded.generation, workerOrdinal: index + 2,
+      }));
+      let last = null;
+      for (const starter of starters) last = await engine.get({ session: starter.sessionCode, linkId: LINK });
+      const finalRows = persisted.at(-1).filter(row => row.jobId === JOB_A);
+      assert(accepted.status === 'accepted' && terminalReads === 9 && last?.status === 'served'
+        && last.handoffCode === 'MATCH-79' && finalRows.length === 1 && finalRows[0].matchTaskId === '79'
+        && persisted.every(rows => rows.filter(row => row.jobId === JOB_A && row.matchTaskId).length <= 10),
+      'the next explicit wave retires stale terminal claims, retains the ten-task cap, and exposes task 79');
+      await engine.close();
+    },
+  },
+  {
+    name: 'handoff bridge: omitted parallel tasks preserve a live family while an explicit wave reconciles it',
+    run: async () => {
+      let submits = 0;
+      const application = source({
+        read: async lane => ({
+          kind: 'open',
+          handoff: { ...handoff({ code: 'MATCH-ONE-1', stage: 'career-match' }), matchTaskId: lane.matchTaskId || 'one' },
+          ...(lane.matchTaskId ? {} : { parallelTasks: [{ id: 'one' }, { id: 'two' }] }),
+        }),
+        submit: async () => {
+          submits += 1;
+          const next = { ...handoff({ code: `MATCH-ONE-${submits + 1}`, stage: 'career-match' }), matchTaskId: 'one' };
+          return {
+            kind: 'accepted', completed: false,
+            handoff: submits === 1 ? next : { ...next, parallelTasks: [{ id: 'one' }] },
+          };
+        },
+      });
+      const persisted = [];
+      const engine = createHandoffEngine({
+        source: application.api, holdMs: 0,
+        store: { saveLanes: async rows => { persisted.push(rows); return true; } },
+      });
+      await engine.release({ jobs: [{ jobId: JOB_A, canvasFilePath: PATH_A }] });
+      const chat = await engine.newChat({ linkId: LINK });
+      const first = await engine.get({ session: chat.sessionCode, linkId: LINK });
+      const omitted = await engine.submit({
+        session: chat.sessionCode, linkId: LINK, handoffCode: first.handoffCode,
+        response: answer({ code: first.handoffCode, stage: first.stage }),
+      });
+      const afterOmitted = persisted.at(-1).filter(row => row.jobId === JOB_A).map(row => row.matchTaskId).sort();
+      const explicitCode = omitted.next?.handoffCode;
+      const explicit = await engine.submit({
+        session: chat.sessionCode, linkId: LINK, handoffCode: explicitCode,
+        response: answer({ code: explicitCode, stage: 'career-match' }),
+      });
+      const afterExplicit = persisted.at(-1).filter(row => row.jobId === JOB_A).map(row => row.matchTaskId).sort();
+      assert(omitted.status === 'accepted' && afterOmitted.join(',') === 'one,two'
+        && explicit.status === 'accepted' && afterExplicit.join(',') === 'one',
+      'only an explicit valid authority declaration may retire an obsolete unclaimed sibling; omission remains non-destructive');
+      await engine.close();
+    },
+  },
+  {
+    name: 'handoff bridge: a restored stale virtual family self-bootstrap discovers active task 79 without a manual retry',
+    run: async () => {
+      const routed = [];
+      const restoredLanes = ['63', ...Array.from({ length: 9 }, (_unused, offset) => String(70 + offset))]
+        .map((matchTaskId, index) => ({
+          ord: index + 1,
+          jobId: JOB_A,
+          canvasFilePath: PATH_A,
+          matchTaskId,
+          releasedAt: index + 1,
+          phase: 'needs_user',
+          reason: matchTaskId === '63' ? 'read_failed' : 'host_silent',
+          heldFrom: 'unread',
+          counters: {},
+        }));
+      const persisted = [];
+      const engine = createHandoffEngine({
+        source: source({
+          read: async lane => {
+            routed.push(lane.matchTaskId ?? null);
+            return lane.matchTaskId
+              ? { kind: 'threw', code: 'internal_error' }
+              : {
+                kind: 'open',
+                handoff: { ...handoff({ code: 'MATCH-79-RESTORED', stage: 'career-match' }), matchTaskId: '79' },
+                parallelTasks: [{ id: '79' }],
+              };
+          },
+        }).api,
+        holdMs: 0,
+        restoredLanes,
+        store: { saveLanes: async rows => { persisted.push(rows); return true; } },
+      });
+      const chat = await engine.newChat({ linkId: LINK });
+      const recovered = await engine.get({ session: chat.sessionCode, linkId: LINK });
+      const finalRows = persisted.at(-1).filter(row => row.jobId === JOB_A);
+      assert(recovered.status === 'served' && recovered.handoffCode === 'MATCH-79-RESTORED'
+        && routed.length === 1 && routed[0] === null && finalRows.length === 1 && finalRows[0].matchTaskId === '79',
+      'a no-prompt read_failed/host_silent virtual family becomes one discovery seed and reconciles the authoritative wave without a Resume click');
       await engine.close();
     },
   },
@@ -2370,6 +2705,43 @@ const tests = [
     },
   },
   {
+    name: 'handoff bridge: engine: a job the independent review stopped is a needs-you hold with its own reason, told to ChatGPT as needing the person, and it survives a restart',
+    run: async () => {
+      const state = await served({ sourceOverrides: { status: async () => ({ kind: 'needs_user', phase: 'needs_user', reason: 'review_stop' }) } });
+      await state.engine.submit({
+        session: state.session, linkId: LINK, handoffCode: state.result.handoffCode,
+        response: answer({ code: state.result.handoffCode, stage: state.result.stage }),
+      });
+      state.clock.advance(CONSTANTS.HOST_POLL_MS);
+      const response = await state.engine.get({ session: state.session, linkId: LINK });
+      const lane = state.engine.snapshot().queue.jobs[0];
+      assert(response.status === 'paused' && response.reason === 'needs_user', `ChatGPT must stop for the person, got ${response.status}/${response.reason || ''}`);
+      assert(lane.phase === 'needs_user' && lane.reason === 'review_stop', `the hold keeps its own reason, not the generic broken one (${lane.phase}/${lane.reason})`);
+      assert(state.engine.snapshot().queue.applications.needsYou === 1 && !JSON.stringify(state.engine.snapshot()).includes('Independent reviewers'), 'one job needs the person and no sentence crossed the bridge');
+      // The hold is durable: the persisted row restores as the same needs-you item, never as a generic restart hold.
+      // The bug-report reducer keeps the closed reason, and a person (or the controller) holding a lane for the same reason lands in the same state.
+      const reduced = reduceBridgeQueue({ at: state.clock.now() + 1000, enabled: true, serving: 'live', lanes: [lane], queue: {}, chat: state.engine.snapshot().chat, counts: {} });
+      assert(reduced.lanes[0].reason === 'review_stop' && reduced.lanes[0].phase === 'needs_user', 'the bug-report view keeps the reason');
+      const other = await started();
+      assert((await other.engine.hold(JOB_A, 'review_stop')).ok && other.engine.snapshot().queue.jobs[0].phase === 'needs_user' && other.engine.snapshot().queue.jobs[0].reason === 'review_stop', 'holding a lane for the review stop is a needs-you hold');
+      // Holding for the same reason again is a no-op: no second hold, so the phase clock does not restart.
+      const heldAt = other.engine.snapshot().queue.jobs[0].changedAt;
+      other.clock.advance(5_000);
+      assert((await other.engine.hold(JOB_A, 'review_stop')).ok && other.engine.snapshot().queue.jobs[0].changedAt === heldAt, 'a second identical hold changes nothing');
+      const rehydrated = rehydrateApplicationLane({ ord: 1, jobId: JOB_A, canvasFilePath: PATH_A, releasedAt: 0, phase: 'needs_user', reason: 'review_stop', heldFrom: 'awaiting', counters: {} });
+      assert(rehydrated.phase === 'needs_user' && rehydrated.reason === 'review_stop', 'a restored review-stop lane keeps its reason');
+      const held = holdLane(createApplicationLane({ ord: 2, jobId: JOB_B, canvasFilePath: PATH_B, releasedAt: 0, phase: 'awaiting' }), 'review_stop', 5);
+      assert(held.phase === 'needs_user' && held.reason === 'review_stop', 'holding a lane for the review stop is a needs-you hold, not a user hold');
+      const directory = cleanDirectory();
+      try {
+        const store = createLaneStore({ userDataPath: directory });
+        await store.saveLanes([held]);
+        const loaded = store.loadLanes();
+        assert(loaded.length === 1 && loaded[0].reason === 'review_stop' && loaded[0].phase === 'needs_user', `the lane file keeps the reason (${JSON.stringify(loaded)})`);
+      } finally { fs.rmSync(directory, { recursive: true, force: true }); }
+    },
+  },
+  {
     name: 'handoff bridge: engine: an unsettled submit is held submit-stuck at ninety seconds',
     run: async () => {
       const pending = deferred(); const state = await served({ sourceOverrides: { submit: async () => pending.promise }, engineOptions: { submitBudgetMs: 0 } });
@@ -4123,6 +4495,146 @@ tests.push(
       gated = false;
       assert((await engine.resume({ jobId: JOB_A })).ok, 'the person resumes');
       assert((await engine.get({ session: chat.sessionCode, linkId: LINK })).status === 'served', 'the resumed lane is read and served');
+    },
+  },
+  {
+    name: 'handoff bridge: engine: a resumed stale awaiting shell cannot preempt a newly released application',
+    run: async () => {
+      const clock = createFakeClock();
+      const enoent = () => Object.assign(new Error('missing canvas'), { code: 'ENOENT' });
+      // Durable lanes never retain prompts. This represents a prior run whose
+      // unavailable canvas was kept for the person, then accidentally resumed
+      // alongside a current job. `heldFrom: awaiting` is valid historical
+      // state, but rehydration leaves current null until a source read succeeds.
+      const stale = {
+        ord: 1, jobId: JOB_A, canvasFilePath: PATH_A, releasedAt: 1,
+        phase: 'needs_user', reason: 'canvas_unavailable', heldFrom: 'awaiting', counters: {},
+      };
+      const engine = createHandoffEngine({
+        source: source({
+          read: async ({ jobId }) => {
+            if (jobId === JOB_A) throw enoent();
+            return { kind: 'open', handoff: handoff({ jobId, code: 'HANDOFF-CURRENT' }) };
+          },
+          status: async ({ jobId }) => {
+            if (jobId === JOB_A) throw enoent();
+            return { kind: 'host' };
+          },
+        }).api,
+        now: clock.now, timers: clock, holdMs: 0, restoredLanes: [stale],
+      });
+      assert((await engine.release({ jobs: [{ jobId: JOB_B, canvasFilePath: PATH_B }] })).ok, 'the current job releases beside the retained stale lane');
+      assert((await engine.resume({ jobId: JOB_A })).ok, 'the retained lane can be resumed for a retry');
+      const chat = await engine.newChat({ linkId: LINK });
+      const result = await engine.get({ session: chat.sessionCode, linkId: LINK });
+      assert(result.status === 'served' && result.handoffCode === 'HANDOFF-CURRENT',
+        `the current job is served instead of the stale shell (got ${result.status}/${result.reason || ''})`);
+      const staleRow = engine.snapshot().queue.jobs.find(job => job.jobId === JOB_A);
+      assert(staleRow?.phase === 'needs_user' && staleRow.reason === 'canvas_unavailable',
+        'the stale lane remains independently actionable and is not aliased to the current job');
+    },
+  },
+  {
+    name: 'handoff bridge: engine: an unrelated needs-user lane cannot stop a career-match worker while a current wave remains claimable',
+    run: async () => {
+      const stale = {
+        ord: 1, jobId: JOB_A, canvasFilePath: PATH_A, releasedAt: 1,
+        phase: 'needs_user', reason: 'canvas_unavailable', heldFrom: 'awaiting', counters: {},
+      };
+      const matchIds = Array.from({ length: 10 }, (_unused, index) => `wave-${index + 1}`);
+      const engine = createHandoffEngine({
+        source: source({
+          read: async lane => {
+            if (lane.jobId === JOB_A) return { kind: 'needs_user', reason: 'canvas_unavailable' };
+            const matchTaskId = lane.matchTaskId ?? matchIds[0];
+            return {
+              kind: 'open',
+              handoff: { ...handoff({ jobId: JOB_B, code: `WAVE-${matchTaskId}`, stage: 'career-match' }), matchTaskId },
+              ...(lane.matchTaskId ? {} : { parallelTasks: matchIds.map(id => ({ id })) }),
+            };
+          },
+          submit: async () => ({ kind: 'accepted', completed: true }),
+        }).api,
+        holdMs: 0,
+        restoredLanes: [stale],
+      });
+      try {
+        assert((await engine.release({ jobs: [{ jobId: JOB_B, canvasFilePath: PATH_B }] })).ok, 'the current application releases beside the stale retained lane');
+        const pool = await engine.startWorkerPool({ linkId: LINK, requestedWorkers: 10 });
+        const starter = ordinal => engine.copyWorkerStarter({ linkId: LINK, generation: pool.generation, workerOrdinal: ordinal });
+        const first = await engine.get({ session: starter(1).sessionCode, linkId: LINK });
+        const secondWorker = starter(2);
+        const second = await engine.get({ session: secondWorker.sessionCode, linkId: LINK });
+        assert(first.status === 'served' && second.status === 'served' && second.stage === 'career-match', 'two workers claim distinct current-wave handoffs');
+        const accepted = await engine.submit({
+          session: secondWorker.sessionCode, linkId: LINK, handoffCode: second.handoffCode,
+          response: answer({ jobId: JOB_B, code: second.handoffCode, stage: second.stage }),
+        });
+        const next = await engine.get({ session: secondWorker.sessionCode, linkId: LINK });
+        assert(accepted.status === 'accepted' && next.status === 'served' && next.stage === 'career-match',
+          `the current wave remains servable after worker two submits (${next.status}/${next.reason || ''})`);
+        const staleRow = engine.snapshot().queue.jobs.find(job => job.jobId === JOB_A);
+        assert(staleRow?.phase === 'needs_user' && staleRow.reason === 'canvas_unavailable',
+          'the retained stale lane stays independently actionable while current work continues');
+      } finally {
+        await engine.close();
+      }
+    },
+  },
+  {
+    name: 'handoff bridge: engine: a stale needs-user lane cannot stop an idle worker while a current authority claim is still settling',
+    run: async () => {
+      const stale = {
+        ord: 1, jobId: JOB_A, canvasFilePath: PATH_A, releasedAt: 1,
+        phase: 'needs_user', reason: 'canvas_unavailable', heldFrom: 'awaiting', counters: {},
+      };
+      let settled = false;
+      const clock = createFakeClock();
+      const engine = createHandoffEngine({
+        source: source({
+          read: async ({ jobId, matchTaskId }) => {
+            if (jobId === JOB_A) return { kind: 'needs_user', reason: 'canvas_unavailable' };
+            return {
+              kind: 'open',
+              handoff: {
+                ...handoff({ jobId: JOB_B, code: `WAVE-${matchTaskId || 'current'}`, stage: 'career-match' }),
+                matchTaskId: matchTaskId || 'wave-current',
+              },
+              ...(matchTaskId ? {} : { parallelTasks: [{ id: 'wave-current' }] }),
+            };
+          },
+          status: async () => settled ? { kind: 'done' } : { kind: 'host' },
+          submit: async () => { settled = true; return { kind: 'accepted', completed: true }; },
+        }).api,
+        now: clock.now, timers: clock, holdMs: 0,
+        restoredLanes: [stale],
+      });
+      try {
+        assert((await engine.release({ jobs: [{ jobId: JOB_B, canvasFilePath: PATH_B }] })).ok, 'the current authority bundle releases beside the stale retained lane');
+        const firstWorker = await engine.newChat({ linkId: LINK });
+        const claimed = await engine.get({ session: firstWorker.sessionCode, linkId: LINK });
+        assert(claimed.status === 'served' && claimed.stage === 'career-match', `the first worker owns the only materialized current claim (${JSON.stringify(claimed)})`);
+        const pool = await engine.startWorkerPool({ linkId: LINK, requestedWorkers: 2 });
+        const idleWorker = engine.copyWorkerStarter({ linkId: LINK, generation: pool.generation, workerOrdinal: 2 });
+        assert(pool.started && idleWorker.copied, 'the existing current worker gains one idle pool sibling');
+        const duringClaim = await engine.get({ session: idleWorker.sessionCode, linkId: LINK });
+        assert(duringClaim.status === 'waiting',
+          `a current in-flight claim keeps idle workers polling instead of stopping at stale attention (${duringClaim.status}/${duringClaim.reason || ''})`);
+        const accepted = await engine.submit({
+          session: firstWorker.sessionCode, linkId: LINK, handoffCode: claimed.handoffCode,
+          response: answer({ jobId: JOB_B, code: claimed.handoffCode, stage: claimed.stage }),
+        });
+        clock.advance(CONSTANTS.HOST_POLL_MS + 1);
+        let afterClaim = await engine.get({ session: idleWorker.sessionCode, linkId: LINK });
+        // The status read that observes the completed authority claim clears
+        // its in-flight marker in a trailing mutation turn. A real polling
+        // worker follows the waiting result, so model that one bounded poll.
+        if (afterClaim.status === 'waiting') afterClaim = await engine.get({ session: idleWorker.sessionCode, linkId: LINK });
+        assert(accepted.status === 'accepted' && afterClaim.status === 'paused' && afterClaim.reason === 'needs_user',
+          `once the active current claim has settled, the retained lane correctly surfaces its human-attention stop (${afterClaim.status}/${afterClaim.reason || ''})`);
+      } finally {
+        await engine.close();
+      }
     },
   },
   {
@@ -6448,6 +6960,323 @@ tests.push(
         'the later B request replays and accepts A without ever overwriting retained text');
     },
   },
+);
+
+// A fanned-out authority-match bundle whose first lane has already turned
+// back into an unkeyed discovery seed (its task completed and the follow-up
+// discovery read failed) while keyed siblings are still live. Three synthetic
+// wave shapes so no fixture's task-id spelling or size is load-bearing.
+const MIXED_FAMILY_WAVES = [
+  { label: 'three-task wave', tasks: ['one', 'two', 'three'] },
+  { label: 'two-task wave', tasks: ['alpha', 'beta'] },
+  { label: 'four-task wave', tasks: ['t-10', 't-11', 't-12', 't-13'] },
+];
+
+async function mixedVirtualFamily(tasks, { seedFailure = { kind: 'threw', code: 'EIO' } } = {}) {
+  const done = new Set();
+  const state = { seedFails: false, reads: [], submits: [] };
+  const api = {
+    read: async lane => {
+      state.reads.push(lane.matchTaskId ?? null);
+      if (lane.matchTaskId && done.has(lane.matchTaskId)) return { kind: 'virtual_done' };
+      if (!lane.matchTaskId) {
+        if (state.seedFails) return seedFailure;
+        const open = tasks.filter(id => !done.has(id));
+        return { kind: 'open', handoff: { ...handoff({ code: `MATCH-${open[0]}`, stage: 'career-match' }), matchTaskId: open[0] }, parallelTasks: open.map(id => ({ id })) };
+      }
+      return { kind: 'open', handoff: { ...handoff({ code: `MATCH-${lane.matchTaskId}`, stage: 'career-match' }), matchTaskId: lane.matchTaskId } };
+    },
+    status: async () => ({ kind: 'awaiting' }),
+    submit: async lane => { state.submits.push(lane.matchTaskId); done.add(lane.matchTaskId); return { kind: 'accepted', completed: true }; },
+  };
+  const persisted = [];
+  const clock = createFakeClock();
+  const engine = createHandoffEngine({ source: api, holdMs: 0, now: clock.now, timers: clock, store: { saveLanes: async rows => { persisted.push(rows); return true; } } });
+  assert((await engine.release({ jobs: [{ jobId: JOB_A, canvasFilePath: PATH_A }] })).ok, 'the synthetic bundle releases');
+  const workers = [];
+  for (let ordinal = 1; ordinal <= tasks.length; ordinal += 1) {
+    const pool = await engine.startWorkerPool({ linkId: LINK, requestedWorkers: tasks.length });
+    workers.push(engine.copyWorkerStarter({ linkId: LINK, generation: pool.generation, workerOrdinal: ordinal }));
+  }
+  const served = [];
+  for (const worker of workers) served.push(await engine.get({ session: worker.sessionCode, linkId: LINK }));
+  assert(served.every((item, index) => item.status === 'served' && item.handoffCode === `MATCH-${tasks[index]}`), 'every task of the wave is served to its own worker');
+  state.seedFails = true;
+  const first = await engine.submit({ session: workers[0].sessionCode, linkId: LINK, handoffCode: served[0].handoffCode, response: answer({ code: served[0].handoffCode, stage: 'career-match' }) });
+  assert(first.status === 'accepted', 'the first task completes');
+  clock.advance(CONSTANTS.HOST_POLL_MS + 1);
+  await engine.get({ session: workers[0].sessionCode, linkId: LINK });
+  const rows = () => (persisted.at(-1) || []).filter(row => row.jobId === JOB_A);
+  const mixed = rows();
+  assert(mixed.length === tasks.length && !mixed[0].matchTaskId && mixed.slice(1).every((row, index) => row.matchTaskId === tasks[index + 1] && row.phase === 'awaiting'),
+    `precondition: the first lane is an unkeyed seed while keyed siblings are live (${JSON.stringify(mixed.map(row => [row.matchTaskId ?? null, row.phase]))})`);
+  const submitSibling = index => engine.submit({ session: workers[index].sessionCode, linkId: LINK, handoffCode: served[index].handoffCode, response: answer({ code: served[index].handoffCode, stage: 'career-match' }) });
+  return { engine, clock, workers, served, state, rows, submitSibling };
+}
+
+tests.push(
+  ...MIXED_FAMILY_WAVES.map(({ label, tasks }) => ({
+    name: `handoff bridge: Hold stops every live keyed sibling once the bundle's first lane is an unkeyed seed, and Resume restarts them all (${label})`,
+    run: async () => {
+      const family = await mixedVirtualFamily(tasks);
+      assert((await family.engine.hold(JOB_A)).ok, 'the person holds the bundle');
+      assert(family.rows().every(row => row.phase === 'held' && row.reason === 'user_hold'),
+        `every lane of the bundle is held, not just the seed (${JSON.stringify(family.rows().map(row => [row.matchTaskId ?? null, row.phase, row.reason]))})`);
+      const submitsBefore = family.state.submits.length;
+      const late = await family.submitSibling(1);
+      assert(late.status === 'held' && family.state.submits.length === submitsBefore, `a live sibling's answer is not forwarded while the bundle is held (${late.status})`);
+      family.state.seedFails = false;
+      family.clock.advance(CONSTANTS.HOST_POLL_MS + 1);
+      const paused = await family.engine.get({ session: family.workers[1].sessionCode, linkId: LINK });
+      assert(paused.status === 'paused' && family.rows().every(row => row.phase === 'held' && row.reason === 'user_hold'),
+        `a held bundle serves nothing and the hold survives a later poll (${paused.status})`);
+      assert((await family.engine.resume({ jobId: JOB_A })).ok, 'the person resumes the bundle');
+      assert(family.rows().every(row => row.phase !== 'held' && row.phase !== 'needs_user'),
+        `one Resume restarts every held lane of the bundle (${JSON.stringify(family.rows().map(row => [row.matchTaskId ?? null, row.phase]))})`);
+      const resumed = await family.engine.get({ session: family.workers[tasks.length - 1].sessionCode, linkId: LINK });
+      assert(resumed.status === 'served', `a resumed bundle serves again (${resumed.status})`);
+      await family.engine.close();
+    },
+  })),
+  ...MIXED_FAMILY_WAVES.map(({ label, tasks }) => ({
+    name: `handoff bridge: Remove retires every live keyed sibling once the bundle's first lane is an unkeyed seed (${label})`,
+    run: async () => {
+      const family = await mixedVirtualFamily(tasks);
+      assert((await family.engine.unrelease(JOB_A)).ok, 'the person removes the bundle from the bridge');
+      assert(family.rows().length === 0 && family.engine.snapshot().queue.jobs.length === 0,
+        `no lane of the removed bundle survives (${JSON.stringify(family.rows().map(row => [row.matchTaskId ?? null, row.phase]))})`);
+      const submitsBefore = family.state.submits.length;
+      const late = await family.submitSibling(1);
+      assert(late.status !== 'accepted' && family.state.submits.length === submitsBefore, `a removed sibling's answer is never forwarded (${late.status})`);
+      family.state.seedFails = false;
+      family.clock.advance(CONSTANTS.HOST_POLL_MS + 1);
+      const after = await family.engine.get({ session: family.workers[tasks.length - 1].sessionCode, linkId: LINK });
+      assert(after.status === 'queue_empty', `the bridge stops serving the removed bundle (${after.status})`);
+      await family.engine.close();
+    },
+  })),
+  ...MIXED_FAMILY_WAVES.map(({ label, tasks }) => ({
+    name: `handoff bridge: a sibling's completion never erases a non-stale hold on the discovery seed (${label})`,
+    run: async () => {
+      // The seed's discovery read reports a broken job, a needs-you hold that
+      // only the person may clear; the next sibling then completes.
+      const family = await mixedVirtualFamily(tasks, { seedFailure: { kind: 'threw', code: 'LOCAL_AI_JOB_INTEGRITY' } });
+      family.clock.advance(CONSTANTS.HOST_POLL_MS + 1);
+      await family.engine.get({ session: family.workers[0].sessionCode, linkId: LINK });
+      const seedOf = () => family.rows().find(row => !row.matchTaskId);
+      assert(seedOf()?.phase === 'needs_user' && seedOf()?.reason === 'job_broken', `precondition: the seed is held as a broken job (${JSON.stringify(seedOf())})`);
+      const heldAtRead = family.state.reads.length;
+      family.state.seedFails = false;
+      assert((await family.submitSibling(1)).status === 'accepted', 'a live sibling completes');
+      family.clock.advance(CONSTANTS.HOST_POLL_MS + 1);
+      await family.engine.get({ session: family.workers[1].sessionCode, linkId: LINK });
+      family.clock.advance(CONSTANTS.HOST_POLL_MS + 1);
+      await family.engine.get({ session: family.workers[1].sessionCode, linkId: LINK });
+      assert(!family.rows().some(row => row.matchTaskId === tasks[1]), 'the completed sibling lane is retired');
+      assert(seedOf()?.phase === 'needs_user' && seedOf()?.reason === 'job_broken',
+        `the broken-job hold on the seed survives the sibling's completion (${JSON.stringify(seedOf())})`);
+      assert(!family.state.reads.slice(heldAtRead).includes(null),
+        `the held seed is not re-read behind the person's back (${JSON.stringify(family.state.reads.slice(heldAtRead))})`);
+      await family.engine.close();
+    },
+  })),
+);
+
+// A crash-restored virtual family whose every lane is a stale retry/quiet hold
+// bootstraps one discovery seed. Parallel tasks finish out of order, so the
+// authority's next unreceipted claim is often a NON-earliest stale sibling.
+const STALE_FAMILY_CLAIMS = [
+  { label: 'numeric ordinals, middle claim', ids: ['63', ...Array.from({ length: 9 }, (_unused, offset) => String(70 + offset))], claim: '75' },
+  { label: 'word ids, last claim', ids: ['north', 'east', 'south'], claim: 'south' },
+  { label: 'prefixed ids, second claim', ids: ['x1', 'x2', 'x3', 'x4'], claim: 'x2' },
+  { label: 'control: the seed\'s own claim', ids: ['k1', 'k2', 'k3'], claim: 'k1' },
+];
+
+tests.push(
+  ...STALE_FAMILY_CLAIMS.map(({ label, ids, claim }) => ({
+    name: `handoff bridge: a recovered stale virtual family serves the authority's claim even when it belongs to a non-earliest stale sibling (${label})`,
+    run: async () => {
+      const routed = [];
+      const restoredLanes = ids.map((matchTaskId, index) => ({
+        ord: index + 1, jobId: JOB_A, canvasFilePath: PATH_A, matchTaskId, releasedAt: index + 1,
+        phase: 'needs_user', reason: index === 0 ? 'read_failed' : 'host_silent', heldFrom: 'unread', counters: {},
+      }));
+      const persisted = [];
+      const engine = createHandoffEngine({
+        source: source({
+          read: async lane => {
+            routed.push(lane.matchTaskId ?? null);
+            if (!lane.matchTaskId || lane.matchTaskId === claim) {
+              return { kind: 'open', handoff: { ...handoff({ code: `MATCH-${claim}`, stage: 'career-match' }), matchTaskId: claim }, parallelTasks: [{ id: claim }] };
+            }
+            return { kind: 'virtual_done' };
+          },
+        }).api,
+        holdMs: 0,
+        restoredLanes,
+        store: { saveLanes: async rows => { persisted.push(rows); return true; } },
+      });
+      const chat = await engine.newChat({ linkId: LINK });
+      const recovered = await engine.get({ session: chat.sessionCode, linkId: LINK });
+      const finalRows = persisted.at(-1).filter(row => row.jobId === JOB_A);
+      assert(recovered.status === 'served' && recovered.handoffCode === `MATCH-${claim}`,
+        `the bundle is served without a Resume click (${recovered.status} ${recovered.reason ?? ''})`);
+      assert(routed.length === 1 && routed[0] === null, `one discovery read recovers the bundle (${JSON.stringify(routed)})`);
+      assert(finalRows.length === 1 && finalRows[0].matchTaskId === claim && finalRows[0].phase === 'awaiting',
+        `exactly one lane owns the claimed task (${JSON.stringify(finalRows.map(row => [row.matchTaskId ?? null, row.phase, row.reason]))})`);
+      await engine.close();
+    },
+  })),
+  {
+    name: 'handoff bridge: a discovery read never steals a claim from a sibling with a live prompt',
+    run: async () => {
+      // Control for the stale-sibling recovery: a sibling holding a served
+      // prompt keeps its claim, and the contradicting seed is the one retired.
+      const done = new Set();
+      const api = {
+        read: async lane => {
+          if (lane.matchTaskId && done.has(lane.matchTaskId)) return { kind: 'virtual_done' };
+          if (!lane.matchTaskId) {
+            const open = ['one', 'two'].filter(id => !done.has(id));
+            return { kind: 'open', handoff: { ...handoff({ code: `MATCH-${open[0]}`, stage: 'career-match' }), matchTaskId: open[0] }, parallelTasks: open.map(id => ({ id })) };
+          }
+          return { kind: 'open', handoff: { ...handoff({ code: `MATCH-${lane.matchTaskId}`, stage: 'career-match' }), matchTaskId: lane.matchTaskId } };
+        },
+        status: async () => ({ kind: 'awaiting' }),
+        submit: async lane => { done.add(lane.matchTaskId); return { kind: 'accepted', completed: true }; },
+      };
+      const persisted = [];
+      const clock = createFakeClock();
+      const engine = createHandoffEngine({ source: api, holdMs: 0, now: clock.now, timers: clock, store: { saveLanes: async rows => { persisted.push(rows); return true; } } });
+      assert((await engine.release({ jobs: [{ jobId: JOB_A, canvasFilePath: PATH_A }] })).ok, 'release');
+      const workers = [];
+      for (let ordinal = 1; ordinal <= 2; ordinal += 1) {
+        const pool = await engine.startWorkerPool({ linkId: LINK, requestedWorkers: 2 });
+        workers.push(engine.copyWorkerStarter({ linkId: LINK, generation: pool.generation, workerOrdinal: ordinal }));
+      }
+      const first = await engine.get({ session: workers[0].sessionCode, linkId: LINK });
+      const second = await engine.get({ session: workers[1].sessionCode, linkId: LINK });
+      assert(first.handoffCode === 'MATCH-one' && second.handoffCode === 'MATCH-two', 'each task is served to its own worker');
+      assert((await engine.submit({ session: workers[0].sessionCode, linkId: LINK, handoffCode: first.handoffCode, response: answer({ code: first.handoffCode, stage: 'career-match' }) })).status === 'accepted', 'one completes');
+      // The completed lane becomes the seed; its discovery read claims two,
+      // which a worker is still answering.
+      clock.advance(CONSTANTS.HOST_POLL_MS + 1);
+      await engine.get({ session: workers[0].sessionCode, linkId: LINK });
+      const rows = (persisted.at(-1) || []).filter(row => row.jobId === JOB_A);
+      assert(rows.length === 1 && rows[0].matchTaskId === 'two' && rows[0].phase === 'awaiting',
+        `the live claim keeps its lane and prompt (${JSON.stringify(rows.map(row => [row.matchTaskId ?? null, row.phase]))})`);
+      const answered = await engine.submit({ session: workers[1].sessionCode, linkId: LINK, handoffCode: second.handoffCode, response: answer({ code: second.handoffCode, stage: 'career-match' }) });
+      assert(answered.status === 'accepted', `the worker still answering two is accepted (${answered.status})`);
+      await engine.close();
+    },
+  },
+);
+
+tests.push(
+  ...[...APPLICATION_QUEUE_STAGES, 'made-up-stage'].map(stage => ({
+    name: `handoff bridge: a FULL bug report names the same workflow stage the live status shows (${stage})`,
+    run: async () => {
+      const known = APPLICATION_QUEUE_STAGES.includes(stage);
+      const state = await served({ sourceOverrides: { read: async () => ({ kind: 'open', handoff: handoff({ code: 'STAGE-PROBE', stage }) }) } });
+      assert((await state.engine.hold(JOB_A, 'review_stop')).ok, 'the lane stops for the person');
+      const jobs = state.engine.snapshot().queue.jobs;
+      assert(jobs.length === 1 && jobs[0].stage === (known ? stage : null), `the live status projects the stage (${jobs[0]?.stage})`);
+      const reduced = reduceBridgeQueue({ at: state.clock.now() + 1000, enabled: true, serving: 'live', lanes: jobs, queue: {}, chat: state.engine.snapshot().chat, counts: {} });
+      assert(reduced.lanes.length === 1 && reduced.lanes[0].stage === jobs[0].stage && reduced.lanes[0].reason === 'review_stop',
+        `the bug-report reducer keeps exactly the stage the live status showed (${reduced.lanes[0]?.stage} vs ${jobs[0].stage})`);
+      await state.engine.close();
+    },
+  })),
+);
+
+tests.push(
+  ...[['a', 'b'], ['north-1', 'north-2'], ['63', '75']].map(([first, second]) => ({
+    name: `handoff bridge: a completed claim whose successor is a stale quiet sibling re-reads that sibling instead of pausing the bundle (${first}/${second})`,
+    run: async () => {
+      let reopened = false;
+      const api = {
+        read: async lane => {
+          const id = lane.matchTaskId ?? first;
+          const code = id === second && reopened ? `MATCH-${second}-AGAIN` : `MATCH-${id}`;
+          return { kind: 'open', handoff: { ...handoff({ code, stage: 'career-match' }), matchTaskId: id }, ...(lane.matchTaskId ? {} : { parallelTasks: [{ id: first }, { id: second }] }) };
+        },
+        status: async () => ({ kind: 'host' }),
+        submit: async lane => {
+          if (lane.matchTaskId !== first) return { kind: 'accepted', completed: true };
+          // The authority hands back the sibling's task as the next open claim.
+          reopened = true;
+          return { kind: 'accepted', completed: false, handoff: { ...handoff({ code: `MATCH-${second}-AGAIN`, stage: 'career-match' }), matchTaskId: second } };
+        },
+      };
+      const persisted = [];
+      const clock = createFakeClock();
+      const engine = createHandoffEngine({ source: api, holdMs: 0, now: clock.now, timers: clock, store: { saveLanes: async rows => { persisted.push(rows); return true; } } });
+      const rows = () => (persisted.at(-1) || []).filter(row => row.jobId === JOB_A).map(row => [row.matchTaskId ?? null, row.phase, row.reason ?? null]);
+      assert((await engine.release({ jobs: [{ jobId: JOB_A, canvasFilePath: PATH_A }] })).ok, 'release');
+      const workers = [];
+      for (let ordinal = 1; ordinal <= 2; ordinal += 1) {
+        const pool = await engine.startWorkerPool({ linkId: LINK, requestedWorkers: 2 });
+        workers.push(engine.copyWorkerStarter({ linkId: LINK, generation: pool.generation, workerOrdinal: ordinal }));
+      }
+      const served = [];
+      for (const worker of workers) served.push(await engine.get({ session: worker.sessionCode, linkId: LINK }));
+      const submitOf = index => engine.submit({ session: workers[index].sessionCode, linkId: LINK, handoffCode: served[index].handoffCode, response: answer({ code: served[index].handoffCode, stage: 'career-match' }) });
+      assert((await submitOf(1)).status === 'accepted', 'the second task is answered and goes quiet on the host');
+      for (let tick = 0; tick < 4; tick += 1) { clock.advance(CONSTANTS.HOST_SILENT_MS / 2 + 1); await engine.get({ session: workers[1].sessionCode, linkId: LINK }); }
+      assert(JSON.stringify(rows().find(row => row[0] === second)) === JSON.stringify([second, 'needs_user', 'host_silent']), `precondition: the sibling is a stale quiet hold (${JSON.stringify(rows())})`);
+      assert((await submitOf(0)).status === 'accepted', 'the first task completes');
+      clock.advance(CONSTANTS.HOST_POLL_MS + 1);
+      const next = await engine.get({ session: workers[0].sessionCode, linkId: LINK });
+      assert(next.status === 'served' && next.handoffCode === `MATCH-${second}-AGAIN`,
+        `the reopened sibling claim is served without a Resume click (${next.status} ${next.reason ?? ''} ${JSON.stringify(rows())})`);
+      await engine.close();
+    },
+  })),
+  ...[['c', 'd'], ['south-1', 'south-2'], ['80', '86']].map(([first, second]) => ({
+    name: `handoff bridge: a keyed re-read that names a stale quiet sibling's claim re-reads that sibling instead of pausing the bundle (${first}/${second})`,
+    run: async () => {
+      let reopened = false;
+      const api = {
+        read: async lane => {
+          const id = lane.matchTaskId === first && reopened ? second : (lane.matchTaskId ?? first);
+          const code = id === second && reopened ? `MATCH-${second}-AGAIN` : `MATCH-${id}`;
+          return { kind: 'open', handoff: { ...handoff({ code, stage: 'career-match' }), matchTaskId: id }, ...(lane.matchTaskId ? {} : { parallelTasks: [{ id: first }, { id: second }] }) };
+        },
+        status: async () => ({ kind: 'host' }),
+        submit: async lane => {
+          if (lane.matchTaskId !== first) return { kind: 'accepted', completed: true };
+          // The authority hands back the sibling's task as the next open claim.
+          reopened = true;
+          return { kind: 'accepted', completed: false, handoff: { ...handoff({ code: `MATCH-${second}-AGAIN`, stage: 'career-match' }), matchTaskId: second } };
+        },
+      };
+      const persisted = [];
+      const clock = createFakeClock();
+      const engine = createHandoffEngine({ source: api, holdMs: 0, now: clock.now, timers: clock, store: { saveLanes: async rows => { persisted.push(rows); return true; } } });
+      const rows = () => (persisted.at(-1) || []).filter(row => row.jobId === JOB_A).map(row => [row.matchTaskId ?? null, row.phase, row.reason ?? null]);
+      assert((await engine.release({ jobs: [{ jobId: JOB_A, canvasFilePath: PATH_A }] })).ok, 'release');
+      const workers = [];
+      for (let ordinal = 1; ordinal <= 2; ordinal += 1) {
+        const pool = await engine.startWorkerPool({ linkId: LINK, requestedWorkers: 2 });
+        workers.push(engine.copyWorkerStarter({ linkId: LINK, generation: pool.generation, workerOrdinal: ordinal }));
+      }
+      const served = [];
+      for (const worker of workers) served.push(await engine.get({ session: worker.sessionCode, linkId: LINK }));
+      const submitOf = index => engine.submit({ session: workers[index].sessionCode, linkId: LINK, handoffCode: served[index].handoffCode, response: answer({ code: served[index].handoffCode, stage: 'career-match' }) });
+      assert((await submitOf(1)).status === 'accepted', 'the second task is answered and goes quiet on the host');
+      for (let tick = 0; tick < 4; tick += 1) { clock.advance(CONSTANTS.HOST_SILENT_MS / 2 + 1); await engine.get({ session: workers[1].sessionCode, linkId: LINK }); }
+      assert(JSON.stringify(rows().find(row => row[0] === second)) === JSON.stringify([second, 'needs_user', 'host_silent']), `precondition: the sibling is a stale quiet hold (${JSON.stringify(rows())})`);
+      // The first lane is asked to re-read and the authority now names the
+      // quiet sibling's task as the open claim.
+      reopened = true;
+      assert(engine.hint({ jobId: JOB_A }), 'the first lane is asked to re-read');
+      clock.advance(CONSTANTS.HOST_POLL_MS + 1);
+      const next = await engine.get({ session: workers[0].sessionCode, linkId: LINK });
+      assert(next.status === 'served' && next.handoffCode === `MATCH-${second}-AGAIN`,
+        `the reopened sibling claim is served without a Resume click (${next.status} ${next.reason ?? ''} ${JSON.stringify(rows())})`);
+      await engine.close();
+    },
+  })),
 );
 
 export default tests;

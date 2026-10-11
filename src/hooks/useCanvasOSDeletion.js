@@ -373,8 +373,13 @@ export function useCanvasOSDeletion({
     }
     // Workflow roots were already cancelled with acknowledgement. This raw
     // post-commit sweep handles ordinary nested node tasks without racing the
-    // durable manual-AI registry snapshot above.
-    cancelNodeTasksRecursively(deletedNodes, deletedWorkflowIds);
+    // durable manual-AI registry snapshot above. The sole exception is an
+    // Interview Helper: its acknowledged worker is already settled, but this
+    // committed `cancel-node-task` notification closes its owner-scoped
+    // companion window. Job Search and Job Board roots remain skipped.
+    cancelNodeTasksRecursively(deletedNodes, deletedWorkflowIds, {
+      notifySkippedInterviewHelpers: true,
+    });
 
     // A deleted job card owns a waiting module-run lease independent of its
     // board (cancelled unconditionally, even for a card whose board is also

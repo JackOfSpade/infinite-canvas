@@ -103,6 +103,20 @@ export default defineConfig({
           },
         },
       },
+      // Interview child gets a deliberately separate, narrow bridge. It must
+      // never inherit the canvas preload's filesystem/job capabilities.
+      {
+        entry: 'electron/interviewWindowPreload.js',
+        vite: {
+          build: {
+            rollupOptions: {
+              output: {
+                format: 'cjs',
+              },
+            },
+          },
+        },
+      },
     ]),
   ],
 })

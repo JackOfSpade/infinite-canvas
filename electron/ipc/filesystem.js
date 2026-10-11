@@ -2,7 +2,7 @@
  * Filesystem IPC handlers — scan directories, open files/URLs, save/load workspaces.
  */
 import electronPkg from 'electron';
-const { shell, dialog } = electronPkg;
+const { shell, dialog, app } = electronPkg;
 import { handleSafe } from './ipcUtils.js';
 import { logger } from '../logger.js';
 import path from 'path';
@@ -13,7 +13,12 @@ import {
   resolveMissingPreviewPath,
 } from './missingPreviewRelink.js';
 import { isProductImageExtension } from '../../src/utils/fileExtensions.js';
-import { isWithinDirectory, isExistingFileAsync, isSensitivePath } from '../utils/pathSafety.js';
+import {
+  isWithinDirectory,
+  isExistingFileAsync,
+  isRendererSensitivePath,
+  registerRendererPrivateAppRoot,
+} from '../utils/pathSafety.js';
 import { isBackgroundE2E, backgroundE2EDisabledError } from '../utils/backgroundE2e.js';
 import { rebindJobRunRecoveryOwners } from './jobRunStaging.js';
 import { rebindJobContinuationOwners } from './jobContinuation.js';
@@ -57,29 +62,91 @@ export function isAllowedOpenFileExt(filePath) {
   return ALLOWED_OPEN_FILE_EXTS.has(path.extname(String(filePath || '')).toLowerCase());
 }
 
+function privateRendererPathError() {
+  const error = new Error('Access to private application data is restricted.');
+  error.code = 'PRIVATE_RENDERER_PATH';
+  return error;
+}
+
+function openFileHardlinkUnsupportedError() {
+  const error = new Error('Files with multiple hard links cannot be opened from the canvas. Break the hard link before opening it.');
+  error.code = 'OPEN_FILE_HARDLINK_UNSUPPORTED';
+  return error;
+}
+
+/**
+ * Reject a renderer-controlled path that reaches a sensitive component through
+ * either its spelling or an existing symlink.  Missing save targets still
+ * resolve their nearest existing ancestor so `safe-link/new.json` cannot
+ * create a file below a private store through a parent symlink.
+ *
+ * This is intentionally a narrow filesystem-IPC seam: app-owned Interview
+ * stores call their own main-process APIs and never pass through this guard.
+ */
+export async function assertRendererFilesystemPathAllowed(filePath, {
+  allowMissing = false,
+  realpath = fs.promises.realpath,
+} = {}) {
+  if (typeof filePath !== 'string' || !filePath.trim()) return null;
+  const normalizedPath = path.resolve(filePath);
+  if (isRendererSensitivePath(normalizedPath)) throw privateRendererPathError();
+
+  let probePath = normalizedPath;
+  const missingSuffix = [];
+  for (;;) {
+    try {
+      const resolvedProbe = await realpath(probePath);
+      const resolvedPath = missingSuffix.length
+        ? path.join(resolvedProbe, ...missingSuffix)
+        : resolvedProbe;
+      if (isRendererSensitivePath(resolvedPath)) throw privateRendererPathError();
+      return { normalizedPath, resolvedPath };
+    } catch (error) {
+      if (error?.code === 'PRIVATE_RENDERER_PATH') throw error;
+      if (!allowMissing || (error?.code !== 'ENOENT' && error?.code !== 'ENOTDIR')) {
+        // Existing callers retain their own normal lstat/read error behavior;
+        // this guard only needs a canonical spelling when one is available.
+        return { normalizedPath, resolvedPath: null };
+      }
+      const parent = path.dirname(probePath);
+      if (parent === probePath) return { normalizedPath, resolvedPath: null };
+      missingSuffix.unshift(path.basename(probePath));
+      probePath = parent;
+    }
+  }
+}
+
 /**
  * Resolve an OS-open request to the regular file it will actually launch.
  * Checking only the renderer-supplied suffix lets `notes.txt -> payload.app`
  * bypass the allowlist because shell.openPath follows the link itself.
  */
-async function inspectAllowedOpenFilePath(filePath) {
+export async function inspectAllowedOpenFilePath(filePath) {
   if (typeof filePath !== 'string' || !filePath.trim() || !path.isAbsolute(filePath)) {
     throw new Error('A valid absolute file path is required.');
   }
-  const normalizedPath = path.normalize(filePath);
+  const normalizedPath = path.resolve(filePath);
+  await assertRendererFilesystemPathAllowed(normalizedPath);
   if (!isAllowedOpenFileExt(normalizedPath)) {
     const ext = path.extname(normalizedPath).toLowerCase();
     throw new Error(`Opening "${ext || '(no extension)'}" files is restricted for security reasons.`);
   }
   const lexicalStat = await fs.promises.lstat(normalizedPath);
+  if (typeof lexicalStat.nlink === 'number' && lexicalStat.nlink > 1) {
+    throw openFileHardlinkUnsupportedError();
+  }
   if (!lexicalStat.isFile() || lexicalStat.isSymbolicLink()) {
-    throw new Error('Only regular document and media files can be opened. Symbolic links are restricted.');
+    throw new Error('Only single-link regular document and media files can be opened. Symbolic and hard links are restricted.');
   }
   const resolvedPath = await fs.promises.realpath(normalizedPath);
+  if (isRendererSensitivePath(resolvedPath)) throw privateRendererPathError();
   if (!isAllowedOpenFileExt(resolvedPath)) {
     throw new Error('The selected document resolves to a restricted file type.');
   }
   const canonicalStat = await fs.promises.lstat(resolvedPath);
+  if (typeof canonicalStat.nlink === 'number' && canonicalStat.nlink > 1) {
+    throw openFileHardlinkUnsupportedError();
+  }
   if (!canonicalStat.isFile() || canonicalStat.isSymbolicLink()
       || !hasSameIdentity(canonicalStat, { dev: lexicalStat.dev, ino: lexicalStat.ino })) {
     throw new Error('Only regular document and media files can be opened.');
@@ -106,6 +173,9 @@ async function assertAllowedOpenFileIdentity(target) {
     fs.promises.realpath(target.parentPath),
     fs.promises.lstat(target.parentPath),
   ]);
+  if (typeof targetStat.nlink === 'number' && targetStat.nlink > 1) {
+    throw openFileHardlinkUnsupportedError();
+  }
   if (resolvedAgain !== target.resolvedPath
       || !targetStat.isFile() || targetStat.isSymbolicLink()
       || !hasSameIdentity(targetStat, target.targetIdentity)
@@ -125,6 +195,14 @@ export async function resolveAllowedOpenFilePath(filePath) {
 const ALLOWED_TEXT_EDIT_EXTS = new Set(['.md', '.txt']);
 const MAX_OS_DELETE_PROTECTION_PATHS = 512;
 const MAX_OS_DELETE_PROTECTION_PATH_LENGTH = 4096;
+const RENDERER_PRIVATE_STORE_DIRECTORY_NAMES = Object.freeze([
+  'interview-helper-artifacts',
+  'interview-helper-prepared-briefs',
+  'career-input-staging',
+  'career-snapshot-store',
+  'renderer-workspace-write-journal',
+  'local-file-protocol-transcodes',
+]);
 
 /** True when a document is one of the two formats the renderer exposes as editable. */
 function isAllowedTextEditExt(filePath) {
@@ -135,6 +213,82 @@ function osDeleteProtectedError() {
   const error = new Error('The item is still represented by another canvas node and was kept on disk.');
   error.code = 'OS_DELETE_PROTECTED';
   return error;
+}
+
+function isSameOrAncestorPath(candidatePath, protectedPath) {
+  let candidate = path.resolve(candidatePath).normalize('NFC');
+  let protectedRoot = path.resolve(protectedPath).normalize('NFC');
+  // `path.relative` is ordinarily case-aware, while Windows and the usual
+  // macOS volume used by userData are case-insensitive. Fold conservatively:
+  // an extra refusal is safe, whereas `C:\\App` deleting `c:\\app\\userData`
+  // (or a case-variant macOS ancestor) is not. The actual path handed to the
+  // OS remains the validated original spelling.
+  if (process.platform === 'win32' || process.platform === 'darwin') {
+    if (process.platform === 'win32' && candidate.startsWith('\\\\?\\')) candidate = candidate.slice(4);
+    if (process.platform === 'win32' && protectedRoot.startsWith('\\\\?\\')) protectedRoot = protectedRoot.slice(4);
+    candidate = candidate.toLowerCase();
+    protectedRoot = protectedRoot.toLowerCase();
+  }
+  const relative = path.relative(candidate, protectedRoot);
+  return relative === '' || (!relative.startsWith(`..${path.sep}`) && relative !== '..' && !path.isAbsolute(relative));
+}
+
+// Keep the first survivor check entirely lexical.  In particular, a renderer
+// must not be able to learn whether `userData/browser-data/secret.json`
+// exists merely by placing it in `protectedPaths` and observing an lstat or
+// realpath branch.  Canonical/alias validation still follows for public
+// spellings, but only after this zero-I/O rejection.
+function isLexicallyRendererPrivateDeleteProtectionPath(filePath) {
+  if (typeof filePath !== 'string' || !filePath.trim() || !path.isAbsolute(filePath)) return true;
+  let userDataPath;
+  try { userDataPath = app?.getPath?.('userData'); } catch { return true; }
+  if (typeof userDataPath !== 'string' || !path.isAbsolute(userDataPath)) return true;
+  registerRendererPrivateAppRoot(userDataPath);
+  const candidate = path.resolve(filePath);
+  if (isRendererSensitivePath(candidate)) return true;
+  const roots = [
+    path.resolve(userDataPath),
+    ...RENDERER_PRIVATE_STORE_DIRECTORY_NAMES.map(name => path.join(path.resolve(userDataPath), name)),
+  ];
+  return roots.some(root => isSameOrAncestorPath(candidate, root));
+}
+
+/**
+ * The generic trash IPC must not be able to remove an app-private root by
+ * naming its parent. Component blocklists only catch descendants; `userData`
+ * itself deliberately has an installation-specific name, so protect its
+ * lexical and real locations plus every private store rooted beneath it.
+ */
+export async function assertRendererDeletePathDoesNotContainPrivateRoots(filePath, {
+  userDataPath = app?.getPath?.('userData'),
+  realpath = fs.promises.realpath,
+} = {}) {
+  if (typeof userDataPath !== 'string' || !path.isAbsolute(userDataPath)) {
+    // A missing host root must not broaden a destructive renderer capability.
+    throw privateRendererPathError();
+  }
+  const lexicalUserDataPath = path.resolve(userDataPath);
+  let realUserDataPath = lexicalUserDataPath;
+  try { realUserDataPath = await realpath(lexicalUserDataPath); } catch { /* checked lexically below */ }
+
+  const protectedRoots = new Set([
+    lexicalUserDataPath,
+    realUserDataPath,
+    ...RENDERER_PRIVATE_STORE_DIRECTORY_NAMES.flatMap(name => [
+      path.join(lexicalUserDataPath, name),
+      path.join(realUserDataPath, name),
+    ]),
+  ]);
+  const lexicalCandidate = path.resolve(filePath);
+  const candidateForms = new Set([lexicalCandidate]);
+  try { candidateForms.add(await realpath(lexicalCandidate)); } catch { /* final lstat validation owns normal errors */ }
+
+  for (const candidate of candidateForms) {
+    for (const protectedRoot of protectedRoots) {
+      if (isSameOrAncestorPath(candidate, protectedRoot)) throw privateRendererPathError();
+    }
+  }
+  return lexicalCandidate;
 }
 
 function isResolvedDescendant(candidateDirectory, survivorPath) {
@@ -170,6 +324,12 @@ export async function assertDeleteTargetNotRepresented(filePath, protectedPaths 
   validate = validateMutablePath,
   lstat = fs.promises.lstat,
   realpath = fs.promises.realpath,
+  // Survivor paths arrive directly from renderer state.  Check the renderer
+  // boundary before the identity inspector gets a chance to lstat/realpath
+  // them; otherwise a private survivor becomes an existence oracle through
+  // the protected-list validation branch.
+  assertRendererPathAllowed = assertRendererFilesystemPathAllowed,
+  assertDeletePathDoesNotContainPrivateRoots = assertRendererDeletePathDoesNotContainPrivateRoots,
 } = {}) {
   const safePath = await validate(filePath, { sender });
   if (!Array.isArray(protectedPaths)
@@ -192,6 +352,22 @@ export async function assertDeleteTargetNotRepresented(filePath, protectedPaths 
     if (typeof survivorPath !== 'string' || !survivorPath.trim()
         || survivorPath.length > MAX_OS_DELETE_PROTECTION_PATH_LENGTH
         || !path.isAbsolute(survivorPath)) {
+      throw osDeleteProtectedError();
+    }
+    if (isLexicallyRendererPrivateDeleteProtectionPath(survivorPath)) {
+      throw osDeleteProtectedError();
+    }
+    try {
+      // Registering the root is normally done at handler setup, but this
+      // exported helper is also used directly by focused tests.  Keep its
+      // renderer boundary self-contained rather than depending on call order.
+      try { registerRendererPrivateAppRoot(app?.getPath?.('userData')); } catch { /* fail closed below if needed */ }
+      await assertRendererPathAllowed(survivorPath, { allowMissing: true });
+      // This catches userData itself and its ancestors, which are intentionally
+      // not descendants of the registered root.  A private or ambiguous
+      // survivor only makes deletion refuse; no private metadata is returned.
+      await assertDeletePathDoesNotContainPrivateRoots(survivorPath);
+    } catch {
       throw osDeleteProtectedError();
     }
     let survivor;
@@ -241,10 +417,82 @@ export function createFileWatchRegistry({
   // an atomic save from becoming invisible to an otherwise healthy watcher for
   // half a minute.
   verificationInterval = 1_000,
+  // Watch requests come from a renderer and each native watcher carries an
+  // OS handle.  Count *unique targets*, not refcounted duplicate starts, so a
+  // React retry cannot consume the quota while a compromised renderer cannot
+  // turn this into an unbounded descriptor registry.
+  maxTargetsPerSender = 64,
+  maxTargets = 512,
+  // Kept injectable for the pure watcher regression suite.  The production
+  // value is the host platform, where fs.watch's filename spelling follows
+  // the native filesystem's case rules.
+  platform = process.platform,
+  // Production supplies an identity-aware validator below.  The dependency is
+  // optional so the pure watcher mechanics remain testable with synthetic
+  // paths/watchers.
+  validateTarget = null,
   onError = (error, filePath) => logger.warn(`[FileSystem] Watcher error for ${filePath}:`, error),
 } = {}) {
   const activeWatchers = new Map();
+  const senderTargets = new WeakMap();
+  const cleanupAttached = new WeakSet();
   const MISSING_WATCH_TARGET_CODES = new Set(['ENOENT', 'ENOTDIR']);
+  const senderTargetCap = Number.isFinite(maxTargetsPerSender)
+    ? Math.max(1, Math.floor(maxTargetsPerSender))
+    : 64;
+  const globalTargetCap = Number.isFinite(maxTargets)
+    ? Math.max(1, Math.floor(maxTargets))
+    : 512;
+
+  const normalizedWatchKey = filePath => {
+    let normalized = path.resolve(String(filePath || '')).normalize('NFC');
+    // A case-variant spelling must not open another native watcher on the
+    // same Windows file.  Preserve the first renderer spelling for messages;
+    // the map key alone is case-folded.
+    if (platform === 'win32') normalized = normalized.toLowerCase();
+    return normalized;
+  };
+
+  // Windows directory events are not required to preserve the case supplied
+  // by the watch request.  Keys are already case-folded above, but comparing
+  // the callback basename literally would make a retarget or replacement
+  // invisible whenever the native event uses a different case.  Keep the
+  // original request spelling for renderer notifications; fold only this
+  // native-name comparison.
+  const watchBasenameMatches = (filename, expected) => filename == null
+    || (platform === 'win32'
+      ? String(filename).toLowerCase() === String(expected).toLowerCase()
+      : String(filename) === String(expected));
+
+  const watchLimitError = scope => {
+    const error = new Error(scope === 'sender'
+      ? `This window is already watching ${senderTargetCap} files.`
+      : `The application is already watching ${globalTargetCap} files.`);
+    error.code = 'FILE_WATCH_LIMIT_EXCEEDED';
+    error.scope = scope;
+    error.limit = scope === 'sender' ? senderTargetCap : globalTargetCap;
+    return error;
+  };
+
+  const targetsForSender = sender => {
+    let targets = senderTargets.get(sender);
+    if (!targets) {
+      targets = new Set();
+      senderTargets.set(sender, targets);
+    }
+    return targets;
+  };
+
+  const releaseSenderTarget = (sender, filePath) => {
+    const targets = senderTargets.get(sender);
+    if (!targets) return;
+    targets.delete(filePath);
+  };
+
+  const releaseEntryClients = (filePath, entry) => {
+    for (const sender of entry.clients.keys()) releaseSenderTarget(sender, filePath);
+    entry.clients.clear();
+  };
 
   const broadcast = (filePath, entry) => {
     if (activeWatchers.get(filePath) !== entry) return;
@@ -253,7 +501,7 @@ export function createFileWatchRegistry({
         if (clientSender.isDestroyed()) {
           removeSender(clientSender, filePath, { all: true });
         } else {
-          clientSender.send('file-changed', filePath);
+          clientSender.send('file-changed', entry.requestPath || filePath);
         }
       } catch {
         // WebContents can be destroyed between isDestroyed() and send(). Do
@@ -261,6 +509,57 @@ export function createFileWatchRegistry({
         removeSender(clientSender, filePath, { all: true });
       }
     }
+  };
+
+  // A directory watcher observes names, not a capability to the file those
+  // names currently resolve to.  Re-check the lexical target before notifying
+  // a renderer so a later symlink/hard-link/private-store swap terminates the
+  // subscription instead of extending it to the replacement.  Safe regular
+  // replacements are allowed to rebind (ordinary atomic text saves rely on
+  // that), but every new identity must pass the same single-link policy.
+  const validateEntry = (filePath, entry, reason) => {
+    if (typeof validateTarget !== 'function') return Promise.resolve(true);
+    const prior = entry.validationTail || Promise.resolve();
+    const checked = prior.catch(() => {}).then(async () => {
+      if (activeWatchers.get(filePath) !== entry || entry.clients.size === 0) return false;
+      try {
+        entry.targetValidation = await validateTarget(entry.requestPath || filePath, {
+          previous: entry.targetValidation || null,
+          reason,
+        });
+        return activeWatchers.get(filePath) === entry && entry.clients.size > 0;
+      } catch (error) {
+        if (activeWatchers.get(filePath) === entry) {
+          onError(error, entry.requestPath || filePath);
+          closeEntry(filePath, entry);
+        }
+        return false;
+      }
+    });
+    entry.validationTail = checked.catch(() => {});
+    return checked;
+  };
+
+  const broadcastValidated = (filePath, entry, reason = 'event') => {
+    if (typeof validateTarget !== 'function') {
+      broadcast(filePath, entry);
+      return;
+    }
+    if (entry.broadcastValidationPending) {
+      entry.broadcastValidationQueued = true;
+      return;
+    }
+    entry.broadcastValidationPending = true;
+    void validateEntry(filePath, entry, reason)
+      .then(valid => { if (valid) broadcast(filePath, entry); })
+      .finally(() => {
+        if (activeWatchers.get(filePath) !== entry) return;
+        entry.broadcastValidationPending = false;
+        if (entry.broadcastValidationQueued) {
+          entry.broadcastValidationQueued = false;
+          broadcastValidated(filePath, entry, 'coalesced-event');
+        }
+      });
   };
 
   const stopPolling = (filePath, entry) => {
@@ -281,6 +580,10 @@ export function createFileWatchRegistry({
   const closeEntry = (filePath, entry) => {
     if (activeWatchers.get(filePath) !== entry) return;
     activeWatchers.delete(filePath);
+    // Closing for an access/identity failure can happen while subscribers are
+    // still present. Release their quota reservations here rather than waiting
+    // for a renderer cleanup that may never arrive after a typed refusal.
+    releaseEntryClients(filePath, entry);
     if (entry.retryTimer) clearTimeout(entry.retryTimer);
     entry.retryTimer = null;
     if (entry.aliasRetryTimer) clearTimeout(entry.aliasRetryTimer);
@@ -293,6 +596,8 @@ export function createFileWatchRegistry({
     try { entry.aliasWatcher?.close(); } catch { /* ignore */ }
     entry.aliasWatcher = null;
     entry.rebindQueued = false;
+    entry.broadcastValidationPending = false;
+    entry.broadcastValidationQueued = false;
   };
 
   const scheduleRetry = (filePath, entry) => {
@@ -322,7 +627,7 @@ export function createFileWatchRegistry({
     if (error) onError(error, filePath);
     // A close can stand in for the final directory event. Refresh
     // conservatively, then retain subscribers with polling until reattach.
-    broadcast(filePath, entry);
+    broadcastValidated(filePath, entry, 'native-recovery');
     startPolling(filePath, entry);
     void rebindLexicalTarget(filePath, entry);
     scheduleRetry(filePath, entry);
@@ -344,7 +649,7 @@ export function createFileWatchRegistry({
         // replaced by a symlink. Re-resolve before future events follow an old
         // directory as though it were still the target.
         void rebindLexicalTarget(filePath, entry);
-        broadcast(filePath, entry);
+        broadcastValidated(filePath, entry, 'poll');
       }
     };
     entry.pollListener = pollListener;
@@ -377,7 +682,7 @@ export function createFileWatchRegistry({
         // directory watcher remains live, so an otherwise invisible change
         // still reaches the renderer and rebinds a replaced lexical target.
         void rebindLexicalTarget(filePath, entry);
-        broadcast(filePath, entry);
+        broadcastValidated(filePath, entry, 'verification-poll');
       }
     };
     entry.verificationPollListener = pollListener;
@@ -453,12 +758,12 @@ export function createFileWatchRegistry({
         if (entry.watcher !== watcher || activeWatchers.get(filePath) !== entry) return;
         // Some platforms omit filename. Forward those events conservatively:
         // they may be for this target, whereas a named sibling is provably not.
-        if (filename != null && String(filename) !== entry.basename) return;
+        if (!watchBasenameMatches(filename, entry.basename)) return;
         // A regular path can itself be replaced by a final symlink. Normal
         // atomic saves resolve to the same target, while an actual retarget is
         // rebound asynchronously without ever changing the renderer contract.
         if (eventType === 'rename') void rebindLexicalTarget(filePath, entry);
-        broadcast(filePath, entry);
+        broadcastValidated(filePath, entry, eventType === 'rename' ? 'rename' : 'native-event');
       });
       entry.watcher = watcher;
       stopPolling(filePath, entry);
@@ -497,7 +802,7 @@ export function createFileWatchRegistry({
       watcher = watch(entry.aliasDir, (_eventType, filename) => {
         if (entry.aliasWatcher !== watcher || activeWatchers.get(filePath) !== entry) return;
         // A null filename is not safely ignorable: it can be the alias itself.
-        if (filename != null && String(filename) !== entry.aliasBasename) return;
+        if (!watchBasenameMatches(filename, entry.aliasBasename)) return;
         void rebindLexicalTarget(filePath, entry);
       });
       entry.aliasWatcher = watcher;
@@ -522,6 +827,7 @@ export function createFileWatchRegistry({
     }
     entry.rebinding = true;
     try {
+      if (!(await validateEntry(filePath, entry, 'rebind'))) return;
       const canonicalPath = await realpath(filePath);
       if (activeWatchers.get(filePath) !== entry || entry.clients.size === 0) return;
       if (canonicalPath === entry.watchPath && !entry.awaitingTarget) return;
@@ -538,7 +844,7 @@ export function createFileWatchRegistry({
       else detachAliasWatch(entry);
       // The lexical node now refers to another file, even if the target emitted
       // no content event. Tell its renderer session to reread/classify it.
-      broadcast(filePath, entry);
+      broadcastValidated(filePath, entry, 'rebind');
     } catch (error) {
       // A dangling alias commonly occurs during delete-then-create replacement.
       // Retain the old target watcher until a later lexical event can rebind.
@@ -562,13 +868,16 @@ export function createFileWatchRegistry({
     if (!entry || !entry.clients.has(sender)) return;
     const remaining = all ? 0 : entry.clients.get(sender) - 1;
     if (remaining > 0) entry.clients.set(sender, remaining);
-    else entry.clients.delete(sender);
+    else {
+      entry.clients.delete(sender);
+      releaseSenderTarget(sender, filePath);
+    }
     if (entry.clients.size === 0) closeEntry(filePath, entry);
   };
 
   const ensureSenderCleanup = (sender) => {
-    if (sender.__fsWatchCleanupAttached) return;
-    sender.__fsWatchCleanupAttached = true;
+    if (cleanupAttached.has(sender)) return;
+    cleanupAttached.add(sender);
     sender.once('destroyed', () => {
       for (const filePath of [...activeWatchers.keys()]) {
         removeSender(sender, filePath, { all: true });
@@ -580,26 +889,41 @@ export function createFileWatchRegistry({
     // IPC may be queued just as a renderer is torn down. Do not reserve a
     // client count or attach its destroyed WebContents to cleanup bookkeeping.
     if (!sender || sender.isDestroyed?.()) return;
-    let entry = activeWatchers.get(filePath);
+    const requestPath = path.resolve(String(filePath || '')).normalize('NFC');
+    const watchKey = normalizedWatchKey(requestPath);
+    const senderTargetSet = targetsForSender(sender);
+    let entry = activeWatchers.get(watchKey);
     if (entry) {
-      entry.clients.set(sender, (entry.clients.get(sender) || 0) + 1);
+      if (entry.clients.has(sender)) {
+        // Keep historical refcount semantics for paired start/stop calls, but
+        // charge only one quota slot for this deduplicated target.
+        entry.clients.set(sender, entry.clients.get(sender) + 1);
+      } else {
+        if (senderTargetSet.size >= senderTargetCap) throw watchLimitError('sender');
+        senderTargetSet.add(watchKey);
+        entry.clients.set(sender, 1);
+      }
       ensureSenderCleanup(sender);
       await entry.starting;
       return;
     }
 
+    if (senderTargetSet.size >= senderTargetCap) throw watchLimitError('sender');
+    if (activeWatchers.size >= globalTargetCap) throw watchLimitError('global');
+
     entry = {
       clients: new Map([[sender, 1]]),
-      filePath,
-      aliasDir: path.dirname(filePath),
-      aliasBasename: path.basename(filePath),
-      dir: path.dirname(filePath),
-      basename: path.basename(filePath),
+      filePath: watchKey,
+      requestPath,
+      aliasDir: path.dirname(watchKey),
+      aliasBasename: path.basename(watchKey),
+      dir: path.dirname(watchKey),
+      basename: path.basename(watchKey),
       // The registry remains keyed by the renderer spelling so start/stop and
       // broadcasts retain their existing contract. The OS watcher follows the
       // canonical target, however: a final symlink can live in a completely
       // different directory from the file it resolves to.
-      watchPath: filePath,
+      watchPath: watchKey,
       watcher: null,
       aliasWatcher: null,
       aliasPollListener: null,
@@ -612,36 +936,47 @@ export function createFileWatchRegistry({
       rebindQueued: false,
       awaitingTarget: false,
       starting: null,
+      targetValidation: null,
+      validationTail: Promise.resolve(),
+      broadcastValidationPending: false,
+      broadcastValidationQueued: false,
     };
-    activeWatchers.set(filePath, entry);
+    senderTargetSet.add(watchKey);
+    activeWatchers.set(watchKey, entry);
     ensureSenderCleanup(sender);
 
     entry.starting = (async () => {
       try {
-        await access(filePath);
+        if (typeof validateTarget === 'function') {
+          entry.targetValidation = await validateTarget(requestPath, {
+            previous: null,
+            reason: 'start',
+          });
+        }
+        await access(watchKey);
         // A cleanup may have removed the reservation while access was pending.
-        if (activeWatchers.get(filePath) !== entry || entry.clients.size === 0) return;
+        if (activeWatchers.get(watchKey) !== entry || entry.clients.size === 0) return;
 
-        const canonicalPath = await realpath(filePath);
+        const canonicalPath = await realpath(watchKey);
         // The caller can unmount while realpath is in flight too. Do not let
         // that late result resurrect a closed entry or attach a watcher.
-        if (activeWatchers.get(filePath) !== entry || entry.clients.size === 0) return;
+        if (activeWatchers.get(watchKey) !== entry || entry.clients.size === 0) return;
         entry.watchPath = canonicalPath;
         entry.dir = path.dirname(canonicalPath);
         entry.basename = path.basename(canonicalPath);
 
-        attachNativeWatcher(filePath, entry);
-        attachAliasWatcher(filePath, entry);
+        attachNativeWatcher(watchKey, entry);
+        attachAliasWatcher(watchKey, entry);
       } catch (error) {
         if (MISSING_WATCH_TARGET_CODES.has(error?.code)
-            && activeWatchers.get(filePath) === entry && entry.clients.size > 0) {
+            && activeWatchers.get(watchKey) === entry && entry.clients.size > 0) {
           // Retain one exact lexical parent subscription for a missing path.
           // Other validation/permission failures still reject and clean up.
           entry.awaitingTarget = true;
-          attachAliasWatcher(filePath, entry);
+          attachAliasWatcher(watchKey, entry);
           return;
         }
-        closeEntry(filePath, entry);
+        closeEntry(watchKey, entry);
         throw error;
       } finally {
         entry.starting = null;
@@ -650,10 +985,26 @@ export function createFileWatchRegistry({
     await entry.starting;
   };
 
-  return { start, stop: (sender, filePath) => removeSender(sender, filePath) };
+  const getCounts = sender => ({
+    targets: activeWatchers.size,
+    subscriptions: [...activeWatchers.values()]
+      .reduce((total, entry) => total + [...entry.clients.values()].reduce((sum, count) => sum + count, 0), 0),
+    senderTargets: sender ? (senderTargets.get(sender)?.size || 0) : undefined,
+  });
+
+  return {
+    start,
+    stop: (sender, filePath) => removeSender(sender, normalizedWatchKey(filePath)),
+    getCounts,
+  };
 }
 
-const fileWatchRegistry = createFileWatchRegistry();
+const fileWatchRegistry = createFileWatchRegistry({
+  // Follow only a public, regular, single-link resolved target before
+  // registration and after each watch event. Public aliases remain supported;
+  // a retarget into a private store or multi-link inode closes the watcher.
+  validateTarget: filePath => inspectRendererWatchPath(filePath, { allowMissing: true }),
+});
 
 /**
  * Module-level recursive directory scanner.
@@ -667,7 +1018,7 @@ const fileWatchRegistry = createFileWatchRegistry();
  * single descendant and the gate could never drain — a hard deadlock (the only
  * escape was closing the window). Being serial, the scan needs no EMFILE bound.
  */
-async function scanPath(currentPath, visited, sender = null, depth = 0) {
+export async function scanPath(currentPath, visited, sender = null, depth = 0) {
   // Prevent infinite recursion from symlink loops or massive trees
   if (depth > 15) return null;
 
@@ -675,25 +1026,28 @@ async function scanPath(currentPath, visited, sender = null, depth = 0) {
   if (sender && sender.isDestroyed()) return null;
 
   try {
-    let realPath = currentPath;
-    try { realPath = await fs.promises.realpath(currentPath); } catch { /* ignore */ }
+    const normalizedPath = path.resolve(currentPath);
+    if (isRendererSensitivePath(normalizedPath)) return null;
+    let realPath = normalizedPath;
+    try { realPath = await fs.promises.realpath(normalizedPath); } catch { /* ignore */ }
+    if (isRendererSensitivePath(realPath)) return null;
     if (visited.has(realPath)) return null;
     visited.add(realPath);
 
     // Skip notoriously large or transient directories/files to prevent thread lock/pollution
-    const base = path.basename(currentPath);
+    const base = path.basename(normalizedPath);
     if (base === 'node_modules' || base === '.git' || base === '.DS_Store' || base.endsWith('.tmp')) return null;
 
     // Use lstat to handle symlinks correctly (don't blindly follow if we've seen the path)
-    const stats = await fs.promises.lstat(currentPath);
+    const stats = await fs.promises.lstat(normalizedPath);
     
     if (stats.isDirectory()) {
-      const dirItems = await fs.promises.readdir(currentPath);
+      const dirItems = await fs.promises.readdir(normalizedPath);
       
       // Process sub-directories sequentially or in small batches to preserve concurrency limit
       const children = [];
       for (const item of dirItems) {
-        const child = await scanPath(path.join(currentPath, item), visited, sender, depth + 1);
+        const child = await scanPath(path.join(normalizedPath, item), visited, sender, depth + 1);
         if (child) children.push(child);
         if (sender && sender.isDestroyed()) return null;
       }
@@ -701,8 +1055,8 @@ async function scanPath(currentPath, visited, sender = null, depth = 0) {
       return {
         id: 'group-' + randomUUID(),
         type: 'group',
-        title: base || currentPath,
-        filePath: currentPath,
+        title: base || normalizedPath,
+        filePath: normalizedPath,
         collapsed: true,
         items: children,
       };
@@ -712,7 +1066,7 @@ async function scanPath(currentPath, visited, sender = null, depth = 0) {
       id: 'doc-' + randomUUID(),
       type: 'document',
       filename: base,
-      filePath: currentPath,
+      filePath: normalizedPath,
     };
   } catch (err) {
     // Possible edge case: file deleted between readdir and lstat
@@ -765,70 +1119,924 @@ export async function atomicWriteFile(targetPath, data) {
   }
 }
 
+function rendererWorkspacePathChangedError() {
+  const error = new Error('The workspace path changed while it was being accessed. Please retry the operation.');
+  error.code = 'RENDERER_WORKSPACE_PATH_CHANGED';
+  return error;
+}
+
+function rendererWorkspaceRecoveryAmbiguousError() {
+  const error = new Error(
+    'An interrupted first save left a file that cannot be proven to belong to this workspace. The file was left untouched; choose a new location or resolve it before retrying.',
+  );
+  // This is deliberately distinct from a generic path-change retry. Callers
+  // can present recovery guidance without ever treating an unproven final
+  // entry as safe to overwrite, delete, or expose.
+  error.code = 'RENDERER_WORKSPACE_RECOVERY_AMBIGUOUS';
+  error.recoveryStatus = 'first-save-placeholder-unproven';
+  return error;
+}
+
+const NO_FOLLOW_FLAG = fs.constants.O_NOFOLLOW || 0;
+const NO_FOLLOW_FALLBACK_CODES = new Set(['EINVAL', 'ENOTSUP', 'EOPNOTSUPP', 'EPERM']);
+const RENDERER_WORKSPACE_JOURNAL_DIR = 'renderer-workspace-write-journal';
+const RENDERER_WORKSPACE_JOURNAL_VERSION = 3;
+const RENDERER_WORKSPACE_FIRST_SAVE_MARKER_PREFIX = 'ICWS-FIRST-SAVE-v1:';
+const RENDERER_WORKSPACE_FIRST_SAVE_NONCE_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu;
+
+/**
+ * Node has no portable openat(2)/renameat(2)/unlinkat(2) API. In particular,
+ * macOS exposes `/dev/fd/N` but does not let Node traverse it as a directory,
+ * and Windows has no equivalent namespace. Do not paper over that gap with a
+ * supposedly-race-free path recheck.
+ *
+ * The authority boundary is therefore deliberately narrower: the renderer can
+ * request a workspace operation, but never a directory mutation primitive. All
+ * workspace writes/deletes below are serialized per canonical target in the
+ * main process, and recovery sidecar/journal paths are derived there. The
+ * renderer has no IPC that can rename or create a symlink while one of these
+ * leases is live.
+ * An independently privileged same-user process can always race a pathname on
+ * platforms where Node lacks *at syscalls; that hostile-local-process problem
+ * is outside this renderer authority boundary and every observed replacement
+ * still fails closed. Payload I/O itself is stronger: it is pinned to a file
+ * handle, so a late path swap cannot redirect bytes to an Interview store.
+ */
+const rendererWorkspaceLocks = new Map();
+
+async function withRendererWorkspaceLock(lockKey, operation) {
+  const prior = rendererWorkspaceLocks.get(lockKey) || Promise.resolve();
+  let release;
+  const tail = new Promise(resolve => { release = resolve; });
+  rendererWorkspaceLocks.set(lockKey, tail);
+  await prior.catch(() => {});
+  try {
+    return await operation();
+  } finally {
+    release();
+    if (rendererWorkspaceLocks.get(lockKey) === tail) rendererWorkspaceLocks.delete(lockKey);
+  }
+}
+
+function normalizeRendererWorkspacePath(value, { foldCase = process.platform === 'win32' || process.platform === 'darwin' } = {}) {
+  let normalized = path.resolve(value).normalize('NFC');
+  // Some Windows filesystem providers return a verbatim `\\?\\` realpath
+  // while the renderer/native dialog supplied a normal drive spelling.
+  if (process.platform === 'win32' && normalized.startsWith('\\\\?\\')) {
+    normalized = normalized.slice(4);
+  }
+  return foldCase ? normalized.toLowerCase() : normalized;
+}
+
+function sameRendererWorkspacePath(left, right) {
+  if (typeof left !== 'string' || typeof right !== 'string') return false;
+  const normalizedLeft = normalizeRendererWorkspacePath(left);
+  const normalizedRight = normalizeRendererWorkspacePath(right);
+  // Windows is normally case-insensitive, and macOS volumes can be either.
+  // Every accepted path is also identity-bound below, so case folding here only
+  // avoids rejecting the same directory when the OS canonicalizes its spelling.
+  return normalizedLeft === normalizedRight;
+}
+
+// Renderer saves from multiple windows share this key. On Windows, realpath
+// providers are not required to return the spelling with a stable drive/path
+// case, so a case-folded capability key is necessary to make the serialization
+// claim real rather than merely likely. macOS additionally folds for the
+// common case-insensitive volume; extra serialization on a case-sensitive
+// volume is harmless because the later identity checks still distinguish files.
+function rendererWorkspaceLockKey(filePath) {
+  return normalizeRendererWorkspacePath(filePath);
+}
+
+/**
+ * Freeze the public identity of a renderer-controlled workspace path before
+ * I/O.  The broad renderer guard is deliberately repeated immediately before
+ * opening a handle: a safe spelling can be swapped for a link into an
+ * Interview Helper store after an earlier IPC-boundary check.
+ */
+export async function inspectRendererWorkspacePath(filePath, { allowMissing = false } = {}) {
+  const guarded = await assertRendererFilesystemPathAllowed(filePath, { allowMissing });
+  const canonicalPath = guarded?.resolvedPath || path.resolve(filePath);
+  const parentPath = path.dirname(canonicalPath);
+  let parentRealPath;
+  let parentStat;
+  try {
+    [parentRealPath, parentStat] = await Promise.all([
+      fs.promises.realpath(parentPath),
+      fs.promises.lstat(parentPath),
+    ]);
+  } catch (error) {
+    if (allowMissing && (error?.code === 'ENOENT' || error?.code === 'ENOTDIR')) {
+      throw rendererWorkspacePathChangedError();
+    }
+    throw error;
+  }
+  if (!sameRendererWorkspacePath(parentRealPath, parentPath)
+      || !parentStat.isDirectory() || parentStat.isSymbolicLink()) {
+    throw rendererWorkspacePathChangedError();
+  }
+
+  let targetStat = null;
+  try {
+    targetStat = await fs.promises.lstat(canonicalPath);
+  } catch (error) {
+    if (error?.code !== 'ENOENT') throw error;
+    if (!allowMissing) throw error;
+  }
+  if (targetStat) {
+    if (!targetStat.isFile() || targetStat.isSymbolicLink()
+        // A public hard link can name an Interview-store inode without any
+        // sensitive path component. Workspace documents do not need hard-link
+        // semantics, so reject ambiguity before either reads or writes.
+        || (typeof targetStat.nlink === 'number' && targetStat.nlink > 1)
+        || !sameRendererWorkspacePath(await fs.promises.realpath(canonicalPath), canonicalPath)) {
+      throw rendererWorkspacePathChangedError();
+    }
+  }
+  return {
+    originalPath: filePath,
+    canonicalPath,
+    parentPath,
+    parentIdentity: { dev: parentStat.dev, ino: parentStat.ino },
+    targetIdentity: targetStat ? { dev: targetStat.dev, ino: targetStat.ino } : null,
+    mode: targetStat ? targetStat.mode & 0o777 : 0o600,
+    exists: !!targetStat,
+  };
+}
+
+/**
+ * Watch subscriptions have no byte-read or mutation authority, so retain the
+ * longstanding public-symlink UX while treating the resolved regular target
+ * as the capability.  Unlike a workspace save/read, a directory watcher must
+ * deliberately follow a safe alias across ordinary atomic replacements; its
+ * registry repeats this inspection before every renderer notification.
+ */
+export async function inspectRendererWatchPath(filePath, { allowMissing = false } = {}) {
+  const guarded = await assertRendererFilesystemPathAllowed(filePath, { allowMissing });
+  const canonicalPath = guarded?.resolvedPath || path.resolve(filePath);
+  let targetStat = null;
+  try {
+    targetStat = await fs.promises.lstat(canonicalPath);
+  } catch (error) {
+    if (error?.code !== 'ENOENT') throw error;
+    if (!allowMissing) throw error;
+  }
+  if (targetStat && (!targetStat.isFile() || targetStat.isSymbolicLink()
+      || (typeof targetStat.nlink === 'number' && targetStat.nlink > 1))) {
+    throw rendererWorkspacePathChangedError();
+  }
+  return {
+    originalPath: filePath,
+    canonicalPath,
+    targetIdentity: targetStat ? { dev: targetStat.dev, ino: targetStat.ino } : null,
+    exists: !!targetStat,
+  };
+}
+
+async function assertRendererWorkspacePathUnchanged(target) {
+  const guarded = await assertRendererFilesystemPathAllowed(target.canonicalPath, { allowMissing: !target.exists });
+  if (!guarded?.resolvedPath || !sameRendererWorkspacePath(guarded.resolvedPath, target.canonicalPath)) {
+    throw rendererWorkspacePathChangedError();
+  }
+  const [parentRealPath, parentStat, targetStat] = await Promise.all([
+    fs.promises.realpath(target.parentPath),
+    fs.promises.lstat(target.parentPath),
+    fs.promises.lstat(target.canonicalPath).catch(error => error?.code === 'ENOENT' ? null : Promise.reject(error)),
+  ]);
+  if (!sameRendererWorkspacePath(parentRealPath, target.parentPath)
+      || !parentStat.isDirectory() || parentStat.isSymbolicLink()
+      || !hasSameIdentity(parentStat, target.parentIdentity)) {
+    throw rendererWorkspacePathChangedError();
+  }
+  if (!target.exists) {
+    if (targetStat) throw rendererWorkspacePathChangedError();
+    return null;
+  }
+  if (!targetStat || !targetStat.isFile() || targetStat.isSymbolicLink()
+      || !hasSameIdentity(targetStat, target.targetIdentity)) {
+    throw rendererWorkspacePathChangedError();
+  }
+  return targetStat;
+}
+
+async function openNoFollowWorkspaceHandle(filePath, flags, mode) {
+  try {
+    return await fs.promises.open(filePath, flags | NO_FOLLOW_FLAG, mode);
+  } catch (error) {
+    // Some Windows/network filesystems reject O_NOFOLLOW. Falling back is safe
+    // only because the opened handle is identity-bound before it is read or
+    // mutated; a final symlink can at most be opened and immediately rejected.
+    if (!NO_FOLLOW_FLAG || !NO_FOLLOW_FALLBACK_CODES.has(error?.code)) throw error;
+    return fs.promises.open(filePath, flags, mode);
+  }
+}
+
+/**
+ * Prove that a handle is still the exact public workspace entry that was
+ * approved. This check deliberately happens *after* open: if a parent was
+ * swapped between validation and open, the handle's identity cannot be made to
+ * match both the old public file and the newly resolved private spelling.
+ */
+async function assertRendererWorkspaceHandleBinding(target, handleStat, {
+  allowCreated = false,
+} = {}) {
+  const guarded = await assertRendererFilesystemPathAllowed(target.canonicalPath, { allowMissing: false });
+  const [parentRealPath, parentStat, entryStat] = await Promise.all([
+    fs.promises.realpath(target.parentPath),
+    fs.promises.lstat(target.parentPath),
+    fs.promises.lstat(target.canonicalPath),
+  ]);
+  if (!guarded?.resolvedPath || !sameRendererWorkspacePath(guarded.resolvedPath, target.canonicalPath)
+      || !sameRendererWorkspacePath(parentRealPath, target.parentPath)
+      || !parentStat.isDirectory() || parentStat.isSymbolicLink()
+      || !hasSameIdentity(parentStat, target.parentIdentity)
+      || !entryStat.isFile() || entryStat.isSymbolicLink()
+      || (typeof entryStat.nlink === 'number' && entryStat.nlink > 1)
+      || !handleStat?.isFile?.() || !hasSameIdentity(entryStat, handleStat)
+      || (typeof handleStat?.nlink === 'number' && handleStat.nlink > 1)
+      || (target.exists && !hasSameIdentity(handleStat, target.targetIdentity))
+      || (!target.exists && !allowCreated)) {
+    throw rendererWorkspacePathChangedError();
+  }
+  return {
+    ...target,
+    exists: true,
+    targetIdentity: { dev: handleStat.dev, ino: handleStat.ino },
+    mode: handleStat.mode & 0o777,
+  };
+}
+
+async function openRendererWorkspaceFileHandle(target, {
+  writable = false,
+  create = false,
+} = {}) {
+  await assertRendererWorkspacePathUnchanged(target);
+  const flags = writable ? fs.constants.O_RDWR : fs.constants.O_RDONLY;
+  let handle;
+  let created = false;
+  try {
+    handle = await openNoFollowWorkspaceHandle(target.canonicalPath, flags, target.mode);
+  } catch (error) {
+    if (!create || target.exists || error?.code !== 'ENOENT') throw error;
+    // O_EXCL means an existing private record cannot be overwritten if an
+    // external actor wins the final-name race. If an unsupported platform
+    // follows a swapped *parent*, the post-open binding below rejects before
+    // any renderer bytes are written. Node cannot remove that zero-length
+    // external artifact safely without unlinkat. Renderer code cannot create
+    // or repoint a link in this lease (that mutation capability is not exposed
+    // by any IPC); an independently privileged local process is outside the
+    // renderer authority boundary and still receives no renderer/private bytes.
+    handle = await openNoFollowWorkspaceHandle(
+      target.canonicalPath,
+      flags | fs.constants.O_CREAT | fs.constants.O_EXCL,
+      target.mode,
+    );
+    created = true;
+  }
+  try {
+    const handleStat = await handle.stat();
+    const boundTarget = await assertRendererWorkspaceHandleBinding(target, handleStat, { allowCreated: created });
+    return { handle, target: boundTarget, created };
+  } catch (error) {
+    await handle.close().catch(() => {});
+    throw error;
+  }
+}
+
+function workspacePayloadBuffer(data) {
+  // Recovery integrity is byte-exact: equivalent JSON spellings are not
+  // canonicalized or reserialized before their WAL digest is recorded. The
+  // only invariant is replaying exactly the bytes the renderer asked to save.
+  if (Buffer.isBuffer(data)) return data;
+  if (data instanceof Uint8Array) return Buffer.from(data);
+  return Buffer.from(String(data), 'utf8');
+}
+
+function workspaceFirstSaveMarker(creationNonce) {
+  if (typeof creationNonce !== 'string' || !RENDERER_WORKSPACE_FIRST_SAVE_NONCE_RE.test(creationNonce)) {
+    throw rendererWorkspaceRecoveryAmbiguousError();
+  }
+  // This is intentionally not JSON. If a power loss also loses the private
+  // WAL directory entry, a caller gets an invalid-workspace failure rather
+  // than silently accepting a placeholder as a real canvas. The WAL digest is
+  // over the caller's exact UTF-8 bytes; JSON canonicalization is neither
+  // performed nor needed for replay.
+  return Buffer.from(`${RENDERER_WORKSPACE_FIRST_SAVE_MARKER_PREFIX}${creationNonce}\n`, 'utf8');
+}
+
+async function writeHandleBufferAt(handle, payload, position = 0) {
+  let offset = 0;
+  while (offset < payload.length) {
+    const { bytesWritten } = await handle.write(payload, offset, payload.length - offset, position + offset);
+    if (!bytesWritten) throw new Error('Could not write the complete workspace payload.');
+    offset += bytesWritten;
+  }
+}
+
+async function writeWorkspaceHandle(handle, payload) {
+  await handle.truncate(0);
+  await writeHandleBufferAt(handle, payload);
+  await handle.truncate(payload.length);
+  await handle.sync();
+  const after = await handle.stat();
+  if (!after.isFile() || after.size !== payload.length) throw rendererWorkspacePathChangedError();
+}
+
+async function writeWorkspaceFirstSaveMarker(handle, creationNonce) {
+  const marker = workspaceFirstSaveMarker(creationNonce);
+  await handle.truncate(0);
+  await writeHandleBufferAt(handle, marker);
+  await handle.truncate(marker.length);
+  await handle.sync();
+  const after = await handle.stat();
+  if (!after.isFile() || after.size !== marker.length) throw rendererWorkspacePathChangedError();
+}
+
+async function hasWorkspaceFirstSaveMarker(handle, creationNonce) {
+  const marker = workspaceFirstSaveMarker(creationNonce);
+  const stat = await handle.stat();
+  if (!stat.isFile() || stat.size !== marker.length) return false;
+  const actual = Buffer.allocUnsafe(marker.length);
+  let offset = 0;
+  while (offset < actual.length) {
+    const { bytesRead } = await handle.read(actual, offset, actual.length - offset, offset);
+    if (!bytesRead) return false;
+    offset += bytesRead;
+  }
+  const after = await handle.stat();
+  return hasSameIdentity(after, stat)
+    && after.size === stat.size
+    && after.mtimeMs === stat.mtimeMs
+    && after.ctimeMs === stat.ctimeMs
+    && actual.equals(marker);
+}
+
+async function assertWorkspaceHandlePayload(handle, payload) {
+  const before = await handle.stat();
+  if (!before.isFile() || before.size !== payload.length) throw rendererWorkspacePathChangedError();
+  const digest = createHash('sha256');
+  const buffer = Buffer.allocUnsafe(Math.min(1024 * 1024, Math.max(payload.length, 1)));
+  let position = 0;
+  while (position < before.size) {
+    const { bytesRead } = await handle.read(
+      buffer,
+      0,
+      Math.min(buffer.length, before.size - position),
+      position,
+    );
+    if (!bytesRead) throw rendererWorkspacePathChangedError();
+    digest.update(buffer.subarray(0, bytesRead));
+    position += bytesRead;
+  }
+  const after = await handle.stat();
+  if (!hasSameIdentity(after, before)
+      || after.size !== before.size
+      || after.mtimeMs !== before.mtimeMs
+      || after.ctimeMs !== before.ctimeMs
+      || digest.digest('hex') !== createHash('sha256').update(payload).digest('hex')) {
+    throw rendererWorkspacePathChangedError();
+  }
+}
+
+function workspaceMutationJournalName(target) {
+  // Windows names are case-insensitive, so two case spellings must resolve to
+  // one host record just as they resolve to one process-local mutation lease.
+  // Do not fold macOS here: a case-sensitive volume may legitimately contain
+  // two distinct canvas names and host recovery records must remain distinct.
+  const key = normalizeRendererWorkspacePath(target.canonicalPath, {
+    foldCase: process.platform === 'win32',
+  });
+  return `${createHash('sha256').update(key).digest('hex')}.journal`;
+}
+
+async function rendererWorkspaceJournalDirectory() {
+  const userDataPath = app?.getPath?.('userData');
+  if (typeof userDataPath !== 'string' || !path.isAbsolute(userDataPath)) {
+    throw new Error('The application workspace recovery store is unavailable.');
+  }
+  // Electron owns userData; never accept a renderer-supplied root here. The
+  // final component is a fixed host-private namespace and is blocked by the
+  // renderer path guard in pathSafety.
+  await fs.promises.mkdir(userDataPath, { recursive: true, mode: 0o700 });
+  const userDataStat = await fs.promises.lstat(userDataPath);
+  if (!userDataStat.isDirectory() || userDataStat.isSymbolicLink()) {
+    throw new Error('The application workspace recovery store is unsafe.');
+  }
+  const realUserDataPath = await fs.promises.realpath(userDataPath);
+  const directory = path.join(realUserDataPath, RENDERER_WORKSPACE_JOURNAL_DIR);
+  try {
+    await fs.promises.mkdir(directory, { mode: 0o700 });
+  } catch (error) {
+    if (error?.code !== 'EEXIST') throw error;
+  }
+  const [stat, realDirectory] = await Promise.all([
+    fs.promises.lstat(directory),
+    fs.promises.realpath(directory),
+  ]);
+  if (!stat.isDirectory() || stat.isSymbolicLink()
+      || !sameRendererWorkspacePath(realDirectory, directory)) {
+    throw new Error('The application workspace recovery store is unsafe.');
+  }
+  return directory;
+}
+
+async function writeWorkspaceMutationJournal(target, payload, {
+  // A first-save record is intentionally created before O_EXCL. Its nonce is
+  // later written to the just-created inode as a short, fsynced marker before
+  // that inode can receive renderer bytes. That lets recovery distinguish an
+  // owned placeholder from a same-name file created by somebody else.
+  creationNonce = target.exists ? null : randomUUID(),
+} = {}) {
+  if (!target.exists && (typeof creationNonce !== 'string'
+      || !RENDERER_WORKSPACE_FIRST_SAVE_NONCE_RE.test(creationNonce))) {
+    throw rendererWorkspaceRecoveryAmbiguousError();
+  }
+  const directory = await rendererWorkspaceJournalDirectory();
+  const journalPath = path.join(directory, workspaceMutationJournalName(target));
+  const expectedAbsent = !target.exists;
+  const header = Buffer.from(`${JSON.stringify({
+    version: RENDERER_WORKSPACE_JOURNAL_VERSION,
+    canonicalPath: target.canonicalPath,
+    targetIdentity: target.targetIdentity,
+    parentIdentity: target.parentIdentity,
+    expectedAbsent,
+    ...(expectedAbsent ? { creationNonce } : {}),
+    payloadBytes: payload.length,
+    payloadDigest: createHash('sha256').update(payload).digest('hex'),
+  })}\n`, 'utf8');
+  const tempPath = path.join(directory, `.${path.basename(journalPath)}.${randomUUID()}.tmp`);
+  let handle = null;
+  let tempCreated = false;
+  try {
+    handle = await openNoFollowWorkspaceHandle(
+      tempPath,
+      fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL,
+      0o600,
+    );
+    tempCreated = true;
+    await writeHandleBufferAt(handle, header);
+    await writeHandleBufferAt(handle, payload, header.length);
+    await handle.sync();
+    await handle.close();
+    handle = null;
+    await fs.promises.rename(tempPath, journalPath);
+    tempCreated = false;
+    // `false` is the explicit Windows/no-directory-fsync result. It is kept
+    // as metadata rather than being mistaken for a namespace durability
+    // guarantee; the payload and marker handles themselves are still fsynced.
+    const directorySyncConfirmed = await syncTextParentDirectory(directory);
+    return { journalPath, creationNonce: expectedAbsent ? creationNonce : null, directorySyncConfirmed };
+  } finally {
+    await handle?.close().catch(() => {});
+    if (tempCreated) await fs.promises.unlink(tempPath).catch(() => {});
+  }
+}
+
+async function readWorkspaceMutationJournal(target) {
+  const directory = await rendererWorkspaceJournalDirectory();
+  const journalPath = path.join(directory, workspaceMutationJournalName(target));
+  let bytes;
+  try {
+    bytes = await fs.promises.readFile(journalPath);
+  } catch (error) {
+    if (error?.code === 'ENOENT') return null;
+    throw error;
+  }
+  const newline = bytes.indexOf(0x0a);
+  if (newline < 1) throw new Error('The application workspace recovery record is invalid.');
+  let header;
+  try {
+    header = JSON.parse(bytes.subarray(0, newline).toString('utf8'));
+  } catch {
+    throw new Error('The application workspace recovery record is invalid.');
+  }
+  const payload = bytes.subarray(newline + 1);
+  // Version 1 records were written only after an existing/new final entry had
+  // already been bound, so they always have the exact-inode semantics below.
+  // Version 2 introduced a provisional expected-absent record but had no
+  // ownership marker; a v2 record can be resumed only while its target is
+  // still absent, and can never trust an entry that already exists. Keep old
+  // exact records recoverable across an update rather than turning an
+  // interrupted save into a permanently opaque file.
+  const legacyExactEntry = header?.version === 1;
+  const markerCapableEntry = header?.version === RENDERER_WORKSPACE_JOURNAL_VERSION;
+  const provisionalEntry = header?.version === 2 || markerCapableEntry;
+  const expectedAbsent = provisionalEntry
+    ? header.expectedAbsent === true
+    : false;
+  const creationNonce = expectedAbsent && markerCapableEntry ? header.creationNonce : null;
+  if ((!legacyExactEntry && !provisionalEntry)
+      || (provisionalEntry
+        && typeof header.expectedAbsent !== 'boolean')
+      || !sameRendererWorkspacePath(header.canonicalPath, target.canonicalPath)
+      || !Number.isSafeInteger(header.payloadBytes) || header.payloadBytes < 0
+      || header.payloadBytes !== payload.length
+      || !/^[a-f0-9]{64}$/u.test(header.payloadDigest || '')
+      || (expectedAbsent && markerCapableEntry
+        && (typeof creationNonce !== 'string' || !RENDERER_WORKSPACE_FIRST_SAVE_NONCE_RE.test(creationNonce)))
+      || createHash('sha256').update(payload).digest('hex') !== header.payloadDigest) {
+    throw rendererWorkspacePathChangedError();
+  }
+  if (expectedAbsent) {
+    if (header.targetIdentity != null || !header.parentIdentity
+        || !hasSameIdentity(header.parentIdentity, target.parentIdentity)) {
+      throw rendererWorkspacePathChangedError();
+    }
+  } else if (!header.targetIdentity || !target.exists || !target.targetIdentity
+      || !hasSameIdentity(header.targetIdentity, target.targetIdentity)
+      || (header.parentIdentity && !hasSameIdentity(header.parentIdentity, target.parentIdentity))) {
+    throw rendererWorkspacePathChangedError();
+  }
+  return { journalPath, payload, expectedAbsent, creationNonce };
+}
+
+async function clearWorkspaceMutationJournal(journalPath) {
+  await fs.promises.unlink(journalPath);
+  return syncTextParentDirectory(path.dirname(journalPath));
+}
+
+async function recoverRendererWorkspaceMutation(target) {
+  const journal = await readWorkspaceMutationJournal(target);
+  if (!journal) return false;
+  let opened;
+  try {
+    opened = await openRendererWorkspaceFileHandle(target, {
+      writable: true,
+      create: journal.expectedAbsent && !target.exists,
+    });
+  } catch (error) {
+    // A pathname can appear between our missing-target inspection and O_EXCL.
+    // It was not created by this recovery lease, so convert the normal EEXIST
+    // into the explicit fail-closed recovery state rather than retrying against
+    // or mutating its bytes.
+    if (journal.expectedAbsent && !target.exists && error?.code === 'EEXIST') {
+      throw rendererWorkspaceRecoveryAmbiguousError();
+    }
+    throw error;
+  }
+  let finalJournal = journal;
+  try {
+    if (journal.expectedAbsent) {
+      if (target.exists) {
+        // A v2 provisional record predates the marker protocol. It has no
+        // proof that this existing path entry was created by us, so touching it
+        // would be an unsafe overwrite. A v3 marker must be an exact match
+        // before recovery can turn its owned placeholder into canvas bytes.
+        if (!journal.creationNonce
+            || !await hasWorkspaceFirstSaveMarker(opened.handle, journal.creationNonce)) {
+          throw rendererWorkspaceRecoveryAmbiguousError();
+        }
+      } else {
+        // O_EXCL just created this entry. Bind it first, then make the marker
+        // durable before the exact journal can authorize a payload write.
+        // A v2 journal predates persisted nonces. It is still safe to resume
+        // only because this invocation won O_EXCL while the target was absent;
+        // a later crash before its exact rewrite is conservatively ambiguous.
+        await writeWorkspaceFirstSaveMarker(opened.handle, journal.creationNonce || randomUUID());
+        await assertRendererWorkspaceHandleBinding(opened.target, await opened.handle.stat());
+      }
+      // Persist the exact O_EXCL-created inode before it can receive canvas
+      // bytes. The marker is self-healed by the following payload write.
+      await assertRendererWorkspaceHandleBinding(opened.target, await opened.handle.stat());
+      finalJournal = await writeWorkspaceMutationJournal(opened.target, journal.payload);
+    }
+    // The WAL write itself performs no canvas I/O, so repeat the binding proof
+    // immediately before the first destructive truncate/write. This catches
+    // an observed parent replacement or newly-added hard link during journal
+    // publication rather than writing a payload through a stale handle.
+    await assertRendererWorkspaceHandleBinding(opened.target, await opened.handle.stat());
+    await writeWorkspaceHandle(opened.handle, journal.payload);
+    await assertWorkspaceHandlePayload(opened.handle, journal.payload);
+    await assertRendererWorkspaceHandleBinding(opened.target, await opened.handle.stat());
+  } finally {
+    await opened.handle.close().catch(() => {});
+  }
+  await clearWorkspaceMutationJournal(finalJournal.journalPath);
+  return true;
+}
+
+/** Read through a bound handle and verify its public entry before exposing bytes. */
+export async function readRendererWorkspaceFile(filePath, {
+  maxBytes = null,
+  encoding = 'utf8',
+  // Test seams prove that a replacement after open/read is never returned as
+  // successful content. Production callers do not receive these callbacks.
+  beforeRead = null,
+  beforeFinalVerification = null,
+} = {}) {
+  const initialTarget = typeof filePath === 'string'
+    ? await inspectRendererWorkspacePath(filePath, { allowMissing: true })
+    : filePath;
+  if (!initialTarget) throw rendererWorkspacePathChangedError();
+  return withRendererWorkspaceLock(rendererWorkspaceLockKey(initialTarget.canonicalPath), async () => {
+    // A pending write-ahead record is host-owned and can finish only against
+    // the exact inode it recorded (or the staged first-save entry). Never
+    // parse a potentially partial canvas.
+    let target = await inspectRendererWorkspacePath(initialTarget.canonicalPath, { allowMissing: true });
+    await recoverRendererWorkspaceMutation(target);
+    target = await inspectRendererWorkspacePath(initialTarget.canonicalPath);
+    const opened = await openRendererWorkspaceFileHandle(target);
+    try {
+      const stat = await opened.handle.stat();
+      await assertRendererWorkspaceHandleBinding(opened.target, stat);
+      if (maxBytes != null && stat.size > maxBytes) {
+        // A size refusal must not become an ambiguous success for a path that
+        // was replaced immediately after its handle opened. No bytes are
+        // returned here, but callers still use this result to report the path.
+        const after = await opened.handle.stat();
+        if (!hasSameIdentity(after, stat)
+            || after.size !== stat.size
+            || after.mtimeMs !== stat.mtimeMs
+            || after.ctimeMs !== stat.ctimeMs) {
+          throw rendererWorkspacePathChangedError();
+        }
+        await assertRendererWorkspaceHandleBinding(opened.target, after);
+        return { target: opened.target, stat: after, content: null, tooLarge: true };
+      }
+      if (beforeRead) await beforeRead({ target: opened.target, handle: opened.handle, stat });
+      const content = encoding == null
+        ? await opened.handle.readFile()
+        : await opened.handle.readFile({ encoding });
+      if (beforeFinalVerification) await beforeFinalVerification({ target: opened.target, handle: opened.handle, stat });
+      // An external replacement after the read must not be represented as a
+      // successful load of the renderer's requested path.
+      const after = await opened.handle.stat();
+      if (!hasSameIdentity(after, stat)
+          || after.size !== stat.size
+          || after.mtimeMs !== stat.mtimeMs
+          || after.ctimeMs !== stat.ctimeMs) {
+        throw rendererWorkspacePathChangedError();
+      }
+      await assertRendererWorkspaceHandleBinding(opened.target, after);
+      return { target: opened.target, stat, content, tooLarge: false };
+    } finally {
+      await opened.handle.close().catch(() => {});
+    }
+  });
+}
+
+async function readRendererWorkspaceBytesIfPresent(filePath) {
+  try {
+    return (await readRendererWorkspaceFile(filePath, { encoding: null })).content;
+  } catch (error) {
+    if (error?.code === 'ENOENT') return null;
+    throw error;
+  }
+}
+
+/**
+ * Write through a handle anchored to the inspected public inode. The historic
+ * export name remains for callers, but this is intentionally not a namespace
+ * `rename()` on macOS/Windows: Node cannot make that rename both portable and
+ * descriptor-relative. A host-private write-ahead record makes a crash during
+ * the in-place phase recoverable on the next save/load; success means the
+ * handle was synced, its public binding still matched, and that record cleared.
+ * The payload file is fsynced, but a platform that does not expose directory
+ * fsync (notably Windows) cannot certify journal-directory metadata durability;
+ * `returnMetadata` exposes that state rather than claiming namespace-atomic
+ * power-loss semantics. The unavoidable O_EXCL→marker crash sliver likewise
+ * fails closed with `RENDERER_WORKSPACE_RECOVERY_AMBIGUOUS`; it never trusts,
+ * deletes, overwrites, or returns the unproven final entry.
+ */
+export async function atomicWriteRendererWorkspaceFile(filePath, data, {
+  // Test seams model both the validation→open gap and late swaps after a
+  // handle is bound; production callers do not supply these callbacks.
+  beforeOpen = null,
+  beforeFirstSaveMarker = null,
+  beforeBindJournal = null,
+  beforeWrite = null,
+  beforeFinalVerification = null,
+  // Retain the former name as a non-production compatibility seam for focused
+  // regression callers while making its timing explicit above.
+  beforePublishedVerification = null,
+  // Direct callers historically receive a string. IPC callers opt into this
+  // metadata so Windows/no-directory-fsync hosts never receive a misleading
+  // full power-loss durability implication from a successful handle write.
+  returnMetadata = false,
+} = {}) {
+  const initialTarget = typeof filePath === 'string'
+    ? await inspectRendererWorkspacePath(filePath, { allowMissing: true })
+    : filePath;
+  return withRendererWorkspaceLock(rendererWorkspaceLockKey(initialTarget.canonicalPath), async () => {
+    let target = await inspectRendererWorkspacePath(initialTarget.canonicalPath, { allowMissing: true });
+    const payload = workspacePayloadBuffer(data);
+    await recoverRendererWorkspaceMutation(target);
+    target = await inspectRendererWorkspacePath(initialTarget.canonicalPath, { allowMissing: true });
+    let opened = null;
+    let mutationJournal = null;
+    // Node's Windows directory-handle behavior cannot certify a directory
+    // metadata flush even if a provider accepts `sync()`. Keep the success
+    // contract honest by reporting that platform as unverified rather than
+    // inferring POSIX fsync semantics from a best-effort call.
+    let journalDirectorySyncConfirmed = process.platform !== 'win32';
+    try {
+      // Existing files are bound before their recovery record is staged. For a
+      // missing target, stage first so a crash immediately after O_EXCL file
+      // creation can still finish the exact payload on next open.
+      if (!target.exists) {
+        mutationJournal = await writeWorkspaceMutationJournal(target, payload);
+        journalDirectorySyncConfirmed = journalDirectorySyncConfirmed
+          && mutationJournal.directorySyncConfirmed !== false;
+      }
+      if (beforeOpen) await beforeOpen({ target });
+      opened = await openRendererWorkspaceFileHandle(target, { writable: true, create: true });
+      await assertRendererWorkspaceHandleBinding(opened.target, await opened.handle.stat());
+      if (!target.exists) {
+        // Make the provisional journal's unpredictable capability visible on
+        // the exact inode before any callback or renderer payload. A crash
+        // after this point can only resume a placeholder bearing this nonce.
+        if (beforeFirstSaveMarker) {
+          await beforeFirstSaveMarker({ target: opened.target, handle: opened.handle, created: opened.created });
+        }
+        await writeWorkspaceFirstSaveMarker(opened.handle, mutationJournal.creationNonce);
+        await assertRendererWorkspaceHandleBinding(opened.target, await opened.handle.stat());
+      }
+      if (!target.exists && beforeBindJournal) {
+        await beforeBindJournal({ target: opened.target, handle: opened.handle, created: opened.created });
+      }
+      // Upgrade a first-save provisional record to an exact handle identity
+      // before writing a single renderer byte. This makes a later replacement
+      // unambiguously rejectable on recovery.
+      if (!target.exists || !mutationJournal) {
+        await assertRendererWorkspaceHandleBinding(opened.target, await opened.handle.stat());
+        mutationJournal = await writeWorkspaceMutationJournal(opened.target, payload);
+        journalDirectorySyncConfirmed = journalDirectorySyncConfirmed
+          && mutationJournal.directorySyncConfirmed !== false;
+      }
+      if (beforeWrite) await beforeWrite({ target: opened.target, handle: opened.handle, created: opened.created });
+
+      // Re-prove the path after every callback and WAL publication. A handle
+      // pins bytes, but an added hard link could otherwise make that public
+      // inode simultaneously reachable from a private store. The remaining
+      // check→write OS sliver is the documented no-*at external-process
+      // limitation; renderer code has no mutation primitive in this lease.
+      await assertRendererWorkspaceHandleBinding(opened.target, await opened.handle.stat());
+      await writeWorkspaceHandle(opened.handle, payload);
+      const contentDigest = createHash('sha256').update(payload).digest('hex');
+      const verification = beforeFinalVerification || beforePublishedVerification;
+      if (verification) {
+        await verification({
+          target: opened.target,
+          handle: opened.handle,
+          contentDigest,
+          created: opened.created,
+          // Compatibility for focused callers that used the former
+          // post-rename seam. This is now the pinned public entry, not a temp.
+          finalPath: opened.target.canonicalPath,
+          tempIdentity: opened.target.targetIdentity,
+        });
+      }
+      await assertWorkspaceHandlePayload(opened.handle, payload);
+      await assertRendererWorkspaceHandleBinding(opened.target, await opened.handle.stat());
+      const clearDirectorySyncConfirmed = await clearWorkspaceMutationJournal(mutationJournal.journalPath);
+      journalDirectorySyncConfirmed = journalDirectorySyncConfirmed
+        && clearDirectorySyncConfirmed !== false;
+      mutationJournal = null;
+      const result = {
+        filePath: opened.target.canonicalPath,
+        // `payload-fsynced` is deliberately narrower than a power-loss
+        // namespace-atomic promise. The false state is observable by the IPC
+        // caller and means the journal directory could not be synced (the
+        // normal Windows limitation), so retry/recovery guidance can remain
+        // honest without making ordinary Windows saves unusable.
+        recoveryStatus: journalDirectorySyncConfirmed
+          ? 'payload-fsynced-and-wal-directory-synced'
+          : 'wal-directory-durability-unverified',
+      };
+      return returnMetadata ? result : result.filePath;
+    } catch (error) {
+      // A staged first-save record that never produced a bound handle has no
+      // bytes to recover. Removing only this host-private record lets a later
+      // deliberate save retry normally; any entry a raced parent open created
+      // contains no renderer payload and was never treated as success.
+      if (!opened && mutationJournal) {
+        await clearWorkspaceMutationJournal(mutationJournal.journalPath).catch(() => {});
+        mutationJournal = null;
+      }
+      throw error;
+    } finally {
+      // A retained journal is intentional: it is the durable proof needed to
+      // finish a partially completed in-place write after a crash or failure.
+      // Preserve the typed pre-open failure (for example a path-bind or
+      // first-save recovery refusal).  A `finally` TypeError here used to
+      // obscure that cause whenever opening the public entry itself failed.
+      if (opened) await opened.handle.close().catch(() => {});
+    }
+  });
+}
+
+/**
+ * Remove a host-derived sidecar/journal after binding it to a regular public
+ * file. `unlink` has no FileHandle form in Node, so physical removal is the one
+ * narrow operation protected by the serialized main-process capability boundary
+ * documented above. It is never exposed as a renderer-selected unlink IPC.
+ */
+async function removeRendererWorkspaceFileIfPresent(filePath, {
+  beforeDelete = null,
+} = {}) {
+  const initialTarget = await inspectRendererWorkspacePath(filePath, { allowMissing: true });
+  return withRendererWorkspaceLock(rendererWorkspaceLockKey(initialTarget.canonicalPath), async () => {
+    let target = await inspectRendererWorkspacePath(initialTarget.canonicalPath, { allowMissing: true });
+    await recoverRendererWorkspaceMutation(target);
+    target = await inspectRendererWorkspacePath(initialTarget.canonicalPath, { allowMissing: true });
+    if (!target.exists) return false;
+    const opened = await openRendererWorkspaceFileHandle(target);
+    let handleClosed = false;
+    try {
+      await assertRendererWorkspaceHandleBinding(opened.target, await opened.handle.stat());
+      if (beforeDelete) await beforeDelete({ target: opened.target, handle: opened.handle });
+      // Reject every observed directory/file replacement before the sole
+      // pathname-only primitive. A compromised renderer cannot manufacture a
+      // swap in this host-only lease, and a separate local process is the
+      // documented Node-*at limitation rather than an implied guarantee.
+      await assertRendererWorkspaceHandleBinding(opened.target, await opened.handle.stat());
+      // Windows commonly refuses to unlink an open FileHandle. The capability
+      // proof and renderer-operation lease remain in force after close; closing
+      // here keeps ordinary sidecar/journal deletion functional on Windows.
+      await opened.handle.close();
+      handleClosed = true;
+      await fs.promises.unlink(opened.target.canonicalPath);
+      await syncTextParentDirectory(opened.target.parentPath);
+      return true;
+    } finally {
+      if (!handleClosed) await opened.handle.close().catch(() => {});
+    }
+  });
+}
+
 const RECOVERY_REBIND_JOURNAL_VERSION = 1;
-function recoveryRebindJournalPath(oldCanvasPath, newCanvasPath, journalDirectory = path.dirname(newCanvasPath)) {
-  const digest = createHash('sha256').update(`${path.resolve(oldCanvasPath)}\u0000${path.resolve(newCanvasPath)}`).digest('hex').slice(0, 24);
+/**
+ * Recovery ownership is a path-keyed host capability. Unlike a display path,
+ * its Windows key must not depend on the case returned by a dialog, watcher,
+ * or filesystem provider: all of those spellings name the same entry on the
+ * normal case-insensitive Windows namespace. Keep this separate from the
+ * general workspace normalizer so focused tests can model Windows on macOS.
+ */
+function normalizeRecoveryRebindPath(value, { platform = process.platform } = {}) {
+  let normalized = path.resolve(value).normalize('NFC');
+  if (platform === 'win32' && normalized.startsWith('\\\\?\\')) normalized = normalized.slice(4);
+  return platform === 'win32' ? normalized.toLowerCase() : normalized;
+}
+
+function sameRecoveryRebindPath(left, right, options = {}) {
+  return typeof left === 'string' && typeof right === 'string'
+    && normalizeRecoveryRebindPath(left, options) === normalizeRecoveryRebindPath(right, options);
+}
+
+function recoveryRebindJournalPath(
+  oldCanvasPath,
+  newCanvasPath,
+  journalDirectory = path.dirname(newCanvasPath),
+  options = {},
+) {
+  const digest = createHash('sha256').update(
+    `${normalizeRecoveryRebindPath(oldCanvasPath, options)}\u0000${normalizeRecoveryRebindPath(newCanvasPath, options)}`,
+  ).digest('hex').slice(0, 24);
   return path.join(journalDirectory, `.ic-recovery-rebind-${digest}.json`);
 }
 
-function recoveryRebindJournalPaths(oldCanvasPath, newCanvasPath) {
-  const targetJournal = recoveryRebindJournalPath(oldCanvasPath, newCanvasPath);
+function recoveryRebindJournalPaths(oldCanvasPath, newCanvasPath, options = {}) {
+  const targetJournal = recoveryRebindJournalPath(oldCanvasPath, newCanvasPath, path.dirname(newCanvasPath), options);
   const sourceDirectory = path.dirname(oldCanvasPath);
-  return sourceDirectory === path.dirname(newCanvasPath)
+  return sameRecoveryRebindPath(sourceDirectory, path.dirname(newCanvasPath), options)
     ? [targetJournal]
-    : [targetJournal, recoveryRebindJournalPath(oldCanvasPath, newCanvasPath, sourceDirectory)];
+    : [targetJournal, recoveryRebindJournalPath(oldCanvasPath, newCanvasPath, sourceDirectory, options)];
 }
 
 async function writeRecoveryRebindJournal(journalPath, journal) {
-  const existing = await fs.promises.lstat(journalPath).catch(error => {
-    if (error?.code === 'ENOENT') return null;
-    throw error;
-  });
-  if (existing && (!existing.isFile() || existing.isSymbolicLink())) {
-    throw new Error('Recovery rebind journal path is unsafe.');
-  }
-  if (existing) {
+  // Journal paths derive from renderer-selected canvas directories. Bind their
+  // preflight/read/write to the same no-follow workspace seam so a late parent
+  // swap cannot make recovery bookkeeping inspect or create private records.
+  const canonicalJournal = {
+    ...journal,
+    oldCanvasPath: normalizeRecoveryRebindPath(journal.oldCanvasPath),
+    newCanvasPath: normalizeRecoveryRebindPath(journal.newCanvasPath),
+  };
+  const existingTarget = await inspectRendererWorkspacePath(journalPath, { allowMissing: true });
+  if (existingTarget.exists) {
     // The deterministic journal name is an ownership slot, not an invitation
     // to overwrite a user-created regular JSON file or a stale transaction.
     // Only this exact transaction may advance its own prepared record to the
     // canvas-written phase (or rewrite the same phase after a retry).
     const prior = await readRecoveryRebindJournal(journalPath);
     const sameOwner = prior
-      && path.resolve(prior.oldCanvasPath) === path.resolve(journal.oldCanvasPath)
-      && path.resolve(prior.newCanvasPath) === path.resolve(journal.newCanvasPath)
-      && prior.canvasDigest === journal.canvasDigest
-      && prior.previousTargetDigest === journal.previousTargetDigest
-      && JSON.stringify(prior.renameAttestation || null) === JSON.stringify(journal.renameAttestation || null);
+      && sameRecoveryRebindPath(prior.oldCanvasPath, canonicalJournal.oldCanvasPath)
+      && sameRecoveryRebindPath(prior.newCanvasPath, canonicalJournal.newCanvasPath)
+      && prior.canvasDigest === canonicalJournal.canvasDigest
+      && prior.previousTargetDigest === canonicalJournal.previousTargetDigest
+      && JSON.stringify(prior.renameAttestation || null) === JSON.stringify(canonicalJournal.renameAttestation || null);
     const allowedPhase = sameOwner
-      && ((prior.phase === journal.phase) || (prior.phase === 'prepared' && journal.phase === 'canvas-written'));
+      && ((prior.phase === canonicalJournal.phase) || (prior.phase === 'prepared' && canonicalJournal.phase === 'canvas-written'));
     if (!allowedPhase) throw new Error('Recovery rebind journal path conflicts with another transaction.');
   }
-  const temp = `${journalPath}.${process.pid}.${randomUUID()}.tmp`;
-  let handle;
-  try {
-    handle = await fs.promises.open(temp, 'wx', 0o600);
-    await handle.writeFile(`${JSON.stringify(journal)}\n`, 'utf8');
-    await handle.sync();
-    await handle.close();
-    handle = null;
-    // rename replaces only the journal directory entry; unlike atomicWriteFile
-    // it never follows a pre-existing journal symlink.
-    await fs.promises.rename(temp, journalPath);
-    const directory = await fs.promises.open(path.dirname(journalPath), 'r').catch(() => null);
-    if (directory) {
-      try { await directory.sync(); } finally { await directory.close(); }
-    }
-  } finally {
-    await handle?.close().catch(() => {});
-    await fs.promises.unlink(temp).catch(() => {});
-  }
+  await atomicWriteRendererWorkspaceFile(journalPath, `${JSON.stringify(canonicalJournal)}\n`);
 }
 
 async function readRecoveryRebindJournal(journalPath) {
   try {
-    const stat = await fs.promises.lstat(journalPath);
-    if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 16 * 1024) return null;
-    const parsed = JSON.parse(await fs.promises.readFile(journalPath, 'utf8'));
+    const { content, tooLarge } = await readRendererWorkspaceFile(journalPath, { maxBytes: 16 * 1024 });
+    if (tooLarge) return null;
+    const parsed = JSON.parse(content);
     if (parsed?.version !== RECOVERY_REBIND_JOURNAL_VERSION
       || typeof parsed.oldCanvasPath !== 'string' || typeof parsed.newCanvasPath !== 'string'
       || !/^[a-f0-9]{64}$/.test(parsed.canvasDigest || '')
@@ -836,11 +2044,11 @@ async function readRecoveryRebindJournal(journalPath) {
       || !(parsed.renameAttestation == null
         || (Number.isSafeInteger(parsed.renameAttestation.dev) && Number.isSafeInteger(parsed.renameAttestation.ino)
           && parsed.renameAttestation.ino > 0))) return null;
-    const oldPath = path.resolve(parsed.oldCanvasPath);
-    const newPath = path.resolve(parsed.newCanvasPath);
-    if (!recoveryRebindJournalPaths(oldPath, newPath).includes(journalPath)
+    const oldPath = normalizeRecoveryRebindPath(parsed.oldCanvasPath);
+    const newPath = normalizeRecoveryRebindPath(parsed.newCanvasPath);
+    if (!recoveryRebindJournalPaths(oldPath, newPath).some(candidate => sameRecoveryRebindPath(candidate, journalPath))
       || !['prepared', 'canvas-written'].includes(parsed.phase)) return null;
-    return parsed;
+    return { ...parsed, oldCanvasPath: oldPath, newCanvasPath: newPath };
   } catch { return null; }
 }
 
@@ -852,9 +2060,7 @@ async function fsyncDirectory(directory) {
 
 async function clearRecoveryRebindJournals(oldCanvasPath, newCanvasPath) {
   const journalPaths = recoveryRebindJournalPaths(oldCanvasPath, newCanvasPath);
-  await Promise.all(journalPaths.map(journalPath => fs.promises.unlink(journalPath).catch(error => {
-    if (error?.code !== 'ENOENT') throw error;
-  })));
+  await Promise.all(journalPaths.map(journalPath => removeRendererWorkspaceFileIfPresent(journalPath)));
   await Promise.all([...new Set(journalPaths.map(journalPath => path.dirname(journalPath)))].map(fsyncDirectory));
 }
 
@@ -865,14 +2071,26 @@ async function clearRecoveryRebindJournals(oldCanvasPath, newCanvasPath) {
  * that is currently open. Returns the normalized path the OS operation should
  * receive (preserving a final symlink rather than trashing its target).
  */
-async function inspectMutablePath(filePath, { sender = null, textOnly = false } = {}) {
+async function inspectMutablePath(filePath, {
+  sender = null,
+  textOnly = false,
+  // Main-process/internal previews retain their historic read-only hard-link
+  // behavior. Renderer IPC explicitly opts in, because a public hard-link can
+  // otherwise name an Interview-store inode without a sensitive pathname.
+  rejectHardlinks = false,
+} = {}) {
   if (typeof filePath !== 'string' || !filePath.trim() || !path.isAbsolute(filePath)) {
     throw new Error('A valid absolute file path is required.');
   }
-  const normalizedPath = path.normalize(filePath);
+  const normalizedPath = path.resolve(filePath);
+  // Reject the renderer spelling before realpath/lstat so a private store is
+  // never probed through the generic editor/delete IPC.
+  if (isRendererSensitivePath(normalizedPath)) {
+    throw privateRendererPathError();
+  }
   const resolvedPath = await fs.promises.realpath(normalizedPath);
-  if (isSensitivePath(normalizedPath) || isSensitivePath(resolvedPath)) {
-    throw new Error('Modifying this sensitive system or credential path is restricted.');
+  if (isRendererSensitivePath(resolvedPath)) {
+    throw privateRendererPathError();
   }
   if (textOnly && !isAllowedTextEditExt(resolvedPath)) {
     throw new Error('Only .md and .txt documents can be edited from the canvas.');
@@ -881,6 +2099,10 @@ async function inspectMutablePath(filePath, { sender = null, textOnly = false } 
   const targetStat = await fs.promises.lstat(resolvedPath);
   if (textOnly && (!targetStat.isFile() || targetStat.isSymbolicLink())) {
     throw new Error('Only regular text files can be edited from the canvas.');
+  }
+  if (textOnly && rejectHardlinks
+      && typeof targetStat.nlink === 'number' && targetStat.nlink > 1) {
+    throw textFileHardlinkUnsupportedError();
   }
 
   if (sender?.__canvasPath) {
@@ -957,6 +2179,21 @@ const TEXT_FILE_HARDLINK_UNSUPPORTED = 'TEXT_FILE_HARDLINK_UNSUPPORTED';
 const TEXT_FILE_DURABILITY_UNVERIFIED = 'TEXT_FILE_DURABILITY_UNVERIFIED';
 const UNSUPPORTED_DIRECTORY_SYNC_CODES = new Set(['EISDIR', 'EINVAL', 'ENOTSUP', 'EOPNOTSUPP']);
 
+function isUnsupportedDirectorySyncError(error, platform = process.platform) {
+  return UNSUPPORTED_DIRECTORY_SYNC_CODES.has(error?.code)
+    || (platform === 'win32' && error?.code === 'EPERM');
+}
+
+async function syncOpenedDirectoryHandle(directoryHandle, { platform = process.platform } = {}) {
+  try {
+    await directoryHandle.sync();
+    return true;
+  } catch (error) {
+    if (isUnsupportedDirectorySyncError(error, platform)) return false;
+    throw error;
+  }
+}
+
 function textFileConflictError() {
   const error = new Error('The text file changed since this edit was loaded.');
   error.code = 'TEXT_FILE_CONFLICT';
@@ -987,7 +2224,7 @@ async function withTextTargetMutationConflict(operation) {
   }
 }
 
-async function assertMutableTextTargetIdentity(target) {
+async function assertMutableTextTargetIdentity(target, { rejectHardlinks = false } = {}) {
   const [targetStat, currentResolvedPath] = await withTextTargetMutationConflict(() => Promise.all([
     fs.promises.lstat(target.resolvedPath),
     // The canonical inode alone is insufficient for a lexical symlink path:
@@ -1000,6 +2237,9 @@ async function assertMutableTextTargetIdentity(target) {
       || !hasSameIdentity(targetStat, target.targetIdentity)
       || currentResolvedPath !== target.resolvedPath) {
     throw textFileConflictError();
+  }
+  if (rejectHardlinks && typeof targetStat.nlink === 'number' && targetStat.nlink > 1) {
+    throw textFileHardlinkUnsupportedError();
   }
   await assertMutableTextParentIdentity(target);
   return targetStat;
@@ -1041,12 +2281,9 @@ export async function syncTextParentDirectory(parentPath, {
   let directoryHandle = null;
   try {
     directoryHandle = await open(parentPath, 'r');
-    await directoryHandle.sync();
-    return true;
+    return await syncOpenedDirectoryHandle(directoryHandle, { platform });
   } catch (error) {
-    const unsupported = UNSUPPORTED_DIRECTORY_SYNC_CODES.has(error?.code)
-      || (platform === 'win32' && error?.code === 'EPERM');
-    if (unsupported) return false;
+    if (isUnsupportedDirectorySyncError(error, platform)) return false;
     throw error;
   } finally {
     // A close failure means the durability barrier was not fully observed; do
@@ -1080,21 +2317,66 @@ async function syncValidatedTextWriteParent(parentPath) {
  * canonical path is a stable logical-target token: it survives this writer's
  * atomic inode replacement, but changes if a lexical final symlink is retargeted.
  */
-export async function readValidatedTextFile(filePath, { sender = null } = {}) {
-  const target = await inspectMutablePath(filePath, { sender, textOnly: true });
+export async function readValidatedTextFile(filePath, {
+  sender = null,
+  // Only the renderer-facing IPC sets this. Main-process preview callers keep
+  // the historic read-only hard-link behavior; they are not a renderer path
+  // capability and cannot expose their result over this IPC.
+  rejectHardlinks = false,
+} = {}) {
+  const target = await inspectMutablePath(filePath, { sender, textOnly: true, rejectHardlinks });
   // Sweep only this opened document directory, asynchronously and with the
   // stale-age guard below, so text temp recovery never delays a read or
   // touches a live writer's private temp.
   void cleanupTempFiles(target.parentPath).catch((error) => {
     logger.warn(`[FileSystem] Text temp cleanup failed for ${target.parentPath}:`, error);
   });
-  const content = await withTextTargetMutationConflict(
-    () => fs.promises.readFile(target.resolvedPath, 'utf8'),
-  );
-  // Do not hand the renderer a baseline from a target that was replaced while
-  // it was being read. The resulting conflict/read error is safer than a
-  // misleading expected-content value for a different inode.
-  await assertMutableTextTargetIdentity(target);
+  let content;
+  if (!rejectHardlinks) {
+    // Preserve the legacy main-process-only preview semantics. Renderer IPC
+    // takes the stricter handle-pinned branch below.
+    content = await withTextTargetMutationConflict(
+      () => fs.promises.readFile(target.resolvedPath, 'utf8'),
+    );
+    await assertMutableTextTargetIdentity(target, { rejectHardlinks });
+  } else {
+    // Pin the renderer editor baseline to one opened regular-file handle. A
+    // path-based read could be redirected by a final/parent replacement
+    // between inspection and `readFile`; the post-read check alone cannot
+    // prove which inode supplied bytes. The no-follow fallback keeps this
+    // generic IPC from becoming a hard-link/private-store disclosure route on
+    // platforms without O_NOFOLLOW support.
+    let handle = null;
+    try {
+      handle = await withTextTargetMutationConflict(
+        () => openNoFollowWorkspaceHandle(target.resolvedPath, fs.constants.O_RDONLY),
+      );
+      const before = await withTextTargetMutationConflict(() => handle.stat());
+      if (!before.isFile() || !hasSameIdentity(before, target.targetIdentity)) {
+        throw textFileConflictError();
+      }
+      if (typeof before.nlink === 'number' && before.nlink > 1) {
+        throw textFileHardlinkUnsupportedError();
+      }
+      await assertMutableTextTargetIdentity(target, { rejectHardlinks: true });
+      content = await withTextTargetMutationConflict(
+        () => handle.readFile({ encoding: 'utf8' }),
+      );
+      const after = await withTextTargetMutationConflict(() => handle.stat());
+      if (!hasSameIdentity(after, before)
+          || after.size !== before.size
+          || after.mtimeMs !== before.mtimeMs
+          || after.ctimeMs !== before.ctimeMs) {
+        throw textFileConflictError();
+      }
+      // Do not hand the renderer a baseline from a target that was replaced
+      // while it was being read. The resulting conflict/read error is safer
+      // than a misleading expected-content value for a different inode.
+      await assertMutableTextTargetIdentity(target, { rejectHardlinks: true });
+    } finally {
+      await handle?.close();
+    }
+  }
   let sessionIdentityToken;
   let directIdentityCandidate = false;
   try {
@@ -1114,7 +2396,7 @@ export async function readValidatedTextFile(filePath, { sender = null } = {}) {
     // identity assertions deliberately live outside the best-effort catch:
     // returning old bytes after a proven path change would be unsafe even if
     // sharing were disabled.
-    await assertMutableTextTargetIdentity(target);
+    await assertMutableTextTargetIdentity(target, { rejectHardlinks });
     let remainedDirect = false;
     try {
       remainedDirect = !await pathContainsSymlinkComponent(target.normalizedPath);
@@ -1122,7 +2404,7 @@ export async function readValidatedTextFile(filePath, { sender = null } = {}) {
       // Sharing is an optimization; ambiguity must preserve independent sessions.
     }
     if (remainedDirect) {
-      await assertMutableTextTargetIdentity(target);
+      await assertMutableTextTargetIdentity(target, { rejectHardlinks });
       sessionIdentityToken = target.resolvedPath;
     }
   }
@@ -1166,6 +2448,10 @@ export async function writeValidatedTextFile(filePath, content, {
   sender = null,
   expectedContent,
   expectedTargetToken,
+  // Renderer IPC opts into an early hard-link refusal so its public spelling
+  // cannot act as an alias for an app-private inode. Internal direct callers
+  // retain the historic read-only/idempotent hard-link behavior.
+  rejectHardlinks = false,
 } = {}) {
   if (typeof content !== 'string') throw new Error('Text file content must be a string.');
   if (expectedContent !== undefined && typeof expectedContent !== 'string') {
@@ -1181,7 +2467,7 @@ export async function writeValidatedTextFile(filePath, content, {
   for (;;) {
     let initialTarget;
     try {
-      initialTarget = await inspectMutablePath(filePath, { sender, textOnly: true });
+      initialTarget = await inspectMutablePath(filePath, { sender, textOnly: true, rejectHardlinks });
     } catch (error) {
       // A loaded editor supplies a baseline. If its target disappeared or the
       // final symlink changed before it reached the FIFO, surface the same
@@ -1203,7 +2489,7 @@ export async function writeValidatedTextFile(filePath, content, {
     }
     const result = await withTextWriteLock(initialTarget.resolvedPath, async () => {
       const target = await withTextTargetMutationConflict(
-        () => inspectMutablePath(filePath, { sender, textOnly: true }),
+        () => inspectMutablePath(filePath, { sender, textOnly: true, rejectHardlinks }),
       );
       if (expectedTargetToken !== undefined && target.resolvedPath !== expectedTargetToken) {
         throw textFileConflictError();
@@ -1221,7 +2507,7 @@ export async function writeValidatedTextFile(filePath, content, {
       await withTextTargetMutationConflict(
         () => fs.promises.access(target.resolvedPath, fs.constants.W_OK),
       );
-      await assertMutableTextTargetIdentity(target);
+      await assertMutableTextTargetIdentity(target, { rejectHardlinks });
 
       // Read only after the path and identity are established inside the lock.
       // A repeated write of the already-requested content is idempotent; every
@@ -1229,7 +2515,7 @@ export async function writeValidatedTextFile(filePath, content, {
       const currentContent = await withTextTargetMutationConflict(
         () => fs.promises.readFile(target.resolvedPath, 'utf8'),
       );
-      await assertMutableTextTargetIdentity(target);
+      await assertMutableTextTargetIdentity(target, { rejectHardlinks });
       if (expectedContent !== undefined
           && currentContent !== expectedContent
           && currentContent !== content) {
@@ -1324,8 +2610,10 @@ function getSidecarPath(filePath) {
 // individual stores preserve their own owner/run/input proof and fail closed on
 // any conflict rather than allowing a stale path to overwrite new work.
 async function rebindJobRecoveryOwnersForCanvasPath(oldPath, newPath) {
-  if (!oldPath || path.resolve(oldPath) === path.resolve(newPath)) return { success: true };
-  return withCanvasRecoveryRebind(oldPath, newPath, async ({ oldPath: oldOwner, newPath: newOwner, installAlias }) => {
+  if (!oldPath || sameRecoveryRebindPath(oldPath, newPath)) return { success: true };
+  const canonicalOldPath = normalizeRecoveryRebindPath(oldPath);
+  const canonicalNewPath = normalizeRecoveryRebindPath(newPath);
+  return withCanvasRecoveryRebind(canonicalOldPath, canonicalNewPath, async ({ oldPath: oldOwner, newPath: newOwner, installAlias }) => {
     const marketplace = await prepareCanvasRecoveryRebind(oldOwner, newOwner);
     if (!marketplace?.success) return { success: false, reason: marketplace?.reason || 'marketplace-migration-prepare-failed' };
     const analysis = await rebindJobAnalysisRecoveryOwners(oldOwner, newOwner, { alreadyExclusive: true });
@@ -1360,27 +2648,36 @@ async function rebindJobRecoveryOwnersForCanvasPath(oldPath, newPath) {
 }
 
 async function reconcileRecoveryRebindJournalForCanvas(targetPath) {
-  const directory = path.dirname(targetPath);
+  const target = await inspectRendererWorkspacePath(targetPath, { allowMissing: true });
+  const directory = target.parentPath;
   let entries;
   try { entries = await fs.promises.readdir(directory); } catch { return { reconciled: false }; }
+  // Do not parse even a journal filename list obtained after a substituted
+  // canvas parent. The handle-bound journal reads below protect payloads; this
+  // repeated directory identity proof keeps the discovery step fail-closed too.
+  await assertRendererWorkspacePathUnchanged(target);
   const journals = entries.filter(name => name.startsWith('.ic-recovery-rebind-') && name.endsWith('.json'));
   for (const name of journals) {
     const journalPath = path.join(directory, name);
     const journal = await readRecoveryRebindJournal(journalPath);
-    if (!journal || (path.resolve(journal.newCanvasPath) !== path.resolve(targetPath)
-      && path.resolve(journal.oldCanvasPath) !== path.resolve(targetPath))) continue;
-    const targetBytes = await fs.promises.readFile(journal.newCanvasPath).catch(() => null);
+    if (!journal || (!sameRecoveryRebindPath(journal.newCanvasPath, targetPath)
+      && !sameRecoveryRebindPath(journal.oldCanvasPath, targetPath))) continue;
+    // A journal is durable but not an authority to cross into a renderer-
+    // forbidden private store. Check both sides before its recovery migration
+    // or its target bytes are touched.
+    await assertRendererFilesystemPathAllowed(journal.oldCanvasPath, { allowMissing: true });
+    await assertRendererFilesystemPathAllowed(journal.newCanvasPath, { allowMissing: true });
+    const targetBytes = await readRendererWorkspaceBytesIfPresent(journal.newCanvasPath);
     const targetDigest = targetBytes
       ? createHash('sha256').update(targetBytes).digest('hex')
       : null;
     if (targetDigest !== journal.canvasDigest) {
-      const targetStat = await fs.promises.lstat(journal.newCanvasPath).catch(() => null);
+      const target = await inspectRendererWorkspacePath(journal.newCanvasPath, { allowMissing: true });
       const finderRenameAttested = journal.phase === 'prepared'
         && journal.renameAttestation
-        && targetStat?.isFile()
-        && !targetStat.isSymbolicLink()
-        && targetStat.dev === journal.renameAttestation.dev
-        && targetStat.ino === journal.renameAttestation.ino;
+        && target.exists
+        && target.targetIdentity?.dev === journal.renameAttestation.dev
+        && target.targetIdentity?.ino === journal.renameAttestation.ino;
       if (finderRenameAttested) {
         const rebind = await rebindJobRecoveryOwnersForCanvasPath(journal.oldCanvasPath, journal.newCanvasPath);
         if (!rebind.success) return { reconciled: false, pending: true, reason: rebind.reason || 'recovery-migration-failed' };
@@ -1412,27 +2709,34 @@ async function reconcileRecoveryRebindJournalForCanvas(targetPath) {
 }
 
 export const __recoveryRebindJournalForTests = {
+  normalizeRecoveryRebindPath,
+  sameRecoveryRebindPath,
   recoveryRebindJournalPath,
   recoveryRebindJournalPaths,
   writeRecoveryRebindJournal,
   readRecoveryRebindJournal,
   reconcileRecoveryRebindJournalForCanvas,
+  removeRendererWorkspaceFileIfPresent,
 };
 
 /**
  * Record the canvas file's identity (inode + device) on the renderer's
  * WebContents after a load or save. A rename preserves the inode, so this is the
  * fingerprint we use later to recognise the same file under a new name. Must be
- * called *after* any write — atomicWriteFile renames a temp over the target, so
- * the canvas inode changes on every save. Best-effort; ino==0 filesystems opt out.
+ * called *after* any write. Workspace writes are handle-pinned in place so the
+ * inode normally remains stable; a host/editor replacement can still change it.
+ * Best-effort; ino==0 filesystems opt out.
  */
-function rememberCanvasInode(sender, filePath) {
+async function rememberCanvasInode(sender, filePath) {
   try {
-    const st = fs.statSync(filePath);
-    if (sender && !sender.isDestroyed?.() && st.ino) {
-      sender.__canvasInode = { ino: st.ino, dev: st.dev };
-      sender.__canvasPath = filePath;
-      ensureCanvasWatcher(sender, filePath);
+    // Do not let the post-save/load bookkeeping reopen an untrusted pathname
+    // with statSync. It must use the same guarded public identity as the
+    // payload operation that just completed.
+    const target = await inspectRendererWorkspacePath(filePath);
+    if (sender && !sender.isDestroyed?.() && target.targetIdentity?.ino) {
+      sender.__canvasInode = { ino: target.targetIdentity.ino, dev: target.targetIdentity.dev };
+      sender.__canvasPath = target.canonicalPath;
+      await ensureCanvasWatcher(sender, target.canonicalPath);
     }
   } catch { /* best-effort; reconciliation simply won't trigger */ }
 }
@@ -1459,26 +2763,37 @@ function rememberCanvasInode(sender, filePath) {
 async function reconcileRenamedCanvas(sender, knownPath) {
   const tracked = sender?.__canvasInode;
   if (!tracked?.ino) return knownPath;
-  if (!sender.__canvasPath || path.resolve(sender.__canvasPath) !== path.resolve(knownPath)) {
+  if (!sender.__canvasPath || !sameRecoveryRebindPath(sender.__canvasPath, knownPath)) {
     return knownPath; // saving somewhere other than "the canvas" — honor it verbatim
   }
   try {
-    const st = await fs.promises.stat(knownPath);
-    if (st.ino === tracked.ino && st.dev === tracked.dev) return knownPath;
-  } catch { /* knownPath is gone — fall through to the inode search */ }
+    const knownTarget = await inspectRendererWorkspacePath(knownPath, { allowMissing: true });
+    if (knownTarget.exists
+        && knownTarget.targetIdentity?.ino === tracked.ino
+        && knownTarget.targetIdentity?.dev === tracked.dev) {
+      return knownTarget.canonicalPath;
+    }
 
-  const dir = path.dirname(knownPath);
-  let entries;
-  try { entries = await fs.promises.readdir(dir); } catch { return knownPath; }
-  for (const name of entries) {
-    const candidate = path.join(dir, name);
-    try {
-      const st = await fs.promises.stat(candidate);
-      if (st.ino === tracked.ino && st.dev === tracked.dev) {
-        logger.info(`[FileSystem] Canvas renamed on disk: ${knownPath} → ${candidate} (followed by inode)`);
-        return candidate;
-      }
-    } catch { /* unreadable entry — skip */ }
+    const entries = await fs.promises.readdir(knownTarget.parentPath);
+    // The directory listing itself must not turn a formerly public canvas
+    // parent into a private-store discovery oracle after a parent swap.
+    await assertRendererWorkspacePathUnchanged(knownTarget);
+    for (const name of entries) {
+      const candidate = path.join(knownTarget.parentPath, name);
+      try {
+        const candidateTarget = await inspectRendererWorkspacePath(candidate, { allowMissing: true });
+        if (candidateTarget.exists
+            && candidateTarget.targetIdentity?.ino === tracked.ino
+            && candidateTarget.targetIdentity?.dev === tracked.dev) {
+          logger.info(`[FileSystem] Canvas renamed on disk: ${knownPath} → ${candidateTarget.canonicalPath} (followed by inode)`);
+          return candidateTarget.canonicalPath;
+        }
+      } catch { /* unreadable/replaced/private entry — skip */ }
+    }
+  } catch {
+    // A path replacement leaves the caller's original spelling in place. The
+    // save/load operation that invoked us performs its own adjacent guard and
+    // will fail closed instead of adopting an unverified candidate.
   }
   return knownPath;
 }
@@ -1502,8 +2817,14 @@ function stopCanvasWatcher(sender) {
   canvasWatchers.delete(sender);
 }
 
-function ensureCanvasWatcher(sender, filePath) {
-  const dir = path.dirname(filePath);
+async function ensureCanvasWatcher(sender, filePath) {
+  let target;
+  try {
+    target = await inspectRendererWorkspacePath(filePath, { allowMissing: true });
+  } catch {
+    return;
+  }
+  const dir = target.parentPath;
   const existing = canvasWatchers.get(sender);
   if (existing && existing.dir === dir) return; // already watching the right directory
   stopCanvasWatcher(sender);
@@ -1550,12 +2871,18 @@ async function handleCanvasDirChange(sender) {
   // the migration then has an exact, dual-directory restart transaction rather
   // than stranding the old path hash. The inode attestation prevents an
   // unrelated same-name JSON from inheriting this owner on recovery.
-  const renamedStat = await fs.promises.lstat(resolved).catch(() => null);
-  if (!renamedStat?.isFile() || renamedStat.isSymbolicLink()) {
+  let renamedWorkspace;
+  try {
+    // A watcher notification can race a parent substitution just like an IPC
+    // load. Bind the bytes and identity before using this rename candidate to
+    // migrate any recovery ownership.
+    renamedWorkspace = await readRendererWorkspaceFile(resolved, { encoding: null });
+  } catch {
     if (!sender.isDestroyed()) sender.send('canvas:file-rename-recovery-failed');
     return;
   }
-  const renamedBytes = await fs.promises.readFile(resolved).catch(() => null);
+  const renamedStat = renamedWorkspace.stat;
+  const renamedBytes = renamedWorkspace.content;
   if (!renamedBytes) {
     if (!sender.isDestroyed()) sender.send('canvas:file-rename-recovery-failed');
     return;
@@ -1565,8 +2892,8 @@ async function handleCanvasDirChange(sender) {
   try {
     await Promise.all(journalPaths.map(journalPath => writeRecoveryRebindJournal(journalPath, {
       version: RECOVERY_REBIND_JOURNAL_VERSION,
-      oldCanvasPath: path.resolve(knownPath),
-      newCanvasPath: path.resolve(resolved),
+      oldCanvasPath: normalizeRecoveryRebindPath(knownPath),
+      newCanvasPath: normalizeRecoveryRebindPath(resolved),
       phase: 'canvas-written',
       canvasDigest: digest,
       previousTargetDigest: digest,
@@ -1590,7 +2917,7 @@ async function handleCanvasDirChange(sender) {
     if (!sender.isDestroyed()) sender.send('canvas:file-rename-recovery-failed');
     return;
   }
-  rememberCanvasInode(sender, resolved); // re-fingerprint at the new name (same dir → watcher unchanged)
+  await rememberCanvasInode(sender, resolved); // re-fingerprint at the new name (same dir → watcher unchanged)
   if (!sender.isDestroyed()) sender.send('canvas:file-renamed', resolved);
   logger.info(`[FileSystem] Canvas followed on-disk rename, notified renderer → ${resolved}`);
 }
@@ -1858,6 +3185,12 @@ function mergeSidecarData(nodes, sidecarData) {
 }
 
 export function registerFilesystemHandlers() {
+  // The renderer's generic filesystem endpoints have no legitimate reason to
+  // inspect Electron's own profile. Remember both userData spellings before
+  // installing any handler so new/private host components are protected even
+  // when their names are not part of the portable component blocklist.
+  try { registerRendererPrivateAppRoot(app?.getPath?.('userData')); } catch { /* app not ready: component guards remain active */ }
+
   handleSafe('scan-directory', async (event, dirPath) => {
     const visited = new Set();
     const result = await scanPath(dirPath, visited, event.sender);
@@ -1910,6 +3243,11 @@ export function registerFilesystemHandlers() {
       targetPath = pendingRebind.newCanvasPath;
       priorCanvasPath = pendingRebind.oldCanvasPath;
     }
+    // A canvas can contain arbitrary file paths and this IPC also accepts a
+    // direct renderer target. Reject either half of a pending rename before
+    // journal reconciliation, sidecar migration, or any write is attempted.
+    if (targetPath) await assertRendererFilesystemPathAllowed(targetPath, { allowMissing: true });
+    if (priorCanvasPath) await assertRendererFilesystemPathAllowed(priorCanvasPath, { allowMissing: true });
     if (!targetPath) {
       if (isBackgroundE2E()) return { canceled: true };
       const { canceled, filePath: dialogPath } = await dialog.showSaveDialog({
@@ -1919,12 +3257,16 @@ export function registerFilesystemHandlers() {
       });
       if (canceled || !dialogPath) return { canceled: true };
       targetPath = dialogPath;
+      await assertRendererFilesystemPathAllowed(targetPath, { allowMissing: true });
     } else {
       // Follow a Finder rename so autosave writes to the renamed file instead of
       // resurrecting the old name. The renderer adopts the returned filePath, so
       // currentFile — and every job sidecar derived from it — self-corrects.
       targetPath = await reconcileRenamedCanvas(event.sender, targetPath);
     }
+    // A Finder rename or dialog result is a fresh untrusted path boundary.
+    // Keep this ahead of the first mutation below (including sidecar cleanup).
+    await assertRendererFilesystemPathAllowed(targetPath, { allowMissing: true });
 
     // The renderer-side sanitizer already preserves actionable paused state
     // directly on the nodes we keep. Re-embedding job progress into a top-level
@@ -1935,46 +3277,47 @@ export function registerFilesystemHandlers() {
     annotatePortableFilePaths(data, targetPath);
     const serializedCanvas = JSON.stringify(data);
 
-    // Delete legacy separate sidecar progress file if present
+    // Delete legacy separate sidecar progress file if present. Bind this
+    // sibling deletion just like the canvas write: a path swap after the
+    // renderer guard must not turn a harmless cleanup into a private-store
+    // mutation.
     try {
       const sidecarPath = getSidecarPath(targetPath);
-      if (fs.existsSync(sidecarPath)) {
-        await fs.promises.unlink(sidecarPath);
+      if (await removeRendererWorkspaceFileIfPresent(sidecarPath)) {
         logger.info(`[FileSystem] Cleaned up legacy separate progress sidecar: ${sidecarPath}`);
       }
     } catch { /* ignore */ }
 
     const needsRecoveryRebind = !!priorCanvasPath
-      && path.resolve(priorCanvasPath) !== path.resolve(targetPath);
+      && !sameRecoveryRebindPath(priorCanvasPath, targetPath);
     const journalPaths = needsRecoveryRebind
       ? recoveryRebindJournalPaths(priorCanvasPath, targetPath)
       : null;
     const priorTargetBytes = journalPaths
-      ? await fs.promises.readFile(targetPath).catch(() => null)
+      ? await readRendererWorkspaceBytesIfPresent(targetPath)
       : null;
     const previousTargetDigest = priorTargetBytes
       ? createHash('sha256').update(priorTargetBytes).digest('hex')
       : null;
-    const [oldTargetStat, newTargetStat] = journalPaths
+    const [oldTarget, newTarget] = journalPaths
       ? await Promise.all([
-        fs.promises.lstat(priorCanvasPath).catch(() => null),
-        fs.promises.lstat(targetPath).catch(() => null),
+        inspectRendererWorkspacePath(priorCanvasPath, { allowMissing: true }),
+        inspectRendererWorkspacePath(targetPath, { allowMissing: true }),
       ])
       : [null, null];
     const trackedInode = event.sender.__canvasInode;
     const renameAttestation = journalPaths
-      && !oldTargetStat
-      && newTargetStat?.isFile()
-      && !newTargetStat.isSymbolicLink()
-      && trackedInode?.ino === newTargetStat.ino
-      && trackedInode?.dev === newTargetStat.dev
-      ? { dev: newTargetStat.dev, ino: newTargetStat.ino }
+      && !oldTarget?.exists
+      && newTarget?.exists
+      && trackedInode?.ino === newTarget.targetIdentity?.ino
+      && trackedInode?.dev === newTarget.targetIdentity?.dev
+      ? { dev: newTarget.targetIdentity.dev, ino: newTarget.targetIdentity.ino }
       : null;
     if (journalPaths) {
       await Promise.all(journalPaths.map(journalPath => writeRecoveryRebindJournal(journalPath, {
         version: RECOVERY_REBIND_JOURNAL_VERSION,
-        oldCanvasPath: path.resolve(priorCanvasPath),
-        newCanvasPath: path.resolve(targetPath),
+        oldCanvasPath: normalizeRecoveryRebindPath(priorCanvasPath),
+        newCanvasPath: normalizeRecoveryRebindPath(targetPath),
         phase: 'prepared',
         canvasDigest: createHash('sha256').update(serializedCanvas).digest('hex'),
         previousTargetDigest,
@@ -1982,15 +3325,18 @@ export function registerFilesystemHandlers() {
       })));
     }
 
-    // Production Hardening: Use atomic write to prevent data corruption. The
-    // prepared journal makes a crash after this point deterministic: opening
-    // the target completes the exact sidecar rebind before exposing recovery.
-    await atomicWriteFile(targetPath, serializedCanvas);
+    // The handle-pinned writer records its complete payload in a host-private
+    // write-ahead journal before truncating the canvas. A crash after this
+    // point is recovered by finishing that exact payload on next save/load;
+    // the prepared rebind journal then completes ownership migration.
+    const workspaceWrite = await atomicWriteRendererWorkspaceFile(targetPath, serializedCanvas, {
+      returnMetadata: true,
+    });
     if (journalPaths) {
       await Promise.all(journalPaths.map(journalPath => writeRecoveryRebindJournal(journalPath, {
         version: RECOVERY_REBIND_JOURNAL_VERSION,
-        oldCanvasPath: path.resolve(priorCanvasPath),
-        newCanvasPath: path.resolve(targetPath),
+        oldCanvasPath: normalizeRecoveryRebindPath(priorCanvasPath),
+        newCanvasPath: normalizeRecoveryRebindPath(targetPath),
         phase: 'canvas-written',
         canvasDigest: createHash('sha256').update(serializedCanvas).digest('hex'),
         previousTargetDigest,
@@ -2013,14 +3359,23 @@ export function registerFilesystemHandlers() {
     if (journalPaths) await clearRecoveryRebindJournals(priorCanvasPath, targetPath);
     event.sender.__pendingCanvasRecoveryRebind = null;
 
-    // Re-fingerprint: the atomic rename gave the canvas a fresh inode, so record
-    // it now to recognise this exact file if it's renamed before the next save.
-    rememberCanvasInode(event.sender, targetPath);
+    // Re-fingerprint after the durable handle write so a later Finder rename is
+    // still recognised before the next save.
+    await rememberCanvasInode(event.sender, targetPath);
 
-    // Background cleanup of any orphaned .tmp files in this specific directory
-    cleanupTempFiles(path.dirname(targetPath)).catch(err => logger.warn('Save cleanup failed:', err));
+    // Workspace persistence no longer creates a same-directory temporary
+    // entry. Deliberately do not sweep a renderer-selected parent by pathname:
+    // Node has no descriptor-relative unlink for that legacy cleanup path.
+    // Validated text-document flows retain their own bounded temp cleanup.
 
-    return { filePath: targetPath };
+    return {
+      filePath: workspaceWrite.filePath,
+      // A deliberately narrow, typed status: successful bytes were fsynced to
+      // the bound public handle, while Windows may be unable to confirm the
+      // WAL directory metadata reached stable storage. Do not infer a fully
+      // crash-atomic namespace publication from the latter state.
+      workspaceRecoveryStatus: workspaceWrite.recoveryStatus,
+    };
   });
 
   handleSafe('load-workspace', async (event, opts) => {
@@ -2037,6 +3392,11 @@ export function registerFilesystemHandlers() {
       targetPath = filePaths[0];
     }
 
+    // Do this before looking for recovery journals: those journals can cause
+    // recovery-owner migration and must never be consulted for a private
+    // Interview authority record.
+    await assertRendererFilesystemPathAllowed(targetPath, { allowMissing: true });
+
     const journalRecovery = await reconcileRecoveryRebindJournalForCanvas(targetPath);
     if (journalRecovery.pending) {
       throw new Error('Recovery ownership migration is still pending for this canvas. Retry opening it after resolving the filesystem error.');
@@ -2046,17 +3406,24 @@ export function registerFilesystemHandlers() {
     // so adopt only that recorded target before any existence/read/fingerprint
     // check. This never follows an arbitrary directory JSON.
     if (journalRecovery.adoptedCanvasPath) targetPath = journalRecovery.adoptedCanvasPath;
+    await assertRendererFilesystemPathAllowed(targetPath);
 
-    if (!fs.existsSync(targetPath)) throw new Error('File does not exist');
-    
-    const stats = fs.statSync(targetPath);
+    // Read from a no-follow descriptor bound to the checked regular-file inode
+    // rather than resolving the renderer path and later reopening it by name.
+    // This closes the guard→read path-swap window into app-private stores.
+    const MAX_WORKSPACE_BYTES = 100 * 1024 * 1024; // 100MB
+    let workspace;
+    try {
+      workspace = await readRendererWorkspaceFile(targetPath, { maxBytes: MAX_WORKSPACE_BYTES });
+    } catch (error) {
+      if (error?.code === 'ENOENT') throw new Error('File does not exist');
+      throw error;
+    }
+    const { stat: stats, content } = workspace;
     if (stats.size === 0) throw new Error('Workspace file is empty (0 bytes)');
     // Static safety bound (not adaptive): a workspace JSON larger than this would
     // OOM the V8 string parser on read. Fixed by design.
-    const MAX_WORKSPACE_BYTES = 100 * 1024 * 1024; // 100MB
-    if (stats.size > MAX_WORKSPACE_BYTES) throw new Error(`Workspace file is excessively large (${(stats.size/1024/1024).toFixed(2)}MB). Limit is 100MB.`);
-
-    const content = await fs.promises.readFile(targetPath, 'utf-8');
+    if (workspace.tooLarge) throw new Error(`Workspace file is excessively large (${(stats.size/1024/1024).toFixed(2)}MB). Limit is 100MB.`);
     try {
       const data = JSON.parse(content);
       await resolvePortableFilePaths(data, targetPath);
@@ -2065,17 +3432,19 @@ export function registerFilesystemHandlers() {
       // Clean up legacy separate progress sidecar file if it exists
       try {
         const sidecarPath = getSidecarPath(targetPath);
-        if (fs.existsSync(sidecarPath)) {
+        const sidecarTarget = await inspectRendererWorkspacePath(sidecarPath, { allowMissing: true });
+        if (sidecarTarget.exists) {
           try {
-            const sidecarContent = await fs.promises.readFile(sidecarPath, 'utf-8');
+            const { content: sidecarContent } = await readRendererWorkspaceFile(sidecarTarget);
             const sidecarData = JSON.parse(sidecarContent);
             mergeSidecarData(data.nodes || [], sidecarData);
             logger.info(`[FileSystem] Migrated and merged legacy progress sidecar data from ${sidecarPath}`);
           } catch (err) {
             logger.error(`[FileSystem] Failed to parse legacy sidecar data: ${sidecarPath}`, err);
           }
-          await fs.promises.unlink(sidecarPath);
-          logger.info(`[FileSystem] Deleted legacy progress sidecar file: ${sidecarPath}`);
+          if (await removeRendererWorkspaceFileIfPresent(sidecarPath)) {
+            logger.info(`[FileSystem] Deleted legacy progress sidecar file: ${sidecarPath}`);
+          }
         }
       } catch { /* ignore */ }
 
@@ -2095,20 +3464,21 @@ export function registerFilesystemHandlers() {
           extractSidecarData(cleanData.nodes || []);
           delete cleanData.transientProgress;
           
-          await atomicWriteFile(targetPath, JSON.stringify(cleanData));
+          await atomicWriteRendererWorkspaceFile(targetPath, JSON.stringify(cleanData));
           logger.info(`[FileSystem] Immediately deleted saved transient progress from disk file: ${targetPath}`);
         } catch (err) {
           logger.error(`[FileSystem] Failed to write clean canvas to disk after loading: ${targetPath}`, err);
         }
       }
       
-      // Cleanup any orphaned .tmp files left over from past crashes in this directory
-      cleanupTempFiles(path.dirname(targetPath)).catch(err => logger.warn('Load cleanup failed:', err));
+      // See the matching save-path note: workspace writes use a host-private
+      // journal, so a broad untrusted-parent temp cleanup is neither needed
+      // nor an authority we retain after loading a renderer-selected canvas.
 
       // Fingerprint the file we just loaded so the next save can tell if it was
-      // renamed underneath us. Done last: the transient-progress path above may
-      // have atomically rewritten it, changing the inode.
-      rememberCanvasInode(event.sender, targetPath);
+      // renamed underneath us. Done last because transient-progress recovery
+      // may have completed a handle-pinned write before we expose the canvas.
+      await rememberCanvasInode(event.sender, targetPath);
 
       return { data, filePath: targetPath };
     } catch (jsonErr) {
@@ -2118,6 +3488,15 @@ export function registerFilesystemHandlers() {
   });
 
   handleSafe('start-file-watch', async (event, filePath) => {
+    // A watcher does not return bytes itself, but a private inode observed
+    // through a public hard-link alias could become a timing oracle for
+    // another renderer route. Its resolved target must remain single-link and
+    // public; the registry repeats this capability check on every event.
+    await inspectRendererWatchPath(filePath, { allowMissing: true });
+    // Keep the renderer's normalized spelling as the subscription key so its
+    // paired stop IPC releases the exact reservation even when realpath
+    // canonicalizes case on a macOS/Windows volume.  The registry's validator
+    // repeats the capability inspection before every notification.
     await fileWatchRegistry.start(event.sender, filePath);
   });
 
@@ -2134,12 +3513,24 @@ export function registerFilesystemHandlers() {
     const protectedPaths = typeof request === 'string' ? [] : request?.protectedPaths;
     const safePath = await assertDeleteTargetNotRepresented(filePath, protectedPaths, {
       sender: event.sender,
+      // Do this inside the target validator so neither the duplicate-path
+      // inspector nor shell.trashItem gets to probe a userData ancestor.
+      validate: async (candidatePath, { sender }) => {
+        const validatedPath = await validateMutablePath(candidatePath, { sender });
+        await assertRendererDeletePathDoesNotContainPrivateRoots(validatedPath);
+        return validatedPath;
+      },
     });
+    // `shell.trashItem` accepts only a pathname, not an anchored handle. Keep
+    // its last guard immediately adjacent to the host-only OS call; the same
+    // renderer capability boundary documented for derived workspace deletes
+    // applies here as well.
+    await assertRendererFilesystemPathAllowed(safePath);
     await shell.trashItem(safePath);
   });
 
   handleSafe('read-text-file', async (event, filePath) => (
-    readValidatedTextFile(filePath, { sender: event.sender })
+    readValidatedTextFile(filePath, { sender: event.sender, rejectHardlinks: true })
   ));
 
   handleSafe('write-text-file', async (event, {
@@ -2152,6 +3543,7 @@ export function registerFilesystemHandlers() {
       sender: event.sender,
       expectedContent,
       expectedTargetToken,
+      rejectHardlinks: true,
     });
   });
 }

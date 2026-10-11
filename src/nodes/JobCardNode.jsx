@@ -965,10 +965,9 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
   }, [localApplication?.id, localApplication?.status, localApplication?.canvasFilePath, nav, importCompletedLocalApplication, isMountedRef]);
 
   // ── Full application (tailored résumé + cover letter HTML) ─────────────────
-  // Reads the merged career data from the ORIGIN Job Search Module — the
-  // module whose search produced this job (cards are spawned by the Job Board,
-  // which merges several modules and holds no career data itself; data.hubId
-  // is the board). Not stored per-card, to avoid bloating the canvas file.
+  // New generation reads only the approved snapshot pinned to this scored
+  // card. The origin hub remains useful for display/history, but its mutable
+  // careerData must never regain authority for a fresh application.
   // Application Generate always writes a self-contained Local AI handoff next
   // to the saved canvas. New jobs use paste-back; legacy coding-agent jobs produce files, then
   // the existing polling/import path validates and saves the final bundle.
@@ -977,18 +976,14 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
     // The reactive effective lock gives mounted cards immediate feedback; the
     // live read remains the race-safe fence if a Board locks after that render.
     if (effectiveLock || getLiveNode(data.hubId)?.data?.locked) return;
-    const originHubId = data.originHubId || data.hubId;
     const careerSnapshotId = typeof data.careerSnapshotId === 'string' ? data.careerSnapshotId.trim() : '';
-    // Fast, non-queued validation prevents a known-invalid card from taking a
-    // queue turn. This is intentionally re-read after the lease as well: the
-    // preflight is only user feedback, never the data used for generation.
-    const preflightOriginHub = getLiveNode(originHubId);
-    if (!careerSnapshotId && !preflightOriginHub?.data?.careerData) {
+    // Fast, non-queued validation prevents a legacy or stale card from taking
+    // a queue turn. The main-process boundary repeats this check before any
+    // job id or filesystem side effect.
+    if (!careerSnapshotId) {
       addToast({
-        title: 'No Career Data',
-        description: data.originHubId && !preflightOriginHub
-          ? 'The Job Search Module this card came from was deleted, so its career files are gone. Re-run a search and re-combine the board.'
-          : 'The origin Job Search Module has no stored career data. Drop your career files on it, re-run the search, then re-combine the board.',
+        title: 'Refresh Career Snapshot',
+        description: 'This job card predates its approved career snapshot. Re-import your career files, re-run Job Search, and re-combine the board before generating an application.',
         type: 'error',
       });
       return;
@@ -1075,24 +1070,6 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
         return;
       }
 
-      const originHub = getLiveNode(originHubId);
-      const careerData = originHub?.data?.careerData;
-      if (!careerSnapshotId && !careerData) {
-        addToast({
-          title: 'No Career Data',
-          description: data.originHubId && !originHub
-            ? 'The Job Search Module this card came from was deleted while this application was waiting, so its career files are gone. Re-run a search and re-combine the board.'
-            : 'The origin Job Search Module has no stored career data. Drop your career files on it, re-run the search, then re-combine the board.',
-          type: 'error',
-        });
-        return;
-      }
-
-      // Preserve an already-mined achievement ledger in the handoff context.
-      // Local application generation never runs the API achievement-mining
-      // pass; the routine can use this durable context when it is available.
-      const cachedAchievements = originHub?.data?.achievements || null;
-      const mineAllowed = !cachedAchievements;
       // A terminal handoff remains on the card as the audit/repair pointer.
       // Snapshot the exact one this click intends to replace; settlement will
       // accept it only if the live card still owns the same terminal id/status.
@@ -1141,20 +1118,13 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
               applySource: variant.applySource,
             })),
         },
-        // Snapshot-pinned jobs resolve their context exclusively in the main
-        // process; never send a renderer projection alongside that authority.
-        ...(!careerSnapshotId ? { careerData } : {}),
-        // New cards are pinned to the approved snapshot that was active when
-        // they were scored.  The main process resolves it again and rejects a
-        // missing/corrupt record rather than trusting a changed hub projection.
-        careerSnapshotId: careerSnapshotId || null,
-        // Paste-mode structured rendering retains this saved-profile role
-        // snapshot and rejects any model attempt to alter its metadata.
-        ...(!careerSnapshotId ? { resumeProfile: originHub?.data?.resumeProfile || null } : {}),
+        // The main process resolves and validates the immutable pin again;
+        // mutable renderer careerData, profiles, roles, and ledgers are never
+        // accepted for a new application job.
+        careerSnapshotId,
         additionalNotes: additionalNotes.trim(),
         reasoning: data.reasoning,
         matchScore: data.matchScore,
-        ...(!careerSnapshotId ? { achievements: cachedAchievements, mineAllowed } : {}),
       });
       if (!queued?.success || !queued.localJob) {
         throw new Error(queued?.error || 'Could not prepare the local application job.');
@@ -1248,7 +1218,7 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
       applicationSubmissionRef.current = false;
       if (isMountedRef.current) setApplicationRun({ state: 'idle', position: null });
     }
-  }, [data.hubId, data.originHubId, data.careerSnapshotId, data.title, data.company, data.snippet, data.location, data.salary, data.url, data.googleCardUrl, data.source, data.posted, data.language, data.postingVariants, data.reasoning, data.matchScore, additionalNotes, id, getLiveNode, nav, addToast, isMountedRef, acquireModuleRun, hasApplicationRun, localJobPending, effectiveLock, updateGlobal]);
+  }, [data.hubId, data.careerSnapshotId, data.title, data.company, data.snippet, data.location, data.salary, data.url, data.googleCardUrl, data.source, data.posted, data.language, data.postingVariants, data.reasoning, data.matchScore, additionalNotes, id, getLiveNode, nav, addToast, isMountedRef, acquireModuleRun, hasApplicationRun, localJobPending, effectiveLock, updateGlobal]);
 
   return (
     <div

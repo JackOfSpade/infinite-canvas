@@ -9,7 +9,7 @@ import { createJobSearchCoordinatorRegistry } from '../../src/utils/jobSearchCoo
 import { exactPausedSourceContinuation, exactPausedSourceTerminalOutcome, isMergeableTerminalJobSearchOutcome, resolveExactPausedJobBoardTerminal, terminalJobSearchOutcome } from '../../src/utils/jobBoardPausedSourceContinuation.js';
 import { effectiveJobSourceCardRunId } from '../../src/utils/jobSourceWarningPolicy.js';
 import { sanitizeNodesForSave } from '../../src/utils/serializationUtils.js';
-import { collectDeletedBoardChildClaims, retireDeletedManualAiRuns } from '../../src/utils/canvasInteractions.js';
+import { applyManualAiRetirementReceiptsToNodes, collectDeletedBoardChildClaims, collectDeletedManualAiWorkflowNodes, retireDeletedManualAiRuns } from '../../src/utils/canvasInteractions.js';
 import { collectJobBoardsAffectedByDeletion, getActiveJobBoardSearchReferenceIds, getClearCanvasRetainedNodes, getJobWorkflowDeletionLifecycleRevision, isClearCanvasDeletionFenceIntact, isJobWorkflowDeletionPending, jobBoardHasCancellableRecovery, markJobWorkflowDeletionPending, settleJobWorkflowDeletion, subscribeJobWorkflowDeletionLifecycle } from '../../src/utils/nodeDeletionLifecycle.js';
 import { boundedCombinedSourceRuns } from '../../src/utils/jobBoardProvenance.js';
 import { exactInterruptedRecoveryAdmission, exactInterruptedRecoveryBackendFailure } from '../../src/utils/jobBoardRecoveryAdmission.js';
@@ -1898,8 +1898,27 @@ export default [
     },
   },
   {
-    name: 'A pending Search recovery remains owned by its exact Job Board transaction',
+    name: 'Manual-AI recovery Continue follows the exact Board child owner, not an idle connection',
     run() {
+      const idleNodes = [
+        {
+          id: 'search', type: 'jobhub',
+          data: {
+            hubState: 'empty',
+            careerImportCompilation: {
+              status: 'compiling', generation: 1, attemptId: 'career-attempt', manualAiRunId: 'manual-run',
+            },
+            manualAiResume: { runId: 'manual-run', task: 'career-profile-audit-conflicts' },
+          },
+        },
+        { id: 'idle-board', type: 'jobboard', data: {} },
+      ];
+      const idleEdges = [{ source: 'search', target: 'idle-board' }];
+      assert(isJobSearchConnectedToBoard('search', idleNodes, idleEdges)
+        && findJobSearchBoardActiveRecoveryOwner('search', idleNodes, idleEdges) === null
+        && findJobSearchBoardRecoveryOwner('search', 'manual-run', idleNodes, idleEdges) === null,
+      'an idle connected Board reserves fresh Search admission but does not own an interrupted career-compilation handoff, so the Search must expose its explicit Continue');
+
       const nodes = [
         {
           id: 'search', type: 'jobhub',
@@ -1921,7 +1940,8 @@ export default [
       const owner = findJobSearchBoardRecoveryOwner('search', 'manual-run', nodes, edges);
       const mapOwner = findJobSearchBoardRecoveryOwner('search', 'manual-run', new Map(nodes.map(node => [node.id, node])), edges);
       assert(owner?.orchestratorNodeId === 'board-a' && owner?.boardRunId === 'board-a-run'
-        && JSON.stringify(mapOwner) === JSON.stringify(owner),
+        && JSON.stringify(mapOwner) === JSON.stringify(owner)
+        && !!findJobSearchBoardActiveRecoveryOwner('search', nodes, edges),
       'the child marker must disambiguate competing durable Board plans regardless of node collection shape');
       assert(findJobSearchBoardRecoveryOwner('search', 'different-run', nodes, edges) === null,
         'a Board plan must never claim a different manual-AI generation');
@@ -1933,7 +1953,21 @@ export default [
         && missingOwner.orchestratorNodeId === 'deleted-board'
         && missingOwner.boardRunId === 'deleted-run',
       'an explicit child owner that matches no live plan must fail closed instead of falling back to a competing Board');
-      return owner;
+      const search = readFileSync(new URL('../../src/nodes/JobSearchNode.jsx', import.meta.url), 'utf8');
+      const manualSelectorStart = search.indexOf('const manualAiRecoveryBoardOwnerKey = useStore(');
+      const manualSelectorEnd = search.indexOf('const pausedBoardContinuationOwnerKey = useStore(', manualSelectorStart);
+      const manualSelector = search.slice(manualSelectorStart, manualSelectorEnd);
+      const manualEffectStart = search.indexOf('const autoResumedManualAiRunRef = useRef(null);');
+      const manualEffectEnd = search.indexOf('const handleContinueManualAiRecovery = useCallback', manualEffectStart);
+      const manualEffect = search.slice(manualEffectStart, manualEffectEnd);
+      assert(manualSelectorStart >= 0 && manualSelectorEnd > manualSelectorStart
+        && manualSelector.includes('findJobSearchBoardRecoveryOwner(')
+        && manualSelector.includes('resume?.runId')
+        && search.includes('&& !manualAiRecoveryBoardOwnerKey;')
+        && manualEffect.includes('|| manualAiRecoveryBoardOwnerKey')
+        && !manualEffect.includes('|| boardRecoveryOwnsActions'),
+      'the mounted manual-AI card must show and admit Continue for an idle connected Board, while an exact active Board child owner still suppresses that competing Search action');
+      return { idleBoardDoesNotOwnContinue: true, activeExactOwnerSuppressesContinue: true };
     },
   },
   {
@@ -3033,6 +3067,335 @@ export default [
     },
   },
   {
+    name: 'Deleting Interview Helpers retires terminal markers and acknowledged autosave-gap handoffs',
+    async run() {
+      const markerOnlyHelper = {
+        id: 'interview-top-level',
+        type: 'interviewhelper',
+        data: {
+          interviewHelperManualAiCleanup: {
+            version: 1,
+            kind: 'preparation',
+            runId: 'interview-marker-only',
+            status: 'failed',
+          },
+        },
+      };
+      const nestedHelper = {
+        id: 'interview-nested',
+        type: 'interviewhelper',
+        data: {
+          interviewHelperCareerCompilation: {
+            version: 1,
+            status: 'compiling',
+            manualAiRunId: 'interview-career-durable',
+          },
+          interviewHelperPreparation: { status: 'preparing' },
+          interviewHelperPreparationRunId: 'interview-preparation-durable',
+          interviewHelperManualAiCleanup: {
+            version: 1,
+            kind: 'career',
+            runId: 'interview-marker-durable',
+            status: 'failed',
+          },
+        },
+      };
+      const deletedTree = [{
+        id: 'deleted-group',
+        type: 'group',
+        data: { canvasData: { nodes: [nestedHelper] } },
+      }];
+      const topLevelOwners = collectDeletedManualAiWorkflowNodes([markerOnlyHelper]);
+      const nestedOwners = collectDeletedManualAiWorkflowNodes(deletedTree);
+      assert(topLevelOwners.length === 1
+        && topLevelOwners[0].nodeId === markerOnlyHelper.id
+        && topLevelOwners[0].markerRunIds.join(',') === 'interview-marker-only',
+      'a top-level Interview Helper terminal marker must be a deletion-cleanup owner');
+      assert(nestedOwners.length === 1
+        && nestedOwners[0].nodeId === nestedHelper.id
+        && new Set(nestedOwners[0].markerRunIds).size === 3
+        && nestedOwners[0].markerRunIds.every(runId => [
+          'interview-career-durable', 'interview-preparation-durable', 'interview-marker-durable',
+        ].includes(runId)),
+      'a nested Interview Helper must retain each durable native owner before renderer markers publish');
+
+      const cancellationCalls = [];
+      const completedBatches = [];
+      const priorWindow = globalThis.window;
+      try {
+        globalThis.window = {
+          electronAPI: {
+            cancelNodeTaskAndWait: async (nodeId, reason) => {
+              cancellationCalls.push({ nodeId, reason });
+              return {
+                settled: true,
+                manualAiRunIds: nodeId === nestedHelper.id
+                  ? ['interview-acknowledged-autosave-gap']
+                  : [],
+              };
+            },
+            completeNonApiAiRuns: async (runIds) => {
+              completedBatches.push([...runIds]);
+              return { completed: true, clearedRunIds: [...runIds], absentRunIds: [] };
+            },
+          },
+        };
+        const topLevelRetired = await retireDeletedManualAiRuns([markerOnlyHelper]);
+        const nestedRetired = await retireDeletedManualAiRuns(deletedTree);
+        const nestedExpected = new Set([
+          'interview-career-durable',
+          'interview-preparation-durable',
+          'interview-marker-durable',
+          'interview-acknowledged-autosave-gap',
+        ]);
+        assert(cancellationCalls.length === 2
+          && cancellationCalls.every(call => call.reason === 'node-deleted')
+          && cancellationCalls.map(call => call.nodeId).sort().join(',')
+            === 'interview-nested,interview-top-level',
+        'each removed Interview Helper, including a nested helper, must wait for main-process cancellation before retirement');
+        assert(topLevelRetired.length === 1
+          && topLevelRetired[0].runId === 'interview-marker-only'
+          && completedBatches[0].join(',') === 'interview-marker-only',
+        'a marker-only helper must atomically retire its exact terminal cleanup run');
+        assert(nestedRetired.length === nestedExpected.size
+          && nestedRetired.every(({ runId }) => nestedExpected.has(runId))
+          && completedBatches[1].length === nestedExpected.size
+          && completedBatches[1].every(runId => nestedExpected.has(runId)),
+        'main-process acknowledged ids must join all persisted Interview Helper owners during the renderer autosave gap');
+      } finally {
+        globalThis.window = priorWindow;
+      }
+      return { topLevelRetired: 1, nestedRetired: 4, cancellationAcknowledged: true };
+    },
+  },
+  {
+    name: 'Failed Interview Helper deletion acknowledgement preserves exact retry identities without changing the terminal marker',
+    async run() {
+      const helper = {
+        id: 'interview-restore',
+        type: 'interviewhelper',
+        data: {
+          interviewHelperCareerCompilation: {
+            version: 1,
+            status: 'compiling',
+            manualAiRunId: 'restore-career-run',
+          },
+          interviewHelperPreparation: { status: 'failed' },
+          interviewHelperPreparationRunId: 'restore-preparation-run',
+          interviewHelperManualAiCleanup: {
+            version: 1,
+            kind: 'preparation',
+            runId: 'restore-terminal-marker-run',
+            status: 'failed',
+          },
+        },
+      };
+      const priorWindow = globalThis.window;
+      let restored;
+      const expectedRunIds = new Set([
+        'restore-career-run',
+        'restore-preparation-run',
+        'restore-terminal-marker-run',
+        'restore-acknowledged-gap-run',
+      ]);
+      try {
+        globalThis.window = {
+          electronAPI: {
+            cancelNodeTaskAndWait: async () => ({
+              settled: false,
+              manualAiRunIds: ['restore-acknowledged-gap-run'],
+            }),
+          },
+        };
+        let failure = null;
+        try {
+          await retireDeletedManualAiRuns([helper]);
+        } catch (error) {
+          failure = error;
+        }
+        assert(failure && Array.isArray(failure.manualAiRetirementReceipts),
+          'an unacknowledged Interview Helper cancellation must retain exact deletion receipts');
+        [restored] = applyManualAiRetirementReceiptsToNodes([helper], failure.manualAiRetirementReceipts);
+        const retained = restored.data.interviewHelperManualAiRetirementReceipts;
+        assert(Array.isArray(retained)
+          && retained.length === expectedRunIds.size
+          && retained.every(receipt => expectedRunIds.has(receipt.runId) && receipt.cancellationPending === true),
+        'a failed acknowledgement must preserve every native and main-acknowledged Interview Helper id for retry');
+        assert(restored.data.interviewHelperCareerCompilation.manualAiRunId === 'restore-career-run'
+          && restored.data.interviewHelperPreparationRunId === 'restore-preparation-run'
+          && Object.keys(restored.data.interviewHelperManualAiCleanup).sort().join(',') === 'kind,runId,status,version'
+          && restored.data.interviewHelperManualAiCleanup.status === 'failed',
+        'restoration must retain native owners while leaving the strict terminal-only UI marker unmodified');
+
+        let retriedRunIds = null;
+        globalThis.window.electronAPI = {
+          cancelNodeTaskAndWait: async () => ({
+            settled: true,
+            manualAiRunIds: ['restore-acknowledged-gap-run'],
+          }),
+          completeNonApiAiRuns: async (runIds) => {
+            retriedRunIds = [...runIds];
+            return { completed: true, clearedRunIds: [...runIds], absentRunIds: [] };
+          },
+        };
+        const retried = await retireDeletedManualAiRuns([restored]);
+        assert(retried.length === expectedRunIds.size
+          && retried.every(({ runId }) => expectedRunIds.has(runId))
+          && retriedRunIds.length === expectedRunIds.size
+          && retriedRunIds.every(runId => expectedRunIds.has(runId)),
+        'a later deletion must retry the identical retained ids and atomically retire them after acknowledgement');
+      } finally {
+        globalThis.window = priorWindow;
+      }
+      return { restoredRunIds: expectedRunIds.size, markerSchemaPreserved: true };
+    },
+  },
+  {
+    name: 'Interview Helper deletion projects only grammar-valid run ids and exact recovery receipts',
+    async run() {
+      const overlongRunId = `a${'b'.repeat(160)}`;
+      const malformedRunIds = [overlongRunId, 'run id with spaces', 'run\u0000control'];
+      const validRunIds = new Set([
+        'interview-career-valid',
+        'interview-preparation-valid',
+        'interview-cleanup-valid',
+        'interview-retirement-valid',
+        'interview-acknowledged-valid',
+      ]);
+      const inheritedReceipt = Object.assign(
+        Object.create({ inherited: 'never project this' }),
+        {
+          runId: 'interview-inherited-receipt',
+          retirementPending: true,
+          retirementReason: 'node-deleted',
+          cancellationPending: true,
+          cancellationReason: 'node-deleted',
+        },
+      );
+      const helper = {
+        id: 'interview-validation',
+        type: 'interviewhelper',
+        data: {
+          interviewHelperCareerCompilation: {
+            version: 1,
+            status: 'compiling',
+            manualAiRunId: 'interview-career-valid',
+          },
+          interviewHelperPreparation: { status: 'preparing' },
+          interviewHelperPreparationRunId: 'interview-preparation-valid',
+          interviewHelperManualAiCleanup: {
+            version: 1,
+            kind: 'career',
+            runId: 'interview-cleanup-valid',
+            status: 'failed',
+          },
+          interviewHelperManualAiRetirementReceipts: [
+            {
+              runId: 'interview-retirement-valid',
+              retirementPending: true,
+              retirementReason: 'node-deleted',
+              cancellationPending: false,
+              cancellationReason: 'node-deleted',
+            },
+            ...malformedRunIds.map(runId => ({
+              runId,
+              retirementPending: true,
+              retirementReason: 'node-deleted',
+              cancellationPending: false,
+              cancellationReason: 'node-deleted',
+            })),
+            {
+              runId: 'interview-extra-field-receipt',
+              retirementPending: true,
+              retirementReason: 'node-deleted',
+              cancellationPending: false,
+              cancellationReason: 'node-deleted',
+              hostile: true,
+            },
+            inheritedReceipt,
+          ],
+        },
+      };
+      const malformedHelper = {
+        id: 'interview-malformed-validation',
+        type: 'interviewhelper',
+        data: {
+          interviewHelperCareerCompilation: {
+            version: 1,
+            status: 'compiling',
+            manualAiRunId: malformedRunIds[0],
+          },
+          interviewHelperPreparation: { status: 'preparing' },
+          interviewHelperPreparationRunId: malformedRunIds[1],
+          interviewHelperManualAiCleanup: {
+            version: 1,
+            kind: 'career',
+            runId: malformedRunIds[2],
+            status: 'failed',
+          },
+          interviewHelperManualAiRetirementReceipts: helper.data.interviewHelperManualAiRetirementReceipts.slice(1),
+        },
+      };
+
+      const owners = collectDeletedManualAiWorkflowNodes([helper]);
+      const malformedOwners = collectDeletedManualAiWorkflowNodes([malformedHelper]);
+      assert(owners.length === 1
+        && owners[0].markerRunIds.length === 4
+        && owners[0].markerRunIds.every(runId => validRunIds.has(runId))
+        && malformedOwners.length === 1
+        && malformedOwners[0].markerRunIds.length === 0,
+      'only strict career, preparation, terminal-cleanup, and exact receipt ids may become Interview Helper deletion owners');
+
+      const priorWindow = globalThis.window;
+      let completedRunIds = null;
+      try {
+        globalThis.window = {
+          electronAPI: {
+            cancelNodeTaskAndWait: async () => ({
+              settled: true,
+              manualAiRunIds: ['interview-acknowledged-valid', ...malformedRunIds, { runId: 'not-a-string' }],
+            }),
+            completeNonApiAiRuns: async runIds => {
+              completedRunIds = [...runIds];
+              return { completed: true, clearedRunIds: [...runIds], absentRunIds: [] };
+            },
+          },
+        };
+        const retired = await retireDeletedManualAiRuns([helper]);
+        assert(completedRunIds?.length === validRunIds.size
+          && completedRunIds.every(runId => validRunIds.has(runId))
+          && retired.every(({ runId }) => validRunIds.has(runId)),
+        'malformed persisted and acknowledgement ids must be filtered before the atomic completion IPC call');
+      } finally {
+        globalThis.window = priorWindow;
+      }
+
+      const [restored] = applyManualAiRetirementReceiptsToNodes([helper], [
+        { nodeId: helper.id, runId: 'interview-acknowledged-valid', cancellationPending: false },
+        { nodeId: helper.id, runId: malformedRunIds[0], cancellationPending: false },
+        { nodeId: helper.id, runId: 'interview-extra-deletion-receipt', cancellationPending: false, hostile: true },
+        Object.assign(Object.create({ inherited: true }), {
+          nodeId: helper.id,
+          runId: 'interview-inherited-deletion-receipt',
+          cancellationPending: false,
+        }),
+      ]);
+      const retained = restored.data.interviewHelperManualAiRetirementReceipts;
+      const allowedKeys = new Set([
+        'cancellationPending,cancellationReason,retirementPending,retirementReason,runId',
+        'cancellationPending,cancellationReason,retirementPending,retirementReason,runId,updatedAt',
+      ]);
+      assert(Array.isArray(retained)
+        && retained.every(receipt => validRunIds.has(receipt.runId)
+          && allowedKeys.has(Object.keys(receipt).sort().join(','))
+          && Object.getPrototypeOf(receipt) === Object.prototype
+          && !Object.hasOwn(receipt, 'hostile')
+          && !('inherited' in receipt)),
+      'restoration must project only exact legacy/current receipt shapes and never spread persisted or supplied hostile fields');
+      return { validRetirements: validRunIds.size, strictReceiptProjection: true };
+    },
+  },
+  {
     name: 'A standalone pending Board Combine reserves its exact shared Search inputs',
     run() {
       const nodes = [
@@ -3147,7 +3510,7 @@ export default [
         && search.includes('onRerun={activeBoardRecoveryOwnerKey || data.terminalFinalizationRecovery || resumeOffer?.incomplete ? null : handleRerun}')
         && search.includes('onReanalyze={boardRecoveryOwnsActions || data.terminalFinalizationRecovery ? null : handleReanalyze}')
         && search.includes('{hasRunnableCareerInput && !controlsLocked && !boardRecoveryOwnsActions && !resumeOffer?.incomplete && (')
-        && search.includes('|| boardRecoveryOwnsActions\n    ) return;')
+        && search.includes('|| manualAiRecoveryBoardOwnerKey\n    ) return;')
         && search.includes('onClearCareerFiles={activeBoardRecoveryOwnerKey ? null : handleClearCareerFiles}')
         && search.includes('boardRecoveryPending={!!activeBoardRecoveryOwnerKey}')
         && search.includes('An idle Board connection does not own this explicit re-scan.')

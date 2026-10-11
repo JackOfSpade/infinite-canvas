@@ -5,7 +5,13 @@ export const LANE_PHASES = Object.freeze(['unread', 'awaiting', 'host', 'done', 
 export const LANE_REASONS = Object.freeze([
   'user_hold', 'human_advance', 'rejection_cap', 'junk_cap', 'review_round_cap',
   'job_broken', 'render_retry', 'app_fix_required', 'canvas_unavailable', 'read_failed', 'write_failed',
-  'submit_stuck', 'host_silent', 'lapsed', 'restart',
+  'submit_stuck', 'host_silent', 'lapsed', 'restart', 'review_stop',
+]);
+// The reasons that need the person to act: a lane held for one of them is
+// 'needs_user'. Every other reason is a plain 'held' lane. One list, so a hold
+// made by the engine and a hold made on the lane itself can never disagree.
+export const NEEDS_USER_REASONS = Object.freeze([
+  'job_broken', 'render_retry', 'app_fix_required', 'canvas_unavailable', 'read_failed', 'write_failed', 'submit_stuck', 'host_silent', 'review_stop',
 ]);
 
 export function makeChatKey(random = randomBytes) {
@@ -206,9 +212,7 @@ export function holdLane(lane, reason = 'user_hold', now = 0) {
   // again after the hold.
   lane.lastServedDigest = null;
   lane.servedCodeAgain = false;
-  lane.phase = ['job_broken', 'render_retry', 'app_fix_required', 'canvas_unavailable', 'read_failed', 'write_failed', 'submit_stuck', 'host_silent'].includes(reason)
-    ? 'needs_user'
-    : 'held';
+  lane.phase = NEEDS_USER_REASONS.includes(reason) ? 'needs_user' : 'held';
   lane.reason = reason;
   lane.snapshot = null;
   lane.changedAt = now;

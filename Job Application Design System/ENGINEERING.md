@@ -56,7 +56,7 @@ Everything in the folder, current as of this audit pass.
 | Path | What it is |
 |------|------------|
 | `STYLE.md` | Every design decision, fully documented. **Read first.** |
-| `SKILL.md` | Agent prompt — pipeline + per-company variant selection. |
+| `SKILL.md` | Agent prompt — pipeline + recipient-signal variant selection. |
 | `CONTENT_RULES.md` | Philosophy, content rules, caveats (the *why*). |
 | `styles.css` | Public entry point for consumers — re-exports the token closure via one `@import`. The two shipped documents link `colors_and_type.css` + their own component sheet directly, so this file is a convenience for consumers, not a build step. |
 | `colors_and_type.css` | Design tokens — colour, typography, spacing, page geometry, all variants. |

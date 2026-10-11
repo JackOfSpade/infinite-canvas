@@ -1,10 +1,15 @@
 import {
   discoverLocalApplicationJobs,
   getLocalApplicationHandoff,
+  localApplicationCanvasPresence,
   localApplicationStatus,
   submitLocalApplicationHandoff,
   subscribeLocalApplicationDiscards,
 } from '../../localAiApplication.js';
+
+// Re-exported for tests: the classification itself is app-owned, because only
+// the app knows where a canvas keeps its private job state.
+export const probeApplicationCanvasPresence = localApplicationCanvasPresence;
 
 // The only bridge-side view of the app's bundle-removal chokepoint. The
 // composition uses the per-source method below; index.js uses this one when
@@ -21,6 +26,7 @@ const CONFIRM_TEXT_MAX_CHARS = 60;
 // projection bounded too: injected adapters must not turn one handoff into an
 // unbounded number of durable bridge lanes.
 const MAX_APPLICATION_PARALLEL_TASKS = 10;
+const PARALLEL_TASK_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/;
 const INTEGRITY_MESSAGE = 'This application needs attention before it can continue.';
 const CONTROL_OR_BIDI = new RegExp(String.raw`[\u0000-\u001F\u007F-\u009F\u061C\u200B-\u200F\u202A-\u202E\u2060\u2066-\u2069\uFEFF]`, 'g');
 const FRESH_CONTEXT_KEY = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
@@ -55,9 +61,14 @@ function copyHandoff(value) {
   const code = handoff?.handoffCode ?? handoff?.code;
   if (!nonEmptyString(code) || !nonEmptyString(handoff?.stage) || !nonEmptyString(handoff?.prompt)) return null;
   if (handoff.freshContextKey !== undefined && !validFreshContextKey(handoff.freshContextKey)) return null;
-  const parallelTasks = Array.isArray(handoff.parallelTasks)
-    ? handoff.parallelTasks.slice(0, MAX_APPLICATION_PARALLEL_TASKS)
-      .map(task => typeof task?.id === 'string' ? { id: task.id } : null)
+  const rawParallelTasks = Array.isArray(handoff.parallelTasks) ? handoff.parallelTasks : null;
+  const hasParallelTaskOverflow = rawParallelTasks !== null
+    && rawParallelTasks.length > MAX_APPLICATION_PARALLEL_TASKS;
+  const hasMalformedParallelTask = rawParallelTasks !== null
+    && rawParallelTasks.some(task => typeof task?.id !== 'string' || !PARALLEL_TASK_ID_RE.test(task.id));
+  const parallelTasks = rawParallelTasks !== null
+    ? rawParallelTasks.slice(0, MAX_APPLICATION_PARALLEL_TASKS)
+      .map(task => typeof task?.id === 'string' && PARALLEL_TASK_ID_RE.test(task.id) ? { id: task.id } : null)
       .filter(Boolean)
     : null;
   const parallelTaskForecast = copyParallelTaskForecast(handoff.parallelTaskForecast, parallelTasks?.length || 0);
@@ -92,6 +103,20 @@ function copyHandoff(value) {
       value: handoff.freshContextKey, enumerable: false, configurable: false, writable: false,
     });
   }
+  // Preserve only the fact of an oversized declaration for the engine. The
+  // extra opaque task ids never leave this adapter, but the engine must reject
+  // a truncated authority wave rather than mistake its first ten entries for
+  // a complete, destructive reconciliation declaration.
+  if (hasParallelTaskOverflow) {
+    Object.defineProperty(copied, 'parallelTasksOverflow', {
+      value: true, enumerable: false, configurable: false, writable: false,
+    });
+  }
+  if (hasMalformedParallelTask) {
+    Object.defineProperty(copied, 'parallelTasksMalformed', {
+      value: true, enumerable: false, configurable: false, writable: false,
+    });
+  }
   return copied;
 }
 
@@ -111,6 +136,7 @@ export function createApplicationSource({
   clearTimeoutImpl = globalThis.clearTimeout,
   codeGuard = null,
   subscribeDiscards = api.subscribeLocalApplicationDiscards || subscribeLocalApplicationDiscards,
+  probeCanvasPresence = api.localApplicationCanvasPresence || localApplicationCanvasPresence,
 } = {}) {
   let guard = null;
   function setCodeGuard(value) {
@@ -129,6 +155,7 @@ export function createApplicationSource({
     status: new Map(),
     submit: new Map(),
     discover: new Map(),
+    presence: new Map(),
   };
 
   function callOnce(kind, key, fn) {
@@ -184,7 +211,14 @@ export function createApplicationSource({
       const outcome = await bounded('read', key, () => getHandoff({ jobId: lane?.jobId, canvasFilePath: lane?.canvasFilePath, matchTaskId: lane?.matchTaskId }));
       if (outcome.timeout) return { kind: 'busy' };
       if (outcome.error) return { kind: 'threw', ...classifyApplicationThrow(outcome.error) };
-      if (outcome.result?.completed === true) return { kind: 'host' };
+      // A completed authority-match claim is not a completed application.
+      // Keep that distinction private to the bridge: the engine turns this
+      // into one unkeyed discovery seed and asks the authority for the next
+      // live wave. Ordinary application completion remains the established
+      // host state.
+      if (outcome.result?.completed === true) {
+        return lane?.matchTaskId ? { kind: 'virtual_done' } : { kind: 'host' };
+      }
       const handoff = copyHandoff(outcome.result?.handoff);
       return handoff ? {
         kind: 'open', handoff,
@@ -200,6 +234,13 @@ export function createApplicationSource({
       if (outcome.timeout) return { kind: 'busy' };
       if (outcome.error) return { kind: 'threw', ...classifyApplicationThrow(outcome.error) };
       return mapApplicationStatus(outcome.result);
+    },
+
+    // Only consulted after a status read for this lane failed with ENOENT. A
+    // timeout or a fault is 'unavailable' (the conservative answer).
+    async canvasPresence(lane) {
+      const outcome = await bounded('presence', operationKey(lane), () => probeCanvasPresence({ jobId: lane?.jobId, canvasFilePath: lane?.canvasFilePath }));
+      return ['present', 'orphaned', 'unavailable'].includes(outcome.result) ? outcome.result : 'unavailable';
     },
 
     async submit(lane, { code, text } = {}) {
@@ -295,12 +336,23 @@ export function classifyApplicationThrow(error) {
   });
 }
 
+// The app's typed human stop (the independent blind review keeps finding what no
+// pasted response can answer, or keeps finding something). Only the status the
+// app builds for that stop carries this marker, so a job that failed an integrity
+// check after the stop is still a broken job. The bridge's status is a closed
+// vocabulary: the stop's own sentence stays on the job card, and the bridge says
+// only that review stopped it.
+const BLIND_REVIEW_HUMAN_STOP_TERMINAL = 'blind-review-human-stop';
+
 export function mapApplicationStatus(status) {
   const value = status && typeof status === 'object' ? status : null;
   if (value?.status === 'saved') return { kind: 'done', phase: 'done' };
-  if (value?.status === 'failed') return value.folder === null
-    ? { kind: 'gone', phase: 'gone' }
-    : { kind: 'needs_user', phase: 'needs_user', reason: 'job_broken' };
+  if (value?.status === 'failed') {
+    if (value.folder === null) return { kind: 'gone', phase: 'gone' };
+    return value.terminalKind === BLIND_REVIEW_HUMAN_STOP_TERMINAL
+      ? { kind: 'needs_user', phase: 'needs_user', reason: 'review_stop' }
+      : { kind: 'needs_user', phase: 'needs_user', reason: 'job_broken' };
+  }
   if (value?.status === 'queued') return value.stage === 'completed'
     ? { kind: 'host', phase: 'host' }
     : { kind: 'awaiting', phase: 'awaiting', read: true };

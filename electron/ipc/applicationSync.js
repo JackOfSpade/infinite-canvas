@@ -455,8 +455,11 @@ function sha256(data) {
 // never be rewritten by a later user Sync; savedArtifacts, in contrast,
 // explicitly binds the exact files currently beside the receipt. Updating one
 // editable panel therefore changes Application.html plus its derived PDF and
-// must refresh only those two saved-artifact fingerprints.
-function withSyncedGenerationAuditSavedArtifacts(data, { applicationHtml, pdf, documentKind }) {
+// must refresh only those two saved-artifact fingerprints. The open-time PDF
+// reconcile can adopt either or both sibling PDFs in one Application.html
+// rewrite, so it passes `pdfs` ({ resume?, cover? } -> bytes) instead of one
+// `pdf`/`documentKind` pair. Only the PDFs named there are re-bound.
+function withSyncedGenerationAuditSavedArtifacts(data, { applicationHtml, pdf, documentKind, pdfs } = {}) {
   let audit;
   try {
     audit = JSON.parse(String(data || ''));
@@ -481,17 +484,39 @@ function withSyncedGenerationAuditSavedArtifacts(data, { applicationHtml, pdf, d
     || !validHashMap(audit.savedArtifacts, GENERATION_AUDIT_SAVED_REQUIRED_HASH_KEYS, GENERATION_AUDIT_OPTIONAL_PDF_HASH_KEYS)) {
     throw new Error('Generation Audit.json cannot be updated because it is not a supported durable application audit.');
   }
-  const pdfKey = documentKind === 'cover' ? 'coverLetterPdfSha256'
-    : documentKind === 'resume' ? 'resumePdfSha256' : '';
-  if (!pdfKey) throw new Error('Application Sync received an invalid audit document kind.');
+  const bindings = pdfs && typeof pdfs === 'object' ? pdfs : { [documentKind]: pdf };
+  const pdfHashes = {};
+  for (const [kind, bytes] of Object.entries(bindings)) {
+    const key = kind === 'cover' ? 'coverLetterPdfSha256' : kind === 'resume' ? 'resumePdfSha256' : '';
+    if (!key) throw new Error('Application Sync received an invalid audit document kind.');
+    pdfHashes[key] = sha256(Buffer.from(bytes));
+  }
   return `${JSON.stringify({
     ...audit,
     savedArtifacts: {
       ...audit.savedArtifacts,
       applicationHtmlSha256: sha256(Buffer.from(applicationHtml, 'utf8')),
-      [pdfKey]: sha256(Buffer.from(pdf)),
+      ...pdfHashes,
     },
   }, null, 2)}\n`;
+}
+
+// Gate for the open-time reconcile's receipt refresh: true only when the
+// receipt currently binds the exact Application.html on disk. Re-binding blesses
+// whatever HTML is stored, so a receipt that already disagrees with the HTML
+// (a hand edit outside the panels, or a pre-refresh Sync) must stay stale: the
+// honest hash-mismatch is the only thing telling the user that HTML was never
+// reviewed against the receipt. Refreshing it here would launder that edit into
+// "verified" just because an unrelated PDF import happened to rewrite the file.
+function generationAuditBindsApplicationHtml(auditText, applicationHtml) {
+  let audit;
+  try {
+    audit = JSON.parse(String(auditText || ''));
+  } catch {
+    return false;
+  }
+  const bound = audit?.savedArtifacts?.applicationHtmlSha256;
+  return typeof bound === 'string' && bound === sha256(Buffer.from(String(applicationHtml), 'utf8'));
 }
 
 function applicationPanelSha256(html, documentKind) {
@@ -864,6 +889,10 @@ async function reconcileWorkspacePdfs(payload) {
     const variantMismatches = [];
     const checkedPdfs = new Map();
     const pdfDualModes = new Map();
+    // Documents whose HTML/PDF pair was actually certified by this reconcile
+    // (a variant-mismatched or conflicting document is deliberately absent).
+    // Only these PDFs may be re-bound into Generation Audit.json below.
+    const adoptedPdfs = {};
     let metadataChanged = false;
 
     for (const documentKind of ['resume', 'cover']) {
@@ -958,14 +987,60 @@ async function reconcileWorkspacePdfs(payload) {
         reconciledHtml = withApplicationDocumentRevision(reconciledHtml, documentKind, pdfBytes, token);
         syncData = applicationSyncDataFromHtml(reconciledHtml);
         metadataChanged = true;
+        adoptedPdfs[documentKind] = pdfBytes;
       }
     }
 
     if (reconciledHtml !== storedHtml) {
       await captureOrVerifyWorkspaceIdentity(workspace);
       await assertWorkspaceHtmlUnchanged(workspace, storedHtml);
+      // Application.html is half of the durable bundle that Generation Audit.json
+      // fingerprints (savedArtifacts), so a rewrite here must refresh the
+      // receipt in the same transaction exactly as Sync does; otherwise the
+      // bundle reads as hash-mismatch the next time it is verified. Audits
+      // postdate Sync, so a legacy bundle legitimately has none and no receipt
+      // is invented. A receipt that is present but unreadable fails closed.
+      let storedAudit = null;
+      try {
+        storedAudit = await readRegisteredWorkspaceGenerationAudit(workspace);
+      } catch (error) {
+        if (error?.code !== 'ENOENT') {
+          throw Object.assign(new Error(`The saved Generation Audit.json could not be read: ${error?.message || error}`), { statusCode: 409 });
+        }
+      }
+      let refreshedAudit = null;
+      if (storedAudit != null) {
+        let candidateAudit = null;
+        try {
+          candidateAudit = withSyncedGenerationAuditSavedArtifacts(storedAudit, {
+            applicationHtml: reconciledHtml,
+            pdfs: adoptedPdfs,
+          });
+        } catch (error) {
+          // Only the helper's receipt-validation refusals are skipped; anything
+          // else is a programming error and must surface, not hide as a log line.
+          if (!String(error?.message || '').startsWith('Generation Audit.json cannot be updated because')) throw error;
+          // An automatic open-time import must not become a hard failure over a
+          // hand-edited or unsupported receipt. Leave it byte-identical (the
+          // bundle is honestly unverified anyway), still import the PDF text,
+          // and say so instead of swallowing the skipped refresh.
+          logger.warn(`[ApplicationSync] Generation Audit.json left unchanged during PDF reconciliation: ${error?.message || error}`);
+        }
+        if (candidateAudit != null) {
+          if (generationAuditBindsApplicationHtml(storedAudit, storedHtml)) {
+            refreshedAudit = candidateAudit;
+          } else {
+            logger.warn('[ApplicationSync] Generation Audit.json left unchanged during PDF reconciliation: it does not match the stored Application.html, so the existing hash mismatch is preserved.');
+          }
+        }
+      }
       await replaceApplicationBundleAtomically([
         { destination: workspace.applicationPath, data: reconciledHtml, expectedCurrentData: storedHtml },
+        ...(refreshedAudit == null ? [] : [{
+          destination: workspace.generationAuditPath,
+          data: refreshedAudit,
+          expectedCurrentData: storedAudit,
+        }]),
       ], {
         verify: async () => {
           const saved = await readRegisteredWorkspaceHtml(workspace);
@@ -975,6 +1050,10 @@ async function reconcileWorkspacePdfs(payload) {
             if (!currentPdf.equals(expectedPdf)) {
               throw new Error(`The ${documentKind} PDF changed while its text was being imported.`);
             }
+          }
+          if (refreshedAudit != null
+            && (await readRegisteredWorkspaceGenerationAudit(workspace)) !== refreshedAudit) {
+            throw new Error('Generation Audit.json failed readback verification.');
           }
           return true;
         },

@@ -7,11 +7,11 @@ platform. GraphQL experience is a preferred qualification.
 `;
 const candidateText = `
 Built React and Django applications, maintained REST APIs, and migrated a
-district operations portal. Evaluated AI-assisted engineering workflows.
+regional dispatch portal. Evaluated code-generation tooling for engineering workflows.
 `;
 const roles = [
-  { id: 'district', start: 'May 2023', end: 'June 2026' },
-  { id: 'health', start: 'October 2022', end: 'January 2023' },
+  { id: 'primary', start: 'March 2021', end: 'April 2024' },
+  { id: 'earlier', start: 'August 2020', end: 'November 2020' },
 ];
 
 function requirement({ requirement, priority, status, jobEvidence, candidateEvidence }) {
@@ -85,18 +85,18 @@ export default [
         'Build observability and evaluation systems with security controls and auditability.',
       ].join(' ');
       const assessedCandidate = [
-        'Regular AI-assisted/agentic coding.',
-        'Built a web app used as a hub for all our internal tools.',
-        'Maintained REST APIs for controlled access.',
+        'Regular pairing with code-generation tools.',
+        'Built a portal that gives several departments one entry point to shared utilities.',
+        'Maintained REST APIs with token-scoped access.',
       ].join(' ');
       const result = validateAndNormalizeFitAssessment({
         score: 70,
         confidence: 'high',
         reasoning: 'Provider prose must never be used in the public explanation.',
         requirementAssessments: [
-          requirement({ requirement: 'Agentic engineering workflow', priority: 'required', status: 'adjacent', jobEvidence: 'use AI coding agents', candidateEvidence: 'AI-assisted/agentic coding' }),
-          requirement({ requirement: 'Shared internal platform', priority: 'important', status: 'adjacent', jobEvidence: 'shared internal platform', candidateEvidence: 'web app used as a hub for all our internal tools' }),
-          requirement({ requirement: 'APIs and integrations', priority: 'important', status: 'adjacent', jobEvidence: 'internal APIs and reusable services', candidateEvidence: 'REST APIs for controlled access' }),
+          requirement({ requirement: 'Agentic engineering workflow', priority: 'required', status: 'adjacent', jobEvidence: 'use AI coding agents', candidateEvidence: 'pairing with code-generation tools' }),
+          requirement({ requirement: 'Shared internal platform', priority: 'important', status: 'adjacent', jobEvidence: 'shared internal platform', candidateEvidence: 'portal that gives several departments one entry point to shared utilities' }),
+          requirement({ requirement: 'APIs and integrations', priority: 'important', status: 'adjacent', jobEvidence: 'internal APIs and reusable services', candidateEvidence: 'REST APIs with token-scoped access' }),
         ],
         materialGaps: [
           requirement({ requirement: 'AI platform architecture and gateways', priority: 'important', status: 'not_documented', jobEvidence: 'clear APIs\nservice boundaries and data models', candidateEvidence: '' }),
@@ -271,12 +271,12 @@ export default [
   {
     name: 'Job fit assessment: dated tenure preserves month/year uncertainty and separates selected experience',
     run: () => {
-      const exact = calculateDatedTenure([{ start: 'May 2023', end: 'June 2026' }]);
+      const exact = calculateDatedTenure([{ start: 'March 2021', end: 'April 2024' }]);
       assert(!exact.exact && exact.minMonths === 36 && exact.maxMonths === 38 && exact.minYears === 3,
         'month-precise tenure should preserve omitted day-of-month uncertainty');
       const uncertain = calculateDatedTenure([{ start: '2023', end: '2025' }]);
       assert(!uncertain.exact && uncertain.minMonths === 12 && uncertain.maxMonths === 36, 'year-only dates must retain a possible tenure range');
-      const dateRange = calculateDatedTenure([{ dates: '2023-05-01 – 2026-06-30' }]);
+      const dateRange = calculateDatedTenure([{ dates: '2021-03-01 – 2024-04-30' }]);
       assert(dateRange.roleCount === 1 && dateRange.minMonths === 36 && dateRange.maxMonths === 38,
         'a parsable date-range field must contribute bounded tenure without assuming its days');
       const result = validateAndNormalizeFitAssessment({
@@ -285,7 +285,7 @@ export default [
           totalProfessionalExperience: { years: '3+ years', candidateEvidence: 'Built React and Django applications', explanation: 'Dated roles supplied.' },
           categorySpecificExperience: [
             {
-              category: 'Software development', requiredMinimumYears: 3.5, roleIds: ['district'], years: '3.1 years',
+              category: 'Software development', requiredMinimumYears: 3.5, roleIds: ['primary'], years: '3.1 years',
               candidateEvidence: 'Built React and Django applications', jobEvidence: 'four years of software development', explanation: 'Selected implementation role only.',
             },
             {
@@ -323,7 +323,7 @@ export default [
         experienceAssessment: {
           totalProfessionalExperience: { years: '3+ years', candidateEvidence: 'Built React and Django applications', explanation: '' },
           categorySpecificExperience: [{
-            category: 'Software development', requiredMinimumYears: 4, roleIds: ['district'], years: '4 years',
+            category: 'Software development', requiredMinimumYears: 4, roleIds: ['primary'], years: '4 years',
             candidateEvidence: 'Built React and Django applications', jobEvidence: 'four years of software development', explanation: '',
           }],
         },

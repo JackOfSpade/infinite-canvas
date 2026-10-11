@@ -137,7 +137,7 @@ function orderedTextBlocksFromItems(items, { page = 1 } = {}) {
       // 0.75pt above the label that introduces it. Composed in the outer
       // order, the right-hand column landed BEFORE the left-hand one and the
       // Skills label was emitted after its own wrapped value
-      // (`... Docker Compose · MCP ·technologies`), which no token alignment
+      // (`... Last Item · Next Item ·label`), which no token alignment
       // against the DOM can resolve. `needsSpace` also only means anything
       // between x-adjacent items.
       const items = [...line.items].sort((left, right) => left.x - right.x);

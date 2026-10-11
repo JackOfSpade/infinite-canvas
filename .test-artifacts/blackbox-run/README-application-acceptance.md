@@ -48,7 +48,10 @@ node --import ./scripts/test-stubs/register.mjs \
 ```
 
 Inspect after the app reaches a terminal receipt, then quit Infinite Canvas
-completely and restore. The no-secret harness owns only its new job/anchor,
+completely and restore. `inspect` is passive by default (it reads the job's
+manifest, receipt and Generation Log counts and does not run the repo-source
+validators over a job the live app may be writing); `inspect --validate` opts
+in to the production status reader, see the passive-inspection note below. The no-secret harness owns only its new job/anchor,
 fixture and pre-reserved bundle candidates. The stopped harness deliberately
 does **not** rewrite `lanes.json`: only the live bridge runtime owns that
 store's serialization, and Node cannot make a pathname-based conditional
@@ -88,7 +91,10 @@ node --import ./scripts/test-stubs/register.mjs \
   .test-artifacts/blackbox-run/one-card-live-acceptance.mjs self-test
 ```
 
-Run its isolated proof first:
+Run its isolated proof first (it includes the passive-inspect contract: the
+default never reaches the production status reader, a byte-compare of the job
+folder across the read, no pasted response text in the report, and `--validate`
+as the only way in):
 
 ```bash
 node --import ./scripts/test-stubs/register.mjs \
@@ -233,6 +239,41 @@ node --import ./scripts/test-stubs/register.mjs \
   .test-artifacts/blackbox-run/application-acceptance-harness.mjs \
   inspect --run-id acceptance-YYYYMMDD --job-id <uuid>
 ```
+
+`inspect` is **passive by default**. For a job folder that exists it reads
+`manifest.json`, the job's terminal receipt (if any) and the Generation Log,
+and reports the manifest status and stage, the recorded integrity-fault
+sentence (if any), the validator stamp the writing build recorded, and the log
+reduced to an entry count plus the last entry's type/stage/sequence/revision.
+It never prints a pasted response, and it never calls the repo-source
+production validators. It also writes nothing: a self-test byte-compares the
+job folder across the read.
+
+The reason is concrete. `localApplicationStatus` is the production *status
+poll*, and a poll that fails validation ends the job on disk (manifest status
+`failed` plus a Generation Log event). The harness imports that code from the
+repository **source tree**, not from the packaged app. A live app may be writing
+the job while the tree differs from the build that wrote it (a one-character
+difference in a signed policy constant is enough), and then an intact job fails
+validation and is ended by an inspection. The app's own stamp check protects
+jobs written by a build that records one; a job written before that existed has
+no stamp, so only this passive default protects it.
+
+Pass `--validate` to opt in to the production status reader:
+
+```bash
+node --import ./scripts/test-stubs/register.mjs \
+  .test-artifacts/blackbox-run/application-acceptance-harness.mjs \
+  inspect --run-id acceptance-YYYYMMDD --job-id <uuid> --validate
+```
+
+Use it only when no app is writing the job **and** this source tree is the
+build that wrote it. The report says `inspection.mode: "validated"` so a
+validated answer is never mistaken for a passive one. When the private job
+folder no longer exists there is nothing to validate, so the production reader
+answers from the terminal receipt without any flag. `--validate` is accepted
+only by `inspect`; the one-card `restore` runs the passive inspection before
+its cleanup.
 
 Run this inspection after the controlled app reaches its terminal receipt and
 before each cleanup. It records the receipt-declared job/bundle candidate as the

@@ -114,6 +114,20 @@ async function runAuthorityWorkflowTest() {
   assert(scopes.every(scope => !scope.allowedContext.includes('peer-findings') && !scope.allowedContext.includes('author-review')), 'blind scopes exclude peer and author-review context');
   const reviewReceipts = scopes.map(scope => createBlindReviewerReceipt({ scope, response: { version: APPLICATION_AUTHORITY_WORKFLOW_VERSION, scopeDigest: scope.digest, pageIndex: 0, complete: true, decision: 'pass', findings: [] } }));
   assert(validateBlindReviewCoverage(scopes, reviewReceipts).clean, 'exact clean reviewer coverage validates');
+  const sourceScope = scopes.find(scope => scope.track === 'fact-fidelity');
+  const artifactScope = scopes.find(scope => scope.track === 'resume-hiring-quality');
+  const sourceOnlyFinding = { id: 'source-only', ruleId: 'missing-source-only', document: 'source', targetId: sourceScope.scopeId,
+    issue: 'The source contains no outcome metric for this cited claim.', fix: '', actionability: 'evidence-limited' };
+  const sourceOnlyReceipt = createBlindReviewerReceipt({ scope: sourceScope, response: { version: APPLICATION_AUTHORITY_WORKFLOW_VERSION,
+    scopeDigest: sourceScope.digest, pageIndex: 0, complete: true, decision: 'issues', findings: [sourceOnlyFinding] } });
+  const artifactSpoofReceipt = createBlindReviewerReceipt({ scope: artifactScope, response: { version: APPLICATION_AUTHORITY_WORKFLOW_VERSION,
+    scopeDigest: artifactScope.digest, pageIndex: 0, complete: true, decision: 'issues', findings: [{ ...sourceOnlyFinding, id: 'artifact-spoof', targetId: artifactScope.scopeId }] } });
+  const unboundSourceReceipt = createBlindReviewerReceipt({ scope: sourceScope, response: { version: APPLICATION_AUTHORITY_WORKFLOW_VERSION,
+    scopeDigest: sourceScope.digest, pageIndex: 0, complete: true, decision: 'issues', findings: [{ ...sourceOnlyFinding, id: 'unbound-source', targetId: 'not-a-host-source-target' }] } });
+  assert(!validateBlindReviewCoverage([sourceScope], [sourceOnlyReceipt]).clean
+    && !validateBlindReviewCoverage([artifactScope], [artifactSpoofReceipt]).clean
+    && !validateBlindReviewCoverage([sourceScope], [unboundSourceReceipt]).clean,
+  'every returned finding blocks coverage, including historical source-labelled metadata');
   assert.equal(invalidateBlindReviewerReceipts(scopes.slice(1), reviewReceipts).length, reviewReceipts.length - 1, 'restart/revision retains only exact unchanged scope digests');
   assert.throws(() => validateBlindReviewCoverage(scopes, reviewReceipts.slice(1)), /incomplete/i, 'reviewer restart with missing receipt fails closed');
   const firstFindings = Array.from({ length: 32 }, (_unused, index) => ({ id: `f-${index + 1}`, ruleId: 'fact', document: 'resume', targetId: `bullet-${index + 1}`, issue: 'Unsupported claim', fix: 'Remove unsupported wording.' }));

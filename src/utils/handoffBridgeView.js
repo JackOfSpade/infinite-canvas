@@ -127,14 +127,20 @@ export function deriveBridgeHealth(status, now = 0) {
   if (['starting', 'connecting', 'checking-public'].includes(tunnel.state) || value.serving === 'starting') {
     matches.push(entry('starting', 'working', BRIDGE_COPY.health.starting));
   }
-  const probeFailed = tunnel.probe?.state === 'failing'
+  // `reason` is diagnostic context for a failed probe, not independent
+  // liveness authority. It can outlive the aggregate state in an in-flight or
+  // older snapshot. Do not tell someone ChatGPT cannot reach the Mac unless
+  // the snapshot also records at least one current failed check.
+  const failedChecks = count(tunnel.probe?.consecutiveFailures);
+  const probeFailed = failedChecks > 0 && (
+    tunnel.probe?.state === 'failing'
     || (typeof tunnel.probe?.state === 'string' && !['unknown', 'off', 'checking', 'ok'].includes(tunnel.probe.state))
-    || (tunnel.probe?.reason && !['unknown', 'off', 'checking', 'ok'].includes(tunnel.probe.reason));
+  );
   if (probeFailed) {
     matches.push(entry(
       'tunnel-unreachable',
       'error',
-      BRIDGE_DYNAMIC_COPY.tunnelFailures(count(tunnel.probe.consecutiveFailures)),
+      BRIDGE_DYNAMIC_COPY.tunnelFailures(failedChecks),
       ['restart-tunnel'],
     ));
   }
@@ -227,6 +233,17 @@ export function describeJobRow(job = {}) {
   // needs-user reasons require the recovery their own status describes.
   if (job.phase === 'needs_user' && job.reason === 'read_failed') {
     return { text: JOB_ROW_COPY.read_failed, action: 'retry-reading' };
+  }
+  // A lane whose canvas cannot be opened has nothing the dock can recover
+  // while the canvas is away, and may never come back (a deleted canvas).
+  // The person can always take it off the bridge explicitly; the job's own
+  // files are untouched, so a canvas that returns can simply be released
+  // again. The bridge never removes such a lane by itself.
+  if (job.phase === 'needs_user' && job.reason === 'canvas_missing') {
+    return { text: JOB_ROW_COPY.canvas_missing, action: null, removable: true };
+  }
+  if (job.phase === 'needs_user' && job.reason === 'canvas_unavailable') {
+    return { text: JOB_ROW_COPY.canvas_unavailable, action: 'dock', removable: true };
   }
   return { text: JOB_ROW_COPY[job.reason] || JOB_ROW_COPY.unreadable, action: 'dock' };
 }

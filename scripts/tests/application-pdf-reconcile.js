@@ -1,13 +1,16 @@
+import crypto from 'node:crypto';
 import {
   __applicationSyncStatePathForTests,
   __reconcileApplicationSyncWorkspaceForTests,
   __resetApplicationSyncWorkspacesForTests,
   __syncApplicationSyncWorkspaceForTests,
+  __withSyncedGenerationAuditSavedArtifactsForTests,
   applyDualPdf,
   applicationSyncConfig,
   assert,
   buildResumeDocument,
   embedApplicationSyncConfig,
+  formatOriginalJobListingMarkdown,
   fs,
   inspectApplicationExport,
   inspectGeneratedApplicationPdf,
@@ -22,6 +25,8 @@ import {
   reconcileApplicationHtmlFromPdf,
   reconcileApplicationHtmlFromPdfBlocks,
 } from '../../electron/ipc/applicationPdfReconcile.js';
+import { captureInterviewPreparationBundle } from '../../electron/ipc/interviewPreparation.js';
+import { logger } from '../../electron/logger.js';
 
 async function textPdf(lines) {
   return textPdfPages([lines]);
@@ -131,15 +136,15 @@ function wrappedCoverBodyLines(firstLine, continuationLine) {
   ];
 }
 
-// Mirrors the real letterhead that broke export on 2026-09-23: a candidate
-// whose contact row carries citizenship and a work-authorization sentence
-// alongside the email and phone. `.contact` is `display: flex; flex-wrap:
+// Mirrors the letterhead shape that broke export on 2026-09-23: a candidate
+// whose contact row carries a short eligibility note and a full availability
+// sentence alongside the email and phone. `.contact` is `display: flex; flex-wrap:
 // wrap`, so that row occupies two visual PDF lines while remaining one leaf.
 const WRAPPED_CONTACT_ITEMS = [
   'Email: maya@example.test',
   'Phone: (555) 010-0100',
-  'Canadian citizenship',
-  'Willing to work anywhere. Can obtain TN-Visa without sponsorship.',
+  'Eligible to work in the US',
+  'Open to relocation. Remote or hybrid roles preferred.',
 ];
 
 function wrappedContactCoverWorkspace(paragraphs, { signatureTitle = '' } = {}) {
@@ -148,10 +153,10 @@ function wrappedContactCoverWorkspace(paragraphs, { signatureTitle = '' } = {}) 
   const title = signatureTitle ? `<p class="signature-title">${signatureTitle}</p>` : '';
   return `<!doctype html><html><head><meta data-shell="preserve"></head><body><section data-ic-document-panel="cover"><main class="page">`
     + `<header class="resume-header letter-letterhead"><h1 class="name">Maya Chen</h1>`
-    + `<p class="tagline"><span class="subtitle-role">Engineer</span><span class="sep" aria-hidden="true">·</span><span class="credential">B.S. Computer Science, York University</span></p>`
+    + `<p class="tagline"><span class="subtitle-role">Engineer</span><span class="sep" aria-hidden="true">·</span><span class="credential">B.S. Computer Science, Halden University</span></p>`
     + `<p class="contact" role="group" aria-label="Contact">${contact}</p></header>`
     + `<div class="letter-meta"><p class="letter-date"><time datetime="2026-09">September 2026</time></p></div>`
-    + `<div class="letter-body"><p class="salutation">Dear Stripe Hiring Team,</p>${body}</div>`
+    + `<div class="letter-body"><p class="salutation">Dear Brindlewood Logistics Hiring Team,</p>${body}</div>`
     + `<div class="letter-close"><p class="valediction">Sincerely,</p><p class="signature">Maya Chen</p>${title}</div>`
     + `</main></section><script data-shell="preserve">trusted()</script></body></html>`;
 }
@@ -163,11 +168,11 @@ function wrappedContactCoverWorkspace(paragraphs, { signatureTitle = '' } = {}) 
 function wrappedContactCoverLines(paragraphs, { signatureTitleLines = [] } = {}) {
   const lines = [
     { page: 1, x: 45.4, y: 778.2, height: 28, text: 'Maya Chen' },
-    { page: 1, x: 45.4, y: 757.9, height: 11, text: 'Engineer · B.S. Computer Science, York University' },
-    { page: 1, x: 45.4, y: 732.4, height: 9, text: 'Email: maya@example.test · Phone: (555) 010-0100 · Canadian citizenship ·' },
-    { page: 1, x: 45.4, y: 716.7, height: 9, text: 'Willing to work anywhere. Can obtain TN-Visa without sponsorship.' },
+    { page: 1, x: 45.4, y: 757.9, height: 11, text: 'Engineer · B.S. Computer Science, Halden University' },
+    { page: 1, x: 45.4, y: 732.4, height: 9, text: 'Email: maya@example.test · Phone: (555) 010-0100 · Eligible to work in the US ·' },
+    { page: 1, x: 45.4, y: 716.7, height: 9, text: 'Open to relocation. Remote or hybrid roles preferred.' },
     { page: 1, x: 484.2, y: 678.4, height: 9, text: 'September 2026' },
-    { page: 1, x: 45.4, y: 652.2, height: 10, text: 'Dear Stripe Hiring Team,' },
+    { page: 1, x: 45.4, y: 652.2, height: 10, text: 'Dear Brindlewood Logistics Hiring Team,' },
   ];
   let y = 623.7;
   for (const paragraph of paragraphs) {
@@ -188,13 +193,119 @@ function wrappedContactCoverLines(paragraphs, { signatureTitleLines = [] } = {})
 }
 
 const WRAPPED_CONTACT_PARAGRAPHS = [
-  ['At Stripe, Connect pairs end-to-end product experiences with integration work', 'that reduces complexity for platforms.'],
-  ['Data migration workflows provide another example of the same integration', 'practice across third-party platforms.'],
-  ['Earlier, my data work handled ingestion and controlled access through REST', 'APIs over a local database.'],
+  ['At Brindlewood Logistics, Dockline pairs end-to-end booking experiences with integration work', 'that reduces complexity for carriers.'],
+  ['Depot scheduling provides another example of the same coordination', 'practice across partner depots.'],
+  ['Earlier, my reporting work handled intake and controlled sharing through scheduled', 'exports from a local ledger.'],
 ];
 
 function wrappedContactParagraphText(paragraph) {
   return paragraph.join(' ');
+}
+
+// ---- Generation Audit re-binding during the open-time reconcile ----------------
+// The saved page POSTs action:'reconcile' on every open. When that rewrites
+// Application.html (a PDF edited outside Sync, or a shared paper-variant import)
+// the durable receipt that fingerprints the bundle must follow in the same
+// transaction, exactly as Sync does; otherwise the Interview Helper reads the
+// bundle as hash-mismatch and drops the audit identity.
+const auditDigest = value => crypto.createHash('sha256')
+  .update(typeof value === 'string' ? Buffer.from(value, 'utf8') : Buffer.from(value)).digest('hex');
+
+const AUDIT_RESUME_LINES = text => [{ text, y: 700 }];
+
+function auditCoverLines(body) {
+  return [
+    { text: 'Maya Chen', y: 700 }, { text: 'Engineer · B.S.', y: 680 },
+    { text: 'maya@example.test · 555-0100', y: 660 }, { text: 'August 2026', y: 620, x: 480 },
+    { text: 'Dear Hiring Team,', y: 590 }, { text: body, y: 550 },
+    { text: 'Sincerely,', y: 510 }, { text: 'Maya Chen', y: 490 },
+  ];
+}
+
+// Builds a complete saved bundle with a REAL Generation Audit.json receipt whose
+// savedArtifacts bind the exact files on disk, registers it with Sync, and
+// returns helpers that read the verdict from the real Interview Preparation
+// verifier. auditText: 'valid' (default), '' (legacy bundle with no receipt) or
+// raw receipt text written verbatim.
+async function auditedReconcileBundle({ dual = false, auditText = 'valid', tokenDigit = '3' } = {}) {
+  await __resetApplicationSyncWorkspacesForTests();
+  const root = await fs.promises.realpath(await fs.promises.mkdtemp('/tmp/infinite-canvas-pdf-audit-'));
+  const userDataPath = await fs.promises.mkdtemp('/tmp/infinite-canvas-pdf-audit-ud-');
+  const token = tokenDigit.repeat(64);
+  let resumePdf = await textPdf(AUDIT_RESUME_LINES('Maya Chen Resume baseline.'));
+  let coverPdf = await textPdf(auditCoverLines('Maya builds reliable systems.'));
+  if (dual) {
+    resumePdf = await applyDualPdf(resumePdf);
+    coverPdf = await applyDualPdf(coverPdf);
+  }
+  const source = combinedWorkspace('Maya builds reliable systems.').replace('<html>', '<html data-print="ink-only">');
+  const saved = embedApplicationSyncConfig(source, applicationSyncConfig(token, { html: source, resumePdf, coverPdf }));
+  const listing = formatOriginalJobListingMarkdown({
+    title: 'Systems Engineer', company: 'Acme Robotics', location: 'Remote (US)', description: 'Build robots.',
+  });
+  const audit = {
+    version: 1,
+    schema: 'infinite-canvas-generation-audit',
+    jobId: 'job-1',
+    createdAt: '2026-10-01T00:00:00.000Z',
+    job: { title: 'Systems Engineer', company: 'Acme Robotics', location: 'Remote (US)' },
+    finalArtifacts: {
+      resultSha256: 'a'.repeat(64),
+      resumeContentSha256: 'b'.repeat(64),
+      coverLetterContentSha256: 'c'.repeat(64),
+      stagedApplicationHtmlSha256: auditDigest(source),
+      resumePdfSha256: auditDigest(resumePdf),
+      coverLetterPdfSha256: auditDigest(coverPdf),
+      originalJobListingSha256: auditDigest(listing),
+    },
+    savedArtifacts: {
+      applicationHtmlSha256: auditDigest(saved),
+      resumePdfSha256: auditDigest(resumePdf),
+      coverLetterPdfSha256: auditDigest(coverPdf),
+      originalJobListingSha256: auditDigest(listing),
+    },
+  };
+  const files = {
+    'Application.html': saved,
+    'Resume.pdf': resumePdf,
+    'Cover Letter.pdf': coverPdf,
+    'Original Job Listing.md': listing,
+  };
+  if (auditText === 'valid') files['Generation Audit.json'] = `${JSON.stringify(audit, null, 2)}\n`;
+  else if (auditText) files['Generation Audit.json'] = auditText;
+  await Promise.all(Object.entries(files).map(([name, data]) => fs.promises.writeFile(path.join(root, name), data)));
+  await registerApplicationSyncWorkspace(root, token);
+  return {
+    root,
+    token,
+    audit,
+    resumePdf,
+    coverPdf,
+    read: name => fs.promises.readFile(path.join(root, name), 'utf8'),
+    write: (name, data) => fs.promises.writeFile(path.join(root, name), data),
+    readAudit: async () => JSON.parse(await fs.promises.readFile(path.join(root, 'Generation Audit.json'), 'utf8')),
+    status: async () => (await captureInterviewPreparationBundle({ directory: root, userDataPath })).verification.status,
+    reconcile: () => __reconcileApplicationSyncWorkspaceForTests({ token, action: 'reconcile' }),
+    cleanup: async () => {
+      await __resetApplicationSyncWorkspacesForTests();
+      await fs.promises.unlink(__applicationSyncStatePathForTests()).catch(() => {});
+      await fs.promises.rm(root, { recursive: true, force: true });
+      await fs.promises.rm(userDataPath, { recursive: true, force: true });
+    },
+  };
+}
+
+// Runs fn while recording the logger.warn lines it emits (and keeping the test
+// output quiet). The reconcile logs, rather than swallows, a skipped refresh.
+async function withCapturedWarnings(fn) {
+  const original = logger.warn;
+  const warnings = [];
+  logger.warn = (...args) => { warnings.push(args.join(' ')); };
+  try {
+    return { result: await fn(), warnings };
+  } finally {
+    logger.warn = original;
+  }
 }
 
 export default [
@@ -222,7 +333,7 @@ export default [
     run: () => {
       const source = wrappedContactCoverWorkspace(WRAPPED_CONTACT_PARAGRAPHS.map(wrappedContactParagraphText));
       const edited = WRAPPED_CONTACT_PARAGRAPHS.map((paragraph, index) => (index === 1
-        ? [paragraph[0], 'practice across audited third-party platforms.']
+        ? [paragraph[0], 'practice across audited partner depots.']
         : paragraph));
       const result = reconcileApplicationHtmlFromPdfBlocks({
         html: source,
@@ -230,11 +341,11 @@ export default [
         blocks: wrappedContactCoverLines(edited),
       });
       assert(result.success && result.status === 'updated'
-        && result.html.includes('practice across audited third-party platforms.'),
+        && result.html.includes('practice across audited partner depots.'),
       `a body edit must still import when the letterhead wraps, got ${JSON.stringify(result)}`);
-      assert(result.html.includes('Willing to work anywhere. Can obtain TN-Visa without sponsorship.')
+      assert(result.html.includes('Open to relocation. Remote or hybrid roles preferred.')
         && result.html.includes('<time datetime="2026-09">September 2026</time>')
-        && result.html.includes('Dear Stripe Hiring Team,'),
+        && result.html.includes('Dear Brindlewood Logistics Hiring Team,'),
       'the wrapped contact row, the date, and the salutation must keep their own trusted text');
       return { coverUpdated: true, envelopePreserved: true };
     },
@@ -242,13 +353,13 @@ export default [
   {
     name: 'Application PDF reconcile: a wrapped closing signature title maps from the end of the letter',
     run: () => {
-      const signatureTitle = 'Software Engineer · Toronto, Ontario · Available on four weeks notice';
+      const signatureTitle = 'Software Engineer · Lakeview, Ontario · Available on four weeks notice';
       const source = wrappedContactCoverWorkspace(WRAPPED_CONTACT_PARAGRAPHS.map(wrappedContactParagraphText), { signatureTitle });
       const result = reconcileApplicationHtmlFromPdfBlocks({
         html: source,
         documentKind: 'cover',
         blocks: wrappedContactCoverLines(WRAPPED_CONTACT_PARAGRAPHS, {
-          signatureTitleLines: ['Software Engineer · Toronto, Ontario ·', 'Available on four weeks notice'],
+          signatureTitleLines: ['Software Engineer · Lakeview, Ontario ·', 'Available on four weeks notice'],
         }),
       });
       assert(result.success && result.status === 'unchanged' && result.exactTextMatch,
@@ -576,21 +687,21 @@ export default [
     name: 'Application PDF reconcile: PDF-only separators cannot offset a later wrapped compound',
     run: () => {
       const source = '<!doctype html><html><body><section data-ic-document-panel="resume"><main class="page">'
-        + '<h1>Jack Wu</h1>'
+        + '<h1>Riley Okafor</h1>'
         + '<p>Software Engineer <span class="sep" aria-hidden="true">·</span> B.S. Computer Science</p>'
         + '<p>Email <span class="sep" aria-hidden="true">·</span> Phone</p>'
-        + '<p>Software Engineer <span class="sep" aria-hidden="true">·</span> Thomson School District '
-        + '<span class="sep" aria-hidden="true">·</span> Loveland, CO</p>'
-        + '<ul><li>Migrated ticketing and repair-tracking systems and data to third-party platforms, with integrations, '
-        + 'data-migration workflows, automation, validation, and operational tooling.</li></ul>'
+        + '<p>Software Engineer <span class="sep" aria-hidden="true">·</span> Maple Ridge School District '
+        + '<span class="sep" aria-hidden="true">·</span> Brookfield, OH</p>'
+        + '<ul><li>Migrated work-order and bus-routing records to hosted products, with imports, '
+        + 'record-matching workflows, automation, validation, and reporting.</li></ul>'
         + '</main></section></body></html>';
       const blocks = [
-        { page: 1, x: 56, y: 700, text: 'Jack Wu' },
+        { page: 1, x: 56, y: 700, text: 'Riley Okafor' },
         { page: 1, x: 56, y: 680, text: 'Software Engineer · B.S. Computer Science' },
         { page: 1, x: 56, y: 660, text: 'Email · Phone' },
-        { page: 1, x: 56, y: 640, text: 'Software Engineer · Thomson School District · Loveland, CO' },
-        { page: 1, x: 56, y: 620, text: '• Migrated ticketing and repair-tracking systems and data to third-party platforms, with integrations, data-' },
-        { page: 1, x: 72, y: 605, text: 'migration workflows, automation, validation, and operational tooling.' },
+        { page: 1, x: 56, y: 640, text: 'Software Engineer · Maple Ridge School District · Brookfield, OH' },
+        { page: 1, x: 56, y: 620, text: '• Migrated work-order and bus-routing records to hosted products, with imports, record-' },
+        { page: 1, x: 72, y: 605, text: 'matching workflows, automation, validation, and reporting.' },
       ];
       const result = reconcileApplicationHtmlFromPdfBlocks({ html: source, documentKind: 'resume', blocks });
       assert(result.success && result.status === 'unchanged' && result.changed === false
@@ -603,11 +714,11 @@ export default [
     name: 'Application PDF reconcile: PDF-only separators do not hide a shifted suspended hyphen',
     run: () => {
       const source = '<!doctype html><html><body><section data-ic-document-panel="resume"><main class="page">'
-        + '<h1>Jack Wu</h1><p>Engineer <span aria-hidden="true">·</span> B.S.</p>'
+        + '<h1>Riley Okafor</h1><p>Engineer <span aria-hidden="true">·</span> B.S.</p>'
         + '<ul><li>Supported part- and full-time schedules.</li></ul>'
         + '</main></section></body></html>';
       const blocks = [
-        { page: 1, x: 56, y: 700, text: 'Jack Wu' },
+        { page: 1, x: 56, y: 700, text: 'Riley Okafor' },
         { page: 1, x: 56, y: 680, text: 'Engineer · B.S.' },
         { page: 1, x: 56, y: 640, text: '• Supported flexible part-' },
         { page: 1, x: 72, y: 625, text: 'and full-time schedules.' },
@@ -1508,6 +1619,301 @@ export default [
         await fs.promises.unlink(stateFile).catch(() => {});
         await fs.promises.rm(root, { recursive: true, force: true });
       }
+    },
+  },
+  {
+    name: 'Application PDF reconcile: an imported cover edit re-binds Generation Audit.json in the same transaction',
+    run: async () => {
+      const bundle = await auditedReconcileBundle({ tokenDigit: '1' });
+      try {
+        assert(await bundle.status() === 'verified', 'precondition: the freshly saved bundle verifies');
+        const changedCover = await textPdf(auditCoverLines('Maya ships reliable systems.'));
+        await bundle.write('Cover Letter.pdf', changedCover);
+        const { result, warnings } = await withCapturedWarnings(() => bundle.reconcile());
+        assert(result.importedDocuments.join() === 'cover', `the cover edit must import, got ${JSON.stringify(result)}`);
+        assert(warnings.length === 0, `a supported receipt must refresh silently, got ${JSON.stringify(warnings)}`);
+        const html = await bundle.read('Application.html');
+        assert(html.includes('Maya ships reliable systems.'), 'the cover text must be imported into Application.html');
+        const audit = await bundle.readAudit();
+        assert(audit.savedArtifacts.applicationHtmlSha256 === auditDigest(html),
+          'savedArtifacts.applicationHtmlSha256 must follow the rewritten Application.html');
+        assert(audit.savedArtifacts.coverLetterPdfSha256 === auditDigest(changedCover),
+          'savedArtifacts.coverLetterPdfSha256 must follow the adopted cover PDF');
+        assert(audit.savedArtifacts.resumePdfSha256 === auditDigest(bundle.resumePdf)
+          && audit.savedArtifacts.originalJobListingSha256 === bundle.audit.savedArtifacts.originalJobListingSha256,
+        'the untouched resume PDF and listing fingerprints must not move');
+        assert(JSON.stringify(audit.finalArtifacts) === JSON.stringify(bundle.audit.finalArtifacts)
+          && audit.jobId === bundle.audit.jobId && audit.createdAt === bundle.audit.createdAt,
+        'producer provenance (finalArtifacts, jobId, createdAt) must never be rewritten by a reconcile');
+        assert(await bundle.status() === 'verified', 'the reconciled bundle must still verify against its receipt');
+
+        const auditBytes = await bundle.read('Generation Audit.json');
+        const htmlBytes = await bundle.read('Application.html');
+        const again = await bundle.reconcile();
+        assert(again.importedDocuments.length === 0
+          && await bundle.read('Generation Audit.json') === auditBytes
+          && await bundle.read('Application.html') === htmlBytes,
+        'a second open must be a byte-for-byte no-op');
+        return { verified: true };
+      } finally { await bundle.cleanup(); }
+    },
+  },
+  {
+    name: 'Application PDF reconcile: importing both edited PDFs re-binds every adopted document in one audit write',
+    run: async () => {
+      const bundle = await auditedReconcileBundle({ tokenDigit: '2' });
+      try {
+        const changedResume = await textPdf(AUDIT_RESUME_LINES('Maya Chen Resume refreshed.'));
+        const changedCover = await textPdf(auditCoverLines('Maya ships reliable systems.'));
+        await bundle.write('Resume.pdf', changedResume);
+        await bundle.write('Cover Letter.pdf', changedCover);
+        const result = await bundle.reconcile();
+        assert(result.importedDocuments.join() === 'resume,cover' && result.conflicts.length === 0,
+          `both edited PDFs must import, got ${JSON.stringify(result)}`);
+        const audit = await bundle.readAudit();
+        assert(audit.savedArtifacts.applicationHtmlSha256 === auditDigest(await bundle.read('Application.html'))
+          && audit.savedArtifacts.resumePdfSha256 === auditDigest(changedResume)
+          && audit.savedArtifacts.coverLetterPdfSha256 === auditDigest(changedCover),
+        `the html, resume and cover fingerprints must all follow the import, got ${JSON.stringify(audit.savedArtifacts)}`);
+        assert(await bundle.status() === 'verified', 'a bundle with both documents adopted must verify');
+        return { verified: true };
+      } finally { await bundle.cleanup(); }
+    },
+  },
+  {
+    name: 'Application PDF reconcile: a shared paper-variant import re-binds only the HTML fingerprint',
+    run: async () => {
+      const bundle = await auditedReconcileBundle({ dual: true, tokenDigit: '4' });
+      try {
+        assert(await bundle.status() === 'verified', 'precondition: the freshly saved bundle verifies');
+        const result = await bundle.reconcile();
+        assert(result.importedDocuments.join() === 'resume,cover', `the shared variant must import, got ${JSON.stringify(result)}`);
+        const audit = await bundle.readAudit();
+        assert(audit.savedArtifacts.applicationHtmlSha256 === auditDigest(await bundle.read('Application.html')),
+          'a variant-only rewrite must refresh applicationHtmlSha256');
+        assert(audit.savedArtifacts.resumePdfSha256 === auditDigest(bundle.resumePdf)
+          && audit.savedArtifacts.coverLetterPdfSha256 === auditDigest(bundle.coverPdf),
+        'the PDFs were not rewritten, so their fingerprints must be untouched');
+        assert(await bundle.status() === 'verified', 'the variant import must keep the bundle verified');
+        return { verified: true };
+      } finally { await bundle.cleanup(); }
+    },
+  },
+  {
+    name: 'Application PDF reconcile: a variant-mismatched PDF is never re-bound into the audit',
+    run: async () => {
+      const bundle = await auditedReconcileBundle({ tokenDigit: '5' });
+      try {
+        const changedResume = await textPdf(AUDIT_RESUME_LINES('Maya Chen Resume refreshed.'));
+        const dualCover = await applyDualPdf(await textPdf(auditCoverLines('Maya ships reliable systems.')));
+        await bundle.write('Resume.pdf', changedResume);
+        await bundle.write('Cover Letter.pdf', dualCover);
+        const result = await bundle.reconcile();
+        assert(result.importedDocuments.includes('resume') && result.variantMismatches.length === 1
+          && result.variantMismatches[0].document === 'cover',
+        `the cover must be reported as a paper-variant mismatch, got ${JSON.stringify(result)}`);
+        const audit = await bundle.readAudit();
+        assert(audit.savedArtifacts.resumePdfSha256 === auditDigest(changedResume),
+          'the certified resume pair must be re-bound');
+        assert(audit.savedArtifacts.coverLetterPdfSha256 === bundle.audit.savedArtifacts.coverLetterPdfSha256
+          && audit.savedArtifacts.coverLetterPdfSha256 !== auditDigest(dualCover),
+        'a cover PDF whose paper variant disagrees with the HTML was not certified and must not be blessed');
+        assert(audit.savedArtifacts.applicationHtmlSha256 === auditDigest(await bundle.read('Application.html')),
+          'the rewritten Application.html is still re-bound');
+        assert(await bundle.status() === 'hash-mismatch',
+          'the uncertified cover PDF must keep the bundle honestly unverified');
+        return { uncertified: 'cover' };
+      } finally { await bundle.cleanup(); }
+    },
+  },
+  {
+    name: 'Application PDF reconcile: a held conflict leaves Generation Audit.json untouched',
+    run: async () => {
+      const bundle = await auditedReconcileBundle({ tokenDigit: '6' });
+      try {
+        await bundle.write('Cover Letter.pdf', await textPdf(auditCoverLines('Maya ships reliable systems.')));
+        const edited = (await bundle.read('Application.html')).replace('Maya builds reliable systems.', 'Maya builds robust systems.');
+        await bundle.write('Application.html', edited);
+        const auditBefore = await bundle.read('Generation Audit.json');
+        const result = await bundle.reconcile();
+        assert(result.conflicts.length === 1 && result.importedDocuments.length === 0,
+          `both-sides-changed must be held as a conflict, got ${JSON.stringify(result)}`);
+        assert(await bundle.read('Application.html') === edited, 'a held conflict must not rewrite Application.html');
+        assert(await bundle.read('Generation Audit.json') === auditBefore, 'a held conflict must leave the receipt byte-identical');
+        assert(await bundle.status() === 'hash-mismatch', 'the bundle stays honestly unverified');
+        return { held: true };
+      } finally { await bundle.cleanup(); }
+    },
+  },
+  {
+    name: 'Application PDF reconcile: an unsupported receipt is skipped with a warning and the PDF text still imports',
+    run: async () => {
+      const unsupported = [
+        '{not json',
+        JSON.stringify({ version: 1, schema: 'infinite-canvas-generation-audit', jobId: 'job-1', savedArtifacts: {}, finalArtifacts: {} }),
+      ];
+      for (const [index, auditText] of unsupported.entries()) {
+        const bundle = await auditedReconcileBundle({ auditText, tokenDigit: String(7 + index) });
+        try {
+          await bundle.write('Cover Letter.pdf', await textPdf(auditCoverLines('Maya ships reliable systems.')));
+          const { result, warnings } = await withCapturedWarnings(() => bundle.reconcile());
+          assert(result.importedDocuments.join() === 'cover'
+            && (await bundle.read('Application.html')).includes('Maya ships reliable systems.'),
+          `the PDF text must still import past an unsupported receipt, got ${JSON.stringify(result)}`);
+          assert(await bundle.read('Generation Audit.json') === auditText,
+            'an unsupported receipt must be left byte-for-byte untouched');
+          assert(warnings.some(line => line.includes('Generation Audit.json left unchanged during PDF reconciliation')),
+            `the skipped refresh must be logged, got ${JSON.stringify(warnings)}`);
+        } finally { await bundle.cleanup(); }
+      }
+      return { skipped: unsupported.length };
+    },
+  },
+  {
+    name: 'Application PDF reconcile: a receipt that no longer matches the stored HTML is not re-bound',
+    run: async () => {
+      const bundle = await auditedReconcileBundle({ tokenDigit: 'a' });
+      try {
+        // A hand edit outside every document panel: no panel fingerprint moves, so
+        // the open-time reconcile still treats the cover PDF edit as importable.
+        const handEdited = (await bundle.read('Application.html')).replace('</body>', '<!-- hand edit --></body>');
+        assert(handEdited !== await bundle.read('Application.html'), 'test setup: the hand edit must change the file');
+        await bundle.write('Application.html', handEdited);
+        assert(await bundle.status() === 'hash-mismatch', 'precondition: the receipt already disagrees with the HTML');
+        await bundle.write('Cover Letter.pdf', await textPdf(auditCoverLines('Maya ships reliable systems.')));
+        const auditBefore = await bundle.read('Generation Audit.json');
+        const { result, warnings } = await withCapturedWarnings(() => bundle.reconcile());
+        const html = await bundle.read('Application.html');
+        assert(result.importedDocuments.join() === 'cover' && html.includes('Maya ships reliable systems.')
+          && html.includes('<!-- hand edit -->'),
+        `the PDF text still imports and the hand edit survives, got ${JSON.stringify(result)}`);
+        assert(await bundle.read('Generation Audit.json') === auditBefore,
+          'the reconcile must not bless an Application.html that was never reviewed against the receipt');
+        assert(await bundle.status() === 'hash-mismatch', 'the honest hash-mismatch must remain');
+        assert(warnings.some(line => line.includes('does not match the stored Application.html')),
+          `the preserved mismatch must be logged, got ${JSON.stringify(warnings)}`);
+        return { preserved: true };
+      } finally { await bundle.cleanup(); }
+    },
+  },
+  {
+    name: 'Application PDF reconcile: a legacy bundle without a Generation Audit still imports and invents no receipt',
+    run: async () => {
+      const bundle = await auditedReconcileBundle({ auditText: '', tokenDigit: 'b' });
+      try {
+        await bundle.write('Cover Letter.pdf', await textPdf(auditCoverLines('Maya ships reliable systems.')));
+        const result = await bundle.reconcile();
+        assert(result.importedDocuments.join() === 'cover', `the legacy import must still work, got ${JSON.stringify(result)}`);
+        assert(!fs.existsSync(path.join(bundle.root, 'Generation Audit.json')), 'a reconcile must never invent a receipt');
+        assert(await bundle.status() === 'legacy-unverified', 'the legacy bundle stays legacy-unverified');
+        return { legacy: true };
+      } finally { await bundle.cleanup(); }
+    },
+  },
+  {
+    name: 'Application PDF reconcile: an unreadable Generation Audit.json fails closed before anything is written',
+    run: async () => {
+      const bundle = await auditedReconcileBundle({ tokenDigit: 'c' });
+      try {
+        // A receipt that is a symlink is not a safe regular file; Sync refuses it
+        // with a 409 and so must the reconcile rather than treat it as absent.
+        await fs.promises.rename(path.join(bundle.root, 'Generation Audit.json'), path.join(bundle.root, 'real-audit.json'));
+        await fs.promises.symlink('real-audit.json', path.join(bundle.root, 'Generation Audit.json'));
+        await bundle.write('Cover Letter.pdf', await textPdf(auditCoverLines('Maya ships reliable systems.')));
+        const htmlBefore = await bundle.read('Application.html');
+        const failure = await bundle.reconcile().then(() => null, error => error);
+        assert(failure && failure.statusCode === 409 && /Generation Audit\.json could not be read/.test(failure.message),
+          `an unreadable receipt must fail closed with a 409, got ${failure && `${failure.statusCode} ${failure.message}`}`);
+        assert(await bundle.read('Application.html') === htmlBefore, 'a refused reconcile must not rewrite Application.html');
+        return { failedClosed: true };
+      } finally { await bundle.cleanup(); }
+    },
+  },
+  {
+    name: 'Application PDF reconcile: the audit refresh helper binds exactly the named PDFs and keeps the single-PDF form',
+    run: () => {
+      const hash = fill => fill.repeat(64);
+      const receipt = `${JSON.stringify({
+        version: 1,
+        schema: 'infinite-canvas-generation-audit',
+        jobId: 'job-1',
+        finalArtifacts: {
+          resultSha256: hash('a'), resumeContentSha256: hash('a'), coverLetterContentSha256: hash('a'),
+          stagedApplicationHtmlSha256: hash('a'), resumePdfSha256: hash('a'), coverLetterPdfSha256: hash('a'),
+          originalJobListingSha256: hash('a'),
+        },
+        savedArtifacts: {
+          applicationHtmlSha256: hash('d'), resumePdfSha256: hash('d'), coverLetterPdfSha256: hash('d'),
+          originalJobListingSha256: hash('d'),
+        },
+      }, null, 2)}\n`;
+      const html = '<html>next</html>';
+      const resume = Buffer.from('%PDF-resume');
+      const cover = Buffer.from('%PDF-cover');
+      const saved = text => JSON.parse(text).savedArtifacts;
+
+      const both = saved(__withSyncedGenerationAuditSavedArtifactsForTests(receipt, { applicationHtml: html, pdfs: { resume, cover } }));
+      assert(both.applicationHtmlSha256 === auditDigest(html) && both.resumePdfSha256 === auditDigest(resume)
+        && both.coverLetterPdfSha256 === auditDigest(cover), 'pdfs must bind every named document');
+
+      const onlyCover = saved(__withSyncedGenerationAuditSavedArtifactsForTests(receipt, { applicationHtml: html, pdfs: { cover } }));
+      assert(onlyCover.coverLetterPdfSha256 === auditDigest(cover) && onlyCover.resumePdfSha256 === hash('d'),
+        'a document absent from pdfs must keep its existing fingerprint');
+
+      const none = saved(__withSyncedGenerationAuditSavedArtifactsForTests(receipt, { applicationHtml: html, pdfs: {} }));
+      assert(none.applicationHtmlSha256 === auditDigest(html) && none.resumePdfSha256 === hash('d')
+        && none.coverLetterPdfSha256 === hash('d'), 'an empty pdfs map re-binds only the HTML');
+
+      const single = saved(__withSyncedGenerationAuditSavedArtifactsForTests(receipt, { applicationHtml: html, pdf: resume, documentKind: 'resume' }));
+      assert(single.resumePdfSha256 === auditDigest(resume) && single.coverLetterPdfSha256 === hash('d'),
+        'the original { pdf, documentKind } form must keep working');
+
+      for (const options of [
+        { applicationHtml: html, pdf: resume, documentKind: 'listing' },
+        { applicationHtml: html, pdfs: { listing: resume } },
+      ]) {
+        let message = '';
+        try { __withSyncedGenerationAuditSavedArtifactsForTests(receipt, options); } catch (error) { message = error.message; }
+        assert(message === 'Application Sync received an invalid audit document kind.',
+          `an unknown document kind must keep the existing error, got ${JSON.stringify(message)}`);
+      }
+      return { bound: true };
+    },
+  },
+  {
+    name: 'Application PDF reconcile: an external edit to Generation Audit.json while the reconcile commits is never overwritten',
+    run: async () => {
+      const bundle = await auditedReconcileBundle({ tokenDigit: '9' });
+      const realLstat = fs.promises.lstat;
+      try {
+        await bundle.write('Cover Letter.pdf', await textPdf(auditCoverLines('Maya ships reliable systems.')));
+        const htmlBefore = await bundle.read('Application.html');
+        const auditPath = path.join(bundle.root, 'Generation Audit.json');
+        const auditBefore = await bundle.read('Generation Audit.json');
+        const external = auditBefore.replace('"version": 1', '"version": 1,\n  "note": "edited externally"');
+        assert(external !== auditBefore, 'setup: the external edit must change the receipt');
+        // Land the external edit after the reconcile read the receipt and before its
+        // transaction first touches it: the commit must notice and refuse.
+        let injected = 0;
+        fs.promises.lstat = async function lstatWithRace(target, ...rest) {
+          if (String(target) === auditPath && String(new Error().stack).includes('applicationFileTransaction')) {
+            injected += 1;
+            fs.writeFileSync(auditPath, external);
+          }
+          return realLstat.call(this, target, ...rest);
+        };
+        let failure = null;
+        try { await bundle.reconcile(); } catch (error) { failure = error; } finally { fs.promises.lstat = realLstat; }
+        assert(injected > 0, 'setup: the external edit must have landed inside the transaction');
+        assert(failure, 'a receipt that changed under the commit must fail the reconcile instead of being overwritten');
+        assert(await bundle.read('Application.html') === htmlBefore, 'the failed transaction must restore Application.html');
+        assert(await bundle.read('Generation Audit.json') === external, 'the external receipt edit must be kept byte for byte');
+        // With no race the next open succeeds against the externally edited receipt.
+        const retry = await bundle.reconcile();
+        assert(retry.importedDocuments.join() === 'cover' && (await bundle.read('Generation Audit.json')).includes('edited externally'), 'a later open re-binds the edited receipt without dropping the edit');
+        assert(await bundle.status() === 'verified', 'and the bundle verifies again');
+        return { guarded: true };
+      } finally { fs.promises.lstat = realLstat; await bundle.cleanup(); }
     },
   },
 ];

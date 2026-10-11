@@ -6,6 +6,8 @@
 import { careerDataProjectProvenanceHeadingForName, resumeProjectProvenanceFailures } from './jobApplication.js';
 import { titleCaseSkillGroupLabel } from './skillGroupLabel.js';
 import { CAREER_SNAPSHOT_CAPABILITY_KINDS, isCareerSkillIndexEligible } from './careerSnapshot.js';
+import { CASE_SENSITIVE_SKILL_NAME_MAX_CHARS, resolveApprovedSkillByName } from './applicationCareerAuthority.js';
+import { boundedExpectedValue } from './hostOwnedText.js';
 
 export const STRUCTURED_RESUME_SCHEMA_VERSION = 'structured-resume.v1';
 
@@ -87,82 +89,112 @@ export const STRUCTURED_RESUME_LIMITS = Object.freeze({
 });
 // A neutral category label names a KIND of skill and claims nothing about
 // proficiency or importance. The gate exists to block editorializing headings
-// ("Expert Technologies", "Core Strengths", "Leadership"), not to force a
-// resume's ordinary taxonomy through a vocabulary too small to name it.
+// ("Expert ...", "Core ...", a bare virtue), not to force a résumé's ordinary
+// taxonomy through a vocabulary too small to name it, and not to hand every
+// candidate the taxonomy of one trade.
 //
-// 'skills', 'technical skills' and 'technologies' were removed from this list:
-// each names the SECTION, not a kind of skill. A row labelled with one of them
-// restates the <h2>Skills</h2> printed directly above it and gives a parser no
-// category axis it did not already have, which is the whole reason the `dt`
-// labels are load-bearing (STYLE.md §5.6). 'tools' stays: it is a real domain
-// beside Languages and Frameworks. The vocabulary that remains can still
-// express a real split (languages / frameworks / infrastructure / platforms /
-// integration), which matters because career data carrying no skills section
-// of its own leaves this list as the whole vocabulary a responder may draw a
-// label from.
+// The vocabulary therefore has three layers, and only the first is fixed:
+//   1. NEUTRAL_SKILL_GROUP_LABELS, a small base of nouns that name a kind of
+//      skill in ANY field (a trade, a clinic, a classroom, a codebase).
+//   2. The plural of each capabilityKind the approved snapshot assigns to one
+//      of the skills this résumé may render. The kind is a controlled taxonomy
+//      value the career audit has already checked against the source, so a
+//      label built from it names a kind the candidate really has.
+//   3. The organizing category a skill row carries in the approved snapshot,
+//      when the skill projection supplies one.
+// Layers 2 and 3 are read from the CURRENT run's evidence (skillGroupVocabulary
+// below); nothing in this file widens the base because a particular sample
+// row used a particular word.
 //
-// SURVEY of every label the design system ships or documents as a skills-row
-// `<dt>`, because that is the set this vocabulary has to be able to express:
-//   Languages            resume.html:197, preview/component-skills.html:20,
-//                        build/multi-page-fragmentation-check.html:227,
-//                        uploads/Application.html:1536,
-//                        handoff/Application-paginated-example.html:1550,
-//                        build/fit-estimate-test.js:441
-//   Data & Storage       resume.html:200, preview/component-skills.html:22,
-//                        build/multi-page-fragmentation-check.html:229,
-//                        build/line-yield-check.html:86
-//   Infrastructure       resume.html:203, preview/component-skills.html:24,
-//                        build/multi-page-fragmentation-check.html:231
-//   Web & Data           uploads/Application.html:1539,
-//                        handoff/Application-paginated-example.html:1553
-//   Infrastructure & AI  uploads/Application.html:1542,
-//                        handoff/Application-paginated-example.html:1556
-//   AI/ML                STYLE.md:833 and SKILL.md:696-697 — the `dt`-casing rule's
-//                        own example of a label that keeps its own spelling
-// STYLE.md §5.6 (STYLE.md:826-828, 843-855) and SKILL.md's Skills-block
-// section (SKILL.md:693-701) document the first three in prose and name no
-// further domain; the last three come from the two Application fixtures, which
-// are real generated output. 'languages' and 'infrastructure' were already
-// here; 'data', 'storage', 'web', 'ai' and 'ml' are exactly what that survey
-// adds, and every one of those exemplar rows is now reachable.
+// 'skills', 'technical skills' and 'technologies' never count, whichever layer
+// they would come from: each names the SECTION, not a kind of skill, so a row
+// labelled with one of them restates the <h2>Skills</h2> printed directly above
+// it and gives a parser no category axis it did not already have, which is the
+// whole reason the `dt` labels are load-bearing (STYLE.md §5.6).
 //
-// This was already the case before the section-head synonyms came out, and it
-// went from latent to acute with them: a candidate whose career data carries no
-// skills section leaves the "occurs verbatim in career data" escape hatch empty,
-// so this list IS the whole vocabulary, and a list of single nouns could not
-// name a compound domain the design system ships on its own sample page.
-// Nothing beyond the survey was added: the list is printed verbatim into the
-// résumé prompt and is what a responder picks from, so an entry the design
-// system never uses is a domain this app invented and then asked for.
-// scripts/tests/paste-application-assembly.js drives every label above through
-// the real validator, so an exemplar this vocabulary cannot express fails the
-// suite here instead of costing the user a manual correction round.
+// scripts/tests/paste-application-assembly.js harvests every `<dt>` label the
+// design system ships and drives each through the real validator against an
+// approved snapshot whose categories carry it, so a shipped exemplar the
+// derivation cannot express fails the suite instead of costing the user a
+// manual correction round.
 export const NEUTRAL_SKILL_GROUP_LABELS = Object.freeze([
-  'tools', 'languages', 'programming languages',
-  'frameworks', 'libraries', 'databases', 'platforms', 'infrastructure', 'integration',
-  'systems', 'methods', 'methodologies', 'practices', 'competencies', 'web development',
-  // The survey's additions. 'data' and 'storage' carry "Data & Storage" (the
-  // shipped sample's own middle row); 'web' carries "Web & Data"; 'ai' carries
-  // "Infrastructure & AI"; 'ml' carries the documented "AI/ML", which 'ai'
-  // alone leaves half-reachable.
-  'data', 'storage', 'web', 'ai', 'ml',
+  'certifications', 'competencies', 'equipment', 'methodologies', 'methods',
+  'platforms', 'practices', 'systems', 'techniques', 'tools',
 ].sort());
-const NEUTRAL_SKILL_GROUPS = new Set(NEUTRAL_SKILL_GROUP_LABELS);
+const NEUTRAL_SKILL_BASE_GROUPS = new Set(NEUTRAL_SKILL_GROUP_LABELS);
+const SECTION_HEAD_SKILL_LABELS = new Set(['skills', 'technical skills', 'technologies']);
 // "Infrastructure & Integration" or "Tools / Platforms" joins neutral category
 // nouns with a neutral connector; the compound still claims nothing.
 const NEUTRAL_GROUP_CONNECTORS = Object.freeze(['&', '/', ',', 'and']);
 const NEUTRAL_GROUP_CONNECTOR_RE = /\s*(?:&|\/|,|\band\b)\s*/u;
 const MAX_NEUTRAL_GROUP_PARTS = 3;
-// Both the rejection message and the résumé prompt state this rule, and a
-// responder that follows it must never be rejected.  Deriving the sentence
-// from the same constants the gate reads is what keeps that true: a hand-worded
-// "two of those joined by & or /" silently understates a gate that accepts
-// three parts joined four ways.
-export const NEUTRAL_SKILL_GROUP_RULE = `one of ${NEUTRAL_SKILL_GROUP_LABELS.join(', ')}, or up to ${MAX_NEUTRAL_GROUP_PARTS} of those joined by ${NEUTRAL_GROUP_CONNECTORS.map(connector => `"${connector}"`).join(', ')}`;
+// A category the approved profile carries is a short organizing noun phrase; a
+// longer value is prose, not a label, and is not offered as one.
+const MAX_DERIVED_GROUP_LABEL_CHARS = 48;
 
-function isNeutralSkillGroupLabel(label) {
-  const parts = String(label).toLocaleLowerCase().split(NEUTRAL_GROUP_CONNECTOR_RE).map(part => part.trim()).filter(Boolean);
-  return parts.length > 0 && parts.length <= MAX_NEUTRAL_GROUP_PARTS && parts.every(part => NEUTRAL_SKILL_GROUPS.has(part));
+function pluralCapabilityKindLabel(kind) {
+  const word = String(kind || '').trim().toLocaleLowerCase();
+  if (!word) return '';
+  return /[^aeiou]y$/u.test(word) ? `${word.slice(0, -1)}ies` : `${word}s`;
+}
+
+function splitNeutralGroupLabel(label) {
+  return String(label).toLocaleLowerCase().split(NEUTRAL_GROUP_CONNECTOR_RE).map(part => part.trim()).filter(Boolean);
+}
+
+/**
+ * The skills-row labels this run accepts: the fixed domain-neutral base plus
+ * what the approved snapshot's own skill rows contribute (their capabilityKind
+ * plurals and any organizing category). `approvedSkills` is the normalized
+ * snapshot projection, or null for a retained pre-snapshot job, which has no
+ * evidence to derive from and keeps only the base.
+ */
+export function skillGroupVocabulary(approvedSkills = null) {
+  const words = new Set(NEUTRAL_SKILL_BASE_GROUPS);
+  const wholes = new Set();
+  const offer = (value) => {
+    const label = String(value ?? '').replace(/\s+/gu, ' ').trim().toLocaleLowerCase();
+    if (!label || label.length > MAX_DERIVED_GROUP_LABEL_CHARS || SECTION_HEAD_SKILL_LABELS.has(label)) return;
+    const parts = splitNeutralGroupLabel(label);
+    if (!parts.length || parts.some(part => SECTION_HEAD_SKILL_LABELS.has(part))) return;
+    if (parts.length > MAX_NEUTRAL_GROUP_PARTS) { wholes.add(label); return; }
+    for (const part of parts) words.add(part);
+  };
+  for (const skill of Array.isArray(approvedSkills) ? approvedSkills : []) {
+    offer(pluralCapabilityKindLabel(skill?.capabilityKind));
+    offer(skill?.category);
+  }
+  return Object.freeze({ words, wholes, labels: Object.freeze([...words].sort()) });
+}
+
+function skillGroupRuleText(labels) {
+  return `one of ${labels.join(', ')}, or up to ${MAX_NEUTRAL_GROUP_PARTS} of those joined by ${NEUTRAL_GROUP_CONNECTORS.map(connector => `"${connector}"`).join(', ')}`;
+}
+
+/**
+ * The sentence both the rejection message and the résumé prompt state, and a
+ * responder that follows it must never be rejected. Deriving it from the same
+ * constants and vocabulary the gate reads is what keeps that true: a hand-worded
+ * "two of those joined by & or /" silently understates a gate that accepts
+ * three parts joined four ways.
+ */
+export function neutralSkillGroupRule(vocabulary = skillGroupVocabulary(null)) {
+  return skillGroupRuleText(vocabulary.labels);
+}
+
+// The prompt is written before any one run's inventory is known, so it states
+// the base and says where the rest comes from: the kinds the controlled
+// capability taxonomy defines, read off the skill rows of the context itself.
+const DERIVABLE_KIND_LABELS = CAREER_SNAPSHOT_CAPABILITY_KINDS
+  .map(kind => [kind, pluralCapabilityKindLabel(kind)])
+  .filter(([, label]) => !SECTION_HEAD_SKILL_LABELS.has(label));
+export const NEUTRAL_SKILL_GROUP_RULE = `${skillGroupRuleText(NEUTRAL_SKILL_GROUP_LABELS)}; where context.careerSkillEvidence is supplied, a label may also be the plural of a capabilityKind that one of its skills carries (${DERIVABLE_KIND_LABELS.map(([kind, label]) => `${kind} gives ${label}`).join(', ')}) or a category value one of its skills carries, and either may be one of the joined parts`;
+
+function isNeutralSkillGroupLabel(label, vocabulary) {
+  const whole = String(label).replace(/\s+/gu, ' ').trim().toLocaleLowerCase();
+  if (vocabulary.wholes.has(whole)) return true;
+  const parts = splitNeutralGroupLabel(label);
+  return parts.length > 0 && parts.length <= MAX_NEUTRAL_GROUP_PARTS && parts.every(part => vocabulary.words.has(part));
 }
 
 // The one separator a rendered skills row is joined by. The row-length gate
@@ -207,59 +239,42 @@ export const STRUCTURED_RESUME_SKILLS_BUDGET = Object.freeze({
 // without them undercounts by two characters per gap and is rejected for a row
 // it had measured as fitting.
 export const SKILLS_BLOCK_BUDGET_RULE = `at most ${MAX_DESIGN_SKILL_GROUPS} groups and ${MAX_DESIGN_SKILL_ITEMS} items across the whole block; each group renders as one row of its items joined by "${SKILL_ITEM_SEPARATOR}", separator spaces included, and that row is at most ${MAX_DESIGN_SKILL_ROW_CHARS} characters; and a block carrying ${MIN_SPLIT_SKILL_ITEMS} items or more is sorted into at least ${MIN_SPLIT_SKILL_GROUPS} groups, because one row carrying everything restates the section head instead of sorting anything`;
-// STYLE.md §5.6 and SKILL.md:676-688 already say this block holds only nouns a
-// recruiter can filter on and never concepts, and prose is all that rule ever
-// was: the shipped defect rendered "connectors", "prompt harnessing" and
-// "model delegation" beside React and Django. A named product, language,
-// platform or acronym shows its name in its own spelling. React, TypeScript,
-// Next.js, Django, Nginx, Gunicorn, Docker Compose, MCP, gRPC and iOS all
-// carry an uppercase letter or a digit; a lowercase common noun or a concept
-// phrase carries neither, which makes the distinction decidable here.
+// STYLE.md §5.6 already says this block holds only nouns a recruiter can filter
+// on and never concepts, and prose is all that rule ever was: a shipped defect
+// rendered concept phrases and activities beside real product names. A named
+// product, language, platform or acronym shows its name in its own spelling,
+// so it carries an uppercase letter or a digit; a lowercase common noun or a
+// concept phrase carries neither, which makes the distinction decidable here
+// without naming a single product.
 //
-// The one real cost: an all-lowercase product name (npm, ffmpeg) is rejected
-// with them. That class is commodity tooling, which SKILL.md:687 already bans
-// from this block, so nothing the design system wanted kept is refused here.
+// This heuristic is the retained pre-snapshot fallback only. A snapshot-backed
+// run takes its names from the approved inventory instead (see normalizeSkills),
+// where an all-lowercase product name is legitimate when the approved profile
+// spells it that way.
 const FILTERABLE_SKILL_ITEM_RE = /[\p{Lu}\p{Lt}\p{N}]/u;
-export const SKILL_ITEM_FILTERABLE_RULE = 'each item is a named product, language, platform or acronym a recruiter can filter on, and a name shows in its spelling: every item carries at least one uppercase letter or digit. Use the canonical spelling “TypeScript”, never “Typescript”. A lowercase common noun, and any phrase naming a concept or an activity rather than a product, belongs in a bullet where it is evidence';
+export const SKILL_ITEM_FILTERABLE_RULE = 'each item is a named product, language, platform or acronym a recruiter can filter on, and a name shows in its spelling: where context.careerSkillEvidence is supplied each item is exactly the spelling that inventory gives, and otherwise every item carries at least one uppercase letter or digit. A lowercase common noun, and any phrase naming a concept or an activity rather than a product, belongs in a bullet where it is evidence';
 // Grounding compares a career-data quote against the item WITHOUT regard to
 // letter case, which is the fact the comparison below has always used but the
-// résumé prompt once contradicted. Reading "Tech used: python" grounds the
-// item "Python" (the capitalization the item must show), and reading
-// "Typescript" grounds "TypeScript"; the résumé contract interpolates this so
-// the filterable-noun rule and this one can never disagree on what lands.
-export const SKILL_ITEM_GROUNDING_RULE = 'a skill item is grounded when a career-data quote its own group cites contains that name as a whole term, compared without regard to letter case, so a quote reading “Tech used: python” grounds the item “Python” (which is the capitalization the item must show) and a quote reading “Typescript” grounds “TypeScript”';
-// A posting can name a technology the candidate corpus went on to attest, and
-// nothing below ever required that technology to reach the rendered block: a
-// résumé shipped "Programming Languages: SQL" while "Are proficient in Python
-// and TypeScript" sat in the posting and both names sat in career data. The
+// résumé prompt once contradicted: a quote that writes the name in lowercase, or
+// in a different mixed-case spelling, still grounds the item, which is the one
+// that shows the approved capitalization. The résumé contract interpolates this
+// so the filterable-noun rule and this one can never disagree on what lands.
+export const SKILL_ITEM_GROUNDING_RULE = 'a skill item is grounded when a career-data quote its own group cites contains that name as a whole term, compared without regard to letter case, so a quote that writes the name in lowercase or in another capitalization still grounds the item, and the item itself shows the capitalization of the approved name';
+// A posting can name a skill the candidate corpus went on to attest, and the
 // block is the index a recruiter filters on, so a posting-named, career-attested
-// name that is missing must be named. The vocabulary is CLOSED and host-owned
-// (never derived from the corpus): a derived list would let a posting quote
-// name a commodity word and silently re-open the filterable-noun gate this
-// exists beside. Ambiguous/commodity names (Go, R, C, Git, npm, Jira) are
-// deliberately absent for the same reason.
-export const POSTING_NAMED_SKILL_TERMS = Object.freeze([
-  'Python', 'TypeScript', 'JavaScript', 'Java', 'Kotlin', 'Swift', 'Scala', 'Ruby', 'PHP', 'Rust',
-  'Golang', 'C++', 'C#', 'Perl', 'Haskell', 'Elixir', 'Erlang', 'Clojure', 'Objective-C', 'MATLAB',
-  'Bash', 'PowerShell', 'SQL', 'Dart', 'Lua', 'Julia', 'Groovy', 'HTML', 'CSS',
-  'PostgreSQL', 'MySQL', 'MongoDB', 'Redis', 'Cassandra', 'DynamoDB', 'Elasticsearch', 'SQLite', 'Snowflake', 'BigQuery',
-  'Redshift', 'Kafka', 'Spark', 'Airflow', 'Hadoop', 'Tableau', 'Power BI', 'AWS', 'GCP', 'Azure',
-  'Docker Compose', 'Docker', 'Kubernetes', 'Terraform', 'Ansible', 'Jenkins', 'Nginx', 'Gunicorn', 'React', 'Angular', 'Vue', 'Node.js', 'Next.js',
-  'Django', 'Flask', 'FastAPI', 'Spring', 'Rails', 'GraphQL', 'TensorFlow', 'PyTorch', 'Pandas', 'NumPy',
-]);
-// Names that are also ordinary English words are matched CASE-SENSITIVELY on
-// BOTH the listing side and the career side: a posting writing "a spring
-// release" must not demand the framework Spring, and a career line writing
-// a swift migration must not attest Swift. Every other
-// name is matched case-insensitively, because the corpus's own casing is
-// unreliable (the reported package spelled TypeScript "Typescript").
-const POSTING_NAMED_SKILL_CASE_SENSITIVE = new Set(['Ruby', 'Swift', 'Rust', 'Dart', 'Julia', 'Spark', 'Spring', 'Flask', 'Angular', 'Azure', 'Groovy']);
+// name that is missing from it must be named. Which names count is decided ONLY
+// by the approved snapshot's skill inventory (`careerSkillEvidence`): the host
+// carries no vocabulary of technologies, because any fixed list is the taxonomy
+// of one trade and decides for every other. A retained pre-snapshot job has no
+// approved inventory to read, so no name can be demanded of it and these rules
+// stand down; the item-level gates (grounding, filterable noun) still apply to
+// whatever it renders.
 // The one ceiling the résumé prompt and the gate share, so a responder is
 // never asked to carry more names than the gate will ever demand.
 export const MAX_REQUIRED_POSTING_SKILL_TERMS = 10;
 // The full plan deliberately catalogs more than the final résumé uses, so the
 // skills index needs a relevance-preserving ceiling rather than an instruction
-// to dump every historical technology onto every application. Ten terms fit
+// to dump every historical skill onto every application. Ten terms fit
 // comfortably inside the design system's three-row / twenty-term budget and
 // are enough to prevent the one-token block that exposed this gap.
 export const MAX_REQUIRED_CAREER_SKILL_TERMS = 10;
@@ -341,6 +356,10 @@ function snapshotCareerSkills(careerSkillEvidence) {
         ? isCareerSkillIndexEligible({ ...skill, name, evidenceSegmentIds, directEvidenceSegmentIds })
         : skill.indexEligible === true ? true : skill.indexEligible === false ? false : null,
       evidenceSegmentIds: [...new Set(evidenceSegmentIds)],
+      // An organizing category is not a career fact and nothing here grades it;
+      // it is carried only so the skills-row label vocabulary can offer the
+      // approved profile's own classification (skillGroupVocabulary).
+      ...(typeof skill.category === 'string' && skill.category.trim() ? { category: skill.category.trim() } : {}),
     };
     if (current) {
       normalized.capabilityKind = skill.capabilityKind;
@@ -356,7 +375,7 @@ function snapshotCareerSkills(careerSkillEvidence) {
 // can" or "are" from becoming a job requirement while retaining arbitrary
 // novel product and technology names in the ordinary case-insensitive path.
 function snapshotSkillTermOccurs(name, text) {
-  const flags = [...String(name || '')].length <= 2 ? 'u' : 'iu';
+  const flags = [...String(name || '')].length <= CASE_SENSITIVE_SKILL_NAME_MAX_CHARS ? 'u' : 'iu';
   return quotedEvidenceHasTerm(name, [String(text ?? '')], flags);
 }
 
@@ -391,65 +410,44 @@ function snapshotRequiredSkillTerms(evidenceCatalog, careerSkillEvidence, { post
     .sort((left, right) => left.bestPriority - right.bestPriority
       || left.firstListingIndex - right.firstListingIndex || left.index - right.index)
     .map(entry => entry.name);
-  return ranked.slice(0, postingOnly ? MAX_REQUIRED_POSTING_SKILL_TERMS : MAX_REQUIRED_CAREER_SKILL_TERMS);
+  return dropSubsumedSkillTerms(ranked).slice(0, postingOnly ? MAX_REQUIRED_POSTING_SKILL_TERMS : MAX_REQUIRED_CAREER_SKILL_TERMS);
 }
 
-function postingNamedSkillTermOccurs(name, text) {
-  const flags = POSTING_NAMED_SKILL_CASE_SENSITIVE.has(name) ? 'u' : 'iu';
-  return quotedEvidenceHasTerm(name, [String(text ?? '')], flags);
-}
-
-// Prefer the precise product name when the same source text also makes its
-// parent token match. “Docker Compose” should produce one useful ATS term, not
-// the redundant pair “Docker Compose · Docker”. A standalone Docker mention
-// remains Docker because the more specific name is then absent.
-function preferSpecificSkillTerms(names) {
-  const uniqueNames = [...new Set(names)];
-  if (uniqueNames.includes('Docker Compose')) {
-    return uniqueNames.filter(name => name !== 'Docker');
-  }
-  return uniqueNames;
+// A skill name that is a whole-word sub-phrase of another selected name states
+// less than that name does ("Foo" beside "Foo Bar"), and printing both spends one
+// of ten index slots on a duplicate. This is a structural rule over the selected
+// names themselves, with no list of products behind it: the shorter name is
+// dropped only when the longer one is also selected, and an item carrying the
+// longer name still satisfies the shorter one because coverage is measured by
+// whole-term occurrence inside the rendered items.
+function dropSubsumedSkillTerms(names) {
+  const unique = [...new Set(names)];
+  const words = unique.map(name => String(name).toLocaleLowerCase().split(/\s+/u).filter(Boolean));
+  const containsRun = (haystack, needle) => {
+    for (let offset = 0; offset + needle.length <= haystack.length; offset += 1) {
+      if (needle.every((word, index) => haystack[offset + index] === word)) return true;
+    }
+    return false;
+  };
+  return unique.filter((name, index) => !unique.some((other, otherIndex) => otherIndex !== index
+    && words[otherIndex].length > words[index].length && containsRun(words[otherIndex], words[index])));
 }
 
 const PRIORITY_RANK = new Map([['highest', 0], ['high', 1], ['supporting', 2]]);
 
 /**
- * The canonical posting-named technology names that are REQUIRED for this
- * résumé: at least one accepted job-listing quote states the name and at
- * least one accepted career-data quote also states it, matched as a whole
- * term under the same per-name case rule. A string-only evidence list cannot
- * say which quotes came from the posting, so the rule stands down ([]) when
- * either source is absent — the same stand-down the project/listing rules use.
- * Deliberately never throws: it reads a candidate response.
+ * The approved skill names that are REQUIRED in this résumé's skills block
+ * because at least one accepted job-listing quote states the name and at least
+ * one accepted career-data quote also states it (whole term, under the
+ * snapshot-name rule). The names come only from the approved inventory
+ * (`careerSkillEvidence`); a pre-snapshot job has none and demands nothing. A
+ * string-only evidence list cannot say which quotes came from the posting, so
+ * the rule stands down ([]) when either source is absent — the same stand-down
+ * the project/listing rules use. Deliberately never throws on a candidate
+ * response: it reads one.
  */
 export function postingNamedAttestedSkillTerms(evidenceCatalog, careerSkillEvidence = null) {
-  const snapshotTerms = snapshotRequiredSkillTerms(evidenceCatalog, careerSkillEvidence, { postingOnly: true });
-  if (snapshotTerms != null) return snapshotTerms;
-  if (!Array.isArray(evidenceCatalog)) return [];
-  const entries = evidenceCatalog.filter(entry => entry && typeof entry.quote === 'string');
-  const listingEntries = entries.filter(entry => entry.sourceId === 'job-listing');
-  const careerEntries = entries.filter(entry => entry.sourceId === 'career-data');
-  if (!listingEntries.length || !careerEntries.length) return [];
-  const required = [];
-  for (const name of POSTING_NAMED_SKILL_TERMS) {
-    if (!listingEntries.some(entry => postingNamedSkillTermOccurs(name, entry.quote))) continue;
-    if (!careerEntries.some(entry => postingNamedSkillTermOccurs(name, entry.quote))) continue;
-    // Best (lowest-rank) priority across the listing entries naming it; an
-    // unranked entry ranks below the lowest ranked one, so an accidental
-    // mention can never outrank an explicit requirement.
-    const bestPriority = listingEntries
-      .filter(entry => postingNamedSkillTermOccurs(name, entry.quote))
-      .reduce((best, entry) => Math.min(best, PRIORITY_RANK.get(entry.priority) ?? 3), 3);
-    const firstListingIndex = listingEntries.findIndex(entry => postingNamedSkillTermOccurs(name, entry.quote));
-    const vocabularyIndex = POSTING_NAMED_SKILL_TERMS.indexOf(name);
-    required.push({ name, bestPriority, firstListingIndex, vocabularyIndex });
-  }
-  required.sort((left, right) =>
-    left.bestPriority - right.bestPriority
-    || left.firstListingIndex - right.firstListingIndex
-    || left.vocabularyIndex - right.vocabularyIndex);
-  return preferSpecificSkillTerms(required.map(entry => entry.name))
-    .slice(0, MAX_REQUIRED_POSTING_SKILL_TERMS);
+  return snapshotRequiredSkillTerms(evidenceCatalog, careerSkillEvidence, { postingOnly: true }) ?? [];
 }
 
 /** Required posting-named terms no skills item carries as a whole term. */
@@ -459,36 +457,26 @@ export function missingPostingNamedSkillTerms(skills, evidenceCatalog, careerSki
   const items = (Array.isArray(skills) ? skills : [])
     .flatMap(group => (group && Array.isArray(group.items) ? group.items : []))
     .filter(item => typeof item === 'string');
-  return required.filter(name => !items.some(item => (careerSkillEvidence != null ? snapshotSkillTermOccurs(name, item) : postingNamedSkillTermOccurs(name, item))));
+  return required.filter(name => !items.some(item => snapshotSkillTermOccurs(name, item)));
 }
 
-export const POSTING_NAMED_SKILLS_RULE = `the skills block is the index a recruiter or applicant-tracking filter reads, so it carries every technology name from this list — ${POSTING_NAMED_SKILL_TERMS.join(', ')} — that one of the accepted plan’s job-listing quotes states and that one of the accepted plan’s career-data quotes also states, each matched as a whole term without regard to letter case (the ordinary-English-word names are matched case-sensitively), and never more than ${MAX_REQUIRED_POSTING_SKILL_TERMS} such names, highest-priority first; write each in the capitalization the list shows even where the career data writes it in lowercase, file it under the group that fits it, and cite the career-data quote that states it; to make room, drop terms this posting never asks about, never a name it asks for`;
+export const POSTING_NAMED_SKILLS_RULE = `the skills block is the index a recruiter or applicant-tracking filter reads, so it carries every name from context.careerSkillEvidence whose indexEligible value is true, that one of the accepted plan’s job-listing quotes states and that one of the accepted plan’s career-data quotes also states, each matched as a whole term, and never more than ${MAX_REQUIRED_POSTING_SKILL_TERMS} such names, highest-priority first; write each in exactly the spelling that inventory gives it, file it under the group that fits it, and cite the career-data quote that states it; to make room, drop terms this posting never asks about, never a name it asks for`;
 const POSTING_NAMED_SKILL_TERM_RULE = 'skill-block-omits-posting-named-attested-term';
 
 /**
- * Vocabulary names the accepted plan's career-data quotes state, whether or
+ * Approved skill names the accepted plan's career-data quotes state, whether or
  * not the posting names them. The posting-named rule above is silent for a
- * posting that names no technology at all (a generic "Full Stack Developer"
- * listing), and a silent gate plus an optional schema field let a résumé ship
- * with no Skills section: the design system says never to delete it, because
- * its terms are what an applicant-tracking filter reads off the section header
- * and a stack-shaped résumé without one reads as an omission. This is the
- * floor beneath that rule, and like it stands down ([]) without BOTH halves of
- * a source-tagged catalog, since a string-only list cannot say the catalog came
- * from the paste workflow. It is satisfiable by construction: a name returned
- * here sits inside a plan quote a skill group may cite, carries an uppercase
- * letter (the filterable-item rule) and is matched under the same per-name
- * case rule the coverage gate uses. Deliberately never throws.
+ * posting that names none of the candidate's skills, and a silent gate plus an
+ * optional schema field let a résumé ship with no Skills section: the design
+ * system says never to delete it, because its terms are what an
+ * applicant-tracking filter reads off the section header. This is the floor
+ * beneath that rule, and like it stands down ([]) without BOTH halves of a
+ * source-tagged catalog and without an approved inventory. It is satisfiable by
+ * construction: a name returned here sits inside a plan quote a skill group may
+ * cite and is an exact approved name. Deliberately never throws.
  */
 export function careerAttestedSkillTerms(evidenceCatalog, careerSkillEvidence = null) {
-  const snapshotTerms = snapshotRequiredSkillTerms(evidenceCatalog, careerSkillEvidence);
-  if (snapshotTerms != null) return snapshotTerms;
-  if (!Array.isArray(evidenceCatalog)) return [];
-  const entries = evidenceCatalog.filter(entry => entry && typeof entry.quote === 'string');
-  if (!entries.some(entry => entry.sourceId === 'job-listing')) return [];
-  const careerEntries = entries.filter(entry => entry.sourceId === 'career-data');
-  return preferSpecificSkillTerms(POSTING_NAMED_SKILL_TERMS
-    .filter(name => careerEntries.some(entry => postingNamedSkillTermOccurs(name, entry.quote))));
+  return snapshotRequiredSkillTerms(evidenceCatalog, careerSkillEvidence) ?? [];
 }
 
 /**
@@ -498,32 +486,7 @@ export function careerAttestedSkillTerms(evidenceCatalog, careerSkillEvidence = 
  * required term is guaranteed to have a citation the skills group can carry.
  */
 export function requiredCareerAttestedSkillTerms(evidenceCatalog, careerSkillEvidence = null) {
-  const snapshotTerms = snapshotRequiredSkillTerms(evidenceCatalog, careerSkillEvidence);
-  if (snapshotTerms != null) return snapshotTerms;
-  if (!Array.isArray(evidenceCatalog)) return [];
-  const entries = evidenceCatalog.filter(entry => entry && typeof entry.quote === 'string');
-  if (!entries.some(entry => entry.sourceId === 'job-listing')) return [];
-  const careerEntries = entries.filter(entry => entry.sourceId === 'career-data');
-  if (!careerEntries.length) return [];
-  const postingRequired = postingNamedAttestedSkillTerms(entries);
-  const postingSet = new Set(postingRequired);
-  const remainder = careerAttestedSkillTerms(entries)
-    .filter(name => !postingSet.has(name))
-    .map(name => {
-      const matches = careerEntries.filter(entry => postingNamedSkillTermOccurs(name, entry.quote));
-      return {
-        name,
-        bestPriority: matches.reduce((best, entry) => Math.min(best, PRIORITY_RANK.get(entry.priority) ?? 3), 3),
-        firstCareerIndex: careerEntries.findIndex(entry => postingNamedSkillTermOccurs(name, entry.quote)),
-        vocabularyIndex: POSTING_NAMED_SKILL_TERMS.indexOf(name),
-      };
-    })
-    .sort((left, right) => left.bestPriority - right.bestPriority
-      || left.firstCareerIndex - right.firstCareerIndex
-      || left.vocabularyIndex - right.vocabularyIndex)
-    .map(entry => entry.name);
-  return preferSpecificSkillTerms([...postingRequired, ...remainder])
-    .slice(0, MAX_REQUIRED_CAREER_SKILL_TERMS);
+  return snapshotRequiredSkillTerms(evidenceCatalog, careerSkillEvidence) ?? [];
 }
 
 export function missingRequiredCareerSkillTerms(skills, evidenceCatalog, careerSkillEvidence = null) {
@@ -531,19 +494,37 @@ export function missingRequiredCareerSkillTerms(skills, evidenceCatalog, careerS
   const items = (Array.isArray(skills) ? skills : [])
     .flatMap(group => (group && Array.isArray(group.items) ? group.items : []))
     .filter(item => typeof item === 'string');
-  return required.filter(name => !items.some(item => (careerSkillEvidence != null ? snapshotSkillTermOccurs(name, item) : postingNamedSkillTermOccurs(name, item))));
+  return required.filter(name => !items.some(item => snapshotSkillTermOccurs(name, item)));
 }
 
 // Kept under its established exported name because queued prompts interpolate
 // it, but this is now a completeness rule rather than a mere presence floor.
-export const SKILLS_BLOCK_PRESENCE_RULE = `the skills block is not optional once the accepted plan’s career-data quotes state a technology name from the coverage list above. It carries the complete prioritized index returned by the same rule: every posting-named, career-attested name first, then the highest-priority remaining career-attested names in evidence order, up to ${MAX_REQUIRED_CAREER_SKILL_TERMS} names total. This is a bounded recruiter and applicant-tracking index, not permission to ship one token or to dump every historical keyword. Write each name in the capitalization the list shows, file it under the neutral domain label that fits it, and cite the career-data quote that states it. Where page space is short, tighten a bullet or drop a project rather than hollowing out this block`;
+export const SKILLS_BLOCK_PRESENCE_RULE = `the skills block is not optional once the accepted plan’s career-data quotes state a name from context.careerSkillEvidence whose indexEligible value is true. It carries the complete prioritized index returned by the same rule: every posting-named, career-attested name first, then the highest-priority remaining career-attested names in evidence order, up to ${MAX_REQUIRED_CAREER_SKILL_TERMS} names total, where a name that is only a shorter form of another listed name is carried by that longer name. This is a bounded recruiter and applicant-tracking index, not permission to ship one token or to dump every historical keyword. Write each name in exactly the spelling that inventory gives it, file it under the neutral domain label that fits it, and cite the career-data quote that states it. Where page space is short, tighten a bullet or drop a project rather than hollowing out this block`;
 const SKILLS_BLOCK_PRESENCE_RULE_ID = 'skills-block-omits-prioritized-career-attested-term';
-const TYPESCRIPT_TOKEN_RE = /\btypescript\b/giu;
-const TYPESCRIPT_SPELLING_RULE = 'canonical-typescript-spelling';
+const APPROVED_SPELLING_RULE = 'approved-skill-spelling';
 
-function hasNonCanonicalTypeScript(value) {
-  return [...String(value || '').matchAll(TYPESCRIPT_TOKEN_RE)]
-    .some(match => match[0] !== 'TypeScript');
+// A skill whose approved spelling mixes cases and carries an uppercase letter
+// after its first character (a camel-cased or otherwise mixed-case product
+// name) has no ordinary-word reading in another case, so the same letters in a
+// different case are a misspelling of THAT name rather than a different word. A
+// name with only an initial capital, and an all-capitals name, are deliberately
+// excluded: their other-case forms are often common words, and rejecting those
+// would reject faithful prose.
+function mixedCaseApprovedSkillNames(approvedSkills) {
+  return (Array.isArray(approvedSkills) ? approvedSkills : [])
+    .map(skill => skill?.name)
+    .filter(name => typeof name === 'string' && [...name].length >= 3
+      && /\p{Ll}/u.test(name) && [...name].slice(1).some(character => /\p{Lu}/u.test(character)));
+}
+
+function misspelledApprovedSkill(value, names) {
+  const text = String(value || '');
+  for (const name of names) {
+    for (const match of text.matchAll(wholeTermPattern(name, 'giu'))) {
+      if (match[0] !== name) return { used: match[0], approved: name };
+    }
+  }
+  return null;
 }
 
 /* A browser renderer does not repair prose, so an apparently harmless
@@ -551,22 +532,22 @@ function hasNonCanonicalTypeScript(value) {
  * it at the structured-resume boundary, which is exercised before a résumé
  * draft is persisted and again for every review replacement.  That keeps the
  * accepted review, its audit, and the recruiter-facing render on identical
- * text; a late display-only rewrite would not. */
-function collectNonCanonicalTypeScriptOffenses(roles, projects, skills, offenses) {
+ * text; a late display-only rewrite would not. The spelling that counts is the
+ * approved snapshot inventory's own: a job with no inventory has no canonical
+ * spelling to compare against, and the host names no product. */
+function collectApprovedSkillSpellingOffenses(roles, projects, approvedSkills, offenses) {
+  const names = mixedCaseApprovedSkillNames(approvedSkills);
+  if (!names.length) return;
+  const check = (value, location) => {
+    const found = misspelledApprovedSkill(value, names);
+    if (found) {
+      offend(offenses, APPROVED_SPELLING_RULE, location,
+        `${location} uses “${found.used}”; write the approved spelling “${found.approved}” exactly as the approved skill inventory gives it.`);
+    }
+  };
   for (const [roleIndex, role] of roles.entries()) {
     for (const [bulletIndex, bullet] of role.bullets.entries()) {
-      if (hasNonCanonicalTypeScript(bullet.text)) {
-        offend(offenses, TYPESCRIPT_SPELLING_RULE, `roles[${roleIndex}].bullets[${bulletIndex}].text`,
-          `roles[${roleIndex}].bullets[${bulletIndex}].text uses “Typescript”; write the canonical product name “TypeScript”.`);
-      }
-    }
-  }
-  for (const [groupIndex, group] of skills.entries()) {
-    for (const [itemIndex, item] of group.items.entries()) {
-      if (hasNonCanonicalTypeScript(item)) {
-        offend(offenses, TYPESCRIPT_SPELLING_RULE, `skills[${groupIndex}].items[${itemIndex}]`,
-          `skills[${groupIndex}].items[${itemIndex}] uses “Typescript”; write the canonical product name “TypeScript”.`);
-      }
+      check(bullet.text, `roles[${roleIndex}].bullets[${bulletIndex}].text`);
     }
   }
   for (const [projectIndex, project] of projects.entries()) {
@@ -575,10 +556,7 @@ function collectNonCanonicalTypeScriptOffenses(roles, projects, skills, offenses
       description: project.description,
       metrics: project.metrics,
     })) {
-      if (hasNonCanonicalTypeScript(value)) {
-        offend(offenses, TYPESCRIPT_SPELLING_RULE, `projects[${projectIndex}].${field}`,
-          `projects[${projectIndex}].${field} uses “Typescript”; write the canonical product name “TypeScript”.`);
-      }
+      check(value, `projects[${projectIndex}].${field}`);
     }
   }
 }
@@ -705,8 +683,11 @@ function unique(values, label) {
   return seen;
 }
 
+// These values are copied from the trusted source role, not authored, so the
+// rejection names the approved text: the host has already written any value that
+// differs only in surface form, and what reaches here is a different value.
 function equalSourceValue(value, sourceValue, label) {
-  if (value !== sourceValue) fail(`${label} must exactly match its trusted source role.`);
+  if (value !== sourceValue) fail(`${label} must exactly match its trusted source role; expected exactly: ${boundedExpectedValue(sourceValue)}.`);
 }
 
 // An identity field is copied from the trusted identity, not from a source
@@ -792,9 +773,9 @@ function normalizeEvidenceIds(value, label, allowedEvidenceIds, careerEvidenceId
 // candidate. Career data commonly states work-authorization facts in the same
 // header block, and the evidence-plan responder, told to copy identity out of
 // career data, carries them straight onto both documents — a shipped letterhead
-// read `… · Canadian citizenship · Willing to work anywhere. Can obtain TN-Visa
-// without sponsorship.` Those questions belong on the employer's own
-// application form, which is where they are actually answered.
+// ended in a citizenship statement and a sponsorship statement after the real
+// channels. Those questions belong on the employer's own application form,
+// which is where they are actually answered.
 //
 // Scoped to the contact row, and deliberately NOT a prose classifier: reading
 // this vocabulary over career prose measured 15 false positives on 24 ordinary
@@ -917,7 +898,43 @@ const ROLE_BULLET_EVIDENCE_REUSE_RULE = 'bullet-cites-evidence-already-spent-in-
 // the role did not already have on the page.
 export const ROLE_BULLET_EVIDENCE_EXCLUSIVITY_RULE = 'each bullet must cite at least one career-data evidence id that no earlier bullet in that same role already cites, because a later bullet whose career-data ids are all already cited by an earlier one reports that same source accomplishment a second time rather than a new one';
 
-function normalizeRole(raw, index, sourceById, allowedEvidenceIds, careerEvidenceIds, careerData, careerEvidenceQuotesById, careerDataRoleRegions, offenses, authorityMode = false) {
+const PROSE_NAMES_APPROVED_SKILL_RULE = 'prose-names-approved-skill-its-evidence-does-not-state';
+
+// Naming a skill inside a bullet or a project description says the work used it.
+// The candidate's approved inventory is the only data this side has about which
+// names are skills, so that is what prose is read against: a skill the prose
+// names must be stated by one of the career quotes the same unit cites. A skill
+// the candidate really has, attached to work whose evidence never states it,
+// is attribution the evidence does not carry (it belongs to some other work).
+//
+// The reading is deliberately narrow, because a skill name can also be an
+// ordinary word. A one- or two-character name is never read out of prose. A
+// multi-word name is a phrase and is read without regard to letter case. A
+// single-word name is read only in its approved capitalization, and not as the
+// first word of the text, where an ordinary capitalized word reads the same.
+function approvedSkillsNamedIn(value, approvedSkills) {
+  const prose = String(value || '');
+  if (!prose || !Array.isArray(approvedSkills)) return [];
+  return approvedSkills.filter(skill => {
+    const name = String(skill?.name || '');
+    if ([...name].length <= CASE_SENSITIVE_SKILL_NAME_MAX_CHARS) return false;
+    const phrase = /\s/u.test(name);
+    for (const match of prose.matchAll(wholeTermPattern(name, phrase ? 'giu' : 'gu'))) {
+      if (phrase || match.index > 0) return true;
+    }
+    return false;
+  });
+}
+
+function collectUnstatedSkillNames(value, location, approvedSkills, careerQuotes, offenses) {
+  for (const skill of approvedSkillsNamedIn(value, approvedSkills)) {
+    if (careerQuotes.some(quote => snapshotSkillTermOccurs(skill.name, quote))) continue;
+    offend(offenses, PROSE_NAMES_APPROVED_SKILL_RULE, `${location} “${skill.name}”`,
+      `${location} names “${skill.name}”, one of this candidate's approved skills, but none of the career-data quotes it cites states it. Naming a skill says this work used it: cite the career-data evidence that states “${skill.name}” for this work, or leave the name out.`);
+  }
+}
+
+function normalizeRole(raw, index, sourceById, allowedEvidenceIds, careerEvidenceIds, careerData, careerEvidenceQuotesById, careerDataRoleRegions, offenses, authorityMode = false, approvedSkills = null) {
   const role = record(raw, `roles[${index}]`);
   const roleId = id(role.id, `roles[${index}].id`);
   const source = sourceById.get(roleId);
@@ -933,6 +950,11 @@ function normalizeRole(raw, index, sourceById, allowedEvidenceIds, careerEvidenc
   if (normalized.summary) fail(`roles[${index}].summary is unsupported; place source-bound claims in bullets.`);
   equalSourceValue(normalized.title, source.title, `roles[${index}].title`);
   equalSourceValue(normalized.company, source.company, `roles[${index}].company`);
+  // The date is compared in its display form on BOTH sides: a spelling that
+  // differs only in what formatRoleDateForPresentation tidies prints exactly
+  // like the approved one, so it is the approved date and the draft carries the
+  // approved spelling. A shifted month or year, or any other difference, is not.
+  if (normalized.dates !== source.dates && sameDatePresentation(normalized.dates, source.dates)) normalized.dates = source.dates;
   equalSourceValue(normalized.dates, source.dates, `roles[${index}].dates`);
   if (source.location) {
     equalSourceValue(normalized.location, source.location, `roles[${index}].location`);
@@ -1001,6 +1023,17 @@ function normalizeRole(raw, index, sourceById, allowedEvidenceIds, careerEvidenc
         offend(bulletOffenses, ROLE_BULLET_SCOPE_RULE, `roles[${index}].bullets[${bulletIndex}]`,
           `roles[${index}].bullets[${bulletIndex}] is nested under ${JSON.stringify(source.company || source.title)}, but its cited career-data evidence has no uniquely recognized role section and does not explicitly name that role's employer. Cite evidence that names the employer, or use an approved structured role relationship.`);
       }
+    }
+  }
+  // A bullet that names an approved skill must cite evidence that states it.
+  // Stands down with the other career-evidence rules where the evidence list
+  // cannot say which quotes are career data, and where no inventory exists.
+  if (careerEvidenceIds && approvedSkills?.length) {
+    for (const [bulletIndex, bullet] of normalized.bullets.entries()) {
+      if (!evidenceAccepted[bulletIndex]) continue;
+      const cited = bullet.evidenceIds.filter(evidenceId => careerEvidenceIds.has(evidenceId));
+      collectUnstatedSkillNames(bullet.text, `roles[${index}].bullets[${bulletIndex}]`, approvedSkills,
+        careerQuotesForEvidenceIds(cited, careerEvidenceQuotesById), bulletOffenses);
     }
   }
   // Scoping a bullet to its own role's career section (above) cannot catch two
@@ -1319,30 +1352,33 @@ function careerQuotesForEvidenceIds(evidenceIds, careerEvidenceQuotesById) {
   return evidenceIds.flatMap(evidenceId => careerEvidenceQuotesById?.get(evidenceId) || []);
 }
 
+// What "the whole term" means, once, for every grounding comparison here.
+//
+// A term is not stated by a longer token that merely contains it, and the longer
+// token need not be made of letters: a symbol attached directly to the term
+// (C++, C#, R&D, user@host) and a dotted continuation (Node.js, ASP.NET) are
+// part of a DIFFERENT name, not the term followed by punctuation. Treating every
+// non-alphanumeric character as a boundary read "C" out of "C++" and "R" out of
+// "R&D". Sentence and list punctuation, brackets, quotes, spaces, slashes and
+// hyphens still end a term, so "C, Python." and "(C)" state C. The rule reads no
+// vocabulary: it looks only at the characters next to the occurrence.
+const NAME_JOINING_SYMBOLS = '+#&@';
+
+function wholeTermPattern(literal, flags) {
+  const escaped = String(literal).replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
+  const letterOrJoiner = `\\p{L}\\p{N}${NAME_JOINING_SYMBOLS}`;
+  return new RegExp(`(?<![${letterOrJoiner}])(?<![\\p{L}\\p{N}]\\.)${escaped}(?![${letterOrJoiner}])(?!\\.[\\p{L}\\p{N}])`, flags);
+}
+
 function quotedEvidenceHasTerm(value, quotes, flags) {
   const literal = String(value || '').trim();
   if (!literal) return false;
-  // Do not let a short skill (Go) match inside a longer token (Google). The
-  // same Unicode-aware boundaries retain literal symbolic names such as C++,
-  // C#, .NET, and Node.js.
-  const escaped = literal.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
-  const exactTerm = new RegExp(`(^|[^\\p{L}\\p{N}])${escaped}(?=$|[^\\p{L}\\p{N}])`, flags);
+  const exactTerm = wholeTermPattern(literal, flags);
   return quotes.some(quote => exactTerm.test(String(quote)));
 }
 
-function occursInQuotedCareerEvidence(value, quotes) {
+export function occursInQuotedCareerEvidence(value, quotes) {
   return quotedEvidenceHasTerm(value, quotes, 'iu');
-}
-
-/* The source corpus from the reported package has the one known legacy
- * spelling, `Typescript`; its canonical recruiter-facing rendering is
- * `TypeScript`. Preserve that explicit source-to-display equivalence before
- * applying the established skill-grounding comparator. No other new
- * equivalence is introduced, so existing grounding behaviour stays intact. */
-function occursInQuotedSkillEvidence(value, quotes) {
-  if (String(value || '').trim() === 'TypeScript'
-    && quotedEvidenceHasTerm('Typescript', quotes, 'u')) return true;
-  return occursInQuotedCareerEvidence(value, quotes);
 }
 
 const PROJECT_OCCURRENCE_RULE = 'project-field-occurs-in-cited-career-evidence';
@@ -1372,7 +1408,7 @@ const SKILLS_BLOCK_ROWS_RULE = 'skills-block-within-design-row-budget';
 const SKILLS_BLOCK_ITEMS_RULE = 'skills-block-within-design-term-budget';
 const SKILLS_ROW_LENGTH_RULE = 'skills-row-within-design-character-budget';
 
-function normalizeProjects(value, allowedEvidenceIds, careerEvidenceIds, careerEvidenceQuotesById, careerData, listingEvidenceQuotesById, offenses, authorityMode = false) {
+function normalizeProjects(value, allowedEvidenceIds, careerEvidenceIds, careerEvidenceQuotesById, careerData, listingEvidenceQuotesById, offenses, authorityMode = false, approvedSkills = null) {
   if (value == null) return [];
   if (!Array.isArray(value) || value.length > MAX_PROJECTS) fail(`projects must be an array with at most ${MAX_PROJECTS} projects.`);
   const projectOffenses = offenses;
@@ -1421,6 +1457,9 @@ function normalizeProjects(value, allowedEvidenceIds, careerEvidenceIds, careerE
       offend(projectOffenses, PROJECT_DESCRIPTION_RULE, `projects.${project.id}.description`,
         `projects.${project.id}.description must share at least two distinct meaningful terms with its cited career-data evidence.`);
     }
+    if (careerEvidenceIds && approvedSkills?.length && careerQuotes.length) {
+      collectUnstatedSkillNames(project.description, `projects.${project.id}.description`, approvedSkills, careerQuotes, projectOffenses);
+    }
     // Only gradeable when the caller supplied the source-tagged catalog. A
     // string-only evidence list cannot say which quotes came from the posting,
     // and a rule that cannot read its input must not invent a verdict — the
@@ -1442,13 +1481,26 @@ function normalizeProjects(value, allowedEvidenceIds, careerEvidenceIds, careerE
   return projects;
 }
 
-function normalizeSkills(value, allowedEvidenceIds, careerEvidenceIds, careerEvidenceQuotesById, careerData, offenses, careerSkillEvidence = null, authorityMode = false) {
+function normalizeSkills(value, allowedEvidenceIds, careerEvidenceIds, careerEvidenceQuotesById, careerData, offenses, approvedSnapshotSkills = null, authorityMode = false) {
   if (value == null) return [];
   if (!Array.isArray(value) || value.length > MAX_SKILL_GROUPS) fail(`skills must be an array with at most ${MAX_SKILL_GROUPS} groups.`);
+  // An authority-backed résumé admits a skill only as a member of the approved
+  // inventory. With no inventory there is nothing to admit it against, and
+  // falling back to the pre-snapshot spelling heuristic would let a cited
+  // non-skill label (an employer system, an evaluated product) through as an
+  // ATS keyword. That is a host defect, not a pasted-résumé defect, and it
+  // fails closed whatever the cited quotes say.
+  if (authorityMode && value.length && approvedSnapshotSkills == null) {
+    configurationFault('careerSkillEvidence must be the approved snapshot skill projection when authorityMode is set and the résumé carries a skills block; an authority job has no pre-snapshot spelling fallback.');
+  }
   // Ungrounded items and non-neutral group labels are collected across every
   // group before reporting. Three bad group labels are one defect class and
   // cost one correction round, not three manual copy/paste handoff rounds.
   const skillOffenses = offenses;
+  // Read lazily so a draft with no skill group never reads the inventory, and
+  // memoized so a many-group draft normalizes it once.
+  let vocabulary = null;
+  const groupVocabulary = () => (vocabulary ??= skillGroupVocabulary(approvedSnapshotSkills));
   // Array.from, not map: map SKIPS a hole and leaves one in its result, so a
   // sparse array (JSON cannot write one, but a fuzzed or mutated draft can)
   // used to reach the block-level checks below as an entry nothing had
@@ -1459,6 +1511,15 @@ function normalizeSkills(value, allowedEvidenceIds, careerEvidenceIds, careerEvi
     if (!Array.isArray(group.items) || !group.items.length || group.items.length > MAX_SKILL_ITEMS_PER_GROUP) fail(`skills[${index}].items must contain between 1 and ${MAX_SKILL_ITEMS_PER_GROUP} values.`);
     const items = Array.from(group.items, (entry, itemIndex) => text(entry, `skills[${index}].items[${itemIndex}]`, { required: true, max: MAX_SKILL_TEXT }));
     unique(items, `skills[${index}].items`);
+    // Each written item resolves to the approved skill it denotes, and what the
+    // résumé renders and is graded on is that skill's canonical spelling: a
+    // case, compatibility or spacing variant of an approved name is the same
+    // skill, and a name that resolves to no approved skill stays as written so
+    // the approval check below can refuse it for what it is.
+    const approvedByItem = items.map(item => (approvedSnapshotSkills ? resolveApprovedSkillByName(approvedSnapshotSkills, item) : null));
+    const canonicalItems = items.map((item, itemIndex) => (approvedByItem[itemIndex] && approvedByItem[itemIndex].indexEligible !== false
+      ? approvedByItem[itemIndex].name : item));
+    unique(canonicalItems, `skills[${index}].items`);
     const offensesBefore = skillOffenses.length;
     const evidenceIds = normalizeEvidenceIds(group.evidenceIds, `skills[${index}].evidenceIds`, allowedEvidenceIds, careerEvidenceIds, { requireCareerEvidence: true, collect: skillOffenses });
     const careerQuotes = careerQuotesForEvidenceIds(evidenceIds, careerEvidenceQuotesById);
@@ -1466,12 +1527,12 @@ function normalizeSkills(value, allowedEvidenceIds, careerEvidenceIds, careerEvi
     // whose citation was already rejected has nothing left to measure them
     // against; restating that as an item defect would hide the real repair.
     if (skillOffenses.length === offensesBefore) {
-      for (const item of items) {
+      for (const [itemIndex, item] of canonicalItems.entries()) {
         if (!(careerQuotes.length
-          ? occursInQuotedSkillEvidence(item, careerQuotes)
+          ? occursInQuotedCareerEvidence(item, careerQuotes)
           : !authorityMode && occursInCareerData(item, careerData))) {
-          offend(skillOffenses, SKILL_ITEM_RULE, `skills[${index}] item "${item}"`,
-            `skills[${index}] item "${item}" must occur in its cited career-data evidence.`);
+          offend(skillOffenses, SKILL_ITEM_RULE, `skills[${index}] item "${items[itemIndex]}"`,
+            `skills[${index}] item "${items[itemIndex]}" must occur in its cited career-data evidence.`);
         }
       }
     }
@@ -1479,24 +1540,23 @@ function normalizeSkills(value, allowedEvidenceIds, careerEvidenceIds, careerEvi
     // the block can be filtered on. They are different defects with different
     // repairs, so an item carrying both is named by both: the two rules batch
     // separately and the whole response still costs one correction round.
-    const approvedSnapshotSkills = snapshotCareerSkills(careerSkillEvidence);
-    for (const item of items) {
-      const approved = approvedSnapshotSkills?.find(skill => skill.name === item) || null;
+    for (const [itemIndex, item] of items.entries()) {
+      const approved = approvedByItem[itemIndex];
       if (approvedSnapshotSkills && (!approved || approved.indexEligible === false)) {
         offend(skillOffenses, SKILL_ITEM_FILTERABLE_NOUN_RULE, `skills[${index}] item "${item}"`,
-          `skills[${index}] item "${item}" is not an exact, index-eligible approved snapshot skill. Keep the approved spelling of a supported skill; do not infer aliases, normalize capitalization, or turn an ambiguous source mention into a keyword.`);
+          `skills[${index}] item "${item}" is not an exact, index-eligible approved snapshot skill. Write the name of a supported skill as the approved inventory spells it (a capitalization or spacing variant of that name resolves to it); do not infer aliases, plurals or longer names, or turn an ambiguous source mention into a keyword.`);
       } else if (!approvedSnapshotSkills && !FILTERABLE_SKILL_ITEM_RE.test(item)) {
         offend(skillOffenses, SKILL_ITEM_FILTERABLE_NOUN_RULE, `skills[${index}] item "${item}"`,
           `skills[${index}] item "${item}" must be a name a recruiter can filter on rather than a concept or an activity: ${SKILL_ITEM_FILTERABLE_RULE}.`);
       }
     }
     const groupName = text(group.group, `skills[${index}].group`, { required: true, max: MAX_SKILL_TEXT });
-    if (!isNeutralSkillGroupLabel(groupName) && (authorityMode || !occursInCareerData(groupName, careerData))) {
+    if (!isNeutralSkillGroupLabel(groupName, groupVocabulary()) && (authorityMode || !occursInCareerData(groupName, careerData))) {
       offend(skillOffenses, SKILL_GROUP_RULE, `skills[${index}].group "${groupName}"`,
-        `skills[${index}].group "${groupName}" must be a neutral category label \u2014 ${NEUTRAL_SKILL_GROUP_RULE} \u2014 or a label that occurs in frozen career data.`);
+        `skills[${index}].group "${groupName}" must be a neutral category label \u2014 ${neutralSkillGroupRule(groupVocabulary())}${authorityMode ? '.' : ' \u2014 or a label that occurs in frozen career data.'}`);
     }
     return {
-      id: id(group.id, `skills[${index}].id`), group: groupName, items,
+      id: id(group.id, `skills[${index}].id`), group: groupName, items: canonicalItems,
       evidenceIds,
     };
   });
@@ -1506,11 +1566,10 @@ function normalizeSkills(value, allowedEvidenceIds, careerEvidenceIds, careerEvi
   // one correction round.
   if (skills.length) {
     const totalItems = skills.reduce((count, group) => count + group.items.length, 0);
-    // A2 removed the section-head synonyms from the label vocabulary, so a
-    // single row can no longer be labelled with a word that means "skills".
-    // This is the other half of that: a block with enough terms to sort must
-    // actually sort them, instead of bolting one honest label onto a keyword
-    // run.
+    // The label vocabulary never offers a word that merely means "skills", so a
+    // single row cannot be labelled that way. This is the other half of that: a
+    // block with enough terms to sort must actually sort them, instead of
+    // bolting one honest label onto a keyword run.
     if (totalItems >= MIN_SPLIT_SKILL_ITEMS && skills.length < MIN_SPLIT_SKILL_GROUPS) {
       offend(skillOffenses, SKILLS_BLOCK_SPLIT_RULE, `skills[0].group "${skills[0].group}"`,
         `skills[0].group "${skills[0].group}" carries all ${totalItems} items of this block under one label; a block of ${MIN_SPLIT_SKILL_ITEMS} items or more must name at least ${MIN_SPLIT_SKILL_GROUPS} groups, so sort these items by the kind of skill they actually are.`);
@@ -1535,6 +1594,32 @@ function normalizeSkills(value, allowedEvidenceIds, careerEvidenceIds, careerEvi
   }
   unique(skills.map(group => group.id), 'skills');
   return skills;
+}
+
+// A date range states two dates, and each half means something only as part of
+// the range: a degree that ran 1993 to 1995 did not conclude in 1993, and the
+// start of a certification's validity is not when it was issued. Occurring in
+// the cited evidence is therefore not enough for a `dates` value; an occurrence
+// that is one end of a range the evidence states as a range does not state the
+// value alone. The connectors are the characters and words that join the two
+// ends of a range; a hyphen counts only where it cannot be a date's own
+// separator (spaced, or between two four-digit years), so "2020-03-15" and
+// "Mar-2020" are single dates and are not read as ranges.
+const RANGE_CONNECTOR_AFTER = /^(?:[^\S\r\n]*[\u2013\u2014][^\S\r\n]*|[^\S\r\n]+-[^\S\r\n]+|[^\S\r\n]+(?:to|until|through|thru)[^\S\r\n]+|-(?=\d{4}(?!\d)))[\p{L}\p{N}]/iu;
+const RANGE_CONNECTOR_BEFORE = /(?:[\p{L}\p{N}.][^\S\r\n]*[\u2013\u2014][^\S\r\n]*|[\p{L}\p{N}.][^\S\r\n]+-[^\S\r\n]+|[\p{L}\p{N}.][^\S\r\n]+(?:to|until|through|thru)[^\S\r\n]+|\d{4}-)$/iu;
+
+function datesStatedAsWholeValue(value, quotes) {
+  const literal = String(value || '').trim();
+  if (!literal) return true;
+  return quotes.some(quote => {
+    const source = String(quote);
+    for (const match of source.matchAll(wholeTermPattern(literal, 'giu'))) {
+      const before = source.slice(0, match.index);
+      const after = source.slice(match.index + match[0].length);
+      if (!RANGE_CONNECTOR_BEFORE.test(before) && !RANGE_CONNECTOR_AFTER.test(after)) return true;
+    }
+    return false;
+  });
 }
 
 // Education and certifications deliberately use their own normalizer rather
@@ -1571,6 +1656,9 @@ function normalizeCredentialItems(value, kind, allowedEvidenceIds, careerEvidenc
           : !authorityMode && occursInCareerData(fieldValue, careerData))) {
           offend(offenses, rule, `${label}.${normalized.id}.${field}`,
             `${label}.${normalized.id}.${field} must occur in its cited career-data evidence.`);
+        } else if (field === 'dates' && fieldValue && quotes.length && !datesStatedAsWholeValue(fieldValue, quotes)) {
+          offend(offenses, `${kind}-dates-state-one-end-of-a-range`, `${label}.${normalized.id}.dates`,
+            `${label}.${normalized.id}.dates “${fieldValue}” is only one end of a date range its cited career-data evidence states as a range; write the whole range exactly as the evidence states it, or omit dates.`);
         }
       }
     }
@@ -1611,6 +1699,10 @@ export function validateStructuredResumeDraft(raw, { sourceRoles, evidenceIds, e
   const listingEvidenceQuotesById = new Map(verifiedEvidence
     .filter(entry => entry?.sourceId === 'job-listing' && typeof entry?.quote === 'string')
     .map(entry => [id(entry.id, 'verified evidenceCatalog id'), entry.quote]));
+  // Read once, and before any collection is walked: it is the data the skill
+  // admission, the spelling rule and the skill-naming attribution rules all
+  // share, and a malformed projection is a host fault whichever of them it hits.
+  const approvedSnapshotSkills = snapshotCareerSkills(careerSkillEvidence);
   const normalizedSourceRoles = normalizeSourceRoles(sourceRoles);
   const sourceById = new Map(normalizedSourceRoles.map(role => [role.id, role]));
   const careerDataRoleRegions = careerEvidenceIds && !authorityMode
@@ -1629,12 +1721,12 @@ export function validateStructuredResumeDraft(raw, { sourceRoles, evidenceIds, e
   // an invalid record at its own index, just as normalizeSkills already does.
   const roles = Array.from(draft.roles, (role, index) => normalizeRole(
     role, index, sourceById, allowedEvidenceIds, careerEvidenceIds, careerData,
-    careerEvidenceQuotesById, careerDataRoleRegions, offenses, authorityMode,
+    careerEvidenceQuotesById, careerDataRoleRegions, offenses, authorityMode, approvedSnapshotSkills,
   ));
   const roleIds = unique(roles.map(role => role.id), 'roles');
   for (const role of normalizedSourceRoles) if (!roleIds.has(role.id)) fail(`roles is missing trusted source role "${role.id}".`);
-  const projects = normalizeProjects(draft.projects, allowedEvidenceIds, careerEvidenceIds, careerEvidenceQuotesById, careerData, listingEvidenceQuotesById, offenses, authorityMode);
-  const skills = normalizeSkills(draft.skills, allowedEvidenceIds, careerEvidenceIds, careerEvidenceQuotesById, careerData, offenses, careerSkillEvidence, authorityMode);
+  const projects = normalizeProjects(draft.projects, allowedEvidenceIds, careerEvidenceIds, careerEvidenceQuotesById, careerData, listingEvidenceQuotesById, offenses, authorityMode, approvedSnapshotSkills);
+  const skills = normalizeSkills(draft.skills, allowedEvidenceIds, careerEvidenceIds, careerEvidenceQuotesById, careerData, offenses, approvedSnapshotSkills, authorityMode);
   const education = normalizeCredentialItems(draft.education, 'education', allowedEvidenceIds, careerEvidenceIds, careerEvidenceQuotesById, careerData, offenses, authorityMode);
   const credentials = normalizeCredentialItems(draft.credentials, 'certification', allowedEvidenceIds, careerEvidenceIds, careerEvidenceQuotesById, careerData, offenses, authorityMode);
   if (!roles.length && !projects.length && !education.length && !credentials.length) {
@@ -1645,9 +1737,9 @@ export function validateStructuredResumeDraft(raw, { sourceRoles, evidenceIds, e
   // and a rule that cannot read its input must not invent a verdict — the
   // same stand-down the project/listing rules use. It fires even when the
   // draft carries no skills block at all, because an absent block means every
-  // required name is missing. The message names only the host's canonical
-  // vocabulary spellings and never interpolates the grounding or coverage
-  // rules: those cite the corpus's lowercase example and must not leak into
+  // required name is missing. The message names only the approved inventory's
+  // own spellings and never interpolates the grounding or coverage rules:
+  // those describe how a source may spell a name and must not leak into
   // rejection prose.
   if (careerEvidenceIds) {
     const missing = missingPostingNamedSkillTerms(skills, verifiedEvidence, careerSkillEvidence);
@@ -1667,7 +1759,7 @@ export function validateStructuredResumeDraft(raw, { sourceRoles, evidenceIds, e
         `skills omits ${missingCareer.join(', ')} from the bounded career-attested index. The accepted plan supports ${missingCareer.length === 1 ? 'this technology' : 'these technologies'}, and the skills section is the recruiter and applicant-tracking index for them; add ${missingCareer.length === 1 ? 'it' : 'each'} under the neutral domain label that fits, cite the career-data quote that states it, and keep every posting-named term. The index stops at ${MAX_REQUIRED_CAREER_SKILL_TERMS} prioritized names, so page fit is not a reason to reduce it to one token.`);
     }
   }
-  collectNonCanonicalTypeScriptOffenses(roles, projects, skills, offenses);
+  collectApprovedSkillSpellingOffenses(roles, projects, approvedSnapshotSkills, offenses);
   failOffenses(offenses);
   return {
     schemaVersion: STRUCTURED_RESUME_SCHEMA_VERSION,
@@ -1687,14 +1779,42 @@ function escapeHtml(value) {
 function separator() { return '<span class="sep" aria-hidden="true">·</span>'; }
 function sectionHead(title, id) { return `<div class="section-head"><h2 id="${id}">${escapeHtml(title)}</h2><span class="rule" aria-hidden="true"></span></div>`; }
 
-// Role metadata remains source-locked in the structured draft. This is only a
-// narrow display projection for the conventional written-month form, so a
-// source such as "May, 2023" reads as "May 2023" without teaching the model
-// that it may rewrite source dates. It deliberately does not try to parse or
-// repair other punctuation, numeric dates, or free-form date text.
-const MONTH_YEAR_DISPLAY_RE = /\b(January|February|March|April|May|June|July|August|September|October|November|December|Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)\s*,\s*(\d{4})\b/giu;
+// Host-owned dates (a role's, an education record's, a certification's) remain
+// source-locked in the structured draft: the validators demand the approved
+// spelling and the draft keeps it byte for byte. What a reader SEES is a
+// separate, display-only projection of that string, and it makes exactly two
+// tidies, each of which can change a glyph but never a digit, a month or a word:
+//   1. the comma a source leaves after a written month: "June, 2011" and
+//      "Sept., 2012" read "June 2011" and "Sept. 2012". Only an English month
+//      name qualifies, so "mai, 2011", "mars, 2011", "Fall, 2010", "Q3, 2011",
+//      "June 5, 2011" and "2012, April" are all left exactly as written.
+//   2. a spaced hyphen that joins two date endpoints reads as the en dash the
+//      design system uses for a range: "2008 - 2012", "June 2011 - Present".
+//      Without it a source range written that way trips the candidate-copy dash
+//      gate in every date cell that gate does not mask (education and
+//      certification), where the host-owned text cannot be repaired. The
+//      endpoints are exactly the ones that gate's range grammar accepts
+//      (dashRanges.js), so the tidied range always passes it.
+// Both are idempotent, and a string that needs neither comes back unchanged.
+// Nothing here parses or repairs any other punctuation, numeric date or
+// free-form date text.
+const DISPLAY_MONTH_NAMES = 'January|February|March|April|May|June|July|August|September|October|November|December|Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sept|Sep|Oct|Nov|Dec';
+const MONTH_COMMA_YEAR_DISPLAY_RE = new RegExp(`(?<![\\p{L}\\p{N}])(${DISPLAY_MONTH_NAMES})(\\.?)\\s*,\\s*(\\d{4})(?![\\p{L}\\p{N}])`, 'giu');
+const SPACED_HYPHEN_RANGE_DISPLAY_RE = new RegExp(`(?<=\\d[^\\S\\r\\n]+)-(?=[^\\S\\r\\n]+(?:\\d|(?:present|current|ongoing)\\b|(?:${DISPLAY_MONTH_NAMES})(?:\\.?[^\\S\\r\\n]+|\\.?,[^\\S\\r\\n]*)\\d{4}(?![\\p{L}\\p{N}])))`, 'giu');
 export function formatRoleDateForPresentation(value) {
-  return String(value ?? '').replace(MONTH_YEAR_DISPLAY_RE, '$1 $2');
+  return String(value ?? '')
+    .replace(MONTH_COMMA_YEAR_DISPLAY_RE, '$1$2 $3')
+    .replace(SPACED_HYPHEN_RANGE_DISPLAY_RE, '\u2013');
+}
+
+/**
+ * Whether two spellings of a host-owned date print identically, i.e. differ at
+ * most in the punctuation formatRoleDateForPresentation tidies. A shifted month
+ * or year, a different word, or any other punctuation is a different date.
+ */
+export function sameDatePresentation(left, right) {
+  return typeof left === 'string' && typeof right === 'string'
+    && formatRoleDateForPresentation(left) === formatRoleDateForPresentation(right);
 }
 
 // A second role row exists to carry a scope summary and a location together.
@@ -1753,11 +1873,11 @@ function renderProjects(projects, careerData, authorityMode = false) {
 }
 
 function renderEducation(items) {
-  return `<section class="section education" aria-labelledby="sec-education">${sectionHead('Education', 'sec-education')}<dl class="credentials-list">${items.map(item => `<div class="credential-item"><dt>${escapeHtml(item.credential)}</dt><dd>${[item.institution, item.dates].filter(Boolean).map(escapeHtml).join(' · ')}</dd></div>`).join('')}</dl></section>`;
+  return `<section class="section education" aria-labelledby="sec-education">${sectionHead('Education', 'sec-education')}<dl class="credentials-list">${items.map(item => `<div class="credential-item"><dt>${escapeHtml(item.credential)}</dt><dd>${[item.institution, formatRoleDateForPresentation(item.dates)].filter(Boolean).map(escapeHtml).join(' · ')}</dd></div>`).join('')}</dl></section>`;
 }
 
 function renderCredentials(items) {
-  return `<section class="section certifications" aria-labelledby="sec-credentials">${sectionHead('Certifications', 'sec-credentials')}<dl class="credentials-list">${items.map(item => `<div class="credential-item"><dt>${escapeHtml(item.name)}</dt><dd>${[item.issuer, item.dates].filter(Boolean).map(escapeHtml).join(' · ')}</dd></div>`).join('')}</dl></section>`;
+  return `<section class="section certifications" aria-labelledby="sec-credentials">${sectionHead('Certifications', 'sec-credentials')}<dl class="credentials-list">${items.map(item => `<div class="credential-item"><dt>${escapeHtml(item.name)}</dt><dd>${[item.issuer, formatRoleDateForPresentation(item.dates)].filter(Boolean).map(escapeHtml).join(' · ')}</dd></div>`).join('')}</dl></section>`;
 }
 
 /** Build design-system-safe HTML after validating against trusted IDs. */

@@ -1,5 +1,6 @@
 import crypto from 'node:crypto';
 import { approvedCareerEvidenceCatalog, CAREER_SNAPSHOT_STATUS_APPROVED, isCareerSkillIndexEligible, projectLegacyCareerProfile, vettedCareerSkillInventory } from './careerSnapshot.js';
+import { expectedExactlyClause } from './hostOwnedText.js';
 
 const privateState = new WeakMap();
 
@@ -26,6 +27,39 @@ function uniqueMap(items, key, label) {
     map.set(id, deepFreeze(structuredClone(item)));
   }
   return map;
+}
+
+// A skill name is spelled one way in the approved snapshot, and that spelling is
+// what a rendered résumé shows. A responder that writes the same name with
+// other letter case, a compatibility form (full-width letters), or stray spacing
+// has still named THAT skill, so those variants resolve to the canonical entry
+// instead of being refused or specially handled per product. Resolution is a
+// lookup key over the approved inventory only; it is not an alias system, and a
+// different name never resolves.
+//
+// A one- or two-character name (C, R, Go) has an ordinary-word reading in
+// another case, so it resolves only in its approved capitalization.
+export const CASE_SENSITIVE_SKILL_NAME_MAX_CHARS = 2;
+
+export function approvedSkillSpellingKey(value) {
+  const base = String(value ?? '').normalize('NFKC').replace(/\s+/gu, ' ').trim();
+  return [...base].length <= CASE_SENSITIVE_SKILL_NAME_MAX_CHARS ? base : base.toLocaleLowerCase();
+}
+
+/**
+ * The approved skill a written name denotes, or null. An exact match always
+ * wins; otherwise the name must resolve to exactly one approved skill, so an
+ * ambiguous variant never silently picks one of two rows.
+ */
+export function resolveApprovedSkillByName(skills, spelled) {
+  if (typeof spelled !== 'string') return null;
+  const candidates = [...(skills || [])].filter(skill => skill && typeof skill.name === 'string');
+  const exact = candidates.find(skill => skill.name === spelled);
+  if (exact) return exact;
+  const key = approvedSkillSpellingKey(spelled);
+  if (!key) return null;
+  const matches = candidates.filter(skill => approvedSkillSpellingKey(skill.name) === key);
+  return matches.length === 1 ? matches[0] : null;
 }
 
 function assertUniqueIndexEligibleSkillNames(skills) {
@@ -75,6 +109,32 @@ function catalogMeta(id) {
   const match = /^host\.career\.(role|achievement|project|skill|education|certification|other)\.([a-z][a-z0-9-]{0,79})\.(?:[1-9]\d*)(?:\.[1-9]\d*)?$/u.exec(id);
   if (!match) throw new Error(`authority catalog id ${JSON.stringify(id)} has an unrecognized namespace.`);
   return { kind: match[1], entityId: match[2] };
+}
+
+// The source segments that make up a role's own work: its header lines, the
+// achievements it owns, and the projects that name it. A skill that a role
+// lists is attributed to that role only while the skill's evidence lies inside
+// this set; the reciprocal skill/role id links alone are a claim, not proof.
+function roleWorkSegments(role, achievementsById, projectsById) {
+  const segments = new Set(Array.isArray(role?.evidenceSegmentIds) ? role.evidenceSegmentIds : []);
+  for (const achievement of achievementsById.values()) {
+    if (achievement?.roleId === role?.id && (role.achievementIds || []).includes(achievement.id)) {
+      for (const id of achievement.evidenceSegmentIds || []) segments.add(id);
+    }
+  }
+  for (const project of projectsById.values()) {
+    if (project?.roleId === role?.id) for (const id of project.evidenceSegmentIds || []) segments.add(id);
+  }
+  return segments;
+}
+
+// A current skill row separates the segments that show direct use from the
+// ones that only qualify it, and role attribution rests on direct use. A
+// historical row has no such split and is read by its full evidence.
+function skillAttributionSegments(skill) {
+  return Array.isArray(skill?.directEvidenceSegmentIds) && skill.directEvidenceSegmentIds.length
+    ? skill.directEvidenceSegmentIds
+    : (Array.isArray(skill?.evidenceSegmentIds) ? skill.evidenceSegmentIds : []);
 }
 
 function sourceRoles(profile) {
@@ -145,8 +205,29 @@ export function buildApplicationCareerAuthority(snapshot) {
     sourceCertifications: Object.freeze([...certificationsById.values()].map(deepFreeze)),
     counts: Object.freeze({ catalog: catalogById.size, roles: rolesById.size, projects: projectsById.size, skills: skillsById.size, education: educationById.size, certifications: certificationsById.size }),
   };
-  privateState.set(authority, { rolesById, projectsById, skillsById, achievementsById, educationById, certificationsById, catalogById });
+  const roleSegmentsById = new Map([...rolesById.values()].map(role => [role.id, roleWorkSegments(role, achievementsById, projectsById)]));
+  privateState.set(authority, { rolesById, projectsById, skillsById, achievementsById, educationById, certificationsById, catalogById, roleSegmentsById });
   return Object.freeze(authority);
+}
+
+function skillBoundToRole(state, skill, roleId) {
+  const role = state.rolesById.get(roleId);
+  if (!skill || !role) return false;
+  if (!(skill.roleIds || []).includes(roleId) || !(role.skillIds || []).includes(skill.id)) return false;
+  const workSegments = state.roleSegmentsById.get(roleId);
+  return skillAttributionSegments(skill).some(segmentId => workSegments?.has(segmentId));
+}
+
+/**
+ * Whether an approved skill is attributable to a role: the two link each other
+ * AND the skill's own evidence lies in that role's work (its header, its
+ * achievements, its projects). A skill linked to a role whose work never
+ * states it is evidence of a different role, and citing it under this one
+ * would attribute that other employer's work here.
+ */
+export function isAuthoritySkillBoundToRole(authority, skillId, roleId) {
+  const state = stateOf(authority);
+  return skillBoundToRole(state, state.skillsById.get(skillId), roleId);
 }
 
 export function resolveAuthorityEvidence(authority, id, quote = undefined) {
@@ -154,6 +235,29 @@ export function resolveAuthorityEvidence(authority, id, quote = undefined) {
   if (!unit) throw new Error(`Unknown authority evidence id ${JSON.stringify(id)}.`);
   if (quote !== undefined && quote !== unit.quote) throw new Error(`Authority evidence ${JSON.stringify(id)} quote does not exactly match its approved catalog entry.`);
   return unit;
+}
+
+/**
+ * Every approved catalog quote about the SAME entity as evidence `id` (the
+ * entity's own statement and the rows the host projects from it), in catalog
+ * order. A relationship or technology row carries only the clause it was cut
+ * from, so how the candidate stood to the work is read from the statement; an
+ * unknown id has no siblings. The result is read-only evidence text.
+ */
+export function authorityEntityEvidenceQuotes(authority, id) {
+  const state = stateOf(authority);
+  const unit = state.catalogById.get(id);
+  if (!unit) return [];
+  if (!state.catalogByEntity) {
+    const grouped = new Map();
+    for (const entry of state.catalogById.values()) {
+      const key = `${entry.kind}:${entry.entityId}`;
+      if (!grouped.has(key)) grouped.set(key, []);
+      grouped.get(key).push(entry.quote);
+    }
+    state.catalogByEntity = grouped;
+  }
+  return [...(state.catalogByEntity.get(`${unit.kind}:${unit.entityId}`) || [])];
 }
 
 export function resolveAuthorityRole(authority, id) {
@@ -193,11 +297,14 @@ export function validateAuthorityRoleEvidence(authority, roleId, evidenceIds) {
   for (const id of evidenceIds || []) {
     const unit = resolveAuthorityEvidence(authority, id);
     if (unit.kind === 'achievement' && state.achievementsById.get(unit.entityId)?.roleId === roleId && (role.achievementIds || []).includes(unit.entityId)) continue;
-    if (unit.kind === 'skill' && (state.skillsById.get(unit.entityId)?.roleIds || []).includes(roleId) && (role.skillIds || []).includes(unit.entityId)) continue;
+    // A skill is this role's work only when the skill and the role link each
+    // other AND the skill's own evidence lies in the role's work; a link to a
+    // role whose achievements never state the skill is not attribution.
+    if (unit.kind === 'skill' && skillBoundToRole(state, state.skillsById.get(unit.entityId), roleId)) continue;
     // Header-only role records restate fields already rendered. They are legal
     // only when this role genuinely carries no substantive linked evidence.
     if (unit.kind === 'role' && unit.entityId === roleId && ![...state.achievementsById.values()].some(item => item.roleId === roleId)
-      && ![...state.skillsById.values()].some(item => (item.roleIds || []).includes(roleId))) continue;
+      && ![...state.skillsById.values()].some(item => skillBoundToRole(state, item, roleId))) continue;
     throw new Error(`Authority evidence ${JSON.stringify(id)} does not belong to role ${JSON.stringify(roleId)}.`);
   }
   return role;
@@ -234,7 +341,9 @@ export function validateAuthorityCertificationEvidence(authority, certificationI
 export function validateAuthoritySkill(authority, skillId, name, evidenceIds) {
   if (!Array.isArray(evidenceIds) || !evidenceIds.length) throw new Error('Skill evidence must be nonempty.');
   const skill = resolveAuthoritySkill(authority, skillId);
-  if (skill.name !== name || !isCareerSkillIndexEligible(skill)) throw new Error(`Skill ${JSON.stringify(skillId)} is not an exact index-eligible approved skill.`);
+  // The name is checked under the same resolution the group uses, so a case or
+  // spacing variant of the approved name denotes this skill; any other name does not.
+  if (resolveApprovedSkillByName([skill], name) !== skill || !isCareerSkillIndexEligible(skill)) throw new Error(`Skill ${JSON.stringify(skillId)} is not an exact index-eligible approved skill.`);
   for (const id of evidenceIds || []) {
     const unit = resolveAuthorityEvidence(authority, id);
     if (unit.kind !== 'skill' || unit.entityId !== skillId) throw new Error(`Authority evidence ${JSON.stringify(id)} does not belong to skill ${JSON.stringify(skillId)}.`);
@@ -246,10 +355,13 @@ export function validateAuthoritySkillGroup(authority, items, evidenceIds) {
   if (!Array.isArray(items) || !items.length) throw new Error('Skill group items must be nonempty.');
   if (!Array.isArray(evidenceIds) || !evidenceIds.length) throw new Error('Skill group evidence must be nonempty.');
   const state = stateOf(authority);
+  const eligible = [...state.skillsById.values()].filter(skill => isCareerSkillIndexEligible(skill));
   const selected = new Map();
   for (const name of items) {
-    const matching = [...state.skillsById.values()].find(skill => skill.name === name && isCareerSkillIndexEligible(skill));
+    // The canonical approved skill, however the case or spacing of the written name differs.
+    const matching = resolveApprovedSkillByName(eligible, name);
     if (!matching) throw new Error(`Skill item ${JSON.stringify(name)} is not an exact index-eligible approved skill.`);
+    if (selected.has(matching.id)) throw new Error(`Skill item ${JSON.stringify(name)} repeats approved skill ${JSON.stringify(matching.name)} within the same group.`);
     selected.set(matching.id, matching);
   }
   const bySkill = new Map([...selected.keys()].map(id => [id, []]));
@@ -259,6 +371,7 @@ export function validateAuthoritySkillGroup(authority, items, evidenceIds) {
     bySkill.get(unit.entityId).push(id);
   }
   for (const skill of selected.values()) validateAuthoritySkill(authority, skill.id, skill.name, bySkill.get(skill.id));
+  return [...selected.values()].map(skill => skill.name);
 }
 
 export function validateAuthorityIdentityAndLocation(authority, identity, roleId, location) {
@@ -268,7 +381,7 @@ export function validateAuthorityIdentityAndLocation(authority, identity, roleId
   // not let a caller add one merely because a downstream schema permits it.
   if (identity?.subtitleRole !== undefined) throw new Error('Identity subtitleRole is not approved by authority identity.');
   const role = resolveAuthorityRole(authority, roleId);
-  if (String(location ?? '') !== String(role.location || '')) throw new Error(`Role ${JSON.stringify(roleId)} location does not exactly match approved authority.`);
+  if (String(location ?? '') !== String(role.location || '')) throw new Error(`Role ${JSON.stringify(roleId)} location does not exactly match approved authority; ${expectedExactlyClause('location', role.location || '')}.`);
 }
 
 export function authorityCareerQuotes(authority, evidenceIds) {

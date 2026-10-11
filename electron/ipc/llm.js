@@ -1,5 +1,7 @@
-import { isSensitivePath } from '../utils/pathSafety.js';
+import { isRendererSensitivePath, registerRendererPrivateAppRoot } from '../utils/pathSafety.js';
 import path from 'path';
+import fs from 'fs';
+import electronPkg from 'electron';
 import {
   compensationCohortAssessmentMaxTokens,
   jobPreferenceResearchAssessmentMaxTokens,
@@ -77,6 +79,12 @@ const KNOWN_TASKS = new Set([
   'job-role-audit',
   'job-role-screen',
   'job-role-screen-batch',
+  // Interview preparation deliberately uses two different contracts: web-grounded
+  // source material stays raw, while the brief itself is a small validated JSON
+  // object. Keeping them distinct prevents a research transcript becoming node
+  // state by accident.
+  'interview-brief-research',
+  'interview-brief-assessment',
   // The fallback bucket resolveTask() lands on for an unmapped/absent task.
   // It is a real member here so that passing task:'default' explicitly is not
   // itself reported as "unmapped"; getKnownTaskIds() filters it back out
@@ -177,6 +185,8 @@ const TASK_MAX_TOKENS = {
   // mid-output. 4096 matches resume-parse and gives ~3000 headroom over
   // typical use (3 short query arrays ≈ 500 tokens visible + ~1000 thinking).
   'job-query-generation':      4096,  // 3 query arrays — small JSON, thinking-heavy
+  'interview-brief-research':  6144,
+  'interview-brief-assessment': 4096,
   // Manual scoring returns a bounded decisive-evidence audit (not a complete,
   // duplicated JD transcription). Fresh batches contain at most 22 jobs:
   // 1,600 + 22*600 = 14,800, safely below the 15,360 usable output ceiling.
@@ -582,9 +592,7 @@ export async function callLLMVision(imagePaths, prompt, opts = {}) {
     ? opts.attachmentSourcePaths
     : imagePaths;
   for (const imgPath of (Array.isArray(attachmentSafetyPaths) ? attachmentSafetyPaths : [])) {
-    if (isSensitivePath(path.resolve(String(imgPath || '')))) {
-      throw new Error(`Refusing to read a sensitive system/credential path as an AI attachment: ${imgPath}`);
-    }
+    assertRendererAttachmentPathAllowed(imgPath);
   }
   const { signal, task, hints, responseSchema, responseValidator } = normalizeOpts(opts);
   assertStructuredResponseSchema(responseSchema, 'callLLMVision');
@@ -606,14 +614,123 @@ export async function callLLMVision(imagePaths, prompt, opts = {}) {
   return result;
 }
 
+// This token is intentionally module-private.  A renderer can serialize any
+// JSON-shaped options object it likes, but it cannot manufacture this Symbol
+// or turn the public `callLLMDocument` function into a staging-capable call.
+// The only factory below is consumed by jobs.js after it has bound a private
+// stage run to host-owned inode identities.
+const HOST_STAGED_DOCUMENT_ATTACHMENT = Symbol('host-staged-document-attachment');
+
+function rendererAttachmentPathError(filePath) {
+  return new Error(`Refusing to read a sensitive system/credential path as an AI attachment: ${filePath}`);
+}
+
+function registerLlmRendererPrivateRoot() {
+  try { registerRendererPrivateAppRoot(electronPkg.app?.getPath?.('userData')); } catch { /* app startup/test stubs can precede userData creation */ }
+}
+
+// Generic document/vision paths originate in renderer-controlled canvas
+// state.  A lexical component check alone misses `ordinary.pdf ->
+// career-input-staging/secret.pdf` and a public hard-link alias.  This is not
+// the host-stage path: its private Symbol capability is checked separately
+// after jobs.js proves its run ownership and inode identities.
+function assertRendererAttachmentPathAllowed(filePath) {
+  const normalizedPath = path.resolve(String(filePath || ''));
+  registerLlmRendererPrivateRoot();
+  if (isRendererSensitivePath(normalizedPath)) throw rendererAttachmentPathError(filePath);
+  let lexical;
+  try {
+    lexical = fs.lstatSync(normalizedPath);
+  } catch (error) {
+    // Preserve the established behavior for a user-selected missing path: the
+    // manual handoff may still surface the normal OS error.  Every other
+    // metadata failure fails closed rather than becoming an attachment oracle.
+    if (error?.code === 'ENOENT' || error?.code === 'ENOTDIR') return;
+    throw rendererAttachmentPathError(filePath);
+  }
+  if (!lexical.isFile() || lexical.isSymbolicLink() || Number(lexical.nlink) !== 1) {
+    throw rendererAttachmentPathError(filePath);
+  }
+  let realPath;
+  let canonical;
+  try {
+    realPath = fs.realpathSync.native(normalizedPath);
+    canonical = fs.lstatSync(realPath);
+  } catch {
+    throw rendererAttachmentPathError(filePath);
+  }
+  if (isRendererSensitivePath(realPath)
+    || !canonical.isFile() || canonical.isSymbolicLink() || Number(canonical.nlink) !== 1
+    || canonical.dev !== lexical.dev || canonical.ino !== lexical.ino) {
+    throw rendererAttachmentPathError(filePath);
+  }
+}
+
+function assertHostStagedDocumentCapability(filePath, capability = null) {
+  if (capability !== HOST_STAGED_DOCUMENT_ATTACHMENT) throw rendererAttachmentPathError(filePath);
+}
+
+/**
+ * Create a document caller for a host-created, private attachment stage.
+ *
+ * This is deliberately not an option on callLLMDocument: options cross IPC
+ * boundaries, while this closure and its private Symbol never do.  The caller
+ * must revalidate the exact attachment immediately before each manual handoff
+ * and return the canonical owned path.  jobs.js is the only production user.
+ */
+export function createHostStagedDocumentCaller(assertOwnedStagedAttachment) {
+  if (typeof assertOwnedStagedAttachment !== 'function') {
+    throw new TypeError('A host staged document caller requires an attachment validator.');
+  }
+  return async function callHostStagedDocument(filePath, prompt, opts = {}) {
+    const approved = await assertOwnedStagedAttachment(filePath);
+    // The validator may return the bare canonical path (older seams) or the
+    // path plus the attachment's content-bound logical identity.
+    const approvedPath = typeof approved === 'string' ? approved : approved?.path;
+    const attachmentIdentity = typeof approved === 'object' && approved && typeof approved.identity === 'string'
+      ? approved.identity
+      : null;
+    if (typeof approvedPath !== 'string' || !approvedPath) {
+      const error = new Error('Host staged attachment ownership could not be verified.');
+      error.code = 'HOST_STAGED_ATTACHMENT_INVALID';
+      throw error;
+    }
+    // Keep this implementation separate from the public wrapper so the
+    // capability cannot be smuggled in through an opts property.
+    const { signal, task, hints, responseSchema, responseValidator } = normalizeOpts(opts);
+    assertStructuredResponseSchema(responseSchema, 'callHostStagedDocument');
+    const capHints = { promptLength: prompt?.length || 0, ...hints };
+    const { maxTokens, formulaSeed, handoffSettings } = manualRequestConfig(task, capHints, {
+      requestKind: 'structured-document',
+    });
+    // The validator above establishes this path's host-stage ownership.  Do
+    // not replace it with a generic path check here: its lexical component is
+    // intentionally renderer-denied (`career-input-staging`).  The private
+    // Symbol is consumed here rather than accepted through `opts`.
+    assertHostStagedDocumentCapability(approvedPath, HOST_STAGED_DOCUMENT_ATTACHMENT);
+    return requestNonApiAi({
+      prompt, task, responseSchema, maxOutputTokens: maxTokens,
+      formulaSeed, handoffSettings, batch: hints.batch, batchTotal: hints.batchTotal, itemCount: hints.itemCount,
+      itemsDone: hints.itemsDone, itemsTotal: hints.itemsTotal, planItemCount: hints.planItemCount, matchCount: hints.matchCount,
+      progressScopeId: hints.progressScopeId, progressUnitId: hints.progressUnitId, progressUnits: hints.progressUnits,
+      attemptKind: hints.attemptKind, rootBatchSize: hints.rootBatchSize,
+      attachmentPaths: [approvedPath], requestKind: 'structured-document', responseValidator,
+      // A host-owned staged copy gets a fresh random pathname on every
+      // staging.  Declaring it host-staged lets the handoff layer key durable
+      // work on the content-bound identity and refuse to show a prompt whose
+      // staged file has vanished.
+      ...(attachmentIdentity ? { attachmentIdentities: [attachmentIdentity], hostStagedAttachments: true } : {}),
+      measureProgressUnits: opts?.measureProgressUnits, signal,
+    });
+  };
+}
+
 export async function callLLMDocument(filePath, prompt, opts = {}) {
   // A document node's filePath is sourced from loaded canvas JSON — an
   // untrusted/shared canvas could point a node at a sensitive system/
   // credential path. Gate here as the single shared entry point before the
   // file is ever Finder-revealed to the user as an attachment.
-  if (isSensitivePath(path.resolve(String(filePath || '')))) {
-    throw new Error(`Refusing to read a sensitive system/credential path as an AI attachment: ${filePath}`);
-  }
+  assertRendererAttachmentPathAllowed(filePath);
   const { signal, task, hints, responseSchema, responseValidator } = normalizeOpts(opts);
   assertStructuredResponseSchema(responseSchema, 'callLLMDocument');
   // The manual handoff does not use a cached prefix for document calls, so

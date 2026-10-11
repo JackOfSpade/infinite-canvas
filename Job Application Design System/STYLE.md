@@ -493,9 +493,9 @@ this budget moves with the location's own width.
   to a `Selected Systems` entry against the bullet corpus, applied
   bullet-to-bullet within one role (`SKILL.md`'s "Do not let one
   bullet restate another"). The tell: a bullet whose subject is the
-  previous bullet's object ("Containerized **the internal-tools
-  hub**…" right after the bullet that built it) is almost always the
-  second half of one accomplishment. Splitting one bullet into two to
+  previous bullet's object ("<Packaged> **<the artifact>**…" right
+  after the bullet that built it) is almost always the second half of
+  one accomplishment. Splitting one bullet into two to
   make a role look fuller is padding, never a repair for a short page
   — the fix is a source-supported accomplishment the page doesn't
   carry yet, not the same one told twice.
@@ -568,7 +568,7 @@ it anyway is welcome, and never a defect.
 |---|---|
 | "Led the migration — reducing p99 latency by 40%." | "Led the migration, reducing p99 latency by 40%." |
 | "Improved the system — and reduced operating cost." | "Improved the system and reduced operating cost." |
-| "I am interested in this role – it involves product-listing workflows." | "The role's product-listing workflows call for maintainable web applications." |
+| "I am interested in this role – it aligns with my experience." | "I am interested in this role because it aligns with my experience." |
 | "The project succeeded - despite the initial constraints." | "The project succeeded despite the initial constraints." |
 
 The repair kit, in order of preference: a comma, a semicolon, a colon
@@ -619,6 +619,15 @@ what this employer needs.
 - **Never change what happened.** Reordering, not rewriting. A
   bullet's facts, numbers, and scope stay exactly as authored; only
   its position in the list changes per application.
+- **Never answer a requirement the evidence does not support.** The
+  first bullet answers the highest-priority requirement that role's
+  approved evidence supports; a requirement no evidence supports is
+  answered by no bullet, however close a neighbouring skill looks.
+- **Never promote the candidate's part.** A bullet keeps that part as its
+  source words it: work the source describes as maintenance, support,
+  monitoring, administration, operation or participation is written with
+  a matching verb and is never presented as work the candidate performed,
+  built or owned.
 - **Never rank by chronology.** The most recent bullet is not
   automatically first; a two-year-old bullet that matches the JD
   beats a last-quarter bullet that doesn't.
@@ -885,8 +894,9 @@ enforces what a check against a finished sample cannot see: a block of
 6 terms or more must sort them into at least 2 rows, every term must
 carry an uppercase letter or a digit (the decidable form of the
 filterable-nouns rule above, and what rejects a lowercase concept such
-as "connectors"), and a label must be a domain drawn from a neutral
-vocabulary or occur verbatim in the candidate's own career data. The
+as "scalability"), and a label must be a neutral category label (a
+domain noun, never an editorializing word or a section name) or occur
+verbatim in the candidate's own career data. The
 three numbers are one set across three files: change 3 / 20 / 64 here
 and they change in `build/fit-estimate-test.js` (`BUDGET`) and in that
 validator too, or the consumer's test suite, which reads the build file
@@ -958,8 +968,8 @@ Rules:
   puts header text inside that block's margin, break, and `:last-child`
   rules, and makes every consumer's `.role { … }` restyle the header.
   No `.tagline` descendant may reuse a block-component class name.
-- **Never a specialisation or marketing tagline.** "Python backend,
-  data integration &amp; full-stack delivery", "distributed systems
+- **Never a specialisation or marketing tagline.** "<language> backend,
+  <function> &amp; <breadth> delivery", "distributed systems
   &amp; storage infrastructure", "driving growth through data" — all
   forbidden. The subtitle states what the candidate *is* and what
   they *completed*; the bullets carry the specialisation as evidence.
@@ -1428,7 +1438,7 @@ the default — an acceptable trade for printability across the
 dual-mode contract. Do not lower it for visual nicety; printability
 is the load-bearing constraint.
 
-**Choosing between dual-pdf and ink-only.** The agent's per-company
+**Choosing between dual-pdf and ink-only.** The agent's recipient-signal
 decision rule lives in `SKILL.md §Variant selection`. Both are
 valid shipping configurations; `dual-pdf` is the default because it
 covers both screen and print rooms in a single artifact, but for
@@ -1603,10 +1613,12 @@ The opening sentence must begin with one of:
 2. **A concrete evidence-to-employer-need connection** — a specific
    piece of the candidate's own experience laid directly against
    something the role or the company needs.
-3. **A supported observation about the company's work** that
-   establishes the candidate's relevant direction — a real, specific
-   read on what the company is building, connected to where the
-   candidate's own work has been pointed.
+3. **A supported observation about the target work** that
+   establishes the candidate's relevant direction — one the posting text
+   itself states, laid against where the candidate's own work has been
+   pointed. An assertion about the employer's domain, product, customers or
+   needs that the posting does not state is one the candidate cannot back, so
+   it is not made.
 
 This gate applies to the first sentence only. The opening paragraph may use
 as many further sentences as it needs to establish the connection, evidence,
@@ -1638,6 +1650,17 @@ role, and still read as generic throat-clearing? If yes, it is an
 announcement and must be rewritten. If the sentence falls apart
 without the specific company and role in it, because the substance
 depends on them, it passes.
+
+Name the target role by the title the job record gives and the employer by
+name in the opening, in the sentence that states the closest capability the
+cited work directly shows, and take both from the job record alone; when the
+record gives no usable title or no usable employer, name the one it gives,
+leave out the other, and invent neither. Write the opening from the
+candidate's side: it makes no assertion about the employer's domain, product,
+customers or needs beyond what the posting text itself says. The title and the
+employer are named once, there, as the place the capability is pointed at;
+every later reference to the position is proximal (*this role*), as the
+paragraph below requires.
 
 **Frame the source of employer context accurately.** A statement about an
 employer, team, product, or operational practice that comes only from the job
@@ -1671,14 +1694,54 @@ relevant evidence gets said, not about inventing or hiding evidence.
 
 **Paragraph structure is not a sentence template.** Give each paragraph one
 argumentative job, not a prescribed number of sentences. Use as many sentences
-as clarity requires, and split separate claims, action steps, or relevance
-links when a combined sentence is harder to parse. A sentence may introduce an
-artifact and the next may explain its supported trigger or follow-up action.
-Do not force every supported feature into the introduction. Likewise, do not
+as the proof needs (usually two to four), and split separate claims or action
+steps within the paragraph when a combined sentence is harder to parse. A
+one-sentence paragraph is for emphasis, a one-line hook or
+a one-line closing, and a letter has at most two of them; a detail of a source
+that the résumé already lists does not get a paragraph of its own. The app
+enforces the cut: a letter of 90 words or more keeps to 7 body paragraphs,
+averages at least 25 words per paragraph, and spreads one career-data quote
+over no more than 4 paragraphs. A sentence may
+introduce an artifact and the next may explain its supported trigger or
+follow-up action. Do not force every supported feature into the introduction. Likewise, do not
 insert a standalone abstract sentence merely to label a "problem shape" or say
 that the work was difficult. Explain the evidence-to-role relationship only
-when the proof and transfer do not already make it clear, using concrete
-actors, artifacts, and actions wherever they help the reader.
+when the proof does not already make it clear, using concrete
+actors, artifacts, and actions wherever they help the reader. Pick the two or
+three strongest proofs. A sentence that turns a proof toward the employer
+belongs in at most one paragraph of a letter, the first that carries a proof,
+and it is worded in the writer's own natural wording, in a sentence other than
+the one that carries the proof; no stock phrase or sentence frame is required
+for it, and a generic sentence such as "I would apply this experience in this
+role" is what to avoid. A later proof paragraph owes no sentence about the
+target and no relevance span: it is bound to the requirement its proof answers
+by its `jobNeedQuote` and ends on a concrete outcome of what the work did, so
+the letter does not close each paragraph on the same kind of sentence, and a
+sentence that only echoes the posting's vocabulary can be cut.
+A sentence about the target also claims no benefit (availability,
+reliability, scalability, cost, security and the like) that the paragraph's
+own proof does not state.
+
+A body paragraph also adds what its résumé bullet cannot: the reason,
+constraint, decision or outcome that a career-data quote it cites states in its
+own words. It never says the bullet again and never adds a reason or outcome no
+cited quote states. The number of proof paragraphs follows the evidence: two
+suffice when the cited quotes are one-line achievements, and a paragraph added
+to reach a count is padding; where a cited quote states nothing beyond its
+bullet, the paragraph says the proof plainly, invents no reason for it, and a
+letter whose evidence is all of that kind uses fewer, plainer paragraphs. Each
+paragraph's `jobNeedQuote` is the posting requirement its own proof answers, and
+no two paragraphs share one quote. A sentence that adds nothing beyond the
+posting's own vocabulary is filler. The claim span and the relevance span are
+owed only by the first proof-bearing paragraph of the letter: the claim is a
+phrase inside a sentence the paragraph needs anyway, never a sentence of its
+own, and the relevance is that paragraph's own sentence about the target, apart
+from the proof sentence. The close ties one concrete item the letter has already
+shown to the role and adds no new frame; in the authorship form (“the
+<artifact> I built”) the artifact is a noun the letter already used for the
+candidate's own work, in an earlier sentence or in a cited quote. A highest- or high-priority requirement the approved
+career evidence does not support is not claimed, implied or approximated in
+either document.
 
 **Scope.** Rule 1 (volunteered weaknesses) and the closing
 synthesis rule are cover-letter rules — the résumé has no prose in
@@ -1770,23 +1833,23 @@ intended parse yet still send a new reader down the wrong path when adjacent
 words form a familiar compound or phrase across a clause boundary. Test the
 first read, not just the eventual grammar: if the reader could initially take
 the adjoining words as a different unit, recast the verb or clause. Do not use
-a comma to force a subject–verb break. For example, where a noun ending in
-“tool” is followed by a verb phrase beginning “calls for,” choose a verb such
-as “requires” so the reader never first sees the unrelated compound “tool
-calls.”
+a comma to force a subject–verb break. For example, where the last word of
+a noun phrase and the first word of the verb phrase after it would read first
+as a familiar compound noun, choose a different verb so the reader never first
+sees the unrelated compound.
 
 **Give each technology its actual operation.** A technology name earns its
 place only when the governing verb accurately describes what it did in the
 system. Do not group components with distinct roles under one operation merely
-because they were deployed together. A container orchestrator can coordinate or
-define containers; a web server can serve or proxy; an application server can
-run the application. Describe those operations separately rather than saying a
-web server or application server “containerized” a service.
+because they were deployed together. Each component can claim only the
+operation that belongs to its own role: describe those operations separately
+rather than assigning one component’s verb to a component whose role is
+different.
 
 **Delete category restatements.** A bridge sentence must add a decision,
 mechanism, constraint, result, or relation to the argument. A sentence that
-only restates its own category — for example, “For tools that remained
-in-house, I built software” — supplies no evidence or transition. Rewrite it
+only restates its own category — for example, “For <category>, I built
+<generic noun>” — supplies no evidence or transition. Rewrite it
 with the distinction that matters, or delete it.
 
 **5. Keep coordinated elements grammatically parallel.** Coordination
@@ -1804,22 +1867,21 @@ signal itself carries two further defects.
 
 *The wrong span preposition.* Write a span as `from X to Y`. `to` can
 only mark a terminus, while `through` keeps a second reading as a path
-the first endpoint travels along — *from the quote request through the
-final analysis* can be read as the request passing through the
-analysis, and the fixed phrase *in the final analysis* pulls the same
-way. Reserve `through` for an enumerable series, where no second
+the first endpoint travels along — *from <first stage> through <last
+stage>* can be read as the first stage passing through the last, and
+when the last stage's name also begins a fixed phrase, that phrase pulls
+the same way. Reserve `through` for an enumerable series, where no second
 reading survives: `2019 through 2023`, `Monday through Friday`,
 `steps 2 through 5`.
 
 *A stewardship verb standing in for the work.* A span states where a
 process began and ended, so the verb governing it must still state
-what was done. *Carrying each one from the quote request to the final
-analysis* names two endpoints and no action; so do *running*,
-*taking*, *owning*, and *driving* something from one stage to another.
-Name the steps instead — requested the quotes, compared the products,
-wrote the analysis — or keep the span and give it a verb that reports
-real work. A verb naming a concrete transfer between two real systems
-is not this defect.
+what was done. *Carrying each one from <first stage> to <last stage>*
+names two endpoints and no action; so do *running*, *taking*, *owning*,
+and *driving* something from one stage to another. Name the steps
+instead — one verb phrase per step the source states — or keep the span
+and give it a verb that reports real work. A verb naming a concrete
+transfer between two real systems is not this defect.
 
 Repair by putting every coordinated element in the same form — noun
 phrase with noun phrase, action with action — and prefer whichever
@@ -1888,9 +1950,10 @@ forward.
 
 **Write from the evidence, not from its phrasing.** Preserve every fact and
 its scope, but vary distinctive source constructions across the résumé and
-letter. “Built from scratch” is rarely load-bearing; use a natural supported
-verb such as “designed and implemented,” “created,” “developed,” or “delivered”
-when it carries the same meaning. Establish the argumentative relationship
+letter. A distinctive stock phrase carried over verbatim from a source is
+rarely load-bearing; use a natural supported verb such as “designed and
+implemented,” “created,” “developed,” or “delivered” when it carries the same
+meaning. Establish the argumentative relationship
 before introducing a new employer, project, or period. Temporal contrast words
 such as “now,” “still,” “again,” “before,” and “after” require an explicit
 contrast or sequence already on the page. Prefer common contemporary diction:
@@ -1922,17 +1985,30 @@ without relying on conditional or deferential boilerplate: “I welcome a
 conversation” is direct; “I would welcome a conversation” or “I would welcome
 a discussion” is not. Three things carry that connection, all inside the same
 sentence: name the asset with a possessive, an authorship clause, or a
-demonstrative carrying its own descriptor (“my integration work”, “the
-connector I built”, “that MCP server experience”) rather than a bare
-demonstrative (“that work”); say what it does (“… could support …”, “…
+demonstrative carrying its own descriptor (“my <work noun>”, “the
+<artifact> I built”, “that <domain> <work noun> experience”) rather than a bare
+demonstrative (“that work”), where the artifact in an authorship clause is a
+noun the letter has already used for the candidate's own work, as the object of
+an earlier sentence in which the candidate built, wrote, designed or created it
+or in a cited career-data quote; say what it does (“… could support …”, “…
 supports …”, “applying … to …”); and reach the employer's own side of that
 action with an explicit target — “your …”, “the” or “this” plus a work noun
-(“the platform”, “this team”, “the roadmap”), a reader noun (“customers”,
+(“the <noun>”, “this <noun>”, with up to two words before the noun), a reader noun (“customers”,
 “users”, “clients”), or the employer's own name. A sentence that names only
 the candidate's asset and what it does — with no employer-facing target in
 that same sentence — does not pass, however specific the asset is; naming the
-target earlier in the paragraph and leaving this sentence to close on the
-asset alone does not satisfy it either.
+target earlier in the paragraph and leaving this sentence to close on the asset
+alone does not satisfy it either. The verb comes from a closed list: support,
+contribute, help, advance, strengthen, improve, build, deliver, apply, serve,
+shorten, extend, scale, accelerate or fit after can, could, would, will or might
+(or in the present tense, as in “supports”), or applying, bringing, putting,
+using, contributing, extending, connecting or carrying; any other verb fails
+that part however naturally it reads. An authorship clause with built, wrote,
+designed, created, developed, led, owned or maintained states a past action of
+the candidate, so a closing that uses one is a proof-bearing paragraph and the
+review records an argumentMapping for it (a proof span and a jobNeedQuote that
+no other paragraph uses); prefer a possessive asset unless the artifact is the
+strongest item the letter showed.
 
 ### 11.3 Accent &amp; the close
 

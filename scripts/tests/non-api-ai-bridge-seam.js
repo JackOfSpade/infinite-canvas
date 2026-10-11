@@ -966,7 +966,7 @@ export default [
       const refused = await submitNonApiAiResponseForBridge({ requestId: by('WITH FILE').requestId, handoffCode: by('WITH FILE').handoffCode, response: answer(by('WITH FILE')), ...everything });
       assert(refused.outcome === 'ineligible' && refused.exclusion === 'attachment', 'submitting to an attachment handoff is refused untouched');
       assert(BRIDGE_EXCLUSION_REASONS.every(reason => reason in listed.excluded), 'every reason is reported');
-      assert(BRIDGE_RAW_RESEARCH_TASKS.join() === 'job-compensation-research,job-compensation-research-batch,job-preference-research,job-preference-research-batch', 'raw bridge eligibility remains an exact reviewed task set');
+      assert(BRIDGE_RAW_RESEARCH_TASKS.join() === 'job-compensation-research,job-compensation-research-batch,job-preference-research,job-preference-research-batch,interview-brief-research', 'raw bridge eligibility remains an exact reviewed task set');
       await cancelAll(sender, requests);
       await run.catch(() => {});
     },

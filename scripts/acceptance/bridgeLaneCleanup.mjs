@@ -5,8 +5,12 @@
  * rename implementation cannot close a parent-symlink swap TOCTOU window.
  *
  * The bridge runtime is the sole lanes.json writer. Its in-process store and
- * engine serialize normal removal. The harness therefore records a deferred
- * request after its own job/bundle rollback and performs no lane-store I/O.
+ * engine serialize normal removal. The harness therefore performs no
+ * lane-store I/O; it returns a deferred receipt after its own job/bundle
+ * rollback. The live bridge then keeps the lane as a needs-you row: once its
+ * own probes prove the released location holds neither the canvas nor the
+ * job's private files, the row reads "canvas missing", and the person removes
+ * it with the panel's explicit Remove from bridge action (never silently).
  */
 
 function validJobId(value) {
@@ -36,6 +40,7 @@ export function deferOwnedBridgeLaneCleanup({
     removed: false,
     deferred: true,
     reason: 'live bridge runtime exclusively owns lanes.json persistence',
+    liveBridgeAction: 'remove_from_bridge_panel',
   });
   if (afterValidationForTest !== null) {
     if (typeof afterValidationForTest !== 'function') {

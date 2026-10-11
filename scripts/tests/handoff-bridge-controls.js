@@ -15,6 +15,7 @@ import { createHandoffBridgePower } from '../../electron/ipc/handoffBridge/power
 import { createHandoffBridgeTray, snapshotToTray } from '../../electron/ipc/handoffBridge/tray.js';
 import { createHandoffBridgeDialogs } from '../../electron/ipc/handoffBridge/uiDialogs.js';
 import { createHandoffBridgeLog } from '../../electron/ipc/handoffBridge/log.js';
+import { APPLICATION_QUEUE_STAGES } from '../../electron/ipc/handoffBridge/telemetry.js';
 import { discardLocalApplicationJob, queueLocalApplicationJob } from '../test-dependencies.js';
 import { createLaneStore } from '../../electron/ipc/handoffBridge/laneStore.js';
 import { composeHandoffBridge, ENABLE_CONSENT_VERSION, handleApplicationBundleRemoved, registerHandoffBridgeHandlers, scheduleHandoffBridgeLaunch, startHandoffBridge, stopHandoffBridge } from '../../electron/ipc/handoffBridge/index.js';
@@ -250,6 +251,58 @@ export default [
     assert(blank.controller.snapshot(false).config.pluginName === 'infinite_canvas'
       && custom.controller.snapshot(false).config.pluginName === 'My Bridge 2',
     'controller snapshots must repair only blank legacy plugin names');
+  } },
+  { name: 'handoff bridge: controls: post-letter application stages survive the closed controller projection', run() {
+    // Every stage the engine and the bug report share, so the controller's
+    // own closed copy cannot silently drop one of them.
+    const stages = [...APPLICATION_QUEUE_STAGES];
+    const engine = enginePort({ status: () => ({
+      queue: {
+        applications: { ready: 0, working: stages.length, needsYou: 0, held: 0, done: 0 },
+        jobs: stages.map((stage, index) => ({ jobId: `550e8400-e29b-41d4-a716-${String(index + 1).padStart(12, '0')}`, phase: 'awaiting', stage })),
+      },
+      chat: { state: 'working', jobsCap: 2, outstanding: { kind: 'application', stage: 'blind-review' } }, counts: {},
+    }) });
+    const status = controllerHarness({ engine }).controller.snapshot(false);
+    assert(status.queue.jobs.map(job => job.stage).join(',') === stages.join(',')
+      && status.chat.outstanding?.stage === 'blind-review',
+    'each allowed post-letter stage must reach the renderer while the projection remains closed');
+  } },
+  { name: 'handoff bridge: controls: the review-stop reason reaches the renderer through the closed status projection, and an unknown reason does not', run() {
+    const job = (index, reason) => ({ jobId: `550e8400-e29b-41d4-a716-${String(index).padStart(12, '0')}`, phase: 'needs_user', stage: 'blind-review', reason });
+    const engine = enginePort({ status: () => ({
+      queue: { applications: { ready: 0, working: 0, needsYou: 2, held: 0, done: 0 }, jobs: [job(1, 'review_stop'), job(2, 'made_up_reason')] },
+      chat: { state: 'none', jobsCap: 2 }, counts: {},
+    }) });
+    const jobs = controllerHarness({ engine }).controller.snapshot(false).queue.jobs;
+    assert(jobs[0].reason === 'review_stop' && jobs[0].phase === 'needs_user' && jobs[1].reason === null, `the closed projection keeps the review stop and drops what it does not know (${JSON.stringify(jobs.map(item => item.reason))})`);
+  } },
+  { name: 'handoff bridge: controls: a canvas_missing refinement crosses the closed projection and a reason-only change republishes on tick', async run() {
+    let reason = 'canvas_unavailable';
+    const engine = enginePort({ status: () => ({
+      queue: { applications: { ready: 0, working: 0, needsYou: 1, held: 0, done: 0 }, jobs: [{ jobId: '550e8400-e29b-41d4-a716-000000000001', phase: 'needs_user', stage: 'resume', reason }] },
+      chat: { state: 'none', jobsCap: 2 }, counts: {},
+    }) });
+    const scheduled = new Map(); let nextTimer = 0;
+    const timers = {
+      setTimeout(fn, delay = 0) { const id = ++nextTimer; scheduled.set(id, { fn, delay, interval: false }); return { id, unref: NOOP }; },
+      setInterval(fn, delay = 0) { const id = ++nextTimer; scheduled.set(id, { fn, delay, interval: true }); return { id, unref: NOOP }; },
+      clearTimeout(timer) { scheduled.delete(timer?.id ?? timer); },
+      clearInterval(timer) { scheduled.delete(timer?.id ?? timer); },
+      flush() { for (const [id, task] of [...scheduled]) { if (task.interval || task.delay !== 0) continue; scheduled.delete(id); task.fn(); } },
+    };
+    const published = [];
+    const h = controllerHarness({ engine, timers, ui: { confirmEnable: async () => ({ response: 1 }), confirmRestart: async () => ({ response: 1 }), notify: NOOP, publishStatus: value => published.push(value) } });
+    await h.controller.enable();
+    await h.controller.tick(); timers.flush();
+    published.length = 0;
+    await h.controller.tick(); timers.flush();
+    assert(published.length === 0, 'an unchanged needs-you row does not republish every tick');
+    reason = 'canvas_missing';
+    await h.controller.tick(); timers.flush();
+    assert(published.length === 1 && published[0].queue.jobs[0].reason === 'canvas_missing',
+      `a phase-preserving reason change is published without any request, through the closed projection (${published.length})`);
+    await h.controller.disable();
   } },
   { name: 'handoff bridge: controls: selected unclaimed push tokens reach the renderer through the closed status projection', run() {
     const available = Array.from({ length: 101 }, (_value, index) => `550e8400-e29b-41d4-a716-${String(index).padStart(12, '0')}`);

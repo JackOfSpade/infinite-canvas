@@ -171,6 +171,19 @@ export default [
     },
   },
   {
+    name: 'application bridge page: post-letter workflow rows stay on the final review step',
+    run: () => {
+      for (const stage of ['requirement-disposition', 'blind-review', 'blind-repair-context']) {
+        const status = statusWith([heldJob('a', 'awaiting', { stage, awaitingAnswer: true, servedAt: 0 })], {
+          state: 'working', ordinal: 1,
+        });
+        const [row] = buildApplicationPageRows({ held: [appRequest('a', { stage })], status });
+        assert(row.view.steps.map(step => step.state).join(',') === 'done,done,done,current', `${stage}: the row preserves completed authoring work`);
+        assert(row.view.kind === 'writing' && row.view.headline === 'ChatGPT is working on: Review and edit', `${stage}: the row remains a live final-step handoff`);
+      }
+    },
+  },
+  {
     name: 'application bridge page: rows use ordinalFor, tolerate throws, and fall back subject',
     run: () => {
       const status = statusWith([heldJob('a', 'unread')]);

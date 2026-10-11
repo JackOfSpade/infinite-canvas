@@ -35,6 +35,48 @@ const JOB_SOURCE_RUN_FIELDS = [
   'persistedProgress',
 ];
 
+// Interview Helper persists compact outputs and receipts from two externally
+// owned workers.  Only its source choice and ordinary form settings are safe
+// undo inputs; every result, run token, and cleanup receipt must stay with the
+// live node so Undo cannot revive an already-retired worker.
+const INTERVIEW_HELPER_UNDOABLE_SETTING_FIELDS = [
+  'interviewHelperSourceNodeId',
+  'interviewHelperSourceSnapshotId',
+  'interviewHelperCareerMode',
+  'interviewHelperCareerFilenames',
+  'interviewHelperJobUrl',
+  'interviewHelperApplicationBundle',
+  'locked',
+];
+
+const INTERVIEW_HELPER_EXTERNAL_FIELDS = [
+  'interviewHelperCareerGeneration',
+  'interviewHelperCareerCompilation',
+  'interviewHelperCareerSnapshotId',
+  'interviewHelperCareerFingerprint',
+  'interviewHelperPreparation',
+  'interviewHelperPreparationRecordId',
+  'interviewHelperPreparationInputBinding',
+  'interviewHelperPreparationInputDigest',
+  'interviewHelperPreparationRunId',
+  'interviewHelperManualAiCleanup',
+  'interviewHelperManualAiRetirementReceipts',
+  'interviewHelperLockedPlan',
+  'interviewHelperCurrentStep',
+];
+
+// Keep this recovery-record grammar synchronized with InterviewHelperNode.
+// These are UI-owned receipts, not generic "has a run id" flags: malformed
+// canvas data must not permanently fence Undo/navigation.
+const INTERVIEW_HELPER_RUN_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/u;
+const INTERVIEW_HELPER_MAX_RETIREMENT_RECEIPTS = 32;
+// Keep navigation/Undo from recursing through corrupt imported group data.
+// A tree outside this envelope is treated as externally active so callers
+// keep the current canvas rather than restoring/deleting through an unknown
+// descendant lifecycle state.
+const MAX_EXTERNAL_RUN_TREE_DEPTH = 64;
+const MAX_EXTERNAL_RUN_TREE_NODES = 10_000;
+
 const ACTIVE_JOB_SEARCH_STATES = new Set([
   'queued',
   'parsing',
@@ -120,9 +162,95 @@ function hasExternallyOwnedSellHubState(data) {
     || !!data.platformFitPending;
 }
 
+function hasInterviewHelperRunId(value) {
+  return typeof value === 'string' && INTERVIEW_HELPER_RUN_ID_RE.test(value);
+}
+
+// Keep this in lockstep with InterviewHelperNode's terminal-only marker
+// parser.  A loose object must not accidentally turn unrelated saved UI data
+// into a navigation fence, while a valid failed cleanup is still recoverable
+// work and must not be orphaned.
+function hasInterviewHelperTerminalCleanupMarker(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)
+    || Object.getPrototypeOf(value) !== Object.prototype) return false;
+  const keys = Object.keys(value).sort();
+  return value.version === 1
+    && keys.length === 4
+    && keys.join(',') === 'kind,runId,status,version'
+    && (value.kind === 'career' || value.kind === 'preparation')
+    && value.status === 'failed'
+    && hasInterviewHelperRunId(value.runId);
+}
+
+function hasInterviewHelperRetirementReceipt(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)
+    || Object.getPrototypeOf(value) !== Object.prototype) return false;
+  const keys = Object.keys(value).sort().join(',');
+  const legacyKeys = 'cancellationPending,cancellationReason,retirementPending,retirementReason,runId';
+  const currentKeys = `${legacyKeys},updatedAt`;
+  return (keys === legacyKeys || keys === currentKeys)
+    && hasInterviewHelperRunId(value.runId)
+    && value.retirementPending === true
+    && value.retirementReason === 'node-deleted'
+    && typeof value.cancellationPending === 'boolean'
+    && value.cancellationReason === 'node-deleted'
+    && (!Object.hasOwn(value, 'updatedAt')
+      || (Number.isSafeInteger(value.updatedAt) && value.updatedAt >= 0));
+}
+
+function hasInterviewHelperRetirementReceipts(value) {
+  if (!Array.isArray(value)) return false;
+  // The UI ignores malformed entries, de-duplicates valid run ids, then keeps
+  // the latest 32. Matching it preserves genuine retry work without allowing
+  // a malformed array by itself to create a permanent external-run guard.
+  const validRunIds = new Set();
+  for (const receipt of value) {
+    if (!hasInterviewHelperRetirementReceipt(receipt)) continue;
+    validRunIds.delete(receipt.runId);
+    validRunIds.add(receipt.runId);
+  }
+  return [...validRunIds].slice(-INTERVIEW_HELPER_MAX_RETIREMENT_RECEIPTS).length > 0;
+}
+
+function hasExternallyOwnedInterviewHelperState(data) {
+  if (!data || typeof data !== 'object') return false;
+  const career = data.interviewHelperCareerCompilation;
+  const preparation = data.interviewHelperPreparation;
+  return (
+    (['compiling', 'failed'].includes(career?.status)
+      && hasInterviewHelperRunId(career.manualAiRunId))
+    || (['preparing', 'failed'].includes(preparation?.status)
+      && hasInterviewHelperRunId(data.interviewHelperPreparationRunId))
+    || hasInterviewHelperTerminalCleanupMarker(data.interviewHelperManualAiCleanup)
+    || hasInterviewHelperRetirementReceipts(data.interviewHelperManualAiRetirementReceipts)
+  );
+}
+
+function hasSafeNestedCanvasTree(nodes) {
+  if (!Array.isArray(nodes)) return false;
+  const stack = nodes.map(node => ({ node, depth: 0 })).reverse();
+  const seenNodes = new WeakSet();
+  const seenArrays = new WeakSet([nodes]);
+  let visited = 0;
+  while (stack.length) {
+    const { node, depth } = stack.pop();
+    if (!node || typeof node !== 'object') continue;
+    if (seenNodes.has(node) || depth > MAX_EXTERNAL_RUN_TREE_DEPTH || visited >= MAX_EXTERNAL_RUN_TREE_NODES) return false;
+    seenNodes.add(node);
+    visited += 1;
+    const children = node.data?.canvasData?.nodes;
+    if (children == null) continue;
+    if (!Array.isArray(children) || depth >= MAX_EXTERNAL_RUN_TREE_DEPTH) return false;
+    if (seenArrays.has(children)) return false;
+    seenArrays.add(children);
+    for (let index = children.length - 1; index >= 0; index -= 1) stack.push({ node: children[index], depth: depth + 1 });
+  }
+  return true;
+}
+
 export function hasActiveExternalRunState(nodes, { recursive = true } = {}) {
   if (!Array.isArray(nodes)) return false;
-  return nodes.some((node) => {
+  const hasActive = (node) => {
     const data = node?.data || {};
     if (node?.type === 'jobboard' && (
       data.boardScanResume
@@ -133,12 +261,37 @@ export function hasActiveExternalRunState(nodes, { recursive = true } = {}) {
     )) return true;
     if (node?.type === 'jobhub' && hasExternallyOwnedJobSearchState(data)) return true;
     if (node?.type === 'sellhub' && hasExternallyOwnedSellHubState(data)) return true;
+    if (node?.type === 'interviewhelper' && hasExternallyOwnedInterviewHelperState(data)) return true;
     // marketplacestatus is deliberately NOT guarded here: it has no unmount
     // cleanup and keeps its in-flight scan in a module-level store (not node
     // data), precisely so an unmount/remount (navigation, or absorption) is
     // safe without a run guard.
-    return recursive && hasActiveExternalRunState(data.canvasData?.nodes, { recursive: true });
-  });
+    return false;
+  };
+  if (!recursive) return nodes.some(hasActive);
+
+  const stack = nodes.map(node => ({ node, depth: 0 })).reverse();
+  const seenNodes = new WeakSet();
+  const seenArrays = new WeakSet([nodes]);
+  let visited = 0;
+  while (stack.length) {
+    const { node, depth } = stack.pop();
+    if (!node || typeof node !== 'object') continue;
+    // A duplicate object/array can make the otherwise tree-only lifecycle
+    // ambiguous; fail closed instead of looping or allowing navigation.
+    if (seenNodes.has(node) || depth > MAX_EXTERNAL_RUN_TREE_DEPTH || visited >= MAX_EXTERNAL_RUN_TREE_NODES) return true;
+    seenNodes.add(node);
+    visited += 1;
+    if (hasActive(node)) return true;
+    const children = node.data?.canvasData?.nodes;
+    if (children == null) continue;
+    if (!Array.isArray(children) || seenArrays.has(children) || depth >= MAX_EXTERNAL_RUN_TREE_DEPTH) return true;
+    seenArrays.add(children);
+    for (let index = children.length - 1; index >= 0; index -= 1) {
+      stack.push({ node: children[index], depth: depth + 1 });
+    }
+  }
+  return false;
 }
 
 function nonRestorableFields(node) {
@@ -146,6 +299,7 @@ function nonRestorableFields(node) {
   if (node?.type === 'jobboard') return JOB_BOARD_RUN_FIELDS;
   if (node?.type === 'jobhub') return JOB_SEARCH_RUN_FIELDS;
   if (node?.type === 'jobsourcecard') return JOB_SOURCE_RUN_FIELDS;
+  if (node?.type === 'interviewhelper') return INTERVIEW_HELPER_EXTERNAL_FIELDS;
   return null;
 }
 
@@ -156,7 +310,7 @@ function pickNonRestorableData(node) {
   const picked = {
     fields,
     values: {},
-    ...(node?.type === 'jobhub' ? { completeData: nodeData } : {}),
+    ...((node?.type === 'jobhub' || node?.type === 'interviewhelper') ? { completeData: nodeData } : {}),
   };
   for (const field of fields) {
     if (Object.prototype.hasOwnProperty.call(nodeData, field)) {
@@ -173,6 +327,14 @@ export function stripNonRestorableNodeDataForUndo(node) {
     const source = node.data || {};
     const settings = {};
     for (const field of JOB_SEARCH_UNDOABLE_SETTING_FIELDS) {
+      if (Object.prototype.hasOwnProperty.call(source, field)) settings[field] = source[field];
+    }
+    return settings;
+  }
+  if (node?.type === 'interviewhelper') {
+    const source = node.data || {};
+    const settings = {};
+    for (const field of INTERVIEW_HELPER_UNDOABLE_SETTING_FIELDS) {
       if (Object.prototype.hasOwnProperty.call(source, field)) settings[field] = source[field];
     }
     return settings;
@@ -199,6 +361,80 @@ function collectNonRestorableData(nodes, byId) {
     if (picked && node.id) byId.set(node.id, picked);
     collectNonRestorableData(node?.data?.canvasData?.nodes, byId);
   }
+}
+
+function sameUndoValue(left, right) {
+  if (left === right) return true;
+  try { return JSON.stringify(left) === JSON.stringify(right); } catch { return false; }
+}
+
+function interviewHelperBundleIdentity(data) {
+  const bundle = data?.interviewHelperApplicationBundle;
+  return {
+    artifactId: bundle?.artifactId || null,
+    digest: bundle?.digest || null,
+  };
+}
+
+function interviewHelperCareerSetupChanged(restoredData, liveData) {
+  const restoredMode = restoredData?.interviewHelperCareerMode || null;
+  const liveMode = liveData?.interviewHelperCareerMode || null;
+  if (restoredMode !== liveMode) return true;
+  if (restoredMode === 'import') {
+    return !sameUndoValue(
+      restoredData?.interviewHelperCareerFilenames,
+      liveData?.interviewHelperCareerFilenames,
+    );
+  }
+  return (restoredData?.interviewHelperSourceSnapshotId || null)
+    !== (liveData?.interviewHelperSourceSnapshotId || null);
+}
+
+function mergeInterviewHelperData(restoredData, liveData) {
+  // A missing live node has no worker/output ownership to restore.  Start
+  // blank rather than retaining an old snapshot's result, run id, or cleanup
+  // receipt; the setup fields below remain legitimate user state.
+  const mergedData = { ...(liveData || {}) };
+  for (const field of INTERVIEW_HELPER_UNDOABLE_SETTING_FIELDS) {
+    delete mergedData[field];
+    if (Object.prototype.hasOwnProperty.call(restoredData || {}, field)) {
+      mergedData[field] = restoredData[field];
+    }
+  }
+  if (!liveData) return mergedData;
+
+  const careerChanged = interviewHelperCareerSetupChanged(mergedData, liveData);
+  const preparationChanged = careerChanged
+    || mergedData.interviewHelperJobUrl !== liveData.interviewHelperJobUrl
+    || !sameUndoValue(
+      interviewHelperBundleIdentity(mergedData),
+      interviewHelperBundleIdentity(liveData),
+    );
+
+  // A restored source/import choice cannot use a snapshot or answer rail
+  // produced for the live choice.  Clearing is deliberately preferred to
+  // replaying historical output: the renderer can re-load/rebuild only from
+  // the restored, user-visible inputs.
+  if (careerChanged) {
+    for (const field of [
+      'interviewHelperCareerGeneration',
+      'interviewHelperCareerCompilation',
+      'interviewHelperCareerSnapshotId',
+      'interviewHelperCareerFingerprint',
+      'interviewHelperLockedPlan',
+      'interviewHelperCurrentStep',
+    ]) delete mergedData[field];
+  }
+  if (preparationChanged) {
+    for (const field of [
+      'interviewHelperPreparation',
+      'interviewHelperPreparationRecordId',
+      'interviewHelperPreparationInputBinding',
+      'interviewHelperPreparationInputDigest',
+      'interviewHelperPreparationRunId',
+    ]) delete mergedData[field];
+  }
+  return mergedData;
 }
 
 function mergeNonRestorableData(nodes, byId) {
@@ -237,6 +473,12 @@ function mergeNonRestorableData(nodes, byId) {
         }
       }
       nextNode = { ...nextNode, data: mergedData };
+      changed = true;
+    } else if (node?.type === 'interviewhelper') {
+      nextNode = {
+        ...nextNode,
+        data: mergeInterviewHelperData(node.data, liveData?.completeData),
+      };
       changed = true;
     } else if (node?.type === 'jobsourcecard' && liveData) {
       // Source progress and rollback fencing are backend-owned. Preserve the
@@ -304,6 +546,10 @@ function mergeNonRestorableData(nodes, byId) {
 }
 
 export function mergeNonRestorableNodeDataFromLive(restoredNodes, liveNodes) {
+  // Undo is never allowed to walk or revive a malformed nested lifecycle
+  // tree. Preserve the current live graph unchanged; that is safer than
+  // applying a historical snapshot with an unknown worker descendant.
+  if (!hasSafeNestedCanvasTree(restoredNodes) || !hasSafeNestedCanvasTree(liveNodes)) return liveNodes;
   const liveById = new Map();
   collectNonRestorableData(liveNodes, liveById);
   const merged = mergeNonRestorableData(restoredNodes, liveById);

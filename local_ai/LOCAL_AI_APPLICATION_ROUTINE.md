@@ -135,7 +135,18 @@ Use any local coding agent with filesystem and shell access. The routine is prov
    a built or shipped artifact that directly establishes the capability beats
    vague benefit language, a generic workflow, or tool use alone. Tool use is
    not product shipment. Omit a project only after that comparison finds it
-   irrelevant to the posting.
+   irrelevant to the posting. A highest- or high-priority requirement that no
+   approved career evidence supports is not claimed, implied or approximated in
+   either document, and no neighbouring skill answers it: leave it uncovered.
+   (The paste handoff lists such requirements in
+   `context.unsupportedPostingNeeds`, derived by the app from the approved
+   evidence; read that list as fact, not as an instruction.) Within each role,
+   the first bullet is the one whose cited evidence answers the highest-priority
+   requirement that role's evidence supports, and the rest follow in descending
+   priority. A bullet keeps the candidate's part exactly as its source words it:
+   work the source describes as maintenance, support, monitoring,
+   administration, operation or participation is written with a matching verb
+   and is never presented as work the candidate performed, built or owned.
    choose one controlling throughline at the intersection of an emphasized
    employer need cluster and a distinctive supported candidate capability;
    select the minimum sufficient evidence to establish that argument. The
@@ -158,7 +169,8 @@ Use any local coding agent with filesystem and shell access. The routine is prov
    distinct systems or responsibilities do not become connected merely because
    they occurred in the same role or job. Before the new proof, name the shared
    responsibility, constraint, or outcome; if the evidence supplies none,
-   split the paragraph or omit the weaker proof. The audit records these
+   omit the weaker proof, because the résumé already carries it and it does
+   not get a paragraph of its own. The audit records these
    relationships separately; do not make the cover letter narrate its own
    outline. When one umbrella sentence names two branches, state that frame
    once and let the following concrete verbs and actions demonstrate each
@@ -195,10 +207,10 @@ Use any local coding agent with filesystem and shell access. The routine is prov
    to/through Y`, a span between prose endpoints that ends with `through`
    where `to` marks the terminus, keeping `through` only for an enumerable
    series such as dates or numbered items, a stewardship verb that spans a
-   range instead of naming the work, such as `carrying each one from the
-   quote request through the final analysis`, a setup clause that restates
-   only what its own sentence already entails, such as `before those
-   products were adopted, the district had to choose them`,
+   range instead of naming the work, such as `<verb> each <item> from
+   <first stage> through <last stage>`, a setup clause that restates
+   only what its own sentence already entails, such as `before <outcome>
+   happened, <actor> had to <prerequisite the outcome already implies>`,
    unsolicited admissions of missing experience, transitions
    that announce a migration or change but name only the origin or only the
    destination, causal connectives whose premise the preceding sentences never
@@ -210,12 +222,46 @@ Use any local coding agent with filesystem and shell access. The routine is prov
    concluding or transitional sentence must name the concrete responsibility,
    system, decision, or process it synthesizes and remain within that evidence's
    scope. Never end a sentence with an appositive that merely labels prior work
-   as relevant to this role (for example `, work relevant to this role's legacy
-   modernization responsibilities`). Connect the named action directly to the
+   as relevant to this role (for example `, work relevant to this role's
+   <responsibility>`). Connect the named action directly to the
    concrete responsibility, using conditional language for work that would
    occur after hiring, or remove the relevance label.
    Every evidence block must let a recruiter identify why it matters to the
-   target work. A prior employer's maintenance or cost rationale can explain an
+   target work. Pick the two or three strongest proofs, and let the number
+   follow the evidence: two suffice when the cited quotes are one-line
+   achievements, and a paragraph added to reach a count is padding. Each body
+   paragraph develops one proof and adds what the résumé bullet beside it
+   cannot, the reason, constraint, decision or outcome that a career-data quote
+   it cites states in its own words; saying the bullet again adds nothing, and
+   a reason or outcome no cited quote states is an invented fact. Bind each
+   paragraph's `jobNeedQuote` to the posting requirement that paragraph's own
+   proof answers, and bind no two paragraphs to the same quote. A sentence
+   that adds no information beyond the posting's own vocabulary is a defect,
+   not evidence. Only the first
+   proof-bearing paragraph of a letter (the first one that owes an
+   `argumentMapping`, counted in letter order) states that link, in the
+   writer's own natural wording and in a sentence other than the one that
+   carries the proof. No stock phrase, modal or sentence frame is required
+   for it: the host recognises it by the words it shares with the posting
+   quote the paragraph cites, never by a frame. Do not write a generic
+   sentence such as `I would apply this experience in this role`. Every later
+   proof-bearing paragraph owes only its proof and `jobNeedQuote`: it may leave
+   the claim out and may leave the relevance out (only the first proof-bearing
+   paragraph owes either; the claim is a phrase set inside a sentence the
+   paragraph needs anyway, never a sentence written only to carry the claim),
+   and it ends on a concrete outcome of what the work did rather than on
+   another statement of relevance, so a sentence of it that only echoes the
+   posting's vocabulary can simply be cut. A stock transfer frame (`I would` or `I can` apply, bring, use
+   or contribute an experience, practice or approach, or `that practice
+   would help the team`) is never required and appears in at most one
+   paragraph of a letter, the opening and the closing counted. A sentence of
+   a proof-bearing paragraph that states no action of the candidate's own,
+   the sentence about the target included, names a benefit of the work
+   (availability, reliability, resilience, scalability, performance, cost,
+   security, accuracy, safety or compliance) only when a proof sentence of its
+   paragraph or a career-data quote the paragraph cites states that benefit,
+   so it never promises more than the proof showed; the posting's own name
+   for a responsibility is not a claim. A prior employer's maintenance or cost rationale can explain an
    earlier decision, but it is not an employer-facing conclusion unless the
    action-to-target link is already explicit. Add that link when needed; do not
    repeat the target formulaically when the existing prose already makes it
@@ -224,29 +270,32 @@ Use any local coding agent with filesystem and shell access. The routine is prov
    system` instead of repeating the full phrase when the antecedent is
    unambiguous. If more than one referent is plausible, retain the shortest
    clear noun or name. This applies to continuity throughout the paragraph,
-   including the transfer sentence: it must still name the specific target
-   responsibility, and a bare `this` or `that` is not enough. For cross-domain proof, lead with the reusable capability and name
+   including the sentence that states relevance: it must still name the
+   specific target responsibility, and a bare `this` or `that` is not enough.
+   For cross-domain proof, lead with the reusable capability and name
    the actual target responsibility it supports. Then give only enough detail
-   about the prior artifact to prove that capability. `For this role's
-   interactive simulation work, that input-driven interaction practice would
-   support faster prototyping` states the supported transferable capability;
-   a target-facing sentence that instead names an old artifact without the
-   shared mechanism leaves the transfer unstated. The later past-tense proof
+   about the prior artifact to prove that capability. In whatever wording you
+   choose, the one sentence about the target names the supported transferable
+   capability and the target responsibility it bears on, with every slot
+   filled from the posting and the accepted evidence; a target-facing sentence
+   that instead names an old artifact without saying what it bears on leaves
+   the transfer unstated. The later past-tense proof
    can name the source-specific workflow. Explain
-   how that capability would help build the interactions this role actually
+   how that capability bears on the work this role actually
    calls for.
-   Do not claim prior simulation experience unless the evidence says so.
+   Do not claim prior experience in the target domain unless the evidence says
+   so.
    Keep completed experience in a past-tense evidence sentence. When
    describing work the candidate would do after hiring, use conditional or
    explicitly future-facing language. Do not make the completed project the
    subject of a past/present readiness bridge such as `That project prepared
-   me to contribute to the target employer's modernization` or `That project
-   equips me to contribute`. Prefer a direct conditional bridge that names the target
-   responsibility, in a transfer form that differs from the neighbouring
-   paragraphs' transfer forms.
+   me to contribute to <target responsibility>` or `That project
+   equips me to contribute`. Prefer a direct conditional statement that names the target
+   responsibility in your own wording, never in the same wording a
+   neighbouring paragraph uses.
    When a résumé role has an explicit end month before `input.json.createdAt`'s
    month, never frame that named employer or title as current employment or
-   current work. For example, write `As a Software Engineer at Acme, I built
+   current work. For example, write `As a <title> at <employer>, I built
    ...`, not `I build ...`; describe the evidence in past
    tense. A date range marked `Present` or `Current` remains a current role,
    and an employer-free present-tense capability claim is not an employment
@@ -264,9 +313,9 @@ Use any local coding agent with filesystem and shell access. The routine is prov
    noun, or a word standing before it in the carrier, or a form of one of them,
    in an earlier sentence of the same paragraph: put a word an earlier
    sentence of the paragraph uses for that capability directly before the noun,
-   or use one of the back-references the relevance rule permits, `that
+   or use one of the back-references that need no earlier mention, `that
    experience`, `this experience`, `that work`, `this work`, `those patterns`
-   or `these patterns`, which need no earlier mention. No object-position
+   or `these patterns`. No object-position
    carrier such as `apply that X`, and no other sentence that opens with a
    demonstrative, is read by this rule. Every carrier-shaped phrase
    is read in any two consecutive paragraphs, the opening and the closing
@@ -280,8 +329,9 @@ Use any local coding agent with filesystem and shell access. The routine is prov
    and `that Y would help` are one form; any other carrier keeps its determiner
    and a `would` standing directly before its verb, and no other modal, so
    `will apply that X` and `could apply that Y` are one form. Reaching for one
-   form again in the very next paragraph is not compliance with the rule that
-   mandates a carrier, because that rule offers a choice of forms. When a new paragraph continues evidence from
+   form again in the very next paragraph is a choice, because no rule
+   requires a carrier at all; the repair is your own wording in one of the two
+   paragraphs, never a different stock form. When a new paragraph continues evidence from
    one prior employer named in the preceding paragraph, do not repeat its full
    name merely from habit. Within a paragraph, continue naturally when the
    candidate remains the subject or when an introduced skill, system, or
@@ -306,16 +356,18 @@ Use any local coding agent with filesystem and shell access. The routine is prov
    to force the intended grammar. In interface or ownership claims, name the
    concrete actor, artifact, and action instead. Every named technology needs a
    governing verb that describes its actual role. Do not group tools with
-   distinct roles under one operation: a container orchestrator, web server,
-   and application server require distinct descriptions. Reject a bridge
-   sentence that uses `full-stack` as though it described a hub, tool
-   collection, or product. Make it modify the candidate's work, implementation,
-   or responsibility, then state the artifact and the supported contribution
-   directly. For example, write `I built the internal tools hub, including its
-   React front end and Django back end`; write `owned` only when the supplied
+   distinct roles under one operation: describe each tool by the operation
+   that belongs to its own role, and never lend one tool's verb to a tool
+   with a different role. Reject a bridge
+   sentence that uses a breadth modifier such as `full-stack` or `end-to-end`
+   as though it described the artifact or a collection of artifacts. Make it
+   modify the candidate's work, implementation, or responsibility, then state
+   the artifact and the supported contribution directly, in the form `I <verb>
+   <artifact>, including its <component> and <component>` with every slot
+   filled from the supplied evidence; write `owned` only when the supplied
    evidence establishes ownership. Reject a bridge
-   sentence that merely restates a category (`For tools that remained in-house,
-   I built software`) without adding a decision, mechanism, constraint, or
+   sentence that merely restates a category (`For <category>, I built
+   <generic noun>`) without adding a decision, mechanism, constraint, or
    result. Honest
    qualification exists to prevent a misleading claim or answer an explicit
    application question; otherwise state supported adjacent experience
@@ -375,14 +427,35 @@ Use any local coding agent with filesystem and shell access. The routine is prov
 
    For checklist version 3 or 4, each final cover-letter paragraph that states a
    completed candidate action must carry an `argumentMapping` in its matching
-   `generationAudit.coverLetterPlan.paragraphs` entry. Copy four exact final
-   text spans: `claim` (the capability asserted), `proof` (the concrete past
-   action), and `relevance` (the explicit connection to this role's work), plus
-   a short `jobNeedQuote` copied verbatim from `context/job-listing.md`. The
-   spans may overlap and relevance may come before proof, but they must identify
+   `generationAudit.coverLetterPlan.paragraphs` entry. Copy exact final text
+   spans: `proof` (the concrete past action) and a short `jobNeedQuote` copied
+   verbatim from `context/job-listing.md` for every such paragraph, plus the two
+   spans only the first proof-bearing paragraph of the letter owes, `claim` (the
+   capability asserted) and `relevance` (the explicit connection to this role's
+   work). Only the first proof-bearing paragraph of the letter owes a `claim`
+   or a `relevance`; a later proof-bearing paragraph keeps its `proof` and
+   `jobNeedQuote` and may omit either one (it may leave the claim out, and it
+   may leave the relevance out), and a `claim` or `relevance` it does record is
+   held to the same shape. A
+   `claim` is a short phrase that may sit inline in any sentence of the
+   paragraph, the proof sentence included, so it needs no sentence of its own;
+   it names the capability with the nouns of the evidence the paragraph cites
+   and asserts no more than that evidence shows. The spans may overlap and relevance may come before proof, but they must identify
    distinct argumentative work: capability claim, past proof, and target-facing
    relevance. Do not use a generic
-   bridge such as "I would bring this to your team". A paragraph with no
+   bridge such as "I would bring this to your team". For the first
+   proof-bearing paragraph of the letter, `relevance` is a sentence, or part of
+   one, other than the sentence the `proof` span sits in, that says in the
+   writer's own words how that proof bears on the work the `jobNeedQuote` came
+   from: it carries at least two content words of the quote (or one of nine
+   letters or more), is not a generic relevance label, and needs no stock
+   phrase, modal or word shared with the proof. A later proof-bearing
+   paragraph that does record one gives any span that names the responsibility
+   its `jobNeedQuote` came from (it carries at least two content words of the
+   quote, or one of nine letters or more, and is not a generic relevance
+   label) and it needs no sentence about the target, because that paragraph
+   ends on what the work did; it may be the proof sentence itself when that
+   sentence names the responsibility. A paragraph with no
    completed candidate proof, such as a closing invitation, uses
    `"argumentMapping": null`. These are final-state bindings, not notes or
    draft commentary: every non-null span must occur in its final paragraph and
@@ -510,8 +583,8 @@ Use any local coding agent with filesystem and shell access. The routine is prov
      A trailing clause belongs only when it materially adds a supported
      mechanism, constraint, scope, or result to that same point. Delete
      conventional runtime-topology detail that merely proves implementation;
-     in particular, do not append web-server, reverse-proxy, or application-
-     server topology to a complete containerization claim unless that topology
+     in particular, do not append the supporting components that sit beneath
+     an already complete packaging or deployment claim unless that detail
      supplies the job-relevant result or constraint being argued.
    - Keep every `.highlights li` visually uniform: never use `<b>` or
      `<strong>` inside it. Technologies, tools,
@@ -624,7 +697,7 @@ Use any local coding agent with filesystem and shell access. The routine is prov
    useful for the responsibility named in this posting.
    Preserve the posting's modality: a requirement to use a tool or workflow is
    not a responsibility to build, introduce, or integrate it unless the posting
-   separately says so. Tool use, including AI-assisted development, is not
+   separately says so. Tool use of any kind is not
    evidence of shipping a product built around that tool; absent direct product
    evidence, keep the transfer at the narrower supported capability.
    State completed work with yourself as the grammatical subject of the
@@ -649,11 +722,26 @@ Use any local coding agent with filesystem and shell access. The routine is prov
    nothing and is cut. If removing the explanation leaves the same clear
    evidence-to-need connection, remove it.
    Give every paragraph one argumentative job, not a prescribed number of
-   sentences. Use as many sentences as that paragraph needs to make its point,
-   establish its proof, and explain its relevance clearly. Split a sentence
-   when separate claims, action steps, or relevance links need their own clear
-   grammatical path; combine them only when the combined sentence is simpler
-   and easier to parse. Do not compress those jobs into one sentence or force a
+   sentences. Use the sentences that paragraph needs to make its point and
+   establish its proof clearly, usually two to four.
+   A one-sentence paragraph is for emphasis, a one-line hook or a one-line
+   closing, and a letter has at most two of them; no single detail of a source
+   earns a paragraph of its own: choose the strongest two or three proofs,
+   develop each in one paragraph, and leave the rest to the résumé. The app
+   counts how the letter is cut, not what it says: a letter of 90 words or
+   more has at most 7 body paragraphs, averages at least 25 words per
+   paragraph, runs no paragraph past 6 sentences, has at most 2 standalone
+   one-sentence paragraphs, states an action of your own in at least 40% of
+   its paragraphs (I or we, then a verb for what you did or do, even after an
+   adverb: "I carefully fixed", "I review"; "I'd", would, can, am, want, hope,
+   believe, look and welcome state none), speaks in your own voice (I, we, my
+   or our) in at least 30% of its sentences, and cites no one career-data
+   quote from more than 4 paragraphs. Repair a proportion defect by merging,
+   appending or deleting paragraphs, never by splitting one. Split a sentence
+   when separate claims or action steps need their own clear grammatical path;
+   combine them only when the combined sentence is simpler and easier to parse.
+   Only the paragraph that owes the sentence about the target gives it a
+   sentence of its own. Do not compress those jobs into one sentence or force a
    paragraph to follow a fixed claim-proof-relevance sentence pattern. Source
    material that lists one trigger and several resulting actions is not a
    command to reproduce every item in one sentence. Select the load-bearing
@@ -670,7 +758,7 @@ Use any local coding agent with filesystem and shell access. The routine is prov
    subject carried into the next paragraph. If it merely launches a new topic,
    develop it there, move it to the next paragraph, or delete it. Read each
    paragraph's final sentence beside the next paragraph's opening. Cut a
-   factual but optional detail, such as capacity for future additions, when it
+   factual but optional detail when it
    neither completes the current proof nor prepares the next decision. Shared
    employer context alone does not make that detail a useful bridge.
    Prefer the concrete system, data flow, responsibility, or decision to an abstract
@@ -679,7 +767,7 @@ Use any local coding agent with filesystem and shell access. The routine is prov
    side by side merely because they occurred in the same role or job. Before
    shifting to the new proof, name the shared responsibility, constraint, or
    outcome; adjacency and “the same job” are not a bridge. If no supported
-   relationship exists, split the paragraph or omit the weaker proof. When a
+   relationship exists, omit the weaker proof; the résumé already carries it. When a
    sentence announces a migration, move, or change, land it in
    the same sentence by naming both the origin and destination, plus the
    systems and/or data that moved; rewrite raw slash shorthand as natural,
@@ -705,9 +793,10 @@ Use any local coding agent with filesystem and shell access. The routine is prov
    words, for a spaced hyphen used as sentence punctuation, and for an en dash
    outside a date or numeric range. Punctuate introductory
    phrases so the transition into the main subject is immediately clear. When
-   describing interface guidance, distinguish the ability to refer to
-   something from the ability to indicate it visibly on screen, and state only
-   the literal limitation. More generally, prefer a concrete actor, artifact,
+   a sentence describes how a product conveys or indicates something to its
+   user, distinguish figurative reference from the literal, observable
+   mechanism, and state only the literal capability and limitation. More
+   generally, prefer a concrete actor, artifact,
    and action over figurative shorthand whenever it would otherwise obscure
    what an interface, system, or owner actually does. When stating an employer
    need, address the employer or work directly instead of treating its source
@@ -727,15 +816,15 @@ Use any local coding agent with filesystem and shell access. The routine is prov
    read the résumé first. When an opening uses completed work as proof, make
    its prior-work setting clear at that first mention: give the supported role
    and employer when useful, or a concise prior-role cue when the employer's
-   name would distract. For example, `my work building an internal tools hub`
-   leaves the employment context unstated; `in my previous software
-   engineering role, I built an internal tools hub` supplies it when
+   name would distract. For example, `my work building <artifact>`
+   leaves the employment context unstated; `in my previous <role>, I built
+   <artifact>` supplies it when
    the source supports that role and chronology. Keep the target need first,
    then situate the evidence without adding an unsupported employer, role, or
    timeline. Name a specific tool, framework, or product
    only when the job listing or the research names it, or as that paragraph's
-   single concrete anchor; otherwise describe it by category, as in `a Python
-   back end` or `containerized deployment`. The résumé carries the stack, so a
+   single concrete anchor; otherwise describe it by category, as in `a
+   <language> back end` or `a <category> deployment`. The résumé carries the stack, so a
    paragraph naming several tools the listing never mentions is a stack tour
    whatever punctuation separates them. The single-anchor allowance is
    per-paragraph but the budget is letter-wide: across the whole letter at
@@ -763,19 +852,40 @@ Use any local coding agent with filesystem and shell access. The routine is prov
    or discuss. Avoid conditional or deferential closing boilerplate: write `I
    welcome a conversation` rather than `I would welcome a conversation` or `I
    would welcome a discussion`. Apply this as a register rule, not as a
-   template for the closing sentence. Infinite Canvas checks two things in
-   that sentence, and a demonstrative pointing back at an earlier paragraph
-   satisfies neither: name the candidate's asset with a possessive, an
+   template for the closing sentence. Close on one concrete item the letter
+   has already shown, tied to the role. When the closing sentence invites a
+   conversation or states an intent to talk or learn, Infinite Canvas checks
+   three things in it, and a demonstrative pointing back at an earlier
+   paragraph satisfies none of them: name the candidate's asset with a possessive, an
    authorship clause, or a demonstrative that carries its own descriptor
-   (`my integration work`, `the connector I built`, `that systems-integration
-   experience`), and say what that asset does for the target work
-   (`... could support ...`, `... supports ...`, `applying ... to ...`).
+   (`my <work noun>`, `the <artifact> I built`, `that <domain> <work noun>
+   experience`; in an authorship clause the verb is one of built, wrote,
+   designed, created, developed, shipped, led, own, owned, maintained or
+   architected, and the `<artifact>` is a noun this letter has already used for
+   the candidate's own work, as the object of an earlier sentence with such a
+   verb or in a cited career-data quote, though a short fixed list of everyday
+   artifact nouns also passes without that), say what that asset does for the target work
+   (`... could support ...`, `... supports ...`, `applying ... to ...`), and
+   reach the employer's side in the same sentence (`your ...`, `the` or `this`
+   plus a work noun, or a reader noun such as clients, customers or users).
    A bare demonstrative names nothing, and an employer-facing phrase is not a
    candidate asset: `I welcome a conversation about applying that work` is
-   rejected; `I welcome a conversation about applying my integration
-   experience to the connected systems this role owns` is accepted, and so is
-   `I welcome a conversation about where the connector work I built would fit
-   the systems this team already runs`. The final paragraph may synthesize only
+   rejected; `I welcome a conversation about applying my <work noun> to
+   <employer-facing target>` is accepted, and so is `I welcome a conversation
+   about where the <artifact> I built would fit <employer-facing target>`,
+   with every slot filled from this letter's own evidence and the posting. The
+   verb comes from a closed list: support, contribute, help, advance,
+   strengthen, improve, build, deliver, apply, serve, shorten, extend, scale,
+   accelerate or fit after can, could, would, will or might (or in the present
+   tense, as in `supports`), or applying, bringing, putting, using,
+   contributing, extending, connecting or carrying; any other verb fails that
+   part however naturally it reads. An authorship clause with built, wrote,
+   designed, created, developed, led, owned or maintained states a past action
+   of the candidate, so a closing that uses one is a proof-bearing paragraph and
+   the review records an argumentMapping for it (a proof span and a jobNeedQuote
+   that no other paragraph uses); prefer a possessive asset unless the artifact
+   is the strongest item the letter showed.
+   The final paragraph may synthesize only
    evidence and relationships already established in the letter. It must not
    introduce a new organizing frame, force nonparallel choices into one
    decision, or ask the employer to choose between products, prototypes, or
@@ -795,7 +905,9 @@ Use any local coding agent with filesystem and shell access. The routine is prov
    them only when one sentence is simpler and equally clear.
    Develop each body paragraph's point, proof, and relevance across as many
    sentences as clarity requires; do not force those functions into the opening
-   sentence, a fixed sequence, or a single sentence. Do not announce
+   sentence, a fixed sequence, or a single sentence. Clarity usually takes two
+   to four sentences, and the letter-proportion limits stated earlier still
+   apply. Do not announce
    interest, motivation, or enthusiasm through first-person emotional
    declarations or formulas such as `interests me because`, `I am interested
    in`, or `I am excited about`. Name the concrete work and capability directly.
@@ -823,9 +935,14 @@ Use any local coding agent with filesystem and shell access. The routine is prov
    wider writing rule the host deliberately does not enforce: a balance claim
    that pairs a thing's downsides with its upsides is unfalsifiable filler in
    either direction, so state the specific judgment the evidence supports.
-   The
-   company or exact role title may appear only when it distinguishes the target
-   responsibility being discussed, not merely to identify the application. Respect the
+   Name the target role by the
+   title the job record gives and the employer by name in the opening, inside
+   the sentence that states the closest capability the cited work directly
+   shows, as the target that capability is pointed at and never as an
+   announcement of the application. Take both from the job record alone, and
+   write the opening from the candidate's side: assert nothing about the
+   employer's domain, product, customers or needs beyond what the posting text
+   itself says. Respect the
    recruiter's intelligence: every opening sentence must contain information
    the application context did not already provide. Do not open with the name
    or description of a personal project, prior employer, or other proof item,
@@ -994,14 +1111,14 @@ more.
       "controllingThesis": "One specific controlling claim that organizes the complete letter.",
       "paragraphs": [
         {
-          "paragraph": "Specific target-work observation. Supported candidate capability claim. Concrete past action. Second proof sentence. Explicit transfer to target responsibility.",
+          "paragraph": "Specific target-work observation. Concrete past action that shows a supported candidate capability set inline, with the reason its cited quote states. A sentence in the writer's own words saying why that proof matters to the target responsibility.",
           "argumentativeJob": "Establish the controlling evidence-to-need connection.",
           "relationToThesis": "Introduces the exact capability and employer need named by the thesis.",
           "relationToPreviousParagraph": "opening",
           "argumentMapping": {
-            "claim": "Supported candidate capability claim.",
-            "proof": "Concrete past action. Second proof sentence.",
-            "relevance": "Explicit transfer to target responsibility.",
+            "claim": "a supported candidate capability set inline",
+            "proof": "Concrete past action that shows a supported candidate capability set inline, with the reason its cited quote states.",
+            "relevance": "A sentence in the writer's own words saying why that proof matters to the target responsibility.",
             "jobNeedQuote": "Exact short verbatim requirement copied from context/job-listing.md."
           },
           "sentences": [
@@ -1011,37 +1128,36 @@ more.
               "relationToPreviousSentence": "opening"
             },
             {
-              "sentence": "Supported candidate capability claim.",
-              "function": "States the capability that connects to the target work.",
+              "sentence": "Concrete past action that shows a supported candidate capability set inline, with the reason its cited quote states.",
+              "function": "Supplies the first completed proof and names the capability it shows in a phrase of the same sentence.",
               "relationToPreviousSentence": "Makes the candidate connection introduced by the target-work observation."
             },
             {
-              "sentence": "Concrete past action.",
-              "function": "Supplies the first completed proof.",
-              "relationToPreviousSentence": "Begins the evidence for the capability claim."
-            },
-            {
-              "sentence": "Second proof sentence.",
-              "function": "Develops the completed proof.",
-              "relationToPreviousSentence": "Adds a second proof detail before the transfer."
-            },
-            {
-              "sentence": "Explicit transfer to target responsibility.",
-              "function": "States the explicit relevance to the target work.",
+              "sentence": "A sentence in the writer's own words saying why that proof matters to the target responsibility.",
+              "function": "States why the proof matters to the target work, in wording the writer chose.",
               "relationToPreviousSentence": "Connects the completed proof to the target responsibility."
             }
           ]
         },
         {
-          "paragraph": "Concise, factual paragraph two.",
+          "paragraph": "Concrete past action that names the target responsibility it answers. Concrete outcome of what the work did.",
           "argumentativeJob": "Deepen the primary proof with its relevant implementation mechanism.",
           "relationToThesis": "Shows how the selected evidence demonstrates the capability in the thesis.",
           "relationToPreviousParagraph": "Develops the opening claim by supplying its concrete mechanism.",
+          "argumentMapping": {
+            "proof": "Concrete past action that names the target responsibility it answers.",
+            "jobNeedQuote": "Exact short verbatim requirement copied from context/job-listing.md."
+          },
           "sentences": [
             {
-              "sentence": "Concise, factual paragraph two.",
-              "function": "Supplies the concrete supporting mechanism.",
+              "sentence": "Concrete past action that names the target responsibility it answers.",
+              "function": "Supplies the second completed proof.",
               "relationToPreviousSentence": "opening"
+            },
+            {
+              "sentence": "Concrete outcome of what the work did.",
+              "function": "Ends the paragraph on the result of the work, with no further statement of relevance.",
+              "relationToPreviousSentence": "States the consequence of the action that precedes it."
             }
           ]
         }
@@ -1112,7 +1228,7 @@ more.
     "recipient": "",
     "paragraphs": [
       "Argument-led opening connecting supported candidate evidence to the employer's priority need.",
-      "Concise, factual paragraph two."
+      "Concrete past action that names the target responsibility it answers. Concrete outcome of what the work did."
     ],
     "closing": "Sincerely,",
     "signatureTitle": ""
@@ -1164,6 +1280,24 @@ additive transition. `argumentativeJob`, `relationToThesis`, and `function`
 must describe what the final prose actually does. Infinite Canvas rejects
 missing, stale, reordered, vague, or nonmatching bindings.
 
+In the example above the first paragraph is proof-bearing and carries the one
+sentence a letter owes about why its proof matters to the target, in wording
+the writer chose, with its `claim` as a phrase set inside the proof sentence
+and its `relevance` as that separate sentence; the first proof-bearing
+paragraph of a letter owes both. The second paragraph is also proof-bearing,
+but it owes neither: it ends on what the work did and records only its `proof`
+and `jobNeedQuote`. It may record a `relevance` span that names the
+responsibility, and a `claim`, but it need not, and a sentence in it that only
+echoes the posting's vocabulary can be cut. A letter never ends every
+paragraph on a statement of relevance.
+
+```json
+"argumentMapping": {
+  "proof": "Concrete past action that ends on what the work did.",
+  "jobNeedQuote": "Exact short verbatim requirement copied from context/job-listing.md."
+}
+```
+
 The audit must contain only these final-state fields. Do not add private
 reasoning, intermediate drafts, discarded alternatives, hidden
 chain-of-thought, scratch notes, tool calls, chat logs, paths, environment
@@ -1210,7 +1344,21 @@ them or drop the qualifier. This includes frequency (`daily`, `weekly`,
 improvement, reduction, increase, savings, acceleration, optimization, or
 guaranteed outcomes. A matching word elsewhere in career data does not support
 the current unit. Remove or narrow an unsupported qualifier rather than citing
-an unrelated role or a whole-document quote.
+an unrelated role or a whole-document quote. In a cover letter a sentence is
+cut where it coordinates a new statement ("..., and I shared ..."), and each
+qualifier, figure, count, name and ownership word is judged against the cited
+quotes about the clause that says it, not against a quote cited beside it for
+other work, so a paragraph that merges two proofs says each claim in the
+clause about the quote that states it. A trailing phrase that reports a
+consequence ("..., cutting effort by 40%") is judged against the clause it
+trails. A span of years, a credential and a calendar year are judged against
+every quote the paragraph cites. A sentence that restates the quoted work
+without saying who did it is read the same way. When it is addressed to the
+target (it says "you" or "your", names the employer, or says "this role", "this
+team" or "this position"), a name the job posting itself uses is free in it, and
+so is a count the posting states for the same counted noun unless a cited quote
+counts that noun differently; a figure is never free, and a sentence about your
+own cited work gets no posting name, count or figure.
 
 `coverLetterArgument` is a required, non-rendered argument contract. It is not
 letter copy: use it to state the single controlling thesis, its primary proof,

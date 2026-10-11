@@ -8,6 +8,7 @@ import {
   isHumanAdvance,
   isHandoffCodeGuard,
   makeChatKey,
+  NEEDS_USER_REASONS,
   normalizeCurrentHandoff,
   rehydrateApplicationLane,
   remainingCounts,
@@ -32,6 +33,7 @@ import {
   supersededStageNote,
 } from './framing.js';
 import { MAX_WORKER_POOL_SIZE, recommendWorkerPool } from './workerPool.js';
+import { APPLICATION_QUEUE_STAGES } from './telemetry.js';
 import { resolveHandoffConcurrency } from '../../../src/utils/handoffScheduler.js';
 
 const JOB_ID_RE = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i;
@@ -65,15 +67,19 @@ const STATUS_PUSH_TASKS = new Set([
   'job-preference-interpretation', 'job-preference-evaluation',
   'job-preference-research-assessment', 'job-preference-research-batch-assessment',
   'job-location-consolidation-confirmation', 'job-role-audit', 'job-role-screen', 'job-role-screen-batch',
+  'interview-brief-research', 'interview-brief-assessment',
 ]);
 const SCORING_PUSH_TASKS = new Set([...STATUS_PUSH_TASKS].filter(task => !MARKETPLACE_PUSH_TASKS.has(task)));
 const PUSH_EXCLUSION_REASONS = ['ending', 'settling', 'attachment', 'free_text', 'task_not_allowed', 'node_not_allowed', 'person_editing'];
-const STATUS_STAGES = new Set(['evidence-plan', 'resume', 'cover-letter', 'review']);
+// Safe, fixed application workflow identifiers for the renderer status. The
+// post-letter stages share the dock's final review step. The list is shared
+// with the bug-report reducer so the two cannot drift apart.
+const STATUS_STAGES = new Set(APPLICATION_QUEUE_STAGES);
 const STATUS_PHASES = new Set(['unread', 'awaiting', 'host', 'done', 'needs_user', 'held', 'gone']);
 const STATUS_REASONS = new Set([
   'user_hold', 'human_advance', 'rejection_cap', 'junk_cap', 'review_round_cap',
   'job_broken', 'render_retry', 'app_fix_required', 'canvas_unavailable', 'read_failed', 'write_failed',
-  'submit_stuck', 'host_silent', 'lapsed', 'restart',
+  'submit_stuck', 'host_silent', 'lapsed', 'restart', 'review_stop',
 ]);
 // Closed drop cause -> the per-cause counter it increments.
 const DROP_COUNTER = Object.freeze({
@@ -1191,9 +1197,10 @@ export function createHandoffEngine({
   // read, not just from submit. Collapse all virtual siblings at either
   // boundary so one application bundle never serves duplicate resume prompts.
   function collapseVirtualApplicationFamily(lane, stamp = safeNow(now)) {
-    if (!lane.matchTaskId || lane.current?.stage === 'career-match' || lane.current?.matchTaskId) return false;
+    if (lane.current?.stage === 'career-match' || lane.current?.matchTaskId) return false;
     const family = lanes.filter(item => item !== lane && item.jobId === lane.jobId
       && item.canvasFilePath === lane.canvasFilePath && item.matchTaskId);
+    if (family.length === 0) return false;
     for (const sibling of family) {
       for (const [key, entry] of codeIndex) {
         if (entry.lane !== sibling) continue;
@@ -1211,26 +1218,223 @@ export function createHandoffEngine({
     return true;
   }
 
-  // A current-authority match queue only hands a successor task to the last
-  // completion in a wave. Its completed siblings have already been retired by
-  // the app (they are host lanes with no current handoff), so keeping their
-  // opaque task identities here would make the next wave look like it had
-  // already consumed the ten-lane cap. Remove only those retired siblings:
-  // awaiting siblings still represent live claims and are never inferred away.
-  function retireCompletedVirtualMatchSiblings(lane) {
-    if (!lane.matchTaskId) return false;
-    let removed = false;
-    for (const sibling of [...lanes]) {
-      if (sibling === lane || sibling.jobId !== lane.jobId || sibling.canvasFilePath !== lane.canvasFilePath
-        || !sibling.matchTaskId || sibling.phase !== 'host' || sibling.current) continue;
-      epoch?.assignedLaneOrds.delete(sibling.ord);
-      clearLaneWorkerAssignment(sibling);
-      clearLaneHint(sibling);
-      lanes.splice(lanes.indexOf(sibling), 1);
-      touchLane(sibling);
-      removed = true;
+  function retireLaneCodeRoutes(lane, stamp) {
+    if (!lane) return;
+    for (const [key, entry] of codeIndex) {
+      if (entry.lane !== lane) continue;
+      codeIndex.delete(key);
+      tombstoneCode(tombstones, lane.current?.code, 'rotated', { laneOrd: lane.ord, at: stamp }, CONSTANTS.TOMBSTONES_PER_ENGINE, codeGuard);
     }
-    return removed;
+  }
+
+  function retireApplicationLane(lane, stamp) {
+    if (!lane || !lanes.includes(lane)) return false;
+    retireLaneCodeRoutes(lane, stamp);
+    epoch?.assignedLaneOrds.delete(lane.ord);
+    clearLaneWorkerAssignment(lane);
+    clearLaneHint(lane);
+    lanes.splice(lanes.indexOf(lane), 1);
+    touchLane(lane);
+    return true;
+  }
+
+  function retireVirtualMatchLane(lane, stamp) {
+    return lane?.matchTaskId ? retireApplicationLane(lane, stamp) : false;
+  }
+
+  // The application adapter makes this an internal-only result when a claimed
+  // authority-match task has completed. That task is terminal, but its bundle
+  // is not: turn it back into exactly one ordinary unread discovery seed so a
+  // later read can ask the authority for the next advertised wave.
+  function virtualDoneToDiscoverySeed(lane, stamp) {
+    if (!lane?.matchTaskId) return false;
+    const existingSeed = lanes.find(item => item !== lane && item.jobId === lane.jobId
+      && item.canvasFilePath === lane.canvasFilePath && !item.matchTaskId);
+    if (existingSeed) {
+      const retired = retireVirtualMatchLane(lane, stamp);
+      if (!retired) return false;
+      // Only a stale, unclaimed seed may be reset. A person's Hold (or any
+      // other hold that is not a stale read/quiet observation), a prompt, an
+      // answer, a worker or a call in flight on the seed wins over a sibling's
+      // completion: retire just the completed keyed lane and leave the seed.
+      if (!mayRetireStaleVirtualMatchLane(existingSeed)) return true;
+      retireLaneCodeRoutes(existingSeed, stamp);
+      setPhase(existingSeed, 'unread', stamp);
+      existingSeed.reason = null;
+      existingSeed.heldFrom = null;
+      existingSeed.current = null;
+      existingSeed.snapshot = null;
+      existingSeed.hostSince = null;
+      existingSeed.needsRefresh = false;
+      existingSeed.applicationForecast = undefined;
+      existingSeed.freshContextKey = null;
+      existingSeed.awaitingAnswer = false;
+      existingSeed.servedAt = null;
+      existingSeed.retained = null;
+      existingSeed.acceptedElsewhere = null;
+      existingSeed.inFlight.read = null;
+      existingSeed.inFlight.status = null;
+      existingSeed.inFlight.submit = null;
+      clearLaneWorkerAssignment(existingSeed);
+      clearLaneHint(existingSeed);
+      touchLane(existingSeed);
+      return true;
+    }
+    retireLaneCodeRoutes(lane, stamp);
+    delete lane.matchTaskId;
+    setPhase(lane, 'unread', stamp);
+    lane.reason = null;
+    lane.heldFrom = null;
+    lane.current = null;
+    lane.snapshot = null;
+    lane.hostSince = null;
+    lane.needsRefresh = false;
+    delete lane.applicationForecast;
+    lane.freshContextKey = null;
+    lane.awaitingAnswer = false;
+    lane.servedAt = null;
+    lane.retained = null;
+    lane.acceptedElsewhere = null;
+    lane.inFlight.read = null;
+    lane.inFlight.status = null;
+    lane.inFlight.submit = null;
+    clearLaneWorkerAssignment(lane);
+    clearLaneHint(lane);
+    touchLane(lane);
+    return true;
+  }
+
+  // An explicit authority wave is a complete declaration, not an additive
+  // hint. Reconcile the task-keyed family to its first ten valid unique ids so
+  // stale retired claims cannot consume the bounded live-wave cap. When the
+  // field is omitted, callers intentionally skip this helper and retain the
+  // existing family unchanged.
+  function mayRetireStaleVirtualMatchLane(lane) {
+    return !lane.current && !lane.awaitingAnswer && lane.servedAt == null && !lane.pendingWorkerId
+      && !lane.inFlight.read && !lane.inFlight.status && !lane.inFlight.submit
+      && (['unread', 'host', 'done', 'gone'].includes(lane.phase)
+        || (lane.phase === 'needs_user' && ['read_failed', 'host_silent'].includes(lane.reason)));
+  }
+
+  // A crash can persist an entire virtual family as retry/quiet holds even
+  // though every lane has no prompt, answer, worker, or call in flight. Those
+  // are stale authority observations, not a person-authored hold. Reclaim one
+  // deterministic discovery seed only when the whole keyed family has that
+  // exact safe shape; all ordinary and active recovery holds remain untouched.
+  function bootstrapRecoveredVirtualMatchFamily(stamp) {
+    const families = new Map();
+    for (const lane of lanes) {
+      if (!lane.matchTaskId) continue;
+      const key = `${lane.jobId}\u0000${lane.canvasFilePath}`;
+      const family = families.get(key) || [];
+      family.push(lane);
+      families.set(key, family);
+    }
+    let changed = false;
+    for (const family of families.values()) {
+      if (family.length === 0 || !family.every(mayRetireStaleVirtualMatchLane)) continue;
+      const seed = [...family].sort((left, right) => left.releasedAt - right.releasedAt || left.ord - right.ord)[0];
+      changed = virtualDoneToDiscoverySeed(seed, stamp) || changed;
+    }
+    return changed;
+  }
+
+  function reconcileVirtualMatchFamily(lane, taskIds, stamp) {
+    const desired = new Set(taskIds);
+    const family = lanes.filter(item => item.jobId === lane.jobId && item.canvasFilePath === lane.canvasFilePath && item.matchTaskId);
+    // A response cannot revoke a claim another worker is actively reading or
+    // answering. If it contradicts such a live sibling, retain the whole
+    // family unchanged instead of partially reconciling past the live-wave
+    // ceiling.
+    if (family.some(item => !desired.has(item.matchTaskId) && !mayRetireStaleVirtualMatchLane(item))) return false;
+    const retainedLive = family.filter(item => !mayRetireStaleVirtualMatchLane(item));
+    const missing = taskIds.filter(taskId => !family.some(item => item.matchTaskId === taskId));
+    if (retainedLive.length + missing.length > MAX_APPLICATION_MATCH_LIVE_WAVE) return false;
+    let changed = false;
+    const retained = new Set();
+    for (const sibling of [...lanes]) {
+      if (sibling.jobId !== lane.jobId || sibling.canvasFilePath !== lane.canvasFilePath
+        || !sibling.matchTaskId || desired.has(sibling.matchTaskId) || !mayRetireStaleVirtualMatchLane(sibling)) continue;
+      if (mayRetireStaleVirtualMatchLane(sibling)) changed = retireVirtualMatchLane(sibling, stamp) || changed;
+    }
+    // A just-read claim is fresher than a same-id stale sibling. Collapse only
+    // duplicate stale lanes; an awaiting, served, pending, or in-flight claim
+    // is never revoked by a later wave declaration.
+    for (const sibling of [...lanes].sort((left, right) => {
+      if (left === lane) return -1;
+      if (right === lane) return 1;
+      const leftActive = !mayRetireStaleVirtualMatchLane(left);
+      const rightActive = !mayRetireStaleVirtualMatchLane(right);
+      return leftActive === rightActive ? left.ord - right.ord : leftActive ? -1 : 1;
+    })) {
+      if (sibling.jobId !== lane.jobId || sibling.canvasFilePath !== lane.canvasFilePath
+        || !sibling.matchTaskId || !desired.has(sibling.matchTaskId)) continue;
+      if (!retained.has(sibling.matchTaskId)) {
+        retained.add(sibling.matchTaskId);
+        continue;
+      }
+      if (mayRetireStaleVirtualMatchLane(sibling)) changed = retireVirtualMatchLane(sibling, stamp) || changed;
+    }
+    for (const taskId of taskIds) {
+      if (lanes.some(item => item.jobId === lane.jobId && item.canvasFilePath === lane.canvasFilePath
+        && item.matchTaskId === taskId)) continue;
+      lanes.push(createApplicationLane({
+        ord: ++laneOrdinal,
+        jobId: lane.jobId,
+        canvasFilePath: lane.canvasFilePath,
+        matchTaskId: taskId,
+        releasedAt: stamp,
+        codeGuard,
+      }));
+      changed = true;
+    }
+    return changed;
+  }
+
+  function advertisedVirtualMatchTaskIds(result, claimedTaskId) {
+    const advertised = Array.isArray(result.parallelTasks)
+      ? result.parallelTasks
+      : (Array.isArray(result.handoff?.parallelTasks) ? result.handoff.parallelTasks : null);
+    if (advertised === null) return { explicit: false, taskIds: null };
+    if (result.handoff?.parallelTasksOverflow === true || result.handoff?.parallelTasksMalformed === true
+      || !validMatchTaskId(claimedTaskId) || advertised.length > MAX_APPLICATION_MATCH_LIVE_WAVE) {
+      return { explicit: true, taskIds: null };
+    }
+    const seen = new Set();
+    for (const item of advertised) {
+      const taskId = typeof item?.id === 'string' ? item.id : null;
+      if (!validMatchTaskId(taskId) || seen.has(taskId)) return { explicit: true, taskIds: null };
+      seen.add(taskId);
+    }
+    if (!seen.has(claimedTaskId)) return { explicit: true, taskIds: null };
+    return { explicit: true, taskIds: [...seen] };
+  }
+
+  // The authority just named this sibling's task as the open claim, which
+  // contradicts a stale read/quiet observation that parked it as needs-you.
+  // Nothing re-reads a needs-you lane, so send it back to unread to read its
+  // own claim. Any other hold, prompt, answer, worker or call is left alone.
+  function reviveStaleClaimedSibling(sibling, stamp) {
+    if (!sibling || sibling.phase !== 'needs_user' || !mayRetireStaleVirtualMatchLane(sibling)) return false;
+    setPhase(sibling, 'unread', stamp);
+    sibling.reason = null;
+    sibling.heldFrom = null;
+    sibling.snapshot = null;
+    sibling.hostSince = null;
+    sibling.quietFrom = stamp;
+    touchLane(sibling);
+    return true;
+  }
+
+  function mayRetireContradictoryMatchRead(lane) {
+    // This lane's read is necessarily in flight while we evaluate its result;
+    // that one self-owned call does not make an otherwise unclaimed stale lane
+    // active. Any prompt, answer, assignment, pending proof, status/submit
+    // call, or human hold remains non-retirable.
+    return !lane.current && !lane.awaitingAnswer && lane.servedAt == null && !lane.pendingWorkerId
+      && !lane.inFlight.status && !lane.inFlight.submit
+      && (['unread', 'host'].includes(lane.phase)
+        || (lane.phase === 'needs_user' && ['read_failed', 'host_silent'].includes(lane.reason)));
   }
 
   // A lane the person (or a cap) held while a call for it was in flight. Calls
@@ -1257,7 +1461,14 @@ export function createHandoffEngine({
   // 'queue_empty'. A held lane that resumes to awaiting keeps its flag
   // and is counted again from that moment.
   function laneBusy(item) {
-    return (item.needsRefresh === true && item.phase === 'awaiting')
+    // A claim belongs to its worker until the answer/commit settles.  During
+    // that interval the lane is still `awaiting`, but it is not available to
+    // a different worker.  It must nevertheless keep an unrelated retained
+    // needs-user lane from telling every idle pool worker to stop: the active
+    // claim can publish a successor or release the next authority wave.
+    return item.awaitingAnswer === true
+      || item.pendingWorkerId != null
+      || (item.needsRefresh === true && item.phase === 'awaiting')
       || ['unread', 'host'].includes(item.phase)
       || Boolean(item.inFlight.read || item.inFlight.status || item.inFlight.submit);
   }
@@ -1481,6 +1692,41 @@ export function createHandoffEngine({
       if (result.kind === 'open') {
         const code = result.handoff?.code ?? result.handoff?.handoffCode;
         const sameRecoveryStage = typeof recoveryStage === 'string' && result.handoff?.stage === recoveryStage;
+        const claimedTaskId = result.handoff?.matchTaskId ?? result.matchTaskId;
+        let claimedSibling = validMatchTaskId(claimedTaskId)
+          ? lanes.find(item => item !== lane && item.jobId === lane.jobId
+            && item.canvasFilePath === lane.canvasFilePath && item.matchTaskId === claimedTaskId)
+          : null;
+        // An unkeyed discovery read that claims a STALE sibling (no prompt,
+        // answer, worker or call; at most a stale read/quiet observation) is
+        // the fresher evidence: the stale sibling goes and this read adopts
+        // the claim below. Keeping the stale lane instead retired the seed and
+        // left the bundle paused on a needs-you hold nothing ever re-reads.
+        if (claimedSibling && !lane.matchTaskId && mayRetireStaleVirtualMatchLane(claimedSibling)) {
+          retireApplicationLane(claimedSibling, stamp);
+          claimedSibling = null;
+          persist = true;
+        }
+        if (claimedSibling) {
+          let changed;
+          if (mayRetireContradictoryMatchRead(lane)) changed = retireApplicationLane(lane, stamp);
+          else {
+            // Never adopt or index a duplicate task claim. Preserve the
+            // contradicted live lane as an explicit recovery hold while its
+            // already-owned sibling remains the only task owner.
+            holdLane(lane, 'read_failed', stamp);
+            clearLaneHint(lane);
+            touchLane(lane);
+            changed = true;
+          }
+          if (result.handoff?.stage === 'career-match') {
+            const advertised = advertisedVirtualMatchTaskIds(result, claimedTaskId);
+            if (advertised.taskIds !== null && reconcileVirtualMatchFamily(claimedSibling, advertised.taskIds, stamp)) changed = true;
+          }
+          if (lanes.includes(claimedSibling) && reviveStaleClaimedSibling(claimedSibling, stamp)) changed = true;
+          updateApplicationForecast(claimedSibling);
+          return { result: { kind: 'virtual_existing' }, persist: changed };
+        }
         if (lane.phase === 'awaiting' && isHumanAdvance(lane, code, codeGuard) && !sameRecoveryStage) {
           holdLane(lane, 'human_advance', stamp);
           // The prompt this lane holds is retired: Resume must re-read and adopt
@@ -1491,10 +1737,10 @@ export function createHandoffEngine({
           // The seed claim identifies its own queue task.  A career-match
           // response may also advertise peer claims; materialize each as a
           // durable virtual lane so distinct pool workers can claim them.
-          const claimedTaskId = result.handoff?.matchTaskId ?? result.matchTaskId;
-          const replacedTaskId = validMatchTaskId(claimedTaskId) && lane.matchTaskId != null
-            && claimedTaskId !== lane.matchTaskId;
-          if (validMatchTaskId(claimedTaskId) && lane.matchTaskId == null) lane.matchTaskId = claimedTaskId;
+          if (validMatchTaskId(claimedTaskId) && lane.matchTaskId !== claimedTaskId) {
+            lane.matchTaskId = claimedTaskId;
+            persist = true;
+          }
           const priorStage = lane.current?.stage;
           const predecessorWorker = workerForId(epoch, lane.servedWorkerId);
           const predecessorIncarnation = lane.servedWorkerContextIncarnation;
@@ -1509,32 +1755,8 @@ export function createHandoffEngine({
           if (collapseVirtualApplicationFamily(lane, stamp)) persist = true;
           lane.counters.errStreak = 0;
           if (result.handoff?.stage === 'career-match') {
-            // A successor proves the preceding bounded wave completed. Free
-            // its host siblings before applying the new fanout, otherwise the
-            // old task ids permanently occupy the live-wave ceiling.
-            if (replacedTaskId && retireCompletedVirtualMatchSiblings(lane)) persist = true;
-            const advertised = Array.isArray(result.parallelTasks)
-              ? result.parallelTasks
-              : (Array.isArray(result.handoff?.parallelTasks) ? result.handoff.parallelTasks : []);
-            const seen = new Set();
-            for (const item of advertised) {
-              const familySize = lanes.filter(existing => existing.jobId === lane.jobId
-                && existing.canvasFilePath === lane.canvasFilePath && existing.matchTaskId).length;
-              if (familySize >= MAX_APPLICATION_MATCH_LIVE_WAVE) break;
-              const taskId = typeof item?.id === 'string' ? item.id : null;
-              if (!validMatchTaskId(taskId) || taskId === lane.matchTaskId || seen.has(taskId)) continue;
-              seen.add(taskId);
-              if (lanes.some(existing => laneIdentity(existing.jobId, existing.canvasFilePath, existing.matchTaskId) === laneIdentity(lane.jobId, lane.canvasFilePath, taskId))) continue;
-              lanes.push(createApplicationLane({
-                ord: ++laneOrdinal,
-                jobId: lane.jobId,
-                canvasFilePath: lane.canvasFilePath,
-                matchTaskId: taskId,
-                releasedAt: stamp,
-                codeGuard,
-              }));
-              persist = true;
-            }
+            const advertised = advertisedVirtualMatchTaskIds(result, claimedTaskId);
+            if (advertised.taskIds !== null && reconcileVirtualMatchFamily(lane, advertised.taskIds, stamp)) persist = true;
           }
         }
       } else if (result.kind === 'host') {
@@ -1543,6 +1765,10 @@ export function createHandoffEngine({
         lane.hostSince ??= stamp;
         lane.snapshot = { at: stamp, kind: 'host' };
         lane.counters.errStreak = 0;
+      } else if (result.kind === 'virtual_done') {
+        // This is emitted only by the application adapter for a completed
+        // task-keyed authority-match read. It never reaches a public result.
+        persist = virtualDoneToDiscoverySeed(lane, stamp);
       } else if (result.kind === 'done') {
         setPhase(lane, 'done', stamp);
         lane.reason = null;
@@ -1561,7 +1787,7 @@ export function createHandoffEngine({
         persist = true;
       } else if (result.kind === 'threw') {
         if (result.code === 'LOCAL_AI_JOB_INTEGRITY') holdLane(lane, 'job_broken', stamp);
-        else if (result.code === 'ENOENT') holdLane(lane, 'canvas_unavailable', stamp);
+        else if (result.code === 'ENOENT') { holdLane(lane, 'canvas_unavailable', stamp); armCanvasProbe(lane); }
         else if (++lane.counters.errStreak >= CONSTANTS.APPLICATION_ERROR_STREAK) holdLane(lane, 'read_failed', stamp);
         lane.snapshot = { at: stamp, kind: 'threw', code: result.code ?? 'internal_error' };
         persist = ['held', 'needs_user'].includes(lane.phase);
@@ -1718,7 +1944,14 @@ export function createHandoffEngine({
   function chooseFreshApplication(worker = epoch) {
     if (!epoch || !worker) return null;
     return [...lanes]
-      .filter(lane => lane.phase === 'awaiting' && !lane.needsRefresh && canAssign(lane, worker))
+      // A restored lane intentionally has no in-memory handoff.  If a
+      // needs-user lane is resumed back to its old `awaiting` phase, it stays
+      // in that shape until refreshOneLane has read it again.  It is not a
+      // candidate yet: selecting it here lets an older stale lane win over a
+      // current unread job, only for serveLaneOp to reject it as a retry.
+      // Requiring the same current-handoff proof that serveLaneOp requires
+      // keeps that shell from consuming a GET or aliasing the current queue.
+      .filter(lane => lane.phase === 'awaiting' && lane.current && !lane.needsRefresh && canAssign(lane, worker))
       .sort((a, b) => a.releasedAt - b.releasedAt || a.ord - b.ord)[0] ?? null;
   }
 
@@ -1997,12 +2230,64 @@ export function createHandoffEngine({
         readWatchdogMs,
         timedOut,
       );
-    } catch { return { cause: null, alive: false, ran: true }; }
+    } catch (error) {
+      if (error?.code === 'ENOENT') return probeMissingCanvas(target, generation);
+      return { cause: null, alive: false, ran: true };
+    }
     if (raw === timedOut || !sourceCurrent(generation)) return { cause: null, alive: false, ran: true };
     const result = normalizeSourceResult(raw);
+    if (result.kind === 'threw' && result.code === 'ENOENT') return probeMissingCanvas(target, generation);
     if (result.kind === 'gone') return { cause: 'bundle_missing', alive: false, ran: true };
     if (includeSaved && result.kind === 'done') return { cause: 'bundle_saved', alive: false, ran: true };
     return { cause: null, alive: ['awaiting', 'host', 'needs_user', 'open'].includes(result.kind), ran: true };
+  }
+
+  // A status probe could not open the lane's canvas. Ask the source what the
+  // released location still holds (a closed enum; see the application
+  // source). The answer is never a drop cause: it only refines what a held
+  // canvas_unavailable row tells the person.
+  async function probeMissingCanvas(target, generation) {
+    if (typeof application.canvasPresence !== 'function') return { cause: null, alive: false, ran: true };
+    const timedOut = Symbol('canvas-presence-timeout');
+    let presence;
+    try {
+      presence = await raceWithBudget(Promise.resolve().then(() => application.canvasPresence(target)), readWatchdogMs, timedOut);
+    } catch { presence = null; }
+    if (!sourceCurrent(generation)) return { cause: null, alive: false, ran: true };
+    return { cause: null, alive: false, ran: true, canvas: ['present', 'orphaned', 'unavailable'].includes(presence) ? presence : 'unavailable' };
+  }
+
+  // A canvas_unavailable lane whose released location has kept proving
+  // 'orphaned' for this long is shown as "canvas missing" with an explicit
+  // Remove. One observation is never enough: a sync client, a Save As, or a
+  // remount can leave a folder briefly empty.
+  const CANVAS_ORPHAN_CONFIRM_MS = 60_000;
+  function canvasOrphanConfirmed(lane) {
+    return lane.phase === 'needs_user' && lane.reason === 'canvas_unavailable'
+      && Number.isFinite(lane.canvasOrphanSince) && Number.isFinite(lane.canvasOrphanSeenAt)
+      && lane.canvasOrphanSeenAt - lane.canvasOrphanSince >= CANVAS_ORPHAN_CONFIRM_MS;
+  }
+  // Memory only (never persisted): every restart re-proves it from scratch.
+  // Returns true when the public row changed.
+  function noteCanvasPresence(lane, presence, stamp) {
+    const before = canvasOrphanConfirmed(lane);
+    if (presence === 'orphaned' && lane.phase === 'needs_user' && lane.reason === 'canvas_unavailable') {
+      if (!Number.isFinite(lane.canvasOrphanSince)) lane.canvasOrphanSince = stamp;
+      lane.canvasOrphanSeenAt = stamp;
+    } else {
+      lane.canvasOrphanSince = null;
+      lane.canvasOrphanSeenAt = null;
+    }
+    return canvasOrphanConfirmed(lane) !== before;
+  }
+  // A lane that just lost its canvas keeps being checked at the restored-lane
+  // cadence, so a canvas that comes back (or is proven gone) is noticed, and a
+  // truly orphaned one can be offered for explicit removal.
+  function armCanvasProbe(lane) {
+    lane.canvasOrphanSince = null;
+    lane.canvasOrphanSeenAt = null;
+    lane.restoreProbes = RESTORE_PROBE_ATTEMPTS;
+    lane.restoreProbeAt = 0;
   }
 
   async function proveBundleGone(lane, generation = sourceGeneration, options = {}) {
@@ -2086,6 +2371,7 @@ export function createHandoffEngine({
                 if (!sourceCurrent(generation) || !lanes.includes(lane) || laneRevision(lane) !== claim.revision
                     || !restoreProbeDue(lane, safeNow(now))) return;
                 lane.restoreProbes = null;
+                if (noteCanvasPresence(lane, 'present', safeNow(now))) touchLane(lane);
               });
               continue;
             }
@@ -2093,6 +2379,9 @@ export function createHandoffEngine({
             await mutateLanes(() => {
               if (!sourceCurrent(generation) || !lanes.includes(lane) || laneRevision(lane) !== claim.revision
                   || !restoreProbeDue(lane, safeNow(now))) return;
+              // Any answer other than 'orphaned' (including no answer at all)
+              // restarts the confirmation window.
+              if (noteCanvasPresence(lane, outcome.canvas ?? null, safeNow(now))) touchLane(lane);
               if (lane.restoreProbes > 0) lane.restoreProbes -= 1;
               if (lane.restoreProbes === 0) lane.restoreProbeAt = safeNow(now) + RESTORE_REPROBE_MS;
             });
@@ -2260,7 +2549,10 @@ export function createHandoffEngine({
 
     const pushWorking = (scope.scoring || scope.marketplace) && pushDecision?.status === 'waiting';
     const pushNeedsUser = (scope.scoring || scope.marketplace) && pushDecision?.status === 'needs_user';
-    const working = pushWorking || (scope.applications && lanes.some(laneBusy));
+    // A fresh-context transition is a deliberate session boundary, not a
+    // pollable claim. It may have been discovered by refreshOneLane above,
+    // after get() performed its initial worker fence.
+    const working = pushWorking || (scope.applications && worker?.freshContextRequired !== true && lanes.some(laneBusy));
     if (working) {
       // A pool deliberately has several independent chats. Holding every one
       // of their MCP requests for GET_HOLD_MS made a completed wave look like
@@ -2289,8 +2581,11 @@ export function createHandoffEngine({
       if (lane?.retry) return makeResultBody('retry');
       if (lane) return serveLane(lane, generation, expectedEpoch, worker, claimId);
       const stillWorking = ((scope.scoring || scope.marketplace) && pushDecision?.status === 'waiting')
-        || (scope.applications && lanes.some(laneBusy));
+        || (scope.applications && worker?.freshContextRequired !== true && lanes.some(laneBusy));
       if (!stillWorking) {
+        if (worker?.freshContextRequired === true) {
+          return makeResultBody('session_full', { remaining: combinedRemaining(pushDecision?.remaining) });
+        }
         if (scope.applications && lanes.some(item => ['held', 'needs_user'].includes(item.phase))) {
           counts.getPaused++;
           markChatStopped(worker);
@@ -2328,6 +2623,9 @@ export function createHandoffEngine({
       });
     }
 
+    if (worker?.freshContextRequired === true) {
+      return makeResultBody('session_full', { remaining: combinedRemaining(pushDecision?.remaining) });
+    }
     if (scope.applications && lanes.some(item => ['held', 'needs_user'].includes(item.phase))) {
       counts.getPaused++;
       markChatStopped(worker);
@@ -2610,6 +2908,30 @@ export function createHandoffEngine({
         const priorStage = lane.current?.stage;
         const predecessorWorker = worker;
         const predecessorIncarnation = lane.servedWorkerContextIncarnation;
+        const claimedTaskId = result.handoff?.matchTaskId;
+        const claimedSibling = result.handoff?.stage === 'career-match' && validMatchTaskId(claimedTaskId)
+          ? lanes.find(item => item !== lane && item.jobId === lane.jobId
+            && item.canvasFilePath === lane.canvasFilePath && item.matchTaskId === claimedTaskId)
+          : null;
+        if (claimedSibling) {
+          if (heldOnLanding) {
+            // The submitted task is complete, but a user hold still wins over
+            // a source-side successor. Do not rebind this lane to the sibling.
+            lane.current = null;
+            clearLaneWorkerAssignment(lane);
+            touchLane(lane);
+          } else {
+            // A completed predecessor no longer owns a task. Retire it rather
+            // than adopting/indexing a duplicate successor claim.
+            retireApplicationLane(lane, stamp);
+          }
+          const advertised = advertisedVirtualMatchTaskIds(result, claimedTaskId);
+          if (advertised.taskIds !== null) reconcileVirtualMatchFamily(claimedSibling, advertised.taskIds, stamp);
+          if (!heldOnLanding && lanes.includes(claimedSibling)) reviveStaleClaimedSibling(claimedSibling, stamp);
+          updateApplicationForecast(claimedSibling);
+          notifyJobChanged(claimedSibling, generation);
+          return { persist: true, body: makeResultBody('accepted', { jobComplete: false, next: null }) };
+        }
         if (heldOnLanding) {
           const held = normalizeCurrentHandoff(result.handoff, stamp);
           lane.current = held;
@@ -2635,22 +2957,9 @@ export function createHandoffEngine({
         }) && requireFreshContextForSuccessor(lane, predecessorWorker, predecessorIncarnation);
         if (result.handoff?.stage === 'career-match') {
           const claimedTaskId = result.handoff.matchTaskId;
-          const replacedTaskId = validMatchTaskId(claimedTaskId) && lane.matchTaskId != null
-            && claimedTaskId !== lane.matchTaskId;
           if (validMatchTaskId(claimedTaskId)) lane.matchTaskId = claimedTaskId;
-          if (replacedTaskId) retireCompletedVirtualMatchSiblings(lane);
-          const advertised = Array.isArray(result.parallelTasks)
-            ? result.parallelTasks : (Array.isArray(result.handoff.parallelTasks) ? result.handoff.parallelTasks : []);
-          const seen = new Set();
-          for (const item of advertised) {
-            const taskId = typeof item?.id === 'string' ? item.id : null;
-            const familySize = lanes.filter(existing => existing.jobId === lane.jobId && existing.canvasFilePath === lane.canvasFilePath && existing.matchTaskId).length;
-            if (familySize >= MAX_APPLICATION_MATCH_LIVE_WAVE) break;
-            if (!validMatchTaskId(taskId) || taskId === lane.matchTaskId || seen.has(taskId)
-              || lanes.some(existing => existing !== lane && laneIdentity(existing.jobId, existing.canvasFilePath, existing.matchTaskId) === laneIdentity(lane.jobId, lane.canvasFilePath, taskId))) continue;
-            seen.add(taskId);
-            lanes.push(createApplicationLane({ ord: ++laneOrdinal, jobId: lane.jobId, canvasFilePath: lane.canvasFilePath, matchTaskId: taskId, releasedAt: stamp, codeGuard }));
-          }
+          const advertised = advertisedVirtualMatchTaskIds(result, claimedTaskId);
+          if (advertised.taskIds !== null) reconcileVirtualMatchFamily(lane, advertised.taskIds, stamp);
         }
         updateApplicationForecast(lane);
         collapseVirtualApplicationFamily(lane, stamp);
@@ -3920,16 +4229,23 @@ export function createHandoffEngine({
     return finished;
   }
 
+  // The lanes of one fanned-out application bundle, or [] for an ordinary
+  // single-lane bundle. Membership is decided by the WHOLE bundle: a
+  // completed claim turns its lane back into an unkeyed discovery seed in
+  // place, so the bundle's first lane may carry no task key while keyed
+  // siblings are still live. Asking only the first lane missed them.
+  function applicationBundleFamily(jobId) {
+    const anchor = lanes.find(item => item.jobId === jobId);
+    if (!anchor) return [];
+    const members = lanes.filter(item => item.jobId === jobId && item.canvasFilePath === anchor.canvasFilePath);
+    return members.length > 1 || members.some(item => item.matchTaskId) ? members : [];
+  }
+
   async function unrelease(jobId) {
     // The dock acts on a bundle, never an individual authority-match claim.
     // Preserve the legacy single-lane path, but retire every virtual sibling
     // when the selected bundle has been fanned out.
-    const family = await mutateLanes(() => {
-      const seed = lanes.find(item => item.jobId === jobId);
-      return seed?.matchTaskId
-        ? lanes.filter(item => item.jobId === jobId && item.canvasFilePath === seed.canvasFilePath)
-        : [];
-    });
+    const family = await mutateLanes(() => applicationBundleFamily(jobId));
     if (family.length > 0) {
       return removeApplicationFamily(jobId, 'user', family[0].canvasFilePath);
     }
@@ -3967,14 +4283,10 @@ export function createHandoffEngine({
   }
 
   async function hold(jobId, reason = 'user_hold') {
-    const virtualFamily = await mutateLanes(() => {
-      const seed = lanes.find(item => item.jobId === jobId);
-      return seed?.matchTaskId ? lanes.filter(item => item.jobId === jobId && item.canvasFilePath === seed.canvasFilePath) : [];
-    });
+    const virtualFamily = await mutateLanes(() => applicationBundleFamily(jobId));
     if (virtualFamily.length > 0) {
       const stagedFamily = await mutateLanes(() => {
-        const targetPhase = ['job_broken', 'render_retry', 'app_fix_required', 'canvas_unavailable', 'read_failed', 'write_failed', 'submit_stuck', 'host_silent'].includes(reason)
-          ? 'needs_user' : 'held';
+        const targetPhase = NEEDS_USER_REASONS.includes(reason) ? 'needs_user' : 'held';
         const members = virtualFamily.filter(lane => lanes.includes(lane));
         if (members.length === 0) return { ok: false, code: 'not_found' };
         try {
@@ -3992,9 +4304,7 @@ export function createHandoffEngine({
     const staged = await mutateLanes(() => {
       const lane = lanes.find(item => item.jobId === jobId);
       if (!lane) return { ok: false, code: 'not_found' };
-      const targetPhase = ['job_broken', 'render_retry', 'app_fix_required', 'canvas_unavailable', 'read_failed', 'write_failed', 'submit_stuck', 'host_silent'].includes(reason)
-        ? 'needs_user'
-        : 'held';
+      const targetPhase = NEEDS_USER_REASONS.includes(reason) ? 'needs_user' : 'held';
       // An identical later hold is a no-op, rather than a second optimistic
       // transaction with an indistinguishable marker (an ABA rollback hazard).
       if (lane.phase === targetPhase && lane.reason === reason) return { ok: true };
@@ -4054,6 +4364,23 @@ export function createHandoffEngine({
   async function resume({ jobId } = {}) {
     const staged = await mutateLanes(() => {
       if (jobId) {
+        // Hold acts on a whole fanned-out bundle, so Resume must too: resuming
+        // only the first lane left every held sibling held, and the resumed
+        // seed's discovery read then retired itself against a held claim.
+        const family = applicationBundleFamily(jobId);
+        if (family.length > 0) {
+          const stamp = safeNow(now);
+          const resumed = family.filter(isHeldPhase).map(lane => {
+            const prior = { phase: lane.phase, reason: lane.reason, heldFrom: lane.heldFrom, snapshot: lane.snapshot, changedAt: lane.changedAt, quietFrom: lane.quietFrom };
+            resumeLane(lane);
+            lane.quietFrom = stamp;
+            lane.changedAt = stamp;
+            if (!lane.current && ['awaiting', 'host'].includes(lane.phase)) setPhase(lane, 'unread');
+            return { lane, prior, revision: touchLane(lane) };
+          });
+          if (resumed.length === 0) return { ok: true };
+          return { generation: sourceGeneration, family: resumed, persist: true };
+        }
         const lane = lanes.find(item => item.jobId === jobId);
         if (!lane) return { ok: false, code: 'not_found' };
         // Only a held lane has anything to resume. A stale or repeated click on a
@@ -4093,7 +4420,13 @@ export function createHandoffEngine({
         if (!saved) {
           // A later hold, source result, or drop has already superseded this
           // resume. Its state is authoritative.
-          if (lanes.includes(staged.lane) && laneRevision(staged.lane) === staged.revision) {
+          if (staged.family) {
+            for (const { lane, prior, revision } of staged.family) {
+              if (!lanes.includes(lane) || laneRevision(lane) !== revision) continue;
+              Object.assign(lane, prior);
+              touchLane(lane);
+            }
+          } else if (lanes.includes(staged.lane) && laneRevision(staged.lane) === staged.revision) {
             Object.assign(staged.lane, staged.prior);
             touchLane(staged.lane);
           }
@@ -4205,6 +4538,7 @@ export function createHandoffEngine({
         touchLane(lane);
       } catch { /* unknown/corrupt lanes are skipped */ }
     }
+    bootstrapRecoveredVirtualMatchFamily(safeNow(now));
     restartConfirmed = lanes.length === 0;
     restartRevision += 1;
     return lanes.length;
@@ -4524,7 +4858,9 @@ export function createHandoffEngine({
             jobId: JOB_ID_RE.test(lane.jobId) ? lane.jobId : null,
             phase: statusPhase(lane.phase),
             stage: statusStage(lane.current?.stage),
-            reason: statusReason(lane.reason),
+            // 'canvas_missing' is a public refinement of a canvas_unavailable
+            // hold (never a stored lane reason): see noteCanvasPresence.
+            reason: canvasOrphanConfirmed(lane) ? 'canvas_missing' : statusReason(lane.reason),
             servedToChat: epoch?.assignedLaneOrds.has(lane.ord) ? epoch.n : null,
             workerOrdinal: (() => {
               const worker = workerForId(epoch, lane.servedWorkerId);

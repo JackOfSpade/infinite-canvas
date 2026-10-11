@@ -15,6 +15,7 @@ import {
   CAREER_APPLICATION_HISTORICAL_PROJECTION_FORMAT,
   CAREER_APPLICATION_PROJECTION_FORMAT,
   CAREER_SNAPSHOT_HISTORICAL_MAX_SEGMENTS,
+  CAREER_SNAPSHOT_PINNED_LEGACY_V6_CONTRACTS,
   CAREER_SNAPSHOT_COMPILATION_CONTRACT,
   CAREER_TRANSCRIPTION_POLICY_DIGEST,
   CAREER_SNAPSHOT_MAX_FILE_BYTES,
@@ -624,9 +625,9 @@ export default [
         'Ada Example\n',
         'Platform Engineer at Maple Systems\n',
         'January 2020 to Present\n',
-        'Selected Cedar or Juniper based on deployment constraints.\n',
+        'Used Cedar or Juniper SDK based on deployment constraints.\n',
         'Maintained Spruce tooling for on-call diagnosis.\n',
-        "Published Orchard telemetry feed through the public Gateway API using the Agency's daily emissions for analysts.\n",
+        "Published Orchard telemetry feed through the public Gateway API using the Agency's daily bulletins for analysts.\n",
         'ada@example.test\n',
       ].join('');
       const corpus = buildCareerSourceCorpus([{
@@ -641,13 +642,13 @@ export default [
       const identityName = segment('Ada Example');
       const roleHeader = segment('Platform Engineer at Maple Systems');
       const roleDates = segment('January 2020 to Present');
-      const relation = segment('Selected Cedar or Juniper');
+      const relation = segment('Used Cedar or Juniper SDK');
       const direct = segment('Maintained Spruce tooling');
       const artifact = segment('Published Orchard telemetry feed');
       const contact = segment('ada@example.test');
-      const relationEvidence = 'Selected Cedar or Juniper based on deployment constraints.';
+      const relationEvidence = 'Used Cedar or Juniper SDK based on deployment constraints.';
       const directEvidence = 'Maintained Spruce tooling for on-call diagnosis.';
-      const artifactEvidence = "Published Orchard telemetry feed through the public Gateway API using the Agency's daily emissions for analysts.";
+      const artifactEvidence = "Published Orchard telemetry feed through the public Gateway API using the Agency's daily bulletins for analysts.";
       const profile = {
         identity: { name: 'Ada Example', contacts: ['ada@example.test'], evidenceSegmentIds: [identityName, contact] },
         roles: [{
@@ -665,11 +666,11 @@ export default [
           id: 'achievement-spruce', roleId: 'role-maple', claim: directEvidence, technologies: ['Spruce'], metrics: [], evidenceSegmentIds: [direct],
           technologyReferences: [{ technology: 'Spruce', disposition: 'skill', skillId: 'skill-spruce', relationship: 'independent', relationshipGroup: '', relationshipEvidence: directEvidence, evidenceSegmentIds: [direct] }],
         }, {
-          id: 'achievement-feed', roleId: 'role-maple', claim: artifactEvidence, technologies: ['Orchard telemetry feed', 'Gateway API', "Agency's daily emissions"], metrics: [], evidenceSegmentIds: [artifact],
+          id: 'achievement-feed', roleId: 'role-maple', claim: artifactEvidence, technologies: ['Orchard telemetry feed', 'Gateway API', "Agency's daily bulletins"], metrics: [], evidenceSegmentIds: [artifact],
           technologyReferences: [
             { technology: 'Orchard telemetry feed', disposition: 'non-skill', relationship: 'independent', relationshipGroup: '', relationshipEvidence: 'Orchard telemetry feed', evidenceSegmentIds: [artifact], nonSkillReason: 'A published data feed is an output, not a candidate capability.' },
             { technology: 'Gateway API', disposition: 'non-skill', relationship: 'independent', relationshipGroup: '', relationshipEvidence: 'Gateway API', evidenceSegmentIds: [artifact], nonSkillReason: 'A public interface owned by another organization is a source endpoint, not candidate capability evidence.' },
-            { technology: "Agency's daily emissions", disposition: 'non-skill', relationship: 'independent', relationshipGroup: '', relationshipEvidence: "Agency's daily emissions", evidenceSegmentIds: [artifact], nonSkillReason: 'Organization-produced data is an external output, not a candidate capability.' },
+            { technology: "Agency's daily bulletins", disposition: 'non-skill', relationship: 'independent', relationshipGroup: '', relationshipEvidence: "Agency's daily bulletins", evidenceSegmentIds: [artifact], nonSkillReason: 'Organization-produced data is an external output, not a candidate capability.' },
           ],
         }],
         projects: [],
@@ -712,32 +713,158 @@ export default [
         && JSON.stringify(projectLegacyCareerProfile(profile).skills) === JSON.stringify(['Spruce'])
         && projection.includes('Usage relationship [Achievement ID: achievement-choice]: alternative')
         && projection.includes('Relationship group [Achievement ID: achievement-choice]: runtime-choice')
-        && projection.includes('Relationship evidence [Achievement ID: achievement-choice]: Selected Cedar or Juniper based on deployment constraints.')
+        && projection.includes('Relationship evidence [Achievement ID: achievement-choice]: Used Cedar or Juniper SDK based on deployment constraints.')
         && !projection.includes('- Cedar [Skill ID: skill-cedar]')
         && !projection.includes('- Juniper [Skill ID: skill-juniper]')
         && projection.includes('- Spruce [Skill ID: skill-spruce]')
         && !catalog.some(item => /^host\.career\.skill\.(?:skill-cedar|skill-juniper)\./u.test(item.id))
         && catalog.some(item => /^host\.career\.skill\.skill-spruce\./u.test(item.id))
         && catalog.some(item => item.id.startsWith('host.career.achievement.achievement-choice.') && item.quote.includes('Usage relationship'))
-        && !profile.skills.some(skill => ['Gateway API', "Agency's daily emissions"].includes(skill.name))
+        && !profile.skills.some(skill => ['Gateway API', "Agency's daily bulletins"].includes(skill.name))
         && !validateCareerProfile(relationAsBareDirect, corpus).valid
         && !validateCareerProfile(missingDisposition, corpus).valid
         && !validateCareerProfile(missingExternalDisposition, corpus).valid
         && compilePrompt.includes('not as a token rule')
+        && compilePrompt.includes('interacts with, consumes, connects to, automates, or access-controls')
+        && compilePrompt.includes('separate bounded capability skill')
         && compilePrompt.includes('organization-owned system')
         && compilePrompt.includes('semantic completeness')
         && !compilePrompt.includes('For EVERY technology/tool candidate label')
         && compilePrompt.includes('data feed/dataset')
         && auditPrompt.includes('not a deterministic token checklist')
+        && auditPrompt.includes('interacts with, consumes, connects to, automates, or access-controls')
+        && auditPrompt.includes('A non-skill requires positive source semantics')
         && auditPrompt.includes('do not assume the existing technologies array is complete')
         && auditPrompt.includes('organization-owned system')
         && auditPrompt.includes('Audit EVERY skill row')
         && pagePrompt.includes('keep that group self-contained')
+        && pagePrompt.includes('separate bounded capability skill')
         && pagePrompt.includes('semantic completeness')
         && !pagePrompt.includes('For EVERY technology/tool candidate label')
         && pagePrompt.includes('directEvidenceSegmentIds'),
       'alternative/conditional semantics remain relation-aware evidence, every extracted label—including external interfaces and organization-produced data—has a skill or audited non-skill disposition, only separately direct evidence reaches inventory/catalog skill rows, and compile/audit/page prompts retain generic semantic defenses');
       return { inventory: inventory.map(skill => skill.name), catalogRows: catalog.length, relationAware: true };
+    },
+  },
+  {
+    name: 'career snapshot: external objects retain a separate integration capability and later repair batches cannot regress it',
+    run: async () => {
+      const source = [
+        'Nova Example\n',
+        'Connectivity Specialist at Arbor Labs\n',
+        'January 2024 to Present\n',
+        'Endpoint integration connected to either Lumen endpoint or Solace endpoint through Auxiliary relay for scheduled retrieval.\n',
+        'nova@example.test\n',
+      ].join('');
+      const files = [{ name: 'fictional-integration-career.txt', text: source, transcriptionAudit: verbatimCareerTranscriptionAuditReceipt() }];
+      const corpus = buildCareerSourceCorpus(files);
+      const segment = literal => corpus.segments.find(item => item.text.includes(literal))?.id;
+      const identity = segment('Nova Example');
+      const roleHeader = segment('Connectivity Specialist');
+      const dates = segment('January 2024');
+      const action = segment('Endpoint integration connected');
+      const contact = segment('nova@example.test');
+      const relationEvidence = 'Endpoint integration connected to either Lumen endpoint or Solace endpoint through Auxiliary relay for scheduled retrieval.';
+      const profile = () => ({
+        identity: { name: 'Nova Example', contacts: ['nova@example.test'], evidenceSegmentIds: [identity, contact] },
+        roles: [{
+          id: 'role-arbor', title: 'Connectivity Specialist', employer: 'Arbor Labs', startDate: 'January 2024', endDate: 'Present', location: '',
+          achievementIds: ['achievement-connect'], skillIds: ['skill-endpoint-integration', 'skill-auxiliary-relay', 'skill-scheduled-retrieval'], evidenceSegmentIds: [roleHeader, dates],
+        }],
+        achievements: [{
+          id: 'achievement-connect', roleId: 'role-arbor', claim: relationEvidence,
+          technologies: ['Endpoint integration', 'Lumen endpoint', 'Solace endpoint', 'Auxiliary relay', 'scheduled retrieval'], metrics: [], evidenceSegmentIds: [action],
+          technologyReferences: [
+            { technology: 'Endpoint integration', disposition: 'skill', relationship: 'independent', relationshipGroup: '', relationshipEvidence: 'Endpoint integration', evidenceSegmentIds: [action] },
+            { technology: 'Lumen endpoint', disposition: 'non-skill', relationship: 'alternative', relationshipGroup: 'external-choice', relationshipEvidence: relationEvidence, evidenceSegmentIds: [action], nonSkillReason: 'An external endpoint is a consumed source, not a candidate capability.' },
+            { technology: 'Solace endpoint', disposition: 'non-skill', relationship: 'alternative', relationshipGroup: 'external-choice', relationshipEvidence: relationEvidence, evidenceSegmentIds: [action], nonSkillReason: 'An external endpoint is a consumed source, not a candidate capability.' },
+            { technology: 'Auxiliary relay', disposition: 'skill', relationship: 'independent', relationshipGroup: '', relationshipEvidence: 'Auxiliary relay', evidenceSegmentIds: [action] },
+            { technology: 'scheduled retrieval', disposition: 'skill', relationship: 'independent', relationshipGroup: '', relationshipEvidence: 'scheduled retrieval', evidenceSegmentIds: [action] },
+          ],
+        }],
+        projects: [],
+        skills: [
+          { id: 'skill-endpoint-integration', name: 'Endpoint integration', category: 'unreviewed', capabilityKind: 'capability', supportMode: 'direct', directEvidenceSegmentIds: [action], indexEligible: false, roleIds: ['role-arbor'], evidenceSegmentIds: [action] },
+          { id: 'skill-auxiliary-relay', name: 'Auxiliary relay', category: 'tool', capabilityKind: 'tool', supportMode: 'direct', directEvidenceSegmentIds: [action], indexEligible: false, roleIds: ['role-arbor'], evidenceSegmentIds: [action] },
+          { id: 'skill-scheduled-retrieval', name: 'scheduled retrieval', category: 'capability', capabilityKind: 'capability', supportMode: 'direct', directEvidenceSegmentIds: [action], indexEligible: false, roleIds: ['role-arbor'], evidenceSegmentIds: [action] },
+        ],
+        education: [], certifications: [], otherEvidence: [],
+        segmentCoverage: [
+          { segmentId: identity, disposition: 'identity', entityIds: ['identity'] },
+          { segmentId: roleHeader, disposition: 'role-header', entityIds: ['role-arbor'] },
+          { segmentId: dates, disposition: 'role-header', entityIds: ['role-arbor'] },
+          { segmentId: action, disposition: 'achievement', entityIds: ['achievement-connect', 'skill-endpoint-integration', 'skill-auxiliary-relay', 'skill-scheduled-retrieval'] },
+          { segmentId: contact, disposition: 'identity', entityIds: ['identity'] },
+        ],
+      });
+      const firstCorrection = profile();
+      firstCorrection.roles[0].skillIds = firstCorrection.roles[0].skillIds.filter(id => id !== 'skill-auxiliary-relay');
+      firstCorrection.skills = firstCorrection.skills.filter(skill => skill.id !== 'skill-auxiliary-relay');
+      firstCorrection.achievements[0].technologies = firstCorrection.achievements[0].technologies.filter(name => name !== 'Auxiliary relay');
+      firstCorrection.achievements[0].technologyReferences = firstCorrection.achievements[0].technologyReferences
+        .filter(reference => reference.technology !== 'Auxiliary relay');
+      firstCorrection.segmentCoverage[3].entityIds = firstCorrection.segmentCoverage[3].entityIds.filter(id => id !== 'skill-auxiliary-relay');
+      const secondCorrection = structuredClone(firstCorrection);
+      secondCorrection.skills.find(skill => skill.id === 'skill-scheduled-retrieval').category = 'method';
+      const explicitTargetCorrection = structuredClone(secondCorrection);
+      const initialAuxiliary = profile();
+      explicitTargetCorrection.roles[0].skillIds.splice(1, 0, 'skill-auxiliary-relay');
+      explicitTargetCorrection.skills.splice(1, 0, initialAuxiliary.skills.find(skill => skill.id === 'skill-auxiliary-relay'));
+      explicitTargetCorrection.achievements[0].technologies.splice(3, 0, 'Auxiliary relay');
+      explicitTargetCorrection.achievements[0].technologyReferences.splice(3, 0,
+        initialAuxiliary.achievements[0].technologyReferences.find(reference => reference.technology === 'Auxiliary relay'));
+      explicitTargetCorrection.segmentCoverage[3].entityIds.splice(2, 0, 'skill-auxiliary-relay');
+      const regressiveSecondCorrection = structuredClone(secondCorrection);
+      regressiveSecondCorrection.roles[0].skillIds.splice(1, 0, 'skill-auxiliary-relay');
+      regressiveSecondCorrection.skills.splice(1, 0, initialAuxiliary.skills.find(skill => skill.id === 'skill-auxiliary-relay'));
+      regressiveSecondCorrection.achievements[0].technologies.splice(3, 0, 'Auxiliary relay');
+      regressiveSecondCorrection.achievements[0].technologyReferences.splice(3, 0,
+        initialAuxiliary.achievements[0].technologyReferences.find(reference => reference.technology === 'Auxiliary relay'));
+      regressiveSecondCorrection.segmentCoverage[3].entityIds.splice(2, 0, 'skill-auxiliary-relay');
+      const findings = [
+        { id: 'remove-auxiliary-relay', severity: 'warning', category: 'skills', segmentIds: [action], entityIds: ['p0001-skill-auxiliary-relay'], detail: `Remove the unsupported auxiliary relay skill and ledger record. ${'evidence '.repeat(110)}`.slice(0, 1_200) },
+        { id: 'retrieval-category', severity: 'warning', category: 'skills', segmentIds: [action], entityIds: ['p0001-skill-scheduled-retrieval'], detail: `Correct the neighboring retrieval classification without changing other source-supported capability evidence. ${'evidence '.repeat(110)}`.slice(0, 1_200) },
+        { id: 'auxiliary-explicit-target', severity: 'warning', category: 'skills', segmentIds: [action], entityIds: ['p0001-skill-auxiliary-relay'], detail: `Revisit the explicitly named auxiliary relay correction. ${'evidence '.repeat(110)}`.slice(0, 1_200) },
+      ];
+      let auditPass = 0;
+      let repairCalls = 0;
+      let regression = null;
+      const prompts = [];
+      const result = await compileAuditedCareerSnapshot({
+        sourceFiles: files, maxPromptChars: 10_600,
+        callText: async (prompt, options) => {
+          if (options.task === 'career-profile-compile') return pageTransport(profile());
+          if (options.task === 'career-profile-audit-skills') return auditPass++ === 0 ? { findings } : { findings: [] };
+          if (options.task?.startsWith('career-profile-audit-')) return { findings: [] };
+          if (options.task === 'career-profile-repair') {
+            prompts.push(prompt);
+            if (repairCalls++ === 0) return pageTransport(firstCorrection);
+            if (repairCalls === 2) {
+              try { options.responseValidator(pageTransport(regressiveSecondCorrection)); } catch (error) { regression = error; }
+              return pageTransport(secondCorrection);
+            }
+            return pageTransport(explicitTargetCorrection);
+          }
+          throw new Error(`Unexpected task ${options.task}`);
+        },
+      });
+      const achievement = result.profile.achievements[0];
+      const integration = result.profile.skills.find(skill => skill.name === 'Endpoint integration');
+      const externalReferences = achievement.technologyReferences.filter(reference => /endpoint$/u.test(reference.technology));
+      assert(result.snapshot.status === 'approved' && repairCalls === 3 && prompts.length === 3
+        && prompts[1].includes('Endpoint integration')
+        && prompts[1].includes('Across later finding batches, preserve earlier source-supported corrected skills')
+        && integration?.capabilityKind === 'capability' && integration.indexEligible === false
+        && externalReferences.length === 2 && externalReferences.every(reference => reference.disposition === 'non-skill'
+          && reference.relationship === 'alternative' && reference.relationshipGroup === 'external-choice')
+        && result.profile.skills.find(skill => skill.name === 'scheduled retrieval')?.category === 'method'
+        && regression?.code === 'CAREER_SNAPSHOT_PAGE_INVALID'
+        && regression?.validationDiagnostic?.reason === 'CAREER_PAGE_REPAIR_REGRESSION'
+        && /earlier removed capability skill/.test(regression.message)
+        && /earlier removed technology ledger record/.test(regression.message)
+        && validateCareerProfile(result.profile, corpus).valid,
+      'an external object can remain a relation-qualified non-skill while the source-supported integration action is a separate non-indexable capability, and an overlapping later repair batch cannot resurrect an unmentioned removed skill/ledger record while an explicitly targeted batch can revisit it');
+      return { repairCalls, integrationPreserved: Boolean(integration), relationPreserved: externalReferences.length, tombstoneReintroductionBlocked: true, explicitTargetCorrectionAllowed: true };
     },
   },
   {
@@ -1161,12 +1288,12 @@ export default [
       // Durable handoff keys derive from the materialized prompt. A prior
       // repair-revision prompt cannot select the current response, so an old
       // accepted no-op is revalidated/reissued rather than silently replayed.
-      const stalePrompt = repairPrompt.replace('Repair protocol revision 3.', 'Repair protocol revision 2.');
+      const stalePrompt = repairPrompt.replace('Repair protocol revision 5.', 'Repair protocol revision 4.');
       const staleAcceptedByPrompt = new Map([[stalePrompt, pageTransport(prior)]]);
       assert(result.snapshot.status === 'approved' && result.profile.skills[0].indexEligible === false
-        && repairPrompt.includes('Repair protocol revision 3.')
+        && repairPrompt.includes('Repair protocol revision 5.')
         && !staleAcceptedByPrompt.has(repairPrompt)
-        && buildCareerProfilePageRepairPrompt(corpus, partitionCareerSourcePages(corpus)[0], pageTransport(prior), [finding]).includes('Repair protocol revision 3.'),
+        && buildCareerProfilePageRepairPrompt(corpus, partitionCareerSourcePages(corpus)[0], pageTransport(prior), [finding]).includes('Repair protocol revision 5.'),
       'the current repair revision must reject a stale canonical no-op before acceptance, recover through the same handoff with a substantive page change, and use a distinct durable prompt identity');
       return { noOpRejectedBeforeAcceptance: true, recovered: true };
     },
@@ -1729,6 +1856,79 @@ export default [
     },
   },
   {
+    name: 'career snapshot: an unreconcilable same-name skill is repaired by the one page whose row is redundant, never by the page whose row is correct',
+    run: async () => {
+      // Each case differs in exactly one governing fact between two pages naming the same skill. The row to change is the
+      // later one for a wording/eligibility difference, and the relationship-qualified one wherever it sits.
+      const cases = [
+        { name: 'category wording', pages: [{ category: 'language' }, { category: 'scripting' }], redundantPage: 1 },
+        { name: 'direct, then qualified', pages: [{}, { mode: 'relationship-qualified' }], redundantPage: 1 },
+        { name: 'qualified, then direct', pages: [{ mode: 'relationship-qualified' }, {}], redundantPage: 0 },
+      ];
+      for (const scenario of cases) {
+        const lines = scenario.pages.map((page, index) => `${index === 0 ? 'Engineer Acme January 2020 December 2021' : 'Analyst Beta January 2018 December 2019'} Python${page.mode ? ' when available' : ''}`);
+        const files = pagedSourceFiles(lines);
+        const corpus = buildCareerSourceCorpus(files);
+        const shardFor = (pageIndex, { removeSkill = false } = {}) => {
+          const { mode = 'direct', category = 'language' } = scenario.pages[pageIndex];
+          const qualified = mode === 'relationship-qualified';
+          const segmentId = corpus.segments[pageIndex].id;
+          const roleId = `role-${pageIndex}`;
+          const skillId = `skill-python-${pageIndex}`;
+          const slice = qualified ? 'Python when available' : 'Python';
+          return pageTransport({
+            identity: { name: '', contacts: [], evidenceSegmentIds: [segmentId] },
+            roles: [{
+              id: roleId, title: pageIndex === 0 ? 'Engineer' : 'Analyst', employer: pageIndex === 0 ? 'Acme' : 'Beta',
+              startDate: pageIndex === 0 ? 'January 2020' : 'January 2018', endDate: pageIndex === 0 ? 'December 2021' : 'December 2019', location: '',
+              achievementIds: [`ach-${pageIndex}`], skillIds: removeSkill ? [] : [skillId], evidenceSegmentIds: [segmentId],
+            }],
+            achievements: [{
+              id: `ach-${pageIndex}`, roleId, claim: slice, technologies: ['Python'],
+              technologyReferences: [{
+                technology: 'Python', disposition: 'skill', relationship: qualified ? 'conditional' : 'independent', relationshipGroup: qualified ? 'condition-1' : '',
+                relationshipEvidence: slice, evidenceSegmentIds: [segmentId],
+              }],
+              metrics: [], evidenceSegmentIds: [segmentId],
+            }],
+            projects: [],
+            skills: removeSkill ? [] : [{
+              id: skillId, name: 'Python', category, capabilityKind: 'language', supportMode: mode,
+              directEvidenceSegmentIds: qualified ? [] : [segmentId], indexEligible: !qualified, roleIds: [roleId], evidenceSegmentIds: [segmentId],
+            }],
+            education: [], certifications: [], otherEvidence: [], rolePatches: [], projectPatches: [],
+            continuationState: { roles: { mode: 'clear', ids: [] }, projects: { mode: 'clear', ids: [] } },
+            segmentCoverage: [{ segmentId, disposition: 'role-header', entityIds: [] }],
+          });
+        };
+        const compileWith = async (repairs, repair) => compileAuditedCareerSnapshot({
+          sourceFiles: files, pageMaxSegments: 1, pageMaxSourceChars: 48_000, now: () => '2026-10-07T00:00:00.000Z',
+          callText: async (_prompt, options) => {
+            if (options.task === 'career-profile-compile') return shardFor(options.hints.pageIndex);
+            if (options.task === 'career-profile-repair') { repairs.push(options.hints.pageIndex); return repair(options.hints.pageIndex); }
+            return { findings: [] };
+          },
+        });
+        // A faithful repair changes only the redundant page (drops its duplicate row) and is never asked of the other page.
+        const faithfulRepairs = [];
+        const approved = await compileWith(faithfulRepairs, pageIndex => shardFor(pageIndex, { removeSkill: pageIndex === scenario.redundantPage }));
+        const python = approved.profile.skills.filter(skill => skill.name === 'Python');
+        assert(faithfulRepairs.length >= 1 && faithfulRepairs.every(pageIndex => pageIndex === scenario.redundantPage),
+          `${scenario.name}: only the redundant page (${scenario.redundantPage}) is asked to repair (asked ${JSON.stringify(faithfulRepairs)})`);
+        assert(python.length === 1 && python[0].id === `p000${2 - scenario.redundantPage}-skill-python-${1 - scenario.redundantPage}`,
+          `${scenario.name}: exactly the correct row survives (${python.map(skill => skill.id).join(',')})`);
+        assert(validateCareerProfile(approved.profile, approved.corpus).valid, `${scenario.name}: the approved profile validates`);
+        // A repair that does not fix the duplicate is still refused with a typed error, and still only asked of the redundant page.
+        const stubbornRepairs = [];
+        let refusal = null;
+        try { await compileWith(stubbornRepairs, pageIndex => shardFor(pageIndex)); } catch (error) { refusal = error; }
+        assert(/^CAREER_SNAPSHOT_[A-Z_]+$/u.test(String(refusal?.code)) && stubbornRepairs.length >= 1 && stubbornRepairs.every(pageIndex => pageIndex === scenario.redundantPage),
+          `${scenario.name}: an unfixed duplicate is a typed refusal asked of the redundant page only (${refusal?.code}, ${JSON.stringify(stubbornRepairs)})`);
+      }
+      return { cases: cases.length };
+    },
+  },
+  {
     name: 'career snapshot: atomic immutable storage survives concurrent identical publish and rejects collisions',
     run: async () => {
       const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ic-career-snapshot-'));
@@ -1921,6 +2121,49 @@ export default [
         assert(await readPinnedCareerSnapshot(root, snapshotId) === null,
           'a historical reader still recomputes the id from the stored contract and rejects tampered contract/id pairs');
         return { historicalPinned: true, auditReceiptRejected: true, tamperRejected: true };
+      } finally {
+        fs.rmSync(root, { recursive: true, force: true });
+      }
+    },
+  },
+  {
+    name: 'career snapshot: only retained prior v6 contracts remain pin-readable after a current contract bump',
+    run: async () => {
+      const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ic-career-snapshot-'));
+      try {
+        const corpus = buildCareerSourceCorpus(sourceFiles());
+        const directory = path.join(root, 'career-snapshots');
+        fs.mkdirSync(directory, { recursive: true });
+        const retainedSnapshots = [];
+        for (const priorContract of CAREER_SNAPSHOT_PINNED_LEGACY_V6_CONTRACTS) {
+          const snapshot = currentSnapshot(corpus, validProfile(corpus));
+          snapshot.compilationContract = priorContract;
+          snapshot.snapshotId = careerSnapshotIdForContract(corpus, priorContract);
+          fs.writeFileSync(path.join(directory, `${snapshot.snapshotId}.json`), `${JSON.stringify(snapshot)}\n`, 'utf8');
+          retainedSnapshots.push(snapshot);
+        }
+        const oldV6Pinned = await Promise.all(retainedSnapshots.map(snapshot => readPinnedCareerSnapshot(root, snapshot.snapshotId)));
+        const currentCacheRejected = (await Promise.all(retainedSnapshots.map(snapshot => readCareerSnapshot(root, snapshot.snapshotId))))
+          .every(snapshot => snapshot === null);
+        const snapshot = retainedSnapshots[0];
+
+        // An arbitrary prior-looking v6 digest cannot turn a same-shape file
+        // into historical data; the allow-list is contract-bound, not merely
+        // schema-bound.
+        const unknownContract = 'f'.repeat(64);
+        const unknown = { ...snapshot, compilationContract: unknownContract, snapshotId: careerSnapshotIdForContract(corpus, unknownContract) };
+        fs.writeFileSync(path.join(directory, `${unknown.snapshotId}.json`), `${JSON.stringify(unknown)}\n`, 'utf8');
+        const arbitraryV6Rejected = await readPinnedCareerSnapshot(root, unknown.snapshotId) === null;
+
+        // A retained contract does not waive the complete paged audit chain.
+        const malformed = { ...snapshot, auditHistory: [] };
+        fs.writeFileSync(path.join(directory, `${snapshot.snapshotId}.json`), `${JSON.stringify(malformed)}\n`, 'utf8');
+        const malformedRetainedV6Rejected = await readPinnedCareerSnapshot(root, snapshot.snapshotId) === null;
+        assert(oldV6Pinned.every((pinned, index) => pinned?.snapshotId === retainedSnapshots[index].snapshotId)
+          && CAREER_SNAPSHOT_PINNED_LEGACY_V6_CONTRACTS.includes('a526f744741d46de51478c5799268bcc1bb1ef2c182472599c9410533c46306b')
+          && currentCacheRejected && arbitraryV6Rejected && malformedRetainedV6Rejected,
+        'a finite prior-v6 contract allow-list preserves existing card pins while fresh cache reads, arbitrary v6 contracts, and malformed retained records remain rejected');
+        return { priorV6Pinned: oldV6Pinned.length, currentCacheRejected, arbitraryV6Rejected, malformedRetainedV6Rejected };
       } finally {
         fs.rmSync(root, { recursive: true, force: true });
       }

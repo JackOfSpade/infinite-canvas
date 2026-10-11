@@ -32,8 +32,8 @@ import {
 } from '../../src/utils/applicationHandoffDock.js';
 import { isWorkflowSuccessor } from '../../src/utils/nonApiAiNavigation.js';
 import { deriveBridgeJobProgress, formatProgressDuration, progressTimeLines, PROGRESS_STAGES } from '../../src/utils/bridgeJobProgress.js';
-import { BRIDGE_PROGRESS_COPY, bridgePluginRef } from '../../src/utils/handoffBridgeCopy.js';
-import { deriveBridgeHealth } from '../../src/utils/handoffBridgeView.js';
+import { BRIDGE_PROGRESS_COPY, JOB_ROW_COPY, bridgePluginRef } from '../../src/utils/handoffBridgeCopy.js';
+import { deriveBridgeHealth, describeJobRow } from '../../src/utils/handoffBridgeView.js';
 import { EMPTY_BRIDGE_STATUS } from '../../src/utils/handoffBridgeStatus.js';
 import { BRIDGE_WORKING_PHASES, bridgeHeldCardLine, bridgeHeldKey, findBridgeHeldJob, isBridgeHeldJob } from '../../src/utils/bridgeHeldApplication.js';
 
@@ -1588,6 +1588,13 @@ const bridgeJobProgressTests = [
       assert(view.steps.every(step => step.label === applicationStageLabel(step.key)), 'step labels must be the dock\'s STAGE_LABELS');
       assert(stepStates(view) === 'done,current,upcoming,upcoming', `resume must be the current step: ${stepStates(view)}`);
       assert(stepStates(progress({ job: progressJob({ stage: 'review' }) })) === 'done,done,done,current', 'review current means three done');
+      for (const stage of ['requirement-disposition', 'blind-review', 'blind-repair-context']) {
+        const postLetter = progress({ job: progressJob({ stage }), item: { stage, corrections: [] } });
+        assert(stepStates(postLetter) === 'done,done,done,current', `${stage} belongs to the final review step`);
+        assert(postLetter.headline === 'ChatGPT is working on: Review and edit', `${stage} uses the final step's working copy`);
+        const legacyStatus = progress({ job: progressJob({ stage: null }), item: { stage, corrections: [] } });
+        assert(stepStates(legacyStatus) === 'done,done,done,current', `${stage} still projects from the request while an older status omits it`);
+      }
       assert(stepStates(progress({ job: progressJob({ stage: null }), item: {} })) === 'upcoming,upcoming,upcoming,upcoming', 'an unknown stage must not invent progress');
     },
   },
@@ -1609,6 +1616,18 @@ const bridgeJobProgressTests = [
       const restart = progress({ job: progressJob({ phase: 'held', reason: 'restart' }) });
       assert(restart.action === 'start-chat' && restart.headline === 'Confirm to restart', 'a restart hold is resolved by starting a chat');
       assert(progress({ job: progressJob({ phase: 'needs_user', reason: 'job_broken', stalled: true }) }).kind === 'needs_user', 'needs_user outranks stalled');
+    },
+  },
+  {
+    name: 'bridge progress: a job the independent review stopped says so and points at the job card, instead of reading as a generic broken job',
+    run: () => {
+      assert(JOB_ROW_COPY.review_stop === 'Needs you: independent review stopped this job. The job card says what to check or edit.' && JOB_ROW_COPY.review_stop !== JOB_ROW_COPY.job_broken, 'the row copy is its own sentence');
+      const stopped = progress({ job: progressJob({ phase: 'needs_user', reason: 'review_stop' }) });
+      assert(stopped.tone === 'problem' && stopped.headline === BRIDGE_PROGRESS_COPY.needsYou && stopped.detail === 'Independent review stopped this job. The job card says what to check or edit.',
+        `the progress card names the review stop (${stopped.detail})`);
+      assert(progress({ job: progressJob({ phase: 'needs_user', reason: 'job_broken' }) }).detail !== stopped.detail, 'a broken job still reads as broken');
+      const row = describeJobRow({ phase: 'needs_user', reason: 'review_stop' });
+      assert(row.text === JOB_ROW_COPY.review_stop && row.action === 'dock', 'the job row uses the same sentence and sends the person to the dock');
     },
   },
   {

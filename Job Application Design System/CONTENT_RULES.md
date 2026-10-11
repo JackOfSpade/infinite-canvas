@@ -23,7 +23,7 @@ or both of those.
 
 > **Mechanical decisions live in `STYLE.md`.** Token tables, type
 > scale, spacing grid, page geometry, page-break rules. **Variant
-> selection logic lives in `SKILL.md`** — the per-company decision
+> selection logic lives in `SKILL.md`** — the recipient-signal decision
 > rule the agent follows. This file holds philosophy, sources,
 > content rules with examples, and caveats. If they ever disagree,
 > `STYLE.md` is the source of truth for what the system *does*;
@@ -67,7 +67,7 @@ degree], [institution]`, as plain text inside `<main>` so every ATS
 reads it. If the candidate has no documented degree, the subtitle is
 the role alone — there is no alternate layout, no early-career
 exception, and no toggle. The subtitle is never a specialisation
-tagline ("Python backend, data integration & full-stack delivery"):
+tagline (`"<language> backend, <function> & <breadth> delivery"`):
 specialisation belongs in the bullets, where it comes with evidence.
 Mechanics in `STYLE.md §5.8`.
 
@@ -155,12 +155,12 @@ temporal modifiers such as "after testing" sit beside the action they modify.
 
 Standing alone is not the same as standing apart. A bullet can pass
 every check above — name its system, carry its own subject, wrap under
-three lines — and still be half of something else: a shipped résumé
-once reported one accomplishment, a full-stack internal-tools hub, as
-three separate bullets — one that built it, one that containerized it
-for deployment, one that added a feature to it. Each read fine alone;
-together they were one accomplishment wearing three `<li>`s, and the
-role carried 9 bullets for 4 real ones. **One accomplishment gets one
+three lines — and still be half of something else: a résumé can
+report one accomplishment, a single built artifact, as three separate
+bullets — one that built it, one that packaged it for deployment, one
+that added a feature to it. Each reads fine alone; together they are
+one accomplishment wearing three `<li>`s, and the role carries more
+bullets than it has real accomplishments. **One accomplishment gets one
 bullet**, its trailing clause carrying whatever supporting mechanism,
 constraint, or result the split-off bullets were protecting — the same
 "does this entry carry something nothing else already carries" test
@@ -168,7 +168,7 @@ constraint, or result the split-off bullets were protecting — the same
 applies to a project against the bullet corpus, here applied one
 bullet against its neighbors. The tell is almost always visible in the
 sentence itself: a bullet whose subject is the previous bullet's
-object — "Containerized *the internal-tools hub*…" right after the
+object — "<Packaged> *<the artifact>*…" right after the
 bullet that built it — is reporting the second half of one
 accomplishment, not a second one. And it is never the fix for a short
 page: a role that runs short needs an accomplishment the résumé hasn't
@@ -185,6 +185,13 @@ position: the facts, numbers, and scope of a bullet never change to
 fit an application, and a bullet never gets promoted to imply a
 relevance it doesn't have. Mechanics in `STYLE.md §5.3.2`.
 
+The first bullet answers the highest-priority requirement that role's
+evidence supports, and a requirement no approved evidence supports is answered
+by no bullet. A bullet also keeps the candidate's part exactly as its source
+words it: work the source describes as maintenance, support, monitoring,
+administration, operation or participation is written with a matching verb and
+is never presented as work the candidate performed, built or owned.
+
 ### Cover letter opening (hard gate)
 
 The letter's first sentence must hand the recruiter something useful
@@ -197,10 +204,15 @@ writing to apply…", "I'm writing to apply…", "I am applying for…",
 application…", or any equivalent throat-clearing. The recruiter
 already knows this is an application; the ATS submission, the
 filename, the job record, and the company-specific salutation already
-say so. The company and role name are still allowed in the opening
-when they're doing real work inside the thesis — the rule bans the
-announcement, not the words. Full rule, the reject/rewrite table, and
-the audit grep are in `STYLE.md §11.2.2`.
+say so. The company and role name belong in the opening as the target the
+capability is pointed at — the rule bans the announcement, not the words.
+Name the role by the title the job record
+gives and the employer by name there (when the record gives no usable title or
+employer, name the one it gives and invent neither), refer to the position as
+*this role* everywhere after, and write the opening from the
+candidate's side: it makes no assertion about the employer's domain,
+product, customers or needs beyond what the posting text itself says. Full
+rule, the reject/rewrite table, and the audit grep are in `STYLE.md §11.2.2`.
 
 If the opening first names an unfamiliar prior employer, it also states the
 candidate's role or relationship there. Do not begin with an unexplained
@@ -211,7 +223,17 @@ domain breadth or a different job function.
 
 The closing names the experience, skills, or work the candidate would bring.
 Those capabilities support the argument; they are not themselves "the
-evidence" brought to the role.
+evidence" brought to the role. It ties one concrete item the letter has
+already shown to the role, and it adds no new frame.
+
+Each body paragraph adds what its résumé bullet cannot: the reason,
+constraint, decision or outcome that a career-data quote it cites states in
+its own words, never the bullet again and never a reason or outcome no cited
+quote states. Two proof paragraphs suffice when the cited quotes are one-line
+achievements; a paragraph added to reach a count is padding. Where a cited
+quote states nothing beyond its bullet, the paragraph says the proof plainly and
+invents no reason for it, and a letter whose evidence is all of that kind uses
+fewer, plainer paragraphs.
 
 ### Colon dumps, overloaded sentences, metaphors, broken parallelism, unearned generalization
 
@@ -291,8 +313,9 @@ Source material supplies facts, not mandatory prose wording. Provenance-bearing
 category labels are part of those facts: personal, open-source, academic,
 volunteer, and employer-owned projects must keep their stated attribution.
 Preserve the evidence boundary while paraphrasing distinctive constructions
-across the résumé and letter; do not repeat “built from scratch” when a plain
-supported verb such as “created” or “designed and implemented” does the job.
+across the résumé and letter; do not repeat a distinctive stock phrase from a
+source when a plain supported verb such as “created” or “designed and
+implemented” does the job.
 State why a new employer, project, or period belongs before its details. Do not
 use “now,” “still,” or a similar temporal contrast without stating the other
 side of the contrast.
@@ -407,7 +430,7 @@ for what's explicitly out of bounds.
 Four opt-in variant attributes, **all valid only on the root
 `<html>` element** — an attribute on `<main class="page">` or any
 other ancestor is ignored. Full mechanical details in
-`STYLE.md §10`; the agent's per-company decision rule for which to
+`STYLE.md §10`; the agent's recipient-signal decision rule for which to
 apply lives in `SKILL.md — §Variant selection`. Variants compose
 freely, except the two `data-print="…"` values which are mutually
 exclusive.
@@ -432,7 +455,7 @@ after measuring an overflow.
 `data-print="dual-pdf"` is the default in `resume.html`. The agent-facing
 pipeline — including the gates to run before rendering — is `SKILL.md
 §The pipeline`; the module, flags and self-tests are in
-`ENGINEERING.md`. The per-company rule for which variant to apply is
+`ENGINEERING.md`. The recipient-signal rule for which variant to apply is
 `SKILL.md §Variant selection`.
 
 Pages 2+ print a mono page indicator (`2 / 3`) at the bottom right via

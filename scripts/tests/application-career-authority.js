@@ -11,7 +11,7 @@ const snapshot = (otherCount = 0) => ({
   snapshotId: 'authority-test', status: CAREER_SNAPSHOT_STATUS_APPROVED,
   profile: {
     identity: { name: 'Ada', contacts: ['ada@example.test'] },
-    roles: [{ id: 'r1', title: 'Engineer', employer: 'Acme', startDate: '', endDate: '', location: 'Toronto', achievementIds: ['a1'], skillIds: ['s1', 's3'] }, { id: 'r2', title: 'Engineer', employer: 'Else', startDate: '', endDate: '', location: '', achievementIds: ['a2'], skillIds: ['s2'] }],
+    roles: [{ id: 'r1', title: 'Engineer', employer: 'Acme', startDate: '', endDate: '', location: 'Lakeview', achievementIds: ['a1'], skillIds: ['s1', 's3'] }, { id: 'r2', title: 'Engineer', employer: 'Else', startDate: '', endDate: '', location: '', achievementIds: ['a2'], skillIds: ['s2'] }],
     achievements: [{ id: 'a1', roleId: 'r1', claim: 'Built service one.' }, { id: 'a2', roleId: 'r2', claim: 'Built service two.' }],
     projects: [{ id: 'p1', name: 'Project', description: 'Built project.' }],
     skills: [{ id: 's1', name: 'TypeScript', category: 'language', indexEligible: true, roleIds: ['r1'] }, { id: 's2', name: 'Ambiguous', category: 'other', indexEligible: false, roleIds: ['r2'] }, { id: 's3', name: 'Node.js', category: 'language', indexEligible: true, roleIds: ['r1'] }],
@@ -37,7 +37,7 @@ export default [{
     try { authority.catalogById?.set('x', {}); } catch { /* private by design */ }
     const role = resolveAuthorityRole(authority, 'r1');
     try { role.location = 'mutated'; } catch { /* frozen by design */ }
-    assert(authority.digests.catalog === digest && resolveAuthorityEvidence(authority, 'host.career.achievement.a1.1').quote.includes('Built service one') && resolveAuthorityRole(authority, 'r1').location === 'Toronto', 'private indexes and cloned records cannot be mutated through the exported authority');
+    assert(authority.digests.catalog === digest && resolveAuthorityEvidence(authority, 'host.career.achievement.a1.1').quote.includes('Built service one') && resolveAuthorityRole(authority, 'r1').location === 'Lakeview', 'private indexes and cloned records cannot be mutated through the exported authority');
     const fail = fn => { try { fn(); return false; } catch { return true; } };
     assert(fail(() => resolveAuthorityEvidence(authority, 'host.career.achievement.a1.1', 'altered'))
       && fail(() => validateAuthorityRoleEvidence(authority, 'r1', []))
@@ -49,11 +49,11 @@ export default [{
       && fail(() => validateAuthoritySkillGroup(authority, ['TypeScript'], []))
       && fail(() => validateAuthoritySkillGroup(authority, ['TypeScript', 'Node.js'], ['host.career.skill.s1.1']))
       && fail(() => validateAuthoritySkillGroup(authority, ['TypeScript'], ['host.career.achievement.a1.1']))
-      && fail(() => validateAuthorityIdentityAndLocation(authority, { name: 'Ada', contact: ['ada@example.test'], credential: 'Wrong' }, 'r1', 'Toronto'))
-      && fail(() => validateAuthorityIdentityAndLocation(authority, { name: 'Ada', contact: ['ada@example.test'], credential: 'BSc, First University', subtitleRole: 'Engineer' }, 'r1', 'Toronto'))
+      && fail(() => validateAuthorityIdentityAndLocation(authority, { name: 'Ada', contact: ['ada@example.test'], credential: 'Wrong' }, 'r1', 'Lakeview'))
+      && fail(() => validateAuthorityIdentityAndLocation(authority, { name: 'Ada', contact: ['ada@example.test'], credential: 'BSc, First University', subtitleRole: 'Engineer' }, 'r1', 'Lakeview'))
       && fail(() => validateAuthorityIdentityAndLocation(authority, { name: 'Ada', contact: ['ada@example.test'] }, 'r1', '')),
     'altered, empty, header-only, cross-entity, ineligible skill, credential, and wrong nonempty location inputs fail closed');
-    validateAuthorityIdentityAndLocation(authority, { name: 'Ada', contact: ['ada@example.test'] }, 'r1', 'Toronto');
+    validateAuthorityIdentityAndLocation(authority, { name: 'Ada', contact: ['ada@example.test'] }, 'r1', 'Lakeview');
     validateAuthorityIdentityAndLocation(authority, { name: 'Ada', contact: ['ada@example.test'] }, 'r2', '');
     validateAuthoritySkillGroup(authority, ['TypeScript'], ['host.career.skill.s1.1']);
     validateAuthoritySkillGroup(authority, ['TypeScript', 'Node.js'], ['host.career.skill.s1.1', 'host.career.skill.s3.1']);
@@ -81,7 +81,7 @@ export default [{
           { id: 'job-need', sourceId: 'job-listing', quote: 'Build reliable services.' },
         ] },
         resume: { schemaVersion: 'structured-resume.v1', identity: authority.identity, roles: [
-          { id: 'r1', title: 'Engineer', company: 'Acme', dates: '', location: 'Toronto', bullets: [{ id: 'bullet-1', text: 'Built service one.', evidenceIds: [achievement.id] }] },
+          { id: 'r1', title: 'Engineer', company: 'Acme', dates: '', location: 'Lakeview', bullets: [{ id: 'bullet-1', text: 'Built service one.', evidenceIds: [achievement.id] }] },
           { id: 'r2', title: 'Engineer', company: 'Else', dates: '', location: '', bullets: [{ id: 'bullet-2', text: 'Built service two.', evidenceIds: [secondAchievement.id] }] },
         ] },
         coverLetter: {
@@ -266,6 +266,10 @@ export default [{
         validateStructuredApplicationResume(draft, {
           sourceRoles: [], evidenceCatalog: [quotedEducation, quoteMissing], trustedIdentity: projectAuthority.identity,
           careerData: 'MSc, Later University\nReporting Project\nBuilt durable reporting workflow.\nTypeScript\nCert — Issuer', authorityMode: true,
+          // Authority mode requires the approved skill projection (omitting it
+          // is a misconfiguration that fails closed); the approved inventory
+          // alone must still not let the raw text stand in for a missing quote.
+          careerSkillEvidence: { version: 'career-snapshot-skills.v1', skills: [{ id: 'skill-ts', name: 'TypeScript', indexEligible: true, evidenceSegmentIds: ['segment-0001'] }] },
         });
       } catch (error) { message = String(error?.message || error); }
       return message.includes(expected);

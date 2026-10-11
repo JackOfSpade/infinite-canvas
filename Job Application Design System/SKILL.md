@@ -86,12 +86,13 @@ End-to-end, given candidate data + job description:
    to buy a line.
 
 2. **Read the job description.** Identify:
-   - Company name and the *kind* of company (see decision table below)
+   - The *kind* of recipient, read from the posting's own prose (see
+     decision table below)
    - Role level (staff, principal, senior, IC4+) — confirms the
      system is being used in its target band
    - Any explicit format requirements (one-page, A4, B&W, etc.)
 
-3. **Choose variants** by company / industry signal. The full
+3. **Choose variants** by the recipient signals in the posting. The full
    decision rule is `## Variant selection` below — read it before
    filling the template. The chosen variants become attributes on
    the root `<html>` element, and nowhere else.
@@ -114,7 +115,12 @@ End-to-end, given candidate data + job description:
    seniority signals — never the most recent, never the one that
    mattered most to the past employer, and never just the one with
    the biggest number. Reordering never changes a bullet's facts or
-   invents relevance a bullet doesn't have. Full rule: `STYLE.md
+   invents relevance a bullet doesn't have; the first bullet answers the
+   highest-priority requirement that role's evidence supports. A bullet keeps
+   the candidate's part exactly as its source words it: work the source
+   describes as maintenance, support, monitoring, administration, operation or
+   participation is written with a matching verb and never presented as work
+   the candidate performed, built or owned. Full rule: `STYLE.md
    §5.3.2`.
 
    **Make every highlight bullet self-contained.** A recruiter or ATS
@@ -179,14 +185,51 @@ End-to-end, given candidate data + job description:
    or result.
 
    Give each cover-letter paragraph one argumentative job, not a prescribed
-   number of sentences. Use as many sentences as clarity requires. Split
-   separate claims, action steps, or relevance links when combining them makes
-   the grammar harder to follow. In particular, an artifact may be introduced
+   number of sentences. Use the sentences the paragraph needs, usually two to
+   four; a one-sentence paragraph is for emphasis, a one-line hook or a
+   one-line closing, and a letter has at most two of them; no single detail of
+   a source earns a paragraph of its own (the résumé carries it). Split separate
+   claims or action steps within a paragraph when combining them makes the
+   grammar harder to follow. In particular, an artifact may be introduced
    in one sentence and its supported trigger or follow-up action explained in
    the next. Do not force a feature inventory into the introduction, and do not
    add a standalone abstract sentence merely to label the work's difficulty or
    "problem shape." Explain the evidence-to-role connection only when the proof
-   and transfer do not already make it clear.
+   does not already make it clear. Pick the two or three strongest proofs. A
+   sentence that turns a proof toward the employer belongs in at most one
+   paragraph of a letter, the first that carries a proof, and it is worded in
+   the writer's own natural wording, in a sentence other than the one that
+   carries the proof; no stock phrase or sentence frame is required for it, and
+   a generic sentence such as "I would apply this experience in this role" is
+   what to avoid. A later proof paragraph owes no sentence about the target and
+   no relevance span: it is bound to the requirement its proof answers by its
+   `jobNeedQuote` and ends on a concrete outcome of what the work did, not on
+   another statement of relevance, so a sentence in it that only echoes the
+   posting's vocabulary can be cut. A sentence about the target also
+   claims no benefit (availability, reliability, scalability, cost, security and
+   the like) that the paragraph's own proof does not state.
+
+   **What each paragraph adds, and how many there are.** A body paragraph
+   develops one proof and adds what its résumé bullet cannot: the reason,
+   constraint, decision or outcome that a career-data quote it cites states in
+   its own words. It never says the bullet again, and it never adds a reason
+   or outcome that no cited quote states. The number of proof paragraphs
+   follows the evidence: two suffice when the cited quotes are one-line
+   achievements, and a paragraph added to reach a count is padding; where a
+   cited quote states nothing beyond its bullet, say the proof plainly, invent
+   no reason for it, and let a letter whose evidence is all of that kind run to
+   fewer, plainer paragraphs. Bind each
+   paragraph's `jobNeedQuote` to the posting requirement its own proof
+   answers, and no two paragraphs to the same quote. A sentence that adds
+   nothing beyond the posting's own vocabulary is filler, not evidence. The
+   claim span and the relevance span are owed only by the first proof-bearing
+   paragraph of the letter. The claim is a phrase set inside a sentence the
+   paragraph needs anyway, the proof sentence included; it is never a sentence
+   written only to carry it. The relevance is that paragraph's own
+   sentence about the target, apart from the proof sentence. A highest- or
+   high-priority requirement the approved career evidence does not support is
+   not claimed, implied or approximated in either document: leaving it
+   uncovered is the honest handling.
 
    **Project-category provenance is binding too.** A heading that identifies
    work as personal, open-source, academic, volunteer, or employer-owned is a
@@ -211,7 +254,7 @@ End-to-end, given candidate data + job description:
    joined by the mid-dot `.sep`. **No documented degree ⇒ render the role
    alone** and delete the separator and `.credential` span; never add
    an Education section, and never write a specialisation tagline
-   ("Python backend, data integration &amp; full-stack delivery") in
+   (`"<language> backend, <function> & <breadth> delivery"`) in
    its place. Full rule: `STYLE.md §5.8`.
 
    **Then run the dash gate.** Every string written in this step is
@@ -272,16 +315,29 @@ End-to-end, given candidate data + job description:
    welcome a conversation` or `I would welcome a discussion` is not.
    The check reads three things in that sentence: the candidate's asset has to
    be named by a possessive, an authorship clause, or a demonstrative carrying
-   its own descriptor (`my integration work`, `the connector I built`, `that
-   MCP server experience` — never a bare `that work`); the sentence has to
+   its own descriptor (`my <work noun>`, `the <artifact> I built`, `that
+   <domain> <work noun> experience` — never a bare `that work`); in an
+   authorship clause the `<artifact>` is a noun the letter has already used for
+   the candidate's own work, as the object of an earlier sentence or in a cited
+   career-data quote; the sentence has to
    say what the asset does (`... could support ...`, `... supports ...`,
    `applying ... to ...`); and the sentence has to reach the employer's own
    side of that action with an explicit target — `your ...`, `the`/`this`
-   plus a work noun (`the platform`, `this team`), a reader noun
+   plus a noun for the team, product or work (`the <noun>`, `this <noun>`), a reader noun
    (`customers`, `users`, `clients`), or the employer's own name. A sentence
    that names only the candidate's asset and what it does, with no
    employer-facing target in that same sentence, does not pass — however
-   specific the asset is.
+   specific the asset is. The verb comes from a closed list: support,
+   contribute, help, advance, strengthen, improve, build, deliver, apply, serve,
+   shorten, extend, scale, accelerate or fit after can, could, would, will or
+   might (or in the present tense, as in `supports`), or applying, bringing,
+   putting, using, contributing, extending, connecting or carrying; any other
+   verb fails that part however naturally it reads. An authorship clause with
+   built, wrote, designed, created, developed, led, owned or maintained states a
+   past action of the candidate, so a closing that uses one is a proof-bearing
+   paragraph and the review records an argumentMapping for it (a proof span and
+   a jobNeedQuote that no other paragraph uses); prefer a possessive asset
+   unless the artifact is the strongest item the letter showed.
 
    **The letter's opening sentence is a hard gate.** `STYLE.md §11.2.2`:
    the first sentence must lead with a job-specific thesis, a concrete
@@ -293,9 +349,17 @@ End-to-end, given candidate data + job description:
    to apply…", "I am applying for…", "I am writing to express my
    interest…", "Please accept my application…", or an equivalent —
    swapping in a synonym doesn't pass, only leading with substance
-   does. The company and role name may still appear in the opening
-   when they're load-bearing inside the thesis itself; they just can't
-   appear only to announce the application. Grep before rendering:
+   does. The company and role name belong in the opening as the target the
+   capability is pointed at; they just can't appear only to announce the
+   application. Name the target role by the
+   title the job record gives and the employer by name in the opening, in the
+   sentence that states the closest capability the cited work directly shows,
+   taking both from the job record alone (when the record gives no usable title
+   or employer, name the one it gives and invent neither), and refer to the
+   position as `this role` everywhere after. Write the opening from the
+   candidate's side: it makes no assertion about the employer's domain,
+   product, customers or needs beyond what the posting text itself says.
+   Grep before rendering:
 
    ```sh
    grep -niE "writing to apply|writing to express my interest|^i am applying for|please accept my application" filled.html
@@ -465,28 +529,31 @@ placed on the page element, do nothing at all.
 
 ### Step 1 — Classify the recipient
 
-Work from the named-company list first. If the company name is
-not listed, fall through to the prose-style heuristics below.
-If still unclassifiable, take the named fallback. **Never agonise**
-— the wrong call here is recoverable; the right call here is not
-worth more than 30 seconds of inference.
+Work from the job description's own prose, never from the company's
+name. A name is not evidence of how a hiring panel reads a document, a
+list of names goes stale, and no list covers the employers it omits.
+Match the posting to the closest profile below using the signals in its
+text; Step 2 orders the tie-breakers when more than one profile fits.
+If the posting still can't be classified, take the named fallback.
+**Never agonise** — the wrong call here is recoverable; the right call
+here is not worth more than 30 seconds of inference.
 
-**Per-company decision rule:**
+**Recipient-profile decision rule:**
 
-| Recipient profile                                                                          | Variants                                                       |
-|--------------------------------------------------------------------------------------------|----------------------------------------------------------------|
-| Design-conscious tech / startup (Anthropic, Stripe, Linear, Figma, Vercel, Notion, Render, Modal, Replicate, Cursor, Anduril, infra startups, design-led seed/Series-A) | `data-print="dual-pdf"` *(default)*                            |
-| Quant-finance / design-conscious finance (Jane Street, Hudson River Trading at IC level)   | `data-print="dual-pdf"` — these firms read carefully; taste reads positively |
-| Big-co tech with Workday-class ATS at the front (Google, Meta, Amazon, Microsoft, Apple, Salesforce, Oracle, Atlassian, Shopify, most public tech) | `data-print="ink-only"`                                        |
-| Traditional enterprise / consulting (IBM, Accenture, Deloitte, Big-4, MBB-tier)            | `data-print="ink-only" data-mono`                              |
-| Traditional finance back-office / banking IT (most bulge-bracket roles outside Citadel/Two Sigma's eng tracks) | `data-print="ink-only" data-mono`                              |
-| Defense / government / cleared roles (exception: Anduril is design-conscious tech)         | `data-print="ink-only" data-mono`                              |
-| Big-law / law-tech                                                                         | `data-print="ink-only" data-mono`                              |
-| Healthcare admin / insurance tech                                                          | `data-print="ink-only" data-mono`                              |
-| Academia / national labs                                                                   | Reconsider — likely wrong design system. If forced: `ink-only data-mono` |
-| **Unknown / can't classify with confidence**                                               | `data-print="dual-pdf"` (named fallback)                       |
+| Recipient profile                                                | Posting-prose signals                                                                 | Variants                                                       |
+|------------------------------------------------------------------|---------------------------------------------------------------------------------------|----------------------------------------------------------------|
+| Design-conscious product or engineering organisation (early-stage, infrastructure, design-led) | craft, taste, design-led, opinionated, product sensibility, polish; short, conversational, written by an engineer | `data-print="dual-pdf"` *(default)*                            |
+| Quantitative or research-driven finance that reads technical work closely | rigour, research, first-principles problem solving; little process vocabulary | `data-print="dual-pdf"` — these readers read carefully; taste reads positively |
+| Large organisation with an applicant-tracking pipeline at the front | enterprise-scale, governance, compliance, stakeholders (five or more mentions), matrix organisation, global; templated corporate boilerplate | `data-print="ink-only"`                                        |
+| Traditional enterprise or consulting                             | the same process-heavy signals, plus client-engagement and delivery-practice vocabulary | `data-print="ink-only" data-mono`                              |
+| Traditional finance back office or banking IT                    | regulated, audit, underwriting, actuarial, banking                                    | `data-print="ink-only" data-mono`                              |
+| Defense, government, or cleared roles                            | clearance, defense, government, public sector, FedRAMP                                | `data-print="ink-only" data-mono`                              |
+| Legal practice or law-adjacent technology                        | regulated-practice and audit vocabulary                                               | `data-print="ink-only" data-mono`                              |
+| Healthcare administration or insurance technology                | regulated, compliance, audit vocabulary                                               | `data-print="ink-only" data-mono`                              |
+| Academia or research institutions                                | CV-style or publication-oriented requirements                                         | Reconsider — likely wrong design system. If forced: `ink-only data-mono` |
+| **Unknown / can't classify with confidence**                     | none of the above                                                                     | `data-print="dual-pdf"` (named fallback)                       |
 
-### Step 2 — If the company isn't on the list, infer from the JD
+### Step 2 — If no profile fits cleanly, apply the ordered JD signals
 
 Read the job description's prose for stylistic signals. Apply
 these in order; first match wins:
@@ -616,11 +683,10 @@ Hard rules for every bullet:
   "shape"/"pattern"/"approach", are all rejected
   on the résumé for the same reasons they are in the letter
   (`STYLE.md §11.2.3`).
-- **Technology verbs describe technology roles.** Do not make a web server or
-  application server a means of containerization merely because it runs in a
-  container. State the container/orchestration operation separately from the
-  serving or application-runtime operation, and give each named technology an
-  accurate governing verb.
+- **Technology verbs describe technology roles.** Do not credit a component
+  with an operation that belongs to a different component merely because the
+  two ship or run together. State each component's operation separately, and
+  give each named technology an accurate governing verb for its own role.
 
 Verbs to prefer: *designed, shipped, owned, drove, killed, replaced,
 rewrote, migrated, decommissioned, halved, tripled, tenfold-d*.
@@ -784,14 +850,14 @@ the reader's attention on work this role has no use for.
 The same failure this file already guards against in `## Do not let a
 project section restate the bullets` shows up one level in: a role
 whose bullets restate each other instead of restating a project. A
-shipped résumé once reported one accomplishment — a full-stack
-internal-tools hub — as three separate `<li>`s: one that built it, one
-that containerized it for deployment, one that added a fee-tracking
-feature to it. Every one of the three was individually self-contained,
-individually under the 180-character budget (`STYLE.md §5.4`), and
-individually grounded — so every rule already in this file passed it —
-while the role carried 9 bullets for 4 real accomplishments, past the
-3–6 ceiling above.
+résumé can report one accomplishment, a single built artifact, as three
+separate `<li>`s: one that built it, one that packaged it for
+deployment, one that added a feature to it. Every one of the three can
+be individually self-contained, individually under the 180-character
+budget (`STYLE.md §5.4`), and individually grounded — so every rule
+already in this file passes it — while the role carries more bullets
+than it has real accomplishments, and can sit past the 3–6 ceiling
+above.
 
 **One accomplishment, one bullet.** A bullet earns its place in a role
 only by carrying something no other bullet in that role carries — a
@@ -803,17 +869,18 @@ or three bullets report the same system's build, its deployment, and
 one of its features, combine them into a single bullet whose trailing
 clause carries the supporting mechanism, constraint, or result — not
 three `<li>`s. A quick check for the pattern: a bullet whose subject is
-the previous bullet's object — "Containerized **the internal-tools
-hub**…" right after the bullet that built it — is almost always the
-second half of one accomplishment, not a second one.
+the previous bullet's object — "<Packaged> **<the artifact>**…" right
+after the bullet that built it — is almost always the second half of
+one accomplishment, not a second one.
 
 **Splitting a bullet is never the repair for a short page.** A page
 that runs short calls for source-supported evidence the résumé hasn't
 used yet — a different accomplishment, project, or skill — never a
-second bullet about an accomplishment already on the page. The case
-above measured 74.1% of the type area and split rather than reach for
-unused evidence; the repair was the unused career data, not a second
-and third bullet about a system the page already covered.
+second bullet about an accomplishment already on the page. A page that
+runs short and answers by splitting one accomplishment into a build
+bullet, a deployment bullet, and a feature bullet has reached for
+padding instead of unused evidence; the repair is the unused career data,
+not a second and third bullet about a system the page already covered.
 
 ## Negative space — what the system does NOT do
 

@@ -22,7 +22,7 @@ import { logger } from '../logger.js';
 import { sanitizeApplicationBundlePart } from './applicationBundle.js';
 import { applicationSyncConfig, applicationSyncStatusSnapshot, registerApplicationSyncWorkspace, withApplicationSyncWorkspaceLock } from './applicationSync.js';
 import { replaceApplicationBundleAtomically } from './applicationFileTransaction.js';
-import { ensureDirectoryWithinRoot, isWithinDirectory } from '../utils/pathSafety.js';
+import { ensureDirectoryWithinRoot, isRendererPrivateAppPath, isWithinDirectory, registerRendererPrivateAppRoot } from '../utils/pathSafety.js';
 import { isBackgroundE2E } from '../utils/backgroundE2e.js';
 import {
   checkCompoundHyphenation,
@@ -31,7 +31,23 @@ import {
   checkReferenceClarity,
 } from './coverLetterChecks.js';
 
-const { shell } = electronPkg;
+const { app, shell } = electronPkg;
+
+/**
+ * The renderer names the canvas file whose directory anchors an export. That
+ * path must never resolve inside the app's private user-data stores, where a
+ * write (or even the directory probe for "Applied Jobs") would be a renderer
+ * foothold in host-only state. Only app-private data is refused here: the
+ * system-path policy is not applied, so an ordinary temp or user folder (for
+ * example macOS's /var/folders) still works. Both the lexical and canonical
+ * spellings are checked by the caller.
+ */
+export function assertRendererCanvasFilePathAllowed(canvasFilePath) {
+  try { registerRendererPrivateAppRoot(app?.getPath?.('userData')); } catch { /* test stubs may not expose userData yet */ }
+  if (isRendererPrivateAppPath(canvasFilePath)) {
+    throw new Error('The saved canvas location is private application data and cannot anchor an application export.');
+  }
+}
 
 // Cover-letter authoring rules deliberately do not live here. This module
 // validates and saves an application; the retired API authoring path that
@@ -1668,23 +1684,85 @@ export function checkResumeBulletSelfContainment(mainHtml) {
     : { id: 'resume-bullet-self-containment', passed: true, detail: `${evidence.bulletTexts.length} résumé bullet(s) are self-contained` };
 }
 
-// Containerization and runtime topology are related deployment facts, but a
-// trailing participial topology clause usually turns one concise résumé point
-// into an implementation inventory. Keep this check narrow: an explicit
-// second predicate with a result or constraint remains legal.
-const RESUME_CONTAINERIZATION_TOPOLOGY_TAIL = /\bcontaineri[sz](?:e|ed|ing)\b[^.!?]{0,180},\s*(?:while\s+)?(?:running|serving|routing|proxying|hosting)\b[^.!?]{0,180}\b(?:Nginx|Gunicorn|uWSGI|Apache|Tomcat|Caddy|HAProxy|Traefik|IIS|Passenger|Puma|Unicorn|mod_wsgi)\b/iu;
+// A bullet that ends in a comma-introduced participial clause which does
+// nothing but chain terms this same résumé already indexes in its Skills block
+// through relational words ("A under B behind C") turns one concise point into
+// an implementation topology: the Skills block carries those names, and the
+// clause adds no mechanism, constraint, scope or result of its own. The decision
+// is relative to THIS résumé's evidence (its own Skills items), never to a list
+// of products, so it reads the same in every field. It stays narrow on purpose:
+// a clause that carries a figure, ends in anything but an indexed name, chains
+// fewer than three indexed terms, or only lists them with commas and "and" is
+// left to the editorial review's concision criterion.
+const MIN_INDEXED_TERMS_IN_INVENTORY_TAIL = 3;
+const MAX_INVENTORY_TAIL_CHARS = 140;
+const PARTICIPIAL_TAIL_RE = /,\s+(?:while\s+)?\p{L}+ing\s+/gu;
+const LIST_ONLY_GAP_RE = /^\s*(?:[,;&+/]|\b(?:and|or)\b)?\s*(?:\b(?:and|or)\b)?\s*$/iu;
+
+function resumeSkillItems(evidence) {
+  return [...new Set((Array.isArray(evidence?.skills) ? evidence.skills : [])
+    .flatMap(group => (Array.isArray(group?.items) ? group.items : []))
+    .map(item => String(item || '').replace(/\s+/g, ' ').trim())
+    .filter(Boolean))];
+}
+
+function indexedTermsInTail(tail, items) {
+  const found = [];
+  for (const item of items) {
+    const escaped = item.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
+    const term = new RegExp(`(^|[^\\p{L}\\p{N}])(${escaped})(?=$|[^\\p{L}\\p{N}])`, [...item].length <= 2 ? 'gu' : 'giu');
+    let match;
+    while ((match = term.exec(tail))) {
+      const start = match.index + match[1].length;
+      found.push({ item, start, end: start + match[2].length });
+    }
+  }
+  // Longest-first at a position, so an item that is only a shorter form of a
+  // neighbouring item cannot count the same words twice.
+  found.sort((left, right) => left.start - right.start || right.end - left.end);
+  const separate = [];
+  for (const entry of found) {
+    if (!separate.length || entry.start >= separate.at(-1).end) separate.push(entry);
+  }
+  return separate;
+}
+
+function indexedInventoryTail(value, items) {
+  if (!items.length) return null;
+  let clauseStart = -1;
+  let tailStart = -1;
+  PARTICIPIAL_TAIL_RE.lastIndex = 0;
+  for (let match = PARTICIPIAL_TAIL_RE.exec(value); match; match = PARTICIPIAL_TAIL_RE.exec(value)) {
+    clauseStart = match.index;
+    tailStart = match.index + match[0].length;
+  }
+  if (tailStart < 0) return null;
+  const clause = value.slice(clauseStart);
+  const tail = value.slice(tailStart).replace(/[\s.;:!?]+$/u, '');
+  if (!tail || tail.length > MAX_INVENTORY_TAIL_CHARS || /\d/u.test(tail)) return null;
+  const found = indexedTermsInTail(tail, items);
+  if (found.length < MIN_INDEXED_TERMS_IN_INVENTORY_TAIL) return null;
+  // The clause must END on an indexed name: anything after the last one
+  // (a purpose, an effect) is the second predicate this check leaves alone.
+  if (tail.slice(found.at(-1).end).trim()) return null;
+  // And it must chain the names through relational words, not merely list them.
+  const gaps = found.slice(1).map((entry, index) => tail.slice(found[index].end, entry.start));
+  if (!gaps.some(gap => !LIST_ONLY_GAP_RE.test(gap))) return null;
+  return { clause: clause.replace(/^,\s*/u, '').replace(/[\s.;:!?]+$/u, ''), terms: found.map(entry => entry.item) };
+}
 
 /** Keeps each résumé highlight focused on one principal achievement. */
 export function checkResumeBulletFocus(mainHtml) {
   const evidence = extractResumeEvidence(mainHtml);
+  const items = resumeSkillItems(evidence);
   const observations = [];
   evidence.roles.forEach((role, roleIndex) => {
     (Array.isArray(role.bullets) ? role.bullets : []).forEach((bullet, bulletIndex) => {
       const value = String(bullet?.text || '').replace(/\s+/g, ' ').trim();
-      const match = RESUME_CONTAINERIZATION_TOPOLOGY_TAIL.exec(value);
-      if (!match) return;
+      const inventory = indexedInventoryTail(value, items);
+      if (!inventory) return;
       const label = role.company || role.title || `role ${roleIndex + 1}`;
-      observations.push(`${label} bullet ${bulletIndex + 1} appends runtime topology to a containerization point (“${match[0]}”); keep the principal containerization claim, or retain topology only in a separate result- or constraint-bearing predicate`);
+      observations.push(`${label} bullet ${bulletIndex + 1} ends in a clause that only chains ${inventory.terms.length} terms this résumé already indexes in Skills (“${inventory.clause}”); keep the principal claim, or retain detail only in a separate result-, constraint- or scope-bearing predicate`);
     });
   });
   return observations.length
@@ -2210,10 +2288,10 @@ function updateApplicationTelemetryForAttempt(attemptId, changes = {}) {
  * from a different job's already-saved bundle when the sanitized
  * company/location/title path collides.
  *
- * VERIFIED (filed bug report, 2026-09-24 13:08–13:10 UTC): two distinct job
- * cards — job c48be7de… (status: saved) and job eeb6303c… (status: failed) —
- * were both "Software Development Engineer 2, Amazon Kids, Amazon Kids @
- * Amazon" at "Toronto, Ontario, Canada", and sanitizeFilePart(company) /
+ * VERIFIED (filed bug report, 2026-09-24): two distinct job cards — one with
+ * status saved and one with status failed — were both "Example Role, Example
+ * Unit, Example Unit @ Example Co" at "Example City, Example Region, Country",
+ * and sanitizeFilePart(company) /
  * sanitizeFilePart(location) / sanitizeFilePart(jobTitle) reduced them to the
  * identical destination directory. Had the second job's save reached this
  * far, it would have silently overwritten the first job's already-saved
@@ -2431,6 +2509,7 @@ export function registerJobApplicationHandlers() {
     if (!canvasFilePath || typeof canvasFilePath !== 'string' || !path.isAbsolute(canvasFilePath)) {
       throw new Error('Save your canvas to a file first — applications are written to an "Applied Jobs" folder next to your saved canvas.');
     }
+    assertRendererCanvasFilePathAllowed(canvasFilePath);
 
     const where = sanitizeFilePart(company, 'Company');
     // Location is a hard part of job identity (§6.3) but here it's just a path
@@ -2456,6 +2535,7 @@ export function registerJobApplicationHandlers() {
         throw new Error('The application destination requires a regular saved canvas file, not a link.');
       }
       const canonicalCanvasFile = await fs.promises.realpath(canvasFilePath);
+      assertRendererCanvasFilePathAllowed(canonicalCanvasFile);
       const canvasRoot = path.dirname(canonicalCanvasFile);
       applicationOutputRoot = await ensureDirectoryWithinRoot(canvasRoot, path.join(canvasRoot, 'Applied Jobs'), {
         mode: 0o700,

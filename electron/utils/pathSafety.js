@@ -190,14 +190,111 @@ const SENSITIVE_DOTENV_PATTERNS = ['/.env/', '/.env.'];
 // external drives). Credential patterns above still apply within them.
 const SENSITIVE_EXACT_PATHS = new Set(['/users/shared', '/volumes']);
 
-/** True when `resolvedPath` matches a sensitive system/config/credential pattern. */
-export function isSensitivePath(resolvedPath) {
+// Interview Helper keeps verified application material and main-process-issued
+// prepared briefs under these app-private directory components. The workspace
+// writer also keeps its crash-recovery payloads in a host-only store. A
+// renderer can otherwise name an arbitrary path through generic canvas file
+// IPC, so treating each *component* (rather than one installation-specific
+// absolute path) as sensitive keeps those authority records private across
+// user-data roots and test installations. `verificationPath` below is padded
+// with separators, which deliberately matches the directory itself and
+// descendants but not an ordinary filename such as
+// `my-interview-helper-artifacts.json`.
+const SENSITIVE_APP_PRIVATE_STORE_COMPONENTS = [
+  'interview-helper-artifacts',
+  'interview-helper-prepared-briefs',
+  // Host-owned career inputs/snapshots contain the same source material that
+  // Interview Helper consumes. They must not become renderer-readable merely
+  // because a canvas supplies a userData-looking absolute pathname.
+  'career-input-staging',
+  'career-snapshot-store',
+  'renderer-workspace-write-journal',
+  // Pathname-only image decoders receive copies only in this host workspace;
+  // renderer filesystem IPC must not enumerate or reuse those transient bytes.
+  'local-file-protocol-transcodes',
+];
+
+// Component names protect portable test stores and known private namespaces.
+// The actual Electron userData root is installation-specific, though, and can
+// also hold browser profiles, encrypted settings, or a newly-added host store
+// whose component name is not in the list above. Register it at main-process
+// boot so renderer-facing generic file routes deny the entire host namespace,
+// while trusted host modules continue to use isSensitivePath/system policy as
+// appropriate for their own storage maintenance.
+const RENDERER_PRIVATE_APP_ROOTS = new Set();
+
+function normalizeRendererPrivatePath(value) {
+  let normalized = normalizeMacOSSystemPathAlias(path.resolve(String(value || '')).normalize('NFC'));
+  // Full Unicode case folding: APFS/NTFS resolve 'ſ' (U+017F) as 's', which
+  // toLowerCase() leaves unchanged, so a lowercase-only fold could be bypassed.
+  if (process.platform === 'win32' || process.platform === 'darwin') normalized = normalized.toUpperCase().toLowerCase();
+  return normalized;
+}
+
+function isWithinRendererPrivateRoot(root, candidate) {
+  const relative = path.relative(root, candidate);
+  return relative === ''
+    || (!relative.startsWith(`..${path.sep}`) && relative !== '..' && !path.isAbsolute(relative));
+}
+
+/**
+ * Register the app-owned userData root as a renderer-denied namespace.
+ * Both its lexical and currently canonical spellings are remembered so a
+ * public-looking symlink cannot make a generic renderer path enumerate the
+ * app profile. This is intentionally process-local state set by main code,
+ * not a global filesystem allow/deny heuristic for ordinary user folders.
+ */
+export function registerRendererPrivateAppRoot(rootPath) {
+  if (typeof rootPath !== 'string' || !rootPath.trim() || !path.isAbsolute(rootPath)) return;
+  const lexical = path.resolve(rootPath).normalize('NFC');
+  RENDERER_PRIVATE_APP_ROOTS.add(normalizeRendererPrivatePath(lexical));
+  try {
+    RENDERER_PRIVATE_APP_ROOTS.add(normalizeRendererPrivatePath(fs.realpathSync.native(lexical)));
+  } catch {
+    // First run can legitimately precede creation of userData. The lexical
+    // root still blocks renderer-created descendants; later registration can
+    // add the canonical spelling once Electron has created it.
+  }
+}
+
+// One definition of "this path names an app-private store directory" for both
+// isSensitivePath and isRendererPrivateAppPath, with the same full case fold.
+function matchesAppPrivateStoreComponent(rawPath) {
+  const normalizedPath = String(rawPath).replace(/[\\/]+/g, '/').replace(/^\/+|\/+$/g, '').toUpperCase().toLowerCase();
+  const verificationPath = `/${normalizedPath}/`;
+  return SENSITIVE_APP_PRIVATE_STORE_COMPONENTS.some(component => verificationPath.includes(`/${component}/`));
+}
+
+/**
+ * True when `resolvedPath` is inside the app's own private data: a known
+ * private store directory, or the registered userData root. Unlike
+ * isRendererSensitivePath this does NOT apply the system/credential policy,
+ * so an ordinary temp or user folder is not refused. For flows that accept a
+ * renderer-named location but only need to keep it out of app-private data.
+ */
+export function isRendererPrivateAppPath(resolvedPath) {
+  if (!resolvedPath) return false;
+  if (matchesAppPrivateStoreComponent(resolvedPath)) return true;
+  const candidate = normalizeRendererPrivatePath(resolvedPath);
+  return [...RENDERER_PRIVATE_APP_ROOTS].some(root => isWithinRendererPrivateRoot(root, candidate));
+}
+
+/**
+ * True when `resolvedPath` matches a sensitive system/config/credential path
+ * and, by default, one of the renderer-denied app-private stores above.
+ * Host-owned flows that are creating/maintaining one of those stores should
+ * use isSystemSensitivePath instead of accidentally treating their own
+ * private root as an untrusted attachment path.
+ */
+export function isSensitivePath(resolvedPath, { includeAppPrivate = true } = {}) {
   if (!resolvedPath) return false;
   const rawPath = String(resolvedPath);
   // Pad both ends with a separator so directory patterns also match the exact
   // directory itself (`/Users/x/.ssh`, `/etc`, `C:\Users\x\.aws`), not only a
   // child path with a trailing slash after the sensitive component.
-  const normalizedPath = rawPath.replace(/[\\/]+/g, '/').replace(/^\/+|\/+$/g, '').toLowerCase();
+  // Fold through upper case so spellings a case-insensitive volume resolves
+  // identically (for example U+017F for 's') cannot evade the component checks.
+  const normalizedPath = rawPath.replace(/[\\/]+/g, '/').replace(/^\/+|\/+$/g, '').toUpperCase().toLowerCase();
   const verificationPath = `/${normalizedPath}/`;
   const exactPath = `/${normalizedPath}`;
   const isUnixRoot = /^\/+$/u.test(rawPath);
@@ -207,5 +304,19 @@ export function isSensitivePath(resolvedPath) {
   const rootAnchoredPath = verificationPath.replace(SENSITIVE_ROOT_PREFIX_RE, '');
   if (SENSITIVE_ROOT_PATTERNS.some(p => rootAnchoredPath.startsWith(p))) return true;
   if (SENSITIVE_DOTENV_PATTERNS.some(p => verificationPath.includes(p))) return true;
+  if (includeAppPrivate && matchesAppPrivateStoreComponent(rawPath)) return true;
   return SENSITIVE_PATH_PATTERNS.some(p => verificationPath.includes(p));
+}
+
+/** System/config/credential policy only; for trusted host maintenance flows. */
+export function isSystemSensitivePath(resolvedPath) {
+  return isSensitivePath(resolvedPath, { includeAppPrivate: false });
+}
+
+/** Renderer policy: generic filesystem IPC must never enter app userData. */
+export function isRendererSensitivePath(resolvedPath) {
+  if (isSensitivePath(resolvedPath)) return true;
+  if (!resolvedPath) return false;
+  const candidate = normalizeRendererPrivatePath(resolvedPath);
+  return [...RENDERER_PRIVATE_APP_ROOTS].some(root => isWithinRendererPrivateRoot(root, candidate));
 }

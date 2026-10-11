@@ -3,12 +3,13 @@ import nodeAssert from 'node:assert/strict';
 import electronPkg from 'electron';
 import { getRecentLogs } from '../../electron/logger.js';
 import { acceptApplicationBlindReviewCursorResponse, applicationBlindReviewScopeCount, applicationBlindReviewWorkAt, assert, assertCandidateDashPunctuation, assertSourceQuoteLinksFinalText, pasteAttributionScopeErrors, sanitizeQualityReview, buildCoverLetterDocument, buildLocalGenerationAuditArtifact, buildResumeDocument, careerDataRoleLocation, createApplicationBlindReviewPlan, createApplicationBlindReviewSourceAccessor, sanitizeDocumentMainHtml, checkAnchorRelevance, checkDirectWelcomeClosing, checkPriorEmployerOpening, checkResumeBulletLength, checkResumeRoleBulletBudget, evaluateResumeProseChecks, extractResumeEvidence, inspectApplicationExport, renderStructuredApplicationResume, resumeProjectProvenanceFailures, resumeRoleBlockSample, resumeRoleLocationFailures, RESUME_ROLE_BULLET_CEILING, ROLE_BULLET_EVIDENCE_EXCLUSIVITY_RULE, STRUCTURED_RESUME_SCHEMA_VERSION, validateStructuredApplicationResume, webFontFacesReadyExpression, canRegenerateLocalApplication, canSaveImportedLocalApplication, createAuthorityLedgerStore, createStoreAuthorityWorkflowRoot, createStoreMatchReceipt, discardLocalApplicationJob, discoverLocalApplicationJobs, ensureDirectoryWithinRoot, fs, getApplicationTelemetry, getLocalApplicationHandoff, ipcMain, isPendingApplicationWorkspaceSaveInFlight, JSDOM, openAuthorityLedgerStore, os, path, PDFLib, LOCAL_AI_APPLICATION_VERSION, LOCAL_AI_CARD_POLL_IDLE_STATUSES, LOCAL_AI_FALLBACK_IDLE_STATUSES, LOCAL_AI_JOB_INTEGRITY_ERROR_CODE, brokenLocalAiJobDriveState, jobIntegrityFailureMessage, collectNodesDeep, deepUpdateNode, importLocalApplicationJob, isJobCardMounted, localApplicationStatus, projectEvidenceCoverageGaps, projectedCareerProjectEvidenceBlocks, queueLocalApplicationJob, queuedLocalApplicationSettlement, readRegisteredApplicationArtifact, registerJobApplicationHandlers, registerLocalAiApplicationHandlers, registerMountedJobCard, registerPendingApplicationWorkspace, replacedLocalApplicationForCleanup, resolveLocalOutputBundleRoot, selectFallbackLocalAiJobs, selectOrphanedLocalAiJobs, storeRequirementCatalogPairDescriptor, submitLocalApplicationHandoff, unregisterMountedJobCard, validateLocalApplicationResult, withLocalAiJobPruneClaim, withUnregisteredApplicationWorkspacePruneClaim, __setAuthorityLedgerStoreFaultHookForTests } from '../test-dependencies.js';
-import { localAiSkillsCoverageTelemetry, subscribeLocalApplicationDiscards, APPLICATION_QUALITY_CHECKLIST_VERSION, APPLICATION_QUALITY_CRITERIA, COVER_LETTER_SECONDARY_NARRATIVE_ROLES, LOCAL_AI_GENERATION_AUDIT_VERSION, MAX_CORRECTION_STAGE_PROMPT_SHARE, MAX_SOURCE_GROUNDING_QUOTE_CHARS, MIN_SHARED_SOURCE_TERMS, __assertCurrentAuthorityDispositionProofCandidatesForTests, __authorityPasteContextEvidencePlanForTests, __blindReviewDocumentProjectionForTests, __currentAuthorityDispositionProofMaterialForTests, __currentAuthorityDraftSelectionForTests, __currentAuthorityRolelessResumeRuleForTests, __relinkListingQuoteToExactSliceForTests, __selectedSourceRolesForTests, __snapshotCareerSkillEvidenceForTests, __validateStoredBlindReviewCoverageForTests, __localAiApplicationOutputTelemetryForTests, __localAiCoverLetterTelemetryForTests, BLIND_REVIEW_DOCUMENT_PROJECTION_MAX_BYTES_FOR_TESTS, DISPOSITION_PROOF_CANDIDATE_BYTES, MAX_DISPOSITION_PROOF_CANDIDATES_PER_DOCUMENT, MAX_DISPOSITION_PROOF_CANDIDATES_PER_REQUIREMENT, MAX_DISPOSITION_PROOF_MATERIAL_BYTES, __setAuthorityLedgerPersistenceFaultHookForTests, __setLegacyAuthorityLedgerAccessHookForTests, __setLocalAiRenderPdfForTests, _resetPasteCorrectionsForTests, _resetPasteRejectionStreakForTests, boundedRejectionError, localAiHandoffEvent, pasteCorrectionPrompt, pasteRejectionCheckIds, pasteRejectionChangeDocuments, pasteRejectionReason, stageLocalApplicationWorkspaceArtifacts } from '../../electron/ipc/localAiApplication.js';
+import { localAiSkillsCoverageTelemetry, subscribeLocalApplicationDiscards, APPLICATION_QUALITY_CHECKLIST_VERSION, APPLICATION_QUALITY_CRITERIA, COVER_LETTER_SECONDARY_NARRATIVE_ROLES, LOCAL_AI_GENERATION_AUDIT_VERSION, MAX_CORRECTION_STAGE_PROMPT_SHARE, MAX_SOURCE_GROUNDING_QUOTE_CHARS, MIN_SHARED_SOURCE_TERMS, __advanceBlindReviewRollingForTests, __assertAuthorityStateGraphForTests, __assertCurrentAuthorityDispositionProofCandidatesForTests, __authorityPasteContextEvidencePlanForTests, __authorityReviewConvergenceValidationForTests, __blindReviewDocumentProjectionForTests, __blindReviewRollingSeedForTests, __blindReviewUnresolvedFindingDigestForTests, __currentAuthorityDispositionProofMaterialForTests, __currentAuthorityDraftSelectionForTests, __currentAuthorityFinalResumeArtifactErrorsForTests, __currentAuthorityRolelessResumeRuleForTests, __relinkListingQuoteToExactSliceForTests, __selectedSourceRolesForTests, __snapshotCareerSkillEvidenceForTests, __validateStoredBlindReviewCoverageForTests, __localAiApplicationOutputTelemetryForTests, __localAiCoverLetterTelemetryForTests, BLIND_REVIEW_DOCUMENT_PROJECTION_MAX_BYTES_FOR_TESTS, DISPOSITION_PROOF_CANDIDATE_BYTES, MAX_DISPOSITION_PROOF_CANDIDATES_PER_DOCUMENT, MAX_DISPOSITION_PROOF_CANDIDATES_PER_REQUIREMENT, MAX_DISPOSITION_PROOF_MATERIAL_BYTES, __setAuthorityLedgerPersistenceFaultHookForTests, __setLegacyAuthorityLedgerAccessHookForTests, __setLocalAiRenderPdfForTests, _resetPasteCorrectionsForTests, _resetPasteRejectionStreakForTests, boundedRejectionError, localAiHandoffEvent, pasteCorrectionPrompt, pasteRejectionCheckIds, pasteRejectionChangeDocuments, pasteRejectionReason, stageLocalApplicationWorkspaceArtifacts } from '../../electron/ipc/localAiApplication.js';
 import { APPLICATION_PDF_MISMATCH_IS_DETERMINISTIC, APPLICATION_PDF_PAGINATION_GEOMETRY_REVISION, APPLICATION_PDF_RECONCILE_REVISION, APPLICATION_PDF_VARIANT_REVISION, checkResumeBulletOpeningVariety } from '../../electron/ipc/jobApplication.js';
+import { __assertCurrentAuthorityBlindRepairCompletionForTests, __blindReviewBoundedTailoringPagesForTests, __blindReviewFactEvidenceForTests, __currentAuthorityBlindRepairPageForTests, __reserveNextLocalApplicationJobIdForAcceptanceHarness, queueLocalApplicationJob as queueCurrentLocalApplicationJob } from '../../electron/ipc/localAiApplication.js';
 import { checkEndedRoleCurrentEmployment } from '../../electron/ipc/coverLetterChecks.js';
 import { inspectLocalAiHandoff, waitForLocalAiHandoff } from '../../local_ai/wait-for-handoff.mjs';
 import { _resetPasteHandoffDiagnostics, buildPasteHandoffDiagnosticsMarkdown, getPasteHandoffDiagnosticsSnapshot, recordPasteHandoffDiagnostic } from '../../electron/ipc/pasteHandoffDiagnostics.js';
-import { approvedCareerEvidenceCatalog, CAREER_SNAPSHOT_COMPILATION_CONTRACT, CAREER_SNAPSHOT_SCHEMA_VERSION, CAREER_SNAPSHOT_STATUS_APPROVED, buildCareerSourceCorpus, canonicalCareerProfileDigest, careerSnapshotId, careerSnapshotStorageRoot, emptyCareerReconciliationReceipt, partitionCareerSourcePages, verbatimCareerTranscriptionAuditReceipt, writeCareerSnapshotAtomically } from '../../electron/ipc/careerSnapshot.js';
+import { approvedCareerEvidenceCatalog, CAREER_SNAPSHOT_COMPILATION_CONTRACT, CAREER_SNAPSHOT_SCHEMA_VERSION, CAREER_SNAPSHOT_STATUS_APPROVED, buildCareerSourceCorpus, canonicalCareerProfileDigest, careerSnapshotId, careerSnapshotIdForContract, careerSnapshotStorageRoot, emptyCareerReconciliationReceipt, partitionCareerSourcePages, verbatimCareerTranscriptionAuditReceipt, writeCareerSnapshotAtomically } from '../../electron/ipc/careerSnapshot.js';
 import { buildApplicationCareerAuthority } from '../../electron/ipc/applicationCareerAuthority.js';
 import { authorityDigest } from '../../electron/ipc/applicationAuthorityWorkflow.js';
 
@@ -277,7 +278,103 @@ async function atomicReplaceJson(file, value) {
 
 const LOCAL_AI_TEST_JOB_ID = '123e4567-e89b-42d3-a456-426614174000';
 
+// Shared with scripts/tests/gapfix-repair-convergence.js, which drives this same
+// real current-authority flow (requirements, match, draft, disposition, blind
+// review) for other synthetic careers instead of copying the fixtures.
+export const currentAuthorityFlowKit = Object.freeze({
+  createCanvasProject, listingCoverageFields, listingSemanticAuditFields, generationAuditFor, groundedQualityReview,
+  sourceGroundingFor, sha256, canonicalJson, cleanCareerSnapshotAuditHistory, atomicReplaceJson,
+});
+
 export default [
+  {
+    name: 'Current blind repair derives ordered acknowledgement progress and targets from authenticated correction streams',
+    run: async () => {
+      const sourceAccessor = createApplicationBlindReviewSourceAccessor({
+        resume: 'A supported current résumé claim.', coverLetter: 'A supported current letter claim.',
+        citedEvidencePages: [{ id: 'evidence-1', text: 'Supported current evidence.' }],
+        tailoringPages: [{ id: 'requirements-1', requirements: [{ id: 'requirement-1', text: 'A current requirement.', priority: 'highest' }],
+          dispositions: [{ requirementId: 'requirement-1', disposition: 'addressed-resume', justification: 'The current résumé addresses it.', proofs: [{ document: 'resume', documentDigest: authorityDigest('A supported current résumé claim.'), offset: 0, quote: 'A supported current résumé claim.' }] }] }],
+        factClaims: [{ id: 'claim-1', document: 'resume', pageIndex: 0, text: 'A supported current résumé claim.', citedEvidenceIds: ['evidence-1'] }],
+      });
+      const plan = createApplicationBlindReviewPlan({ sourceAccessor });
+      const correctionStream = `blind-correction-${plan.digest.slice(0, 18)}`;
+      const acknowledgementStream = `blind-repair-ack-${plan.digest.slice(0, 18)}`;
+      const completionStream = `blind-repair-done-${plan.digest.slice(0, 18)}`;
+      const correctionPages = [
+        { digest: 'a'.repeat(64), records: [{ kind: 'blind-review-correction', item: { planDigest: plan.digest, finding: { id: '0-0-1', document: 'resume' } } }] },
+        { digest: 'b'.repeat(64), records: [{ kind: 'blind-review-correction', item: { planDigest: plan.digest, finding: { id: '0-1-1', document: 'cover-letter' } } }] },
+      ];
+      const correctionPointer = { count: correctionPages.length, head: 'c'.repeat(64), digest: 'd'.repeat(64) };
+      const aggregateUnsigned = { version: plan.version, kind: 'application-blind-finding-aggregate', planDigest: plan.digest, findingCount: 2, findingDigest: 'e'.repeat(64) };
+      const aggregate = { ...aggregateUnsigned, digest: authorityDigest(aggregateUnsigned) };
+      const baseState = { authorityBlindReview: { plan, findings: aggregate }, blindRepairReceipt: {
+        planDigest: plan.digest, stream: correctionPointer, findingCount: aggregate.findingCount, findingAggregateDigest: aggregate.digest,
+        requiredChangeDocuments: ['resume', 'coverLetter'], requiredChangeTargets: ['resume:rendered', 'coverLetter:rendered'],
+      } };
+      const acknowledgement = (pageIndex, { page = correctionPages[pageIndex], ids = page.records.map(record => record.item.finding.id), digest = null } = {}) => {
+        const unsigned = { version: plan.version, kind: 'blind-review-repair-acknowledgement', planDigest: plan.digest, pageIndex, pageDigest: page.digest, findingIds: ids };
+        return { digest: `ack-page-${pageIndex}`, records: [{ kind: 'blind-review-repair-acknowledgement', item: { ...unsigned, digest: digest || authorityDigest(unsigned) } }] };
+      };
+      const completionFor = (acknowledgements) => {
+        let acknowledgementDigest = authorityDigest({ version: plan.version, kind: 'repair-acknowledgements', seed: true });
+        for (const acknowledgementPage of acknowledgements) {
+          acknowledgementDigest = authorityDigest({ previousDigest: acknowledgementDigest, descriptorDigest: acknowledgementPage.records[0].item.digest });
+        }
+        const unsigned = { version: plan.version, kind: 'blind-review-repair-completion', planDigest: plan.digest,
+          correctionStream: correctionPointer, acknowledgementCount: acknowledgements.length, acknowledgementDigest,
+          findingCount: aggregate.findingCount, findingAggregateDigest: aggregate.digest,
+          requiredChangeDocuments: ['resume', 'coverLetter'], requiredChangeTargets: ['resume:rendered', 'coverLetter:rendered'] };
+        const item = { ...unsigned, digest: authorityDigest(unsigned) };
+        return { pointer: { count: 1, head: '2'.repeat(64), digest: '3'.repeat(64) }, page: { digest: '4'.repeat(64), records: [{
+          id: `blind-repair-done:${plan.digest}:${item.digest}`, kind: 'blind-review-repair-completion', item,
+        }] } };
+      };
+      const storeFor = (acknowledgements = [], completion = null) => ({
+        receipt: () => ({ streams: {
+          [correctionStream]: correctionPointer,
+          ...(acknowledgements.length ? { [acknowledgementStream]: { count: acknowledgements.length, head: 'f'.repeat(64), digest: '1'.repeat(64) } } : {}),
+          ...(completion ? { [completionStream]: completion.pointer } : {}),
+        } }),
+        getReceiptPage: async (stream, index) => stream === correctionStream ? correctionPages[index]
+          : stream === acknowledgementStream ? acknowledgements[index] : completion?.page,
+      });
+      const pageZeroDespiteForgedCursor = await __currentAuthorityBlindRepairPageForTests(storeFor(), { ...baseState, blindRepairCursor: { pageIndex: 1 } });
+      assert(pageZeroDespiteForgedCursor.pageIndex === 0,
+        'a manifest cursor cannot skip the first immutable correction page without a durable acknowledgement');
+      const pageOneAfterAuthenticatedAck = await __currentAuthorityBlindRepairPageForTests(storeFor([acknowledgement(0)]), baseState);
+      assert(pageOneAfterAuthenticatedAck.pageIndex === 1,
+        'the next repair page follows the authenticated acknowledgement prefix, not manifest state');
+      const expectRepairFailure = async (store, state, pattern, label) => {
+        let error = null; try { await __currentAuthorityBlindRepairPageForTests(store, state); } catch (caught) { error = caught; }
+        assert(pattern.test(String(error?.message || error)), label);
+      };
+      await expectRepairFailure(storeFor([acknowledgement(1)]), baseState, /out of order|duplicate|forged|does not bind/i,
+        'an acknowledgement for a later correction page cannot forge page-zero progress');
+      await expectRepairFailure(storeFor([acknowledgement(0), acknowledgement(0)]), baseState, /out of order|duplicate|forged|does not bind/i,
+        'a duplicate acknowledgement cannot satisfy a distinct later correction page');
+      await expectRepairFailure(storeFor([acknowledgement(0, { digest: '0'.repeat(64) })]), baseState, /malformed|unauthenticated/i,
+        'a forged acknowledgement signature cannot advance the immutable repair stream');
+      await expectRepairFailure(storeFor(), { ...baseState, blindRepairReceipt: { ...baseState.blindRepairReceipt,
+        requiredChangeDocuments: [], requiredChangeTargets: [] } }, /target projection.*tampered|targets cannot be waived/i,
+      'a manifest empty target array cannot waive immutable correction targets');
+      const completeAcknowledgements = [acknowledgement(0), acknowledgement(1)];
+      const completion = completionFor(completeAcknowledgements);
+      const completedState = { ...baseState, stage: 'review', blindRepairCompletion: { planDigest: plan.digest, stream: completion.pointer } };
+      await __assertCurrentAuthorityBlindRepairCompletionForTests(storeFor(completeAcknowledgements, completion), completedState);
+      const expectCompletionFailure = async (store, state, pattern, label) => {
+        let error = null; try { await __assertCurrentAuthorityBlindRepairCompletionForTests(store, state); } catch (caught) { error = caught; }
+        assert(pattern.test(String(error?.message || error)), label);
+      };
+      await expectCompletionFailure(storeFor([acknowledgement(0, { digest: '0'.repeat(64) }), acknowledgement(1)], completion), completedState, /malformed|unauthenticated/i,
+        'a mutated earlier acknowledgement invalidates a completed repair root on restart');
+      await expectCompletionFailure(storeFor([acknowledgement(0)], completion), completedState, /acknowledgement chain is incomplete/i,
+        'a deleted acknowledgement cannot leave a completed repair root open for review');
+      await expectCompletionFailure(storeFor([acknowledgement(0)], null), { ...baseState, stage: 'review' }, /acknowledgement chain is incomplete/i,
+        'a stage forged from repair context directly into review cannot bypass the missing completion chain');
+      return { pages: correctionPages.length, acknowledgementTamperChecks: 7 };
+    },
+  },
   {
     name: 'Listing quote relink stores only one exact source slice and rejects ambiguous or semantic lookalikes',
     run: () => {
@@ -849,6 +946,104 @@ export default [
     },
   },
   {
+    name: 'Current authority blind projection shows complete résumé and letter reader-visible structure',
+    run: () => {
+      const projection = __blindReviewDocumentProjectionForTests({
+        resume: {
+          identity: { name: 'Ada Lovelace', contact: ['ada@example.test', '+1 555 0100'], subtitleRole: 'Software Engineer', credential: 'MSc, Example University' },
+          roles: [{ id: 'role-1', title: 'Engineer', company: 'Example Co', dates: '2020 – Present', location: 'Lakeview', bullets: [{ id: 'bullet-1', text: 'Built the reviewed service.', evidenceIds: ['career-1'] }] }],
+          projects: [{ id: 'project-1', name: 'Service', description: 'Delivered a tested integration.', metrics: '50 users', evidenceIds: ['career-1'] }],
+          education: [{ id: 'education-1', credential: 'MSc', institution: 'Example University', dates: '2019', evidenceIds: ['career-1'] }],
+          credentials: [{ id: 'credential-1', name: 'Cloud Certificate', issuer: 'Example', dates: '2020', evidenceIds: ['career-1'] }],
+          skills: [{ id: 'skills-1', group: 'Languages', items: ['TypeScript'], evidenceIds: ['career-1'] }],
+        },
+        coverLetter: { name: 'Ada Lovelace', contact: ['ada@example.test'], salutation: 'Dear Hiring Team,', paragraphs: [{ id: 'letter-1', text: 'I built the reviewed service.', evidenceIds: ['career-1'] }], closing: 'Sincerely,', signatureTitle: 'Software Engineer' },
+      });
+      assert(['Name: Ada Lovelace', 'Contact: ada@example.test', 'Subtitle: Software Engineer', 'Credential: MSc, Example University', 'Experience', 'Projects', 'Education', 'Certifications', 'Skills']
+        .every(text => projection.resume.includes(text)) && projection.resume.split('\n').filter(line => line === 'Experience').length === 1
+        && ['Name: Ada Lovelace', 'Contact: ada@example.test', 'Salutation: Dear Hiring Team,', 'Body', 'I built the reviewed service.', 'Closing: Sincerely,', 'Signature title: Software Engineer']
+          .every(text => projection.coverLetter.includes(text))
+        && projection.claims.every(claim => (claim.document === 'resume' ? projection.resume : projection.coverLetter).includes(claim.text)),
+      'the blind projection contains reader-visible identity, contact, section structure, and letter envelope while each fact claim remains an exact document substring');
+    },
+  },
+  {
+    name: 'Current authority fact review excludes job-listing citations, binds complete career evidence, and adds trusted role attribution to letter claims',
+    run: () => {
+      const state = {
+        evidencePlan: { evidence: [
+          { id: 'career-a', sourceId: 'career-data', quote: 'Built the service.', roleId: 'role-1' },
+          { id: 'career-b', sourceId: 'career-data', quote: 'Tested the service.', roleId: 'role-1' },
+          { id: 'listing-only', sourceId: 'job-listing', quote: 'KYC required.' },
+        ] },
+        resume: { identity: { name: 'Ada', contact: ['ada@example.test'] }, roles: [{ id: 'role-1', title: 'Engineer', company: 'Example Co', dates: '2020 – Present', location: '', bullets: [{ id: 'bullet-1', text: 'Built and tested the service.', evidenceIds: ['listing-only', 'career-a', 'career-b'] }] }] },
+        coverLetter: { name: 'Ada', contact: ['ada@example.test'], paragraphs: [{ id: 'letter-1', text: 'As an Engineer at Example Co, I built and tested the service.', evidenceIds: ['listing-only', 'career-a', 'career-b'] }] },
+      };
+      const input = { sourceRoles: [{ id: 'role-1', title: 'Engineer', company: 'Example Co', dates: '2020 – Present', location: '' }] };
+      const fact = __blindReviewFactEvidenceForTests(state, input);
+      const resume = fact.factClaims.find(claim => claim.document === 'resume'); const letter = fact.factClaims.find(claim => claim.document === 'coverLetter');
+      let missingCareerRejected = false;
+      try { __blindReviewFactEvidenceForTests({ ...state, resume: { ...state.resume, roles: [{ ...state.resume.roles[0], bullets: [{ id: 'listing-claim', text: 'KYC required.', evidenceIds: ['listing-only'] }] }] } }, input); } catch (error) { missingCareerRejected = /no cited career-data evidence/u.test(String(error?.message || error)); }
+      let crossRoleRejected = false;
+      try {
+        __blindReviewFactEvidenceForTests({ ...state, coverLetter: { ...state.coverLetter, paragraphs: [{ id: 'cross-role', text: 'At Other Co, I built the service.', evidenceIds: ['career-a'] }] } }, {
+          sourceRoles: [...input.sourceRoles, { id: 'role-2', title: 'Architect', company: 'Other Co', dates: '2018 – 2020', location: '' }],
+        });
+      } catch (error) { crossRoleRejected = /without career evidence deterministically scoped/u.test(String(error?.message || error)); }
+      const targetTitleState = {
+        ...state,
+        coverLetter: { ...state.coverLetter, paragraphs: [{ id: 'target-title', text: 'As a Software Engineer, I built and tested the service.', evidenceIds: ['career-a', 'career-b'] }] },
+      };
+      const targetTitleInput = {
+        sourceRoles: [
+          ...input.sourceRoles,
+          { id: 'role-2', title: 'Software Engineer', company: 'Former Co', dates: '2018 – 2020', location: '' },
+        ],
+      };
+      let targetTitleAccepted = false;
+      try { targetTitleAccepted = __blindReviewFactEvidenceForTests(targetTitleState, targetTitleInput).factClaims.length === 2; } catch {
+        // The assertion below intentionally records a rejected fact-evidence fixture.
+      }
+      let overlappingEmployerAccepted = false;
+      try {
+        const overlap = __blindReviewFactEvidenceForTests({
+          ...state,
+          evidencePlan: { evidence: [...state.evidencePlan.evidence, { id: 'career-acme-labs', sourceId: 'career-data', quote: 'Built the Labs service.', roleId: 'role-acme-labs' }] },
+          coverLetter: { ...state.coverLetter, paragraphs: [{ id: 'acme-labs', text: 'At Acme Labs, I built the Labs service.', evidenceIds: ['career-acme-labs'] }] },
+        }, {
+          sourceRoles: [
+            ...input.sourceRoles,
+            { id: 'role-acme', title: 'Engineer', company: 'Acme', dates: '2017 – 2018', location: '' },
+            { id: 'role-acme-labs', title: 'Engineer', company: 'Acme Labs', dates: '2018 – 2019', location: '' },
+          ],
+        });
+        overlappingEmployerAccepted = overlap.factClaims.some(claim => claim.id === 'letter-acme-labs');
+      } catch {
+        // The assertion below intentionally records a rejected fact-evidence fixture.
+      }
+      let mixedRoleAccepted = false;
+      try {
+        const mixed = __blindReviewFactEvidenceForTests({
+          ...state,
+          evidencePlan: { evidence: [...state.evidencePlan.evidence, { id: 'career-other', sourceId: 'career-data', quote: 'Built another service.', roleId: 'role-2' }] },
+          coverLetter: { ...state.coverLetter, paragraphs: [{ id: 'mixed-role', text: 'Across Example Co and Former Co, I built services.', evidenceIds: ['career-a', 'career-other'] }] },
+        }, targetTitleInput);
+        const attribution = mixed.pages.find(page => page.id.startsWith('host.role-attribution.'))?.text || '';
+        mixedRoleAccepted = attribution.includes('Evidence ID: career-a') && attribution.includes('Employer: Example Co')
+          && attribution.includes('Evidence ID: career-other') && attribution.includes('Employer: Former Co');
+      } catch {
+        // The assertion below intentionally records a rejected fact-evidence fixture.
+      }
+      assert(JSON.stringify(resume.citedEvidenceIds) === JSON.stringify(['career-a', 'career-b'])
+        && JSON.stringify(letter.citedEvidenceIds.slice(0, 2)) === JSON.stringify(['career-a', 'career-b'])
+        && /^host\.role-attribution\.[a-f0-9]{28}$/u.test(letter.citedEvidenceIds[2])
+        && fact.pages.map(page => page.id).filter(id => id.startsWith('host.role-attribution.')).length === 1
+        && fact.pages.at(-1).text.includes('Title: Engineer') && fact.pages.at(-1).text.includes('Employer: Example Co')
+        && missingCareerRejected && crossRoleRejected && targetTitleAccepted && overlappingEmployerAccepted && mixedRoleAccepted,
+      'fact review receives only complete career support plus per-evidence trusted role attribution, resolves overlapping employer names to the explicit longest name, permits an unowned target-title mention and valid multi-role comparison, and fails closed for listing-only or cross-role employer attribution');
+    },
+  },
+  {
     name: 'Current authority application: a final blind host rejection preserves the held store receipt and reopens cleanly',
     run: async () => {
       const project = await createCanvasProject();
@@ -1008,6 +1203,13 @@ export default [
           && !reopenedStore.pendingJournal
           && await fs.promises.lstat(path.join(queued.folder, 'context', 'application-authority.journal.json')).then(() => false, error => error?.code === 'ENOENT'),
         'the recovery manifest publishes the final clean blind root and store receipt before finalizing its held journal');
+        // A review is always planned grounded (prompt mode v7), and the root keeps the job-need record its reviewers were shown: the audit was corrupted
+        // after planning above and the reopened root still verifies, because the record is persisted rather than reread from the audit.
+        assert(rejectedManifest.paste.authorityBlindReview.plan.root.promptMode === 'artifact-repair-only-v7'
+          && rejectedManifest.paste.authorityBlindReview.plan.root.sources.letterGrounding?.paragraphCount > 0
+          && Array.isArray(rejectedManifest.paste.authorityBlindReview.letterNeedQuotes)
+          && rejectedManifest.paste.authorityBlindReview.letterNeedQuotes.length === rejectedManifest.paste.authorityBlindReview.plan.root.sources.letterGrounding.paragraphCount,
+        'the production blind review is planned under the grounded prompt mode and persists one job-need record per grounded paragraph');
         const reopened = await current();
         assert(reopened.stage === 'review' && reopened.handoffCode === accepted.handoff.handoffCode,
           'a restart-style reread accepts the recovery manifest and returns its live host-validation repair handoff');
@@ -1060,6 +1262,69 @@ export default [
         'the response-only fix retains the exact completed blind root rather than appending another plan');
         const completedStatus = await localApplicationStatus(queued.id, project.canvasFilePath);
         assert(completedStatus.status === 'completed', 'status reload accepts the reused clean blind root after the audit-only repair');
+        // A completed current-authority load intentionally has no runtime
+        // workflow cursor. A resume-only measured-fit recovery must retain the
+        // compact manifest pointer anyway, because the next review load uses
+        // it to verify the selected draft context.
+        const completedResultRaw = await fs.promises.readFile(path.join(queued.folder, 'result.json'), 'utf8');
+        const storePointer = structuredClone(completedManifest.paste.authorityStore);
+        const workflowPointer = structuredClone(completedManifest.paste.authorityWorkflow);
+        await atomicReplaceJson(path.join(queued.folder, 'fit-feedback.json'), {
+          version: 1, jobId: queued.id, status: 'revision-required', revisionRound: 1,
+          resultSha256: sha256(completedResultRaw), targetPageCount: 1,
+          resume: { targetPageCount: 1, pageCount: 2, layoutIssues: [] },
+          coverLetter: { targetPageCount: 1, pageCount: 1, layoutIssues: [] },
+          message: 'Measured résumé is 2 pages (target: 1).',
+        });
+        const measuredFitReview = await current();
+        const measuredFitManifest = JSON.parse(await fs.promises.readFile(path.join(queued.folder, 'manifest.json'), 'utf8'));
+        const measuredFitReload = await current();
+        assert(measuredFitReview.stage === 'review' && measuredFitReload.stage === 'review'
+          && JSON.stringify(measuredFitManifest.paste.authorityStore) === JSON.stringify(storePointer)
+          && measuredFitManifest.paste.authorityWorkflow
+          && JSON.stringify(measuredFitManifest.paste.authorityWorkflow) === JSON.stringify(workflowPointer)
+          && JSON.stringify(measuredFitManifest.paste.requiredChangeDocuments) === JSON.stringify(['resume'])
+          && JSON.stringify(measuredFitManifest.paste.requiredChangeTargets) === JSON.stringify(['resume:rendered']),
+        'a completed current-authority resume-only measured-fit recovery keeps its manifest workflow pointer and reloads as a valid review handoff');
+        // Reproduce the sibling ordinary-validation route from a completed V3
+        // package. Status records an invalid result, import reaches the same
+        // result grade, and the next handoff must reopen review without
+        // serializing completed-state runtime store/workflow values over the
+        // compact manifest pointers.
+        const completedForHostValidation = {
+          ...completedManifest,
+          paste: { ...completedManifest.paste, logCount: measuredFitManifest.paste.logCount },
+        };
+        await atomicReplaceJson(path.join(queued.folder, 'manifest.json'), completedForHostValidation);
+        const invalidResult = JSON.parse(completedResultRaw);
+        invalidResult.coverLetterArgument.primaryEvidence.evidence = 'A non-final résumé bullet cannot satisfy this letter argument.';
+        const invalidResultWrite = await atomicReplaceJson(path.join(queued.folder, 'result.json'), invalidResult);
+        const invalidStatus = await localApplicationStatus(queued.id, project.canvasFilePath);
+        const invalidFeedback = JSON.parse(await fs.promises.readFile(path.join(queued.folder, 'fit-feedback.json'), 'utf8'));
+        assert(invalidStatus.status === 'invalid'
+          && invalidFeedback.status === 'invalid'
+          && invalidFeedback.resultSha256 === invalidResultWrite.sha256,
+        `status records a hash-bound invalid feedback response for a completed current-authority result (${JSON.stringify({ status: invalidStatus.status, feedbackStatus: invalidFeedback.status, expected: invalidResultWrite.sha256, actual: invalidFeedback.resultSha256, error: invalidFeedback.error || null })})`);
+        let invalidImportError = null;
+        try {
+          await importLocalApplicationJob({
+            jobId: queued.id,
+            canvasFilePath: project.canvasFilePath,
+            expectedResultSha256: invalidResultWrite.sha256,
+          });
+        } catch (error) { invalidImportError = error; }
+        const invalidFeedbackAfterImport = JSON.parse(await fs.promises.readFile(path.join(queued.folder, 'fit-feedback.json'), 'utf8'));
+        assert(invalidImportError && invalidFeedbackAfterImport.status === 'invalid'
+          && invalidFeedbackAfterImport.resultSha256 === invalidResultWrite.sha256,
+        'import preserves the same invalid feedback response instead of treating the completed package as importable');
+        const hostValidationReview = await current();
+        const hostValidationManifest = JSON.parse(await fs.promises.readFile(path.join(queued.folder, 'manifest.json'), 'utf8'));
+        const hostValidationReload = await current();
+        assert(hostValidationReview.stage === 'review' && hostValidationReload.stage === 'review'
+          && JSON.stringify(hostValidationManifest.paste.authorityStore) === JSON.stringify(storePointer)
+          && hostValidationManifest.paste.authorityWorkflow
+          && JSON.stringify(hostValidationManifest.paste.authorityWorkflow) === JSON.stringify(workflowPointer),
+        'an invalid status/import recovery reopens a valid V3 review with its compact authority pointers intact');
         return { blindPages: rejectedBlind.blindPages, tracks: [...rejectedBlind.tracks].sort(), recoveryStoreDigest: completedManifest.paste.authorityStore.digest };
       } finally { await fs.promises.rm(project.root, { recursive: true, force: true }); }
     },
@@ -1099,7 +1364,7 @@ export default [
               version: 1, scopeDigest: work.scopeDigest, pageIndex, previousPageDigest: work.previousPageDigest,
               complete: pageIndex === continuationPages - 1, decision: 'issues',
               findings: [{
-                id: `0-${pageIndex}-1`, ruleId: 'fact-fidelity', document: 'resume', targetId: `claim-${pageIndex}`,
+                id: `0-${pageIndex}-1`, ruleId: 'fact-fidelity', document: 'resume', targetId: 'resume-claim',
                 issue: `Finding ${pageIndex} remains for this independent review page.`, fix: `Correct finding ${pageIndex}.`,
               }],
             },
@@ -1147,6 +1412,152 @@ export default [
     },
   },
   {
+    name: 'Current authority blind rolling migration keeps every historical finding blocking after restart',
+    run: () => {
+      const resume = 'CLAIM: Built a reliable service.';
+      const coverLetter = 'LETTER: I would bring that service-delivery practice to this role.';
+      const input = {
+        resume,
+        coverLetter,
+        citedEvidencePages: [{ id: 'career-proof', text: 'Built a reliable service.' }],
+        tailoringPages: [{
+          id: 'requirement-1', requirements: [{ id: 'requirement-1', text: 'Deliver reliable services.', priority: 'highest' }],
+          dispositions: [{ requirementId: 'requirement-1', disposition: 'addressed-both', justification: 'Both documents cite the approved service evidence.', proofs: [
+            { document: 'resume', documentDigest: authorityDigest(resume), offset: 0, quote: resume },
+            { document: 'cover-letter', documentDigest: authorityDigest(coverLetter), offset: 0, quote: coverLetter },
+          ] }],
+        }],
+        factClaims: [{ id: 'resume-claim', document: 'resume', pageIndex: 0, text: resume, citedEvidenceIds: ['career-proof'] }],
+      };
+      const legacyAccessor = createApplicationBlindReviewSourceAccessor({ ...input, factScopeMode: 'legacy-citation-page' });
+      const currentLegacyPlan = createApplicationBlindReviewPlan({ sourceAccessor: legacyAccessor });
+      // Reopen a genuinely pre-v3 markerless root. A newly issued root may
+      // retain this accessor shape but its prompt marker still makes it v3.
+      const { digest: _legacyRootDigest, promptMode: _legacyPromptMode, ...legacyRootUnsigned } = currentLegacyPlan.root;
+      const legacyPolicyDigest = authorityDigest({
+        version: currentLegacyPlan.version, kind: 'application-blind-review-policy', promptByteLimit: currentLegacyPlan.root.promptByteLimit,
+        maxFindingsPerResponse: currentLegacyPlan.root.maxFindingsPerResponse,
+        allowedContext: {
+          'fact-fidelity': ['host-projected-claim-page', 'cited-evidence-page'],
+          'resume-hiring-quality': ['resume'],
+          'letter-argument-editorial': ['cover-letter'],
+          'tailoring-ats': ['target-requirement-listing-proof', 'disposition-exact-document-proof'],
+          'cross-document-coherence': ['resume', 'cover-letter'],
+        },
+        reviewerBriefDigest: authorityDigest({
+          'fact-fidelity': 'Act as a forensic fact checker. Compare the supplied document claim directly to its supplied citation. Flag any unsupported or broadened action, result, quantity, duration, scope, ownership, attribution, or certainty; shared keywords alone are not support. Judge only the supplied claim and evidence.',
+          'resume-hiring-quality': 'Act as a skeptical recruiter deciding whether this résumé earns an interview. Flag low-signal task inventory, weak evidence hierarchy, vague or redundant claims, and missing persuasive specificity; judge only the supplied page.',
+          'letter-argument-editorial': 'Act as an editorial reviewer deciding whether this letter makes a concrete case for an interview. Flag disproportionate focus away from strongest proof, speculative or conditional scaffolding, repetition, a generic closing, and unnatural prose; judge only the supplied page.',
+          'cross-document-coherence': 'Act as a hiring reviewer of this paired material. Require complementary documents: flag when a central or strongest cover-letter proof is entirely absent from the supplied résumé material while lower-signal material remains, and do not claim absence outside this pair.',
+        }),
+      });
+      const { 'bundle-editorial': _legacyAggregateEditorialCount, ...legacyTrackCounts } = legacyRootUnsigned.trackCounts;
+      const legacyRoot = { ...legacyRootUnsigned, policyDigest: legacyPolicyDigest,
+        trackCounts: legacyTrackCounts,
+        scopeCount: Object.values(legacyTrackCounts).reduce((total, count) => total + count, 0) };
+      legacyRoot.digest = authorityDigest(legacyRoot);
+      const legacyPlan = { version: currentLegacyPlan.version, kind: currentLegacyPlan.kind, root: legacyRoot };
+      legacyPlan.digest = authorityDigest(legacyPlan);
+      const firstWork = applicationBlindReviewWorkAt(legacyPlan, { scopeOrdinal: 0, sourceAccessor: legacyAccessor });
+      const firstReceipt = acceptApplicationBlindReviewCursorResponse({
+        plan: legacyPlan, work: firstWork, sourceAccessor: legacyAccessor,
+        response: { version: 1, scopeDigest: firstWork.scopeDigest, pageIndex: 0, previousPageDigest: null, complete: true, decision: 'issues', findings: [{ id: '0-0-1', ruleId: 'fact-fidelity', document: 'resume', targetId: 'resume-claim', issue: 'The claim needs correction.', fix: 'Correct the claim.' }] },
+      });
+      const upgradedFirst = __advanceBlindReviewRollingForTests(legacyPlan, __blindReviewRollingSeedForTests(legacyPlan), firstWork, firstReceipt, legacyAccessor);
+      const { blockingFindingCount: _oldCount, blockingFindingDigest: _oldDigest, digest: _oldRecordDigest, ...oldUnsigned } = upgradedFirst;
+      const markerlessPersistedRolling = { ...oldUnsigned, digest: authorityDigest(oldUnsigned) };
+      const secondWork = applicationBlindReviewWorkAt(legacyPlan, { scopeOrdinal: 1, sourceAccessor: legacyAccessor });
+      const secondReceipt = acceptApplicationBlindReviewCursorResponse({
+        plan: legacyPlan, work: secondWork, sourceAccessor: legacyAccessor,
+        response: { version: 1, scopeDigest: secondWork.scopeDigest, pageIndex: 0, previousPageDigest: null, complete: true, decision: 'pass', findings: [] },
+      });
+      const resumed = __advanceBlindReviewRollingForTests(legacyPlan, markerlessPersistedRolling, secondWork, secondReceipt, legacyAccessor);
+      const markedAccessor = createApplicationBlindReviewSourceAccessor(input);
+      const markedPlan = createApplicationBlindReviewPlan({ sourceAccessor: markedAccessor });
+      // Rebuild an actual pre-v3 marked root: it carries the old signed policy
+      // digest and has no promptMode, rather than merely deleting fields from
+      // a current v3 plan. This is the root shape persisted before the compact
+      // continuation/actionability correction.
+      const historicalMarkedPolicyDigest = authorityDigest({
+        version: markedPlan.version, kind: 'application-blind-review-policy', promptByteLimit: markedPlan.root.promptByteLimit,
+        maxFindingsPerResponse: markedPlan.root.maxFindingsPerResponse,
+        allowedContext: {
+          'fact-fidelity': ['host-projected-claim-page', 'cited-evidence-page'],
+          'resume-hiring-quality': ['resume'],
+          'letter-argument-editorial': ['cover-letter'],
+          'tailoring-ats': ['target-requirement-listing-proof', 'disposition-exact-document-proof'],
+          'cross-document-coherence': ['resume', 'cover-letter'],
+        },
+        reviewerBriefDigest: 'd91b5e71c3dfbea85808b2facca3d5b34672c5de2daa332246f0c34be2de2f51',
+      });
+      const { digest: _historicalRootDigest, promptMode: _historicalPromptMode,
+        trackCounts: { 'bundle-editorial': _aggregateEditorialCount, ...historicalTrackCounts }, ...historicalRootUnsigned } = markedPlan.root;
+      // A persisted pre-aggregate root has neither its later marker nor its
+      // later sixth scope. Re-sign the exact five-track shape rather than
+      // merely stripping promptMode from a freshly issued v4 root.
+      const historicalMarkedRoot = { ...historicalRootUnsigned, policyDigest: historicalMarkedPolicyDigest,
+        trackCounts: historicalTrackCounts,
+        scopeCount: Object.values(historicalTrackCounts).reduce((total, count) => total + count, 0) };
+      historicalMarkedRoot.digest = authorityDigest(historicalMarkedRoot);
+      const historicalMarkedPlan = { version: markedPlan.version, kind: markedPlan.kind, root: historicalMarkedRoot };
+      historicalMarkedPlan.digest = authorityDigest(historicalMarkedPlan);
+      const historicalMarkedWork = applicationBlindReviewWorkAt(historicalMarkedPlan, { scopeOrdinal: 0, sourceAccessor: markedAccessor });
+      const historicalMarkedFirstReceipt = acceptApplicationBlindReviewCursorResponse({
+        plan: historicalMarkedPlan, work: historicalMarkedWork, sourceAccessor: markedAccessor,
+        response: { version: 1, scopeDigest: historicalMarkedWork.scopeDigest, pageIndex: 0, previousPageDigest: null, complete: true, decision: 'issues', findings: [{ id: '0-0-historical', ruleId: 'fact-fidelity', document: 'resume', targetId: 'resume-claim', issue: 'The claim needs correction.', fix: 'Correct the claim.' }] },
+      });
+      const upgradedHistoricalMarked = __advanceBlindReviewRollingForTests(historicalMarkedPlan, __blindReviewRollingSeedForTests(historicalMarkedPlan), historicalMarkedWork, historicalMarkedFirstReceipt, markedAccessor);
+      const { blockingFindingCount: _historicalCount, blockingFindingDigest: _historicalDigest, digest: _historicalRecordDigest, ...historicalMarkedUnsigned } = upgradedHistoricalMarked;
+      const historicalMarkedPersistedRolling = { ...historicalMarkedUnsigned, digest: authorityDigest(historicalMarkedUnsigned) };
+      const historicalMarkedNextWork = applicationBlindReviewWorkAt(historicalMarkedPlan, { scopeOrdinal: 1, sourceAccessor: markedAccessor });
+      const historicalMarkedNextReceipt = acceptApplicationBlindReviewCursorResponse({
+        plan: historicalMarkedPlan, work: historicalMarkedNextWork, sourceAccessor: markedAccessor,
+        response: { version: 1, scopeDigest: historicalMarkedNextWork.scopeDigest, pageIndex: 0, previousPageDigest: null, complete: true, decision: 'pass', findings: [] },
+      });
+      const resumedHistoricalMarked = __advanceBlindReviewRollingForTests(historicalMarkedPlan, historicalMarkedPersistedRolling, historicalMarkedNextWork, historicalMarkedNextReceipt, markedAccessor);
+      const markedWork = applicationBlindReviewWorkAt(markedPlan, { scopeOrdinal: 0, sourceAccessor: markedAccessor });
+      const markedReceipt = acceptApplicationBlindReviewCursorResponse({
+        plan: markedPlan, work: markedWork, sourceAccessor: markedAccessor,
+        response: { version: 1, scopeDigest: markedWork.scopeDigest, pageIndex: 0, previousPageDigest: null, complete: true, decision: 'pass', findings: [] },
+      });
+      const validMarked = __blindReviewRollingSeedForTests(markedPlan);
+      const { blockingFindingCount: _markedCount, blockingFindingDigest: _markedDigest, digest: _markedRecordDigest, ...markedUnsigned } = validMarked;
+      const incompleteMarked = { ...markedUnsigned, digest: authorityDigest(markedUnsigned) };
+      const { digest: _tamperedMarkedDigest, ...tamperedMarkedBase } = validMarked;
+      const tamperedMarkedUnsigned = { ...tamperedMarkedBase, blockingFindingCount: 1 };
+      const tamperedMarked = { ...tamperedMarkedUnsigned, digest: authorityDigest(tamperedMarkedUnsigned) };
+      const currentLegacyWork = applicationBlindReviewWorkAt(currentLegacyPlan, { scopeOrdinal: 0, sourceAccessor: legacyAccessor });
+      const currentLegacyReceipt = acceptApplicationBlindReviewCursorResponse({
+        plan: currentLegacyPlan, work: currentLegacyWork, sourceAccessor: legacyAccessor,
+        response: { version: 1, scopeDigest: currentLegacyWork.scopeDigest, pageIndex: 0, previousPageDigest: null, complete: true, decision: 'pass', findings: [] },
+      });
+      const currentLegacySeed = __blindReviewRollingSeedForTests(currentLegacyPlan);
+      const { blockingFindingCount: _legacyCount, blockingFindingDigest: _legacyDigest, digest: _legacyRecordDigest, ...currentLegacyUnsigned } = currentLegacySeed;
+      const incompleteCurrentLegacy = { ...currentLegacyUnsigned, digest: authorityDigest(currentLegacyUnsigned) };
+      assert(resumed.blockingFindingCount === 1 && resumed.blockingFindingDigest === upgradedFirst.findingDigest,
+        'a markerless rolling receipt carries its complete historical finding chain into the new blocking aggregate on the next resumed page');
+      assert(historicalMarkedPlan.root.promptMode === undefined
+        && resumedHistoricalMarked.blockingFindingCount === upgradedHistoricalMarked.findingCount
+        && resumedHistoricalMarked.blockingFindingDigest === upgradedHistoricalMarked.findingDigest,
+      'a true historical marked root derives missing blocker fields from its authenticated finding chain on resume');
+      nodeAssert.throws(() => __advanceBlindReviewRollingForTests(markedPlan, incompleteMarked, markedWork, markedReceipt, markedAccessor), /blocker aggregate is malformed or missing/u,
+        'a marked current plan cannot silently downgrade a missing blocker aggregate during restart');
+      nodeAssert.throws(() => __advanceBlindReviewRollingForTests(markedPlan, tamperedMarked, markedWork, markedReceipt, markedAccessor), /blocker aggregate is stale/u,
+        'a re-signed current blocker aggregate cannot disagree with its authenticated finding chain before the next page advances');
+      nodeAssert.throws(() => __advanceBlindReviewRollingForTests(currentLegacyPlan, incompleteCurrentLegacy, currentLegacyWork, currentLegacyReceipt, legacyAccessor), /blocker aggregate is malformed or missing/u,
+        'a v3 root with a legacy citation-page accessor cannot use the historical missing-blocker migration');
+      nodeAssert.throws(() => acceptApplicationBlindReviewCursorResponse({
+        plan: markedPlan, work: markedWork, sourceAccessor: markedAccessor,
+        response: { version: 1, scopeDigest: markedWork.scopeDigest, pageIndex: 0, previousPageDigest: null, complete: true, decision: 'issues', findings: [{
+          id: '0-0-source-only', ruleId: 'missing-source-only', document: 'source', targetId: 'resume-claim',
+          issue: 'The cited source has no metric beyond the supported service claim.', fix: '', actionability: 'evidence-limited',
+        }] },
+      }), /allowed current artifact document/u,
+      'a current v3 rolling path rejects a source-only blank-fix response before it can become a blocker');
+      return { preservedBlockers: resumed.blockingFindingCount, historicalMarkedMigrates: true, markedPlanFailsClosed: true, tamperedBlockersFailClosed: true, v3LegacyAccessorFailsClosed: true };
+    },
+  },
+  {
     name: 'Current authority finite selection reserves matched skills and distinct requirement evidence through an A-flood',
     run: async () => {
       const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'authority-selection-flood-'));
@@ -1163,9 +1574,9 @@ export default [
         const store = await createAuthorityLedgerStore(root, { namespace: 'selection-flood', genesis: { jobId: 'selection-flood' } });
         await store.appendReceiptPage('requirements', [
           { id: 'listing-a', kind: 'listing-evidence', item: { id: 'listing-a', sourceId: 'job-listing', quote: 'Need Python delivery.', requirement: 'Python delivery', priority: 'highest' } },
-          { id: 'listing-b', kind: 'listing-evidence', item: { id: 'listing-b', sourceId: 'job-listing', quote: 'Need product delivery.', requirement: 'Product delivery', priority: 'highest' } },
+          { id: 'listing-b', kind: 'listing-evidence', item: { id: 'listing-b', sourceId: 'job-listing', quote: 'Need React interface delivery.', requirement: 'React interface delivery', priority: 'highest' } },
           { id: 'requirement-a', kind: 'requirement', item: { id: 'requirement-a', text: 'Python delivery', priority: 'highest', evidenceIds: ['listing-a'] } },
-          { id: 'requirement-b', kind: 'requirement', item: { id: 'requirement-b', text: 'Product delivery', priority: 'highest', evidenceIds: ['listing-b'] } },
+          { id: 'requirement-b', kind: 'requirement', item: { id: 'requirement-b', text: 'React interface delivery', priority: 'highest', evidenceIds: ['listing-b'] } },
         ]);
         for (let start = 0; start < catalog.length; start += 24) {
           await store.appendReceiptPage('catalog', catalog.slice(start, start + 24).map(item => ({ id: `catalog:${item.id}`, kind: 'catalog-evidence', item })));
@@ -1227,7 +1638,7 @@ export default [
         const sourceRoles = [
           { id: 'role-middle', title: 'Middle role', company: '', dates: 'March, 2022 – December, 2022', location: '' },
           { id: 'role-earlier', title: 'Earlier role', company: '', dates: '2021-04 – February, 2022', location: '' },
-          { id: 'role-current', title: 'Current role', company: '', dates: 'May, 2023 – Present', location: '' },
+          { id: 'role-current', title: 'Current role', company: '', dates: 'July, 2023 – Present', location: '' },
           { id: 'role-undated', title: 'Undated role', company: '', dates: 'Earlier experience', location: '' },
         ];
         // Catalog order intentionally disagrees with the approved role order.
@@ -1309,6 +1720,277 @@ export default [
         'the host binds the top selected project that supports a highest-priority requirement from immutable matches and recomputes the same obligation after reopening');
         return { obligation: selected.evidenceSelection.resumeProjectObligation };
       } finally { await fs.promises.rm(root, { recursive: true, force: true }); }
+    },
+  },
+  {
+    name: 'Current authority selection suppresses only fully duplicated employer-linked project evidence',
+    run: async () => {
+      const buildFixture = ({
+        linked = true,
+        projectId = 'project-linked',
+        sameAchievementId = 'achievement-same',
+        distinctAchievementId = 'achievement-distinct',
+        projectDescription = 'Built adaptive account reconciliation workflow with exception controls.',
+        sameClaim = 'Built adaptive account reconciliation workflow with exception controls.',
+        distinctClaim = 'Led production incident response for customer support triage.',
+      } = {}) => {
+        const snapshot = {
+          snapshotId: `linked-project-selection-${linked ? 'linked' : 'unlinked'}`,
+          status: CAREER_SNAPSHOT_STATUS_APPROVED,
+          profile: {
+            identity: { name: 'Test Candidate', contacts: ['candidate@example.test'] },
+            roles: [{ id: 'role-linked', title: 'Engineer', employer: 'Acme', startDate: '', endDate: '', location: '', achievementIds: [sameAchievementId, distinctAchievementId], skillIds: [] }],
+            achievements: [
+              { id: sameAchievementId, roleId: 'role-linked', claim: sameClaim },
+              { id: distinctAchievementId, roleId: 'role-linked', claim: distinctClaim },
+            ],
+            projects: [{ id: projectId, name: 'Reconciliation workflow', description: projectDescription, ...(linked ? { roleId: 'role-linked' } : {}), technologies: [], technologyReferences: [], metrics: [] }],
+            skills: [], education: [], certifications: [], otherEvidence: [],
+          },
+        };
+        const authority = buildApplicationCareerAuthority(snapshot);
+        const catalog = approvedCareerEvidenceCatalog(snapshot);
+        return {
+          authority,
+          projectDescription: catalog.find(item => item.id === `host.career.project.${projectId}.2`),
+          projectName: catalog.find(item => item.id === `host.career.project.${projectId}.1`),
+          same: catalog.find(item => item.id === `host.career.achievement.${sameAchievementId}.1`),
+          distinct: catalog.find(item => item.id === `host.career.achievement.${distinctAchievementId}.1`),
+        };
+      };
+      const runCase = async ({ label, linked = true, fixture = null, rows, expectedProject, expectedNullObligation = false }) => {
+        const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), `authority-project-suppression-${label}-`));
+        try {
+          fixture ||= buildFixture({ linked });
+          const catalog = [...new Map(rows.flatMap(row => row.candidateEvidence).map(item => [item.id, item])).values()];
+          const namespace = 'project-suppression';
+          const store = await createAuthorityLedgerStore(root, { namespace, genesis: { jobId: label } });
+          const requirements = rows.flatMap((row, index) => [
+            { id: `listing-${index}`, kind: 'listing-evidence', item: { id: `listing-${index}`, sourceId: 'job-listing', quote: `Need ${row.requirement}.`, requirement: row.requirement, priority: row.priority || 'highest' } },
+            { id: `requirement-${index}`, kind: 'requirement', item: { id: `requirement-${index}`, text: row.requirement, priority: row.priority || 'highest', evidenceIds: [`listing-${index}`] } },
+          ]);
+          await store.appendReceiptPage('requirements', requirements);
+          await store.appendReceiptPage('catalog', catalog.map(item => ({ id: `catalog:${item.id}`, kind: 'catalog-evidence', item })));
+          const receipt = store.receipt();
+          const workflow = { root: createStoreAuthorityWorkflowRoot({ requirements: receipt.streams.requirements, catalog: receipt.streams.catalog, rolesDigest: 'roles', skillsDigest: 'skills', catalogPageSize: 24 }) };
+          const requirementPage = await store.getReceiptPage('requirements', 0); const catalogPage = await store.getReceiptPage('catalog', 0);
+          const pair = storeRequirementCatalogPairDescriptor(workflow.root, { requirementPage, catalogPage });
+          await store.appendReceiptPage('matches', [{ id: 'match:0', receipt: createStoreMatchReceipt({ root: workflow.root, pair, response: {
+            version: 1, rootDigest: workflow.root.digest, pairDigest: pair.digest,
+            rows: rows.map((row, index) => ({ requirementId: `requirement-${index}`, candidateEvidenceIds: row.candidateEvidence.map(item => item.id), localStatus: 'matched' })),
+          } }) }]);
+          const input = { careerAuthority: { snapshotId: fixture.authority.snapshotId }, sourceRoles: fixture.authority.sourceRoles,
+            careerSkillEvidence: { version: 1, skills: [] }, hostCareerEvidenceCatalog: catalog };
+          Object.defineProperty(input, '__careerAuthorityIndex', { value: fixture.authority, enumerable: false });
+          const selection = await __currentAuthorityDraftSelectionForTests(store, workflow, input);
+          for await (const entry of selection.transactionEntries) await store.appendReceiptPage(entry.stream, entry.records);
+          const reopened = await openAuthorityLedgerStore(root, { namespace });
+          const restarted = await __currentAuthorityDraftSelectionForTests(reopened, workflow, input);
+          const selected = new Set(selection.evidenceSelection.selectedEvidenceIds);
+          const restartedSelected = new Set(restarted.evidenceSelection.selectedEvidenceIds);
+          assert(selected.has(fixture.projectDescription.id) === expectedProject
+            && restartedSelected.has(fixture.projectDescription.id) === expectedProject
+            && JSON.stringify(restarted.evidenceSelection) === JSON.stringify(selection.evidenceSelection)
+            && restarted.draftContext.digest === selection.draftContext.digest
+            && (expectedNullObligation ? selection.evidenceSelection.resumeProjectObligation === null : true),
+          `${label} retains only the project evidence allowed by immutable role linkage, selected same-requirement proof, and source-quote overlap before receipts are committed and replayed`);
+          return selection.evidenceSelection;
+        } finally { await fs.promises.rm(root, { recursive: true, force: true }); }
+      };
+      const linked = buildFixture({ linked: true }); const unlinked = buildFixture({ linked: false });
+      const highOverlap = await runCase({ label: 'linked-overlap', rows: [{ requirement: 'reconciliation workflow', candidateEvidence: [linked.projectDescription, linked.same] }], expectedProject: false, expectedNullObligation: true });
+      const lowOverlap = await runCase({ label: 'linked-low-overlap', rows: [{ requirement: 'reconciliation workflow', candidateEvidence: [linked.projectDescription, linked.distinct] }], expectedProject: true });
+      const soleProof = await runCase({ label: 'linked-sole-proof', rows: [{ requirement: 'reconciliation workflow', candidateEvidence: [linked.projectDescription] }], expectedProject: true });
+      const mixedContribution = await runCase({ label: 'linked-mixed', rows: [
+        { requirement: 'reconciliation workflow', candidateEvidence: [linked.projectDescription, linked.same] },
+        { requirement: 'incident response', candidateEvidence: [linked.projectName] },
+      ], expectedProject: true });
+      const unlinkedOverlap = await runCase({ label: 'unlinked-overlap', linked: false, rows: [{ requirement: 'reconciliation workflow', candidateEvidence: [unlinked.projectDescription, unlinked.same] }], expectedProject: true });
+      const sharedProjectionId = 'alpha-bravo-charl-delta-echoo-foxtt-gulff-hotel-india-julie-kiloo-limaa';
+      const richerProject = buildFixture({
+        projectId: sharedProjectionId, sameAchievementId: `${sharedProjectionId}-role`,
+        projectDescription: 'Built scalable payment platform for settlements reconciliation fraud dashboards reporting.',
+        sameClaim: 'Built scalable payment platform.',
+      });
+      const richerProjectRetained = await runCase({ label: 'linked-richer-project', fixture: richerProject,
+        rows: [{ requirement: 'payment platform', candidateEvidence: [richerProject.projectDescription, richerProject.same] }], expectedProject: true });
+      const idLabelOnly = buildFixture({
+        projectId: sharedProjectionId, sameAchievementId: `${sharedProjectionId}-role`,
+        projectDescription: 'Designed.', sameClaim: 'Negotiated.',
+      });
+      const idLabelOnlyRetained = await runCase({ label: 'projection-id-only', fixture: idLabelOnly,
+        rows: [{ requirement: 'delivery', candidateEvidence: [idLabelOnly.projectDescription, idLabelOnly.same] }], expectedProject: true });
+      return {
+        suppressedProjectIds: highOverlap.selectedProjectIds,
+        retainedProjectIds: [lowOverlap, soleProof, mixedContribution, unlinkedOverlap, richerProjectRetained, idLabelOnlyRetained]
+          .map(selection => selection.selectedProjectIds),
+      };
+    },
+  },
+  {
+    name: 'Current authority skill reservation retains exact named matches deterministically and records capped omissions',
+    run: async () => {
+      const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'authority-named-skill-reservation-'));
+      try {
+        const skills = Array.from({ length: 11 }, (_unused, index) => {
+          const ordinal = String(index + 1).padStart(2, '0');
+          return { id: `skill-${ordinal}`, name: `Skill${ordinal}`, indexEligible: true };
+        });
+        const catalog = skills.map(skill => ({
+          id: `host.career.skill.${skill.id}.1`, sourceId: 'career-data', quote: skill.name, skillId: skill.id,
+        }));
+        const store = await createAuthorityLedgerStore(root, { namespace: 'named-skill-reservation', genesis: { jobId: 'named-skill-reservation' } });
+        const requirementText = `Need ${skills.map(skill => skill.name).join(', ')}.`;
+        await store.appendReceiptPage('requirements', [
+          { id: 'listing', kind: 'listing-evidence', item: { id: 'listing', sourceId: 'job-listing', quote: requirementText, requirement: requirementText, priority: 'highest' } },
+          { id: 'requirement', kind: 'requirement', item: { id: 'requirement', text: requirementText, priority: 'highest', evidenceIds: ['listing'] } },
+        ]);
+        await store.appendReceiptPage('catalog', catalog.map(item => ({ id: `catalog:${item.id}`, kind: 'catalog-evidence', item })));
+        const receipt = store.receipt();
+        const workflow = { root: createStoreAuthorityWorkflowRoot({
+          requirements: receipt.streams.requirements, catalog: receipt.streams.catalog,
+          rolesDigest: 'roles', skillsDigest: 'skills', catalogPageSize: 24,
+        }) };
+        const requirementPage = await store.getReceiptPage('requirements', 0); const catalogPage = await store.getReceiptPage('catalog', 0);
+        const pair = storeRequirementCatalogPairDescriptor(workflow.root, { requirementPage, catalogPage });
+        await store.appendReceiptPage('matches', [{ id: 'match:0', receipt: createStoreMatchReceipt({ root: workflow.root, pair, response: {
+          version: 1, rootDigest: workflow.root.digest, pairDigest: pair.digest,
+          rows: [{ requirementId: 'requirement', candidateEvidenceIds: catalog.map(item => item.id), localStatus: 'matched' }],
+        } }) }]);
+        const selection = await __currentAuthorityDraftSelectionForTests(store, workflow, {
+          sourceRoles: [], careerSkillEvidence: { version: 1, skills }, hostCareerEvidenceCatalog: catalog,
+        });
+        const transactionEntries = [];
+        for await (const entry of selection.transactionEntries) transactionEntries.push(entry);
+        const omissionRecords = transactionEntries.find(entry => entry.stream === 'skill-omissions')?.records || [];
+        assert(JSON.stringify(selection.skillSelection.selectedSkillIds) === JSON.stringify(skills.slice(0, 10).map(skill => skill.id))
+          && JSON.stringify(omissionRecords.map(record => record.item)) === JSON.stringify([{
+            id: 'skill-11', reason: 'positive direct requirement match exceeded the bounded exact-name skill evidence reservation',
+          }]),
+        'eleven equal exact direct matches retain the first ten by frozen evidence order and persist the named-match cap reason for the omitted row');
+        return { selectedSkillIds: selection.skillSelection.selectedSkillIds, omitted: omissionRecords.map(record => record.item) };
+      } finally { await fs.promises.rm(root, { recursive: true, force: true }); }
+    },
+  },
+  {
+    name: 'Current authority exact-name skill reservation cannot evict distinct higher-priority evidence',
+    run: async () => {
+      const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'authority-skill-priority-reservation-'));
+      try {
+        const higherEvidence = Array.from({ length: 24 }, (_unused, index) => ({
+          id: `host.career.project.project-${String(index + 1).padStart(2, '0')}.1`, sourceId: 'career-data',
+          quote: `Highest-priority project proof ${index + 1}.`, projectId: `project-${String(index + 1).padStart(2, '0')}`,
+        }));
+        const directSkill = { id: 'host.career.skill.skill-python.1', sourceId: 'career-data', quote: 'Python', skillId: 'skill-python' };
+        const catalog = [...higherEvidence, directSkill];
+        const store = await createAuthorityLedgerStore(root, { namespace: 'skill-priority-reservation', genesis: { jobId: 'skill-priority-reservation' } });
+        const requirements = higherEvidence.flatMap((item, index) => [
+          { id: `listing-high-${index}`, kind: 'listing-evidence', item: { id: `listing-high-${index}`, sourceId: 'job-listing', quote: `Need decisive proof ${index + 1}.`, requirement: `Decisive proof ${index + 1}`, priority: 'highest' } },
+          { id: `requirement-high-${index}`, kind: 'requirement', item: { id: `requirement-high-${index}`, text: `Decisive proof ${index + 1}`, priority: 'highest', evidenceIds: [`listing-high-${index}`] } },
+        ]);
+        requirements.push(
+          { id: 'listing-python', kind: 'listing-evidence', item: { id: 'listing-python', sourceId: 'job-listing', quote: 'Python is helpful.', requirement: 'Python', priority: 'supporting' } },
+          { id: 'requirement-python', kind: 'requirement', item: { id: 'requirement-python', text: 'Python', priority: 'supporting', evidenceIds: ['listing-python'] } },
+        );
+        await store.appendReceiptPage('requirements', requirements);
+        await store.appendReceiptPage('catalog', catalog.map(item => ({ id: `catalog:${item.id}`, kind: 'catalog-evidence', item })));
+        const receipt = store.receipt();
+        const workflow = { root: createStoreAuthorityWorkflowRoot({ requirements: receipt.streams.requirements, catalog: receipt.streams.catalog, rolesDigest: 'roles', skillsDigest: 'skills', catalogPageSize: 24 }) };
+        const requirementPage = await store.getReceiptPage('requirements', 0);
+        for (let catalogPageIndex = 0; catalogPageIndex < workflow.root.catalog.count; catalogPageIndex += 1) {
+          const catalogPage = await store.getReceiptPage('catalog', catalogPageIndex);
+          const pageEvidenceIds = new Set(catalogPage.records.filter(record => record?.kind === 'catalog-evidence').map(record => record.item.id));
+          const pair = storeRequirementCatalogPairDescriptor(workflow.root, { requirementPage, catalogPage });
+          await store.appendReceiptPage('matches', [{ id: `match:${catalogPageIndex}`, receipt: createStoreMatchReceipt({ root: workflow.root, pair, response: {
+            version: 1, rootDigest: workflow.root.digest, pairDigest: pair.digest,
+            rows: [
+              ...higherEvidence.map((item, index) => ({ requirementId: `requirement-high-${index}`, candidateEvidenceIds: pageEvidenceIds.has(item.id) ? [item.id] : [], localStatus: pageEvidenceIds.has(item.id) ? 'matched' : 'no-match' })),
+              { requirementId: 'requirement-python', candidateEvidenceIds: pageEvidenceIds.has(directSkill.id) ? [directSkill.id] : [], localStatus: pageEvidenceIds.has(directSkill.id) ? 'matched' : 'no-match' },
+            ],
+          } }) }]);
+        }
+        const selection = await __currentAuthorityDraftSelectionForTests(store, workflow, {
+          sourceRoles: [], careerSkillEvidence: { version: 1, skills: [{ id: 'skill-python', name: 'Python', indexEligible: true }] }, hostCareerEvidenceCatalog: catalog,
+        });
+        const entries = []; for await (const entry of selection.transactionEntries) entries.push(entry);
+        const omissions = entries.filter(entry => entry.stream === 'skill-omissions').flatMap(entry => entry.records.map(record => record.item));
+        assert(selection.evidenceSelection.selectedEvidenceIds.length === 24
+          && higherEvidence.every(item => selection.evidenceSelection.selectedEvidenceIds.includes(item.id))
+          && !selection.skillSelection.selectedSkillIds.includes('skill-python')
+          && JSON.stringify(omissions) === JSON.stringify([{
+            id: 'skill-python', reason: 'positive direct exact-name requirement match could not be retained within the bounded final résumé skills layout',
+          }]),
+        'the low-priority direct Python reservation cannot displace any of 24 distinct highest-priority proofs, and its bounded omission remains deterministic');
+        return { selectedHighestEvidence: selection.evidenceSelection.selectedEvidenceIds.length, omittedSkills: omissions };
+      } finally { await fs.promises.rm(root, { recursive: true, force: true }); }
+    },
+  },
+  {
+    name: 'Current authority final artifact rules reject only linked or shared role-project duplicates and retain selected skills',
+    run: () => {
+      const claim = 'Built adaptive account reconciliation workflow with exception controls.';
+      const snapshot = {
+        snapshotId: 'final-artifact-duplicate-detection',
+        status: CAREER_SNAPSHOT_STATUS_APPROVED,
+        profile: {
+          identity: { name: 'Test Candidate', contacts: ['candidate@example.test'] },
+          roles: [{ id: 'role-linked', title: 'Engineer', employer: 'Acme', startDate: '', endDate: '', location: '', achievementIds: ['achievement-linked'], skillIds: [] }],
+          achievements: [{ id: 'achievement-linked', roleId: 'role-linked', claim }],
+          projects: [{ id: 'project-linked', name: 'Reconciliation workflow', description: claim, roleId: 'role-linked', technologies: [], technologyReferences: [], metrics: [] }],
+          skills: [], education: [], certifications: [], otherEvidence: [],
+        },
+      };
+      const authority = buildApplicationCareerAuthority(snapshot);
+      const catalog = approvedCareerEvidenceCatalog(snapshot);
+      const roleEvidence = catalog.find(item => item.id === 'host.career.achievement.achievement-linked.1');
+      const projectEvidence = catalog.find(item => item.id === 'host.career.project.project-linked.2');
+      const duplicateResume = {
+        roles: [{ id: 'role-linked', bullets: [{ id: 'role-linked-1', text: claim, evidenceIds: [roleEvidence.id] }] }],
+        projects: [{ id: 'project-linked', description: claim, metrics: [], evidenceIds: [projectEvidence.id] }],
+        skills: [],
+      };
+      const linkedHighOverlapDistinctEvidenceErrors = __currentAuthorityFinalResumeArtifactErrorsForTests({
+        resume: duplicateResume, authority, skillSelection: { selectedSkillIds: [] }, skills: [],
+      });
+      const linkedSharedEvidenceErrors = __currentAuthorityFinalResumeArtifactErrorsForTests({
+        resume: {
+          ...duplicateResume,
+          roles: [{ ...duplicateResume.roles[0], bullets: [{ ...duplicateResume.roles[0].bullets[0], evidenceIds: [roleEvidence.id, projectEvidence.id] }] }],
+        },
+        authority, skillSelection: { selectedSkillIds: [] }, skills: [],
+      });
+      const distinctErrors = __currentAuthorityFinalResumeArtifactErrorsForTests({
+        resume: {
+          ...duplicateResume,
+          projects: [{ ...duplicateResume.projects[0], description: 'Created a volunteer scheduling service for weekly program coordinators.' }],
+        },
+        authority, skillSelection: { selectedSkillIds: [] }, skills: [],
+      });
+      const unlinkedSharedEvidenceErrors = __currentAuthorityFinalResumeArtifactErrorsForTests({
+        resume: {
+          ...duplicateResume,
+          roles: [{ id: 'another-role', bullets: [{ id: 'another-role-1', text: claim, evidenceIds: [projectEvidence.id] }] }],
+        },
+        authority, skillSelection: { selectedSkillIds: [] }, skills: [],
+      });
+      const missingSkillErrors = __currentAuthorityFinalResumeArtifactErrorsForTests({
+        resume: { roles: [], projects: [], skills: [] }, authority: null,
+        skillSelection: { selectedSkillIds: ['skill-python'] },
+        skills: [{ id: 'skill-python', name: 'Python', indexEligible: true }],
+      });
+      const renderedSkillErrors = __currentAuthorityFinalResumeArtifactErrorsForTests({
+        resume: { roles: [], projects: [], skills: [{ id: 'languages', items: ['Python'] }] }, authority: null,
+        skillSelection: { selectedSkillIds: ['skill-python'] },
+        skills: [{ id: 'skill-python', name: 'Python', indexEligible: true }],
+      });
+      assert(!linkedHighOverlapDistinctEvidenceErrors.length
+        && linkedSharedEvidenceErrors.some(error => /duplicates project/u.test(error))
+        && !distinctErrors.length
+        && unlinkedSharedEvidenceErrors.some(error => /duplicates project/u.test(error))
+        && missingSkillErrors.some(error => /selected direct skill/u.test(error))
+        && !renderedSkillErrors.length,
+      'a role-linked project with distinct authority evidence survives even at high textual overlap, while repeated claims sharing immutable authority evidence fail final validation and bounded direct skills remain a final-artifact requirement');
+      return { linkedHighOverlapDistinctEvidenceErrors: linkedHighOverlapDistinctEvidenceErrors.length, linkedSharedEvidenceErrors: linkedSharedEvidenceErrors.length, unlinkedSharedEvidenceErrors: unlinkedSharedEvidenceErrors.length, missingSkillErrors: missingSkillErrors.length };
     },
   },
   {
@@ -1478,7 +2160,7 @@ export default [
     },
   },
   {
-    name: 'Current authority application: blind finding revisions re-run dispositions and every blind track through persisted handoffs',
+    name: 'Current authority application: review convergence persists across discretionary and blind-target revisions',
     run: async () => {
       const project = await createCanvasProject();
       try {
@@ -1623,7 +2305,155 @@ export default [
         const reviewKey = reviewAfterReload.freshContextKey;
         assert(/^authority-review-[a-f0-9]{64}$/u.test(reviewKey) && reviewAfterReload.freshContextRequired === true,
           'the review predecessor carries a private lineage so the first blind track has a real fresh-chat boundary');
-        accepted = await submit(reviewAfterReload, quality(originalParagraph, auditFor(originalParagraph)));
+        // The first unblocked review may make one discretionary, material
+        // revision. It must persist the convergence marker together with its
+        // fresh document-bound disposition path, then survive a reload before
+        // the next review enforces the pass-to-blind boundary.
+        const voluntaryParagraph = 'I delivered a Python service for 50 users. The engineering was in matching the constraints those teams set rather than my own preferences. I would apply that supported Python delivery work to the reliable Python service delivery this role requires.';
+        const voluntary = documentsFor(voluntaryParagraph);
+        voluntary.resume.roles[0].bullets[0].text = 'Built a Python service that served 50 users.';
+        voluntary.resume.roles[0].bullets[0].evidenceIds = [achievementId];
+        voluntary.resume.skills = [{ id: 'skills-python', group: 'Languages', items: ['Python'], evidenceIds: [skillEvidenceId] }];
+        voluntary.coverLetter.paragraphs[0].evidenceIds = [achievementId];
+        accepted = await submit(reviewAfterReload, { ...quality(voluntaryParagraph, auditFor(voluntaryParagraph)), decision: 'revised',
+          findings: [{ id: 'voluntary-review-1', document: 'resume', targetId: 'bullet-1', issue: 'Use the concise supported result statement.', fix: 'Replace both documents with the revised supported wording.' }],
+          resume: voluntary.resume, coverLetter: voluntary.coverLetter });
+        assert(accepted.accepted && accepted.handoff?.stage === 'requirement-disposition',
+          `a first discretionary current-authority revision must start a document-bound disposition refresh (${JSON.stringify(accepted.validationErrors || [])})`);
+        const voluntaryManifest = JSON.parse(await fs.promises.readFile(path.join(queued.folder, 'manifest.json'), 'utf8'));
+        assert(voluntaryManifest.paste.authorityReviewConvergence?.version === 2
+          && voluntaryManifest.paste.authorityReviewConvergence.passRequired === true
+          && voluntaryManifest.paste.authorityReviewConvergence.rootDigest === voluntaryManifest.paste.authorityWorkflow?.rootDigest,
+        'the accepted discretionary revision atomically persists a root-bound durable pass-required convergence marker');
+        const voluntaryManifestPath = path.join(queued.folder, 'manifest.json');
+        const voluntaryManifestBeforeConvergenceTamper = await fs.promises.readFile(voluntaryManifestPath, 'utf8');
+        const voluntaryGenerationLogPath = path.join(queued.folder, 'Generation Log.jsonl');
+        const voluntaryGenerationLogBeforeConvergenceTamper = await fs.promises.readFile(voluntaryGenerationLogPath, 'utf8');
+        const removedConvergenceMarker = structuredClone(voluntaryManifest);
+        delete removedConvergenceMarker.paste.authorityReviewConvergence;
+        await atomicReplaceJson(voluntaryManifestPath, removedConvergenceMarker);
+        let removedConvergenceError = null;
+        try { await current(); } catch (error) { removedConvergenceError = error; }
+        assert(/durable authority review-convergence receipt is missing|review-convergence receipt/i.test(String(removedConvergenceError?.message || removedConvergenceError)),
+          'deleting a current convergence marker after restart fails closed against its durable immutable receipt');
+        await fs.promises.writeFile(voluntaryManifestPath, voluntaryManifestBeforeConvergenceTamper, 'utf8');
+        await fs.promises.writeFile(voluntaryGenerationLogPath, voluntaryGenerationLogBeforeConvergenceTamper, 'utf8');
+        const tamperedConvergenceMarker = structuredClone(voluntaryManifest);
+        tamperedConvergenceMarker.paste.authorityReviewConvergence.rootDigest = '0'.repeat(64);
+        await atomicReplaceJson(voluntaryManifestPath, tamperedConvergenceMarker);
+        let tamperedConvergenceError = null;
+        try { await current(); } catch (error) { tamperedConvergenceError = error; }
+        assert(/convergence|workflow root|generation log/i.test(String(tamperedConvergenceError?.message || tamperedConvergenceError)),
+          'a current convergence marker cannot be rebound or tampered independently of its signed store record');
+        await fs.promises.writeFile(voluntaryManifestPath, voluntaryManifestBeforeConvergenceTamper, 'utf8');
+        await fs.promises.writeFile(voluntaryGenerationLogPath, voluntaryGenerationLogBeforeConvergenceTamper, 'utf8');
+        handoff = await current();
+        assert(handoff.stage === 'requirement-disposition', 'the authentic current convergence receipt survives a restart before disposition resumes');
+        const voluntaryDispositionPages = await completeDispositions();
+        const passRequiredReview = await current();
+        assertPostMatchDraftContext(passRequiredReview, 'review');
+        assert(passRequiredReview.prompt.includes('Current-authority convergence is now required')
+          && passRequiredReview.prompt.includes('decision:"pass"')
+          && passRequiredReview.prompt.includes('blind review'),
+        'a reload exposes the persisted convergence marker as a pass-required route into blind review');
+        const manifestBeforeBlockedRevision = JSON.stringify(JSON.parse(await fs.promises.readFile(path.join(queued.folder, 'manifest.json'), 'utf8')));
+        const blockedRevision = await submit(passRequiredReview, { ...quality(originalParagraph, auditFor(originalParagraph)), decision: 'revised',
+          findings: [{ id: 'voluntary-review-2', document: 'resume', targetId: 'bullet-1', issue: 'Attempting another discretionary edit.', fix: 'Use the earlier wording.' }],
+          resume: original.resume, coverLetter: original.coverLetter });
+        assert(!blockedRevision.accepted
+          && blockedRevision.validationErrors?.some(message => message.startsWith('authority-review-convergence:'))
+          && blockedRevision.handoff?.correctionPrompt?.includes('decision:"pass"'),
+        `a second unblocked discretionary revision is rejected with the stable convergence correction (${JSON.stringify(blockedRevision.validationErrors || [])})`);
+        const manifestAfterBlockedRevision = JSON.stringify(JSON.parse(await fs.promises.readFile(path.join(queued.folder, 'manifest.json'), 'utf8')));
+        assert(manifestAfterBlockedRevision === manifestBeforeBlockedRevision,
+          'a rejected second discretionary revision must not mutate the persisted marker, documents, or review transition');
+        const reboundBullet = 'Matched the constraints those teams set while serving 50 users.';
+        const reboundResume = structuredClone(voluntary.resume);
+        reboundResume.roles[0].bullets[0].text = reboundBullet;
+        const reboundCoverLetter = structuredClone(voluntary.coverLetter);
+        reboundCoverLetter.coverLetterArgument.primaryEvidence.evidence = reboundBullet;
+        const activateDocumentTarget = async (target, document, findingId) => {
+          const targetManifest = JSON.parse(await fs.promises.readFile(path.join(queued.folder, 'manifest.json'), 'utf8'));
+          await atomicReplaceJson(path.join(queued.folder, 'manifest.json'), {
+            ...targetManifest,
+            paste: {
+              ...targetManifest.paste,
+              findings: [{ id: findingId, document, targetId: 'host-target', issue: 'The host requires a material document repair.', fix: 'Return only the document this target permits.' }],
+              requiredChangeDocuments: [document], requiredChangeTargets: [target],
+            },
+          });
+        };
+        // A narrow cover target must remain narrow even after the marker is
+        // set: a résumé replacement is never the reverse coupling exception.
+        await activateDocumentTarget('coverLetter:rendered', 'coverLetter', 'host-cover-only');
+        handoff = await current();
+        const coverOnlyCollateral = await submit(handoff, { ...quality(voluntaryParagraph, auditFor(voluntaryParagraph)), decision: 'revised',
+          findings: [{ id: 'cover-only-collateral', document: 'coverLetter', targetId: 'host-target', issue: 'Attempting an unrelated résumé edit.', fix: 'Repair the cover letter only.' }],
+          resume: reboundResume, coverLetter: reboundCoverLetter });
+        assert(!coverOnlyCollateral.accepted
+          && coverOnlyCollateral.validationErrors?.some(message => message.startsWith('authority-review-document-scope:')),
+        `a cover-only active target rejects a collateral résumé replacement (${JSON.stringify(coverOnlyCollateral.validationErrors || [])})`);
+
+        // A host-targeted résumé repair can break the accepted letter's
+        // argument binding. A résumé-only answer must still surface that
+        // existing cross-document check; adding a properly rebound letter is
+        // the one permitted directional coupling.
+        await activateDocumentTarget('resume:rendered', 'resume', 'host-resume-only');
+        handoff = await current();
+        assert(handoff.prompt.includes('A résumé-targeted repair may also include a cover-letter replacement only when')
+          && handoff.prompt.includes('may change only coverLetterArgument')
+          && handoff.prompt.includes('context.requiredChangeTargets'),
+        'a resume-only repair prompt explains the argument-only rebinding exception');
+        const missingRebind = await submit(handoff, { ...quality(voluntaryParagraph, auditFor(voluntaryParagraph)), decision: 'revised',
+          findings: [{ id: 'resume-only-rebind', document: 'resume', targetId: 'bullet-1', issue: 'Replace the required résumé bullet.', fix: 'Use the source-supported constraint wording.' }],
+          resume: reboundResume });
+        assert(!missingRebind.accepted
+          && missingRebind.validationErrors?.some(message => message.startsWith('Résumé replacement versus the accepted cover letter — '))
+          && !missingRebind.validationErrors?.some(message => message.startsWith('authority-review-document-scope:')),
+        `a resume-only repair that breaks the accepted argument binding must request a rebind rather than be scope-blocked (${JSON.stringify(missingRebind.validationErrors || [])})`);
+        // The allowed coupling is a metadata-only rebind. It cannot smuggle a
+        // paragraph, citation, or thesis rewrite alongside the required
+        // résumé repair; every such graded change remains outside the active
+        // resume-only document target.
+        const collateralCoverMutations = [
+          {
+            label: 'paragraph',
+            apply: cover => { cover.paragraphs[0].text = originalParagraph; },
+          },
+          {
+            label: 'citation',
+            apply: cover => { cover.paragraphs[0].evidenceIds = [achievementId, skillEvidenceId]; },
+          },
+          {
+            label: 'thesis',
+            apply: cover => { cover.roleThesis = 'Python service delivery for 50 users is the supported capability this engineering role needs.'; },
+          },
+        ];
+        for (const mutation of collateralCoverMutations) {
+          handoff = await current();
+          const collateralCover = structuredClone(reboundCoverLetter);
+          mutation.apply(collateralCover);
+          const collateral = await submit(handoff, { ...quality(voluntaryParagraph, auditFor(voluntaryParagraph)), decision: 'revised',
+            findings: [{ id: `resume-only-collateral-${mutation.label}`, document: 'resume', targetId: 'bullet-1', issue: 'Repair the required résumé bullet without rewriting the dependent letter.', fix: 'Return only the argument metadata rebind when a cover replacement is necessary.' }],
+            resume: reboundResume, coverLetter: collateralCover });
+          assert(!collateral.accepted
+            && collateral.validationErrors?.some(message => message.startsWith('authority-review-document-scope:')
+              && message.includes('Keep the accepted cover letter\'s rendered text, paragraph IDs and citation IDs, and roleThesis unchanged; change only coverLetterArgument'))
+            && !collateral.validationErrors?.some(message => message.startsWith('authority-review-document-scope:') && message.includes('omit coverLetter')),
+          `a resume-only repair rejects collateral cover ${mutation.label} churn (${JSON.stringify(collateral.validationErrors || [])})`);
+        }
+        handoff = await current();
+        accepted = await submit(handoff, { ...quality(voluntaryParagraph, auditFor(voluntaryParagraph)), decision: 'revised',
+          findings: [{ id: 'resume-only-rebound', document: 'resume', targetId: 'bullet-1', issue: 'Replace the required résumé bullet and rebind its dependent cover argument.', fix: 'Return the changed résumé and the necessary rebound cover letter.' }],
+          resume: reboundResume, coverLetter: reboundCoverLetter });
+        assert(accepted.accepted && accepted.handoff?.stage === 'requirement-disposition',
+          `a resume-targeted repair may include only its necessary rebound cover replacement (${JSON.stringify({ accepted: accepted.accepted, stage: accepted.handoff?.stage || null, errors: accepted.validationErrors || [] })})`);
+        const reboundDispositionPages = await completeDispositions();
+        handoff = await current();
+        assert(handoff.prompt.includes('Current-authority convergence is now required')
+          && handoff.prompt.includes('decision:"pass"'),
+        'after the host-targeted coupled repair, the persisted marker again requires a pass before blind review');
+        accepted = await submit(handoff, quality(voluntaryParagraph, auditFor(voluntaryParagraph)));
         assert(accepted.accepted && accepted.handoff?.stage === 'blind-review', 'review pass must enter the live blind-review stage');
         const firstTracks = new Set(); const firstTrackKeys = new Map(); let injectedFinding = false; let completedFindingContinuation = false;
         const denseFindingText = 'x'.repeat(3_200);
@@ -1639,14 +2469,16 @@ export default [
           const scopeDigest = /"scopeDigest":"([a-f0-9]{64})"/u.exec(handoff.prompt)?.[1]; const pageIndex = Number(/"pageIndex":(\d+)/u.exec(handoff.prompt)?.[1]);
           const predecessor = /"previousPageDigest":(null|"[a-f0-9]{64}")/u.exec(handoff.prompt)?.[1];
           const fields = { version: 1, scopeDigest, pageIndex, previousPageDigest: predecessor === 'null' ? null : JSON.parse(predecessor), complete: true, decision: 'pass', findings: [] };
+          const blindContextRaw = /<untrusted-evidence-json>\n([\s\S]*?)\n<\/untrusted-evidence-json>/u.exec(handoff.prompt)?.[1];
+          const blindTargetId = JSON.parse(blindContextRaw).claim?.id || 'resume-claim';
           if (!injectedFinding) {
-            injectedFinding = true; fields.complete = false; fields.decision = 'issues'; fields.findings = Array.from({ length: 32 }, (_unused, index) => ({ id: `0-0-${index + 1}`, ruleId: 'fact-grounding', document: 'resume', targetId: 'bullet-1', issue: `Use the exact first-person source wording for supported result ${index + 1}: ${denseFindingText}`, fix: `Replace claim ${index + 1} with the cited exact source wording: ${denseFindingText}` }));
+            injectedFinding = true; fields.complete = false; fields.decision = 'issues'; fields.findings = Array.from({ length: 32 }, (_unused, index) => ({ id: `0-0-${index + 1}`, ruleId: 'fact-grounding', document: 'resume', targetId: blindTargetId, issue: `Use the exact first-person source wording for supported result ${index + 1}: ${denseFindingText}`, fix: `Replace claim ${index + 1} with the cited exact source wording: ${denseFindingText}` }));
           } else if (!completedFindingContinuation && pageIndex === 1 && /TRACK: fact-fidelity/u.test(handoff.prompt)) {
-            completedFindingContinuation = true; fields.decision = 'issues'; fields.findings = [{ id: '0-1-33', ruleId: 'fact-grounding', document: 'resume', targetId: 'bullet-1', issue: 'Preserve the exact supported result through the final continuation page.', fix: 'Replace the bullet with the cited exact source wording.' }];
+            completedFindingContinuation = true; fields.decision = 'issues'; fields.findings = [{ id: '0-1-33', ruleId: 'fact-grounding', document: 'resume', targetId: blindTargetId, issue: 'Preserve the exact supported result through the final continuation page.', fix: 'Replace the bullet with the cited exact source wording.' }];
           }
           accepted = await submit(handoff, fields);
         }
-        assert(accepted.accepted && accepted.handoff?.stage === 'blind-repair-context' && firstTracks.size === 5 && firstTrackKeys.size === 5 && injectedFinding && completedFindingContinuation
+        assert(accepted.accepted && accepted.handoff?.stage === 'blind-repair-context' && firstTracks.size === 6 && firstTrackKeys.size === 6 && injectedFinding && completedFindingContinuation
           && /^authority-blind-repair-[a-f0-9]{64}$/u.test(accepted.handoff.freshContextKey)
           && ![...firstTrackKeys.values()].includes(accepted.handoff.freshContextKey),
         'bounded blind finding continuation must page every immutable finding before opening a distinct repair chat');
@@ -1660,6 +2492,114 @@ export default [
           && /^[a-f0-9]{64}$/u.test(repairManifest.paste.authorityBlindReview.rolling.receiptDigest)
           && /^[a-f0-9]{64}$/u.test(repairManifest.paste.authorityBlindReview.rolling.scopeDigest),
         'all continuation findings survive in the bounded immutable correction receipt rather than a response-sized review array');
+        assert(repairManifest.paste.authorityBlindReview.coverage?.clean === false,
+          'the terminal nonclean fixture begins with the immutable receipt-derived coverage flag set false');
+        const terminalPlanDigest = repairManifest.paste.authorityBlindReview.plan.digest;
+        assert(repairManifest.paste.authorityStore.streams?.[`blind-repair-root-${terminalPlanDigest.slice(0, 18)}`]?.count === 1,
+          'a terminal nonclean blind aggregate mints an independent durable repair-root commitment outside the mutable blind-review pointer');
+        const repairManifestPath = path.join(queued.folder, 'manifest.json');
+        const repairManifestBeforeTamper = await fs.promises.readFile(repairManifestPath, 'utf8');
+        const repairGenerationLogPath = path.join(queued.folder, 'Generation Log.jsonl');
+        const repairGenerationLogBeforeTamper = await fs.promises.readFile(repairGenerationLogPath, 'utf8');
+        const assertRepairPointerTamperFailsClosed = async (label, mutate) => {
+          const forged = structuredClone(repairManifest); mutate(forged.paste);
+          await atomicReplaceJson(repairManifestPath, forged);
+          let reopenError = null;
+          try { await current(); } catch (error) { reopenError = error; }
+          assert(/blind-review repair (stream pointer|finding aggregate)|correction pages cannot be skipped/i.test(String(reopenError?.message || reopenError)),
+          `${label} is a terminal repair-stream integrity fault before any acknowledgement can skip a correction page`);
+          await fs.promises.writeFile(repairManifestPath, repairManifestBeforeTamper, 'utf8');
+          await fs.promises.writeFile(repairGenerationLogPath, repairGenerationLogBeforeTamper, 'utf8');
+          handoff = await current();
+          assert(handoff.stage === 'blind-repair-context', `${label} fixture restoration reopens the authentic first correction page`);
+        };
+        await assertRepairPointerTamperFailsClosed('a forged smaller correction stream pointer', paste => {
+          paste.blindRepairReceipt.stream = { ...paste.blindRepairReceipt.stream, count: 1, digest: '0'.repeat(64) };
+        });
+        await assertRepairPointerTamperFailsClosed('a forged smaller correction finding aggregate', paste => {
+          paste.blindRepairReceipt.findingCount = 1; paste.blindRepairReceipt.findingAggregateDigest = '0'.repeat(64);
+        });
+        const assertTerminalBlindRootTamperFailsClosed = async (label, mutate) => {
+          const forged = structuredClone(repairManifest); mutate(forged.paste);
+          await atomicReplaceJson(repairManifestPath, forged);
+          let reopenError = null; let reopened = null;
+          try { reopened = await current(); } catch (error) { reopenError = error; }
+          assert(!reopened || /terminal (nonclean blind-review root|blind-review coverage|blind-review finding aggregate)|authenticated repair receipt|durable completion pointer|generation log/i.test(String(reopenError?.message || reopenError)),
+            `${label} cannot hide the receipt-derived terminal nonclean blind root behind mutable manifest metadata`);
+          await fs.promises.writeFile(repairManifestPath, repairManifestBeforeTamper, 'utf8');
+          await fs.promises.writeFile(repairGenerationLogPath, repairGenerationLogBeforeTamper, 'utf8');
+          handoff = await current();
+          assert(handoff.stage === 'blind-repair-context', `${label} restoration resumes the authentic repair root at page zero`);
+        };
+        await assertTerminalBlindRootTamperFailsClosed('deleting terminal coverage', paste => {
+          delete paste.authorityBlindReview.coverage;
+        });
+        await assertTerminalBlindRootTamperFailsClosed('flipping terminal coverage clean', paste => {
+          paste.authorityBlindReview.coverage.clean = true;
+        });
+        const wholePointerDeletion = structuredClone(repairManifest);
+        wholePointerDeletion.paste.stage = 'review';
+        delete wholePointerDeletion.paste.authorityBlindReview;
+        delete wholePointerDeletion.paste.blindRepairReceipt;
+        delete wholePointerDeletion.paste.blindRepairCompletion;
+        delete wholePointerDeletion.paste.authorityReviewConvergence;
+        await atomicReplaceJson(repairManifestPath, wholePointerDeletion);
+        let wholePointerDeletionError = null;
+        try { await current(); } catch (error) { wholePointerDeletionError = error; }
+        assert(/durable terminal blind-review repair root.*(missing|another stage)|active while its live blind-review pointer/i.test(String(wholePointerDeletionError?.message || wholePointerDeletionError)),
+          'deleting the complete blind-review and repair manifest subtree cannot reopen a first direct nonclean blind root for discretionary review');
+        await fs.promises.writeFile(repairManifestPath, repairManifestBeforeTamper, 'utf8');
+        await fs.promises.writeFile(repairGenerationLogPath, repairGenerationLogBeforeTamper, 'utf8');
+        handoff = await current();
+        assert(handoff.stage === 'blind-repair-context', 'the signed repair-root commitment restores the authentic repair page after whole-pointer deletion');
+        const forgedReviewCleanup = structuredClone(repairManifest);
+        forgedReviewCleanup.paste.stage = 'review';
+        forgedReviewCleanup.paste.authorityBlindReview.coverage.clean = true;
+        delete forgedReviewCleanup.paste.blindRepairReceipt;
+        delete forgedReviewCleanup.paste.blindRepairCompletion;
+        await atomicReplaceJson(repairManifestPath, forgedReviewCleanup);
+        let forgedReviewCleanupError = null; let forgedReviewCleanupResult = null;
+        try {
+          forgedReviewCleanupResult = await submit(handoff, { decision: 'revised', findings: [], checklist: [] });
+        } catch (error) { forgedReviewCleanupError = error; }
+        assert(!forgedReviewCleanupResult?.accepted || /terminal nonclean blind-review root|authenticated repair receipt|generation log/i.test(String(forgedReviewCleanupError?.message || forgedReviewCleanupError)),
+          'a stage-tampered review cannot submit a discretionary revision that clears a terminal nonclean blind root');
+        await fs.promises.writeFile(repairManifestPath, repairManifestBeforeTamper, 'utf8');
+        await fs.promises.writeFile(repairGenerationLogPath, repairGenerationLogBeforeTamper, 'utf8');
+        handoff = await current();
+        assert(handoff.stage === 'blind-repair-context', 'the authentic nonclean root still follows the normal repaired/new-cycle path after cleanup tamper testing');
+        const cursorForgedManifest = structuredClone(repairManifest);
+        cursorForgedManifest.paste.blindRepairCursor = { pageIndex: cursorForgedManifest.paste.blindRepairReceipt.stream.count - 1 };
+        await atomicReplaceJson(repairManifestPath, cursorForgedManifest);
+        handoff = await current();
+        assert(handoff.stage === 'blind-repair-context' && contextOf(handoff).pageIndex === 0,
+          'a restarted repair ignores a manifest cursor forged from page zero to the last correction page');
+        await fs.promises.writeFile(repairManifestPath, repairManifestBeforeTamper, 'utf8');
+        await fs.promises.writeFile(repairGenerationLogPath, repairGenerationLogBeforeTamper, 'utf8');
+        const emptyTargetsManifest = structuredClone(repairManifest);
+        emptyTargetsManifest.paste.blindRepairReceipt.requiredChangeDocuments = [];
+        emptyTargetsManifest.paste.blindRepairReceipt.requiredChangeTargets = [];
+        await atomicReplaceJson(repairManifestPath, emptyTargetsManifest);
+        let emptyTargetsError = null;
+        try { await current(); } catch (error) { emptyTargetsError = error; }
+        assert(/target projection.*tampered|targets cannot be waived/i.test(String(emptyTargetsError?.message || emptyTargetsError)),
+          'a reopened current repair refuses manifest empty target arrays that would waive immutable correction targets');
+        await fs.promises.writeFile(repairManifestPath, repairManifestBeforeTamper, 'utf8');
+        await fs.promises.writeFile(repairGenerationLogPath, repairGenerationLogBeforeTamper, 'utf8');
+        handoff = await current();
+        assert(handoff.stage === 'blind-repair-context', 'the authentic repair receipt reopens after target-projection tamper testing');
+        const prematureReviewManifest = structuredClone(repairManifest);
+        prematureReviewManifest.paste.stage = 'review';
+        delete prematureReviewManifest.paste.authorityReviewConvergence;
+        await atomicReplaceJson(repairManifestPath, prematureReviewManifest);
+        let prematureReviewError = null;
+        try { await current(); } catch (error) { prematureReviewError = error; }
+        assert(/durable completion pointer|acknowledgement chain is incomplete|completion receipt/i.test(String(prematureReviewError?.message || prematureReviewError)),
+          'removing the convergence marker cannot turn an incomplete blind-repair root into review before every acknowledgement is durable');
+        await fs.promises.writeFile(repairManifestPath, repairManifestBeforeTamper, 'utf8');
+        await fs.promises.writeFile(repairGenerationLogPath, repairGenerationLogBeforeTamper, 'utf8');
+        handoff = await current();
+        assert(handoff.stage === 'blind-repair-context', 'the authentic incomplete repair root remains the only resumable stage after premature-review tamper testing');
         const repairKey = accepted.handoff.freshContextKey; const acknowledged = []; let repairPages = 0;
         while (accepted.handoff?.stage === 'blind-repair-context') {
           handoff = await current(); const repairContext = contextOf(handoff);
@@ -1679,26 +2619,41 @@ export default [
         assert(accepted.accepted && accepted.handoff?.stage === 'review' && acknowledged.length === 33
           && new Set(acknowledged).size === 33 && repairPages >= 2,
         'every continuation finding is presented and acknowledged before the material repair review opens');
+        const completedRepairManifest = JSON.parse(await fs.promises.readFile(repairManifestPath, 'utf8'));
+        assert(completedRepairManifest.paste.blindRepairCompletion?.planDigest === completedRepairManifest.paste.blindRepairReceipt?.planDigest
+          && completedRepairManifest.paste.blindRepairCompletion?.stream?.count === 1,
+        'the completed multi-page repair persists one immutable completion receipt before a restart may enter review');
         // A pass that leaves the documents unchanged cannot consume blind
         // repairs; it must not advance to a partial review or disposition.
         handoff = await current();
         assertPostMatchDraftContext(handoff, 'review');
         const noOp = await submit(handoff, quality(originalParagraph, auditFor(originalParagraph)));
         assert(!noOp.accepted && noOp.handoff?.stage === 'review', 'an unchanged review response cannot clear unresolved blind findings');
-        const revisedParagraph = 'I delivered a Python service for 50 users. The engineering was in matching the constraints those teams set rather than my own preferences. I would apply that supported Python delivery work to the reliable Python service delivery this role requires.';
-        const revised = documentsFor(revisedParagraph);
-        revised.resume.roles[0].bullets[0].text = 'Built a Python service that served 50 users.';
-        revised.resume.roles[0].bullets[0].evidenceIds = [achievementId];
-        revised.resume.skills = [{ id: 'skills-python', group: 'Languages', items: ['Python'], evidenceIds: [skillEvidenceId] }];
-        revised.coverLetter.paragraphs[0].evidenceIds = [achievementId];
         handoff = await current();
         assertPostMatchDraftContext(handoff, 'review');
-        accepted = await submit(handoff, { ...quality(revisedParagraph, auditFor(revisedParagraph)), decision: 'revised',
+        // The blocking packets are resume-only, so the repair boundary must
+        // permit a material résumé fix without forcing a collateral letter
+        // rewrite merely to satisfy the old both-document target default.
+        const targetedParagraph = originalParagraph;
+        const targeted = structuredClone(original);
+        targeted.resume.roles[0].bullets[0].text = 'Built the Python service used by 50 users.';
+        targeted.resume.roles[0].bullets[0].evidenceIds = [achievementId];
+        targeted.resume.skills = [{ id: 'skills-python', group: 'Languages', items: ['Python'], evidenceIds: [skillEvidenceId] }];
+        // A résumé-only repair may carry the accepted letter solely to rebind
+        // coverLetterArgument. Reconstruct that exact accepted letter rather
+        // than accidentally turning the narrow coupling into a rewrite.
+        targeted.coverLetter = structuredClone(JSON.parse(await fs.promises.readFile(path.join(queued.folder, 'manifest.json'), 'utf8')).paste.coverLetter);
+        targeted.coverLetter.coverLetterArgument.primaryEvidence.evidence = targeted.resume.roles[0].bullets[0].text;
+        accepted = await submit(handoff, { ...quality(targetedParagraph, auditFor(targetedParagraph)), decision: 'revised',
           findings: [{ id: 'blind-repair-1', document: 'resume', targetId: 'bullet-1', issue: 'The blind fact review requires an exact supported result statement.', fix: 'Replace both rendered document claims with supported source wording.' }],
-          resume: revised.resume, coverLetter: revised.coverLetter });
-        assert(accepted.accepted && accepted.handoff?.stage === 'requirement-disposition', `a material writer revision invalidates old disposition receipts before another review (${JSON.stringify({ accepted: accepted.accepted, stage: accepted.handoff?.stage || null, errors: accepted.validationErrors || [] })})`);
+          resume: targeted.resume, coverLetter: targeted.coverLetter });
+        assert(accepted.accepted && accepted.handoff?.stage === 'requirement-disposition', `an active blind target bypasses the pass-required marker and invalidates old disposition receipts (${JSON.stringify({ accepted: accepted.accepted, stage: accepted.handoff?.stage || null, errors: accepted.validationErrors || [] })})`);
         const secondDispositionPages = await completeDispositions();
-        handoff = await current(); accepted = await submit(handoff, quality(revisedParagraph, auditFor(revisedParagraph)));
+        handoff = await current();
+        assert(handoff.prompt.includes('Current-authority convergence is now required')
+          && handoff.prompt.includes('decision:"pass"'),
+        'after the active target is accepted, the persisted marker again requires a pass before blind review');
+        accepted = await submit(handoff, quality(targeted.coverLetter.paragraphs[0].text, auditFor(targeted.coverLetter.paragraphs[0].text)));
         const secondTracks = new Set(); const secondTrackKeys = new Map();
         while (accepted.handoff?.stage === 'blind-review') {
           handoff = await current(); const track = /TRACK: ([^\n]+)/u.exec(handoff.prompt)?.[1]; secondTracks.add(track);
@@ -1709,13 +2664,122 @@ export default [
           const predecessor = /"previousPageDigest":(null|"[a-f0-9]{64}")/u.exec(handoff.prompt)?.[1];
           accepted = await submit(handoff, { version: 1, scopeDigest, pageIndex, previousPageDigest: predecessor === 'null' ? null : JSON.parse(predecessor), complete: true, decision: 'pass', findings: [] });
         }
-        assert(accepted.accepted && secondTracks.size === 5 && secondTrackKeys.size === 5
+        assert(accepted.accepted && secondTracks.size === 6 && secondTrackKeys.size === 6
           && [...secondTrackKeys.entries()].every(([track, key]) => key !== firstTrackKeys.get(track))
-          && firstDispositionPages === secondDispositionPages, 'the changed hashes force full disposition and all-five blind coverage to restart with fresh plan/track chats');
+          && secondDispositionPages >= 1, `the targeted document repair restarts current disposition and all six blind tracks with fresh plan/track chats (${JSON.stringify({ accepted: accepted.accepted, completed: accepted.completed, errors: accepted.validationErrors, secondTracks: [...secondTracks], secondKeys: secondTrackKeys.size, secondDispositionPages })})`);
         const status = await localApplicationStatus(queued.id, project.canvasFilePath);
         assert(status.status === 'completed', 'only the clean second blind root completes the persisted current-authority job');
-        return { firstDispositionPages, secondDispositionPages, firstTracks: [...firstTracks].sort(), secondTracks: [...secondTracks].sort(), noOpRejected: true };
+        return { firstDispositionPages, voluntaryDispositionPages, reboundDispositionPages, secondDispositionPages, firstTracks: [...firstTracks].sort(), secondTracks: [...secondTracks].sort(), noOpRejected: true };
       } finally { await fs.promises.rm(project.root, { recursive: true, force: true }); }
+    },
+  },
+  {
+    name: 'Current authority application: review convergence is root-bound, target-scoped, and legacy-compatible',
+    run: () => {
+      const rootDigest = 'a'.repeat(64);
+      const marker = { version: 2, rootDigest, passRequired: true };
+      const currentInput = { careerAuthority: {}, authorityProtocol: 'requirements-ledger.v3' };
+      const unblockedReview = { stage: 'review', authorityReviewConvergence: marker };
+      const passRequired = __authorityReviewConvergenceValidationForTests({
+        input: currentInput, state: unblockedReview, response: { decision: 'revised' },
+      });
+      assert(passRequired.length === 1 && passRequired[0].startsWith('authority-review-convergence:'),
+        'a persisted convergence marker deterministically rejects a second discretionary revision when no repair target is active');
+      assert(pasteRejectionCheckIds(passRequired).checkIds.includes('authority-review-convergence'),
+        'the convergence rejection has a stable coded correction identity, rather than falling through to schema-invalid diagnostics');
+      assert(__authorityReviewConvergenceValidationForTests({
+        input: currentInput, state: unblockedReview, response: { decision: 'pass' },
+      }).length === 0, 'the same converged review permits the required pass into blind review');
+
+      const coverRepair = { ...unblockedReview, requiredChangeTargets: ['coverLetter:rendered'] };
+      assert(__authorityReviewConvergenceValidationForTests({
+        input: currentInput, state: coverRepair, response: { decision: 'revised', coverLetter: {} },
+      }).length === 0, 'an active host-targeted cover repair bypasses the pass-required gate');
+      const collateral = __authorityReviewConvergenceValidationForTests({
+        input: currentInput, state: coverRepair, response: { decision: 'revised', coverLetter: {}, resume: { skills: [] } },
+      });
+      assert(collateral.length === 1 && collateral[0].startsWith('authority-review-document-scope:'),
+        'a cover-only repair cannot use its bypass to replace résumé or skills content');
+
+      assert(__authorityReviewConvergenceValidationForTests({
+        input: currentInput, state: { stage: 'review' }, response: { decision: 'revised' },
+      }).length === 0, 'a review with no prior signed convergence record remains open for its initial discretionary revision');
+
+      const persistedReview = {
+        stage: 'review', authorityStore: { version: 1 }, authorityWorkflow: { rootDigest }, authoritySelection: {}, authorityReviewConvergence: marker,
+      };
+      assert(__assertAuthorityStateGraphForTests(currentInput, persistedReview) === 'requirements-ledger.v3',
+        'a crash-recovered marker is accepted only when it is bound to the durable current workflow root');
+      nodeAssert.throws(() => __assertAuthorityStateGraphForTests(currentInput, {
+        ...persistedReview, authorityReviewConvergence: { ...marker, rootDigest: 'b'.repeat(64) },
+      }), /review-convergence marker/i, 'a marker from another root cannot be replayed after restart');
+
+      const directPassTerminalNonclean = {
+        stage: 'review', authorityStore: { version: 1 }, authorityWorkflow: { rootDigest }, authoritySelection: {},
+        authorityBlindReview: {
+          plan: { root: { promptMode: 'artifact-repair-only-v3', scopeCount: 1 } },
+          rolling: { completedScopeCount: 1, findingCount: 1 },
+        },
+      };
+      nodeAssert.throws(() => __assertAuthorityStateGraphForTests(currentInput, directPassTerminalNonclean), /terminal nonclean blind-review root/i,
+        'a first direct review pass that reaches a terminal nonclean blind root cannot remove repair state and reopen discretionary review merely because no convergence marker was minted');
+
+      // The terminal root is not merely a field under authorityBlindReview:
+      // that whole mutable subtree (and both repair pointers) can be deleted
+      // in a forged manifest.  Its independently committed store stream must
+      // still stop review before a discretionary `revised` response is even
+      // eligible.  This is deliberately the first-direct-pass shape, with no
+      // authorityReviewConvergence marker to provide incidental protection.
+      const deletedPlanDigest = 'c'.repeat(64);
+      const fullyDeletedDirectNonclean = {
+        stage: 'review', authorityWorkflow: { rootDigest }, authoritySelection: {},
+        authorityStore: { version: 1, streams: {
+          [`blind-repair-root-${deletedPlanDigest.slice(0, 18)}`]: { count: 1, head: 'root-page', digest: 'd'.repeat(64) },
+        } },
+      };
+      assert(__authorityReviewConvergenceValidationForTests({
+        input: currentInput, state: fullyDeletedDirectNonclean, response: { decision: 'revised' },
+      }).length === 0,
+      'the review-only convergence helper intentionally has no mutable blind pointer to inspect in the deletion probe');
+      nodeAssert.throws(() => __assertAuthorityStateGraphForTests(currentInput, fullyDeletedDirectNonclean), /durable terminal blind-review repair root.*missing|durable terminal blind-review repair root.*another stage/i,
+        'deleting authorityBlindReview, blindRepairReceipt, and blindRepairCompletion cannot reopen a first direct nonclean blind root for discretionary review');
+
+      const historicalMarker = { version: 1, rootDigest, passRequired: true };
+      assert(__authorityReviewConvergenceValidationForTests({
+        input: currentInput, state: { stage: 'review', authorityReviewConvergence: historicalMarker }, response: { decision: 'revised' },
+      }).length === 1,
+      'a genuinely historical v1 marker remains a restrictive migration record while current v2 markers require a durable store receipt');
+
+      const legacyInput = {};
+      assert(__assertAuthorityStateGraphForTests(legacyInput, { stage: 'review' }) === 'legacy-evidence-plan.v1',
+        'legacy review manifests remain valid without a convergence marker');
+      assert(__authorityReviewConvergenceValidationForTests({
+        input: legacyInput, state: { stage: 'review', authorityReviewConvergence: marker }, response: { decision: 'revised' },
+      }).length === 0, 'legacy review behavior is not subject to the current-authority convergence gate');
+      return { passRequired: true, coverScopeGuarded: true, historicalMarkerCompatible: true, rootBound: true, legacyCompatible: true };
+    },
+  },
+  {
+    name: 'Current blind tailoring projection fragments escape-heavy requirement text before a schedulable v3 plan is persisted',
+    run: () => {
+      const text = '<>&'.repeat(5_400);
+      const requirement = { id: 'escaped-requirement', text, priority: 'highest' };
+      const row = { requirementId: requirement.id, disposition: 'omitted-minimum-sufficient', justification: 'No supported artifact claim is available.', proofs: [] };
+      const pages = __blindReviewBoundedTailoringPagesForTests([requirement], [row], 'escaped-boundary');
+      assert(pages.length > 1 && pages.every(page => page.requirements.length === 1 && page.dispositions.length === 1),
+        'a roughly 16KiB raw requirement with <>& transport expansion is deterministically split into bounded v3 source pages');
+      assert(pages.map(page => page.requirements[0].text).join('') === text,
+        'fragmentation preserves every requirement source character in order instead of truncating it before persistence');
+      for (const page of pages) {
+        const context = {
+          targetRequirementListingProof: page.requirements,
+          dispositionAndExactDocumentProof: page.dispositions,
+        };
+        const safeBytes = Buffer.byteLength(JSON.stringify(context).replaceAll('<', '\\u003c').replaceAll('>', '\\u003e').replaceAll('&', '\\u0026'), 'utf8');
+        assert(safeBytes <= 18 * 1024,
+          'every persisted tailoring fragment fits the same escaped JSON context envelope the reviewer receives');
+      }
+      return { pages: pages.length, rawBytes: Buffer.byteLength(text, 'utf8') };
     },
   },
   {
@@ -1772,8 +2836,64 @@ export default [
           profile,
           auditHistory: cleanCareerSnapshotAuditHistory(corpus, profile),
         });
-        const queued = await queueLocalApplicationJob({
+        const jobsRoot = path.join(project.root, '.local-ai', 'jobs');
+        const foldersBeforeRejectedQueue = await fs.promises.readdir(jobsRoot).catch(error => error?.code === 'ENOENT' ? [] : Promise.reject(error));
+        const rejectNewQueue = async (careerSnapshotId, reservationCapability = null) => {
+          let error = null;
+          try {
+            await queueCurrentLocalApplicationJob({
+              transport: 'paste', canvasFilePath: project.canvasFilePath, careerSnapshotId,
+              ...(reservationCapability ? { __acceptanceHarnessReservationCapability: reservationCapability } : {}),
+              careerData: 'UNTRUSTED RENDERER DATA must never authorize a new job.',
+              resumeProfile: { workHistory: [{ title: 'Untrusted role', employer: 'Wrong company' }] },
+              job: { title: 'Engineer', company: 'Acme', snippet: 'Reliable Python service delivery.' },
+            });
+          } catch (caught) { error = caught; }
+          return error;
+        };
+        const missingPin = await rejectNewQueue(null);
+        const unknownPin = await rejectNewQueue('f'.repeat(64));
+        const reservation = __reserveNextLocalApplicationJobIdForAcceptanceHarness('123e4567-e89b-42d3-a456-426614174001');
+        const oversizedPin = await rejectNewQueue(`${snapshotId}junk`, reservation.capability);
+        // A fully shaped v2 record remains readable by the recovery reader,
+        // but is never current enough to seed a NEW application queue.
+        const historicalContract = 'c'.repeat(64);
+        const historicalSnapshotId = careerSnapshotIdForContract(corpus, historicalContract);
+        const emptyFindingDigest = sha256(canonicalJson([]));
+        const historicalAuditHistory = [{
+          round: 0, deterministicFailureCount: 0, deterministicFailures: [], unresolvedCount: 0,
+          audits: [
+            ['coverage', 'career-profile-audit-completeness'], ['grounding', 'career-profile-audit-grounding'],
+            ['attribution', 'career-profile-audit-attribution'], ['metrics', 'career-profile-audit-metrics'],
+            ['skills', 'career-profile-audit-skills'], ['conflict', 'career-profile-audit-conflicts'],
+          ].map(([category, task]) => ({ category, task, findingCount: 0, findingDigest: emptyFindingDigest, findings: [] })),
+        }];
+        await fs.promises.writeFile(path.join(snapshotRoot, 'career-snapshots', `${historicalSnapshotId}.json`), `${JSON.stringify({
+          schemaVersion: 2, status: CAREER_SNAPSHOT_STATUS_APPROVED, snapshotId: historicalSnapshotId,
+          inputFingerprint: corpus.inputFingerprint, sourceFingerprint: corpus.sourceFingerprint,
+          compilationContract: historicalContract, approvedAt: '2026-10-07T00:00:00.000Z',
+          sources: corpus.sources, segments: corpus.segments, profile, auditHistory: historicalAuditHistory,
+        })}\n`, { encoding: 'utf8', mode: 0o600 });
+        const historicalPin = await rejectNewQueue(historicalSnapshotId);
+        const foldersAfterRejectedQueue = await fs.promises.readdir(jobsRoot).catch(error => error?.code === 'ENOENT' ? [] : Promise.reject(error));
+        assert(/current approved career snapshot is required/i.test(missingPin?.message || '')
+          && /approved career snapshot.*missing or no longer valid/i.test(unknownPin?.message || '')
+          && /valid current approved career snapshot pin/i.test(oversizedPin?.message || '')
+          && /approved career snapshot.*missing or no longer valid/i.test(historicalPin?.message || '')
+          && JSON.stringify(foldersAfterRejectedQueue) === JSON.stringify(foldersBeforeRejectedQueue),
+        'new queues reject missing, unknown, and historical snapshot pins before reserving a job folder or accepting renderer career fallback');
+        const cardSource = await fs.promises.readFile(path.resolve('src/nodes/JobCardNode.jsx'), 'utf8');
+        const queuePayload = cardSource.slice(cardSource.indexOf('const queued = await window.electronAPI.queueLocalApplication({'), cardSource.indexOf('      });\n      if (!queued?.success', cardSource.indexOf('const queued = await window.electronAPI.queueLocalApplication({')));
+        assert(cardSource.includes("if (!careerSnapshotId) {")
+          && /careerSnapshotId,/.test(queuePayload)
+          && !/\bcareerData\s*:/.test(queuePayload)
+          && !/\bresumeProfile\s*:/.test(queuePayload)
+          && !/\bachievements\s*:/.test(queuePayload)
+          && !/\bmineAllowed\s*:/.test(queuePayload),
+        'JobCardNode refuses an unpinned card before IPC and sends only the immutable snapshot pin, never mutable career authority fields');
+        const queued = await queueCurrentLocalApplicationJob({
           transport: 'paste', canvasFilePath: project.canvasFilePath, careerSnapshotId: snapshotId,
+          __acceptanceHarnessReservationCapability: reservation.capability,
           // These deliberately disagree with the approved snapshot. A pinned
           // job is never permitted to freeze mutable renderer state instead.
           careerData: 'UNTRUSTED RENDERER DATA for a different person.',
@@ -1782,6 +2902,8 @@ export default [
           mineAllowed: true,
           job: { title: 'Engineer', company: 'Acme', snippet: 'Reliable Python service delivery.' },
         });
+        assert(queued.id === reservation.id,
+          'a rejected malformed pin does not consume a pending acceptance-harness reservation before a valid current snapshot queues');
         const input = JSON.parse(await fs.promises.readFile(path.join(queued.folder, 'input.json'), 'utf8'));
         const queuedManifest = JSON.parse(await fs.promises.readFile(path.join(queued.folder, 'manifest.json'), 'utf8'));
         assert(input.careerSnapshotId === snapshotId
@@ -2432,7 +3554,7 @@ export default [
         && normalizedRoutineSource.includes('scan the entire supplied career corpus, including standalone and personal-project sections')
         && normalizedRoutineSource.includes('a concrete built or shipped artifact that directly demonstrates an emphasized need outranks a generic workflow')
         && normalizedRoutineSource.includes("a requirement to use a tool or workflow is not a responsibility to build, introduce, or integrate it")
-        && normalizedRoutineSource.includes('Tool use, including AI-assisted development, is not evidence of shipping a product built around that tool')
+        && normalizedRoutineSource.includes('Tool use of any kind is not evidence of shipping a product built around that tool')
         && normalizedRoutineSource.includes('leaves the transfer unstated')
         && !normalizedRoutineSource.includes('let the transfer stay implicit')
         && localSource.includes('${COVER_LETTER_TRANSFER_RULE} ${COVER_LETTER_OPENING_CONTEXT_RULE}')
@@ -2465,6 +3587,8 @@ export default [
         && localSource.includes('renderPdf(buildResumeDocument')
         && localSource.includes('targetPageCount')
         && localSource.includes('fit-feedback.json')
+        && localSource.includes('baselinePageCount: resumeFit.attempts[0]?.pageCount ?? null')
+        && !localSource.includes('baselinePageCount: resumeFit.pageCount')
         && localSource.includes('render-retry-required')
         && localSource.includes("'kept_diminishing_returns'")
         && localSource.includes('documentSha256')
@@ -2490,6 +3614,9 @@ export default [
         && localSource.includes('COVER_LETTER_CANDIDATE_AGENCY_RULE')
         && localSource.includes('COVER_LETTER_WARRANT_RULE')
         && localSource.includes('COVER_LETTER_SENTENCE_FLEXIBILITY_RULE')
+        && localSource.includes("id: 'CL-COHESION'")
+        && localSource.includes('localizedCoverLetterCorrectiveGuidance(result.hostValidation?.coverLetter)')
+        && localSource.includes('Repair only these failed cover-letter rules:')
         && localSource.includes('grammatical subject of the action')
         && localSource.includes('graded by none of the argument rules and ships unexamined')
         && localSource.includes('Do not insert a mandatory standalone warrant or problem-shape sentence')
@@ -2525,7 +3652,7 @@ export default [
         && localSource.includes('use a natural implicit reference such as “it,” “that experience,” or “the system”')
         && localSource.includes('Keep completed experience in a past-tense evidence sentence')
         && localSource.includes('That project prepared/equips me to contribute')
-        && localSource.includes('prefer a direct conditional bridge that names the target responsibility, in a transfer form that differs from the neighbouring paragraphs’ transfer forms')
+        && localSource.includes('prefer a direct conditional statement that names the target responsibility in your own wording, never in the same wording a neighbouring paragraph uses')
         && !localSource.includes('At the target employer, I would apply that experience')
         && localSource.includes('Within a paragraph, continue naturally when the candidate remains the subject')
         && localSource.includes('At a new paragraph, use a concise, unambiguous re-entry cue such as “In that role” when it helps identify the role being continued')
@@ -2534,7 +3661,7 @@ export default [
         && localSource.includes('Punctuate introductory phrases')
         && localSource.includes('recruiter seeing it for the first time')
         && localSource.includes('concrete actor, artifact, and action')
-        && localSource.includes('distinguish metaphorical reference from visible on-screen indication')
+        && localSource.includes('distinguish figurative reference from the literal, observable mechanism')
         && localSource.includes('use direct present-tense language')
         // The closing-invitation rule now states the THREE parts the check
         // (coverLetterChecks.js's candidateContributionRequirement) actually
@@ -2604,7 +3731,7 @@ export default [
         && normalizedRoutineSource.includes('a bare `this` or `that` is not enough')
         && normalizedRoutineSource.includes('Keep completed experience in a past-tense evidence sentence')
         && normalizedRoutineSource.includes('That project prepared me to contribute')
-        && normalizedRoutineSource.includes('Prefer a direct conditional bridge that names the target responsibility, in a transfer form that differs from the neighbouring paragraphs')
+        && normalizedRoutineSource.includes('Prefer a direct conditional statement that names the target responsibility in your own wording, never in the same wording a neighbouring paragraph uses')
         && normalizedRoutineSource.includes('do not repeat its full name merely from habit')
         && normalizedRoutineSource.includes('At a new paragraph, use a concise re-entry cue such as `In that role` when it helps')
         && normalizedRoutineSource.includes('ordinary definite descriptions such as `The system`')
@@ -2680,7 +3807,11 @@ export default [
         && normalizedRoutineSource.includes('one-sentence `roleThesis` records the plan\'s controlling angle')
         && normalizedRoutineSource.includes('Do not announce interest, motivation, or enthusiasm through first-person emotional declarations')
         && normalizedRoutineSource.includes("Do not repeat the opening's reason for interest there")
-        && normalizedRoutineSource.includes('role title may appear only when it distinguishes the target responsibility')
+        // The opening names the target role (the title the job record gives) and the employer as the target the
+        // capability is pointed at, never as an announcement; the earlier "only when it distinguishes the target
+        // responsibility" wording is superseded (applicationWriterGuidance.js, LETTER_OPENING_RULE).
+        && normalizedRoutineSource.includes('Name the target role by the title the job record gives and the employer by name in the opening')
+        && normalizedRoutineSource.includes('assert nothing about the employer\'s domain, product, customers or needs beyond what the posting text itself says')
         && normalizedRoutineSource.includes("Respect the recruiter's intelligence")
         && !normalizedRoutineSource.includes('Name the target company and role naturally in the opening sentence')
         && APPLICATION_QUALITY_CRITERIA.find(criterion => criterion.id === 'cover-opening')?.requirement.includes('opening demonstrates interest implicitly')
@@ -3280,15 +4411,15 @@ export default [
       catch { unrelatedParagraphRejected = true; }
       assert(unrelatedParagraphRejected,
         'an exact but lexically unrelated career quote cannot be used to ground a cover-letter paragraph');
-      const aiWorkflowQuote = 'At Thomson School District, I worked across AI-assisted development workflows with model delegation and appropriate use cases.';
+      const aiWorkflowQuote = 'At Maple Ridge School District, I worked across automated development workflows with task delegation and appropriate use cases.';
       let unsupportedDailyRejected = false;
       try {
         assertSourceQuoteLinksFinalText(
-          'At Thomson School District, I worked across AI-assisted development workflows. Deciding what a model should own was a daily call at the district.',
+          'At Maple Ridge School District, I worked across automated development workflows. Choosing the right task delegation was a daily call at the district.',
           [aiWorkflowQuote],
           'coverLetterParagraphs',
           0,
-          { identityTokens: ['thomson', 'district'] },
+          { identityTokens: ['maple', 'ridge', 'district'] },
         );
       } catch (error) {
         unsupportedDailyRejected = /unsupported daily frequency/u.test(String(error?.message || error));
@@ -3298,8 +4429,8 @@ export default [
       let unsupportedSuperiorityRejected = false;
       try {
         assertSourceQuoteLinksFinalText(
-          'Used model delegation while deciding where agentic coding beat traditional workflows.',
-          ['Worked across agentic coding and traditional workflows with model delegation and appropriate use cases.'],
+          'Used task delegation while deciding where scripted automation beat manual workflows.',
+          ['Worked across scripted automation and manual workflows with task delegation and appropriate use cases.'],
           'resumeBullets',
           0,
           { identityTokens: [] },
@@ -3311,19 +4442,19 @@ export default [
         'a résumé bullet cannot turn supported workflow comparison into unsupported superiority');
       const unsupportedSuperiorityResult = {
         ...trustedResult,
-        resumeMainHtml: '<main class="page"><section class="section"><article class="role"><span class="title">Engineer</span><span class="company">Acme</span><ul class="highlights"><li>Used model delegation while deciding where agentic coding beat traditional workflows.</li></ul></article></section></main>',
+        resumeMainHtml: '<main class="page"><section class="section"><article class="role"><span class="title">Engineer</span><span class="company">Acme</span><ul class="highlights"><li>Used task delegation while deciding where scripted automation beat manual workflows.</li></ul></article></section></main>',
         coverLetterArgument: coverLetterArgumentForResumeEvidence(
-          'Used model delegation while deciding where agentic coding beat traditional workflows.',
+          'Used task delegation while deciding where scripted automation beat manual workflows.',
         ),
         qualityReview: groundedQualityReview(sourceGroundingFor({
-          resumeBullets: ['Used model delegation while deciding where agentic coding beat traditional workflows.'],
-          resumeQuotes: ['Worked across agentic coding and traditional workflows with model delegation and appropriate use cases.'],
+          resumeBullets: ['Used task delegation while deciding where scripted automation beat manual workflows.'],
+          resumeQuotes: ['Worked across scripted automation and manual workflows with task delegation and appropriate use cases.'],
         })),
       };
       let importerSuperiorityRejected = false;
       try {
         validateLocalApplicationResult(unsupportedSuperiorityResult, id, path.join(os.tmpdir(), 'local-ai-project'), {}, {
-          careerData: 'Worked across agentic coding and traditional workflows with model delegation and appropriate use cases. I built supported systems for the teams that depend on them. The engineering was in matching the constraints those teams set rather than my own preferences. I would apply that delivery work to the reliable system delivery this role requires.',
+          careerData: 'Worked across scripted automation and manual workflows with task delegation and appropriate use cases. I built supported systems for the teams that depend on them. The engineering was in matching the constraints those teams set rather than my own preferences. I would apply that delivery work to the reliable system delivery this role requires.',
         });
       } catch (error) {
         importerSuperiorityRejected = /unsupported comparative superiority/u.test(String(error?.message || error));
@@ -3333,8 +4464,8 @@ export default [
       let unsupportedAuthorshipRejected = false;
       try {
         assertSourceQuoteLinksFinalText(
-          'Engineered a model-delegation workflow for the team.',
-          ['Used model delegation hands-on while evaluating development workflows.'],
+          'Engineered a task-delegation workflow for the team.',
+          ['Used task delegation hands-on while evaluating development workflows.'],
           'resumeBullets',
           0,
           { identityTokens: [] },
@@ -3345,74 +4476,88 @@ export default [
       assert(unsupportedAuthorshipRejected,
         'claim-strength grounding rejects upgrading hands-on tool use into engineering authorship');
       assertSourceQuoteLinksFinalText(
-        'Engineered a model-delegation workflow for the team.',
-        ['Built and implemented a model-delegation workflow for the team.'],
+        'Engineered a task-delegation workflow for the team.',
+        ['Built and implemented a task-delegation workflow for the team.'],
         'resumeBullets',
         0,
         { identityTokens: [] },
       );
-      const thomsonRole = { id: 'role-thomson', title: 'Developer', company: 'Thomson', dates: '2023 – 2024', location: '' };
-      const unscopedThomsonEvidence = [{ id: 'p0002', sourceId: 'career-data', quote: 'Used model delegation to evaluate development workflows.' }];
-      const thomsonResume = () => ({
+      const mapleRidgeRole = { id: 'role-maple-ridge', title: 'Developer', company: 'Maple Ridge', dates: '2023 – 2024', location: '' };
+      const unscopedMapleRidgeEvidence = [{ id: 'p0002', sourceId: 'career-data', quote: 'Used task delegation to evaluate development workflows.' }];
+      const mapleRidgeResume = () => ({
         schemaVersion: STRUCTURED_RESUME_SCHEMA_VERSION,
         identity: { name: 'Ada Lovelace', contact: ['ada@example.test'], subtitleRole: '', credential: '' },
-        roles: [{ ...thomsonRole, bullets: [{ id: 'thomson-bullet', text: 'Used model delegation to evaluate development workflows.', evidenceIds: ['p0002'] }] }],
+        roles: [{ ...mapleRidgeRole, bullets: [{ id: 'maple-ridge-bullet', text: 'Used task delegation to evaluate development workflows.', evidenceIds: ['p0002'] }] }],
       });
       let unscopedRoleRejected = false;
       try {
-        validateStructuredApplicationResume(thomsonResume(), {
-          sourceRoles: [thomsonRole], evidenceCatalog: unscopedThomsonEvidence,
+        validateStructuredApplicationResume(mapleRidgeResume(), {
+          sourceRoles: [mapleRidgeRole], evidenceCatalog: unscopedMapleRidgeEvidence,
           trustedIdentity: { name: 'Ada Lovelace', contact: ['ada@example.test'], subtitleRole: '', credential: '' },
-          careerData: 'Ada Lovelace\nUsed model delegation to evaluate development workflows.',
+          careerData: 'Ada Lovelace\nUsed task delegation to evaluate development workflows.',
         });
       } catch (error) { unscopedRoleRejected = /does not explicitly name that role's employer/u.test(String(error?.message || error)); }
       assert(unscopedRoleRejected,
         'an unscoped approved evidence record cannot be nested under a résumé employer role');
-      const scopedThomsonQuote = 'At Thomson, used model delegation to evaluate development workflows.';
-      const scopedThomsonResume = thomsonResume(scopedThomsonQuote);
-      scopedThomsonResume.roles[0].bullets[0].text = 'At Thomson, used model delegation to evaluate development workflows.';
-      validateStructuredApplicationResume(scopedThomsonResume, {
-        sourceRoles: [thomsonRole], evidenceCatalog: [{ ...unscopedThomsonEvidence[0], quote: scopedThomsonQuote }],
+      const scopedMapleRidgeQuote = 'At Maple Ridge, used task delegation to evaluate development workflows.';
+      const scopedMapleRidgeResume = mapleRidgeResume(scopedMapleRidgeQuote);
+      scopedMapleRidgeResume.roles[0].bullets[0].text = 'At Maple Ridge, used task delegation to evaluate development workflows.';
+      validateStructuredApplicationResume(scopedMapleRidgeResume, {
+        sourceRoles: [mapleRidgeRole], evidenceCatalog: [{ ...unscopedMapleRidgeEvidence[0], quote: scopedMapleRidgeQuote }],
         trustedIdentity: { name: 'Ada Lovelace', contact: ['ada@example.test'], subtitleRole: '', credential: '' },
-        careerData: `Ada Lovelace\n${scopedThomsonQuote}`,
+        careerData: `Ada Lovelace\n${scopedMapleRidgeQuote}`,
       });
       const unscopedCover = pasteAttributionScopeErrors({
-        unitLabel: 'Cover-letter paragraph', unitId: 'cover-thomson',
-        finalText: 'At Thomson, I used model delegation to evaluate development workflows.',
-        evidenceIds: ['p0002'], acceptedEvidence: unscopedThomsonEvidence,
-        sourceRoles: [thomsonRole], careerData: 'Ada Lovelace\nUsed model delegation to evaluate development workflows.',
+        unitLabel: 'Cover-letter paragraph', unitId: 'cover-maple-ridge',
+        finalText: 'At Maple Ridge, I used task delegation to evaluate development workflows.',
+        evidenceIds: ['p0002'], acceptedEvidence: unscopedMapleRidgeEvidence,
+        sourceRoles: [mapleRidgeRole], careerData: 'Ada Lovelace\nUsed task delegation to evaluate development workflows.',
       });
       const scopedCover = pasteAttributionScopeErrors({
-        unitLabel: 'Cover-letter paragraph', unitId: 'cover-thomson',
-        finalText: 'At Thomson, I used model delegation to evaluate development workflows.',
-        evidenceIds: ['p0002'], acceptedEvidence: [{ ...unscopedThomsonEvidence[0], quote: scopedThomsonQuote }],
-        sourceRoles: [thomsonRole], careerData: `Ada Lovelace\n${scopedThomsonQuote}`,
+        unitLabel: 'Cover-letter paragraph', unitId: 'cover-maple-ridge',
+        finalText: 'At Maple Ridge, I used task delegation to evaluate development workflows.',
+        evidenceIds: ['p0002'], acceptedEvidence: [{ ...unscopedMapleRidgeEvidence[0], quote: scopedMapleRidgeQuote }],
+        sourceRoles: [mapleRidgeRole], careerData: `Ada Lovelace\n${scopedMapleRidgeQuote}`,
       });
       assert(unscopedCover.some(message => message.includes('explicitly names that employer')) && scopedCover.length === 0,
         'cover-letter employer attribution needs scoped cited evidence while correctly scoped evidence remains usable');
       const inflatedPopulation = pasteAttributionScopeErrors({
         unitLabel: 'Cover-letter paragraph', unitId: 'cover-population',
-        finalText: 'At Thomson, built the portal used by 10,000 students.',
+        finalText: 'At Maple Ridge, built the portal used by 10,000 students.',
         evidenceIds: ['p0002'],
-        acceptedEvidence: [{ id: 'p0002', sourceId: 'career-data', quote: 'At Thomson, built the portal used by students.' }],
-        sourceRoles: [thomsonRole], careerData: 'At Thomson, built the portal used by students.',
+        acceptedEvidence: [{ id: 'p0002', sourceId: 'career-data', quote: 'At Maple Ridge, built the portal used by students.' }],
+        sourceRoles: [mapleRidgeRole], careerData: 'At Maple Ridge, built the portal used by students.',
       });
       const supportedPopulation = pasteAttributionScopeErrors({
         unitLabel: 'Cover-letter paragraph', unitId: 'cover-population',
-        finalText: 'At Thomson, built the portal used by 1,000 students.',
+        finalText: 'At Maple Ridge, built the portal used by 1,000 students.',
         evidenceIds: ['p0002'],
-        acceptedEvidence: [{ id: 'p0002', sourceId: 'career-data', quote: 'At Thomson, built the portal used by 1000 students.' }],
-        sourceRoles: [thomsonRole], careerData: 'At Thomson, built the portal used by 1000 students.',
+        acceptedEvidence: [{ id: 'p0002', sourceId: 'career-data', quote: 'At Maple Ridge, built the portal used by 1000 students.' }],
+        sourceRoles: [mapleRidgeRole], careerData: 'At Maple Ridge, built the portal used by 1000 students.',
       });
       assert(inflatedPopulation.some(message => message.includes('10,000 students')) && supportedPopulation.length === 0,
         'population grounding requires the stated amount or universal scope, while accepting comma-only number formatting differences');
       assertSourceQuoteLinksFinalText(
-        'Maintained Bash cron jobs that synchronized daily FAA API data into the local database.',
-        ['Maintained cron jobs that synced the FAA daily API data into the local database.'],
+        'Maintained cron jobs that synchronized daily Orbis API data into the local database.',
+        ['Maintained cron jobs that synced the Orbis daily API data into the local database.'],
         'resumeBullets',
         0,
         { identityTokens: [] },
       );
+      // A tool the bound quote never names is a claim the quote cannot support,
+      // however natural it sounds: this fixture used to add one and be accepted.
+      let unstatedToolRejected = '';
+      try {
+        assertSourceQuoteLinksFinalText(
+          'Maintained Bash cron jobs that synchronized daily Orbis API data into the local database.',
+          ['Maintained cron jobs that synced the Orbis daily API data into the local database.'],
+          'resumeBullets',
+          0,
+          { identityTokens: [] },
+        );
+      } catch (error) { unstatedToolRejected = String(error?.message || error); }
+      assert(/names \u201cBash\u201d/u.test(unstatedToolRejected),
+        `a tool the bound quote never names cannot ride on the words the quote does share (got ${unstatedToolRejected || 'acceptance'})`);
       assertSourceQuoteLinksFinalText(
         'Outperformed the legacy routing process in controlled tests.',
         ['The revised routing process outperformed the legacy routing process in controlled tests.'],
@@ -3508,14 +4653,14 @@ export default [
       assertGroundingRejected('an argument proof assigned to the wrong résumé role', wrongRole, 'evidenceRole 1');
       const projectWithoutCompany = {
         ...trustedResult,
-        resumeMainHtml: '<main class="page"><section class="section"><article class="role"><span class="title">AI-Chalkboard</span><ul class="highlights"><li>Built a native macOS overlay for precise on-screen guidance.</li></ul></article></section></main>',
+        resumeMainHtml: '<main class="page"><section class="section"><article class="role"><span class="title">SlateBoard</span><ul class="highlights"><li>Built a native desktop overlay for precise on-screen guidance.</li></ul></article></section></main>',
         coverLetterArgument: coverLetterArgumentForResumeEvidence(
-          'Built a native macOS overlay for precise on-screen guidance.',
-          'AI-Chalkboard project',
+          'Built a native desktop overlay for precise on-screen guidance.',
+          'SlateBoard project',
         ),
         qualityReview: groundedQualityReview(sourceGroundingFor({
-          resumeBullets: ['Built a native macOS overlay for precise on-screen guidance.'],
-          resumeQuotes: ['Built a native macOS overlay for precise on-screen guidance.'],
+          resumeBullets: ['Built a native desktop overlay for precise on-screen guidance.'],
+          resumeQuotes: ['Built a native desktop overlay for precise on-screen guidance.'],
         })),
       };
       const groundedProjectWithoutCompany = validateLocalApplicationResult(
@@ -3523,9 +4668,9 @@ export default [
         id,
         path.join(os.tmpdir(), 'local-ai-project'),
         {},
-        { careerData: 'Built a native macOS overlay for precise on-screen guidance. I built supported systems for the teams that depend on them. The engineering was in matching the constraints those teams set rather than my own preferences. I would apply that delivery work to the reliable system delivery this role requires.' },
+        { careerData: 'Built a native desktop overlay for precise on-screen guidance. I built supported systems for the teams that depend on them. The engineering was in matching the constraints those teams set rather than my own preferences. I would apply that delivery work to the reliable system delivery this role requires.' },
       );
-      assert(groundedProjectWithoutCompany.coverLetterArgument.primaryEvidence.evidenceRole === 'AI-Chalkboard project',
+      assert(groundedProjectWithoutCompany.coverLetterArgument.primaryEvidence.evidenceRole === 'SlateBoard project',
         'argument evidence can identify a company-less project by its résumé title without inventing an employer label');
       const logisticsParagraph = 'I built supported systems for the teams that depend on them. The engineering was in matching the constraints those teams set rather than my own preferences. I would apply that delivery work to the reliable system delivery this role requires. I am available to start in June.';
       const logisticsResult = {
@@ -3558,11 +4703,11 @@ export default [
         ['backward platform reference', 'Built Python ETL integrations between the district information system and those platforms.', 'resume-bullet-self-containment'],
         ['backward database reference', 'Exposed that database through Python REST APIs for controlled access.', 'resume-bullet-self-containment'],
         ['missing compound hyphen', 'Designed a React hub for tools kept in house.', 'compound-hyphenation'],
-        ['noun-to-gerund process range', 'Evaluated products from the quote request through presenting findings.', 'parallel-structure'],
-        ['opaque run-range process', 'Evaluated products, running each from the quote request through a findings presentation.', 'parallel-structure'],
+        ['noun-to-gerund process range', 'Evaluated products from the intake request through presenting findings.', 'parallel-structure'],
+        ['opaque run-range process', 'Evaluated products, running each from the intake request through a findings presentation.', 'parallel-structure'],
         ['ambiguous data owner', 'Migrated ticketing across with their data.', 'reference-clarity'],
-        ['ambiguous API owner', 'Synchronized FAA releases through their APIs.', 'reference-clarity'],
-        ['detached temporal modifier', 'Modified A*, applying it to flight routing after testing candidate algorithms.', 'modifier-attachment'],
+        ['ambiguous API owner', 'Loaded the nightly extract through their APIs.', 'reference-clarity'],
+        ['detached temporal modifier', 'Modified the planner, applying it to delivery routing after testing candidate algorithms.', 'modifier-attachment'],
       ]) {
         let editorialRejected = false;
         try {
@@ -3584,21 +4729,21 @@ export default [
       for (const [label, paragraph, expected] of [
         ['abrupt prior-employer opener', 'At Acme, I evaluated third-party products before adoption.', 'prior-employer-opening'],
         ['broad industry label', 'My aviation work extends this evidence with software design.', 'vague-domain-work-label'],
-        ['noun-to-gerund cover-letter range', 'I evaluated products from the quote request through presenting findings.', 'parallel-structure'],
-        ['stewardship process range', 'I ran the evaluations, carrying each one from the quote request through the final analysis for management.', 'parallel-structure'],
+        ['noun-to-gerund cover-letter range', 'I evaluated products from the intake request through presenting findings.', 'parallel-structure'],
+        ['stewardship process range', 'I ran the evaluations, carrying each one from the intake request through the closing review for management.', 'parallel-structure'],
         ['prose span ending in through', 'I owned that work from the first scoping call through the final handoff.', 'parallel-structure'],
-        ['entailed setup premise', 'Before those products were adopted, the district had to choose them, and I ran the evaluations.', 'entailed-premise'],
-        ['ambiguous data consumer', 'The platforms produced data they used and data they returned.', 'reference-clarity'],
-        ['missing workplace-introduction comma', 'At the district I delivered software through traditional and AI-assisted workflows.', 'introductory-workplace-comma'],
+        ['entailed setup premise', 'Before those vendors were purchased, the district had to select them, and I ran the pilots.', 'entailed-premise'],
+        ['ambiguous data consumer', 'Data arrived late, so I rebuilt their loader.', 'reference-clarity'],
+        ['missing workplace-introduction comma', 'At the district I delivered software through manual and automated workflows.', 'introductory-workplace-comma'],
         ['metaphorically ambiguous UI pointing', 'An agent walking someone through an on-screen task cannot point at the control it means.', 'visual-reference-precision'],
         ['conditionally deferential closing', 'I would welcome the chance to talk about that work.', 'direct-welcome-closing'],
         ['opaque responsibility pivot', 'Keeping the district data consistent across its tools was a different problem. I solved it with Python integration jobs.', 'responsibility-transition'],
         ['same-job responsibility opener', 'The same job also included assessing software before adoption.', 'responsibility-transition'],
-        ['detached relevance tail', "As a software engineer for Thomson School District, I moved operational data and workflows from internal systems to third-party platforms, work relevant to this role's legacy modernization and cross-program integration responsibilities.", 'detached-relevance-claim'],
+        ['detached relevance tail', "As a software engineer for Maple Ridge School District, I moved operational data and workflows from internal systems to third-party platforms, work relevant to this role's legacy modernization and cross-program integration responsibilities.", 'detached-relevance-claim'],
         ['present-tense prospective contribution', "That migration experience helps me contribute to this role's legacy-modernization responsibilities.", 'prospective-contribution-tense'],
         ['past-readiness prospective contribution', "That project prepared me to contribute to this role's legacy-modernization and cross-program integration responsibilities.", 'prospective-contribution-tense'],
         ['employer-choice closing', 'I welcome a conversation about whether the voice assistant or browser agent should be the first prototype.', 'direct-welcome-closing'],
-        ['literalized decision frame', 'Model delegation and a purchased platform are two answers to one build-or-buy call.', 'claimed-equivalence'],
+        ['literalized decision frame', 'Task delegation and a purchased platform are two answers to one build-or-buy call.', 'claimed-equivalence'],
       ]) {
         let editorialRejected = false;
         try {
@@ -3610,17 +4755,22 @@ export default [
         } catch (error) { editorialRejected = String(error?.message || error).includes(expected); }
         assert(editorialRejected, `Local AI validation rejects ${label} before rendering`);
       }
-      let topologyTailRejected = false;
+      // A trailing participial clause that only lists terms this same résumé
+      // already indexes in its Skills block adds no mechanism, constraint, scope
+      // or result of its own. The terms are invented; the decision reads them
+      // from the résumé's own Skills items.
+      let inventoryTailRejected = false;
+      const inventoryTailBullet = 'Migrated the clinic intake process, running Alpha Console under Beta Ledger behind Gamma Scheduler.';
       try {
         validateLocalApplicationResult({
           version: LOCAL_AI_APPLICATION_VERSION, jobId: id, status: 'completed', outputBundleRoot: 'Applied Jobs',
-          resumeMainHtml: '<main class="page"><article class="role"><span class="title">Engineer</span><span class="company">Acme</span><ul class="highlights"><li>Containerized the internal-tools hub with Docker Compose, running Django under Gunicorn behind Nginx.</li></ul></article></main>',
-          coverLetter: normalizedCoverLetter(), coverLetterArgument: coverLetterArgumentForResumeEvidence('Containerized the internal-tools hub with Docker Compose, running Django under Gunicorn behind Nginx.'),
+          resumeMainHtml: `<main class="page"><article class="role"><span class="title">Engineer</span><span class="company">Acme</span><ul class="highlights"><li>${inventoryTailBullet}</li></ul></article><section class="section"><h2>Skills</h2><dl class="skills"><dt>Tools</dt><dd>Alpha Console · Beta Ledger · Gamma Scheduler</dd></dl></section></main>`,
+          coverLetter: normalizedCoverLetter(), coverLetterArgument: coverLetterArgumentForResumeEvidence(inventoryTailBullet),
           qualityReview: draftedQualityReview(),
         }, id, path.join(os.tmpdir(), 'local-ai-project'), {}, { careerData: null });
-      } catch (error) { topologyTailRejected = /resume-bullet-focus/.test(String(error?.message || error)); }
-      assert(topologyTailRejected,
-        'Local AI validation rejects a runtime-topology tail appended to an already complete containerization highlight');
+      } catch (error) { inventoryTailRejected = /resume-bullet-focus/.test(String(error?.message || error)); }
+      assert(inventoryTailRejected,
+        'Local AI validation rejects a participial tail that only lists terms the résumé already indexes in its Skills block');
       const uniformHighlightText = validateLocalApplicationResult({
         version: LOCAL_AI_APPLICATION_VERSION, jobId: id, status: 'completed',
         outputBundleRoot: 'Applied Jobs',
@@ -3673,7 +4823,7 @@ export default [
       const canonicalEnvelope = validateLocalApplicationResult({
         version: LOCAL_AI_APPLICATION_VERSION, jobId: id, status: 'completed',
         outputBundleRoot: 'Applied Jobs',
-        resumeMainHtml: '<main class="page"><header class="resume-header"><h1 class="name">Maya Chen</h1><p class="tagline"><span class="subtitle-role">Senior Engineer</span><span class="sep" aria-hidden="true">·</span><span class="credential">B.S. Computer Science, Example University</span></p><p class="contact">maya@example.test · Toronto, ON</p></header><article class="role"><span class="title">Engineer</span><span class="company">Acme</span><ul class="highlights"><li>Built supported systems.</li></ul></article></main>',
+        resumeMainHtml: '<main class="page"><header class="resume-header"><h1 class="name">Maya Chen</h1><p class="tagline"><span class="subtitle-role">Senior Engineer</span><span class="sep" aria-hidden="true">·</span><span class="credential">B.S. Computer Science, Example University</span></p><p class="contact">maya@example.test · Lakeview, ON</p></header><article class="role"><span class="title">Engineer</span><span class="company">Acme</span><ul class="highlights"><li>Built supported systems.</li></ul></article></main>',
         coverLetter: {
           ...normalizedCoverLetter(), name: 'Wrong Name', contact: ['wrong@example.test'],
           salutation: 'Dear Acme Hiring Team,', recipient: 'Acme Hiring Team', closing: 'Regards,', signatureTitle: 'Engineer',
@@ -3682,7 +4832,7 @@ export default [
         qualityReview: draftedQualityReview(),
       }, id, path.join(os.tmpdir(), 'local-ai-project'), { company: 'Acme', title: 'Senior Platform Engineer' }, { careerData: null });
       assert(canonicalEnvelope.coverLetter.name === 'Maya Chen'
-        && JSON.stringify(canonicalEnvelope.coverLetter.contact) === JSON.stringify(['maya@example.test', 'Toronto, ON'])
+        && JSON.stringify(canonicalEnvelope.coverLetter.contact) === JSON.stringify(['maya@example.test', 'Lakeview, ON'])
         && canonicalEnvelope.coverLetter.tagline === 'Senior Engineer · B.S. Computer Science, Example University'
         && canonicalEnvelope.coverLetter.subtitleRole === 'Senior Engineer'
         && canonicalEnvelope.coverLetter.credential === 'B.S. Computer Science, Example University'
@@ -3712,7 +4862,7 @@ export default [
         validateLocalApplicationResult({
           version: LOCAL_AI_APPLICATION_VERSION, jobId: id, status: 'completed',
           outputBundleRoot: 'Applied Jobs',
-          resumeMainHtml: '<main class="page"><article class="role"><span class="title">Software Engineer</span><span class="company">FliteX</span><p class="role-summary">Built flight-routing automation.</p></article></main>',
+          resumeMainHtml: '<main class="page"><article class="role"><span class="title">Software Engineer</span><span class="company">SkyLoom</span><p class="role-summary">Built delivery-routing automation.</p></article></main>',
           coverLetter: normalizedCoverLetter(), coverLetterArgument: validCoverLetterArgument(), qualityReview: draftedQualityReview(),
         }, id, path.join(os.tmpdir(), 'local-ai-project'), {}, { careerData: null });
       } catch { summaryOnlyRejected = true; }
@@ -3826,21 +4976,21 @@ export default [
       assert(rangeAccepted, 'date and numeric en-dash ranges remain valid candidate copy');
       let monthToMonthDateRangeAccepted = true;
       try {
-        validateLocalApplicationResult({ ...good, version: LOCAL_AI_APPLICATION_VERSION, jobId: id, status: 'completed', outputBundleRoot: 'Applied Jobs', resumeMainHtml: '<main class="page"><article class="role"><span class="title">Engineer</span><span class="company">Acme</span><ul class="highlights"><li>Software Engineer, May 2023 – June 2026.</li></ul></article></main>', coverLetterArgument: coverLetterArgumentForResumeEvidence('Software Engineer, May 2023 – June 2026.') }, id, path.join(os.tmpdir(), 'local-ai-project'), {}, { careerData: null });
+        validateLocalApplicationResult({ ...good, version: LOCAL_AI_APPLICATION_VERSION, jobId: id, status: 'completed', outputBundleRoot: 'Applied Jobs', resumeMainHtml: '<main class="page"><article class="role"><span class="title">Engineer</span><span class="company">Acme</span><ul class="highlights"><li>Software Engineer, July 2023 – April 2026.</li></ul></article></main>', coverLetterArgument: coverLetterArgumentForResumeEvidence('Software Engineer, July 2023 – April 2026.') }, id, path.join(os.tmpdir(), 'local-ai-project'), {}, { careerData: null });
       } catch { monthToMonthDateRangeAccepted = false; }
       assert(monthToMonthDateRangeAccepted, 'month-to-month date ranges remain valid candidate copy');
       const acceptedRangeCorpus = [
-        'May, 2023 – June, 2026',
+        'July, 2023 – April, 2026',
         'Sep. 2023 – Feb. 2024',
-        'May,2023 – Jun.,2026',
-        '03/2023 – 06/2026',
+        'Jul,2023 – Apr.,2026',
+        '07/2023 – 04/2026',
         '3 – 5',
-        'May 2023 – Current',
-        'May 2023 – Ongoing',
-        'May 2023 – (Present)',
+        'July 2023 – Current',
+        'July 2023 – Ongoing',
+        'July 2023 – (Present)',
       ];
       const rejectedRangeLookalikes = [
-        'The project grew in May, 2023 – and then shipped.',
+        'The project grew in July, 2023 – and then shipped.',
         'The service migrated from Sep. 2023 – after testing.',
         'The deadline was 2023 – maybe next year.',
       ];
@@ -3854,7 +5004,7 @@ export default [
       }
       const sourceExactRoleDateRanges = [
         'Spring 2020 – Fall 2021',
-        'Mai 2023 – Juin 2026',
+        'Juillet 2023 – Avril 2026',
         'Q2 ’20 – Q1 ’21',
         'Spring · Summer 2020 – Fall 2021',
         'A < B & C – D > E',
@@ -3903,7 +5053,7 @@ export default [
       let foldedLocationRejected = false;
       try {
         buildResumeDocument({
-          resumeMainHtml: '<main class="page"><article class="role"><div class="role-header"><p class="role-dates">Spring 2020 – Fall 2021 · Toronto – Ontario</p></div></article></main>',
+          resumeMainHtml: '<main class="page"><article class="role"><div class="role-header"><p class="role-dates">Spring 2020 – Fall 2021 · Lakeview – Ontario</p></div></article></main>',
           trustedRenderedRoleDates: ['Spring 2020 – Fall 2021'],
         });
       } catch { foldedLocationRejected = true; }
@@ -3912,7 +5062,7 @@ export default [
       let rendererStyleFoldAccepted = true;
       try {
         buildResumeDocument({
-          resumeMainHtml: '<main class="page"><article class="role"><div class="role-header"><p class="role-dates">Spring 2020 – Fall 2021<span class="sep" aria-hidden="true">·</span>Toronto, ON</p></div></article></main>',
+          resumeMainHtml: '<main class="page"><article class="role"><div class="role-header"><p class="role-dates">Spring 2020 – Fall 2021<span class="sep" aria-hidden="true">·</span>Lakeview, ON</p></div></article></main>',
           trustedRenderedRoleDates: ['Spring 2020 – Fall 2021'],
         });
       } catch { rendererStyleFoldAccepted = false; }
@@ -3921,7 +5071,7 @@ export default [
       let rendererStyleDashLocationRejected = false;
       try {
         buildResumeDocument({
-          resumeMainHtml: '<main class="page"><article class="role"><div class="role-header"><p class="role-dates">Spring 2020 – Fall 2021<span class="sep" aria-hidden="true">·</span>Toronto – Ontario</p></div></article></main>',
+          resumeMainHtml: '<main class="page"><article class="role"><div class="role-header"><p class="role-dates">Spring 2020 – Fall 2021<span class="sep" aria-hidden="true">·</span>Lakeview – Ontario</p></div></article></main>',
           trustedRenderedRoleDates: ['Spring 2020 – Fall 2021'],
         });
       } catch { rendererStyleDashLocationRejected = true; }
@@ -4187,7 +5337,7 @@ export default [
       result.qualityReview.resume.rationale = 'api_key: QUALITY_REVIEW_SECRET_SENTINEL_abcdefghijklmnopqrstuvwxyz';
       result.qualityReview.privateReasoning = 'QUALITY_PRIVATE_REASONING_SENTINEL';
       result.hostValidation.resumeProse[0].privateReasoning = 'HOST_PRIVATE_REASONING_SENTINEL';
-      result.hostValidation.resumeProse[0].detail = '/Users/jack/SECRET_HOST_CHECK_PATH_SENTINEL.log';
+      result.hostValidation.resumeProse[0].detail = '/Users/example/SECRET_HOST_CHECK_PATH_SENTINEL.log';
       const careerData = 'CAREER_DATA_SENTINEL Built supported systems.';
       const listing = '# Developer\n\nA supported job listing.';
       const resultRaw = '{"undeclared":"RAW_RESULT_TEXT_SENTINEL"}';
@@ -4261,7 +5411,7 @@ export default [
             attempt: 1,
             density: 'default',
             pageCount: 2,
-            error: '/Users/jack/SECRET_RENDER_PATH_SENTINEL.log',
+            error: '/Users/example/SECRET_RENDER_PATH_SENTINEL.log',
             privateReasoning: 'FIT_PRIVATE_REASONING_SENTINEL',
           }, { attempt: 2, density: 'compact', pageCount: 1 }],
         },
@@ -4284,7 +5434,7 @@ export default [
               attempts: handoffEvent.resume.attempts.map((attempt, index) => (
                 index === 0 ? { ...attempt, error: '/private/tmp/SECRET_EVENT_RENDER_PATH_SENTINEL.log' } : attempt
               )),
-              internalPath: '/Users/jack/SECRET_EVENT_INTERNAL_PATH_SENTINEL',
+              internalPath: '/Users/example/SECRET_EVENT_INTERNAL_PATH_SENTINEL',
             },
           }],
         },
@@ -6071,12 +7221,12 @@ export default [
           generationAuditPath: null,
           workDir,
           jobTitle: 'Developer',
-          location: 'Toronto',
+          location: 'Lakeview',
           canvasFilePath: project.canvasFilePath,
           suppressReveal: true,
         });
         fs.promises.rm = originalRm;
-        const destinationHtml = path.join(project.root, 'Applied Jobs', 'Acme', 'Toronto', 'Developer', 'Application.html');
+        const destinationHtml = path.join(project.root, 'Applied Jobs', 'Acme', 'Lakeview', 'Developer', 'Application.html');
         let pruneOperationRan = false;
         const released = await withUnregisteredApplicationWorkspacePruneClaim(workDir, async () => {
           pruneOperationRan = true;
@@ -6158,11 +7308,11 @@ export default [
         };
         const saved = await saveApplication({ sender }, {
           resumeHtmlPath, resumePdfPath: null, coverLetterPdfPath: null, jobListingPath,
-          generationAuditPath: null, workDir, jobTitle: 'Developer', location: 'Toronto',
+          generationAuditPath: null, workDir, jobTitle: 'Developer', location: 'Lakeview',
           canvasFilePath: project.canvasFilePath, suppressReveal: true,
         });
         fs.promises.rm = originalRm;
-        const destinationHtml = path.join(project.root, 'Applied Jobs', 'Acme', 'Toronto', 'Developer', 'Application.html');
+        const destinationHtml = path.join(project.root, 'Applied Jobs', 'Acme', 'Lakeview', 'Developer', 'Application.html');
         let pruneOperationRan = false;
         const released = await withUnregisteredApplicationWorkspacePruneClaim(workDir, async () => {
           pruneOperationRan = true;
@@ -6248,12 +7398,12 @@ export default [
         };
         const saved = await saveApplication({ sender }, {
           resumeHtmlPath, resumePdfPath: null, coverLetterPdfPath: null, jobListingPath,
-          generationAuditPath: null, workDir, jobTitle: 'Developer', location: 'Toronto',
+          generationAuditPath: null, workDir, jobTitle: 'Developer', location: 'Lakeview',
           canvasFilePath: project.canvasFilePath, suppressReveal: true,
         });
         fs.renameSync = originalRenameSync;
         fs.promises.rm = originalRm;
-        const destinationHtml = path.join(project.root, 'Applied Jobs', 'Acme', 'Toronto', 'Developer', 'Application.html');
+        const destinationHtml = path.join(project.root, 'Applied Jobs', 'Acme', 'Lakeview', 'Developer', 'Application.html');
         let pruneOperationRan = false;
         const released = await withUnregisteredApplicationWorkspacePruneClaim(workDir, async () => {
           pruneOperationRan = true;
@@ -6335,12 +7485,12 @@ export default [
         };
         const saved = await saveApplication({ sender }, {
           resumeHtmlPath, resumePdfPath: null, coverLetterPdfPath: null, jobListingPath,
-          generationAuditPath: null, workDir, jobTitle: 'Developer', location: 'Toronto',
+          generationAuditPath: null, workDir, jobTitle: 'Developer', location: 'Lakeview',
           canvasFilePath: project.canvasFilePath, suppressReveal: true,
         });
         fs.renameSync = originalRenameSync;
         fs.promises.rm = originalRm;
-        const destinationHtml = path.join(project.root, 'Applied Jobs', 'Acme', 'Toronto', 'Developer', 'Application.html');
+        const destinationHtml = path.join(project.root, 'Applied Jobs', 'Acme', 'Lakeview', 'Developer', 'Application.html');
         let pruneOperationRan = false;
         const released = await withUnregisteredApplicationWorkspacePruneClaim(workDir, async () => {
           pruneOperationRan = true;
@@ -6402,7 +7552,7 @@ export default [
         const duplicateDiscard = await discardApplication({ sender }, { workDir });
         const concurrentSave = await saveApplication({ sender }, {
           resumeHtmlPath, resumePdfPath: null, coverLetterPdfPath: null, jobListingPath,
-          generationAuditPath: null, workDir, jobTitle: 'Developer', location: 'Toronto',
+          generationAuditPath: null, workDir, jobTitle: 'Developer', location: 'Lakeview',
           canvasFilePath: project.canvasFilePath, suppressReveal: true,
         });
         releaseCleanup();
@@ -6471,7 +7621,7 @@ export default [
         const saveApplication = ipcMain.__getInvokeHandler('save-application');
         const saving = saveApplication({ sender }, {
           resumeHtmlPath, resumePdfPath: null, coverLetterPdfPath: null, jobListingPath,
-          generationAuditPath: null, workDir, jobTitle: 'Developer', location: 'Toronto',
+          generationAuditPath: null, workDir, jobTitle: 'Developer', location: 'Lakeview',
           canvasFilePath: project.canvasFilePath, suppressReveal: true,
         });
         await saveEntered;
@@ -6545,11 +7695,11 @@ export default [
           generationAuditPath: null,
           workDir,
           jobTitle: 'Developer',
-          location: 'Toronto',
+          location: 'Lakeview',
           canvasFilePath: project.canvasFilePath,
           suppressReveal: true,
         });
-        const destinationHtml = path.join(project.root, 'Applied Jobs', 'Acme', 'Toronto', 'Developer', 'Application.html');
+        const destinationHtml = path.join(project.root, 'Applied Jobs', 'Acme', 'Lakeview', 'Developer', 'Application.html');
         assert(saved?.success === false
           && successCallbacks === 1
           && failureCallbacks === 1
@@ -7603,7 +8753,7 @@ export default [
       try {
         validateLocalApplicationResult({
           version: LOCAL_AI_APPLICATION_VERSION, jobId: id, status: 'completed', outputBundleRoot: 'Applied Jobs',
-          resumeMainHtml: '<main class="page"><article class="role"><span class="title">Engineer</span><span class="company">Acme</span><ul class="highlights"><li>Containerized the internal-tools hub with Docker Compose, running Django under Gunicorn behind Nginx.</li></ul></article></main>',
+          resumeMainHtml: '<main class="page"><article class="role"><span class="title">Engineer</span><span class="company">Acme</span><ul class="highlights"><li>Reconciled nightly ledger exports and published that database for auditors.</li></ul></article></main>',
           coverLetter: { ...normalizedCoverLetter(), paragraphs: ['I would welcome the chance to talk about that work.'] },
           coverLetterArgument: validCoverLetterArgument(), qualityReview: draftedQualityReview(),
         }, id, root, {}, { careerData: null });
@@ -7694,7 +8844,7 @@ export default [
       try {
         validateLocalApplicationResult({
           version: LOCAL_AI_APPLICATION_VERSION, jobId: id, status: 'completed', outputBundleRoot: 'Applied Jobs',
-          resumeMainHtml: '<main class="page"><article class="role"><span class="title">Engineer</span><span class="company">Acme</span><ul class="highlights"><li>Containerized the internal-tools hub with Docker Compose, running Django under Gunicorn behind Nginx.</li></ul></article></main>',
+          resumeMainHtml: '<main class="page"><article class="role"><span class="title">Engineer</span><span class="company">Acme</span><ul class="highlights"><li>Reconciled nightly ledger exports and published that database for auditors.</li></ul></article></main>',
           coverLetter: { ...normalizedCoverLetter(), paragraphs: [] },
           coverLetterArgument: validCoverLetterArgument(), qualityReview: draftedQualityReview(),
         }, id, root, {}, { careerData: null });
@@ -7712,23 +8862,23 @@ export default [
   {
     name: 'Local AI grounding: qualifier evidence is accepted in the word forms career data actually uses',
     async run() {
-      // The real rejection: a bullet said "optimization" while its bound quote
-      // said "flight route optimizations", and the source regex could not match
-      // its own plural.
+      // The failure class: a bullet said "optimization" while its bound quote
+      // said "route optimizations", and the source regex could not match its
+      // own plural.
       const identityTokens = [];
       const accepted = [
-        ['Researched and tested shortest path algorithms for flight route optimization.',
-          ['Modified A* to account for the curvature of the Earth for flight route optimizations at Boeing.']],
+        ['Researched and tested route-search algorithms for delivery route optimization.',
+          ['Modified a graph-search routine to account for road closures for delivery route optimizations at SkyLoom.']],
         ['Decided the integration boundary for the district reporting pipeline.',
-          ['Owned the architecture decisions for the district reporting pipeline at Thomson.']],
+          ['Owned the architecture decisions for the district reporting pipeline at Maple Ridge.']],
         ['Led the connector rollout across the reporting stack.',
-          ['I lead the connector rollout across the reporting stack at Thomson.']],
+          ['I lead the connector rollout across the reporting stack at Maple Ridge.']],
         ['Managed the nightly extract schedule for student records.',
-          ['Held management of the nightly extract schedule for student records at Thomson.']],
+          ['Held management of the nightly extract schedule for student records at Maple Ridge.']],
         // Fix A: plural "optimizations" in a bullet must now trigger the gate
         // AND be satisfied by a quote that also uses the plural.
-        ['Built route optimizations for domestic flight legs using the district scheduler.',
-          ['Modified A* to account for the curvature of the Earth for flight route optimizations at Boeing.']],
+        ['Modified route optimizations for domestic delivery legs using the district scheduler.',
+          ['Modified a graph-search routine to account for road closures for delivery route optimizations at SkyLoom.']],
         // Fix B: a "never" claim must be grounded by "without ever" in the quote.
         ['Built a focus-preserving overlay that never interrupts the active workflow.',
           ['Built a status overlay without ever interrupting your focus or active workflow.']],
@@ -7738,7 +8888,7 @@ export default [
       // different word from the qualifier it would have grounded.
       const homographs = [
         ['Regularly parsed vendor logs with the shared parser library.',
-          ['Wrote regular expressions for the vendor log parser library at Thomson.'], 'routine frequency'],
+          ['Wrote regular expressions for the vendor log parser library at Maple Ridge.'], 'routine frequency'],
         ['Led the reporting migration into the district database.',
           ['Helped with the reporting migration after district leadership approved the database schedule.'], 'leadership ownership'],
         ['Cut reporting ingestion latency for the district database.',
@@ -7751,8 +8901,8 @@ export default [
           ['The status bar widget felt better than ever after the focus work landed.'], 'absolute frequency'],
         // A plural bullet ("optimizations") with no optimization word in the
         // quote must still be rejected now that the claim gate fires on the plural.
-        ['Built route optimizations for domestic flight legs using the district scheduler.',
-          ['Researched shortest path algorithms for domestic flight routes and rendered them on a globe at Boeing.'], 'optimization outcome'],
+        ['Built route optimizations for domestic delivery legs using the district scheduler.',
+          ['Researched route-search algorithms for domestic delivery routes and rendered them on a map at SkyLoom.'], 'optimization outcome'],
       ];
       for (const [finalText, quotes, label] of homographs) {
         let rejected = '';
@@ -7767,8 +8917,8 @@ export default [
       let rejected = false;
       try {
         assertSourceQuoteLinksFinalText(
-          'Researched shortest path algorithms for flight route optimization.',
-          ['Researched shortest path algorithms and rendered flight routes on a globe at Boeing.'],
+          'Researched route-search algorithms for delivery route optimization.',
+          ['Researched route-search algorithms and rendered delivery routes on a map at SkyLoom.'],
           'resumeBullets', 0, { identityTokens },
         );
       } catch (error) { rejected = /unsupported optimization outcome/.test(String(error?.message || error)); }
@@ -7781,13 +8931,13 @@ export default [
     async run() {
       const shouldPass = [
         'I welcome a conversation about how my release-workflow experience could support the team’s deployment process.',
-        'I welcome a conversation about applying my MCP server experience to the agent integrations this role owns.',
+        'I welcome a conversation about applying my event-routing service experience to the agent integrations this role owns.',
         'I welcome a conversation about bringing my Python integration work to the data pipelines your agents draw on.',
-        'I welcome a conversation about where the connector work I built at Thomson would fit the systems this team already runs.',
-        'I welcome a conversation about how the MCP server I built could shorten the path to your first production agent.',
+        'I welcome a conversation about where the connector work I built at Maple Ridge would fit the systems this team already runs.',
+        'I welcome a conversation about how the event-routing service I built could shorten the path to your first production agent.',
         'I welcome a conversation about how my pipeline experience supports your ingestion backlog.',
         // An anchored demonstrative names the asset; only a bare one does not.
-        'I welcome a conversation about using that MCP server experience to connect agents with client systems.',
+        'I welcome a conversation about using that event-routing service experience to connect agents with client systems.',
         // A hyphenated head modifier is a real descriptor, not a filler.
         'I welcome a conversation about how that same-day pipeline experience could support your backlog.',
       ];
@@ -7820,7 +8970,7 @@ export default [
       // the construction, so the revision missed it again.
       const detail = checkDirectWelcomeClosing(['I welcome a conversation about applying that work.']).detail;
       assert(detail.includes('possessive, an authorship clause, or a demonstrative that carries its own descriptor')
-        && detail.includes('the connector I built')
+        && detail.includes('the <artifact> I built')
         && detail.includes('never a bare demonstrative'),
       `the rejection must name the accepted construction, got ${JSON.stringify(detail)}`);
       return { passing: shouldPass.length, rejecting: shouldFail.length };
@@ -7953,8 +9103,8 @@ export default [
 
 Software Engineer
 
-Thomson School District — Loveland, Colorado
-*May 2023 – June 2026*
+Maple Ridge School District — Brookfield, Ohio
+*July 2023 – April 2026*
 - Built attendance reporting for district staff.
 - Automated the nightly grade-sync job between two student information systems.
 - Wrote the onboarding guide new teachers use to request account access.
@@ -7962,7 +9112,7 @@ Thomson School District — Loveland, Colorado
 
 Data Engineer
 
-Horizon Health Alliance — Denver, Colorado
+Cedar Valley Health Alliance — Denver, Colorado
 *January 2020 – April 2023*
 - Built clinical data pipelines for care teams.
 - Mentored two junior engineers on code review practices.
@@ -7970,74 +9120,74 @@ Horizon Health Alliance — Denver, Colorado
 ---
 Personal Projects`;
       const fragRoles = [
-        { id: 'thomson', title: 'Software Engineer', company: 'Thomson School District', dates: 'May 2023 – June 2026', location: '' },
-        { id: 'horizon', title: 'Data Engineer', company: 'Horizon Health Alliance', dates: 'January 2020 – April 2023', location: '' },
+        { id: 'maple-ridge', title: 'Software Engineer', company: 'Maple Ridge School District', dates: 'July 2023 – April 2026', location: '' },
+        { id: 'cedar', title: 'Data Engineer', company: 'Cedar Valley Health Alliance', dates: 'January 2020 – April 2023', location: '' },
       ];
       const fragContext = {
         sourceRoles: fragRoles,
         careerData: fragCareerData,
         evidenceCatalog: [
-          { id: 'thomson-q1', sourceId: 'career-data', quote: 'Built attendance reporting for district staff.' },
-          { id: 'thomson-q2', sourceId: 'career-data', quote: 'Automated the nightly grade-sync job between two student information systems.' },
-          { id: 'thomson-q3', sourceId: 'career-data', quote: 'Wrote the onboarding guide new teachers use to request account access.' },
+          { id: 'maple-ridge-q1', sourceId: 'career-data', quote: 'Built attendance reporting for district staff.' },
+          { id: 'maple-ridge-q2', sourceId: 'career-data', quote: 'Automated the nightly grade-sync job between two student information systems.' },
+          { id: 'maple-ridge-q3', sourceId: 'career-data', quote: 'Wrote the onboarding guide new teachers use to request account access.' },
           { id: 'shared-mentor', sourceId: 'career-data', quote: 'Mentored two junior engineers on code review practices.' },
-          { id: 'horizon-q1', sourceId: 'career-data', quote: 'Built clinical data pipelines for care teams.' },
+          { id: 'cedar-q1', sourceId: 'career-data', quote: 'Built clinical data pipelines for care teams.' },
         ],
       };
-      const fragResume = thomsonBullets => ({
+      const fragResume = mapleRidgeBullets => ({
         schemaVersion: STRUCTURED_RESUME_SCHEMA_VERSION,
         identity: { name: 'Ada Lovelace', contact: ['ada@example.test'] },
         roles: [
-          { id: 'thomson', title: 'Software Engineer', company: 'Thomson School District', dates: 'May 2023 – June 2026', location: 'Loveland, Colorado', bullets: thomsonBullets },
+          { id: 'maple-ridge', title: 'Software Engineer', company: 'Maple Ridge School District', dates: 'July 2023 – April 2026', location: 'Brookfield, Ohio', bullets: mapleRidgeBullets },
           {
-            id: 'horizon', title: 'Data Engineer', company: 'Horizon Health Alliance', dates: 'January 2020 – April 2023', location: 'Denver, Colorado',
+            id: 'cedar', title: 'Data Engineer', company: 'Cedar Valley Health Alliance', dates: 'January 2020 – April 2023', location: 'Denver, Colorado',
             bullets: [
-              { id: 'horizon-bullet-1', text: 'Built clinical data pipelines for care teams.', evidenceIds: ['horizon-q1'] },
-              { id: 'horizon-bullet-2', text: 'Mentored two junior engineers on code review practices.', evidenceIds: ['shared-mentor'] },
+              { id: 'cedar-bullet-1', text: 'Built clinical data pipelines for care teams.', evidenceIds: ['cedar-q1'] },
+              { id: 'cedar-bullet-2', text: 'Mentored two junior engineers on code review practices.', evidenceIds: ['shared-mentor'] },
             ],
           },
         ],
       });
 
-      // A={thomson-q1}, B={thomson-q1}: an identical single-id repeat.
+      // A={maple-ridge-q1}, B={maple-ridge-q1}: an identical single-id repeat.
       let fragmentedMessage = '';
       try {
         renderStructuredApplicationResume(fragResume([
-          { id: 'thomson-bullet-1', text: 'Built attendance reporting for district staff.', evidenceIds: ['thomson-q1'] },
-          { id: 'thomson-bullet-2', text: 'Built a second attendance view for the same district staff.', evidenceIds: ['thomson-q1'] },
+          { id: 'maple-ridge-bullet-1', text: 'Built attendance reporting for district staff.', evidenceIds: ['maple-ridge-q1'] },
+          { id: 'maple-ridge-bullet-2', text: 'Built a second attendance view for the same district staff.', evidenceIds: ['maple-ridge-q1'] },
         ]), fragContext);
       } catch (error) { fragmentedMessage = error.message; }
-      assert(fragmentedMessage.includes('roles[0]') && fragmentedMessage.includes('"thomson-bullet-1"') && fragmentedMessage.includes('"thomson-bullet-2"') && fragmentedMessage.includes('"thomson-q1"'),
+      assert(fragmentedMessage.includes('roles[0]') && fragmentedMessage.includes('"maple-ridge-bullet-1"') && fragmentedMessage.includes('"maple-ridge-bullet-2"') && fragmentedMessage.includes('"maple-ridge-q1"'),
         `two bullets citing the same single evidence id must be rejected naming the role and both bullet ids, got ${JSON.stringify(fragmentedMessage)}`);
       assert(!fragmentedMessage.includes('Built a second attendance view'),
         'the rejection must not echo suggested replacement bullet wording');
 
-      // A={thomson-q1,thomson-q2}, B={thomson-q1}: B is still a strict subset.
+      // A={maple-ridge-q1,maple-ridge-q2}, B={maple-ridge-q1}: B is still a strict subset.
       let subsetMessage = '';
       try {
         renderStructuredApplicationResume(fragResume([
-          { id: 'thomson-bullet-1', text: 'Built attendance reporting for district staff and automated the nightly grade-sync job.', evidenceIds: ['thomson-q1', 'thomson-q2'] },
-          { id: 'thomson-bullet-2', text: 'Built attendance reporting for district staff.', evidenceIds: ['thomson-q1'] },
+          { id: 'maple-ridge-bullet-1', text: 'Built attendance reporting for district staff and automated the nightly grade-sync job.', evidenceIds: ['maple-ridge-q1', 'maple-ridge-q2'] },
+          { id: 'maple-ridge-bullet-2', text: 'Built attendance reporting for district staff.', evidenceIds: ['maple-ridge-q1'] },
         ]), fragContext);
       } catch (error) { subsetMessage = error.message; }
-      assert(subsetMessage.includes('"thomson-q1"') && !subsetMessage.includes('"thomson-q2"'),
+      assert(subsetMessage.includes('"maple-ridge-q1"') && !subsetMessage.includes('"maple-ridge-q2"'),
         `a later bullet whose evidence ids are a strict subset of an earlier bullet's must be rejected naming only the actually-shared id, got ${JSON.stringify(subsetMessage)}`);
 
-      // A={thomson-q1,thomson-q2}, B={thomson-q1,thomson-q3}: B adds an id A
-      // never cited, so it is accepted even though it repeats thomson-q1.
+      // A={maple-ridge-q1,maple-ridge-q2}, B={maple-ridge-q1,maple-ridge-q3}: B adds an id A
+      // never cited, so it is accepted even though it repeats maple-ridge-q1.
       const disjointHtml = renderStructuredApplicationResume(fragResume([
-        { id: 'thomson-bullet-1', text: 'Built attendance reporting for district staff and automated the nightly grade-sync job.', evidenceIds: ['thomson-q1', 'thomson-q2'] },
-        { id: 'thomson-bullet-2', text: 'Built attendance reporting for district staff and wrote the new-teacher onboarding guide.', evidenceIds: ['thomson-q1', 'thomson-q3'] },
+        { id: 'maple-ridge-bullet-1', text: 'Built attendance reporting for district staff and automated the nightly grade-sync job.', evidenceIds: ['maple-ridge-q1', 'maple-ridge-q2'] },
+        { id: 'maple-ridge-bullet-2', text: 'Built attendance reporting for district staff and wrote the new-teacher onboarding guide.', evidenceIds: ['maple-ridge-q1', 'maple-ridge-q3'] },
       ]), fragContext);
       assert(disjointHtml.includes('automated the nightly grade-sync job') && disjointHtml.includes('onboarding guide'),
         'a later bullet that adds a career-data id no earlier bullet cited is accepted even though it repeats one shared id');
 
-      // The same evidence id ("shared-mentor") cited once in Thomson's role
-      // and once in Horizon's role is not fragmentation: the rule is scoped to
+      // The same evidence id ("shared-mentor") cited once in Maple Ridge's role
+      // and once in Cedar Valley's role is not fragmentation: the rule is scoped to
       // one role's own bullets, never compared across roles.
       const crossRoleHtml = renderStructuredApplicationResume(fragResume([
-        { id: 'thomson-bullet-1', text: 'Built attendance reporting for district staff.', evidenceIds: ['thomson-q1'] },
-        { id: 'thomson-bullet-2', text: 'Mentored two junior engineers on code review practices.', evidenceIds: ['shared-mentor'] },
+        { id: 'maple-ridge-bullet-1', text: 'Built attendance reporting for district staff.', evidenceIds: ['maple-ridge-q1'] },
+        { id: 'maple-ridge-bullet-2', text: 'Mentored two junior engineers on code review practices.', evidenceIds: ['shared-mentor'] },
       ]), fragContext);
       assert(crossRoleHtml.includes('Mentored two junior engineers'),
         'the same career-data evidence id cited once per role, in two different roles, is not treated as fragmentation');
@@ -8046,24 +9196,23 @@ Personal Projects`;
     },
   },
   {
-    // The shipped MGT/AI Solutions Architect résumé rendered three roles with a
-    // `.role-header` and nothing else, dropping "Loveland, Colorado",
-    // "Getzville, New York" and "Oshawa, Ontario" — all three stated in the
-    // career data. Nothing asked for them and nothing measured their absence,
-    // so the result imported clean. These are the two halves of that fix.
+    // A shipped résumé rendered three roles with a `.role-header` and nothing
+    // else, dropping all three work locations the career data stated for them.
+    // Nothing asked for them and nothing measured their absence, so the result
+    // imported clean. These are the two halves of that fix.
     name: 'Local AI résumé: a work location the career data states must reach the role, in either legal cell',
     async run() {
       const CAREER = [
         '### Software Engineer',
         '',
-        '**Thomson School District — Loveland, Colorado**',
-        '*May, 2023 – June, 2026*',
+        '**Maple Ridge School District — Brookfield, Ohio**',
+        '*July, 2023 – April, 2026*',
         '',
         '### Data Engineer',
-        '**Horizon Health Alliance — Getzville, New York**',
+        '**Cedar Valley Health Alliance — Ashgrove, Pennsylvania**',
         '',
         '### Software Engineer',
-        '**FliteX (Plan de Vol International) — Oshawa, Ontario**',
+        '**SkyLoom (Aerovia International) — Lakeview, Ontario**',
         '',
         '### Analyst',
         '**Unlocated Systems — Consumer Robotics, Hardware**',
@@ -8071,43 +9220,43 @@ Personal Projects`;
 
       // The career-data side reads the employer's own heading line and is sure
       // or silent: a tail that is not a `City, Region` yields no requirement.
-      const stated = careerDataRoleLocation(CAREER, 'Thomson School District');
-      assert(stated && stated.city === 'Loveland' && stated.region === 'Colorado' && stated.code === 'CO',
+      const stated = careerDataRoleLocation(CAREER, 'Maple Ridge School District');
+      assert(stated && stated.city === 'Brookfield' && stated.region === 'Ohio' && stated.code === 'OH',
         `the employer heading must yield its stated city and region, got ${JSON.stringify(stated)}`);
-      assert(careerDataRoleLocation(CAREER, 'FliteX (Plan de Vol International)')?.code === 'ON',
+      assert(careerDataRoleLocation(CAREER, 'SkyLoom (Aerovia International)')?.code === 'ON',
         'a parenthesised employer name and a Canadian province must both resolve');
       assert(careerDataRoleLocation(CAREER, 'Unlocated Systems') === null,
         'a tail that is not a recognised region must state no location rather than invent one');
       assert(careerDataRoleLocation(CAREER, 'Nowhere Inc') === null,
         'an employer the corpus never names must state no location');
 
-      const role = (company, meta, dates = '<p class="role-dates">May 2023 – Jun 2026</p>') =>
+      const role = (company, meta, dates = '<p class="role-dates">Jul 2023 – Apr 2026</p>') =>
         `<article class="role"><div class="role-header meta-row"><p class="role-title-line">`
         + `<span class="title">Software Engineer</span><span class="company">${company}</span></p>${dates}</div>`
         + `${meta}<ul class="highlights"><li>Built the nightly district extract.</li></ul></article>`;
       const page = (...roles) => `<main class="page">${roles.join('')}</main>`;
 
       // 1. The defect: a header-only role drops a stated location silently.
-      const dropped = extractResumeEvidence(page(role('Thomson School District', '')));
+      const dropped = extractResumeEvidence(page(role('Maple Ridge School District', '')));
       assert(dropped.roles[0].location === '', 'the reproduction must render no location');
       const failures = resumeRoleLocationFailures(dropped.roles, CAREER);
-      assert(failures.length === 1 && failures[0].includes('Thomson School District')
-        && failures[0].includes('Loveland, Colorado') && failures[0].includes('role-location'),
+      assert(failures.length === 1 && failures[0].includes('Maple Ridge School District')
+        && failures[0].includes('Brookfield, Ohio') && failures[0].includes('role-location'),
         `the gate must name the role, the stated location, and where it belongs, got ${JSON.stringify(failures)}`);
 
       // 2. The design system's own cell satisfies it.
-      const metaRow = page(role('Thomson School District',
-        '<div class="role-meta meta-row"><p class="role-location">Loveland, CO</p></div>'));
+      const metaRow = page(role('Maple Ridge School District',
+        '<div class="role-meta meta-row"><p class="role-location">Brookfield, OH</p></div>'));
       const viaMeta = extractResumeEvidence(metaRow);
-      assert(viaMeta.roles[0].location === 'Loveland, CO', 'a .role-location cell must be read as the location');
+      assert(viaMeta.roles[0].location === 'Brookfield, OH', 'a .role-location cell must be read as the location');
       assert(resumeRoleLocationFailures(viaMeta.roles, CAREER).length === 0,
         'an abbreviated region must satisfy the stated location — shortening is formatting, not a new fact');
 
       // 3. So does the STYLE.md §5.2b fold, which is what a tight page uses.
       // The dates cell must still read back as the date range alone.
-      const folded = extractResumeEvidence(page(role('Thomson School District', '',
-        '<p class="role-dates"><time datetime="2023-05">May 2023</time> – <time datetime="2026-06">Jun 2026</time><span class="sep" aria-hidden="true">·</span>Loveland, CO</p>')));
-      assert(folded.roles[0].location === 'Loveland, CO' && folded.roles[0].dates === 'May 2023 – Jun 2026',
+      const folded = extractResumeEvidence(page(role('Maple Ridge School District', '',
+        '<p class="role-dates"><time datetime="2023-07">Jul 2023</time> – <time datetime="2026-04">Apr 2026</time><span class="sep" aria-hidden="true">·</span>Brookfield, OH</p>')));
+      assert(folded.roles[0].location === 'Brookfield, OH' && folded.roles[0].dates === 'Jul 2023 – Apr 2026',
         `a folded location must split back into dates + location, got ${JSON.stringify(folded.roles[0])}`);
       assert(resumeRoleLocationFailures(folded.roles, CAREER).length === 0,
         'the fold is a legal home for the location, not a missing one');
@@ -8115,16 +9264,16 @@ Personal Projects`;
       // A plain date range must never be mistaken for a fold, and a role the
       // corpus never located must not be required to show anything.
       const plain = extractResumeEvidence(page(role('Unlocated Systems', '')));
-      assert(plain.roles[0].dates === 'May 2023 – Jun 2026' && plain.roles[0].location === '',
+      assert(plain.roles[0].dates === 'Jul 2023 – Apr 2026' && plain.roles[0].location === '',
         'an unfolded dates cell must stay entirely in dates');
       assert(resumeRoleLocationFailures(plain.roles, CAREER).length === 0,
         'a role with no stated location must raise no requirement');
 
       // 4. A location that contradicts the career data is its own defect.
-      const wrong = extractResumeEvidence(page(role('Thomson School District',
+      const wrong = extractResumeEvidence(page(role('Maple Ridge School District',
         '<div class="role-meta meta-row"><p class="role-location">Denver, CO</p></div>')));
       const wrongFailures = resumeRoleLocationFailures(wrong.roles, CAREER);
-      assert(wrongFailures.length === 1 && wrongFailures[0].includes('Denver, CO') && wrongFailures[0].includes('Loveland'),
+      assert(wrongFailures.length === 1 && wrongFailures[0].includes('Denver, CO') && wrongFailures[0].includes('Brookfield'),
         `a contradicted location must be reported distinctly from a missing one, got ${JSON.stringify(wrongFailures)}`);
 
       // 5. The bug report can see the role-block structure without retaining
@@ -8143,30 +9292,30 @@ Personal Projects`;
       // 6. Production sanitizes the model's markup BEFORE any of this parses
       // it, so the fold has to survive that pass — the <time> elements and the
       // prescribed .sep span included. Testing only raw markup would not show it.
-      const sanitized = sanitizeDocumentMainHtml(page(role('Thomson School District', '',
-        '<p class="role-dates"><time datetime="2023-05">May 2023</time> – <time datetime="2026-06">Jun 2026</time><span class="sep" aria-hidden="true">·</span>Loveland, CO</p>')),
+      const sanitized = sanitizeDocumentMainHtml(page(role('Maple Ridge School District', '',
+        '<p class="role-dates"><time datetime="2023-07">Jul 2023</time> – <time datetime="2026-04">Apr 2026</time><span class="sep" aria-hidden="true">·</span>Brookfield, OH</p>')),
         { documentKind: 'resume' });
       const throughSanitizer = extractResumeEvidence(sanitized).roles[0];
-      assert(throughSanitizer.location === 'Loveland, CO' && throughSanitizer.dates === 'May 2023 – Jun 2026',
+      assert(throughSanitizer.location === 'Brookfield, OH' && throughSanitizer.dates === 'Jul 2023 – Apr 2026',
         `the fold must survive the production sanitizer, got ${JSON.stringify(throughSanitizer)}`);
       assert(resumeRoleLocationFailures([throughSanitizer], CAREER).length === 0,
         'a sanitized folded location must clear the gate');
 
       // A place name may legitimately carry a number. The fold's guard exists to
       // reject a second DATE, so it tests for a year, not for any digit.
-      const numbered = extractResumeEvidence(page(role('Thomson School District', '',
-        '<p class="role-dates">May 2023 – Jun 2026<span class="sep" aria-hidden="true">·</span>Route 66, MO</p>')));
+      const numbered = extractResumeEvidence(page(role('Maple Ridge School District', '',
+        '<p class="role-dates">Jul 2023 – Apr 2026<span class="sep" aria-hidden="true">·</span>Route 66, MO</p>')));
       assert(numbered.roles[0].location === 'Route 66, MO',
         `a digit in a place name must not discard the location, got ${JSON.stringify(numbered.roles[0])}`);
-      const twoRanges = extractResumeEvidence(page(role('Thomson School District', '',
-        '<p class="role-dates">May 2023 – Jun 2026<span class="sep" aria-hidden="true">·</span>Jan 2020 – Mar 2021</p>')));
+      const twoRanges = extractResumeEvidence(page(role('Maple Ridge School District', '',
+        '<p class="role-dates">Jul 2023 – Apr 2026<span class="sep" aria-hidden="true">·</span>Jan 2020 – Mar 2021</p>')));
       assert(twoRanges.roles[0].location === '', 'a second date range must not be read as a location');
 
       // 7. The fold split must be LINEAR. The obvious regex for it
       // (/^(.*\d.*?)\s*·\s*([^·]+)$/) backtracks quadratically on a
       // digit-bearing cell with no separator — 2.4s at 24k chars, per role,
       // inside a synchronous main-process import.
-      const huge = page(role('Thomson School District', '',
+      const huge = page(role('Maple Ridge School District', '',
         `<p class="role-dates">${'1 '.repeat(60000)}</p>`));
       const started = Date.now();
       assert(extractResumeEvidence(huge).roles[0].location === '',
@@ -8177,26 +9326,26 @@ Personal Projects`;
     },
   },
   {
-    // Three defects an adversarial pass reproduced against the real corpus
+    // Three defects an adversarial pass reproduced against a realistic corpus
     // before this test existed. The first is the dangerous one: matching the
     // employer as a bare substring made a CORRECT résumé fail, with an
-    // instruction to render the fabricated string "Alliance — Getzville".
+    // instruction to render the fabricated string "Alliance — Ashgrove".
     name: 'Local AI résumé: the work-location matcher survives short, long, colliding and ambiguous employer names',
     async run() {
       const CAREER = [
-        '**Thomson School District — Loveland, Colorado**',
-        '**Horizon Health Alliance — Getzville, New York**',
-        '**FliteX (Plan de Vol International) — Oshawa, Ontario**',
+        '**Maple Ridge School District — Brookfield, Ohio**',
+        '**Cedar Valley Health Alliance — Ashgrove, Pennsylvania**',
+        '**SkyLoom (Aerovia International) — Lakeview, Ontario**',
       ].join('\n');
       const at = (company) => careerDataRoleLocation(CAREER, company);
 
       // The résumé may shorten or extend the corpus's own name for an employer.
-      assert(at('Horizon Health Alliance')?.text === 'Getzville, NY', 'the exact name must resolve');
-      assert(at('Horizon Health')?.text === 'Getzville, NY',
-        `a shortened employer must resolve to its real city, got ${JSON.stringify(at('Horizon Health'))}`);
-      assert(at('FliteX')?.text === 'Oshawa, ON',
+      assert(at('Cedar Valley Health Alliance')?.text === 'Ashgrove, PA', 'the exact name must resolve');
+      assert(at('Cedar Valley Health')?.text === 'Ashgrove, PA',
+        `a shortened employer must resolve to its real city, got ${JSON.stringify(at('Cedar Valley Health'))}`);
+      assert(at('SkyLoom')?.text === 'Lakeview, ON',
         'dropping a parenthetical must not disable the requirement — fail-open here is the evasion path');
-      assert(at('Thomson School District (K-12)')?.text === 'Loveland, CO',
+      assert(at('Maple Ridge School District (K-12)')?.text === 'Brookfield, OH',
         'a résumé name longer than the corpus name must still resolve');
 
       // ...but only on a whole-word boundary, and never past a real ambiguity.
@@ -8230,11 +9379,11 @@ Personal Projects`;
       // A division suffix hit the same first-dash split, and because the left
       // half was still the bare company it matched EXACTLY — so the ambiguity
       // guard never ran and a correct résumé was rejected outright.
-      assert(careerDataRoleLocation('**Thomson School District - IT Department — Loveland, Colorado**', 'Thomson School District')?.text === 'Loveland, CO',
+      assert(careerDataRoleLocation('**Maple Ridge School District - IT Department — Brookfield, Ohio**', 'Maple Ridge School District')?.text === 'Brookfield, OH',
         'a division suffix in the heading must not become part of the city');
       assert(resumeRoleLocationFailures(
-        [{ title: 'SWE', company: 'Thomson School District', location: 'Loveland, CO' }],
-        '**Thomson School District - IT Department — Loveland, Colorado**').length === 0,
+        [{ title: 'SWE', company: 'Maple Ridge School District', location: 'Brookfield, OH' }],
+        '**Maple Ridge School District - IT Department — Brookfield, Ohio**').length === 0,
         'a correct résumé must not be rejected because the heading names a division');
 
       // The city is matched by the same prefix relation as the employer, which
@@ -8248,13 +9397,13 @@ Personal Projects`;
       // when it does not — supplying the missing half is the fabrication this
       // whole rule exists to prevent.
       const shownVerdict = (location) => resumeRoleLocationFailures(
-        [{ title: 'SE', company: 'Thomson School District', location }], CAREER).length === 0;
-      assert(shownVerdict('Loveland, CO'), 'an abbreviated region must pass');
-      assert(shownVerdict('Loveland, Colorado'), 'the written-out region must pass');
-      assert(shownVerdict('Loveland'), 'a city with no region must pass — the region is never demanded');
-      assert(!shownVerdict('Loveland, TX'), 'a region that contradicts the career data must be rejected');
+        [{ title: 'SE', company: 'Maple Ridge School District', location }], CAREER).length === 0;
+      assert(shownVerdict('Brookfield, OH'), 'an abbreviated region must pass');
+      assert(shownVerdict('Brookfield, Ohio'), 'the written-out region must pass');
+      assert(shownVerdict('Brookfield'), 'a city with no region must pass — the region is never demanded');
+      assert(!shownVerdict('Brookfield, TX'), 'a region that contradicts the career data must be rejected');
       assert(!shownVerdict('Denver, CO'), 'a different city must be rejected');
-      assert(!shownVerdict('New Loveland, CO'), 'a city that merely contains the stated one must be rejected');
+      assert(!shownVerdict('New Brookfield, OH'), 'a city that merely contains the stated one must be rejected');
       return { enforced: true };
     },
   },
@@ -8308,13 +9457,13 @@ Personal Projects`;
         '',
         '## Personal Projects',
         '',
-        'AI-Chalkboard',
-        'A native macOS MCP server for transparent on-screen annotation.',
+        'SlateBoard',
+        'A native desktop utility for transparent on-screen annotation.',
         '',
-        'Marketplace Hub',
-        'Uses AI to draft and monitor resale listings.',
+        'RouteDesk',
+        'Plans and monitors delivery routes for a small dispatch team.',
         '',
-        'Infinite Canvas A spatial productivity app built on a pannable canvas.',
+        'TrailMap A planning app built on a zoomable board.',
         '',
         '## Open Source',
         '',
@@ -8329,7 +9478,7 @@ Personal Projects`;
         '## Skills',
         'JavaScript',
       ].join('\n');
-      const section = (heading, body = '<article class="project"><h3 class="project-name">AI-Chalkboard</h3><p class="project-desc">A native macOS MCP server.</p></article>') => `
+      const section = (heading, body = '<article class="project"><h3 class="project-name">SlateBoard</h3><p class="project-desc">A native desktop utility.</p></article>') => `
         <section class="section" aria-labelledby="sec-projects">
           <div class="section-head"><h2 id="sec-projects">${heading}</h2><span class="rule"></span></div>
           ${body}
@@ -8339,7 +9488,7 @@ Personal Projects`;
 
       const selectedFailures = resumeProjectProvenanceFailures(resume('Selected Projects'), careerData);
       assert(selectedFailures.length === 1
-        && selectedFailures[0].includes('AI-Chalkboard')
+        && selectedFailures[0].includes('SlateBoard')
         && selectedFailures[0].includes('Personal Projects')
         && selectedFailures[0].includes('Selected Projects'),
       `a retained personal project under Selected Projects must report the lost provenance, got ${JSON.stringify(selectedFailures)}`);
@@ -8354,19 +9503,19 @@ Personal Projects`;
       'both markdown and faithfully transcribed plain Personal Projects headings are recognized');
 
       for (const body of [
-        '<div class="project"><h3 class="project-name">Marketplace Hub</h3></div>',
-        '<div class="project"><span class="title">Infinite Canvas</span></div>',
-        '<article class="role"><span class="title">AI-Chalkboard</span><ul class="highlights"><li>A native macOS MCP server.</li></ul></article>',
+        '<div class="project"><h3 class="project-name">RouteDesk</h3></div>',
+        '<div class="project"><span class="title">TrailMap</span></div>',
+        '<article class="role"><span class="title">SlateBoard</span><ul class="highlights"><li>A native desktop utility.</li></ul></article>',
       ]) {
         assert(resumeProjectProvenanceFailures(resume('Selected Projects', body), careerData).length === 1,
           `project provenance must not depend on one generated component shape: ${body}`);
       }
       assert(resumeProjectProvenanceFailures(`<main class="page">${experience}</main>`, careerData).length === 0,
         'omitting an optional personal-project section remains valid');
-      const ordinaryExperienceNameCollision = experience.replace('>Engineer<', '>AI-Chalkboard<');
+      const ordinaryExperienceNameCollision = experience.replace('>Engineer<', '>SlateBoard<');
       assert(resumeProjectProvenanceFailures(`<main class="page">${ordinaryExperienceNameCollision}</main>`, careerData).length === 0,
         'an ordinary Experience role title that happens to equal a personal project must not be relabelled as a project');
-      const ambiguousCareerData = `${careerData}\n\n## Open Source\n\nAI-Chalkboard\nA separate community project with the same name.`;
+      const ambiguousCareerData = `${careerData}\n\n## Open Source\n\nSlateBoard\nA separate community project with the same name.`;
       assert(resumeProjectProvenanceFailures(resume('Selected Projects'), ambiguousCareerData).length === 0,
         'a same-name project in two different source categories is ambiguous and must not trigger a guessed attribution');
       assert(resumeProjectProvenanceFailures(resume('Projects'), careerData.replace('## Personal Projects', '## Featured Work')).length === 0,
@@ -8425,10 +9574,10 @@ Personal Projects`;
   {
     name: 'Local AI validation: a dropped work location is rejected only when the career data actually states one',
     async run() {
-      const CAREER = 'Jack Wu\n\n**Thomson School District — Loveland, Colorado**\n- Built the nightly district extract.\n';
+      const CAREER = 'Riley Okafor\n\n**Maple Ridge School District — Brookfield, Ohio**\n- Built the nightly district extract.\n';
       const resumeMainHtml = (meta) => `<main class="page"><article class="role">`
         + `<div class="role-header meta-row"><p class="role-title-line"><span class="title">Software Engineer</span>`
-        + `<span class="company">Thomson School District</span></p><p class="role-dates">May 2023 – Jun 2026</p></div>`
+        + `<span class="company">Maple Ridge School District</span></p><p class="role-dates">Jul 2023 – Apr 2026</p></div>`
         + `${meta}<ul class="highlights"><li>Built the nightly district extract.</li></ul></article></main>`;
       // The cover-letter envelope must be well-formed: it is validated before
       // the collected-failures block, so a malformed one would throw first and
@@ -8457,13 +9606,13 @@ Personal Projects`;
         validateLocalApplicationResult(result(''), 'job-1', process.cwd(), {}, { careerData: CAREER });
       } catch (error) { droppedError = error; }
       assert(droppedError && /work location/.test(String(droppedError.message))
-        && /Thomson School District/.test(String(droppedError.message)),
+        && /Maple Ridge School District/.test(String(droppedError.message)),
         `a dropped stated location must reject the import by name, got ${droppedError && droppedError.message}`);
 
       let keptError = null;
       try {
         validateLocalApplicationResult(
-          result('<div class="role-meta meta-row"><p class="role-location">Loveland, CO</p></div>'),
+          result('<div class="role-meta meta-row"><p class="role-location">Brookfield, OH</p></div>'),
           'job-1', process.cwd(), {}, { careerData: CAREER },
         );
       } catch (error) { keptError = error; }
@@ -8511,10 +9660,10 @@ Personal Projects`;
         'STYLE.md must not restore the wording that graded the location optional');
       assert(!/Per-role `\.role-location` values are\s+employment facts and may be used when supplied/.test(skillSource),
         'SKILL.md must not restore the permissive "may be used" wording');
-      // The design system is shared and its fixtures are fictional; the real
+      // The design system is shared and its fixtures are fictional; a test
       // candidate's employer city must not be pasted into it as an example.
-      assert(!/Loveland/.test(styleSource) && !/Loveland/.test(skillSource),
-        'design-system docs must not carry the real candidate\'s employment location');
+      assert(!/Brookfield/.test(styleSource) && !/Brookfield/.test(skillSource),
+        'design-system docs must not carry a test candidate\'s employment location');
       assert(styleSource.includes('### 5.2b Folding the location into the dates cell')
         && styleSource.includes('Fold only a lone location'),
         'STYLE.md documents the fold and its one precondition');
@@ -8526,24 +9675,24 @@ Personal Projects`;
     run: () => {
       const referenceDate = '2026-10-01T12:00:00.000Z';
       const endedRole = {
-        title: 'Software Engineer', company: 'Thomson School District', dates: '2023-05 – 2026-06',
+        title: 'Software Engineer', company: 'Maple Ridge School District', dates: '2023-07 – 2026-04',
       };
-      const incident = 'As a Software Engineer at Thomson School District, I build reliable district systems.';
+      const incident = 'As a Software Engineer at Maple Ridge School District, I build reliable district systems.';
       const rejected = checkEndedRoleCurrentEmployment([incident], { roles: [endedRole] }, referenceDate);
       assert(!rejected.passed
         && rejected.id === 'ended-role-current-employment'
-        && rejected.detail.includes('Software Engineer at Thomson School District')
-        && rejected.detail.includes('2023-05 - 2026-06')
+        && rejected.detail.includes('Software Engineer at Maple Ridge School District')
+        && rejected.detail.includes('2023-07 - 2026-04')
         && rejected.detail.includes('past tense'),
       `the exact ended-role/current-work incident must be rejected with a stable actionable observation, got ${JSON.stringify(rejected)}`);
 
       const pastTense = checkEndedRoleCurrentEmployment(
-        ['As a Software Engineer at Thomson School District, I built reliable district systems.'],
+        ['As a Software Engineer at Maple Ridge School District, I built reliable district systems.'],
         { roles: [endedRole] }, referenceDate,
       );
       const presentRole = checkEndedRoleCurrentEmployment(
         [incident],
-        { roles: [{ ...endedRole, dates: '2023-05 – Present' }] }, referenceDate,
+        { roles: [{ ...endedRole, dates: '2023-07 – Present' }] }, referenceDate,
       );
       const employerFreeCapability = checkEndedRoleCurrentEmployment(
         ['I build reliable systems by applying the delivery practices I developed in prior roles.'],
@@ -8552,7 +9701,7 @@ Personal Projects`;
       assert(pastTense.passed && presentRole.passed && employerFreeCapability.passed,
         'past evidence, a Present role, and employer-free present-tense capability claims must remain outside the ended-role current-employment gate');
 
-      const noSpaceIsoRange = { title: 'Software Engineer', company: 'Acme', dates: '2023-05–2026-06' };
+      const noSpaceIsoRange = { title: 'Software Engineer', company: 'Acme', dates: '2023-07–2026-04' };
       const progressiveCurrentWork = checkEndedRoleCurrentEmployment(
         ['As a Software Engineer at Acme, I am building reliable systems.'],
         { roles: [noSpaceIsoRange] }, referenceDate,
@@ -8574,15 +9723,15 @@ Personal Projects`;
       'a no-space ISO range must still reject progressive current work, including creating/managing, and an explicit current-role declaration at its ended employer');
 
       const resumeMainHtml = '<main class="page"><article class="role"><div class="role-header meta-row">'
-        + '<p class="role-title-line"><span class="title">Software Engineer</span><span class="company">Thomson School District</span></p>'
-        + '<p class="role-dates">2023-05 – 2026-06</p></div><ul class="highlights"><li>Built reliable district systems.</li></ul></article></main>';
+        + '<p class="role-title-line"><span class="title">Software Engineer</span><span class="company">Maple Ridge School District</span></p>'
+        + '<p class="role-dates">2023-07 – 2026-04</p></div><ul class="highlights"><li>Built reliable district systems.</li></ul></article></main>';
       let validationError = '';
       try {
         validateLocalApplicationResult({
           version: LOCAL_AI_APPLICATION_VERSION, jobId: LOCAL_AI_TEST_JOB_ID, status: 'completed', outputBundleRoot: 'Applied Jobs',
           resumeMainHtml,
           coverLetter: { ...normalizedCoverLetter(), paragraphs: [incident] },
-          coverLetterArgument: coverLetterArgumentForResumeEvidence('Built reliable district systems.', 'Software Engineer at Thomson School District'),
+          coverLetterArgument: coverLetterArgumentForResumeEvidence('Built reliable district systems.', 'Software Engineer at Maple Ridge School District'),
           qualityReview: draftedQualityReview(),
         }, LOCAL_AI_TEST_JOB_ID, process.cwd(), {}, { careerData: null, referenceDate });
       } catch (error) { validationError = String(error?.message || error); }
@@ -8595,29 +9744,29 @@ Personal Projects`;
   {
     name: 'Local AI cover letter: employer introductions are accepted in every frame the contract describes',
     async run() {
-      const employers = ['Thomson School District'];
+      const employers = ['Maple Ridge School District'];
       const shouldPass = [
-        'My work as a data engineer at Thomson School District built the reporting pipeline.',
-        'My work as a data engineer for Thomson School District built the reporting pipeline.',
-        'At Thomson School District I served as the data engineer who built the reporting pipeline.',
-        'Thomson School District hired me as a data engineer to build the reporting pipeline.',
-        'At Thomson School District my role covered the reporting pipeline.',
+        'My work as a data engineer at Maple Ridge School District built the reporting pipeline.',
+        'My work as a data engineer for Maple Ridge School District built the reporting pipeline.',
+        'At Maple Ridge School District I served as the data engineer who built the reporting pipeline.',
+        'Maple Ridge School District hired me as a data engineer to build the reporting pipeline.',
+        'At Maple Ridge School District my role covered the reporting pipeline.',
       ];
       for (const paragraph of shouldPass) {
         assert(checkPriorEmployerOpening([paragraph], employers).passed,
           `a sentence that names the candidate's role or relationship must pass: ${paragraph}`);
       }
       for (const paragraph of [
-        'Thomson School District runs a reporting pipeline that needed integration work.',
-        'The reporting pipeline at Thomson School District needed integration work.',
+        'Maple Ridge School District runs a reporting pipeline that needed integration work.',
+        'The reporting pipeline at Maple Ridge School District needed integration work.',
         // The employer-first branches must assert a ROLE. "as" is also a
         // conjunction and "I am" is also a bare copula; admitting either made
         // the check fire on any first-person aside near the employer's name.
-        'At Thomson School District, latency doubled as traffic grew.',
-        'At Thomson School District the rollout stalled, as everyone predicted.',
-        'A friend at Thomson School District mentioned the opening, so I am writing today.',
-        'For Thomson School District the hiring bar is famously high, and I am glad it is.',
-        'Thomson School District once ran a science fair that brought me to this field.',
+        'At Maple Ridge School District, latency doubled as traffic grew.',
+        'At Maple Ridge School District the rollout stalled, as everyone predicted.',
+        'A friend at Maple Ridge School District mentioned the opening, so I am writing today.',
+        'For Maple Ridge School District the hiring bar is famously high, and I am glad it is.',
+        'Maple Ridge School District once ran a science fair that brought me to this field.',
       ]) {
         assert(!checkPriorEmployerOpening([paragraph], employers).passed,
           `an employer named with no candidate relationship must still be rejected: ${paragraph}`);
@@ -8679,6 +9828,50 @@ Personal Projects`;
         && style.includes('source-labelled "Personal Projects" stays exactly "Personal Projects"'),
       'the design references must preserve explicit personal-project provenance instead of steering the writer to a generic heading');
       return { documented: true };
+    },
+  },
+  {
+    name: 'Local AI prompt text: worked examples are slotted placeholders and recipient variants key on posting prose, never on employer names',
+    run: () => {
+      const flat = (text) => String(text).replace(/\s+/g, ' ');
+      const localSource = fs.readFileSync(path.resolve('electron/ipc/localAiApplication.js'), 'utf8');
+      const routine = flat(fs.readFileSync(path.resolve('local_ai/LOCAL_AI_APPLICATION_ROUTINE.md'), 'utf8'));
+      const skillRaw = fs.readFileSync(path.resolve('Job Application Design System/SKILL.md'), 'utf8');
+      const skill = flat(skillRaw);
+      const constantText = (name) => new RegExp(`const ${name} = '([^\\n]*)';`, 'u').exec(localSource)?.[1] || '';
+
+      // A prompt that hands the writer one concrete sentence hands it the
+      // sentence to copy. Every example the writer can see is a slotted form
+      // whose slots the writer must fill from the current run's own evidence.
+      const copyRule = constantText('COVER_LETTER_COPY_PRECISION_RULE');
+      const priorWorkRule = constantText('COVER_LETTER_PRIOR_WORK_CONTEXT_RULE');
+      assert(copyRule.includes('“I <verb> <artifact>, including its <component> and <component>”')
+        && copyRule.includes('with every slot filled from the accepted evidence'),
+      'the artifact-and-contribution example is a slotted form, not a sentence about any one candidate');
+      assert(priorWorkRule.includes('“my work building <artifact>”') && priorWorkRule.includes('“in my previous <role>, I built...”'),
+        'the prior-work-context example is slotted');
+      assert(routine.includes('`my <work noun>`, `the <artifact> I built`')
+        && routine.includes('about applying my <work noun> to <employer-facing target>')
+        && routine.includes('such as `<verb> each <item> from <first stage> through <last stage>`')
+        && routine.includes('`my work building <artifact>`')
+        && routine.includes('write `As a <title> at <employer>, I built ...`'),
+      'the routine states its closing, stewardship-span, prior-work, and ended-role examples as slotted forms');
+      assert(routine.includes('Delete conventional runtime-topology detail that merely proves implementation')
+        && !/web-server|reverse-proxy|containerization claim/u.test(routine),
+      'the runtime-topology rule names the defect class, not a particular technology stack');
+
+      // The recipient variant rule is selected from the posting's own prose.
+      const variantStart = skillRaw.indexOf('### Step 1 — Classify the recipient');
+      const variantEnd = skillRaw.indexOf('### Step 2');
+      const variantStep = variantStart >= 0 && variantEnd > variantStart ? skillRaw.slice(variantStart, variantEnd) : '';
+      assert(variantStep.length > 0
+        && flat(variantStep).includes("Work from the job description's own prose, never from the company's name")
+        && flat(variantStep).includes('Posting-prose signals'),
+      'SKILL.md selects the print variant from posting-prose signals');
+      assert(!/\((?:[A-Z][A-Za-z.&]+(?:,\s*|\s+and\s+)){2,}[A-Z]/u.test(variantStep)
+        && !/\b(?:named-company|per-company)\b/iu.test(skill),
+      'SKILL.md carries no parenthesised list of employer names and no named-company rule');
+      return { slotted: true, variantRuleKeysOnProse: true };
     },
   },
   {
@@ -10570,10 +11763,9 @@ Personal Projects`;
   {
     name: 'Application save destination: a different job never silently overwrites another job\'s saved bundle at the same sanitized company/location/title path',
     run: async () => {
-      // Reproduces the filed bug report's exact collision text (2026-09-24):
-      // two distinct job cards both "Software Development Engineer 2, Amazon
-      // Kids" at "Toronto, Ontario, Canada" sanitized to the identical
-      // destination directory. See resolveApplicationExportDirectory's own
+      // Reproduces the shape of a filed bug report's collision: two distinct
+      // job cards with the same title, company and location text sanitized to
+      // the identical destination directory. See resolveApplicationExportDirectory's own
       // comment in jobApplication.js for why this compares by the ORIGINAL
       // JOB LISTING bytes rather than a per-generation job id: regenerating
       // an already-'saved' card (canRegenerateLocalApplication) mints a
@@ -10581,9 +11773,9 @@ Personal Projects`;
       // misfire on the ordinary regenerate-and-resave flow this test also
       // covers.
       const project = await createCanvasProject();
-      const company = 'Amazon Kids';
-      const location = 'Toronto, Ontario, Canada';
-      const jobTitle = 'Software Development Engineer 2';
+      const company = 'Northwind Kids';
+      const location = 'Lakeview, Ontario, Canada';
+      const jobTitle = 'Software Engineer 2';
       const baseDir = path.join(project.root, 'Applied Jobs', company, location, jobTitle);
       const resumeHtmlFor = variant => `<!doctype html><html data-print="ink-only"><body><section data-ic-document-panel="resume"><main class="page"><p>${variant} resume</p></main></section><section data-ic-document-panel="cover"><main class="page"><p>${variant} cover</p></main></section><script id="ic-application-bundle-data" type="application/json">{}</script></body></html>`;
       const jobListingFor = listingLabel => `# ${listingLabel} listing\n\nScraped listing text unique to ${listingLabel}.\n`;
@@ -11004,9 +12196,9 @@ Personal Projects`;
     name: 'Application-output telemetry retains every final visible résumé unit and cover-letter header/body field',
     run() {
       const output = __localAiApplicationOutputTelemetryForTests({
-        resumeMainHtml: '<main class="page"><header class="resume-header"><h1 class="name">Maya Chen</h1><p class="tagline"><span class="subtitle-role">Engineer</span><span class="credential">B.Sc. Computer Science</span></p><p class="contact">maya@example.test · Toronto, ON</p></header><article class="role"><span class="title">Engineer</span><span class="company">Acme</span><div class="role-meta"><span class="role-dates">2024 – Present</span></div><p class="role-summary">Owned release reliability.</p><ul class="highlights"><li>resume-first-bullet</li><li>resume-last-bullet</li></ul></article><article class="role"><span class="title">Developer</span><span class="company">Beta</span><ul class="highlights"><li>resume-second-role-bullet</li></ul></article><article class="project"><h3 class="project-name">Canvas Project</h3><p class="project-desc">project-description</p><p class="project-metrics">project-metric</p></article><dl class="skills"><dt>Engineering</dt><dd>TypeScript · Testing · Systems Design</dd><dt>Data</dt><dd>SQL</dd></dl><div class="edu-line">Example University</div></main>',
+        resumeMainHtml: '<main class="page"><header class="resume-header"><h1 class="name">Maya Chen</h1><p class="tagline"><span class="subtitle-role">Engineer</span><span class="credential">B.Sc. Computer Science</span></p><p class="contact">maya@example.test · Lakeview, ON</p></header><article class="role"><span class="title">Engineer</span><span class="company">Acme</span><div class="role-meta"><span class="role-dates">2024 – Present</span></div><p class="role-summary">Owned release reliability.</p><ul class="highlights"><li>resume-first-bullet</li><li>resume-last-bullet</li></ul></article><article class="role"><span class="title">Developer</span><span class="company">Beta</span><ul class="highlights"><li>resume-second-role-bullet</li></ul></article><article class="project"><h3 class="project-name">Canvas Project</h3><p class="project-desc">project-description</p><p class="project-metrics">project-metric</p></article><dl class="skills"><dt>Engineering</dt><dd>TypeScript · Testing · Systems Design</dd><dt>Data</dt><dd>SQL</dd></dl><div class="edu-line">Example University</div></main>',
         coverLetter: {
-          name: 'Maya Chen', contact: ['maya@example.test', 'Toronto, ON'], date: 'January 2, 2026',
+          name: 'Maya Chen', contact: ['maya@example.test', 'Lakeview, ON'], date: 'January 2, 2026',
           recipient: 'Hiring Team', salutation: 'Dear Hiring Team,', closing: 'Sincerely,', signatureTitle: 'Engineer',
           paragraphs: ['cover-first-paragraph', 'cover-second-paragraph', 'cover-third-paragraph', 'cover-fourth-paragraph', 'cover-last-paragraph'],
         },
@@ -11019,7 +12211,7 @@ Personal Projects`;
         && output.documents.resume.skills.length === 2
         && output.documents.resume.education.includes('B.Sc. Computer Science')
         && output.documents.coverLetter.paragraphs.length === 5
-        && ['resume-first-bullet', 'resume-last-bullet', 'resume-second-role-bullet', 'project-description', 'project-metric', 'Systems Design', 'Maya Chen', 'maya@example.test', 'Toronto, ON', 'January 2, 2026', 'cover-last-paragraph'].every(text => serialised.includes(text))
+        && ['resume-first-bullet', 'resume-last-bullet', 'resume-second-role-bullet', 'project-description', 'project-metric', 'Systems Design', 'Maya Chen', 'maya@example.test', 'Lakeview, ON', 'January 2, 2026', 'cover-last-paragraph'].every(text => serialised.includes(text))
         && /^[a-f0-9]{64}$/.test(output.metadata.digests.resume)
         && /^[a-f0-9]{64}$/.test(output.metadata.digests.coverLetter),
       'the producer must retain every final visible unit and digest the complete typed documents rather than select samples');
@@ -11034,55 +12226,72 @@ Personal Projects`;
   },
   {
     // The bug report could not show the skills block at all, so a résumé that
-    // shipped "Programming Languages: SQL" under a posting asking for Python and
-    // TypeScript took the exported folder to diagnose. This summary is the
-    // content-free replacement: shape counts plus the host vocabulary names the
-    // block is missing, never an item the writer produced.
+    // shipped one skill row under a posting asking for several approved skills
+    // took the exported folder to diagnose. This summary is the content-free
+    // replacement: shape counts plus the approved-inventory names the block is
+    // missing, never an item the writer produced. The names are invented and
+    // belong to no field in particular.
     name: 'Local AI telemetry: the skills-coverage summary reports counts and missing posting-named names without item text',
     run() {
+      const skill = (slug, skillName, capabilityKind) => ({
+        id: `skill-${slug}`, name: skillName, capabilityKind, supportMode: 'direct', indexEligible: true,
+        directEvidenceSegmentIds: [`segment-${slug}`], evidenceSegmentIds: [`segment-${slug}`],
+      });
+      const inventory = {
+        version: 'career-snapshot-skills.v2',
+        skills: [skill('ledger', 'LedgerPro', 'tool'), skill('triage', 'Triage Board', 'method'), skill('quanta', 'Quanta Model', 'method'), skill('rota', 'Rotamax', 'platform')],
+      };
       const plan = {
         evidence: [
-          { id: 'jl', sourceId: 'job-listing', quote: 'Are proficient in Python and TypeScript, SQL and relational databases', priority: 'highest' },
-          { id: 'cd1', sourceId: 'career-data', quote: 'Tech used: python' },
-          { id: 'cd2', sourceId: 'career-data', quote: 'Tech used: React, Typescript' },
-          { id: 'cd3', sourceId: 'career-data', quote: 'SQL automations' },
+          { id: 'jl', sourceId: 'job-listing', quote: 'Are proficient in LedgerPro and Quanta Model, Triage Board and relational reporting', priority: 'highest' },
+          { id: 'cd1', sourceId: 'career-data', quote: 'Tech used: ledgerpro' },
+          { id: 'cd2', sourceId: 'career-data', quote: 'Tech used: Rotamax, Quanta Model' },
+          { id: 'cd3', sourceId: 'career-data', quote: 'Triage Board automations' },
         ],
       };
       const skillsMarkup = rows => `<main class="page"><dl class="skills">${rows}</dl></main>`;
-      const shipped = skillsMarkup('<dt>Programming Languages</dt><dd>SQL</dd><dt>Web Development</dt><dd>React · Django · Nginx · Gunicorn</dd><dt>AI &amp; Infrastructure</dt><dd>MCP · Claude · Gemini · Docker Compose · Zyzzyva-Tool</dd>');
-      const reported = localAiSkillsCoverageTelemetry(shipped, plan);
-      assert(JSON.stringify(reported) === JSON.stringify({ groups: 3, items: 10, required: ['Python', 'TypeScript', 'SQL'], absent: ['Python', 'TypeScript'], indexed: ['Python', 'TypeScript', 'SQL', 'React'], indexAbsent: ['Python', 'TypeScript'], attested: ['Python', 'TypeScript', 'SQL', 'React'] }),
-        `the shipped block is summarised as 3 rows / 10 terms with Python and TypeScript absent (got ${JSON.stringify(reported)})`);
+      const shipped = skillsMarkup('<dt>Methods</dt><dd>Triage Board</dd><dt>Platforms</dt><dd>Rotamax · Zyzzyva-Tool · Harbor Console</dd><dt>Systems &amp; Practices</dt><dd>Quanta Model · Cobalt Forecast · Dune Register · Ember Intake · Fathom Audit</dd>');
+      const reported = localAiSkillsCoverageTelemetry(shipped, plan, inventory);
+      assert(JSON.stringify(reported) === JSON.stringify({ groups: 3, items: 9, required: ['LedgerPro', 'Triage Board', 'Quanta Model'], absent: ['LedgerPro'], indexed: ['LedgerPro', 'Triage Board', 'Quanta Model', 'Rotamax'], indexAbsent: ['LedgerPro'], attested: ['LedgerPro', 'Triage Board', 'Quanta Model', 'Rotamax'] }),
+        `the shipped block is summarised as 3 rows / 9 terms with LedgerPro absent (got ${JSON.stringify(reported)})`);
       const serialised = JSON.stringify(reported);
-      assert(!serialised.includes('Zyzzyva-Tool') && !serialised.includes('AI & Infrastructure') && !serialised.includes('Gunicorn'),
+      assert(!serialised.includes('Zyzzyva-Tool') && !serialised.includes('Systems & Practices') && !serialised.includes('Harbor Console'),
         'the summary never carries a skills item or a row label the writer produced');
 
-      const corrected = localAiSkillsCoverageTelemetry(skillsMarkup('<dt>Programming Languages</dt><dd>Python · TypeScript · SQL</dd><dt>Web Development</dt><dd>React · Django</dd>'), plan);
-      assert(JSON.stringify(corrected) === JSON.stringify({ groups: 2, items: 5, required: ['Python', 'TypeScript', 'SQL'], absent: [], indexed: ['Python', 'TypeScript', 'SQL', 'React'], indexAbsent: [], attested: ['Python', 'TypeScript', 'SQL', 'React'] }),
+      const corrected = localAiSkillsCoverageTelemetry(skillsMarkup('<dt>Tools</dt><dd>LedgerPro · Triage Board · Quanta Model</dd><dt>Platforms</dt><dd>Rotamax</dd>'), plan, inventory);
+      assert(JSON.stringify(corrected) === JSON.stringify({ groups: 2, items: 4, required: ['LedgerPro', 'Triage Board', 'Quanta Model'], absent: [], indexed: ['LedgerPro', 'Triage Board', 'Quanta Model', 'Rotamax'], indexAbsent: [], attested: ['LedgerPro', 'Triage Board', 'Quanta Model', 'Rotamax'] }),
         `a block carrying every required name reports nothing absent (got ${JSON.stringify(corrected)})`);
 
-      assert(localAiSkillsCoverageTelemetry(shipped, null) === null
-        && localAiSkillsCoverageTelemetry(shipped, { evidence: [] }) === null
-        && localAiSkillsCoverageTelemetry(shipped, {}) === null,
+      assert(localAiSkillsCoverageTelemetry(shipped, null, inventory) === null
+        && localAiSkillsCoverageTelemetry(shipped, { evidence: [] }, inventory) === null
+        && localAiSkillsCoverageTelemetry(shipped, {}, inventory) === null,
       'a legacy job with no evidence plan has nothing to measure the block against, so it records null rather than a verdict');
 
-      const noBlock = localAiSkillsCoverageTelemetry('<main class="page"><section>Experience</section></main>', plan);
-      assert(JSON.stringify(noBlock) === JSON.stringify({ groups: 0, items: 0, required: ['Python', 'TypeScript', 'SQL'], absent: ['Python', 'TypeScript', 'SQL'], indexed: ['Python', 'TypeScript', 'SQL', 'React'], indexAbsent: ['Python', 'TypeScript', 'SQL', 'React'], attested: ['Python', 'TypeScript', 'SQL', 'React'] }),
+      const noBlock = localAiSkillsCoverageTelemetry('<main class="page"><section>Experience</section></main>', plan, inventory);
+      assert(JSON.stringify(noBlock) === JSON.stringify({ groups: 0, items: 0, required: ['LedgerPro', 'Triage Board', 'Quanta Model'], absent: ['LedgerPro', 'Triage Board', 'Quanta Model'], indexed: ['LedgerPro', 'Triage Board', 'Quanta Model', 'Rotamax'], indexAbsent: ['LedgerPro', 'Triage Board', 'Quanta Model', 'Rotamax'], attested: ['LedgerPro', 'Triage Board', 'Quanta Model', 'Rotamax'] }),
         `a résumé with no skills block has every required name absent (got ${JSON.stringify(noBlock)})`);
 
-      const notMarkup = localAiSkillsCoverageTelemetry(undefined, plan);
+      const notMarkup = localAiSkillsCoverageTelemetry(undefined, plan, inventory);
       assert(notMarkup?.groups === 0 && notMarkup?.items === 0 && notMarkup?.absent.length === 3,
         'non-string markup is read as an empty block rather than throwing');
-      // A posting that names no technology demands nothing (required stays empty,
-      // so `absent` can only read "none"), yet an empty block is still a defect:
-      // `attested` is the observation that says the career evidence had names to list.
+      // A posting that names none of the approved skills demands nothing
+      // (required stays empty, so `absent` can only read "none"), yet an empty
+      // block is still a defect: `attested` is the observation that says the
+      // career evidence had names to list.
       const genericPlan = { evidence: [
-        { id: 'jl', sourceId: 'job-listing', quote: 'Participates in agile development teams.', priority: 'highest' },
-        { id: 'cd1', sourceId: 'career-data', quote: 'Built the hub with React, Django and Docker Compose.' },
+        { id: 'jl', sourceId: 'job-listing', quote: 'Participates in cross-functional teams.', priority: 'highest' },
+        { id: 'cd1', sourceId: 'career-data', quote: 'Ran the office with Rotamax, Triage Board and Quanta Model.' },
       ] };
-      const genericNoBlock = localAiSkillsCoverageTelemetry('<main class="page"><section>Experience</section></main>', genericPlan);
-      assert(JSON.stringify(genericNoBlock) === JSON.stringify({ groups: 0, items: 0, required: [], absent: [], indexed: ['Docker Compose', 'React', 'Django'], indexAbsent: ['Docker Compose', 'React', 'Django'], attested: ['Docker Compose', 'React', 'Django'] }),
+      const genericNoBlock = localAiSkillsCoverageTelemetry('<main class="page"><section>Experience</section></main>', genericPlan, inventory);
+      assert(JSON.stringify(genericNoBlock) === JSON.stringify({ groups: 0, items: 0, required: [], absent: [], indexed: ['Triage Board', 'Quanta Model', 'Rotamax'], indexAbsent: ['Triage Board', 'Quanta Model', 'Rotamax'], attested: ['Triage Board', 'Quanta Model', 'Rotamax'] }),
         `a generic posting leaves posting-required/absent empty while reporting the bounded career index it owes (got ${JSON.stringify(genericNoBlock)})`);
+
+      // A retained pre-snapshot job has no approved inventory, so the host has
+      // no evidence from which to name a skill: the shape is still counted and
+      // every name list stays empty rather than guessing from a vocabulary.
+      const preSnapshot = localAiSkillsCoverageTelemetry(shipped, plan);
+      assert(JSON.stringify(preSnapshot) === JSON.stringify({ groups: 3, items: 9, required: [], absent: [], indexed: [], indexAbsent: [], attested: [] }),
+        `without an approved inventory the summary counts the block and names nothing (got ${JSON.stringify(preSnapshot)})`);
       return { shipped: reported, corrected, noBlock, genericNoBlock };
     },
   },
@@ -11224,6 +12433,91 @@ Personal Projects`;
       assert(/if \(live\.status === 'saved' && !reconcileSaved\) return null;/.test(fallbackSource),
         'the in-updater saved guard must reject a downgrade unless the narrow reconciliation explicitly authorized it');
       return { mountedProbeInvariants: true, fallbackReconcileInvariants: true };
+    },
+  },
+  {
+    name: 'Local AI application: the completion gate grades letter proportion on the assembled letter, so a letter of standalone detail sentences is rejected by name and its merged form is not',
+    run: () => {
+      const id = '123e4567-e89b-42d3-a456-426614174000';
+      const validResumeMain = '<main class="page"><section class="section"><article class="role"><span class="title">Engineer</span><span class="company">Acme</span><ul class="highlights"><li>Built supported systems.</li></ul></article></section></main>';
+      // Eight first-person detail sentences, each its own paragraph, about 110 words in all: past the paragraph ceiling and
+      // the standalone-sentence allowance, and over the judged-from word floor.
+      const details = [
+        'I built supported systems for the teams that depend on them during the first quarter.',
+        'I built supported systems for the teams that rely on them during the second quarter.',
+        'I built supported systems for the teams that count on them during the third quarter.',
+        'I built supported systems for the teams that lean on them during the fourth quarter.',
+        'I built supported systems for the groups that depend on them during the early spring.',
+        'I built supported systems for the groups that rely on them during the late summer.',
+        'I built supported systems for the groups that count on them during the early autumn.',
+        'I built supported systems for the groups that lean on them during the deep winter.',
+      ];
+      const merged = [details.slice(0, 4).join(' '), details.slice(4).join(' ')];
+      const careerData = `Built supported systems. ${details.join(' ')}`;
+      const resultFor = (paragraphs, quotes) => ({
+        version: LOCAL_AI_APPLICATION_VERSION, jobId: id, status: 'completed', outputBundleRoot: 'Applied Jobs',
+        resumeMainHtml: validResumeMain,
+        coverLetter: { ...normalizedCoverLetter(), paragraphs },
+        coverLetterArgument: validCoverLetterArgument(),
+        qualityReview: groundedQualityReview(sourceGroundingFor({ coverLetterParagraphs: paragraphs, coverLetterQuotes: quotes })),
+      });
+      const verdict = (paragraphs, quotes) => {
+        try { validateLocalApplicationResult(resultFor(paragraphs, quotes), id, path.join(os.tmpdir(), 'local-ai-project'), {}, { careerData: careerData }); return ''; }
+        catch (error) { return String(error?.message || error); }
+      };
+      const oneQuote = details.map(() => details.join(' '));
+      const rejected = verdict(details, oneQuote);
+      assert(rejected.includes('letter-proportion:') && /body paragraphs against a ceiling of 7/u.test(rejected),
+        `the gate reports the proportion defect by name and with the measured counts (got ${rejected.slice(0, 400)})`);
+      // The quote limit reads the quotes assembly bound to each paragraph (qualityReview.sourceGrounding), so the gate
+      // and the drafting twin count the same thing: eight paragraphs bound to one quote are named for it ...
+      assert(/cite the same career-data quote against a maximum of 4/u.test(rejected),
+        'eight paragraphs bound to one quote are reported for it');
+      // ... and the identical letter bound to a quote of its own per paragraph is not.
+      const ownQuotes = verdict(details, details);
+      assert(ownQuotes.includes('letter-proportion:') && !/cite the same career-data quote/u.test(ownQuotes),
+        `bound to a quote each, the structural defects remain and the quote limit is gone (got ${ownQuotes.slice(0, 400)})`);
+      const mergedVerdict = verdict(merged, merged);
+      assert(!mergedVerdict.includes('letter-proportion:'),
+        `the same sentences cut into two paragraphs raise no proportion defect (got ${mergedVerdict.slice(0, 400)})`);
+      return { gateNamesProportion: true };
+    },
+  },
+  {
+    // The gate and the drafting twin read one posting copy: a name the posting states is free in a sentence that restates cited work AND is
+    // addressed to the target (second person, the employer's name, "this role"), in both, so the twin is never stricter than the gate about it.
+    // A sentence about the work that addresses nobody gets nothing from the posting.
+    name: 'Local AI application: the completion gate reads the job posting for a sentence that restates cited work and addresses the target, so a name the posting states is free there, and the same sentence is rejected without the posting or without the address (A / B / C / D)',
+    run: () => {
+      const id = '123e4567-e89b-42d3-a456-426614174000';
+      const validResumeMain = '<main class="page"><section class="section"><article class="role"><span class="title">Engineer</span><span class="company">Acme</span><ul class="highlights"><li>Built supported systems.</li></ul></article></section></main>';
+      const quote = 'I built supported systems for the teams that depend on them during the first quarter.';
+      const careerData = `Built supported systems. ${quote}`;
+      const addressed = `${quote} The systems serve the teams that depend on them during the first quarter on the Northwind platform your team runs.`;
+      const unaddressed = `${quote} The systems serve the teams that depend on them during the first quarter on the Northwind platform.`;
+      const verdict = (job, paragraph = addressed) => {
+        try {
+          validateLocalApplicationResult({
+            version: LOCAL_AI_APPLICATION_VERSION, jobId: id, status: 'completed', outputBundleRoot: 'Applied Jobs',
+            resumeMainHtml: validResumeMain,
+            coverLetter: { ...normalizedCoverLetter(), paragraphs: [paragraph] },
+            coverLetterArgument: validCoverLetterArgument(),
+            qualityReview: groundedQualityReview(sourceGroundingFor({ coverLetterParagraphs: [paragraph], coverLetterQuotes: [quote] })),
+          }, id, path.join(os.tmpdir(), 'local-ai-project'), job, { careerData });
+          return '';
+        } catch (error) { return String(error?.message || error); }
+      };
+      const without = { company: 'Acme', description: 'The team runs on a shared platform.' };
+      const withName = { company: 'Acme', description: 'The team runs on the Northwind platform.' };
+      assert(/names “Northwind”/u.test(verdict(without)), `A: the posting does not state the name, so the gate rejects it (got ${verdict(without).slice(0, 300)})`);
+      assert(!/Northwind/u.test(verdict(withName)), `B: the posting states the name and the sentence addresses the target, so the gate raises no defect for it (got ${verdict(withName).slice(0, 300)})`);
+      assert(/names “Northwind”/u.test(verdict(without)), 'C: the posting without the name rejects it again');
+      assert(/names “Northwind”/u.test(verdict(withName, unaddressed)), `D: a sentence that addresses nobody gets no name from the posting (got ${verdict(withName, unaddressed).slice(0, 300)})`);
+      // The employer's name addresses the target too: the gate is given the job's company.
+      const employerMarked = `${quote} The systems serve the teams that depend on them during the first quarter on the Northwind platform at Acme.`;
+      assert(!/Northwind/u.test(verdict(withName, employerMarked)) && /names “Northwind”/u.test(verdict({ ...withName, company: 'Other Co' }, employerMarked)),
+        `E: a sentence that names the employer gets the posting's name, and one that names a different company does not (got ${verdict(withName, employerMarked).slice(0, 300)})`);
+      return { gateReadsPosting: true };
     },
   },
   {

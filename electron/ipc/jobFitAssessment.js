@@ -229,48 +229,147 @@ function monthIndex(year, month) {
   return year * 12 + month;
 }
 
-function parseMonthYear(value) {
-  const raw = text(value).toLowerCase().replace(/,/g, ' ');
-  if (!raw || /^(?:present|current|now)$/i.test(raw)) return { current: true };
-  const monthYear = raw.match(/^(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+(\d{4})$/i);
-  if (monthYear) {
-    const month = MONTHS[monthYear[1].toLowerCase()];
-    const year = Number(monthYear[2]);
-    return { earliest: monthIndex(year, month), latest: monthIndex(year, month), precision: 'month' };
+// ---------------------------------------------------------------------------
+// One date reader for every consumer.
+//
+// A career record states a period in many equivalent spellings ("March 2017",
+// "Mar. 2017", "03/2017", "2017-03", "2017-03-15", "Sept. 2016", a bare year,
+// "Present", "Ongoing"). The tenure engine below and the cover-letter
+// ended-role gate used to read different subsets of them, so a period one
+// accepted the other silently dropped. They now share these three functions:
+// `splitCareerDateRange` finds the two ends of a range, `parseCareerDate` reads
+// one end, and `careerRoleDateInputs` takes whichever of a role's fields states
+// the period. A caller that needs a different policy (a year-only end is only
+// "ended" once the whole year has passed) applies it to the parsed value; it
+// does not parse again.
+// ---------------------------------------------------------------------------
+const MONTH_TOKEN = '(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\\.?';
+const YEAR_TOKEN = '((?:19|20)\\d{2})';
+const DAY_TOKEN = '(0?[1-9]|[12]\\d|3[01])(?:st|nd|rd|th)?';
+const NUMERIC_MONTH_TOKEN = '(0?[1-9]|1[0-2])';
+const CURRENT_DATE_RE = /^(?:(?:to|till|until|up to)\s+)?(?:present|now|today|date)$|^(?:current(?:ly)?|ongoing)$/u;
+const CURRENT_DATE_WORD_RE = /\b(?:present|current|currently|ongoing|now)\b/u;
+const DATE_FORMS = Object.freeze([
+  { re: new RegExp(`^${MONTH_TOKEN}\\s+(?:${DAY_TOKEN}\\s+)?${YEAR_TOKEN}$`, 'u'), read: m => ({ month: m[1], year: m[3] }) },
+  { re: new RegExp(`^(?:${DAY_TOKEN}\\s+)?${MONTH_TOKEN}\\s+${YEAR_TOKEN}$`, 'u'), read: m => ({ month: m[2], year: m[3] }) },
+  { re: new RegExp(`^${YEAR_TOKEN}\\s*[-/.]\\s*${NUMERIC_MONTH_TOKEN}(?:\\s*[-/.]\\s*${DAY_TOKEN})?$`, 'u'), read: m => ({ year: m[1], numericMonth: m[2] }) },
+  { re: new RegExp(`^${NUMERIC_MONTH_TOKEN}\\s*[-/.]\\s*${YEAR_TOKEN}$`, 'u'), read: m => ({ numericMonth: m[1], year: m[2] }) },
+  { re: new RegExp(`^${YEAR_TOKEN}$`, 'u'), read: m => ({ year: m[1] }) },
+]);
+// Looser, position-free readers used only when a caller asks for `lenient`: the
+// end of a range can carry a trailing place or note ("June 2022 Boston").
+const LENIENT_DATE_SCANS = Object.freeze([
+  { re: new RegExp(`(?<![\\p{L}\\p{N}])${YEAR_TOKEN}\\s*[-/.]\\s*${NUMERIC_MONTH_TOKEN}(?![\\p{L}\\p{N}])`, 'gu'), read: m => ({ year: m[1], numericMonth: m[2] }) },
+  { re: new RegExp(`(?<![\\p{L}\\p{N}])${MONTH_TOKEN}\\s+(?:${DAY_TOKEN}\\s+)?${YEAR_TOKEN}(?![\\p{L}\\p{N}])`, 'gu'), read: m => ({ month: m[1], year: m[3] }) },
+  { re: new RegExp(`(?<![\\p{L}\\p{N}])${NUMERIC_MONTH_TOKEN}\\s*[-/.]\\s*${YEAR_TOKEN}(?![\\p{L}\\p{N}])`, 'gu'), read: m => ({ numericMonth: m[1], year: m[2] }) },
+]);
+
+function normalizedDateFragment(value) {
+  const raw = typeof value === 'number' && Number.isFinite(value) ? String(value) : text(value);
+  return raw
+    .normalize('NFKC')
+    .toLowerCase()
+    .replace(/[([][^)\]]*[)\]]/gu, ' ')
+    .replace(/\s*[·•|].*$/u, '')
+    .replace(/[,;]/gu, ' ')
+    .replace(/\s+/gu, ' ')
+    .trim()
+    .replace(/[.\s]+$/u, '');
+}
+
+function monthFromWord(word) {
+  const key = String(word || '').toLowerCase().replace(/\.$/u, '');
+  return Object.hasOwn(MONTHS, key) ? MONTHS[key] : null;
+}
+
+function datePartsToValue(parts) {
+  const year = Number(parts.year);
+  if (!Number.isInteger(year)) return null;
+  if (parts.numericMonth != null) return { year, month: Number(parts.numericMonth) - 1, precision: 'month' };
+  if (parts.month != null) {
+    const month = monthFromWord(parts.month);
+    return month == null ? null : { year, month, precision: 'month' };
   }
-  const iso = raw.match(/^(\d{4})[-/](0?[1-9]|1[0-2])$/);
-  if (iso) {
-    const year = Number(iso[1]);
-    const month = Number(iso[2]) - 1;
-    return { earliest: monthIndex(year, month), latest: monthIndex(year, month), precision: 'month' };
+  return { year, month: null, precision: 'year' };
+}
+
+/**
+ * Reads one end of a career period. Returns `{ current: true }` for an open
+ * end (Present, Current, Ongoing, Now), `{ year, month, precision }` for a
+ * stated date (`month` is 0-11, or null with `precision: 'year'` for a bare
+ * year), and null when the text is not a date this reader recognizes. With
+ * `lenient`, a recognizable date inside surrounding words still counts and a
+ * current-employment word anywhere makes the end open.
+ */
+export function parseCareerDate(value, { lenient = false } = {}) {
+  const fragment = normalizedDateFragment(value);
+  if (!fragment) return null;
+  if (CURRENT_DATE_RE.test(fragment)) return { current: true };
+  for (const form of DATE_FORMS) {
+    const match = form.re.exec(fragment);
+    if (match) return datePartsToValue(form.read(match));
   }
-  const isoDay = raw.match(/^(\d{4})[-/](0?[1-9]|1[0-2])[-/]\d{1,2}$/);
-  if (isoDay) {
-    const year = Number(isoDay[1]);
-    const month = Number(isoDay[2]) - 1;
-    return { earliest: monthIndex(year, month), latest: monthIndex(year, month), precision: 'month' };
+  if (!lenient) return null;
+  if (CURRENT_DATE_WORD_RE.test(fragment)) return { current: true };
+  for (const scan of LENIENT_DATE_SCANS) {
+    for (const match of fragment.matchAll(scan.re)) {
+      const parsed = datePartsToValue(scan.read(match));
+      if (parsed) return parsed;
+    }
   }
-  const yearOnly = raw.match(/^(\d{4})$/);
-  if (yearOnly) {
-    const year = Number(yearOnly[1]);
-    return { earliest: monthIndex(year, 0), latest: monthIndex(year, 11), precision: 'year' };
+  const years = fragment.match(/(?<![\p{L}\p{N}])(?:19|20)\d{2}(?![\p{L}\p{N}])/gu) || [];
+  return years.length === 1 ? { year: Number(years[0]), month: null, precision: 'year' } : null;
+}
+
+/**
+ * Splits a stated period ("March 2017 - Present", "2017-03 – 2020-11",
+ * "1997-2003", "03/2017 to 05/2020") into its two end strings, or null when no
+ * separator is found. Hyphens inside an ISO date are never a separator.
+ */
+export function splitCareerDateRange(value) {
+  const range = (typeof value === 'string' ? value : '').normalize('NFKC').replace(/\s+/gu, ' ').trim()
+    .split(/\s*[·•|]\s*/u)[0].trim();
+  if (!range) return null;
+  const rules = [
+    /^(.+?)\s+(?:[–—-]|to|through|thru|until|till)\s+(.+)$/iu,
+    /^(.+?[\p{L}\d.)])\s*[–—]\s*(.+)$/u,
+    /^((?:19|20)\d{2})\s*-\s*((?:19|20)\d{2})$/u,
+    /^(\d{1,2}[/.](?:19|20)\d{2})\s*-\s*(\d{1,2}[/.](?:19|20)\d{2})$/u,
+    /^(.+?\d)-(\p{L}.*)$/u,
+    /^(.+?)\s+-(\S.*)$/u,
+    /^(.+?\S)-\s+(.+)$/u,
+  ];
+  for (const rule of rules) {
+    const match = rule.exec(range);
+    if (match && text(match[1]) && text(match[2])) return { start: match[1].trim(), end: match[2].trim() };
   }
   return null;
 }
 
-function roleDateInputs(role) {
+/** The start and end strings a role states, from explicit fields or a combined range field. */
+export function careerRoleDateInputs(role) {
   const explicitStart = role?.startDate ?? role?.start ?? role?.from;
   const explicitEnd = role?.endDate ?? role?.end ?? role?.to;
   if (explicitStart || explicitEnd) return { start: explicitStart, end: explicitEnd };
   const range = text(role?.dateRange ?? role?.dates ?? role?.period ?? role?.tenure);
-  // Keep the delimiter strict enough not to split ISO dates. The individual
-  // values are subsequently parsed, so this works for human and ISO months.
-  const match = range.match(/^(.+?)\s+(?:-|–|—|to)\s+(.+)$/i);
-  return match ? { start: match[1], end: match[2] } : { start: '', end: '' };
+  return splitCareerDateRange(range) ?? { start: '', end: '' };
+}
+
+// The tenure engine's view of one end: month-precise dates collapse to a single
+// month index, a bare year to its first and last months. An end that is simply
+// not stated counts as open, as it always has here.
+function parseMonthYear(value) {
+  if (!(typeof value === 'number' ? String(value) : text(value))) return { current: true };
+  const date = parseCareerDate(value);
+  if (!date) return null;
+  if (date.current) return { current: true };
+  if (date.month == null) return { earliest: monthIndex(date.year, 0), latest: monthIndex(date.year, 11), precision: 'year' };
+  const index = monthIndex(date.year, date.month);
+  return { earliest: index, latest: index, precision: 'month' };
 }
 
 function rolePeriod(role, asOf) {
-  const input = roleDateInputs(role);
+  const input = careerRoleDateInputs(role);
   const start = parseMonthYear(input.start);
   const end = parseMonthYear(input.end);
   if (!start || start.current || !end) return null;
@@ -393,8 +492,23 @@ function normalizeExperience(raw, candidateRoles, options, { candidateText = '',
     // not state a numeric minimum”, not a literal zero-year requirement.
     const requiredMinimumYears = positiveNumberOrNull(category?.requiredMinimumYears ?? category?.requiredYears ?? category?.yearsRequired);
     const tenure = selectedRoleTenure(candidateRoles, category?.roleIds, options);
-    const shortfallYears = requiredMinimumYears != null && tenure
-      ? Math.max(0, requiredMinimumYears - tenure.maxYears)
+    // A category that names no role, or only roles that are not in the record,
+    // cannot be measured against a subset. Whatever relevant work it covers is
+    // still part of the dated career, so the whole dated career is the most it
+    // can reach: a requirement above that ceiling is unreachable whichever
+    // roles the model meant. The ceiling can refute a threshold; it can never
+    // confirm one, because the subset it stands for is unknown.
+    const unscopedCeiling = requiredMinimumYears != null && !(tenure?.matchedRoleCount > 0) && totalProfessionalTenure.roleCount > 0
+      ? {
+        basis: 'all-dated-roles',
+        roleCount: totalProfessionalTenure.roleCount,
+        minYears: totalProfessionalTenure.minYears,
+        maxYears: totalProfessionalTenure.maxYears,
+      }
+      : null;
+    const measured = tenure?.matchedRoleCount > 0 ? tenure : (unscopedCeiling ?? tenure);
+    const shortfallYears = requiredMinimumYears != null && measured
+      ? Math.max(0, requiredMinimumYears - measured.maxYears)
       : null;
     return {
       id: text(category?.id) || `experience-category-${index + 1}`,
@@ -403,6 +517,7 @@ function normalizeExperience(raw, candidateRoles, options, { candidateText = '',
       reportedYears: text(category?.years ?? category?.candidateYears ?? category?.candidateRelevantYears),
       roleIds: Array.isArray(category?.roleIds) ? category.roleIds.map(String) : [],
       tenure,
+      unscopedCeiling,
       meetsMinimum: requiredMinimumYears != null && tenure ? tenure.minYears >= requiredMinimumYears : null,
       nearMinimum: shortfallYears != null && shortfallYears > 0 && shortfallYears <= 0.5,
       shortfallYears,
@@ -430,20 +545,30 @@ function categoryMatchesRequirement(category, row) {
 // A selected subset of concise career history does not prove the candidate has
 // no other relevant experience, so a short documented duration is an evidence
 // gap—not a factual contradiction.
+//
+// A category that identifies no usable role (the field omitted, empty, or
+// naming only roles absent from the record) is held to the one bound that needs
+// no role: no subset of the dated career is longer than the dated career. That
+// bound can only demote a claim the whole record cannot reach; it never
+// confirms one.
 function applyDatedTenureToRequirements(rows, experience) {
   const categories = experience.categorySpecificExperience || [];
   return rows.map(row => {
     const category = categories.find(item => categoryMatchesRequirement(item, row)
       && item.requiredMinimumYears != null
-      && item.tenure?.matchedRoleCount > 0
+      && (item.tenure?.matchedRoleCount > 0 || item.unscopedCeiling)
       && item.jobEvidenceGrounded);
     if (!category) return row;
+    const scoped = category.tenure?.matchedRoleCount > 0;
+    const measured = scoped ? category.tenure : category.unscopedCeiling;
     let effectiveStatus = row.effectiveStatus;
     let tenureDisposition = null;
-    if (category.tenure.maxYears < category.requiredMinimumYears) {
+    if (measured.maxYears < category.requiredMinimumYears) {
       effectiveStatus = category.nearMinimum ? 'adjacent' : 'not_documented';
       tenureDisposition = category.nearMinimum ? 'near-shortfall' : 'shortfall';
-    } else if (category.tenure.minYears < category.requiredMinimumYears) {
+    } else if (!scoped) {
+      return row;
+    } else if (measured.minYears < category.requiredMinimumYears) {
       // The incomplete date precision could meet the threshold, but cannot
       // prove it. Do not retain a direct claim in that ambiguity.
       if (effectiveStatus === 'direct') effectiveStatus = 'unclear';
@@ -459,9 +584,10 @@ function applyDatedTenureToRequirements(rows, experience) {
       datedTenure: {
         categoryId: category.id,
         requiredMinimumYears: category.requiredMinimumYears,
-        minYears: category.tenure.minYears,
-        maxYears: category.tenure.maxYears,
+        minYears: measured.minYears,
+        maxYears: measured.maxYears,
         disposition: tenureDisposition,
+        basis: scoped ? 'selected-roles' : 'all-dated-roles',
       },
     };
   });

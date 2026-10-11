@@ -62,23 +62,27 @@ function cleanAuditHistory(corpus, profile) {
 }
 
 /** Publish a real approved snapshot in the isolated Electron test userData. */
-export async function writeApprovedCareerSnapshotFixture({ sourceName = 'Work Experience.md' } = {}) {
+export async function writeApprovedCareerSnapshotFixture({ sourceName = 'Work Experience.md', extraAchievementCount = 0 } = {}) {
   const text = 'Ada Lovelace\nSoftware Engineer at Acme\nJanuary 2020 to Present\nBuilt a Python service used by 50 users.\nada@example.test\n';
   const corpus = buildCareerSourceCorpus([{
     name: sourceName, contentHash: digest(text), text, legacyText: text,
     transcriptionAudit: verbatimCareerTranscriptionAuditReceipt(),
   }]);
   const evidenceSegmentIds = corpus.segments.map(segment => segment.id);
+  const extraAchievements = Array.from({ length: extraAchievementCount }, (_unused, index) => ({
+    id: `achievement-extra-${index + 1}`,
+    roleId: 'role-acme', claim: 'Built a Python service used by 50 users.', technologies: [], technologyReferences: [], metrics: [], evidenceSegmentIds,
+  }));
   const profile = {
     identity: { name: 'Ada Lovelace', contacts: ['ada@example.test'], evidenceSegmentIds },
-    roles: [{ id: 'role-acme', title: 'Software Engineer', employer: 'Acme', startDate: 'January 2020', endDate: 'Present', location: '', achievementIds: ['achievement-service'], skillIds: ['skill-python'], evidenceSegmentIds }],
+    roles: [{ id: 'role-acme', title: 'Software Engineer', employer: 'Acme', startDate: 'January 2020', endDate: 'Present', location: '', achievementIds: ['achievement-service', ...extraAchievements.map(item => item.id)], skillIds: ['skill-python'], evidenceSegmentIds }],
     achievements: [{
       id: 'achievement-service', roleId: 'role-acme', claim: 'Built a Python service used by 50 users.', technologies: ['Python'],
       technologyReferences: [{ technology: 'Python', disposition: 'skill', skillId: 'skill-python', relationship: 'independent', relationshipGroup: '', relationshipEvidence: 'Built a Python service used by 50 users.', evidenceSegmentIds }],
       metrics: [{ label: 'users', value: '50', unit: 'users', evidenceSegmentIds }], evidenceSegmentIds,
-    }],
+    }, ...extraAchievements],
     projects: [], skills: [{ id: 'skill-python', name: 'Python', category: 'language', capabilityKind: 'language', supportMode: 'direct', directEvidenceSegmentIds: evidenceSegmentIds, indexEligible: true, roleIds: ['role-acme'], evidenceSegmentIds }], education: [], certifications: [], otherEvidence: [],
-    segmentCoverage: corpus.segments.map(segment => ({ segmentId: segment.id, disposition: 'achievement', entityIds: ['identity', 'role-acme', 'achievement-service', 'skill-python'] })),
+    segmentCoverage: corpus.segments.map(segment => ({ segmentId: segment.id, disposition: 'achievement', entityIds: ['identity', 'role-acme', 'achievement-service', ...extraAchievements.map(item => item.id), 'skill-python'] })),
   };
   const snapshotId = careerSnapshotId(corpus);
   const pages = partitionCareerSourcePages(corpus);

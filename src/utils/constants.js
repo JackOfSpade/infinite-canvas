@@ -91,6 +91,8 @@ export const MINIMAP_NODE_COLORS = {
   sellhub: '#10b981',
   // Matches JobBoardNode's own header accent (bg-indigo-500/15 / text-indigo-300).
   jobboard: '#6366f1',
+  // Matches InterviewHelperNode's violet evidence rail.
+  interviewhelper: '#a78bfa',
   // Matches JobGroupNode's 'role' (leaf/most common) kind accent border #14b8a655.
   jobgroup: '#14b8a6',
   // No single brand color (JobSourceCardNode's accent is per-platform/dynamic);
@@ -119,6 +121,12 @@ const NODE_DIMS = {
   // capped at max-h-44 = 176px, JobBoardSearchSelection.jsx) + JobBoardDoneState's
   // result summary (~110px), matching the jobhub/sellhub height convention above.
   jobboard: { w: 260, h: 320 },
+  // InterviewHelperNode has a fixed 350px card width. Its first actionable
+  // setup state includes four configuration sections plus the optional
+  // evidence-question panel; 560px leaves room for that complete setup before
+  // React Flow has a measured DOM size. Prepared brief/rail states remain
+  // content-sized after measurement.
+  interviewhelper: { w: 350, h: 560 },
   // MarketplaceStatusNode computes nodeWidth dynamically per platform-card grid
   // (marketplaceStatusLayout.js) — no single fixed size exists. This is the
   // node's own single-platform-row size: marketplaceStatusNodeWidth(1) = 1*CARD_W

@@ -65,7 +65,7 @@ Usage (from the repository root):
     --run-id NAME --card anthropic|affirm --execute
 
   node --import ./scripts/test-stubs/register.mjs \\
-    .test-artifacts/blackbox-run/one-card-live-acceptance.mjs inspect --run-id NAME
+    .test-artifacts/blackbox-run/one-card-live-acceptance.mjs inspect --run-id NAME [--validate]
 
   node --import ./scripts/test-stubs/register.mjs \\
     .test-artifacts/blackbox-run/one-card-live-acceptance.mjs launch --run-id NAME --execute
@@ -83,6 +83,12 @@ Usage (from the repository root):
     .test-artifacts/blackbox-run/one-card-live-acceptance.mjs self-test
 
 Safety contract:
+  - inspect is PASSIVE by default: it reads the job's manifest.json, terminal
+    receipt and Generation Log (counts only) and never runs the repo-source
+    production validators, because a live app may be writing the job and a
+    source tree that differs from the packaged build can fail an intact job and
+    end it on disk. --validate opts in to the production status reader; use it
+    only when no app is writing the job and this tree is the build that wrote it;
   - prepare reads ${PRODUCTION_CANVAS}, ${WORK_EXPERIENCE}, and the already
     present approved snapshot in production user-data; it never republishes it;
   - it writes only a new ${RUNS_ROOT}/NAME directory;
@@ -109,7 +115,7 @@ function parseArgs(argv) {
     const token = rest[index];
     if (!token.startsWith('--')) throw new Error(`Unexpected argument: ${token}`);
     const key = token.slice(2);
-    if (key === 'execute' || key === 'preserve-changed-protected-state') options[key] = true;
+    if (key === 'execute' || key === 'preserve-changed-protected-state' || key === 'validate') options[key] = true;
     else {
       const value = rest[++index];
       if (!value || value.startsWith('--')) throw new Error(`Missing value for --${key}`);
@@ -712,10 +718,12 @@ async function prepare({ id, cardName }) {
   }
 }
 
-async function inspect({ id }) {
+async function inspect({ id, validate = false }) {
   const paths = runPaths(id); const manifest = readManifest(paths);
   assertPreparedFixture(paths, manifest);
-  const report = await inspectJob({ canvas: paths.canvas, userData: PRODUCTION_USER_DATA, destination: paths.rollback, jobId: manifest.queue.jobId });
+  // Passive unless --validate: see inspectJob. restore() calls this without the
+  // flag, so cleanup never runs the repo-source validators over the run's job.
+  const report = await inspectJob({ canvas: paths.canvas, userData: PRODUCTION_USER_DATA, destination: paths.rollback, jobId: manifest.queue.jobId, validate });
   const result = { ok: true, runId: id, jobId: manifest.queue.jobId, status: report.status, output: report.output };
   writeJsonReplace(paths.manifest, { ...manifest, lastInspection: { at: new Date().toISOString(), status: report.status?.status || null } });
   return result;
@@ -967,13 +975,14 @@ async function main() {
   if (options['preserve-changed-protected-state'] && !['restore', 'restore-corrupt', 'recover'].includes(command)) {
     throw new Error('--preserve-changed-protected-state is valid only with restore, restore-corrupt, or recover.');
   }
+  if (options.validate && command !== 'inspect') throw new Error('--validate is valid only with inspect.');
   if (command === 'self-test') { process.stdout.write(`${JSON.stringify(await selfTest(), null, 2)}\n`); return; }
   const id = required(options, 'run-id');
   if (command === 'prepare') {
     if (!options.execute) throw new Error('Refusing fixture creation and real queueing without --execute.');
     process.stdout.write(`${JSON.stringify(await prepare({ id, cardName: required(options, 'card') }), null, 2)}\n`); return;
   }
-  if (command === 'inspect') { process.stdout.write(`${JSON.stringify(await inspect({ id }), null, 2)}\n`); return; }
+  if (command === 'inspect') { process.stdout.write(`${JSON.stringify(await inspect({ id, validate: options.validate === true }), null, 2)}\n`); return; }
   if (command === 'launch') {
     if (!options.execute) throw new Error('Refusing packaged-app launch without --execute.');
     process.stdout.write(`${JSON.stringify(await launch({ id }), null, 2)}\n`); return;

@@ -1073,7 +1073,7 @@ export default [
       }));
       const resume = {
         schemaVersion: 'structured-resume.v1',
-        identity: { name: 'Ada Lovelace', contact: ['ada@example.test', '555-0100'], credential: 'B.S. Computer Science' },
+        identity: { name: 'Ada Lovelace', contact: ['ada@example.test', '555-0100'], credential: 'B.S. Mathematics' },
         roles: [
           { id: 'role-1', title: 'Senior Software Engineer', company: 'Acme Systems', dates: '2020 - 2024', location: 'Remote', bullets },
           { id: 'role-2', title: 'Software Engineer', company: 'Prior Co', dates: '2017 - 2020', location: 'New York, NY', bullets: bullets.slice(0, 3).map((bullet, index) => ({ ...bullet, id: `old-bullet-${index}` })) },

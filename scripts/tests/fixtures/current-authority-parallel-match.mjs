@@ -7,11 +7,20 @@ import os from 'node:os';
 import path from 'node:path';
 import { writeApprovedCareerSnapshotFixture } from '../careerSnapshotFixture.mjs';
 
-export async function makeCurrentAuthorityParallelMatchFixture() {
+export async function makeCurrentAuthorityParallelMatchFixture({
+  trailingCoverageOnlyUnit = false,
+  coverageOnlyPrefix = false,
+  coverageOnlyAfterRequirementIndex = null,
+  coverageOnlyAfterEveryRequirement = false,
+  extraAchievementCount = 0,
+} = {}) {
   const root = await fs.promises.realpath(await fs.promises.mkdtemp(path.join(os.tmpdir(), 'current-authority-parallel-match-')));
   const canvasFilePath = path.join(root, 'Synthetic Canvas.json');
   await fs.promises.writeFile(canvasFilePath, '{"version":1}', 'utf8');
-  const snapshot = await writeApprovedCareerSnapshotFixture({ sourceName: 'Synthetic Parallel Match.md' });
+  const snapshot = await writeApprovedCareerSnapshotFixture({
+    sourceName: extraAchievementCount ? `Synthetic Parallel Match catalog-${extraAchievementCount}.md` : 'Synthetic Parallel Match.md',
+    extraAchievementCount,
+  });
   const requirements = Array.from({ length: 21 }, (_unused, index) => `Synthetic capability ${String(index + 1).padStart(2, '0')} is required.`);
   return {
     root,
@@ -21,7 +30,15 @@ export async function makeCurrentAuthorityParallelMatchFixture() {
     job: {
       title: 'Synthetic Parallel Match Engineer',
       company: 'Example Systems',
-      snippet: requirements.join('\n'),
+      snippet: [
+        ...(coverageOnlyPrefix ? ['Synthetic opening overview; no requirement.'] : []),
+        ...requirements.flatMap((requirement, index) => [
+          requirement,
+          ...(coverageOnlyAfterEveryRequirement || coverageOnlyAfterRequirementIndex === index ? ['Synthetic mid-list overview; no requirement.'] : []),
+        ]),
+        ...(trailingCoverageOnlyUnit ? ['Synthetic company overview; no additional requirement.'] : []),
+      ].join('\n'),
     },
+    trailingCoverageOnlyUnit, coverageOnlyPrefix, coverageOnlyAfterRequirementIndex, coverageOnlyAfterEveryRequirement,
   };
 }

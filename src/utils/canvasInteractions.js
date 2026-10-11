@@ -23,9 +23,203 @@ export const TitleZoneActive = new Set();
 // Tracks original positional values mid-drag when TitleZone logic intercepts coordinate spaces.
 export const TitleZoneCorrection = new Map();
 
+function isManualAiWorkflowNode(node) {
+  return node?.type === 'jobhub'
+    || node?.type === 'jobboard'
+    || node?.type === 'interviewhelper';
+}
+
+// These renderer-owned receipts become arguments to main-process cleanup APIs
+// at a deletion boundary. Keep their grammar in lockstep with
+// InterviewHelperNode and undoNonRestorableState: persisted canvas data is not
+// trusted simply because it has a string named `runId`.
+const INTERVIEW_HELPER_RUN_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/u;
+const INTERVIEW_HELPER_MAX_RETIREMENT_RECEIPTS = 32;
+// Canvas JSON is normally a tree, but imported/corrupt in-memory data can
+// contain a cyclic reference or pathological nesting. Lifecycle cleanup runs
+// at destructive boundaries, so it must not overflow the renderer stack or
+// silently loop before it can cancel a real sibling. These limits are far
+// above a practical nested-canvas workspace while still bounding hostile data.
+export const CANVAS_LIFECYCLE_MAX_NESTED_DEPTH = 64;
+export const CANVAS_LIFECYCLE_MAX_NODES = 10_000;
+
+/**
+ * Visit each reachable canvas node once without recursion.
+ *
+ * Returns `{ complete: false }` if the input is malformed beyond the safe
+ * traversal envelope. Callers that retire durable work use that result as a
+ * fail-closed signal; best-effort post-commit notification callers still
+ * process the safely reachable prefix.
+ */
+export function walkCanvasNodesBounded(nodes, visitor, {
+  maxDepth = CANVAS_LIFECYCLE_MAX_NESTED_DEPTH,
+  maxNodes = CANVAS_LIFECYCLE_MAX_NODES,
+} = {}) {
+  if (!Array.isArray(nodes) || typeof visitor !== 'function') return { complete: !nodes || Array.isArray(nodes), visited: 0 };
+  const stack = nodes.map(node => ({ node, depth: 0 })).reverse();
+  const seenNodes = new WeakSet();
+  const seenArrays = new WeakSet([nodes]);
+  let visited = 0;
+  let complete = true;
+  while (stack.length) {
+    const { node, depth } = stack.pop();
+    if (!node || typeof node !== 'object') continue;
+    if (seenNodes.has(node)) { complete = false; continue; }
+    seenNodes.add(node);
+    if (depth > maxDepth || visited >= maxNodes) { complete = false; continue; }
+    visited += 1;
+    visitor(node, depth);
+    const childLists = [node.data?.canvasData?.nodes, node.data?.nodes];
+    const locallyAliasedChildArrays = new Set();
+    for (let index = childLists.length - 1; index >= 0; index -= 1) {
+      const children = childLists[index];
+      if (children == null) continue;
+      if (!Array.isArray(children)) { complete = false; continue; }
+      // A migrated group can expose the same child array through both the
+      // current and legacy field. It is already covered; that is not a
+      // malformed graph or a reason to reject an otherwise safe deletion.
+      if (seenArrays.has(children)) {
+        // The one benign alias is a single migrated node exposing its exact
+        // children through both current and legacy fields. A root/self cycle
+        // or an array shared by a different node is malformed and must make
+        // transactional retirement fail closed.
+        if (locallyAliasedChildArrays.has(children)) continue;
+        complete = false;
+        continue;
+      }
+      seenArrays.add(children);
+      locallyAliasedChildArrays.add(children);
+      if (depth >= maxDepth) { complete = false; continue; }
+      for (let childIndex = children.length - 1; childIndex >= 0; childIndex -= 1) {
+        stack.push({ node: children[childIndex], depth: depth + 1 });
+      }
+    }
+  }
+  return { complete, visited };
+}
+
+function isPlainRecord(value) {
+  return !!value
+    && typeof value === 'object'
+    && !Array.isArray(value)
+    && Object.getPrototypeOf(value) === Object.prototype;
+}
+
+function isInterviewHelperRunId(value) {
+  return typeof value === 'string' && INTERVIEW_HELPER_RUN_ID_RE.test(value);
+}
+
+function hasExactOwnKeys(value, keys) {
+  if (!isPlainRecord(value)) return false;
+  const actual = Object.keys(value).sort();
+  return actual.length === keys.length
+    && actual.every((key, index) => key === keys[index]);
+}
+
+function interviewHelperCareerRunId(value) {
+  return isPlainRecord(value)
+    && ['compiling', 'failed'].includes(value.status)
+    && Object.hasOwn(value, 'manualAiRunId')
+    && isInterviewHelperRunId(value.manualAiRunId)
+    ? value.manualAiRunId
+    : null;
+}
+
+function interviewHelperPreparationRunId(data) {
+  const preparation = data?.interviewHelperPreparation;
+  const runId = data?.interviewHelperPreparationRunId;
+  return isPlainRecord(preparation)
+    && ['preparing', 'failed'].includes(preparation.status)
+    && Object.hasOwn(data || {}, 'interviewHelperPreparationRunId')
+    && isInterviewHelperRunId(runId)
+    ? runId
+    : null;
+}
+
+function interviewHelperCleanupMarkerRunId(value) {
+  return hasExactOwnKeys(value, ['kind', 'runId', 'status', 'version'])
+    && value.version === 1
+    && (value.kind === 'career' || value.kind === 'preparation')
+    && value.status === 'failed'
+    && isInterviewHelperRunId(value.runId)
+    ? value.runId
+    : null;
+}
+
+function normalizeInterviewHelperRetirementReceipt(value) {
+  const legacyKeys = ['cancellationPending', 'cancellationReason', 'retirementPending', 'retirementReason', 'runId'];
+  const currentKeys = [...legacyKeys, 'updatedAt'];
+  if (!hasExactOwnKeys(value, legacyKeys) && !hasExactOwnKeys(value, currentKeys)) return null;
+  if (!isInterviewHelperRunId(value.runId)
+    || value.retirementPending !== true
+    || value.retirementReason !== 'node-deleted'
+    || typeof value.cancellationPending !== 'boolean'
+    || value.cancellationReason !== 'node-deleted'
+    || (Object.hasOwn(value, 'updatedAt')
+      && (!Number.isSafeInteger(value.updatedAt) || value.updatedAt < 0))) return null;
+  return {
+    runId: value.runId,
+    retirementPending: true,
+    retirementReason: 'node-deleted',
+    cancellationPending: value.cancellationPending,
+    cancellationReason: 'node-deleted',
+    ...(Object.hasOwn(value, 'updatedAt') ? { updatedAt: value.updatedAt } : {}),
+  };
+}
+
+function normalizedInterviewHelperRetirementReceipts(value) {
+  if (!Array.isArray(value)) return [];
+  const byRunId = new Map();
+  for (const item of value) {
+    const receipt = normalizeInterviewHelperRetirementReceipt(item);
+    if (!receipt) continue;
+    // Match the UI's last-seen-wins, bounded persistence behavior.
+    byRunId.delete(receipt.runId);
+    byRunId.set(receipt.runId, receipt);
+  }
+  return [...byRunId.values()].slice(-INTERVIEW_HELPER_MAX_RETIREMENT_RECEIPTS);
+}
+
+// Receipts passed back from a failed deletion are not persisted UI receipts:
+// they are the narrow handoff between deletion and restoration. Give them an
+// equally strict schema before they may seed any durable retry record.
+function normalizeInterviewHelperDeletionReceipt(value) {
+  if (!hasExactOwnKeys(value, ['cancellationPending', 'nodeId', 'runId'])
+    || typeof value.nodeId !== 'string'
+    || !value.nodeId
+    || !isInterviewHelperRunId(value.runId)
+    || typeof value.cancellationPending !== 'boolean') return null;
+  return {
+    nodeId: value.nodeId,
+    runId: value.runId,
+    cancellationPending: value.cancellationPending,
+  };
+}
+
+function acknowledgedManualAiRunIds(workflowNode, acknowledgement) {
+  const raw = Array.isArray(acknowledgement?.manualAiRunIds)
+    ? acknowledgement.manualAiRunIds
+    : [];
+  // Do not change the long-standing Search/Board compatibility grammar here.
+  // Interview Helper's newly introduced persisted/UI contract is strict.
+  return workflowNode?.type === 'interviewhelper'
+    ? raw.filter(isInterviewHelperRunId)
+    : raw.filter(Boolean);
+}
+
 function durableManualAiRunIdsForWorkflowNode(node) {
-  if (node?.type !== 'jobhub' && node?.type !== 'jobboard') return [];
+  if (!isManualAiWorkflowNode(node)) return [];
   const data = node.data || {};
+  if (node.type === 'interviewhelper') {
+    return [...new Set([
+      interviewHelperCareerRunId(data.interviewHelperCareerCompilation),
+      interviewHelperPreparationRunId(data),
+      interviewHelperCleanupMarkerRunId(data.interviewHelperManualAiCleanup),
+      ...normalizedInterviewHelperRetirementReceipts(
+        data.interviewHelperManualAiRetirementReceipts,
+      ).map(receipt => receipt.runId),
+    ].filter(isInterviewHelperRunId))];
+  }
   return [...new Set([
     data.manualAiResume?.runId,
     data.boardScanResume?.combineManualAiRunId,
@@ -64,19 +258,30 @@ function durableManualAiRunIdsForWorkflowNode(node) {
  * nodes' background tasks (partial cancellation).
  *
  * @param {Array}  nodes   - Array of ReactFlow node objects to process
- * @param {Set}   [skipIds] - Optional set of node IDs to skip (e.g. locked nodes)
+ * @param {Set}   [skipIds] - Optional set of node IDs to skip (e.g. already
+ *                              acknowledged manual-AI workflow roots)
+ * @param {object} [options]
+ * @param {boolean} [options.notifySkippedInterviewHelpers=false] - A committed
+ * deletion has already acknowledged an Interview Helper's worker before the
+ * raw sweep. It still needs this direct, post-commit notification to retire
+ * its owner-scoped companion window. Job/Search and Board roots remain skipped
+ * so they are never needlessly aborted a second time.
  */
-export function cancelNodeTasksRecursively(nodes, skipIds) {
-  if (!Array.isArray(nodes)) return;
-  nodes.forEach(n => {
-    if (skipIds?.has(n.id)) return;
+export function cancelNodeTasksRecursively(nodes, skipIds, options = {}) {
+  if (!Array.isArray(nodes)) return { complete: true, visited: 0 };
+  const { notifySkippedInterviewHelpers = false } = options;
+  return walkCanvasNodesBounded(nodes, n => {
+    const skipped = skipIds?.has(n.id);
+    if (skipped && !(notifySkippedInterviewHelpers && n?.type === 'interviewhelper')) return;
     // This helper is only reached from the two real deletion paths, so it is
     // the one caller whose cancel genuinely IS a node deletion — every other
     // caller passes its own cause so diagnostics stop calling a Reset a delete.
-    window.electronAPI?.cancelNodeTask?.(n.id, 'node-deleted');
-    if (n.data?.canvasData?.nodes) cancelNodeTasksRecursively(n.data.canvasData.nodes, skipIds);
-    // Legacy nodes shape fallback
-    if (n.data?.nodes) cancelNodeTasksRecursively(n.data.nodes, skipIds);
+    try {
+      window.electronAPI?.cancelNodeTask?.(n.id, 'node-deleted');
+    } catch {
+      // Cancellation is best effort at this post-commit sweep. Continue to
+      // reachable siblings so one bridge failure cannot strand their tasks.
+    }
   });
 }
 
@@ -92,8 +297,7 @@ export function collectMarketplaceRecoveryOwners(nodes) {
   if (!Array.isArray(nodes)) return [];
   const owners = [];
   const seen = new Set();
-  const visit = (items) => {
-    for (const node of items || []) {
+  walkCanvasNodesBounded(nodes, node => {
       const kind = node?.type === 'sellhub'
         ? 'sellhub'
         : node?.type === 'marketplacestatus'
@@ -115,25 +319,21 @@ export function collectMarketplaceRecoveryOwners(nodes) {
           });
         }
       }
-      visit(node?.data?.canvasData?.nodes);
-      visit(node?.data?.nodes);
-    }
-  };
-  visit(nodes);
+  });
   return owners;
 }
 
 /**
- * Return exact durable manual-AI workflow ids owned by deleted Job Search or
- * Job Board nodes, including nodes nested inside removed canvas groups.
+ * Return exact durable manual-AI workflow ids owned by deleted Job Search,
+ * Job Board, or Interview Helper nodes, including nodes nested inside removed
+ * canvas groups.
  */
 export function collectDeletedManualAiRetirements(nodes) {
   if (!Array.isArray(nodes)) return [];
   const retirements = [];
   const seenRunIds = new Set();
-  const visit = (items) => {
-    for (const node of items || []) {
-      if (node?.type === 'jobhub' || node?.type === 'jobboard') {
+  walkCanvasNodesBounded(nodes, node => {
+      if (isManualAiWorkflowNode(node)) {
         const nodeId = typeof node.id === 'string' && node.id ? node.id : null;
         for (const runId of durableManualAiRunIdsForWorkflowNode(node)) {
           if (nodeId && !seenRunIds.has(runId)) {
@@ -142,39 +342,33 @@ export function collectDeletedManualAiRetirements(nodes) {
           }
         }
       }
-      visit(node?.data?.canvasData?.nodes);
-      visit(node?.data?.nodes);
-    }
-  };
-  visit(nodes);
+  });
   return retirements;
 }
 
 export function collectDeletedManualAiWorkflowNodes(nodes) {
   if (!Array.isArray(nodes)) return [];
   const workflowNodesById = new Map();
-  const visit = (items) => {
-    for (const node of items || []) {
-      if ((node?.type === 'jobhub' || node?.type === 'jobboard') && node.id) {
-        const entry = workflowNodesById.get(node.id) || { nodeId: node.id, markerRunIds: [] };
+  walkCanvasNodesBounded(nodes, node => {
+      if (isManualAiWorkflowNode(node) && node.id) {
+        const entry = workflowNodesById.get(node.id) || {
+          nodeId: node.id,
+          type: node.type,
+          markerRunIds: [],
+        };
         for (const markerRunId of durableManualAiRunIdsForWorkflowNode(node)) {
           if (!entry.markerRunIds.includes(markerRunId)) entry.markerRunIds.push(markerRunId);
         }
         workflowNodesById.set(node.id, entry);
       }
-      visit(node?.data?.canvasData?.nodes);
-      visit(node?.data?.nodes);
-    }
-  };
-  visit(nodes);
+  });
   return [...workflowNodesById.values()];
 }
 
 export function collectDeletedBoardChildClaims(nodes) {
   const claims = [];
   const seen = new Set();
-  const visit = (items) => {
-    for (const node of items || []) {
+  walkCanvasNodesBounded(nodes, node => {
       const plan = node?.type === 'jobboard' ? node.data?.boardScanResume : null;
       const activeSourceIds = [...new Set([
         ...(Array.isArray(plan?.activeSourceIds) ? plan.activeSourceIds : []),
@@ -200,11 +394,7 @@ export function collectDeletedBoardChildClaims(nodes) {
           }
         }
       }
-      visit(node?.data?.canvasData?.nodes);
-      visit(node?.data?.nodes);
-    }
-  };
-  visit(nodes);
+  });
   return claims;
 }
 
@@ -214,6 +404,14 @@ export function collectDeletedBoardChildClaims(nodes) {
  * fails, the caller can restore/retain the node and its retry marker.
  */
 export async function retireDeletedManualAiRuns(nodes) {
+  // Unlike post-commit best-effort cancellation, durable manual-AI retirement
+  // must not proceed with a partial tree: that could delete a parent while a
+  // hidden descendant still owns a resumable handoff. Reject the transaction
+  // and let its caller retain/restore the canvas instead.
+  const traversal = walkCanvasNodesBounded(nodes, () => {});
+  if (!traversal.complete) {
+    throw new Error('Canvas lifecycle cleanup stopped at an unsafe nested-canvas boundary. The deletion was not completed.');
+  }
   const workflowNodes = collectDeletedManualAiWorkflowNodes(nodes);
   if (workflowNodes.length === 0) return [];
   const cancelAndWait = window.electronAPI?.cancelNodeTaskAndWait;
@@ -244,9 +442,7 @@ export async function retireDeletedManualAiRuns(nodes) {
     const cancellationPending = !!error || acknowledgement?.settled !== true;
     return [...new Set([
       ...workflowNode.markerRunIds,
-      ...(Array.isArray(acknowledgement?.manualAiRunIds)
-        ? acknowledgement.manualAiRunIds
-        : []),
+      ...acknowledgedManualAiRunIds(workflowNode, acknowledgement),
     ].filter(Boolean))].map(runId => ({
       nodeId: workflowNode.nodeId,
       runId,
@@ -265,9 +461,7 @@ export async function retireDeletedManualAiRuns(nodes) {
 
   const runIds = [...new Set(acknowledgements.flatMap(({ workflowNode, acknowledgement }) => [
     ...workflowNode.markerRunIds,
-    ...(Array.isArray(acknowledgement?.manualAiRunIds)
-      ? acknowledgement.manualAiRunIds
-      : []),
+    ...acknowledgedManualAiRunIds(workflowNode, acknowledgement),
   ]).filter(Boolean))];
   if (runIds.length === 0) return [];
   const completeRuns = window.electronAPI?.completeNonApiAiRuns;
@@ -297,6 +491,10 @@ export async function retireDeletedManualAiRuns(nodes) {
 
 /** Reattach exact cleanup receipts when a pending deletion/clear is retained. */
 export function applyManualAiRetirementReceiptsToNodes(nodes, receipts) {
+  // Receipt restoration is reached on a failed destructive transaction. Do
+  // not recurse into corrupt data while trying to make it safe; preserving the
+  // live tree unchanged is the only honest recovery when traversal is bounded.
+  if (!walkCanvasNodesBounded(nodes, () => {}).complete) return nodes;
   const byNodeId = new Map();
   for (const receipt of Array.isArray(receipts) ? receipts : []) {
     if (!receipt?.nodeId || !receipt?.runId) continue;
@@ -310,8 +508,15 @@ export function applyManualAiRetirementReceiptsToNodes(nodes, receipts) {
     const receipt = candidates.find(candidate => candidate.runId === currentMarker?.runId)
       || candidates[0]
       || null;
-    const nestedCanvasNodes = patchItems(node?.data?.canvasData?.nodes);
-    const legacyNestedNodes = patchItems(node?.data?.nodes);
+    const currentChildren = node?.data?.canvasData?.nodes;
+    const legacyChildren = node?.data?.nodes;
+    const nestedCanvasNodes = patchItems(currentChildren);
+    // Current + legacy fields can deliberately alias the same array during a
+    // migration. Reusing its transformed result keeps a valid deeply nested
+    // tree linear instead of expanding work exponentially at every level.
+    const legacyNestedNodes = legacyChildren === currentChildren
+      ? nestedCanvasNodes
+      : patchItems(legacyChildren);
     if (!receipt && nestedCanvasNodes === node?.data?.canvasData?.nodes && legacyNestedNodes === node?.data?.nodes) {
       return node;
     }
@@ -398,6 +603,36 @@ export function applyManualAiRetirementReceiptsToNodes(nodes, receipts) {
       const cleanupReceipts = [...cleanupReceiptsByRunId.values()].slice(-32);
       nextData.manualAiCleanupReceipts = cleanupReceipts.length > 0 ? cleanupReceipts : null;
       nextData.errorMessage = cleanupError;
+    } else if (node?.type === 'interviewhelper' && candidates.length > 0) {
+      // The helper's UI cleanup marker is deliberately an exact terminal-only
+      // shape. A deletion acknowledgement can still be in flight, so do not
+      // add cancellation metadata to that marker or manufacture a failed
+      // marker for a live worker. Retain every exact id separately; the next
+      // deletion/recovery preflight will include these receipts alongside the
+      // helper's native career, preparation, and terminal-cleanup owners.
+      const receiptsByRunId = new Map(
+        normalizedInterviewHelperRetirementReceipts(
+          nextData.interviewHelperManualAiRetirementReceipts,
+        ).map(item => [item.runId, item]),
+      );
+      for (const rawCandidate of candidates) {
+        const candidate = normalizeInterviewHelperDeletionReceipt(rawCandidate);
+        if (!candidate || candidate.nodeId !== node?.id) continue;
+        receiptsByRunId.delete(candidate.runId);
+        receiptsByRunId.set(candidate.runId, {
+          runId: candidate.runId,
+          retirementPending: true,
+          retirementReason: 'node-deleted',
+          cancellationPending: candidate.cancellationPending === true,
+          cancellationReason: 'node-deleted',
+          updatedAt: Date.now(),
+        });
+      }
+      const retainedReceipts = [...receiptsByRunId.values()]
+        .slice(-INTERVIEW_HELPER_MAX_RETIREMENT_RECEIPTS);
+      nextData.interviewHelperManualAiRetirementReceipts = retainedReceipts.length > 0
+        ? retainedReceipts
+        : null;
     } else if (receipt) {
       nextData.manualAiResume = {
         ...(currentMarker?.runId === receipt.runId ? currentMarker : {}),
@@ -428,6 +663,11 @@ export function applyManualAiRetirementReceiptsToNodes(nodes, receipts) {
  * without overwriting unrelated edits which landed during an async preflight.
  */
 export function restoreJobWorkflowSnapshots(liveNodes, snapshotNodes, workflowNodeIds, receipts = null) {
+  // This helper performs structural recursion below. A malformed group graph
+  // is not a valid rollback target; retain live state rather than risking a
+  // stack overflow or reviving a worker marker from an unbounded snapshot.
+  if (!walkCanvasNodesBounded(liveNodes, () => {}).complete
+    || !walkCanvasNodesBounded(snapshotNodes, () => {}).complete) return liveNodes;
   const workflowIds = workflowNodeIds instanceof Set
     ? workflowNodeIds
     : new Set(Array.isArray(workflowNodeIds) ? workflowNodeIds : []);
@@ -436,8 +676,10 @@ export function restoreJobWorkflowSnapshots(liveNodes, snapshotNodes, workflowNo
   }
   const treeContainsWorkflow = (node) => {
     if (workflowIds.has(node?.id) || workflowIds.has(node?.data?.hubId)) return true;
-    return (node?.data?.canvasData?.nodes || []).some(treeContainsWorkflow)
-      || (node?.data?.nodes || []).some(treeContainsWorkflow);
+    const currentChildren = node?.data?.canvasData?.nodes || [];
+    const legacyChildren = node?.data?.nodes || [];
+    return currentChildren.some(treeContainsWorkflow)
+      || (legacyChildren !== currentChildren && legacyChildren.some(treeContainsWorkflow));
   };
   const snapshots = (Array.isArray(snapshotNodes) ? snapshotNodes : [])
     .filter(treeContainsWorkflow);
@@ -502,8 +744,7 @@ export function collectDeletedJobRunDiscards(nodes, canvasFilePath) {
   if (!Array.isArray(nodes)) return [];
   const discards = [];
   const seen = new Set();
-  const visit = (items) => {
-    for (const node of items || []) {
+  walkCanvasNodesBounded(nodes, node => {
       if (node?.type === 'jobhub') {
         const nodeId = node.id || null;
         const runId = node.data?.jobRunId || null;
@@ -513,11 +754,7 @@ export function collectDeletedJobRunDiscards(nodes, canvasFilePath) {
           discards.push({ canvasFilePath, nodeId, runId });
         }
       }
-      visit(node?.data?.canvasData?.nodes);
-      visit(node?.data?.nodes);
-    }
-  };
-  visit(nodes);
+  });
   return discards;
 }
 
@@ -559,8 +796,7 @@ export function collectDeletedJobAnalysisDiscards(nodes, canvasFilePath, cleared
   if (!Array.isArray(nodes)) return [];
   const discards = [];
   const seen = new Set();
-  const visit = (items) => {
-    for (const node of items || []) {
+  walkCanvasNodesBounded(nodes, node => {
       if (node?.type === 'jobhub') {
         const nodeId = typeof node.id === 'string' && node.id ? node.id : null;
         const rawRunId = node.data?.jobRunId || null;
@@ -576,11 +812,7 @@ export function collectDeletedJobAnalysisDiscards(nodes, canvasFilePath, cleared
           discards.push({ canvasFilePath, nodeId, runId, clearedAt });
         }
       }
-      visit(node?.data?.canvasData?.nodes);
-      visit(node?.data?.nodes);
-    }
-  };
-  visit(nodes);
+  });
   return discards;
 }
 

@@ -31,8 +31,14 @@ export default [
       const searchSource = readFileSync(new URL('../../src/nodes/JobSearchNode.jsx', import.meta.url), 'utf8');
       const careerRecoveryGate = searchSource.indexOf('isCareerCompilationTask(resume?.task)');
       const jobRunInspection = searchSource.indexOf('window.electronAPI.peekJobRun', careerRecoveryGate);
-      assert(dialogSource.includes("request.task.startsWith('career-profile-')")
-        && searchSource.includes("task.startsWith('career-profile-')")
+      // The whole compiler family (career-file-* and career-profile-*) is
+      // classified by ONE shared renderer helper; neither gate keeps its own
+      // list, so a newly added stage cannot be missed by one of them.
+      const taskHelperSource = readFileSync(new URL('../../src/utils/careerCompilerTasks.js', import.meta.url), 'utf8');
+      assert(dialogSource.includes('isCareerCompilerTask(request.task)')
+        && searchSource.includes('return isCareerCompilerTask(task);')
+        && taskHelperSource.includes("task.startsWith('career-profile-')")
+        && taskHelperSource.includes("task.startsWith('career-file-')")
         // The optional access is intentional: a malformed/stale renderer
         // marker must not throw before the recovery path can fail closed.
         && careerRecoveryGate >= 0
@@ -40,7 +46,7 @@ export default [
         // normal saved-job recovery tries to inspect one.
         && careerRecoveryGate < jobRunInspection,
       'compile, every parallel audit, and repair must be pause/resume eligible as one pre-search career-profile workflow, before job-run recovery inspection');
-      return { compilerTaskFamily: 'career-profile-*' };
+      return { compilerTaskFamily: 'career-file-* + career-profile-*' };
     },
   },
   {
@@ -657,7 +663,9 @@ export default [
       'every standalone continuation rechecks stale admission both before and after its queue turn, so a marker that arrives while scoring, interrupted recovery, saved-scrape recovery, or re-analysis waits cannot mint manual AI');
       assert(jobSearchSource.includes('manualAiStaleRecoveryActionRunIdRef.current')
         && jobSearchSource.includes('className="nodrag px-2 py-0.5')
-        && jobSearchSource.includes('disabled={baseControlsLocked || manualAiRecoveryActionBusy || !canvasFilePath}')
+        // A saved career compilation additionally waits for the main-process
+        // verdict on whether Continue resumes exactly or restarts.
+        && jobSearchSource.includes('disabled={baseControlsLocked || manualAiRecoveryActionBusy || !canvasFilePath || careerResumeStillChecking}')
         && jobSearchSource.includes('onClick={handleContinueManualAiRecovery}')
         && !jobSearchSource.includes("cancellationReason: 'discarded-stale-manual-ai-recovery'"),
       'an explicit stale-recovery Resume remains single-action and exact-id-bound; it never exposes a competing discard path that could erase the saved marker');

@@ -81,6 +81,7 @@ import handoff_bridge_hostile from './tests/handoff-bridge-hostile.js';
 import handoff_bridge_source_scan from './tests/handoff-bridge-source-scan.js';
 import handoff_bridge_ui from './tests/handoff-bridge-ui.js';
 import handoff_bridge_render from './tests/handoff-bridge-render.js';
+import handoff_bridge_canvas_orphan from './tests/handoff-bridge-canvas-orphan.js';
 import issue_reporter from './tests/issue-reporter.js';
 import network_rolling_scheduler from './tests/network-rolling-scheduler.js';
 import handoff_scheduler from './tests/handoff-scheduler.js';
@@ -96,6 +97,48 @@ import application_blind_review from './tests/application-blind-review.js';
 import one_card_live_acceptance from './tests/one-card-live-acceptance.js';
 import pointer_occlusion_probe from './tests/pointer-occlusion-probe.js';
 import test_runner_watchdog from './tests/test-runner-watchdog.js';
+import interview_helper from './tests/interview-helper.js';
+import interview_helper_privacy from './tests/interview-helper-privacy.js';
+import interview_helper_render from './tests/interview-helper-render.js';
+import interview_private_store_filesystem from './tests/interview-private-store-filesystem.js';
+import interview_preparation from './tests/interview-preparation.js';
+import interview_preload from './tests/interview-preload.js';
+import interview_window from './tests/interview-window.js';
+import interview_window_render from './tests/interview-window-render.js';
+import career_recovery_resume from './tests/career-recovery-resume.js';
+import adaptability_skills from './tests/adaptability-skills.js';
+import adaptability_metrics from './tests/adaptability-metrics.js';
+import adaptability_dates from './tests/adaptability-dates.js';
+import adaptability_ownership from './tests/adaptability-ownership.js';
+import adaptability_relationships from './tests/adaptability-relationships.js';
+import adaptability_listing from './tests/adaptability-listing.js';
+import gapfix_claim_grounding from './tests/gapfix-claim-grounding.js';
+import gapfix_letter_evidence from './tests/gapfix-letter-evidence.js';
+import gapfix_career_validators from './tests/gapfix-career-validators.js';
+import gapfix_letter_proportion from './tests/gapfix-letter-proportion.js';
+import gapfix_repair_convergence from './tests/gapfix-repair-convergence.js';
+import gapfix_grounding_locality from './tests/gapfix-grounding-locality.js';
+import gapfix_transfer_budget from './tests/gapfix-transfer-budget.js';
+import gapfix_poll_integrity from './tests/gapfix-poll-integrity.js';
+import gapfix_host_owned_fields from './tests/gapfix-host-owned-fields.js';
+import gapfix_v16_claim_budget from './tests/gapfix-v16-claim-budget.js';
+import gapfix_v16_letter_conventions from './tests/gapfix-v16-letter-conventions.js';
+import gapfix_v16_prompts from './tests/gapfix-v16-prompts.js';
+import gapfix_v16_repair_brief from './tests/gapfix-v16-repair-brief.js';
+import gapfix_v16_resume_dates from './tests/gapfix-v16-resume-dates.js';
+import gapfix_v16_verb_fidelity from './tests/gapfix-v16-verb-fidelity.js';
+import gapfix_v16b_closing_authorship from './tests/gapfix-v16b-closing-authorship.js';
+import gapfix_v16b_contract_consistency from './tests/gapfix-v16b-contract-consistency.js';
+import gapfix_v16b_letter_truthfulness from './tests/gapfix-v16b-letter-truthfulness.js';
+import gapfix_v16b_relevance_budget from './tests/gapfix-v16b-relevance-budget.js';
+import gapfix_v16b_reviewer_context from './tests/gapfix-v16b-reviewer-context.js';
+import gapfix_v16b_verb_fidelity from './tests/gapfix-v16b-verb-fidelity.js';
+import gapfix_v16c_closing_gate from './tests/gapfix-v16c-closing-gate.js';
+import gapfix_v16c_letter_binding from './tests/gapfix-v16c-letter-binding.js';
+import gapfix_v16c_letter_functions from './tests/gapfix-v16c-letter-functions.js';
+import gapfix_v16c_requirement_modality from './tests/gapfix-v16c-requirement-modality.js';
+import gapfix_v16c_verb_fidelity from './tests/gapfix-v16c-verb-fidelity.js';
+import oracle_leak_gate from './tests/oracle-leak-gate.js';
 
 // Keep the file name beside its group so omissions and stale registrations
 // fail before a green test run gives a false signal.
@@ -182,6 +225,7 @@ const testGroups = [
   ['handoff-bridge-source-scan.js', handoff_bridge_source_scan],
   ['handoff-bridge-ui.js', handoff_bridge_ui],
   ['handoff-bridge-render.js', handoff_bridge_render],
+  ['handoff-bridge-canvas-orphan.js', handoff_bridge_canvas_orphan],
   ['issue-reporter.js', issue_reporter],
   ['network-rolling-scheduler.js', network_rolling_scheduler],
   ['handoff-scheduler.js', handoff_scheduler],
@@ -197,6 +241,48 @@ const testGroups = [
   ['one-card-live-acceptance.js', one_card_live_acceptance],
   ['pointer-occlusion-probe.js', pointer_occlusion_probe],
   ['test-runner-watchdog.js', test_runner_watchdog],
+  ['interview-helper.js', interview_helper],
+  ['interview-helper-privacy.js', interview_helper_privacy],
+  ['interview-helper-render.js', interview_helper_render],
+  ['interview-private-store-filesystem.js', interview_private_store_filesystem],
+  ['interview-preparation.js', interview_preparation],
+  ['interview-preload.js', interview_preload],
+  ['interview-window.js', interview_window],
+  ['interview-window-render.js', interview_window_render],
+  ['career-recovery-resume.js', career_recovery_resume],
+  ['adaptability-skills.js', adaptability_skills],
+  ['adaptability-metrics.js', adaptability_metrics],
+  ['adaptability-dates.js', adaptability_dates],
+  ['adaptability-ownership.js', adaptability_ownership],
+  ['adaptability-relationships.js', adaptability_relationships],
+  ['adaptability-listing.js', adaptability_listing],
+  ['gapfix-claim-grounding.js', gapfix_claim_grounding],
+  ['gapfix-letter-evidence.js', gapfix_letter_evidence],
+  ['gapfix-career-validators.js', gapfix_career_validators],
+  ['gapfix-letter-proportion.js', gapfix_letter_proportion],
+  ['gapfix-repair-convergence.js', gapfix_repair_convergence],
+  ['gapfix-grounding-locality.js', gapfix_grounding_locality],
+  ['gapfix-transfer-budget.js', gapfix_transfer_budget],
+  ['gapfix-poll-integrity.js', gapfix_poll_integrity],
+  ['gapfix-host-owned-fields.js', gapfix_host_owned_fields],
+  ['gapfix-v16-claim-budget.js', gapfix_v16_claim_budget],
+  ['gapfix-v16-letter-conventions.js', gapfix_v16_letter_conventions],
+  ['gapfix-v16-prompts.js', gapfix_v16_prompts],
+  ['gapfix-v16-repair-brief.js', gapfix_v16_repair_brief],
+  ['gapfix-v16-resume-dates.js', gapfix_v16_resume_dates],
+  ['gapfix-v16-verb-fidelity.js', gapfix_v16_verb_fidelity],
+  ['gapfix-v16b-closing-authorship.js', gapfix_v16b_closing_authorship],
+  ['gapfix-v16b-contract-consistency.js', gapfix_v16b_contract_consistency],
+  ['gapfix-v16b-letter-truthfulness.js', gapfix_v16b_letter_truthfulness],
+  ['gapfix-v16b-relevance-budget.js', gapfix_v16b_relevance_budget],
+  ['gapfix-v16b-reviewer-context.js', gapfix_v16b_reviewer_context],
+  ['gapfix-v16b-verb-fidelity.js', gapfix_v16b_verb_fidelity],
+  ['gapfix-v16c-closing-gate.js', gapfix_v16c_closing_gate],
+  ['gapfix-v16c-letter-binding.js', gapfix_v16c_letter_binding],
+  ['gapfix-v16c-letter-functions.js', gapfix_v16c_letter_functions],
+  ['gapfix-v16c-requirement-modality.js', gapfix_v16c_requirement_modality],
+  ['gapfix-v16c-verb-fidelity.js', gapfix_v16c_verb_fidelity],
+  ['oracle-leak-gate.js', oracle_leak_gate],
 ];
 
 // Unit tests are normally short, but a suspended Promise otherwise lets Node

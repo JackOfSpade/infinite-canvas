@@ -72,7 +72,8 @@ import { isJobBoardUserCancellation } from '../utils/jobBoardAiProvider';
 import { exactInterruptedRecoveryBackendFailure } from '../utils/jobBoardRecoveryAdmission';
 import { classifyJobBoardSourceAdmission } from '../utils/jobBoardSourceAdmission';
 import { createJobCareerImportCapability, freshJobCareerImportCapability, jobCareerImportBoardAdmission, jobCareerImportConsumptionPatch, retryableUnstartedJobCareerImportCapability } from '../utils/jobCareerImportCapability';
-import { approveCareerImportCompilation, beginCareerImportCompilation, careerImportCompilationAdmission, careerImportCompilationMatches, compileBeforeCareerProvider, currentApprovedCareerImportSnapshot, failCareerImportCompilation, resumableCareerImportCompilation } from '../utils/jobCareerCompilationReceipt';
+import { isCareerCompilerTask } from '../utils/careerCompilerTasks';
+import { approveCareerImportCompilation, beginCareerImportCompilation, careerCompileResumeExplanation, careerImportCompilationAdmission, careerResumeBannerStatus, careerImportCompilationMatches, careerResumeInputPaths, compileBeforeCareerProvider, currentApprovedCareerImportSnapshot, failCareerImportCompilation, resumableCareerImportCompilation } from '../utils/jobCareerCompilationReceipt';
 import { buildJobCareerQueryCacheKey, canClaimJobRunCollectionCompletion, careerSnapshotBindingMatches, exactJobRunCareerSnapshotBindingMatches, normalizedJobCareerSnapshotId } from '../utils/jobCareerSnapshotBinding';
 import { moduleFingerprint } from './jobboard/mergeJobs';
 import {
@@ -219,10 +220,7 @@ function hasPendingManualAiRetirement(data) {
 // any independent audit, or repair must replay the same retained inputs and
 // frozen search window, never fall through to a fresh search.
 function isCareerCompilationTask(task) {
-  return task === 'career-file-extract'
-    || task === 'career-file-transcription-audit'
-    || task === 'resume-parse'
-    || (typeof task === 'string' && task.startsWith('career-profile-'));
+  return isCareerCompilerTask(task);
 }
 
 // The results cascade (hiring-fit/salary/role tree) is no longer spawned here —
@@ -1445,6 +1443,26 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         store.edges,
       );
       return owner ? `${owner.orchestratorNodeId}:${owner.boardRunId}` : '';
+    }, [id]),
+  );
+  // A live Board connection owns *new* search admission, but it does not own
+  // every pre-existing manual-AI handoff on that Search. Bind recovery consent
+  // to the exact child marker so an idle Board cannot hide its only Continue
+  // action after a crash. This resolver remains fail-closed for an explicitly
+  // Board-owned orphan, while the broader active-owner reservation below keeps
+  // governing fresh scans.
+  const manualAiRecoveryBoardOwnerKey = useStore(
+    useCallback((store) => {
+      const resume = store.nodeLookup.get(id)?.data?.manualAiResume;
+      const owner = findJobSearchBoardRecoveryOwner(
+        id,
+        resume?.runId,
+        store.nodeLookup,
+        store.edges,
+      );
+      return owner
+        ? `${owner.orchestratorNodeId || 'unknown'}:${owner.boardRunId || 'unknown'}:${owner.missingPlan === true ? 'orphaned' : 'active'}`
+        : '';
     }, [id]),
   );
   // Most durable Board recovery ownership makes direct Search controls dead
@@ -12088,7 +12106,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
   const savedManualAiRecovery = data.manualAiResume;
   const manualAiRecoveryNeedsDecision = !!savedManualAiRecovery?.runId
     && savedManualAiRecovery.retirementPending !== true
-    && !boardRecoveryOwnsActions;
+    && !manualAiRecoveryBoardOwnerKey;
   const manualAiRecoveryActionBusy = manualAiRecoveryNeedsDecision
     && manualAiStaleRecoveryActionRunId === savedManualAiRecovery?.runId;
   // Any saved semantic handoff is an admission boundary. Letting Re-scan,
@@ -12814,11 +12832,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       if (!compilation) {
         return failRecoveryInspection('This saved career-import recovery no longer matches its current compilation receipt. It was kept; use Clear career data rather than mixing runs.');
       }
-      const uniquePaths = [...new Set([
-        ...(Array.isArray(liveData.filePaths) ? liveData.filePaths : []),
-        ...(Array.isArray(liveData.careerFilePaths) ? liveData.careerFilePaths : []),
-        liveData.filePath,
-      ].filter(Boolean))];
+      const uniquePaths = careerResumeInputPaths(liveData);
       if (uniquePaths.length === 0) {
         return failRecoveryInspection('This saved career-import recovery no longer has the career input that created it. Use Clear career data before choosing new input.');
       }
@@ -13042,7 +13056,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       processingRunsRef.current.active
       || data.locked
       || platformsVerifying
-      || boardRecoveryOwnsActions
+      || manualAiRecoveryBoardOwnerKey
     ) return;
     if (!['empty', 'done', 'sources-ready'].includes(hubState)) return;
     // Provider collection may recover unattended, but a role-screen/scoring
@@ -13111,7 +13125,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         }
       }
     });
-  }, [activeBoardRecoveryOwnerKey, boardRecoveryOwnsActions, canvasFilePath, data.manualAiCleanupReceipts, data.manualAiResume, data.locked, deletionLifecycleRevision, getEdges, getNode, getNodes, hubState, id, isMountedRef, manualAiAutoResumeRetryRevision, manualAiExplicitResumeRequest, platformsVerifying, resumeManualAiRecovery, settleManualAiRetirement, updateGlobal]);
+  }, [canvasFilePath, data.manualAiCleanupReceipts, data.manualAiResume, data.locked, deletionLifecycleRevision, getEdges, getNode, getNodes, hubState, id, isMountedRef, manualAiAutoResumeRetryRevision, manualAiExplicitResumeRequest, manualAiRecoveryBoardOwnerKey, platformsVerifying, resumeManualAiRecovery, settleManualAiRetirement, updateGlobal]);
 
   const handleContinueManualAiRecovery = useCallback(() => {
     const liveData = getNode(id)?.data || {};
@@ -13137,6 +13151,53 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     setManualAiExplicitResumeRequest({ runId: resume.runId, requestedAt: Date.now() });
     EventLogger.log(`[JobSearch][${id}] User continued saved manual AI run ${resume.runId}`);
   }, [canvasFilePath, getEdges, getNode, getNodes, id]);
+
+  // What will Continue really do for a saved career compilation?  Answered by
+  // the main process from the files' content and the compiler contract, never
+  // assumed: the banner must not call a restart an exact resume.
+  const careerResumeMarkerRunId = isCareerCompilationTask(data.manualAiResume?.task)
+    ? data.manualAiResume?.runId || null
+    : null;
+  const careerResumePaths = careerResumeInputPaths(data);
+  const careerResumePathsKey = careerResumePaths.join('\u0000');
+  const careerResumeInspectable = ['empty', 'done', 'sources-ready'].includes(hubState);
+  const [careerResumeStatus, setCareerResumeStatus] = useState(null);
+  // A verdict is about the files' CONTENT, which can change on disk at the same
+  // path while this card sits idle.  Re-inspect whenever the window regains
+  // focus (the person typically edits the file in another app), so an
+  // "unchanged" verdict is never left standing after an edit.
+  const [careerResumeRefresh, setCareerResumeRefresh] = useState(0);
+  useEffect(() => {
+    if (!careerResumeMarkerRunId || !careerResumePathsKey || !careerResumeInspectable) return undefined;
+    const refresh = () => setCareerResumeRefresh(count => count + 1);
+    window.addEventListener('focus', refresh);
+    return () => window.removeEventListener('focus', refresh);
+  }, [careerResumeInspectable, careerResumeMarkerRunId, careerResumePathsKey]);
+  useEffect(() => {
+    if (!careerResumeMarkerRunId || !careerResumePathsKey || !careerResumeInspectable) return undefined;
+    const inspect = window.electronAPI?.inspectCareerCompileResume;
+    const key = `${careerResumeMarkerRunId}\u0000${careerResumePathsKey}`;
+    if (typeof inspect !== 'function') {
+      setCareerResumeStatus({ key, state: 'unavailable' });
+      return undefined;
+    }
+    let cancelled = false;
+    setCareerResumeStatus(current => (current?.key === key && current.state !== 'unavailable' ? current : { key, state: 'checking' }));
+    void Promise.resolve(inspect({ filePaths: careerResumePathsKey.split('\u0000'), manualAiRunId: careerResumeMarkerRunId }))
+      .then((result) => {
+        if (cancelled) return;
+        const mode = result?.success && ['snapshot-ready', 'exact', 'restart', 'unverified'].includes(result.mode) ? result.mode : 'unavailable';
+        setCareerResumeStatus({ key, state: mode, acceptedSteps: result?.acceptedSteps, reason: result?.reason });
+      })
+      .catch(() => { if (!cancelled) setCareerResumeStatus({ key, state: 'unavailable' }); });
+    return () => { cancelled = true; };
+  }, [careerResumeInspectable, careerResumeMarkerRunId, careerResumePathsKey, careerResumeRefresh]);
+  const careerResumeCurrentStatus = careerResumeBannerStatus({
+    markerRunId: careerResumeMarkerRunId,
+    paths: careerResumePaths,
+    inspected: careerResumeStatus,
+    key: `${careerResumeMarkerRunId}\u0000${careerResumePathsKey}`,
+  });
 
   const handleDismissError = useCallback(() => {
     EventLogger.log(`[JobSearch][${id}] User clicked Dismiss Error`);
@@ -13379,8 +13440,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     manualAiRecoveryNeedsDecision
     && !data.queuedModuleRun
     && !data.terminalFinalizationRecovery
-    && !activeBoardRecoveryOwnerKey
-    && !boardRecoveryOwnsActions
+    && !manualAiRecoveryBoardOwnerKey
     && (hubState === 'empty' || hubState === 'done' || hubState === 'sources-ready')
   );
   // The run manifest tells a bug report that recovery data exists, but it
@@ -13594,13 +13654,22 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
   const agedManualAiRecovery = isStaleOrdinaryManualAiResume(savedManualAiRecovery);
   const savedReanalysisManualAiRecovery = isSavedJobReanalysisManualAiResume(savedManualAiRecovery);
   const savedScrapeManualAiRecovery = isSavedScrapeManualAiResume(savedManualAiRecovery);
+  // A saved career compilation never reuses the generic "exact saved
+  // checkpoint" sentence: whether Continue resumes exactly or restarts depends
+  // on the files and compiler, which the main process verified above.
+  const careerResumeExplanation = careerResumeMarkerRunId
+    ? careerCompileResumeExplanation(careerResumeCurrentStatus || { state: 'checking' }, { paused: pausedManualAiRecovery })
+    : null;
+  const careerResumeStillChecking = !!careerResumeExplanation && (careerResumeCurrentStatus?.state || 'checking') === 'checking';
   const manualAiRecoveryBanner = showManualAiRecoveryBanner ? (
     <div className="m-2 p-2 rounded-md bg-amber-500/10 border border-amber-500/30" onPointerDown={(e) => e.stopPropagation()}>
       <div className="text-amber-200/90 text-[11px] font-medium leading-snug">
-        {savedReanalysisManualAiRecovery ? 'Saved-job re-analysis paused' : pausedManualAiRecovery ? 'Job search paused' : 'Saved AI handoff ready'}
+        {careerResumeExplanation ? careerResumeExplanation.title : savedReanalysisManualAiRecovery ? 'Saved-job re-analysis paused' : pausedManualAiRecovery ? 'Job search paused' : 'Saved AI handoff ready'}
       </div>
       <div className="text-amber-200/60 text-[10px] leading-snug mt-0.5">
-        {savedReanalysisManualAiRecovery
+        {careerResumeExplanation
+          ? `${careerResumeExplanation.body} Clear career data is the only way to remove it.`
+          : savedReanalysisManualAiRecovery
           ? 'Your saved listings and revised Search Brief are retained. Continue re-evaluates those saved jobs only; it never starts a new scrape.'
           : pausedManualAiRecovery
           ? 'This job search was stopped before source scraping began. Continue resumes its saved handoff and original date window; it never starts a new scan. Clear career data is the only way to remove it.'
@@ -13615,7 +13684,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
           className="nodrag px-2 py-0.5 rounded text-[10px] font-medium bg-amber-500/80 text-black hover:bg-amber-400 disabled:cursor-default disabled:opacity-50"
           onPointerDown={(e) => e.stopPropagation()}
           onClick={handleContinueManualAiRecovery}
-          disabled={baseControlsLocked || manualAiRecoveryActionBusy || !canvasFilePath}
+          disabled={baseControlsLocked || manualAiRecoveryActionBusy || !canvasFilePath || careerResumeStillChecking}
         >Continue</button>
       </div>
     </div>

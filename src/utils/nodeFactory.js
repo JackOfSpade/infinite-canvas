@@ -107,6 +107,38 @@ function createJobBoardNode(position, extra = {}) {
   };
 }
 
+// Interview Helper can pin an approved Job Search snapshot or compile its own
+// independent approved snapshot. It persists only opaque references and a
+// compact, privacy-safe preparation brief; unfinished question typing remains
+// renderer-local.
+function createInterviewHelperNode(position, extra = {}) {
+  return {
+    id: generateId(), type: 'interviewhelper', position,
+    data: {
+      interviewHelperSourceNodeId: null,
+      interviewHelperSourceSnapshotId: null,
+      interviewHelperCareerMode: null,
+      interviewHelperCareerGeneration: null,
+      interviewHelperCareerCompilation: null,
+      interviewHelperCareerSnapshotId: null,
+      interviewHelperCareerFingerprint: null,
+      interviewHelperCareerFilenames: [],
+      interviewHelperJobUrl: null,
+      interviewHelperApplicationBundle: null,
+      interviewHelperPreparation: null,
+      interviewHelperPreparationRecordId: null,
+      interviewHelperPreparationInputBinding: null,
+      interviewHelperPreparationInputDigest: null,
+      interviewHelperPreparationRunId: null,
+      interviewHelperManualAiCleanup: null,
+      interviewHelperManualAiRetirementReceipts: null,
+      interviewHelperLockedPlan: null,
+      interviewHelperCurrentStep: 0,
+      ...extra,
+    },
+  };
+}
+
 /** Centralized factory lookup — avoids duplicated maps across hooks. */
 export const NODE_FACTORIES = {
   text: createTextNode,
@@ -114,6 +146,7 @@ export const NODE_FACTORIES = {
   group: createGroupNode,
   jobhub: createJobSearchNode,
   jobboard: createJobBoardNode,
+  interviewhelper: createInterviewHelperNode,
   sellhub: createSellHubNode,
   marketplacestatus: createMarketplaceStatusNode,
 };
@@ -260,6 +293,29 @@ export function cloneNode(original, dx = 40, dy = 40) {
   // cleanup above; Sell Hub retains its existing draft recovery behavior.
   if (clone.type === 'jobhub') {
     sanitizeJobHubClone(clone.data);
+  } else if (clone.type === 'interviewhelper') {
+    // A helper rail is bound to a particular Job Search node and immutable
+    // snapshot. A duplicate (including a nested-group duplicate) has a new
+    // identity and must make that consent/source selection afresh.
+    clone.data.interviewHelperSourceNodeId = null;
+    clone.data.interviewHelperSourceSnapshotId = null;
+    clone.data.interviewHelperCareerMode = null;
+    clone.data.interviewHelperCareerGeneration = null;
+    clone.data.interviewHelperCareerCompilation = null;
+    clone.data.interviewHelperCareerSnapshotId = null;
+    clone.data.interviewHelperCareerFingerprint = null;
+    clone.data.interviewHelperCareerFilenames = [];
+    clone.data.interviewHelperJobUrl = null;
+    clone.data.interviewHelperApplicationBundle = null;
+    clone.data.interviewHelperPreparation = null;
+    clone.data.interviewHelperPreparationRecordId = null;
+    clone.data.interviewHelperPreparationInputBinding = null;
+    clone.data.interviewHelperPreparationInputDigest = null;
+    clone.data.interviewHelperPreparationRunId = null;
+    clone.data.interviewHelperManualAiCleanup = null;
+    clone.data.interviewHelperManualAiRetirementReceipts = null;
+    clone.data.interviewHelperLockedPlan = null;
+    clone.data.interviewHelperCurrentStep = 0;
   } else if (clone.type === 'jobboard') {
     // A standalone Board clone starts with no edges, so its connection-specific
     // nonempty allow-list cannot be reused. An explicit [] is topology-free

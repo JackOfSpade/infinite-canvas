@@ -63,8 +63,16 @@ export const APPLICATION_DOCK_WORKING_STATUSES = Object.freeze([
 // is possible here either — but unlike a truly idle status, the bundle can
 // still fail back into another paste round, so its number must not be
 // released while it sits here. Mirrors LOCAL_AI_CARD_POLL_IDLE_STATUSES.
+//
+// 'blocked' is the status poll's answer for a job written by another app
+// build, whose signed state this build cannot re-verify. Asking such a job
+// for a handoff would run the mutating load path, which ends a job on its
+// first integrity fault: so it must never read as "can show a prompt". It is
+// not finished either (the build that wrote it can still continue it), so it
+// keeps its slot and number.
 export const APPLICATION_DOCK_BLOCKED_STATUSES = Object.freeze([
   'render-retry-required',
+  'blocked',
 ]);
 
 /**

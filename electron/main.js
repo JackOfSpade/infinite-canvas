@@ -3,9 +3,22 @@ const { app, BrowserWindow, Menu, protocol, nativeImage } = electronPkg;
 import path from 'path';
 import { registerFilesystemHandlers } from './ipc/filesystem.js';
 import { resolveMissingPreviewPath } from './ipc/missingPreviewRelink.js';
-import { decodeLocalFileRequestPath } from './localFileProtocol.js';
+import {
+  assertPrivateLocalFileReservation,
+  assertLocalFileLookupPathAllowed,
+  assertPinnedLocalFileBinding,
+  createPrivateLocalFileOutputDirectory,
+  createPrivateLocalFileWorkDirectory,
+  createPinnedLocalReadStream,
+  decodeLocalFileRequestPath,
+  isLocalFileSafetyError,
+  openPinnedLocalFile,
+  readPrivateLocalFile,
+  removePrivateLocalFileWorkDirectory,
+  reservePrivateLocalFile,
+} from './localFileProtocol.js';
 import { isProductImageExtension } from '../src/utils/fileExtensions.js';
-import { isExistingFile, isSensitivePath } from './utils/pathSafety.js';
+import { isExistingFile, isRendererSensitivePath } from './utils/pathSafety.js';
 import {
   initialCanvasWindowSpec,
   openOrFocusCanvasWindow,
@@ -15,6 +28,9 @@ import {
 import { isTrustedCanvasNavigation } from './canvasNavigation.js';
 import { logger } from './logger.js';
 import { registerJobsHandlers } from './ipc/jobs.js';
+import { loadInterviewHelperCareerSnapshot, registerInterviewHelperHandlers } from './ipc/interviewHelper.js';
+import { loadInterviewPreparationBundle, registerInterviewPreparationHandlers } from './ipc/interviewPreparation.js';
+import { createInterviewWindowController, isTrustedInterviewNavigation } from './interviewWindow.js';
 import { registerJobApplicationHandlers } from './ipc/jobApplication.js';
 import { registerLocalAiApplicationHandlers } from './ipc/localAiApplication.js';
 import { startApplicationSyncServer, stopApplicationSyncServer } from './ipc/applicationSync.js';
@@ -35,8 +51,6 @@ import { prepareBinary } from './ipc/handoffBridge/tunnel/binary.js';
 import { inspectCredentials } from './ipc/handoffBridge/tunnel/credentials.js';
 import { reapOrphans } from './ipc/handoffBridge/tunnel/reap.js';
 import fs from 'fs';
-import os from 'node:os';
-import crypto from 'node:crypto';
 import { Readable } from 'node:stream';
 import { execFile as execFileCb, execFileSync, spawnSync } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -429,25 +443,53 @@ function encodeNativeImageUnderLimit(image, { maxBytes, maxDimension }) {
   return null;
 }
 
-async function createSipsPreviewBuffer(filePath, { maxBytes, maxDimension }) {
+/**
+ * sips only accepts a pathname or directory for --out and internally stages a
+ * temporary file before rename.  Give it a fresh host-only directory rather
+ * than a shared os.tmpdir filename; bind the expected result before returning
+ * any bytes.  This deliberately has no disk cache: an untrusted cache hit is
+ * worse than a repeat conversion, while the in-memory preview LRU above never
+ * reopens a filesystem path.
+ */
+async function createPrivateSipsJpegBuffer(filePath, workDirectory, sipsArgs, sourceReservation = null) {
+  if (sourceReservation) {
+    await assertPrivateLocalFileReservation(workDirectory, sourceReservation);
+  }
+  const output = await createPrivateLocalFileOutputDirectory(workDirectory);
+  const outputPath = path.join(output.directory, 'source.jpg');
+  try {
+    await execFile('/usr/bin/sips', [...sipsArgs, filePath, '--out', output.directory]);
+    await assertPrivateLocalFileReservation(output.directory, {
+      filePath: output.markerPath,
+      identity: output.markerIdentity,
+    });
+    return await readPrivateLocalFile(output.directory, outputPath);
+  } finally {
+    // The converter namespace is a private child created for this one call.
+    // Its cleanup helper refuses a substituted top-level directory rather than
+    // recursively chasing a symlink during an error path.
+    await removePrivateLocalFileWorkDirectory(output.directory, { storageRoot: workDirectory }).catch(() => {});
+  }
+}
+
+async function createSipsPreviewBuffer(filePath, {
+  maxBytes,
+  maxDimension,
+  workDirectory,
+  sourceReservation,
+}) {
   let dimension = maxDimension;
   while (dimension >= 128) {
     for (const quality of MARKETPLACE_PREVIEW_QUALITY_STEPS) {
-      const tmpOut = path.join(os.tmpdir(), `ic_marketplace_preview_${crypto.randomUUID()}.jpg`);
       try {
-        await execFile('/usr/bin/sips', [
+        const buffer = await createPrivateSipsJpegBuffer(filePath, workDirectory, [
           '-Z', String(dimension),
           '-s', 'format', 'jpeg',
           '-s', 'formatOptions', String(quality),
-          filePath,
-          '--out', tmpOut,
-        ]);
-        const buffer = await fs.promises.readFile(tmpOut);
+        ], sourceReservation);
         if (buffer.length <= maxBytes) return buffer;
       } catch {
         return null;
-      } finally {
-        fs.promises.unlink(tmpOut).catch(() => {});
       }
     }
     dimension = Math.floor(dimension * 0.65);
@@ -455,14 +497,25 @@ async function createSipsPreviewBuffer(filePath, { maxBytes, maxDimension }) {
   return null;
 }
 
-async function createMarketplacePreviewBuffer(filePath, { maxBytes, maxDimension }) {
+async function createMarketplacePreviewBuffer(filePath, {
+  maxBytes,
+  maxDimension,
+  workDirectory,
+  sourceReservation,
+}) {
+  await assertPrivateLocalFileReservation(workDirectory, sourceReservation);
   const sourceImage = nativeImage.createFromPath(filePath);
   if (sourceImage && !sourceImage.isEmpty()) {
     const directBuffer = encodeNativeImageUnderLimit(sourceImage, { maxBytes, maxDimension });
     if (directBuffer) return directBuffer;
   }
 
-  const sipsBuffer = await createSipsPreviewBuffer(filePath, { maxBytes, maxDimension });
+  const sipsBuffer = await createSipsPreviewBuffer(filePath, {
+    maxBytes,
+    maxDimension,
+    workDirectory,
+    sourceReservation,
+  });
   if (sipsBuffer) return sipsBuffer;
 
   const thumbnail = await nativeImage.createThumbnailFromPath(filePath, {
@@ -471,6 +524,53 @@ async function createMarketplacePreviewBuffer(filePath, { maxBytes, maxDimension
   });
   if (!thumbnail || thumbnail.isEmpty()) return null;
   return encodeNativeImageUnderLimit(thumbnail, { maxBytes, maxDimension });
+}
+
+// External image decoders accept only a pathname.  Do not hand them a
+// renderer-controlled pathname after it has been checked: copy the already
+// pinned descriptor to a private, unpredictable temp directory first.  The
+// decoder therefore sees exactly the bytes whose identity was approved by the
+// local-file protocol, even if the renderer spelling is replaced meanwhile.
+async function materializePinnedLocalFile(pinnedFile, extension = '') {
+  const workspace = await createPrivateLocalFileWorkDirectory(app.getPath('userData'));
+  const safeExtension = /^\.[a-z0-9]{1,16}$/iu.test(extension) ? extension.toLowerCase() : '';
+  let reservation = null;
+  const sourcePath = path.join(workspace.directory, `source${safeExtension}`);
+  try {
+    reservation = await reservePrivateLocalFile(workspace.directory, path.basename(sourcePath));
+    const sourceReservation = {
+      filePath: reservation.filePath,
+      identity: reservation.identity,
+    };
+    const input = createPinnedLocalReadStream(pinnedFile, { start: 0, closeOnEnd: false });
+    // Write through the O_EXCL|O_NOFOLLOW descriptor returned by the private
+    // workspace reservation. No renderer-controlled pathname is reopened.
+    const output = fs.createWriteStream(null, { fd: reservation.handle.fd, autoClose: false });
+    await new Promise((resolve, reject) => {
+      const fail = error => {
+        input.destroy();
+        output.destroy();
+        reject(error);
+      };
+      input.once('error', fail);
+      output.once('error', fail);
+      output.once('finish', resolve);
+      input.pipe(output);
+    });
+    await reservation.close();
+    reservation = null;
+    return {
+      sourcePath,
+      workDirectory: workspace.directory,
+      sourceReservation,
+      cleanup: () => removePrivateLocalFileWorkDirectory(workspace.directory, { storageRoot: workspace.storageRoot }),
+    };
+  } catch (error) {
+    await reservation?.close().catch(() => {});
+    await pinnedFile.close().catch(() => {});
+    await removePrivateLocalFileWorkDirectory(workspace.directory, { storageRoot: workspace.storageRoot }).catch(() => {});
+    throw error;
+  }
 }
 
 function getMarketplacePreviewCache(key) {
@@ -525,6 +625,7 @@ process.on('unhandledRejection', (reason, promise) => {
 // localStorage) live once in this single main process and are deliberately
 // shared — running multiple OS processes would fight over those.
 const canvasWindows = new Set();
+let interviewWindowController = null;
 // Most-recently focused canvas window — menu actions target this so File ▸ Save
 // etc. act on the window the user is actually looking at.
 let lastFocusedCanvasWindow = null;
@@ -1021,6 +1122,7 @@ function createWindow(initSpec = { mode: 'auto' }) {
   });
 
   win.on('closed', () => {
+    interviewWindowController?.cleanupOwner(win);
     canvasWindows.delete(win);
     if (lastFocusedCanvasWindow === win) lastFocusedCanvasWindow = null;
   });
@@ -1157,18 +1259,24 @@ app.on('web-contents-created', (_, contents) => {
 
   contents.on('will-navigate', (event, navigationUrl) => {
     // Auth/monitor BrowserWindows need to follow their remote flows. Only the
-    // canvas has the application's preload bridge and therefore needs this
-    // strict top-level navigation allowlist.
-    if (!contents.__isCanvasRenderer) return;
+    // canvas and the narrow Interview Helper child have application preload
+    // bridges, so both get a strict, surface-specific top-level allowlist.
+    if (!contents.__isCanvasRenderer && !contents.__isInterviewHelperRenderer) return;
     try {
       const parsedUrl = new URL(navigationUrl);
-      if (isTrustedCanvasNavigation(navigationUrl, {
-        devServerUrl: process.env.VITE_DEV_SERVER_URL,
-        distDir: path.join(__dirname, '../dist'),
-      })) return;
+      const trusted = contents.__isInterviewHelperRenderer
+        ? isTrustedInterviewNavigation(navigationUrl, {
+            devServerUrl: process.env.VITE_DEV_SERVER_URL,
+            distHtmlPath: path.join(__dirname, '../dist/index.html'),
+          })
+        : isTrustedCanvasNavigation(navigationUrl, {
+            devServerUrl: process.env.VITE_DEV_SERVER_URL,
+            distDir: path.join(__dirname, '../dist'),
+          });
+      if (trusted) return;
 
       event.preventDefault();
-      if (parsedUrl.protocol === 'http:' || parsedUrl.protocol === 'https:') {
+      if (contents.__isCanvasRenderer && (parsedUrl.protocol === 'http:' || parsedUrl.protocol === 'https:')) {
         openExternalSafely(navigationUrl);
       }
     } catch {
@@ -1253,6 +1361,7 @@ if (!gotTheLock) {
 
     protocol.handle('local-file', async (request) => {
       let requestParams = new URLSearchParams();
+      let pinnedFile = null;
       try {
         requestParams = new URL(request.url).searchParams;
       } catch { /* malformed legacy URL; path decoder below has its own fallback */ }
@@ -1261,7 +1370,7 @@ if (!gotTheLock) {
         // ── Protocol Security Hardening ──────────────────────────────────────────
         // 1. Resolve to an absolute path immediately to catch relative traversal attempts.
         // 2. Normalize segments. 
-        // 3. Resolve real path to prevent symlink-based blocklist bypasses.
+        // 3. Bind the resolved regular file through the descriptor guard below.
         const absolutePath = path.resolve(decodedPath);
         const normalizedPath = path.normalize(absolutePath);
         const previewMode = requestParams.get('preview');
@@ -1269,12 +1378,19 @@ if (!gotTheLock) {
         const isImageRequest = isProductImageExtension(requestedExt);
         
         let targetPath = normalizedPath;
-        try { targetPath = fs.realpathSync(normalizedPath); } catch { /* ignore */ }
+
+        // Prove the lexical path and its nearest resolved ancestor are outside
+        // the complete renderer-denied userData namespace before even the
+        // missing-preview existence probe below. That probe is metadata-only,
+        // but it must not become an oracle for host-private store entries.
+        await assertLocalFileLookupPathAllowed(normalizedPath, { isSensitive: isRendererSensitivePath });
 
         if (
           isImageRequest
           && !isExistingFile(targetPath)
         ) {
+          // A missing preview can trigger a bounded hierarchy search. The
+          // generic guard above has already checked its nearest real ancestor.
           const relink = await resolveMissingPreviewPath(normalizedPath);
           if (relink.status === 'found') {
             targetPath = relink.path;
@@ -1287,25 +1403,31 @@ if (!gotTheLock) {
         }
         
         // Block sensitive system roots, config, and credential-store files
-        // (shared with the AI-attachment read gate in nonApiAi.js — see
-        // isSensitivePath's doc comment for why this is a blocklist, not an
-        // allowlist).
-        if (isSensitivePath(targetPath)) {
+        // (shared with the AI-attachment read gate in nonApiAi.js — renderer
+        // policy also denies the complete app-owned userData namespace).
+        if (isRendererSensitivePath(targetPath)) {
           logger.warn(`[Security] Blocked access to sensitive path via local-file: ${targetPath}`);
           return new Response('Access Denied', { status: 403 });
         }
 
-        // Verify the file exists and get its extension before any branch
-        // (HEIC transcoding and range-streaming both need these).
-        let stat;
-        try { stat = fs.statSync(targetPath); }
+        // Bind a direct, regular, single-link descriptor before any branch
+        // can read bytes.  In particular, do not validate `targetPath` and
+        // later createReadStream(targetPath): a pathname replacement in that
+        // gap could otherwise redirect the protocol to private application
+        // material.
+        try { pinnedFile = await openPinnedLocalFile(targetPath, { isSensitive: isRendererSensitivePath }); }
         catch (error) {
+          if (isLocalFileSafetyError(error)) {
+            logger.warn(`[Security] Blocked unsafe local-file target: ${targetPath} (${error.code})`);
+            return new Response('Access Denied', { status: 403 });
+          }
           if (isImageRequest) {
             logger.warn(`[local-file] Image preview target not found after relink: request=${request.url} normalized=${normalizedPath} target=${targetPath} (${error?.code || error?.message || 'stat failed'})`);
           }
           return new Response('Not Found', { status: 404 });
         }
-        if (!stat.isFile()) return new Response('Not Found', { status: 404 });
+        const stat = pinnedFile.stat;
+        targetPath = pinnedFile.filePath;
 
         const ext = path.extname(targetPath).toLowerCase();
         const contentType = LOCAL_FILE_MIME_TYPES[ext] || 'application/octet-stream';
@@ -1325,6 +1447,8 @@ if (!gotTheLock) {
           const cacheKey = `${targetPath}|${stat.mtimeMs}|${stat.size}|${maxBytes}|${maxDimension}`;
           const cachedPreview = getMarketplacePreviewCache(cacheKey);
           if (cachedPreview) {
+            await pinnedFile.close();
+            pinnedFile = null;
             return new Response(cachedPreview, {
               status: 200,
               headers: {
@@ -1334,12 +1458,23 @@ if (!gotTheLock) {
               },
             });
           }
-          const previewBuffer = await createMarketplacePreviewBuffer(targetPath, {
-            maxBytes,
-            maxDimension,
-          });
+          await assertPinnedLocalFileBinding(pinnedFile);
+          const materialized = await materializePinnedLocalFile(pinnedFile, ext);
+          let previewBuffer;
+          try {
+            previewBuffer = await createMarketplacePreviewBuffer(materialized.sourcePath, {
+              maxBytes,
+              maxDimension,
+              workDirectory: materialized.workDirectory,
+              sourceReservation: materialized.sourceReservation,
+            });
+          } finally {
+            await materialized.cleanup();
+          }
           if (previewBuffer) {
             setMarketplacePreviewCache(cacheKey, previewBuffer);
+            await pinnedFile.close();
+            pinnedFile = null;
             return new Response(previewBuffer, {
               status: 200,
               headers: {
@@ -1350,6 +1485,8 @@ if (!gotTheLock) {
             });
           }
           if (stat.size > maxBytes) {
+            await pinnedFile.close();
+            pinnedFile = null;
             return new Response('Preview unavailable', { status: 415 });
           }
         }
@@ -1359,50 +1496,35 @@ if (!gotTheLock) {
         // raw bytes render as a broken image. sips is Apple's built-in image tool
         // (ships with every Mac since 10.3) on the full Core Image / ImageIO
         // stack — it reads all of these and emits JPEG for compact transfer.
-        // Result is CACHED on disk keyed by source path+mtime+size: the previous
-        // no-cache path re-ran sips on every fetch (a multi-MB HEIC took ~1-2s
-        // each → visible "loading" flicker). The cache invalidates automatically
-        // when the file changes, and reuses one temp JPEG across all re-renders.
+        // Conversion deliberately has no on-disk cache. A cache path is another
+        // renderer-adjacent read surface, while this one-shot private workspace
+        // can bind the exact sips result before returning it.
         if (DISPLAY_TRANSCODE_EXT.has(ext)) {
-          const key = crypto.createHash('sha1')
-            .update(`${targetPath}|${stat.mtimeMs}|${stat.size}`).digest('hex');
-          const cachePath = path.join(os.tmpdir(), `ic_imgcache_${key}.jpg`);
           try {
+            await assertPinnedLocalFileBinding(pinnedFile);
+            const materialized = await materializePinnedLocalFile(pinnedFile, ext);
             let jpegBuf;
             try {
-              jpegBuf = await fs.promises.readFile(cachePath); // cache hit — no sips
-            } catch {
-              // Convert to a UNIQUE temp then atomically rename into the cache
-              // slot, so two concurrent first-renders of the same image can't
-              // collide on one deterministic --out path (the Error 13 sips
-              // rename race). A lost rename race is fine — the winner's file is
-              // identical bytes; fall back to the temp if the cache read misses.
-              const tmpOut = path.join(os.tmpdir(), `ic_imgtmp_${crypto.randomUUID()}.jpg`);
-              try {
-                await execFile('/usr/bin/sips', [
-                  '-s', 'format', 'jpeg',
-                  '-s', 'formatOptions', '85',
-                  targetPath,
-                  '--out', tmpOut,
-                ]);
-                await fs.promises.rename(tmpOut, cachePath).catch(() => {});
-                jpegBuf = await fs.promises.readFile(cachePath).catch(() => fs.promises.readFile(tmpOut));
-              } finally {
-                // sips can leave a partial output when conversion fails. Keep
-                // the deterministic cache winner, but never leak the unique
-                // per-attempt file on an error or lost rename race.
-                await fs.promises.unlink(tmpOut).catch(() => {});
-              }
+              jpegBuf = await createPrivateSipsJpegBuffer(materialized.sourcePath, materialized.workDirectory, [
+                '-s', 'format', 'jpeg',
+                '-s', 'formatOptions', '85',
+              ], materialized.sourceReservation);
+            } finally {
+              await materialized.cleanup();
             }
+            await pinnedFile.close();
+            pinnedFile = null;
             return new Response(jpegBuf, {
               status: 200,
               headers: {
                 'Content-Type':   'image/jpeg',
                 'Content-Length': String(jpegBuf.length),
-                'Cache-Control':  'no-cache', // revalidate, but served from the disk cache (no re-convert)
+                'Cache-Control':  'no-cache',
               },
             });
           } catch (imgErr) {
+            await pinnedFile?.close().catch(() => {});
+            pinnedFile = null;
             console.error(`[local-file] ${ext} sips transcode failed:`, imgErr);
             return new Response('Image decode error', { status: 500 });
           }
@@ -1430,6 +1552,8 @@ if (!gotTheLock) {
               if (Number.isNaN(end))   end   = total - 1;
             }
             if (start > end || start >= total) {
+              await pinnedFile.close();
+              pinnedFile = null;
               return new Response('Range Not Satisfiable', {
                 status: 416,
                 headers: { 'Content-Range': `bytes */${total}` },
@@ -1437,7 +1561,9 @@ if (!gotTheLock) {
             }
             end = Math.min(end, total - 1);
             const chunkSize = end - start + 1;
-            const stream = fs.createReadStream(targetPath, { start, end });
+            await assertPinnedLocalFileBinding(pinnedFile);
+            const stream = createPinnedLocalReadStream(pinnedFile, { start, end });
+            pinnedFile = null; // the stream owns descriptor cleanup now
             return new Response(Readable.toWeb(stream), {
               status: 206,
               headers: {
@@ -1452,7 +1578,9 @@ if (!gotTheLock) {
           // Malformed Range — fall through to full-body 200.
         }
 
-        const stream = fs.createReadStream(targetPath);
+        await assertPinnedLocalFileBinding(pinnedFile);
+        const stream = createPinnedLocalReadStream(pinnedFile);
+        pinnedFile = null; // the stream owns descriptor cleanup now
         return new Response(Readable.toWeb(stream), {
           status: 200,
           headers: {
@@ -1463,6 +1591,11 @@ if (!gotTheLock) {
           },
         });
       } catch (error) {
+        await pinnedFile?.close().catch(() => {});
+        if (isLocalFileSafetyError(error)) {
+          logger.warn(`[Security] Blocked unsafe local-file target after binding (${error.code})`);
+          return new Response('Access Denied', { status: 403 });
+        }
         console.error('Failed to handle local-file protocol', error);
         return new Response('Internal Error', { status: 500 });
       }
@@ -1470,6 +1603,19 @@ if (!gotTheLock) {
 
     registerFilesystemHandlers();
     registerJobsHandlers();
+    registerInterviewHelperHandlers();
+    registerInterviewPreparationHandlers();
+    interviewWindowController = createInterviewWindowController({
+      BrowserWindow,
+      ipcMain: electronPkg.ipcMain,
+      appInstance: app,
+      isAuthorizedOwner: owner => canvasWindows.has(owner) && !owner.isDestroyed(),
+      loadSnapshot: ({ snapshotId, userDataPath }) => loadInterviewHelperCareerSnapshot({ snapshotId, userDataPath }),
+      loadBundle: ({ artifactId, userDataPath }) => loadInterviewPreparationBundle({ artifactId, userDataPath }),
+      preloadPath: path.join(__dirname, 'interviewWindowPreload.js'),
+      devServerUrl: process.env.VITE_DEV_SERVER_URL || null,
+      distHtmlPath: path.join(__dirname, '../dist/index.html'),
+    });
     registerJobApplicationHandlers();
     registerLocalAiApplicationHandlers();
     startApplicationSyncServer().catch((err) => logger.warn(`[main] Application sync service failed to start: ${err?.message || err}`));
@@ -1481,7 +1627,11 @@ if (!gotTheLock) {
     let bridgeRegistered = false;
     let bridgeUserData = '';
     registerBugReportHandlers();
-    registerNetworkHandlers();
+    registerNetworkHandlers({
+      onNodeDeleted: (sender, nodeId) => (
+        interviewWindowController?.cleanupBySenderAndNode(sender, nodeId)
+      ),
+    });
     registerSettingsHandlers();
     registerNonApiAiHandlers();
     try {

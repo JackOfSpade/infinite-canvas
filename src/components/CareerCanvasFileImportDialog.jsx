@@ -19,6 +19,11 @@ export function CareerCanvasFileImportDialog({
   onClose,
   onImport,
   importDisabled = false,
+  title = 'Import from canvas files',
+  description = 'Select the career files already shown on this canvas.',
+  emptyMessage = 'No compatible file cards are on this canvas level. Add or open a document file here, then try again.',
+  importLabel = null,
+  errorMessage = null,
 }) {
   const dialogRef = useRef(null);
   const cancelButtonRef = useRef(null);
@@ -92,16 +97,17 @@ export function CareerCanvasFileImportDialog({
         onMouseDown={(event) => event.stopPropagation()}
       >
         <div className="border-b border-white/10 px-5 py-4">
-          <h3 id={titleId} className="text-sm font-semibold text-white">Import from canvas files</h3>
+          <h3 id={titleId} className="text-sm font-semibold text-white">{title}</h3>
           <p id={descriptionId} className="mt-1 text-xs leading-relaxed text-white/55">
-            Select the career files already shown on this canvas. They will be compiled before any search begins.
+            {description}
           </p>
         </div>
 
         <div className="max-h-72 overflow-y-auto px-5 py-3">
+          {errorMessage && <p role="alert" className="mb-2 rounded-md border border-red-400/20 bg-red-500/10 px-2 py-1.5 text-xs text-red-100">{errorMessage}</p>}
           {files.length === 0 ? (
             <p className="py-3 text-xs leading-relaxed text-white/55">
-              No compatible file cards are on this canvas level. Add or open a document file here, then try again.
+              {emptyMessage}
             </p>
           ) : (
             <fieldset>
@@ -154,7 +160,7 @@ export function CareerCanvasFileImportDialog({
             disabled={importDisabled || selectedCount === 0}
             className="flex-1 rounded-lg bg-blue-500 px-4 py-2.5 text-xs font-medium text-white transition-colors hover:bg-blue-400 disabled:cursor-not-allowed disabled:opacity-45"
           >
-            {selectedCount === 1 ? 'Import 1 file' : `Import ${selectedCount} files`}
+            {importLabel || (selectedCount === 1 ? 'Import 1 file' : `Import ${selectedCount} files`)}
           </button>
         </div>
       </div>

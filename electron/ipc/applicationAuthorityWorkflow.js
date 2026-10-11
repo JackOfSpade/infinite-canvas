@@ -17,14 +17,24 @@ export const APPLICATION_AUTHORITY_REVIEW_TRACKS = Object.freeze([
   'letter-argument-editorial',
   'tailoring-ats',
   'cross-document-coherence',
+  'bundle-editorial',
 ]);
 
 const PRIORITY_WEIGHT = Object.freeze({ highest: 3, high: 2, supporting: 1 });
 const DISPOSITIONS = new Set(['addressed-resume', 'addressed-cover-letter', 'addressed-both', 'omitted-no-evidence', 'omitted-minimum-sufficient', 'contradicted', 'unclear']);
+export const BLIND_REVIEW_ACTIONABILITY = Object.freeze(['repair-required', 'advisory', 'evidence-limited']);
+const BLIND_REVIEW_ACTIONABILITY_SET = new Set(BLIND_REVIEW_ACTIONABILITY);
 const AUTHORITY_LEDGER_STREAM = /^[a-z][a-z0-9-]{0,39}$/u;
 const DEFAULT_REQUIREMENTS_STREAM = 'requirements';
 
 function fail(message) { throw new Error(`Application authority workflow: ${message}`); }
+
+/**
+ * Actionability is retained only as signed audit metadata for historical
+ * receipts. It never waives repair: every returned finding blocks clean
+ * coverage and must receive a correction packet.
+ */
+export function blindReviewFindingRequiresRepair() { return true; }
 
 export function canonicalAuthorityValue(value) {
   if (Array.isArray(value)) return `[${value.map(canonicalAuthorityValue).join(',')}]`;
@@ -694,7 +704,12 @@ export function validateBlindReviewerResponse({ scope, response, previousReceipt
   const normalized = findings.map((finding, index) => {
     const id = requireId(finding?.id, `finding ${index}`); if (ids.has(id)) fail('review response repeats a finding ID.'); ids.add(id);
     if (typeof finding.ruleId !== 'string' || !finding.ruleId.trim() || typeof finding.issue !== 'string' || !finding.issue.trim()) fail('review finding needs a ruleId and issue.');
-    return { id, ruleId: finding.ruleId.trim(), document: typeof finding.document === 'string' ? finding.document : 'bundle', targetId: typeof finding.targetId === 'string' ? finding.targetId : '', issue: finding.issue.trim(), fix: typeof finding.fix === 'string' ? finding.fix.trim() : '' };
+    if (finding.actionability !== undefined && !BLIND_REVIEW_ACTIONABILITY_SET.has(finding.actionability)) fail('review finding actionability is invalid.');
+    // Do not add the optional field when reading a v1 finding: receipts sign
+    // the normalized payload, so materializing a default would invalidate it.
+    const normalizedFinding = { id, ruleId: finding.ruleId.trim(), document: typeof finding.document === 'string' ? finding.document : 'bundle', targetId: typeof finding.targetId === 'string' ? finding.targetId : '', issue: finding.issue.trim(), fix: typeof finding.fix === 'string' ? finding.fix.trim() : '' };
+    if (finding.actionability !== undefined) normalizedFinding.actionability = finding.actionability;
+    return normalizedFinding;
   });
   const findingDigest = authorityDigest(normalized);
   if (response.pageIndex > 0 && previousReceipt) {
@@ -735,7 +750,7 @@ export function validateBlindReviewCoverage(scopes, receipts) {
     }
     completeReceipts.push(...pages);
   }
-  return { complete: true, clean: completeReceipts.every(receipt => receipt.decision === 'pass'), receipts: completeReceipts };
+  return { complete: true, clean: completeReceipts.every(receipt => receipt.findings.length === 0), receipts: completeReceipts };
 }
 
 export function invalidateBlindReviewerReceipts(scopes, receipts) {
@@ -751,7 +766,7 @@ export function aggregateBlindFindings(receipts) {
   const rows = requireArray(receipts, 'review receipts').flatMap(receipt => receipt.findings.map(finding => ({ ...finding, scopeDigest: receipt.scopeDigest })));
   const unique = new Map();
   for (const row of rows) {
-    const key = [row.scopeDigest, row.document, row.targetId, row.ruleId, row.issue, row.fix].join('\u0000');
+    const key = [row.scopeDigest, row.document, row.targetId, row.ruleId, row.issue, row.fix, row.actionability ?? 'repair-required'].join('\u0000');
     if (!unique.has(key)) unique.set(key, row);
   }
   const findings = [...unique.values()].sort((left, right) => canonicalAuthorityValue(left).localeCompare(canonicalAuthorityValue(right)));

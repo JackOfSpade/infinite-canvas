@@ -4,12 +4,26 @@ import os from 'node:os';
 import path from 'node:path';
 import { assert, buildResumeDocument, extractResumeEvidence, projectContactChannels, projectTrustedIdentity, resumeRoleLocationFailures, validateLocalApplicationResult } from '../test-dependencies.js';
 import { FROZEN_COMPLETED_PACKAGE, LOCAL_AI_JOB_INTEGRITY_CODE, MAX_FROZEN_SOURCE_CHARS, MAX_UNIT_CAREER_DATA_QUOTES, assemblePasteApplicationResult, assertAuthorityDraftSelection, isJobIntegrityFault, normalizeBoundDocumentText } from '../../electron/ipc/pasteApplicationAssembly.js';
-import { APPLICATION_QUALITY_CHECKLIST_VERSION, APPLICATION_QUALITY_CRITERIA, LOCAL_AI_GENERATION_AUDIT_VERSION, pasteRejectionChangeDocuments, queueLocalApplicationJob, sanitizeQualityReview, stampPasteQualityReviewFromFit } from '../../electron/ipc/localAiApplication.js';
-import { CAREER_SNAPSHOT_HISTORICAL_SKILL_EVIDENCE_VERSION, CAREER_SNAPSHOT_SKILL_EVIDENCE_VERSION, careerAttestedSkillTerms, formatRoleDateForPresentation, MAX_REQUIRED_CAREER_SKILL_TERMS, MAX_REQUIRED_POSTING_SKILL_TERMS, missingPostingNamedSkillTerms, missingRequiredCareerSkillTerms, NEUTRAL_SKILL_GROUP_LABELS, POSTING_NAMED_SKILL_TERMS, postingNamedAttestedSkillTerms, requiredCareerAttestedSkillTerms, renderStructuredApplicationResume, SKILLS_BLOCK_BUDGET_RULE, STRUCTURED_RESUME_LIMITS, STRUCTURED_RESUME_SCHEMA_VERSION, STRUCTURED_RESUME_SKILLS_BUDGET, validateStructuredApplicationResume } from '../../electron/ipc/structuredResume.js';
+import { APPLICATION_QUALITY_CHECKLIST_VERSION, APPLICATION_QUALITY_CRITERIA, LOCAL_AI_GENERATION_AUDIT_VERSION, __queueLegacyLocalApplicationFixtureForTests, pasteRejectionChangeDocuments, sanitizeQualityReview, stampPasteQualityReviewFromFit } from '../../electron/ipc/localAiApplication.js';
+import { CAREER_SNAPSHOT_HISTORICAL_SKILL_EVIDENCE_VERSION, CAREER_SNAPSHOT_SKILL_EVIDENCE_VERSION, careerAttestedSkillTerms, formatRoleDateForPresentation, MAX_REQUIRED_CAREER_SKILL_TERMS, MAX_REQUIRED_POSTING_SKILL_TERMS, missingPostingNamedSkillTerms, missingRequiredCareerSkillTerms, NEUTRAL_SKILL_GROUP_LABELS, NEUTRAL_SKILL_GROUP_RULE, neutralSkillGroupRule, postingNamedAttestedSkillTerms, requiredCareerAttestedSkillTerms, renderStructuredApplicationResume, SKILLS_BLOCK_BUDGET_RULE, STRUCTURED_RESUME_LIMITS, STRUCTURED_RESUME_SCHEMA_VERSION, skillGroupVocabulary, STRUCTURED_RESUME_SKILLS_BUDGET, titleCaseSkillGroupLabel, validateStructuredApplicationResume } from '../../electron/ipc/structuredResume.js';
 import { careerDataProjectProvenanceHeadingForName } from '../../electron/ipc/jobApplication.js';
 
 const careerData = 'Ada Lovelace\nada@example.test\n## Analytical Engines\nSoftware Engineer\n\nBuilt reporting systems that reduced manual work.';
 const sourceRoles = [{ id: 'role-1', title: 'Software Engineer', company: 'Analytical Engines', dates: '2020 – 2024', location: '' }];
+
+// Synthetic approved-inventory rows (career-snapshot-skills.v2). Every name in
+// this file is invented and spans unrelated fields on purpose: the rules under
+// test must decide from the evidence handed to them, never from a vocabulary of
+// real products.
+function approvedSkill(slug, name, extra = {}) {
+  return {
+    id: `skill-${slug}`, name, capabilityKind: 'tool', supportMode: 'direct', indexEligible: true,
+    directEvidenceSegmentIds: [`segment-${slug}`], evidenceSegmentIds: [`segment-${slug}`], ...extra,
+  };
+}
+function approvedInventory(...skills) {
+  return { version: CAREER_SNAPSHOT_SKILL_EVIDENCE_VERSION, skills };
+}
 
 // `overrides` replaces fields of the pasted package; `frozen` replaces the
 // app-owned inputs assembly is handed beside it.
@@ -75,7 +89,7 @@ export default [
   {
     name: 'Structured résumé date presentation only removes the proven Month, YYYY comma without changing source authority',
     run() {
-      const sourceDate = 'May, 2023 – Present';
+      const sourceDate = 'April, 2022 – Present';
       const sourceRole = { id: 'role-date-display', title: 'Engineer', company: 'Example Co', dates: sourceDate, location: '' };
       const resume = {
         schemaVersion: STRUCTURED_RESUME_SCHEMA_VERSION,
@@ -87,13 +101,13 @@ export default [
         careerData: 'Candidate\nExample Co\nAt Example Co, built a supported workflow.',
       });
       const document = buildResumeDocument({ resumeMainHtml: html, trustedRenderedRoleDates: [formatRoleDateForPresentation(sourceDate)] });
-      assert(html.includes('May 2023 – Present') && !html.includes('May, 2023')
+      assert(html.includes('April 2022 – Present') && !html.includes('April, 2022')
         && sourceRole.dates === sourceDate && resume.roles[0].dates === sourceDate
-        && document.includes('May 2023 – Present')
-        && formatRoleDateForPresentation('2023, May') === '2023, May'
-        && formatRoleDateForPresentation('May 2023') === 'May 2023',
+        && document.includes('April 2022 – Present')
+        && formatRoleDateForPresentation('2022, April') === '2022, April'
+        && formatRoleDateForPresentation('April 2022') === 'April 2022',
       'the renderer presents only exact written month-year commas conventionally, keeps the source/draft date byte-for-byte intact, and the trusted date gate recognizes that host-owned display projection');
-      return { sourceDateUnchanged: true, displayDate: 'May 2023 – Present' };
+      return { sourceDateUnchanged: true, displayDate: 'April 2022 – Present' };
     },
   },
   {
@@ -214,36 +228,36 @@ export default [
 
 Software Engineer
 
-Thomson School District — Loveland, Colorado
-*May 2023 – June 2026*
+Maple Ridge School District — Brookfield, Ohio
+*April 2022 – July 2025*
 - Built attendance reporting for district staff.
 
 Data Engineer
 
-Horizon Health Alliance — Denver, Colorado
-*January 2020 – April 2023*
+Cedar Valley Health Alliance — Lakeview, Ontario
+*January 2019 – March 2022*
 - Built clinical data pipelines for care teams.
 
 ---
 Personal Projects`;
       const scopedRoles = [
-        { id: 'thomson', title: 'Software Engineer', company: 'Thomson School District', dates: 'May 2023 – June 2026', location: '' },
-        { id: 'horizon', title: 'Data Engineer', company: 'Horizon Health Alliance', dates: 'January 2020 – April 2023', location: '' },
+        { id: 'maple', title: 'Software Engineer', company: 'Maple Ridge School District', dates: 'April 2022 – July 2025', location: '' },
+        { id: 'cedar', title: 'Data Engineer', company: 'Cedar Valley Health Alliance', dates: 'January 2019 – March 2022', location: '' },
       ];
       const scopedResume = {
         schemaVersion: STRUCTURED_RESUME_SCHEMA_VERSION,
         identity: { name: 'Ada Lovelace', contact: ['ada@example.test'] },
         roles: [
-          { id: 'thomson', title: 'Software Engineer', company: 'Thomson School District', dates: 'May 2023 – June 2026', location: 'Loveland, Colorado', bullets: [{ id: 'thomson-bullet', text: 'Built attendance reporting for district staff.', evidenceIds: ['thomson-proof'] }] },
-          { id: 'horizon', title: 'Data Engineer', company: 'Horizon Health Alliance', dates: 'January 2020 – April 2023', location: 'Denver, Colorado', bullets: [{ id: 'horizon-bullet', text: 'Built clinical data pipelines for care teams.', evidenceIds: ['horizon-proof'] }] },
+          { id: 'maple', title: 'Software Engineer', company: 'Maple Ridge School District', dates: 'April 2022 – July 2025', location: 'Brookfield, Ohio', bullets: [{ id: 'maple-bullet', text: 'Built attendance reporting for district staff.', evidenceIds: ['maple-proof'] }] },
+          { id: 'cedar', title: 'Data Engineer', company: 'Cedar Valley Health Alliance', dates: 'January 2019 – March 2022', location: 'Lakeview, Ontario', bullets: [{ id: 'cedar-bullet', text: 'Built clinical data pipelines for care teams.', evidenceIds: ['cedar-proof'] }] },
         ],
       };
       const scopedContext = {
         sourceRoles: scopedRoles,
         careerData: scopedCareerData,
         evidenceCatalog: [
-          { id: 'thomson-proof', sourceId: 'career-data', quote: 'Built attendance reporting for district staff.' },
-          { id: 'horizon-proof', sourceId: 'career-data', quote: 'Built clinical data pipelines for care teams.' },
+          { id: 'maple-proof', sourceId: 'career-data', quote: 'Built attendance reporting for district staff.' },
+          { id: 'cedar-proof', sourceId: 'career-data', quote: 'Built clinical data pipelines for care teams.' },
           { id: 'job-need', sourceId: 'job-listing', quote: 'Build reliable reporting systems.' },
         ],
       };
@@ -251,22 +265,22 @@ Personal Projects`;
       let rejectedCrossRoleEvidence = false;
       try {
         const invalid = structuredClone(scopedResume);
-        invalid.roles[0].bullets[0].evidenceIds = ['horizon-proof'];
+        invalid.roles[0].bullets[0].evidenceIds = ['cedar-proof'];
         renderStructuredApplicationResume(invalid, scopedContext);
       } catch { rejectedCrossRoleEvidence = true; }
       let rejectedMixedCareerEvidence = false;
       try {
         const invalid = structuredClone(scopedResume);
-        invalid.roles[0].bullets[0].evidenceIds = ['thomson-proof', 'horizon-proof', 'job-need'];
+        invalid.roles[0].bullets[0].evidenceIds = ['maple-proof', 'cedar-proof', 'job-need'];
         renderStructuredApplicationResume(invalid, scopedContext);
       } catch { rejectedMixedCareerEvidence = true; }
       let rejectedCrossRoleLocation = false;
       try {
         const invalid = structuredClone(scopedResume);
-        invalid.roles[0].location = 'Denver, Colorado';
+        invalid.roles[0].location = 'Lakeview, Ontario';
         renderStructuredApplicationResume(invalid, scopedContext);
       } catch { rejectedCrossRoleLocation = true; }
-      assert(html.includes('Loveland, Colorado') && rejectedCrossRoleEvidence && rejectedMixedCareerEvidence && rejectedCrossRoleLocation,
+      assert(html.includes('Brookfield, Ohio') && rejectedCrossRoleEvidence && rejectedMixedCareerEvidence && rejectedCrossRoleLocation,
         'plain title-and-employer career sections bind each role to its own evidence and constrain blank trusted-role locations to that section');
       return { rejectedCrossRoleEvidence, rejectedMixedCareerEvidence, rejectedCrossRoleLocation };
     },
@@ -279,12 +293,12 @@ Personal Projects`;
 ## Work Experience
 
 ### Software Engineer — Acme [Role ID: role-acme-engineer]
-Acme — Toronto, Ontario
+Acme — Lakeview, Ontario
 Dates: January 2020 — Present
 - Built the production Python service for customer reporting.
 
 ### Engineering Intern — Acme [Role ID: role-acme-intern]
-Acme — Toronto, Ontario
+Acme — Lakeview, Ontario
 Dates: May 2019 — August 2019
 - Built the internal JavaScript dashboard for support teams.
 `;
@@ -299,7 +313,7 @@ Dates: May 2019 — August 2019
           { id: 'role-acme-engineer', title: 'Software Engineer', company: 'Acme', dates: 'January 2020 — Present', location: '', bullets: [{ id: 'engineer-bullet', text: 'Built the production Python service for customer reporting.', evidenceIds: ['engineer-proof'] }] },
           { id: 'role-acme-intern', title: 'Engineering Intern', company: 'Acme', dates: 'May 2019 — August 2019', location: '', bullets: [{ id: 'intern-bullet', text: 'Built the internal JavaScript dashboard for support teams.', evidenceIds: ['intern-proof'] }] },
         ],
-        skills: [{ id: 'skills-languages', group: 'Languages', items: ['Python', 'JavaScript'], evidenceIds: ['engineer-proof', 'intern-proof'] }],
+        skills: [{ id: 'skills-tools', group: 'Tools', items: ['Python', 'JavaScript'], evidenceIds: ['engineer-proof', 'intern-proof'] }],
       };
       const repeatedEmployerContext = {
         sourceRoles: repeatedEmployerRoles,
@@ -506,38 +520,39 @@ Dates: May 2019 — August 2019
     },
   },
   {
-    // THE DEFECT this covers, rendered by a real generation:
-    //   <dl class="skills"><dt>technologies</dt><dd>React · TypeScript ·
-    //   Next.js · Django · Nginx · Gunicorn · Docker Compose · MCP ·
-    //   connectors · prompt harnessing · model delegation</dd></dl>
-    // One lowercase row labelled with a synonym of its own section head, 11
-    // terms, three of them concepts, in a 131-character `dd`. Nothing refused
-    // any of it: the structural ceilings are 8x looser than the design system
-    // (24 groups of 48 items), and the only skills check that existed —
-    // build/fit-estimate-test.js — reads `dd` text and never runs against
-    // generated output. The design system's shape is 3 Title Case domain rows,
-    // 16-20 filterable nouns, no `dd` over 64 characters.
+    // THE DEFECT this covers, rendered by a real generation: one lowercase row
+    // labelled with a synonym of its own section head, a dozen terms of which
+    // three were concepts rather than names, in a `dd` far past one printed
+    // line. Nothing refused any of it: the structural ceilings are 8x looser
+    // than the design system (24 groups of 48 items), and the only skills check
+    // that existed — build/fit-estimate-test.js — reads `dd` text and never runs
+    // against generated output. The design system's shape is 3 Title Case
+    // domain rows, 16-20 filterable nouns, no `dd` over 64 characters.
+    //
+    // The names below are invented and belong to no field in particular: the
+    // budget gates count rows, items and characters and must not care what the
+    // words are.
     name: 'The rendered skills block is held to the design system’s shape, not to the structural ceilings',
     run() {
+      const names = ['Aster', 'Birch', 'Cedar', 'Dune', 'Ember', 'Fjord', 'Garnet', 'Heron', 'Iris', 'Juniper', 'Kestrel', 'Lumen', 'Mica', 'Nimbus', 'Onyx', 'Pylon', 'Quartz', 'Ridge', 'Sable', 'Tundra', 'Umber'];
+      const longNames = ['Meridian Ledger', 'Observatory Console', 'Cartographic Suite', 'Foundry Scheduler', 'Harbourmaster Portal'];
+      const concepts = ['handoff coaching', 'shift swapping', 'workflow mapping'];
       const skillsCareer = [
-        'Ada Lovelace', 'ada@example.test', 'Software Engineer',
-        // The frozen source contains the historical misspelling. The
-        // canonical candidate copy below must still render and remain
-        // grounded, while the old authored spelling is rejected.
-        'Built React and Typescript interfaces on a Django service.',
-        'Ran Nginx, Gunicorn and Docker Compose for the reporting deployment.',
-        'Wired MCP connectors with prompt harnessing and model delegation.',
-        'Shipped Go, Rust, Ruby, Swift, Scala, Kotlin, Elixir, Python, Flask, Redis, Kafka, Docker, Next.js, Vite, Babel, Jest, Sass, PostgreSQL and Elasticsearch tooling.',
+        'Ada Lovelace', 'ada@example.test', 'Operations Lead',
+        'Coordinated the Aster rota and the Birch intake desk.',
+        `Used ${names.join(', ')} across the site.`,
+        `Operated ${longNames.join(', ')} for the regional office.`,
+        `Practised ${concepts.join(', ')} with new staff.`,
       ].join('\n');
       const context = {
-        sourceRoles: [{ id: 'role-1', title: 'Software Engineer', company: 'Analytical Engines', dates: '2020 – 2024', location: '' }],
+        sourceRoles: [{ id: 'role-1', title: 'Operations Lead', company: 'Analytical Engines', dates: '2020 – 2024', location: '' }],
         evidenceCatalog: ['career-proof'],
         careerData: skillsCareer,
       };
       const resume = (skills) => ({
         schemaVersion: STRUCTURED_RESUME_SCHEMA_VERSION,
         identity: { name: 'Ada Lovelace', contact: ['ada@example.test'] },
-        roles: [{ id: 'role-1', title: 'Software Engineer', company: 'Analytical Engines', dates: '2020 – 2024', location: '', bullets: [{ id: 'bullet-1', text: 'Built React and TypeScript interfaces on a Django service.', evidenceIds: ['career-proof'] }] }],
+        roles: [{ id: 'role-1', title: 'Operations Lead', company: 'Analytical Engines', dates: '2020 – 2024', location: '', bullets: [{ id: 'bullet-1', text: 'Coordinated the Aster rota and the Birch intake desk.', evidenceIds: ['career-proof'] }] }],
         skills,
       });
       const group = (index, label, items) => ({ id: `skills-${index}`, group: label, items, evidenceIds: ['career-proof'] });
@@ -548,30 +563,30 @@ Dates: May 2019 — August 2019
       // The shipped block itself: one rejection round names the label, the
       // unsplit row, the row's length and all three concepts, because every
       // repair costs the user the same manual copy/paste round.
-      const shippedItems = ['React', 'TypeScript', 'Next.js', 'Django', 'Nginx', 'Gunicorn', 'Docker Compose', 'MCP', 'connectors', 'prompt harnessing', 'model delegation'];
-      const shipped = rejection([group(0, 'technologies', shippedItems)]);
-      assert(shipped.includes('skills[0].group "technologies" must be a neutral category label')
-        && shipped.includes(`skills[0].group "technologies" carries all ${shippedItems.length} items of this block under one label`)
+      const shippedItems = [...names.slice(0, 8), ...concepts];
+      const shipped = rejection([group(0, 'skills', shippedItems)]);
+      assert(shipped.includes('skills[0].group "skills" must be a neutral category label')
+        && shipped.includes(`skills[0].group "skills" carries all ${shippedItems.length} items of this block under one label`)
         && shipped.includes(`skills[0].items renders a row of ${shippedItems.join(' · ').length} characters`)
-        && ['connectors', 'prompt harnessing', 'model delegation'].every(item => shipped.includes(`skills[0] item "${item}"`)),
+        && concepts.every(item => shipped.includes(`skills[0] item "${item}"`)),
       `the whole shipped skills defect is reported in one round (got ${shipped})`);
 
       // Each budget gate alone, on a block that breaks only that one, so a
       // later edit cannot pass this case by rejecting everything.
       const fourRows = rejection([
-        group(0, 'languages', ['Go', 'Rust']),
-        group(1, 'frameworks', ['React', 'Django']),
-        group(2, 'infrastructure', ['Nginx', 'Gunicorn']),
-        group(3, 'databases', ['Redis', 'Kafka']),
+        group(0, 'tools', names.slice(0, 2)),
+        group(1, 'methods', names.slice(2, 4)),
+        group(2, 'systems', names.slice(4, 6)),
+        group(3, 'practices', names.slice(6, 8)),
       ]);
       assert(fourRows.includes(`skills renders 4 rows but this block carries at most ${STRUCTURED_RESUME_SKILLS_BUDGET.groups}`)
         && !fourRows.includes('item "') && !fourRows.includes('renders a row of'),
       `a fourth row is rejected on the row budget alone (got ${fourRows})`);
 
       const overTerms = rejection([
-        group(0, 'languages', ['Go', 'Rust', 'Ruby', 'Swift', 'Scala', 'Kotlin', 'Elixir']),
-        group(1, 'frameworks', ['Python', 'Django', 'Flask', 'Redis', 'Kafka', 'Nginx', 'Docker']),
-        group(2, 'platforms', ['React', 'Next.js', 'Vite', 'Babel', 'Jest', 'Sass', 'MCP']),
+        group(0, 'tools', names.slice(0, 7)),
+        group(1, 'methods', names.slice(7, 14)),
+        group(2, 'systems', names.slice(14, 21)),
       ]);
       assert(overTerms.includes(`skills lists 21 items but this block carries at most ${STRUCTURED_RESUME_SKILLS_BUDGET.items} in total`)
         && !overTerms.includes('renders a row of') && !overTerms.includes('rows but this block'),
@@ -580,68 +595,42 @@ Dates: May 2019 — August 2019
       // Five items, so the split gate stands down and only the rendered row's
       // own length is at issue. The gate measures the string the renderer
       // emits, separators included.
-      const longRow = ['Docker Compose', 'Elasticsearch', 'TypeScript', 'Gunicorn', 'PostgreSQL'];
-      const overRow = rejection([group(0, 'infrastructure', longRow)]);
-      assert(overRow.includes(`skills[0].items renders a row of ${longRow.join(' · ').length} characters but a row holds at most ${STRUCTURED_RESUME_SKILLS_BUDGET.rowChars}`)
+      const overRow = rejection([group(0, 'systems', longNames)]);
+      assert(overRow.includes(`skills[0].items renders a row of ${longNames.join(' · ').length} characters but a row holds at most ${STRUCTURED_RESUME_SKILLS_BUDGET.rowChars}`)
         && !overRow.includes('carries all') && !overRow.includes('item "'),
       `a row past the character budget is rejected on its own, measured on what renders (got ${overRow})`);
 
-      const unsplit = ['Go', 'Rust', 'Ruby', 'Swift', 'Scala', 'Kotlin'];
-      const oneBigRow = rejection([group(0, 'languages', unsplit)]);
-      assert(oneBigRow.includes(`skills[0].group "languages" carries all ${unsplit.length} items of this block under one label`)
+      const unsplit = names.slice(0, 6);
+      const oneBigRow = rejection([group(0, 'tools', unsplit)]);
+      assert(oneBigRow.includes(`skills[0].group "tools" carries all ${unsplit.length} items of this block under one label`)
         && oneBigRow.includes(`must name at least ${STRUCTURED_RESUME_SKILLS_BUDGET.splitIntoGroups} groups`)
         && !oneBigRow.includes('renders a row of'),
       `a block that has reached the split threshold must be split even when its row fits (got ${oneBigRow})`);
-      assert(rejection([group(0, 'languages', unsplit.slice(0, STRUCTURED_RESUME_SKILLS_BUDGET.splitAtItems - 1))]) === '',
+      assert(rejection([group(0, 'tools', unsplit.slice(0, STRUCTURED_RESUME_SKILLS_BUDGET.splitAtItems - 1))]) === '',
         'one row below the split threshold is still a real answer and is accepted');
 
       // The concept rule, batched: three lowercase phrases across two groups
       // come back as one message, and the named products beside them are never
       // mentioned.
-      const concepts = rejection([
-        group(0, 'integration', ['Docker Compose', 'connectors', 'model delegation']),
-        group(1, 'platforms', ['MCP', 'prompt harnessing']),
+      const conceptual = rejection([
+        group(0, 'systems', [names[0], concepts[0], concepts[1]]),
+        group(1, 'methods', [names[1], concepts[2]]),
       ]);
-      assert(['skills[0] item "connectors"', 'skills[0] item "model delegation"', 'skills[1] item "prompt harnessing"'].every(fragment => concepts.includes(fragment))
-        && !concepts.includes('Docker Compose') && !concepts.includes('"MCP"')
-        && concepts.split('Fix all of them before resubmitting.').length === 2,
-      `every concept phrase is reported once in one round while the filterable names beside them pass (got ${concepts})`);
+      assert([`skills[0] item "${concepts[0]}"`, `skills[0] item "${concepts[1]}"`, `skills[1] item "${concepts[2]}"`].every(fragment => conceptual.includes(fragment))
+        && !conceptual.includes(`"${names[0]}"`) && !conceptual.includes(`"${names[1]}"`)
+        && conceptual.split('Fix all of them before resubmitting.').length === 2,
+      `every concept phrase is reported once in one round while the filterable names beside them pass (got ${conceptual})`);
 
       const clean = [
-        group(0, 'languages', ['TypeScript', 'Python']),
-        group(1, 'frameworks', ['React', 'Django']),
-        group(2, 'infrastructure', ['Nginx', 'Gunicorn', 'Docker Compose']),
+        group(0, 'tools', names.slice(0, 2)),
+        group(1, 'methods', names.slice(2, 4)),
+        group(2, 'systems', names.slice(4, 7)),
       ];
       const html = renderStructuredApplicationResume(resume(clean), context);
-      assert(html.includes('<dt>Languages</dt><dd>TypeScript · Python</dd>')
-        && html.includes('<dt>Frameworks</dt><dd>React · Django</dd>')
-        && html.includes('<dt>Infrastructure</dt><dd>Nginx · Gunicorn · Docker Compose</dd>'),
+      assert(html.includes(`<dt>Tools</dt><dd>${names.slice(0, 2).join(' · ')}</dd>`)
+        && html.includes(`<dt>Methods</dt><dd>${names.slice(2, 4).join(' · ')}</dd>`)
+        && html.includes(`<dt>Systems</dt><dd>${names.slice(4, 7).join(' · ')}</dd>`),
       `a three-row block inside every budget renders the design system's own shape (got ${html})`);
-
-      // This is a copy-quality rule, not a renderer cosmetic: the resume
-      // draft is accepted before the review/audit stage, so silently changing
-      // it while writing HTML would leave those records describing different
-      // text. Every generated location must instead be rejected together at
-      // the authored-resume boundary.
-      const nonCanonical = resume([
-        group(0, 'languages', ['Typescript', 'Python']),
-        group(1, 'frameworks', ['React', 'Django']),
-        group(2, 'infrastructure', ['Nginx', 'Gunicorn', 'Docker Compose']),
-      ]);
-      nonCanonical.roles[0].bullets[0].text = 'Built React and Typescript interfaces on a Django service.';
-      nonCanonical.projects = [{
-        id: 'typescript-project', name: 'TypeScript',
-        description: 'Built React and Typescript interfaces on a Django service.',
-        metrics: '', evidenceIds: ['career-proof'],
-      }];
-      const nonCanonicalMessage = (() => {
-        try { renderStructuredApplicationResume(nonCanonical, context); return ''; } catch (error) { return String(error?.message || error); }
-      })();
-      assert(nonCanonicalMessage.includes('roles[0].bullets[0].text uses “Typescript”')
-        && nonCanonicalMessage.includes('skills[0].items[0]')
-        && nonCanonicalMessage.includes('projects[0].description')
-        && nonCanonicalMessage.includes('canonical product name “TypeScript”'),
-      `a noncanonical TypeScript spelling is rejected in every rendered location before review/audit (got ${nonCanonicalMessage})`);
       return { gates: 5, cleanRows: clean.length, shippedTerms: shippedItems.length };
     },
   },
@@ -653,20 +642,19 @@ Dates: May 2019 — August 2019
     name: 'A skills-group label renders in Title Case without changing the text it was graded as',
     run() {
       const labelCareer = [
-        'Ada Lovelace', 'ada@example.test', 'Software Engineer',
-        'Built React and TypeScript interfaces on a Django service.',
-        'Ran Nginx and Gunicorn for the reporting deployment.',
-        'AI/ML delivery ran MCP for the reporting model.',
+        'Ada Lovelace', 'ada@example.test', 'Operations Lead',
+        'Ran the Aster rota and the Birch intake desk for the regional office.',
+        'Reviewed the QA/HR handoff for the regional office.',
       ].join('\n');
       const context = {
-        sourceRoles: [{ id: 'role-1', title: 'Software Engineer', company: 'Analytical Engines', dates: '2020 – 2024', location: '' }],
+        sourceRoles: [{ id: 'role-1', title: 'Operations Lead', company: 'Analytical Engines', dates: '2020 – 2024', location: '' }],
         evidenceCatalog: ['career-proof'],
         careerData: labelCareer,
       };
       const resume = (skills) => ({
         schemaVersion: STRUCTURED_RESUME_SCHEMA_VERSION,
         identity: { name: 'Ada Lovelace', contact: ['ada@example.test'] },
-        roles: [{ id: 'role-1', title: 'Software Engineer', company: 'Analytical Engines', dates: '2020 – 2024', location: '', bullets: [{ id: 'bullet-1', text: 'Built React and TypeScript interfaces on a Django service.', evidenceIds: ['career-proof'] }] }],
+        roles: [{ id: 'role-1', title: 'Operations Lead', company: 'Analytical Engines', dates: '2020 – 2024', location: '', bullets: [{ id: 'bullet-1', text: 'Ran the Aster rota and the Birch intake desk for the regional office.', evidenceIds: ['career-proof'] }] }],
         skills,
       });
       const group = (index, label, items) => ({ id: `skills-${index}`, group: label, items, evidenceIds: ['career-proof'] });
@@ -675,61 +663,66 @@ Dates: May 2019 — August 2019
       };
 
       const cased = [
-        group(0, 'languages and frameworks', ['TypeScript', 'React']),
-        group(1, 'infrastructure & integration', ['Nginx', 'Gunicorn']),
-        group(2, 'AI/ML', ['MCP']),
+        group(0, 'tools and methods', ['Aster']),
+        group(1, 'systems & practices', ['Birch']),
+        group(2, 'qa/hr', ['Aster']),
       ];
       const html = renderStructuredApplicationResume(resume(cased), context);
-      assert(html.includes('<dt>Languages and Frameworks</dt>')
-        && html.includes('<dt>Infrastructure &amp; Integration</dt>')
-        && html.includes('<dt>AI/ML</dt>'),
-      `a lowercase label renders Title Case, its connectors survive, a connecting "and" stays lowercase, and a label that already carries uppercase is left exactly as written (got ${html})`);
+      assert(html.includes('<dt>Tools and Methods</dt>')
+        && html.includes('<dt>Systems &amp; Practices</dt>')
+        && html.includes('<dt>QA/HR</dt>'),
+      `a lowercase label renders Title Case, its connectors survive, a connecting "and" stays lowercase, and a short lowercase abbreviation from the career data prints as an acronym (got ${html})`);
 
       // Casing is display only: the validated draft every later stage reads,
       // echoes and patches still carries the text the response actually sent.
       const draft = validateStructuredApplicationResume(resume(cased), context);
-      assert(draft.skills.map(entry => entry.group).join('|') === 'languages and frameworks|infrastructure & integration|AI/ML',
+      assert(draft.skills.map(entry => entry.group).join('|') === 'tools and methods|systems & practices|qa/hr',
         'the validated draft keeps the responder’s own label text, so the careerData and neutral-vocabulary comparisons read what was sent');
 
-      // A2: the three section-head synonyms are gone from the vocabulary. A row
+      // The section-head synonyms are never part of the vocabulary. A row
       // labelled with one of them restates the <h2>Skills</h2> above it and
       // gives a parser no category axis it did not already have.
       const sectionHeadSynonyms = ['skills', 'technical skills', 'technologies'];
       assert(sectionHeadSynonyms.every(label => !NEUTRAL_SKILL_GROUP_LABELS.includes(label)),
         'the neutral vocabulary no longer offers a label that only names the section');
       for (const label of sectionHeadSynonyms) {
-        const message = rejection([group(0, label, ['TypeScript', 'React'])]);
+        const message = rejection([group(0, label, ['Aster', 'Birch'])]);
         assert(message.includes(`skills[0].group "${label}" must be a neutral category label`)
           && sectionHeadSynonyms.every(synonym => !message.includes(`, ${synonym},`)),
         `"${label}" is rejected and the vocabulary the rejection prints never offers it back (got ${message})`);
       }
-      // 'tools' stays: it is a real domain beside Languages and Frameworks.
+      // 'tools' stays: it is a real kind of skill in any field.
       assert(NEUTRAL_SKILL_GROUP_LABELS.includes('tools')
-        && renderStructuredApplicationResume(resume([group(0, 'tools', ['MCP'])]), context).includes('<dt>Tools</dt>'),
+        && renderStructuredApplicationResume(resume([group(0, 'tools', ['Aster'])]), context).includes('<dt>Tools</dt>'),
       'a label naming a kind of skill rather than the section is still accepted, and renders Title Case');
+      // The acronym rule is structural, not a list: a short lowercase word is
+      // printed as an acronym unless it is a two-letter function word, so a
+      // label from any field's abbreviation is cased alike.
+      assert(titleCaseSkillGroupLabel('qa & hr') === 'QA & HR'
+        && titleCaseSkillGroupLabel('tools of the trade') === 'Tools Of The Trade'
+        && titleCaseSkillGroupLabel('iOS and c') === 'iOS and C',
+      'a short lowercase word is an acronym, a function word is not, and a word that already carries an uppercase letter is left exactly as written');
       return { labels: cased.length, rejectedSynonyms: sectionHeadSynonyms.length };
     },
   },
   {
     // THE DEFECT: the app could not emit the design system's OWN exemplar
-    // labels. "Data & Storage" (the shipped sample's middle row), "Web & Data"
-    // and "Infrastructure & AI" (both whole-Application fixtures, which are
-    // real generated output) were every one of them REJECTED, because 'data',
-    // 'storage', 'web' and 'ai' were not in the neutral vocabulary. With a
-    // career file carrying no skills section the "occurs verbatim in career
-    // data" escape hatch is empty, so that vocabulary is the whole set of
-    // labels a responder may write, and single nouns were the only shape it
-    // could express — not the shape the design system publishes.
+    // labels, because the label vocabulary was a closed list and a list cannot
+    // name the compound domains a real profile carries. Closing the gap by
+    // widening the list for each sample row was the wrong repair: it taught the
+    // gate one trade's nouns. The vocabulary is now a small domain-neutral base
+    // plus what the approved snapshot's own skill rows contribute.
     //
     // This case harvests the labels from the design system's own files rather
-    // than restating them, which is what ties this app's vocabulary to the
-    // published examples: an exemplar row this app cannot emit fails here
-    // instead of costing the user a manual correction round.
-    name: 'Every skills-row label the design system ships is a label this app can emit, in its published casing',
+    // than restating them, then proves each is emit-able exactly when the
+    // current approved profile carries it: an exemplar row this app cannot
+    // emit fails here instead of costing the user a manual correction round,
+    // and the same row is refused when no approved evidence backs it.
+    name: 'Every skills-row label the design system ships is emit-able when the approved profile carries it, in its published casing',
     run() {
       // Each file publishes an exemplar skills block: the shipped sample, the
       // component preview, the in-context multi-page check, the line-yield
-      // measurement harness, and the two whole-Application fixtures.
+      // measurement harness, and the whole-Application fixtures.
       const exemplarFiles = ['resume.html', 'preview/component-skills.html', 'build/multi-page-fragmentation-check.html', 'build/line-yield-check.html', 'uploads/Application.html', 'handoff/Application-paginated-example.html'];
       const shippedLabels = new Map();
       for (const file of exemplarFiles) {
@@ -738,64 +731,95 @@ Dates: May 2019 — August 2019
         assert(labels.length > 0, `the design system still publishes skills-row labels in ${file}`);
         for (const label of labels) shippedLabels.set(label, [...(shippedLabels.get(label) || []), file]);
       }
-      // The survey the vocabulary was widened from. Pinning it means a design
-      // system file that DROPS a label cannot silently shrink what this case
-      // proves, while a file that ADDS one still has to pass the drive below.
-      const surveyed = ['Languages', 'Data & Storage', 'Infrastructure', 'Web & Data', 'Infrastructure & AI'];
-      assert(surveyed.every(label => shippedLabels.has(label)),
-        `the surveyed exemplar labels are still the ones the design system ships (harvested ${[...shippedLabels.keys()].join(' | ')})`);
-      // STYLE.md §5.6 and SKILL.md's Skills-block section document one further
-      // label inside the `dt`-casing rule itself without shipping a row for it,
-      // and it is the reason 'ml' is in the vocabulary beside 'ai'.
-      const styleMd = fs.readFileSync(new URL('../../Job Application Design System/STYLE.md', import.meta.url), 'utf8');
-      const skillMd = fs.readFileSync(new URL('../../Job Application Design System/SKILL.md', import.meta.url), 'utf8');
-      assert(styleMd.includes('`AI/ML`') && skillMd.includes('`AI/ML`'),
-        'both design-system documents still name AI/ML as a skills-row label that keeps its own spelling');
-      const exemplars = [...shippedLabels.keys(), 'AI/ML'];
+      const sectionHead = new Set(['skills', 'technical skills', 'technologies']);
+      const exemplars = [...shippedLabels.keys()].filter(label => !sectionHead.has(label.toLocaleLowerCase()));
+      assert(exemplars.length > 0, 'the design system ships at least one skills-row label that is not a synonym of the section head');
 
-      // This corpus states no exemplar label, so the escape hatch cannot pass
-      // any case below — the neutral vocabulary has to. It carries no skills
-      // section either, which is the candidate shape that made the gap acute.
-      const labelCareer = ['Ada Lovelace', 'ada@example.test', 'Software Engineer', 'Shipped TypeScript on a Django service with Postgres behind Nginx.'].join('\n');
-      assert(exemplars.every(label => !labelCareer.toLocaleLowerCase().includes(label.toLocaleLowerCase())),
-        'the frozen corpus states no exemplar label, so only the neutral vocabulary can accept one');
-      const context = {
-        sourceRoles: [{ id: 'role-1', title: 'Software Engineer', company: 'Analytical Engines', dates: '2020 – 2024', location: '' }],
-        evidenceCatalog: ['career-proof'],
-        careerData: labelCareer,
-      };
+      const careerData = 'Ada Lovelace\nada@example.test\n## Analytical Engines\nOperations Lead\n\nReconciled the Zephyr Ledger for the regional office.';
+      const evidenceCatalog = [
+        { id: 'career-proof', sourceId: 'career-data', quote: 'Reconciled the Zephyr Ledger for the regional office.' },
+        { id: 'job-need', sourceId: 'job-listing', quote: 'Own the reporting workflow for the office.' },
+      ];
+      const sourceRoles = [{ id: 'role-1', title: 'Operations Lead', company: 'Analytical Engines', dates: '2020 – 2024', location: '' }];
       const resume = (label) => ({
         schemaVersion: STRUCTURED_RESUME_SCHEMA_VERSION,
         identity: { name: 'Ada Lovelace', contact: ['ada@example.test'] },
-        roles: [{ id: 'role-1', title: 'Software Engineer', company: 'Analytical Engines', dates: '2020 – 2024', location: '', bullets: [{ id: 'bullet-1', text: 'Shipped TypeScript on a Django service with Postgres behind Nginx.', evidenceIds: ['career-proof'] }] }],
-        skills: [{ id: 'skills-1', group: label, items: ['TypeScript', 'Postgres'], evidenceIds: ['career-proof'] }],
+        roles: [{ id: 'role-1', title: 'Operations Lead', company: 'Analytical Engines', dates: '2020 – 2024', location: '', bullets: [{ id: 'bullet-1', text: 'Reconciled the Zephyr Ledger for the regional office.', evidenceIds: ['career-proof'] }] }],
+        skills: [{ id: 'skills-1', group: label, items: ['Zephyr Ledger'], evidenceIds: ['career-proof'] }],
       });
-      const rendered = (label) => {
-        try { return renderStructuredApplicationResume(resume(label), context); } catch (error) { return `REJECTED: ${String(error?.message || error)}`; }
+      const rendered = (label, category) => {
+        try {
+          return renderStructuredApplicationResume(resume(label), {
+            sourceRoles, evidenceCatalog, careerData, authorityMode: true,
+            careerSkillEvidence: approvedInventory(approvedSkill('zephyr', 'Zephyr Ledger', category ? { category } : {})),
+          });
+        } catch (error) { return `REJECTED: ${String(error?.message || error)}`; }
       };
       const skillsBlock = (html) => /<dl class="skills">.*?<\/dl>/su.exec(html)?.[0] || html;
+      assert(exemplars.every(label => !careerData.toLocaleLowerCase().includes(label.toLocaleLowerCase())),
+        'the frozen corpus states no exemplar label, so only the vocabulary can accept one');
 
+      const baseOnly = skillGroupVocabulary(null);
+      let evidenceRelative = 0;
       for (const label of exemplars) {
         const printed = `<dt>${label.replace(/&/gu, '&amp;')}</dt>`;
         // Both spellings a responder can plausibly send have to reach the
         // published casing: the label as the design system prints it, and the
-        // all-lowercase form the prompt's own vocabulary offers it in. The
-        // second is what rendered "Infrastructure & Ai" beside a design system
-        // that ships "Infrastructure & AI".
+        // all-lowercase form the prompt's own vocabulary offers it in.
         for (const sent of [label, label.toLocaleLowerCase()]) {
-          const html = rendered(sent);
+          const html = rendered(sent, label);
           assert(html.includes(printed),
-            `${shippedLabels.get(label)?.join(', ') || 'STYLE.md §5.6'} publishes "${label}"; sent as "${sent}" it must be accepted and render as ${printed} (got ${skillsBlock(html)})`);
+            `${shippedLabels.get(label)?.join(', ')} publishes "${label}"; sent as "${sent}" against an approved profile whose category is "${label}" it must be accepted and render as ${printed} (got ${skillsBlock(html)})`);
+        }
+        // The same label with no approved evidence behind it is refused unless
+        // it is made of the domain-neutral base alone.
+        const unbacked = rendered(label, '');
+        const neutralAlone = label.toLocaleLowerCase().split(/\s*(?:&|\/|,|\band\b)\s*/u).filter(Boolean).every(part => baseOnly.words.has(part));
+        if (!neutralAlone) {
+          assert(unbacked.startsWith('REJECTED:') && unbacked.includes(`skills[0].group "${label}" must be a neutral category label`),
+            `"${label}" is only a label when the approved profile carries it (got ${skillsBlock(unbacked)})`);
+          evidenceRelative += 1;
         }
       }
 
       // Widening the nouns did not widen the gate: an editorializing word
-      // beside a shipped domain is still refused on the same rule.
-      const editorialized = rendered('Advanced Data & Storage');
+      // beside an approved category is still refused on the same rule.
+      const first = exemplars[0];
+      const editorialized = rendered(`Advanced ${first}`, first);
       assert(editorialized.startsWith('REJECTED:')
-        && editorialized.includes('skills[0].group "Advanced Data & Storage" must be a neutral category label'),
+        && editorialized.includes(`skills[0].group "Advanced ${first}" must be a neutral category label`),
       `a compound built on an editorializing word is still rejected (got ${editorialized})`);
-      return { exemplars: exemplars.length, files: exemplarFiles.length, casings: 2 };
+      return { exemplars: exemplars.length, files: exemplarFiles.length, evidenceRelative, casings: 2 };
+    },
+  },
+  {
+    name: 'The skills-row vocabulary is a small neutral base plus the approved profile’s own kinds and categories, never the section head',
+    run() {
+      const base = skillGroupVocabulary(null);
+      assert(JSON.stringify(base.labels) === JSON.stringify([...NEUTRAL_SKILL_GROUP_LABELS].sort())
+        && base.labels.length <= 12,
+      `a retained pre-snapshot job has only the small base (got ${base.labels.join(', ')})`);
+
+      const projected = [
+        { name: 'Aster Press', capabilityKind: 'language' },
+        { name: 'Birch Ledger', capabilityKind: 'technology', category: 'Ward Operations & Triage' },
+        { name: 'Cedar Loom', capabilityKind: 'capability', category: 'Skills' },
+      ];
+      const derived = skillGroupVocabulary(projected);
+      assert(['languages', 'capabilities', 'ward operations', 'triage'].every(label => derived.words.has(label))
+        && base.labels.every(label => derived.words.has(label)),
+      `kinds and categories the approved rows carry join the base (got ${derived.labels.join(', ')})`);
+      assert(!derived.words.has('technologies') && !derived.words.has('skills') && !derived.words.has('technical skills'),
+        'a kind or category that merely names the section is never offered, whichever layer it came from');
+      assert(!derived.words.has('frameworks') && !derived.words.has('platform'),
+        'a kind no approved row carries is not offered');
+      const rule = neutralSkillGroupRule(derived);
+      assert(derived.labels.every(label => rule.includes(label)) && /up to 3 of those joined by/u.test(rule),
+        'the stated rule is built from the vocabulary the gate reads');
+      assert(NEUTRAL_SKILL_GROUP_RULE.includes('capabilityKind') && NEUTRAL_SKILL_GROUP_RULE.includes('language gives languages')
+        && !NEUTRAL_SKILL_GROUP_RULE.includes('technology gives'),
+      'the prompt-time rule names where the rest of the vocabulary comes from, derived from the controlled taxonomy');
+      return { base: base.labels.length, derived: derived.labels.length };
     },
   },
   {
@@ -1659,16 +1683,29 @@ Dates: May 2019 — August 2019
       });
       assert(yenSymbolError?.message.includes('(currency)'),
         `the ambiguous yen/yuan symbol stays distinct from national word denominations (${yenSymbolError?.message || 'accepted'})`);
-      // Calendar years and version-like labels are intentionally not figures;
-      // their source fidelity remains subject to the ordinary term/semantic
-      // review rather than a multiplier parser.
+      // Calendar years and version-like labels are intentionally not FIGURES:
+      // a changed version label is left to the ordinary term/semantic review
+      // rather than a multiplier parser. A year is a different claim with a
+      // rule of its own: the same year is admissible, and a shifted year is
+      // rejected as one the cited quote never states.
       const versionSource = 'I built v2x reporting tools during 2024.';
-      const changedVersion = 'I built v3x reporting tools during 2025.';
+      const changedVersion = 'I built v3x reporting tools during 2024.';
       sanitizeQualityReview(
         review({ bullet: changedVersion, paragraph: changedVersion, quote: versionSource }),
         context({ bullet: changedVersion, paragraph: changedVersion, corpus: versionSource }),
         APPLICATION_QUALITY_CHECKLIST_VERSION,
       );
+      const shiftedYear = 'I built v3x reporting tools during 2025.';
+      let shiftedYearError = null;
+      try {
+        sanitizeQualityReview(
+          review({ bullet: shiftedYear, paragraph: shiftedYear, quote: versionSource }),
+          context({ bullet: shiftedYear, paragraph: shiftedYear, corpus: versionSource }),
+          APPLICATION_QUALITY_CHECKLIST_VERSION,
+        );
+      } catch (error) { shiftedYearError = error; }
+      assert(/dates its work with .during 2025/u.test(shiftedYearError?.message || ''),
+        `a year the cited quote never states is rejected by the year rule, not the figure rule (${shiftedYearError?.message || 'accepted'})`);
 
       const listingOnlyFigure = 'This role has a 40% target. I built reporting systems that reduced manual work by 25%.';
       sanitizeQualityReview(
@@ -2004,7 +2041,7 @@ Dates: May 2019 — August 2019
       const oversizedCorpus = `${careerData}\nArchive note${del} retained.\n${'Maintained the reporting corpus. '.repeat(9_000)}`;
       let oversizedError = null;
       try {
-        await queueLocalApplicationJob({
+        await __queueLegacyLocalApplicationFixtureForTests({
           transport: 'paste',
           canvasFilePath,
           careerData: oversizedCorpus,
@@ -2016,7 +2053,7 @@ Dates: May 2019 — August 2019
         && /too large to freeze without omitting evidence/i.test(oversizedError?.message || ''),
       'an oversized career corpus is rejected before a handoff can silently omit its tail');
 
-      const queued = await queueLocalApplicationJob({
+      const queued = await __queueLegacyLocalApplicationFixtureForTests({
         transport: 'paste',
         canvasFilePath,
         careerData: `${oversizedRoleCareerData}\nArchive note${del} retained.`,
@@ -2061,17 +2098,17 @@ Dates: May 2019 — August 2019
       const resume = {
         schemaVersion: STRUCTURED_RESUME_SCHEMA_VERSION,
         identity: { name: 'Ada Lovelace', contact: ['ada@example.test'] },
-        roles: [{ id: 'role-1', title: 'Software Engineer', company: 'Analytical Engines', dates: '2023-05 – 2026-06', location: 'Loveland, Colorado', bullets: [{ id: 'bullet-1', text: 'Built reporting systems that reduced manual work.', evidenceIds: ['career-proof'] }] }],
+        roles: [{ id: 'role-1', title: 'Software Engineer', company: 'Analytical Engines', dates: '2022-04 – 2025-07', location: 'Brookfield, Ohio', bullets: [{ id: 'bullet-1', text: 'Built reporting systems that reduced manual work.', evidenceIds: ['career-proof'] }] }],
       };
       const context = {
-        sourceRoles: [{ id: 'role-1', title: 'Software Engineer', company: 'Analytical Engines', dates: '2023-05 – 2026-06', location: '' }],
+        sourceRoles: [{ id: 'role-1', title: 'Software Engineer', company: 'Analytical Engines', dates: '2022-04 – 2025-07', location: '' }],
         evidenceCatalog: [{ id: 'career-proof', sourceId: 'career-data', quote: 'Built reporting systems that reduced manual work.' }],
-        careerData: `${careerData}\nLoveland, Colorado`,
+        careerData: `${careerData}\nBrookfield, Ohio`,
       };
       const html = renderStructuredApplicationResume(resume, context);
       assert(!html.includes('role-meta') && !html.includes('role-location'),
         `a lone location renders no .role-meta row and no .role-location cell (html=${html})`);
-      assert(html.includes('<p class="role-dates">2023-05 – 2026-06<span class="sep" aria-hidden="true">·</span>Loveland, Colorado</p>'),
+      assert(html.includes('<p class="role-dates">2022-04 – 2025-07<span class="sep" aria-hidden="true">·</span>Brookfield, Ohio</p>'),
         `the dates cell carries the folded location after the standard separator (html=${html})`);
       return { folded: true };
     },
@@ -2084,12 +2121,12 @@ Dates: May 2019 — August 2019
       // dates and location would satisfy the writer's budget while starving
       // the gate that requires the location, which is why this is the
       // assertion that matters most here, not the render alone.
-      const roundTripCareerData = '## Thomson School District — Loveland, Colorado\nSoftware Engineer\n\nBuilt attendance reporting for district staff.';
-      const roundTripRoles = [{ id: 'thomson', title: 'Software Engineer', company: 'Thomson School District', dates: '2023-05 – 2026-06', location: '' }];
+      const roundTripCareerData = '## Maple Ridge School District — Brookfield, Ohio\nSoftware Engineer\n\nBuilt attendance reporting for district staff.';
+      const roundTripRoles = [{ id: 'maple', title: 'Software Engineer', company: 'Maple Ridge School District', dates: '2022-04 – 2025-07', location: '' }];
       const resume = {
         schemaVersion: STRUCTURED_RESUME_SCHEMA_VERSION,
         identity: { name: 'Ada Lovelace', contact: ['ada@example.test'] },
-        roles: [{ id: 'thomson', title: 'Software Engineer', company: 'Thomson School District', dates: '2023-05 – 2026-06', location: 'Loveland, Colorado', bullets: [{ id: 'bullet-1', text: 'Built attendance reporting for district staff.', evidenceIds: ['career-proof'] }] }],
+        roles: [{ id: 'maple', title: 'Software Engineer', company: 'Maple Ridge School District', dates: '2022-04 – 2025-07', location: 'Brookfield, Ohio', bullets: [{ id: 'bullet-1', text: 'Built attendance reporting for district staff.', evidenceIds: ['career-proof'] }] }],
       };
       const context = {
         sourceRoles: roundTripRoles,
@@ -2100,7 +2137,7 @@ Dates: May 2019 — August 2019
       assert(!html.includes('role-location'),
         `the fold actually happened, so no separate .role-location cell exists to read instead (html=${html})`);
       const evidence = extractResumeEvidence(html);
-      assert(evidence.roles[0].dates === '2023-05 – 2026-06' && evidence.roles[0].location === 'Loveland, Colorado',
+      assert(evidence.roles[0].dates === '2022-04 – 2025-07' && evidence.roles[0].location === 'Brookfield, Ohio',
         `the extractor splits the folded dates cell back into its own dates and location (got dates="${evidence.roles[0].dates}" location="${evidence.roles[0].location}")`);
       const failures = resumeRoleLocationFailures(evidence.roles, roundTripCareerData);
       assert(!failures.length,
@@ -2153,9 +2190,9 @@ Dates: May 2019 — August 2019
   {
     name: 'projectContactChannels drops application-logistics values that carry no channel, exactly the shipped letterhead defect',
     run() {
-      const contact = ['Email: jacksterwu@gmail.com', 'Phone: (716) 305-8819', 'Canadian citizenship', 'Willing to work anywhere. Can obtain TN-Visa without sponsorship.'];
+      const contact = ['Email: riley.okafor@example.test', 'Phone: (555) 010-0142', 'Freedonian citizenship', 'Willing to work anywhere. Can obtain a work visa without sponsorship.'];
       const projected = projectContactChannels(contact);
-      assert(JSON.stringify(projected) === JSON.stringify(['Email: jacksterwu@gmail.com', 'Phone: (716) 305-8819']),
+      assert(JSON.stringify(projected) === JSON.stringify(['Email: riley.okafor@example.test', 'Phone: (555) 010-0142']),
         `the projection keeps only the email and phone, in order, and drops the citizenship and visa lines (got ${JSON.stringify(projected)})`);
       return { projected };
     },
@@ -2173,7 +2210,7 @@ Dates: May 2019 — August 2019
   {
     name: 'An ordinary city and a profile link survive contact projection untouched',
     run() {
-      const contact = ['Toronto, Ontario', 'linkedin.com/in/jackwu'];
+      const contact = ['Lakeview, Ontario', 'linkedin.com/in/rileyokafor'];
       const projected = projectContactChannels(contact);
       assert(JSON.stringify(projected) === JSON.stringify(contact),
         `neither value states application logistics, so both are kept unchanged (got ${JSON.stringify(projected)})`);
@@ -2183,7 +2220,7 @@ Dates: May 2019 — August 2019
   {
     name: 'projectContactChannels fails open when every value is application logistics, because a contact row is required',
     run() {
-      const contact = ['Canadian citizenship', 'Willing to relocate anywhere', 'Available immediately, no notice period'];
+      const contact = ['Freedonian citizenship', 'Willing to relocate anywhere', 'Available immediately, no notice period'];
       const projected = projectContactChannels(contact);
       assert(projected === contact,
         `a contact list with no reachable channel at all is returned unchanged rather than emptied (got ${JSON.stringify(projected)})`);
@@ -2193,7 +2230,7 @@ Dates: May 2019 — August 2019
   {
     name: 'projectTrustedIdentity projects only the contact array and is idempotent',
     run() {
-      const identity = { name: 'Ada Lovelace', subtitleRole: 'Software Engineer', credential: 'B.S. Computer Science', contact: ['ada@example.test', 'Canadian citizenship'] };
+      const identity = { name: 'Ada Lovelace', subtitleRole: 'Software Engineer', credential: 'B.S. Computer Science', contact: ['ada@example.test', 'Freedonian citizenship'] };
       const once = projectTrustedIdentity(identity);
       const twice = projectTrustedIdentity(once);
       assert(once.name === identity.name && once.subtitleRole === identity.subtitleRole && once.credential === identity.credential,
@@ -2208,7 +2245,7 @@ Dates: May 2019 — August 2019
   {
     name: 'A rendered résumé contact row excludes application logistics even when the trusted identity supplied them',
     run() {
-      const contact = ['ada@example.test', 'Canadian citizenship', 'Willing to work anywhere. Can obtain TN-Visa without sponsorship.'];
+      const contact = ['ada@example.test', 'Freedonian citizenship', 'Willing to work anywhere. Can obtain a work visa without sponsorship.'];
       const resume = {
         schemaVersion: STRUCTURED_RESUME_SCHEMA_VERSION,
         identity: { name: 'Ada Lovelace', contact },
@@ -2228,186 +2265,311 @@ Dates: May 2019 — August 2019
     },
   },
   {
-    // Root cause this whole gate exists to prevent: the career corpus wrote
-    // "Tech used: python" (lowercase) and "Typescript" (one quote) while the
-    // posting said "Are proficient in Python and TypeScript". Nothing required
-    // a posting-named, career-attested name to reach the rendered block, and
-    // the résumé prompt claimed items had to occur "verbatim", so a real
-    // generation dropped exactly the two names whose corpus casing disagreed.
-    name: 'Posting-named, career-attested technology names must appear in the skills block',
+    // Root cause this whole gate exists to prevent: the career corpus wrote one
+    // required skill in lowercase and another in an odd mixed case while the
+    // posting named both in the canonical spelling. Nothing required a
+    // posting-named, career-attested name to reach the rendered block, so a
+    // real generation dropped exactly the names whose corpus casing disagreed.
+    // Which names count is decided by the approved inventory alone.
+    name: 'Posting-named, career-attested skills must appear in the skills block',
     run() {
-      const sourceRoles = [{ id: 'role-1', title: 'Software Engineer', company: 'Analytical Engines', dates: '2020 – 2024', location: '' }];
+      const sourceRoles = [{ id: 'role-1', title: 'Operations Lead', company: 'Analytical Engines', dates: '2020 – 2024', location: '' }];
       const catalog = () => [
-        { id: 'ev-report', sourceId: 'career-data', quote: 'Built the reporting systems.' },
-        { id: 'ev-python', sourceId: 'career-data', quote: 'Tech used: python' },
-        { id: 'ev-ticketing', sourceId: 'career-data', quote: 'Built the ticketing UI. Tech used: React, Typescript' },
-        { id: 'ev-sql', sourceId: 'career-data', quote: 'Wrote SQL for the reporting database.' },
-        { id: 'ev-need', sourceId: 'job-listing', quote: 'Are proficient in Python and TypeScript', priority: 'highest' },
+        { id: 'ev-report', sourceId: 'career-data', quote: 'Coordinated the regional rota.' },
+        { id: 'ev-ledger', sourceId: 'career-data', quote: 'Tech used: ledgerpro' },
+        { id: 'ev-intake', sourceId: 'career-data', quote: 'Trained staff on the Aldrin Intake forms.' },
+        { id: 'ev-quanta', sourceId: 'career-data', quote: 'Built forecasts with the Quanta Model.' },
+        { id: 'ev-need', sourceId: 'job-listing', quote: 'Are proficient in LedgerPro and Aldrin Intake', priority: 'highest' },
       ];
-      const careerData = 'Ada Lovelace\nada@example.test\n## Analytical Engines\nSoftware Engineer\n\nBuilt the reporting systems.\nTech used: python\nWrote SQL for the reporting database.\nBuilt the ticketing UI. Tech used: React, Typescript';
-      const context = () => ({ sourceRoles, evidenceCatalog: catalog(), careerData });
+      const inventory = approvedInventory(
+        approvedSkill('ledger', 'LedgerPro'), approvedSkill('intake', 'Aldrin Intake', { capabilityKind: 'platform' }),
+        approvedSkill('quanta', 'Quanta Model', { capabilityKind: 'method' }),
+      );
+      const careerData = 'Ada Lovelace\nada@example.test\n## Analytical Engines\nOperations Lead\n\nCoordinated the regional rota.\nTech used: ledgerpro\nTrained staff on the Aldrin Intake forms.\nBuilt forecasts with the Quanta Model.';
+      const context = (overrides = {}) => ({ sourceRoles, evidenceCatalog: catalog(), careerData, careerSkillEvidence: inventory, authorityMode: true, ...overrides });
       const draft = (skills) => ({
         schemaVersion: STRUCTURED_RESUME_SCHEMA_VERSION,
         identity: { name: 'Ada Lovelace', contact: ['ada@example.test'] },
-        roles: [{ id: 'role-1', title: 'Software Engineer', company: 'Analytical Engines', dates: '2020 – 2024', location: '', bullets: [{ id: 'bullet-1', text: 'Built the reporting systems.', evidenceIds: ['ev-report'] }] }],
+        roles: [{ id: 'role-1', title: 'Operations Lead', company: 'Analytical Engines', dates: '2020 – 2024', location: '', bullets: [{ id: 'bullet-1', text: 'Coordinated the regional rota.', evidenceIds: ['ev-report'] }] }],
         skills,
       });
       const reject = (skills, overrides = {}) => {
-        try { renderStructuredApplicationResume(draft(skills), { ...context(), ...overrides }); return ''; } catch (error) { return String(error?.message || error); }
+        try { renderStructuredApplicationResume(draft(skills), context(overrides)); return ''; } catch (error) { return String(error?.message || error); }
       };
 
-      const onlySqlAndReact = reject([
-        { id: 's1', group: 'languages', items: ['SQL'], evidenceIds: ['ev-sql'] },
-        { id: 's2', group: 'frameworks', items: ['React'], evidenceIds: ['ev-ticketing'] },
-      ]);
-      assert(onlySqlAndReact.includes('Python') && onlySqlAndReact.includes('TypeScript'),
-        `a block that drops the posting-named names is rejected naming Python and TypeScript (got ${onlySqlAndReact})`);
-      assert(!onlySqlAndReact.includes('Typescript') && !onlySqlAndReact.includes('python'),
-        `the rejection names only canonical vocabulary spellings, never the corpus's "Typescript" or lowercase "python" (got ${onlySqlAndReact})`);
-      assert(!onlySqlAndReact.includes(POSTING_NAMED_SKILL_TERMS.join(', ')),
-        'the rejection never prints the full closed vocabulary list');
+      assert(JSON.stringify(postingNamedAttestedSkillTerms(catalog(), inventory)) === JSON.stringify(['LedgerPro', 'Aldrin Intake']),
+        'the posting names two approved skills and the career quotes state both, so both are required, in the approved spelling, even though one career quote spells the name in lowercase');
 
-      const carryingBoth = reject([
-        { id: 's1', group: 'languages', items: ['Python'], evidenceIds: ['ev-python'] },
-        { id: 's2', group: 'frameworks', items: ['TypeScript', 'React'], evidenceIds: ['ev-ticketing'] },
-        { id: 's3', group: 'data', items: ['SQL'], evidenceIds: ['ev-sql'] },
+      const onlyQuanta = reject([
+        { id: 's1', group: 'methods', items: ['Quanta Model'], evidenceIds: ['ev-quanta'] },
       ]);
-      assert(carryingBoth === '', `a block carrying every posting-required and prioritized career-attested name in canonical spelling is accepted (got ${carryingBoth})`);
+      assert(onlyQuanta.includes('skills omits LedgerPro, Aldrin Intake'),
+        `a block that drops the posting-named skills is rejected naming both in their approved spelling (got ${onlyQuanta})`);
+      assert(!onlyQuanta.includes('ledgerpro'),
+        `the rejection names only the approved spelling, never the corpus's lowercase one (got ${onlyQuanta})`);
 
-      const carryingPython3 = reject([
-        { id: 's1', group: 'languages', items: ['Python 3'], evidenceIds: ['ev-python3'] },
-        { id: 's2', group: 'frameworks', items: ['TypeScript', 'React'], evidenceIds: ['ev-ticketing'] },
-        { id: 's3', group: 'data', items: ['SQL'], evidenceIds: ['ev-sql'] },
-      ], { evidenceCatalog: [...catalog(), { id: 'ev-python3', sourceId: 'career-data', quote: 'Tooling: Python 3 and pytest.' }] });
-      assert(carryingPython3 === '', `an item that embeds a required whole term (Python 3) still satisfies the rule (got ${carryingPython3})`);
+      const carryingAll = reject([
+        { id: 's1', group: 'tools', items: ['LedgerPro'], evidenceIds: ['ev-ledger'] },
+        { id: 's2', group: 'platforms', items: ['Aldrin Intake'], evidenceIds: ['ev-intake'] },
+        { id: 's3', group: 'methods', items: ['Quanta Model'], evidenceIds: ['ev-quanta'] },
+      ]);
+      assert(carryingAll === '', `a block carrying every posting-required and prioritized career-attested skill in its approved spelling is accepted (got ${carryingAll})`);
 
       const noBlock = reject(undefined);
-      assert(noBlock.includes('Python') && noBlock.includes('TypeScript'),
+      assert(noBlock.includes('LedgerPro') && noBlock.includes('Aldrin Intake'),
         `a résumé with no skills block at all is rejected for every required name (got ${noBlock})`);
 
-      return { onlySqlAndReactRejected: true, carryingBothAccepted: true, carryingPython3Accepted: true, noBlockRejected: true };
+      // A retained pre-snapshot job has no approved inventory, so there is no
+      // evidence from which to demand a name: the same plan demands nothing.
+      const legacy = reject(undefined, { careerSkillEvidence: null, authorityMode: false });
+      assert(legacy === '', `without an approved inventory nothing can be demanded (got ${legacy})`);
+      return { requiredRejected: true, carryingAllAccepted: true, noBlockRejected: true, legacyStandsDown: true };
     },
   },
   {
-    name: 'Posting-named term matching is whole-term and case-sensitive only for ordinary-English-word names',
+    name: 'Posting-named matching is whole-term and never reads a longer name as a shorter one',
     run() {
-      const sourceRoles = [{ id: 'role-1', title: 'Software Engineer', company: 'Analytical Engines', dates: '2020 – 2024', location: '' }];
-      const careerData = 'Ada Lovelace\nada@example.test\n## Analytical Engines\nSoftware Engineer\n\nBuilt the reporting systems.';
+      const sourceRoles = [{ id: 'role-1', title: 'Operations Lead', company: 'Analytical Engines', dates: '2020 – 2024', location: '' }];
+      const careerData = 'Ada Lovelace\nada@example.test\n## Analytical Engines\nOperations Lead\n\nCoordinated the regional rota.';
       const draft = () => ({
         schemaVersion: STRUCTURED_RESUME_SCHEMA_VERSION,
         identity: { name: 'Ada Lovelace', contact: ['ada@example.test'] },
-        roles: [{ id: 'role-1', title: 'Software Engineer', company: 'Analytical Engines', dates: '2020 – 2024', location: '', bullets: [{ id: 'bullet-1', text: 'Built the reporting systems.', evidenceIds: ['ev-report'] }] }],
+        roles: [{ id: 'role-1', title: 'Operations Lead', company: 'Analytical Engines', dates: '2020 – 2024', location: '', bullets: [{ id: 'bullet-1', text: 'Coordinated the regional rota.', evidenceIds: ['ev-report'] }] }],
       });
-      // The career quote in each case below attests a recognised technology, so
+      // Each case's career quote states a name the approved inventory carries, so
       // the résumé owes a skills block; each case carries the one row its own
       // quote states, which leaves the posting-named rule under test the only
       // thing that can reject it.
-      const accept = (evidenceCatalog, skills) => {
+      const outcome = (inventory, listingQuote, careerQuote, skills) => {
         try {
-          renderStructuredApplicationResume({ ...draft(), skills }, { sourceRoles, evidenceCatalog, careerData });
+          renderStructuredApplicationResume({ ...draft(), skills }, {
+            sourceRoles, careerData, careerSkillEvidence: inventory, authorityMode: true,
+            evidenceCatalog: [
+              { id: 'ev-report', sourceId: 'career-data', quote: 'Coordinated the regional rota.' },
+              { id: 'ev-career', sourceId: 'career-data', quote: careerQuote },
+              { id: 'ev-need', sourceId: 'job-listing', quote: listingQuote },
+            ],
+          });
           return true;
         } catch (error) { return String(error?.message || error); }
       };
 
-      const spring = accept([
-        { id: 'ev-report', sourceId: 'career-data', quote: 'Built the reporting systems.' },
-        { id: 'ev-spring', sourceId: 'career-data', quote: 'Primary framework: Spring' },
-        { id: 'ev-need', sourceId: 'job-listing', quote: 'a spring release' },
-      ], [{ id: 's1', group: 'frameworks', items: ['Spring'], evidenceIds: ['ev-spring'] }]);
-      assert(spring === true, 'a lowercase "spring" in the posting never requires the case-sensitive framework Spring');
+      const longer = outcome(
+        approvedInventory(approvedSkill('long', 'LedgerPro Cloud')),
+        'Ledger duties for the clinic', 'Operated LedgerPro Cloud nightly',
+        [{ id: 's1', group: 'tools', items: ['LedgerPro Cloud'], evidenceIds: ['ev-career'] }],
+      );
+      assert(longer === true, 'a listing that names only part of an approved multi-word skill demands nothing of it, and the block that carries the full approved name is accepted');
 
-      const java = accept([
-        { id: 'ev-report', sourceId: 'career-data', quote: 'Built the reporting systems.' },
-        { id: 'ev-js', sourceId: 'career-data', quote: 'JavaScript front-ends' },
-        { id: 'ev-need', sourceId: 'job-listing', quote: 'Java services' },
-      ], [{ id: 's1', group: 'languages', items: ['JavaScript'], evidenceIds: ['ev-js'] }]);
-      assert(java === true, 'a listing naming Java is not satisfied by "JavaScript" in career data (whole-term, no substring match)');
+      const adjacent = outcome(
+        approvedInventory(approvedSkill('short', 'Ledger'), approvedSkill('long', 'LedgerPro')),
+        'Ledger duties for the clinic', 'Operated LedgerPro nightly',
+        [{ id: 's1', group: 'tools', items: ['LedgerPro'], evidenceIds: ['ev-career'] }],
+      );
+      assert(adjacent === true, 'a listing naming Ledger is not satisfied by LedgerPro in career data (whole-term, no substring match), so the shorter approved skill demands nothing here');
 
-      const sql = accept([
-        { id: 'ev-report', sourceId: 'career-data', quote: 'Built the reporting systems.' },
-        { id: 'ev-pg', sourceId: 'career-data', quote: 'PostgreSQL reporting' },
-        { id: 'ev-need', sourceId: 'job-listing', quote: 'SQL queries' },
-      ], [{ id: 's1', group: 'databases', items: ['PostgreSQL'], evidenceIds: ['ev-pg'] }]);
-      assert(sql === true, 'a listing naming SQL is not satisfied by "PostgreSQL" in career data (whole-term, no substring match)');
-
-      return { springCaseSensitive: spring === true, javaWholeTerm: java === true, sqlWholeTerm: sql === true };
+      // Positive controls: the same shapes, but with the posting and the career
+      // evidence naming the term in matching form.
+      const demanded = outcome(
+        approvedInventory(approvedSkill('short', 'Ledger'), approvedSkill('long', 'LedgerPro')),
+        'Ledger duties for the clinic', 'Operated Ledger and LedgerPro nightly',
+        [{ id: 's1', group: 'tools', items: ['LedgerPro'], evidenceIds: ['ev-career'] }],
+      );
+      assert(typeof demanded === 'string' && demanded.includes('skills omits Ledger:'),
+        `a name the posting and the career quote both state as a whole term is demanded (got ${demanded})`);
+      return { wholeTerm: true, adjacentKept: true, demanded: true };
     },
   },
   {
-    name: 'Posting-named term requirement stands down without a source-tagged catalog',
+    name: 'Posting-named term requirement stands down without a source-tagged catalog or an approved inventory',
     run() {
-      const sourceRoles = [{ id: 'role-1', title: 'Software Engineer', company: 'Analytical Engines', dates: '2020 – 2024', location: '' }];
-      const careerData = 'Ada Lovelace\nada@example.test\n## Analytical Engines\nSoftware Engineer\n\nBuilt the reporting systems.';
+      const sourceRoles = [{ id: 'role-1', title: 'Operations Lead', company: 'Analytical Engines', dates: '2020 – 2024', location: '' }];
+      const careerData = 'Ada Lovelace\nada@example.test\n## Analytical Engines\nOperations Lead\n\nCoordinated the regional rota.';
       const draft = () => ({
         schemaVersion: STRUCTURED_RESUME_SCHEMA_VERSION,
         identity: { name: 'Ada Lovelace', contact: ['ada@example.test'] },
-        roles: [{ id: 'role-1', title: 'Software Engineer', company: 'Analytical Engines', dates: '2020 – 2024', location: '', bullets: [{ id: 'bullet-1', text: 'Built the reporting systems.', evidenceIds: ['ev-report'] }] }],
+        roles: [{ id: 'role-1', title: 'Operations Lead', company: 'Analytical Engines', dates: '2020 – 2024', location: '', bullets: [{ id: 'bullet-1', text: 'Coordinated the regional rota.', evidenceIds: ['ev-report'] }] }],
       });
-      const accept = (evidenceCatalog) => {
-        try { renderStructuredApplicationResume(draft(), { sourceRoles, evidenceCatalog, careerData }); return ''; } catch (error) { return String(error?.message || error); }
+      const inventory = approvedInventory(approvedSkill('ledger', 'LedgerPro'));
+      const accept = (evidenceCatalog, careerSkillEvidence = inventory) => {
+        try { renderStructuredApplicationResume(draft(), { sourceRoles, evidenceCatalog, careerData, careerSkillEvidence, authorityMode: careerSkillEvidence != null }); return ''; } catch (error) { return String(error?.message || error); }
       };
 
       const careerOnly = accept([
-        { id: 'ev-report', sourceId: 'career-data', quote: 'Built the reporting systems.' },
-        { id: 'ev-python', sourceId: 'career-data', quote: 'Tech used: python' },
+        { id: 'ev-report', sourceId: 'career-data', quote: 'Coordinated the regional rota.' },
+        { id: 'ev-ledger', sourceId: 'career-data', quote: 'Operated LedgerPro nightly' },
       ]);
       assert(careerOnly === '', 'a catalog with no job-listing source stands the rule down rather than guessing (career-only catalogue)');
 
       const stringIds = accept(['ev-report']);
       assert(stringIds === '', 'a plain string-id catalog cannot say which quotes came from the posting, so the rule stands down');
 
-      return { careerOnlyStandsDown: careerOnly === '', stringIdsStandDown: stringIds === '' };
+      const noInventory = accept([
+        { id: 'ev-report', sourceId: 'career-data', quote: 'Coordinated the regional rota.' },
+        { id: 'ev-ledger', sourceId: 'career-data', quote: 'Operated LedgerPro nightly' },
+        { id: 'ev-need', sourceId: 'job-listing', quote: 'LedgerPro duties', priority: 'highest' },
+      ], null);
+      assert(noInventory === '', 'a job with no approved inventory has no evidence from which to demand a name');
+
+      return { careerOnlyStandsDown: true, stringIdsStandDown: true, noInventoryStandsDown: true };
     },
   },
   {
-    // Root cause this gate exists to prevent: a "Full Stack Developer" posting
-    // that names no technology made the posting-named rule demand nothing, and
-    // a real generation shipped a résumé with only Python while the accepted
-    // career evidence also stated React, Django and Docker Compose. Presence
-    // alone is not quality: ATS skill fields are extracted off this index.
+    name: 'requiredCareerAttestedSkillTerms prioritizes posting matches, then inventory order, drops a name a longer selected name already carries, and keeps merely adjacent names',
+    run() {
+      const inventory = approvedInventory(
+        approvedSkill('ledger', 'LedgerPro'), approvedSkill('cloud', 'LedgerPro Cloud'),
+        approvedSkill('plain', 'Ledger'), approvedSkill('quanta', 'Quanta'), approvedSkill('model', 'Quanta Model', { capabilityKind: 'method' }),
+        approvedSkill('triage', 'Triage Board', { capabilityKind: 'method' }), approvedSkill('rota', 'Rotamax', { capabilityKind: 'platform' }),
+      );
+      const catalog = [
+        { id: 'l', sourceId: 'job-listing', quote: 'Rotamax scheduling for dependable regional rosters.', priority: 'highest' },
+        { id: 'c-low', sourceId: 'career-data', quote: 'Kept the Triage Board current.', priority: 'supporting' },
+        { id: 'c-high', sourceId: 'career-data', quote: 'Operated LedgerPro Cloud and the Quanta Model nightly.', priority: 'high' },
+        { id: 'c-rota', sourceId: 'career-data', quote: 'Automated Rotamax and Ledger reporting.', priority: 'supporting' },
+      ];
+      const required = requiredCareerAttestedSkillTerms(catalog, inventory);
+      assert(JSON.stringify(required) === JSON.stringify(['Rotamax', 'LedgerPro Cloud', 'Ledger', 'Quanta Model', 'Triage Board']),
+        `posting matches lead, career terms follow inventory order, a name that is a whole-word sub-phrase of another selected name is dropped (LedgerPro stays out only because its longer form is selected; Quanta likewise), and the adjacent but distinct Ledger is kept (got ${JSON.stringify(required)})`);
+      const missing = missingRequiredCareerSkillTerms([{ items: ['Rotamax', 'LedgerPro Cloud'] }], catalog, inventory);
+      assert(JSON.stringify(missing) === JSON.stringify(['Ledger', 'Quanta Model', 'Triage Board']),
+        `the missing-index helper reports every required name the rendered block lacks (got ${JSON.stringify(missing)})`);
+      assert(required.length <= MAX_REQUIRED_CAREER_SKILL_TERMS, 'the prioritized index stays inside its published cap');
+
+      // A shorter name stays required when no longer selected name carries it.
+      const alone = requiredCareerAttestedSkillTerms(catalog, approvedInventory(approvedSkill('ledger', 'LedgerPro'), approvedSkill('rota', 'Rotamax')));
+      assert(alone.includes('LedgerPro') && alone.includes('Rotamax'), `a name with no longer selected form is kept (got ${JSON.stringify(alone)})`);
+      return { required, cap: MAX_REQUIRED_CAREER_SKILL_TERMS };
+    },
+  },
+  {
+    name: 'careerAttestedSkillTerms lists approved names, stands down without both sources, and the host names no technology',
+    run() {
+      const inventory = approvedInventory(approvedSkill('a', 'Aster Press'), approvedSkill('b', 'Birch Ledger'));
+      const catalog = [
+        { id: 'l', sourceId: 'job-listing', quote: 'Coordinate the office.' },
+        { id: 'c1', sourceId: 'career-data', quote: 'Built it with Birch Ledger and Aster Press.' },
+        { id: 'c2', sourceId: 'career-data', quote: 'A swift migration during a spring release.' },
+      ];
+      assert(JSON.stringify(careerAttestedSkillTerms(catalog, inventory)) === JSON.stringify(['Aster Press', 'Birch Ledger']),
+        `approved names come back in inventory order, matched whole-term (got ${JSON.stringify(careerAttestedSkillTerms(catalog, inventory))})`);
+      assert(careerAttestedSkillTerms(catalog.filter(entry => entry.sourceId === 'career-data'), inventory).length === 0, 'no job-listing source: stands down');
+      assert(careerAttestedSkillTerms(catalog.filter(entry => entry.sourceId === 'job-listing'), inventory).length === 0, 'no career-data source: nothing attested');
+      assert(careerAttestedSkillTerms(undefined, inventory).length === 0 && careerAttestedSkillTerms(['a'], inventory).length === 0, 'non-catalog input yields no names and never throws');
+
+      // No host vocabulary: a pre-snapshot job whose quotes name widely used
+      // products demands none of them, because nothing approved says they are
+      // this candidate's skills.
+      const famous = [
+        { id: 'l', sourceId: 'job-listing', quote: 'Python, TypeScript, Docker Compose, Nginx, React and SQL required.', priority: 'highest' },
+        { id: 'c', sourceId: 'career-data', quote: 'Tech used: Python, TypeScript, Docker Compose, Nginx, React, SQL' },
+      ];
+      assert(careerAttestedSkillTerms(famous).length === 0 && postingNamedAttestedSkillTerms(famous).length === 0 && requiredCareerAttestedSkillTerms(famous).length === 0,
+        'without an approved inventory no name is demanded, however widely used it is');
+      return { inventoryOrder: true };
+    },
+  },
+  {
+    // The approved inventory is the sole authority for how a skill is spelled.
+    // A fixed rule about one product's casing is wrong for every other product
+    // and wrong for a candidate whose source spells that product differently.
+    name: 'A mixed-case approved skill name is held to its approved spelling in prose, and the host knows no spelling of its own',
+    run() {
+      const sourceRoles = [{ id: 'role-1', title: 'Operations Lead', company: 'Analytical Engines', dates: '2020 – 2024', location: '' }];
+            const run = ({ approved, bullet, project = null, skillItem = null }) => {
+        const quote = `Reconciled payroll in ${approved} for the regional office.`;
+        const evidenceCatalog = [{ id: 'career-proof', sourceId: 'career-data', quote }, { id: 'job-need', sourceId: 'job-listing', quote: 'Own regional payroll reconciliation.' }];
+        const careerData = `Ada Lovelace\nada@example.test\n## Analytical Engines\nOperations Lead\n\n${quote}`;
+        try {
+          renderStructuredApplicationResume({
+            schemaVersion: STRUCTURED_RESUME_SCHEMA_VERSION,
+            identity: { name: 'Ada Lovelace', contact: ['ada@example.test'] },
+            roles: [{ id: 'role-1', title: 'Operations Lead', company: 'Analytical Engines', dates: '2020 – 2024', location: '', bullets: [{ id: 'bullet-1', text: bullet, evidenceIds: ['career-proof'] }] }],
+            ...(project ? { projects: [project] } : {}),
+            skills: [{ id: 'skills-1', group: 'tools', items: [skillItem || approved], evidenceIds: ['career-proof'] }],
+          }, { sourceRoles, evidenceCatalog, careerData, careerSkillEvidence: approvedInventory(approvedSkill('x', approved)), authorityMode: true });
+          return '';
+        } catch (error) { return String(error?.message || error); }
+      };
+
+      const faithful = run({ approved: 'LedgerPro', bullet: 'Reconciled payroll in LedgerPro for the regional office.' });
+      assert(faithful === '', `the approved spelling renders (got ${faithful})`);
+      const variant = run({ approved: 'LedgerPro', bullet: 'Reconciled payroll in Ledgerpro for the regional office.' });
+      assert(variant.includes('roles[0].bullets[0].text uses “Ledgerpro”') && variant.includes('approved spelling “LedgerPro”'),
+        `a different capitalization of a mixed-case approved name is rejected in prose with the approved spelling named (got ${variant})`);
+      const projectVariant = run({
+        approved: 'LedgerPro', bullet: 'Reconciled payroll in LedgerPro for the regional office.',
+        project: { id: 'project-1', name: 'LEDGERPRO', description: 'Reconciled payroll in LedgerPro for the regional office.', metrics: '', evidenceIds: ['career-proof', 'job-need'] },
+      });
+      assert(projectVariant.includes('projects[0].name uses “LEDGERPRO”'), `the same rule reaches project copy (got ${projectVariant})`);
+
+      // Faithful prose is not rejected: an initial-capital or all-capitals
+      // approved name has a common-word reading in another case.
+      const common = run({ approved: 'Swift', bullet: 'Reconciled payroll in Swift during a swift handover for the regional office.' });
+      assert(common === '', `a name whose other-case form is an ordinary word is left alone (got ${common})`);
+      const acronym = run({ approved: 'REST', bullet: 'Reconciled payroll in REST while the rest of the office slept.' });
+      assert(acronym === '', `an all-capitals approved name never rejects the ordinary word (got ${acronym})`);
+
+      // The source's own spelling is authoritative: when the approved name IS
+      // the odd spelling, that spelling renders and nothing is flagged.
+      const odd = run({ approved: 'Ledgerpro', bullet: 'Reconciled payroll in Ledgerpro for the regional office.' });
+      assert(odd === '', `a name approved in an unusual spelling is rendered exactly as approved (got ${odd})`);
+      return { variantRejected: true, projectRejected: true, commonWordKept: true };
+    },
+  },
+  {
+    // Root cause this gate exists to prevent: a posting that names none of the
+    // candidate's skills made the posting-named rule demand nothing, and a real
+    // generation shipped a résumé with one skill while the accepted career
+    // evidence also stated several more. Presence alone is not quality: ATS
+    // skill fields are extracted off this index.
     name: 'A résumé must carry the bounded prioritized career-attested skill index, not merely one token',
     run() {
-      const sourceRoles = [{ id: 'role-1', title: 'Software Engineer', company: 'Analytical Engines', dates: '2020 – 2024', location: '' }];
-      const genericListing = { id: 'ev-need', sourceId: 'job-listing', quote: 'Participates in agile development teams to build and maintain software solutions.', priority: 'highest' };
+      const sourceRoles = [{ id: 'role-1', title: 'Operations Lead', company: 'Analytical Engines', dates: '2020 – 2024', location: '' }];
+      const genericListing = { id: 'ev-need', sourceId: 'job-listing', quote: 'Participates in cross-functional teams to coordinate and improve regional operations.', priority: 'highest' };
+      const inventory = approvedInventory(
+        approvedSkill('ledger', 'LedgerPro'), approvedSkill('triage', 'Triage Board', { capabilityKind: 'method' }),
+        approvedSkill('quanta', 'Quanta Model', { capabilityKind: 'method' }), approvedSkill('rota', 'Rotamax', { capabilityKind: 'platform' }),
+      );
       const catalog = () => [
-        { id: 'ev-report', sourceId: 'career-data', quote: 'Built the reporting systems.' },
-        { id: 'ev-python', sourceId: 'career-data', quote: 'Tech used: python' },
-        { id: 'ev-hub', sourceId: 'career-data', quote: 'Built the internal hub with React, Django and Docker Compose.' },
+        { id: 'ev-report', sourceId: 'career-data', quote: 'Coordinated the regional rota.' },
+        { id: 'ev-ledger', sourceId: 'career-data', quote: 'Tech used: ledgerpro' },
+        { id: 'ev-hub', sourceId: 'career-data', quote: 'Ran the Triage Board, the Quanta Model and Rotamax for the regional office.' },
         genericListing,
       ];
-      const careerData = 'Ada Lovelace\nada@example.test\n## Analytical Engines\nSoftware Engineer\n\nBuilt the reporting systems.\nTech used: python\nBuilt the internal hub with React, Django and Docker Compose.';
+      const careerData = 'Ada Lovelace\nada@example.test\n## Analytical Engines\nOperations Lead\n\nCoordinated the regional rota.\nTech used: ledgerpro\nRan the Triage Board, the Quanta Model and Rotamax for the regional office.';
       const draft = (skills) => ({
         schemaVersion: STRUCTURED_RESUME_SCHEMA_VERSION,
         identity: { name: 'Ada Lovelace', contact: ['ada@example.test'] },
-        roles: [{ id: 'role-1', title: 'Software Engineer', company: 'Analytical Engines', dates: '2020 – 2024', location: '', bullets: [{ id: 'bullet-1', text: 'Built the reporting systems.', evidenceIds: ['ev-report'] }] }],
+        roles: [{ id: 'role-1', title: 'Operations Lead', company: 'Analytical Engines', dates: '2020 – 2024', location: '', bullets: [{ id: 'bullet-1', text: 'Coordinated the regional rota.', evidenceIds: ['ev-report'] }] }],
         ...(skills === undefined ? {} : { skills }),
       });
-      const attempt = (skills, evidenceCatalog = catalog()) => {
-        try { renderStructuredApplicationResume(draft(skills), { sourceRoles, evidenceCatalog, careerData }); return ''; } catch (error) { return String(error?.message || error); }
+      const attempt = (skills, evidenceCatalog = catalog(), careerSkillEvidence = inventory) => {
+        try { renderStructuredApplicationResume(draft(skills), { sourceRoles, evidenceCatalog, careerData, careerSkillEvidence, authorityMode: careerSkillEvidence != null }); return ''; } catch (error) { return String(error?.message || error); }
       };
 
-      assert(postingNamedAttestedSkillTerms(catalog()).length === 0, 'precondition: the generic posting names no attested technology, so the coverage rule demands nothing');
+      assert(postingNamedAttestedSkillTerms(catalog(), inventory).length === 0, 'precondition: the generic posting names no attested skill, so the coverage rule demands nothing');
       const absent = attempt(undefined);
-      assert(absent.includes('skills omits Python, Docker Compose, React, Django') && absent.includes('bounded career-attested index'),
+      assert(absent.includes('skills omits LedgerPro, Triage Board, Quanta Model, Rotamax') && absent.includes('bounded career-attested index'),
         `a draft with no skills key is rejected with the complete bounded index it owes (got ${absent})`);
       const emptyArray = attempt([]);
-      assert(emptyArray.includes('skills omits Python, Docker Compose, React, Django'), `an empty skills array owes the same complete index (got ${emptyArray})`);
+      assert(emptyArray.includes('skills omits LedgerPro, Triage Board, Quanta Model, Rotamax'), `an empty skills array owes the same complete index (got ${emptyArray})`);
 
-      const oneRow = attempt([{ id: 's1', group: 'languages', items: ['Python'], evidenceIds: ['ev-python'] }]);
-      assert(oneRow.includes('skills omits Docker Compose, React, Django'), `a one-item compliance gesture is rejected with the evidence-backed terms it dropped (got ${oneRow})`);
+      const oneRow = attempt([{ id: 's1', group: 'tools', items: ['LedgerPro'], evidenceIds: ['ev-ledger'] }]);
+      assert(oneRow.includes('skills omits Triage Board, Quanta Model, Rotamax'), `a one-item compliance gesture is rejected with the evidence-backed terms it dropped (got ${oneRow})`);
       const complete = attempt([
-        { id: 's1', group: 'languages', items: ['Python'], evidenceIds: ['ev-python'] },
-        { id: 's2', group: 'frameworks', items: ['React', 'Django'], evidenceIds: ['ev-hub'] },
-        { id: 's3', group: 'infrastructure', items: ['Docker Compose'], evidenceIds: ['ev-hub'] },
+        { id: 's1', group: 'tools', items: ['LedgerPro'], evidenceIds: ['ev-ledger'] },
+        { id: 's2', group: 'methods', items: ['Triage Board', 'Quanta Model'], evidenceIds: ['ev-hub'] },
+        { id: 's3', group: 'platforms', items: ['Rotamax'], evidenceIds: ['ev-hub'] },
       ]);
       assert(complete === '', `the complete, source-grounded four-term index passes (got ${complete})`);
 
       // Satisfiable by construction: nothing to index means nothing demanded.
       const nothingAttested = attempt(undefined, [
-        { id: 'ev-report', sourceId: 'career-data', quote: 'Built the reporting systems.' },
+        { id: 'ev-report', sourceId: 'career-data', quote: 'Coordinated the regional rota.' },
         genericListing,
       ]);
-      assert(nothingAttested === '', `a plan whose career quotes state no recognised technology stands the floor down (got ${nothingAttested})`);
+      assert(nothingAttested === '', `a plan whose career quotes state no approved skill stands the floor down (got ${nothingAttested})`);
 
       // Same stand-downs as the coverage rule: without both halves of a
       // source-tagged catalog the rule cannot tell it is in the paste workflow.
@@ -2418,80 +2580,46 @@ Dates: May 2019 — August 2019
 
       // The posting-specific wording remains for its own omission while the
       // breadth rule names only the additional career-attested terms.
-      const postingNamed = attempt(undefined, [...catalog(), { id: 'ev-need-py', sourceId: 'job-listing', quote: 'Proficient in Python', priority: 'highest' }]);
-      assert(postingNamed.includes('skills omits Python')
-        && postingNamed.includes('skills omits Docker Compose, React, Django from the bounded career-attested index'),
-      `posting-named and additional career coverage are both actionable without duplicating Python (got ${postingNamed})`);
+      const postingNamed = attempt(undefined, [...catalog(), { id: 'ev-need-ledger', sourceId: 'job-listing', quote: 'Proficient in LedgerPro', priority: 'highest' }]);
+      assert(postingNamed.includes('skills omits LedgerPro')
+        && postingNamed.includes('skills omits Triage Board, Quanta Model, Rotamax from the bounded career-attested index'),
+      `posting-named and additional career coverage are both actionable without duplicating LedgerPro (got ${postingNamed})`);
 
       return { absentRejected: true, emptyArrayRejected: true, oneRowRejected: true, completeAccepted: true, standsDown: true };
     },
   },
   {
-    name: 'requiredCareerAttestedSkillTerms prioritizes posting matches, then evidence priority and order, within the bounded index',
-    run() {
-      const catalog = [
-        { id: 'l', sourceId: 'job-listing', quote: 'Python services for dependable identity decisions.', priority: 'highest' },
-        { id: 'c-low', sourceId: 'career-data', quote: 'Built a React interface with TypeScript.', priority: 'supporting' },
-        { id: 'c-high', sourceId: 'career-data', quote: 'Operated Django, Nginx, Gunicorn and Docker Compose services.', priority: 'high' },
-        { id: 'c-python', sourceId: 'career-data', quote: 'Automated Python and SQL reporting.', priority: 'supporting' },
-      ];
-      const required = requiredCareerAttestedSkillTerms(catalog);
-      assert(JSON.stringify(required) === JSON.stringify(['Python', 'Docker Compose', 'Nginx', 'Gunicorn', 'Django', 'TypeScript', 'React', 'SQL']),
-        `posting matches lead, then career terms follow evidence priority/order without redundant Docker (got ${JSON.stringify(required)})`);
-      const missing = missingRequiredCareerSkillTerms([{ items: ['Python', 'Docker Compose', 'Django'] }], catalog);
-      assert(JSON.stringify(missing) === JSON.stringify(['Nginx', 'Gunicorn', 'TypeScript', 'React', 'SQL']),
-        `the missing-index helper reports every required name the rendered block lacks (got ${JSON.stringify(missing)})`);
-      assert(required.length <= MAX_REQUIRED_CAREER_SKILL_TERMS, 'the prioritized index stays inside its published cap');
-      return { required, cap: MAX_REQUIRED_CAREER_SKILL_TERMS };
-    },
-  },
-  {
-    name: 'careerAttestedSkillTerms lists vocabulary names in vocabulary order under the per-name case rule and stands down without both sources',
-    run() {
-      const catalog = [
-        { id: 'l', sourceId: 'job-listing', quote: 'Build software.' },
-        { id: 'c1', sourceId: 'career-data', quote: 'Built it with Django and React; also Tech used: python' },
-        { id: 'c2', sourceId: 'career-data', quote: 'A swift migration during a spring release.' },
-        { id: 'c3', sourceId: 'career-data', quote: 'Wrote reports for the Javascript front-end.' },
-      ];
-      assert(JSON.stringify(careerAttestedSkillTerms(catalog)) === JSON.stringify(['Python', 'JavaScript', 'React', 'Django']),
-        `names come back in vocabulary order, matched whole-term; lowercase "swift" and "spring" attest nothing (got ${JSON.stringify(careerAttestedSkillTerms(catalog))})`);
-      assert(careerAttestedSkillTerms(catalog.filter(entry => entry.sourceId === 'career-data')).length === 0, 'no job-listing source: stands down');
-      assert(careerAttestedSkillTerms(catalog.filter(entry => entry.sourceId === 'job-listing')).length === 0, 'no career-data source: nothing attested');
-      assert(careerAttestedSkillTerms(undefined).length === 0 && careerAttestedSkillTerms(['a']).length === 0, 'non-catalog input yields no names and never throws');
-      return { vocabularyOrder: true };
-    },
-  },
-  {
     name: 'postingNamedAttestedSkillTerms orders by priority then listing order and caps at ten',
     run() {
-      const career = { id: 'c', sourceId: 'career-data', quote: 'Tech used: TypeScript, Python, JavaScript, Java, Kotlin, Swift, Scala, Ruby, PHP, Rust' };
+      const names = ['Axiom Ledger', 'Borealis CAD', 'Cobalt Intake', 'Dune Roster', 'Ember Pantry', 'Fathom Audit', 'Garnet Triage', 'Harbor Dispatch', 'Indigo Grader', 'Juniper Lathe', 'Kestrel Survey', 'Lumen Pharmacy'];
+      const inventory = approvedInventory(...names.map((name, index) => approvedSkill(`n${index}`, name)));
+      const career = { id: 'c', sourceId: 'career-data', quote: `Tech used: ${names.join(', ')}` };
       const listing = [
-        { id: 'l1', sourceId: 'job-listing', quote: 'Python scripting', priority: 'high' },
-        { id: 'l2', sourceId: 'job-listing', quote: 'TypeScript UI', priority: 'highest' },
-        { id: 'l3', sourceId: 'job-listing', quote: 'JavaScript runtime', priority: 'high' },
-        { id: 'l4', sourceId: 'job-listing', quote: 'Java services', priority: 'supporting' },
+        { id: 'l1', sourceId: 'job-listing', quote: 'Dune Roster scheduling', priority: 'high' },
+        { id: 'l2', sourceId: 'job-listing', quote: 'Axiom Ledger reporting', priority: 'highest' },
+        { id: 'l3', sourceId: 'job-listing', quote: 'Garnet Triage rounds', priority: 'high' },
+        { id: 'l4', sourceId: 'job-listing', quote: 'Cobalt Intake forms', priority: 'supporting' },
       ];
-      assert(JSON.stringify(postingNamedAttestedSkillTerms([...listing, career])) === JSON.stringify(['TypeScript', 'Python', 'JavaScript', 'Java']),
-        'higher priority is listed first, then the first listing entry, no matter the vocabulary order');
+      assert(JSON.stringify(postingNamedAttestedSkillTerms([...listing, career], inventory)) === JSON.stringify(['Axiom Ledger', 'Dune Roster', 'Garnet Triage', 'Cobalt Intake']),
+        'higher priority is listed first, then the first listing entry, no matter the inventory order');
 
-      const twelve = ['Python', 'TypeScript', 'JavaScript', 'Java', 'Kotlin', 'Swift', 'Scala', 'Ruby', 'PHP', 'Rust', 'Golang', 'C++'];
       const cappedCatalog = [
-        { id: 'need', sourceId: 'job-listing', quote: `Required: ${twelve.join(', ')}`, priority: 'highest' },
-        { id: 'c', sourceId: 'career-data', quote: `Tech used: ${twelve.join(', ')}` },
+        { id: 'need', sourceId: 'job-listing', quote: `Required: ${names.join(', ')}`, priority: 'highest' },
+        career,
       ];
-      assert(postingNamedAttestedSkillTerms(cappedCatalog).length === MAX_REQUIRED_POSTING_SKILL_TERMS
-        && JSON.stringify(postingNamedAttestedSkillTerms(cappedCatalog)) === JSON.stringify(twelve.slice(0, MAX_REQUIRED_POSTING_SKILL_TERMS)),
-        'twelve posting-named, career-attested names are capped to exactly ten, in priority/listing order');
+      assert(postingNamedAttestedSkillTerms(cappedCatalog, inventory).length === MAX_REQUIRED_POSTING_SKILL_TERMS
+        && JSON.stringify(postingNamedAttestedSkillTerms(cappedCatalog, inventory)) === JSON.stringify(names.slice(0, MAX_REQUIRED_POSTING_SKILL_TERMS)),
+      'twelve posting-named, career-attested names are capped to exactly ten, in priority/listing order');
 
       const missing = missingPostingNamedSkillTerms(
-        [{ items: ['Python', 'SQL'] }, { items: ['TypeScript'] }],
+        [{ items: ['Axiom Ledger', 'Borealis CAD'] }, { items: ['Dune Roster'] }],
         [...listing, career],
+        inventory,
       );
-      assert(JSON.stringify(missing) === JSON.stringify(['JavaScript', 'Java']),
+      assert(JSON.stringify(missing) === JSON.stringify(['Garnet Triage', 'Cobalt Intake']),
         'missingPostingNamedSkillTerms returns only the required names no item carries');
 
-      const noCatalog = postingNamedAttestedSkillTerms(undefined);
+      const noCatalog = postingNamedAttestedSkillTerms(undefined, inventory);
       assert(JSON.stringify(noCatalog) === JSON.stringify([]), 'a non-array catalog yields no required names');
       return { ordering: true, cap: MAX_REQUIRED_POSTING_SKILL_TERMS, missing: 2 };
     },
@@ -2538,9 +2666,14 @@ Dates: May 2019 — August 2019
       };
       assert(renderStructuredApplicationResume(lowercaseDraft, lowercaseContext).includes('npm'),
         'an exact lowercase approved snapshot name bypasses the legacy uppercase-or-digit heuristic');
-      let normalizedAliasRejected = false;
-      try { renderStructuredApplicationResume({ ...lowercaseDraft, skills: [{ ...lowercaseDraft.skills[0], items: ['NPM'] }] }, lowercaseContext); } catch { normalizedAliasRejected = true; }
-      assert(normalizedAliasRejected, 'snapshot mode rejects a capitalization-normalized alias instead of inventing a new skill spelling');
+      // A case/spacing variant of an approved skill resolves to the approved
+      // canonical spelling; it is never rendered as a new spelling.
+      let variantOutcome;
+      try {
+        variantOutcome = renderStructuredApplicationResume({ ...lowercaseDraft, skills: [{ ...lowercaseDraft.skills[0], items: ['NPM'] }] }, lowercaseContext);
+      } catch (error) { variantOutcome = error; }
+      assert(typeof variantOutcome === 'string' ? (variantOutcome.includes('npm') && !variantOutcome.includes('NPM')) : variantOutcome instanceof Error,
+        'snapshot mode either resolves a capitalization variant to the approved canonical spelling or rejects it; it never prints an invented spelling');
       return { novelRequired: true, shortTokenSourceLimited: true, lowercaseApproved: true };
     },
   },
@@ -2577,64 +2710,6 @@ Dates: May 2019 — August 2019
         && qualifiedRejected,
       'v2 accepts only direct, index-eligible inventory rows, rejects relation-qualified rows instead of flattening them into keyword matching, and keeps the explicit v1 reader separate');
       return { v2DirectOnly: true, v1Historical: true };
-    },
-  },
-  {
-    name: 'POSTING_NAMED_SKILL_TERMS is a frozen duplicate-free filterable vocabulary',
-    run() {
-      assert(Object.isFrozen(POSTING_NAMED_SKILL_TERMS), 'the vocabulary is frozen against drift');
-      assert(new Set(POSTING_NAMED_SKILL_TERMS).size === POSTING_NAMED_SKILL_TERMS.length, 'the vocabulary has no duplicate names');
-      const filterable = /[\p{Lu}\p{N}]/u;
-      assert(POSTING_NAMED_SKILL_TERMS.every(name => filterable.test(name)),
-        'every vocabulary name carries an uppercase letter or digit, so the filterable-item rule can always accept it');
-      const caseSensitive = ['Ruby', 'Swift', 'Rust', 'Dart', 'Julia', 'Spark', 'Spring', 'Flask', 'Angular', 'Azure', 'Groovy'];
-      assert(caseSensitive.every(name => POSTING_NAMED_SKILL_TERMS.includes(name)),
-        'every case-sensitive name is a member of the closed vocabulary');
-      assert(MAX_REQUIRED_POSTING_SKILL_TERMS === 10, 'the cap is exactly ten');
-      return { terms: POSTING_NAMED_SKILL_TERMS.length, caseSensitive: caseSensitive.length };
-    },
-  },
-  {
-    // The whole-term/case tests above only prove the NEGATIVE side (nothing is
-    // required), which would also hold if the rule never fired in those
-    // fixtures. These are their positive controls: the same shape, but with the
-    // posting and the career evidence naming the term in matching form.
-    name: 'Posting-named term matching requires the name when listing and career evidence state it in matching form',
-    run() {
-      const sourceRoles = [{ id: 'role-1', title: 'Software Engineer', company: 'Analytical Engines', dates: '2020 – 2024', location: '' }];
-      const careerData = 'Ada Lovelace\nada@example.test\nSoftware Engineer\nBuilt the reporting systems.';
-      const draft = () => ({
-        schemaVersion: STRUCTURED_RESUME_SCHEMA_VERSION,
-        identity: { name: 'Ada Lovelace', contact: ['ada@example.test'] },
-        roles: [{ id: 'role-1', title: 'Software Engineer', company: 'Analytical Engines', dates: '2020 – 2024', location: '', bullets: [{ id: 'bullet-1', text: 'Built the reporting systems.', evidenceIds: ['ev-report'] }] }],
-      });
-      const rejection = (listingQuote, careerQuote) => {
-        try {
-          renderStructuredApplicationResume(draft(), {
-            sourceRoles,
-            evidenceCatalog: [
-              { id: 'ev-report', sourceId: 'career-data', quote: 'Built the reporting systems.' },
-              { id: 'ev-career', sourceId: 'career-data', quote: careerQuote },
-              { id: 'ev-need', sourceId: 'job-listing', quote: listingQuote },
-            ],
-            careerData,
-          });
-          return '';
-        } catch (error) { return String(error?.message || error); }
-      };
-
-      const spring = rejection('Spring services', 'Primary framework: Spring');
-      assert(spring.includes('skills omits Spring:'),
-        `a capitalised "Spring" in the posting and in career data does require the case-sensitive framework (got ${spring})`);
-      const java = rejection('Java services', 'Java and JavaScript');
-      assert(java.includes('skills omits Java:')
-        && !java.slice(0, java.indexOf('skills omits JavaScript')).includes('JavaScript'),
-      `the posting-specific rule requires whole-term Java without mistaking JavaScript for that posting match; the separate bounded career index may still retain JavaScript (got ${java})`);
-      const sql = rejection('SQL queries', 'SQL and PostgreSQL reporting');
-      assert(sql.includes('skills omits SQL:')
-        && !sql.slice(0, sql.indexOf('skills omits PostgreSQL')).includes('PostgreSQL'),
-      `the posting-specific rule requires whole-term SQL without mistaking PostgreSQL for that posting match; the separate bounded career index may still retain PostgreSQL (got ${sql})`);
-      return { spring: true, java: true, sql: true };
     },
   },
 ];

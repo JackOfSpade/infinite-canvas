@@ -71,7 +71,15 @@ export default [
     for (const state of CHAT_STATES) assert(typeof normalizeBridgeStatus(rawStatus(1, { chat: { state } })).chat.state === 'string', `chat enum ${state} must be normalized`);
     const jobId = '00000000-0000-4000-8000-000000000001';
     for (const phase of JOB_PHASES) assert(typeof normalizeBridgeStatus(rawStatus(1, { queue: { jobs: [{ jobId, phase }] } })).queue.jobs[0]?.phase === 'string', `job phase ${phase} must be normalized`);
+    for (const stage of ['requirement-disposition', 'blind-review', 'blind-repair-context']) {
+      assert(normalizeBridgeStatus(rawStatus(1, { queue: { jobs: [{ jobId, phase: 'awaiting', stage }] } })).queue.jobs[0]?.stage === stage,
+        `${stage} must survive the safe status projection for the dock progress rollup`);
+    }
+    assert(normalizeBridgeStatus(rawStatus(1, { queue: { jobs: [{ jobId, phase: 'awaiting', stage: 'not-a-stage' }] } })).queue.jobs[0]?.stage === null,
+      'an unknown stage must still fail closed');
     for (const reason of JOB_REASONS) assert(normalizeBridgeStatus(rawStatus(1, { queue: { jobs: [{ jobId, phase: 'held', reason }] } })).queue.jobs[0]?.reason === reason, `job reason ${reason} must be preserved`);
+    assert(normalizeBridgeStatus(rawStatus(1, { queue: { jobs: [{ jobId, phase: 'needs_user', reason: 'review_stop' }] } })).queue.jobs[0]?.reason === 'review_stop',
+      'the independent-review stop reaches the dock as its own reason, not as an unknown one');
     assert(normalizeBridgeStatus(rawStatus(1, { chat: { previous: [{ ordinal: 1, endedAt: NOW - 1_000, reason: 'source_ended' }] } })).chat.previous[0]?.reason === 'source_ended',
       'the neutral prior-chat source_ended reason must survive renderer normalization');
     assert(normalizeBridgeStatus(rawStatus(1, { tunnel: { state: 'online' } })).tunnel.state === 'unknown', 'a raw supervisor online state is not a public renderer enum');
@@ -231,6 +239,24 @@ export default [
       && pushNudge.detail === 'Prepare worker chats for this queue.'
       && pushNudge.actions.some(item => item.id === 'new-chat'),
     'selected push work with no client poll must lead with the automatic chat starter instead of looking idle');
+  } },
+  { name: 'handoff bridge: ui: a stale probe reason never overrides a successful or zero-failure tunnel snapshot', run: () => {
+    const staleReason = rawStatus(1, {
+      tunnel: { state: 'up', probe: { state: 'ok', reason: 'edge-unreachable', consecutiveFailures: 0 } },
+    });
+    const zeroFailureAggregate = rawStatus(1, {
+      tunnel: { state: 'up', probe: { state: 'failing', reason: 'edge-unreachable', consecutiveFailures: 0 } },
+    });
+    for (const status of [staleReason, zeroFailureAggregate]) {
+      const health = deriveBridgeHealth(normalizeBridgeStatus(status), NOW);
+      assert(health.id === 'ready' && !health.detail.includes('checks in a row failed'),
+        'a diagnostic reason without an observed failed check must not claim the tunnel is unreachable');
+    }
+    const observedFailure = deriveBridgeHealth(normalizeBridgeStatus(rawStatus(1, {
+      tunnel: { state: 'up', probe: { state: 'failing', reason: 'edge-unreachable', consecutiveFailures: 1 } },
+    })), NOW);
+    assert(observedFailure.id === 'tunnel-unreachable' && observedFailure.detail.includes('1 checks in a row failed'),
+      'a current observed failure must remain actionable');
   } },
   { name: 'handoff bridge: ui: normalizer is total across 500 deterministic hostile snapshots', run: () => {
     const random = seeded(0x51a7e);

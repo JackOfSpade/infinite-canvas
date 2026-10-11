@@ -41,7 +41,12 @@ const LINK_STATES = new Set(['unlinked', 'pairing', 'linked', 'needs-renewal', '
 const CHAT_STATES = new Set(['none', 'awaiting-first-call', 'reached', 'working', 'idle', 'full', 'ended']);
 const POOL_WORKER_STATES = new Set(['available', 'ready', 'working', 'quiet', 'waiting', 'idle']);
 const LANE_PHASES = new Set(['unread', 'awaiting', 'host', 'needs_user', 'held', 'done', 'gone']);
-const APPLICATION_STAGES = new Set(['evidence-plan', 'resume', 'cover-letter', 'review']);
+// Fixed application workflow identifiers allowed across the main-to-renderer
+// policy boundary. Post-letter work projects to the dock's final review step.
+const APPLICATION_STAGES = new Set([
+  'evidence-plan', 'resume', 'cover-letter', 'requirement-disposition',
+  'review', 'blind-review', 'blind-repair-context',
+]);
 // The closed vocabulary of task names that may reach the renderer. It was
 // just 'job-scoring' while that was the only bridgeable task; every other
 // served task projected to null, so the UI said "this handoff" instead of
@@ -59,8 +64,9 @@ const TASK_IDS = new Set([
   'job-location-consolidation-confirmation', 'job-role-audit', 'job-role-screen', 'job-role-screen-batch', 'job-scoring', 'job-taxonomy-classify',
   'job-taxonomy-classify-batch', 'job-taxonomy-plan', 'platform-fit-assessment', 'price-synthesis',
   'price-synthesis-batch', 'resume-parse',
+  'interview-brief-research', 'interview-brief-assessment',
 ]);
-const JOB_REASONS = new Set(['user_hold', 'human_advance', 'rejection_cap', 'junk_cap', 'review_round_cap', 'job_broken', 'render_retry', 'app_fix_required', 'canvas_unavailable', 'read_failed', 'write_failed', 'submit_stuck', 'host_silent', 'lapsed', 'restart', 'app_only_handoffs', 'commit_failed', 'person_editing', 'hub_not_selected', 'task_disabled', 'integrity_fault', 'failed', 'render_retry_required', 'user', 'answered_in_dock']);
+const JOB_REASONS = new Set(['user_hold', 'human_advance', 'rejection_cap', 'junk_cap', 'review_round_cap', 'job_broken', 'render_retry', 'app_fix_required', 'canvas_unavailable', 'canvas_missing', 'read_failed', 'write_failed', 'submit_stuck', 'host_silent', 'lapsed', 'restart', 'review_stop', 'app_only_handoffs', 'commit_failed', 'person_editing', 'hub_not_selected', 'task_disabled', 'integrity_fault', 'failed', 'render_retry_required', 'user', 'answered_in_dock']);
 const ALARM_KINDS = new Set(['unknown_key', 'unknown_handoff', 'refresh_reuse', 'code_reuse', 'rate_limited', 'held_caps']);
 const PAUSE_CAUSES = new Set(['user', 'idle', 'anomaly', 'revoked', 'quit']);
 const FAULT_CODES = new Set(['socket_unavailable', 'tunnel_failed', 'state_unreadable', 'persist_failed', 'internal_error']);
@@ -1179,7 +1185,7 @@ export function createHandoffBridgeController(options = {}) {
       const jobs = Array.isArray(inner.queue?.jobs) ? inner.queue.jobs : [];
       const signature = JSON.stringify([
         inner.chat?.outstanding?.stalled === true,
-        jobs.map(job => [job?.jobId, job?.phase, job?.stalled === true]),
+        jobs.map(job => [job?.jobId, job?.phase, job?.reason ?? null, job?.stalled === true]),
         // A waiting worker that stops polling can cross its recovery threshold
         // without another MCP request, so include the closed roster state in
         // the tick-driven publication signature.

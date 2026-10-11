@@ -314,8 +314,16 @@ export function getFailedStartDiagnosticLines() {
 // code, chat key or hostname can pass through it. The provider returns null
 // when the person's report-telemetry opt-in is off.
 const QUEUE_PHASES = new Set(['unread', 'awaiting', 'host', 'needs_user', 'held', 'done', 'gone']);
-const QUEUE_STAGES = new Set(['evidence-plan', 'resume', 'cover-letter', 'review']);
-const QUEUE_REASONS = new Set(['user_hold', 'human_advance', 'rejection_cap', 'junk_cap', 'review_round_cap', 'job_broken', 'render_retry', 'app_fix_required', 'canvas_unavailable', 'read_failed', 'write_failed', 'submit_stuck', 'host_silent', 'lapsed', 'restart']);
+// The ONE closed list of application workflow stages a lane may report. The
+// engine's renderer status imports it, so a stage the live status shows can
+// never collapse to null in a bug report (the post-letter stages once did,
+// because this list was a hand-kept copy that missed them).
+export const APPLICATION_QUEUE_STAGES = Object.freeze([
+  'evidence-plan', 'resume', 'cover-letter', 'requirement-disposition',
+  'review', 'blind-review', 'blind-repair-context',
+]);
+const QUEUE_STAGES = new Set(APPLICATION_QUEUE_STAGES);
+const QUEUE_REASONS = new Set(['user_hold', 'human_advance', 'rejection_cap', 'junk_cap', 'review_round_cap', 'job_broken', 'render_retry', 'app_fix_required', 'canvas_unavailable', 'canvas_missing', 'read_failed', 'write_failed', 'submit_stuck', 'host_silent', 'lapsed', 'restart', 'review_stop']);
 const QUEUE_SERVING = new Set(['off', 'live', 'paused', 'stopping', 'starting', 'failed', 'error']);
 const QUEUE_PAUSE_CAUSES = new Set(['user', 'idle', 'anomaly', 'network', 'expiry', 'sleep', 'quit', 'tunnel', 'other']);
 const QUEUE_FAULTS = new Set(['persist_failed', 'source_failed', 'other']);
@@ -351,6 +359,7 @@ const QUEUE_PUSH_TASKS = new Set([
   'job-preference-interpretation', 'job-preference-evaluation',
   'job-preference-research-assessment', 'job-preference-research-batch-assessment',
   'job-location-consolidation-confirmation', 'job-role-audit', 'job-role-screen', 'job-role-screen-batch',
+  'interview-brief-research', 'interview-brief-assessment',
 ]);
 const QUEUE_PUSH_EXCLUSION_REASONS = ['ending', 'settling', 'attachment', 'free_text', 'task_not_allowed', 'node_not_allowed', 'person_editing'];
 const QUEUE_MAX_PUSH_HUBS = 50;

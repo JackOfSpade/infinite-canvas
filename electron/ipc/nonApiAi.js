@@ -814,6 +814,7 @@ export async function durableRunHasExactStep(runId, {
   batchTotal = null,
   itemCount = null,
   attachmentPaths = [],
+  attachmentIdentities = null,
 } = {}) {
   return (await durableRunExactStepStatus(runId, {
     materializedPrompt,
@@ -823,6 +824,7 @@ export async function durableRunHasExactStep(runId, {
     batchTotal,
     itemCount,
     attachmentPaths,
+    attachmentIdentities,
   })) !== null;
 }
 
@@ -841,16 +843,18 @@ export async function durableRunExactStepStatus(runId, {
   batchTotal = null,
   itemCount = null,
   attachmentPaths = [],
+  attachmentIdentities = null,
 } = {}) {
   const clean = cleanRunId(runId);
   if (!clean || typeof materializedPrompt !== 'string' || !materializedPrompt) return null;
+  const cleanPaths = cleanAttachmentPaths(attachmentPaths);
   const keys = durableStepKeys({
     materializedPrompt,
     task: typeof task === 'string' ? task : null,
     nodeId: nodeId || null,
     ...cleanBatchMetadata(batch, batchTotal),
     itemCount: cleanBatchNumber(itemCount),
-    attachmentPaths: cleanAttachmentPaths(attachmentPaths),
+    attachmentPaths: logicalAttachmentInputs(cleanPaths, cleanAttachmentIdentities(attachmentIdentities, cleanPaths)),
   });
   const saved = await durableStepByLogicalOrRawKey(clean, keys);
   return saved?.step?.status === 'accepted' || saved?.step?.status === 'pending'
@@ -1454,6 +1458,28 @@ function cleanAttachmentPaths(paths) {
   return [...new Set(paths
     .filter(value => typeof value === 'string' && value.trim())
     .map(value => value.trim()))];
+}
+
+const ATTACHMENT_IDENTITY_RE = /^[A-Za-z0-9:_.#-]{1,200}$/;
+
+// A host that stages a private COPY of a person's file under a fresh random
+// pathname every time (the career compiler does) names the attachment by what
+// it is, not where this staging happened to put it.  Identities pair 1:1 with
+// the cleaned attachment paths; anything malformed or unpaired is ignored so a
+// caller can only ever fall back to the path-based identity, never to a
+// weaker one.
+function cleanAttachmentIdentities(identities, paths) {
+  if (!Array.isArray(identities) || identities.length === 0 || identities.length !== paths.length) return null;
+  const clean = identities.map(value => (typeof value === 'string' ? value.trim() : ''));
+  return clean.every(value => ATTACHMENT_IDENTITY_RE.test(value)) && new Set(clean).size === clean.length
+    ? clean
+    : null;
+}
+
+// What the durable step key and handoff code hash for the attachment inputs: the
+// stable logical identity when the host supplied one, otherwise the pathname.
+function logicalAttachmentInputs(paths, identities) {
+  return identities ? identities.map(identity => `logical-attachment:${identity}`) : paths;
 }
 
 // `handoffSettings` is deliberately rendered into a prompt. Keep this
@@ -2306,7 +2332,44 @@ function isActiveSettlingRecord(record) {
     && pendingRequests.get(record.requestId) === record;
 }
 
+function hostStagedAttachmentMissingError() {
+  const error = new Error('The private copy of your career file that this step needs is no longer on disk, so the prompt was not shown. Nothing was saved. Choose Continue to stage the file again.');
+  error.code = 'HOST_STAGED_ATTACHMENT_MISSING';
+  return error;
+}
+
+async function hostStagedAttachmentsPresent(record) {
+  for (const attachmentPath of record.attachmentPaths) {
+    try {
+      const stat = await fs.promises.lstat(attachmentPath);
+      if (!stat.isFile() || stat.isSymbolicLink()) return false;
+    } catch {
+      return false;
+    }
+  }
+  return true;
+}
+
+function hostStagedAttachmentsPresentSync(record) {
+  for (const attachmentPath of record.attachmentPaths) {
+    try {
+      const stat = fs.lstatSync(attachmentPath);
+      if (!stat.isFile() || stat.isSymbolicLink()) return false;
+    } catch {
+      return false;
+    }
+  }
+  return true;
+}
+
 function sendRequest(record, deliveryKind = 'initial') {
+  // Every delivery path (first show, dock-remount replay, paced re-issue)
+  // funnels through here, so this is the one place that guarantees a shown
+  // prompt never names a host-staged attachment that has disappeared.
+  if (record.hostStagedAttachments && !hostStagedAttachmentsPresentSync(record)) {
+    abortPending(record, hostStagedAttachmentMissingError());
+    return false;
+  }
   if (send(record, 'non-api-ai-request', publicRequest(record))) {
     updateHandoffLifecycle(record, deliveryKind === 'replay'
       ? 'replayed'
@@ -2352,6 +2415,13 @@ export async function requestNonApiAi({
   maxOutputTokens,
   formulaSeed,
   attachmentPaths,
+  // Optional content-bound names for `attachmentPaths` (see
+  // cleanAttachmentIdentities).  Only a host that owns the attachment's staging
+  // may supply them; `hostStagedAttachments` additionally promises that every
+  // listed path is a host-staged copy which must exist whenever the prompt is
+  // shown.
+  attachmentIdentities,
+  hostStagedAttachments = false,
   requestKind,
   handoffSettings,
   batch,
@@ -2426,6 +2496,8 @@ export async function requestNonApiAi({
     measureProgressUnits: typeof measureProgressUnits === 'function' ? measureProgressUnits : null,
   };
   const normalizedAttachmentPaths = cleanAttachmentPaths(attachmentPaths);
+  const normalizedAttachmentIdentities = cleanAttachmentIdentities(attachmentIdentities, normalizedAttachmentPaths);
+  const keyedAttachmentInputs = logicalAttachmentInputs(normalizedAttachmentPaths, normalizedAttachmentIdentities);
   const batchMeta = cleanBatchMetadata(batch, batchTotal);
   // Stage 1: Build base prompt WITHOUT handoff code. This keeps durableStepKey
   // hashing byte-identical to prior versions so existing durable steps stay reachable.
@@ -2443,7 +2515,7 @@ export async function requestNonApiAi({
   const currentStepKeys = durableStepKeys({
     materializedPrompt: basePrompt, task, nodeId: context.nodeId || null,
     ...batchMeta, itemCount: cleanBatchNumber(itemCount),
-    attachmentPaths: normalizedAttachmentPaths,
+    attachmentPaths: keyedAttachmentInputs,
   });
   let stepKey = runId ? currentStepKeys.logicalKey : '';
   // Read the durable step before choosing a code. Selection and reservation
@@ -2482,7 +2554,7 @@ export async function requestNonApiAi({
     const legacyStepKeys = durableStepKeys({
       materializedPrompt: legacyBasePrompt, task, nodeId: context.nodeId || null,
       ...legacyBatchMeta, itemCount: legacyItemCount,
-      attachmentPaths: normalizedAttachmentPaths,
+      attachmentPaths: keyedAttachmentInputs,
     });
     // First use the canonical v1 key, then the exact historical raw key when
     // this newly generated boundary happens to reproduce it. Older random
@@ -2557,7 +2629,7 @@ export async function requestNonApiAi({
       batch: effectiveBatchMeta.batch,
       batchTotal: effectiveBatchMeta.batchTotal,
       itemCount: effectiveItemCount,
-      attachmentPaths: normalizedAttachmentPaths,
+      attachmentPaths: keyedAttachmentInputs,
       pendingMap: pendingRequests,
       reservationMap: handoffCodeReservations,
       currentReservationId: handoffReservationId,
@@ -2642,6 +2714,9 @@ export async function requestNonApiAi({
     requestKind: requestKind === 'raw-text' ? 'raw-text' : 'structured-text',
     grounded: grounding === true,
     attachmentPaths: normalizedAttachmentPaths,
+    // True only for host-staged private copies: the handoff must never be shown
+    // (initially, replayed, or re-issued) while one of them is missing.
+    hostStagedAttachments: hostStagedAttachments === true && normalizedAttachmentPaths.length > 0,
     canStepBack: canStepBack === true,
     stepBackLabel: cleanStepBackLabel(stepBackLabel),
     initialResponse: typeof initialResponse === 'string' && initialResponse
@@ -2665,6 +2740,16 @@ export async function requestNonApiAi({
     progressScopeKey: null,
     progressCandidateToken: null,
   };
+  // A resumed workflow stages its private attachment copies BEFORE it asks for
+  // anything, and an accepted step replays above without needing them.  If a
+  // handoff that does need one is nevertheless about to be shown while the file
+  // is gone (external cleanup, a stage pruned underneath a long wait), refuse it
+  // here: a prompt that tells the person to attach a file that does not exist is
+  // worse than an explicit failure that Continue can recover from.
+  if (record.hostStagedAttachments && !(await hostStagedAttachmentsPresent(record))) {
+    releaseHandoffCodeReservation(record.handoffCode, record.handoffReservationId);
+    throw hostStagedAttachmentMissingError();
+  }
   // Immutable before the first renderer delivery/replay.  The dock must never
   // consult a live bridge status packet to choose its workflow: an unavailable
   // bridge is a setup state for reviewed text, not a reason to offer a second
@@ -3000,6 +3085,7 @@ export const BRIDGE_RAW_RESEARCH_TASKS = Object.freeze([
   'job-compensation-research-batch',
   'job-preference-research',
   'job-preference-research-batch',
+  'interview-brief-research',
 ]);
 const bridgeRawResearchTasks = new Set(BRIDGE_RAW_RESEARCH_TASKS);
 
@@ -3019,6 +3105,7 @@ export const BRIDGE_RELEASE_ONE_TASKS = Object.freeze([
   'job-location-consolidation-confirmation', 'job-role-audit', 'job-role-screen', 'job-role-screen-batch', 'job-scoring', 'job-taxonomy-classify',
   'job-taxonomy-classify-batch', 'job-taxonomy-plan', 'platform-fit-assessment', 'price-synthesis',
   'price-synthesis-batch', 'resume-parse',
+  'interview-brief-research', 'interview-brief-assessment',
 ]);
 const bridgeReleaseOneTasks = new Set(BRIDGE_RELEASE_ONE_TASKS);
 

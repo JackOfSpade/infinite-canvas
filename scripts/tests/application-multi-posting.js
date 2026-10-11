@@ -50,9 +50,9 @@ export default [
       assert(normaliseJobPostingVariants({ url: 'https://jobs.example.test/a' }).length === 0, 'a non-array postingVariants must normalize to []');
 
       const normalized = normaliseJobPostingVariants([
-        { location: 'Toronto', url: 'https://jobs.example.test/a', source: 'linkedin', posted: '2 days ago', salary: '$1', applySource: 'direct' },
-        { location: 'Toronto', url: 'https://jobs.example.test/a' }, // exact duplicate URL+location
-        { location: 'Toronto', url: 'https://jobs.example.test/a/' }, // distinct canonical href (trailing slash)
+        { location: 'Lakeview', url: 'https://jobs.example.test/a', source: 'linkedin', posted: '2 days ago', salary: '$1', applySource: 'direct' },
+        { location: 'Lakeview', url: 'https://jobs.example.test/a' }, // exact duplicate URL+location
+        { location: 'Lakeview', url: 'https://jobs.example.test/a/' }, // distinct canonical href (trailing slash)
         { location: '  Berlin\u0000 ', url: 'https://jobs.example.test/b' }, // control char + trim
         { location: 'No URL' }, // no target at all
         { location: 'Credentialed', url: 'https://user:pass@jobs.example.test/c' },
@@ -101,14 +101,14 @@ export default [
         location: 'Multiple locations',
         description: sharedDescription,
         postingVariants: [
-          { location: 'Toronto, ON', url: 'https://jobs.example.test/toronto' },
+          { location: 'Lakeview, ON', url: 'https://jobs.example.test/lakeview' },
           { location: 'Berlin', url: 'https://jobs.example.test/berlin' },
           { location: 'Unsafe', url: 'javascript:alert(1)' },
           { location: 'Creds', url: 'https://token:secret@jobs.example.test/creds' },
         ],
       });
       assert(countOccurrences(markdown, sharedDescription) === 1, 'the shared description must appear exactly once');
-      assert(markdown.includes('- **Toronto, ON:** <https://jobs.example.test/toronto>'), 'each safe location must list with its URL');
+      assert(markdown.includes('- **Lakeview, ON:** <https://jobs.example.test/lakeview>'), 'each safe location must list with its URL');
       assert(markdown.includes('- **Berlin:** <https://jobs.example.test/berlin>'), 'the second safe location must be listed');
       assert(!markdown.includes('javascript:alert'), 'an unsafe variant URL must not become a Markdown link');
       assert(!markdown.includes('token:secret'), 'credentialed variant URLs must not be printed');
@@ -119,7 +119,7 @@ export default [
       // A single/legacy posting (no variants) must keep its exact prior shape:
       // no posting-target section, one fenced description.
       const legacy = formatOriginalJobListingMarkdown({
-        title: 'Platform Engineer', company: 'Acme', location: 'Toronto', url: 'https://jobs.example.test/one',
+        title: 'Platform Engineer', company: 'Acme', location: 'Lakeview', url: 'https://jobs.example.test/one',
         description: sharedDescription,
       });
       assert(!legacy.includes('## Posting locations'), 'legacy output must not grow a posting-locations section');
@@ -133,19 +133,19 @@ export default [
       const multi = renderApplication({
         jobUrl: 'https://jobs.example.test/primary',
         postingVariants: [
-          { location: 'Toronto', url: 'https://jobs.example.test/toronto' },
+          { location: 'Lakeview', url: 'https://jobs.example.test/lakeview' },
           { location: 'Berlin', url: 'https://jobs.example.test/berlin' },
           { location: 'Unsafe', url: 'javascript:alert(1)' },
         ],
       });
-      assert(countOccurrences(multi, 'View original job posting — Toronto') === 1, 'Toronto must render one labelled link');
+      assert(countOccurrences(multi, 'View original job posting — Lakeview') === 1, 'Lakeview must render one labelled link');
       assert(countOccurrences(multi, 'View original job posting — Berlin') === 1, 'Berlin must render one labelled link');
       assert(!multi.includes('javascript:alert'), 'a javascript: variant URL must be omitted from the document');
       assert(!multi.includes('View original job posting — Unsafe'), 'an unsafe variant must not render a labelled link');
       const blankLinks = (multi.match(/<a class="ic-job-posting-link" href="[^"]+" target="_blank" rel="noopener noreferrer">/g) || []);
       assert(blankLinks.length === 2, `expected exactly two rendered posting links, saw ${blankLinks.length}`);
       assert(countOccurrences(multi, '<div class="ic-job-posting-links">') === 1, 'multiple links render inside the bounded posting-links container');
-      assert(/href="https:\/\/jobs\.example\.test\/toronto"/.test(multi), 'the safe Toronto href must be rendered');
+      assert(/href="https:\/\/jobs\.example\.test\/lakeview"/.test(multi), 'the safe Lakeview href must be rendered');
       assert(/href="https:\/\/jobs\.example\.test\/berlin"/.test(multi), 'the safe Berlin href must be rendered');
 
       // Legacy one-link: with no variants, the exact legacy label must remain
@@ -159,7 +159,7 @@ export default [
       // A single safe variant still uses the legacy label: it is not "multiple".
       const singleVariant = renderApplication({
         jobUrl: '',
-        postingVariants: [{ location: 'Toronto', url: 'https://jobs.example.test/solo' }],
+        postingVariants: [{ location: 'Lakeview', url: 'https://jobs.example.test/solo' }],
       });
       assert(countOccurrences(singleVariant, 'View original job posting</a>') === 1, 'one variant keeps the legacy label');
       assert(!singleVariant.includes('<div class="ic-job-posting-links">'), 'one variant does not trigger the multi-link container');
@@ -183,8 +183,8 @@ export default [
         company: 'Acme',
         jobUrl: 'https://jobs.example.test/primary',
         postingVariants: [
-          { location: 'Toronto', url: 'https://jobs.example.test/a' },
-          { location: 'Toronto', url: 'https://jobs.example.test/a' },
+          { location: 'Lakeview', url: 'https://jobs.example.test/a' },
+          { location: 'Lakeview', url: 'https://jobs.example.test/a' },
           { location: 'Creds', url: 'https://user:pass@jobs.example.test/c' },
           { location: 'Unsafe', url: 'javascript:void(0)' },
         ],
@@ -196,7 +196,7 @@ export default [
 
       const html = renderApplication({
         jobUrl: 'https://jobs.example.test/primary',
-        postingVariants: [{ location: 'Toronto', url: 'https://jobs.example.test/a' }, { location: 'Berlin', url: 'https://jobs.example.test/b' }],
+        postingVariants: [{ location: 'Lakeview', url: 'https://jobs.example.test/a' }, { location: 'Berlin', url: 'https://jobs.example.test/b' }],
       });
       assert(/"postingVariants":/.test(html), 'the inert bundle JSON must carry postingVariants');
       assert(!/user:pass|javascript:/.test(html), 'no unsafe URL text may reach the generated document');

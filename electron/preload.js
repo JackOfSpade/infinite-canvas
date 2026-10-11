@@ -145,6 +145,35 @@ contextBridge.exposeInMainWorld('electronAPI', {
   discardJobAnalysisSnapshot: (args) => ipcRenderer.invoke('discard-job-analysis-snapshot', args),
   discardBoardJobRun: (args) => ipcRenderer.invoke('discard-board-job-run', args),
   parseCareerData: (args) => ipcRenderer.invoke('parse-career-data', args),
+  inspectCareerCompileResume: (args) => ipcRenderer.invoke('inspect-career-compile-resume', args),
+  // Returns a deliberately allowlisted projection of one approved immutable
+  // career snapshot for the Interview Helper. The node id keeps the request
+  // cancellable with the rest of its canvas module lifecycle.
+  loadInterviewHelperCareerSnapshot: (args) => ipcRenderer.invoke('load-interview-helper-career-snapshot', args),
+  selectInterviewApplicationBundle: (args) => ipcRenderer.invoke('select-interview-preparation-bundle', args),
+  loadInterviewApplicationBundle: (args) => ipcRenderer.invoke('load-interview-preparation-bundle', args),
+  loadInterviewPreparedBrief: (args) => {
+    const { nodeId, briefRecordId, snapshotId, jobUrl, bundleArtifactId, bundleArtifactDigest } = args || {};
+    return ipcRenderer.invoke('load-interview-prepared-brief', {
+      nodeId,
+      briefRecordId,
+      snapshotId,
+      canonicalJobUrl: jobUrl,
+      bundleArtifactId,
+      bundleArtifactDigest,
+    });
+  },
+  prepareInterviewBrief: (args) => {
+    const { nodeId, snapshotId, jobUrl, bundleArtifactId, manualAiRunId } = args || {};
+    return ipcRenderer.invoke('build-interview-brief', {
+      nodeId,
+      snapshotId,
+      canonicalJobUrl: jobUrl,
+      bundleArtifactId,
+      manualAiRunId,
+    });
+  },
+  launchInterviewWindow: (args) => ipcRenderer.invoke('interview-window:launch', args),
   // New Local AI application jobs use an app-owned copy/paste handoff. Legacy
   // filesystem coding-agent jobs remain supported for existing job folders.
   queueLocalApplication: (args) => ipcRenderer.invoke('queue-local-application', args),

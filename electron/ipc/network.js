@@ -13,25 +13,31 @@ const TITLE_REGEX = /<title[^>]*>([^<]+)<\/title>/i;
 // fetched page that hasn't yielded one within 3s is almost certainly not going to.
 const TITLE_FETCH_TIMEOUT_MS = 3000;
 
-export function registerNetworkHandlers() {
+export function registerNetworkHandlers({ onNodeDeleted = null, ipcMainInstance = ipcMain, registerHandler = handleSafe } = {}) {
   // Add direct listener for node task cancellation
-  ipcMain.on('cancel-node-task', (event, nodeId, cause = null) => {
+  ipcMainInstance.on('cancel-node-task', (event, nodeId, cause = null) => {
     // `cause` is the renderer's own account of WHY (Reset / cleared files /
     // board clear / node deleted). Without it the main process could only see
     // the generic sentinel and reported every user Reset as "Node deleted".
-    if (nodeId) abortNodeTasks(nodeId, event.sender, nodeCancellationError(cause));
+    if (nodeId) {
+      abortNodeTasks(nodeId, event.sender, nodeCancellationError(cause));
+      // This direct route is dispatched only after the canvas has committed a
+      // deletion. Keep companion-window retirement on that committed boundary:
+      // transactional cancellation probes may still be rolled back.
+      if (cause === 'node-deleted' && typeof onNodeDeleted === 'function') onNodeDeleted(event.sender, nodeId);
+    }
   });
 
   // Transactional cancellation (Job Board) needs acknowledgement that the
   // aborted handler has reached its own finally/sidecar-cleanup boundary before
   // the shared queue lane is released. This handler is deliberately not wrapped
   // in handleSafe, otherwise it would register—and abort—itself under `nodeId`.
-  ipcMain.handle('cancel-node-task-and-wait', async (event, { nodeId, cause = null } = {}) => {
+  ipcMainInstance.handle('cancel-node-task-and-wait', async (event, { nodeId, cause = null } = {}) => {
     if (!nodeId) return { abortedCount: 0, settled: true };
     return abortNodeTasksAndWait(nodeId, event.sender, nodeCancellationError(cause));
   });
 
-  handleSafe('fetch-url-title', async (event, url, signal) => {
+  registerHandler('fetch-url-title', async (event, url, signal) => {
     try {
       let fetchUrl = url;
       if (!fetchUrl.startsWith('http://') && !fetchUrl.startsWith('https://')) {

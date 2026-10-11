@@ -372,7 +372,7 @@ export default [
     run: () => {
       const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ic-paste-rejection-trace-'));
       const canvas = path.join(dir, 'canvas.canvas');
-      const jobId = '394d73d6-d008-460c-8771-301c013fbcf2';
+      const jobId = '5b0c7e12-4a3d-4f6b-9c1e-7d2a8f3e6b40';
       const jobDir = path.join(dir, '.local-ai', 'jobs', jobId);
       fs.mkdirSync(jobDir, { recursive: true });
       const rows = [
@@ -404,7 +404,7 @@ export default [
       fs.writeFileSync(path.join(jobDir, 'Paste Rejections.json'), JSON.stringify(rows));
       try {
         const localApplications = [{
-          nodeId: 'node-1', title: 'Integration Engineer', company: 'Micromart',
+          nodeId: 'node-1', title: 'Operations Analyst', company: 'Fernhill Market',
           localApplication: { id: jobId, canvasFilePath: canvas, status: 'revision-required' },
         }];
         const markdown = buildPasteRejectionTraceMarkdown(canvas, localApplications);
@@ -412,7 +412,7 @@ export default [
           'the durable trace renders under its own heading');
         assert(markdown.includes('4 rejection(s) retained'), `all 4 durable rows are counted, got: ${markdown}`);
         assert(/job #[0-9a-f]{10}/.test(markdown)
-          && !markdown.includes('Integration Engineer') && !markdown.includes('Micromart') && !markdown.includes(jobId),
+          && !markdown.includes('Operations Analyst') && !markdown.includes('Fernhill Market') && !markdown.includes(jobId),
         'the durable trace must use a short correlation digest, never the job title, company, or full job id');
         assert(/longest same-cause run: 4 consecutive rejection\(s\).*stage `cover-letter`, check direct-welcome-closing \(752d8241\)/.test(markdown),
           `the true run length (4 — row 1's extra "redundancy" check must not break the run for direct-welcome-closing, which failed in every row) must be surfaced plainly, got: ${markdown}`);
@@ -563,7 +563,7 @@ export default [
     run: () => {
       const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ic-paste-correction-privacy-'));
       const canvas = path.join(dir, 'canvas.canvas');
-      const jobId = '394d73d6-d008-460c-8771-301c013fbcf2';
+      const jobId = '5b0c7e12-4a3d-4f6b-9c1e-7d2a8f3e6b40';
       const jobDir = path.join(dir, '.local-ai', 'jobs', jobId);
       fs.mkdirSync(jobDir, { recursive: true });
       // The metadata-only trace: identical in shape to every other test
@@ -584,7 +584,7 @@ export default [
       }));
       try {
         const localApplications = [{
-          nodeId: 'node-1', title: 'Integration Engineer', company: 'Micromart',
+          nodeId: 'node-1', title: 'Operations Analyst', company: 'Fernhill Market',
           localApplication: { id: jobId, canvasFilePath: canvas, status: 'revision-required' },
         }];
         const markdown = buildPasteRejectionTraceMarkdown(canvas, localApplications);
@@ -5855,11 +5855,11 @@ export default [
 {
     name: 'Résumé retained roles always carry factual bullet evidence',
     run: () => {
-      const summaryOnly = `<main class="page"><article class="role"><div class="role-header"><span class="title">Software Engineer</span><span class="company">FliteX</span></div><div class="role-meta"><p class="role-summary">Built shortest-path tooling and FAA data-sync automation.</p></div></article><article class="role"><span class="title">Data Engineer</span><span class="company">Horizon</span><ul class="highlights"><li>Built Python ETL pipelines.</li></ul></article></main>`;
+      const summaryOnly = `<main class="page"><article class="role"><div class="role-header"><span class="title">Software Engineer</span><span class="company">SkyLoom</span></div><div class="role-meta"><p class="role-summary">Built route-planning tooling and scheduled data-sync automation.</p></div></article><article class="role"><span class="title">Data Engineer</span><span class="company">Cedar Valley</span><ul class="highlights"><li>Built Python ETL pipelines.</li></ul></article></main>`;
       const missing = retainedResumeRolesWithoutBullets(summaryOnly);
       let rejected = false;
       try { assertRetainedResumeRoleBullets(summaryOnly); } catch { rejected = true; }
-      assert(missing.length === 1 && missing[0].company === 'FliteX',
+      assert(missing.length === 1 && missing[0].company === 'SkyLoom',
         'a summary-only retained role must be detected before it can ship');
       assert(rejected,
         'a summary-only role must be rejected so unpolished career notes can never be copied into a bullet');
@@ -6612,7 +6612,7 @@ export default [
   {
     name: 'Job scoring: structured evidence contract grounds every material requirement and evaluates hiring fit without false probability',
     run: () => {
-      const careerData = 'Software Engineer\nBuilt and maintained React and Django services from May 2023 through June 2026.';
+      const careerData = 'Software Engineer\nBuilt and maintained React and Django services from March 2021 through April 2024.';
       const { snapshot: grounded } = buildJobAnalysisSnapshot({
         jobs: [{ title: 'Systems Engineer', company: 'Example', snippet: 'Required: production system design experience.' }],
         profile: { titles: ['Software Engineer'], experience_years: 3.1 },
