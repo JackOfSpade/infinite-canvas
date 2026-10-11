@@ -4956,6 +4956,23 @@ async function readTrustedSnapshotFile(directory, snapshotId) {
   }
 }
 
+// A publisher links the fsynced temporary inode into place, then removes the
+// temporary name. That final unlink changes ctime on the shared inode. A
+// concurrent identical publisher can observe the transition during its
+// guarded read; retry a fresh guarded read rather than treating that one
+// transient metadata change as a permanent collision. Every successful read
+// still passes all descriptor, path, and byte checks above.
+async function readPublishedSnapshotFile(directory, snapshotId) {
+  for (let attempt = 0; ; attempt += 1) {
+    try { return await readTrustedSnapshotFile(directory, snapshotId); }
+    catch (error) {
+      if (attempt >= 7 || error?.code !== 'CAREER_SNAPSHOT_STORAGE_UNSAFE'
+        || error.message !== 'Career snapshot file changed while it was being read.') throw error;
+      await new Promise(resolve => setTimeout(resolve, 1));
+    }
+  }
+}
+
 /** Atomically publish one approved immutable snapshot. Existing divergent bytes are a collision, never overwritten. */
 export async function writeCareerSnapshotAtomically(root, snapshot) {
   const validation = validateCurrentCareerSnapshot(snapshot);
@@ -4967,7 +4984,7 @@ export async function writeCareerSnapshotAtomically(root, snapshot) {
   const destination = path.join(directory, `${snapshot.snapshotId}.json`);
   const bytes = `${canonicalJson(snapshot)}\n`;
   try {
-    const existing = await readTrustedSnapshotFile(directory, snapshot.snapshotId);
+    const existing = await readPublishedSnapshotFile(directory, snapshot.snapshotId);
     if (existing == null) throw Object.assign(new Error('not found'), { code: 'ENOENT' });
     if (existing === bytes) return { snapshotId: snapshot.snapshotId, path: destination, created: false };
     throw hardError(`Career snapshot collision for ${snapshot.snapshotId}; existing approved data was preserved.`, 'CAREER_SNAPSHOT_COLLISION');
@@ -4992,7 +5009,7 @@ export async function writeCareerSnapshotAtomically(root, snapshot) {
       await fs.promises.link(temporary, destination);
     } catch (error) {
       if (error?.code !== 'EEXIST') throw error;
-      const existing = await readTrustedSnapshotFile(directory, snapshot.snapshotId);
+      const existing = await readPublishedSnapshotFile(directory, snapshot.snapshotId);
       if (existing === bytes) return { snapshotId: snapshot.snapshotId, path: destination, created: false };
       throw hardError(`Career snapshot collision for ${snapshot.snapshotId}; existing approved data was preserved.`, 'CAREER_SNAPSHOT_COLLISION');
     }

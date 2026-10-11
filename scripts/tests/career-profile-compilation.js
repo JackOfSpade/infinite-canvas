@@ -1962,6 +1962,11 @@ export default [
         const corpus = buildCareerSourceCorpus(sourceFiles());
         const snapshot = currentSnapshot(corpus, validProfile(corpus));
         await writeCareerSnapshotAtomically(root, snapshot);
+        const leaf = path.join(root, 'career-snapshots', `${snapshot.snapshotId}.json`);
+        // Use a timestamp the platform can restore exactly through utimes;
+        // Linux-created mtimes may carry nanoseconds that its double-based
+        // utimes API cannot reproduce after the intentional in-place write.
+        await fs.promises.utimes(leaf, 1_700_000_000, 1_700_000_000);
         let restoredSizeAndMtime = false;
         __setCareerSnapshotReadHookForTests(async ({ filePath, initial }) => {
           const bytes = await fs.promises.readFile(filePath);

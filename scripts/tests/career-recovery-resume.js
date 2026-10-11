@@ -704,7 +704,8 @@ export default [
         let staged;
         try {
           const source = writeSource(directory, domain.name, domain.text);
-          staged = await __stageCareerInputFilesForTests([source], { stagingRoot });
+          staged = await __stageCareerInputFilesForTests([source], { stagingRoot,
+            afterStagedCopyForTests: stagedPath => fs.utimesSync(stagedPath, 1_700_000_000, 1_700_000_000) });
           const stagedPath = staged.stagedPaths[0];
           assert(await __assertOwnedStagedCareerAttachmentForTests(staged, stagedPath) === stagedPath, `${domain.label}: freshly staged copy is owned`);
           const before = fs.statSync(stagedPath);

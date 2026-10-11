@@ -266,6 +266,10 @@ export async function runCurrentSnapshotResolutionSelfTest() {
     const outsideFile = path.join(root, 'outside-race.md');
     fs.writeFileSync(captureFile, 'stable source\n', { mode: 0o600 });
     fs.writeFileSync(outsideFile, 'outside source\n', { mode: 0o600 });
+    // A whole-second fixture timestamp survives a write/utimes round trip on
+    // filesystems whose freshly created mtime has finer precision than Node's
+    // numeric utimes arguments can represent.
+    fs.utimesSync(captureFile, 1_700_000_000, 1_700_000_000);
     let restoredMutationMtime = false;
     __setCurrentCareerSnapshotCaptureHookForTests(({ file, before }) => {
       // Same byte length and restored mtime force the ctime check to be the

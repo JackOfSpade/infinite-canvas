@@ -1854,6 +1854,7 @@ async function pruneStaleCareerInputStages({ stagingRoot = careerInputStagingRoo
 
 async function stageCareerInputFiles(paths, {
   stagingRoot = careerInputStagingRoot(), afterSourceInspection = null, afterSourceOpen = null,
+  afterStagedCopyForTests = null,
 } = {}) {
   const originals = Array.isArray(paths) ? paths : [];
   const base = path.resolve(String(stagingRoot || ''));
@@ -1891,6 +1892,7 @@ async function stageCareerInputFiles(paths, {
           ? binding => afterSourceOpen({ binding, sourcePath: resolvedPath, stagedPath, index })
           : null,
       });
+      if (typeof afterStagedCopyForTests === 'function') await afterStagedCopyForTests(stagedPath);
       const [stagedStat, stagedRealPath] = await Promise.all([
         fs.promises.lstat(stagedPath), fs.promises.realpath(stagedPath),
       ]);
