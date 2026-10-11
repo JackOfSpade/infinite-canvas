@@ -1,5 +1,10 @@
 # STYLE.md — Job Application Design System
 
+In the Infinite Canvas application workflow, the style and wording limits
+below guide writing and layout. The host measures actual one-page fit and
+rejects truth, provenance, schema and safety failures. A numerical prose
+budget or prescribed sentence form by itself is advisory.
+
 This file documents **every design decision** in the system — the
 résumé surface and its paired cover letter (§11). Future AI edits
 should read this end-to-end before touching `resume.html`,

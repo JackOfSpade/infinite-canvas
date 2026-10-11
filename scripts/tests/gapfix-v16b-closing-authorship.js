@@ -34,9 +34,8 @@
 // in production names any of them.
 import { assert } from './testHelpers.js';
 import {
-  CANDIDATE_AUTHORSHIP_VERBS, checkDirectWelcomeClosing, closingContributionParts, evaluateCoverLetterChecks,
+  CANDIDATE_AUTHORSHIP_VERBS, checkDirectWelcomeClosing, evaluateCoverLetterChecks,
 } from '../../electron/ipc/coverLetterChecks.js';
-import * as guidance from '../../electron/ipc/applicationWriterGuidance.js';
 
 // Each domain: the artifact (a noun the fixed list does NOT contain), a second artifact, the employer side of the closing, and a letter that built the first.
 const DOMAINS = Object.freeze([
@@ -188,28 +187,4 @@ export default [
         assert(!noTarget.passed && noTarget.detail.includes('the sentence is missing its target half') && !noTarget.detail.includes('authorship clause'), `${domain.key}: a closing that reaches no employer side names the target half alone (${detailOf(noTarget)})`);
       }
     },
-  },
-  {
-    name: 'Closing, guidance: the asset half the contract and the rejection print says what the gate accepts from the same constants, and the target half prints placeholders, not a domain (A/B/C)',
-    run() {
-      const parts = closingContributionParts();
-      const asset = parts[0];
-      // A: the verbs the guidance lists are the verbs the gate reads, in the same order, from the exported constant.
-      const verbs = `${CANDIDATE_AUTHORSHIP_VERBS.slice(0, -1).join(', ')} or ${CANDIDATE_AUTHORSHIP_VERBS.at(-1)}`;
-      assert(asset.includes(`in an authorship clause the verb is one of ${verbs}`) && CANDIDATE_AUTHORSHIP_VERBS.includes('built') && CANDIDATE_AUTHORSHIP_VERBS.includes('architected'), `the asset half lists the authorship verbs (${asset})`);
-      // B: it says what the gate accepts about the noun: one the letter already used for the candidate's own work, in an earlier sentence or a cited quote.
-      for (const phrase of ['the <artifact> I built', 'a noun this letter has already used for your own work', 'the object of an earlier sentence of yours with such a verb', 'in a career-data quote the letter cites']) {
-        assert(asset.includes(phrase), `the asset half says: ${phrase}`);
-      }
-      assert(asset.includes('possessive, an authorship clause, or a demonstrative that carries its own descriptor') && asset.includes('never a bare demonstrative'), 'and it keeps the earlier accepted forms');
-      // The stage contract prints the same words the check reports (one source), and so does a rejection.
-      assert(guidance.LETTER_CLOSING_RULE.includes(`(1) ${asset}`), 'the stage contract prints the asset half exactly as the check words it');
-      const emitted = checkDirectWelcomeClosing(['I welcome a conversation.'], '');
-      assert(!emitted.passed && emitted.detail.includes(asset), 'and a rejection prints the same sentence');
-      // C: the target half prints placeholders and no domain noun.
-      const target = parts[2];
-      assert(target.includes('“the … <noun>”') && target.includes('“this … <noun>”') && target.includes('“clients”, “customers”, “users”'), `the target half prints placeholders (${target})`);
-      for (const text of parts) assert(!/\b(?:platform|pipeline|dashboard|repository|database|server)\b/iu.test(text), `no part of the closing grammar prints a software noun (${text})`);
-    },
-  },
-];
+  },];

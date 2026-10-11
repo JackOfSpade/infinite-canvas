@@ -25,6 +25,25 @@ function approvedInventory(...skills) {
   return { version: CAREER_SNAPSHOT_SKILL_EVIDENCE_VERSION, skills };
 }
 
+// What one structured résumé draft produces under the résumé check
+// dispositions (electron/ipc/resumeCheckDispositions.js): a TRUTH or HYGIENE
+// rule rejects it, so `rejected` is true and `text` is the thrown message; a
+// TASTE rule only advises, so the draft is accepted, still renders, and `text`
+// is the advisories' detail. Tests that pin what a rule SAYS read `text`; tests
+// that pin what it DOES read `rejected`.
+function structuredOutcome(resume, context) {
+  try {
+    const draft = validateStructuredApplicationResume(resume, context);
+    renderStructuredApplicationResume(resume, context);
+    const advisoryText = draft.advisories.map(entry => entry.detail).join(' ');
+    return { rejected: false, message: '', advisories: draft.advisories, advisoryText, text: advisoryText };
+  } catch (error) {
+    if (error?.code !== 'STRUCTURED_RESUME_INVALID') throw error;
+    const advisories = error.advisories || [];
+    return { rejected: true, message: String(error.message || error), advisories, advisoryText: advisories.map(entry => entry.detail).join(' '), text: String(error.message || error) };
+  }
+}
+
 // `overrides` replaces fields of the pasted package; `frozen` replaces the
 // app-owned inputs assembly is handed beside it.
 function fixture(overrides = {}, frozen = {}) {
@@ -556,9 +575,8 @@ Dates: May 2019 — August 2019
         skills,
       });
       const group = (index, label, items) => ({ id: `skills-${index}`, group: label, items, evidenceIds: ['career-proof'] });
-      const rejection = (skills) => {
-        try { renderStructuredApplicationResume(resume(skills), context); return ''; } catch (error) { return String(error?.message || error); }
-      };
+      const outcome = (skills) => structuredOutcome(resume(skills), context);
+      const rejection = (skills) => outcome(skills).text;
 
       // The shipped block itself: one rejection round names the label, the
       // unsplit row, the row's length and all three concepts, because every
@@ -570,6 +588,10 @@ Dates: May 2019 — August 2019
         && shipped.includes(`skills[0].items renders a row of ${shippedItems.join(' · ').length} characters`)
         && concepts.every(item => shipped.includes(`skills[0] item "${item}"`)),
       `the whole shipped skills defect is reported in one round (got ${shipped})`);
+      // Layout, label vocabulary and the capitalisation guess are TASTE: the
+      // writer is told, the document is not refused for them.
+      assert(!outcome([group(0, 'skills', shippedItems)]).rejected,
+        'a skills block that only breaks the design system’s shape advises and is never rejected for it');
 
       // Each budget gate alone, on a block that breaks only that one, so a
       // later edit cannot pass this case by rejecting everything.
@@ -618,7 +640,7 @@ Dates: May 2019 — August 2019
       ]);
       assert([`skills[0] item "${concepts[0]}"`, `skills[0] item "${concepts[1]}"`, `skills[1] item "${concepts[2]}"`].every(fragment => conceptual.includes(fragment))
         && !conceptual.includes(`"${names[0]}"`) && !conceptual.includes(`"${names[1]}"`)
-        && conceptual.split('Fix all of them before resubmitting.').length === 2,
+        && conceptual.split('also applies to').length === 2,
       `every concept phrase is reported once in one round while the filterable names beside them pass (got ${conceptual})`);
 
       const clean = [
@@ -658,9 +680,8 @@ Dates: May 2019 — August 2019
         skills,
       });
       const group = (index, label, items) => ({ id: `skills-${index}`, group: label, items, evidenceIds: ['career-proof'] });
-      const rejection = (skills) => {
-        try { renderStructuredApplicationResume(resume(skills), context); return ''; } catch (error) { return String(error?.message || error); }
-      };
+      const outcome = (skills) => structuredOutcome(resume(skills), context);
+      const rejection = (skills) => outcome(skills).text;
 
       const cased = [
         group(0, 'tools and methods', ['Aster']),
@@ -756,6 +777,10 @@ Dates: May 2019 — August 2019
         } catch (error) { return `REJECTED: ${String(error?.message || error)}`; }
       };
       const skillsBlock = (html) => /<dl class="skills">.*?<\/dl>/su.exec(html)?.[0] || html;
+      const labelAdvisories = (label, category) => validateStructuredApplicationResume(resume(label), {
+        sourceRoles, evidenceCatalog, careerData, authorityMode: true,
+        careerSkillEvidence: approvedInventory(approvedSkill('zephyr', 'Zephyr Ledger', category ? { category } : {})),
+      }).advisories;
       assert(exemplars.every(label => !careerData.toLocaleLowerCase().includes(label.toLocaleLowerCase())),
         'the frozen corpus states no exemplar label, so only the vocabulary can accept one');
 
@@ -776,19 +801,27 @@ Dates: May 2019 — August 2019
         const unbacked = rendered(label, '');
         const neutralAlone = label.toLocaleLowerCase().split(/\s*(?:&|\/|,|\band\b)\s*/u).filter(Boolean).every(part => baseOnly.words.has(part));
         if (!neutralAlone) {
-          assert(unbacked.startsWith('REJECTED:') && unbacked.includes(`skills[0].group "${label}" must be a neutral category label`),
-            `"${label}" is only a label when the approved profile carries it (got ${skillsBlock(unbacked)})`);
+          // The vocabulary is a labelling preference: a label the approved
+          // profile does not carry is advised about and still renders.
+          assert(!unbacked.startsWith('REJECTED:') && unbacked.includes(printed),
+            `"${label}" is not a reason to reject the document when the approved profile does not carry it (got ${skillsBlock(unbacked)})`);
+          const advice = labelAdvisories(label, '');
+          assert(advice.some(entry => entry.id === 'skill-group-is-neutral-or-in-career-data' && entry.detail.includes(`skills[0].group "${label}" must be a neutral category label`)),
+            `"${label}" is only a neutral label when the approved profile carries it, and the writer is told so (got ${JSON.stringify(advice)})`);
           evidenceRelative += 1;
         }
       }
 
       // Widening the nouns did not widen the gate: an editorializing word
       // beside an approved category is still refused on the same rule.
+      // A label that GRADES the candidate's skill is a strength claim, not a
+      // vocabulary preference, so it is still refused: on its own rule, because
+      // the evidence cited for the group never states the level.
       const first = exemplars[0];
       const editorialized = rendered(`Advanced ${first}`, first);
       assert(editorialized.startsWith('REJECTED:')
-        && editorialized.includes(`skills[0].group "Advanced ${first}" must be a neutral category label`),
-      `a compound built on an editorializing word is still rejected (got ${editorialized})`);
+        && editorialized.includes(`skills[0].group "Advanced ${first}" grades the candidate’s skill with “advanced”`),
+      `a compound built on a skill-level word is still rejected (got ${editorialized})`);
       return { exemplars: exemplars.length, files: exemplarFiles.length, evidenceRelative, casings: 2 };
     },
   },
@@ -876,12 +909,8 @@ Dates: May 2019 — August 2019
       };
       const posting = { id: 'job-analytics', sourceId: 'job-listing', quote: 'analytics reporting ownership' };
       const unrelated = { id: 'job-unrelated', sourceId: 'job-listing', quote: 'warehouse logistics scheduling' };
-      const render = (projects, evidenceCatalog) => {
-        try {
-          renderStructuredApplicationResume({ ...resume, projects }, { ...context, evidenceCatalog });
-          return '';
-        } catch (error) { return String(error?.message || error); }
-      };
+      const outcome = (projects, evidenceCatalog) => structuredOutcome({ ...resume, projects }, { ...context, evidenceCatalog });
+      const render = (projects, evidenceCatalog) => outcome(projects, evidenceCatalog).text;
 
       const careerOnly = render([project], [career, posting]);
       const citedButUnrelated = render([{ ...project, evidenceIds: ['career-proof', 'job-unrelated'] }], [career, posting, unrelated]);
@@ -889,14 +918,19 @@ Dates: May 2019 — August 2019
       assert(/cites no job-listing evidence/.test(careerOnly)
         && /share at least two distinct meaningful terms with a job-listing quote/.test(citedButUnrelated)
         && answersThePosting === '',
-      'a project is carried only when it cites a posting quote and shares that quote’s words, so citing one it answers nothing of does not save it');
+      'a project the posting does not ask about is reported to the writer: it cites a posting quote and shares that quote’s words, and citing one it answers nothing of does not save it');
+      // Relevance is selection, not grounding: the project is TRUE, so the
+      // document is told and never refused for it.
+      assert(!outcome([project], [career, posting]).rejected
+        && !outcome([{ ...project, evidenceIds: ['career-proof', 'job-unrelated'] }], [career, posting, unrelated]).rejected,
+      'a true project that does not answer the posting advises and is never rejected');
 
       // The same standdown the career-evidence rule takes: a plan that named
       // no posting evidence cannot be graded on posting relevance, and a rule
       // that cannot read its input must not invent a verdict.
       assert(render([project], [career]) === '',
         'a catalog carrying no job-listing evidence at all grades no project against the posting');
-      return { careerOnlyRejected: true, unrelatedCitationRejected: true };
+      return { careerOnlyAdvised: true, unrelatedCitationAdvised: true };
     },
   },
   {
@@ -913,13 +947,14 @@ Dates: May 2019 — August 2019
         identity: { name: 'Ada Lovelace', contact: ['ada@example.test'] },
         roles: [{ id: 'role-1', title: 'Engineer', company: 'Acme', dates: '', location: '', bullets: [{ id: 'bullet-1', text: 'Built reporting systems.', evidenceIds: ['career-proof'] }] }],
       };
-      const rejection = (resume) => {
-        try { renderStructuredApplicationResume(resume, batchContext); return ''; } catch (error) { return String(error?.message || error); }
-      };
+      const rejection = (resume) => structuredOutcome(resume, batchContext).text;
 
       // The measured chain this replaces: three invented group labels cost
       // three sequential manual copy/paste handoff rounds, one per offender.
-      const groupNames = ['Bespoke Wizardry', 'Rockstar Ninja Skills', 'World-Class Mastery'];
+      // The labels that still REJECT are the ones that grade the candidate's
+      // own skill (a strength the evidence never states); a merely invented
+      // label advises, and is batched the same way below.
+      const groupNames = ['Expert Wizardry', 'Advanced Ninja Skills', 'Proficient Craft'];
       const threeBadGroups = rejection({
         ...batchResume,
         skills: groupNames.map((group, index) => ({ id: `skills-${index}`, group, items: ['JavaScript'], evidenceIds: ['career-proof'] })),
@@ -973,10 +1008,19 @@ Dates: May 2019 — August 2019
       // correction prompt, and the count of hidden offenders stays visible.
       const manyBadGroups = rejection({
         ...batchResume,
-        skills: Array.from({ length: 20 }, (unused, index) => ({ id: `skills-${index}`, group: `Invented Specialty ${index}`, items: ['JavaScript'], evidenceIds: ['career-proof'] })),
+        skills: Array.from({ length: 20 }, (unused, index) => ({ id: `skills-${index}`, group: `Expert Specialty ${index}`, items: ['JavaScript'], evidenceIds: ['career-proof'] })),
       });
-      assert(/and \d+ more/u.test(manyBadGroups) && manyBadGroups.length < 2_000 && !manyBadGroups.includes('Invented Specialty 19'),
+      assert(/and \d+ more/u.test(manyBadGroups) && manyBadGroups.length < 2_000 && !manyBadGroups.includes('Expert Specialty 19'),
         'a collection full of offenders reports a bounded list plus a count of the remainder');
+      // An advisory collection is bounded the same way: advice about twenty
+      // invented labels is one finding, not twenty.
+      const manyAdvisedGroups = structuredOutcome({
+        ...batchResume,
+        skills: Array.from({ length: 20 }, (unused, index) => ({ id: `skills-${index}`, group: `Invented Specialty ${index}`, items: ['JavaScript'], evidenceIds: ['career-proof'] })),
+      }, { ...batchContext, careerData: 'Ada Lovelace\nada@example.test\n## Acme\nEngineer\n\nBuilt JavaScript, Python and Docker reporting systems that reduced manual work.' });
+      assert(!manyAdvisedGroups.rejected && manyAdvisedGroups.advisories.filter(entry => entry.id === 'skill-group-is-neutral-or-in-career-data').length === 1
+        && /and \d+ more/u.test(manyAdvisedGroups.advisoryText) && !manyAdvisedGroups.advisoryText.includes('Invented Specialty 19'),
+      'twenty invented labels are one bounded advisory and no rejection');
       return { batchedGroups: 3, batchedItems: 4, batchedProjects: 3, batchedBullets: 3 };
     },
   },
@@ -1024,9 +1068,7 @@ Dates: May 2019 — August 2019
         ],
         skills: [{ id: 's1', group: 'Tools', items: ['JavaScript', 'Docker'], evidenceIds: ['e4'] }],
       });
-      const rejection = (resume) => {
-        try { renderStructuredApplicationResume(resume, context); return ''; } catch (error) { return String(error?.message || error); }
-      };
+      const rejection = (resume) => structuredOutcome(resume, context).message;
 
       const acrossRoles = draft();
       acrossRoles.roles.forEach((role, index) => { role.bullets[0].evidenceIds = [`ghost-${index}`]; });
@@ -1051,10 +1093,15 @@ Dates: May 2019 — August 2019
       acrossCollections.roles[2].bullets[0].evidenceIds = ['ghost'];
       acrossCollections.projects = [{ id: 'p1', name: 'Invented Alpha', evidenceIds: ['e1'] }];
       acrossCollections.skills = [{ id: 's1', group: 'Bespoke Wizardry', items: ['Haskell'], evidenceIds: ['e1'] }];
-      const collectionsMessage = rejection(acrossCollections);
+      const collectionsOutcome = structuredOutcome(acrossCollections, context);
+      const collectionsMessage = collectionsOutcome.message;
       assert(collectionsMessage.includes('roles[1].bullets[0]') && collectionsMessage.includes('"ghost"')
-        && collectionsMessage.includes('projects.p1.name') && collectionsMessage.includes('"Haskell"') && collectionsMessage.includes('"Bespoke Wizardry"'),
-      `a bullet, a project, a skill item and a skill group defect are reported in one rejection (got ${collectionsMessage})`);
+        && collectionsMessage.includes('projects.p1.name') && collectionsMessage.includes('"Haskell"'),
+      `a bullet, a project and a skill item defect are reported in one rejection (got ${collectionsMessage})`);
+      // The invented skill-group label is TASTE: it rides along as an advisory
+      // on the same rejection and is never part of what rejects.
+      assert(!collectionsMessage.includes('Bespoke Wizardry') && collectionsOutcome.advisoryText.includes('skills[0].group "Bespoke Wizardry"'),
+        `a skill-group label the vocabulary does not offer is advised about beside the rejection, not part of it (got ${collectionsOutcome.advisoryText})`);
 
       // Structural and shape checks still fail fast, so nothing downstream
       // runs on data an earlier check rejected: a bullets array of the wrong
@@ -2293,9 +2340,10 @@ Dates: May 2019 — August 2019
         roles: [{ id: 'role-1', title: 'Operations Lead', company: 'Analytical Engines', dates: '2020 – 2024', location: '', bullets: [{ id: 'bullet-1', text: 'Coordinated the regional rota.', evidenceIds: ['ev-report'] }] }],
         skills,
       });
-      const reject = (skills, overrides = {}) => {
-        try { renderStructuredApplicationResume(draft(skills), context(overrides)); return ''; } catch (error) { return String(error?.message || error); }
-      };
+      // `reject` keeps its name from when these omissions rejected: it returns
+      // what the draft is told about the skills block. Completeness of the index
+      // is a selection preference, so it advises and never rejects.
+      const reject = (skills, overrides = {}) => structuredOutcome(draft(skills), context(overrides)).text;
 
       assert(JSON.stringify(postingNamedAttestedSkillTerms(catalog(), inventory)) === JSON.stringify(['LedgerPro', 'Aldrin Intake']),
         'the posting names two approved skills and the career quotes state both, so both are required, in the approved spelling, even though one career quote spells the name in lowercase');
@@ -2304,9 +2352,11 @@ Dates: May 2019 — August 2019
         { id: 's1', group: 'methods', items: ['Quanta Model'], evidenceIds: ['ev-quanta'] },
       ]);
       assert(onlyQuanta.includes('skills omits LedgerPro, Aldrin Intake'),
-        `a block that drops the posting-named skills is rejected naming both in their approved spelling (got ${onlyQuanta})`);
+        `a block that drops the posting-named skills is advised about, naming both in their approved spelling (got ${onlyQuanta})`);
       assert(!onlyQuanta.includes('ledgerpro'),
-        `the rejection names only the approved spelling, never the corpus's lowercase one (got ${onlyQuanta})`);
+        `the advice names only the approved spelling, never the corpus's lowercase one (got ${onlyQuanta})`);
+      assert(!structuredOutcome(draft([{ id: 's1', group: 'methods', items: ['Quanta Model'], evidenceIds: ['ev-quanta'] }]), context()).rejected,
+        'a skills block that leaves out a posting-named, career-attested skill is told so and is never rejected for it');
 
       const carryingAll = reject([
         { id: 's1', group: 'tools', items: ['LedgerPro'], evidenceIds: ['ev-ledger'] },
@@ -2341,17 +2391,15 @@ Dates: May 2019 — August 2019
       // quote states, which leaves the posting-named rule under test the only
       // thing that can reject it.
       const outcome = (inventory, listingQuote, careerQuote, skills) => {
-        try {
-          renderStructuredApplicationResume({ ...draft(), skills }, {
-            sourceRoles, careerData, careerSkillEvidence: inventory, authorityMode: true,
-            evidenceCatalog: [
-              { id: 'ev-report', sourceId: 'career-data', quote: 'Coordinated the regional rota.' },
-              { id: 'ev-career', sourceId: 'career-data', quote: careerQuote },
-              { id: 'ev-need', sourceId: 'job-listing', quote: listingQuote },
-            ],
-          });
-          return true;
-        } catch (error) { return String(error?.message || error); }
+        const result = structuredOutcome({ ...draft(), skills }, {
+          sourceRoles, careerData, careerSkillEvidence: inventory, authorityMode: true,
+          evidenceCatalog: [
+            { id: 'ev-report', sourceId: 'career-data', quote: 'Coordinated the regional rota.' },
+            { id: 'ev-career', sourceId: 'career-data', quote: careerQuote },
+            { id: 'ev-need', sourceId: 'job-listing', quote: listingQuote },
+          ],
+        });
+        return result.text === '' ? true : result.text;
       };
 
       const longer = outcome(
@@ -2391,9 +2439,7 @@ Dates: May 2019 — August 2019
         roles: [{ id: 'role-1', title: 'Operations Lead', company: 'Analytical Engines', dates: '2020 – 2024', location: '', bullets: [{ id: 'bullet-1', text: 'Coordinated the regional rota.', evidenceIds: ['ev-report'] }] }],
       });
       const inventory = approvedInventory(approvedSkill('ledger', 'LedgerPro'));
-      const accept = (evidenceCatalog, careerSkillEvidence = inventory) => {
-        try { renderStructuredApplicationResume(draft(), { sourceRoles, evidenceCatalog, careerData, careerSkillEvidence, authorityMode: careerSkillEvidence != null }); return ''; } catch (error) { return String(error?.message || error); }
-      };
+      const accept = (evidenceCatalog, careerSkillEvidence = inventory) => structuredOutcome(draft(), { sourceRoles, evidenceCatalog, careerData, careerSkillEvidence, authorityMode: careerSkillEvidence != null }).text;
 
       const careerOnly = accept([
         { id: 'ev-report', sourceId: 'career-data', quote: 'Coordinated the regional rota.' },
@@ -2544,19 +2590,17 @@ Dates: May 2019 — August 2019
         roles: [{ id: 'role-1', title: 'Operations Lead', company: 'Analytical Engines', dates: '2020 – 2024', location: '', bullets: [{ id: 'bullet-1', text: 'Coordinated the regional rota.', evidenceIds: ['ev-report'] }] }],
         ...(skills === undefined ? {} : { skills }),
       });
-      const attempt = (skills, evidenceCatalog = catalog(), careerSkillEvidence = inventory) => {
-        try { renderStructuredApplicationResume(draft(skills), { sourceRoles, evidenceCatalog, careerData, careerSkillEvidence, authorityMode: careerSkillEvidence != null }); return ''; } catch (error) { return String(error?.message || error); }
-      };
+      const attempt = (skills, evidenceCatalog = catalog(), careerSkillEvidence = inventory) => structuredOutcome(draft(skills), { sourceRoles, evidenceCatalog, careerData, careerSkillEvidence, authorityMode: careerSkillEvidence != null }).text;
 
       assert(postingNamedAttestedSkillTerms(catalog(), inventory).length === 0, 'precondition: the generic posting names no attested skill, so the coverage rule demands nothing');
       const absent = attempt(undefined);
       assert(absent.includes('skills omits LedgerPro, Triage Board, Quanta Model, Rotamax') && absent.includes('bounded career-attested index'),
-        `a draft with no skills key is rejected with the complete bounded index it owes (got ${absent})`);
+        `a draft with no skills key is told the complete bounded index it owes (got ${absent})`);
       const emptyArray = attempt([]);
       assert(emptyArray.includes('skills omits LedgerPro, Triage Board, Quanta Model, Rotamax'), `an empty skills array owes the same complete index (got ${emptyArray})`);
 
       const oneRow = attempt([{ id: 's1', group: 'tools', items: ['LedgerPro'], evidenceIds: ['ev-ledger'] }]);
-      assert(oneRow.includes('skills omits Triage Board, Quanta Model, Rotamax'), `a one-item compliance gesture is rejected with the evidence-backed terms it dropped (got ${oneRow})`);
+      assert(oneRow.includes('skills omits Triage Board, Quanta Model, Rotamax'), `a one-item compliance gesture is told the evidence-backed terms it dropped (got ${oneRow})`);
       const complete = attempt([
         { id: 's1', group: 'tools', items: ['LedgerPro'], evidenceIds: ['ev-ledger'] },
         { id: 's2', group: 'methods', items: ['Triage Board', 'Quanta Model'], evidenceIds: ['ev-hub'] },
@@ -2585,7 +2629,9 @@ Dates: May 2019 — August 2019
         && postingNamed.includes('skills omits Triage Board, Quanta Model, Rotamax from the bounded career-attested index'),
       `posting-named and additional career coverage are both actionable without duplicating LedgerPro (got ${postingNamed})`);
 
-      return { absentRejected: true, emptyArrayRejected: true, oneRowRejected: true, completeAccepted: true, standsDown: true };
+      assert(!structuredOutcome(draft(undefined), { sourceRoles, evidenceCatalog: catalog(), careerData, careerSkillEvidence: inventory, authorityMode: true }).rejected,
+        'an absent skills block owes the index as advice and is never rejected for it');
+      return { absentAdvised: true, emptyArrayAdvised: true, oneRowAdvised: true, completeAccepted: true, standsDown: true };
     },
   },
   {

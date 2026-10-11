@@ -18,11 +18,9 @@
 // the list of unsupported requirements the host derived from the approved evidence
 // of the CURRENT job (unsupportedPostingNeeds below), and that list is bounded.
 //
-// Each rule is its own exported sentence, composed into one block by a single
-// builder, and the prompts print the block (never a copy of it). A number or a
-// phrase that comes from a check is read from the module that owns the check, so a
-// rule that moves there moves here with no second edit.
-import { closingContributionParts, OWING_CLAIM_PARAGRAPHS } from './coverLetterChecks.js';
+// Each rule is its own exported sentence, composed into one brief by a single
+// builder, and the prompts print that brief. Truth rules live with their checks;
+// this module supplies positive writing guidance only.
 
 // ---------------------------------------------------------------------------
 // The cover letter.
@@ -31,59 +29,35 @@ import { closingContributionParts, OWING_CLAIM_PARAGRAPHS } from './coverLetterC
 // What a body paragraph is for. The résumé already says what was done, so a
 // paragraph that says it again adds nothing; what a paragraph can add is the
 // context the cited quote itself states, and nothing it does not state.
-export const LETTER_PROOF_ADDS_RULE = 'Each body paragraph develops one proof and adds what the résumé bullet beside it cannot: the reason, '
-  + 'constraint, decision or outcome that a career-data quote the paragraph cites states in its own words. Saying the bullet again '
-  + 'adds nothing, and a reason, constraint, decision or outcome that no cited quote states is an invented fact, so leave it out '
-  + 'and state the proof plainly instead.';
+export const LETTER_PROOF_ADDS_RULE = 'Add the reasons, decisions, constraints and outcomes that the cited career evidence states, instead of restating résumé bullets. Never claim more than a cited quote states.';
 
 // The opening names the target and speaks from the candidate's side. The role and
 // the employer come from the job record alone (context.job); anything said about
 // the employer beyond the posting's own text is a claim the candidate cannot back.
-export const LETTER_OPENING_RULE = 'The opening names the target role by the title context.job gives and the employer by the name context.job gives, '
-  + 'taking both from the job record alone; when the record gives no usable title or no usable employer, it names the one it does give, '
-  + 'leaves out the other, and invents neither. It is written from the candidate’s side: it states the closest capability the cited work directly shows, '
-  + 'and it makes no assertion about the employer’s domain, product, customers or needs beyond what the posting text itself says. '
-  + 'Naming the role and the employer this way points the capability at its target; it is not an announcement of an application.';
+export const LETTER_OPENING_RULE = 'Name the role and company once in the opening, using the job record. Lead with the strongest true evidence for the posting, and make no unsupported assertion about the employer.';
 
-// The closing grammar is graded when a closing sentence invites a conversation or
-// states an intent to talk or learn. It is stated here once, in the check's own
-// words (closingContributionParts), because a writer that meets it first in a
-// rejection has already written the closing.
-const closingParts = () => closingContributionParts().map((part, index) => `(${index + 1}) ${part}`).join('; ');
-export const LETTER_CLOSING_RULE = 'Close with one sentence that ties a concrete item the letter has already shown to the role; the closing adds no '
-  + 'new frame and does not repeat the opening’s rationale. State any invitation directly, in the present tense: one opened with “would” '
-  + '(“would welcome”, “would be glad to”) is rejected as conditional or deferential, and so is one that asks the employer to choose between options. '
-  + 'A closing sentence that invites a conversation or states an intent to talk or learn '
-  + `is held to three parts, so give any closing all three: ${closingParts()}.`;
+// A specific closing is a writing goal, not a deterministic grammar.
+export const LETTER_CLOSING_RULE = 'Make the closing specific to evidence the letter has already shown.';
 
 // How many proof paragraphs a letter has is a function of the evidence, not a
 // target. A quote that states only an achievement has nothing to add, so a third
 // paragraph built on it can only restate.
-export const LETTER_PROOF_COUNT_RULE = 'Let the number of proof paragraphs follow the evidence: two suffice when the cited quotes are one-line '
-  + 'achievements, and a third earns its place only when it cites a quote that states a different reason, constraint, decision or outcome. '
-  + 'A paragraph added to reach a count is padding. When a cited quote states nothing beyond its bullet, the paragraph says the proof plainly and '
-  + 'invents no reason, constraint, decision or outcome for it, and a letter whose evidence is all of that kind uses fewer, plainer paragraphs.';
+export const LETTER_PROOF_COUNT_RULE = 'Use as many proof paragraphs as the evidence warrants, keeping the strongest distinct points.';
 
 // jobNeedQuote is a verbatim span of the posting. Two paragraphs bound to one span
 // make the letter say one posting phrase twice; the review's argument-links check
 // rejects exactly that degenerate case (checkParagraphArgumentLinks), and nothing else
 // about how a quote relates to its paragraph.
-export const LETTER_JOB_NEED_BINDING_RULE = 'Bind each paragraph’s jobNeedQuote to the posting requirement that paragraph’s own proof answers, '
-  + 'and bind no two paragraphs to the same quote: a second paragraph on one need repeats the posting phrase, so give it a different need '
-  + 'or fold it into the first. The review is rejected when two proof-bearing paragraphs carry the same jobNeedQuote.';
+export const LETTER_JOB_NEED_BINDING_RULE = 'When recording a jobNeedQuote, copy an exact span of the posting and connect it honestly to the paragraph’s evidence.';
 
-export const LETTER_NO_POSTING_ECHO_RULE = 'Never echo posting phrases as filler: a sentence that adds no information beyond the posting’s own '
-  + 'vocabulary is a defect, so use a posting word only where it names the work a proof answers.';
+export const LETTER_NO_POSTING_ECHO_RULE = 'Write plain, natural English without echoing the posting as filler.';
 
 // The claim span is owed by a bounded number of paragraphs (the constant behind
 // OWING_CLAIM_PARAGRAPHS); the rule for its shape is printed by the contract. What
 // the contract could not say is where it goes: a span is a phrase inside a sentence
 // the paragraph needs, and a sentence written only to carry one is the abstract
 // filler the reviewers keep flagging.
-export const LETTER_CLAIM_PLACEMENT_RULE = `The claim span that only ${OWING_CLAIM_PARAGRAPHS} owes is a phrase, not a sentence of its own: `
-  + 'set it inside a sentence the paragraph needs anyway, the proof sentence included, and write no sentence whose only job is to carry the claim span. '
-  + 'The relevance span a paragraph owes is a different thing: it is a sentence of that paragraph, apart from the proof sentence, '
-  + 'that says how the proof bears on the requirement its jobNeedQuote came from.';
+export const LETTER_CLAIM_PLACEMENT_RULE = 'Frame adjacent experience honestly; explain the connection without presenting different work as equivalent.';
 
 export const COVER_LETTER_GUIDANCE_RULES = Object.freeze([
   LETTER_PROOF_ADDS_RULE, LETTER_OPENING_RULE, LETTER_CLOSING_RULE, LETTER_PROOF_COUNT_RULE,
@@ -93,7 +67,7 @@ export const COVER_LETTER_GUIDANCE_RULES = Object.freeze([
 // One block, printed by the cover-letter writer and by the review that may rewrite
 // the letter. No host check counts these sentences (a few are backed by one); the
 // independent reviewers read for them after the checks pass.
-export const COVER_LETTER_WRITER_GUIDANCE = 'Letter writing guidance. The independent reviewers read for these after the host’s checks pass: '
+export const COVER_LETTER_WRITER_GUIDANCE = 'Letter writing guidance: '
   + COVER_LETTER_GUIDANCE_RULES.join(' ');
 
 // What a correction round restates. A rewrite of a flagged paragraph is invited to
@@ -106,8 +80,7 @@ export const LETTER_REWRITE_BRIEF_RULE = [LETTER_PROOF_ADDS_RULE, LETTER_JOB_NEE
 // The résumé.
 // ---------------------------------------------------------------------------
 
-export const RESUME_LEAD_BULLET_RULE = 'Order each role’s bullets by the posting requirements they answer: the first bullet is the one whose cited '
-  + 'evidence answers the highest-priority requirement that role’s evidence supports, and the rest follow in descending priority.';
+export const RESUME_LEAD_BULLET_RULE = 'Lead with the strongest true evidence for the posting, and order the remaining bullets by value to the reader.';
 
 // Source-verb fidelity. The class is closed and generic: it names the kinds of
 // work a quote can describe that are not authorship, never a verb from a candidate.

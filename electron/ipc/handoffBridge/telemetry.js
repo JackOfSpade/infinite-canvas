@@ -320,7 +320,7 @@ const QUEUE_PHASES = new Set(['unread', 'awaiting', 'host', 'needs_user', 'held'
 // because this list was a hand-kept copy that missed them).
 export const APPLICATION_QUEUE_STAGES = Object.freeze([
   'evidence-plan', 'resume', 'cover-letter', 'requirement-disposition',
-  'review', 'blind-review', 'blind-repair-context',
+  'review', 'blind-review', 'blind-repair-context', 'refinement-judge',
 ]);
 const QUEUE_STAGES = new Set(APPLICATION_QUEUE_STAGES);
 const QUEUE_REASONS = new Set(['user_hold', 'human_advance', 'rejection_cap', 'junk_cap', 'review_round_cap', 'job_broken', 'render_retry', 'app_fix_required', 'canvas_unavailable', 'canvas_missing', 'read_failed', 'write_failed', 'submit_stuck', 'host_silent', 'lapsed', 'restart', 'review_stop']);

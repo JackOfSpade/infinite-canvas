@@ -30,6 +30,19 @@ import {
   checkParallelStructure,
   checkReferenceClarity,
 } from './coverLetterChecks.js';
+import { resumeCheckDisposition } from './resumeCheckDispositions.js';
+
+// Which résumé check failures block a document and which only advise. The
+// table lives in an import-free module because structuredResume.js (which
+// imports this file) reads it too; re-exported here so the consumers that
+// already import the résumé checks from this module have one place to look.
+export {
+  RESUME_CHECK_CLASSES,
+  RESUME_CHECK_DISPOSITIONS,
+  RESUME_CHECK_RATIONALES,
+  partitionResumeCheckResults,
+  resumeCheckDisposition,
+} from './resumeCheckDispositions.js';
 
 const { app, shell } = electronPkg;
 
@@ -1864,24 +1877,32 @@ export function checkResumeBulletOpeningVariety(mainHtml) {
     : { id: 'resume-bullet-opening-variety', passed: true, detail: `${evidence.roles.length} résumé role(s) avoid a repeated opening-verb pattern` };
 }
 
-/** Shared pre-publication prose checks for the résumé's generated copy. */
-export function evaluateResumeProseChecks(mainHtml) {
+/**
+ * Shared pre-publication prose checks for the résumé's generated copy.
+ *
+ * Every check is evaluated and returned whatever its disposition: this
+ * function measures, it does not decide. What a failure may DO (block, advise,
+ * nothing) is RESUME_CHECK_DISPOSITIONS' answer; a consumer passes the result
+ * through partitionResumeCheckResults and only `blocking` rejects a document.
+ */
+export function evaluateResumeProseChecks(mainHtml, { activeOnly = false } = {}) {
   const evidence = extractResumeEvidence(mainHtml);
   const prose = evidence.roles.flatMap(role => [
     role.summary,
     ...(Array.isArray(role.bullets) ? role.bullets.map(bullet => bullet.text) : []),
   ]).filter(Boolean);
-  return [
-    checkResumeBulletSelfContainment(mainHtml),
-    checkResumeBulletFocus(mainHtml),
-    checkResumeBulletLength(mainHtml),
-    checkResumeRoleBulletBudget(mainHtml),
-    checkResumeBulletOpeningVariety(mainHtml),
-    checkCompoundHyphenation(prose),
-    checkParallelStructure(prose),
-    checkReferenceClarity(prose),
-    checkModifierAttachment(prose),
+  const checks = [
+    ['resume-bullet-self-containment', () => checkResumeBulletSelfContainment(mainHtml)],
+    ['resume-bullet-focus', () => checkResumeBulletFocus(mainHtml)],
+    ['resume-bullet-length', () => checkResumeBulletLength(mainHtml)],
+    ['resume-role-bullet-budget', () => checkResumeRoleBulletBudget(mainHtml)],
+    ['resume-bullet-opening-variety', () => checkResumeBulletOpeningVariety(mainHtml)],
+    ['compound-hyphenation', () => checkCompoundHyphenation(prose)],
+    ['parallel-structure', () => checkParallelStructure(prose)],
+    ['reference-clarity', () => checkReferenceClarity(prose)],
+    ['modifier-attachment', () => checkModifierAttachment(prose)],
   ];
+  return checks.filter(([id]) => !activeOnly || resumeCheckDisposition(id) !== 'off').map(([, run]) => run());
 }
 
 export function normalizeCoverLetterParagraphs(paragraphs) {

@@ -8,15 +8,27 @@ import { titleCaseSkillGroupLabel } from './skillGroupLabel.js';
 import { CAREER_SNAPSHOT_CAPABILITY_KINDS, isCareerSkillIndexEligible } from './careerSnapshot.js';
 import { CASE_SENSITIVE_SKILL_NAME_MAX_CHARS, resolveApprovedSkillByName } from './applicationCareerAuthority.js';
 import { boundedExpectedValue } from './hostOwnedText.js';
+import { resumeCheckDisposition } from './resumeCheckDispositions.js';
 
 export const STRUCTURED_RESUME_SCHEMA_VERSION = 'structured-resume.v1';
 
 export class StructuredResumeValidationError extends Error {
-  constructor(message) {
+  /**
+   * `checks` names the rules that rejected, one `{ id, passed: false, detail }`
+   * per rule in the shape every other check result uses, so a rejection can be
+   * attributed to a check id instead of arriving as an anonymous sentence.
+   * `advisories` are the non-blocking findings the same draft also produced:
+   * they never contributed to this rejection, and are carried so the caller
+   * that is already asking for a correction round can choose to show them.
+   */
+  constructor(message, { checks = [], advisories = [] } = {}) {
     super(`Structured résumé validation failed: ${message}`);
     this.name = 'StructuredResumeValidationError';
     this.code = 'STRUCTURED_RESUME_INVALID';
     this.detail = message;
+    this.checks = checks;
+    this.rules = checks.map(check => check.id);
+    this.advisories = advisories;
   }
 }
 
@@ -576,7 +588,7 @@ const GROUNDING_STOPWORDS = new Set(['about', 'after', 'against', 'built', 'buil
 // same set and thresholds the gate reads rather than hand-listed beside them.
 const MIN_GROUNDING_TERM_CHARS = 3;
 export const MIN_SHARED_CAREER_TERMS = 2;
-export const CAREER_TERM_OVERLAP_RULE = `a term is a run of letters or digits at least ${MIN_GROUNDING_TERM_CHARS} characters long, compared case-insensitively and counted once however often it repeats, and these ${GROUNDING_STOPWORDS.size} words never count: ${[...GROUNDING_STOPWORDS].sort().join(', ')}`;
+export const CAREER_TERM_OVERLAP_RULE = `a term is a run of letters or digits at least ${MIN_GROUNDING_TERM_CHARS} characters long, compared case-insensitively with a plural ending folded away (a trailing s or es, and ies read as y, so pipeline and pipelines are one term) and counted once however often it repeats, and these ${GROUNDING_STOPWORDS.size} words never count: ${[...GROUNDING_STOPWORDS].sort().join(', ')}; a description that holds only one countable term needs only that one to match`;
 // Source profile IDs include UUIDs and can validly begin with a digit.
 const ID_RE = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,119}$/;
 export const STRUCTURED_RESUME_ID_PATTERN = ID_RE.source;
@@ -606,24 +618,55 @@ function clipOffender(value) {
 }
 
 /**
- * Report every collected offense as one message. Offenses are
+ * Group collected offenses by rule, one `{ id, passed: false, detail }` per
+ * rule in the shape every other check result uses. Offenses are
  * `{ rule, offender, message }`; the first offense of a rule keeps its full
  * single-offender wording and every sibling offender is named after it, so one
- * correction round can fix the whole class.
+ * correction round can fix the whole class. A blocking group says the rule
+ * "rejects" its siblings; an advisory group never rejects anything and says so.
  */
-function failOffenses(offenses) {
-  if (!offenses?.length) return;
+function describeOffenseGroups(offenses, { blocking }) {
   const byRule = new Map();
   for (const offense of offenses) {
     if (!byRule.has(offense.rule)) byRule.set(offense.rule, []);
     byRule.get(offense.rule).push(offense);
   }
-  fail([...byRule.values()].map(([first, ...rest]) => {
-    if (!rest.length) return first.message;
-    const shown = rest.slice(0, MAX_LISTED_OFFENDERS).map(offense => clipOffender(offense.offender));
-    const remaining = rest.length - shown.length;
-    return `${first.message} The same rule also rejects ${rest.length} more in this response: ${shown.join('; ')}${remaining > 0 ? `, and ${remaining} more` : ''}. Fix all of them before resubmitting.`;
-  }).join(' '));
+  return [...byRule.entries()].map(([rule, [first, ...rest]]) => {
+    let detail = first.message;
+    if (rest.length) {
+      const shown = rest.slice(0, MAX_LISTED_OFFENDERS).map(offense => clipOffender(offense.offender));
+      const remaining = rest.length - shown.length;
+      const listed = `${shown.join('; ')}${remaining > 0 ? `, and ${remaining} more` : ''}`;
+      detail = blocking
+        ? `${first.message} The same rule also rejects ${rest.length} more in this response: ${listed}. Fix all of them before resubmitting.`
+        : `${first.message} The same observation also applies to ${rest.length} more in this response: ${listed}.`;
+    }
+    return { id: rule, passed: false, detail, disposition: blocking ? 'gate' : 'advisory' };
+  });
+}
+
+/**
+ * Apply the résumé check dispositions to every collected offense: a GATE rule
+ * rejects the draft (one message, one correction round, exactly as before the
+ * dispositions existed), an ADVISORY rule is returned as a finding and never
+ * rejects, and an OFF rule is dropped. A rule the table does not list is a gate.
+ * Returns the advisories; throws when any gate offense is present, carrying the
+ * advisories along on the error.
+ */
+function settleOffenses(offenses) {
+  const gates = [];
+  const advisories = [];
+  for (const offense of offenses || []) {
+    const disposition = resumeCheckDisposition(offense.rule);
+    if (disposition === 'gate') gates.push(offense);
+    else if (disposition === 'advisory') advisories.push(offense);
+  }
+  const advisoryChecks = describeOffenseGroups(advisories, { blocking: false });
+  if (gates.length) {
+    const checks = describeOffenseGroups(gates, { blocking: true });
+    throw new StructuredResumeValidationError(checks.map(check => check.detail).join(' '), { checks, advisories: advisoryChecks });
+  }
+  return advisoryChecks;
 }
 
 function offend(collect, rule, offender, message) {
@@ -1340,12 +1383,33 @@ function meaningfulTokens(value) {
   return [...new Set(String(value || '').toLocaleLowerCase().match(/[\p{L}\p{N}]+/gu)?.filter(token => token.length >= MIN_GROUNDING_TERM_CHARS && !GROUNDING_STOPWORDS.has(token)) || [])];
 }
 
+// A plural ending is the one inflection folded when two texts are compared: the
+// same word in the singular and the plural is the same term, so an honest
+// restatement ("pipelines" for "pipeline") shares it. Each token yields the
+// spellings it could be the plural of; two tokens share a term when their
+// spellings meet. Only a trailing s, es and ies are read, so no stem is guessed
+// at and no suffix list grows to cover a vocabulary.
+function termSpellings(token) {
+  const spellings = [token];
+  if (token.length > 3 && token.endsWith('s') && !token.endsWith('ss')) spellings.push(token.slice(0, -1));
+  if (token.length > 4 && token.endsWith('es')) spellings.push(token.slice(0, -2));
+  if (token.length > 4 && token.endsWith('ies')) spellings.push(`${token.slice(0, -3)}y`);
+  return spellings;
+}
+
 function hasCareerOverlap(value, careerQuotes) {
   const tokens = meaningfulTokens(value);
-  if (tokens.length < MIN_SHARED_CAREER_TERMS) return false;
-  const sourceTokens = new Set(meaningfulTokens(careerQuotes.join(' ')));
-  const shared = tokens.filter(token => sourceTokens.has(token));
-  return shared.length >= MIN_SHARED_CAREER_TERMS;
+  // A description with nothing countable asserts nothing the evidence could
+  // support. One with a single countable term cannot be held to two, so that
+  // one has to match: the floor is "two where two exist", never "two or fail".
+  if (!tokens.length) return false;
+  const sourceSpellings = new Set(meaningfulTokens(careerQuotes.join(' ')).flatMap(termSpellings));
+  const matched = new Set();
+  for (const token of tokens) {
+    const hit = termSpellings(token).find(spelling => sourceSpellings.has(spelling));
+    if (hit) matched.add(hit);
+  }
+  return matched.size >= Math.min(MIN_SHARED_CAREER_TERMS, tokens.length);
 }
 
 function careerQuotesForEvidenceIds(evidenceIds, careerEvidenceQuotesById) {
@@ -1381,6 +1445,21 @@ export function occursInQuotedCareerEvidence(value, quotes) {
   return quotedEvidenceHasTerm(value, quotes, 'iu');
 }
 
+// Words that grade the candidate's own skill. A skills-row label is meant to
+// name a KIND of skill; one that also grades it ("Advanced ...", "Expert ...")
+// states a proficiency the career data may never have claimed. The list is
+// short and closed on purpose: it names only unambiguous proficiency words,
+// not seniority or intensity words that ordinary labels use ("strong typing",
+// "deep learning"), and it is never shown to the writer as a vocabulary. The
+// decision is relative to the evidence the group cites, so a career file that
+// itself says "advanced" admits the label.
+const SKILL_LEVEL_WORDS = Object.freeze(['accomplished', 'advanced', 'expert', 'expertise', 'fluency', 'fluent', 'mastery', 'proficiency', 'proficient', 'seasoned']);
+
+function unsupportedSkillLevelWords(label, quotes) {
+  const present = new Set((String(label || '').toLocaleLowerCase().match(/\p{L}+/gu) || []).filter(word => SKILL_LEVEL_WORDS.includes(word)));
+  return [...present].filter(word => !quotedEvidenceHasTerm(word, quotes, 'iu'));
+}
+
 const PROJECT_OCCURRENCE_RULE = 'project-field-occurs-in-cited-career-evidence';
 const PROJECT_DESCRIPTION_RULE = 'project-description-shares-career-evidence-terms';
 const PROJECT_LISTING_EVIDENCE_RULE = 'project-cites-job-listing-evidence';
@@ -1407,6 +1486,71 @@ const SKILLS_BLOCK_SPLIT_RULE = 'skills-block-big-enough-to-split-is-split';
 const SKILLS_BLOCK_ROWS_RULE = 'skills-block-within-design-row-budget';
 const SKILLS_BLOCK_ITEMS_RULE = 'skills-block-within-design-term-budget';
 const SKILLS_ROW_LENGTH_RULE = 'skills-row-within-design-character-budget';
+const SKILL_ITEM_LOOKS_FILTERABLE_RULE = 'skill-item-looks-like-a-filterable-name';
+const SKILL_GROUP_LEVEL_CLAIM_RULE = 'skill-group-label-claims-a-level';
+const PROJECT_EMPLOYER_TASK_RULE = 'project-is-work-done-for-a-listed-employer';
+const credentialOccurrenceRule = kind => `${kind}-field-occurs-in-cited-career-evidence`;
+const credentialRangeRule = kind => `${kind}-dates-state-one-end-of-a-range`;
+
+/**
+ * Every rule id this validator can emit, whichever way it is dispositioned.
+ * The drift test holds this list and RESUME_CHECK_DISPOSITIONS against each
+ * other and against what the validator actually emits, so a rule added here
+ * without being classified (or classified without existing) is caught.
+ */
+export const STRUCTURED_RESUME_RULE_IDS = Object.freeze([
+  UNKNOWN_EVIDENCE_RULE, CAREER_EVIDENCE_RULE, APPROVED_SPELLING_RULE, PROSE_NAMES_APPROVED_SKILL_RULE,
+  ROLE_BULLET_SCOPE_RULE, ROLE_BULLET_OPENING_BLOCK_RULE, ROLE_BULLET_EVIDENCE_REUSE_RULE,
+  PROJECT_OCCURRENCE_RULE, PROJECT_DESCRIPTION_RULE, PROJECT_LISTING_EVIDENCE_RULE, PROJECT_LISTING_OVERLAP_RULE,
+  PROJECT_EMPLOYER_TASK_RULE,
+  SKILL_ITEM_RULE, SKILL_ITEM_FILTERABLE_NOUN_RULE, SKILL_ITEM_LOOKS_FILTERABLE_RULE,
+  SKILL_GROUP_RULE, SKILL_GROUP_LEVEL_CLAIM_RULE,
+  SKILLS_BLOCK_SPLIT_RULE, SKILLS_BLOCK_ROWS_RULE, SKILLS_BLOCK_ITEMS_RULE, SKILLS_ROW_LENGTH_RULE,
+  POSTING_NAMED_SKILL_TERM_RULE, SKILLS_BLOCK_PRESENCE_RULE_ID,
+  credentialOccurrenceRule('education'), credentialOccurrenceRule('certification'),
+  credentialRangeRule('education'), credentialRangeRule('certification'),
+]);
+
+// The evidence id the approved-authority catalog gives a project's own quotes:
+// host.career.project.<entity>.<n>. The same grammar applicationCareerAuthority
+// enforces when it builds the catalog; read here only to name the project
+// entity a rendered project cites, never to invent one.
+const AUTHORITY_PROJECT_EVIDENCE_ID_RE = /^host\.career\.project\.([a-z][a-z0-9-]{0,79})\.[1-9]\d*(?:\.[1-9]\d*)?$/u;
+
+/**
+ * A rendered project that the approved career record itself links to a role
+ * this résumé also lists is that employer's work. Filed under Projects it
+ * reads as separate personal work and leaves a thin Projects section, a
+ * defect independent review flagged again and again. The link is the record's
+ * own (project.roleId), supplied through `projectRoleOf`; nothing here infers
+ * an employer from wording, so with no link supplied the check has nothing to
+ * read and says nothing. It advises rather than rejects because the record can
+ * link a project to the role it was done during and still be a deliberate,
+ * separately worthwhile entry.
+ */
+function collectEmployerTaskProjects(projects, sourceRoles, projectRoleOf, offenses) {
+  if (projectRoleOf == null) return;
+  if (typeof projectRoleOf !== 'function') {
+    configurationFault('projectRoleOf must be a function from an approved project entity id to its linked role id, or omitted.');
+  }
+  const rolesById = new Map(sourceRoles.map(role => [role.id, role]));
+  for (const project of projects) {
+    const entityIds = new Set(project.evidenceIds
+      .map(evidenceId => AUTHORITY_PROJECT_EVIDENCE_ID_RE.exec(evidenceId)?.[1])
+      .filter(Boolean));
+    for (const entityId of entityIds) {
+      let linkedRoleId = null;
+      // Advice must never be the reason a draft cannot be read.
+      try { linkedRoleId = projectRoleOf(entityId) || null; } catch { linkedRoleId = null; }
+      const role = typeof linkedRoleId === 'string' ? rolesById.get(linkedRoleId) : null;
+      if (!role) continue;
+      const roleLabel = [role.title, role.company].filter(Boolean).join(', ') || role.id;
+      offend(offenses, PROJECT_EMPLOYER_TASK_RULE, `projects.${project.id}`,
+        `projects.${project.id} is linked, in the approved career record, to the role “${roleLabel}”, which this résumé also lists. Work done for an employer reads best as that role’s own bullet; filed under Projects it reads as separate personal work. Keep it as a project only if it carries a contribution of its own that the role’s bullets do not already state.`);
+      break;
+    }
+  }
+}
 
 function normalizeProjects(value, allowedEvidenceIds, careerEvidenceIds, careerEvidenceQuotesById, careerData, listingEvidenceQuotesById, offenses, authorityMode = false, approvedSkills = null) {
   if (value == null) return [];
@@ -1546,7 +1690,12 @@ function normalizeSkills(value, allowedEvidenceIds, careerEvidenceIds, careerEvi
         offend(skillOffenses, SKILL_ITEM_FILTERABLE_NOUN_RULE, `skills[${index}] item "${item}"`,
           `skills[${index}] item "${item}" is not an exact, index-eligible approved snapshot skill. Write the name of a supported skill as the approved inventory spells it (a capitalization or spacing variant of that name resolves to it); do not infer aliases, plurals or longer names, or turn an ambiguous source mention into a keyword.`);
       } else if (!approvedSnapshotSkills && !FILTERABLE_SKILL_ITEM_RE.test(item)) {
-        offend(skillOffenses, SKILL_ITEM_FILTERABLE_NOUN_RULE, `skills[${index}] item "${item}"`,
+        // A pre-snapshot job has no approved inventory to admit the item
+        // against, so all that is left is a capitalisation guess at "this is a
+        // name". That is taste: a lowercase tool name is a good keyword, and
+        // the grounding rule above already proves the item is TRUE. Its own
+        // id lets it advise while the approved-inventory test stays a gate.
+        offend(skillOffenses, SKILL_ITEM_LOOKS_FILTERABLE_RULE, `skills[${index}] item "${item}"`,
           `skills[${index}] item "${item}" must be a name a recruiter can filter on rather than a concept or an activity: ${SKILL_ITEM_FILTERABLE_RULE}.`);
       }
     }
@@ -1554,6 +1703,13 @@ function normalizeSkills(value, allowedEvidenceIds, careerEvidenceIds, careerEvi
     if (!isNeutralSkillGroupLabel(groupName, groupVocabulary()) && (authorityMode || !occursInCareerData(groupName, careerData))) {
       offend(skillOffenses, SKILL_GROUP_RULE, `skills[${index}].group "${groupName}"`,
         `skills[${index}].group "${groupName}" must be a neutral category label \u2014 ${neutralSkillGroupRule(groupVocabulary())}${authorityMode ? '.' : ' \u2014 or a label that occurs in frozen career data.'}`);
+    }
+    // The vocabulary above is a labelling preference and only advises. A label
+    // that grades the candidate's own skill ("Advanced ...", "Expert ...") is a
+    // strength claim, so it is held to what the evidence the group cites says.
+    for (const levelWord of unsupportedSkillLevelWords(groupName, careerQuotes.length ? careerQuotes : (authorityMode ? [] : [careerData]))) {
+      offend(skillOffenses, SKILL_GROUP_LEVEL_CLAIM_RULE, `skills[${index}].group "${groupName}"`,
+        `skills[${index}].group "${groupName}" grades the candidate\u2019s skill with \u201c${levelWord}\u201d, but none of the career-data quotes this group cites states that level. A label names a kind of skill; drop the level word, or cite the career-data quote that states it.`);
     }
     return {
       id: id(group.id, `skills[${index}].id`), group: groupName, items: canonicalItems,
@@ -1635,7 +1791,7 @@ function normalizeCredentialItems(value, kind, allowedEvidenceIds, careerEvidenc
   const fieldNames = isEducation
     ? [['credential', MAX_SHORT_TEXT], ['institution', MAX_SHORT_TEXT], ['dates', MAX_SHORT_TEXT]]
     : [['name', MAX_SHORT_TEXT], ['issuer', MAX_SHORT_TEXT], ['dates', MAX_SHORT_TEXT]];
-  const rule = `${kind}-field-occurs-in-cited-career-evidence`;
+  const rule = credentialOccurrenceRule(kind);
   const items = Array.from(value, (raw, index) => {
     const item = record(raw, `${label}[${index}]`);
     const before = offenses.length;
@@ -1657,7 +1813,7 @@ function normalizeCredentialItems(value, kind, allowedEvidenceIds, careerEvidenc
           offend(offenses, rule, `${label}.${normalized.id}.${field}`,
             `${label}.${normalized.id}.${field} must occur in its cited career-data evidence.`);
         } else if (field === 'dates' && fieldValue && quotes.length && !datesStatedAsWholeValue(fieldValue, quotes)) {
-          offend(offenses, `${kind}-dates-state-one-end-of-a-range`, `${label}.${normalized.id}.dates`,
+          offend(offenses, credentialRangeRule(kind), `${label}.${normalized.id}.dates`,
             `${label}.${normalized.id}.dates “${fieldValue}” is only one end of a date range its cited career-data evidence states as a range; write the whole range exactly as the evidence states it, or omit dates.`);
         }
       }
@@ -1668,8 +1824,20 @@ function normalizeCredentialItems(value, kind, allowedEvidenceIds, careerEvidenc
   return items;
 }
 
-/** Validate a paste response and normalize it into the only renderer input. */
-export function validateStructuredResumeDraft(raw, { sourceRoles, evidenceIds, evidenceCatalog, trustedIdentity, careerData, careerSkillEvidence = null, authorityMode = false } = {}) {
+/**
+ * Validate a paste response and normalize it into the only renderer input.
+ *
+ * TRUTH and HYGIENE rules reject (a StructuredResumeValidationError carrying
+ * `checks`, one per rule that rejected). TASTE rules never do: the same pass
+ * returns them as `draft.advisories`, check-shaped (`{ id, passed: false,
+ * detail, disposition: 'advisory' }`), for the caller to show the writer or the
+ * reviewer. RESUME_CHECK_DISPOSITIONS says which rule is which.
+ *
+ * `projectRoleOf(projectEntityId)` is optional and answers, from the approved
+ * career record, which role a project is linked to (or null). Without it the
+ * employer-task advisory has nothing to read and stands down.
+ */
+export function validateStructuredResumeDraft(raw, { sourceRoles, evidenceIds, evidenceCatalog, trustedIdentity, careerData, careerSkillEvidence = null, authorityMode = false, projectRoleOf = null } = {}) {
   // The frozen corpus is what the grounding rules below read: role-bullet
   // scope, the blank-trusted-location provenance rule, project and skill
   // occurrence, and the rendered project provenance heading. Defaulting it to
@@ -1726,6 +1894,7 @@ export function validateStructuredResumeDraft(raw, { sourceRoles, evidenceIds, e
   const roleIds = unique(roles.map(role => role.id), 'roles');
   for (const role of normalizedSourceRoles) if (!roleIds.has(role.id)) fail(`roles is missing trusted source role "${role.id}".`);
   const projects = normalizeProjects(draft.projects, allowedEvidenceIds, careerEvidenceIds, careerEvidenceQuotesById, careerData, listingEvidenceQuotesById, offenses, authorityMode, approvedSnapshotSkills);
+  collectEmployerTaskProjects(projects, normalizedSourceRoles, projectRoleOf, offenses);
   const skills = normalizeSkills(draft.skills, allowedEvidenceIds, careerEvidenceIds, careerEvidenceQuotesById, careerData, offenses, approvedSnapshotSkills, authorityMode);
   const education = normalizeCredentialItems(draft.education, 'education', allowedEvidenceIds, careerEvidenceIds, careerEvidenceQuotesById, careerData, offenses, authorityMode);
   const credentials = normalizeCredentialItems(draft.credentials, 'certification', allowedEvidenceIds, careerEvidenceIds, careerEvidenceQuotesById, careerData, offenses, authorityMode);
@@ -1760,7 +1929,7 @@ export function validateStructuredResumeDraft(raw, { sourceRoles, evidenceIds, e
     }
   }
   collectApprovedSkillSpellingOffenses(roles, projects, approvedSnapshotSkills, offenses);
-  failOffenses(offenses);
+  const advisories = settleOffenses(offenses);
   return {
     schemaVersion: STRUCTURED_RESUME_SCHEMA_VERSION,
     identity: normalizeIdentity(draft.identity, trustedIdentity),
@@ -1769,6 +1938,7 @@ export function validateStructuredResumeDraft(raw, { sourceRoles, evidenceIds, e
     skills,
     education,
     credentials,
+    advisories,
   };
 }
 
@@ -1902,7 +2072,10 @@ export function renderStructuredResume(raw, context = {}) {
     ? resumeProjectProvenanceFailures(resumeMainHtml, context.careerData)
     : [];
   if (projectFailures.length) fail(projectFailures.join(' '));
-  return { draft, resumeMainHtml };
+  // `advisories` is the draft's own list, repeated at the top level so a caller
+  // that renders (and so never holds the draft) can still show what the draft
+  // was told without failing.
+  return { draft, resumeMainHtml, advisories: draft.advisories };
 }
 
 /** Paste-workflow adapter: only returns markup accepted by the legacy validator. */
@@ -1910,6 +2083,6 @@ export function validateStructuredApplicationResume(resume, context = {}) {
   return validateStructuredResumeDraft(resume, context);
 }
 
-export function renderStructuredApplicationResume(resume, { sourceRoles, evidenceCatalog, trustedIdentity, careerData, careerSkillEvidence = null, authorityMode = false } = {}) {
-  return renderStructuredResume(resume, { sourceRoles, evidenceCatalog, trustedIdentity, careerData, careerSkillEvidence, authorityMode }).resumeMainHtml;
+export function renderStructuredApplicationResume(resume, { sourceRoles, evidenceCatalog, trustedIdentity, careerData, careerSkillEvidence = null, authorityMode = false, projectRoleOf = null } = {}) {
+  return renderStructuredResume(resume, { sourceRoles, evidenceCatalog, trustedIdentity, careerData, careerSkillEvidence, authorityMode, projectRoleOf }).resumeMainHtml;
 }

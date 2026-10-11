@@ -5,6 +5,13 @@ description: Use this skill to generate editorial-modernist, developer-literate 
 
 # Job Application Design System
 
+For Infinite Canvas application generation, use this design system to improve
+selection, ordering, clarity and page layout. Its numerical writing budgets
+and sentence-form rules are editorial guidance. The application host blocks
+unsupported claims, malformed structure, unsafe content and measured page
+overflow; it does not reject a truthful document for taste. Any cited source
+span remains exact.
+
 A polished, opinionated visual template for senior IC résumés and their
 paired cover letters. Both surfaces are in scope and ship from the same
 tokens, palette, and page geometry — a matched pair, not two systems. The

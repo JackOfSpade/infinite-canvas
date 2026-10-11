@@ -763,6 +763,7 @@ export default [
         'artifact-repair-only-v5': { reviewerBriefDigest: 'ae27be4bd41cd131c4da72e77533e3802f84143711909a58e5f3469ddc39d2a4', allowedContextDigest: 'd5f4e6fd53b424a6cdf4948bb71aca4d5af57ff45dbca332b66e78ded26d8c3e' },
         'artifact-repair-only-v6': { reviewerBriefDigest: 'ae27be4bd41cd131c4da72e77533e3802f84143711909a58e5f3469ddc39d2a4', allowedContextDigest: 'd5f4e6fd53b424a6cdf4948bb71aca4d5af57ff45dbca332b66e78ded26d8c3e' },
         'artifact-repair-only-v7': { reviewerBriefDigest: 'ae27be4bd41cd131c4da72e77533e3802f84143711909a58e5f3469ddc39d2a4', allowedContextDigest: '07244e5f769c471a6b1681597a3bbd9133678b8524bfee36f3dcbcee355c614a' },
+        'artifact-repair-only-v8': { reviewerBriefDigest: 'e49b9bedc92e301497b0201202961aed22e2ae9df85851380f47ff01bf9b4a6a', allowedContextDigest: '64bccf74bff0bbfbe534361b8f0bffc28c01c5953f8e324f652c54ff0af0cce8' },
       });
       assert.equal(APPLICATION_BLIND_REVIEW_PROMPT_MODE, 'artifact-repair-only-v7', 'a new prompt mode must pin its own digests here, next to the ones it supersedes');
       // The current mode is minted from a source accessor that carries the host-projected letter grounding; an accessor without it mints the ungrounded mode.
@@ -776,6 +777,21 @@ export default [
       assert.equal(plan.root.policyDigest, current.digest, 'the root binds exactly this policy');
       // B: every earlier mode this build still reconstructs keeps its own pinned constants.
       const catalogue = applicationBlindReviewPolicyCatalogue();
+      assert.deepEqual({
+        panelLimitsDigest: catalogue.modes['artifact-repair-only-v8'].panelLimitsDigest,
+        holisticConventionsDigest: catalogue.modes['artifact-repair-only-v8'].holisticConventionsDigest,
+        findingKindDigest: catalogue.modes['artifact-repair-only-v8'].findingKindDigest,
+        conventionsDigest: catalogue.modes['artifact-repair-only-v8'].conventionsDigest,
+        letterConventionsDigest: catalogue.modes['artifact-repair-only-v8'].letterConventionsDigest,
+        letterGroundingDigest: catalogue.modes['artifact-repair-only-v8'].letterGroundingDigest,
+      }, {
+        panelLimitsDigest: '4ec2080b95a02a1c32a98176f75618c0e6b39587243f7db5b2af1c35e265af11',
+        holisticConventionsDigest: '41e2074cf3490e007a5e2c2ca8bc47d146a075011e1208a80e592d254a0625b1',
+        findingKindDigest: 'dde56b050c88715995f5f93cfb3a1ca18eb7cfcd1d4f24625f7cafdf4fc91b01',
+        conventionsDigest: 'a708abd7a733456010bb7caf591c94b03e2b7c95fdd29b3eea698e0495cc5ec0',
+        letterConventionsDigest: '3f081f97ef735182da35b6a6425fbbe6e2954262229bbcea7c0c41993a4b6202',
+        letterGroundingDigest: 'c4de1d4d1f070c020c443434d50ce860b0dc95ae197b3a5481116db856a7828d',
+      }, 'the signed v8 policy pins every new panel and inherited clause');
       for (const [mode, expected] of Object.entries(GOLDEN)) {
         const policy = __applicationBlindReviewPolicyForTests({ promptByteLimit: plan.root.promptByteLimit, maxFindingsPerResponse: plan.root.maxFindingsPerResponse, sources: { factClaims: { scopeMode: 'claim-evidence-set' } }, promptMode: mode });
         assert.equal(policy.reviewerBriefDigest, expected.reviewerBriefDigest, `${mode} reviewerBriefDigest is pinned`);

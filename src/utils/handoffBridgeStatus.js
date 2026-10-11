@@ -60,7 +60,7 @@ const ALARM_KINDS = Object.freeze(['unknown_key', 'unknown_handoff', 'refresh_re
 // stages all project to the dock's final review step in bridgeJobProgress.
 const APPLICATION_STAGES = Object.freeze([
   'evidence-plan', 'resume', 'cover-letter', 'requirement-disposition',
-  'review', 'blind-review', 'blind-repair-context',
+  'review', 'blind-review', 'blind-repair-context', 'refinement-judge',
 ]);
 const MAX_STRING = 200;
 const MAX_JOBS = 50;

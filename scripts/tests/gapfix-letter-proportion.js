@@ -25,8 +25,6 @@
 //
 // A neutered gate fails the isolation and variant cases that name it.
 import { assert } from './testHelpers.js';
-import fs from 'node:fs';
-import path from 'node:path';
 import {
   LETTER_PROPORTION_MIN_JUDGED_WORDS, LETTER_PROPORTION_RULE, MAX_LETTER_BODY_PARAGRAPHS, MAX_PARAGRAPH_SENTENCES,
   MAX_PARAGRAPHS_PER_CITED_QUOTE, MIN_FIRST_PERSON_ACTION_PARAGRAPH_SHARE, MIN_FIRST_PERSON_SENTENCE_SHARE,
@@ -38,7 +36,7 @@ import {
 import {
   MIN_COVER_LETTER_UNDERFILL_WORDS, MIN_IMPERSONAL_RESTATEMENT_SHARED_TERMS, MIN_IMPERSONAL_RESTATEMENT_SOURCE_SHARE,
   PASTE_CHECK_PROSE_UNITS, __completedParagraphCitationsForTests, __localizedCoverLetterCorrectiveGuidanceForTests,
-  __pasteCoverLetterUnderfillErrorsForTests, __pasteTwinParagraphCitationsForTests, assertSourceQuoteLinksFinalText, pasteReportableCheckIds, sentenceAddressesTarget,
+  __pasteCoverLetterUnderfillErrorsForTests, __pasteTwinParagraphCitationsForTests, assertSourceQuoteLinksFinalText, sentenceAddressesTarget,
 } from '../../electron/ipc/localAiApplication.js';
 
 // ---------------------------------------------------------------------------
@@ -649,63 +647,7 @@ export default [
       // The merge advice carries its own counter-pressure: merged paragraphs are read as one by the repeat checks.
       assert(/repeated-phrase and sentence-shape/u.test(message), 'the message names the checks that a merge can trip');
     },
-  },
-  {
-    name: 'Letter proportion: the check is wired into the battery, the reportable-id table, the contracts and the corrective rules, from one set of constants',
-    run() {
-      const checks = evaluateCoverLetterChecks({ plan: { mappings: [{}], companyHook: { detail: '' } }, paragraphs: ['I built it.', 'It ran.'], evidence: {}, jobText: '', researchText: '' });
-      const ids = checks.map(check => check.id);
-      assert(ids.includes('letter-proportion') && ids.indexOf('letter-proportion') === ids.indexOf('candidate-agency') + 1,
-        'letter-proportion runs in the battery right after the agency check it tightens');
-      assert(pasteReportableCheckIds().includes('letter-proportion') && PASTE_CHECK_PROSE_UNITS['letter-proportion'] === 'prose-unit',
-        'the check is reportable and scoped to the letter\'s prose unit, so a correction brief is printed for it');
-
-      const root = path.resolve('.');
-      const localSource = fs.readFileSync(path.join(root, 'electron/ipc/localAiApplication.js'), 'utf8');
-      const checksSource = fs.readFileSync(path.join(root, 'electron/ipc/coverLetterChecks.js'), 'utf8');
-      // The drafting contract and the review contract are asserted on the prompts the flow builds (paste-application-flow.js); the
-      // corrective rule is asserted on the guidance a failed check prints (below). Neither is read from this file's source text.
-      // The printed rule states every number the gate reads.
-      for (const printed of [
-        `${LETTER_PROPORTION_MIN_JUDGED_WORDS} words`, `at most ${MAX_LETTER_BODY_PARAGRAPHS} body paragraphs`, `at least ${MIN_MEAN_PARAGRAPH_WORDS} words per paragraph`,
-        `past ${MAX_PARAGRAPH_SENTENCES} sentences`, `at most ${MIN_STANDALONE_SENTENCE_PARAGRAPH_ALLOWANCE} standalone one-sentence paragraphs`,
-        `${Math.round(MIN_FIRST_PERSON_ACTION_PARAGRAPH_SHARE * 100)}% of paragraphs stating an action of your own (${PROPORTION_ACTION_STATEMENT})`,
-        `${Math.round(MIN_FIRST_PERSON_SENTENCE_SHARE * 100)}% of all sentences`, `more than ${MAX_PARAGRAPHS_PER_CITED_QUOTE} paragraphs`,
-      ]) assert(LETTER_PROPORTION_RULE.includes(printed), `the rule prints “${printed}”`);
-      assert(!LETTER_PROPORTION_RULE.includes('every 3 paragraphs') && !LETTER_PROPORTION_RULE.includes('completed action'),
-        'the rule no longer states the superseded one-per-three allowance or the past-tense-only action');
-      // One allowance, said once everywhere it is printed: the FLEXIBILITY rule used to tell the writer a one-sentence
-      // paragraph "appears at most once" while the proportion rule allowed more, so a letter written to the stricter
-      // sentence was cut for a hook the gate permits.
-      const flexibility = /const COVER_LETTER_SENTENCE_FLEXIBILITY_RULE = ([^\n]+);\n/u.exec(localSource)?.[1] || '';
-      assert(flexibility.includes("a letter has at most ' + MIN_STANDALONE_SENTENCE_PARAGRAPH_ALLOWANCE + ' of them") && !/appears at most once|at most once/u.test(flexibility),
-        'the FLEXIBILITY rule states the standalone-sentence allowance from the constant the gate reads');
-      const sources = fs.readdirSync(path.join(root, 'electron/ipc')).filter(name => name.endsWith('.js'))
-        .map(name => [name, fs.readFileSync(path.join(root, 'electron/ipc', name), 'utf8')]);
-      for (const [name, source] of sources) {
-        assert(!/one-sentence paragraph[^.]{0,80}appears at most once/u.test(source), `${name}: no prompt tells the writer a one-sentence paragraph appears at most once`);
-      }
-      // The docs a writer or maintainer reads state the same allowance, floor and action reading.
-      for (const doc of ['local_ai/LOCAL_AI_APPLICATION_ROUTINE.md', 'Job Application Design System/SKILL.md', 'Job Application Design System/STYLE.md']) {
-        const body = fs.readFileSync(path.join(root, doc), 'utf8').replace(/\s+/gu, ' ');
-        assert(/one-sentence paragraph is for emphasis, a one-line hook or a one-line closing, and a letter has at most two of them/u.test(body) && !/appears at most once/u.test(body),
-          `${doc}: states the two-hook-and-closing allowance, not “at most once”`);
-        assert(!/at least 30 words per paragraph/u.test(body) && (doc.includes('SKILL') || /at least 25 words per paragraph/u.test(body)), `${doc}: states the 25-word paragraph mean`);
-      }
-      const routine = fs.readFileSync(path.join(root, 'local_ai/LOCAL_AI_APPLICATION_ROUTINE.md'), 'utf8').replace(/\s+/gu, ' ');
-      assert(routine.includes('states an action of your own in at least 40% of its paragraphs') && routine.includes('even after an adverb') && routine.includes('"I\'d", would, can, am, want, hope, believe, look and welcome state none'),
-        'the routine states what counts as an action of your own, in the words the check prints');
-      // The wording that made splitting the cheap repair is gone from the prompts and the check messages.
-      for (const gone of ['split the paragraph or omit the weaker proof', 'Use as many sentences as the paragraph needs', 'use it when the thesis otherwise remains under-proved', 'Each paragraph uses as many sentences as clarity requires']) {
-        assert(!localSource.includes(gone), `the prompt no longer says “${gone}”`);
-      }
-      assert(!checksSource.includes('split or remove') && !checksSource.includes('split or remove the weaker proof'), 'the check messages no longer offer splitting a paragraph');
-      // The prompts say to move weaker proof to the résumé or omit it: asserted on the guidance a failed redundancy check prints.
-      const cohesion = __localizedCoverLetterCorrectiveGuidanceForTests([{ id: 'resume-redundancy', passed: false, detail: 'x' }]);
-      assert(cohesion.includes('[CL-COHESION]') && cohesion.includes('Evidence beyond those proofs stays in the résumé'), `a correction round for a redundancy defect says where the weaker proof goes (got ${cohesion.slice(0, 200)})`);
-    },
-  },
-  {
+  },  {
     name: 'Letter proportion: the drafting twin and the completion gate derive the same per-paragraph quote bindings, so the twin is never stricter than the gate',
     run() {
       const letter = GOOD_LETTERS[1];

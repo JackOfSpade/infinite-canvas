@@ -565,11 +565,11 @@ export default [
     },
   },
   {
-    name: 'Claim contract documents: the Local AI routine says only the first proof-bearing paragraph owes a claim and no longer says every later paragraph keeps one (A/B)',
+    name: 'Claim contract documents: the Local AI routine makes claim and relevance spans optional while retaining provenance',
     run() {
       const routine = fs.readFileSync(path.resolve('local_ai/LOCAL_AI_APPLICATION_ROUTINE.md'), 'utf8').replace(/\s+/gu, ' ');
-      assert(/Only the first proof-bearing paragraph of the letter owes a `claim` or a `relevance`/u.test(routine) && /may omit either one/u.test(routine) && /may leave the claim out/u.test(routine), 'the routine states the claim budget');
-      assert(/may sit inline in any sentence of the paragraph, the proof sentence included, so it needs no sentence of its own/u.test(routine), 'the routine says a claim may be inline');
+      assert(routine.includes('`argumentMapping`') && routine.includes('`claim`, `proof` and `relevance` fields are optional'), 'the routine makes prose spans optional');
+      assert(/Every supplied span must be an exact substring/u.test(routine), 'the routine retains exact provenance for supplied spans');
       assert(!/Every later proof-bearing paragraph keeps its claim, proof and `jobNeedQuote`/u.test(routine), 'the routine no longer says every later paragraph keeps a claim');
     },
   },

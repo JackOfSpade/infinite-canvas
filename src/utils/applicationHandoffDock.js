@@ -180,6 +180,7 @@ const STAGE_LABELS = {
   resume: 'Résumé',
   'cover-letter': 'Cover letter',
   review: 'Review and edit',
+  'refinement-judge': 'Compare revisions',
 };
 
 export function applicationStageLabel(stage) {

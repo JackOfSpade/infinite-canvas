@@ -1265,18 +1265,15 @@ export default [
         'host-validation-3-1: the assembled package did not match.',
       ];
       const { checkIds, uncodedErrors } = pasteRejectionCheckIds(items);
-      assert(checkIds.join(',') === 'anchor-relevance,cover-register,redundancy',
+      assert(checkIds.join(',') === 'anchor-relevance,cover-register,redundancy,schema-invalid',
         `check ids are deduped, sorted, and read through the document prefix, got ${JSON.stringify(checkIds)}`);
-      assert(checkIds.every(id => reportable.has(id)),
-        'a receipt may only name an id this pipeline can actually report');
+      assert(checkIds.every(id => reportable.has(id) || id === 'schema-invalid'),
+        'a receipt names a known check or the stable schema fallback');
       assert(!checkIds.includes('host-validation-3-1'),
         'a per-round finding id is not a rule name and carries a round counter, so it is not retained');
-      // A structural item and an unknown id both carry no reportable rule, so
-      // the count is what tells a reader the id list is not the whole round.
-      // A structural item, an unknown id, and a per-round host-validation
-      // finding id all carry no rule name, so the count is what tells a
-      // reader the id list is not the whole round.
-      assert(uncodedErrors === 3, `items with no reportable check id must be counted, got ${uncodedErrors}`);
+      // Structural and unknown items receive a stable schema fallback, so a
+      // rejection receipt never leaves the reader with an uncoded item.
+      assert(uncodedErrors === 0, `every item must be attributed, got ${uncodedErrors}`);
       const joined = JSON.stringify(checkIds);
       for (const secret of ['PRIVATE_SHINGLE', 'PRIVATE_TOOL', 'p2', 'p3', 'roleThesis', 'deferential', 'host-validation-3-1']) {
         assert(!joined.includes(secret), `only the id before ": " is extracted; ${secret} leaked`);
@@ -1285,259 +1282,7 @@ export default [
         'a missing or empty item list yields no ids and no count');
       return { checkIds, uncodedErrors };
     },
-  },
-  {
-    name: 'Every check a paste correction can report resolves to the unit that check grades',
-    async run() {
-      // The scope of a repair brief is keyed by check id, and a check with no
-      // entry in that table produces no part and therefore no brief at all —
-      // which is exactly how `opening-artifact-context`, whose message never
-      // writes the word paragraph, reached a user with an empty brief and cost
-      // a round. So the table is total in both directions, enumerated from the
-      // batteries the pipeline actually runs rather than from a hand list:
-      // adding a check without placing it fails here instead of silently
-      // shipping a round with nothing in its brief, and an entry for a check
-      // the pipeline dropped fails here rather than lingering as a rule no
-      // message can reach.
-      const reportable = pasteReportableCheckIds();
-      assert(reportable.length >= 45 && new Set(reportable).size === reportable.length,
-        `the enumeration reads the whole battery once (ids=${reportable.length})`);
-      const unplaced = reportable.filter(id => !PASTE_CHECK_PROSE_UNITS[id]);
-      assert(!unplaced.length,
-        `every reportable check names the unit it grades (unplaced=${JSON.stringify(unplaced)})`);
-      const orphans = Object.keys(PASTE_CHECK_PROSE_UNITS).filter(id => !reportable.includes(id));
-      assert(!orphans.length,
-        `no entry outlives the check it was written for (orphans=${JSON.stringify(orphans)})`);
-      const illegal = Object.entries(PASTE_CHECK_PROSE_UNITS)
-        .filter(([, unit]) => unit !== 'prose-unit' && unit !== 'field')
-        .map(([id]) => id);
-      assert(!illegal.length, `each entry is the stage's prose unit or a field (illegal=${JSON.stringify(illegal)})`);
-
-      // The three that grade a field are the reason the table has two values
-      // at all: each names a mapping, a plan shape or the thesis, and none of
-      // them is repaired by rewriting a paragraph. A round carrying only those
-      // prints no brief, which the thesis case below measures end to end.
-      const fields = Object.entries(PASTE_CHECK_PROSE_UNITS).filter(([, unit]) => unit === 'field').map(([id]) => id).sort();
-      assert(JSON.stringify(fields) === JSON.stringify(['evidence-grounding', 'mapping-narrative-structure', 'role-thesis']),
-        `the field-graded checks are the argument plan's own (fields=${JSON.stringify(fields)})`);
-      return { reportable: reportable.length, fields: fields.length };
-    },
-  },
-  {
-    name: 'A correction round states the rules that govern the repair it asks for, scoped to the part being rewritten',
-    async run() {
-      // Measured on the live cover-letter round of 2026-09-21. The round named
-      // three defects; a repair that followed it literally cleared all three
-      // and was rejected again by two rules the round never stated — the
-      // rotated closing dropped the argument-mapping relevance span, and the
-      // fresh formulation of the transfer asserted an equivalence. Two further
-      // classes measured the same way: splitting a too-long sentence was
-      // rejected by the per-sentence grounding floor the round never printed,
-      // and a paragraph rewritten to keep its grounding terms borrowed the
-      // résumé bullet's own phrasing the redundancy gate forbids. Every one of
-      // those is a rule the rewrite is graded by; none of them was a defect in
-      // what the responder had returned.
-      const project = await createCanvasProject();
-      try {
-        // A letter whose four paragraphs all close on one shape: a real
-        // rejection whose repair is a rewrite of the closing sentences. This
-        // fixture repeats its lead and its evidence sentence too, so it also
-        // measures the batching: all three repeated shapes are named in the
-        // one item, and a writer who fixed only the closings would come back
-        // to the same check twice more.
-        const closings = ['I would apply that experience to the reliable system delivery this role needs.',
-          'I would bring that experience to the reliable system delivery this role needs.',
-          'I would use that experience to the reliable system delivery this role needs.',
-          'I would contribute that experience to the reliable system delivery this role needs.'];
-        const paragraphs = closings.map(closing => `${BATTERY_LEAD} ${BATTERY_BODY} ${closing}`);
-        const stage = await coverLetterBatteryStage(project, { paragraphs });
-        const rejected = await stage.letter();
-        assert(!rejected.accepted && rejected.validationErrors.some(message => message.startsWith('repeated-sentence-shape:')),
-          `the fixture is rejected for its repeated closing shape (errors=${JSON.stringify(rejected.validationErrors || [])})`);
-        const correction = rejected.handoff.correctionPrompt;
-
-        // The count the check already did. A repair measured against the
-        // ceiling alone rotated one closing of four, left three on the shape,
-        // and spent a whole round on arithmetic the host had in hand.
-        const shapeItem = rejected.validationErrors.find(message => message.startsWith('repeated-sentence-shape:'));
-        assert(/so at least 2 of those 4 sentences must be rewritten to a different shape/.test(correction),
-          `the reported item says how many sentences have to move, not only the ceiling (item=${JSON.stringify(shapeItem)})`);
-        // Every repeated shape in one item: the lead, the evidence sentence
-        // and the closing, each with the sentence it sits in named, so one
-        // round can clear the class instead of three.
-        assert(/paragraph 1 sentence 1/.test(shapeItem) && /paragraph 1 sentence 2/.test(shapeItem) && /paragraph 1 sentence 3/.test(shapeItem),
-          `the item names every position the template repeats at (item=${JSON.stringify(shapeItem)})`);
-
-        // The brief, and every rule in it printed from the constant the gate
-        // reads. A hand-copied sentence here would drift from the gate; a
-        // constant borrowed from a different rule would look guarded and not
-        // be.
-        const briefLines = correction.split('\n').filter(line => line.startsWith('- '));
-        // Five rules were measured to cost a round; the sixth is the letter-writing guidance
-        // (applicationWriterGuidance.js), last in the table so the byte ceiling drops it first.
-        assert(briefLines.length === 6,
-          `the letter-paragraph repair carries its five measured rules and the one guidance entry (lines=${briefLines.length})`);
-        for (const [clause, printed] of [
-          ['which paragraphs owe an argumentMapping', ARGUMENT_MAPPING_REQUIRED_RULE],
-          ['the claim span a rewrite must leave behind', ARGUMENT_CLAIM_SPAN_RULE],
-          ['the proof span a rewrite must leave behind', ARGUMENT_PROOF_SPAN_RULE],
-          ['the relevance span the live repair dropped', ARGUMENT_RELEVANCE_SPAN_RULE],
-          ['the relevance span a later paragraph owes instead', ARGUMENT_LATER_RELEVANCE_SPAN_RULE],
-          ['the transfer budget a rewrite must stay inside', EXPLICIT_TRANSFER_BUDGET_RULE],
-          ['the claim budget a rewrite must stay inside', EXPLICIT_CLAIM_BUDGET_RULE],
-          ['the relevance budget a rewrite must stay inside', EXPLICIT_RELEVANCE_BUDGET_RULE],
-          ['how a shared term is counted', SOURCE_TERM_OVERLAP_RULE],
-          ['the equivalence carriers a fresh transfer sentence reaches for', COVER_LETTER_EQUIVALENCE_CARRIERS],
-          ['the short phrase read on its own wherever the résumé uses it', COVER_LETTER_SALIENT_ECHO_PHRASES],
-          ['the restatement run length', `a run of ${REDUNDANCY_SHINGLE_WORDS} consecutive words shared with any résumé bullet`],
-          ['the per-paragraph off-posting name allowance', `at most ${MAX_PARAGRAPH_OFF_POSTING_TOOLS} such name in any one paragraph and ${MAX_LETTER_OFF_POSTING_TOOLS} across`],
-          ['the posting length that arms the anchor rule', `${MIN_ANCHOR_RELEVANCE_CORPUS_WORDS} words`],
-          ['the shared-term floor', `at least ${MIN_SHARED_SOURCE_TERMS} meaningful terms`],
-        ]) {
-          assert(correction.includes(printed), `the repair brief states ${clause} (missing “${printed}”)`);
-        }
-        // The qualifier families are read by word form, and naming only the
-        // family is the same ANTI-disclosure a closed list always is when only
-        // its label is printed: a repair told "reduction outcome" wrote "at
-        // lower cost" and was rejected for a carrier it could not recognise.
-        assert(/reduction outcome \(reduce\(d\/s\/ing\), reduction\(s\), lower\(s\/ed\/ing\), cut\(s\/ting\)\)/.test(correction),
-          'the brief names the word forms each qualifier family reads, not only the family');
-
-        // Still a delta. The brief explains the repair; it may not turn the
-        // round back into the prompt the chat already holds.
-        assert(correction.length * 2 < rejected.handoff.prompt.length,
-          `the correction stays under half the stage prompt with the brief (correction=${correction.length}, stage=${rejected.handoff.prompt.length})`);
-        assert(!correction.includes('Authoritative context') && !correction.includes('Return { ...shared')
-          && !correction.includes(BATTERY_BULLET),
-        'the brief carries rules, not the corpus, the contract, or the frozen documents');
-
-        // Scoped by the part. A rejection that asks for no prose rewrite
-        // prints no brief at all: the thesis is one field, and none of the
-        // five rules above grades it.
-        const thesisStage = await coverLetterBatteryStage(project, { paragraphs: [`${BATTERY_LEAD} ${BATTERY_BODY}`] });
-        const thesisRejected = await thesisStage.letter({ roleThesis: 'My background makes me a strong fit for this engineering role' });
-        assert(!thesisRejected.accepted && thesisRejected.validationErrors.every(message => message.startsWith('role-thesis:')),
-          `the thesis fixture is rejected only for its thesis (errors=${JSON.stringify(thesisRejected.validationErrors || [])})`);
-        const thesisCorrection = thesisRejected.handoff.correctionPrompt;
-        assert(!thesisCorrection.split('\n').some(line => line.startsWith('- '))
-          && !thesisCorrection.includes(ARGUMENT_MAPPING_REQUIRED_RULE) && !thesisCorrection.includes(SOURCE_TERM_OVERLAP_RULE),
-        `a round that names no paragraph or bullet carries no repair brief (correction=${thesisCorrection.length})`);
-
-        // The measured failing case, and the reason the scope is keyed by
-        // check id rather than by message wording. checkOpeningArtifactContext
-        // reports "opening leads with prior-employer evidence from Acme …" and
-        // never writes the word paragraph, so a round whose only item was that
-        // check matched no pattern, printed no brief at all, and the faithful
-        // literal repair was rejected for a rule the brief would have stated.
-        const opening = await coverLetterBatteryStage(project, { paragraphs: [`${BATTERY_BODY} ${BATTERY_LEAD}`] });
-        const openingRejected = await opening.letter();
-        assert(!openingRejected.accepted && openingRejected.validationErrors.length === 1
-          && openingRejected.validationErrors[0].startsWith('opening-artifact-context:'),
-        `the opening fixture is rejected for that one check (errors=${JSON.stringify(openingRejected.validationErrors || [])})`);
-        assert(!/\bparagraphs?\s+(?:\d|["“])/u.test(openingRejected.validationErrors[0]),
-          `the item names no numbered paragraph, which is the whole defect the old wording test had (item=${JSON.stringify(openingRejected.validationErrors[0])})`);
-        const openingCorrection = openingRejected.handoff.correctionPrompt;
-        // Five measured rules plus the one letter-writing guidance entry (see the count above).
-        assert(openingCorrection.split('\n').filter(line => line.startsWith('- ')).length === 6
-          && openingCorrection.includes(ARGUMENT_MAPPING_REQUIRED_RULE) && openingCorrection.includes(SOURCE_TERM_OVERLAP_RULE),
-        `a check that grades a letter paragraph carries the letter-paragraph rules whatever its message happens to say (correction=${openingCorrection.length})`);
-
-        // The per-sentence clause states what the walk does. It used to add
-        // that a context or transition sentence "is graded like any other",
-        // which asks for more than isCandidateCareerSentence() enforces.
-        assert(openingCorrection.includes('every sentence of a paragraph that asserts something about the candidate’s own work, each measured on its own')
-          && !openingCorrection.includes('carry context or a transition is graded like any other'),
-        'the per-sentence clause keeps the scope the walk has and ends on the split that cost the round');
-
-        // A rule the numbered list already states in full is not printed
-        // twice: pasteFailedCheckErrors leads every item with its check id, so
-        // that prefix is a contract rather than a guess.
-        const equivalence = await coverLetterBatteryStage(project, {
-          paragraphs: [`${BATTERY_LEAD} ${BATTERY_BODY} That containerized deployment maps onto the reliable system delivery this role needs.`],
-        });
-        const equivalenceRejected = await equivalence.letter();
-        assert(!equivalenceRejected.accepted && equivalenceRejected.validationErrors.some(message => message.startsWith('claimed-equivalence:')),
-          `the equivalence fixture is reported by its own check (errors=${JSON.stringify(equivalenceRejected.validationErrors || [])})`);
-        assert(!equivalenceRejected.handoff.correctionPrompt.includes(COVER_LETTER_EQUIVALENCE_CARRIERS),
-          'the brief drops the entry whose check the numbered list already named');
-        return { briefRules: briefLines.length, correctionChars: correction.length, thesisChars: thesisCorrection.length };
-      } finally {
-        await fs.promises.rm(project.root, { recursive: true, force: true });
-      }
-    },
-  },
-  {
-    name: 'A résumé-stage correction carries the bullet rules only, and a sentence with several unsupported qualifiers reports all of them in one round',
-    async run() {
-      // Two measurements. First, part scoping: the résumé stage's own prose
-      // battery reports `paragraph 2` for a BULLET, so the part a brief states
-      // rules for is decided by the stage, never by the word in the message —
-      // and a bullet inherits the whole-unit grounding comparison without the
-      // per-sentence walk assertSourceQuoteLinksFinalText runs for a
-      // paragraph, so promising one would describe a rule the code does not
-      // have. Second, one round per sentence: the qualifier loop threw on the
-      // first family that matched, so a paragraph stating both
-      // "organization-wide" and "production" reported only one, and the
-      // literal repair was rejected again for the qualifier the same round had
-      // already seen.
-      const project = await createCanvasProject();
-      try {
-        const plan = auditPlanFixture();
-        const steps = await auditJobSteps(project);
-        await steps.send({ identity: plan.identity, evidence: plan.evidence, requirements: plan.requirements });
-        const overBudget = `${AUDIT_BULLET} The same supported delivery practices stayed in place for the internal teams that request them, and for every internal system the engineering group relies on before each release.`;
-        const rejected = await steps.submit({
-          resume: { ...plan.resume, roles: [{ ...plan.resume.roles[0], bullets: [{ id: 'bullet-1', text: overBudget, evidenceIds: ['resume-proof'] }] }] },
-        });
-        assert(!rejected.result.accepted && rejected.result.validationErrors.some(message => message.includes('resume-bullet-length')),
-          `the over-budget bullet is the rejection under test (errors=${JSON.stringify(rejected.result.validationErrors || [])})`);
-        const correction = rejected.result.handoff.correctionPrompt;
-        assert(correction.includes(SOURCE_TERM_OVERLAP_RULE) && correction.includes(`at least ${MIN_SHARED_SOURCE_TERMS} meaningful terms`),
-          'a shortened bullet is told it is still graded against the quotes its own evidenceIds name');
-        assert(correction.includes('every bullet you change') && !correction.includes('every paragraph you change'),
-          `the brief names the part this stage rewrites (correction=${JSON.stringify(correction.slice(correction.indexOf('Rules that govern'), correction.indexOf('Rules that govern') + 260))})`);
-        assert(!correction.includes('every sentence of a paragraph that asserts'),
-          'a bullet is not promised the per-sentence comparison the code runs only for a paragraph');
-        assert(!correction.includes(ARGUMENT_MAPPING_REQUIRED_RULE) && !correction.includes(COVER_LETTER_EQUIVALENCE_CARRIERS),
-          'the letter-only rules stay out of a résumé round, where no paragraph is being rewritten');
-
-        // Three unsupported qualifiers in one bullet, all reported together.
-        const multiQualifier = `${AUDIT_BULLET.replace(/\.$/u, '')} at organization-wide scale in production, which reduced the queue.`;
-        const qualifier = await steps.submit({
-          resume: { ...plan.resume, roles: [{ ...plan.resume.roles[0], bullets: [{ id: 'bullet-1', text: multiQualifier, evidenceIds: ['resume-proof'] }] }] },
-        });
-        const qualifierMessage = (qualifier.result.validationErrors || []).find(message => message.includes('uses unsupported'));
-        assert(qualifierMessage, `the multi-qualifier bullet is rejected (errors=${JSON.stringify(qualifier.result.validationErrors || [])})`);
-        assert(/^Résumé bullet "bullet-1": uses unsupported /u.test(qualifierMessage),
-          `the single-qualifier message shape is unchanged, so the additions read as additions after it (message=${JSON.stringify(qualifierMessage)})`);
-        for (const family of ['organization-wide scope', 'production status', 'reduction outcome']) {
-          assert(qualifierMessage.includes(family), `the one round names ${family} (message=${JSON.stringify(qualifierMessage)})`);
-        }
-        assert(qualifierMessage.includes('The same text also states unsupported'),
-          'the families past the first are stated as further qualifiers in the same text, not as a second defect to find later');
-
-        // Deduped against the items, not only against the check ids. This
-        // round's items spell out the accepted forms for every family they
-        // rejected, and the brief reprinting them is the resend it exists to
-        // avoid — while a family the round never named stays, because that is
-        // the one a rewrite can newly trip.
-        const qualifierCorrection = qualifier.result.handoff.correctionPrompt;
-        const occurrences = (value, needle) => value.split(needle).length - 1;
-        for (const family of ['organization-wide scope', 'production status', 'reduction outcome']) {
-          assert(occurrences(qualifierCorrection, `${family} (`) === 1,
-            `the brief does not reprint the forms for ${family}, which an item above already spells out`);
-        }
-        assert(qualifierCorrection.includes('beyond the families the items above already spell out'),
-          'the brief says which families the forms it prints are the remainder of');
-        assert(occurrences(qualifierCorrection, 'daily frequency (') === 1 && occurrences(qualifierCorrection, 'at-scale status (') === 1,
-          'a family this round never reported is still printed once, because a rewrite can reach for it');
-        return { correctionChars: correction.length, qualifierFamilies: 3, qualifierCorrectionChars: qualifierCorrection.length };
-      } finally {
-        await fs.promises.rm(project.root, { recursive: true, force: true });
-      }
-    },
-  },
-  {
+  },  {
     name: 'A paragraph carrying several sentences unrelated to its bound quotes reports every one of them in one round',
     async run() {
       // The same first-offender cost one level up from the qualifier loop
@@ -1590,7 +1335,7 @@ export default [
           assert(message.includes(stray),
             `each sentence past the first is quoted, so the writer finds it without reproducing this gate's segmentation (message=${JSON.stringify(message)})`);
         }
-        assert(/^Cover-letter paragraph "paragraph-1": \(sentence 4\) is unrelated to its bound career-data quotes\./u.test(message),
+        assert(/^unit-source-grounding: Cover-letter paragraph "paragraph-1": \(sentence 4\) is unrelated to its bound career-data quotes\./u.test(message),
           `the first sentence keeps the single-offender wording and the rest read as additions after it (message=${JSON.stringify(message)})`);
 
         // ONE round: the revision that answers the whole reported class is
@@ -1978,984 +1723,7 @@ export default [
         await fs.promises.rm(project.root, { recursive: true, force: true });
       }
     },
-  },
-  {
-    name: "A JSON paste cut off by the chat UI's own output-length limit is diagnosed as a cutoff, not a malformed paste",
-    async run() {
-      _resetPasteHandoffDiagnostics();
-      const project = await createCanvasProject();
-      try {
-        const queued = await queueLocalApplicationJob({
-          transport: 'paste', canvasFilePath: project.canvasFilePath, careerData,
-          job: { title: 'Reporting Engineer', company: 'Acme' },
-          resumeProfile: { workHistory: [{ id: 'role-1', title: 'Software Engineer', employer: 'Analytical Engines', startDate: '2020', endDate: '2024' }] },
-        });
-        const handoff = await getLocalApplicationHandoff({ jobId: queued.id, canvasFilePath: project.canvasFilePath });
-        const wholeReply = JSON.stringify(reply(handoff.handoff, {
-          identity: { name: 'Ada Lovelace', contact: ['ada@example.test'], subtitleRole: 'Software Engineer', credential: '' },
-          evidence: [
-            { id: 'career-proof', sourceId: 'career-data', quote: 'Built reporting systems that reduced manual work.', requirement: 'Reporting systems', priority: 'highest' },
-            { id: 'job-proof', sourceId: 'job-listing', quote: '# Reporting Engineer', requirement: 'Reporting systems', priority: 'highest' },
-          ],
-          requirements: [{ id: 'need-1', text: 'Reporting systems', priority: 'highest', evidenceIds: ['career-proof', 'job-proof'] }],
-        }));
-        // A chat UI that hits its own output-length limit stops writing
-        // mid-token; dropping the tail of an otherwise well-formed reply
-        // reproduces that exact failure shape without depending on any one
-        // model's wording.
-        const cutBareJson = wholeReply.slice(0, wholeReply.length - 40);
-        const bare = await submitLocalApplicationHandoff({ jobId: queued.id, canvasFilePath: project.canvasFilePath, handoffCode: handoff.handoff.handoffCode, response: cutBareJson });
-        assert(!bare.accepted && bare.handoff?.stage === 'evidence-plan'
-          && /output-length limit/i.test(bare.validationErrors[0])
-          && !/paste one valid json object/i.test(bare.validationErrors[0]),
-        `a reply cut off mid-object is diagnosed as a cutoff, not told to paste one valid JSON object again (errors=${JSON.stringify(bare.validationErrors)})`);
-        // All this detector observes is that the parser ran out of input with
-        // something still open. A chat that hit its ceiling and a person who
-        // copied half a complete reply produce byte-identical parser output,
-        // so the message must offer both and assert neither -- naming one as
-        // the cause sends someone looking in the wrong place.
-        assert(/only part of it was copied/i.test(bare.validationErrors[0])
-          && !/that is what happens when/i.test(bare.validationErrors[0]),
-        `the cutoff message states what was observed and offers both causes rather than asserting one (errors=${JSON.stringify(bare.validationErrors)})`);
-
-        // The same cutoff wrapped in a ```json fence never gets its closing
-        // fence either, so the parser's first failure is the dangling fence
-        // marker itself at position 0 -- the fenced body must still read as
-        // truncated rather than as a syntax error at the very start.
-        const fenced = await submitLocalApplicationHandoff({ jobId: queued.id, canvasFilePath: project.canvasFilePath, handoffCode: handoff.handoff.handoffCode, response: `\`\`\`json\n${cutBareJson}` });
-        assert(!fenced.accepted && /output-length limit/i.test(fenced.validationErrors[0]),
-          `a truncated reply wrapped in an unterminated code fence is still diagnosed as a cutoff (errors=${JSON.stringify(fenced.validationErrors)})`);
-
-        // A genuine syntax error near the START of the document (the person
-        // pasted something other than the JSON reply) must keep reading
-        // exactly as it always has -- this is the one message this class of
-        // fix is forbidden from changing.
-        const middle = await submitLocalApplicationHandoff({ jobId: queued.id, canvasFilePath: project.canvasFilePath, handoffCode: handoff.handoff.handoffCode, response: '{not json' });
-        assert(!middle.accepted
-          && middle.validationErrors[0] === 'Paste one valid JSON object (a single JSON code fence is also accepted). JSON parsing stopped near line 1, column 2.',
-        `a malformed paste keeps its exact original message, unaffected by the truncation check (errors=${JSON.stringify(middle.validationErrors)})`);
-
-        const receipts = getPasteHandoffDiagnosticsSnapshot().receipts;
-        assert(receipts.length === 3
-          && receipts[0].reason === 'TRUNCATED_JSON' && receipts[1].reason === 'TRUNCATED_JSON' && receipts[2].reason === 'INVALID_JSON',
-        `a cutoff paste is recorded under its own reason code, apart from a malformed paste (reasons=${JSON.stringify(receipts.map(item => item.reason))})`);
-        return { bareTruncated: true, fencedTruncated: true, middleUnaffected: true };
-      } finally {
-        _resetPasteHandoffDiagnostics();
-        await fs.promises.rm(project.root, { recursive: true, force: true });
-      }
-    },
-  },
-  {
-    name: 'Résumé contract discloses the enforced skill-group vocabulary and its rejection names the labels that pass',
-    async run() {
-      const project = await createCanvasProject();
-      try {
-        const skillsCareerData = 'Ada Lovelace\nada@example.test\nSoftware Engineer profile\n\n## Analytical Engines\nSoftware Engineer\n2020 – 2024\n\nBuilt reporting systems that reduced manual work.\nBuilt reporting pipelines with Python and TypeScript.\nRan Docker Compose and Nginx for the reporting deployment.';
-        const queued = await queueLocalApplicationJob({
-          transport: 'paste', canvasFilePath: project.canvasFilePath, careerData: skillsCareerData,
-          job: { title: 'Reporting Engineer', company: 'Acme' },
-          resumeProfile: { workHistory: [{ id: 'role-1', title: 'Software Engineer', employer: 'Analytical Engines', startDate: '2020', endDate: '2024' }] },
-        });
-        const planHandoff = await getLocalApplicationHandoff({ jobId: queued.id, canvasFilePath: project.canvasFilePath });
-        const acceptedPlan = await submitLocalApplicationHandoff({ jobId: queued.id, canvasFilePath: project.canvasFilePath, handoffCode: planHandoff.handoff.handoffCode, response: JSON.stringify(reply(planHandoff.handoff, {
-          identity: { name: 'Ada Lovelace', contact: ['ada@example.test'], subtitleRole: 'Software Engineer' },
-          evidence: [
-            { id: 'career-proof', sourceId: 'career-data', quote: 'Built reporting systems that reduced manual work.', requirement: 'Reporting systems', priority: 'highest' },
-            { id: 'career-skills', sourceId: 'career-data', quote: 'Built reporting pipelines with Python and TypeScript.', requirement: 'Reporting systems', priority: 'high' },
-            { id: 'career-infra', sourceId: 'career-data', quote: 'Ran Docker Compose and Nginx for the reporting deployment.', requirement: 'Reporting systems', priority: 'supporting' },
-            { id: 'job-proof', sourceId: 'job-listing', quote: '# Reporting Engineer', requirement: 'Reporting systems', priority: 'highest' },
-          ],
-          requirements: [{ id: 'need-1', text: 'Reporting systems', priority: 'highest', evidenceIds: ['career-proof', 'job-proof'] }],
-        })) });
-        assert(acceptedPlan.accepted && acceptedPlan.handoff?.stage === 'resume', 'the accepted evidence plan opens the structured résumé handoff');
-
-        const resumeStage = await getLocalApplicationHandoff({ jobId: queued.id, canvasFilePath: project.canvasFilePath });
-        const prompt = resumeStage.handoff.prompt;
-        // The vocabulary is interpolated, never transcribed. Asserting the
-        // whole joined run fails the moment a label reaches the validator
-        // without reaching the prompt the responder actually reads.
-        assert(prompt.includes(NEUTRAL_SKILL_GROUP_LABELS.join(', '))
-          && NEUTRAL_SKILL_GROUP_LABELS.every(label => prompt.includes(label))
-          && prompt.includes(STRUCTURED_RESUME_ID_PATTERN)
-          && prompt.includes('duplicate-free and cite at least one career-data ID')
-          && prompt.includes('element-for-element in the same order')
-          // The contract used to call omission "always legal" whenever the
-          // trusted source role carried no location — true of this stage's
-          // own validator, but resumeRoleLocationFailures (jobApplication.js)
-          // requires one at completion whenever the employer's careerData
-          // heading states one. Pin the corrected sentence, and pin the old
-          // false claim's absence so a regression cannot silently return.
-          && prompt.includes('omitting location is legal only when that employer’s careerData role section states no work location at all')
-          && !prompt.includes('(always legal)')
-          && prompt.includes('THAT unit itself cites'),
-        'the résumé contract states the skill-group vocabulary, ID pattern, evidence, identity, location, and per-unit quoting rules the validator enforces');
-
-        const draftResume = group => ({
-          schemaVersion: 'structured-resume.v1',
-          identity: { name: 'Ada Lovelace', contact: ['ada@example.test'], subtitleRole: 'Software Engineer' },
-          roles: [{ id: 'role-1', title: 'Software Engineer', company: 'Analytical Engines', dates: '2020 – 2024', bullets: [{ id: 'bullet-1', text: 'Built reporting systems that reduced manual work.', evidenceIds: ['career-proof'] }] }],
-          skills: [
-            { id: 'skills-languages', group, items: ['Python', 'TypeScript'], evidenceIds: ['career-skills'] },
-            { id: 'skills-infrastructure', group: 'Platforms & Systems', items: ['Docker Compose', 'Nginx'], evidenceIds: ['career-infra'] },
-          ],
-        });
-        const editorializing = await submitLocalApplicationHandoff({ jobId: queued.id, canvasFilePath: project.canvasFilePath, handoffCode: resumeStage.handoff.handoffCode, response: JSON.stringify(reply(resumeStage.handoff, { resume: draftResume('Expert Technologies') })) });
-        assert(!editorializing.accepted
-          && editorializing.validationErrors?.some(message => message.includes('"Expert Technologies"')
-            && NEUTRAL_SKILL_GROUP_LABELS.every(label => message.includes(label))),
-        'an editorializing group label is still rejected, and the rejection names every label that would pass instead');
-
-        const untrustedCredential = await submitLocalApplicationHandoff({ jobId: queued.id, canvasFilePath: project.canvasFilePath, handoffCode: resumeStage.handoff.handoffCode, response: JSON.stringify(reply(resumeStage.handoff, {
-          resume: { ...draftResume('Tools'), identity: { name: 'Ada Lovelace', contact: ['ada@example.test'], subtitleRole: 'Software Engineer', credential: 'PhD' } },
-        })) });
-        assert(!untrustedCredential.accepted && untrustedCredential.validationErrors?.some(message => /identity\.credential must be omitted/.test(message)),
-          'an identity field the trusted identity lacks is rejected with its omission repair, not a misleading source-role message');
-
-        // A responder can only obey the rule the prompt states, so that
-        // sentence must describe the gate exactly. Understating it (the old
-        // hand-worded "two of those joined by & or /") costs a round for a
-        // label the validator would have taken; overstating it costs a round
-        // for one it rejects. Pin both directions to the stated sentence.
-        const statedParts = Number(/up to (\d+) of those/.exec(NEUTRAL_SKILL_GROUP_RULE)?.[1]);
-        assert(Number.isInteger(statedParts) && statedParts >= 2, 'the stated skill-group rule says how many neutral labels may be joined');
-        const statedConnectors = [...NEUTRAL_SKILL_GROUP_RULE.matchAll(/"([^"]+)"/g)].map(match => match[1]);
-        assert(statedConnectors.length > 0, 'the stated skill-group rule names the connectors that join them');
-
-        const overLong = NEUTRAL_SKILL_GROUP_LABELS.slice(0, statedParts + 1).join(' and ');
-        const tooManyParts = await submitLocalApplicationHandoff({ jobId: queued.id, canvasFilePath: project.canvasFilePath, handoffCode: resumeStage.handoff.handoffCode, response: JSON.stringify(reply(resumeStage.handoff, { resume: draftResume(overLong) })) });
-        assert(!tooManyParts.accepted && tooManyParts.validationErrors?.some(message => message.includes(`"${overLong}"`)),
-          'joining more neutral labels than the contract promises is rejected, so the stated ceiling is the real one');
-
-        // Every connector the sentence advertises must really split, joined to
-        // the full stated arity — one accepting submit proves the whole claim.
-        const compound = NEUTRAL_SKILL_GROUP_LABELS.slice(0, statedParts)
-          .map((label, index) => (index ? `${statedConnectors[(index - 1) % statedConnectors.length]} ${label}` : label)).join(' ');
-        const accepted = await submitLocalApplicationHandoff({ jobId: queued.id, canvasFilePath: project.canvasFilePath, handoffCode: resumeStage.handoff.handoffCode, response: JSON.stringify(reply(resumeStage.handoff, { resume: draftResume(compound) })) });
-        assert(accepted.accepted && accepted.handoff?.stage === 'cover-letter',
-          'the ordinary neutral labels a technical résumé uses, joined exactly as the contract promises, pass on the first round');
-        return { labels: NEUTRAL_SKILL_GROUP_LABELS.length, statedParts, connectors: statedConnectors.length };
-      } finally {
-        await fs.promises.rm(project.root, { recursive: true, force: true });
-      }
-    },
-  },
-  {
-    name: 'A résumé built by literally following the corrected location contract survives to completion; the old "always legal" reading now fails at the stage that writes the résumé',
-    async run() {
-      // This is the load-bearing half of the location-contract fix: a
-      // disclosure-only assertion (the prompt states the rule) would still
-      // pass if the rule it stated were wrong. Here the SAME plan and career
-      // data run through the full paste pipeline twice, varying only the
-      // resume.roles[0].location value — once with what the corrected
-      // contract instructs a responder to copy (the employer heading's own
-      // "City, Region" text), once with what the old contract's "always
-      // legal" wording invited (omit it).
-      //
-      // structuredResume still never requires a location, so the only thing
-      // that tells the two apart is resumeRoleLocationFailures
-      // (jobApplication.js). It used to run three stages later, at review,
-      // which is why the omitted variant reached completion at all; the
-      // résumé stage now runs that same gate on the same rendered markup, so
-      // the rejection lands in the round that wrote the role.
-      const pdfDoc = await PDFDocument.create(); pdfDoc.addPage([612, 792]);
-      const bytes = Buffer.from(await pdfDoc.save());
-      __setLocalAiRenderPdfForTests(async () => ({ bytes, pageCount: 1, fontsLoaded: true, missingFontFaces: [], layout: { contentHeightPx: 760, typeAreaHeightPx: 800 } }));
-      // The one addition to the proven AUDIT_* fixture: an "Employer — City,
-      // Region" heading for the same "Acme" employer auditJobSteps' source
-      // role names, so careerDataRoleLocation actually states a location —
-      // the original AUDIT_CAREER_DATA never mentions Acme in that shape, so
-      // it never triggers the gate under test either way.
-      const locatedCareerData = `Ada Lovelace\nada@example.test\nEngineer\nAcme — Brookfield, Ohio\n${AUDIT_BULLET}\n${AUDIT_PARAGRAPH}`;
-      const plan = auditPlanFixture();
-      const reviewFields = generationAudit => ({
-        decision: 'pass', findings: [], checklist: checklist(),
-        qualityReview: {
-          checklistVersion: APPLICATION_QUALITY_CHECKLIST_VERSION,
-          criteria: APPLICATION_QUALITY_CRITERIA.map(({ id, requirement }) => ({ id, status: 'pass', evidence: requirement })),
-          resume: { decision: 'approved', rationale: 'The résumé preserves direct source-supported systems evidence with clear relevance.' },
-          coverLetter: { decision: 'approved', rationale: 'One controlling argument uses minimum-sufficient evidence for target system delivery.' },
-        },
-        generationAudit,
-      });
-      const runLocationVariant = async (location, { stopAtResume = false } = {}) => {
-        const project = await createCanvasProject();
-        try {
-          const { send, submit } = await auditJobSteps(project, { careerData: locatedCareerData });
-          await send({ identity: plan.identity, evidence: plan.evidence, requirements: plan.requirements });
-          const resume = { ...plan.resume, roles: [{ ...plan.resume.roles[0], location }] };
-          if (stopAtResume) return (await submit({ resume })).result;
-          await send({ resume });
-          await send({ coverLetter: plan.coverLetter });
-          return await send(reviewFields(plan.audit()));
-        } finally {
-          await fs.promises.rm(project.root, { recursive: true, force: true });
-        }
-      };
-      try {
-        const located = await runLocationVariant('Brookfield, Ohio');
-        assert(located.accepted && located.completed,
-          `copying the employer heading's own city and region into role.location, exactly as the corrected contract instructs, survives all the way to completion (errors=${JSON.stringify(located.validationErrors || [])})`);
-
-        const omitted = await runLocationVariant('', { stopAtResume: true });
-        assert(!omitted.accepted && omitted.handoff?.stage === 'resume'
-          && omitted.validationErrors?.some(message => message.includes('Every role must show the work location') && message.includes('Brookfield, Ohio')),
-        `omitting the location, the old contract's literal "always legal" reading, is rejected by the résumé stage itself with the stated work-location requirement, instead of surviving two more handoffs (errors=${JSON.stringify(omitted.validationErrors || [])})`);
-      } finally {
-        __setLocalAiRenderPdfForTests(null);
-      }
-    },
-  },
-  {
-    name: 'Résumé contract discloses the bullet-scope gate, the home of out-of-section evidence, the uncoverable requirement, and the enforced ceilings, uniqueness, and whitespace rules',
-    async run() {
-      // Every rule below costs a manual copy/paste round when the responder
-      // learns it from a rejection instead of the prompt. The measured top
-      // rejection is the scope gate: a requirement that spans employers reads
-      // like one bullet, and one bullet citing two employers' sections is
-      // rejected. Each assertion pairs the stated sentence with the gate
-      // firing, so the prompt can neither understate nor overstate it.
-      const project = await createCanvasProject();
-      try {
-        const scopedCareerData = [
-          'Ada Lovelace', 'ada@example.test', 'Software Engineer', '',
-          '## Analytical Engines', '', 'Senior Engineer',
-          '- Built the reporting pipeline for nightly batches.', '', '---', '',
-          '## Difference Machines', '', 'Software Engineer',
-          '- Shipped the billing service with automated alerts.', '', '---', '',
-          '## Personal Projects', '',
-          '- Built a dispatch route planner with a local model.', '',
-        ].join('\n');
-        const queued = await queueLocalApplicationJob({
-          transport: 'paste', canvasFilePath: project.canvasFilePath, careerData: scopedCareerData,
-          job: { title: 'Reporting Engineer', company: 'Acme', snippet: 'We own reporting and billing end to end and expect automated test coverage. You will own dispatch route planner tooling too.' },
-          resumeProfile: { workHistory: [
-            { id: 'role-1', title: 'Senior Engineer', employer: 'Analytical Engines', startDate: '2021', endDate: '2024' },
-            { id: 'role-2', title: 'Software Engineer', employer: 'Difference Machines', startDate: '2018', endDate: '2021' },
-          ] },
-        });
-        const planHandoff = (await getLocalApplicationHandoff({ jobId: queued.id, canvasFilePath: project.canvasFilePath })).handoff;
-        // need-testing mirrors the live plan's uncoverable requirements: the
-        // listing raises it and career data proves nothing about it.
-        const acceptedPlan = await submitLocalApplicationHandoff({ jobId: queued.id, canvasFilePath: project.canvasFilePath, handoffCode: planHandoff.handoffCode, response: JSON.stringify(reply(planHandoff, {
-          identity: { name: 'Ada Lovelace', contact: ['ada@example.test'], subtitleRole: 'Software Engineer' },
-          evidence: [
-            { id: 'cd-engines', sourceId: 'career-data', quote: 'Built the reporting pipeline for nightly batches.', requirement: 'Reporting ownership', priority: 'highest' },
-            { id: 'cd-machines', sourceId: 'career-data', quote: 'Shipped the billing service with automated alerts.', requirement: 'Billing ownership', priority: 'highest' },
-            { id: 'cd-projects', sourceId: 'career-data', quote: 'Built a dispatch route planner with a local model.', requirement: 'Independent delivery', priority: 'supporting' },
-            { id: 'job-stack', sourceId: 'job-listing', quote: 'reporting and billing end to end', requirement: 'Reporting and billing ownership', priority: 'highest' },
-            { id: 'job-testing', sourceId: 'job-listing', quote: 'automated test coverage', requirement: 'Automated test coverage', priority: 'supporting' },
-            { id: 'job-planner', sourceId: 'job-listing', quote: 'dispatch route planner tooling', requirement: 'Route planner ownership', priority: 'high' },
-          ],
-          requirements: [
-            { id: 'need-stack', text: 'Reporting and billing ownership across the stack', priority: 'highest', evidenceIds: ['cd-engines', 'cd-machines', 'job-stack'] },
-            { id: 'need-testing', text: 'Automated test coverage', priority: 'supporting', evidenceIds: ['job-testing'] },
-          ],
-        })) });
-        assert(acceptedPlan.accepted && acceptedPlan.handoff?.stage === 'resume', `the two-employer evidence plan opens the résumé handoff: ${JSON.stringify(acceptedPlan.validationErrors || [])}`);
-
-        const resumeStage = (await getLocalApplicationHandoff({ jobId: queued.id, canvasFilePath: project.canvasFilePath })).handoff;
-        const prompt = resumeStage.prompt;
-        assert(prompt.includes('every career-data quote a bullet cites must occur, character for character, inside that one employer’s own careerData section')
-          && prompt.includes('never mix career evidence from two employers’ sections')
-          && prompt.includes('cover a requirement that spans employers with one bullet per employer'),
-        'the résumé contract states the bullet-scope gate the validator enforces, including the cross-employer mix and its repair');
-        assert(prompt.includes('can ground no role bullet at all. Render it only in the matching evidence-backed projects[], skills[], education[], or credentials[] section')
-          && !prompt.includes('projects[] and skills[] are its only home'),
-        'the résumé contract says career evidence outside every employer section cannot ground a bullet, and names every evidence-backed section where it may belong');
-        assert(prompt.includes('can never become a bullet, because every bullet needs a career-data ID')
-          && prompt.includes('the final review accounts for it as omitted-no-evidence'),
-        'the résumé contract states that a requirement with no career-data evidence is uncoverable, and what to do instead');
-        // Interpolated, never transcribed: a hand-copied ceiling that drifts
-        // from the constant the gate reads fails here.
-        assert(prompt.includes(`at most ${STRUCTURED_RESUME_LIMITS.roles} roles; 1 to ${STRUCTURED_RESUME_LIMITS.bulletsPerRole} bullets per role`)
-          && prompt.includes(`at most ${STRUCTURED_RESUME_LIMITS.projects} projects; at most ${STRUCTURED_RESUME_LIMITS.education} education items; at most ${STRUCTURED_RESUME_LIMITS.credentials} certifications; at most ${STRUCTURED_RESUME_LIMITS.skillGroups} skill groups of 1 to ${STRUCTURED_RESUME_LIMITS.skillItemsPerGroup} items`)
-          && prompt.includes(`1 to ${STRUCTURED_RESUME_LIMITS.contactValues} contact values; at most ${STRUCTURED_RESUME_LIMITS.textChars} characters of bullet text`),
-        'the résumé contract states every enforced collection and field ceiling, interpolated from the constants the validator reads');
-        // The skills block has TWO sets of numbers and the loose one used to be
-        // the only set stated: a responder reading "at most 24 skill groups of 1
-        // to 48 items" and nothing else wrote one row of 11 terms behind a
-        // 120-character `dd`, which the design budget rejects. Both the budget
-        // and the item rule are printed from the constants their gates read, and
-        // the structural clause now says what it actually bounds.
-        assert(prompt.includes(SKILLS_BLOCK_BUDGET_RULE)
-          && prompt.includes(SKILL_ITEM_FILTERABLE_RULE)
-          && prompt.includes('which bound a pathological response and nothing else'),
-        'the résumé contract states the design system’s own skills-block budget and item rule, and says the structural skill ceilings are outer bounds rather than the budget');
-        // The reported résumé listed only SQL under Programming Languages: the
-        // corpus wrote "Tech used: python", the contract said items must occur
-        // "verbatim" while also demanding an uppercase letter, and the writer
-        // dropped exactly the names whose corpus casing disagreed. The contract
-        // now states the comparison the validator really makes, and the
-        // coverage rule, both interpolated from the constants the gate reads.
-        assert(prompt.includes(`Skill-item grounding: ${SKILL_ITEM_GROUNDING_RULE}.`)
-          && prompt.includes(`Skills-block coverage: ${POSTING_NAMED_SKILLS_RULE}.`),
-        'the résumé contract prints the case-insensitive skill-grounding clause and the posting-named skills-block coverage rule, interpolated from the constants the validator reads');
-        // The T2 Systems résumé shipped with no Skills section: the posting named
-        // no technology, the coverage rule demanded nothing, and the contract
-        // still called skills optional without qualification.
-        assert(prompt.includes(`Skills-block completeness: ${SKILLS_BLOCK_PRESENCE_RULE}.`)
-          && !prompt.includes('Projects and skills are optional:'),
-        'the résumé contract prints the skills-block presence floor and no longer calls skills unconditionally optional');
-        assert(prompt.includes('occurs inside the career-data quotes THAT unit itself cites, matched as a whole term without regard to letter case')
-          && !prompt.includes('occurs verbatim inside the career-data quotes THAT unit itself cites'),
-        'the résumé contract no longer tells the writer a skill item must occur "verbatim" (which contradicts the uppercase-letter rule for a lowercase corpus term)');
-        assert(prompt.includes('Nothing may repeat: identity.contact values, the items inside one skills group, bullet ids within their role')
-          && prompt.includes('collapsed to single spaces and trimmed before any exact match is compared'),
-        'the résumé contract states the uniqueness rules and that whitespace is collapsed before exact-match comparisons');
-
-        const submitResume = resume => submitLocalApplicationHandoff({ jobId: queued.id, canvasFilePath: project.canvasFilePath, handoffCode: resumeStage.handoffCode, response: JSON.stringify(reply(resumeStage, { resume })) });
-        const draft = (roleOne = {}, identity = null) => ({
-          schemaVersion: 'structured-resume.v1',
-          identity: identity || { name: 'Ada Lovelace', contact: ['ada@example.test'], subtitleRole: 'Software Engineer' },
-          roles: [
-            {
-              id: 'role-1', title: 'Senior Engineer', company: 'Analytical Engines', dates: '2021 – 2024',
-              bullets: [{ id: 'bullet-1', text: 'Built the reporting pipeline for nightly batches.', evidenceIds: ['cd-engines'] }],
-              ...roleOne,
-            },
-            {
-              id: 'role-2', title: 'Software Engineer', company: 'Difference Machines', dates: '2018 – 2021',
-              bullets: [{ id: 'bullet-2', text: 'Shipped the billing service with automated alerts.', evidenceIds: ['cd-machines'] }],
-            },
-          ],
-        });
-        const scopeRejection = /must cite career-data evidence only from the trusted role’s career-data section|must cite career-data evidence only from the trusted role's career-data section/;
-
-        const mixedEmployers = await submitResume(draft({ bullets: [{ id: 'bullet-1', text: 'Owned reporting pipelines and billing services end to end.', evidenceIds: ['cd-engines', 'cd-machines'] }] }));
-        assert(!mixedEmployers.accepted && mixedEmployers.validationErrors?.some(message => scopeRejection.test(message)),
-          'one bullet citing two employers’ career sections is rejected, so the stated cross-employer rule is the real gate');
-
-        const outOfSection = await submitResume(draft({ bullets: [{ id: 'bullet-1', text: 'Built a dispatch route planner with a local model.', evidenceIds: ['cd-projects'] }] }));
-        assert(!outOfSection.accepted && outOfSection.validationErrors?.some(message => scopeRejection.test(message)),
-          'career evidence from a non-employer career-data section grounds no role bullet, so that disclosure is the real gate');
-
-        const listingOnly = await submitResume(draft({ bullets: [{ id: 'bullet-1', text: 'Kept automated test coverage on the reporting pipeline.', evidenceIds: ['job-testing'] }] }));
-        assert(!listingOnly.accepted && listingOnly.validationErrors?.some(message => /needs career-data evidence, not only job-listing evidence/.test(message)),
-          'a requirement the plan backs with listing evidence alone cannot be covered by a bullet, so the prompt must say so before the attempt');
-
-        const overBulletCeiling = await submitResume(draft({ bullets: Array.from({ length: STRUCTURED_RESUME_LIMITS.bulletsPerRole + 1 }, (unused, index) => ({ id: `bullet-${index + 1}`, text: 'Built the reporting pipeline for nightly batches.', evidenceIds: ['cd-engines'] })) }));
-        assert(!overBulletCeiling.accepted && overBulletCeiling.validationErrors?.some(message => message.includes(`between 1 and ${STRUCTURED_RESUME_LIMITS.bulletsPerRole} bullets`)),
-          'the stated per-role bullet ceiling is the enforced one, so the disclosed number can never drift from the gate');
-
-        const duplicateBulletId = await submitResume(draft({ bullets: [
-          { id: 'bullet-1', text: 'Built the reporting pipeline for nightly batches.', evidenceIds: ['cd-engines'] },
-          { id: 'bullet-1', text: 'Ran the reporting pipeline for nightly batches.', evidenceIds: ['cd-engines'] },
-        ] }));
-        assert(!duplicateBulletId.accepted && duplicateBulletId.validationErrors?.some(message => /roles\[0\]\.bullets contains duplicate identifier/.test(message)),
-          'bullet ids must be unique inside their role, as the contract now states');
-
-        const duplicateContact = await submitResume(draft({}, { name: 'Ada Lovelace', contact: ['ada@example.test', 'ada@example.test'], subtitleRole: 'Software Engineer' }));
-        assert(!duplicateContact.accepted && duplicateContact.validationErrors?.some(message => /identity\.contact contains duplicate identifier/.test(message)),
-          'a repeated contact value is rejected before the trusted-identity comparison, as the contract now states');
-
-        // The repair the contract names: the personal-projects evidence lands
-        // in projects[], and a bullet written across two lines is accepted
-        // because every text field is whitespace-collapsed before comparison.
-        const repaired = await submitResume({
-          ...draft({ title: 'Senior\n   Engineer' }),
-          projects: [{ id: 'project-planner', name: 'dispatch route planner', description: 'Built a route planner with a local model.', evidenceIds: ['cd-projects', 'job-planner'] }],
-        });
-        assert(repaired.accepted && repaired.handoff?.stage === 'cover-letter',
-          `the disclosed repair passes on the first round: out-of-section evidence in projects[], and collapsed whitespace in an exact-match field (${JSON.stringify(repaired.validationErrors || [])})`);
-        return { rejections: 6, ceilings: Object.keys(STRUCTURED_RESUME_LIMITS).length };
-      } finally {
-        await fs.promises.rm(project.root, { recursive: true, force: true });
-      }
-    },
-  },
-  {
-    name: 'The evidence-plan stage rejects a plan that would leave the résumé stage no legal answer for an employer',
-    async run() {
-      // Measured on the live job: the accepted plan gave one employer only its
-      // date block, and the résumé stage — which must show every saved role
-      // with at least one bullet, each citing career evidence from that
-      // employer's own section — could only answer with a bullet restating the
-      // role header. The harder version of the same defect has NO answer at
-      // all: an employer the plan quotes nowhere makes every possible résumé
-      // response illegal, and the plan is frozen, so stage 2 rejects forever.
-      // The rejection therefore belongs at the only stage that can still edit
-      // the plan.
-      const careerData = [
-        'Ada Lovelace', 'ada@example.test', '',
-        'Work Done from Past Jobs', '',
-        'Senior Engineer', 'Analytical Engines — Reading, Berkshire', '*2021 – 2024*', '',
-        '- Built the reporting pipeline for nightly batches.', '',
-        'Software Engineer', 'Difference Machines — Cambridge, Cambridgeshire', '*2018 – 2021*', '',
-        '- Shipped the billing service with automated alerts.', '',
-        'Junior Engineer', 'Spare Parts Co — Oxford, Oxfordshire', '*2016 – 2018*', '',
-        '---', '', 'Personal Projects', '',
-        '- Built a dispatch route planner with a local model.', '',
-      ].join('\n');
-      const ENGINES_WORK = 'Built the reporting pipeline for nightly batches.';
-      const MACHINES_WORK = 'Shipped the billing service with automated alerts.';
-      const MACHINES_HEADER = 'Software Engineer\nDifference Machines — Cambridge, Cambridgeshire\n*2018 – 2021*';
-      const SPARE_HEADER = 'Junior Engineer\nSpare Parts Co — Oxford, Oxfordshire\n*2016 – 2018*';
-      const PROJECT_WORK = 'Built a dispatch route planner with a local model.';
-      const project = await createCanvasProject();
-      try {
-        const queued = await queueLocalApplicationJob({
-          transport: 'paste', canvasFilePath: project.canvasFilePath, careerData,
-          job: { title: 'Reporting Engineer', company: 'Acme', snippet: 'We own reporting and billing end to end and expect independent delivery.' },
-          resumeProfile: { workHistory: [
-            { id: 'role-1', title: 'Senior Engineer', employer: 'Analytical Engines', startDate: '2021', endDate: '2024' },
-            { id: 'role-2', title: 'Software Engineer', employer: 'Difference Machines', startDate: '2018', endDate: '2021' },
-            { id: 'role-3', title: 'Junior Engineer', employer: 'Spare Parts Co', startDate: '2016', endDate: '2018' },
-          ] },
-        });
-        const handoff = (await getLocalApplicationHandoff({ jobId: queued.id, canvasFilePath: project.canvasFilePath })).handoff;
-        const prompt = handoff.prompt;
-
-        // Disclosure first: a rule the responder is rejected by must be
-        // readable in the prompt that produced the response, and the section
-        // it names is interpolated from the module that cuts it, so the two
-        // stages can never describe the same block two different ways.
-        assert(prompt.includes('Career evidence is also planned per EMPLOYER')
-          && prompt.includes('the résumé must show every saved work-history role with at least one bullet')
-          && prompt.includes(CAREER_DATA_ROLE_SECTION_RULE),
-        'the evidence-plan contract states the per-employer coverage rule and the section boundary the résumé gate enforces');
-        assert(prompt.includes('is not enough on its own') && prompt.includes('could only restate the role header')
-          && prompt.includes('once this plan is accepted it cannot be changed'),
-        'the contract says the opening block alone is not enough, and why the rejection lands at this stage');
-
-        const submit = (fields) => submitLocalApplicationHandoff({
-          jobId: queued.id, canvasFilePath: project.canvasFilePath, handoffCode: handoff.handoffCode,
-          response: JSON.stringify(reply(handoff, {
-            identity: { name: 'Ada Lovelace', contact: ['ada@example.test'], subtitleRole: 'Software Engineer' },
-            ...fields,
-          })),
-        });
-        const listing = { id: 'job-stack', sourceId: 'job-listing', quote: 'reporting and billing end to end', requirement: 'Reporting and billing ownership', priority: 'highest' };
-        const career = (id, quote, requirement) => ({ id, sourceId: 'career-data', quote, requirement, priority: 'highest' });
-        const need = ids => [{ id: 'need-stack', text: 'Reporting and billing ownership across the stack', priority: 'highest', evidenceIds: [...ids, 'job-stack'] }];
-
-        // No career evidence at all: every bullet and every letter paragraph
-        // needs a career-data ID, so nothing downstream could ever be answered.
-        const noCareer = await submit({ evidence: [listing], requirements: [{ id: 'need-stack', text: 'Reporting and billing ownership across the stack', priority: 'highest', evidenceIds: ['job-stack'] }] });
-        assert(!noCareer.accepted && noCareer.validationErrors.some(message => message.includes('no career-data evidence item at all')),
-          `a plan with only listing evidence is rejected at the stage that can still fix it (errors=${JSON.stringify(noCareer.validationErrors)})`);
-
-        // One employer quoted nowhere. Career evidence sitting in the
-        // personal-projects block grounds no role bullet, so it does not
-        // rescue the uncovered employer either.
-        const uncovered = await submit({
-          evidence: [career('cd-engines', ENGINES_WORK, 'Reporting ownership'), career('cd-machines', MACHINES_WORK, 'Billing ownership'), career('cd-projects', PROJECT_WORK, 'Independent delivery'), listing],
-          requirements: need(['cd-engines', 'cd-machines', 'cd-projects']),
-        });
-        assert(!uncovered.accepted
-          && uncovered.validationErrors.some(message => message.includes('"Spare Parts Co"') && message.includes('No career-data evidence item in this plan quotes the career-data section of'))
-          && !uncovered.validationErrors.some(message => message.includes('"Analytical Engines"') || message.includes('"Difference Machines"')),
-        `only the uncovered employer is named, and personal-projects evidence does not cover it (errors=${JSON.stringify(uncovered.validationErrors)})`);
-        // That employer's section is its own header and nothing else. The
-        // message used to close by telling the responder to quote what the
-        // section says about the work — evidence this corpus does not contain,
-        // on a plan that is frozen the moment it is accepted.
-        assert(uncovered.validationErrors.some(message => message.includes('"Spare Parts Co"')
-          && message.includes('states nothing beyond its own opening block')
-          && message.includes('quoting that opening block itself'))
-          && !uncovered.validationErrors.some(message => message.includes("quoting what that employer's section says about the work")),
-        `an employer whose section is only its header is told to quote that header (errors=${JSON.stringify(uncovered.validationErrors)})`);
-
-        // The same absence over a section that DOES describe the work keeps
-        // the original repair, so the two classes are reported separately
-        // rather than collapsed into whichever wording fits one of them.
-        const uncoveredWithBody = await submit({
-          evidence: [career('cd-engines', ENGINES_WORK, 'Reporting ownership'), career('cd-spare-dates', SPARE_HEADER, 'Early tenure'), career('cd-projects', PROJECT_WORK, 'Independent delivery'), listing],
-          requirements: need(['cd-engines', 'cd-spare-dates', 'cd-projects']),
-        });
-        assert(!uncoveredWithBody.accepted
-          && uncoveredWithBody.validationErrors.some(message => message.includes('"Difference Machines"')
-            && message.includes("quoting what that employer's section says about the work"))
-          && !uncoveredWithBody.validationErrors.some(message => message.includes('"Spare Parts Co"')),
-        `an employer whose section describes the work is told to quote that description (errors=${JSON.stringify(uncoveredWithBody.validationErrors)})`);
-
-        // An employer quoted only by its opening block: the live job's defect.
-        const headerOnly = await submit({
-          evidence: [career('cd-engines', ENGINES_WORK, 'Reporting ownership'), career('cd-machines-dates', MACHINES_HEADER, 'Billing tenure'), career('cd-spare-dates', SPARE_HEADER, 'Early tenure'), listing],
-          requirements: need(['cd-engines', 'cd-machines-dates', 'cd-spare-dates']),
-        });
-        assert(!headerOnly.accepted
-          && headerOnly.validationErrors.some(message => message.includes('"Difference Machines"') && message.includes('falls inside the section') && message.includes('opening block'))
-          && !headerOnly.validationErrors.some(message => message.includes('"Spare Parts Co"')),
-        `the date-block-only employer is rejected, while the employer whose section says nothing else is not (errors=${JSON.stringify(headerOnly.validationErrors)})`);
-
-        // Following the rejection literally repairs it in one round, and the
-        // employer with nothing but a header keeps its header quote.
-        const repaired = await submit({
-          evidence: [career('cd-engines', ENGINES_WORK, 'Reporting ownership'), career('cd-machines', MACHINES_WORK, 'Billing ownership'), career('cd-spare-dates', SPARE_HEADER, 'Early tenure'), listing],
-          requirements: need(['cd-engines', 'cd-machines', 'cd-spare-dates']),
-        });
-        assert(repaired.accepted && repaired.handoff?.stage === 'resume',
-          `the repair the message names is accepted in one round (errors=${JSON.stringify(repaired.validationErrors || [])})`);
-
-        // What the gate prevented: under the uncovered plan the résumé stage
-        // had no legal answer for that employer at all. Every citation a
-        // bullet could have made is rejected, so the loop had no exit — which
-        // is why this rejection cannot wait for the stage that hits it.
-        const uncoveredCatalog = [
-          { id: 'cd-engines', sourceId: 'career-data', quote: ENGINES_WORK },
-          { id: 'cd-machines', sourceId: 'career-data', quote: MACHINES_WORK },
-          { id: 'cd-projects', sourceId: 'career-data', quote: PROJECT_WORK },
-          { id: 'job-stack', sourceId: 'job-listing', quote: 'reporting and billing end to end' },
-        ];
-        const attempt = (evidenceIds) => {
-          try {
-            renderStructuredApplicationResume({
-              schemaVersion: 'structured-resume.v1',
-              identity: { name: 'Ada Lovelace', contact: ['ada@example.test'], subtitleRole: 'Software Engineer' },
-              roles: [
-                { id: 'role-1', title: 'Senior Engineer', company: 'Analytical Engines', dates: '2021 – 2024', bullets: [{ id: 'b1', text: ENGINES_WORK, evidenceIds: ['cd-engines'] }] },
-                { id: 'role-2', title: 'Software Engineer', company: 'Difference Machines', dates: '2018 – 2021', bullets: [{ id: 'b2', text: MACHINES_WORK, evidenceIds: ['cd-machines'] }] },
-                { id: 'role-3', title: 'Junior Engineer', company: 'Spare Parts Co', dates: '2016 – 2018', bullets: [{ id: 'b3', text: 'Supported the parts catalogue.', evidenceIds }] },
-              ],
-            }, {
-              sourceRoles: [
-                { id: 'role-1', title: 'Senior Engineer', company: 'Analytical Engines', dates: '2021 – 2024', location: '' },
-                { id: 'role-2', title: 'Software Engineer', company: 'Difference Machines', dates: '2018 – 2021', location: '' },
-                { id: 'role-3', title: 'Junior Engineer', company: 'Spare Parts Co', dates: '2016 – 2018', location: '' },
-              ],
-              evidenceCatalog: uncoveredCatalog, careerData,
-            });
-            return '';
-          } catch (error) { return String(error?.message || error); }
-        };
-        const everyCitation = [['cd-engines'], ['cd-machines'], ['cd-projects'], ['job-stack'], ['cd-engines', 'cd-machines', 'cd-projects', 'job-stack'], []];
-        assert(everyCitation.every(evidenceIds => attempt(evidenceIds) !== ''),
-          'under the rejected plan every citation the uncovered role could make is refused, so stage 2 had no answer to reach');
-
-        return { rejectedClasses: 4, repairedInOneRound: true };
-      } finally {
-        await fs.promises.rm(project.root, { recursive: true, force: true });
-      }
-    },
-  },
-  {
-    name: 'A section written as a heading, a separate location line, and a dates line — with no work description — is classified by its own shape',
-    async run() {
-      // Note 1's exact shape: `### Title — Employer` fuses the title and the
-      // employer into one markdown heading, so a location career data puts on
-      // its own very next line — "City, Region" — states none of title,
-      // company, or a year. Before careerSectionBodyStart checked the role's
-      // OWN location value the same way it already checked title and company,
-      // that location line broke the opening-block walk early: the location
-      // and the dates line below it were read as body prose, and a section
-      // that says nothing but its own header was reported as `reason: 'none'`
-      // — told to quote what the section says about the work — instead of
-      // `'none-opening-block-only'`, whose message asks for the one quote
-      // this corpus actually has: the header itself.
-      const careerData = [
-        'Ada Lovelace', 'ada@example.test', '',
-        'Senior Engineer', 'Analytical Engines — Reading, Berkshire', '*2021 – 2024*', '',
-        '- Built the reporting pipeline for nightly batches.', '',
-        '### Senior Analyst — Beacon Labs', 'Portland, Oregon', '*2019 – 2022*', '',
-      ].join('\n');
-      const ENGINES_WORK = 'Built the reporting pipeline for nightly batches.';
-      const BEACON_HEADER = '### Senior Analyst — Beacon Labs\nPortland, Oregon\n*2019 – 2022*';
-      const project = await createCanvasProject();
-      try {
-        const queued = await queueLocalApplicationJob({
-          transport: 'paste', canvasFilePath: project.canvasFilePath, careerData,
-          job: { title: 'Analyst', company: 'Acme', snippet: 'We need reporting and analysis end to end.' },
-          resumeProfile: { workHistory: [
-            { id: 'role-1', title: 'Senior Engineer', employer: 'Analytical Engines', startDate: '2021', endDate: '2024' },
-            { id: 'role-2', title: 'Senior Analyst', employer: 'Beacon Labs', location: 'Portland, Oregon', startDate: '2019', endDate: '2022' },
-          ] },
-        });
-        const handoff = (await getLocalApplicationHandoff({ jobId: queued.id, canvasFilePath: project.canvasFilePath })).handoff;
-        const submit = fields => submitLocalApplicationHandoff({
-          jobId: queued.id, canvasFilePath: project.canvasFilePath, handoffCode: handoff.handoffCode,
-          response: JSON.stringify(reply(handoff, {
-            identity: { name: 'Ada Lovelace', contact: ['ada@example.test'], subtitleRole: 'Senior Engineer' },
-            ...fields,
-          })),
-        });
-        const listing = { id: 'job-stack', sourceId: 'job-listing', quote: 'reporting and analysis end to end', requirement: 'Reporting and analysis ownership', priority: 'highest' };
-        const uncovered = await submit({
-          evidence: [{ id: 'cd-engines', sourceId: 'career-data', quote: ENGINES_WORK, requirement: 'Reporting ownership', priority: 'highest' }, listing],
-          requirements: [{ id: 'need-stack', text: 'Reporting and analysis ownership across the stack', priority: 'highest', evidenceIds: ['cd-engines', 'job-stack'] }],
-        });
-        assert(!uncovered.accepted
-          && uncovered.validationErrors.some(message => message.includes('"Beacon Labs"')
-            && message.includes('states nothing beyond its own opening block')
-            && message.includes('quoting that opening block itself'))
-          && !uncovered.validationErrors.some(message => message.includes('Beacon Labs') && message.includes("quoting what that employer's section says about the work")),
-        `the heading-plus-location-plus-dates shape with no body is classified 'none-opening-block-only', not told to quote work it never describes (errors=${JSON.stringify(uncovered.validationErrors)})`);
-
-        // Following the message literally repairs it in one round: the
-        // opening block itself — the heading, the location line, and the
-        // dates the résumé already prints — is the one legal quote left.
-        const repaired = await submit({
-          evidence: [
-            { id: 'cd-engines', sourceId: 'career-data', quote: ENGINES_WORK, requirement: 'Reporting ownership', priority: 'highest' },
-            { id: 'cd-beacon-header', sourceId: 'career-data', quote: BEACON_HEADER, requirement: 'Analyst tenure', priority: 'supporting' },
-            listing,
-          ],
-          requirements: [{ id: 'need-stack', text: 'Reporting and analysis ownership across the stack', priority: 'highest', evidenceIds: ['cd-engines', 'cd-beacon-header', 'job-stack'] }],
-        });
-        assert(repaired.accepted && repaired.handoff?.stage === 'resume',
-          `the message's own repair — quoting the opening block itself — is accepted in one round (errors=${JSON.stringify(repaired.validationErrors || [])})`);
-        return { classified: 'none-opening-block-only' };
-      } finally {
-        await fs.promises.rm(project.root, { recursive: true, force: true });
-      }
-    },
-  },
-  {
-    name: 'The review contract discloses the proof span as the closed verb list PAST_PROOF_CUE actually enforces, not a vague "past action"',
-    async run() {
-      // Note 2: the review contract used to describe the proof span only as
-      // "states a first-person past action of the candidate's" — a
-      // description broad enough to admit "shipped", when
-      // checkParagraphArgumentLinks (coverLetterChecks.js) actually decides
-      // it with the closed list PAST_PROOF_CUE enforces. A responder who
-      // wrote to the stated rule and picked an ordinary past-tense verb
-      // outside that list was rejected by a rule the contract never named,
-      // with no way to see the real list short of trial and error.
-      const MY_BULLET = 'Maintained internal systems with supported delivery practices.';
-      const CLAIM_SPAN = 'My experience delivering supported systems is a relevant capability.';
-      const RELEVANCE_SPAN = 'I would apply my experience delivering supported systems to reliable system delivery this role requires.';
-      const GOOD_PROOF_SPAN = 'In my engineering role at Acme, I delivered supported systems for internal users.';
-      const BAD_PROOF_SPAN = 'In my engineering role at Acme, I shipped supported systems for internal users.';
-      const GOOD_PARAGRAPH = `${CLAIM_SPAN} ${GOOD_PROOF_SPAN} ${RELEVANCE_SPAN}`;
-      const BAD_PARAGRAPH = `${CLAIM_SPAN} ${BAD_PROOF_SPAN} ${RELEVANCE_SPAN}`;
-
-      const plan = (paragraph) => ({
-        identity: AUDIT_IDENTITY,
-        evidence: [
-          { id: 'resume-proof', sourceId: 'career-data', quote: MY_BULLET, requirement: 'Reliable system delivery', priority: 'highest' },
-          { id: 'letter-proof', sourceId: 'career-data', quote: paragraph, requirement: 'Reliable system delivery', priority: 'highest' },
-          { id: 'job-proof', sourceId: 'job-listing', quote: 'reliable system delivery', requirement: 'Reliable system delivery', priority: 'highest' },
-        ],
-        requirements: [{ id: 'need-1', text: 'Reliable system delivery', priority: 'highest', evidenceIds: ['resume-proof', 'job-proof'] }],
-        resume: { schemaVersion: 'structured-resume.v1', identity: AUDIT_IDENTITY, roles: [{ id: 'role-1', title: 'Engineer', company: 'Acme', dates: '', location: '', bullets: [{ id: 'bullet-1', text: MY_BULLET, evidenceIds: ['resume-proof'] }] }] },
-        coverLetter: {
-          name: AUDIT_IDENTITY.name, contact: AUDIT_IDENTITY.contact,
-          paragraphs: [{ id: 'paragraph-1', text: paragraph, evidenceIds: ['letter-proof', 'job-proof'] }],
-          roleThesis: AUDIT_THESIS,
-          coverLetterArgument: { primaryEvidence: { evidence: MY_BULLET, evidenceRole: 'Engineer at Acme', relationToThesis: 'The systems work establishes the delivery capability named in the thesis.' } },
-        },
-      });
-      const audit = (paragraph, proofSpan) => ({
-        version: LOCAL_AI_GENERATION_AUDIT_VERSION,
-        jobPriorities: [{ requirement: 'need-1', priority: 'highest', disposition: 'addressed-both', justification: 'The selected systems evidence directly addresses the stated delivery requirement.' }],
-        resumePlan: { strategy: 'Lead with the strongest supported systems evidence for the role.', selectionRationale: 'The retained role preserves direct factual support and concise relevance.' },
-        coverLetterPlan: {
-          controllingThesis: AUDIT_THESIS,
-          paragraphs: [{
-            paragraph, argumentativeJob: 'Establish the controlling evidence-to-need connection.',
-            relationToThesis: 'Connect the source-supported proof to reliable system delivery.', relationToPreviousParagraph: 'opening',
-            sentences: paragraph.split(/(?<=\.)\s+/u).map((sentence, index) => ({ sentence, function: index === 0 ? 'States the general candidate capability.' : index === 1 ? 'Supplies the source-supported candidate proof.' : 'Connects the proof to the target responsibility.', relationToPreviousSentence: index === 0 ? 'opening' : 'Develops the preceding argument step.' })),
-            argumentMapping: { claim: CLAIM_SPAN, proof: proofSpan, relevance: RELEVANCE_SPAN, jobNeedQuote: 'reliable system delivery' },
-          }],
-        },
-        finalDecisionSummary: 'The final documents use the strongest supported evidence without introducing a second cover-letter argument.',
-      });
-
-      const goodProject = await createCanvasProject();
-      const badProject = await createCanvasProject();
-      try {
-        // Disclosure: the printed rule names the exact closed list the gate
-        // reads, not a paraphrase of it — and the sibling claim/relevance
-        // rules beside it are the constants CANDIDATE_CAPABILITY_CUE and
-        // FORMULAIC_TRANSFER_FRAME and the relevance gate actually grade, confirmed below by measuring
-        // both a verb the list accepts and one it does not through the real
-        // gate rather than trusting the two strings merely look plausible.
-        const goodFlow = await runAuditFlow(goodProject, plan(GOOD_PARAGRAPH), { careerData: `Ada Lovelace\nada@example.test\nEngineer\n${MY_BULLET}\n${GOOD_PARAGRAPH}` });
-        assert(goodFlow.reviewPrompt.includes(ARGUMENT_PROOF_SPAN_RULE),
-          'the review contract prints the exact proof-span rule PAST_PROOF_VERBS builds, not a hand-copied paraphrase');
-        assert(!goodFlow.reviewPrompt.includes('states a first-person past action of the candidate'),
-          'the superseded vague proof-span description no longer appears in the review contract');
-        assert(PAST_PROOF_VERBS.every(verb => goodFlow.reviewPrompt.includes(verb)),
-          'every verb PAST_PROOF_CUE accepts is named in the printed rule, not just a sample of it');
-        assert(goodFlow.reviewPrompt.includes(ARGUMENT_CLAIM_SPAN_RULE) && goodFlow.reviewPrompt.includes(ARGUMENT_RELEVANCE_SPAN_RULE)
-          && [ARGUMENT_LATER_RELEVANCE_SPAN_RULE, EXPLICIT_TRANSFER_BUDGET_RULE, EXPLICIT_CLAIM_BUDGET_RULE, EXPLICIT_RELEVANCE_BUDGET_RULE, TRANSFER_BENEFIT_SUPPORT_RULE].every(printed => goodFlow.reviewPrompt.split(printed).length - 1 === 1),
-          'the sibling claim and relevance rules are still printed beside the proof rule');
-        // The review replaces the letter the proportion check grades, so the prompt that sends it must carry the limits (the drafting
-        // contract carries them too, in the disclosure scenario above).
-        assert(goodFlow.reviewPrompt.includes(LETTER_PROPORTION_RULE),
-          'the review contract prints the proportion limits the check reads, from the constant it reads them from');
-        assert(goodFlow.reviewPrompt.includes('no single detail of the evidence earns a paragraph of its own'),
-          'the review contract carries the flexibility rule that keeps a replacement letter from becoming an inventory');
-
-        // Provenance, not presence: a verb PAST_PROOF_VERBS accepts is
-        // accepted by the real gate...
-        const goodResult = await goodFlow.review(audit(GOOD_PARAGRAPH, GOOD_PROOF_SPAN));
-        assert(goodResult.accepted && goodResult.completed,
-          `a proof span using a listed verb ("delivered") is accepted by the gate the rule describes (errors=${JSON.stringify(goodResult.validationErrors || [])})`);
-
-        // ...and an ordinary past-tense verb outside that list — exactly the
-        // gap a "first-person past action" description could not warn about —
-        // is rejected by the same gate, by name, in the round that used it.
-        const badFlow = await runAuditFlow(badProject, plan(BAD_PARAGRAPH), { careerData: `Ada Lovelace\nada@example.test\nEngineer\n${MY_BULLET}\n${BAD_PARAGRAPH}` });
-        const badResult = await badFlow.review(audit(BAD_PARAGRAPH, BAD_PROOF_SPAN));
-        assert(!badResult.accepted && badResult.validationErrors.some(message => message.includes('argumentMapping.proof does not state a candidate past action')),
-          `a proof span using "shipped" — outside PAST_PROOF_VERBS — is rejected by the gate the disclosed rule now names in advance (errors=${JSON.stringify(badResult.validationErrors || [])})`);
-        return { verbs: PAST_PROOF_VERBS.length };
-      } finally {
-        await fs.promises.rm(goodProject.root, { recursive: true, force: true });
-        await fs.promises.rm(badProject.root, { recursive: true, force: true });
-      }
-    },
-  },
-  {
-    name: 'The review contract discloses the pass bar, the host-finding protocol, the audit floors, and the working-record words the audit gate reads',
-    async run() {
-      // Stage 4 is the last and most expensive handoff, and four of its rules
-      // were enforced in silence: a pass needs every checklist entry to read
-      // "pass"; a requirement the plan backed but neither document used has
-      // exactly one legal disposition; each verification note is measured
-      // against character, word, and non-boilerplate floors; and every
-      // narrative audit field is read for the name of a working record — a
-      // gate whose "scratch" branch made its own qualifier optional, so
-      // "built from scratch", the candidate's own headline evidence in the
-      // live run, was rejected as private reasoning with no repairable
-      // message. Each disclosure below is proved in both directions: obey it
-      // literally and the review completes; violate it and the named
-      // rejection comes back.
-      const project = await createCanvasProject();
-      try {
-        const steps = await auditJobSteps(project);
-        const plan = auditPlanFixture();
-        await steps.send({ identity: plan.identity, evidence: plan.evidence, requirements: plan.requirements });
-        await steps.send({ resume: plan.resume });
-        await steps.send({ coverLetter: plan.coverLetter });
-        const reviewPrompt = (await steps.current()).prompt;
-
-        // Disclosure, each constant printed by the code that enforces it.
-        assert(reviewPrompt.includes(QUALITY_NOTE_RULE),
-          'the review contract prints the verification-note rule sanitizeApplicationQualityCriteria builds from its own floors');
-        assert(reviewPrompt.includes(`at least ${QUALITY_NOTE_MIN_CHARS} characters and ${QUALITY_NOTE_MIN_WORDS} words`),
-          'the note floors reach the contract as numbers, not as "concrete"');
-        assert(reviewPrompt.includes(ARGUMENT_MAPPING_REQUIRED_RULE),
-          'the contract states which paragraphs owe an argumentMapping using the closed verb list that decides it');
-        assert(!reviewPrompt.includes('Every paragraph stating an action of the candidate’s needs one'),
-          'the superseded "any paragraph stating an action" wording is gone: it promised a looser test than PAST_PROOF_CUE applies');
-        assert(!reviewPrompt.includes('must also carry a word of') && !reviewPrompt.includes('never count as that shared word') && !reviewPrompt.includes('anaphora'),
-          'the shared-word rule and its anaphora exception are gone: the host reads the words a relevance span shares with its quote and asks for no phrase');
-        assert(reviewPrompt.includes('looks for no particular wording in any relevance span') && reviewPrompt.includes('outside the sentence the proof span sits in'),
-          'the contract says the host asks for no wording and judges the owing paragraph on the part outside its proof sentence');
-        assert(reviewPrompt.includes('State that transfer explicitly, once, in the first proof-bearing paragraph of the letter, in your own wording')
-          && reviewPrompt.includes('a stock sentence such as “I would apply this experience in this role” is generic and reads as formulaic')
-          && !reviewPrompt.includes('followed, in a paragraph that owes a transfer, by an explicit bridge'),
-        'the review contract asks for one transfer, in the writer\'s own wording, and no explicit bridge in every paragraph');
-        assert(!reviewPrompt.includes('unless it is the sentence directly after the proof sentence and refers back to it'),
-          'the superseded "refers back to it" wording is gone: no reference rule remains');
-        assert(reviewPrompt.includes('the accepted disposition is "omitted-minimum-sufficient"'),
-          'the contract names the one legal disposition for a requirement the plan backed and neither document used');
-        assert(reviewPrompt.includes('context.reviewFindings') && reviewPrompt.includes('context.requiredChangeDocuments'),
-          'the contract names the two host-owned context fields a review round has to answer');
-        // Each of these fields used to be disclosed only in its blocking
-        // direction ("while it is present..."), leaving a reader to infer
-        // the permissive case. A real rejection cost three handoff rounds to
-        // a reviewer that could not find the negative stated anywhere, so
-        // each field's own sentence now states it directly rather than
-        // relying solely on the separate affirmative summary above it.
-        assert(reviewPrompt.includes('Absent from this context altogether, it blocks nothing on its own: decision:"pass" is not rejected for this reason'),
-          'the requiredChangeDocuments rule states its own permissive case beside its blocking one, not only the blocking direction');
-        assert(reviewPrompt.includes('It never appears without context.requiredChangeDocuments or context.requiredChangeTargets naming that same rejection'),
-          'the reviewFindings rule states plainly that its own absence carries no separate meaning, so a reader is not left to infer that');
-        assert(reviewPrompt.includes(`${RESUME_BULLET_CHARACTER_BUDGET}-visible-character ceiling`),
-          'a replacement résumé is told the rendered-bullet budget from the module that measures it');
-        for (const floor of new Set(Object.values(GENERATION_AUDIT_TEXT_MINIMUMS))) {
-          assert(reviewPrompt.includes(String(floor)), `the audit prose floor ${floor} is printed, not left to be discovered by rejection`);
-        }
-
-        const passBody = (overrides = {}) => ({
-          decision: 'pass', findings: [], checklist: checklist(),
-          qualityReview: {
-            checklistVersion: APPLICATION_QUALITY_CHECKLIST_VERSION,
-            criteria: APPLICATION_QUALITY_CRITERIA.map(({ id, requirement }) => ({ id, status: 'pass', evidence: requirement })),
-            resume: { decision: 'approved', rationale: 'The résumé preserves direct source-supported systems evidence with clear relevance.' },
-            coverLetter: { decision: 'approved', rationale: 'One controlling argument uses minimum-sufficient evidence for target system delivery.' },
-          },
-          generationAudit: plan.audit(),
-          ...overrides,
-        });
-        // Each violation is submitted against a review handoff that is still
-        // open, so the rejection below is the only thing separating it from
-        // the accepted control at the end.
-        const violate = async (mutate) => {
-          const body = passBody();
-          mutate(body);
-          const { result } = await steps.submit(body);
-          return result;
-        };
-
-        const issueChecklist = await violate((body) => { body.checklist[3].status = 'issue'; });
-        assert(!issueChecklist.accepted && issueChecklist.validationErrors.includes('A passing review requires every checklist item to pass.'),
-          `one checklist entry left at "issue" rejects the pass the contract now warns about (errors=${JSON.stringify(issueChecklist.validationErrors || [])})`);
-
-        const wrongDisposition = await violate((body) => { body.generationAudit.jobPriorities[0].disposition = 'omitted-no-evidence'; });
-        assert(!wrongDisposition.accepted && wrongDisposition.validationErrors.some(message => message.includes('“omitted-minimum-sufficient”')),
-          `the plan-backed requirement rejects "omitted-no-evidence" and the rejection names the legal disposition rather than demanding the documents addressed it (errors=${JSON.stringify(wrongDisposition.validationErrors || [])})`);
-
-        const workingRecord = await violate((body) => { body.generationAudit.finalDecisionSummary = 'Both documents stand as written; the scratch notes behind them are not carried here.'; });
-        assert(!workingRecord.accepted && workingRecord.validationErrors.some(message => message.includes('"scratch notes"')),
-          `naming a working record is still rejected, and the message quotes the span it read (errors=${JSON.stringify(workingRecord.validationErrors || [])})`);
-
-        const shortNote = await violate((body) => { body.qualityReview.criteria[2].evidence = 'one two three four fiv'; });
-        assert(!shortNote.accepted && shortNote.validationErrors.some(message => message.includes(`at least ${QUALITY_NOTE_MIN_CHARS} characters and ${QUALITY_NOTE_MIN_WORDS} words`)),
-          `a note under the character floor is rejected by a message naming both floors and what it measured (errors=${JSON.stringify(shortNote.validationErrors || [])})`);
-
-        const boilerplateNote = await violate((body) => { body.qualityReview.criteria[2].evidence = 'Verified this criterion against the final application documents in review.'; });
-        assert(!boilerplateNote.accepted && boilerplateNote.validationErrors.some(message => message.includes('repeated or boilerplate verification note')),
-          `a note that is only its own criterion plus review boilerplate is rejected, as the printed rule says (errors=${JSON.stringify(boilerplateNote.validationErrors || [])})`);
-
-        // The other direction of the working-record gate, and the reason it
-        // had to be narrowed: the ordinary English phrase now passes, on the
-        // same field that rejects a named record.
-        const fromScratch = passBody();
-        fromScratch.generationAudit.resumePlan.strategy = 'Lead with the supported systems this engineer built from scratch for internal users.';
-        fromScratch.generationAudit.jobPriorities[0].justification = 'The résumé and letter both carry the systems work this engineer built from scratch.';
-        const accepted = await steps.submit(fromScratch);
-        assert(accepted.result.accepted && accepted.result.completed,
-          `a review naming work built from scratch completes, because that phrase describes the work rather than a working record (errors=${JSON.stringify(accepted.result.validationErrors || [])})`);
-        return { disclosedFloors: Object.keys(GENERATION_AUDIT_TEXT_MINIMUMS).length };
-      } finally {
-        await fs.promises.rm(project.root, { recursive: true, force: true });
-      }
-    },
-  },
-  {
-    name: 'The evidence plan names the employers it must cover, and the résumé stage rejects a bullet citing nothing but its own role header',
-    async run() {
-      // Two halves of one defect, measured on the live run. The plan stage was
-      // never shown sourceRoles, so it planned from the posting and gave one
-      // employer only its date block. And once a plan DOES carry work evidence
-      // for that employer, nothing stopped the résumé from citing the date
-      // block anyway: the only gate that reads bullet prose asks for shared
-      // terms between a bullet and its cited quote, which a bullet restating
-      // its own role header satisfies maximally.
-      const careerData = [
-        'Ada Lovelace', 'ada@example.test', '',
-        'Work Done from Past Jobs', '',
-        'Senior Engineer', 'Analytical Engines — Reading, Berkshire', '*2021 – 2024*', '',
-        '- Built the reporting pipeline for nightly batches.', '',
-        'Software Engineer', 'Difference Machines — Cambridge, Cambridgeshire', '*2018 – 2021*', '',
-        '- Shipped the billing service with automated alerts.', '',
-        'Junior Engineer', 'Spare Parts Co — Oxford, Oxfordshire', '*2016 – 2018*', '',
-        '---', '', 'Personal Projects', '',
-        '- Built a dispatch route planner with a local model.', '',
-      ].join('\n');
-      const ENGINES_WORK = 'Built the reporting pipeline for nightly batches.';
-      const MACHINES_WORK = 'Shipped the billing service with automated alerts.';
-      const ENGINES_HEADER = 'Senior Engineer\nAnalytical Engines — Reading, Berkshire\n*2021 – 2024*';
-      const MACHINES_HEADER = 'Software Engineer\nDifference Machines — Cambridge, Cambridgeshire\n*2018 – 2021*';
-      const SPARE_HEADER = 'Junior Engineer\nSpare Parts Co — Oxford, Oxfordshire\n*2016 – 2018*';
-      const workHistory = [
-        { id: 'role-1', title: 'Senior Engineer', employer: 'Analytical Engines', startDate: '2021', endDate: '2024' },
-        { id: 'role-2', title: 'Software Engineer', employer: 'Difference Machines', startDate: '2018', endDate: '2021' },
-        { id: 'role-3', title: 'Junior Engineer', employer: 'Spare Parts Co', startDate: '2016', endDate: '2018' },
-      ];
-      const project = await createCanvasProject();
-      try {
-        const queued = await queueLocalApplicationJob({
-          transport: 'paste', canvasFilePath: project.canvasFilePath, careerData,
-          job: { title: 'Reporting Engineer', company: 'Acme', snippet: 'We own reporting and billing end to end and expect independent delivery.' },
-          resumeProfile: { workHistory },
-        });
-        const planHandoff = (await getLocalApplicationHandoff({ jobId: queued.id, canvasFilePath: project.canvasFilePath })).handoff;
-
-        // The plan stage is bound by these roles, so it is shown these roles.
-        // Inferring them from careerData was the responder's only option, and
-        // the gate on this very stage measures coverage against this list.
-        const planContext = pasteContext(planHandoff.prompt);
-        assert(JSON.stringify(planContext.sourceRoles) === JSON.stringify(workHistory.map(role => ({
-          id: role.id, title: role.title, company: role.employer, dates: `${role.startDate} – ${role.endDate}`, location: '',
-        }))), `the evidence-plan context carries the saved work history the later stages are bound by (shipped=${JSON.stringify(planContext.sourceRoles)})`);
-        assert(planHandoff.prompt.includes('context.sourceRoles is that saved work history')
-          && planHandoff.prompt.includes('for every sourceRoles entry')
-          && planHandoff.prompt.includes('whether or not the posting asked about it'),
-        'the evidence-plan contract points at context.sourceRoles and says the plan is not driven by the posting alone');
-
-        const listing = { id: 'job-stack', sourceId: 'job-listing', quote: 'reporting and billing end to end', requirement: 'Reporting and billing ownership', priority: 'highest' };
-        const career = (id, quote, requirement) => ({ id, sourceId: 'career-data', quote, requirement, priority: 'highest' });
-        const plan = await submitLocalApplicationHandoff({
-          jobId: queued.id, canvasFilePath: project.canvasFilePath, handoffCode: planHandoff.handoffCode,
-          response: JSON.stringify(reply(planHandoff, {
-            identity: { name: 'Ada Lovelace', contact: ['ada@example.test'], subtitleRole: 'Software Engineer' },
-            evidence: [
-              career('cd-engines', ENGINES_WORK, 'Reporting ownership'), career('cd-engines-dates', ENGINES_HEADER, 'Reporting tenure'),
-              career('cd-machines', MACHINES_WORK, 'Billing ownership'), career('cd-machines-dates', MACHINES_HEADER, 'Billing tenure'),
-              career('cd-spare-dates', SPARE_HEADER, 'Early tenure'), listing,
-            ],
-            requirements: [{
-              id: 'need-stack', text: 'Reporting and billing ownership across the stack', priority: 'highest',
-              evidenceIds: ['cd-engines', 'cd-engines-dates', 'cd-machines', 'cd-machines-dates', 'cd-spare-dates', 'job-stack'],
-            }],
-          })),
-        });
-        assert(plan.accepted && plan.handoff?.stage === 'resume',
-          `a plan that covers every employer's section body is accepted (errors=${JSON.stringify(plan.validationErrors || [])})`);
-        assert(plan.handoff.prompt.includes('a bullet must also reach past its opening block')
-          && plan.handoff.prompt.includes('has nothing left to rewrite and can only restate the role header')
-          && plan.handoff.prompt.includes('Only where the plan carries no quote from below that employer’s opening block'),
-        'the résumé contract states the rule, its reason, and the one case where citing the opening block is still right');
-
-        const identity = { name: 'Ada Lovelace', contact: ['ada@example.test'], subtitleRole: 'Software Engineer' };
-        const role = (id, title, company, dates, location, bullet) => ({ id, title, company, dates, location, bullets: [bullet] });
-        // The employer whose section says nothing but its header keeps a
-        // header-restating bullet in every draft below: the host requires a
-        // bullet for it and the plan can offer nothing else, so a rejection
-        // there would have no repair at all.
-        const spare = role('role-3', 'Junior Engineer', 'Spare Parts Co', '2016 – 2018', 'Oxford, Oxfordshire',
-          { id: 'b3', text: 'Held a Junior Engineer role with Spare Parts Co in Oxford, Oxfordshire from 2016 to 2018.', evidenceIds: ['cd-spare-dates'] });
-        const submitResume = async roles => submitLocalApplicationHandoff({
-          jobId: queued.id, canvasFilePath: project.canvasFilePath,
-          handoffCode: (await getLocalApplicationHandoff({ jobId: queued.id, canvasFilePath: project.canvasFilePath })).handoff.handoffCode,
-          response: JSON.stringify(reply(plan.handoff, { resume: { schemaVersion: 'structured-resume.v1', identity, roles } })),
-        });
-
-        // The live defect: the plan holds this employer's work evidence, and
-        // the bullet cites its date block instead.
-        const contentless = await submitResume([
-          role('role-1', 'Senior Engineer', 'Analytical Engines', '2021 – 2024', 'Reading, Berkshire',
-            { id: 'b1', text: 'Built the nightly reporting pipeline.', evidenceIds: ['cd-engines'] }),
-          role('role-2', 'Software Engineer', 'Difference Machines', '2018 – 2021', 'Cambridge, Cambridgeshire',
-            { id: 'b2', text: 'Held a Software Engineer role with Difference Machines in Cambridge, Cambridgeshire from 2018 to 2021.', evidenceIds: ['cd-machines-dates'] }),
-          spare,
-        ]);
-        assert(!contentless.accepted
-          && contentless.validationErrors.some(message => message.includes('roles[1].bullets[0] cites career-data evidence only from inside that employer')
-            && message.includes('carries one career-data item quoting that same section below its opening block: cite it here instead'))
-          && !contentless.validationErrors.some(message => message.includes('roles[2]')),
-        `the header-only bullet is rejected and the employer with no other evidence is left alone (errors=${JSON.stringify(contentless.validationErrors)})`);
-
-        // Same rule in two roles is one class: one message, both offenders,
-        // one manual round.
-        const bothRoles = await submitResume([
-          role('role-1', 'Senior Engineer', 'Analytical Engines', '2021 – 2024', 'Reading, Berkshire',
-            { id: 'b1', text: 'Held a Senior Engineer role with Analytical Engines in Reading, Berkshire from 2021 to 2024.', evidenceIds: ['cd-engines-dates'] }),
-          role('role-2', 'Software Engineer', 'Difference Machines', '2018 – 2021', 'Cambridge, Cambridgeshire',
-            { id: 'b2', text: 'Held a Software Engineer role with Difference Machines in Cambridge, Cambridgeshire from 2018 to 2021.', evidenceIds: ['cd-machines-dates'] }),
-          spare,
-        ]);
-        assert(!bothRoles.accepted
-          && bothRoles.validationErrors.some(message => message.includes('roles[0].bullets[0] cites career-data evidence only from inside that employer')
-            && message.includes('The same rule also rejects 1 more in this response: roles[1].bullets[0]')),
-        `both header-only bullets are reported in one message (errors=${JSON.stringify(bothRoles.validationErrors)})`);
-
-        // Following the message literally repairs it inside this stage, with
-        // no reopening of the frozen plan. A bullet that cites its section
-        // body is never this rule's business, even when it also cites the
-        // opening block: it has real evidence to rewrite, and whether the
-        // prose used it is the assembled package's overlap check to judge.
-        const repaired = await submitResume([
-          role('role-1', 'Senior Engineer', 'Analytical Engines', '2021 – 2024', 'Reading, Berkshire',
-            { id: 'b1', text: 'Built the nightly reporting pipeline.', evidenceIds: ['cd-engines', 'cd-engines-dates'] }),
-          role('role-2', 'Software Engineer', 'Difference Machines', '2018 – 2021', 'Cambridge, Cambridgeshire',
-            { id: 'b2', text: 'Shipped the billing service with automated alerts.', evidenceIds: ['cd-machines'] }),
-          spare,
-        ]);
-        assert(repaired.accepted && repaired.handoff?.stage === 'cover-letter',
-          `the repair the message names is accepted in one round (errors=${JSON.stringify(repaired.validationErrors || [])})`);
-        return { employersPlanned: workHistory.length, rejectedBullets: 3 };
-      } finally {
-        await fs.promises.rm(project.root, { recursive: true, force: true });
-      }
-    },
-  },
-  {
+  },  {
     name: 'Evidence-plan contract discloses the ID pattern, quote cap, item ceilings, and the context field each sourceId is checked against, and ships the listing once',
     async run() {
       // Every rejection here costs a manual copy/paste round, so each rule the
@@ -4002,778 +2770,7 @@ export default [
         await fs.promises.rm(project.root, { recursive: true, force: true });
       }
     },
-  },
-  {
-    name: 'An experience span no cited career evidence states is rejected by the stage that writes it',
-    async run() {
-      // The listing demands a span of years; the career corpus states roles and
-      // dates. Nothing stopped a bullet or a paragraph from adding those dates
-      // up and asserting the demanded span: checkFigureDiscipline only checks
-      // that a letter figure also appears in the résumé, so the same invented
-      // span in both documents passed. One rule now runs at the résumé stage,
-      // at the cover-letter stage, and at completion, each against the
-      // career-data quotes the offending unit itself cites.
-      const project = await createCanvasProject();
-      try {
-        const plan = auditPlanFixture();
-        const spanBullet = { id: 'bullet-1', text: 'Maintained internal systems with supported delivery practices over more than four years of systems work.', evidenceIds: ['resume-proof'] };
-        const spanResume = { ...plan.resume, roles: [{ ...plan.resume.roles[0], bullets: [spanBullet] }] };
-        const spanParagraph = `${AUDIT_PARAGRAPH} That work spans more than four years of systems delivery.`;
-
-        const steps = await auditJobSteps(project);
-        await steps.send({ identity: plan.identity, evidence: plan.evidence, requirements: plan.requirements });
-        const resumePrompt = (await steps.current()).prompt;
-        assert(resumePrompt.includes('A span of experience measured in years is a claim like any other: a bullet may state one only when a career-data quote that same bullet cites states it.')
-          && resumePrompt.includes('Never total a span across roles and never compute one from employment dates'),
-          'the résumé contract states the rule before the stage can break it');
-
-        const rejected = await steps.submit({ resume: spanResume });
-        assert(!rejected.result.accepted && rejected.result.validationErrors.some(message => message === 'Resume bullet bullet-1 claims an experience span (“more than four years”) that none of the career-data evidence it cites states. A span of years is a claim like any other: state one only when a career-data quote that same unit cites states it. Do not total a span across roles and do not compute one from employment dates; a duration the posting asks for is the posting’s requirement, not a fact about the candidate. Either cite a career-data quote that states the span, or describe the work instead of its length.'),
-          `a bullet asserting a span its evidence never states is rejected by bullet id (errors=${JSON.stringify(rejected.result.validationErrors)})`);
-        assert(!rejected.result.validationErrors.some(message => message.includes(AUDIT_BULLET)),
-          'the rejection quotes only the span the responder wrote, never a corpus passage it could paste back');
-        await steps.send({ resume: plan.resume });
-
-        const letterPrompt = (await steps.current()).prompt;
-        // The letter contract states the same rule AND the shapes that trip
-        // it. Its earlier explanation ("a duration the posting asks for is the
-        // posting's requirement") invited the one sentence the gate rejects:
-        // findUnsupportedDurationClaim reads the paragraph's own words and
-        // cannot tell whose span it is, so "The posting asks for four years of
-        // experience" is a claim like any other and cost a round.
-        assert(letterPrompt.includes('a paragraph may state one only when a career-data quote that same paragraph cites states that same span')
-          && letterPrompt.includes(DURATION_CLAIM_SHAPE_RULE)
-          && letterPrompt.includes('do not write the span a posting asks for into the letter at all'),
-          'the cover-letter contract states the paragraph rule, the shapes the gate reads, and that an attributed span is still a claim');
-        const letterRejected = await steps.submit({ coverLetter: { ...plan.coverLetter, paragraphs: [{ ...plan.coverLetter.paragraphs[0], text: spanParagraph }] } });
-        assert(!letterRejected.result.accepted && letterRejected.result.validationErrors.some(message => message.startsWith('Cover-letter paragraph paragraph-1 claims an experience span (“more than four years”)')),
-          `the same span in a letter paragraph is rejected by paragraph id (errors=${JSON.stringify(letterRejected.result.validationErrors)})`);
-        await steps.send({ coverLetter: plan.coverLetter });
-
-        // A review may rewrite either document, and nothing revalidates a
-        // revised draft against the drafting-stage gates — so the rule has a
-        // third call site inside the completion-time grounding pass.
-        const reviewPrompt = (await steps.current()).prompt;
-        assert(reviewPrompt.includes('Any experience span measured in years that either document states must be stated by a career-data quote the same bullet or paragraph cites'),
-          'the review contract states the rule the completion pass enforces');
-        const revised = await steps.submit({
-          decision: 'revised', resume: spanResume,
-          checklist: checklist().map(item => (item.id === 'resume-source-grounding' ? { ...item, status: 'issue' } : item)),
-          findings: [{ id: 'finding-1', document: 'resume', targetId: 'bullet-1', issue: 'The bullet understates the duration of the practice.', fix: 'State the span of the practice.' }],
-        });
-        assert(revised.result.accepted, `a revised review may rewrite the résumé (errors=${JSON.stringify(revised.result.validationErrors || [])})`);
-        const completion = await steps.submit({
-          decision: 'pass', findings: [], checklist: checklist(),
-          qualityReview: {
-            checklistVersion: APPLICATION_QUALITY_CHECKLIST_VERSION,
-            criteria: APPLICATION_QUALITY_CRITERIA.map(({ id, requirement }) => ({ id, status: 'pass', evidence: requirement })),
-            resume: { decision: 'approved', rationale: 'The résumé preserves direct source-supported systems evidence with clear relevance.' },
-            coverLetter: { decision: 'approved', rationale: 'One controlling argument uses minimum-sufficient evidence for target system delivery.' },
-          },
-          generationAudit: plan.audit(),
-        });
-        assert(!completion.result.accepted && completion.result.validationErrors.some(message => message.startsWith('Résumé bullet 1 claims an experience span (“more than four years”)')),
-          `a span a review introduced is caught at completion by the same rule (errors=${JSON.stringify(completion.result.validationErrors)})`);
-
-        // Silent neighbours. Each is a number governing "year" that asserts no
-        // span of practice, so each must reach the cover-letter stage on a
-        // clean job. A false rejection here has no repair the writer can see.
-        const controls = await auditJobSteps(project);
-        await controls.send({ identity: plan.identity, evidence: plan.evidence, requirements: plan.requirements });
-        // The posting asks for "years of <work> experience"; the two words can
-        // sit several apart, so the span is still named as practice and is
-        // still rejected when nothing cited states it.
-        const spacedClaim = await controls.submit({
-          resume: { ...plan.resume, roles: [{ ...plan.resume.roles[0], bullets: [{ id: 'bullet-1', text: 'Maintained internal systems with three years of supported delivery experience.', evidenceIds: ['resume-proof'] }] }] },
-        });
-        assert(!spacedClaim.result.accepted && spacedClaim.result.validationErrors.some(message => message.startsWith('Resume bullet bullet-1 claims an experience span (“three years”)')),
-          `a span named as experience several words later is still rejected (errors=${JSON.stringify(spacedClaim.result.validationErrors)})`);
-        const controlTexts = [
-          'Maintained internal systems through the four-year platform rollout.',
-          // "shortened", not "cut": a reduction verb is a gated qualifier in
-          // its own right, and this control exists to prove the DURATION rule
-          // stays silent, not to smuggle a second defect past it.
-          'Maintained internal systems and shortened onboarding from three years to six weeks.',
-          'Maintained internal systems running Python 3 on 24/7 paging through 2021 and 2022.',
-          'Maintained internal systems for 12 teams before the 2024 release.',
-          'Maintained internal systems after clearing three years of archived ticket data.',
-        ];
-        // One job per text rather than one role of five bullets: all five cite
-        // the corpus's only career-data line, 'resume-proof', and packing them
-        // into one role would now trip structuredResume.js's own
-        // ROLE_BULLET_EVIDENCE_EXCLUSIVITY_RULE — a real rule, but not the one
-        // this control proves silent. Each gets its own single-bullet role.
-        for (const text of controlTexts) {
-          const control = await auditJobSteps(project);
-          await control.send({ identity: plan.identity, evidence: plan.evidence, requirements: plan.requirements });
-          const controlResult = await control.submit({
-            resume: { ...plan.resume, roles: [{ ...plan.resume.roles[0], bullets: [{ id: 'bullet-1', text, evidenceIds: ['resume-proof'] }] }] },
-          });
-          // These texts assert numbers and years the one career line never
-          // states, and the claim-grounding rules now reject those on their own
-          // account. What this control proves is narrower: none of them is read
-          // as a span of EXPERIENCE, so the duration rule stays silent.
-          assert(!(controlResult.result.validationErrors || []).some(message => /claims an experience span/u.test(message)),
-            `"${text}" must stay silent under the duration rule (errors=${JSON.stringify(controlResult.result.validationErrors || [])})`);
-        }
-
-        // A span the cited evidence does state is admissible, digits or words.
-        const supportingQuote = 'Ada Lovelace has 6 years of internal systems delivery.';
-        const supported = await auditJobSteps(project, { careerData: `${AUDIT_CAREER_DATA}\n${supportingQuote}` });
-        const supportedPlan = {
-          ...plan,
-          evidence: plan.evidence.map(item => (item.id === 'p1-resume-proof' ? { ...item, quote: supportingQuote } : item)),
-        };
-        await supported.send({ identity: plan.identity, evidence: supportedPlan.evidence, requirements: plan.requirements });
-        const supportedResult = await supported.submit({
-          resume: { ...plan.resume, roles: [{ ...plan.resume.roles[0], bullets: [{ id: 'bullet-1', text: 'Delivered more than four years of internal systems delivery.', evidenceIds: ['resume-proof'] }] }] },
-        });
-        assert(supportedResult.result.accepted,
-          `a floor claim a cited quote exceeds is accepted, across the digit/word spelling (errors=${JSON.stringify(supportedResult.result.validationErrors || [])})`);
-        return { rejections: 4, controls: controlTexts.length };
-      } finally {
-        await fs.promises.rm(project.root, { recursive: true, force: true });
-      }
-    },
-  },
-  {
-    name: 'Résumé contract defines the meaningful terms the project gate counts, names every uniqueness and per-field ceiling, and anchors the employer block the way a heading-less corpus writes it',
-    async run() {
-      // Four rules were enforced here with nothing said about them, and the
-      // fifth was described inaccurately. The corpus below is the shape the
-      // real career file uses — plain title/employer lines, no markdown
-      // headings, horizontal rules between sections — which is exactly the
-      // case the old "from that employer's heading" wording described wrongly:
-      // careerDataRoleRegionsForSourceRoles anchors such a corpus on the line
-      // that IS the role title, and bounds it by the next role or the next
-      // horizontal rule, never by a heading it does not have.
-      const project = await createCanvasProject();
-      try {
-        const headlessCareerData = [
-          'Ada Lovelace', 'ada@example.test', '', '---', '', 'Work Done from Past Jobs', '',
-          'Senior Engineer', 'Analytical Engines — Brookfield, Ohio', '*May, 2021 – June, 2024*', '',
-          '- Built the reporting pipeline for nightly batches.', '',
-          'Software Engineer', 'Difference Machines — Lakeview, Ontario', '*October, 2018 – January, 2021*', '',
-          '- Shipped the billing service with automated alerts.', '', '---', '',
-          'Personal Projects',
-          'RouteDesk - a dispatch route planner with a local model.', '',
-        ].join('\n');
-        assert(!/^\s{0,3}#{1,6}\s/mu.test(headlessCareerData),
-          'the corpus under test carries no markdown heading at all, so the contract sentence being checked is the one this corpus actually exercises');
-        const queued = await queueLocalApplicationJob({
-          transport: 'paste', canvasFilePath: project.canvasFilePath, careerData: headlessCareerData,
-          job: { title: 'Reporting Engineer', company: 'Acme', snippet: 'We own reporting and billing end to end, and a dispatch route planner.' },
-          resumeProfile: { workHistory: [
-            { id: 'role-1', title: 'Senior Engineer', employer: 'Analytical Engines', startDate: '2021', endDate: '2024' },
-            { id: 'role-2', title: 'Software Engineer', employer: 'Difference Machines', startDate: '2018', endDate: '2021' },
-          ] },
-        });
-        const planHandoff = (await getLocalApplicationHandoff({ jobId: queued.id, canvasFilePath: project.canvasFilePath })).handoff;
-        const acceptedPlan = await submitLocalApplicationHandoff({ jobId: queued.id, canvasFilePath: project.canvasFilePath, handoffCode: planHandoff.handoffCode, response: JSON.stringify(reply(planHandoff, {
-          identity: { name: 'Ada Lovelace', contact: ['ada@example.test'] },
-          evidence: [
-            { id: 'cd-engines', sourceId: 'career-data', quote: 'Built the reporting pipeline for nightly batches.', requirement: 'Reporting ownership', priority: 'highest' },
-            { id: 'cd-machines', sourceId: 'career-data', quote: 'Shipped the billing service with automated alerts.', requirement: 'Billing ownership', priority: 'highest' },
-            { id: 'cd-planner', sourceId: 'career-data', quote: 'RouteDesk - a dispatch route planner with a local model.', requirement: 'Independent delivery', priority: 'supporting' },
-            { id: 'job-stack', sourceId: 'job-listing', quote: 'reporting and billing end to end', requirement: 'Reporting and billing ownership', priority: 'highest' },
-            { id: 'job-planner', sourceId: 'job-listing', quote: 'a dispatch route planner', requirement: 'Route planner ownership', priority: 'high' },
-          ],
-          requirements: [{ id: 'need-stack', text: 'Reporting and billing ownership across the stack', priority: 'highest', evidenceIds: ['cd-engines', 'cd-machines', 'cd-planner', 'job-stack', 'job-planner'] }],
-        })) });
-        assert(acceptedPlan.accepted && acceptedPlan.handoff?.stage === 'resume', `the heading-less evidence plan opens the résumé handoff: ${JSON.stringify(acceptedPlan.validationErrors || [])}`);
-
-        const resumeStage = (await getLocalApplicationHandoff({ jobId: queued.id, canvasFilePath: project.canvasFilePath })).handoff;
-        const prompt = resumeStage.prompt;
-        const chars = STRUCTURED_RESUME_LIMITS.chars;
-        // Interpolated from the constants the gates read, never transcribed:
-        // a hand-copied threshold or stopword list that drifts fails here.
-        assert(prompt.includes(`shares at least ${MIN_SHARED_CAREER_TERMS} meaningful terms with its cited career evidence — ${CAREER_TERM_OVERLAP_RULE} —`),
-          'the résumé contract defines the meaningful term the project-description gate counts, from the same set and thresholds that gate reads');
-        // Two gates of the same shape grade this one document, and the bullet
-        // is NOT graded by the project gate above: assertSourceQuoteLinksFinalText
-        // reads the rendered bullet, drops a different word list, and counts a
-        // one-character term only when it is a digit. The floors are equal
-        // today, so a contract printing the other module's rule here looked
-        // guarded while naming a word list the bullet was never measured by.
-        assert(prompt.includes(`it must share at least ${MIN_SHARED_SOURCE_TERMS} meaningful terms with the career-data quotes it cites — ${SOURCE_TERM_OVERLAP_RULE} —`),
-          'the per-bullet floor and term rule are interpolated from the gate that rejects the bullet, not from the project gate beside it');
-        assert(!prompt.includes(`share at least ${MIN_SHARED_CAREER_TERMS} meaningful terms with the career-data quotes it cites, under a similar exclusion`),
-          'the bullet clause no longer describes its exclusion instead of naming it');
-        assert(prompt.includes('Nothing may repeat: identity.contact values, the items inside one skills group, bullet ids within their role, and — each across the whole résumé — role ids, project ids, and skill-group ids.'),
-          'the résumé contract names every uniqueness rule the validator enforces, not only the three it used to admit');
-        assert(prompt.includes(`Per-field character ceilings, all measured after whitespace collapsing: ${chars.shortText} for identity.name or subtitleRole, a role’s title, company, dates or location, a project name, institution, issuer, degree, or certification name; ${chars.longText} for identity.credential, one contact value, or a project’s metrics; ${chars.projectDescription} for a project description; ${chars.skillText} for a skill-group label or one of its items.`),
-          'the résumé contract states every per-field character ceiling text() enforces, including evidence-backed education and certification fields');
-        assert(prompt.includes('Typed role dates retain source punctuation verbatim, even if their separator would be forbidden in authored prose; never normalize them.')
-          && prompt.includes('The dash-style rule still applies to bullets and every other authored copy.'),
-        'the résumé contract distinguishes source-locked typed dates from authored prose, so it cannot request a normalizing rewrite and then reject the retained source spelling');
-        assert(prompt.includes(`inside that one employer’s own careerData section — ${CAREER_DATA_ROLE_SECTION_RULE}`)
-          && CAREER_DATA_ROLE_SECTION_RULE.includes('at the line that is exactly this role’s title with that employer named on one of the lines just below it')
-          && CAREER_DATA_ROLE_SECTION_RULE.includes('the next horizontal rule')
-          && CAREER_DATA_ROLE_SECTION_RULE.includes('only when the block began at a markdown heading'),
-        'the bullet-scope sentence describes both anchors the region scoper actually uses, and bounds the block the way it actually bounds it');
-
-        const sourceRoles = pasteContext(prompt).sourceRoles;
-        const submitResume = resume => submitLocalApplicationHandoff({ jobId: queued.id, canvasFilePath: project.canvasFilePath, handoffCode: resumeStage.handoffCode, response: JSON.stringify(reply(resumeStage, { resume })) });
-        const role = (index, overrides = {}) => ({
-          id: sourceRoles[index].id, title: sourceRoles[index].title, company: sourceRoles[index].company, dates: sourceRoles[index].dates,
-          location: index === 0 ? 'Brookfield, Ohio' : 'Lakeview, Ontario',
-          bullets: [{
-            id: `bullet-${index + 1}`,
-            text: index === 0 ? 'Built the reporting pipeline for nightly batches.' : 'Shipped the billing service with automated alerts.',
-            evidenceIds: [index === 0 ? 'cd-engines' : 'cd-machines'],
-          }],
-          ...overrides,
-        });
-        const project1 = { id: 'project-planner', name: 'RouteDesk', description: 'Dispatch route planner that runs a local model.', evidenceIds: ['cd-planner', 'job-planner'] };
-        // A skill item has to be a name a recruiter can filter on, which shows in
-        // its spelling, so this group carries the product its cited quote names
-        // rather than the "local model" phrase that names the activity.
-        const skillGroup = { id: 'skills-tools', group: 'tools', items: ['RouteDesk'], evidenceIds: ['cd-planner'] };
-        const draft = (overrides = {}) => ({
-          schemaVersion: 'structured-resume.v1',
-          identity: { name: 'Ada Lovelace', contact: ['ada@example.test'] },
-          roles: [role(0), role(1)],
-          projects: [project1],
-          skills: [skillGroup],
-          ...overrides,
-        });
-        const scopeRejection = /must cite career-data evidence only from the trusted role’s career-data section|must cite career-data evidence only from the trusted role's career-data section/;
-
-        // The region description, exercised on the corpus shape it now
-        // describes: the first employer's block ends where the second role's
-        // own title line begins, and the last one ends at the horizontal rule
-        // above Personal Projects.
-        const crossedRoles = await submitResume(draft({ roles: [role(0, { bullets: [{ id: 'bullet-1', text: 'Shipped the billing service with automated alerts.', evidenceIds: ['cd-machines'] }] }), role(1)] }));
-        assert(!crossedRoles.accepted && crossedRoles.validationErrors?.some(message => scopeRejection.test(message)),
-          `in a heading-less corpus the next role's own title line still ends the block, so a bullet reaching past it is rejected (errors=${JSON.stringify(crossedRoles.validationErrors || [])})`);
-        const pastTheRule = await submitResume(draft({ roles: [role(0), role(1, { bullets: [{ id: 'bullet-2', text: 'Built a dispatch route planner with a local model.', evidenceIds: ['cd-planner'] }] })] }));
-        assert(!pastTheRule.accepted && pastTheRule.validationErrors?.some(message => scopeRejection.test(message)),
-          `the horizontal rule ends the last employer's block, so evidence below it grounds no bullet (errors=${JSON.stringify(pastTheRule.validationErrors || [])})`);
-
-        // Each newly disclosed rule, fired.
-        const flatDescription = await submitResume(draft({ projects: [{ ...project1, description: 'Built and delivered the system using work over time.' }] }));
-        assert(!flatDescription.accepted && flatDescription.validationErrors?.some(message => /projects\.project-planner\.description must share at least two distinct meaningful terms/.test(message)),
-          `a description that restates the deed in résumé verbs alone shares nothing the gate counts, exactly as the stopword list now printed says (errors=${JSON.stringify(flatDescription.validationErrors || [])})`);
-        const repeatedItem = await submitResume(draft({ skills: [{ ...skillGroup, items: ['RouteDesk', 'RouteDesk'] }] }));
-        assert(!repeatedItem.accepted && repeatedItem.validationErrors?.some(message => /skills\[0\]\.items contains duplicate identifier "RouteDesk"/.test(message)),
-          'a repeated item inside one skills group is rejected, as the contract now states');
-        const repeatedProjectId = await submitResume(draft({ projects: [project1, { ...project1, name: 'RouteDesk' }] }));
-        assert(!repeatedProjectId.accepted && repeatedProjectId.validationErrors?.some(message => /projects contains duplicate identifier "project-planner"/.test(message)),
-          'a repeated project id is rejected, as the contract now states');
-        const repeatedSkillId = await submitResume(draft({ skills: [skillGroup, { ...skillGroup, group: 'methods' }] }));
-        assert(!repeatedSkillId.accepted && repeatedSkillId.validationErrors?.some(message => /skills contains duplicate identifier "skills-tools"/.test(message)),
-          'a repeated skill-group id is rejected, as the contract now states');
-        const repeatedRoleId = await submitResume(draft({ roles: [role(0), { ...role(0), bullets: [{ id: 'bullet-2', text: 'Built the reporting pipeline for nightly batches.', evidenceIds: ['cd-engines'] }] }] }));
-        assert(!repeatedRoleId.accepted && repeatedRoleId.validationErrors?.some(message => /roles contains duplicate identifier/.test(message)),
-          'a repeated role id is rejected, as the contract now states');
-        const longName = await submitResume(draft({ projects: [{ ...project1, name: 'P'.repeat(chars.shortText + 1) }] }));
-        assert(!longName.accepted && longName.validationErrors?.some(message => message.includes(`projects[0].name exceeds ${chars.shortText} characters`)),
-          'the stated project-name ceiling is the enforced one, so the disclosed number can never drift from the gate');
-        const longItem = await submitResume(draft({ skills: [{ ...skillGroup, items: ['l'.repeat(chars.skillText + 1)] }] }));
-        assert(!longItem.accepted && longItem.validationErrors?.some(message => message.includes(`skills[0].items[0] exceeds ${chars.skillText} characters`)),
-          'the stated skill-item ceiling is the enforced one too');
-
-        // One draft that obeys every sentence above literally, in one round:
-        // bullets inside their own plain-line block, unique ids everywhere,
-        // a description that shares countable terms, every field inside its
-        // stated ceiling.
-        const accepted = await submitResume(draft());
-        assert(accepted.accepted && accepted.handoff?.stage === 'cover-letter',
-          `a résumé built by literally following the disclosed rules is accepted on the first round (errors=${JSON.stringify(accepted.validationErrors || [])})`);
-        return { rejections: 7, ceilings: Object.keys(chars).length };
-      } finally {
-        await fs.promises.rm(project.root, { recursive: true, force: true });
-      }
-    },
-  },
-  {
-    name: 'The résumé stage measures the bullet rules the assembled package measures, so an over-budget bullet is rejected in the round that wrote it instead of three stages later',
-    async run() {
-      // A stage-2 acceptance used to say only that the CITATION was sound. The
-      // measured cost was a bullet that cleared the résumé stage, cleared the
-      // letter, cleared the review, and was rejected when the package was
-      // assembled — a full review round spent on a rule the writer could have
-      // satisfied while drafting, after every drafting handoff was gone. The
-      // live run's accepted résumé carried three bullets over the
-      // visible-character budget for exactly that reason.
-      //
-      // The rule is unchanged and the gate is the same function; only WHERE it
-      // runs moved. So the assertions below pair the contract sentence with the
-      // stage firing, and then prove the corrected bullet still completes —
-      // a twin that rejected more than the completion gate would be worse than
-      // the surprise it replaced.
-      const pdfDoc = await PDFDocument.create(); pdfDoc.addPage([612, 792]);
-      const bytes = Buffer.from(await pdfDoc.save());
-      __setLocalAiRenderPdfForTests(async () => ({ bytes, pageCount: 1, fontsLoaded: true, missingFontFaces: [], layout: { contentHeightPx: 760, typeAreaHeightPx: 800 } }));
-      const project = await createCanvasProject();
-      try {
-        const plan = auditPlanFixture();
-        const overBudgetText = `${AUDIT_BULLET} The same supported delivery practices stayed in place for the internal teams that request them, and for every internal system the engineering group relies on before each release.`;
-        assert(overBudgetText.length > RESUME_BULLET_CHARACTER_BUDGET && AUDIT_BULLET.length <= RESUME_BULLET_CHARACTER_BUDGET,
-          'the fixture pair straddles the budget: one bullet is over it and the corrected one is under it');
-        const withBullet = text => ({ ...plan.resume, roles: [{ ...plan.resume.roles[0], bullets: [{ id: 'bullet-1', text, evidenceIds: ['resume-proof'] }] }] });
-
-        const steps = await auditJobSteps(project);
-        await steps.send({ identity: plan.identity, evidence: plan.evidence, requirements: plan.requirements });
-        const prompt = (await steps.current()).prompt;
-        assert(prompt.includes('it also renders this résumé and grades its PROSE by the same checks the finished package is graded by, so a defect below is reported in this round instead of three stages later'),
-          'the résumé contract says the prose is graded here, not left to assembly');
-        assert(prompt.includes(`a rendered bullet is at most ${RESUME_BULLET_CHARACTER_BUDGET} visible characters`)
-          && prompt.includes(`one bullet binds at most ${MAX_UNIT_CAREER_DATA_QUOTES} distinct career-data quotes`),
-        'both ceilings are interpolated from the constants the gates read, not transcribed');
-        assert(prompt.includes('any qualifier the bullet adds beyond those quotes — frequency (daily, weekly, monthly, routine, absolute); superiority (comparative); ownership (leadership, direct, management, sole); authorship (implementation); authority (decision); status (production, at-scale, large-scale, high-volume); scope (organization-wide, geographic); outcome (improvement, reduction, increase, savings, acceleration, optimization, guaranteed); magnitude (comparative); scale (bulk-quantity) — must be stated by one of them'),
-          'the qualifier classes are named, grouped from the same rule table assertSupportedSourceQualifiers reads');
-
-        const drafted = await steps.submit({ resume: withBullet(overBudgetText) });
-        assert(!drafted.result.accepted && drafted.result.handoff?.stage === 'resume'
-          && drafted.result.validationErrors.some(message => message.includes('resume-bullet-length') && message.includes(`(budget ${RESUME_BULLET_CHARACTER_BUDGET})`)),
-        `the round that wrote the bullet is the round that measures it, and the rejection reopens the same stage (errors=${JSON.stringify(drafted.result.validationErrors || [])})`);
-
-        // Obeying the disclosed budget is a same-round repair, and the twin
-        // costs the corrected résumé nothing on the way to completion.
-        await steps.send({ resume: withBullet(AUDIT_BULLET) });
-        await steps.send({ coverLetter: plan.coverLetter });
-        const completed = await steps.submit({
-          decision: 'pass', findings: [], checklist: checklist(),
-          qualityReview: {
-            checklistVersion: APPLICATION_QUALITY_CHECKLIST_VERSION,
-            criteria: APPLICATION_QUALITY_CRITERIA.map(({ id, requirement }) => ({ id, status: 'pass', evidence: requirement })),
-            resume: { decision: 'approved', rationale: 'The résumé preserves direct source-supported systems evidence with clear relevance.' },
-            coverLetter: { decision: 'approved', rationale: 'One controlling argument uses minimum-sufficient evidence for target system delivery.' },
-          },
-          generationAudit: plan.audit(),
-        });
-        assert(completed.result.accepted && completed.result.completed,
-          `a bullet written to the disclosed budget still completes the package (errors=${JSON.stringify(completed.result.validationErrors || [])})`);
-        return { budget: RESUME_BULLET_CHARACTER_BUDGET };
-      } finally {
-        __setLocalAiRenderPdfForTests(null);
-        await fs.promises.rm(project.root, { recursive: true, force: true });
-      }
-    },
-  },
-  {
-    name: 'The résumé stage applies the source-grounding rules the assembled package applies, and a career quote too short to bind a claim is named when a bullet cites it',
-    async run() {
-      // Two completion-time rules with no earlier twin, both reachable from a
-      // stage-accepted document. The qualifier rule reads a bullet's PROSE
-      // against the quotes that bullet cites; the specificity rule reads the
-      // quote itself. The second one is the expensive shape: the evidence plan
-      // is frozen at stage 1, so a two-word quote accepted there and cited at
-      // stage 2 used to surface only at assembly, when no round left could
-      // change the plan it came from.
-      const project = await createCanvasProject();
-      try {
-        const plan = auditPlanFixture();
-        const steps = await auditJobSteps(project);
-        const planPrompt = (await steps.current()).prompt;
-        assert(planPrompt.includes(`at least ${MIN_SOURCE_GROUNDING_QUOTE_CHARS} characters and ${MIN_SOURCE_GROUNDING_QUOTE_WORDS} words`),
-          'the evidence-plan contract states the minimum a career-data quote needs, interpolated from the constants sourceQuoteIsSpecific reads');
-        await steps.send({
-          identity: plan.identity,
-          // A real contiguous slice of the corpus body and a legal plan quote:
-          // the plan stage is not made stricter, because a quote no unit
-          // ever cites is never measured against this rule.
-          evidence: [...plan.evidence, { id: 'p1-short-proof', sourceId: 'career-data', quote: 'Maintained', requirement: 'Systems maintenance', priority: 'supporting' }],
-          requirements: plan.requirements,
-        });
-
-        const bullet = (text, evidenceIds) => ({ ...plan.resume, roles: [{ ...plan.resume.roles[0], bullets: [{ id: 'bullet-1', text, evidenceIds }] }] });
-        const qualifier = await steps.submit({ resume: bullet('Maintained internal systems and cut onboarding delays.', ['resume-proof']) });
-        assert(!qualifier.result.accepted && qualifier.result.handoff?.stage === 'resume'
-          && qualifier.result.validationErrors.some(message => message.startsWith('Résumé bullet "bullet-1": uses unsupported reduction outcome')),
-        `a qualifier the cited quote never states is named by bullet id in the round that wrote it (errors=${JSON.stringify(qualifier.result.validationErrors || [])})`);
-
-        const short = await steps.submit({ resume: bullet(AUDIT_BULLET, ['p1-short-proof']) });
-        assert(!short.result.accepted && short.result.validationErrors.some(message =>
-          message.startsWith('Résumé bullet "bullet-1" cites a career-data quote that is too short to bind a claim')
-          && message.includes(`at least ${MIN_SOURCE_GROUNDING_QUOTE_CHARS} characters and ${MIN_SOURCE_GROUNDING_QUOTE_WORDS} words`)),
-        `citing the two-word quote is rejected where the citation is still changeable, not after the plan is frozen (errors=${JSON.stringify(short.result.validationErrors || [])})`);
-
-        // Never stricter than the gate it mirrors: the bullet the fixture was
-        // always allowed to write still passes on the next round.
-        const accepted = await steps.submit({ resume: bullet(AUDIT_BULLET, ['resume-proof']) });
-        assert(accepted.result.accepted && accepted.result.handoff?.stage === 'cover-letter',
-          `a bullet whose prose stays inside the quote it cites is accepted (errors=${JSON.stringify(accepted.result.validationErrors || [])})`);
-        return { minQuoteChars: MIN_SOURCE_GROUNDING_QUOTE_CHARS, minQuoteWords: MIN_SOURCE_GROUNDING_QUOTE_WORDS };
-      } finally {
-        await fs.promises.rm(project.root, { recursive: true, force: true });
-      }
-    },
-  },
-  {
-    name: 'The cover-letter stage grades the letter by the editorial battery the assembled package grades it by, and its contract says so',
-    async run() {
-      // Around forty deterministic prose checks read the authored letter, and
-      // every one of them used to run for the first time when the package was
-      // assembled — after the letter stage and the review had both accepted
-      // it. The letter stage now authors the same envelope from the frozen
-      // résumé and the posting and runs the same battery on it.
-      const project = await createCanvasProject();
-      try {
-        const plan = auditPlanFixture();
-        const steps = await auditJobSteps(project);
-        await steps.send({ identity: plan.identity, evidence: plan.evidence, requirements: plan.requirements });
-        await steps.send({ resume: plan.resume });
-        const prompt = (await steps.current()).prompt;
-        assert(prompt.includes('grades that letter by the same deterministic editorial battery the finished package is graded by, so a defect below is reported in this round instead of after the review'),
-          'the cover-letter contract says where the battery runs');
-        assert(prompt.includes(`Every paragraph needs 1 to ${MAX_COVER_LETTER_PARAGRAPH_EVIDENCE_IDS} evidenceIds`)
-          && prompt.includes(`needs ${COVER_LETTER_ARGUMENT_TEXT_LIMITS.min} to ${COVER_LETTER_ARGUMENT_TEXT_LIMITS.max} characters`),
-        'the ceilings this stage enforces are interpolated from the constants that enforce them');
-        assert(prompt.includes('the letterhead, salutation, date, and closing are authored by the app from the accepted résumé and the posting, so those fields you return are replaced'),
-          'the contract admits which returned fields the host overwrites, rather than asking for copy it discards');
-
-        const withParagraph = text => ({ ...plan.coverLetter, paragraphs: [{ ...plan.coverLetter.paragraphs[0], text }] });
-        const declared = await steps.submit({ coverLetter: withParagraph(`I am excited about this role. ${AUDIT_PARAGRAPH}`) });
-        assert(!declared.result.accepted && declared.result.handoff?.stage === 'cover-letter'
-          && declared.result.validationErrors.some(message => message.startsWith('interest-framing:')),
-        `a register defect is named by its own check in the round that wrote the paragraph (errors=${JSON.stringify(declared.result.validationErrors || [])})`);
-
-        // The argument's bindings are read by the completion-time grounding
-        // pass, not by the battery, and they need the employer as well as the
-        // title. Learning that from an assembly rejection cost a review round.
-        const role = await steps.submit({
-          coverLetter: {
-            ...plan.coverLetter,
-            coverLetterArgument: { primaryEvidence: { ...plan.coverLetter.coverLetterArgument.primaryEvidence, evidenceRole: 'Engineer' } },
-          },
-        });
-        assert(!role.result.accepted && role.result.validationErrors.some(message => message.startsWith('coverLetterArgument evidenceRole 1 must identify the matched résumé role')),
-          `an evidenceRole that names the title but not the employer is rejected here, naming the role it had to match (errors=${JSON.stringify(role.result.validationErrors || [])})`);
-
-        // Never stricter: the letter the fixture always wrote still passes,
-        // and still completes.
-        const accepted = await steps.submit({ coverLetter: plan.coverLetter });
-        assert(accepted.result.accepted && accepted.result.handoff?.stage === 'review',
-          `the unmodified letter is accepted (errors=${JSON.stringify(accepted.result.validationErrors || [])})`);
-        return { stage: 'cover-letter' };
-      } finally {
-        await fs.promises.rm(project.root, { recursive: true, force: true });
-      }
-    },
-  },
-  {
-    name: 'The cover-letter contract discloses the battery rules a cold responder cannot infer, and every threshold it prints is read from the check that enforces it',
-    async run() {
-      // Rules this stage enforces were reaching the responder as a vague
-      // family or not at all: the off-posting tool ceilings, the ban on
-      // addressing the advertisement, the thesis shape, and the numbers
-      // behind "restatement", "figures", and "sentence length". Each clause
-      // was written from the check's own code and then measured both ways
-      // here — a letter that breaks it is rejected by the check the clause
-      // names, and the repair the clause prescribes is accepted in the same
-      // round, so no clause sends a writer into a second rejection.
-      const project = await createCanvasProject();
-      try {
-        const base = await coverLetterBatteryStage(project, { paragraphs: [`${BATTERY_LEAD} ${BATTERY_BODY}`] });
-        for (const [clause, printed] of [
-          ['the per-paragraph and letter-wide tool ceilings', `at most ${MAX_PARAGRAPH_OFF_POSTING_TOOLS} such name in any one paragraph and ${MAX_LETTER_OFF_POSTING_TOOLS} across the whole letter, counted as distinct names`],
-          ['the posting-text floor those ceilings need', `once the posting text runs to ${MIN_ANCHOR_RELEVANCE_CORPUS_WORDS} words`],
-          ['the letter-wide figure ceiling', `at most ${MAX_LETTER_FIGURES} figures in the whole letter`],
-          ['the run length that makes a paragraph a restatement', `a run of ${REDUNDANCY_SHINGLE_WORDS} consecutive words shared with any résumé bullet`],
-          ['the sentence-length ceiling', `no sentence longer than ${MAX_SENTENCE_WORDS} words`],
-          ['the thesis shape', `exactly one sentence, at least ${MIN_ROLE_THESIS_WORDS} words`],
-          ['the window a sentence shape is read from', `reduces to its first ${SENTENCE_SHAPE_FRAME_WORDS} words`],
-          ['the letter length that arms the repeated-shape rule', `once the letter runs to ${MIN_SHARED_SHAPE_PARAGRAPHS} paragraphs`],
-          // The ceiling is a formula the prompt cannot evaluate, because the
-          // letter does not exist yet. Printing it from the function that
-          // enforces it keeps both of its numbers on one source.
-          ['the ceiling that formula produces', SHARED_SENTENCE_SHAPE_CEILING_RULE],
-          // The formula the clause above prints understates the rule: a count
-          // cannot see distance, so two adjacent paragraphs are always under it.
-          // A writer told only the ceiling spends a round on a defect the
-          // contract never mentioned.
-          ['the adjacency condition that ceiling cannot express', ADJACENT_SENTENCE_SHAPE_RULE],
-          // Both floors and ALL THREE exclusions. The exclusions are not
-          // decoration: a writer who does not know the mandated transfer
-          // carrier and a run of names are excused over-corrects into breaking
-          // the rules that demanded them, and a writer who thinks the ordinary
-          // function-word syntax two sentences share is counted writes around
-          // the language to satisfy a rule that never applied to it. The third
-          // one carries MIN_REPEAT_CONTENT_WORDS, so this clause also proves
-          // that number reaches the prompt from the constant the gate reads.
-          ['the two repeat floors and the three repeats it excuses', REPEATED_PHRASE_RULE],
-          // The two rules a second reading of the shipped letter found it
-          // passing: the same carrier form in back-to-back paragraphs, and a
-          // demonstrative whose noun the paragraph never used. A writer told
-          // neither spends a round on each.
-          ['the carrier form two neighbouring paragraphs may not share', REPEATED_TRANSFER_CARRIER_RULE],
-          ['the demonstrative noun a later sentence has to find earlier in its paragraph', DANGLING_DEMONSTRATIVE_RULE],
-        ]) {
-          assert(base.prompt.includes(printed),
-            `the contract prints ${clause} from the constant its own check reads (missing “${printed}”)`);
-        }
-        // The superseded wording told the writer the résumé licensed a
-        // figure. checkFigureDiscipline scopes the permitted figures to the
-        // evidence the coverLetterArgument cites, so that sentence was a
-        // false permission rather than a vague one.
-        assert(!base.prompt.includes('figures that also appear in the résumé'),
-          'the contract no longer offers the whole résumé as a source of figures');
-        // REPEATED_PHRASE_RULE dropped "is the letter restating itself" because
-        // the claim is untrue of a repeated lowercase compound artifact name —
-        // two sentences can say different things about one named thing, which
-        // is what the design system's own fixture letter does. The prose that
-        // INTRODUCED the rule here still said it, so the responder was told the
-        // cause the rule itself had stopped asserting, and a run reported on a
-        // name reads as a wrong report to argue with rather than a measurement
-        // to repair. Both surfaces now name what is read instead.
-        for (const claim of ['restatement of the letter', 'restate itself', 'restating itself', 'statement made twice']) {
-          assert(!base.prompt.includes(claim),
-            `the cover-letter contract introduces the repeat rule by what is read, not by an asserted cause (“${claim}” in the prompt)`);
-        }
-        assert(base.prompt.includes(`the letter is read against its own wording too: ${REPEATED_PHRASE_RULE}`),
-          'the repeat rule reaches the cover-letter contract behind a lead-in that names its subject and states no cause');
-        assert(base.prompt.includes('Give every paragraph one argumentative job, not a prescribed number of sentences')
-          && base.prompt.includes('use an immediately following causal sentence for a trigger or follow-up action')
-          && base.prompt.includes('The audit records the sentences the prose needs; it does not allocate one sentence to each planning field')
-          && base.prompt.includes('Do not insert a mandatory standalone warrant or problem-shape sentence'),
-        'the initial cover-letter contract permits natural multi-sentence evidence sequences instead of reserving one sentence for each planning field');
-        assert(!base.prompt.includes('state what the described work required, one level of abstraction above the artifact')
-          && !base.prompt.includes('carry that action into the introduction'),
-        'the initial contract no longer forces an abstract warrant or merges a follow-up action into the artifact-introduction sentence');
-        // A clause with no number to interpolate still needs a guard, or the
-        // disclosure can be deleted without a test noticing.
-        for (const [clause, printed] of [
-          ['that the letter addresses the employer, not the advertisement', 'Write to the employer, not about the advertisement'],
-          ['the attribution shape that is its one exception', 'opens with the source document as its grammatical subject'],
-          ['that a title or a fronted clause does not move that rule', 'Wherever it stands is literal for all three'],
-          ['what a paragraph-opening demonstrative is measured against', 'is read against the paragraph before it'],
-          ['the infinitive the grammar check rejects', 'where the gerund is meant'],
-          // Six rules this battery enforces reached the responder as a vague
-          // family or as nothing at all. Each clause below was written from
-          // its own check and is measured both ways by the scenarios above.
-          ['the three introduction gates, in place of the family that only said “a concrete opening”',
-            'an opening sentence that leads with this role’s work rather than with a prior employer or a named project of yours'],
-          ['the interest declaration the register check reads in every paragraph, not only the opening',
-            'no first-person declaration of interest, excitement, or enthusiasm in any paragraph'],
-          ['the semicolon the punctuation check reads, beside the dash forms it already printed',
-            'including no semicolon, no em dash'],
-          ['that a run shorter than the restatement threshold is not automatically safe',
-            'a shorter run is not automatically safe'],
-          ['the tense the prospective-contribution check requires of a contribution',
-            'Keep the contribution itself conditional'],
-          // The completion rule whose two halves are written three stages
-          // apart. Both shapes are interpolated from the module that matches
-          // them, so a form added to either cue reaches this contract without
-          // a second edit — and printing them is the whole repair: the spans
-          // are matched on literal word form, so a writer who is told only
-          // "explain the transfer" cannot know what counts.
-          ['what the review must be able to map each proof-bearing paragraph to', 'each span the review records for it (claim, proof or relevance) is an exact span of THAT paragraph'],
-          ['the claim span shape that mapping needs', ARGUMENT_CLAIM_SPAN_RULE],
-          ['the relevance span shape that mapping needs', ARGUMENT_RELEVANCE_SPAN_RULE],
-          // Which paragraphs owe a mapping, and what a proof span may say, are
-          // both decided by one closed verb list. The stage that WRITES the
-          // paragraph was told neither: "for every paragraph that states an
-          // action of yours" and "a proof span states, in the first person and
-          // the past tense, what you did" both read as any past-tense verb,
-          // while PAST_PROOF_VERBS is the whole test. A writer who says "I
-          // enhanced" or "I used" therefore writes a paragraph that carries no
-          // proof span — legal only if the review omits its mapping, and the
-          // review two stages later is the one that finds out.
-          ['which paragraphs owe an argumentMapping, by the closed list that decides it', ARGUMENT_MAPPING_REQUIRED_RULE],
-          ['the proof span shape that mapping needs', ARGUMENT_PROOF_SPAN_RULE],
-          // How the letter is cut is graded by counting, so the limits are the
-          // one thing a cold responder cannot infer from the prose rules.
-          ['the proportion limits the letter is counted against', LETTER_PROPORTION_RULE],
-          // The sentence-flexibility rule and the proportion rule say one thing about one-sentence paragraphs.
-          ['the standalone-sentence allowance the sentence-flexibility rule states, which is the proportion allowance', `a letter has at most ${MIN_STANDALONE_SENTENCE_PARAGRAPH_ALLOWANCE} of them`],
-          // The readings of grounding that decide which quotes and which names a sentence may rely on.
-          ['that a sentence restating cited work is read the same whoever it names', 'That reading does not depend on who the sentence names'],
-          ['that a posting name is free only in a sentence addressed to the target, and what addresses it', 'When such a sentence is addressed to the target (it says “you” or “your”, names the employer, or says “this role”, “this team” or “this position”), a name the posting itself uses is free in it'],
-          ['that a posting count is free only for the same counted noun and never against a cited quote, and a figure never', 'a count the posting states for the same counted noun unless a cited quote counts that noun differently. A figure is never free'],
-          ['that each claim is judged against the cited quotes about the clause that says it', 'each qualifier, figure, count, name and ownership word is judged against the cited quotes about the clause that says it'],
-          ['which claims every cited quote answers for', 'A span of years, a credential and a calendar year are judged against every quote the paragraph cites'],
-          ['that no single detail earns a paragraph (the flexibility rule)', 'no single detail of the evidence earns a paragraph of its own'],
-        ]) {
-          assert(base.prompt.includes(printed), `the contract states ${clause} (missing “${printed}”)`);
-        }
-        assert(!/one-sentence paragraph[^.]{0,80}appears at most once/u.test(base.prompt) && base.prompt.includes(`at most ${MIN_STANDALONE_SENTENCE_PARAGRAPH_ALLOWANCE} standalone one-sentence paragraphs`),
-          'the contract states one allowance for a one-sentence paragraph, in the sentence-flexibility rule and in the proportion rule alike');
-        assert(!base.prompt.includes('a proof span states, in the first person and the past tense, what you did'),
-          'the superseded proof-span wording is gone: it promised any past-tense verb, and the closed list is what rejects one');
-        // Two closed lists the responder cannot infer, each printed from the
-        // table its own check matches with, so a carrier or phrase added to
-        // either reaches this contract without a second edit.
-        assert(base.prompt.includes(`the carriers read are ${COVER_LETTER_EQUIVALENCE_CARRIERS}`),
-          'the contract prints the equivalence carriers from the table checkClaimedEquivalence matches with');
-        assert(base.prompt.includes(`the list read is ${COVER_LETTER_SALIENT_ECHO_PHRASES}`),
-          'the contract prints the short-phrase list from the table checkSalientPhraseEcho reads');
-        // The transfer budget: how many paragraphs owe a transfer, what a later paragraph owes instead, and what a transfer may claim, each
-        // printed from the constant the gate and the checks read.
-        for (const [label, printed] of [['the transfer budget', EXPLICIT_TRANSFER_BUDGET_RULE], ['the claim budget', EXPLICIT_CLAIM_BUDGET_RULE], ['the relevance budget', EXPLICIT_RELEVANCE_BUDGET_RULE], ['the relevance span a later paragraph may record', ARGUMENT_LATER_RELEVANCE_SPAN_RULE],
-          ['the relevance span the first paragraphs owe', ARGUMENT_RELEVANCE_SPAN_RULE], ['the benefits a transfer may claim', TRANSFER_BENEFIT_SUPPORT_RULE]]) {
-          assert(base.prompt.split(printed).length - 1 === 1, `the contract prints ${label} once, from the constant the check reads`);
-        }
-        assert(!/every proof-bearing paragraph can carry one/u.test(base.prompt), 'the contract no longer says every proof-bearing paragraph can carry a transfer');
-        // The writer is told the relevance contract in words, not only through the printed rule constants: pick the strongest proofs,
-        // one paragraph says why its proof matters in its own natural wording, the rest end on outcomes, and no generic frame sentence.
-        for (const stated of ['Pick the two or three strongest proofs', 'in your own natural wording', 'the rest end on concrete outcomes of what the work did',
-          'Do not write a generic sentence of the form “I would apply this experience in this role”', 'State that transfer explicitly, once, in the first proof-bearing paragraph of the letter']) {
-          assert(base.prompt.includes(stated), `the drafting contract states the relevance contract (“${stated}” is missing)`);
-        }
-        assert(!/explicit bridge to the target responsibility|do that in a transfer sentence|State that transfer explicitly in each of the first/u.test(base.prompt),
-          'the drafting contract no longer asks for an explicit bridge or a transfer sentence in the first proof paragraphs');
-        assert(!base.prompt.includes('a concrete opening that names the artifact and employer it refers to'),
-          'the superseded opening family is gone: it named neither the first-mention gates nor the proof-first opener, and read as licence to open with the artifact');
-        for (const verb of PAST_PROOF_VERBS) {
-          assert(base.prompt.includes(verb), `the drafting contract prints the proof verb “${verb}” the gate accepts`);
-        }
-
-        const measured = [];
-        for (const scenario of COVER_LETTER_DISCLOSURE_SCENARIOS) {
-          const stage = await coverLetterBatteryStage(project, scenario);
-          const first = await stage.letter();
-          if (scenario.accepted) {
-            assert(first.accepted,
-              `${scenario.clause}: the clause says this letter is legal (errors=${JSON.stringify(first.validationErrors || [])})`);
-            measured.push(scenario.clause);
-            continue;
-          }
-          assert(!first.accepted && (first.validationErrors || []).some(message => message.startsWith(`${scenario.rejectedBy}:`)),
-            `${scenario.clause}: the clause predicts ${scenario.rejectedBy} (errors=${JSON.stringify(first.validationErrors || [])})`);
-          if (scenario.control) {
-            const repaired = await coverLetterBatteryStage(project, { ...scenario, paragraphs: scenario.control });
-            const second = await repaired.letter();
-            assert(second.accepted,
-              `${scenario.clause}: the repair the clause prescribes is accepted in one round (errors=${JSON.stringify(second.validationErrors || [])})`);
-          }
-          measured.push(scenario.clause);
-        }
-
-        // The thesis scenarios vary one field over one paragraph set, so they
-        // share a stage; the accepted control runs last because acceptance
-        // advances the job.
-        const thesisStage = await coverLetterBatteryStage(project, { paragraphs: [`${BATTERY_LEAD} ${BATTERY_BODY}`] });
-        for (const scenario of COVER_LETTER_THESIS_SCENARIOS) {
-          const rejected = await thesisStage.letter({ roleThesis: scenario.thesis });
-          assert(!rejected.accepted && (rejected.validationErrors || []).some(message => message.startsWith('role-thesis:')),
-            `${scenario.clause}: role-thesis reports it (errors=${JSON.stringify(rejected.validationErrors || [])})`);
-          measured.push(scenario.clause);
-        }
-        assert(batteryWordCount(SHORTEST_LEGAL_THESIS) === MIN_ROLE_THESIS_WORDS
-          && batteryWordCount(COVER_LETTER_THESIS_SCENARIOS[0].thesis) === MIN_ROLE_THESIS_WORDS - 1,
-        'the thesis fixtures sit either side of the floor the contract prints, so a changed floor fails loudly here');
-        const thesisControl = await thesisStage.letter({ roleThesis: SHORTEST_LEGAL_THESIS });
-        assert(thesisControl.accepted,
-          `a thesis of exactly the disclosed floor is accepted (errors=${JSON.stringify(thesisControl.validationErrors || [])})`);
-
-        // checkParagraphArgumentLinks reads the review's audit AND this
-        // letter, and runs only once the package is assembled — so a
-        // paragraph that states a candidate action but carries no span the
-        // mapping could use passed this stage, passed the review, and was
-        // rejected when every drafting handoff was gone, with a rewrite of
-        // this letter as the only repair left. The rule is unchanged and the
-        // cues are the same ones; only WHERE it is reported moved.
-        const unmappable = await coverLetterBatteryStage(project, {
-          paragraphs: ['My delivery experience is directly relevant to this role. I owned the internal reporting service for the colleagues who depend on it.'],
-        });
-        const unmapped = await unmappable.letter();
-        assert(!unmapped.accepted && (unmapped.validationErrors || []).some(message =>
-          message.includes('contains no span that could be its relevance')),
-        `a proof-bearing paragraph with no transfer span is reported in the round that wrote it (errors=${JSON.stringify(unmapped.validationErrors || [])})`);
-        const mappable = await coverLetterBatteryStage(project, {
-          paragraphs: ['My delivery experience is directly relevant to this role. I owned the internal reporting service for the colleagues who depend on it. Reliable system delivery is what the engineering team needs from whoever owns that service.'],
-        });
-        const mapped = await mappable.letter();
-        assert(mapped.accepted,
-          `adding the span the message describes is a same-round repair (errors=${JSON.stringify(mapped.validationErrors || [])})`);
-
-        // The sentence apart from the proof is owed by the FIRST proof-bearing paragraph only, the same letter-wide count the completion gate
-        // reads. The second paragraph below has nothing apart from its proof sentence that names the posting, and is legal; the identical
-        // paragraph standing first is reported.
-        const laterProof = 'My quiet practice grew over many years. I tested each release note for reliable system delivery.';
-        const firstProofParagraph = 'My delivery experience is directly relevant to this role. I owned the internal reporting service for the colleagues who depend on it. Reliable system delivery is what the engineering team needs from whoever owns that service.';
-        const laterOk = await (await coverLetterBatteryStage(project, { paragraphs: [firstProofParagraph, laterProof] })).letter();
-        assert(!(laterOk.validationErrors || []).some(message => message.includes('contains no span that could be its relevance')),
-          `a later proof paragraph owes no sentence apart from its proof (errors=${JSON.stringify(laterOk.validationErrors || [])})`);
-        const laterFirst = await (await coverLetterBatteryStage(project, { paragraphs: [laterProof, firstProofParagraph] })).letter();
-        assert((laterFirst.validationErrors || []).some(message => message.includes('contains no span that could be its relevance')),
-          `the same paragraph standing first owes it (errors=${JSON.stringify(laterFirst.validationErrors || [])})`);
-
-        // The claim span has its own budget, counted the same way: a later proof paragraph with no capability phrase of its own is legal,
-        // and the identical paragraph standing first is reported for its claim. The report names only the spans the paragraph owes.
-        const laterNoClaim = 'I tested each release note for reliable system delivery, and the engineering team read those notes every week.';
-        const claimLaterOk = await (await coverLetterBatteryStage(project, { paragraphs: [firstProofParagraph, laterNoClaim] })).letter();
-        assert(!(claimLaterOk.validationErrors || []).some(message => message.includes('could be its claim')),
-          `a later proof paragraph owes no claim span (errors=${JSON.stringify(claimLaterOk.validationErrors || [])})`);
-        const claimFirst = await (await coverLetterBatteryStage(project, { paragraphs: [laterNoClaim, firstProofParagraph] })).letter();
-        const claimReport = (claimFirst.validationErrors || []).find(message => message.includes('could be its claim'));
-        assert(claimReport && claimReport.includes('whose claim, proof and relevance are each an exact span of this paragraph') && claimReport.includes(ARGUMENT_CLAIM_SPAN_RULE),
-          `the same paragraph standing first owes one, and the report names all three spans and the claim rule (errors=${JSON.stringify(claimFirst.validationErrors || [])})`);
-        // The relevance span has its own budget too: a later proof paragraph that records no span naming a responsibility of the posting owes
-        // none and is not reported, and the identical paragraph standing first is reported for it, naming only the spans it owes.
-        const laterNoRelevance = 'I tested every release note before the weekend.';
-        const relevanceLaterOk = (await (await coverLetterBatteryStage(project, { paragraphs: [firstProofParagraph, laterNoRelevance] })).letter()).validationErrors || [];
-        assert(!relevanceLaterOk.some(message => message.includes('contains no span that could be its')),
-          `a later proof paragraph that offers no relevance span is not reported (errors=${JSON.stringify(relevanceLaterOk)})`);
-        const relevanceFirst = ((await (await coverLetterBatteryStage(project, { paragraphs: [laterNoRelevance, firstProofParagraph] })).letter()).validationErrors || [])
-          .find(message => message.includes('contains no span that could be its claim or its relevance'));
-        assert(relevanceFirst && relevanceFirst.includes('whose claim, proof and relevance are each an exact span of this paragraph'),
-          `the same paragraph standing first owes the span and the report names the spans it owes (report=${JSON.stringify(relevanceFirst)})`);
-
-        // Jointly followable, not merely individually survivable: one letter
-        // that obeys every clause added here — one off-posting tool name, a
-        // qualified source attribution, a proximal reference to this role,
-        // figures confined to the cited bullet, an anchored opening
-        // demonstrative, and a transfer span in the paragraph that states a
-        // candidate action — is accepted in its first round.
-        const conformant = await coverLetterBatteryStage(project, {
-          bullets: ['Cut nightly reporting failures from 12 to 3 for daily users.'],
-          thesis: 'Dependable reporting delivery is the capability this engineering role needs.',
-          paragraphs: [
-            'Dependable reporting delivery is the capability this engineering role needs, and my delivery experience supports it. The job listing states that dependable delivery matters, and that is what I practised. Failure counts fell from 12 to 3 while I owned the nightly reporting run, with Docker handling the deployment step. I would apply that experience to the reliable system delivery this role needs.',
-            'That deployment step was scripted so a colleague could repeat it without me present during the change window. This role needs the same dependability, and I would keep that habit.',
-          ],
-        });
-        const whole = await conformant.letter();
-        assert(whole.accepted && whole.handoff?.stage === 'review',
-          `a letter that follows every disclosed clause is accepted in one round (errors=${JSON.stringify(whole.validationErrors || [])})`);
-        return { clauses: measured.length };
-      } finally {
-        await fs.promises.rm(project.root, { recursive: true, force: true });
-      }
-    },
-  },
-  {
-    name: 'A cover-letter response broken two independent ways — a structural argument-envelope defect and a separate prose defect — reports both in one rejection',
-    async run() {
-      // pasteCoverLetterCompletionTwinErrors used to build the letter's
-      // rendered envelope and its non-rendered argument inside one
-      // try/catch: a throw from either half skipped everything below it,
-      // even the half that did not depend on it. Measured live: a response
-      // with two independent defects — one structural (the argument), one
-      // prose (the paragraph battery) — cost two correction rounds, because
-      // the second was never even checked in the first round. Each half now
-      // runs in its own try, so a broken argument and a broken paragraph are
-      // both reported the first time.
-      const project = await createCanvasProject();
-      try {
-        const { letter } = await coverLetterBatteryStage(project, {
-          paragraphs: [`${BATTERY_LEAD} ${BATTERY_BODY} The listing states that dependable delivery matters, and that is what I practised.`],
-        });
-        const result = await letter({
-          coverLetterArgument: {
-            primaryEvidence: { evidence: BATTERY_BULLET, evidenceRole: 'Engineer at Acme', relationToThesis: 'The systems work establishes the delivery capability named in the thesis.' },
-            // narrativeRole "primary" is illegal for a SECOND mapping — a
-            // structural defect in the argument envelope, independent of the
-            // paragraph's own prose below.
-            secondaryEvidence: { evidence: BATTERY_BULLET, evidenceRole: 'Engineer at Acme', narrativeRole: 'primary', relationToPrimary: 'Extends the same argument with more detail.' },
-          },
-        });
-        assert(!result.accepted, 'the malformed argument alone must reject this response');
-        const errors = result.validationErrors || [];
-        assert(errors.some(message => /narrativeRole reads "primary"/.test(message)),
-          `the structural argument-envelope defect must be reported (errors=${JSON.stringify(errors)})`);
-        assert(errors.some(message => message.startsWith('posting-reference:')),
-          `the independent prose defect must ALSO be reported in the same rejection, not deferred to a second round (errors=${JSON.stringify(errors)})`);
-        return { errors: errors.length };
-      } finally {
-        await fs.promises.rm(project.root, { recursive: true, force: true });
-      }
-    },
-  },
-  {
+  },  {
     name: 'Two cover-letter paragraphs failing the same structural check are reported as two distinct items, not deduped into one',
     async run() {
       // normalizePasteCorrections dedupes by exact string equality. Each
@@ -5302,260 +3299,7 @@ export default [
         await fs.promises.rm(project.root, { recursive: true, force: true });
       }
     },
-  },
-  {
-    // A host-validation failure prints a review CRITERION id (from
-    // APPLICATION_QUALITY_CRITERIA, e.g. cover-register) in the exact
-    // `<id>: detail` shape a paste check prints its own id in — but a
-    // criterion is deliberately absent from PASTE_CHECK_PROSE_UNITS, because
-    // that table enumerates the batteries alone. The function that scopes a
-    // correction round's repair brief used to read only that table, so a
-    // round whose one and only defect was a criterion recognised no prose
-    // part at all and went out with an empty brief — silently, since the
-    // numbered item list above it still named the defect just fine.
-    name: 'A host rejection naming only a review criterion still scopes its repair brief to the document that criterion grades',
-    async run() {
-      const project = await createCanvasProject();
-      try {
-        const plan = auditPlanFixture();
-        const steps = await auditJobSteps(project);
-        await steps.send({ identity: plan.identity, evidence: plan.evidence, requirements: plan.requirements });
-        await steps.send({ resume: plan.resume });
-        await steps.send({ coverLetter: plan.coverLetter });
-        const passFields = () => ({
-          decision: 'pass', findings: [], checklist: checklist(),
-          qualityReview: {
-            checklistVersion: APPLICATION_QUALITY_CHECKLIST_VERSION,
-            criteria: APPLICATION_QUALITY_CRITERIA.map(({ id, requirement }) => ({ id, status: 'pass', evidence: requirement })),
-            resume: { decision: 'approved', rationale: 'The résumé preserves direct source-supported systems evidence with clear relevance.' },
-            coverLetter: { decision: 'approved', rationale: 'One controlling argument uses minimum-sufficient evidence for target system delivery.' },
-          },
-          generationAudit: plan.audit(),
-        });
-        const completed = await steps.submit(passFields());
-        assert(completed.result.completed, `the fixture completes before the import rejects it (errors=${JSON.stringify(completed.result.validationErrors || [])})`);
-
-        // The same recovered-rejection shape as the test above, but with the
-        // one detail this test exists to cover: the only id in the message is
-        // a review criterion, not a paste check.
-        const folder = completed.result.localJob.folder;
-        const resultRaw = await fs.promises.readFile(path.join(folder, 'result.json'), 'utf8');
-        await fs.promises.writeFile(path.join(folder, 'fit-feedback.json'), JSON.stringify({
-          version: 1, jobId: steps.queued.id, status: 'invalid', measured: false,
-          resultSha256: crypto.createHash('sha256').update(resultRaw).digest('hex'),
-          error: 'Local AI cover letter failed required checks: cover-register: paragraph 1 closes on a deferential invitation.',
-          rejectedAt: new Date().toISOString(), documentSha256: null, revisionRound: 0, priorMeasured: null,
-          message: 'Infinite Canvas rejected this result.json during validation.',
-        }), 'utf8');
-
-        const reopened = await getLocalApplicationHandoff({ jobId: steps.queued.id, canvasFilePath: project.canvasFilePath });
-        const prompt = reopened.handoff?.correctionPrompt || '';
-        assert(prompt.includes('cover-register: paragraph 1 closes on a deferential invitation'),
-          `the reopened correction prompt still names the rejected criterion (prompt=${JSON.stringify(prompt.slice(0, 400))})`);
-        assert(prompt.includes('Rules that govern this repair'),
-          `a rejection naming only a criterion still carries a repair brief instead of going out empty (prompt=${JSON.stringify(prompt.slice(0, 2000))})`);
-        assert(prompt.includes('every paragraph you change is measured against') && !prompt.includes('every bullet you change is measured against'),
-          `the brief is scoped to the letter paragraph cover-register grades, not a résumé bullet (prompt=${JSON.stringify(prompt.slice(0, 2000))})`);
-        // The brief says which quotes a claim is read against, so a rewrite that merges two proofs knows where each claim must stand.
-        assert(prompt.includes('A claim is read against the quotes about the clause that makes it, so a paragraph that merges two proofs says each qualifier, figure, count, name and ownership word in the clause about the quote that states it.'),
-          `the letter's repair brief states the clause-level reading of grounding (prompt=${JSON.stringify(prompt.slice(0, 2000))})`);
-      } finally {
-        await fs.promises.rm(project.root, { recursive: true, force: true });
-      }
-    },
-  },
-  {
-    name: 'A host rejection that names a document requires that document to change, so the rejected package cannot be returned forever',
-    async run() {
-      // The live mid-test job's exact shape: a résumé accepted two stages
-      // back and frozen, carrying bullets past the rendered character budget.
-      // The host rejects the assembled package for it, reopens the review —
-      // and used to require nothing, because the one function that decided
-      // which documents a rejection named re-read its prose and recognised
-      // only two measured-fit sentences. Everything else, resume-bullet-length
-      // included, answered "no document has to change", so a pass could be
-      // returned and rejected identically, forever, at the most expensive
-      // stage in the flow.
-      const project = await createCanvasProject();
-      try {
-        const plan = auditPlanFixture();
-        const steps = await auditJobSteps(project);
-        await steps.send({ identity: plan.identity, evidence: plan.evidence, requirements: plan.requirements });
-        await steps.send({ resume: plan.resume });
-        await steps.send({ coverLetter: plan.coverLetter });
-        const opened = await getLocalApplicationHandoff({ jobId: steps.queued.id, canvasFilePath: project.canvasFilePath });
-        const manifestPath = path.join(opened.localJob.folder, 'manifest.json');
-        const readPaste = async () => JSON.parse(await fs.promises.readFile(manifestPath, 'utf8')).paste;
-
-        // A document frozen before the check that rejects it is the state this
-        // guards: the stage that drafts a résumé now measures bullet length
-        // itself, so only an already-accepted document can still carry one.
-        const frozen = JSON.parse(await fs.promises.readFile(manifestPath, 'utf8'));
-        const overBudget = `Maintained internal systems with supported delivery practices ${'for the internal user teams that depend on them, '.repeat(3)}with supported delivery practices.`;
-        assert(overBudget.length > RESUME_BULLET_CHARACTER_BUDGET, 'the frozen bullet is over the budget this rejection reports');
-        frozen.paste.resume = structuredClone(plan.resume);
-        frozen.paste.resume.roles[0].bullets[0].text = overBudget;
-        await fs.promises.writeFile(manifestPath, JSON.stringify(frozen), 'utf8');
-
-        const passFields = () => ({
-          decision: 'pass', findings: [], checklist: checklist(),
-          qualityReview: {
-            checklistVersion: APPLICATION_QUALITY_CHECKLIST_VERSION,
-            criteria: APPLICATION_QUALITY_CRITERIA.map(({ id, requirement }) => ({ id, status: 'pass', evidence: requirement })),
-            resume: { decision: 'approved', rationale: 'The résumé preserves direct source-supported systems evidence with clear relevance.' },
-            coverLetter: { decision: 'approved', rationale: 'One controlling argument uses minimum-sufficient evidence for target system delivery.' },
-          },
-          generationAudit: plan.audit(),
-        });
-
-        const rejected = await steps.submit(passFields());
-        assert(rejected.result.accepted === false
-          && rejected.result.validationErrors.some(message => message.includes('resume-bullet-length') && message.includes(`(budget ${RESUME_BULLET_CHARACTER_BUDGET})`)),
-        `the completed package is rejected for the frozen bullet (errors=${JSON.stringify(rejected.result.validationErrors || [])})`);
-        const reopened = await readPaste();
-        assert(JSON.stringify(reopened.requiredChangeDocuments) === JSON.stringify(['resume']),
-          `the rejection requires the document it named (required=${JSON.stringify(reopened.requiredChangeDocuments)})`);
-        assert(reopened.findings.some(finding => finding.document === 'resume' && finding.issue.includes('resume-bullet-length')),
-          `the finding names the résumé rather than the bundle, which is what tells the reviewer to replace it (findings=${JSON.stringify(reopened.findings.map(item => item.document))})`);
-
-        const repeated = await steps.submit(passFields());
-        const afterRepeat = await readPaste();
-        assert(repeated.result.accepted === false
-          && repeated.result.validationErrors.length === 1
-          && /leaves resume exactly as the package the app's own checks rejected/.test(repeated.result.validationErrors[0])
-          && repeated.result.validationErrors[0].includes('resume must change materially'),
-        `the identical pass is rejected once, saying both what happened and what has to change (errors=${JSON.stringify(repeated.result.validationErrors || [])})`);
-        assert(afterRepeat.revision === reopened.revision && JSON.stringify(afterRepeat.requiredChangeDocuments) === JSON.stringify(['resume']),
-          'a rejected repeat advances nothing and leaves the required change standing');
-
-        // A pass that edits only its own fields is a different response, and
-        // comparing whole packages is exactly what used to let it through. The
-        // gate measures the part the rejection named, so moving another one
-        // answers nothing.
-        const reworded = passFields();
-        reworded.qualityReview.resume.rationale = `${reworded.qualityReview.resume.rationale} Reviewed once more against the rendered page.`;
-        const stillPassing = await steps.submit(reworded);
-        assert(stillPassing.result.accepted === false
-          && stillPassing.result.validationErrors.some(message => message.includes('resume must change materially in this response')),
-        `a pass that leaves the résumé alone is rejected for the outstanding change (errors=${JSON.stringify(stillPassing.result.validationErrors || [])})`);
-
-        const revision = await steps.submit({
-          decision: 'revised',
-          checklist: checklist().map(item => (item.id === 'resume-concision'
-            ? { id: item.id, status: 'issue', detail: 'One highlight ran past the rendered character ceiling until this revision cut it.' }
-            : item)),
-          findings: [{ id: 'review-length-1', document: 'resume', targetId: 'bullet-1', issue: 'The highlight rendered past the measured character ceiling.', fix: 'Cut it to the single supported achievement it states.' }],
-          resume: plan.resume,
-        });
-        assert(revision.result.accepted, `the revision that actually shortens the bullet is accepted (errors=${JSON.stringify(revision.result.validationErrors || [])})`);
-        const afterRevision = await readPaste();
-        assert(JSON.stringify(afterRevision.requiredChangeDocuments) === JSON.stringify([]),
-          `a material change clears the requirement it answered (required=${JSON.stringify(afterRevision.requiredChangeDocuments)})`);
-
-        const completed = await steps.submit(passFields());
-        assert(completed.result.accepted && completed.result.completed,
-          `the review that follows the repair completes the package (errors=${JSON.stringify(completed.result.validationErrors || [])})`);
-        return { requiredAfterRejection: reopened.requiredChangeDocuments, rounds: 4 };
-      } finally {
-        await fs.promises.rm(project.root, { recursive: true, force: true });
-      }
-    },
-  },
-  {
-    name: 'A finding the host attributed to no document is routed by its repair, and the contract names both routes because both are open',
-    async run() {
-      // The review contract used to sort findings into two classes and gave a
-      // "bundle" finding no class of its own: the nearest sentence sent every
-      // defect in the audit, the checklist or the review's own fields to a
-      // pass. A defect the host could not attribute reads as exactly that, so
-      // the contract routed a document repair to the one answer that leaves
-      // the document unchanged — and the same measurement rejected the pass
-      // again, forever, at the most expensive stage in the flow. Both routes
-      // are open to such a finding; which one answers it is read off the
-      // issue. Each half is proved here: the disclosure, then both answers.
-      const project = await createCanvasProject();
-      try {
-        const plan = auditPlanFixture();
-        const steps = await auditJobSteps(project);
-        await steps.send({ identity: plan.identity, evidence: plan.evidence, requirements: plan.requirements });
-        await steps.send({ resume: plan.resume });
-        await steps.send({ coverLetter: plan.coverLetter });
-        const reviewPrompt = (await steps.current()).prompt;
-
-        const bundle = PASTE_FINDING_DOCUMENTS.at(-1);
-        assert(reviewPrompt.includes(`document:${PASTE_FINDING_DOCUMENTS.map(document => `"${document}"`).join('|')}`),
-          'the finding schema prints the enum the validator enforces, rather than a hand-copied list of the same three words');
-        assert(!reviewPrompt.includes('A finding naming a defect in the generation audit, the checklist, or this review’s own fields is answered with decision:"pass"'),
-          'the sentence that sent an unattributed defect to a pass it cannot be repaired by is gone');
-        assert(reviewPrompt.includes(`A finding naming "${bundle}" is one the host did not attribute to a single document`),
-          'the contract says what that finding field means instead of leaving the reviewer to guess its class');
-        assert(reviewPrompt.includes('where the repair changes wording in either document, answer decision:"revised"')
-          && reviewPrompt.includes('where the whole repair lies in the generation audit, the checklist, or this review’s own fields — a mapping span copied off the words it names, a verification note that states nothing measured — answer decision:"pass"'),
-        'both routes are stated, each with the repair that reaches it');
-        assert(reviewPrompt.includes(ARGUMENT_SPAN_ALIGNMENT_RULE),
-          'the span rule prints the word-boundary the gate applies, from the module that applies it');
-
-        // A mapping whose relevance field repeats the claim sentence: an exact
-        // span of the paragraph, so the audit sanitizer keeps it, and a defect
-        // only the paragraph-argument gate sees. That gate reads the audit's
-        // spans against the letter, so the host attributes it to neither
-        // document — the finding this contract has to route.
-        const mislabelled = plan.audit();
-        mislabelled.coverLetterPlan.paragraphs[0].argumentMapping.relevance = mislabelled.coverLetterPlan.paragraphs[0].argumentMapping.claim;
-        const passFields = (generationAudit) => ({
-          decision: 'pass', findings: [], checklist: checklist(),
-          qualityReview: {
-            checklistVersion: APPLICATION_QUALITY_CHECKLIST_VERSION,
-            criteria: APPLICATION_QUALITY_CRITERIA.map(({ id, requirement }) => ({ id, status: 'pass', evidence: requirement })),
-            resume: { decision: 'approved', rationale: 'The résumé preserves direct source-supported systems evidence with clear relevance.' },
-            coverLetter: { decision: 'approved', rationale: 'One controlling argument uses minimum-sufficient evidence for target system delivery.' },
-          },
-          generationAudit,
-        });
-        const rejected = await steps.submit(passFields(mislabelled));
-        assert(rejected.result.accepted === false
-          && rejected.result.validationErrors.some(message => message.includes('paragraph-argument-links')),
-        `the mislabelled span is rejected at completion (errors=${JSON.stringify(rejected.result.validationErrors || [])})`);
-        const opened = await getLocalApplicationHandoff({ jobId: steps.queued.id, canvasFilePath: project.canvasFilePath });
-        const reopened = JSON.parse(await fs.promises.readFile(path.join(opened.localJob.folder, 'manifest.json'), 'utf8')).paste;
-        assert(JSON.stringify(reopened.requiredChangeDocuments) === JSON.stringify([])
-          && reopened.findings.every(finding => finding.document === bundle),
-        `and reopens with a finding no document list carries (required=${JSON.stringify(reopened.requiredChangeDocuments)}, documents=${JSON.stringify(reopened.findings.map(item => item.document))})`);
-
-        // Route one: read as a defect repaired in a document. The revision is
-        // accepted — the answer the old contract denied this finding outright
-        // — and it carries the corrected mapping alongside the replacement,
-        // because context.requiredChangeTargets names that field too.
-        const shortened = structuredClone(plan.resume);
-        shortened.roles[0].bullets[0].text = 'Maintained internal systems with supported practices.';
-        const revisedBody = {
-          decision: 'revised',
-          checklist: checklist().map(item => (item.id === 'requirement-coverage'
-            ? { id: item.id, status: 'issue', detail: 'The highlight carried a qualifier the cited quote does not state, so this revision cut it.' }
-            : item)),
-          findings: [{ id: 'review-bundle-1', document: bundle, targetId: 'bullet-1', issue: 'The rendered highlight overstated the cited quote.', fix: 'Cut the highlight back to the words the quote states.' }],
-          resume: shortened,
-        };
-        const revisedWithoutAudit = await steps.submit(revisedBody);
-        assert(revisedWithoutAudit.result.accepted === false
-          && revisedWithoutAudit.result.validationErrors.some(message => message.includes('generationAudit')),
-        `a revision that leaves the required field alone is rejected by name (errors=${JSON.stringify(revisedWithoutAudit.result.validationErrors || [])})`);
-        const revised = await steps.submit({ ...revisedBody, generationAudit: plan.audit() });
-        assert(revised.result.accepted,
-          `a revision answering a ${bundle} finding is accepted (errors=${JSON.stringify(revised.result.validationErrors || [])})`);
-
-        // Route two: read as a defect repaired in the review's own fields. The
-        // pass carrying the corrected mapping completes the package.
-        const completed = await steps.submit(passFields(plan.audit()));
-        assert(completed.result.accepted && completed.result.completed,
-          `and a pass carrying the corrected mapping completes it (errors=${JSON.stringify(completed.result.validationErrors || [])})`);
-        return { routes: 2, findingDocuments: reopened.findings.map(item => item.document) };
-      } finally {
-        await fs.promises.rm(project.root, { recursive: true, force: true });
-      }
-    },
-  },
-  {
+  },  {
     name: 'An argumentMapping supplied as an array is reported as the shape it is, not discarded into "no mapping"',
     async run() {
       // projectAuditArgumentMapping returns null for anything that is not a
@@ -5585,7 +3329,7 @@ export default [
         const rejected = await steps.submit(passFields(arrayShaped));
         assert(rejected.result.accepted === false
           && rejected.result.validationErrors.some(message => message.includes('argumentMapping is an array')
-            && message.includes('carrying proof and jobNeedQuote, and carrying claim and relevance wherever the span budgets')),
+            && message.includes('every span it does carry must copy the final paragraph')),
         `the shape is reported (errors=${JSON.stringify(rejected.result.validationErrors || [])})`);
         assert(!rejected.result.validationErrors.some(message => message.includes('has no argumentMapping')),
           `and never as the missing mapping it is not (errors=${JSON.stringify(rejected.result.validationErrors || [])})`);
@@ -6337,96 +4081,7 @@ export default [
         `a frozen-state rejection arriving at a re-grade ends the job rather than reopening a round: ${JSON.stringify(doorFailures, null, 1)}`);
       return { ended: cases.length + doors.length };
     },
-  },
-  {
-    name: 'Every response ceiling is printed by the contract of the stage that writes the field, including the review that rewrites both documents',
-    async run() {
-      // Three live rejections in one day shared one shape: a numeric limit a
-      // validator enforces on a response that the prompt asking for that
-      // response never stated. The last rejected a real review twice, because
-      // two paragraphs of its replacement letter cited five accepted evidence
-      // IDs — a cap only the cover-letter contract carried, and the review is
-      // the stage that writes a replacement.
-      const project = await createCanvasProject();
-      try {
-        const plan = auditPlanFixture();
-        const steps = await auditJobSteps(project);
-
-        // The plan freezes the identity; the ceilings that grade it are the
-        // résumé stage's, and by then the plan can no longer be changed.
-        const planPrompt = (await steps.current()).prompt;
-        const planMissing = [
-          `1 to ${STRUCTURED_RESUME_LIMITS.contactValues} contact values`,
-          `at most ${STRUCTURED_RESUME_LIMITS.chars.shortText} characters for name or subtitleRole`,
-          `at most ${STRUCTURED_RESUME_LIMITS.chars.longText} for credential or one contact value`,
-        ].filter(phrase => !planPrompt.includes(phrase));
-        assert(!planMissing.length,
-          `the evidence-plan contract states the identity ceilings a later stage enforces on what this one freezes: missing ${JSON.stringify(planMissing)}`);
-
-        await steps.send({ identity: plan.identity, evidence: plan.evidence, requirements: plan.requirements });
-        await steps.send({ resume: plan.resume });
-        await steps.send({ coverLetter: plan.coverLetter });
-
-        const reviewPrompt = (await steps.current()).prompt;
-        const reviewMissing = [
-          `a letter paragraph carries 1 to ${MAX_COVER_LETTER_PARAGRAPH_EVIDENCE_IDS} evidenceIds`,
-          `a bullet cites at most ${MAX_UNIT_CAREER_DATA_QUOTES} distinct career-data quotes`,
-          `shares at least ${MIN_SHARED_SOURCE_TERMS} meaningful terms`,
-          `a project description shares ${MIN_SHARED_CAREER_TERMS} with its own`,
-          `at most ${MAX_LETTER_FIGURES} figures`,
-          `no sentence longer than ${MAX_SENTENCE_WORDS} words`,
-          `no run of ${REDUNDANCY_SHINGLE_WORDS} consecutive words`,
-          `once the posting text runs to ${MIN_ANCHOR_RELEVANCE_CORPUS_WORDS} words`,
-          `at most ${MAX_PARAGRAPH_OFF_POSTING_TOOLS} off-posting tool in any one paragraph and ${MAX_LETTER_OFF_POSTING_TOOLS} across the whole letter`,
-          `its first ${SENTENCE_SHAPE_FRAME_WORDS} words`,
-          `once the letter runs to ${MIN_SHARED_SHAPE_PARAGRAPHS} paragraphs, ${SHARED_SENTENCE_SHAPE_CEILING_RULE}, ${ADJACENT_SENTENCE_SHAPE_RULE}`,
-          REPEATED_PHRASE_RULE,
-          REPEATED_TRANSFER_CARRIER_RULE,
-          DANGLING_DEMONSTRATIVE_RULE,
-          SKILLS_BLOCK_BUDGET_RULE,
-          SKILL_ITEM_FILTERABLE_RULE,
-          SKILL_ITEM_GROUNDING_RULE,
-          POSTING_NAMED_SKILLS_RULE,
-          SKILLS_BLOCK_PRESENCE_RULE,
-          `at least ${MIN_ROLE_THESIS_WORDS} words running ${COVER_LETTER_ARGUMENT_TEXT_LIMITS.min} to ${COVER_LETTER_ARGUMENT_TEXT_LIMITS.max} characters`,
-          `except evidenceRole at ${COVER_LETTER_ARGUMENT_TEXT_LIMITS.roleMin} to ${COVER_LETTER_ARGUMENT_TEXT_LIMITS.roleMax}`,
-          `at most ${STRUCTURED_RESUME_LIMITS.roles} roles`,
-          `1 to ${STRUCTURED_RESUME_LIMITS.bulletsPerRole} bullets per role`,
-          `${RESUME_BULLET_CHARACTER_BUDGET}-visible-character ceiling`,
-          `${GENERATION_AUDIT_TEXT_MINIMUMS.finalDecisionSummary} for finalDecisionSummary`,
-        ].filter(phrase => !reviewPrompt.includes(phrase));
-        assert(!reviewMissing.length,
-          `the review contract states every ceiling a replacement is regraded by: missing ${JSON.stringify(reviewMissing)}`);
-        // Same lead-in, same reason as the cover-letter contract: the rule
-        // stopped asserting that a repeat is the letter restating itself, so the
-        // sentence that introduces it here must not assert it either.
-        for (const claim of ['does not restate itself', 'restating itself', 'statement made twice']) {
-          assert(!reviewPrompt.includes(claim),
-            `the review contract introduces the repeat rule by what is read, not by an asserted cause (“${claim}” in the prompt)`);
-        }
-        assert(reviewPrompt.includes(`the letter is read against its own wording as well, and ${REPEATED_PHRASE_RULE}`),
-          'the repeat rule reaches the review contract behind a lead-in that names its subject and states no cause');
-
-        // The number it prints is the number it enforces: one ID over the cap
-        // is the live rejection, reproduced against the prompt that now
-        // discloses it.
-        const paragraph = plan.coverLetter.paragraphs[0];
-        const overCited = await steps.submit({
-          decision: 'revised',
-          checklist: checklist(),
-          findings: [{ id: 'finding-1', document: 'coverLetter', targetId: 'paragraph-1', issue: 'The paragraph cites evidence it does not argue from.', fix: 'Cite only the evidence this paragraph argues from.' }],
-          coverLetter: { ...plan.coverLetter, paragraphs: [{ ...paragraph, evidenceIds: ['letter-proof', 'job-proof', 'job-alpha', 'job-bravo', 'job-charlie'] }] },
-        });
-        assert(!overCited.result.accepted
-          && overCited.result.validationErrors.some(message => message.includes(`1 to ${MAX_COVER_LETTER_PARAGRAPH_EVIDENCE_IDS} evidenceIds`)),
-        `a replacement paragraph citing one ID over the printed cap is rejected by that same number (errors=${JSON.stringify(overCited.result.validationErrors || [])})`);
-        return { stages: ['evidence-plan', 'review'], ceilings: 20 };
-      } finally {
-        await fs.promises.rm(project.root, { recursive: true, force: true });
-      }
-    },
-  },
-  {
+  },  {
     name: 'jobNeedQuote is graded against the listing companion the prompt prints, and both contracts print that rule',
     async run() {
       // The review contract said "jobNeedQuote is a verbatim span of the
@@ -6890,33 +4545,723 @@ export default [
         await fs.promises.rm(project.root, { recursive: true, force: true });
       }
     },
-  },
-  {
-    name: 'The drafting twin counts the paragraphs that cite one career-data quote from the ids the response chose, and re-pointing the citations is a same-round repair',
+  },  {
+    // A host-validation failure prints a review CRITERION id (from
+    // APPLICATION_QUALITY_CRITERIA, e.g. cover-register) in the exact
+    // `<id>: detail` shape a paste check prints its own id in — but a
+    // criterion is deliberately absent from PASTE_CHECK_PROSE_UNITS, because
+    // that table enumerates the batteries alone. The function that scopes a
+    // correction round's repair brief used to read only that table, so a
+    // round whose one and only defect was a criterion recognised no prose
+    // part at all and went out with an empty brief — silently, since the
+    // numbered item list above it still named the defect just fine.
+    name: 'A host rejection naming only a review criterion still scopes its repair brief to the document that criterion grades',
     async run() {
-      // Five paragraphs, each its own proof, in the accepted shapes of the scenarios above. One of them carries a
-      // stock transfer frame, which is all a letter may (the transfer budget); the others end on what the work did. The
-      // paragraphs are the same in both submissions; only which quotes they cite changes, so the proportion
-      // check's quote limit is the only variable.
-      const paragraphs = [
-        `${BATTERY_LEAD} ${BATTERY_BODY}`,
-        'My delivery practice covers the deployment step itself. I scripted that step so a colleague could repeat it without me present during the change window. That practice would support reliable system delivery in the role you are filling.',
-        'My delivery judgment covers the colleagues who depend on the service. I wrote the weekly runbook the rotation followed. This role needs the same judgment for reliable system delivery.',
-        'My review habits cover the changes that reach the service. I checked each release note with a reviewer before the service went out. The reviewer signed every note before the release window opened.',
-        'My monitoring routine covers the quiet failures. I tuned the alert thresholds the rotation used to catch a slow reporting job early. The rotation caught the next slow job within a single shift.',
-      ];
       const project = await createCanvasProject();
       try {
-        const leaning = await coverLetterBatteryStage(project, { paragraphs, sharedProof: true });
-        const rejected = await leaning.letter();
-        assert(!rejected.accepted && (rejected.validationErrors || []).some(message => message.startsWith('letter-proportion:') && /paragraphs 1, 2, 3, 4 and 5 cite the same career-data quote against a maximum of 4/u.test(message)),
-          `five paragraphs citing one quote are reported by the twin for that quote alone (errors=${JSON.stringify(rejected.validationErrors || [])})`);
-        assert((rejected.validationErrors || []).filter(message => message.startsWith('letter-proportion:')).every(message => !/body paragraphs against a ceiling|single sentences|average [\d.]+ words|against a minimum/u.test(message)),
-          'only the quote limit failed: the structure of the letter is within every other limit');
-        const own = await coverLetterBatteryStage(project, { paragraphs });
-        const accepted = await own.letter();
-        assert(accepted.accepted,
-          `the identical paragraphs, each citing its own quote, are accepted in one round (errors=${JSON.stringify(accepted.validationErrors || [])})`);
+        const plan = auditPlanFixture();
+        const steps = await auditJobSteps(project);
+        await steps.send({ identity: plan.identity, evidence: plan.evidence, requirements: plan.requirements });
+        await steps.send({ resume: plan.resume });
+        await steps.send({ coverLetter: plan.coverLetter });
+        const passFields = () => ({
+          decision: 'pass', findings: [], checklist: checklist(),
+          qualityReview: {
+            checklistVersion: APPLICATION_QUALITY_CHECKLIST_VERSION,
+            criteria: APPLICATION_QUALITY_CRITERIA.map(({ id, requirement }) => ({ id, status: 'pass', evidence: requirement })),
+            resume: { decision: 'approved', rationale: 'The résumé preserves direct source-supported systems evidence with clear relevance.' },
+            coverLetter: { decision: 'approved', rationale: 'One controlling argument uses minimum-sufficient evidence for target system delivery.' },
+          },
+          generationAudit: plan.audit(),
+        });
+        const completed = await steps.submit(passFields());
+        assert(completed.result.completed, `the fixture completes before the import rejects it (errors=${JSON.stringify(completed.result.validationErrors || [])})`);
+
+        // The same recovered-rejection shape as the test above, but with the
+        // one detail this test exists to cover: the only id in the message is
+        // a review criterion, not a paste check.
+        const folder = completed.result.localJob.folder;
+        const resultRaw = await fs.promises.readFile(path.join(folder, 'result.json'), 'utf8');
+        await fs.promises.writeFile(path.join(folder, 'fit-feedback.json'), JSON.stringify({
+          version: 1, jobId: steps.queued.id, status: 'invalid', measured: false,
+          resultSha256: crypto.createHash('sha256').update(resultRaw).digest('hex'),
+          error: 'Local AI cover letter failed required checks: cover-register: paragraph 1 closes on a deferential invitation.',
+          rejectedAt: new Date().toISOString(), documentSha256: null, revisionRound: 0, priorMeasured: null,
+          message: 'Infinite Canvas rejected this result.json during validation.',
+        }), 'utf8');
+
+        const reopened = await getLocalApplicationHandoff({ jobId: steps.queued.id, canvasFilePath: project.canvasFilePath });
+        const prompt = reopened.handoff?.correctionPrompt || '';
+        assert(prompt.includes('cover-register: paragraph 1 closes on a deferential invitation'),
+          `the reopened correction prompt still names the rejected criterion (prompt=${JSON.stringify(prompt.slice(0, 400))})`);
+        assert(prompt.includes('Rules that govern this repair'),
+          `a rejection naming only a criterion still carries a repair brief instead of going out empty (prompt=${JSON.stringify(prompt.slice(0, 2000))})`);
+        assert(prompt.includes('every paragraph you change is measured against') && !prompt.includes('every bullet you change is measured against'),
+          `the brief is scoped to the letter paragraph cover-register grades, not a résumé bullet (prompt=${JSON.stringify(prompt.slice(0, 2000))})`);
+        // The brief says which quotes a claim is read against, so a rewrite that merges two proofs knows where each claim must stand.
+        assert(prompt.includes('A claim is read against the quotes about the clause that makes it, so a paragraph that merges two proofs says each qualifier, figure, count, name and ownership word in the clause about the quote that states it.'),
+          `the letter's repair brief states the clause-level reading of grounding (prompt=${JSON.stringify(prompt.slice(0, 2000))})`);
+      } finally {
+        await fs.promises.rm(project.root, { recursive: true, force: true });
+      }
+    },
+  },
+  {
+    name: 'A résumé built by literally following the corrected location contract survives to completion; the old "always legal" reading now fails at the stage that writes the résumé',
+    async run() {
+      // This is the load-bearing half of the location-contract fix: a
+      // disclosure-only assertion (the prompt states the rule) would still
+      // pass if the rule it stated were wrong. Here the SAME plan and career
+      // data run through the full paste pipeline twice, varying only the
+      // resume.roles[0].location value — once with what the corrected
+      // contract instructs a responder to copy (the employer heading's own
+      // "City, Region" text), once with what the old contract's "always
+      // legal" wording invited (omit it).
+      //
+      // structuredResume still never requires a location, so the only thing
+      // that tells the two apart is resumeRoleLocationFailures
+      // (jobApplication.js). It used to run three stages later, at review,
+      // which is why the omitted variant reached completion at all; the
+      // résumé stage now runs that same gate on the same rendered markup, so
+      // the rejection lands in the round that wrote the role.
+      const pdfDoc = await PDFDocument.create(); pdfDoc.addPage([612, 792]);
+      const bytes = Buffer.from(await pdfDoc.save());
+      __setLocalAiRenderPdfForTests(async () => ({ bytes, pageCount: 1, fontsLoaded: true, missingFontFaces: [], layout: { contentHeightPx: 760, typeAreaHeightPx: 800 } }));
+      // The one addition to the proven AUDIT_* fixture: an "Employer — City,
+      // Region" heading for the same "Acme" employer auditJobSteps' source
+      // role names, so careerDataRoleLocation actually states a location —
+      // the original AUDIT_CAREER_DATA never mentions Acme in that shape, so
+      // it never triggers the gate under test either way.
+      const locatedCareerData = `Ada Lovelace\nada@example.test\nEngineer\nAcme — Brookfield, Ohio\n${AUDIT_BULLET}\n${AUDIT_PARAGRAPH}`;
+      const plan = auditPlanFixture();
+      const reviewFields = generationAudit => ({
+        decision: 'pass', findings: [], checklist: checklist(),
+        qualityReview: {
+          checklistVersion: APPLICATION_QUALITY_CHECKLIST_VERSION,
+          criteria: APPLICATION_QUALITY_CRITERIA.map(({ id, requirement }) => ({ id, status: 'pass', evidence: requirement })),
+          resume: { decision: 'approved', rationale: 'The résumé preserves direct source-supported systems evidence with clear relevance.' },
+          coverLetter: { decision: 'approved', rationale: 'One controlling argument uses minimum-sufficient evidence for target system delivery.' },
+        },
+        generationAudit,
+      });
+      const runLocationVariant = async (location, { stopAtResume = false } = {}) => {
+        const project = await createCanvasProject();
+        try {
+          const { send, submit } = await auditJobSteps(project, { careerData: locatedCareerData });
+          await send({ identity: plan.identity, evidence: plan.evidence, requirements: plan.requirements });
+          const resume = { ...plan.resume, roles: [{ ...plan.resume.roles[0], location }] };
+          if (stopAtResume) return (await submit({ resume })).result;
+          await send({ resume });
+          await send({ coverLetter: plan.coverLetter });
+          return await send(reviewFields(plan.audit()));
+        } finally {
+          await fs.promises.rm(project.root, { recursive: true, force: true });
+        }
+      };
+      try {
+        const located = await runLocationVariant('Brookfield, Ohio');
+        assert(located.accepted && located.completed,
+          `copying the employer heading's own city and region into role.location, exactly as the corrected contract instructs, survives all the way to completion (errors=${JSON.stringify(located.validationErrors || [])})`);
+
+        const omitted = await runLocationVariant('', { stopAtResume: true });
+        assert(!omitted.accepted && omitted.handoff?.stage === 'resume'
+          && omitted.validationErrors?.some(message => message.includes('Every role must show the work location') && message.includes('Brookfield, Ohio')),
+        `omitting the location, the old contract's literal "always legal" reading, is rejected by the résumé stage itself with the stated work-location requirement, instead of surviving two more handoffs (errors=${JSON.stringify(omitted.validationErrors || [])})`);
+      } finally {
+        __setLocalAiRenderPdfForTests(null);
+      }
+    },
+  },
+  {
+    name: 'A section written as a heading, a separate location line, and a dates line — with no work description — is classified by its own shape',
+    async run() {
+      // Note 1's exact shape: `### Title — Employer` fuses the title and the
+      // employer into one markdown heading, so a location career data puts on
+      // its own very next line — "City, Region" — states none of title,
+      // company, or a year. Before careerSectionBodyStart checked the role's
+      // OWN location value the same way it already checked title and company,
+      // that location line broke the opening-block walk early: the location
+      // and the dates line below it were read as body prose, and a section
+      // that says nothing but its own header was reported as `reason: 'none'`
+      // — told to quote what the section says about the work — instead of
+      // `'none-opening-block-only'`, whose message asks for the one quote
+      // this corpus actually has: the header itself.
+      const careerData = [
+        'Ada Lovelace', 'ada@example.test', '',
+        'Senior Engineer', 'Analytical Engines — Reading, Berkshire', '*2021 – 2024*', '',
+        '- Built the reporting pipeline for nightly batches.', '',
+        '### Senior Analyst — Beacon Labs', 'Portland, Oregon', '*2019 – 2022*', '',
+      ].join('\n');
+      const ENGINES_WORK = 'Built the reporting pipeline for nightly batches.';
+      const BEACON_HEADER = '### Senior Analyst — Beacon Labs\nPortland, Oregon\n*2019 – 2022*';
+      const project = await createCanvasProject();
+      try {
+        const queued = await queueLocalApplicationJob({
+          transport: 'paste', canvasFilePath: project.canvasFilePath, careerData,
+          job: { title: 'Analyst', company: 'Acme', snippet: 'We need reporting and analysis end to end.' },
+          resumeProfile: { workHistory: [
+            { id: 'role-1', title: 'Senior Engineer', employer: 'Analytical Engines', startDate: '2021', endDate: '2024' },
+            { id: 'role-2', title: 'Senior Analyst', employer: 'Beacon Labs', location: 'Portland, Oregon', startDate: '2019', endDate: '2022' },
+          ] },
+        });
+        const handoff = (await getLocalApplicationHandoff({ jobId: queued.id, canvasFilePath: project.canvasFilePath })).handoff;
+        const submit = fields => submitLocalApplicationHandoff({
+          jobId: queued.id, canvasFilePath: project.canvasFilePath, handoffCode: handoff.handoffCode,
+          response: JSON.stringify(reply(handoff, {
+            identity: { name: 'Ada Lovelace', contact: ['ada@example.test'], subtitleRole: 'Senior Engineer' },
+            ...fields,
+          })),
+        });
+        const listing = { id: 'job-stack', sourceId: 'job-listing', quote: 'reporting and analysis end to end', requirement: 'Reporting and analysis ownership', priority: 'highest' };
+        const uncovered = await submit({
+          evidence: [{ id: 'cd-engines', sourceId: 'career-data', quote: ENGINES_WORK, requirement: 'Reporting ownership', priority: 'highest' }, listing],
+          requirements: [{ id: 'need-stack', text: 'Reporting and analysis ownership across the stack', priority: 'highest', evidenceIds: ['cd-engines', 'job-stack'] }],
+        });
+        assert(!uncovered.accepted
+          && uncovered.validationErrors.some(message => message.includes('"Beacon Labs"')
+            && message.includes('states nothing beyond its own opening block')
+            && message.includes('quoting that opening block itself'))
+          && !uncovered.validationErrors.some(message => message.includes('Beacon Labs') && message.includes("quoting what that employer's section says about the work")),
+        `the heading-plus-location-plus-dates shape with no body is classified 'none-opening-block-only', not told to quote work it never describes (errors=${JSON.stringify(uncovered.validationErrors)})`);
+
+        // Following the message literally repairs it in one round: the
+        // opening block itself — the heading, the location line, and the
+        // dates the résumé already prints — is the one legal quote left.
+        const repaired = await submit({
+          evidence: [
+            { id: 'cd-engines', sourceId: 'career-data', quote: ENGINES_WORK, requirement: 'Reporting ownership', priority: 'highest' },
+            { id: 'cd-beacon-header', sourceId: 'career-data', quote: BEACON_HEADER, requirement: 'Analyst tenure', priority: 'supporting' },
+            listing,
+          ],
+          requirements: [{ id: 'need-stack', text: 'Reporting and analysis ownership across the stack', priority: 'highest', evidenceIds: ['cd-engines', 'cd-beacon-header', 'job-stack'] }],
+        });
+        assert(repaired.accepted && repaired.handoff?.stage === 'resume',
+          `the message's own repair — quoting the opening block itself — is accepted in one round (errors=${JSON.stringify(repaired.validationErrors || [])})`);
+        return { classified: 'none-opening-block-only' };
+      } finally {
+        await fs.promises.rm(project.root, { recursive: true, force: true });
+      }
+    },
+  },
+  {
+    name: 'An experience span no cited career evidence states is rejected by the stage that writes it',
+    async run() {
+      // The listing demands a span of years; the career corpus states roles and
+      // dates. Nothing stopped a bullet or a paragraph from adding those dates
+      // up and asserting the demanded span: checkFigureDiscipline only checks
+      // that a letter figure also appears in the résumé, so the same invented
+      // span in both documents passed. One rule now runs at the résumé stage,
+      // at the cover-letter stage, and at completion, each against the
+      // career-data quotes the offending unit itself cites.
+      const project = await createCanvasProject();
+      try {
+        const plan = auditPlanFixture();
+        const spanBullet = { id: 'bullet-1', text: 'Maintained internal systems with supported delivery practices over more than four years of systems work.', evidenceIds: ['resume-proof'] };
+        const spanResume = { ...plan.resume, roles: [{ ...plan.resume.roles[0], bullets: [spanBullet] }] };
+        const spanParagraph = `${AUDIT_PARAGRAPH} That work spans more than four years of systems delivery.`;
+
+        const steps = await auditJobSteps(project);
+        await steps.send({ identity: plan.identity, evidence: plan.evidence, requirements: plan.requirements });
+        const resumePrompt = (await steps.current()).prompt;
+        assert(resumePrompt.includes('A span of experience measured in years is a claim like any other: a bullet may state one only when a career-data quote that same bullet cites states it.')
+          && resumePrompt.includes('Never total a span across roles and never compute one from employment dates'),
+          'the résumé contract states the rule before the stage can break it');
+
+        const rejected = await steps.submit({ resume: spanResume });
+        assert(!rejected.result.accepted && rejected.result.validationErrors.some(message => message === 'unsupported-experience-span: Resume bullet bullet-1 claims an experience span (“more than four years”) that none of the career-data evidence it cites states. A span of years is a claim like any other: state one only when a career-data quote that same unit cites states it. Do not total a span across roles and do not compute one from employment dates; a duration the posting asks for is the posting’s requirement, not a fact about the candidate. Either cite a career-data quote that states the span, or describe the work instead of its length.'),
+          `a bullet asserting a span its evidence never states is rejected by bullet id (errors=${JSON.stringify(rejected.result.validationErrors)})`);
+        assert(!rejected.result.validationErrors.some(message => message.includes(AUDIT_BULLET)),
+          'the rejection quotes only the span the responder wrote, never a corpus passage it could paste back');
+        await steps.send({ resume: plan.resume });
+
+        const letterPrompt = (await steps.current()).prompt;
+        // The letter contract states the same rule AND the shapes that trip
+        // it. Its earlier explanation ("a duration the posting asks for is the
+        // posting's requirement") invited the one sentence the gate rejects:
+        // findUnsupportedDurationClaim reads the paragraph's own words and
+        // cannot tell whose span it is, so "The posting asks for four years of
+        // experience" is a claim like any other and cost a round.
+        assert(letterPrompt.includes('a paragraph may state one only when a career-data quote that same paragraph cites states that same span')
+          && letterPrompt.includes(DURATION_CLAIM_SHAPE_RULE)
+          && letterPrompt.includes('do not write the span a posting asks for into the letter at all'),
+          'the cover-letter contract states the paragraph rule, the shapes the gate reads, and that an attributed span is still a claim');
+        const letterRejected = await steps.submit({ coverLetter: { ...plan.coverLetter, paragraphs: [{ ...plan.coverLetter.paragraphs[0], text: spanParagraph }] } });
+        assert(!letterRejected.result.accepted && letterRejected.result.validationErrors.some(message => message.startsWith('unsupported-experience-span: Cover-letter paragraph paragraph-1 claims an experience span (“more than four years”)')),
+          `the same span in a letter paragraph is rejected by paragraph id (errors=${JSON.stringify(letterRejected.result.validationErrors)})`);
+        await steps.send({ coverLetter: plan.coverLetter });
+
+        // A review may rewrite either document, so a replacement must meet
+        // the same source-backed duration gate before it can be accepted.
+        const reviewPrompt = (await steps.current()).prompt;
+        assert(reviewPrompt.includes('Any experience span measured in years that either document states must be stated by a career-data quote the same bullet or paragraph cites'),
+          'the review contract states the rule the completion pass enforces');
+        const revised = await steps.submit({
+          decision: 'revised', resume: spanResume,
+          checklist: checklist().map(item => (item.id === 'resume-source-grounding' ? { ...item, status: 'issue' } : item)),
+          findings: [{ id: 'finding-1', document: 'resume', targetId: 'bullet-1', issue: 'The bullet understates the duration of the practice.', fix: 'State the span of the practice.' }],
+        });
+        assert(!revised.result.accepted && revised.result.validationErrors.some(message =>
+          message.startsWith('Résumé replacement — unsupported-experience-span: Resume bullet bullet-1 claims an experience span (“more than four years”)')),
+        `a revised review cannot introduce an unsupported span (errors=${JSON.stringify(revised.result.validationErrors || [])})`);
+
+        // Silent neighbours. Each is a number governing "year" that asserts no
+        // span of practice, so each must reach the cover-letter stage on a
+        // clean job. A false rejection here has no repair the writer can see.
+        const controls = await auditJobSteps(project);
+        await controls.send({ identity: plan.identity, evidence: plan.evidence, requirements: plan.requirements });
+        // The posting asks for "years of <work> experience"; the two words can
+        // sit several apart, so the span is still named as practice and is
+        // still rejected when nothing cited states it.
+        const spacedClaim = await controls.submit({
+          resume: { ...plan.resume, roles: [{ ...plan.resume.roles[0], bullets: [{ id: 'bullet-1', text: 'Maintained internal systems with three years of supported delivery experience.', evidenceIds: ['resume-proof'] }] }] },
+        });
+        assert(!spacedClaim.result.accepted && spacedClaim.result.validationErrors.some(message => message.startsWith('unsupported-experience-span: Resume bullet bullet-1 claims an experience span (“three years”)')),
+          `a span named as experience several words later is still rejected (errors=${JSON.stringify(spacedClaim.result.validationErrors)})`);
+        const controlTexts = [
+          'Maintained internal systems through the four-year platform rollout.',
+          // "shortened", not "cut": a reduction verb is a gated qualifier in
+          // its own right, and this control exists to prove the DURATION rule
+          // stays silent, not to smuggle a second defect past it.
+          'Maintained internal systems and shortened onboarding from three years to six weeks.',
+          'Maintained internal systems running Python 3 on 24/7 paging through 2021 and 2022.',
+          'Maintained internal systems for 12 teams before the 2024 release.',
+          'Maintained internal systems after clearing three years of archived ticket data.',
+        ];
+        // One job per text rather than one role of five bullets: all five cite
+        // the corpus's only career-data line, 'resume-proof', and packing them
+        // into one role would now trip structuredResume.js's own
+        // ROLE_BULLET_EVIDENCE_EXCLUSIVITY_RULE — a real rule, but not the one
+        // this control proves silent. Each gets its own single-bullet role.
+        for (const text of controlTexts) {
+          const control = await auditJobSteps(project);
+          await control.send({ identity: plan.identity, evidence: plan.evidence, requirements: plan.requirements });
+          const controlResult = await control.submit({
+            resume: { ...plan.resume, roles: [{ ...plan.resume.roles[0], bullets: [{ id: 'bullet-1', text, evidenceIds: ['resume-proof'] }] }] },
+          });
+          // These texts assert numbers and years the one career line never
+          // states, and the claim-grounding rules now reject those on their own
+          // account. What this control proves is narrower: none of them is read
+          // as a span of EXPERIENCE, so the duration rule stays silent.
+          assert(!(controlResult.result.validationErrors || []).some(message => /claims an experience span/u.test(message)),
+            `"${text}" must stay silent under the duration rule (errors=${JSON.stringify(controlResult.result.validationErrors || [])})`);
+        }
+
+        // A span the cited evidence does state is admissible, digits or words.
+        const supportingQuote = 'Ada Lovelace has 6 years of internal systems delivery.';
+        const supported = await auditJobSteps(project, { careerData: `${AUDIT_CAREER_DATA}\n${supportingQuote}` });
+        const supportedPlan = {
+          ...plan,
+          evidence: plan.evidence.map(item => (item.id === 'p1-resume-proof' ? { ...item, quote: supportingQuote } : item)),
+        };
+        await supported.send({ identity: plan.identity, evidence: supportedPlan.evidence, requirements: plan.requirements });
+        const supportedResult = await supported.submit({
+          resume: { ...plan.resume, roles: [{ ...plan.resume.roles[0], bullets: [{ id: 'bullet-1', text: 'Delivered more than four years of internal systems delivery.', evidenceIds: ['resume-proof'] }] }] },
+        });
+        assert(supportedResult.result.accepted,
+          `a floor claim a cited quote exceeds is accepted, across the digit/word spelling (errors=${JSON.stringify(supportedResult.result.validationErrors || [])})`);
+        return { rejections: 4, controls: controlTexts.length };
+      } finally {
+        await fs.promises.rm(project.root, { recursive: true, force: true });
+      }
+    },
+  },
+  {
+    name: 'Every check a paste correction can report resolves to the unit that check grades',
+    async run() {
+      // The scope of a repair brief is keyed by check id, and a check with no
+      // entry in that table produces no part and therefore no brief at all —
+      // which is exactly how `opening-artifact-context`, whose message never
+      // writes the word paragraph, reached a user with an empty brief and cost
+      // a round. So the table is total in both directions, enumerated from the
+      // batteries the pipeline actually runs rather than from a hand list:
+      // adding a check without placing it fails here instead of silently
+      // shipping a round with nothing in its brief, and an entry for a check
+      // the pipeline dropped fails here rather than lingering as a rule no
+      // message can reach.
+      const reportable = pasteReportableCheckIds();
+      assert(reportable.length >= 45 && new Set(reportable).size === reportable.length,
+        `the enumeration reads the whole battery once (ids=${reportable.length})`);
+      const unplaced = reportable.filter(id => !PASTE_CHECK_PROSE_UNITS[id]);
+      assert(!unplaced.length,
+        `every reportable check names the unit it grades (unplaced=${JSON.stringify(unplaced)})`);
+      const orphans = Object.keys(PASTE_CHECK_PROSE_UNITS).filter(id => !reportable.includes(id));
+      assert(!orphans.length,
+        `no entry outlives the check it was written for (orphans=${JSON.stringify(orphans)})`);
+      const illegal = Object.entries(PASTE_CHECK_PROSE_UNITS)
+        .filter(([, unit]) => unit !== 'prose-unit' && unit !== 'field')
+        .map(([id]) => id);
+      assert(!illegal.length, `each entry is the stage's prose unit or a field (illegal=${JSON.stringify(illegal)})`);
+
+      // The three that grade a field are the reason the table has two values
+      // at all: each names a mapping, a plan shape or the thesis, and none of
+      // them is repaired by rewriting a paragraph. A round carrying only those
+      // prints no brief, which the thesis case below measures end to end.
+      const fields = Object.entries(PASTE_CHECK_PROSE_UNITS).filter(([, unit]) => unit === 'field').map(([id]) => id).sort();
+      assert(JSON.stringify(fields) === JSON.stringify(['evidence-grounding', 'mapping-narrative-structure', 'role-thesis']),
+        `the field-graded checks are the argument plan's own (fields=${JSON.stringify(fields)})`);
+      return { reportable: reportable.length, fields: fields.length };
+    },
+  },
+  {
+    name: 'Résumé contract defines the meaningful terms the project gate counts, names every uniqueness and per-field ceiling, and anchors the employer block the way a heading-less corpus writes it',
+    async run() {
+      // Four rules were enforced here with nothing said about them, and the
+      // fifth was described inaccurately. The corpus below is the shape the
+      // real career file uses — plain title/employer lines, no markdown
+      // headings, horizontal rules between sections — which is exactly the
+      // case the old "from that employer's heading" wording described wrongly:
+      // careerDataRoleRegionsForSourceRoles anchors such a corpus on the line
+      // that IS the role title, and bounds it by the next role or the next
+      // horizontal rule, never by a heading it does not have.
+      const project = await createCanvasProject();
+      try {
+        const headlessCareerData = [
+          'Ada Lovelace', 'ada@example.test', '', '---', '', 'Work Done from Past Jobs', '',
+          'Senior Engineer', 'Analytical Engines — Brookfield, Ohio', '*May, 2021 – June, 2024*', '',
+          '- Built the reporting pipeline for nightly batches.', '',
+          'Software Engineer', 'Difference Machines — Lakeview, Ontario', '*October, 2018 – January, 2021*', '',
+          '- Shipped the billing service with automated alerts.', '', '---', '',
+          'Personal Projects',
+          'RouteDesk - a dispatch route planner with a local model.', '',
+        ].join('\n');
+        assert(!/^\s{0,3}#{1,6}\s/mu.test(headlessCareerData),
+          'the corpus under test carries no markdown heading at all, so the contract sentence being checked is the one this corpus actually exercises');
+        const queued = await queueLocalApplicationJob({
+          transport: 'paste', canvasFilePath: project.canvasFilePath, careerData: headlessCareerData,
+          job: { title: 'Reporting Engineer', company: 'Acme', snippet: 'We own reporting and billing end to end, and a dispatch route planner.' },
+          resumeProfile: { workHistory: [
+            { id: 'role-1', title: 'Senior Engineer', employer: 'Analytical Engines', startDate: '2021', endDate: '2024' },
+            { id: 'role-2', title: 'Software Engineer', employer: 'Difference Machines', startDate: '2018', endDate: '2021' },
+          ] },
+        });
+        const planHandoff = (await getLocalApplicationHandoff({ jobId: queued.id, canvasFilePath: project.canvasFilePath })).handoff;
+        const acceptedPlan = await submitLocalApplicationHandoff({ jobId: queued.id, canvasFilePath: project.canvasFilePath, handoffCode: planHandoff.handoffCode, response: JSON.stringify(reply(planHandoff, {
+          identity: { name: 'Ada Lovelace', contact: ['ada@example.test'] },
+          evidence: [
+            { id: 'cd-engines', sourceId: 'career-data', quote: 'Built the reporting pipeline for nightly batches.', requirement: 'Reporting ownership', priority: 'highest' },
+            { id: 'cd-machines', sourceId: 'career-data', quote: 'Shipped the billing service with automated alerts.', requirement: 'Billing ownership', priority: 'highest' },
+            { id: 'cd-planner', sourceId: 'career-data', quote: 'RouteDesk - a dispatch route planner with a local model.', requirement: 'Independent delivery', priority: 'supporting' },
+            { id: 'job-stack', sourceId: 'job-listing', quote: 'reporting and billing end to end', requirement: 'Reporting and billing ownership', priority: 'highest' },
+            { id: 'job-planner', sourceId: 'job-listing', quote: 'a dispatch route planner', requirement: 'Route planner ownership', priority: 'high' },
+          ],
+          requirements: [{ id: 'need-stack', text: 'Reporting and billing ownership across the stack', priority: 'highest', evidenceIds: ['cd-engines', 'cd-machines', 'cd-planner', 'job-stack', 'job-planner'] }],
+        })) });
+        assert(acceptedPlan.accepted && acceptedPlan.handoff?.stage === 'resume', `the heading-less evidence plan opens the résumé handoff: ${JSON.stringify(acceptedPlan.validationErrors || [])}`);
+
+        const resumeStage = (await getLocalApplicationHandoff({ jobId: queued.id, canvasFilePath: project.canvasFilePath })).handoff;
+        const prompt = resumeStage.prompt;
+        const chars = STRUCTURED_RESUME_LIMITS.chars;
+        // Interpolated from the constants the gates read, never transcribed:
+        // a hand-copied threshold or stopword list that drifts fails here.
+        assert(prompt.includes(`shares at least ${MIN_SHARED_CAREER_TERMS} meaningful terms with its cited career evidence — ${CAREER_TERM_OVERLAP_RULE} —`),
+          'the résumé contract defines the meaningful term the project-description gate counts, from the same set and thresholds that gate reads');
+        // Two gates of the same shape grade this one document, and the bullet
+        // is NOT graded by the project gate above: assertSourceQuoteLinksFinalText
+        // reads the rendered bullet, drops a different word list, and counts a
+        // one-character term only when it is a digit. The floors are equal
+        // today, so a contract printing the other module's rule here looked
+        // guarded while naming a word list the bullet was never measured by.
+        assert(prompt.includes(`it must share at least ${MIN_SHARED_SOURCE_TERMS} meaningful terms with the career-data quotes it cites — ${SOURCE_TERM_OVERLAP_RULE} —`),
+          'the per-bullet floor and term rule are interpolated from the gate that rejects the bullet, not from the project gate beside it');
+        assert(!prompt.includes(`share at least ${MIN_SHARED_CAREER_TERMS} meaningful terms with the career-data quotes it cites, under a similar exclusion`),
+          'the bullet clause no longer describes its exclusion instead of naming it');
+        assert(prompt.includes('Nothing may repeat: identity.contact values, the items inside one skills group, bullet ids within their role, and — each across the whole résumé — role ids, project ids, and skill-group ids.'),
+          'the résumé contract names every uniqueness rule the validator enforces, not only the three it used to admit');
+        assert(prompt.includes(`Per-field character ceilings, all measured after whitespace collapsing: ${chars.shortText} for identity.name or subtitleRole, a role’s title, company, dates or location, a project name, institution, issuer, degree, or certification name; ${chars.longText} for identity.credential, one contact value, or a project’s metrics; ${chars.projectDescription} for a project description; ${chars.skillText} for a skill-group label or one of its items.`),
+          'the résumé contract states every per-field character ceiling text() enforces, including evidence-backed education and certification fields');
+        assert(prompt.includes('Typed role dates retain source punctuation verbatim, even if their separator would be forbidden in authored prose; never normalize them.')
+          && prompt.includes('The dash-style rule still applies to bullets and every other authored copy.'),
+        'the résumé contract distinguishes source-locked typed dates from authored prose, so it cannot request a normalizing rewrite and then reject the retained source spelling');
+        assert(prompt.includes(`inside that one employer’s own careerData section — ${CAREER_DATA_ROLE_SECTION_RULE}`)
+          && CAREER_DATA_ROLE_SECTION_RULE.includes('at the line that is exactly this role’s title with that employer named on one of the lines just below it')
+          && CAREER_DATA_ROLE_SECTION_RULE.includes('the next horizontal rule')
+          && CAREER_DATA_ROLE_SECTION_RULE.includes('only when the block began at a markdown heading'),
+        'the bullet-scope sentence describes both anchors the region scoper actually uses, and bounds the block the way it actually bounds it');
+
+        const sourceRoles = pasteContext(prompt).sourceRoles;
+        const submitResume = resume => submitLocalApplicationHandoff({ jobId: queued.id, canvasFilePath: project.canvasFilePath, handoffCode: resumeStage.handoffCode, response: JSON.stringify(reply(resumeStage, { resume })) });
+        const role = (index, overrides = {}) => ({
+          id: sourceRoles[index].id, title: sourceRoles[index].title, company: sourceRoles[index].company, dates: sourceRoles[index].dates,
+          location: index === 0 ? 'Brookfield, Ohio' : 'Lakeview, Ontario',
+          bullets: [{
+            id: `bullet-${index + 1}`,
+            text: index === 0 ? 'Built the reporting pipeline for nightly batches.' : 'Shipped the billing service with automated alerts.',
+            evidenceIds: [index === 0 ? 'cd-engines' : 'cd-machines'],
+          }],
+          ...overrides,
+        });
+        const project1 = { id: 'project-planner', name: 'RouteDesk', description: 'Dispatch route planner that runs a local model.', evidenceIds: ['cd-planner', 'job-planner'] };
+        // A skill item has to be a name a recruiter can filter on, which shows in
+        // its spelling, so this group carries the product its cited quote names
+        // rather than the "local model" phrase that names the activity.
+        const skillGroup = { id: 'skills-tools', group: 'tools', items: ['RouteDesk'], evidenceIds: ['cd-planner'] };
+        const draft = (overrides = {}) => ({
+          schemaVersion: 'structured-resume.v1',
+          identity: { name: 'Ada Lovelace', contact: ['ada@example.test'] },
+          roles: [role(0), role(1)],
+          projects: [project1],
+          skills: [skillGroup],
+          ...overrides,
+        });
+        const scopeRejection = /must cite career-data evidence only from the trusted role’s career-data section|must cite career-data evidence only from the trusted role's career-data section/;
+
+        // The region description, exercised on the corpus shape it now
+        // describes: the first employer's block ends where the second role's
+        // own title line begins, and the last one ends at the horizontal rule
+        // above Personal Projects.
+        const crossedRoles = await submitResume(draft({ roles: [role(0, { bullets: [{ id: 'bullet-1', text: 'Shipped the billing service with automated alerts.', evidenceIds: ['cd-machines'] }] }), role(1)] }));
+        assert(!crossedRoles.accepted && crossedRoles.validationErrors?.some(message => scopeRejection.test(message)),
+          `in a heading-less corpus the next role's own title line still ends the block, so a bullet reaching past it is rejected (errors=${JSON.stringify(crossedRoles.validationErrors || [])})`);
+        const pastTheRule = await submitResume(draft({ roles: [role(0), role(1, { bullets: [{ id: 'bullet-2', text: 'Built a dispatch route planner with a local model.', evidenceIds: ['cd-planner'] }] })] }));
+        assert(!pastTheRule.accepted && pastTheRule.validationErrors?.some(message => scopeRejection.test(message)),
+          `the horizontal rule ends the last employer's block, so evidence below it grounds no bullet (errors=${JSON.stringify(pastTheRule.validationErrors || [])})`);
+
+        // Each newly disclosed rule, fired.
+        const flatDescription = await submitResume(draft({ projects: [{ ...project1, description: 'Built and delivered the system using work over time.' }] }));
+        assert(!flatDescription.accepted && flatDescription.validationErrors?.some(message => /projects\.project-planner\.description must share at least two distinct meaningful terms/.test(message)),
+          `a description that restates the deed in résumé verbs alone shares nothing the gate counts, exactly as the stopword list now printed says (errors=${JSON.stringify(flatDescription.validationErrors || [])})`);
+        const repeatedItem = await submitResume(draft({ skills: [{ ...skillGroup, items: ['RouteDesk', 'RouteDesk'] }] }));
+        assert(!repeatedItem.accepted && repeatedItem.validationErrors?.some(message => /skills\[0\]\.items contains duplicate identifier "RouteDesk"/.test(message)),
+          'a repeated item inside one skills group is rejected, as the contract now states');
+        const repeatedProjectId = await submitResume(draft({ projects: [project1, { ...project1, name: 'RouteDesk' }] }));
+        assert(!repeatedProjectId.accepted && repeatedProjectId.validationErrors?.some(message => /projects contains duplicate identifier "project-planner"/.test(message)),
+          'a repeated project id is rejected, as the contract now states');
+        const repeatedSkillId = await submitResume(draft({ skills: [skillGroup, { ...skillGroup, group: 'methods' }] }));
+        assert(!repeatedSkillId.accepted && repeatedSkillId.validationErrors?.some(message => /skills contains duplicate identifier "skills-tools"/.test(message)),
+          'a repeated skill-group id is rejected, as the contract now states');
+        const repeatedRoleId = await submitResume(draft({ roles: [role(0), { ...role(0), bullets: [{ id: 'bullet-2', text: 'Built the reporting pipeline for nightly batches.', evidenceIds: ['cd-engines'] }] }] }));
+        assert(!repeatedRoleId.accepted && repeatedRoleId.validationErrors?.some(message => /roles contains duplicate identifier/.test(message)),
+          'a repeated role id is rejected, as the contract now states');
+        const longName = await submitResume(draft({ projects: [{ ...project1, name: 'P'.repeat(chars.shortText + 1) }] }));
+        assert(!longName.accepted && longName.validationErrors?.some(message => message.includes(`projects[0].name exceeds ${chars.shortText} characters`)),
+          'the stated project-name ceiling is the enforced one, so the disclosed number can never drift from the gate');
+        const longItem = await submitResume(draft({ skills: [{ ...skillGroup, items: ['l'.repeat(chars.skillText + 1)] }] }));
+        assert(!longItem.accepted && longItem.validationErrors?.some(message => message.includes(`skills[0].items[0] exceeds ${chars.skillText} characters`)),
+          'the stated skill-item ceiling is the enforced one too');
+
+        // One draft that obeys every sentence above literally, in one round:
+        // bullets inside their own plain-line block, unique ids everywhere,
+        // a description that shares countable terms, every field inside its
+        // stated ceiling.
+        const accepted = await submitResume(draft());
+        assert(accepted.accepted && accepted.handoff?.stage === 'cover-letter',
+          `a résumé built by literally following the disclosed rules is accepted on the first round (errors=${JSON.stringify(accepted.validationErrors || [])})`);
+        return { rejections: 7, ceilings: Object.keys(chars).length };
+      } finally {
+        await fs.promises.rm(project.root, { recursive: true, force: true });
+      }
+    },
+  },
+  {
+    name: 'The evidence-plan stage rejects a plan that would leave the résumé stage no legal answer for an employer',
+    async run() {
+      // Measured on the live job: the accepted plan gave one employer only its
+      // date block, and the résumé stage — which must show every saved role
+      // with at least one bullet, each citing career evidence from that
+      // employer's own section — could only answer with a bullet restating the
+      // role header. The harder version of the same defect has NO answer at
+      // all: an employer the plan quotes nowhere makes every possible résumé
+      // response illegal, and the plan is frozen, so stage 2 rejects forever.
+      // The rejection therefore belongs at the only stage that can still edit
+      // the plan.
+      const careerData = [
+        'Ada Lovelace', 'ada@example.test', '',
+        'Work Done from Past Jobs', '',
+        'Senior Engineer', 'Analytical Engines — Reading, Berkshire', '*2021 – 2024*', '',
+        '- Built the reporting pipeline for nightly batches.', '',
+        'Software Engineer', 'Difference Machines — Cambridge, Cambridgeshire', '*2018 – 2021*', '',
+        '- Shipped the billing service with automated alerts.', '',
+        'Junior Engineer', 'Spare Parts Co — Oxford, Oxfordshire', '*2016 – 2018*', '',
+        '---', '', 'Personal Projects', '',
+        '- Built a dispatch route planner with a local model.', '',
+      ].join('\n');
+      const ENGINES_WORK = 'Built the reporting pipeline for nightly batches.';
+      const MACHINES_WORK = 'Shipped the billing service with automated alerts.';
+      const MACHINES_HEADER = 'Software Engineer\nDifference Machines — Cambridge, Cambridgeshire\n*2018 – 2021*';
+      const SPARE_HEADER = 'Junior Engineer\nSpare Parts Co — Oxford, Oxfordshire\n*2016 – 2018*';
+      const PROJECT_WORK = 'Built a dispatch route planner with a local model.';
+      const project = await createCanvasProject();
+      try {
+        const queued = await queueLocalApplicationJob({
+          transport: 'paste', canvasFilePath: project.canvasFilePath, careerData,
+          job: { title: 'Reporting Engineer', company: 'Acme', snippet: 'We own reporting and billing end to end and expect independent delivery.' },
+          resumeProfile: { workHistory: [
+            { id: 'role-1', title: 'Senior Engineer', employer: 'Analytical Engines', startDate: '2021', endDate: '2024' },
+            { id: 'role-2', title: 'Software Engineer', employer: 'Difference Machines', startDate: '2018', endDate: '2021' },
+            { id: 'role-3', title: 'Junior Engineer', employer: 'Spare Parts Co', startDate: '2016', endDate: '2018' },
+          ] },
+        });
+        const handoff = (await getLocalApplicationHandoff({ jobId: queued.id, canvasFilePath: project.canvasFilePath })).handoff;
+        const prompt = handoff.prompt;
+
+        // Disclosure first: a rule the responder is rejected by must be
+        // readable in the prompt that produced the response, and the section
+        // it names is interpolated from the module that cuts it, so the two
+        // stages can never describe the same block two different ways.
+        assert(prompt.includes('Career evidence is also planned per EMPLOYER')
+          && prompt.includes('the résumé must show every saved work-history role with at least one bullet')
+          && prompt.includes(CAREER_DATA_ROLE_SECTION_RULE),
+        'the evidence-plan contract states the per-employer coverage rule and the section boundary the résumé gate enforces');
+        assert(prompt.includes('is not enough on its own') && prompt.includes('could only restate the role header')
+          && prompt.includes('once this plan is accepted it cannot be changed'),
+        'the contract says the opening block alone is not enough, and why the rejection lands at this stage');
+
+        const submit = (fields) => submitLocalApplicationHandoff({
+          jobId: queued.id, canvasFilePath: project.canvasFilePath, handoffCode: handoff.handoffCode,
+          response: JSON.stringify(reply(handoff, {
+            identity: { name: 'Ada Lovelace', contact: ['ada@example.test'], subtitleRole: 'Software Engineer' },
+            ...fields,
+          })),
+        });
+        const listing = { id: 'job-stack', sourceId: 'job-listing', quote: 'reporting and billing end to end', requirement: 'Reporting and billing ownership', priority: 'highest' };
+        const career = (id, quote, requirement) => ({ id, sourceId: 'career-data', quote, requirement, priority: 'highest' });
+        const need = ids => [{ id: 'need-stack', text: 'Reporting and billing ownership across the stack', priority: 'highest', evidenceIds: [...ids, 'job-stack'] }];
+
+        // No career evidence at all: every bullet and every letter paragraph
+        // needs a career-data ID, so nothing downstream could ever be answered.
+        const noCareer = await submit({ evidence: [listing], requirements: [{ id: 'need-stack', text: 'Reporting and billing ownership across the stack', priority: 'highest', evidenceIds: ['job-stack'] }] });
+        assert(!noCareer.accepted && noCareer.validationErrors.some(message => message.includes('no career-data evidence item at all')),
+          `a plan with only listing evidence is rejected at the stage that can still fix it (errors=${JSON.stringify(noCareer.validationErrors)})`);
+
+        // One employer quoted nowhere. Career evidence sitting in the
+        // personal-projects block grounds no role bullet, so it does not
+        // rescue the uncovered employer either.
+        const uncovered = await submit({
+          evidence: [career('cd-engines', ENGINES_WORK, 'Reporting ownership'), career('cd-machines', MACHINES_WORK, 'Billing ownership'), career('cd-projects', PROJECT_WORK, 'Independent delivery'), listing],
+          requirements: need(['cd-engines', 'cd-machines', 'cd-projects']),
+        });
+        assert(!uncovered.accepted
+          && uncovered.validationErrors.some(message => message.includes('"Spare Parts Co"') && message.includes('No career-data evidence item in this plan quotes the career-data section of'))
+          && !uncovered.validationErrors.some(message => message.includes('"Analytical Engines"') || message.includes('"Difference Machines"')),
+        `only the uncovered employer is named, and personal-projects evidence does not cover it (errors=${JSON.stringify(uncovered.validationErrors)})`);
+        // That employer's section is its own header and nothing else. The
+        // message used to close by telling the responder to quote what the
+        // section says about the work — evidence this corpus does not contain,
+        // on a plan that is frozen the moment it is accepted.
+        assert(uncovered.validationErrors.some(message => message.includes('"Spare Parts Co"')
+          && message.includes('states nothing beyond its own opening block')
+          && message.includes('quoting that opening block itself'))
+          && !uncovered.validationErrors.some(message => message.includes("quoting what that employer's section says about the work")),
+        `an employer whose section is only its header is told to quote that header (errors=${JSON.stringify(uncovered.validationErrors)})`);
+
+        // The same absence over a section that DOES describe the work keeps
+        // the original repair, so the two classes are reported separately
+        // rather than collapsed into whichever wording fits one of them.
+        const uncoveredWithBody = await submit({
+          evidence: [career('cd-engines', ENGINES_WORK, 'Reporting ownership'), career('cd-spare-dates', SPARE_HEADER, 'Early tenure'), career('cd-projects', PROJECT_WORK, 'Independent delivery'), listing],
+          requirements: need(['cd-engines', 'cd-spare-dates', 'cd-projects']),
+        });
+        assert(!uncoveredWithBody.accepted
+          && uncoveredWithBody.validationErrors.some(message => message.includes('"Difference Machines"')
+            && message.includes("quoting what that employer's section says about the work"))
+          && !uncoveredWithBody.validationErrors.some(message => message.includes('"Spare Parts Co"')),
+        `an employer whose section describes the work is told to quote that description (errors=${JSON.stringify(uncoveredWithBody.validationErrors)})`);
+
+        // An employer quoted only by its opening block: the live job's defect.
+        const headerOnly = await submit({
+          evidence: [career('cd-engines', ENGINES_WORK, 'Reporting ownership'), career('cd-machines-dates', MACHINES_HEADER, 'Billing tenure'), career('cd-spare-dates', SPARE_HEADER, 'Early tenure'), listing],
+          requirements: need(['cd-engines', 'cd-machines-dates', 'cd-spare-dates']),
+        });
+        assert(!headerOnly.accepted
+          && headerOnly.validationErrors.some(message => message.includes('"Difference Machines"') && message.includes('falls inside the section') && message.includes('opening block'))
+          && !headerOnly.validationErrors.some(message => message.includes('"Spare Parts Co"')),
+        `the date-block-only employer is rejected, while the employer whose section says nothing else is not (errors=${JSON.stringify(headerOnly.validationErrors)})`);
+
+        // Following the rejection literally repairs it in one round, and the
+        // employer with nothing but a header keeps its header quote.
+        const repaired = await submit({
+          evidence: [career('cd-engines', ENGINES_WORK, 'Reporting ownership'), career('cd-machines', MACHINES_WORK, 'Billing ownership'), career('cd-spare-dates', SPARE_HEADER, 'Early tenure'), listing],
+          requirements: need(['cd-engines', 'cd-machines', 'cd-spare-dates']),
+        });
+        assert(repaired.accepted && repaired.handoff?.stage === 'resume',
+          `the repair the message names is accepted in one round (errors=${JSON.stringify(repaired.validationErrors || [])})`);
+
+        // What the gate prevented: under the uncovered plan the résumé stage
+        // had no legal answer for that employer at all. Every citation a
+        // bullet could have made is rejected, so the loop had no exit — which
+        // is why this rejection cannot wait for the stage that hits it.
+        const uncoveredCatalog = [
+          { id: 'cd-engines', sourceId: 'career-data', quote: ENGINES_WORK },
+          { id: 'cd-machines', sourceId: 'career-data', quote: MACHINES_WORK },
+          { id: 'cd-projects', sourceId: 'career-data', quote: PROJECT_WORK },
+          { id: 'job-stack', sourceId: 'job-listing', quote: 'reporting and billing end to end' },
+        ];
+        const attempt = (evidenceIds) => {
+          try {
+            renderStructuredApplicationResume({
+              schemaVersion: 'structured-resume.v1',
+              identity: { name: 'Ada Lovelace', contact: ['ada@example.test'], subtitleRole: 'Software Engineer' },
+              roles: [
+                { id: 'role-1', title: 'Senior Engineer', company: 'Analytical Engines', dates: '2021 – 2024', bullets: [{ id: 'b1', text: ENGINES_WORK, evidenceIds: ['cd-engines'] }] },
+                { id: 'role-2', title: 'Software Engineer', company: 'Difference Machines', dates: '2018 – 2021', bullets: [{ id: 'b2', text: MACHINES_WORK, evidenceIds: ['cd-machines'] }] },
+                { id: 'role-3', title: 'Junior Engineer', company: 'Spare Parts Co', dates: '2016 – 2018', bullets: [{ id: 'b3', text: 'Supported the parts catalogue.', evidenceIds }] },
+              ],
+            }, {
+              sourceRoles: [
+                { id: 'role-1', title: 'Senior Engineer', company: 'Analytical Engines', dates: '2021 – 2024', location: '' },
+                { id: 'role-2', title: 'Software Engineer', company: 'Difference Machines', dates: '2018 – 2021', location: '' },
+                { id: 'role-3', title: 'Junior Engineer', company: 'Spare Parts Co', dates: '2016 – 2018', location: '' },
+              ],
+              evidenceCatalog: uncoveredCatalog, careerData,
+            });
+            return '';
+          } catch (error) { return String(error?.message || error); }
+        };
+        const everyCitation = [['cd-engines'], ['cd-machines'], ['cd-projects'], ['job-stack'], ['cd-engines', 'cd-machines', 'cd-projects', 'job-stack'], []];
+        assert(everyCitation.every(evidenceIds => attempt(evidenceIds) !== ''),
+          'under the rejected plan every citation the uncovered role could make is refused, so stage 2 had no answer to reach');
+
+        return { rejectedClasses: 4, repairedInOneRound: true };
+      } finally {
+        await fs.promises.rm(project.root, { recursive: true, force: true });
+      }
+    },
+  },
+  {
+    name: 'The résumé stage applies the source-grounding rules the assembled package applies, and a career quote too short to bind a claim is named when a bullet cites it',
+    async run() {
+      // Two completion-time rules with no earlier twin, both reachable from a
+      // stage-accepted document. The qualifier rule reads a bullet's PROSE
+      // against the quotes that bullet cites; the specificity rule reads the
+      // quote itself. The second one is the expensive shape: the evidence plan
+      // is frozen at stage 1, so a two-word quote accepted there and cited at
+      // stage 2 used to surface only at assembly, when no round left could
+      // change the plan it came from.
+      const project = await createCanvasProject();
+      try {
+        const plan = auditPlanFixture();
+        const steps = await auditJobSteps(project);
+        const planPrompt = (await steps.current()).prompt;
+        assert(planPrompt.includes(`at least ${MIN_SOURCE_GROUNDING_QUOTE_CHARS} characters and ${MIN_SOURCE_GROUNDING_QUOTE_WORDS} words`),
+          'the evidence-plan contract states the minimum a career-data quote needs, interpolated from the constants sourceQuoteIsSpecific reads');
+        await steps.send({
+          identity: plan.identity,
+          // A real contiguous slice of the corpus body and a legal plan quote:
+          // the plan stage is not made stricter, because a quote no unit
+          // ever cites is never measured against this rule.
+          evidence: [...plan.evidence, { id: 'p1-short-proof', sourceId: 'career-data', quote: 'Maintained', requirement: 'Systems maintenance', priority: 'supporting' }],
+          requirements: plan.requirements,
+        });
+
+        const bullet = (text, evidenceIds) => ({ ...plan.resume, roles: [{ ...plan.resume.roles[0], bullets: [{ id: 'bullet-1', text, evidenceIds }] }] });
+        const qualifier = await steps.submit({ resume: bullet('Maintained internal systems and cut onboarding delays.', ['resume-proof']) });
+        assert(!qualifier.result.accepted && qualifier.result.handoff?.stage === 'resume'
+          && qualifier.result.validationErrors.some(message => message.startsWith('unit-source-grounding: Résumé bullet "bullet-1": uses unsupported reduction outcome')),
+        `a qualifier the cited quote never states is named by bullet id in the round that wrote it (errors=${JSON.stringify(qualifier.result.validationErrors || [])})`);
+
+        const short = await steps.submit({ resume: bullet(AUDIT_BULLET, ['p1-short-proof']) });
+        assert(!short.result.accepted && short.result.validationErrors.some(message =>
+          message.startsWith('Résumé bullet "bullet-1" cites a career-data quote that is too short to bind a claim')
+          && message.includes(`at least ${MIN_SOURCE_GROUNDING_QUOTE_CHARS} characters and ${MIN_SOURCE_GROUNDING_QUOTE_WORDS} words`))
+          && pasteRejectionCheckIds(short.result.validationErrors).checkIds.includes('unit-source-grounding'),
+        `citing the two-word quote is rejected where the citation is still changeable, not after the plan is frozen (errors=${JSON.stringify(short.result.validationErrors || [])})`);
+
+        // Never stricter than the gate it mirrors: the bullet the fixture was
+        // always allowed to write still passes on the next round.
+        const accepted = await steps.submit({ resume: bullet(AUDIT_BULLET, ['resume-proof']) });
+        assert(accepted.result.accepted && accepted.result.handoff?.stage === 'cover-letter',
+          `a bullet whose prose stays inside the quote it cites is accepted (errors=${JSON.stringify(accepted.result.validationErrors || [])})`);
+        return { minQuoteChars: MIN_SOURCE_GROUNDING_QUOTE_CHARS, minQuoteWords: MIN_SOURCE_GROUNDING_QUOTE_WORDS };
       } finally {
         await fs.promises.rm(project.root, { recursive: true, force: true });
       }

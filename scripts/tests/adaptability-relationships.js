@@ -523,9 +523,16 @@ function resumeFor(d, skillItems, { listing = null } = {}) {
   };
 }
 
+// `advice` is what an ACCEPTED draft is still told: index completeness (a skills
+// block that leaves out a posting-named or career-attested name) is a TASTE
+// rule, so it advises rather than rejects, and the requirement the source
+// evidence derives is observed through that advice.
 function resumeVerdict(d, skillItems, options) {
   const { resume, context } = resumeFor(d, skillItems, options);
-  try { validateStructuredApplicationResume(resume, context); return { accepted: true }; } catch (error) { return { accepted: false, message: String(error?.message || error) }; }
+  try {
+    const draft = validateStructuredApplicationResume(resume, context);
+    return { accepted: true, advice: draft.advisories.map(entry => entry.detail).join(' ') };
+  } catch (error) { return { accepted: false, message: String(error?.message || error), advice: '' }; }
 }
 
 const hasName = (names, label) => names.some(name => name.toLowerCase() === label.toLowerCase());
@@ -733,8 +740,9 @@ export default [
           const requiredA = resumeVerdict(dA, [], { listing: profile.listing });
           const requiredB = resumeVerdict(dB, [], { listing: profile.listing });
           const requiredC = resumeVerdict(dC, [], { listing: profile.listing });
-          assert(requiredA.accepted && !requiredB.accepted && /skills omits/u.test(requiredB.message) && requiredB.message.includes(profile.label) && requiredC.accepted,
-            `${context}: the posting-named skill requirement must appear and disappear with the source evidence (${requiredA.message}|${requiredB.message}|${requiredC.message})`);
+          assert(requiredA.accepted && requiredB.accepted && requiredC.accepted
+            && !/skills omits/u.test(requiredA.advice) && /skills omits/u.test(requiredB.advice) && requiredB.advice.includes(profile.label) && !/skills omits/u.test(requiredC.advice),
+          `${context}: the posting-named skill requirement must appear and disappear with the source evidence, as advice (${requiredA.advice}|${requiredB.advice}|${requiredC.advice})`);
           const claimedWithPosting = [dA, dB].map(item => resumeVerdict(item, [profile.label], { listing: profile.listing }));
           assert(claimedWithPosting[1].accepted && !claimedWithPosting[0].accepted && NOT_APPROVED_SKILL_RESUME.test(claimedWithPosting[0].message),
             `${context}: with the posting present the skill is accepted only after the flip, and a refusal names the approved-skill gate (${claimedWithPosting[0].message})`);
@@ -744,8 +752,9 @@ export default [
           assert(!unrelated.listing.toLowerCase().includes(profile.label.toLowerCase()), 'fixture invariant: the unrelated posting must not name the technology');
           const unrelatedA = resumeVerdict(dA, [], { listing: unrelated.listing });
           const unrelatedB = resumeVerdict(dB, [], { listing: unrelated.listing });
-          assert(unrelatedA.accepted && !unrelatedB.accepted && /from the bounded career-attested index/u.test(unrelatedB.message) && unrelatedB.message.includes(profile.label),
-            `${context}: with any posting the career index must require the genuine skill (after the flip) and never the non-candidate one (${unrelatedA.message}|${unrelatedB.message})`);
+          assert(unrelatedA.accepted && unrelatedB.accepted && !/from the bounded career-attested index/u.test(unrelatedA.advice)
+            && /from the bounded career-attested index/u.test(unrelatedB.advice) && unrelatedB.advice.includes(profile.label),
+          `${context}: with any posting the career index must name the genuine skill (after the flip) and never the non-candidate one (${unrelatedA.advice}|${unrelatedB.advice})`);
         }
       }
     },
@@ -812,8 +821,9 @@ export default [
           for (const sibling of spec.refused(profile).filter(label => label !== profile.label)) assertRefused(dB, sibling, `${context} B sibling`);
           // A posting that names the technology demands it from the résumé only once the candidate truly has it directly.
           const [requiredA, requiredB, requiredC] = [dA, dB, dC].map(item => resumeVerdict(item, [], { listing: profile.listing }));
-          assert(requiredA.accepted && requiredC.accepted && !requiredB.accepted && /skills omits/u.test(requiredB.message) && requiredB.message.includes(profile.label),
-            `${context}: the posting-named requirement must exist only in B (${requiredA.message}|${requiredB.message}|${requiredC.message})`);
+          assert(requiredA.accepted && requiredB.accepted && requiredC.accepted
+            && !/skills omits/u.test(requiredA.advice) && !/skills omits/u.test(requiredC.advice) && /skills omits/u.test(requiredB.advice) && requiredB.advice.includes(profile.label),
+          `${context}: the posting-named requirement must exist only in B (${requiredA.advice}|${requiredB.advice}|${requiredC.advice})`);
         }
       }
     },
@@ -841,8 +851,8 @@ export default [
         // Resume side: both labels become required career-index terms only in B.
         const requiredA = resumeVerdict(dA, [], { listing: profile.listing });
         const requiredB = resumeVerdict(dB, [], { listing: profile.listing });
-        assert(requiredA.accepted && !requiredB.accepted && requiredB.message.includes(profile.label) && requiredB.message.includes(profile.other),
-          `${context}: simultaneous use must require both labels in the index and the choice neither (${requiredA.message}|${requiredB.message})`);
+        assert(requiredA.accepted && requiredB.accepted && !requiredA.advice.includes(profile.label) && requiredB.advice.includes(profile.label) && requiredB.advice.includes(profile.other),
+          `${context}: simultaneous use must require both labels in the index and the choice neither (${requiredA.advice}|${requiredB.advice})`);
       }
     },
   },

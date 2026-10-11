@@ -1,5 +1,11 @@
 # Infinite Canvas Local AI application routine
 
+For the paste-back workflow, play the approved career hand as strongly as its
+evidence allows. Truth, source provenance, schema and measured page fit are
+hard gates. The detailed length, cadence, sentence-shape, opening, closing and
+argument-mapping forms in this routine guide editorial judgment; they do not
+reject truthful prose. Any recorded span must still copy its source exactly.
+
 `INPUT_JOBS_ROOT: /replace/with/the/saved-canvas-folder/.local-ai/jobs`
 
 `OUTPUT_BUNDLE_ROOT: Applied Jobs`
@@ -425,41 +431,13 @@ Use any local coding agent with filesystem and shell access. The routine is prov
    audit inside `result.json`; Infinite Canvas validates it and writes any
    durable audit companion in the final application folder itself.
 
-   For checklist version 3 or 4, each final cover-letter paragraph that states a
-   completed candidate action must carry an `argumentMapping` in its matching
-   `generationAudit.coverLetterPlan.paragraphs` entry. Copy exact final text
-   spans: `proof` (the concrete past action) and a short `jobNeedQuote` copied
-   verbatim from `context/job-listing.md` for every such paragraph, plus the two
-   spans only the first proof-bearing paragraph of the letter owes, `claim` (the
-   capability asserted) and `relevance` (the explicit connection to this role's
-   work). Only the first proof-bearing paragraph of the letter owes a `claim`
-   or a `relevance`; a later proof-bearing paragraph keeps its `proof` and
-   `jobNeedQuote` and may omit either one (it may leave the claim out, and it
-   may leave the relevance out), and a `claim` or `relevance` it does record is
-   held to the same shape. A
-   `claim` is a short phrase that may sit inline in any sentence of the
-   paragraph, the proof sentence included, so it needs no sentence of its own;
-   it names the capability with the nouns of the evidence the paragraph cites
-   and asserts no more than that evidence shows. The spans may overlap and relevance may come before proof, but they must identify
-   distinct argumentative work: capability claim, past proof, and target-facing
-   relevance. Do not use a generic
-   bridge such as "I would bring this to your team". For the first
-   proof-bearing paragraph of the letter, `relevance` is a sentence, or part of
-   one, other than the sentence the `proof` span sits in, that says in the
-   writer's own words how that proof bears on the work the `jobNeedQuote` came
-   from: it carries at least two content words of the quote (or one of nine
-   letters or more), is not a generic relevance label, and needs no stock
-   phrase, modal or word shared with the proof. A later proof-bearing
-   paragraph that does record one gives any span that names the responsibility
-   its `jobNeedQuote` came from (it carries at least two content words of the
-   quote, or one of nine letters or more, and is not a generic relevance
-   label) and it needs no sentence about the target, because that paragraph
-   ends on what the work did; it may be the proof sentence itself when that
-   sentence names the responsibility. A paragraph with no
-   completed candidate proof, such as a closing invitation, uses
-   `"argumentMapping": null`. These are final-state bindings, not notes or
-   draft commentary: every non-null span must occur in its final paragraph and
-   the job quote must occur in the selected listing.
+   For checklist version 3 or 4, the final generation audit may include an
+   `argumentMapping` for a paragraph. Its `claim`, `proof` and `relevance`
+   fields are optional. Every supplied span must be an exact substring of that
+   final paragraph; a supplied `jobNeedQuote` must be an exact substring of
+   the selected job listing. Do not use a mapping to claim uncited evidence.
+   Choose and explain evidence in natural prose; no closed claim grammar,
+   proof-verb list or posting-word overlap formula is a rejection rule.
 
    Canonical checklist, version 4:
 
@@ -577,8 +555,8 @@ Use any local coding agent with filesystem and shell access. The routine is prov
      whole résumé, including `in-house`.
    - Keep every `.highlights li` at or under 180 visible characters, and any
      `.tradeoff` clause's own text (excluding its label) at or under 100. This
-     is `STYLE.md §5.4`'s two-line budget, and Infinite Canvas now measures it
-     directly and rejects the result when a bullet exceeds it.
+     is `STYLE.md §5.4`'s two-line budget, and Infinite Canvas records excess length as editorial advice. The
+     renderer measures actual one-page fit as the hard layout gate.
    - Give every résumé highlight one principal achievement or action chain.
      A trailing clause belongs only when it materially adds a supported
      mechanism, constraint, scope, or result to that same point. Delete
@@ -685,274 +663,38 @@ Use any local coding agent with filesystem and shell access. The routine is prov
    shorter argument does not need filler or another example. The final cover
    letter must fit one page when rendered by Infinite Canvas. Every factual
    candidate claim must be supported by the supplied career data, using the
-   evidence boundary in step 3. Write natural connected prose: select one
-   load-bearing proof, summarize related implementation details, and use short
-   causal sentences instead of an inventory unloaded after a colon, a
-   semicolon, or a dash.
+   evidence boundary in step 3.
+
+   Lead with the strongest true evidence for the posting. Name the target role
+   and company once in the opening. Add reasons, decisions, constraints and
+   outcomes that the cited quotes state instead of restating the résumé.
+   Write plain, natural English without echoing the posting. Make the closing
+   specific to the contribution and target work. Be honest about adjacent
+   experience; never claim more ownership, skill, scope, metric, date or
+   outcome than a cited quote states.
+
    Include prior-project implementation detail only when it proves the narrow
    transferable capability or decision relevant to this posting. Preserve the
    source-supported trigger and scope without turning a prior workflow,
-   industry, feature, or tool into a requirement of the target role. Do not
-   catalog features: explain the shared mechanism that makes the selected proof
-   useful for the responsibility named in this posting.
+   industry, feature, or tool into a requirement of the target role.
    Preserve the posting's modality: a requirement to use a tool or workflow is
    not a responsibility to build, introduce, or integrate it unless the posting
-   separately says so. Tool use of any kind is not
-   evidence of shipping a product built around that tool; absent direct product
-   evidence, keep the transfer at the narrower supported capability.
-   State completed work with yourself as the grammatical subject of the
-   action. An artifact, project, pipeline, or system named as the actor
-   describes something that exists rather than work a person did. It also
-   decides whether a paragraph owes an `argumentMapping`, so a letter written
-   entirely in artifact-as-actor sentences is graded by none of the argument
-   rules and ships unexamined; the omission is silent, not permissive. Every
-   paragraph offering completed work as proof carries at least one first-person
-   action.
-   Explain the relationship between concrete evidence and the target work only
-   when the proof and transfer do not already make it clear. Do not insert a
-   mandatory standalone warrant or problem-shape sentence. The explanation may
-   stay inside the evidence sentence, stay inside the transfer, or use
-   additional sentences when that is easier to understand. Keep concrete
-   actors, artifacts, actions, and supported domain details when they make the
-   relationship clearer. Abstract only enough to name a real dependency,
-   constraint, or design trade. Reject stock frames that turn a clear action
-   into an abstract obligation or merely announce that the work was difficult.
-   The explanation may introduce no outcome, scale, or motivation the sources
-   do not state. A sentence that only assigns the work to a category adds
-   nothing and is cut. If removing the explanation leaves the same clear
-   evidence-to-need connection, remove it.
-   Give every paragraph one argumentative job, not a prescribed number of
-   sentences. Use the sentences that paragraph needs to make its point and
-   establish its proof clearly, usually two to four.
-   A one-sentence paragraph is for emphasis, a one-line hook or a one-line
-   closing, and a letter has at most two of them; no single detail of a source
-   earns a paragraph of its own: choose the strongest two or three proofs,
-   develop each in one paragraph, and leave the rest to the résumé. The app
-   counts how the letter is cut, not what it says: a letter of 90 words or
-   more has at most 7 body paragraphs, averages at least 25 words per
-   paragraph, runs no paragraph past 6 sentences, has at most 2 standalone
-   one-sentence paragraphs, states an action of your own in at least 40% of
-   its paragraphs (I or we, then a verb for what you did or do, even after an
-   adverb: "I carefully fixed", "I review"; "I'd", would, can, am, want, hope,
-   believe, look and welcome state none), speaks in your own voice (I, we, my
-   or our) in at least 30% of its sentences, and cites no one career-data
-   quote from more than 4 paragraphs. Repair a proportion defect by merging,
-   appending or deleting paragraphs, never by splitting one. Split a sentence
-   when separate claims or action steps need their own clear grammatical path;
-   combine them only when the combined sentence is simpler and easier to parse.
-   Only the paragraph that owes the sentence about the target gives it a
-   sentence of its own. Do not compress those jobs into one sentence or force a
-   paragraph to follow a fixed claim-proof-relevance sentence pattern. Source
-   material that lists one trigger and several resulting actions is not a
-   command to reproduce every item in one sentence. Select the load-bearing
-   examples and use an immediately following causal sentence for a trigger or
-   follow-up action when that reads more naturally. The final audit records the
-   sentences the prose needs; it does not allocate one sentence to each planning
-   field. When a paragraph changes from
-   one implementation path, system, employer, or proof to another, state the
-   real relationship before the new details; a generic connective or a truism
-   does not create coherence. When the thesis names multiple decision branches,
-   make each evidence paragraph identify the branch it develops; do not replace
-   an established branch with a new abstraction at the transition. The last sentence of every non-final paragraph
-   must either conclude that paragraph's point or explicitly name the exact
-   subject carried into the next paragraph. If it merely launches a new topic,
-   develop it there, move it to the next paragraph, or delete it. Read each
-   paragraph's final sentence beside the next paragraph's opening. Cut a
-   factual but optional detail when it
-   neither completes the current proof nor prepares the next decision. Shared
-   employer context alone does not make that detail a useful bridge.
-   Prefer the concrete system, data flow, responsibility, or decision to an abstract
-   metaphor, and never repeat a metaphor across paragraphs as connective
-   tissue. Within a paragraph, do not place distinct systems or responsibilities
-   side by side merely because they occurred in the same role or job. Before
-   shifting to the new proof, name the shared responsibility, constraint, or
-   outcome; adjacency and “the same job” are not a bridge. If no supported
-   relationship exists, omit the weaker proof; the résumé already carries it. When a
-   sentence announces a migration, move, or change, land it in
-   the same sentence by naming both the origin and destination, plus the
-   systems and/or data that moved; rewrite raw slash shorthand as natural,
-   unambiguous coordination. Open a
-   paragraph with a demonstrative noun phrase only when the immediately
-   preceding paragraph establishes its referent; a demonstrative never reaches past the previous
-   paragraph, so either restate the referent in full or open with the new
-   paragraph's own subject. Use a causal connective only when the premise
-   already stated on the page makes the
-   conclusion follow; if the reader must supply a missing link, write the
-   link as its own sentence or drop the connective. Make one comparison per
-   sentence with both terms named; never nest a comparison inside a condition.
-   A coined frame may organize the evidence, but never let it recast one posted
-   role as multiple positions. Name the target role literally and in the
-   singular when referring to it.
-   Keep the letter in a plain, direct register. Write clear sentences of
-   natural length, splitting multi-step reasoning when separate actions or
-   causal links need their own grammatical path, and keep every sentence to 40
-   words or fewer. Infinite
-   Canvas rejects the whole result at 41. Use no semicolon anywhere in the
-   letter, and no dash as a clause splice. Infinite Canvas rejects the whole
-   result for any semicolon, for an em dash, for a double hyphen between
-   words, for a spaced hyphen used as sentence punctuation, and for an en dash
-   outside a date or numeric range. Punctuate introductory
-   phrases so the transition into the main subject is immediately clear. When
-   a sentence describes how a product conveys or indicates something to its
-   user, distinguish figurative reference from the literal, observable
-   mechanism, and state only the literal capability and limitation. More
-   generally, prefer a concrete actor, artifact,
-   and action over figurative shorthand whenever it would otherwise obscure
-   what an interface, system, or owner actually does. When stating an employer
-   need, address the employer or work directly instead of treating its source
-   document as the audience. Refer to the selected scope as `this role` or the
-   work itself, not `the listing describes`; use listing attribution only when
-   it establishes the provenance of an unverified employer or company
-   assertion. When listing-only context requires attribution, make that
-   document the reporting subject; never assign a communication verb to the
-   target position itself. Refer to the selected position proximally unless the
-   sentence explicitly distinguishes it from another role. Never
-   join two pieces of evidence with a
-   bare additive connective such as `I also built` or `... too`: state the
-   relation that makes the second piece advance the argument. On its first
-   mention, introduce every unfamiliar candidate project, product, system, or
-   prior employer with the candidate's role or relationship and a concise
-   descriptor before relying on its name; the reader cannot be assumed to have
-   read the résumé first. When an opening uses completed work as proof, make
-   its prior-work setting clear at that first mention: give the supported role
-   and employer when useful, or a concise prior-role cue when the employer's
-   name would distract. For example, `my work building <artifact>`
-   leaves the employment context unstated; `in my previous <role>, I built
-   <artifact>` supplies it when
-   the source supports that role and chronology. Keep the target need first,
-   then situate the evidence without adding an unsupported employer, role, or
-   timeline. Name a specific tool, framework, or product
-   only when the job listing or the research names it, or as that paragraph's
-   single concrete anchor; otherwise describe it by category, as in `a
-   <language> back end` or `a <category> deployment`. The résumé carries the stack, so a
-   paragraph naming several tools the listing never mentions is a stack tour
-   whatever punctuation separates them. The single-anchor allowance is
-   per-paragraph but the budget is letter-wide: across the whole letter at
-   most two tool names may be off-posting, even when each one is its own
-   paragraph's only anchor. A tour spread one name per paragraph is still a
-   tour. Do not assert a cross-domain
-   equivalence with `maps onto`, `translates directly to`, or `mirrors`; never
-   call prior work a side, form, version, facet, or aspect of the same problem,
-   or the same challenge in another context; and do not quote the employer's
-   phrasing back as the second half of an analogy:
-   state the transferable capability and the shared mechanism (such as
-   interaction design or data flow) explicitly, while preserving the boundary
-   between the prior domain and the target work. Do not state application
-   logistics: availability, start date, schedule, the work location
-   of the job being applied for, relocation, commute, and travel willingness
-   belong in
-   application fields, even when career data or the listing mentions them.
-   This bars them from the letter's prose only, and says nothing about the
-   résumé's per-role employment locations, which step 4 requires.
-   Infinite Canvas rejects a result that includes
-   them (for example `willing to work anywhere` or `available to start`).
-   If the final paragraph invites a conversation, use direct present-tense
-   language and connect the candidate's relevant contribution to the specific
-   target work. Do not repeat the opening's reason for interest there. Do not end solely on what the candidate wants to learn, hear,
-   or discuss. Avoid conditional or deferential closing boilerplate: write `I
-   welcome a conversation` rather than `I would welcome a conversation` or `I
-   would welcome a discussion`. Apply this as a register rule, not as a
-   template for the closing sentence. Close on one concrete item the letter
-   has already shown, tied to the role. When the closing sentence invites a
-   conversation or states an intent to talk or learn, Infinite Canvas checks
-   three things in it, and a demonstrative pointing back at an earlier
-   paragraph satisfies none of them: name the candidate's asset with a possessive, an
-   authorship clause, or a demonstrative that carries its own descriptor
-   (`my <work noun>`, `the <artifact> I built`, `that <domain> <work noun>
-   experience`; in an authorship clause the verb is one of built, wrote,
-   designed, created, developed, shipped, led, own, owned, maintained or
-   architected, and the `<artifact>` is a noun this letter has already used for
-   the candidate's own work, as the object of an earlier sentence with such a
-   verb or in a cited career-data quote, though a short fixed list of everyday
-   artifact nouns also passes without that), say what that asset does for the target work
-   (`... could support ...`, `... supports ...`, `applying ... to ...`), and
-   reach the employer's side in the same sentence (`your ...`, `the` or `this`
-   plus a work noun, or a reader noun such as clients, customers or users).
-   A bare demonstrative names nothing, and an employer-facing phrase is not a
-   candidate asset: `I welcome a conversation about applying that work` is
-   rejected; `I welcome a conversation about applying my <work noun> to
-   <employer-facing target>` is accepted, and so is `I welcome a conversation
-   about where the <artifact> I built would fit <employer-facing target>`,
-   with every slot filled from this letter's own evidence and the posting. The
-   verb comes from a closed list: support, contribute, help, advance,
-   strengthen, improve, build, deliver, apply, serve, shorten, extend, scale,
-   accelerate or fit after can, could, would, will or might (or in the present
-   tense, as in `supports`), or applying, bringing, putting, using,
-   contributing, extending, connecting or carrying; any other verb fails that
-   part however naturally it reads. An authorship clause with built, wrote,
-   designed, created, developed, led, owned or maintained states a past action
-   of the candidate, so a closing that uses one is a proof-bearing paragraph and
-   the review records an argumentMapping for it (a proof span and a jobNeedQuote
-   that no other paragraph uses); prefer a possessive asset unless the artifact
-   is the strongest item the letter showed.
-   The final paragraph may synthesize only
-   evidence and relationships already established in the letter. It must not
-   introduce a new organizing frame, force nonparallel choices into one
-   decision, or ask the employer to choose between products, prototypes, or
-   initiatives; close with the candidate's contribution to the work.
-   Hyphenate compound modifiers (`in-house`, `end-to-end ownership`,
-   `full-stack engineer`, `organization-wide`, `third-party integrations`,
-   `real-time data`, `open-source project`) and use one spelling of a compound
-   throughout both documents.
-   The opening paragraph must demonstrate interest implicitly: lead with a
-   supported candidate capability or thesis tied to concrete target work; where
-   useful, frame it with a precise observation about concrete employer, team,
-   or role work, then make a credible candidate connection through the
-   transferable capability.
-   Let that connection show why the work merits attention. Preview the
-   transferable capability before the first source-specific proof. Use a
-   separate sentence when the observation and connection each need room; combine
-   them only when one sentence is simpler and equally clear.
-   Develop each body paragraph's point, proof, and relevance across as many
-   sentences as clarity requires; do not force those functions into the opening
-   sentence, a fixed sequence, or a single sentence. Clarity usually takes two
-   to four sentences, and the letter-proportion limits stated earlier still
-   apply. Do not announce
-   interest, motivation, or enthusiasm through first-person emotional
-   declarations or formulas such as `interests me because`, `I am interested
-   in`, or `I am excited about`. Name the concrete work and capability directly.
-   The application already identifies the candidate and
-   position, so never announce that the candidate is applying
-   or that the document is a cover letter. Reject openings such as `I am writing to apply`, `I'm writing to
-   apply`, `I’m writing to apply`, `I am applying for`, `I'm applying for`,
-   `I’m applying for`, `I am writing to express my interest`, `Please accept
-   my application`, and equivalent administrative throat-clearing.
-   Do not open with job-summary scaffolding such as `the posting requires`,
-   `this role calls for`, or `<company>'s posting/listing calls for`. A
-   listing attribution may appear later only when it is actually needed to
-   source an unverified employer assertion.
-   Infinite Canvas also rejects the entire result when the letter contains any
-   of these stock phrases, so avoid them outright: `proven track record`
-   (including a `proven ... track record` split by up to three words),
-   `fast-paced environment`, `dynamic environment`, `passionate about`,
-   `hit the ground running`, `align with your values`, `team player`,
-   `wealth of experience`, `writing to express my interest`, and
-   `I believe I would be a great fit`. The same rejection covers three
-   modifier-insertion variants of the same stock wording: `more than basic
-   presence` (including `more than just basic presence`), `the primary line of
-   defense`, and `this/that/the exact foundation`. It also rejects the bare
-   pair `downsides and trade-offs`. Treat that as the narrow, literal edge of a
-   wider writing rule the host deliberately does not enforce: a balance claim
-   that pairs a thing's downsides with its upsides is unfalsifiable filler in
-   either direction, so state the specific judgment the evidence supports.
-   Name the target role by the
-   title the job record gives and the employer by name in the opening, inside
-   the sentence that states the closest capability the cited work directly
-   shows, as the target that capability is pointed at and never as an
-   announcement of the application. Take both from the job record alone, and
-   write the opening from the candidate's side: assert nothing about the
-   employer's domain, product, customers or needs beyond what the posting text
-   itself says. Respect the
-   recruiter's intelligence: every opening sentence must contain information
-   the application context did not already provide. Do not open with the name
-   or description of a personal project, prior employer, or other proof item,
-   even when it is introduced correctly. First state the job-specific
-   capability or evidence-to-need connection that makes the proof relevant;
-   then introduce the artifact as evidence. The host owns the
-   envelope: use the candidate name/contact from the résumé, omit the recipient
-   block, and use `Dear [Company] Hiring Team,` as the salutation. Infinite
-   Canvas reconstructs these deterministic fields at import, so do not make
-   them part of the writing or revision decision.
+   separately says so. Tool use of any kind is not evidence of shipping a
+   product built around that tool; absent direct product evidence, keep the
+   transfer at the narrower supported capability.
+
+   State only supported facts about the employer, product, customers and
+   requirements. Where the source is a posting rather than verified company
+   information, attribute the assertion to the posting. Do not state
+   application logistics such as availability, start date, relocation or
+   commute in the letter; the application form owns them. The app owns the
+   deterministic envelope: candidate name and contact come from the résumé,
+   and the salutation is reconstructed at import.
+
+   Cadence, paragraph count, sentence length, openings, closings, stock
+   phrases, repetition and tool-name density are writing guidance. They do
+   not reject a truthful letter. The renderer measures actual one-page fit.
+
 6. Write only the UTF-8 `result.json` in the selected job folder. Do not modify
    project source, the routine, any project-memory/knowledge file, the
    input/context files, `fit-feedback.json`, or create HTML/PDF files. Do not

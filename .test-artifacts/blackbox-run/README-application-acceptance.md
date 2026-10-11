@@ -317,3 +317,101 @@ owned files are verified by SHA-256, byte count, mode, and mtime; owned tree
 digests, snapshot source SHA-256, snapshot-store state, and the byte-exact
 Application Sync registry are also verified. A registry change is never
 silently overwritten because this harness does not own it.
+
+## Offline simulator
+
+`offline-simulator.mjs` lets a stand-in writer (an LLM agent, or a scripted
+writer) drive the real host stages of one application end to end, in process,
+with no Electron app, no ChatGPT and no bridge. A quality iteration takes
+minutes instead of hours. Run it under the Electron test stub, from the
+repository root:
+
+```bash
+SIM="node --import ./scripts/test-stubs/register.mjs .test-artifacts/blackbox-run/offline-simulator.mjs"
+
+$SIM init --card affirm --dir /tmp/sim-run        # or anthropic, node:<job card id>, synthetic[:key]
+$SIM next --dir /tmp/sim-run --auto-ack           # prints stage, header and the FULL prompt; also DIR/handoff-<n>.txt/.json
+$SIM submit --dir /tmp/sim-run --file response.json --auto-ack
+$SIM status --dir /tmp/sim-run                    # job + lane state
+$SIM docs   --dir /tmp/sim-run                    # DIR/docs/resume.txt and cover-letter.txt
+$SIM log    --dir /tmp/sim-run                    # handoffs per stage, rejections, check ids, streaks
+```
+
+Exit codes: 0 ok, 1 tool error, 2 usage, 3 the host (or the bridge classifier)
+rejected or refused the answer. A tight loop for one agent is
+`next` -> write `response.json` -> `submit` -> `next` ... until `next` prints
+`NO OPEN HANDOFF` (terminal states: `completed`, `human-stop`, `job-broken`,
+`render-retry`, `app-fix-required`). `serve --dir DIR` answers `get_handoff` /
+`submit_handoff` style JSON lines on stdin/stdout (`{"tool":"get_handoff"}`,
+`{"tool":"submit_handoff","handoffCode":"...","response":"..."}`, plus `status`,
+`docs`, `log`); `serve --spool` does the same through
+`DIR/spool/<id>.request.json` -> `<id>.response.json` for agents that only have
+file tools (create `DIR/spool/STOP` to end it). `--auto-ack` answers the
+acknowledgement-only stages (today: `blind-repair-context`) so a driver does not
+spend turns on them.
+
+### What is real and what is not
+
+Real: the handoff is read and the answer submitted through the exact functions the
+bridge's application source calls (`getLocalApplicationHandoff`,
+`submitLocalApplicationHandoff`), through the bridge's own `createApplicationSource`
+adapter and handoff-code guard. What a chat would be served (code, instructions,
+corrections, `correctionPrompt`) is built by the bridge's own framing, and every
+answer first passes the bridge's own pre-source classifier (`junk`, `misrouted`,
+`superseded`, `duplicate`, `unknown_handoff`, `too_large`). After an accepted answer
+with no successor the simulator does what the engine does for a host lane: poll
+`localApplicationStatus`, map it with `mapApplicationStatus`, read again when the
+app reopened a round. Every validator verdict is the production one.
+
+Not real, honestly:
+
+- A stand-in writer is not ChatGPT. An LLM agent reading these prompts will fail and
+  succeed differently from the chat model (context handling, output limits, JSON
+  discipline, web research the prompt asks for). Use the simulator to find host and
+  prompt defects fast, then confirm on the live bridge before trusting a score.
+- Nothing renders a PDF. The terminal state `completed` means every deterministic host
+  gate passed and `result.json` validates; the app's measured-fit loop (print to PDF,
+  page count, reopen a review round for layout) does not run.
+- One writer serves one lane serially. The engine's parallel career-match workers are
+  played one task at a time; chat boundaries (`freshContextRequired`) are not enforced;
+  there is no session, worker pool, pacing or watchdog.
+- The bridge's junk-streak hold is counted, not applied.
+- `docs` reads `result.json` when it exists (the host-rendered final résumé HTML and
+  letter) and otherwise the accepted-so-far documents in the job manifest, and says
+  which.
+
+### Isolation
+
+`init` needs an empty `--dir`, creates DIR/userData (the Electron stub's `userData`,
+set before any production module loads) and DIR/canvas, and never touches the real
+user-data, `Applied Jobs`, any `.local-ai`, or the real canvas:
+
+- the only reads are one byte copy of the approved snapshot file (default id is the
+  one the one-card fixture uses; `--snapshot-id` overrides) and a JSON read of one saved
+  job card. The copy is validated with the production snapshot reader; it never reads
+  the career source file;
+- a directory that is not empty, that overlaps a protected real location, or that sits
+  in an `Applied Jobs` / `.local-ai` folder is refused; a second `init` into a used
+  directory is refused; a failed `init` removes what it created (an interrupted one
+  leaves `.simulator-init-incomplete`, and later commands refuse the directory);
+- a deny-list guard over the node fs write APIs throws on a write into a protected real
+  location (defense in depth; the tests prove it blocks);
+- commands take a per-run lock (stale owners recovered; `OFFLINE_SIM_LOCK_TIMEOUT_MS`);
+  a command killed between the host's commit and its own save leaves a pending-submit
+  marker, and the next `next` re-asks the host instead of trusting its cache.
+
+The job state binds absolute paths, so a run directory cannot be moved after `init`.
+
+### Synthetic careers and the scripted writer
+
+`init --card synthetic[:freight|clinic|library|survey]` builds an invented career,
+snapshot and posting (with one unsupported high-priority and one unsupported
+supporting requirement; `--match-gap` flips the high-priority verdict).
+`autoplay --dir DIR [--findings-cycles N]` plays the scripted stand-in writer
+through the same `next`/`submit` path (adapted from the flow drivers in
+`scripts/tests/gapfix-repair-convergence.js` and `gapfix-v16-prompts.js`; it
+needs `currentAuthorityFlowKit` from `scripts/tests/local-ai-application.js`). The
+test `scripts/tests/offline-simulator.js` drives three careers through the CLI, the
+serve loop and autoplay and requires the same handoff count per stage for all three.
+The scripted writer is a plumbing check, not a quality signal: it writes the same
+sentences every time.

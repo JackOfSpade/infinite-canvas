@@ -9,6 +9,7 @@
 import crypto from 'node:crypto';
 
 export const APPLICATION_AUTHORITY_WORKFLOW_VERSION = 1;
+export const APPLICATION_BLIND_REVIEW_PANEL_PROMPT_MODE = 'artifact-repair-only-v8';
 export const APPLICATION_AUTHORITY_MATCH_PAGE_REQUIREMENTS = 12;
 export const APPLICATION_AUTHORITY_MATCH_PAGE_EVIDENCE = 24;
 export const APPLICATION_AUTHORITY_REVIEW_TRACKS = Object.freeze([
@@ -18,12 +19,17 @@ export const APPLICATION_AUTHORITY_REVIEW_TRACKS = Object.freeze([
   'tailoring-ats',
   'cross-document-coherence',
   'bundle-editorial',
+  'holistic-hiring-evidence',
+  'holistic-letter-argument',
+  'holistic-bundle-coherence',
 ]);
 
 const PRIORITY_WEIGHT = Object.freeze({ highest: 3, high: 2, supporting: 1 });
 const DISPOSITIONS = new Set(['addressed-resume', 'addressed-cover-letter', 'addressed-both', 'omitted-no-evidence', 'omitted-minimum-sufficient', 'contradicted', 'unclear']);
 export const BLIND_REVIEW_ACTIONABILITY = Object.freeze(['repair-required', 'advisory', 'evidence-limited']);
 const BLIND_REVIEW_ACTIONABILITY_SET = new Set(BLIND_REVIEW_ACTIONABILITY);
+const BLIND_REVIEW_KINDS = new Set(['truth', 'editorial']);
+const BLIND_REVIEW_SEVERITIES = new Set(['major', 'minor']);
 const AUTHORITY_LEDGER_STREAM = /^[a-z][a-z0-9-]{0,39}$/u;
 const DEFAULT_REQUIREMENTS_STREAM = 'requirements';
 
@@ -705,10 +711,17 @@ export function validateBlindReviewerResponse({ scope, response, previousReceipt
     const id = requireId(finding?.id, `finding ${index}`); if (ids.has(id)) fail('review response repeats a finding ID.'); ids.add(id);
     if (typeof finding.ruleId !== 'string' || !finding.ruleId.trim() || typeof finding.issue !== 'string' || !finding.issue.trim()) fail('review finding needs a ruleId and issue.');
     if (finding.actionability !== undefined && !BLIND_REVIEW_ACTIONABILITY_SET.has(finding.actionability)) fail('review finding actionability is invalid.');
+    const panel = scope.promptMode === APPLICATION_BLIND_REVIEW_PANEL_PROMPT_MODE;
+    if (panel && finding.kind !== undefined && !BLIND_REVIEW_KINDS.has(finding.kind)) fail('review finding kind is invalid.');
+    if (panel && finding.severity !== undefined && !BLIND_REVIEW_SEVERITIES.has(finding.severity)) fail('review finding severity is invalid.');
+    if (panel && finding.span !== undefined && (typeof finding.span !== 'string' || !finding.span.trim())) fail('review finding span is invalid.');
     // Do not add the optional field when reading a v1 finding: receipts sign
     // the normalized payload, so materializing a default would invalidate it.
     const normalizedFinding = { id, ruleId: finding.ruleId.trim(), document: typeof finding.document === 'string' ? finding.document : 'bundle', targetId: typeof finding.targetId === 'string' ? finding.targetId : '', issue: finding.issue.trim(), fix: typeof finding.fix === 'string' ? finding.fix.trim() : '' };
     if (finding.actionability !== undefined) normalizedFinding.actionability = finding.actionability;
+    if (panel && finding.kind !== undefined) normalizedFinding.kind = scope.track === 'fact-fidelity' ? 'truth' : finding.kind;
+    if (panel && finding.severity !== undefined) normalizedFinding.severity = finding.severity;
+    if (panel && finding.span !== undefined) normalizedFinding.span = finding.span;
     return normalizedFinding;
   });
   const findingDigest = authorityDigest(normalized);

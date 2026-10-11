@@ -35,7 +35,6 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { pathToFileURL } from 'node:url';
 import { assert } from './testHelpers.js';
 import { getLocalApplicationHandoff, queueLocalApplicationJob, submitLocalApplicationHandoff } from '../test-dependencies.js';
 import * as checks from '../../electron/ipc/coverLetterChecks.js';
@@ -193,6 +192,7 @@ async function walkContracts() {
       ],
       requirements: [{ id: 'need-1', text: 'Reliable turnarounds', priority: 'highest', evidenceIds: ['resume-proof-1', 'job-proof'] }],
     }), 'evidence-plan');
+    prompts.resume = (await current()).prompt;
     must(await submit({
       resume: {
         schemaVersion: 'structured-resume.v1', identity: { name: CAREER.name, contact: [CAREER.email], subtitleRole: CAREER.title, credential: '' },
@@ -281,97 +281,48 @@ export default [
       const input = { jobId: 'consistency-job', qualityChecklist: { criteria: [], version: 4 }, generationAudit: { required: true, version: 1 } };
       const state = { stage: 'cover-letter', handoffCode: 'h', baseHashes: {}, reviewBaseline: null, findings: [] };
       const correction = pasteCorrectionPrompt({ input, state, corrections: ['paragraph-argument-links: paragraph 2 argumentMapping.relevance is missing'], stagePromptChars: 0 }).prompt;
-      assert(correction.includes('argument-spans') || correction.includes(checks.ARGUMENT_SPAN_BUDGET_RULES), 'the correction round prints the argument brief (the premise of scanning it)');
+      assert(correction.includes('Any recorded argumentMapping span must copy the final paragraph exactly'), 'the correction round prints the retained provenance brief');
       scan('the letter-paragraph correction brief', correction);
       assert(flagged.length === 0, `no printed surface says every proof-bearing paragraph owes a claim or a relevance span:\n${flagged.join('\n')}`);
     },
   },
   {
-    name: 'One voice: the span-budget block is printed once in each contract and in the brief from the exported constants, the audit shape marks the optional fields, and the shape error names what each paragraph owes (A/B/C)',
+    name: 'Stage 1 contracts keep provenance and grounding rules while omitting demoted span, length, cadence and layout grammars',
     async run() {
       const prompts = await walkContracts();
-      const block = checks.ARGUMENT_SPAN_BUDGET_RULES;
-      // A: each contract prints the block once, and so each budget sentence once (the claim, the relevance and the transfer budgets read the same way).
-      for (const stage of ['cover-letter', 'review']) {
-        const contract = contractOf(prompts[stage]);
-        assert(contract.split(block).length === 2, `the ${stage} contract prints the span-budget block exactly once`);
-        for (const rule of [checks.EXPLICIT_TRANSFER_BUDGET_RULE, checks.EXPLICIT_CLAIM_BUDGET_RULE, checks.EXPLICIT_RELEVANCE_BUDGET_RULE, checks.ARGUMENT_LATER_RELEVANCE_SPAN_RULE]) {
-          assert(contract.split(rule).length === 2, `the ${stage} contract prints each budget sentence once (${rule.slice(0, 60)})`);
+      const resume = contractOf(prompts.resume);
+      const letter = contractOf(prompts['cover-letter']);
+      const review = contractOf(prompts.review);
+      for (const [stage, contract] of [['cover-letter', letter], ['review', review]]) {
+        assert(contract.includes('jobNeedQuote') && contract.includes('exact span'), `${stage}: recorded spans retain their provenance rule`);
+        for (const rule of [checks.ARGUMENT_SPAN_BUDGET_RULES, checks.ARGUMENT_CLAIM_SPAN_RULE, checks.ARGUMENT_PROOF_SPAN_RULE,
+          checks.ARGUMENT_RELEVANCE_SPAN_RULE, checks.LETTER_PROPORTION_RULE, checks.REPEATED_PHRASE_RULE]) {
+          assert(!contract.includes(rule), `${stage}: an advisory or off grammar is still printed`);
         }
-        // The static statement of what the review records is the conditional one.
-        assert(!contract.includes('claim, proof and relevance are each an exact span') && !contract.includes('claim, proof and relevance are each'), `the ${stage} contract no longer says all three spans are each required`);
       }
-      assert(contractOf(prompts['cover-letter']).includes('each span the review records for it (claim, proof or relevance) is an exact span of THAT paragraph'), 'the cover-letter contract says which spans are exact spans');
-      assert(contractOf(prompts.review).includes('each span it records (claim, proof or relevance) is an exact span of that paragraph and no two of them are the same span'), 'and the review contract says it of the spans it records');
-      assert(contractOf(prompts['cover-letter']).includes('This stage reports a paragraph that owes a mapping and offers no span it owes (a claim span or a relevance span, only where the budgets above say the paragraph owes one)'),
-        'the cover-letter contract says the drafting reporter names only spans the budgets owe');
-      // B: the generationAudit shape notation marks the claim and the relevance as optional, and says who owes them.
-      const audit = contractOf(prompts.review);
-      assert(audit.includes('argumentMapping?:{claim?,proof,relevance?,jobNeedQuote} only for proof-bearing paragraphs, claim and relevance only where their budgets say so'), 'the audit shape marks claim and relevance optional');
-      assert(!audit.includes('argumentMapping?:{claim?,proof,relevance,jobNeedQuote}'), 'and no notation still requires the relevance');
-      // C: the shape error is the one sentence both call sites read, built to name what is owed by every paragraph and what by the budgets.
+      assert(review.includes('argumentMapping?:{claim?,proof?,relevance?,jobNeedQuote?}'), 'all optional mapping spans are marked optional');
+      assert(letter.includes('A span of experience measured in years is a claim like any other'), 'the duration truth rule is unchanged');
+      assert(resume.includes('A span of experience measured in years is a claim like any other'), 'the résumé duration truth rule is unchanged');
+      assert(!resume.includes('RESUME_BULLET_OPENING_VARIETY_RULE') && !resume.includes('180 visible characters'), 'résumé cadence and length proxies are no longer printed as gates');
       const source = read('electron/ipc/localAiApplication.js');
-      assert(source.includes('it must be an object carrying proof and jobNeedQuote, and carrying claim and relevance wherever the span budgets in this contract say the paragraph owes them.')
-        && !source.includes('Supply those four fields'), 'the shape error names the fields every paragraph owes and defers the rest to the budgets');
-      // The drafting-stage reporter names the spans a paragraph owes, from the same two counts the gate reads.
-      assert(source.includes("const owedSpans = [owesClaim[index] ? 'claim' : null, 'proof', owesRelevance[index] ? 'relevance' : null].filter(Boolean);"), 'the reporter derives the named spans from the counts');
+      assert(source.includes('every span it does carry must copy the final paragraph'), 'malformed mapping errors teach provenance, not the old span budget');
+      // Three unrelated domains keep this contract test independent of any one career.
+      for (const phrase of ['orchard routing', 'museum conservation', 'coastal surveys']) {
+        assert(!resume.includes(phrase) && !letter.includes(phrase) && !review.includes(phrase), 'contracts contain no fixture-specific work');
+      }
     },
   },
   {
-    name: 'Guidance: the placement rule separates the claim phrase from the relevance sentence, the repair rule names the host-required functions from the constants and follows them, and the opening and proof-count rules cover the cases they left open (A/B/C)',
-    async run() {
-      // A: placement. The sentence that is never written only to carry a span is the claim's; the relevance is a sentence of the paragraph apart from the proof.
-      const placement = guidance.LETTER_CLAIM_PLACEMENT_RULE;
-      assert(placement.includes('write no sentence whose only job is to carry the claim span') && !placement.includes('carry a span.'), `the placement rule limits itself to the claim span (${placement})`);
-      assert(placement.includes('The relevance span a paragraph owes is a different thing: it is a sentence of that paragraph, apart from the proof sentence, that says how the proof bears on the requirement its jobNeedQuote came from.'),
-        'and says what the relevance span is, so the two cannot be read as one instruction');
-      // B: the repair rule names the functions, from the same constants.
-      const raised = convergence.BLIND_REPAIR_RAISED_CYCLES_RULE;
-      // The list is not claimed to be complete ("among the functions"), and it names the opening and the letter's proportions beside the claim, the proof and the closing
-      // (gapfix-v16c-letter-functions holds it against the checks themselves: every check that newly fails when a sentence is deleted is named by it).
-      assert(raised.includes(`Among the functions the host requires of a cover-letter paragraph are these: ${checks.HOST_REQUIRED_LETTER_FUNCTIONS}.`) && raised.includes('unless a function the host requires of that paragraph would be lost'), `the repair rule prints the functions (${raised})`);
-      assert(!raised.includes('requires only these functions'), 'and no longer claims the list is the whole of what the host requires');
-      for (const part of ['a claim phrase and a sentence relating its proof to the job need', 'a proof sentence in every proof-bearing paragraph', 'an opening that leads with the target work', 'the closing’s asset, action and target parts', 'proportion limits']) {
-        assert(checks.HOST_REQUIRED_LETTER_FUNCTIONS.includes(part), `the functions list says: ${part}`);
+    name: 'Stage 1 quality guidance is short, positive and never describes a deterministic style rejection',
+    run() {
+      const brief = guidance.COVER_LETTER_WRITER_GUIDANCE;
+      for (const phrase of ['strongest true evidence', 'role and company once', 'reasons, decisions, constraints and outcomes',
+        'plain, natural English', 'closing specific', 'adjacent experience honestly', 'Never claim more than a cited quote states']) {
+        assert(brief.includes(phrase), `writer quality brief includes ${phrase}`);
       }
-      assert(!/["“”]/u.test(raised) && !/\d/u.test(raised) && raised.length < 1_000, 'the repair rule quotes nothing, prints no figure and stays short');
-      // The list follows the constants: in temporary copies of the checks and the convergence module wired together, a moved claim budget moves the functions phrase.
-      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'v16b-functions-'));
-      try {
-        const IPC = path.resolve('electron/ipc');
-        const absolutize = text => text.replace(/from '(\.{1,2}\/[^']+)'/gu, (_match, relative) => `from '${pathToFileURL(path.resolve(IPC, relative)).href}'`);
-        const checksSource = read('electron/ipc/coverLetterChecks.js');
-        const declaration = 'export const MAX_EXPLICIT_CLAIM_PARAGRAPHS = 1;';
-        assert(checksSource.split(declaration).length === 2, 'the claim number is declared once');
-        const load = async (name, source) => {
-          const file = path.join(dir, `${name}.mjs`);
-          fs.writeFileSync(file, source, 'utf8');
-          return { url: pathToFileURL(file).href, module: await import(`${pathToFileURL(file).href}?copy=${name}`) };
-        };
-        const control = await load('checks-control', absolutize(checksSource));
-        const two = await load('checks-two', absolutize(checksSource.replace(declaration, 'export const MAX_EXPLICIT_CLAIM_PARAGRAPHS = 2;')));
-        const convergenceSource = absolutize(read('electron/ipc/applicationRepairConvergence.js'));
-        const realChecksUrl = pathToFileURL(path.resolve(IPC, 'coverLetterChecks.js')).href;
-        assert(convergenceSource.includes(realChecksUrl), 'the convergence module imports the checks module');
-        const wired = async (name, checksCopy) => (await load(name, convergenceSource.replace(realChecksUrl, checksCopy.url))).module;
-        const controlRule = (await wired('conv-control', control)).BLIND_REPAIR_RAISED_CYCLES_RULE;
-        const twoRule = (await wired('conv-two', two)).BLIND_REPAIR_RAISED_CYCLES_RULE;
-        assert(controlRule === raised, 'an unmutated copy prints exactly what the real module prints');
-        assert(twoRule !== controlRule && twoRule.includes('a claim phrase in each of the first 2 proof-bearing paragraphs of the letter and a sentence relating its proof to the job need in the first proof-bearing paragraph of the letter'),
-          `a moved claim budget moves the functions the repair rule names (${twoRule})`);
-        assert(checks.HOST_REQUIRED_LETTER_FUNCTIONS.includes('in the first proof-bearing paragraph of the letter') && !checks.HOST_REQUIRED_LETTER_FUNCTIONS.includes('each of the first 2'), 'the real module is unchanged by the copies');
-      } finally {
-        fs.rmSync(dir, { recursive: true, force: true });
-      }
-      // C: the cases the opening and proof-count rules left open.
-      assert(guidance.LETTER_OPENING_RULE.includes('when the record gives no usable title or no usable employer, it names the one it does give, leaves out the other, and invents neither'), 'the opening rule covers a job record with no usable title or employer');
-      assert(guidance.LETTER_PROOF_ADDS_RULE.includes('so leave it out and state the proof plainly instead'), 'the adds rule says what to do when no quote states a reason');
-      assert(guidance.LETTER_PROOF_COUNT_RULE.includes('When a cited quote states nothing beyond its bullet, the paragraph says the proof plainly and invents no reason, constraint, decision or outcome for it, and a letter whose evidence is all of that kind uses fewer, plainer paragraphs.'),
-        'the count rule says what a letter does when its quotes state nothing beyond their bullets');
-      // The printed rules quote nothing and print no figure, so there is no string to copy, and the new sentences name no field of work.
-      for (const name of ['LETTER_OPENING_RULE', 'LETTER_PROOF_ADDS_RULE', 'LETTER_PROOF_COUNT_RULE', 'LETTER_CLAIM_PLACEMENT_RULE']) {
-        assert(!/["“”‘']/u.test(guidance[name]) && !/\d/u.test(guidance[name]), `${name} quotes nothing and prints no number`);
-      }
+      assert(!/rejected|exactly one sentence|closed verb|three parts|span budget|at most \d/iu.test(brief),
+        'the quality brief teaches no demoted rejection grammar');
+      for (const career of ['orchard routing', 'museum conservation', 'coastal surveys']) assert(!brief.includes(career), 'the brief stays career-independent');
     },
   },
   {

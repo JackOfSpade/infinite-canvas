@@ -1,5 +1,11 @@
 # Job Application Design System
 
+Application quality means playing the approved career evidence well: choose
+and order the strongest true work, write clearly, and use the letter to add
+cited context. Honest adjacent experience is preferable to implied direct
+experience. The app enforces truth, source provenance, hygiene and measured
+one-page fit; the editorial examples and prose forms below are guidance.
+
 An agent-only design system for generating staff/principal-level
 engineering résumés — and their paired cover letters — from
 structured candidate data + a target company / job description.

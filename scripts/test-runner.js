@@ -138,6 +138,13 @@ import gapfix_v16c_letter_binding from './tests/gapfix-v16c-letter-binding.js';
 import gapfix_v16c_letter_functions from './tests/gapfix-v16c-letter-functions.js';
 import gapfix_v16c_requirement_modality from './tests/gapfix-v16c-requirement-modality.js';
 import gapfix_v16c_verb_fidelity from './tests/gapfix-v16c-verb-fidelity.js';
+import gapfix_v17_resume_dispositions from './tests/gapfix-v17-resume-dispositions.js';
+import gapfix_v17_letter_dispositions from './tests/gapfix-v17-letter-dispositions.js';
+import gapfix_v17_truth_recall from './tests/gapfix-v17-truth-recall.js';
+import application_refinement from './tests/application-refinement.js';
+import application_blind_review_panel from './tests/application-blind-review-panel.js';
+import application_refinement_flow from './tests/application-refinement-flow.js';
+import offline_simulator from './tests/offline-simulator.js';
 import oracle_leak_gate from './tests/oracle-leak-gate.js';
 
 // Keep the file name beside its group so omissions and stale registrations
@@ -282,6 +289,13 @@ const testGroups = [
   ['gapfix-v16c-letter-functions.js', gapfix_v16c_letter_functions],
   ['gapfix-v16c-requirement-modality.js', gapfix_v16c_requirement_modality],
   ['gapfix-v16c-verb-fidelity.js', gapfix_v16c_verb_fidelity],
+  ['gapfix-v17-resume-dispositions.js', gapfix_v17_resume_dispositions],
+  ['gapfix-v17-letter-dispositions.js', gapfix_v17_letter_dispositions],
+  ['gapfix-v17-truth-recall.js', gapfix_v17_truth_recall],
+  ['application-refinement.js', application_refinement],
+  ['application-blind-review-panel.js', application_blind_review_panel],
+  ['application-refinement-flow.js', application_refinement_flow],
+  ['offline-simulator.js', offline_simulator],
   ['oracle-leak-gate.js', oracle_leak_gate],
 ];
 

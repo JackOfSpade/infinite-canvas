@@ -36,14 +36,11 @@
 //                 verb list and the proof-bearing closing, from the same constants
 //
 // Nothing in production names any of the fixtures.
-import fs from 'node:fs';
-import path from 'node:path';
 import { assert } from './testHelpers.js';
 import {
   CANDIDATE_AUTHORSHIP_VERBS, CLOSING_ACTION_MODALS, CLOSING_ACTION_MODAL_VERBS, CLOSING_ACTION_OPEN_PARTICIPLES, PAST_PROOF_VERBS,
-  checkDirectWelcomeClosing, checkParagraphArgumentLinks, closingContributionParts, paragraphHasCandidatePastProof,
+  checkDirectWelcomeClosing,
 } from '../../electron/ipc/coverLetterChecks.js';
-import * as guidance from '../../electron/ipc/applicationWriterGuidance.js';
 
 // a / b / c: three artifacts no fixed noun list knows (head noun last); crew: who uses them; outcome: what the work did (an object the closing must not claim to have built).
 const DOMAINS = Object.freeze([
@@ -208,112 +205,7 @@ export default [
         assert(accepted(domain, `The ${a} I built reduced ${outcome}.`, a) && assetHalfMissing(domain, `The ${a} I used reduced ${outcome}.`, a), `${domain.key}/C: built → used flips the verdict`);
       }
     },
-  },
-  {
-    name: 'Closing action: the verbs the guidance prints are exactly the verbs the gate accepts, in the three places they may stand, and a verb outside the list fails the action half (5 domains, 15 verbs, A/B/C)',
-    run() {
-      const action = closingContributionParts()[1];
-      // A: the printed rule lists the modal verbs, the modals and the -ing verbs from the exported constants, and the printed rule is the one the contract carries.
-      for (const word of [...CLOSING_ACTION_MODAL_VERBS, ...CLOSING_ACTION_MODALS, ...CLOSING_ACTION_OPEN_PARTICIPLES]) assert(new RegExp(`\\b${word}\\b`, 'u').test(action), `the action half names “${word}”`);
-      assert(guidance.LETTER_CLOSING_RULE.includes(`(2) ${action}`) && action.includes('a verb outside these fails this half however naturally it reads'), 'the stage contract prints the action half as the check words it');
-      for (const domain of DOMAINS) {
-        const earlier = `I built the ${domain.a} for ${domain.crew}.`;
-        const withVerb = verb => `I welcome a conversation about how the ${head(domain.a)} I built ${verb} ${domain.side}.`;
-        // B: every printed verb passes after each modal, in the present tense and as -ing, and the whole battery of the check agrees.
-        for (const verb of CLOSING_ACTION_MODAL_VERBS) {
-          const sentence = withVerb(`could ${verb}`);
-          assert(checkDirectWelcomeClosing([earlier, sentence], '').passed, `${domain.key}/B: “${sentence}” passes`);
-        }
-        for (const modal of CLOSING_ACTION_MODALS) assert(checkDirectWelcomeClosing([earlier, withVerb(`${modal} support`)], '').passed, `${domain.key}/B: ${modal} support passes`);
-        assert(checkDirectWelcomeClosing([earlier, withVerb('supports')], '').passed && checkDirectWelcomeClosing([earlier, withVerb('applies to')], '').passed, `${domain.key}/B: the present tense passes`);
-        for (const participle of CLOSING_ACTION_OPEN_PARTICIPLES) {
-          const sentence = `I welcome a conversation about ${participle} the ${head(domain.a)} I built to ${domain.side}.`;
-          assert(checkDirectWelcomeClosing([earlier, sentence], '').passed, `${domain.key}/B: “${sentence}” passes`);
-        }
-        // C: a verb outside the printed list fails the action half alone, and moving it into the list's company flips the verdict.
-        for (const verb of ['could benefit', 'addresses', 'could assist', 'would enable', 'will boost', 'enhances']) {
-          const verdict = checkDirectWelcomeClosing([earlier, withVerb(verb)], '');
-          assert(!verdict.passed && verdict.detail.includes('the sentence is missing its action half'), `${domain.key}/C: “${verb}” is outside the list (${detailOf(verdict)})`);
-        }
-        assert(!checkDirectWelcomeClosing([earlier, withVerb('could benefit')], '').passed && checkDirectWelcomeClosing([earlier, withVerb('could support')], '').passed, `${domain.key}/C: benefit → support flips the verdict`);
-      }
-    },
-  },
-  {
-    name: 'Closing proof: an authorship clause with a proof verb makes the closing a proof-bearing paragraph that owes its own argumentMapping, the guidance says so from the constants, and the review is rejected without it (8 verbs + 3 that are not, 5 domains, A/B/C)',
-    run() {
-      const asset = closingContributionParts()[0];
-      const proofVerbs = CANDIDATE_AUTHORSHIP_VERBS.filter(verb => PAST_PROOF_VERBS.includes(verb));
-      const notProofVerbs = CANDIDATE_AUTHORSHIP_VERBS.filter(verb => !PAST_PROOF_VERBS.includes(verb));
-      // A: the guidance names the verbs the gate reads, from the two constants, and says what the closing then owes.
-      assert(proofVerbs.length >= 5 && notProofVerbs.length >= 1, 'the premise: some authorship verbs are proof verbs and some are not');
-      assert(asset.includes(`its verb is ${proofVerbs.slice(0, -1).join(', ')} or ${proofVerbs.at(-1)}`), `the asset half names the authorship verbs that are proof verbs (${asset})`);
-      for (const part of ['a closing that holds one is a proof-bearing paragraph', 'the review must also record an argumentMapping for it', 'a proof span and a jobNeedQuote that no other paragraph uses', 'use a possessive asset unless the artifact is the strongest item the letter showed']) {
-        assert(asset.includes(part), `the asset half says: ${part}`);
-      }
-      assert(guidance.LETTER_CLOSING_RULE.includes(`(1) ${asset}`), 'and the stage contract prints it');
-      for (const domain of DOMAINS) {
-        const noun = head(domain.a);
-        // B: the claim is true of the gate. A closing with a proof verb is proof-bearing, one with another authorship verb or a possessive asset is not.
-        for (const verb of proofVerbs) {
-          const closing = `I welcome a conversation about how the ${noun} I ${verb} could support ${domain.side}.`;
-          assert(paragraphHasCandidatePastProof(closing), `${domain.key}/B: “I ${verb}” makes the closing proof-bearing`);
-        }
-        for (const verb of notProofVerbs) {
-          const closing = `I welcome a conversation about how the ${noun} I ${verb} could support ${domain.side}.`;
-          assert(!paragraphHasCandidatePastProof(closing), `${domain.key}/B: “I ${verb}” does not (${closing})`);
-        }
-        assert(!paragraphHasCandidatePastProof(`I welcome a conversation about how my ${noun} work could support ${domain.side}.`), `${domain.key}/B: a possessive asset states no past action`);
-        // C: end to end. The review that omits the closing's mapping is rejected, one that supplies a proof span and a quote of its own passes, and a possessive closing needs none.
-        const [quoteOne, quoteTwo] = domain.posting.split('. ').map((sentence, index, all) => (index === all.length - 1 ? sentence : `${sentence}.`));
-        const proofSentence = `I built the ${domain.a} that ${domain.crew} used at every shift.`;
-        const first = { claim: domain.claim, proof: proofSentence, relevance: domain.natural, jobNeedQuote: quoteOne };
-        const lettered = text => ({ paragraphs: [domain.opening, `${domain.claim} ${proofSentence} ${domain.natural}`, text] });
-        const gate = (text, closingMapping) => checkParagraphArgumentLinks({
-          plan: { paragraphs: [{ argumentMapping: null }, { argumentMapping: first }, { argumentMapping: closingMapping }] }, paragraphs: lettered(text).paragraphs, jobText: domain.posting,
-        });
-        const authored = `I welcome a conversation about how the ${noun} I built could support ${domain.side}.`;
-        const missing = gate(authored, null);
-        assert(!missing.passed && missing.detail.includes('paragraph 3 contains a candidate past action but has no argumentMapping'), `${domain.key}/C: the closing owes a mapping (${detailOf(missing)})`);
-        const supplied = gate(authored, { proof: `the ${noun} I built`, jobNeedQuote: quoteTwo });
-        assert(supplied.passed, `${domain.key}/C: a proof span and a quote of its own answer it (${detailOf(supplied)})`);
-        const possessive = gate(`I welcome a conversation about how my ${noun} work could support ${domain.side}.`, null);
-        assert(possessive.passed, `${domain.key}/C: a possessive closing owes none (${detailOf(possessive)})`);
-      }
-    },
-  },
-  {
-    name: 'Closing invitation: the guidance says the invitation is direct and present, and the gate rejects the modal, the deferential and the choice forms while accepting the direct, the look-forward and the self-directed forms (12 closings, 5 domains, A/B/C)',
-    run() {
-      const rule = guidance.LETTER_CLOSING_RULE;
-      for (const part of ['State any invitation directly, in the present tense', 'one opened with “would”', 'conditional or deferential', 'asks the employer to choose between options']) assert(rule.includes(part), `the closing rule says: ${part}`);
-      for (const domain of DOMAINS) {
-        const earlier = `I built the ${domain.a} for ${domain.crew}.`;
-        const noun = head(domain.a);
-        const side = domain.side;
-        const body = `how the ${noun} I built could support ${side}`;
-        const verdict = closing => checkDirectWelcomeClosing([earlier, closing], '');
-        // A: the direct present, and the two other certified invitation shapes, pass.
-        for (const closing of [`I welcome a conversation about ${body}.`, `I welcome the chance to discuss ${body}.`, `I look forward to discussing ${body}.`, `I want to talk about ${body}.`]) {
-          assert(verdict(closing).passed, `${domain.key}/A: “${closing}” passes`);
-        }
-        // B: opened by “would”, deferential, or a choice for the employer: rejected, whatever follows.
-        for (const [closing, reason] of [
-          [`I would welcome a conversation about ${body}.`, 'conditional or deferential'],
-          [`I would welcome the chance to discuss ${body}.`, 'conditional or deferential'],
-          [`I would be glad to discuss ${body}.`, 'conditional or deferential'],
-          [`I'd be happy to talk about ${body}.`, 'conditional or deferential'],
-          [`I welcome a conversation about whether the ${noun} I built or a new ${domain.b} suits ${side} better.`, 'choose between initiatives'],
-        ]) {
-          const result = verdict(closing);
-          assert(!result.passed && result.detail.includes(reason), `${domain.key}/B: “${closing}” is rejected as ${reason} (${detailOf(result)})`);
-        }
-        // C: mutation. The one word “would” decides the first pair.
-        assert(verdict(`I welcome a conversation about ${body}.`).passed && !verdict(`I would welcome a conversation about ${body}.`).passed, `${domain.key}/C: inserting “would” flips the verdict`);
-      }
-    },
-  },
-  {
+  },{
     name: 'Closing unchanged: twenty shapes the reader already read, in every domain, license exactly the nouns the earlier reader licensed (golden recorded from the build before this change, 5 domains)',
     run() {
       // Recorded by running the reader this change replaced on each template over the five domains: the nouns (a, b, c: the three artifacts; crew: who used them) whose closing it accepted.
@@ -334,28 +226,4 @@ export default [
         }
       }
     },
-  },
-  {
-    name: 'Closing documents: the routine, the skill file and the style guide list the closed action verbs and say an authorship closing is proof-bearing, from the constants, and the protocol document says it too (A/B/C)',
-    run() {
-      const flat = file => fs.readFileSync(path.resolve(file), 'utf8').replace(/[`“”]/gu, '').replace(/[’‘]/gu, "'").replace(/\s+/gu, ' ');
-      const proofVerbs = CANDIDATE_AUTHORSHIP_VERBS.filter(verb => PAST_PROOF_VERBS.includes(verb));
-      const list = (items, joiner = 'or') => `${items.slice(0, -1).join(', ')} ${joiner} ${items.at(-1)}`;
-      const documents = ['local_ai/LOCAL_AI_APPLICATION_ROUTINE.md', 'Job Application Design System/SKILL.md', 'Job Application Design System/STYLE.md'];
-      for (const file of documents) {
-        const text = flat(file);
-        // A: the verbs, the modals and the -ing forms, exactly the ones the gate reads.
-        assert(text.includes(`The verb comes from a closed list: ${list(CLOSING_ACTION_MODAL_VERBS)} after ${list(CLOSING_ACTION_MODALS)}`), `${file}: the modal verbs and the modals`);
-        assert(text.includes(`or ${list(CLOSING_ACTION_OPEN_PARTICIPLES, 'or')}; any other verb fails that part however naturally it reads`), `${file}: the -ing forms`);
-        // B: the proof-bearing closing, with the verbs the gate counts.
-        assert(text.includes(`An authorship clause with ${list(proofVerbs)} states a past action of the candidate, so a closing that uses one is a proof-bearing paragraph and the review records an argumentMapping for it`), `${file}: the proof-bearing note`);
-        assert(text.includes('a proof span and a jobNeedQuote that no other paragraph uses'), `${file}: and what the mapping holds`);
-      }
-      const protocol = flat('local_ai/PASTE_BACK_APPLICATION.md');
-      assert(protocol.includes('a closing that uses one is itself a proof-bearing paragraph whose argumentMapping (a proof span and a jobNeedQuote no other paragraph uses) the review records') && protocol.includes('(an invitation opened with would is rejected)'), 'the protocol document says the closing is proof-bearing and the invitation direct');
-      // C: mutation. A verb list with one verb dropped is not what any document says.
-      const dropped = list(CLOSING_ACTION_MODAL_VERBS.filter(verb => verb !== 'accelerate'));
-      for (const file of documents) assert(!flat(file).includes(`The verb comes from a closed list: ${dropped} after`), `${file}: a list without accelerate is not the documents' list`);
-    },
-  },
-];
+  },];

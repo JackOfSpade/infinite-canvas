@@ -177,7 +177,7 @@ export async function createFlow(spec) {
 }
 
 /** Pass the review and drive one blind cycle; `reviewer` returns findings per scope. */
-async function runBlindCycle(flow, reviewer) {
+export async function runBlindCycle(flow, reviewer) {
   const review = await flow.current();
   assert(review.stage === 'review', `expected a review handoff before blind review, found ${review.stage}`);
   const reviewContext = flow.contextOf(review);
@@ -188,10 +188,12 @@ async function runBlindCycle(flow, reviewer) {
     const handoff = await flow.current(); const prompt = handoff.prompt;
     const track = /TRACK: ([^\n]+)/u.exec(prompt)[1]; const scopeDigest = /"scopeDigest":"([a-f0-9]{64})"/u.exec(prompt)[1];
     const pageIndex = Number(/"pageIndex":(\d+)/u.exec(prompt)[1]); const predecessor = /"previousPageDigest":(null|"[a-f0-9]{64}")/u.exec(prompt)[1];
-    const scopeOrdinal = Number(/Each finding id MUST begin "(\d+)-\d+-"/u.exec(prompt)[1]);
+    const scopeOrdinal = Number(/Each finding id (?:MUST begin|begins) "(\d+)-\d+-"/u.exec(prompt)[1]);
     const context = JSON.parse(/<untrusted-evidence-json>\n([\s\S]*?)\n<\/untrusted-evidence-json>/u.exec(prompt)[1]);
     tracks.push({ track, prompt });
-    const raw = reviewer({ track, scopeOrdinal, context, prompt }) || [];
+    const raw = track === 'fact-fidelity' && Array.isArray(context.claims)
+      ? context.claims.flatMap(claim => reviewer({ track, scopeOrdinal, context: { ...context, claim }, prompt }) || [])
+      : reviewer({ track, scopeOrdinal, context, prompt }) || [];
     const findings = raw.map((finding, index) => ({ id: `${scopeOrdinal}-${pageIndex}-${index + 1}`, ruleId: 'review-rule', ...finding }));
     flow.accepted = await flow.submit(handoff, { version: 1, scopeDigest, pageIndex, previousPageDigest: predecessor === 'null' ? null : JSON.parse(predecessor),
       complete: true, decision: findings.length ? 'issues' : 'pass', findings });
@@ -240,7 +242,7 @@ async function submitRepair(flow, { paragraph = flow.texts.paragraph, bullet = f
 async function answerRepair(flow, options) {
   flow.accepted = await submitRepair(flow, options);
   assert(flow.accepted.accepted && flow.accepted.handoff?.stage === 'requirement-disposition',
-    `the repair must be accepted and restart disposition (${JSON.stringify(flow.accepted.validationErrors || [])})`);
+    `the repair must be accepted and restart disposition (${JSON.stringify({ options, errors: flow.accepted.validationErrors || [] })})`);
   await flow.completeDispositions();
 }
 
@@ -473,13 +475,13 @@ function threeKindReviewer({ track, context }) {
   if (track === 'fact-fidelity' && context.claim.id.startsWith('letter-')) {
     return [letterClaimFinding(context, ISSUE_WORDINGS[0])];
   }
-  if (track === 'letter-argument-editorial') {
+  if (track === 'holistic-letter-argument') {
     const quoted = String(context.coverLetter).split('\n').find(line => line.includes('The engineering was in matching'));
     const run = quoted.split(/\s+/u).slice(0, 8).join(' ');
-    return [{ document: 'cover-letter', targetId: 'letter body', issue: `The wording "${run}" reads as unspecific boilerplate.`, fix: 'Name the concrete responsibility this proof serves.' }];
+    return [{ document: 'cover-letter', targetId: 'letter body', issue: `The wording "${run}" reads as unspecific boilerplate.`, fix: 'Name the concrete responsibility this proof serves.', kind: 'editorial', severity: 'minor' }];
   }
-  if (track === 'resume-hiring-quality') {
-    return [{ document: 'resume', targetId: 'experience section', issue: 'The highlights list tasks without any outcome.', fix: 'Lead with the strongest supported result.' }];
+  if (track === 'holistic-hiring-evidence') {
+    return [{ document: 'resume', targetId: 'experience section', issue: 'The highlights list tasks without any outcome.', fix: 'Lead with the strongest supported result.', kind: 'editorial', severity: 'minor' }];
   }
   return [];
 }
@@ -1120,7 +1122,7 @@ export default [
     },
   },
   {
-    name: 'repair convergence C: the writer receives a bounded, clustered brief of every blind finding that survives reload, a forged manifest field, and a rejected round',
+    name: 'repair convergence C: the writer receives every blocking finding while editorial findings stay in their separate signed stream',
     run: async () => {
       for (const spec of FLOW_SPECS) {
         const flow = await createFlow(spec);
@@ -1130,13 +1132,13 @@ export default [
           const ackKey = flow.accepted.handoff.freshContextKey;
           const pages = await acknowledgeRepairPages(flow);
           const acknowledged = pages.flatMap(page => page.ids).sort();
-          assert(acknowledged.length === 3, 'three findings are acknowledged');
+          assert(acknowledged.length === 1, 'only the truth finding requires acknowledgement');
           const review = await flow.current();
           assert(review.stage === 'review' && review.freshContextKey !== ackKey,
             'the writer is a different chat from the one that acknowledged the findings, so acknowledgement alone cannot inform it');
           const context = flow.contextOf(review);
           const brief = context.blindRepairBrief;
-          assert(brief && brief.findingCount === 3 && brief.clusterCount === 3 && brief.omittedClusterCount === 0, 'the review context carries the brief');
+          assert(brief && brief.findingCount === 1 && brief.clusterCount === 1 && brief.omittedClusterCount === 0, 'the review context carries the truth-only brief');
           assert(brief.clusters.every(cluster => Object.keys(cluster).every(key => BRIEF_CLUSTER_KEYS.includes(key))),
             'a cluster carries only typed host fields and the quoted reviewer wording');
           assert(JSON.stringify(brief.clusters.flatMap(cluster => cluster.findingIds).sort()) === JSON.stringify(acknowledged),
@@ -1144,11 +1146,9 @@ export default [
           const exact = brief.clusters.find(cluster => cluster.unit);
           assert(exact.unit.kind === 'letter-paragraph' && exact.unit.id === 'letter-paragraph-1' && exact.track === 'fact-fidelity'
             && exact.legalEdits.includes('rewrite-paragraph') && exact.pinnedFields.length === 0, 'the exact claim resolves to its unit and its legal edits');
-          const quoted = brief.clusters.find(cluster => cluster.units.length);
-          assert(quoted.units.length === 1 && quoted.units[0].id === 'letter-paragraph-1' && quoted.document === 'coverLetter',
-            'a verbatim quote resolves to the unit it quotes');
-          const documentLevel = brief.clusters.find(cluster => !cluster.unit && !cluster.units.length);
-          assert(documentLevel.document === 'resume', 'a pattern that quotes nothing stays a document-level cluster');
+          const editorialStream = (await flow.manifest()).paste.authorityStore.streams;
+          assert(Object.entries(editorialStream).some(([name, pointer]) => name.startsWith('blind-editorial-') && pointer.count > 0),
+            'advisory findings remain in immutable editorial pages');
           assert(review.prompt.includes('context.blindRepairBrief lists what the independent blind reviewers recorded')
             && review.prompt.includes('this response cannot change those fields'), 'the fixed host rule that explains the brief is printed with it');
           assert(review.prompt.includes('concerns fields the host copies exactly from the approved career snapshot, or an entry the app requires to stay')
@@ -1178,7 +1178,7 @@ export default [
           assert(contextPromptHasBrief(elsewhere.handoff.prompt, brief.digest), 'the retried round after a rejection still carries the brief');
           assert(elsewhere.handoff.freshContextKey === review.freshContextKey, 'the retry stays in the writer chat');
           // Changing the flagged unit is accepted, and a clean next cycle completes the job (no stop for progress).
-          await answerRepair(flow, { paragraph: LOCAL_EDITS[1](flow.texts.paragraph, spec), bullet: `Built the ${spec.tech} service used by ${spec.users} users.`, resume: true, coverLetter: true });
+          await answerRepair(flow, { paragraph: LOCAL_EDITS[1](flow.texts.paragraph, spec), coverLetter: true });
           assert(!JSON.stringify(await flow.manifest()).includes('blind-repair-brief'), 'the brief is runtime-only: an accepted transition never writes it into the manifest');
           await runBlindCycle(flow, () => []);
           const status = await localApplicationStatus(flow.queued.id, flow.project.canvasFilePath);
@@ -1214,11 +1214,11 @@ export default [
             && manifest.paste.terminal.kind === 'blind-review-human-stop' && manifest.paste.terminal.reason === 'recurrence'
             && manifest.paste.terminal.streak === 3 && manifest.paste.handoffCode === null,
           'the stop is a typed, failed, handoff-less terminal');
-          assert(/cover-letter paragraph 1 \(finding 2-0-1\)/u.test(manifest.paste.terminal.message) && !/paragraph-1/u.test(manifest.paste.terminal.message)
+          assert(/cover-letter paragraph 1 \(finding \d+-0-1\)/u.test(manifest.paste.terminal.message) && !/paragraph-1/u.test(manifest.paste.terminal.message)
             && /3 consecutive review cycles/u.test(manifest.paste.terminal.message)
             && /never waives them/u.test(manifest.paste.terminal.message) && !/verbatim|accept the current/u.test(manifest.paste.terminal.message),
           `the message names the finding and the unit and says nothing was waived (${manifest.paste.terminal.message})`);
-          assert(manifest.paste.terminal.findings[0].findingIds.includes('2-0-1') && manifest.paste.terminal.findings[0].unit.id === 'paragraph-1',
+          assert(manifest.paste.terminal.findings[0].findingIds.some(id => /^\d+-0-1$/u.test(id)) && manifest.paste.terminal.findings[0].unit.id === 'paragraph-1',
             'the terminal carries the typed finding and unit');
           const status = await localApplicationStatus(flow.queued.id, flow.project.canvasFilePath);
           assert(status.status === 'failed' && status.message === manifest.paste.terminal.message, 'the run status shows the same human-facing sentence');

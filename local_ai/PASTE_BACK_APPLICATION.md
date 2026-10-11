@@ -1,5 +1,14 @@
 # Paste-back application workflow
 
+For new paste responses, the approved career evidence is a fixed hand. Select
+and order its strongest true evidence, write plainly, add cited reasons and
+outcomes in the letter, and frame adjacent experience honestly. Deterministic
+rejection is reserved for truth and hygiene, including schema, source
+grounding and measured one-page fit. Length, cadence, opening, closing and
+argument-span wording rules in older examples below are writing guidance;
+they do not reject a truthful document. A recorded mapping span and its
+`jobNeedQuote` still have to be exact substrings of their stated sources.
+
 New application bundles use a local AI chat through a copy and paste handoff.
 Infinite Canvas supplies a self-contained prompt for each stage. Copy it into
 the same chat when practical, then paste the AI's complete JSON response back
@@ -20,22 +29,36 @@ The normal sequence is:
 
 For newly queued snapshot-authority jobs, an internal passing review is not
 completion. The host first freezes the exact accepted document hashes and
-starts five independent blind checks (fact fidelity, résumé quality, letter
-editorial quality, tailoring/ATS, and cross-document coherence). Each handoff
+starts a signed panel of packed fact-fidelity scopes and three holistic lenses
+(résumé evidence, letter argument, and bundle coherence). The lenses see the
+posting, the approved career evidence as a fixed hand, and the relevant
+documents; they judge how the hand was played, never candidate fit. Each handoff
 contains one UTF-8-bounded, host-projected scope only; it never includes the
 authoring rules, a prior reviewer’s findings, or another track’s conclusion.
 Finding pages continue without a total-page limit and are stored as immutable
 receipt pages. A full bounded finding page must explicitly continue; it cannot
 declare the scope complete. Before the normal repair review opens, Infinite
 Canvas presents every host-signed correction page in turn and requires an
-exact acknowledgement of each finding ID. A clean, digest-bound receipt for
-every scope is required before assembly/import. Findings return through the
-ordinary typed review revision; any document change reruns requirement
-dispositions and all five blind tracks.
+exact acknowledgement of each **truth** finding ID. Fact-fidelity findings
+are always truth; a holistic reviewer can escalate an exact document span to
+truth. Editorial findings remain in a separate immutable advisory stream.
+Truth-clean, digest-bound coverage for every scope is required before
+assembly/import. Truth findings return through the ordinary typed review
+revision; any document change reruns requirement dispositions and the panel.
+When a truth-clean panel reports a major editorial issue, the writer may make
+one optional revision. Two judges compare the versions in opposite positions;
+ties, disagreement, and unsupported claims keep the incumbent. A promoted
+candidate must pass a fresh truth check, and the host restores the incumbent
+if that check finds a truth defect. Refinement has a two-round cap.
+
+Existing v3–v7 blind-review jobs retain their original signed prompts and
+all-findings-blocking behavior. New panel and refinement records use a newer
+stage vocabulary, so an older app build cannot resume them; reopen them with
+the current build.
 
 The acknowledgement chat and the repair review are different chats, so the
 repair review does not rely on the acknowledgement: it carries a bounded,
-clustered, de-duplicated brief of every blind finding that the app rebuilds
+clustered, de-duplicated brief of every blocking truth finding that the app rebuilds
 from the signed correction stream on each open (never read from a mutable
 field). Each cluster names the unit it concerns, the reviewer wording as quoted
 data, the fields it concerns that the app copies verbatim from the approved
@@ -84,35 +107,22 @@ paragraph to (`jobNeedQuote`, labelled as posting text and not as proof of fit)
 and the career quotes it cites: a sentence grounded in a cited career quote is
 not an abstraction defect merely for being general, but one that adds nothing to
 the cited quotes, or only echoes the `jobNeedQuote` about the candidate, is
-reportable. The clause waives nothing: every finding still needs a correction.
+reportable. Truth findings always need a correction. Editorial findings remain
+recorded and may open a judged, optional refinement.
 A skill group label is not among the fields the app owns, so an overclaiming
 label stays reportable (the fix is a neutral label), and a wholly unsupported
 entry may be reported for removal; the app keeps any entry it requires.
 
-The drafting and review prompts also carry writer guidance that the independent
-reviewers read for after the app's checks pass. A letter paragraph adds what its
-résumé bullet cannot, the reason, constraint, decision or outcome its cited
-quote states, and never says the bullet again; the number of proof paragraphs
-follows the evidence (two suffice when the cited quotes are one-line
-achievements); the opening names the target role and the employer from the job
-record alone (when the record gives no usable title or employer it names the one
-it gives and invents neither) and speaks from the candidate's side; the close
-ties one concrete item the letter has already shown to the role (in the
-authorship form `the <artifact> I built`, an artifact the letter has already
-used for the candidate's own work, in an earlier sentence or a cited quote), and
-a closing that invites a conversation is stated directly in the present tense
-(an invitation opened with `would` is rejected), says what the item does for
-the target work with one verb from the closed list the app reads, and reaches
-the employer's side; because an authorship clause names a past action of the
-candidate, a closing that uses one is itself a proof-bearing paragraph whose
-argumentMapping (a proof span and a `jobNeedQuote` no other paragraph uses) the
-review records, so a possessive asset is preferred unless the artifact is the
-strongest item the letter showed; when a cited quote states nothing beyond its
-bullet the paragraph says the proof plainly and a letter whose evidence is all
-of that kind uses fewer, plainer paragraphs; a posting phrase is bound to at
-most one paragraph's `jobNeedQuote` (the review is rejected when two
-proof-bearing paragraphs bind the same span); and no sentence echoes the posting
-as filler. A bullet keeps the candidate's part exactly as its source words it, so
+The drafting and review prompts carry one quality brief. Lead with the strongest
+true evidence for the posting. Name the role and company once in the opening.
+Use cited reasons, decisions, constraints and outcomes to add information beyond
+the résumé. Write plain, natural English without posting echo; make the closing
+specific and frame adjacent experience honestly. Never claim more than a cited
+quote states. A recorded argument-mapping span must be an exact substring of its
+paragraph and `jobNeedQuote` an exact substring of the posting; claim, proof and
+relevance fields may be omitted when they add no provenance information.
+
+A bullet keeps the candidate's part exactly as its source words it, so
 maintenance, support, monitoring, administration, operation or participation
 is never written as work the candidate built or owned. When the approved career
 evidence does not support a highest- or high-priority requirement, the prompt
@@ -183,8 +193,8 @@ the lowest of the two cycles just before it (7, 6, 6, 7, 6 stops at the fifth;
 job stops at the eighth consecutive cycle that reported something. The stop says
 the review keeps finding defects, gives the per-cycle counts and says whether the
 findings were still trending down or had stopped, lists the units and themes
-reported in the most of those cycles, and waives nothing. A clean cycle
-completes the job and starts the count over. The stop never competes with the
+reported in the most of those cycles, and waives nothing. A truth-clean cycle
+completes the blocking review and starts the count over. The stop never competes with the
 others: a stop that can name its cause (a pinned field, a recurring defect) is
 reported first.
 

@@ -313,6 +313,36 @@ function result(id, passed, detail) {
   return { id, passed, detail };
 }
 
+// How many observations a failed row carries, kept OFF the row's enumerable
+// fields so a row still serialises, compares and spreads as { id, passed,
+// detail }. A row whose count is lost (a spread copy, a structured clone)
+// counts as one observation, which only understates an advisory record.
+function withObservationCount(row, count) {
+  Object.defineProperty(row, 'observationCount', { value: count, enumerable: false });
+  return row;
+}
+
+// A row that mixes a truth/hygiene half with a taste half keeps its legacy
+// shape (id, passed = every half passed, detail = every observation) and
+// carries its halves as `parts`: [{ id, passed, detail, observationCount }],
+// each under an id of its own so the disposition table can give each half a
+// different verdict (see partitionCheckResults). Non-enumerable for the same
+// reason as the count above, and with the same fail-safe: a copy that loses
+// `parts` is read as the whole row under the whole row's id, which is the
+// pre-split behaviour.
+function withParts(row, parts) {
+  Object.defineProperty(row, 'parts', {
+    value: Object.freeze(parts.map(part => Object.freeze({
+      id: part.id,
+      passed: part.passed,
+      detail: part.detail,
+      observationCount: part.passed ? 0 : Math.max(1, part.observationCount ?? 1),
+    }))),
+    enumerable: false,
+  });
+  return row;
+}
+
 function bulletTexts(evidence) {
   return Array.isArray(evidence?.bulletTexts) ? evidence.bulletTexts.filter(Boolean).map(text) : [];
 }
@@ -503,16 +533,25 @@ function sentenceCount(value) {
  */
 export function checkRoleThesis(plan = {}) {
   const thesis = text(plan?.roleThesis);
-  if (!thesis) return result('role-thesis', false, 'roleThesis is missing');
+  // Two halves under two ids (see CHECK_DISPOSITIONS): a thesis that is
+  // present is the host's record of the letter's claim and is hygiene; whether
+  // it is one sentence, long enough and free of stock language is taste. The
+  // row's own shape is unchanged: it fails when either half does.
+  const split = (passed, shapeDetail, detail) => withParts(result('role-thesis', passed, detail), [
+    { id: 'role-thesis', passed: Boolean(thesis), detail: thesis ? 'roleThesis is present' : detail },
+    { id: 'role-thesis-shape', passed: !shapeDetail, detail: shapeDetail || (thesis ? detail : 'not judged: there is no roleThesis') },
+  ]);
+  const shapeFailure = detail => split(false, detail, detail);
+  if (!thesis) return split(false, '', 'roleThesis is missing');
   const count = sentenceCount(thesis);
-  if (count !== 1) return result('role-thesis', false, `roleThesis contains ${count} sentences; exactly one controlling claim is required`);
+  if (count !== 1) return shapeFailure(`roleThesis contains ${count} sentences; exactly one controlling claim is required`);
   const countWords = wordCount(thesis);
-  if (countWords < MIN_ROLE_THESIS_WORDS) return result('role-thesis', false, `roleThesis has only ${countWords} words; it does not establish a specific controlling claim`);
+  if (countWords < MIN_ROLE_THESIS_WORDS) return shapeFailure(`roleThesis has only ${countWords} words; it does not establish a specific controlling claim`);
   const genericLanguage = checkGenericPhrases([thesis]);
-  if (!genericLanguage.passed) return result('role-thesis', false, `roleThesis is generic: ${genericLanguage.detail}`);
+  if (!genericLanguage.passed) return shapeFailure(`roleThesis is generic: ${genericLanguage.detail}`);
   const genericPattern = GENERIC_THESIS_PATTERNS.find(item => item.pattern.test(thesis));
-  if (genericPattern) return result('role-thesis', false, `roleThesis contains a ${genericPattern.label}`);
-  return result('role-thesis', true, 'roleThesis is one non-generic controlling claim');
+  if (genericPattern) return shapeFailure(`roleThesis contains a ${genericPattern.label}`);
+  return split(true, '', 'roleThesis is one non-generic controlling claim');
 }
 
 const SECONDARY_NARRATIVE_ROLES = new Set(['foundation', 'corroborates', 'deepens', 'extends', 'qualifies']);
@@ -1248,12 +1287,20 @@ export function checkParagraphArgumentLinks({
   const finalParagraphs = Array.isArray(paragraphs) ? paragraphs.map(text) : [];
   const plannedParagraphs = Array.isArray(plan?.paragraphs) ? plan.paragraphs : [];
   if (!plannedParagraphs.length) {
-    return result('paragraph-argument-links', false, 'coverLetterPlan has no paragraph-level argument mappings');
+    return argumentLinksRow([{ kind: PROVENANCE, message: 'coverLetterPlan has no paragraph-level argument mappings' }], 0);
   }
   if (plannedParagraphs.length !== finalParagraphs.length) {
-    return result('paragraph-argument-links', false, `coverLetterPlan has ${plannedParagraphs.length} paragraph record(s), but the final letter has ${finalParagraphs.length} paragraph(s)`);
+    return argumentLinksRow([{ kind: PROVENANCE, message: `coverLetterPlan has ${plannedParagraphs.length} paragraph record(s), but the final letter has ${finalParagraphs.length} paragraph(s)` }], 0);
   }
+  // Every observation is tagged with what kind of fact it is about (see
+  // argumentLinksRow): PROVENANCE observations say a recorded span or quote is
+  // not what it claims to be, or that the letter promotes a tool use into a
+  // product build; SHAPE observations say a mapping does not meet the span
+  // grammar the audit asks for. The tag is the only thing that differs between
+  // them here, so the legacy aggregate (every observation, in this order) and
+  // the two halves are all read off one list.
   const observations = [];
+  const observe = (kind, message) => observations.push({ kind, message });
   // Only the first MAX_EXPLICIT_TRANSFER_PARAGRAPHS proof-bearing paragraphs owe
   // a relevance span that stands apart from the proof, written in any wording
   // that names the responsibility the paragraph answers; a later one owes no
@@ -1274,8 +1321,13 @@ export function checkParagraphArgumentLinks({
     const paragraph = finalParagraphs[index] || '';
     if (mapping == null) {
       if (paragraphHasCandidatePastProof(paragraph)) {
-        observations.push(`paragraph ${index + 1} contains a candidate past action but has no argumentMapping`);
+        observe(SHAPE, `paragraph ${index + 1} contains a candidate past action but has no argumentMapping`);
       }
+      // Leaving the mapping out is a shape matter (the audit's grammar is not
+      // required of a writer), but it must not be a way past the truth read:
+      // the scope guard reads the paragraph's own sentences and needs no span.
+      const unmappedScope = evidenceScopeObservation(`paragraph ${index + 1}`, '', '', '', paragraph);
+      if (unmappedScope) observe(PROVENANCE, unmappedScope);
       return;
     }
     const claim = text(mapping.claim);
@@ -1289,34 +1341,34 @@ export function checkParagraphArgumentLinks({
         // proof-bearing paragraph; the claim and the relevance only by the
         // paragraphs their budgets name.
         const owed = field === 'claim' ? owesClaim[index] : field === 'relevance' ? owesRelevance[index] : true;
-        if (owed) observations.push(`${label} argumentMapping.${field} is missing`);
-      } else if (!normalizedSpanIsInParagraph(span, paragraph)) observations.push(`${label} argumentMapping.${field} is not an exact normalized span of the final paragraph`);
+        if (owed) observe(SHAPE, `${label} argumentMapping.${field} is missing`);
+      } else if (!normalizedSpanIsInParagraph(span, paragraph)) observe(PROVENANCE, `${label} argumentMapping.${field} is not an exact normalized span of the final paragraph`);
       // Reported separately from containment because the repair is a different
       // one: the words are there, the cut is not on their boundaries. Extend
       // or trim the field to whole words; nothing in the letter has to change.
-      else if (!wordAlignedSpanIsInParagraph(span, paragraph)) observations.push(`${label} argumentMapping.${field} begins or ends inside a word of the final paragraph; copy it out on word boundaries`);
+      else if (!wordAlignedSpanIsInParagraph(span, paragraph)) observe(PROVENANCE, `${label} argumentMapping.${field} begins or ends inside a word of the final paragraph; copy it out on word boundaries`);
     }
-    if (!jobNeedQuote) observations.push(`${label} argumentMapping.jobNeedQuote is missing`);
+    if (!jobNeedQuote) observe(SHAPE, `${label} argumentMapping.jobNeedQuote is missing`);
     // Names the copy it was compared against, because that is the whole
     // repair: the words can be in the posting and still not be in this copy of
     // it, and a reader told only "the job posting" re-copies from whichever
     // one is nearest.
-    else if (!normalized(postingQuoteText).includes(normalized(jobNeedQuote))) observations.push(`${label} argumentMapping.jobNeedQuote does not occur in ${postingQuoteLabel}; it is compared as a substring of that copy with only letter case ignored, so copy the span out of that copy's own characters`);
-    if (claim && proof && normalized(claim) === normalized(proof)) observations.push(`${label} argumentMapping.claim duplicates its proof instead of stating the candidate capability it demonstrates`);
-    if (claim && relevance && normalized(claim) === normalized(relevance)) observations.push(`${label} argumentMapping.claim duplicates its relevance instead of separating the candidate capability from the target transfer`);
+    else if (!normalized(postingQuoteText).includes(normalized(jobNeedQuote))) observe(PROVENANCE, `${label} argumentMapping.jobNeedQuote does not occur in ${postingQuoteLabel}; it is compared as a substring of that copy with only letter case ignored, so copy the span out of that copy's own characters`);
+    if (claim && proof && normalized(claim) === normalized(proof)) observe(SHAPE, `${label} argumentMapping.claim duplicates its proof instead of stating the candidate capability it demonstrates`);
+    if (claim && relevance && normalized(claim) === normalized(relevance)) observe(SHAPE, `${label} argumentMapping.claim duplicates its relevance instead of separating the candidate capability from the target transfer`);
     // A paragraph past the budget owes no sentence about the target to separate
     // from its proof: its relevance span is the part of the paragraph that names
     // the responsibility, and that can be the proof sentence itself.
-    if (owesTransfer[index] && proof && relevance && normalized(proof) === normalized(relevance)) observations.push(`${label} argumentMapping.proof duplicates its relevance instead of separating past evidence from the statement of why it matters to the target work`);
+    if (owesTransfer[index] && proof && relevance && normalized(proof) === normalized(relevance)) observe(SHAPE, `${label} argumentMapping.proof duplicates its relevance instead of separating past evidence from the statement of why it matters to the target work`);
     if (claim && (!CANDIDATE_CAPABILITY_CUE.test(claim)
       || (paragraphHasCandidatePastProof(claim) && !isGeneralPresentPerfectCapability(claim))
       || FORMULAIC_TRANSFER_FRAME.test(claim))) {
-      observations.push(`${label} argumentMapping.claim must state a general candidate capability, not a past proof or target-facing transfer`);
+      observe(SHAPE, `${label} argumentMapping.claim must state a general candidate capability, not a past proof or target-facing transfer`);
     }
-    if (proof && !paragraphHasCandidatePastProof(proof)) observations.push(`${label} argumentMapping.proof does not state a candidate past action`);
+    if (proof && !paragraphHasCandidatePastProof(proof)) observe(SHAPE, `${label} argumentMapping.proof does not state a candidate past action`);
     if (relevance) {
-      if (GENERIC_ARGUMENT_RELEVANCE.test(relevance)) observations.push(`${label} argumentMapping.relevance uses a generic relevance label instead of explaining the transfer to target work`);
-      if (jobNeedQuote && !relevanceNamesNeed(relevance, jobNeedQuote)) observations.push(`${label} argumentMapping.relevance does not name a concrete responsibility from its jobNeedQuote.${relevanceNeedRepairHint(relevance, jobNeedQuote)}`);
+      if (GENERIC_ARGUMENT_RELEVANCE.test(relevance)) observe(SHAPE, `${label} argumentMapping.relevance uses a generic relevance label instead of explaining the transfer to target work`);
+      if (jobNeedQuote && !relevanceNamesNeed(relevance, jobNeedQuote)) observe(SHAPE, `${label} argumentMapping.relevance does not name a concrete responsibility from its jobNeedQuote.${relevanceNeedRepairHint(relevance, jobNeedQuote)}`);
       else if (owesTransfer[index] && proof && normalized(proof) !== normalized(relevance)) {
         // The paragraph that owes a statement of why its proof matters owes it in
         // a sentence of its own, in whatever words the writer chooses: what is
@@ -1324,7 +1376,7 @@ export function checkParagraphArgumentLinks({
         // and only for the words it shares with the quote it answers.
         const beyond = relevanceBeyondProof(paragraph, proof, relevance, jobNeedQuote);
         if (beyond.applicable && !beyond.ok) {
-          observations.push(beyond.reached
+          observe(SHAPE, beyond.reached
             ? `${label} argumentMapping.relevance reaches outside its proof's sentence, but the part outside it names no concrete responsibility from its jobNeedQuote, so no sentence says how the proof bears on the target work.${relevanceNeedRepairHint(beyond.apart, jobNeedQuote, 'in the part of the relevance span outside the proof span’s sentence', 'that part')}`
             : `${label} argumentMapping.relevance sits inside the sentence its proof span comes from, so it restates the proof instead of saying how the proof bears on the target work; this paragraph owes one sentence of its own, in the writer's own words and with no particular phrase required, about the responsibility its jobNeedQuote came from, and the relevance span must be that sentence or reach into it.${jobNeedQuote ? relevanceNeedRepairHint('', jobNeedQuote, 'in the part of the relevance span outside the proof span’s sentence', 'that part') : ''}`);
         }
@@ -1333,11 +1385,11 @@ export function checkParagraphArgumentLinks({
     // Outside the relevance branch on purpose, like the scope guard below: a paragraph that records no
     // relevance span is still read for a sentence that turns a use requirement into building it.
     const modality = requirementModalityObservation(label, jobNeedQuote, relevance, { claim, proof, paragraph });
-    if (modality) observations.push(modality);
+    if (modality) observe(PROVENANCE, modality);
     // Outside the relevance branch on purpose: a paragraph that records no relevance
     // span (or no claim span) is still read for the promotion in its own sentences.
     const scope = evidenceScopeObservation(label, claim, proof, relevance, paragraph);
-    if (scope) observations.push(scope);
+    if (scope) observe(PROVENANCE, scope);
   });
   // A posting requirement answered twice. jobNeedQuote is graded as a verbatim span of the posting and,
   // for a paragraph that owes no relevance span, as nothing more, so the only thing keeping two
@@ -1354,15 +1406,59 @@ export function checkParagraphArgumentLinks({
   });
   for (const ordinals of paragraphsByQuote.values()) {
     if (ordinals.length < 2) continue;
-    observations.push(`paragraphs ${ordinals.length === 2 ? ordinals.join(' and ') : `${ordinals.slice(0, -1).join(', ')} and ${ordinals.at(-1)}`} bind the same argumentMapping.jobNeedQuote, so one posting requirement is answered more than once; bind each proof-bearing paragraph to the requirement its own proof answers, giving a paragraph that repeats a requirement another span of the posting it also answers, or folding it into the first`);
+    observe(SHAPE, `paragraphs ${ordinals.length === 2 ? ordinals.join(' and ') : `${ordinals.slice(0, -1).join(', ')} and ${ordinals.at(-1)}`} bind the same argumentMapping.jobNeedQuote, so one posting requirement is answered more than once; bind each proof-bearing paragraph to the requirement its own proof answers, giving a paragraph that repeats a requirement another span of the posting it also answers, or folding it into the first`);
   }
   const mappedCount = plannedParagraphs.filter(item => item?.argumentMapping != null).length;
   if (!mappedCount && finalParagraphs.some(paragraphHasCandidatePastProof)) {
-    observations.push('coverLetterPlan has no argumentMapping for a proof-bearing paragraph');
+    observe(SHAPE, 'coverLetterPlan has no argumentMapping for a proof-bearing paragraph');
   }
-  return observations.length
-    ? result('paragraph-argument-links', false, observations.slice(0, 12).join('; '))
+  return argumentLinksRow(observations, mappedCount);
+}
+
+// What kind of fact an argument-mapping observation is about. A mapping is the
+// review's audit of the letter, and two different things can be wrong with it.
+//
+// PROVENANCE: the audit says something false about where its words come from
+// or what they license. A recorded span that is not a span of the paragraph, a
+// jobNeedQuote that is not a span of the posting copy the writer was shown, a
+// use requirement promoted into a build, a tool-assisted practice promoted into
+// a product the tool powers. These are checkable against the letter and the
+// posting, they have one repair, and each is a claim about a source.
+//
+// SHAPE: the audit does not meet the grammar the host asks of it: a claim span
+// must match a closed capability grammar, a proof span must use one of a closed
+// list of verbs, a relevance span must carry words of the quote, a paragraph
+// that states an action owes a mapping at all, and no two paragraphs may bind
+// one quote. Each is a statement about how a writer worded something, decided
+// by literal word form, and a letter that fails one is not thereby false.
+const PROVENANCE = 'provenance';
+const SHAPE = 'shape';
+
+// One row, two halves. The row is the legacy aggregate (every observation, in
+// the order the checks ran, capped as it always was) so a reader of the single
+// verdict is unchanged; `parts` carries the same observations under the two ids
+// the disposition table gives different verdicts.
+function argumentLinksRow(observations, mappedCount) {
+  const messages = kind => observations.filter(observation => observation.kind === kind).map(observation => observation.message);
+  const provenance = messages(PROVENANCE);
+  const shape = messages(SHAPE);
+  const row = observations.length
+    ? result('paragraph-argument-links', false, observations.map(observation => observation.message).slice(0, 12).join('; '))
     : result('paragraph-argument-links', true, `${mappedCount} proof-bearing paragraph argument mapping(s) bind exact claim, proof, relevance, and job-need spans`);
+  return withParts(row, [
+    {
+      id: 'paragraph-argument-links',
+      passed: !provenance.length,
+      detail: provenance.length ? provenance.slice(0, 12).join('; ') : 'every recorded span is an exact span of its paragraph and every job-need quote is a span of the posting',
+      observationCount: provenance.length,
+    },
+    {
+      id: 'paragraph-argument-shape',
+      passed: !shape.length,
+      detail: shape.length ? shape.slice(0, 12).join('; ') : 'every recorded mapping meets the span grammar',
+      observationCount: shape.length,
+    },
+  ]);
 }
 
 // A jobNeedQuote reaches checkParagraphArgumentLinks only after the generation
@@ -1541,6 +1637,36 @@ export function paragraphArgumentSpanGaps(paragraph = '', postingQuoteText = '',
     gaps.push({ field: 'relevance', rule: owesTransfer !== false ? ARGUMENT_RELEVANCE_SPAN_RULE : ARGUMENT_LATER_RELEVANCE_SPAN_RULE });
   }
   return gaps;
+}
+
+/**
+ * The drafting-stage twin of the argument audit, as a check row.
+ *
+ * paragraphArgumentSpanGaps asks, of each paragraph that states an action of
+ * the candidate's own, whether the paragraph could supply a claim span and a
+ * relevance span at all. Those spans are the shape mandates of the audit
+ * (CLAIM and RELEVANCE grammar), so a paragraph that cannot supply one is not
+ * thereby false, and the twin was measured rejecting paragraphs that were not
+ * defective. It carries the id `paragraph-argument-span-gaps`, which the
+ * disposition table keeps OFF: the row exists so the id is named and a caller
+ * that wants the observation can still read it, and a caller that partitions
+ * by disposition drops it. `postingQuoteText` is the posting copy
+ * checkParagraphArgumentLinks grades jobNeedQuote against.
+ */
+export function checkParagraphArgumentSpanGaps(paragraphs = [], postingQuoteText = '') {
+  const list = (Array.isArray(paragraphs) ? paragraphs : []).map(text);
+  const owesTransfer = explicitTransferOwed(list);
+  const owesClaim = explicitClaimOwed(list);
+  const owesRelevance = explicitRelevanceOwed(list);
+  const observations = [];
+  list.forEach((paragraph, index) => {
+    const gaps = paragraphArgumentSpanGaps(paragraph, postingQuoteText, {
+      owesTransfer: owesTransfer[index], owesClaim: owesClaim[index], owesRelevance: owesRelevance[index],
+    });
+    if (gaps.length) observations.push(`paragraph ${index + 1} contains no span that could be its ${gaps.map(gap => gap.field).join(' or its ')}`);
+  });
+  return observationResult('paragraph-argument-span-gaps', observations, MAX_GENERIC_OBSERVATIONS,
+    `${list.length} paragraph(s) each offer the spans their audit mapping would record`);
 }
 
 // Deliberately wider than PAST_PROOF_CUE's closed verb list. That list decides
@@ -1936,17 +2062,30 @@ function describeLetterProportionViolation(violation) {
 export function checkLetterProportion(paragraphs = [], options = {}) {
   const analysis = analyzeLetterProportion(paragraphs, options);
   const { metrics } = analysis;
+  // The paragraph ceiling is the one proportion limit that is a property of the
+  // page rather than of the writing: a letter cut into more body paragraphs
+  // than any one-page letter holds cannot be set on its page however well each
+  // is written (the atomised letter this check was built for). It is its own
+  // half, under its own id, so it can hold as hygiene while every other
+  // proportion limit, each a count over how the letter is worded and cut, is
+  // advisory. The row's own shape is unchanged.
+  const split = (row, ceiling, rest) => withParts(row, [
+    { id: 'letter-paragraph-ceiling', passed: !ceiling, detail: ceiling || `${metrics.paragraphCount} body paragraph(s), within the ceiling of ${MAX_LETTER_BODY_PARAGRAPHS}`, observationCount: 1 },
+    { id: 'letter-proportion', passed: !rest.length, detail: rest.length ? rest.join('; ') : 'within the other letter proportion limits', observationCount: rest.length },
+  ]);
   if (!analysis.judged) {
-    return result('letter-proportion', true,
-      `skipped: the letter has ${metrics.paragraphCount} paragraph(s) and ${metrics.totalWords} words, and proportion is judged from ${LETTER_PROPORTION_MIN_JUDGED_WORDS} words`);
+    return split(result('letter-proportion', true,
+      `skipped: the letter has ${metrics.paragraphCount} paragraph(s) and ${metrics.totalWords} words, and proportion is judged from ${LETTER_PROPORTION_MIN_JUDGED_WORDS} words`), '', []);
   }
   if (!analysis.violations.length) {
-    return result('letter-proportion', true,
-      `${metrics.paragraphCount} paragraph(s), ${metrics.totalWords} words and ${metrics.totalSentences} sentences are within the letter proportion limits`);
+    return split(result('letter-proportion', true,
+      `${metrics.paragraphCount} paragraph(s), ${metrics.totalWords} words and ${metrics.totalSentences} sentences are within the letter proportion limits`), '', []);
   }
-  return result('letter-proportion', false,
+  const ceiling = analysis.violations.filter(violation => violation.gate === 'paragraph-count').map(describeLetterProportionViolation).join('; ');
+  const rest = analysis.violations.filter(violation => violation.gate !== 'paragraph-count').map(describeLetterProportionViolation);
+  return split(result('letter-proportion', false,
     `${analysis.violations.map(describeLetterProportionViolation).join('; ')};`
-    + ' a merge is read as one paragraph by the repeated-phrase and sentence-shape checks, so reword any repeat');
+    + ' a merge is read as one paragraph by the repeated-phrase and sentence-shape checks, so reword any repeat'), ceiling, rest);
 }
 
 /** The limits the contract prints, derived from the constants so prose and gate cannot drift. */
@@ -2612,16 +2751,13 @@ export function checkShape(planOrParagraphs = {}, paragraphs = []) {
   return result('shape', true, `letter has ${list.length} paragraph(s) and ${count} words`);
 }
 
-export function checkFigureDiscipline(paragraphs = [], evidence = {}, plan = null) {
-  const letterTokens = figureTokens((Array.isArray(paragraphs) ? paragraphs : []).join(' '));
-  const letterFigures = letterTokens.map(token => token.raw);
-  // These checks must remain diagnostic-only. A partially persisted or legacy
-  // evidence payload therefore cannot turn a recoverable letter defect into a
-  // thrown application-generation failure.
+// Everything the fitted résumé states, as one string: bullets, role headers,
+// skills and education. Tolerant of a partially persisted or legacy payload.
+function resumeEvidenceText(evidence) {
   const roles = Array.isArray(evidence?.roles) ? evidence.roles : [];
   const skills = Array.isArray(evidence?.skills) ? evidence.skills : [];
   const education = Array.isArray(evidence?.education) ? evidence.education : [];
-  const résuméText = [
+  return [
     ...bulletTexts(evidence),
     ...roles.flatMap(role => [
       role?.title || '', role?.company || '', role?.dates || '', role?.location || '', role?.summary || '',
@@ -2630,14 +2766,48 @@ export function checkFigureDiscipline(paragraphs = [], evidence = {}, plan = nul
     ...skills.flatMap(skill => [skill?.group || '', ...(Array.isArray(skill?.items) ? skill.items : [])]),
     ...education,
   ].join(' ');
+}
+
+/**
+ * Every figure in the letter must be a figure the approved evidence states.
+ *
+ * Two halves, under two ids (CHECK_DISPOSITIONS). A figure the evidence never
+ * states is a fabricated metric, a fact about the candidate nobody approved:
+ * that is `figure-discipline`, and it is the only half that rejects. How many
+ * figures a letter carries is a preference about density, with no fact in it:
+ * that is `figure-count`, advisory. The row keeps its legacy shape (one id, and
+ * it fails when either half does); `parts` carries the halves.
+ *
+ * What licenses a figure. With the plan's mappings, the evidence those mappings
+ * select; without them, the whole résumé evidence. In both cases also the
+ * career-data quotes the letter's paragraphs cite (`citations`: for paragraph i,
+ * the quotes it cites), because a paragraph that cites a quote has told the
+ * reader and the grounding checks which accomplishment it is about, so a number
+ * that quote states is stated by approved evidence. Without that, a true figure
+ * from a bullet the argument did not quote was refused although the paragraph
+ * cited it. What is still refused is the coincidence this scoping exists for:
+ * a figure that sits somewhere else in the résumé and in nothing the letter
+ * cites or maps.
+ */
+export function checkFigureDiscipline(paragraphs = [], evidence = {}, plan = null, { citations = null } = {}) {
+  const letterTokens = figureTokens((Array.isArray(paragraphs) ? paragraphs : []).join(' '));
+  const letterFigures = letterTokens.map(token => token.raw);
+  // These checks must remain diagnostic-only. A partially persisted or legacy
+  // evidence payload therefore cannot turn a recoverable letter defect into a
+  // thrown application-generation failure.
+  const résuméText = resumeEvidenceText(evidence);
   const mappings = Array.isArray(plan?.mappings) ? plan.mappings : [];
   // Planned prose may use figures only from the evidence anchors the planner
   // selected. Treating every number anywhere in the résumé as permission let
   // an unrelated/research-only figure pass by coincidence. The direct fallback
   // has no mappings, so it retains the full fitted-résumé evidence boundary.
-  const permittedFigureText = mappings.length
+  const citedText = (Array.isArray(citations) ? citations : [])
+    .flatMap(quotes => (Array.isArray(quotes) ? quotes : []))
+    .filter(quote => typeof quote === 'string')
+    .join(' ');
+  const permittedFigureText = `${mappings.length
     ? mappings.map(mapping => text(mapping?.evidence)).join(' ')
-    : résuméText;
+    : résuméText} ${citedText}`;
   const résuméFigures = new Set(figureTokens(permittedFigureText).map(token => token.key));
   const missingFigures = [];
   const seenMissing = new Set();
@@ -2647,15 +2817,20 @@ export function checkFigureDiscipline(paragraphs = [], evidence = {}, plan = nul
       missingFigures.push(raw);
     }
   }
-  const observations = [];
-  if (letterFigures.length > MAX_LETTER_FIGURES) {
-    observations.push(`letter contains ${letterFigures.length} figures ${boundedQuotedList(letterFigures)}; maximum is ${MAX_LETTER_FIGURES}`);
-  }
-  if (missingFigures.length) {
-    observations.push(`figures absent from résumé evidence: ${boundedQuotedList(missingFigures)}`);
-  }
-  if (observations.length) return result('figure-discipline', false, observations.join('; '));
-  return result('figure-discipline', true, `${letterFigures.length} figure(s) appear in résumé evidence`);
+  const countObservation = letterFigures.length > MAX_LETTER_FIGURES
+    ? `letter contains ${letterFigures.length} figures ${boundedQuotedList(letterFigures)}; maximum is ${MAX_LETTER_FIGURES}`
+    : '';
+  const absentObservation = missingFigures.length
+    ? `figures absent from résumé evidence: ${boundedQuotedList(missingFigures)}`
+    : '';
+  const observations = [countObservation, absentObservation].filter(Boolean);
+  const row = observations.length
+    ? result('figure-discipline', false, observations.join('; '))
+    : result('figure-discipline', true, `${letterFigures.length} figure(s) appear in résumé evidence`);
+  return withParts(row, [
+    { id: 'figure-discipline', passed: !absentObservation, detail: absentObservation || `${letterFigures.length} figure(s) appear in approved evidence`, observationCount: missingFigures.length },
+    { id: 'figure-count', passed: !countObservation, detail: countObservation || `${letterFigures.length} figure(s), within the ${MAX_LETTER_FIGURES} the letter is advised to carry`, observationCount: 1 },
+  ]);
 }
 
 /**
@@ -2751,8 +2926,12 @@ function observationResult(id, observations, cap, passedDetail) {
   if (!observations.length) return result(id, true, passedDetail);
   const visible = observations.slice(0, cap);
   const omitted = observations.length - visible.length;
-  return result(id, false,
-    `${visible.join('; ')}${omitted ? `; ${omitted} additional observation(s) omitted` : ''}`);
+  // The count is kept beside the row, not in it: the row's three fields are the
+  // contract every consumer and test reads, and an advisory record
+  // (partitionCheckResults) needs how many observations there were, not what
+  // they said. It counts the omitted ones too.
+  return withObservationCount(result(id, false,
+    `${visible.join('; ')}${omitted ? `; ${omitted} additional observation(s) omitted` : ''}`), observations.length);
 }
 
 /** Opening words of a sentence, bounded like every other quoted detail value. */
@@ -3366,11 +3545,34 @@ function scopeTerms(value) {
     .map(word => word.replace(/s$/u, ''));
 }
 
+// Words that make a sentence target-facing, or carry the offer itself, without
+// saying anything about what the target does. A sentence whose only posting
+// words are these (“I would bring my … experience to this role”) offers the
+// candidate's experience and claims nothing about the work. Plain English
+// function and reference words, no field's vocabulary. Terms are compared the
+// way scopeTerms writes them: lower case, trailing “s” removed.
+const TARGET_GENERIC_REFERENCE_WORDS = new Set([
+  'role', 'position', 'team', 'organization', 'organisation', 'company', 'employer', 'department', 'project', 'job', 'opportunity',
+  'work', 'service', 'system', 'modernization', 'modernisation', 'bring', 'apply', 'applying', 'bringing', 'contribute', 'contributing', 'draw',
+  'would', 'could', 'will', 'able', 'want', 'have', 'been', 'their', 'these', 'those', 'which', 'where', 'while', 'when', 'what', 'each', 'every',
+  'skill', 'background', 'capability', 'practice', 'approach', 'judgment', 'knowledge', 'strength', 'ability', 'expertise', 'foundation',
+]);
+
 /**
  * Keeps a prior workflow's mechanics in its proof sentence instead of
  * promoting them into the target thesis. A role thesis is always target
  * facing; prose needs an explicit target reference plus a prospective-transfer
  * verb before this limited lexical check applies.
+ *
+ * What the check protects is the reader's picture of the TARGET: a sentence
+ * that sets two of the candidate's own workflow terms beside a responsibility
+ * the posting names teaches the reader that the team does that workflow. A
+ * sentence that names no responsibility of the posting at all offers the
+ * candidate's experience and says nothing about the team, whatever words the
+ * experience is called by, and is not read. The posting has to name something
+ * the sentence is about (a content word of the posting that is not the
+ * offer's own vocabulary, see TARGET_GENERIC_REFERENCE_WORDS) for the pair to
+ * be set beside it; the pair itself is still found the way it always was.
  */
 export function checkTargetClaimScope(plan = {}, paragraphs = [], evidence = {}, jobText = '') {
   if (wordCount(jobText) < MIN_ANCHOR_RELEVANCE_CORPUS_WORDS) {
@@ -3393,6 +3595,12 @@ export function checkTargetClaimScope(plan = {}, paragraphs = [], evidence = {},
   const observations = [];
   for (const claim of claims) {
     const claimWords = scopeTerms(claim.value);
+    // Nothing of the target is named, so nothing is claimed about it.
+    const namesTargetWork = claimWords.some(word => word.length >= 4
+      && jobTerms.has(word)
+      && !TARGET_SCOPE_STOP_WORDS.has(word)
+      && !TARGET_GENERIC_REFERENCE_WORDS.has(word));
+    if (!namesTargetWork) continue;
     // Two adjacent source-only terms is the signal. A single source-only noun
     // is not: a posting that says “stock” where the evidence says “inventory”
     // (or “residents” for “patients”) licenses the candidate's own word for the
@@ -3473,7 +3681,7 @@ function namesProspectiveCompany(sentence, companyName = '') {
 // Limit the detector to the prospective employer frame so past evidence at a
 // cited prior employer remains ordinary, truthful experience prose.
 const PROSPECTIVE_COMPANY_FRAME = /\b(?:(?:i|we|my\s+(?:work|experience|background)|this\s+(?:work|experience))\s+(?:(?:would|could|can|will)\s+)?(?:contribute|support|help|build|deliver|join|work|apply|bring)|(?:your|this)\s+(?:role|team|company|organization|organisation|mission|work|platform|product))\b/iu;
-const NAMED_COMPANY_AFTER_PREPOSITION = /\b(?:at|for|with)\s+([\p{Lu}][\p{L}\p{N}&.'’-]*(?:\s+[\p{Lu}][\p{L}\p{N}&.'’-]*){0,5})\b/gu;
+const NAMED_COMPANY_AFTER_PREPOSITION = /\b(at|for|with)\s+([\p{Lu}][\p{L}\p{N}&.'’-]*(?:\s+[\p{Lu}][\p{L}\p{N}&.'’-]*){0,5})\b/gu;
 const NAMED_COMPANY_POSSESSIVE = /\b([\p{Lu}][\p{L}\p{N}&.'’-]*(?:\s+[\p{Lu}][\p{L}\p{N}&.'’-]*){0,5})['’]s\b/gu;
 // These are capitalized product/domain abbreviations, not employer names.
 // Do not turn an ordinary prospective sentence such as "bring AI practice"
@@ -3500,30 +3708,82 @@ function isPriorEmployerEvidenceBeforeProspectiveFrame(sentence, employerIndex) 
   return /\b(?:built|created|delivered|designed|developed|drove|implemented|improved|led|managed|operated|shipped|supported|worked)\b/iu.test(intervening);
 }
 
+// The words of every tool name the module already treats as a technology, so a
+// name made only of them is a product the candidate works with, not an employer.
+const TOOL_NAME_WORDS = new Set(STACK_TOOL_LEXICON
+  .flatMap(entry => entry.split(/\s+/u))
+  .map(word => word.toLowerCase()));
+
+function namesOnlyTools(name) {
+  const parts = String(name || '').split(/\s+/u).map(word => word.replace(/[.,;:]+$/u, '').toLowerCase()).filter(Boolean);
+  return parts.length > 0 && parts.every(word => TOOL_NAME_WORDS.has(word));
+}
+
+// A suffix that makes a capitalised run read as a legal entity.
+const COMPANY_SUFFIX_RE = /(?:^|\s)(?:inc|incorporated|llc|ltd|limited|corp|corporation|co|company|plc|gmbh|ag|sa)\.?$/iu;
+
+function occursAsWholeName(name, corpus) {
+  const needle = normalized(name).replace(/[.,;:]+$/u, '').trim();
+  if (!needle || !corpus) return false;
+  return new RegExp(`(?<![\\p{L}\\p{N}])${escapeRegExp(needle)}(?![\\p{L}\\p{N}])`, 'u').test(corpus);
+}
+
+// A known prior employer named after a past-tense verb in the same clause is a
+// reference to history (“the way it worked at <employer>”, “as I did at
+// <employer>”), not the employer a future contribution is directed to.
+const PAST_HISTORY_BEFORE_EMPLOYER = /\b(?:did|had|was|were|built|created|delivered|designed|developed|drove|implemented|improved|led|managed|operated|ran|shipped|supported|wrote|worked)\s+(?:[\p{L}'’-]+\s+){0,3}(?:at|for|with)\s+$/iu;
+
 /**
  * Keeps a named prospective employer bound to this job.  Known prior
  * employers are allowed only in a past-evidence sentence; an unknown named
  * company in a future contribution sentence is never a safe target guess.
+ *
+ * The defect this reads is a copy/paste company error: a name that belongs to
+ * some other application standing where this job's employer should be. A name
+ * the approved record already explains cannot be one. So a name is not read as
+ * an employer when it is a technology the candidate works with (a tool name, or
+ * one the evidence itself names), when the posting names it, when it follows
+ * “with” as a single word (“work with <Name> services”), or, for a known prior
+ * employer, when it only recalls the work done there. A run of capitalised words
+ * after “at” or “for”, or a possessive, that the evidence and the posting never
+ * mention is still refused.
  */
-export function checkTargetCompanyBinding(paragraphs = [], companyName = '', priorEmployers = []) {
+export function checkTargetCompanyBinding(paragraphs = [], companyName = '', priorEmployers = [], { evidence = null, jobText = '' } = {}) {
   const targetAliases = companyReferenceAliases(companyName);
   if (!targetAliases.length) return result('target-company-binding', true, 'skipped: job company is unavailable');
   const priorAliases = (Array.isArray(priorEmployers) ? priorEmployers : [])
     .flatMap(companyReferenceAliases);
+  const postingCorpus = normalized(jobText);
+  const projectText = (Array.isArray(evidence?.projects) ? evidence.projects : [])
+    .map(project => `${project?.name || ''} ${project?.description || ''}`).join(' ');
+  const evidenceCorpus = normalized(`${resumeEvidenceText(evidence || {})} ${projectText}`);
   const observations = [];
   (Array.isArray(paragraphs) ? paragraphs : []).forEach((paragraph, paragraphIndex) => {
     sentences(paragraph).forEach((sentence, sentenceIndex) => {
       const value = text(sentence);
       if (!PROSPECTIVE_COMPANY_FRAME.test(value)) return;
       const namedEmployers = [
-        ...value.matchAll(NAMED_COMPANY_AFTER_PREPOSITION),
-        ...value.matchAll(NAMED_COMPANY_POSSESSIVE),
-      ].map(match => ({ value: match[1], index: match.index ?? -1 })).filter(match => plausibleNamedCompany(match.value));
+        ...[...value.matchAll(NAMED_COMPANY_AFTER_PREPOSITION)].map(match => ({
+          value: match[2], index: match.index ?? -1, preposition: match[1].toLowerCase(), prefixEnd: (match.index ?? 0) + match[0].length - match[2].length,
+        })),
+        ...[...value.matchAll(NAMED_COMPANY_POSSESSIVE)].map(match => ({
+          value: match[1], index: match.index ?? -1, preposition: '', prefixEnd: match.index ?? 0,
+        })),
+      ].filter(match => plausibleNamedCompany(match.value));
       for (const employer of namedEmployers) {
         const named = employer.value;
         if (sameCompanyReference(named, targetAliases)) continue;
         const knownPrior = sameCompanyReference(named, priorAliases);
         if (knownPrior && isPriorEmployerEvidenceBeforeProspectiveFrame(value, employer.index)) continue;
+        if (knownPrior && PAST_HISTORY_BEFORE_EMPLOYER.test(value.slice(0, employer.prefixEnd))) continue;
+        if (!knownPrior) {
+          if (namesOnlyTools(named)) continue;
+          if (occursAsWholeName(named, postingCorpus) || occursAsWholeName(named, evidenceCorpus)) continue;
+          // “with” takes a product, a language or a client far more often than
+          // a new employer; a single word after it is read only when it is
+          // known to be an employer, which the branches above already did.
+          if (employer.preposition === 'with' && !/\s/u.test(named.trim()) && !COMPANY_SUFFIX_RE.test(named)) continue;
+        }
         observations.push(`paragraph ${paragraphIndex + 1} sentence ${sentenceIndex + 1} directs prospective contribution to “${boundedDetailValue(named)}”${knownPrior ? ', a prior employer' : ''}; bind future-facing work to this job’s employer or use “this role”, and keep prior employers only in past-tense evidence context`);
         break;
       }
@@ -5502,6 +5762,31 @@ export function findUnsupportedDurationClaim(finalText, sourceQuotes = []) {
   return null;
 }
 
+/**
+ * findUnsupportedDurationClaim over a whole letter, as a check row.
+ *
+ * `citations` is parallel to `paragraphs`: for paragraph i, the career-data
+ * quotes it cites. Each paragraph is judged against ITS OWN quotes, which is
+ * how every stage that writes a span reads it (a span is only as true as the
+ * evidence the unit itself cites). When the quotes cannot be lined up with the
+ * paragraphs the check does not judge rather than guess, the way
+ * analyzeLetterProportion treats an unlined quote limit. The decision itself
+ * is findUnsupportedDurationClaim's, unchanged.
+ */
+export function checkUnsupportedExperienceSpan(paragraphs = [], citations = null) {
+  const list = (Array.isArray(paragraphs) ? paragraphs : []).map(text);
+  if (!Array.isArray(citations) || citations.length !== list.length) {
+    return result('unsupported-experience-span', true, 'skipped: the quotes each paragraph cites are not available');
+  }
+  const observations = [];
+  list.forEach((paragraph, index) => {
+    const found = findUnsupportedDurationClaim(paragraph, Array.isArray(citations[index]) ? citations[index] : []);
+    if (found) observations.push(`paragraph ${index + 1} claims an experience span (“${found.phrase}”) that none of the career-data evidence it cites states`);
+  });
+  return observationResult('unsupported-experience-span', observations, MAX_GENERIC_OBSERVATIONS,
+    `${list.length} paragraph(s) claim no experience span their cited evidence does not state`);
+}
+
 // A paragraph-opening demonstrative noun phrase promises that its referent
 // sits in the paragraph the reader just finished. A shipped letter opened a
 // paragraph “That <topic> practice …” two paragraphs after the <topic>
@@ -6964,87 +7249,307 @@ export function checkPlanGate(plan = {}, evidence = {}, needs = [], jobText = ''
   return { shouldRetry, checks };
 }
 
+// ---------------------------------------------------------------------------
+// CHECK DISPOSITIONS
+//
+// What a failure of each cover-letter check is allowed to DO.
+//
+// The career file is a fixed hand and the system plays it as well as it can.
+// What rejects a letter is TRUTH (a fact, a figure, an ownership or strength,
+// a date, a claim about the employer or the posting the writer cannot support,
+// evidence the paragraph does not cite) and HYGIENE (schema, structure, a
+// record that is missing or does not line up). TASTE (cadence, wording, the
+// grammar of a required sentence, repetition limits, opening and closing
+// forms, paragraph shape) never does: a deterministic wording gate cannot be
+// satisfied naturally, and a writer who must satisfy one writes filler. The
+// gate audit measured exactly that, so every check carries one of three
+// dispositions.
+//
+//   'gate'     a failure blocks the letter and is returned for correction;
+//   'advisory' a failure never blocks. It is kept as a content-free record
+//              (the check id and how many observations there were; the
+//              observation text is not persisted) and the writer prompt may
+//              still describe the check as guidance;
+//   'off'      the check is not run by production callers. The function stays
+//              exported and tested; partitionCheckResults drops its rows.
+//
+// An id this table does not list is a GATE: a check added without being
+// classified fails closed, as every check did before there was a table, until
+// someone decides. The drift test (scripts/tests/gapfix-v17-letter-dispositions.js)
+// fails on that omission, and on a row that names an id nothing emits, instead
+// of letting either ship silently.
+//
+// A check that mixes a truth half with a taste half is split: its row keeps its
+// legacy shape and carries its halves as `parts`, each under an id of its own
+// (figure-discipline / figure-count, role-thesis / role-thesis-shape,
+// paragraph-argument-links / paragraph-argument-shape, letter-proportion /
+// letter-paragraph-ceiling). partitionCheckResults reads the halves, so the
+// truth half can hold while the taste half advises.
+// ---------------------------------------------------------------------------
+
+export const CHECK_DISPOSITION_VALUES = Object.freeze(['gate', 'advisory', 'off']);
+
+// [id, disposition, class, why]. The class is the audit's (TRUTH / HYGIENE /
+// TASTE / MIXED); where the disposition departs from the audit's recommendation
+// the `why` says so. One list builds all three frozen maps, so no id can have a
+// disposition without a stated reason.
+const CHECK_DISPOSITION_ROWS = Object.freeze([
+  // ---- the production battery (evaluateCoverLetterChecks), in battery order
+  ['redundancy', 'advisory', 'TASTE', 'a verbatim run shared with a résumé bullet is repetition, not a falsehood; the word floor re-rejects a repair the host itself suggested and misses a restated meaning.'],
+  ['salient-phrase-echo', 'off', 'TASTE', 'depends on a refrain list the writer cannot see, so the rule cannot be learned; no fact is at stake.'],
+  ['generic-phrases', 'advisory', 'TASTE', 'stock phrases and opener formulas are a true weakness, but a closed list that synonyms pass is a lexical lottery, not a gate.'],
+  ['interest-framing', 'advisory', 'TASTE', 'declarations of enthusiasm are style advice with no fact in them.'],
+  ['experience-infinitive-grammar', 'off', 'TASTE', 'the grammar of one construction a writer does not produce.'],
+  ['company-specificity', 'off', 'TASTE', 'inert in the paste pipeline, which never supplies research text, and wording-only where it does run.'],
+  ['shape', 'gate', 'HYGIENE', 'a letter needs at least one non-empty body paragraph.'],
+  ['figure-discipline', 'gate', 'MIXED', 'a figure the approved evidence never states is a fabricated metric. Only that half gates (the count cap is figure-count), and a figure is licensed by the evidence the letter cites as well as by the mapped evidence.'],
+  ['logistics-exclusion', 'gate', 'MIXED', 'availability, start-date, location and relocation promises state facts about the candidate that no approved evidence supports; promise-shaped patterns, no false positives measured.'],
+  ['compound-hyphenation', 'off', 'TASTE', 'orthography; the message already prints the corrected spelling.'],
+  ['parallel-structure', 'off', 'TASTE', 'grammar heuristics.'],
+  ['prior-employer-opening', 'advisory', 'TASTE', 'where a sentence states the candidate’s relationship to an employer is a wording preference; the closed frames rejected complete relationship statements and taught one template.'],
+  ['named-artifact-introduction', 'advisory', 'TASTE', 'introduction style, not fact.'],
+  ['opening-artifact-context', 'advisory', 'TASTE', 'opening form; with the other opening checks it steered writers toward an abstract opener about the employer’s domain, which is the unsupported claim a gate should be catching.'],
+  ['vague-domain-work-label', 'off', 'TASTE', 'a one-pattern wording fixer.'],
+  ['reference-clarity', 'off', 'TASTE', 'grammar judgment that rejected a plural pronoun with a plain coordinated antecedent.'],
+  ['modifier-attachment', 'off', 'TASTE', 'one regex fitted to one past sentence.'],
+  ['migration-object-clarity', 'off', 'TASTE', 'a one-pattern fixer.'],
+  ['opening-posting-restatement', 'advisory', 'TASTE', 'rejected the opener the host’s own opening rule asks for (naming the role and the employer).'],
+  ['opening-job-summary-scaffolding', 'advisory', 'TASTE', 'style.'],
+  ['anchor-relevance', 'advisory', 'TASTE', 'forbids accurate, relevant tool naming and its repair makes the letter vaguer; it is not a truth gate.'],
+  ['target-claim-scope', 'gate', 'MIXED', 'telling the employer its role involves the candidate’s own prior mechanics is a claim about the employer. Held as a gate once it reads only sentences that name a responsibility of the posting.'],
+  ['target-company-binding', 'gate', 'TRUTH', 'a name from another application where this job’s employer belongs is a copy/paste company error. Held as a gate once it excludes technologies, names the evidence or posting explains, and history recalled in the past tense.'],
+  ['detached-relevance-claim', 'off', 'TASTE', 'a one-pattern wording rule.'],
+  ['prospective-contribution-tense', 'advisory', 'TASTE', 'the tense of a hedge; no fact at stake.'],
+  ['additive-seam', 'off', 'TASTE', 'connective style.'],
+  ['responsibility-transition', 'off', 'TASTE', 'fixed phrases.'],
+  ['tool-calls-garden-path', 'off', 'TASTE', 'a single literal string.'],
+  ['low-information-tool-build', 'off', 'TASTE', 'one wording pattern.'],
+  ['containerization-technology-roles', 'gate', 'TRUTH', 'fires only when a tool is credited with a role the résumé itself assigns to another tool: attribution truth, precise.'],
+  ['posting-reference', 'advisory', 'TASTE', 'register advice.'],
+  ['claimed-equivalence', 'advisory', 'MIXED', 'an asserted cross-domain equivalence is truth-adjacent, but the lexical carriers also match innocent phrasing and cannot tell a claim about the employer from the candidate’s own account; advice, not a gate.'],
+  ['dangling-paragraph-transition', 'off', 'TASTE', 'one regex shape.'],
+  ['sentence-length', 'advisory', 'TASTE', 'a readability preference.'],
+  ['punctuation-style', 'advisory', 'TASTE', 'house style the host can normalise mechanically instead of rejecting.'],
+  ['plain-register', 'off', 'TASTE', 'a few fixed phrases from past letters.'],
+  ['introductory-workplace-comma', 'off', 'TASTE', 'comma placement.'],
+  ['visual-reference-precision', 'off', 'TASTE', 'fitted to one project description.'],
+  ['direct-welcome-closing', 'advisory', 'TASTE', 'the most frequent rejection and never a truth question; coverage is lexical accident (one invitation noun passes and a synonym fails) and the certified form is itself boilerplate.'],
+  ['opening-demonstrative', 'off', 'TASTE', 'cohesion judgment for a reviewer.'],
+  ['opening-employer-shorthand', 'off', 'TASTE', 'wording.'],
+  ['adjacent-employer-repetition', 'off', 'TASTE', 'wording that pulled opposite to prior-employer-opening.'],
+  ['entailed-premise', 'off', 'TASTE', 'one regex.'],
+  ['repeated-sentence-shape', 'off', 'TASTE', 'teaches a writer to contort syntax and did not catch the monotone shape it names.'],
+  ['repeated-phrase', 'advisory', 'TASTE', 'the floor sits below ordinary repeated naming of one thing; repetition of an idea is a reviewer’s call.'],
+  ['candidate-agency', 'advisory', 'TASTE', 'existed so the audit’s span obligations had something to grade, and those obligations are advisory now.'],
+  ['letter-proportion', 'advisory', 'TASTE', 'counts over how the letter is cut and worded, not facts; page fit is measured by the renderer. Its paragraph ceiling is split off as letter-paragraph-ceiling.'],
+  ['repeated-transfer-carrier', 'off', 'TASTE', 'existed only to fence the mandated transfer sentence.'],
+  ['dangling-demonstrative', 'off', 'TASTE', 'a cohesion rule.'],
+  ['ended-role-current-employment', 'gate', 'TRUTH', 'a role with an explicit past end date framed as current employment is a false date claim; reads explicit end dates only.'],
+  ['transfer-carrier-budget', 'off', 'TASTE', 'a fence around the mandated transfer sentence.'],
+  ['transfer-benefit-support', 'gate', 'TRUTH', 'a benefit class (reliability, cost, safety and so on) that neither the proof nor the cited quotes state is an outcome the evidence does not show; a closed lexicon that errs toward silence.'],
+
+  // ---- rows the production battery adds around evaluateCoverLetterChecks
+  ['role-thesis', 'gate', 'HYGIENE', 'only the half that records a roleThesis at all gates; one sentence, long enough and free of stock language is role-thesis-shape.'],
+  ['mapping-narrative-structure', 'off', 'TASTE', 'scaffolding for the argument plan, not a property of the letter.'],
+  ['evidence-grounding', 'gate', 'HYGIENE', 'binds each argument evidence string to a final résumé bullet; cheap and precise.'],
+  ['paragraph-argument-links', 'gate', 'MIXED', 'the provenance half of the argument audit: a recorded span must be an exact span of its paragraph, a jobNeedQuote an exact span of the posting copy, and the paragraph may not promote a use requirement into a build or a tool-assisted practice into a product. The span grammar is paragraph-argument-shape.'],
+  ['paragraph-argument-span-gaps', 'off', 'TASTE', 'the drafting twin of the span grammar; it rejected paragraphs that were not defective and carried no check id.'],
+  ['unsupported-experience-span', 'gate', 'TRUTH', 'a span of years the text claims must be stated by a quote the same unit cites; computed durations are a classic fabrication.'],
+
+  // ---- halves split off the rows above, each under its own id
+  ['role-thesis-shape', 'advisory', 'TASTE', 'sentence count, length and stock language in the thesis are wording.'],
+  ['figure-count', 'advisory', 'TASTE', 'how many figures a letter carries is a density preference.'],
+  ['letter-paragraph-ceiling', 'advisory', 'TASTE', 'paragraph count is a layout proxy; the renderer measures actual one-page fit.'],
+  ['paragraph-argument-shape', 'advisory', 'TASTE', 'the claim must match a closed capability grammar, a proof must use one of a closed list of verbs, a relevance span must carry words of the quote, a paragraph that states an action owes a mapping, no two paragraphs bind one quote: wording decided by literal form.'],
+
+  // ---- the needs-analysis plan gate: no production caller since the APIs were removed
+  ['need-grounding', 'off', 'HYGIENE', 'dead code: no production caller.'],
+  ['plan-mappings', 'off', 'HYGIENE', 'dead code: no production caller.'],
+  ['plan-need-references', 'off', 'HYGIENE', 'dead code: no production caller.'],
+  ['plan-redundancy', 'off', 'TASTE', 'dead code: no production caller.'],
+  ['all-needs-disposition', 'off', 'HYGIENE', 'dead code: no production caller.'],
+  ['top-need-disposition', 'off', 'HYGIENE', 'dead code: no production caller.'],
+  ['eligibility-need-disposition', 'off', 'HYGIENE', 'dead code: no production caller.'],
+  ['needs-portfolio', 'off', 'TASTE', 'dead code: no production caller.'],
+  ['work-sample-link', 'off', 'HYGIENE', 'dead code: no production caller.'],
+]);
+
+export const CHECK_DISPOSITIONS = Object.freeze(Object.fromEntries(CHECK_DISPOSITION_ROWS.map(([id, disposition]) => [id, disposition])));
+export const CHECK_CLASSES = Object.freeze(Object.fromEntries(CHECK_DISPOSITION_ROWS.map(([id, , checkClass]) => [id, checkClass])));
+export const CHECK_RATIONALES = Object.freeze(Object.fromEntries(CHECK_DISPOSITION_ROWS.map(([id, , , why]) => [id, why])));
+
+const VALID_DISPOSITIONS = new Set(CHECK_DISPOSITION_VALUES);
+
+/**
+ * The disposition of one check id. An id the table does not list, or lists
+ * with a value that is not one of the three, is a gate: the safe answer for a
+ * check nobody has classified is the one it had before there was a table.
+ * `table` is injectable so a test can flip one entry and prove the outcome
+ * flips with it.
+ */
+export function checkDisposition(id, table = CHECK_DISPOSITIONS) {
+  if (typeof id !== 'string' || !table || typeof table !== 'object' || !Object.hasOwn(table, id)) return 'gate';
+  const value = table[id];
+  return VALID_DISPOSITIONS.has(value) ? value : 'gate';
+}
+
+/**
+ * The independently judged halves of a result row. A row that mixes a truth
+ * half with a taste half carries them as `parts` (see the block comment above);
+ * any other row is its own single half. A row whose `parts` are not a usable
+ * list is read as the whole row, never as nothing.
+ */
+export function checkResultParts(row) {
+  const parts = row && typeof row === 'object' ? row.parts : null;
+  if (Array.isArray(parts) && parts.length && parts.every(part => part && typeof part === 'object' && typeof part.id === 'string')) {
+    return parts;
+  }
+  return [row];
+}
+
+function advisoryObservationCount(row) {
+  return Number.isInteger(row?.observationCount) && row.observationCount > 0 ? row.observationCount : 1;
+}
+
+/**
+ * Split check result rows (the { id, passed, detail } rows evaluateCoverLetterChecks
+ * and its siblings return) by what a failure is allowed to do.
+ *
+ *   blocking  the failed halves whose disposition is 'gate', as rows (with
+ *             their detail, which the correction prompt prints);
+ *   advisory  the failed halves whose disposition is 'advisory', as
+ *             content-free records { id, count }: the id and how many
+ *             observations there were, never the observation text. One record
+ *             per id, counts summed;
+ *   (dropped) a failed half whose disposition is 'off', and every half that
+ *             passed.
+ *
+ * Fail-safe in the direction of blocking: a half with no id, an id the table
+ * does not list, and a row that does not say `passed: true` all count as
+ * failed gates, because an unattributable failure must not be waved through.
+ */
+export function partitionCheckResults(results, table = CHECK_DISPOSITIONS) {
+  const blocking = [];
+  const advisoryCounts = new Map();
+  for (const row of Array.isArray(results) ? results : []) {
+    if (!row || typeof row !== 'object') continue;
+    for (const part of checkResultParts(row)) {
+      if (part.passed === true) continue;
+      const disposition = checkDisposition(part.id, table);
+      if (disposition === 'off') continue;
+      if (disposition === 'advisory') {
+        advisoryCounts.set(part.id, (advisoryCounts.get(part.id) || 0) + advisoryObservationCount(part));
+        continue;
+      }
+      blocking.push(part);
+    }
+  }
+  return { blocking, advisory: [...advisoryCounts].map(([id, count]) => ({ id, count })) };
+}
+
+/**
+ * The table as data, for documents and tests: the values, the default, the
+ * counts, the ids grouped by disposition and one row per id with its class and
+ * the reason it has the disposition it has.
+ */
+export function describeCheckDispositions(table = CHECK_DISPOSITIONS) {
+  const ids = { gate: [], advisory: [], off: [] };
+  const rows = Object.keys(table).map(id => {
+    const disposition = checkDisposition(id, table);
+    ids[disposition].push(id);
+    return { id, disposition, class: CHECK_CLASSES[id] ?? null, rationale: CHECK_RATIONALES[id] ?? null };
+  });
+  return {
+    values: CHECK_DISPOSITION_VALUES,
+    defaultDisposition: 'gate',
+    counts: { gate: ids.gate.length, advisory: ids.advisory.length, off: ids.off.length, total: rows.length },
+    ids,
+    rows,
+  };
+}
+
 /** Evaluates the prose-level checks used to decide the single revision attempt. */
-export function evaluateCoverLetterChecks({ plan = {}, paragraphs = [], evidence = {}, jobText = '', researchText = '', companyName = '', referenceDate = null, paragraphCitations = null } = {}) {
+export function evaluateCoverLetterChecks({ plan = {}, paragraphs = [], evidence = {}, jobText = '', researchText = '', companyName = '', referenceDate = null, paragraphCitations = null, activeOnly = false } = {}) {
   const plannedCompanyDetail = text(plan?.companyHook?.detail);
   const priorEmployers = (Array.isArray(evidence?.roles) ? evidence.roles : [])
     .map(role => text(role?.company)).filter(Boolean);
-  const companySpecificity = researchText && !plannedCompanyDetail
+  const companySpecificity = () => researchText && !plannedCompanyDetail
     ? result('company-specificity', true, 'skipped: argument plan intentionally omitted a company-specific hook')
     : checkCompanySpecificity(paragraphs, researchText, companyName, plannedCompanyDetail);
-  return [
-    checkRedundancy(paragraphs, evidence),
-    checkSalientPhraseEcho(paragraphs, evidence, jobText),
-    checkGenericPhrases(paragraphs),
-    checkInterestFraming(paragraphs),
-    checkExperienceInfinitiveGrammar(paragraphs),
-    companySpecificity,
-    checkShape(plan, paragraphs),
-    checkFigureDiscipline(paragraphs, evidence, plan),
-    checkLogisticsExclusion(plan, paragraphs),
+  const checks = [
+    ['redundancy', () => checkRedundancy(paragraphs, evidence)],
+    ['salient-phrase-echo', () => checkSalientPhraseEcho(paragraphs, evidence, jobText)],
+    ['generic-phrases', () => checkGenericPhrases(paragraphs)],
+    ['interest-framing', () => checkInterestFraming(paragraphs)],
+    ['experience-infinitive-grammar', () => checkExperienceInfinitiveGrammar(paragraphs)],
+    ['company-specificity', companySpecificity],
+    ['shape', () => checkShape(plan, paragraphs)],
+    ['figure-discipline', () => checkFigureDiscipline(paragraphs, evidence, plan, { citations: paragraphCitations })],
+    ['logistics-exclusion', () => checkLogisticsExclusion(plan, paragraphs)],
     // Register and style checks. They are appended rather than interleaved so
     // the established check order stays stable, and every one of them reads
     // paragraphs only, so they still run in the plan-degraded path where the
     // call site filters out the plan-dependent 'shape' result.
-    checkCompoundHyphenation(paragraphs),
-    checkParallelStructure(paragraphs),
-    checkPriorEmployerOpening(paragraphs, priorEmployers),
-    checkNamedArtifactIntroduction(paragraphs, (Array.isArray(evidence?.projects) ? evidence.projects : []).map(project => project?.name)),
-    checkOpeningArtifactContext(
+    ['compound-hyphenation', () => checkCompoundHyphenation(paragraphs)],
+    ['parallel-structure', () => checkParallelStructure(paragraphs)],
+    ['prior-employer-opening', () => checkPriorEmployerOpening(paragraphs, priorEmployers)],
+    ['named-artifact-introduction', () => checkNamedArtifactIntroduction(paragraphs, (Array.isArray(evidence?.projects) ? evidence.projects : []).map(project => project?.name))],
+    ['opening-artifact-context', () => checkOpeningArtifactContext(
       paragraphs,
       (Array.isArray(evidence?.projects) ? evidence.projects : []).map(project => project?.name),
       priorEmployers,
-    ),
-    checkVagueDomainWorkLabel(paragraphs),
-    checkReferenceClarity(paragraphs),
-    checkModifierAttachment(paragraphs),
-    checkMigrationObjectClarity(paragraphs),
-    checkOpeningPostingRestatement(paragraphs, jobText),
-    checkOpeningJobSummaryScaffolding(paragraphs),
-    checkAnchorRelevance(paragraphs, jobText, researchText),
-    checkTargetClaimScope(plan, paragraphs, evidence, jobText),
-    checkTargetCompanyBinding(paragraphs, companyName, priorEmployers),
-    checkDetachedRelevanceClaim(paragraphs),
-    checkProspectiveContributionTense(paragraphs, companyName),
-    checkAdditiveSeam(paragraphs),
-    checkResponsibilityTransition(paragraphs),
-    checkToolCallsGardenPath(paragraphs),
-    checkLowInformationToolBuild(paragraphs),
-    checkContainerizationTechnologyRoles(paragraphs, evidence),
-    checkPostingReference(paragraphs),
-    checkClaimedEquivalence(paragraphs),
-    checkDanglingParagraphTransition(paragraphs),
-    checkSentenceLength(paragraphs),
-    checkPunctuationStyle(paragraphs),
-    checkPlainRegister(paragraphs),
-    checkIntroductoryWorkplaceComma(paragraphs, priorEmployers),
-    checkVisualReferencePrecision(paragraphs),
-    checkDirectWelcomeClosing(paragraphs, companyName, { citations: paragraphCitations }),
-    checkOpeningDemonstrative(paragraphs),
-    checkOpeningEmployerShorthand(paragraphs, priorEmployers),
-    checkAdjacentEmployerRepetition(paragraphs, priorEmployers),
-    checkEntailedPremise(paragraphs),
-    checkRepeatedSentenceShape(paragraphs),
-    checkRepeatedPhrase(paragraphs, { jobNeedQuotes: paragraphJobNeedQuotes(plan) }),
-    checkCandidateAgency(paragraphs),
+    )],
+    ['vague-domain-work-label', () => checkVagueDomainWorkLabel(paragraphs)],
+    ['reference-clarity', () => checkReferenceClarity(paragraphs)],
+    ['modifier-attachment', () => checkModifierAttachment(paragraphs)],
+    ['migration-object-clarity', () => checkMigrationObjectClarity(paragraphs)],
+    ['opening-posting-restatement', () => checkOpeningPostingRestatement(paragraphs, jobText)],
+    ['opening-job-summary-scaffolding', () => checkOpeningJobSummaryScaffolding(paragraphs)],
+    ['anchor-relevance', () => checkAnchorRelevance(paragraphs, jobText, researchText)],
+    ['target-claim-scope', () => checkTargetClaimScope(plan, paragraphs, evidence, jobText)],
+    ['target-company-binding', () => checkTargetCompanyBinding(paragraphs, companyName, priorEmployers, { evidence, jobText })],
+    ['detached-relevance-claim', () => checkDetachedRelevanceClaim(paragraphs)],
+    ['prospective-contribution-tense', () => checkProspectiveContributionTense(paragraphs, companyName)],
+    ['additive-seam', () => checkAdditiveSeam(paragraphs)],
+    ['responsibility-transition', () => checkResponsibilityTransition(paragraphs)],
+    ['tool-calls-garden-path', () => checkToolCallsGardenPath(paragraphs)],
+    ['low-information-tool-build', () => checkLowInformationToolBuild(paragraphs)],
+    ['containerization-technology-roles', () => checkContainerizationTechnologyRoles(paragraphs, evidence)],
+    ['posting-reference', () => checkPostingReference(paragraphs)],
+    ['claimed-equivalence', () => checkClaimedEquivalence(paragraphs)],
+    ['dangling-paragraph-transition', () => checkDanglingParagraphTransition(paragraphs)],
+    ['sentence-length', () => checkSentenceLength(paragraphs)],
+    ['punctuation-style', () => checkPunctuationStyle(paragraphs)],
+    ['plain-register', () => checkPlainRegister(paragraphs)],
+    ['introductory-workplace-comma', () => checkIntroductoryWorkplaceComma(paragraphs, priorEmployers)],
+    ['visual-reference-precision', () => checkVisualReferencePrecision(paragraphs)],
+    ['direct-welcome-closing', () => checkDirectWelcomeClosing(paragraphs, companyName, { citations: paragraphCitations })],
+    ['opening-demonstrative', () => checkOpeningDemonstrative(paragraphs)],
+    ['opening-employer-shorthand', () => checkOpeningEmployerShorthand(paragraphs, priorEmployers)],
+    ['adjacent-employer-repetition', () => checkAdjacentEmployerRepetition(paragraphs, priorEmployers)],
+    ['entailed-premise', () => checkEntailedPremise(paragraphs)],
+    ['repeated-sentence-shape', () => checkRepeatedSentenceShape(paragraphs)],
+    ['repeated-phrase', () => checkRepeatedPhrase(paragraphs, { jobNeedQuotes: paragraphJobNeedQuotes(plan) })],
+    ['candidate-agency', () => checkCandidateAgency(paragraphs)],
     // Reads how the letter is cut rather than what it says, and is the only
     // check here that can refuse a letter of dozens of one-sentence
     // paragraphs. It sits beside the agency check it tightens. The optional
     // per-paragraph citations are the career-data quotes each paragraph is
     // bound to; a caller that cannot supply them still gets every structural
     // limit.
-    checkLetterProportion(paragraphs, { citations: paragraphCitations }),
+    ['letter-proportion', () => checkLetterProportion(paragraphs, { citations: paragraphCitations })],
     // Appended last for the same reason as the register block above: the
     // established order stays stable and both read paragraphs only.
-    checkRepeatedTransferCarrier(paragraphs),
-    checkDanglingDemonstrative(paragraphs),
-    checkEndedRoleCurrentEmployment(paragraphs, evidence, referenceDate),
+    ['repeated-transfer-carrier', () => checkRepeatedTransferCarrier(paragraphs)],
+    ['dangling-demonstrative', () => checkDanglingDemonstrative(paragraphs)],
+    ['ended-role-current-employment', () => checkEndedRoleCurrentEmployment(paragraphs, evidence, referenceDate)],
     // Appended after the established order for the same reason as above. The
     // budget reads paragraphs only; the benefit check also reads the quotes
     // each paragraph cites and is silent when they are not supplied.
-    checkTransferCarrierBudget(paragraphs),
-    checkTransferBenefitSupport(paragraphs, { citations: paragraphCitations, jobText }),
+    ['transfer-carrier-budget', () => checkTransferCarrierBudget(paragraphs)],
+    ['transfer-benefit-support', () => checkTransferBenefitSupport(paragraphs, { citations: paragraphCitations, jobText })],
   ];
+  return checks.filter(([id]) => !activeOnly || checkDisposition(id) !== 'off').map(([, run]) => run());
 }
 
 /** Authors the stable cover-letter fields without changing the document-builder contract. */

@@ -1026,7 +1026,8 @@ export default [
             `${label}: an approved term cited to another skill's evidence is refused for the citation alone (${miscited.message})`);
           // Once the posting names a term the candidate has, the bounded index must carry it; omitting it is rejected by name.
           const omitted = gradeResume(B, L, resumeDraft(B, [{ id: 'skills-1', group: SKILL_GROUP, items: inventoryNames(A), evidenceIds: A.skillEvidence.skills.map(skill => skillRowId(skill.id)) }]));
-          assert(!omitted.ok && omitted.message.includes(term), `${label}: omitting the now-supported term is rejected by name (${omitted.message})`);
+          const omittedAdvice = omitted.ok ? omitted.value.advisories.map(entry => entry.detail).join(' ') : '';
+          assert(omitted.ok && omittedAdvice.includes(term), `${label}: omitting the now-supported term is reported by name, as advice and not a rejection (${omitted.ok ? omittedAdvice : omitted.message})`);
           // C: B's text minus its line, recompiled: back to A.
           removeSourceLine(B, achievementLine(extra), A);
           const C = build(spec, [], { fresh: true });

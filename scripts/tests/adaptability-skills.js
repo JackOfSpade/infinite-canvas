@@ -623,13 +623,16 @@ function resumeAttempt(view, name, { omit = [], items = null, wire = null, evide
     skills,
   };
   try {
-    validateStructuredApplicationResume(draft, {
+    const validated = validateStructuredApplicationResume(draft, {
       sourceRoles: view.authority.sourceRoles, evidenceCatalog, trustedIdentity: view.authority.identity,
       careerData: view.careerData, careerSkillEvidence: wire || view.careerSkillEvidence, authorityMode: true,
     });
-    return { accepted: true, message: '', required };
+    // Index completeness (a skills block that leaves out a name the posting and
+    // the career data both state) is TASTE: it advises, so an accepted draft is
+    // still told what its block omits, and `advice` is where that is observed.
+    return { accepted: true, message: '', advice: validated.advisories.map(entry => entry.detail).join(' '), required };
   } catch (error) {
-    return { accepted: false, message: String(error?.message || error), required };
+    return { accepted: false, message: String(error?.message || error), advice: '', required };
   }
 }
 
@@ -1236,7 +1239,7 @@ export default [
         assert(named(B, c.addedName) && !named(B, c.nearMiss.sibling), `${c.key} B: recompiled evidence makes exactly the supported name required`);
         assert(resumeAttempt(B, null).accepted, `${c.key} B: complete block accepted`);
         const omitted = resumeAttempt(B, null, { omit: [c.addedName] });
-        assert(!omitted.accepted && omitted.message.includes(`skills omits ${c.addedName}`), `${c.key} B: omitting the now-supported posting-named skill is refused (${omitted.message.slice(0, 200)})`);
+        assert(omitted.accepted && omitted.advice.includes(`skills omits ${c.addedName}`), `${c.key} B: omitting the now-supported posting-named skill is reported by name (${omitted.advice.slice(0, 200)})`);
         const stillRefused = resumeAttempt(B, c.nearMiss.sibling);
         assert(!stillRefused.accepted && stillRefused.message.includes(`item "${c.nearMiss.sibling}"`), `${c.key} B: the other listing-only name remains refused (${stillRefused.message.slice(0, 200)})`);
       }
@@ -1347,7 +1350,7 @@ export default [
         for (const name of names) expectAdmission(viewL, name, true, `${c.key} listed ${name}`);
         // The posting names both listed skills, so a complete skills block must now carry them.
         const omitted = resumeAttempt(viewL, null, { omit: [first.name] });
-        assert(!omitted.accepted && omitted.message.includes(`skills omits ${first.name}`), `${c.key}: a skills block that leaves out a listed, posting-named skill is refused (${omitted.message.slice(0, 200)})`);
+        assert(omitted.accepted && omitted.advice.includes(`skills omits ${first.name}`), `${c.key}: a skills block that leaves out a listed, posting-named skill is reported by name (${omitted.advice.slice(0, 200)})`);
 
         // A competency listed outside any role is not attributed to the employer: its catalog lines are not
         // admissible evidence for the role's bullets, while a skill demonstrated in the role's duty is.

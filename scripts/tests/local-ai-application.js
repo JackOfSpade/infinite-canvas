@@ -1123,13 +1123,13 @@ export default [
         // blind receipt finish, then proves recovery compares the retry to the
         // accepted review package rather than to that receipt.
         const terminalBadAudit = structuredClone(audit);
-        terminalBadAudit.coverLetterPlan.paragraphs[0].argumentMapping.jobNeedQuote = '';
+        terminalBadAudit.coverLetterPlan.paragraphs[0].argumentMapping.jobNeedQuote = 'invented employer requirement';
         // These were previously accepted as a review, sent through every
         // blind scope, and only then rejected by final assembly. The review
         // preflight must run that same final validator before a blind plan
         // exists, so both response-owned defects return together here.
         const defectiveAudit = structuredClone(audit);
-        defectiveAudit.coverLetterPlan.paragraphs[0].argumentMapping.jobNeedQuote = '';
+        defectiveAudit.coverLetterPlan.paragraphs[0].argumentMapping.jobNeedQuote = 'invented employer requirement';
         const defectiveQualityReview = groundedQualityReview(sourceGroundingFor({ resumeBullets: [bullet], coverLetterParagraphs: [paragraph], resumeQuotes: [bullet], coverLetterQuotes: [bullet] }));
         defectiveQualityReview.coverLetter.rationale = 'One controlling user-action thesis joins minimum-sufficient personal screen evidence.';
         const terminalBadQualityReview = structuredClone(defectiveQualityReview);
@@ -1203,9 +1203,9 @@ export default [
           && !reopenedStore.pendingJournal
           && await fs.promises.lstat(path.join(queued.folder, 'context', 'application-authority.journal.json')).then(() => false, error => error?.code === 'ENOENT'),
         'the recovery manifest publishes the final clean blind root and store receipt before finalizing its held journal');
-        // A review is always planned grounded (prompt mode v7), and the root keeps the job-need record its reviewers were shown: the audit was corrupted
+        // A review is always planned grounded (panel mode v8), and the root keeps the job-need record its reviewers were shown: the audit was corrupted
         // after planning above and the reopened root still verifies, because the record is persisted rather than reread from the audit.
-        assert(rejectedManifest.paste.authorityBlindReview.plan.root.promptMode === 'artifact-repair-only-v7'
+        assert(rejectedManifest.paste.authorityBlindReview.plan.root.promptMode === 'artifact-repair-only-v8'
           && rejectedManifest.paste.authorityBlindReview.plan.root.sources.letterGrounding?.paragraphCount > 0
           && Array.isArray(rejectedManifest.paste.authorityBlindReview.letterNeedQuotes)
           && rejectedManifest.paste.authorityBlindReview.letterNeedQuotes.length === rejectedManifest.paste.authorityBlindReview.plan.root.sources.letterGrounding.paragraphCount,
@@ -1235,7 +1235,7 @@ export default [
         // receipt, so recovery must carry forward the already-published
         // authorityStore receipt rather than dropping it with runtime state.
         const secondBadAudit = structuredClone(audit);
-        delete secondBadAudit.coverLetterPlan.paragraphs[0].argumentMapping.jobNeedQuote;
+        secondBadAudit.coverLetterPlan.paragraphs[0].argumentMapping.jobNeedQuote = 'invented employer requirement';
         accepted = await submit(afterUnchangedRetry, { decision: 'pass', checklist: APPLICATION_QUALITY_CRITERIA.map(({ id }) => ({ id, status: 'pass', detail: `Reviewed ${id} against the exact final documents.` })), findings: [],
           qualityReview: groundedQualityReview(sourceGroundingFor({ resumeBullets: [bullet], coverLetterParagraphs: [paragraph], resumeQuotes: [bullet], coverLetterQuotes: [bullet] })), generationAudit: secondBadAudit });
         assert(!accepted.accepted && accepted.handoff?.stage === 'review',
@@ -2470,7 +2470,8 @@ export default [
           const predecessor = /"previousPageDigest":(null|"[a-f0-9]{64}")/u.exec(handoff.prompt)?.[1];
           const fields = { version: 1, scopeDigest, pageIndex, previousPageDigest: predecessor === 'null' ? null : JSON.parse(predecessor), complete: true, decision: 'pass', findings: [] };
           const blindContextRaw = /<untrusted-evidence-json>\n([\s\S]*?)\n<\/untrusted-evidence-json>/u.exec(handoff.prompt)?.[1];
-          const blindTargetId = JSON.parse(blindContextRaw).claim?.id || 'resume-claim';
+          const blindContext = JSON.parse(blindContextRaw);
+          const blindTargetId = blindContext.claims?.[0]?.id || blindContext.claim?.id || 'resume-claim';
           if (!injectedFinding) {
             injectedFinding = true; fields.complete = false; fields.decision = 'issues'; fields.findings = Array.from({ length: 32 }, (_unused, index) => ({ id: `0-0-${index + 1}`, ruleId: 'fact-grounding', document: 'resume', targetId: blindTargetId, issue: `Use the exact first-person source wording for supported result ${index + 1}: ${denseFindingText}`, fix: `Replace claim ${index + 1} with the cited exact source wording: ${denseFindingText}` }));
           } else if (!completedFindingContinuation && pageIndex === 1 && /TRACK: fact-fidelity/u.test(handoff.prompt)) {
@@ -2478,7 +2479,7 @@ export default [
           }
           accepted = await submit(handoff, fields);
         }
-        assert(accepted.accepted && accepted.handoff?.stage === 'blind-repair-context' && firstTracks.size === 6 && firstTrackKeys.size === 6 && injectedFinding && completedFindingContinuation
+        assert(accepted.accepted && accepted.handoff?.stage === 'blind-repair-context' && firstTracks.size === 4 && firstTrackKeys.size === 4 && injectedFinding && completedFindingContinuation
           && /^authority-blind-repair-[a-f0-9]{64}$/u.test(accepted.handoff.freshContextKey)
           && ![...firstTrackKeys.values()].includes(accepted.handoff.freshContextKey),
         'bounded blind finding continuation must page every immutable finding before opening a distinct repair chat');
@@ -2664,9 +2665,9 @@ export default [
           const predecessor = /"previousPageDigest":(null|"[a-f0-9]{64}")/u.exec(handoff.prompt)?.[1];
           accepted = await submit(handoff, { version: 1, scopeDigest, pageIndex, previousPageDigest: predecessor === 'null' ? null : JSON.parse(predecessor), complete: true, decision: 'pass', findings: [] });
         }
-        assert(accepted.accepted && secondTracks.size === 6 && secondTrackKeys.size === 6
+        assert(accepted.accepted && secondTracks.size === 4 && secondTrackKeys.size === 4
           && [...secondTrackKeys.entries()].every(([track, key]) => key !== firstTrackKeys.get(track))
-          && secondDispositionPages >= 1, `the targeted document repair restarts current disposition and all six blind tracks with fresh plan/track chats (${JSON.stringify({ accepted: accepted.accepted, completed: accepted.completed, errors: accepted.validationErrors, secondTracks: [...secondTracks], secondKeys: secondTrackKeys.size, secondDispositionPages })})`);
+          && secondDispositionPages >= 1, `the targeted document repair restarts current disposition and all four panel tracks with fresh plan/track chats (${JSON.stringify({ accepted: accepted.accepted, completed: accepted.completed, errors: accepted.validationErrors, secondTracks: [...secondTracks], secondKeys: secondTrackKeys.size, secondDispositionPages })})`);
         const status = await localApplicationStatus(queued.id, project.canvasFilePath);
         assert(status.status === 'completed', 'only the clean second blind root completes the persisted current-authority job');
         return { firstDispositionPages, voluntaryDispositionPages, reboundDispositionPages, secondDispositionPages, firstTracks: [...firstTracks].sort(), secondTracks: [...secondTracks].sort(), noOpRejected: true };
@@ -3531,12 +3532,10 @@ export default [
         && normalizedRoutineSource.includes('Never add an unrecorded outcome, improvement, scale, duration, ownership level, production use, adoption, or causal result')
         && normalizedRoutineSource.includes('never move a fact between employers or projects'),
       'Local AI résumé generation must apply the same bounded compressed-evidence synthesis rule as API generation');
-      assert(normalizedRoutineSource.includes('State completed work with yourself as the grammatical subject of the action')
-        && normalizedRoutineSource.includes('graded by none of the argument rules and ships unexamined')
-        && normalizedRoutineSource.includes('Explain the relationship between concrete evidence and the target work only when the proof and transfer do not already make it clear')
-        && normalizedRoutineSource.includes('Do not insert a mandatory standalone warrant or problem-shape sentence')
-        && normalizedRoutineSource.includes('If removing the explanation leaves the same clear evidence-to-need connection, remove it'),
-      'the routine must require first-person agency while keeping any evidence-to-transfer explanation concrete, optional, and useful');
+      assert(normalizedRoutineSource.includes('Lead with the strongest true evidence for the posting')
+        && normalizedRoutineSource.includes('never claim more ownership, skill, scope, metric, date or outcome than a cited quote states')
+        && normalizedRoutineSource.includes('They do not reject a truthful letter'),
+      'the routine gives concise quality guidance without turning taste into a hard gate');
       const checklistBlock = new RegExp(`Canonical checklist, version ${APPLICATION_QUALITY_CHECKLIST_VERSION}:\\s*([\\s\\S]*?)\\n\\s*Use the full requirements`).exec(routineSource)?.[1] || '';
       const routineChecklistIds = [...checklistBlock.matchAll(/`([^`]+)`/g)].map(match => match[1]);
       const compactReviewStart = localSource.indexOf('function compactLocalAiQualityReview');
@@ -3579,115 +3578,26 @@ export default [
         && normalizedRoutineSource.includes('never open a paragraph with `That <thing>` or `This <thing>` unless the previous paragraph is about that thing'),
       'Local AI must keep synthesis evidence-scoped and replace ambiguous cross-paragraph references');
       assert(!/legal work status|citizenship|work authorization|sponsorship/iu.test(normalizedRoutineSource)
-        && normalizedRoutineSource.includes('naming both the origin and destination')
-        && normalizedRoutineSource.includes('Name the target role literally and in the singular')
+        && normalizedRoutineSource.includes('Preserve the posting\'s modality')
+        && normalizedRoutineSource.includes('never claim more ownership, skill, scope, metric, date or outcome than a cited quote states')
         && localSource.includes('failed required checks'),
-      'the routine states no work-authorization rule, and the host still rejects a completed result that fails a check it does enforce');
+      'the routine avoids a work-authorization rule and retains factual claim boundaries');
       assert(localSource.includes('renderLocalResumeWithFit')
         && localSource.includes('renderPdf(buildResumeDocument')
         && localSource.includes('targetPageCount')
         && localSource.includes('fit-feedback.json')
-        && localSource.includes('baselinePageCount: resumeFit.attempts[0]?.pageCount ?? null')
-        && !localSource.includes('baselinePageCount: resumeFit.pageCount')
         && localSource.includes('render-retry-required')
-        && localSource.includes("'kept_diminishing_returns'")
         && localSource.includes('documentSha256')
-        && localSource.includes('there is no fixed revision limit')
-        && localSource.includes('handoffHistory')
-        && localSource.includes('handoff-receipts')
         && localSource.includes('writeLocalAiTerminalReceipt')
         && localSource.includes('result-imported')
         && localSource.includes('localAiCoverLetterTelemetry')
         && localSource.includes("status: 'revision-required'")
         && !localSource.includes('MAX_LOCAL_AI_UNFINISHED_JOBS')
-        && localSource.includes('MAX_LOCAL_AI_HANDOFF_HISTORY')
         && localSource.includes('handoffEventCount')
-        && localSource.includes('allEvents.slice(-MAX_LOCAL_AI_HANDOFF_HISTORY)')
         && localSource.includes('function compactLocalAiQualityReview')
-        && localSource.includes('qualityReview: compactLocalAiQualityReview(result.qualityReview)')
-        && !localSource.includes('qualityReview: result.qualityReview,\n      requestedAt')
         && !compactReviewSource.includes('sourceGrounding')
-        && !compactReviewSource.includes('evidence: cleanText')
-        && localSource.includes('LOCAL_AI_RESULT_CHANGED')
-        && localSource.includes('For a cover letter that already fits, improve it')
-        && localSource.includes('COVER_LETTER_COHESION_REVISION_RULE')
-        && localSource.includes('COVER_LETTER_CANDIDATE_AGENCY_RULE')
-        && localSource.includes('COVER_LETTER_WARRANT_RULE')
-        && localSource.includes('COVER_LETTER_SENTENCE_FLEXIBILITY_RULE')
-        && localSource.includes("id: 'CL-COHESION'")
-        && localSource.includes('localizedCoverLetterCorrectiveGuidance(result.hostValidation?.coverLetter)')
-        && localSource.includes('Repair only these failed cover-letter rules:')
-        && localSource.includes('grammatical subject of the action')
-        && localSource.includes('graded by none of the argument rules and ships unexamined')
-        && localSource.includes('Do not insert a mandatory standalone warrant or problem-shape sentence')
-        && localSource.includes('Keep concrete actors, artifacts, actions, and supported domain details')
-        && localSource.includes('turn a clear action into an abstract obligation')
-        && localSource.includes('Give every paragraph one argumentative job, not a prescribed number of sentences')
-        && localSource.includes('use an immediately following causal sentence for a trigger or follow-up action')
-        && localSource.includes('The audit records the sentences the prose needs; it does not allocate one sentence to each planning field')
-        && localSource.includes('${COVER_LETTER_CANDIDATE_AGENCY_RULE} ${COVER_LETTER_WARRANT_RULE} ${COVER_LETTER_SENTENCE_FLEXIBILITY_RULE} context.criteria')
-        && localSource.includes('${COVER_LETTER_CANDIDATE_AGENCY_RULE} ${COVER_LETTER_WARRANT_RULE} ${COVER_LETTER_SENTENCE_FLEXIBILITY_RULE} Any experience span')
-        && localSource.includes('one controlling throughline')
-        && localSource.includes('minimum-sufficient evidence')
-        && localSource.includes('résumé owns breadth')
-        && localSource.includes('Give every paragraph one argumentative job')
-        && localSource.includes('last sentence of each non-final paragraph')
-        && localSource.includes('must not introduce a new decision frame or ask the employer to choose between initiatives')
-        && localSource.includes('Cut or consolidate before introducing another employer, project, or tool merely to cover a different requirement')
-        && localSource.includes('Each additional proof must have one explicit supporting role in the same argument')
-        && localSource.includes('distinct systems or responsibilities side by side merely because they occurred in the same role or job')
-        && localSource.includes('adjacency and “the same job” are not a bridge')
-        && localSource.includes('do not make the letter narrate its own outline')
-        && localSource.includes('Reject mirrored scaffolding')
-        && localSource.includes('use neutral parallel framing that claims neither')
-        && localSource.includes('Name actors and referents explicitly wherever pronouns would be ambiguous')
-        && localSource.includes('keep general domain principles distinct from personal experience')
-        && localSource.includes('listing’s description rather than independently verified fact')
-        && localSource.includes('COVER_LETTER_COPY_PRECISION_RULE')
-        && localSource.includes('COVER_LETTER_RELEVANCE_LINK_RULE')
-        && localSource.includes('COVER_LETTER_BOUNDARY_REFERENCE_RULE')
-        && localSource.includes('Every evidence block must let a recruiter identify why it matters to the target work')
-        && localSource.includes('maintenance or cost rationale can explain an earlier decision')
-        && localSource.includes('do not repeat the target formulaically when the existing prose already makes it clear')
-        && localSource.includes('use a natural implicit reference such as “it,” “that experience,” or “the system”')
-        && localSource.includes('Keep completed experience in a past-tense evidence sentence')
-        && localSource.includes('That project prepared/equips me to contribute')
-        && localSource.includes('prefer a direct conditional statement that names the target responsibility in your own wording, never in the same wording a neighbouring paragraph uses')
-        && !localSource.includes('At the target employer, I would apply that experience')
-        && localSource.includes('Within a paragraph, continue naturally when the candidate remains the subject')
-        && localSource.includes('At a new paragraph, use a concise, unambiguous re-entry cue such as “In that role” when it helps identify the role being continued')
-        && localSource.includes('Do not use bare “There” when a platform, place, or more than one employer could be its antecedent')
-        && localSource.includes('Ordinary definite descriptions such as “The system” remain appropriate')
-        && localSource.includes('Punctuate introductory phrases')
-        && localSource.includes('recruiter seeing it for the first time')
-        && localSource.includes('concrete actor, artifact, and action')
-        && localSource.includes('distinguish figurative reference from the literal, observable mechanism')
-        && localSource.includes('use direct present-tense language')
-        // The closing-invitation rule now states the THREE parts the check
-        // (coverLetterChecks.js's candidateContributionRequirement) actually
-        // enforces, not two, and says the employer's own name satisfies the
-        // employer-facing third part exactly as "your …" does — see this
-        // file's own comment above COVER_LETTER_COPY_PRECISION_RULE for the
-        // incident (four rejected rounds, 2026-09-24) this rewrite answers.
-        && localSource.includes('build that one sentence from three parts, all three required')
-        && localSource.includes('the employer’s own name exactly as this letter already spells it')
-        && localSource.includes('Naming the employer by name is not a fallback or a weaker option')
-        && localSource.includes('this rule is read against the sentence before it, not the sign-off itself')
-        && localSource.includes('source document—not the target position—the grammatical subject')
-        && localSource.includes('position attached to the application with a proximal determiner')
-        && localSource.includes('communication verbs attached to an actual document or speaker')
-        && localSource.includes('sanitizeCoverLetterArgument')
-        && localSource.includes('assertCoverLetterReviewAttestsToArgument')
-        && localSource.includes('primaryEvidence.relationToThesis')
-        && localSource.includes('COVER_LETTER_SECONDARY_NARRATIVE_ROLES.includes(narrativeRole)')
-        && localSource.includes('layout: coverLetterFit.layout ? { ...coverLetterFit.layout, utilization: coverLetterFit.contentUtilization } : null')
-        && localSource.includes('contentUtilization: resumeTypeAreaUtilization(layout)')
-        && localSource.includes('Type-area utilization and body shape are informational diagnostics, not quality or acceptance criteria')
-        && localSource.includes('reported horizontal-overflow layout issues')
-        && !localSource.includes('Treat only the page counts, render attempts, and type-area utilization in this feedback as app measurements')
-        && localSource.includes('do not rewrite it merely because the résumé overflowed or to occupy more page space')
         && localSource.includes('missingArtifacts.length === 0'),
-      'Local AI measures both final documents, treats utilization and cover-letter body shape as diagnostics rather than acceptance gates, records every handoff event without a queue/history cap, keeps unresolved page-limit work revision-required, and never saves when layout verification is unavailable');
+      'Local AI measures both final documents, records handoff events, and never saves when layout verification is unavailable');
       assert(APPLICATION_QUALITY_CRITERIA.find(({ id }) => id === 'cover-reference-clarity')?.requirement.includes('selected position is referenced proximally')
         && APPLICATION_QUALITY_CRITERIA.find(({ id }) => id === 'cover-reference-clarity')?.requirement.includes('target scope is stated as this role or the work itself')
         && APPLICATION_QUALITY_CRITERIA.find(({ id }) => id === 'cover-reference-clarity')?.requirement.includes('source document—not the target position—as the reporting subject')
@@ -3710,57 +3620,12 @@ export default [
         && localSource.includes('version ${expectedChecklistVersion} quality checklist')
         && localSource.includes('checklistVersion: expectedChecklistVersion'),
       'new jobs use checklist v2 while status, import, normalized review, and measured revision guidance preserve only the queued app-owned supported version');
-      assert(normalizedRoutineSource.includes("the listing's description, not as independently verified fact")
-        && normalizedRoutineSource.includes('source document the grammatical')
-        && normalizedRoutineSource.includes('position attached to this application with a proximal determiner')
-        && normalizedRoutineSource.includes('Read every sentence once as a recruiter seeing')
-        && normalizedRoutineSource.includes('adjacent words form a familiar compound or alternate parse')
-        && normalizedRoutineSource.includes('governing verb that describes its actual role')
-        && normalizedRoutineSource.includes('merely restates a category')
-        && normalizedRoutineSource.includes('distinct systems or responsibilities do not become connected merely because')
-        && normalizedRoutineSource.includes('adjacency and “the same job” are not a bridge')
-        && normalizedRoutineSource.includes('Give every résumé highlight one principal achievement or action chain')
-        && normalizedRoutineSource.includes('Delete conventional runtime-topology detail that merely proves implementation')
-        && normalizedRoutineSource.includes('Give every paragraph one argumentative job')
-        && normalizedRoutineSource.includes('make each evidence paragraph identify the branch it develops')
-        && normalizedRoutineSource.includes('last sentence of every non-final paragraph')
-        && normalizedRoutineSource.includes('Every evidence block must let a recruiter identify why it matters to the target work')
-        && normalizedRoutineSource.includes('maintenance or cost rationale can explain an earlier decision')
-        && normalizedRoutineSource.includes('do not repeat the target formulaically when the existing prose already makes it clear')
-        && normalizedRoutineSource.includes('use a natural implicit reference such as `it`, `that experience`, or `the system`')
-        && normalizedRoutineSource.includes('a bare `this` or `that` is not enough')
-        && normalizedRoutineSource.includes('Keep completed experience in a past-tense evidence sentence')
-        && normalizedRoutineSource.includes('That project prepared me to contribute')
-        && normalizedRoutineSource.includes('Prefer a direct conditional statement that names the target responsibility in your own wording, never in the same wording a neighbouring paragraph uses')
-        && normalizedRoutineSource.includes('do not repeat its full name merely from habit')
-        && normalizedRoutineSource.includes('At a new paragraph, use a concise re-entry cue such as `In that role` when it helps')
-        && normalizedRoutineSource.includes('ordinary definite descriptions such as `The system`')
-        && normalizedRoutineSource.includes('must not introduce a new organizing frame')
-        && normalizedRoutineSource.includes('ask the employer to choose between products, prototypes, or initiatives')
-        && normalizedRoutineSource.includes('selected scope as `this role` or the work itself')
-        && normalizedRoutineSource.includes('I welcome a conversation')
-        && normalizedRoutineSource.includes('connect the candidate\'s relevant contribution to the specific')
-        && normalizedSkillSource.includes("the listing's description, not as independently verified fact")
-        && normalizedSkillSource.includes('source document, not the target position')
-        && normalizedSkillSource.includes('proximal determiner unless explicitly contrasting')
-        && normalizedSkillSource.includes('concrete actor, artifact, and')
-        && normalizedSkillSource.includes('adjacent words form a familiar compound')
-        && normalizedSkillSource.includes('governing verb that reflects its actual role')
-        && normalizedSkillSource.includes('merely restates a category')
-        && normalizedSkillSource.includes('Discuss target scope as `this role`')
-        && normalizedSkillSource.includes('I welcome a conversation')
-        && normalizedSkillSource.includes('final sentence as a role-facing invitation')
-        && normalizedStyleSource.includes('Frame the source of employer context accurately')
-        && normalizedStyleSource.includes('reporting verb belongs to the source document')
-        && normalizedStyleSource.includes('position attached to the application with a proximal determiner')
-        && normalizedStyleSource.includes('Read literally on the first pass')
-        && normalizedStyleSource.includes('Read word boundaries literally too')
-        && normalizedStyleSource.includes('Give each technology its actual operation')
-        && normalizedStyleSource.includes('Delete category restatements')
-        && normalizedStyleSource.includes('Discuss the target scope as *this role*')
-        && normalizedStyleSource.includes('I welcome a conversation')
-        && normalizedStyleSource.includes('Close by connecting contribution to work'),
-      'the routine and design-system guidance carry the version 2 role-facing scope, source-framing, first-read parsing, technology-role, non-filler-bridge, and direct-closing contract');
+      assert(normalizedRoutineSource.includes('Every factual candidate claim must be supported by the supplied career data')
+        && normalizedRoutineSource.includes('Cadence, paragraph count, sentence length, openings, closings, stock phrases, repetition and tool-name density are writing guidance')
+        && normalizedSkillSource.includes('unsupported claims, malformed structure, unsafe content and measured page overflow')
+        && normalizedStyleSource.includes('The host measures actual one-page fit')
+        && normalizedStyleSource.includes('rejects truth, provenance, schema and safety failures'),
+      'the routine and design system distinguish factual and layout gates from editorial guidance');
       assert(localSource.includes('applicationConvergenceInstruction')
         && !apiSource.includes('createApplicationConvergenceTracker')
         && !apiSource.includes("from './llm.js'")
@@ -3783,51 +3648,15 @@ export default [
         && toastSource.includes('normalizedDedupeKey')
         && toastSource.includes('toast.actionLabel') && toastSource.includes('toast.onAction'),
       'a hidden-card or orphaned hash-bound save failure exposes one explicit retry action instead of automatically repeating render/save or parking forever without UI');
-      assert(routineSource.includes('resultSha256') && routineSource.includes('Preserve a verified one-page cover letter')
+      assert(routineSource.includes('resultSha256')
         && routineSource.includes('candidate location/contact')
         && routineSource.includes('page fit as a constraint')
-        && routineSource.includes('never use `<b>` or')
-        && routineSource.includes('front-load the most relevant')
-        && routineSource.includes("Order each role's highlights by interview value")
-        && normalizedRoutineSource.includes('source-supported trigger and scope without turning a prior workflow')
-        && normalizedRoutineSource.includes('without turning a prior workflow')
-        && !normalizedRoutineSource.includes('barcode and device-management mechanics')
-        && normalizedRoutineSource.includes('colon-led evidence dumps')
-        && normalizedRoutineSource.includes('unsolicited admissions of missing experience')
-        && normalizedRoutineSource.includes('never repeat a metaphor across paragraphs')
-        && routineSource.includes('<span data-achievement-id="ID">figure</span>')
-        && routineSource.includes('Every top-level résumé category is a peer')
-        && routineSource.includes('never use it as a peer category heading')
-        && normalizedRoutineSource.includes("opening paragraph adds information beyond the application context")
-        && normalizedRoutineSource.includes("never announce that the candidate is applying")
-        && normalizedRoutineSource.includes('opening paragraph must demonstrate interest implicitly')
-        && normalizedRoutineSource.includes('precise observation about concrete employer, team, or role work')
-        && normalizedRoutineSource.includes('Preview the transferable capability before the first source-specific proof')
-        && normalizedRoutineSource.includes('Develop each body paragraph\'s point, proof, and relevance across as many sentences as clarity requires')
-        && normalizedRoutineSource.includes('one-sentence `roleThesis` records the plan\'s controlling angle')
-        && normalizedRoutineSource.includes('Do not announce interest, motivation, or enthusiasm through first-person emotional declarations')
-        && normalizedRoutineSource.includes("Do not repeat the opening's reason for interest there")
-        // The opening names the target role (the title the job record gives) and the employer as the target the
-        // capability is pointed at, never as an announcement; the earlier "only when it distinguishes the target
-        // responsibility" wording is superseded (applicationWriterGuidance.js, LETTER_OPENING_RULE).
-        && normalizedRoutineSource.includes('Name the target role by the title the job record gives and the employer by name in the opening')
-        && normalizedRoutineSource.includes('assert nothing about the employer\'s domain, product, customers or needs beyond what the posting text itself says')
-        && normalizedRoutineSource.includes("Respect the recruiter's intelligence")
-        && !normalizedRoutineSource.includes('Name the target company and role naturally in the opening sentence')
-        && APPLICATION_QUALITY_CRITERIA.find(criterion => criterion.id === 'cover-opening')?.requirement.includes('opening demonstrates interest implicitly')
-        && APPLICATION_QUALITY_CRITERIA.find(criterion => criterion.id === 'cover-register')?.requirement.includes('does not repeat the opening’s interest rationale')
-        && routineSource.includes('SAME local AI agent run active') && !routineSource.includes('6 minutes')
-        && !routineSource.includes('six-minute')
+        && routineSource.includes('source-supported trigger and scope')
         && routineSource.includes('There is no fixed round limit')
         && routineSource.includes('Infinite Canvas owns all root document variants')
         && routineSource.includes('handoff-receipts/<job-id>.json')
-        && routineSource.includes('"coverLetterArgument"')
-        && routineSource.includes('"relationToThesis"')
-        && routineSource.includes('non-rendered argument contract')
-        && routineSource.includes('one controlling argument')
-        && routineSource.includes('minimum-sufficient evidence')
         && routineSource.includes('Never claim that the app "confirmed" bullet line counts'),
-      'the Local AI routine can select a measured revision job, protect optional contact location from inference, require an argument-led cover-letter opening, distinguish measurements from diagnosis, observe final imported measurements after staging cleanup, and quality-check both documents until diminishing returns');
+      'the Local AI routine retains source truth, page fit, measured revisions and imported receipts');
       assert(!apiSource.includes('_retiredRemoteApplicationGeneration')
         && !apiSource.includes('generate-application'),
       'the retired API cover-letter authoring path is absent from the application module');
@@ -4717,7 +4546,7 @@ export default [
             coverLetter: normalizedCoverLetter(), coverLetterArgument: validCoverLetterArgument(), qualityReview: draftedQualityReview(),
           }, id, path.join(os.tmpdir(), 'local-ai-project'), {}, { careerData: null });
         } catch (error) { editorialRejected = String(error?.message || error).includes(expected); }
-        assert(editorialRejected, `Local AI validation rejects ${label} before rendering`);
+        assert(!editorialRejected, `Local AI validation does not reject ${label} as a taste gate`);
       }
       const withinBulletReference = validateLocalApplicationResult({
         version: LOCAL_AI_APPLICATION_VERSION, jobId: id, status: 'completed', outputBundleRoot: 'Applied Jobs',
@@ -4753,7 +4582,7 @@ export default [
             coverLetter: { ...normalizedCoverLetter(), paragraphs: [paragraph] }, coverLetterArgument: validCoverLetterArgument(), qualityReview: draftedQualityReview(),
           }, id, path.join(os.tmpdir(), 'local-ai-project'), {}, { careerData: null });
         } catch (error) { editorialRejected = String(error?.message || error).includes(expected); }
-        assert(editorialRejected, `Local AI validation rejects ${label} before rendering`);
+        assert(!editorialRejected, `Local AI validation does not reject ${label} as a taste gate`);
       }
       // A trailing participial clause that only lists terms this same résumé
       // already indexes in its Skills block adds no mechanism, constraint, scope
@@ -4769,8 +4598,8 @@ export default [
           qualityReview: draftedQualityReview(),
         }, id, path.join(os.tmpdir(), 'local-ai-project'), {}, { careerData: null });
       } catch (error) { inventoryTailRejected = /resume-bullet-focus/.test(String(error?.message || error)); }
-      assert(inventoryTailRejected,
-        'Local AI validation rejects a participial tail that only lists terms the résumé already indexes in its Skills block');
+      assert(!inventoryTailRejected,
+        'Local AI validation does not reject a participial tail as a taste gate');
       const uniformHighlightText = validateLocalApplicationResult({
         version: LOCAL_AI_APPLICATION_VERSION, jobId: id, status: 'completed',
         outputBundleRoot: 'Applied Jobs',
@@ -4794,8 +4623,8 @@ export default [
           qualityReview: draftedQualityReview(),
         }, id, path.join(os.tmpdir(), 'local-ai-project'), {}, { careerData: null });
       } catch (error) { runawaySentenceRejected = /sentence-length/.test(String(error?.message || error)); }
-      assert(runawaySentenceRejected,
-        'Local AI validation rejects a runaway sentence before layout fit can make an unchecked draft shippable');
+      assert(!runawaySentenceRejected,
+        'sentence length is advisory; the renderer measures actual page fit');
       for (const opener of [
         'I am writing to apply for the Developer role at Acme.',
         "I'm writing to apply for the Developer role at Acme.",
@@ -4817,8 +4646,8 @@ export default [
         } catch (error) {
           bannedOpenerRejected = /generic-phrases.*banned opener/i.test(String(error?.message || error));
         }
-        assert(bannedOpenerRejected,
-          `Local AI validation must reject application-announcement opener: ${opener}`);
+        assert(!bannedOpenerRejected,
+          `an application-announcement opener is writer guidance, not a gate: ${opener}`);
       }
       const canonicalEnvelope = validateLocalApplicationResult({
         version: LOCAL_AI_APPLICATION_VERSION, jobId: id, status: 'completed',
@@ -5198,8 +5027,8 @@ export default [
         delete v3.generationAudit.coverLetterPlan.paragraphs[0].argumentMapping;
         let missingMapping = '';
         try { v3Validate(v3); } catch (error) { missingMapping = String(error?.message || error); }
-        assert(/paragraph-argument-links: .*candidate past action.*no argumentMapping/iu.test(missingMapping),
-          `a v3 ${proof.includes('have built') ? 'present-perfect' : 'updated'} proof cannot omit its argument mapping: ${missingMapping}`);
+        assert(!/paragraph-argument-links: .*candidate past action.*no argumentMapping/iu.test(missingMapping),
+          `a v3 ${proof.includes('have built') ? 'present-perfect' : 'updated'} proof may omit advisory mapping shape: ${missingMapping}`);
       }
       // One response, one round. An audit that fails its shape somewhere other
       // than the paragraph binding still binds those paragraphs, so the
@@ -6064,10 +5893,10 @@ export default [
       const project = await createCanvasProject();
       let releaseDRender = () => {};
       let admittedImportPromiseD = null;
-      const overlongBullet = 'Built supported systems with clear outcomes, sustained ownership, concrete engineering judgment, careful operational validation, reliable release controls, documented decisions, and durable support practices across the full delivery lifecycle.';
+      const overlongBullet = 'Built reporting systems with Python for internal teams with more than 20 years of experience.';
       const initialBullet = 'Built supported systems.';
       const revisedBullet = 'More relevant evidence.';
-      const careerData = `${overlongBullet} ${initialBullet} ${revisedBullet} I built supported systems for the teams that depend on them. The engineering was in matching the constraints those teams set rather than my own preferences. I would apply that delivery work to the reliable system delivery this role requires.`;
+      const careerData = `Built reporting systems with Python for internal teams. ${initialBullet} ${revisedBullet} I built supported systems for the teams that depend on them. The engineering was in matching the constraints those teams set rather than my own preferences. I would apply that delivery work to the reliable system delivery this role requires.`;
       try {
         const queued = await queueLocalApplicationJob({
           job: { title: 'Developer', company: 'Acme', snippet: 'Reliable system delivery is required for this role.' }, careerData,
@@ -6093,13 +5922,13 @@ export default [
         // A: validation consumes the exact bytes and responds without rendering.
         const resultA = await atomicReplaceJson(resultPath, resultFor(
           overlongBullet,
-          groundedQualityReview(sourceGroundingFor({ resumeBullets: [overlongBullet] })),
+          groundedQualityReview(sourceGroundingFor({ resumeBullets: [overlongBullet], resumeQuotes: ['Built reporting systems with Python for internal teams.'] })),
         ));
         const statusA = await localApplicationStatus(queued.id, project.canvasFilePath);
         const feedbackA = JSON.parse(await fs.promises.readFile(feedbackPath, 'utf8'));
         assert(statusA.status === 'invalid' && feedbackA.status === 'invalid'
           && feedbackA.measured === false && feedbackA.resultSha256 === resultA.sha256
-          && /resume-bullet-length/i.test(`${statusA.message} ${feedbackA.error}`),
+          && /unsupported-experience-span/i.test(`${statusA.message} ${feedbackA.error}`),
         `hash A must receive exact non-measured invalid feedback for the overlong résumé bullet, got ${JSON.stringify({ statusA, feedbackA })}`);
 
         // B: inject the measured renderer verdict at the unit boundary. Status
@@ -6666,8 +6495,8 @@ export default [
       let importPromise = null;
       let renderCalls = 0;
       try {
-        const overlongBullet = 'Built supported systems with clear outcomes, sustained ownership, concrete engineering judgment, careful operational validation, reliable release controls, documented decisions, and durable support practices across the full delivery lifecycle.';
-        const careerData = `${overlongBullet} Built supported systems. I built supported systems for the teams that depend on them. The engineering was in matching the constraints those teams set rather than my own preferences. I would apply that delivery work to the reliable system delivery this role requires.`;
+        const overlongBullet = 'Built reporting systems with Python for internal teams with more than 20 years of experience.';
+        const careerData = `Built reporting systems with Python for internal teams. Built supported systems. I built supported systems for the teams that depend on them. The engineering was in matching the constraints those teams set rather than my own preferences. I would apply that delivery work to the reliable system delivery this role requires.`;
         const queued = await queueLocalApplicationJob({
           job: { title: 'Developer', company: 'Acme', snippet: 'Reliable system delivery is required for this role.' },
           careerData,
@@ -6684,7 +6513,7 @@ export default [
           coverLetter: normalizedCoverLetter(),
           coverLetterArgument: coverLetterArgumentForResumeEvidence(bullet, 'Developer at Acme'),
           generationAudit: generationAuditFor(),
-          qualityReview: groundedQualityReview(sourceGroundingFor({ resumeBullets: [bullet] })),
+          qualityReview: groundedQualityReview(sourceGroundingFor({ resumeBullets: [bullet], resumeQuotes: [bullet === overlongBullet ? 'Built reporting systems with Python for internal teams.' : bullet] })),
         });
         await atomicReplaceJson(resultPath, resultFor(overlongBullet));
 
@@ -8758,12 +8587,8 @@ export default [
           coverLetterArgument: validCoverLetterArgument(), qualityReview: draftedQualityReview(),
         }, id, root, {}, { careerData: null });
       } catch (error) { message = String(error?.message || error); }
-      assert(message.includes('independent validation failures'),
-        `two independent families must be reported together, got ${JSON.stringify(message.slice(0, 400))}`);
-      assert(message.includes('(1)') && message.includes('(2)'),
-        'an aggregated rejection must number its defects so the revision addresses all of them');
-      assert(message.includes('direct-welcome-closing'),
-        `the cover-letter defect must survive aggregation, got ${JSON.stringify(message.slice(0, 400))}`);
+      assert(!message.includes('direct-welcome-closing'),
+        `closing taste does not enter a rejection, got ${JSON.stringify(message.slice(0, 400))}`);
       // The dash gate is a third aggregation depth: three independent dash
       // defects across both documents used to cost three rounds.
       let dashMessage = '';
@@ -8849,8 +8674,8 @@ export default [
           coverLetterArgument: validCoverLetterArgument(), qualityReview: draftedQualityReview(),
         }, id, root, {}, { careerData: null });
       } catch (error) { structural = String(error?.message || error); }
-      assert(/failed editorial checks/.test(structural),
-        `a structural throw must carry the already-measured résumé defect, got ${JSON.stringify(structural.slice(0, 300))}`);
+      assert(/needs at least one paragraph/.test(structural) && !/resume-bullet-self-containment/.test(structural),
+        `the structural defect remains a gate while résumé wording is advisory, got ${JSON.stringify(structural.slice(0, 300))}`);
       const markers = grounding.match(/\(\d+\)/g) || [];
       assert(!grounding || new Set(markers).size === markers.length,
         `an aggregated rejection must be one flat numbered list, got markers ${JSON.stringify(markers)}`);
@@ -9092,7 +8917,7 @@ export default [
     },
   },
   {
-    name: 'Structured résumé rejects a later bullet whose career-data evidence ids are already all cited by an earlier bullet in the same role, but not the same id reused across roles or a bullet that adds a new one',
+    name: 'Structured résumé advises on a later bullet whose career-data evidence ids are already all cited by an earlier bullet in the same role, but not the same id reused across roles or a bullet that adds a new one',
     run() {
       // Root cause: a shipped résumé's structured-résumé JSON showed nine
       // bullets in one role citing only four distinct evidenceIds — one id
@@ -9149,29 +8974,34 @@ Personal Projects`;
         ],
       });
 
+      // Splitting one accomplishment across bullets is redundancy, not a
+      // fabrication, so it is reported as an ADVISORY (the draft is accepted and
+      // still renders); what the advice says is what these assertions pin.
+      const fragmentationAdvice = resume => {
+        const draft = validateStructuredApplicationResume(resume, fragContext);
+        return draft.advisories.filter(entry => entry.id === 'bullet-cites-evidence-already-spent-in-role').map(entry => entry.detail).join(' ');
+      };
+
       // A={maple-ridge-q1}, B={maple-ridge-q1}: an identical single-id repeat.
-      let fragmentedMessage = '';
-      try {
-        renderStructuredApplicationResume(fragResume([
-          { id: 'maple-ridge-bullet-1', text: 'Built attendance reporting for district staff.', evidenceIds: ['maple-ridge-q1'] },
-          { id: 'maple-ridge-bullet-2', text: 'Built a second attendance view for the same district staff.', evidenceIds: ['maple-ridge-q1'] },
-        ]), fragContext);
-      } catch (error) { fragmentedMessage = error.message; }
+      const fragmentedDraft = fragResume([
+        { id: 'maple-ridge-bullet-1', text: 'Built attendance reporting for district staff.', evidenceIds: ['maple-ridge-q1'] },
+        { id: 'maple-ridge-bullet-2', text: 'Built a second attendance view for the same district staff.', evidenceIds: ['maple-ridge-q1'] },
+      ]);
+      const fragmentedMessage = fragmentationAdvice(fragmentedDraft);
       assert(fragmentedMessage.includes('roles[0]') && fragmentedMessage.includes('"maple-ridge-bullet-1"') && fragmentedMessage.includes('"maple-ridge-bullet-2"') && fragmentedMessage.includes('"maple-ridge-q1"'),
-        `two bullets citing the same single evidence id must be rejected naming the role and both bullet ids, got ${JSON.stringify(fragmentedMessage)}`);
+        `two bullets citing the same single evidence id must be reported naming the role and both bullet ids, got ${JSON.stringify(fragmentedMessage)}`);
       assert(!fragmentedMessage.includes('Built a second attendance view'),
-        'the rejection must not echo suggested replacement bullet wording');
+        'the advice must not echo suggested replacement bullet wording');
+      assert(renderStructuredApplicationResume(fragmentedDraft, fragContext).includes('Built a second attendance view'),
+        'fragmentation advises and never rejects: the résumé still renders');
 
       // A={maple-ridge-q1,maple-ridge-q2}, B={maple-ridge-q1}: B is still a strict subset.
-      let subsetMessage = '';
-      try {
-        renderStructuredApplicationResume(fragResume([
-          { id: 'maple-ridge-bullet-1', text: 'Built attendance reporting for district staff and automated the nightly grade-sync job.', evidenceIds: ['maple-ridge-q1', 'maple-ridge-q2'] },
-          { id: 'maple-ridge-bullet-2', text: 'Built attendance reporting for district staff.', evidenceIds: ['maple-ridge-q1'] },
-        ]), fragContext);
-      } catch (error) { subsetMessage = error.message; }
+      const subsetMessage = fragmentationAdvice(fragResume([
+        { id: 'maple-ridge-bullet-1', text: 'Built attendance reporting for district staff and automated the nightly grade-sync job.', evidenceIds: ['maple-ridge-q1', 'maple-ridge-q2'] },
+        { id: 'maple-ridge-bullet-2', text: 'Built attendance reporting for district staff.', evidenceIds: ['maple-ridge-q1'] },
+      ]));
       assert(subsetMessage.includes('"maple-ridge-q1"') && !subsetMessage.includes('"maple-ridge-q2"'),
-        `a later bullet whose evidence ids are a strict subset of an earlier bullet's must be rejected naming only the actually-shared id, got ${JSON.stringify(subsetMessage)}`);
+        `a later bullet whose evidence ids are a strict subset of an earlier bullet's must be reported naming only the actually-shared id, got ${JSON.stringify(subsetMessage)}`);
 
       // A={maple-ridge-q1,maple-ridge-q2}, B={maple-ridge-q1,maple-ridge-q3}: B adds an id A
       // never cited, so it is accepted even though it repeats maple-ridge-q1.
@@ -9181,6 +9011,10 @@ Personal Projects`;
       ]), fragContext);
       assert(disjointHtml.includes('automated the nightly grade-sync job') && disjointHtml.includes('onboarding guide'),
         'a later bullet that adds a career-data id no earlier bullet cited is accepted even though it repeats one shared id');
+      assert(fragmentationAdvice(fragResume([
+        { id: 'maple-ridge-bullet-1', text: 'Built attendance reporting for district staff and automated the nightly grade-sync job.', evidenceIds: ['maple-ridge-q1', 'maple-ridge-q2'] },
+        { id: 'maple-ridge-bullet-2', text: 'Built attendance reporting for district staff and wrote the new-teacher onboarding guide.', evidenceIds: ['maple-ridge-q1', 'maple-ridge-q3'] },
+      ])) === '', 'a later bullet that adds a career-data id draws no advice either');
 
       // The same evidence id ("shared-mentor") cited once in Maple Ridge's role
       // and once in Cedar Valley's role is not fragmentation: the rule is scoped to
@@ -9192,7 +9026,7 @@ Personal Projects`;
       assert(crossRoleHtml.includes('Mentored two junior engineers'),
         'the same career-data evidence id cited once per role, in two different roles, is not treated as fragmentation');
 
-      return { fragmentedRejected: true, subsetRejected: true, disjointAccepted: true, crossRoleAccepted: true };
+      return { fragmentedAdvised: true, subsetAdvised: true, disjointAccepted: true, crossRoleAccepted: true };
     },
   },
   {
@@ -9641,7 +9475,7 @@ Personal Projects`;
       assert(routineSource.includes('Never infer that contact location from an employer')
         && routineSource.includes('It does not reach the per-role employment locations'),
         'the routine scopes the contact-location privacy rule so it cannot be read as banning employment locations');
-      assert(routineSource.includes("This bars them from the letter's prose only"),
+      assert(routineSource.includes('Do not state') && routineSource.includes('in the letter; the application form owns them'),
         'the letter-scoped logistics ban says it is letter-scoped');
       // The privacy rule itself must survive intact.
       assert(routineSource.includes('candidate location/contact'),
@@ -9783,35 +9617,20 @@ Personal Projects`;
     },
   },
   {
-    name: 'Local AI contract: the routine states the rules the app actually enforces',
+    name: 'Local AI contract: the routine states retained truth, provenance and audit rules',
     async run() {
       // Markdown prose wraps, so every assertion below runs against a
       // whitespace-normalized copy — the same convention the version-2
       // contract assertions earlier in this file use.
       const routine = fs.readFileSync(new URL('../../local_ai/LOCAL_AI_APPLICATION_ROUTINE.md', import.meta.url), 'utf8').replace(/\s+/g, ' ');
-      // Every one of these was enforced by a hard reject while the contract
-      // either omitted it or described something softer, so a writer obeying
-      // the contract literally could still be rejected.
+      // Retain the truth, provenance and audit instructions after retiring the
+      // deterministic taste grammar.
       for (const [label, needle] of [
-        ['exact sentence-length threshold', 'keep every sentence to 40 words or fewer'],
-        ['semicolon ban', 'Use no semicolon anywhere in the'],
-        ['double hyphen', 'for a double hyphen between'],
-        ['modifier-insertion stock phrases', 'more than basic presence'],
-        ['primary line of defense', 'the primary line of defense'],
-        ['exact foundation', 'exact foundation'],
-        ['letter-wide off-posting budget', 'at most two tool names may be off-posting'],
-        ['letter figure boundary', 'The letter carries at most three figures in total'],
-        ['bullet character budget', '180 visible characters'],
         ['literal-form qualifier matching', 'The match is on the literal word form'],
-        ['closing construction', 'authorship clause'],
         ['personal-project provenance', 'A source-stated project category is factual provenance'],
         ['generation audit input contract', '`manifest.json.generationAudit` both have `version: 1` and `required: true`'],
         ['legacy generation audit compatibility', 'A queued legacy job may have no `generationAudit` contract'],
         ['generation audit mismatch handling', 'If only one file has the contract or their values differ, stop and report the mismatch'],
-        ['natural branch realization', 'do not make the cover letter narrate its own outline'],
-        ['mirrored category scaffolding', 'Reject mirrored scaffolding such as `I handled <category> by ... I addressed <category> by ...`'],
-        ['mechanism versus example wording', 'Use `by` when the action is the supported mechanism; use `such as` only'],
-        ['scope-neutral parallel framing', 'use neutral parallel framing that claims neither'],
         ['exact audit paragraph binding', 'must bind every final cover-letter paragraph exactly once'],
         ['exact audit sentence binding', 'must do the same for every sentence in that paragraph'],
         ['audit chain-of-thought boundary', 'Do not add private reasoning, intermediate drafts, discarded alternatives, hidden chain-of-thought'],
@@ -9821,8 +9640,8 @@ Personal Projects`;
       }
       const skill = fs.readFileSync(new URL('../../Job Application Design System/SKILL.md', import.meta.url), 'utf8').replace(/\s+/g, ' ');
       const style = fs.readFileSync(new URL('../../Job Application Design System/STYLE.md', import.meta.url), 'utf8').replace(/\s+/g, ' ');
-      assert(skill.includes('authorship clause') && style.includes('authorship clause'),
-        'the design references must carry the same closing construction as the routine and the validator');
+      assert(skill.includes('truth') && style.includes('truth'),
+        'the design references retain their factual boundary');
       assert(skill.includes('Project-category provenance is binding too')
         && skill.includes('Personal Projects` must remain `Personal Projects')
         && style.includes('source-labelled "Personal Projects" stays exactly "Personal Projects"'),
@@ -9850,12 +9669,8 @@ Personal Projects`;
       'the artifact-and-contribution example is a slotted form, not a sentence about any one candidate');
       assert(priorWorkRule.includes('“my work building <artifact>”') && priorWorkRule.includes('“in my previous <role>, I built...”'),
         'the prior-work-context example is slotted');
-      assert(routine.includes('`my <work noun>`, `the <artifact> I built`')
-        && routine.includes('about applying my <work noun> to <employer-facing target>')
-        && routine.includes('such as `<verb> each <item> from <first stage> through <last stage>`')
-        && routine.includes('`my work building <artifact>`')
-        && routine.includes('write `As a <title> at <employer>, I built ...`'),
-      'the routine states its closing, stewardship-span, prior-work, and ended-role examples as slotted forms');
+      assert(!routine.includes('about applying my <work noun> to <employer-facing target>'),
+        'the routine no longer prints a closed closing construction');
       assert(routine.includes('Delete conventional runtime-topology detail that merely proves implementation')
         && !/web-server|reverse-proxy|containerization claim/u.test(routine),
       'the runtime-topology rule names the defect class, not a particular technology stack');
@@ -10402,14 +10217,13 @@ Personal Projects`;
       assert(pasteRejectionReason({ envelopeMismatch: false, validationErrors: namedItems, checkIds: namedIds }) === 'VALIDATION_FAILED',
         'a rejection whose items name a known check takes VALIDATION_FAILED');
 
-      // The genuinely nameless case keeps the old, residual code: nothing in
-      // PASTE_CHECK_PROSE_UNITS or APPLICATION_QUALITY_CRITERIA names this
-      // structural message, so pasteRejectionCheckIds returns no ids for it.
+      // A structural message gets the stable schema fallback, so the receipt
+      // does not leave a rejected round uncoded.
       const uncodedItems = ['Evidence plan needs at least one prioritized requirement.'];
       const { checkIds: uncodedIds } = pasteRejectionCheckIds(uncodedItems);
-      assert(uncodedIds.length === 0, `fixture sanity: this message must name no known check (ids=${JSON.stringify(uncodedIds)})`);
-      assert(pasteRejectionReason({ envelopeMismatch: false, validationErrors: uncodedItems, checkIds: uncodedIds }) === 'SCHEMA_INVALID',
-        'a rejection whose items name no known check stays the residual SCHEMA_INVALID');
+      assert(JSON.stringify(uncodedIds) === '["schema-invalid"]', `fixture sanity: the fallback names schema-invalid (ids=${JSON.stringify(uncodedIds)})`);
+      assert(pasteRejectionReason({ envelopeMismatch: false, validationErrors: uncodedItems, checkIds: uncodedIds }) === 'VALIDATION_FAILED',
+        'a rejection with a schema fallback has a coded validation reason');
 
       // STALE_HANDOFF_ECHO and DOMAIN_VALIDATION_FAILED keep exactly the
       // precedence they had before pasteRejectionReason existed: an envelope
@@ -10554,10 +10368,10 @@ Personal Projects`;
         });
         assert(plan.accepted && plan.handoff.stage === 'resume', `fixture sanity: the evidence plan must be accepted to reach the resume stage (errors=${JSON.stringify(plan.validationErrors || [])})`);
 
-        // Overly-long bullet: exceeds RESUME_BULLET_CHARACTER_BUDGET (180)
+        // Unsupported duration claim: career evidence states no span of years
         // while still citing resume-proof, so this is the ONE named check —
-        // resume-bullet-length — that fails, round after round, unchanged.
-        const longBullet = `${bullet} Maintained internal systems with supported delivery practices across every deployed environment and every supported release for the whole engineering organization.`;
+        // unsupported-experience-span — that fails, round after round, unchanged.
+        const longBullet = `${bullet.replace(/\.$/u, '')} with more than 20 years of experience.`;
         const tooLongResume = {
           resume: {
             schemaVersion: 'structured-resume.v1', identity,
@@ -10567,8 +10381,8 @@ Personal Projects`;
 
         handoff = plan.handoff;
         const round1 = await submit(handoff, tooLongResume);
-        assert(!round1.accepted && round1.validationErrors.length === 1 && round1.validationErrors[0].startsWith('resume-bullet-length:'),
-          `fixture sanity: the padded bullet must fail resume-bullet-length alone (errors=${JSON.stringify(round1.validationErrors)})`);
+        assert(!round1.accepted && round1.validationErrors.length === 1 && round1.validationErrors[0].startsWith('unsupported-experience-span:'),
+          `fixture sanity: the inflated bullet must fail unsupported-experience-span alone (errors=${JSON.stringify(round1.validationErrors)})`);
         assert(!round1.handoff.correctionPrompt.includes('consecutive responses'),
           'round 1 of a repeated defect carries no escalation yet');
 
@@ -10579,7 +10393,7 @@ Personal Projects`;
 
         handoff = round2.handoff;
         const round3 = await submit(handoff, tooLongResume);
-        const escalation = 'Check "resume-bullet-length" has now rejected 3 consecutive responses in this round. Re-reading the same observation and rewriting the prose around it has not worked. The repair is a literal edit to the exact sentence, phrase, or word the observation above names — not a rewrite of the paragraph, bullet, or clause it lives in. Change only what that item says is wrong and return the rest of it exactly as it was.';
+        const escalation = 'Check "unsupported-experience-span" has now rejected 3 consecutive responses in this round. Re-reading the same observation and rewriting the prose around it has not worked. The repair is a literal edit to the exact sentence, phrase, or word the observation above names — not a rewrite of the paragraph, bullet, or clause it lives in. Change only what that item says is wrong and return the rest of it exactly as it was.';
         assert(!round3.accepted && round3.handoff.correctionPrompt.includes(escalation),
           `round 3 of the SAME defect escalates with the exact wording (correction=${JSON.stringify(round3.handoff.correctionPrompt)})`);
 
@@ -10591,12 +10405,14 @@ Personal Projects`;
         assert(reopened.handoff.correctionPrompt.includes(escalation),
           'reopening the handoff dialog shows the same escalation without counting as another round');
 
-        // A DIFFERENT defect — too many bullets on one role, each citing the
-        // same evidence id, which fails a structural rule no check id names —
-        // resets the streak: the next occurrence of the ORIGINAL check must
-        // start over at 1, not continue from 3.
+        // A DIFFERENT defect — a bullet citing an evidence id the host never
+        // issued, which fails a structural rule no check id names — resets the
+        // streak: the next occurrence of the ORIGINAL check must start over at
+        // 1, not continue from 3. (Too many bullets on one role used to serve
+        // here; it is now a coded advisory-class check, so it no longer
+        // exercises the nameless bucket.)
         handoff = round3.handoff;
-        const manyBullets = Array.from({ length: 7 }, (_, index) => ({ id: `bullet-${index + 1}`, text: 'Maintained supported systems.', evidenceIds: ['resume-proof'] }));
+        const manyBullets = [{ id: 'bullet-1', text: 'Maintained supported systems.', evidenceIds: ['an-evidence-id-the-host-never-issued'] }];
         const differentDefectResume = {
           resume: {
             schemaVersion: 'structured-resume.v1', identity,
@@ -10628,28 +10444,28 @@ Personal Projects`;
         assert(rejections.every(event => !('response' in event) && !('prompt' in event) && !('draft' in event) && !('detail' in event)
           && !('correctionPrompt' in event) && !JSON.stringify(event).includes(bullet)),
         `a rejection row carries no response, prompt, draft, or validation detail text, and never quotes the career-data bullet (rows=${JSON.stringify(rejections)})`);
-        assert(rejections.map(event => event.rejectionStreak).join(',') === '1,2,3,0,1',
+        assert(rejections.map(event => event.rejectionStreak).join(',') === '1,2,3,1,1',
           `the durable streak count matches what the correction prompt escalated by (streaks=${rejections.map(event => event.rejectionStreak).join(',')})`);
-        assert(rejections.slice(0, 3).every(event => event.reason === 'VALIDATION_FAILED' && JSON.stringify(event.checkIds) === '["resume-bullet-length"]'),
-          `the three resume-bullet-length rounds are filed under VALIDATION_FAILED, not the residual bucket (rows=${JSON.stringify(rejections.slice(0, 3))})`);
-        assert(rejections[3].reason === 'SCHEMA_INVALID' && Array.isArray(rejections[3].checkIds) && rejections[3].checkIds.length === 0,
-          `the structural, nameless defect stays the residual SCHEMA_INVALID bucket (row=${JSON.stringify(rejections[3])})`);
+        assert(rejections.slice(0, 3).every(event => event.reason === 'VALIDATION_FAILED' && JSON.stringify(event.checkIds) === '["unsupported-experience-span"]'),
+          `the three unsupported-experience-span rounds are filed under VALIDATION_FAILED, not the residual bucket (rows=${JSON.stringify(rejections.slice(0, 3))})`);
+        assert(rejections[3].reason === 'VALIDATION_FAILED' && Array.isArray(rejections[3].checkIds) && rejections[3].checkIds.length > 0 && rejections[3].uncodedErrors === 0,
+          `the structural defect now carries a stable check id (row=${JSON.stringify(rejections[3])})`);
 
         // Every durable row also carries checkFingerprints — the same real
         // pipeline that produced checkIds above. The three identical
-        // resume-bullet-length rounds resubmit the exact same padded bullet,
+        // unsupported-experience-span rounds resubmit the exact same inflated bullet,
         // so their fingerprints must agree with each other (same branch, same
         // observation), and the row already proven to carry no response,
         // prompt, or bullet text above proves the fingerprint itself leaked
         // none of it either — it is 8 lowercase hex characters, nothing else.
         const fingerprintHex = /^[0-9a-f]{8}$/;
-        const namedFingerprints = rejections.slice(0, 3).map(event => event.checkFingerprints?.['resume-bullet-length']);
+        const namedFingerprints = rejections.slice(0, 3).map(event => event.checkFingerprints?.['unsupported-experience-span']);
         assert(namedFingerprints.every(fp => fingerprintHex.test(fp)),
           `each named round's checkFingerprints must key the same check id with an 8-hex digest (fingerprints=${JSON.stringify(namedFingerprints)})`);
         assert(new Set(namedFingerprints).size === 1,
           `the identical resubmitted defect must fingerprint identically across all three rounds (fingerprints=${JSON.stringify(namedFingerprints)})`);
-        assert(rejections[3].checkFingerprints && Object.keys(rejections[3].checkFingerprints).length === 0,
-          `the nameless structural round names no check, so it carries no fingerprint either (row=${JSON.stringify(rejections[3])})`);
+        assert(rejections[3].checkFingerprints && Object.keys(rejections[3].checkFingerprints).length > 0,
+          `the structural round carries an attributed fingerprint (row=${JSON.stringify(rejections[3])})`);
 
         // Generation Log's own strictly monotonic sequence is untouched by any
         // of the five rejections above: only the creation record and the one
@@ -10710,7 +10526,7 @@ Personal Projects`;
         });
         assert(plan.accepted && plan.handoff.stage === 'resume', `fixture sanity: the evidence plan must be accepted to reach the resume stage (errors=${JSON.stringify(plan.validationErrors || [])})`);
 
-        const longBullet = `${bullet} Maintained internal systems with supported delivery practices across every deployed environment and every supported release for the whole engineering organization.`;
+        const longBullet = `${bullet.replace(/\.$/u, '')} with more than 20 years of experience.`;
         const tooLongResume = {
           resume: {
             schemaVersion: 'structured-resume.v1', identity,
@@ -10725,8 +10541,8 @@ Personal Projects`;
         // and must not throw, which a rejected-not-thrown round 1 proves.
         handoff = plan.handoff;
         const round1 = await submit(handoff, tooLongResume);
-        assert(!round1.accepted && round1.validationErrors.length === 1 && round1.validationErrors[0].startsWith('resume-bullet-length:'),
-          `fixture sanity: the padded bullet must fail resume-bullet-length alone (errors=${JSON.stringify(round1.validationErrors)})`);
+        assert(!round1.accepted && round1.validationErrors.length === 1 && round1.validationErrors[0].startsWith('unsupported-experience-span:'),
+          `fixture sanity: the inflated bullet must fail unsupported-experience-span alone (errors=${JSON.stringify(round1.validationErrors)})`);
         assert(!round1.handoff.correctionPrompt.includes('consecutive responses'),
           'round 1 carries no escalation yet, and a genuinely missing trace file produced no throw');
 
@@ -10760,10 +10576,10 @@ Personal Projects`;
         // uninterrupted process would have escalated on — not one round later.
         handoff = round2.handoff;
         const round3 = await submit(handoff, tooLongResume);
-        const escalation = 'Check "resume-bullet-length" has now rejected 3 consecutive responses in this round. Re-reading the same observation and rewriting the prose around it has not worked. The repair is a literal edit to the exact sentence, phrase, or word the observation above names — not a rewrite of the paragraph, bullet, or clause it lives in. Change only what that item says is wrong and return the rest of it exactly as it was.';
+        const escalation = 'Check "unsupported-experience-span" has now rejected 3 consecutive responses in this round. Re-reading the same observation and rewriting the prose around it has not worked. The repair is a literal edit to the exact sentence, phrase, or word the observation above names — not a rewrite of the paragraph, bullet, or clause it lives in. Change only what that item says is wrong and return the rest of it exactly as it was.';
         assert(!round3.accepted && round3.handoff.correctionPrompt.includes(escalation),
           `round 3 after a simulated restart escalates exactly as an uninterrupted process would (correction=${JSON.stringify(round3.handoff.correctionPrompt)})`);
-        assert(JSON.stringify(round3.handoff.rejectionEscalation) === JSON.stringify({ active: true, checkIds: ['resume-bullet-length'], streak: 3, trimmedFromPrompt: false }),
+        assert(JSON.stringify(round3.handoff.rejectionEscalation) === JSON.stringify({ active: true, checkIds: ['unsupported-experience-span'], streak: 3, trimmedFromPrompt: false }),
           `the restart-seeded streak reports the same escalation state an uninterrupted process would have (rejectionEscalation=${JSON.stringify(round3.handoff.rejectionEscalation)})`);
 
         // The durable trace itself proves the seed reproduced the SAME streak
@@ -10862,24 +10678,24 @@ Personal Projects`;
         // token-coverage match (argumentEvidenceMatchesBullet) against every
         // résumé bullet variant below — the too-long one and the revised one
         // alike both retain every one of `bullet`'s words.
-        const longBullet = `${bullet} Maintained internal systems with supported delivery practices across every deployed environment and every supported release for the whole engineering organization.`;
+        const longBullet = `${bullet.replace(/\.$/u, '')} with more than 20 years of experience.`;
         const tooLongReview = handoffNow => submit(handoffNow, {
           decision: 'revised', checklist: checklist(), findings: findings(),
           resume: { schemaVersion: 'structured-resume.v1', identity, roles: [{ id: 'role-1', title: 'Engineer', company: 'Acme', dates: '', location: '', bullets: [{ id: 'bullet-1', text: longBullet, evidenceIds: ['resume-proof'] }] }] },
         });
 
         // Rounds 1-2: "2 rejections at revision N" — the review stage's FIRST
-        // revision — both failing resume-bullet-length alone (the same defect
+        // revision — both failing unsupported-experience-span alone (the same defect
         // the plain résumé-stage restart test above uses, now reached through
         // a review-stage résumé REPLACEMENT, which wraps the identical
         // completion-twin message in PASTE_RESUME_REPLACEMENT_PREFIX).
         handoff = letterAccepted.handoff;
         const round1 = await tooLongReview(handoff);
-        assert(!round1.accepted && round1.validationErrors.some(message => message.includes('resume-bullet-length:')),
-          `fixture sanity: round 1 must fail resume-bullet-length alone (errors=${JSON.stringify(round1.validationErrors)})`);
+        assert(!round1.accepted && round1.validationErrors.some(message => message.includes('unsupported-experience-span:')),
+          `fixture sanity: round 1 must fail unsupported-experience-span alone (errors=${JSON.stringify(round1.validationErrors)})`);
         handoff = round1.handoff;
         const round2 = await tooLongReview(handoff);
-        assert(!round2.accepted && round2.validationErrors.some(message => message.includes('resume-bullet-length:')),
+        assert(!round2.accepted && round2.validationErrors.some(message => message.includes('unsupported-experience-span:')),
           `fixture sanity: round 2 repeats the identical defect (errors=${JSON.stringify(round2.validationErrors)})`);
         assert(!round2.handoff.correctionPrompt.includes('consecutive responses'),
           'round 2 carries no escalation yet — below PASTE_REJECTION_ESCALATION_STREAK');
@@ -10933,7 +10749,7 @@ Personal Projects`;
         _resetPasteRejectionStreakForTests();
         handoff = round3.handoff;
         const round4 = await tooLongReview(handoff);
-        assert(!round4.accepted, `fixture sanity: round 4 must still fail resume-bullet-length (errors=${JSON.stringify(round4.validationErrors)})`);
+        assert(!round4.accepted, `fixture sanity: round 4 must still fail unsupported-experience-span (errors=${JSON.stringify(round4.validationErrors)})`);
         assert(round4.handoff.rejectionEscalation.active === false && !round4.handoff.correctionPrompt.includes('consecutive responses'),
           `the per-id count after 2 restarts is the 2 genuine new-epoch rejections, NOT 4 bridged in from the closed epoch — a bridged streak would escalate here and it must not (rejectionEscalation=${JSON.stringify(round4.handoff.rejectionEscalation)})`);
 
@@ -10946,7 +10762,7 @@ Personal Projects`;
         // restart test above proves for the single-restart case.
         handoff = round4.handoff;
         const round5 = await tooLongReview(handoff);
-        const escalation = 'Check "resume-bullet-length" has now rejected 3 consecutive responses in this round. Re-reading the same observation and rewriting the prose around it has not worked. The repair is a literal edit to the exact sentence, phrase, or word the observation above names — not a rewrite of the paragraph, bullet, or clause it lives in. Change only what that item says is wrong and return the rest of it exactly as it was.';
+        const escalation = 'Check "unsupported-experience-span" has now rejected 3 consecutive responses in this round. Re-reading the same observation and rewriting the prose around it has not worked. The repair is a literal edit to the exact sentence, phrase, or word the observation above names — not a rewrite of the paragraph, bullet, or clause it lives in. Change only what that item says is wrong and return the rest of it exactly as it was.';
         assert(!round5.accepted && round5.handoff.correctionPrompt.includes(escalation),
           `round 5 escalates at exactly streak 3, proving the seeded count going into round 4 was 2 and not 4 (which would reach 5 here) (correction=${JSON.stringify(round5.handoff.correctionPrompt)})`);
 
@@ -10988,7 +10804,7 @@ Personal Projects`;
         });
         assert(plan.accepted && plan.handoff.stage === 'resume', `fixture sanity: the evidence plan must be accepted to reach the resume stage (errors=${JSON.stringify(plan.validationErrors || [])})`);
 
-        const longBullet = `${bullet} Maintained internal systems with supported delivery practices across every deployed environment and every supported release for the whole engineering organization.`;
+        const longBullet = `${bullet.replace(/\.$/u, '')} with more than 20 years of experience.`;
         const tooLongResume = {
           resume: {
             schemaVersion: 'structured-resume.v1', identity,
@@ -10998,8 +10814,8 @@ Personal Projects`;
 
         handoff = plan.handoff;
         const round1 = await submit(handoff, tooLongResume);
-        assert(!round1.accepted && round1.validationErrors.length === 1 && round1.validationErrors[0].startsWith('resume-bullet-length:'),
-          `fixture sanity: the padded bullet must fail resume-bullet-length alone (errors=${JSON.stringify(round1.validationErrors)})`);
+        assert(!round1.accepted && round1.validationErrors.length === 1 && round1.validationErrors[0].startsWith('unsupported-experience-span:'),
+          `fixture sanity: the inflated bullet must fail unsupported-experience-span alone (errors=${JSON.stringify(round1.validationErrors)})`);
 
         // The durable sidecar — a SEPARATE file from Paste Rejections.json,
         // per PASTE_CORRECTIONS_SIDECAR_FILE's own header — mirrors
@@ -11011,7 +10827,7 @@ Personal Projects`;
         assert(sidecar.version === 1 && sidecar.jobId === queued.id && sidecar.stage === 'resume'
           && sidecar.revision === round1.handoff.revision && sidecar.handoffCode === round1.handoff.handoffCode,
           `the sidecar mirrors the exact round it was written for (sidecar=${JSON.stringify(sidecar)})`);
-        assert(Array.isArray(sidecar.corrections) && sidecar.corrections.length === 1 && sidecar.corrections[0].startsWith('resume-bullet-length:'),
+        assert(Array.isArray(sidecar.corrections) && sidecar.corrections.length === 1 && sidecar.corrections[0].startsWith('unsupported-experience-span:'),
           `the sidecar carries the same validation text the correction prompt would print (corrections=${JSON.stringify(sidecar.corrections)})`);
 
         // Simulate a full app restart: discard BOTH in-memory maps a live
@@ -11025,10 +10841,10 @@ Personal Projects`;
         // exactly what reopening the handoff dialog after relaunching the
         // app triggers.
         const recovered = await current();
-        assert(Array.isArray(recovered.corrections) && recovered.corrections.length === 1 && recovered.corrections[0].startsWith('resume-bullet-length:'),
+        assert(Array.isArray(recovered.corrections) && recovered.corrections.length === 1 && recovered.corrections[0].startsWith('unsupported-experience-span:'),
           `the recovered handoff restores the same outstanding item from disk (corrections=${JSON.stringify(recovered.corrections)})`);
         assert(JSON.stringify({ ...recovered.correctionsRecovered, lastAt: undefined }) === JSON.stringify({
-          active: true, itemCount: 1, checkIds: ['resume-bullet-length'], rejectionCount: 1, lastAt: undefined,
+          active: true, itemCount: 1, checkIds: ['unsupported-experience-span'], rejectionCount: 1, lastAt: undefined,
         }), `correctionsRecovered reports the exact restored item count and the durable trace's own checkIds/rejectionCount (correctionsRecovered=${JSON.stringify(recovered.correctionsRecovered)})`);
         assert(typeof recovered.correctionsRecovered.lastAt === 'string' && !Number.isNaN(Date.parse(recovered.correctionsRecovered.lastAt)),
           `lastAt is a real ISO timestamp read off the durable rejection trace (lastAt=${JSON.stringify(recovered.correctionsRecovered.lastAt)})`);
@@ -11100,7 +10916,7 @@ Personal Projects`;
         });
         assert(plan.accepted, `fixture sanity: the evidence plan must be accepted (errors=${JSON.stringify(plan.validationErrors || [])})`);
 
-        const longBullet = `${bullet} Maintained internal systems with supported delivery practices across every deployed environment and every supported release for the whole engineering organization.`;
+        const longBullet = `${bullet.replace(/\.$/u, '')} with more than 20 years of experience.`;
         const tooLongResume = {
           resume: {
             schemaVersion: 'structured-resume.v1', identity,
@@ -11110,7 +10926,7 @@ Personal Projects`;
 
         handoff = plan.handoff;
         const round1 = await submit(handoff, tooLongResume);
-        assert(!round1.accepted, `fixture sanity: the padded bullet must be rejected (errors=${JSON.stringify(round1.validationErrors)})`);
+        assert(!round1.accepted, `fixture sanity: the inflated bullet must be rejected (errors=${JSON.stringify(round1.validationErrors)})`);
 
         // No restart simulated — this process still holds the live entry
         // rememberPasteCorrections just wrote. Reopening the dialog here
@@ -11162,7 +10978,7 @@ Personal Projects`;
         });
         assert(plan.accepted, `fixture sanity: the evidence plan must be accepted (errors=${JSON.stringify(plan.validationErrors || [])})`);
 
-        const longBullet = `${bullet} Maintained internal systems with supported delivery practices across every deployed environment and every supported release for the whole engineering organization.`;
+        const longBullet = `${bullet.replace(/\.$/u, '')} with more than 20 years of experience.`;
         const tooLongResume = {
           resume: {
             schemaVersion: 'structured-resume.v1', identity,
@@ -11172,7 +10988,7 @@ Personal Projects`;
 
         handoff = plan.handoff;
         const round1 = await submit(handoff, tooLongResume);
-        assert(!round1.accepted, `fixture sanity: the padded bullet must be rejected (errors=${JSON.stringify(round1.validationErrors)})`);
+        assert(!round1.accepted, `fixture sanity: the inflated bullet must be rejected (errors=${JSON.stringify(round1.validationErrors)})`);
 
         const sidecarPath = path.join(queued.folder, 'Paste Correction Items.json');
         const staleSidecarRaw = await fs.promises.readFile(sidecarPath, 'utf8');
@@ -11249,7 +11065,7 @@ Personal Projects`;
         });
         assert(plan.accepted, `fixture sanity: the evidence plan must be accepted (errors=${JSON.stringify(plan.validationErrors || [])})`);
 
-        const longBullet = `${bullet} Maintained internal systems with supported delivery practices across every deployed environment and every supported release for the whole engineering organization.`;
+        const longBullet = `${bullet.replace(/\.$/u, '')} with more than 20 years of experience.`;
         const tooLongResume = {
           resume: {
             schemaVersion: 'structured-resume.v1', identity,
@@ -11259,7 +11075,7 @@ Personal Projects`;
 
         handoff = plan.handoff;
         const round1 = await submit(handoff, tooLongResume);
-        assert(!round1.accepted, `fixture sanity: the padded bullet must be rejected (errors=${JSON.stringify(round1.validationErrors)})`);
+        assert(!round1.accepted, `fixture sanity: the inflated bullet must be rejected (errors=${JSON.stringify(round1.validationErrors)})`);
 
         const sidecarPath = path.join(queued.folder, 'Paste Correction Items.json');
         const sidecar = JSON.parse(await fs.promises.readFile(sidecarPath, 'utf8'));
@@ -11315,7 +11131,7 @@ Personal Projects`;
         });
         assert(plan.accepted, `fixture sanity: the evidence plan must be accepted (errors=${JSON.stringify(plan.validationErrors || [])})`);
 
-        const longBullet = `${bullet} Maintained internal systems with supported delivery practices across every deployed environment and every supported release for the whole engineering organization.`;
+        const longBullet = `${bullet.replace(/\.$/u, '')} with more than 20 years of experience.`;
         const tooLongResume = {
           resume: {
             schemaVersion: 'structured-resume.v1', identity,
@@ -11325,7 +11141,7 @@ Personal Projects`;
 
         handoff = plan.handoff;
         const round1 = await submit(handoff, tooLongResume);
-        assert(!round1.accepted, `fixture sanity: the padded bullet must be rejected (errors=${JSON.stringify(round1.validationErrors)})`);
+        assert(!round1.accepted, `fixture sanity: the inflated bullet must be rejected (errors=${JSON.stringify(round1.validationErrors)})`);
 
         const sidecarPath = path.join(queued.folder, 'Paste Correction Items.json');
 
@@ -11344,7 +11160,7 @@ Personal Projects`;
         // still carries the same still-open handoffCode) to get a fresh,
         // genuinely-written sidecar on disk.
         const round2 = await submit(missingReopen, tooLongResume);
-        assert(!round2.accepted, `fixture sanity: round 2 must still fail resume-bullet-length (errors=${JSON.stringify(round2.validationErrors)})`);
+        assert(!round2.accepted, `fixture sanity: round 2 must still fail unsupported-experience-span (errors=${JSON.stringify(round2.validationErrors)})`);
 
         // CORRUPT: the file exists but is not valid JSON — a torn write.
         _resetPasteRejectionStreakForTests();
@@ -11402,7 +11218,7 @@ Personal Projects`;
         const sidecarPath = path.join(queued.folder, 'Paste Correction Items.json');
         await fs.promises.mkdir(sidecarPath);
 
-        const longBullet = `${bullet} Maintained internal systems with supported delivery practices across every deployed environment and every supported release for the whole engineering organization.`;
+        const longBullet = `${bullet.replace(/\.$/u, '')} with more than 20 years of experience.`;
         const tooLongResume = {
           resume: {
             schemaVersion: 'structured-resume.v1', identity,
@@ -11412,7 +11228,7 @@ Personal Projects`;
 
         handoff = plan.handoff;
         const round1 = await submit(handoff, tooLongResume);
-        assert(!round1.accepted && round1.validationErrors.length === 1 && round1.validationErrors[0].startsWith('resume-bullet-length:'),
+        assert(!round1.accepted && round1.validationErrors.length === 1 && round1.validationErrors[0].startsWith('unsupported-experience-span:'),
           `the rejection itself completes normally despite the sidecar write failing underneath it (errors=${JSON.stringify(round1.validationErrors)})`);
         assert(Array.isArray(round1.handoff.corrections) && round1.handoff.corrections.length === 1,
           'the in-memory correction (and its correction prompt) is unaffected by the sidecar write failure');
@@ -11473,7 +11289,7 @@ Personal Projects`;
         // still read at the 'resume' stage below exactly as it would be at
         // 'review'. Its issue names a DIFFERENT review criterion
         // ("cover-register") than the check this test now rejects on every
-        // round ("resume-bullet-length").
+        // round ("unsupported-experience-span").
         const manifestPath = path.join(queued.folder, 'manifest.json');
         const manifest = JSON.parse(await fs.promises.readFile(manifestPath, 'utf8'));
         manifest.paste.findings = [{
@@ -11484,9 +11300,9 @@ Personal Projects`;
         await fs.promises.writeFile(manifestPath, JSON.stringify(manifest), 'utf8');
 
         // Same repeated single-check defect as the streak test above: an
-        // overly-long bullet that fails resume-bullet-length alone, round
+        // unsupported duration claim that fails unsupported-experience-span alone, round
         // after round, unchanged.
-        const longBullet = `${bullet} Maintained internal systems with supported delivery practices across every deployed environment and every supported release for the whole engineering organization.`;
+        const longBullet = `${bullet.replace(/\.$/u, '')} with more than 20 years of experience.`;
         const tooLongResume = {
           resume: {
             schemaVersion: 'structured-resume.v1', identity,
@@ -11496,8 +11312,8 @@ Personal Projects`;
 
         handoff = plan.handoff;
         const round1 = await submit(handoff, tooLongResume);
-        assert(!round1.accepted && round1.validationErrors.length === 1 && round1.validationErrors[0].startsWith('resume-bullet-length:'),
-          `fixture sanity: the padded bullet must fail resume-bullet-length alone (errors=${JSON.stringify(round1.validationErrors)})`);
+        assert(!round1.accepted && round1.validationErrors.length === 1 && round1.validationErrors[0].startsWith('unsupported-experience-span:'),
+          `fixture sanity: the inflated bullet must fail unsupported-experience-span alone (errors=${JSON.stringify(round1.validationErrors)})`);
         assert(!round1.handoff.correctionPrompt.includes('consecutive responses'), 'round 1 carries no escalation yet');
         // The lingering host finding still prints in the ordinary numbered
         // item list — only the ESCALATION block's check-id computation is
@@ -11511,10 +11327,10 @@ Personal Projects`;
           'round 2 of the same defect still carries no escalation — below PASTE_REJECTION_ESCALATION_STREAK');
 
         // Round 3 is the one FLAW 2 broke. bumpPasteRejectionStreak stored a
-        // streak of 3 keyed on {resume-bullet-length} alone (this round's own
+        // streak of 3 keyed on {unsupported-experience-span} alone (this round's own
         // validationErrors). The OLD pasteHandoffRecord recomputed its own
         // checkIds from measured+recalled instead of reading that store back
-        // — a wider set, {cover-register, resume-bullet-length}, because the
+        // — a wider set, {cover-register, unsupported-experience-span}, because the
         // lingering host finding above is always in `measured` — so the
         // peek's key never matched the bump's key and peekPasteRejectionStreak
         // silently returned 0. The escalation block therefore never fired no
@@ -11526,7 +11342,7 @@ Personal Projects`;
         // the streak test above despite the unrelated lingering finding.
         handoff = round2.handoff;
         const round3 = await submit(handoff, tooLongResume);
-        const escalation = 'Check "resume-bullet-length" has now rejected 3 consecutive responses in this round. Re-reading the same observation and rewriting the prose around it has not worked. The repair is a literal edit to the exact sentence, phrase, or word the observation above names — not a rewrite of the paragraph, bullet, or clause it lives in. Change only what that item says is wrong and return the rest of it exactly as it was.';
+        const escalation = 'Check "unsupported-experience-span" has now rejected 3 consecutive responses in this round. Re-reading the same observation and rewriting the prose around it has not worked. The repair is a literal edit to the exact sentence, phrase, or word the observation above names — not a rewrite of the paragraph, bullet, or clause it lives in. Change only what that item says is wrong and return the rest of it exactly as it was.';
         assert(!round3.accepted && round3.handoff.correctionPrompt.includes(escalation),
           `round 3 escalates even with an unrelated host finding still persisted in state.findings (correction=${JSON.stringify(round3.handoff.correctionPrompt)})`);
 
@@ -11550,13 +11366,13 @@ Personal Projects`;
       // Reproduces the measured shape of the incident that motivated per-id
       // tracking: round 1 fails TWO checks together, rounds 2-4 fail only ONE
       // of them, unchanged — direct-welcome-closing/redundancy on the live
-      // job, resume-bullet-self-containment/resume-bullet-length here (both
+      // job, evidence-id-is-verified/unsupported-experience-span here (both
       // résumé-stage checks, reliably reproducible without the cover-letter
       // stage's much larger contract). The set-keyed streak the app already
       // had goes 1, 1, 2, 3 either way (round 2's narrower set differs from
       // round 1's, so it restarts); escalation used to require that SET
       // streak to reach 3, which happened only on round 4 — one paste later
-      // than the check that was actually stuck (resume-bullet-length, never
+      // than the check that was actually stuck (unsupported-experience-span, never
       // clearing) deserved. The fix tracks each check id's own count
       // independently: it runs 1, 2, 3, 4 and crosses the threshold on round 3.
       const project = await createCanvasProject();
@@ -11590,17 +11406,17 @@ Personal Projects`;
         assert(plan.accepted && plan.handoff.stage === 'resume', `fixture sanity: the evidence plan must be accepted to reach the resume stage (errors=${JSON.stringify(plan.validationErrors || [])})`);
         handoff = plan.handoff;
 
-        const longBullet = `${bullet} Maintained internal systems with supported delivery practices across every deployed environment and every supported release for the whole engineering organization.`;
+        const longBullet = `${bullet.replace(/\.$/u, '')} with more than 20 years of experience.`;
         // Adds a DEPENDENT reference ("those pipelines") that names a system
         // noun DEPENDENT_RESUME_SYSTEM_REFERENCE recognizes and that never
         // occurred earlier in the bullet, so checkResumeBulletSelfContainment
         // fires alongside checkResumeBulletLength on round 1 only.
-        const withDependentReference = `${longBullet} It also extended those pipelines across the company.`;
+        const withDependentReference = `${bullet.replace(/\.$/u, '')} and cut onboarding delays with more than 20 years of experience.`;
         const submitBullet = async (text) => {
           const round = await submit(handoff, {
             resume: {
               schemaVersion: 'structured-resume.v1', identity,
-              roles: [{ id: 'role-1', title: 'Engineer', company: 'Acme', dates: '', location: '', bullets: [{ id: 'bullet-1', text, evidenceIds: ['resume-proof'] }] }],
+              roles: [{ id: 'role-1', title: 'Engineer', company: 'Acme', dates: '', location: '', bullets: [{ id: 'bullet-1', text, evidenceIds: text === withDependentReference ? ['resume-proof', 'unknown-id'] : ['resume-proof'] }] }],
             },
           });
           handoff = round.handoff;
@@ -11608,30 +11424,30 @@ Personal Projects`;
         };
 
         const round1 = await submitBullet(withDependentReference);
-        assert(!round1.accepted && JSON.stringify(round1.validationErrors.map(item => item.split(':')[0]).sort()) === '["resume-bullet-length","resume-bullet-self-containment"]',
+        assert(!round1.accepted && JSON.stringify([...new Set(round1.validationErrors.map(item => item.split(':')[0]))].sort()) === '["evidence-id-is-verified","unsupported-experience-span"]',
           `fixture sanity: round 1 must fail both checks together (errors=${JSON.stringify(round1.validationErrors)})`);
         assert(!round1.handoff.correctionPrompt.includes('consecutive responses') && round1.handoff.rejectionEscalation.active === false,
           `round 1 carries no escalation yet (rejectionEscalation=${JSON.stringify(round1.handoff.rejectionEscalation)})`);
 
         const round2 = await submitBullet(longBullet);
-        assert(!round2.accepted && round2.validationErrors.length === 1 && round2.validationErrors[0].startsWith('resume-bullet-length:'),
-          `fixture sanity: round 2 drops the self-containment defect and keeps only resume-bullet-length (errors=${JSON.stringify(round2.validationErrors)})`);
+        assert(!round2.accepted && round2.validationErrors.length === 1 && round2.validationErrors[0].startsWith('unsupported-experience-span:'),
+          `fixture sanity: round 2 drops the self-containment defect and keeps only unsupported-experience-span (errors=${JSON.stringify(round2.validationErrors)})`);
         assert(!round2.handoff.correctionPrompt.includes('consecutive responses') && round2.handoff.rejectionEscalation.active === false,
           'round 2 of the now-narrower set still carries no escalation — its own per-id count is only 2');
 
         // ROUND 3 is the one the old set-keyed-only design got wrong: the SET
         // streak here is only 2 (round 2's narrower set differs from round
         // 1's wider one, so the set-keyed count restarted), but
-        // resume-bullet-length's OWN count is 3 — its third consecutive
-        // round — so escalation must fire now, naming resume-bullet-length
-        // alone, never resume-bullet-self-containment (which cleared).
+        // unsupported-experience-span's OWN count is 3 — its third consecutive
+        // round — so escalation must fire now, naming unsupported-experience-span
+        // alone, never evidence-id-is-verified (which cleared).
         const round3 = await submitBullet(longBullet);
-        const escalation3 = 'Check "resume-bullet-length" has now rejected 3 consecutive responses in this round. Re-reading the same observation and rewriting the prose around it has not worked. The repair is a literal edit to the exact sentence, phrase, or word the observation above names — not a rewrite of the paragraph, bullet, or clause it lives in. Change only what that item says is wrong and return the rest of it exactly as it was.';
+        const escalation3 = 'Check "unsupported-experience-span" has now rejected 3 consecutive responses in this round. Re-reading the same observation and rewriting the prose around it has not worked. The repair is a literal edit to the exact sentence, phrase, or word the observation above names — not a rewrite of the paragraph, bullet, or clause it lives in. Change only what that item says is wrong and return the rest of it exactly as it was.';
         assert(!round3.accepted && round3.handoff.correctionPrompt.includes(escalation3),
-          `round 3 escalates on resume-bullet-length's own 3rd consecutive failure, even though the SET streak is only 2 (correction=${JSON.stringify(round3.handoff.correctionPrompt)})`);
-        assert(!round3.handoff.correctionPrompt.includes('resume-bullet-self-containment'),
+          `round 3 escalates on unsupported-experience-span's own 3rd consecutive failure, even though the SET streak is only 2 (correction=${JSON.stringify(round3.handoff.correctionPrompt)})`);
+        assert(!round3.handoff.correctionPrompt.includes('evidence-id-is-verified'),
           'the escalation names only the check that is still failing, never the one that cleared after round 1');
-        assert(JSON.stringify(round3.handoff.rejectionEscalation) === JSON.stringify({ active: true, checkIds: ['resume-bullet-length'], streak: 3, trimmedFromPrompt: false }),
+        assert(JSON.stringify(round3.handoff.rejectionEscalation) === JSON.stringify({ active: true, checkIds: ['unsupported-experience-span'], streak: 3, trimmedFromPrompt: false }),
           `the handoff payload exposes the same escalation state for the renderer (rejectionEscalation=${JSON.stringify(round3.handoff.rejectionEscalation)})`);
 
         // A dialog reopen must show the identical escalation without
@@ -11645,15 +11461,15 @@ Personal Projects`;
         // Round 4: the same unresolved defect, one round further — the
         // per-id count keeps climbing and the escalation wording keeps pace.
         const round4 = await submitBullet(longBullet);
-        const escalation4 = 'Check "resume-bullet-length" has now rejected 4 consecutive responses in this round. Re-reading the same observation and rewriting the prose around it has not worked. The repair is a literal edit to the exact sentence, phrase, or word the observation above names — not a rewrite of the paragraph, bullet, or clause it lives in. Change only what that item says is wrong and return the rest of it exactly as it was.';
+        const escalation4 = 'Check "unsupported-experience-span" has now rejected 4 consecutive responses in this round. Re-reading the same observation and rewriting the prose around it has not worked. The repair is a literal edit to the exact sentence, phrase, or word the observation above names — not a rewrite of the paragraph, bullet, or clause it lives in. Change only what that item says is wrong and return the rest of it exactly as it was.';
         assert(!round4.accepted && round4.handoff.correctionPrompt.includes(escalation4),
           `round 4 keeps escalating with its own climbing count (correction=${JSON.stringify(round4.handoff.correctionPrompt)})`);
 
-        // A GENUINELY different, structural defect (too many bullets on one
-        // role, no check id at all) resets both the set-keyed streak and
-        // every per-id count — the next occurrence of the original check must
-        // start over at 1, not resume at 4.
-        const manyBullets = Array.from({ length: 7 }, (_, index) => ({ id: `bullet-${index + 1}`, text: 'Maintained supported systems.', evidenceIds: ['resume-proof'] }));
+        // A GENUINELY different, structural defect (a bullet citing an
+        // evidence id the host never issued, no check id at all) resets both
+        // the set-keyed streak and every per-id count — the next occurrence of
+        // the original check must start over at 1, not resume at 4.
+        const manyBullets = [{ id: 'bullet-1', text: 'Maintained supported systems.', evidenceIds: ['an-evidence-id-the-host-never-issued'] }];
         const round5 = await submit(handoff, {
           resume: {
             schemaVersion: 'structured-resume.v1', identity,
@@ -11666,7 +11482,7 @@ Personal Projects`;
 
         const round6 = await submitBullet(longBullet);
         assert(!round6.accepted && !round6.handoff.correctionPrompt.includes('consecutive responses') && round6.handoff.rejectionEscalation.active === false,
-          'resume-bullet-length\'s per-id count restarted at 1 after the interruption, rather than resuming at 4');
+          'unsupported-experience-span\'s per-id count restarted at 1 after the interruption, rather than resuming at 4');
 
         // The bug-report receipt (electron/ipc/pasteHandoffDiagnostics.js)
         // shows the exact gap this whole fix closes: round 3's receipt must
@@ -11679,7 +11495,7 @@ Personal Projects`;
         const snapshot = getPasteHandoffDiagnosticsSnapshot();
         const rejected = snapshot.receipts.filter(item => item.outcome === 'rejected');
         assert(rejected.length === 6, `every rejected round left a receipt (count=${rejected.length})`);
-        assert(rejected.map(item => item.rejectionStreak).join(',') === '1,1,2,3,0,1',
+        assert(rejected.map(item => item.rejectionStreak).join(',') === '1,1,2,3,1,1',
           `the receipt's own rejectionStreak column matches the set-keyed sequence (streaks=${rejected.map(item => item.rejectionStreak).join(',')})`);
         assert(rejected.map(item => item.escalated).join(',') === 'false,false,true,true,false,false',
           `the receipt's escalated column shows escalation active from round 3 on, one round before the set-keyed streak alone reaches the threshold (escalated=${rejected.map(item => item.escalated).join(',')})`);
@@ -12436,7 +12252,7 @@ Personal Projects`;
     },
   },
   {
-    name: 'Local AI application: the completion gate grades letter proportion on the assembled letter, so a letter of standalone detail sentences is rejected by name and its merged form is not',
+    name: 'Local AI application: letter paragraph proportion is advisory in the assembled result',
     run: () => {
       const id = '123e4567-e89b-42d3-a456-426614174000';
       const validResumeMain = '<main class="page"><section class="section"><article class="role"><span class="title">Engineer</span><span class="company">Acme</span><ul class="highlights"><li>Built supported systems.</li></ul></article></section></main>';
@@ -12467,20 +12283,20 @@ Personal Projects`;
       };
       const oneQuote = details.map(() => details.join(' '));
       const rejected = verdict(details, oneQuote);
-      assert(rejected.includes('letter-proportion:') && /body paragraphs against a ceiling of 7/u.test(rejected),
-        `the gate reports the proportion defect by name and with the measured counts (got ${rejected.slice(0, 400)})`);
+      assert(!rejected.includes('letter-proportion:'),
+        `paragraph proportion is not a rejection (got ${rejected.slice(0, 400)})`);
       // The quote limit reads the quotes assembly bound to each paragraph (qualityReview.sourceGrounding), so the gate
       // and the drafting twin count the same thing: eight paragraphs bound to one quote are named for it ...
-      assert(/cite the same career-data quote against a maximum of 4/u.test(rejected),
-        'eight paragraphs bound to one quote are reported for it');
+      assert(!/cite the same career-data quote against a maximum of 4/u.test(rejected),
+        'eight paragraphs sharing a quote remain an advisory observation');
       // ... and the identical letter bound to a quote of its own per paragraph is not.
       const ownQuotes = verdict(details, details);
-      assert(ownQuotes.includes('letter-proportion:') && !/cite the same career-data quote/u.test(ownQuotes),
-        `bound to a quote each, the structural defects remain and the quote limit is gone (got ${ownQuotes.slice(0, 400)})`);
+      assert(!ownQuotes.includes('letter-proportion:'),
+        `bound to a quote each, proportion still cannot reject (got ${ownQuotes.slice(0, 400)})`);
       const mergedVerdict = verdict(merged, merged);
       assert(!mergedVerdict.includes('letter-proportion:'),
         `the same sentences cut into two paragraphs raise no proportion defect (got ${mergedVerdict.slice(0, 400)})`);
-      return { gateNamesProportion: true };
+      return { proportionAdvisory: true };
     },
   },
   {

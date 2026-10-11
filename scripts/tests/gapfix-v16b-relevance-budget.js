@@ -482,37 +482,4 @@ export default [
         fs.rmSync(dir, { recursive: true, force: true });
       }
     },
-  },
-  {
-    name: 'Relevance rules: the printed budget sentences are built from the constants, say one thing between them, and no consumer recounts the paragraphs (A/B/C)',
-    run() {
-      // A: each budget sentence is the constant's phrase around fixed clauses, and the block prints each exactly once, in the order the contracts read them.
-      assert(EXPLICIT_RELEVANCE_BUDGET_RULE === `only ${OWING_RELEVANCE_PARAGRAPHS} owes a relevance span; a later proof-bearing paragraph owes only its proof span and its jobNeedQuote, may leave the relevance out, and is held to the same shape for a relevance span it records`,
-        `the relevance budget is the constant's phrase around the fixed clauses (${EXPLICIT_RELEVANCE_BUDGET_RULE})`);
-      assert(ARGUMENT_SPAN_BUDGET_RULES === `Also, ${EXPLICIT_TRANSFER_BUDGET_RULE}. Likewise, ${EXPLICIT_CLAIM_BUDGET_RULE}. Likewise, ${EXPLICIT_RELEVANCE_BUDGET_RULE}.`, 'the block is the three sentences, composed once');
-      for (const rule of [EXPLICIT_TRANSFER_BUDGET_RULE, EXPLICIT_CLAIM_BUDGET_RULE, EXPLICIT_RELEVANCE_BUDGET_RULE]) {
-        assert(ARGUMENT_SPAN_BUDGET_RULES.split(rule).length - 1 === 1, 'each budget sentence is printed once');
-      }
-      // The three sentences agree on what a later paragraph owes. None says it keeps a claim or a relevance span.
-      for (const rule of [EXPLICIT_CLAIM_BUDGET_RULE, EXPLICIT_RELEVANCE_BUDGET_RULE]) {
-        assert(rule.includes('owes only its proof span and its jobNeedQuote') && /may leave the (?:claim|relevance) out/u.test(rule), 'a later paragraph owes its proof and its quote and may leave the span out');
-      }
-      assert(!/\bkeeps? its (?:claim|relevance)\b/u.test(ARGUMENT_SPAN_BUDGET_RULES) && EXPLICIT_TRANSFER_BUDGET_RULE.includes('owes no such sentence and ends on what the work did'),
-        'and the transfer budget no longer says a later paragraph keeps a claim');
-      // B: the rule for a span a later paragraph records says "records", never "every later paragraph's span is".
-      assert(ARGUMENT_LATER_RELEVANCE_SPAN_RULE.startsWith('in a later proof-bearing paragraph that records a relevance span') && !/every later/u.test(ARGUMENT_LATER_RELEVANCE_SPAN_RULE),
-        `the later-span rule applies to a paragraph that records one (${ARGUMENT_LATER_RELEVANCE_SPAN_RULE})`);
-      // C: one count. coverLetterChecks.js calls the shared helper once per budget and nowhere else; the consumers read the exported function.
-      const checks = fs.readFileSync(path.resolve('electron/ipc/coverLetterChecks.js'), 'utf8');
-      const callers = checks.match(/firstProofBearingParagraphs\(/gu) || [];
-      assert(callers.length === 4, `the helper is declared once and called once per budget (explicitTransferOwed, explicitClaimOwed, explicitRelevanceOwed): ${callers.length}`);
-      assert(/return firstProofBearingParagraphs\(paragraphs, MAX_EXPLICIT_RELEVANCE_PARAGRAPHS\);/u.test(checks) && /const owesRelevance = explicitRelevanceOwed\(finalParagraphs\);/u.test(checks),
-        'the gate reads the exported function over the final paragraphs');
-      const localAi = fs.readFileSync(path.resolve('electron/ipc/localAiApplication.js'), 'utf8');
-      assert(localAi.split('const owesRelevance = explicitRelevanceOwed(paragraphs);').length === 2 && localAi.includes('owesRelevance: owesRelevance[index]'),
-        'the drafting-stage reporter reads the same function over the assembled paragraphs and passes the flag');
-      assert(!/paragraphHasCandidatePastProof\([^)]*\)[^;\n]*\bproofBearing\b/u.test(localAi.slice(localAi.indexOf('function pasteParagraphArgumentSpanErrors'), localAi.indexOf('function pasteParagraphArgumentSpanErrors') + 3000)),
-        'the reporter does not recount proof-bearing paragraphs itself');
-    },
-  },
-];
+  },];
