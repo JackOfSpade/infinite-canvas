@@ -370,7 +370,7 @@ export function createScriptedWriter({ spec, kit, criteria, matchGap = false, fi
   let cyclesRaised = memory.findingsCyclesRaised || 0;
 
   async function respond({ stage, prompt }) {
-    const context = stage === 'blind-review' ? null : contextOfPrompt(prompt);
+    const context = stage === 'blind-review' || stage === 'cover-letter' ? null : contextOfPrompt(prompt);
     switch (stage) {
       case 'requirements':
         return { storeDigest: context.authorityStore.digest, complete: true, identity: context.trustedIdentity, evidence: requirementEvidence, requirements: requirementRecords,

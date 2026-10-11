@@ -608,8 +608,13 @@ export default [
         const controlLast = (await control.logEvents()).at(-1);
         assert(controlLast.type === 'paste-accepted' && !('hostCanonicalizations' in controlLast) && !('originalResponseSha256' in controlLast), `[${career.id}] a response that needed no rewrite logs none`);
         const [nextA, nextB] = [await flow.current(), await control.current()];
-        const [resumeA, resumeB] = [flow.contextOf(nextA).resume, control.contextOf(nextB).resume];
-        assert(J(resumeA) === J(resumeB), `[${career.id}] the next stage reads the same résumé in both jobs`);
+        const finishedResume = handoff => {
+          const marker = '\n\nFinished résumé:\n';
+          const index = handoff.prompt.lastIndexOf(marker);
+          assert(index >= 0, `[${career.id}] the cover-letter handoff carries the finished résumé`);
+          return handoff.prompt.slice(index + marker.length);
+        };
+        assert(finishedResume(nextA) === finishedResume(nextB), `[${career.id}] the next stage reads the same résumé in both jobs`);
         assert(nextA.baseHashes.resume && nextA.baseHashes.resume === nextB.baseHashes.resume, `[${career.id}] the document hash every later stage binds is the hash of the canonical text (${nextA.baseHashes.resume} vs ${nextB.baseHashes.resume})`);
         assert(J((await control.manifest()).paste.resume) === J(stored), `[${career.id}] stored résumés are identical`);
       } finally {

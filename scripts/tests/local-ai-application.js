@@ -1728,6 +1728,7 @@ export default [
       const buildFixture = ({
         linked = true,
         projectId = 'project-linked',
+        projectName = 'Reconciliation workflow',
         sameAchievementId = 'achievement-same',
         distinctAchievementId = 'achievement-distinct',
         projectDescription = 'Built adaptive account reconciliation workflow with exception controls.',
@@ -1744,7 +1745,7 @@ export default [
               { id: sameAchievementId, roleId: 'role-linked', claim: sameClaim },
               { id: distinctAchievementId, roleId: 'role-linked', claim: distinctClaim },
             ],
-            projects: [{ id: projectId, name: 'Reconciliation workflow', description: projectDescription, ...(linked ? { roleId: 'role-linked' } : {}), technologies: [], technologyReferences: [], metrics: [] }],
+            projects: [{ id: projectId, name: projectName, description: projectDescription, ...(linked ? { roleId: 'role-linked' } : {}), technologies: [], technologyReferences: [], metrics: [] }],
             skills: [], education: [], certifications: [], otherEvidence: [],
           },
         };
@@ -1799,6 +1800,32 @@ export default [
       };
       const linked = buildFixture({ linked: true }); const unlinked = buildFixture({ linked: false });
       const highOverlap = await runCase({ label: 'linked-overlap', rows: [{ requirement: 'reconciliation workflow', candidateEvidence: [linked.projectDescription, linked.same] }], expectedProject: false, expectedNullObligation: true });
+      const nearDuplicateDomains = [
+        { label: 'orchard', name: 'Harvest route board', requirement: 'harvest routing',
+          project: 'Designed orchard route board with harvest crate scans and driver arrival alerts during peak harvest.',
+          role: 'Designed orchard route board with harvest crate scans and driver arrival alerts.',
+          other: 'Negotiated refrigerated storage contracts for the autumn harvest.' },
+        { label: 'museum', name: 'Conservation ledger', requirement: 'conservation records',
+          project: 'Built conservation ledger tracking humidity readings and artifact transfer approvals during gallery moves.',
+          role: 'Built conservation ledger tracking humidity readings and artifact transfer approvals.',
+          other: 'Catalogued pigments for an independent exhibition restoration.' },
+        { label: 'coastal', name: 'Tidal survey dashboard', requirement: 'coastal surveys',
+          project: 'Created coastal survey dashboard mapping tidal samples and vessel position updates during monthly surveys.',
+          role: 'Created coastal survey dashboard mapping tidal samples and vessel position updates.',
+          other: 'Repaired autonomous buoy casings during winter field deployments.' },
+      ];
+      for (const domain of nearDuplicateDomains) {
+        const fixture = buildFixture({ projectId: `project-${domain.label}`, projectName: domain.name,
+          projectDescription: domain.project, sameClaim: domain.role });
+        await runCase({ label: `${domain.label}-duplicate`, fixture,
+          rows: [{ requirement: domain.requirement, candidateEvidence: [fixture.projectDescription, fixture.same] }],
+          expectedProject: false, expectedNullObligation: true });
+        const mutation = buildFixture({ projectId: `project-${domain.label}`, projectName: domain.name,
+          projectDescription: domain.project, sameClaim: domain.other });
+        await runCase({ label: `${domain.label}-mutated-role`, fixture: mutation,
+          rows: [{ requirement: domain.requirement, candidateEvidence: [mutation.projectDescription, mutation.same] }],
+          expectedProject: true });
+      }
       const lowOverlap = await runCase({ label: 'linked-low-overlap', rows: [{ requirement: 'reconciliation workflow', candidateEvidence: [linked.projectDescription, linked.distinct] }], expectedProject: true });
       const soleProof = await runCase({ label: 'linked-sole-proof', rows: [{ requirement: 'reconciliation workflow', candidateEvidence: [linked.projectDescription] }], expectedProject: true });
       const mixedContribution = await runCase({ label: 'linked-mixed', rows: [
@@ -2207,6 +2234,14 @@ export default [
         });
         const assertPostMatchDraftContext = (writerHandoff, expectedStage) => {
           assert(writerHandoff.stage === expectedStage, `expected the persisted current-authority ${expectedStage} writer handoff`);
+          if (expectedStage === 'cover-letter') {
+            assert(writerHandoff.prompt.includes('Posting requirements and cited listing evidence:')
+              && writerHandoff.prompt.includes('Full cited career quotes:')
+              && writerHandoff.prompt.includes('Finished résumé:')
+              && writerHandoff.prompt.includes(achievementId),
+            'the letter writer receives the selected requirement, complete cited career quote and accepted résumé');
+            return;
+          }
           const writerContext = contextOf(writerHandoff);
           const plan = writerContext.evidencePlan;
           assert(writerContext.draftEvidenceView?.complete === true
@@ -2286,6 +2321,15 @@ export default [
         assert(accepted.accepted && accepted.handoff?.stage === 'cover-letter', `persisted draft-context must accept the grounded résumé before letter drafting (${JSON.stringify({ accepted: accepted.accepted, stage: accepted.handoff?.stage || null, errors: accepted.validationErrors || [] })})`);
         handoff = await current();
         assertPostMatchDraftContext(handoff, 'cover-letter');
+        assert(handoff.prompt.includes('Full cited career quotes:')
+          && handoff.prompt.includes(achievementId)
+          && handoff.prompt.includes('Finished résumé:')
+          && handoff.prompt.includes(`EXPERIENCE\n${original.resume.roles[0].title} - ${original.resume.roles[0].company}`)
+          && handoff.prompt.includes(`  - ${original.resume.roles[0].bullets[0].text}`),
+        'the current-authority letter writer must see the complete selected career quote and finished résumé prose');
+        assert(!handoff.prompt.includes('Host-required project:')
+          && !handoff.prompt.includes('Letter writing guidance:'),
+        'the letter prompt must omit the project workaround and unproven editorial rules');
         accepted = await submit(handoff, { coverLetter: original.coverLetter });
         async function completeDispositions() {
           let dispositionPages = 0;
