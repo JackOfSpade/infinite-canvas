@@ -82,14 +82,27 @@ async function completeRequirementsDiscovery({ fixture, queued, epoch = 0 }) {
     assert(requirementUnitIndex >= 0, `synthetic requirement ${index + 1} appears in the current immutable source window`);
     const item = { id: `${idPrefix}e-${index + 1}`, sourceId: 'job-listing', quote: fixture.requirements[index], requirement: `Synthetic capability ${String(index + 1).padStart(2, '0')}`, priority: 'high' };
     const requirement = { id: `${idPrefix}r-${index + 1}`, text: item.requirement, priority: 'high', evidenceIds: [item.id] };
-    evidence.push(item); requirements.push(requirement);
+    const pageEvidence = [item];
+    const pageRequirements = [requirement];
+    if (epoch > 0) {
+      for (const binding of source.bindingRows || []) {
+        if (binding.disposition !== 'requirement' || source.units.find(unit => unit.id === binding.unitId)?.text === item.quote) continue;
+        const unit = source.units.find(candidate => candidate.id === binding.unitId);
+        if (!unit || source.units.indexOf(unit) > requirementUnitIndex) continue;
+        const extra = { id: `${idPrefix}e-bound-${binding.unitId}`, sourceId: 'job-listing', quote: unit.text,
+          requirement: `Synthetic adjudicated capability ${binding.unitId}`, priority: 'high' };
+        pageEvidence.push(extra);
+        pageRequirements.push({ id: `${idPrefix}r-bound-${binding.unitId}`, text: extra.requirement, priority: 'high', evidenceIds: [extra.id] });
+      }
+    }
+    evidence.push(...pageEvidence); requirements.push(...pageRequirements);
     const hasCoverageOnlyAfter = fixture.coverageOnlyAfterEveryRequirement || fixture.coverageOnlyAfterRequirementIndex === index;
     const accepted = await submitLocalApplicationHandoff({
       jobId: queued.id, canvasFilePath: fixture.canvasFilePath, handoffCode: handoff.handoffCode,
       response: reply(handoff, {
         storeDigest: context.authorityStore.digest, complete: index === fixture.requirements.length - 1 && !fixture.trailingCoverageOnlyUnit && !hasCoverageOnlyAfter,
-        identity: context.trustedIdentity, evidence: [item], requirements: [requirement],
-        ...coverageFor(context, [item], [requirement], index === fixture.requirements.length - 1 && !fixture.trailingCoverageOnlyUnit && !hasCoverageOnlyAfter
+        identity: context.trustedIdentity, evidence: pageEvidence, requirements: pageRequirements,
+        ...coverageFor(context, pageEvidence, pageRequirements, index === fixture.requirements.length - 1 && !fixture.trailingCoverageOnlyUnit && !hasCoverageOnlyAfter
           ? source.unitStart + source.units.length
           : source.unitStart + requirementUnitIndex + 1),
       }),
@@ -849,6 +862,43 @@ export default [{
         && receipt.streams['requirements-epochs'].count === 1
         && receipt.streams['requirements-adjudications'].count === 1,
       'the durable epoch pointer and adjudication receipt select a new stream without rewriting the old immutable requirements stream');
+    } finally {
+      await fs.promises.rm(fixture.root, { recursive: true, force: true });
+    }
+  },
+}, {
+  name: 'current authority requirements adjudication: repeated dispute stops with bound source unit named',
+  run: async () => {
+    const fixture = await makeCurrentAuthorityParallelMatchFixture();
+    try {
+      const queued = await queueLocalApplicationJob({ transport: 'paste', canvasFilePath: fixture.canvasFilePath, careerSnapshotId: fixture.snapshotId, job: fixture.job });
+      const epochZero = await completeRequirementsDiscovery({ fixture, queued });
+      const firstAudit = semanticAuditFor(contextOf(epochZero.handoff), epochZero.evidence, epochZero.requirements);
+      firstAudit.rows[0].disposition = firstAudit.rows[0].disposition === 'requirement' ? 'not-a-requirement' : 'requirement';
+      const opened = await submitLocalApplicationHandoff({ jobId: queued.id, canvasFilePath: fixture.canvasFilePath,
+        handoffCode: epochZero.handoff.handoffCode, response: epochZero.reply(epochZero.handoff, firstAudit) });
+      assert(opened.accepted && opened.handoff?.stage === 'requirements-adjudication', 'first independent dispute reaches adjudication');
+      const adjudicationContext = contextOf(opened.handoff);
+      const reset = await submitLocalApplicationHandoff({ jobId: queued.id, canvasFilePath: fixture.canvasFilePath,
+        handoffCode: opened.handoff.handoffCode, response: epochZero.reply(opened.handoff, {
+          storeDigest: adjudicationContext.storeDigest, caseDigest: adjudicationContext.caseDigest,
+          rows: adjudicationContext.cases.map(unit => ({ unitId: unit.unitId,
+            disposition: firstAudit.rows.find(row => row.unitId === unit.unitId).disposition })),
+        }) });
+      assert(reset.accepted && reset.handoff?.stage === 'requirements', 'audit-sided adjudication opens one new epoch');
+      const epochOne = await completeRequirementsDiscovery({ fixture, queued, epoch: 1 });
+      const secondAudit = semanticAuditFor(contextOf(epochOne.handoff), epochOne.evidence, epochOne.requirements);
+      const disputedId = firstAudit.rows[0].unitId;
+      const repeated = secondAudit.rows.find(row => row.unitId === disputedId);
+      assert(!!repeated, 'the prior disputed unit is present in the second independent audit');
+      repeated.disposition = repeated.disposition === 'requirement' ? 'not-a-requirement' : 'requirement';
+      const stopped = await submitLocalApplicationHandoff({ jobId: queued.id, canvasFilePath: fixture.canvasFilePath,
+        handoffCode: epochOne.handoff.handoffCode, response: epochOne.reply(epochOne.handoff, secondAudit) });
+      const status = await localApplicationStatus(queued.id, fixture.canvasFilePath);
+      assert(stopped.accepted && !stopped.handoff && status.status === 'failed'
+        && status.terminalKind === 'requirements-audit-human-stop'
+        && status.disputedUnitIds.includes(disputedId) && status.message.includes(disputedId),
+      'a repeated independent dispute becomes a typed human-stop naming the bound unit');
     } finally {
       await fs.promises.rm(fixture.root, { recursive: true, force: true });
     }

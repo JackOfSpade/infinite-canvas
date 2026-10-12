@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import { createHash } from 'node:crypto';
 import os from 'node:os';
 import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { assert } from './testHelpers.js';
 import { createFakeClock } from './fixtures/handoff-bridge/fakeClock.js';
 import { createHandoffEngine } from '../../electron/ipc/handoffBridge/engine.js';
@@ -20,6 +21,7 @@ import { createPushSource } from '../../electron/ipc/handoffBridge/sources/push.
 import { APPLICATION_QUEUE_STAGES, reduceBridgeQueue } from '../../electron/ipc/handoffBridge/telemetry.js';
 import { SURFACE_PIN, TOOLS_LIST, surfaceHash } from '../../electron/ipc/handoffBridge/tools.js';
 import { recommendWorkerPool } from '../../electron/ipc/handoffBridge/workerPool.js';
+import { writeVerifyStageKey } from '../../electron/ipc/applicationWriteVerify.js';
 
 const JOB_A = '11111111-1111-4111-8111-111111111111';
 const JOB_B = '22222222-2222-4222-8222-222222222222';
@@ -73,7 +75,131 @@ async function served(options = {}) {
 
 function cleanDirectory() { return fs.mkdtempSync(path.join(os.tmpdir(), 'ic-handoff-engine-')); }
 
+async function assertV2FreshChatTrace(steps, createEngine = createHandoffEngine) {
+  const state = { candidates: Array.from({ length: 3 }, (_, index) => ({ id: `candidate-${index + 1}` })), ordinal: 0,
+    ranking: ['candidate-2', 'candidate-3', 'candidate-1'], factIndex: 0, elimination: { round: 0 } };
+  const keyFor = ({ stage, candidate }) => {
+    if (candidate) state.ordinal = candidate - 1;
+    if (stage.startsWith('fact-')) state.factIndex = state.ranking.indexOf(`candidate-${candidate}`);
+    return writeVerifyStageKey(state, stage, JOB_A);
+  };
+  const expected = steps.map(step => ({ ...step, key: keyFor(step) }));
+  const roles = new Map();
+  for (const step of expected) {
+    const role = step.stage === 'verify-correction' || step.stage === 'fit-correction' ? 'convert' : step.stage;
+    const owner = `${step.candidate || 'judge'}:${role}`;
+    if (roles.has(step.key)) assert(roles.get(step.key) === owner, `fresh key ${step.key} crossed role owners`);
+    else roles.set(step.key, owner);
+  }
+  let submitted = 0;
+  const make = index => ({ ...handoff({ code: `V2-TRACE-${index}`, stage: expected[index].stage }),
+    freshContextRequired: true, freshContextKey: expected[index].key });
+  const engine = createEngine({ source: source({
+    read: async () => ({ kind: 'open', handoff: make(0) }),
+    submit: async () => {
+      const current = expected[submitted++];
+      if (submitted >= expected.length) return { kind: 'accepted', completed: true };
+      return { kind: current.outcome || 'accepted', completed: false, handoff: make(submitted),
+        validationErrors: current.outcome === 'rejected' ? ['Synthetic correction'] : undefined };
+    },
+  }).api, holdMs: 0 });
+  try {
+    await engine.release({ jobs: [{ jobId: JOB_A, canvasFilePath: PATH_A }] });
+    const pool = await engine.startWorkerPool({ linkId: LINK, requestedWorkers: 1 });
+    let starter = engine.copyWorkerStarter({ linkId: LINK, generation: pool.generation, workerOrdinal: 1 });
+    const observed = [];
+    for (let index = 0; index < expected.length; index++) {
+      const current = await engine.get({ session: starter.sessionCode, linkId: LINK });
+      assert(current.status === 'served' && current.stage === expected[index].stage
+        && current.handoffCode === `V2-TRACE-${index}`, `v2 trace ${index}: wrong handoff ${current.status}/${current.stage}`);
+      observed.push({ stage: current.stage, key: expected[index].key, session: starter.sessionCode });
+      const result = await engine.submit({ session: starter.sessionCode, linkId: LINK,
+        handoffCode: current.handoffCode, response: answer({ code: current.handoffCode, stage: current.stage }) });
+      if (index + 1 === expected.length) { assert(result.status === 'accepted', 'terminal trace must accept'); break; }
+      const changed = expected[index].key !== expected[index + 1].key;
+      if (changed) {
+        assert((result.status === 'accepted' && result.next?.status === 'session_full') || result.status === 'session_full',
+          `v2 trace ${index}: changed key after ${expected[index].outcome || 'accept'} must close prior chat`);
+        assert((await engine.get({ session: starter.sessionCode, linkId: LINK })).status === 'session_full',
+          `v2 trace ${index}: old chat reclaimed a new role`);
+        const previous = starter.sessionCode;
+        starter = engine.restartWorker({ linkId: LINK, generation: pool.generation, workerOrdinal: 1 });
+        assert(starter.copied && starter.sessionCode !== previous, `v2 trace ${index}: replacement did not rotate`);
+      } else {
+        assert(result.status === (expected[index].outcome || 'accepted'), `v2 trace ${index}: correction changed chat`);
+      }
+    }
+    for (let a = 0; a < observed.length; a++) for (let b = a + 1; b < observed.length; b++) {
+      if (observed[a].key !== observed[b].key) assert(observed[a].session !== observed[b].session,
+        `v2 trace ${a}/${b}: different roles shared a chat`);
+      else assert(observed[a].session === observed[b].session, `v2 trace ${a}/${b}: correction left convert chat`);
+    }
+    return observed;
+  } finally { await engine.close(); }
+}
+
 const tests = [
+  {
+    name: 'handoff bridge: v2 fresh-chat trace covers candidate-1 and candidate-2 drops, judge, fallback and recheck',
+    run: async () => {
+      const drop = candidate => [
+        { stage: 'write', candidate }, { stage: 'convert', candidate, outcome: 'rejected' },
+        { stage: 'verify-correction', candidate, outcome: 'rejected' },
+        { stage: 'verify-correction', candidate, outcome: 'rejected' },
+        { stage: 'verify-correction', candidate, outcome: 'rejected' },
+      ];
+      const first = await assertV2FreshChatTrace([
+        ...drop(1), { stage: 'write', candidate: 2 },
+        { stage: 'convert', candidate: 2 }, { stage: 'write', candidate: 3 },
+        { stage: 'convert', candidate: 3 }, { stage: 'pick' },
+        { stage: 'fact-check', candidate: 2 }, { stage: 'fact-correction', candidate: 2 },
+        { stage: 'fact-recheck', candidate: 2 }, { stage: 'fact-check', candidate: 3 },
+      ]);
+      assert(first[5].session !== first[4].session, 'candidate 1 drop must restart before candidate 2 write');
+      const second = await assertV2FreshChatTrace([
+        { stage: 'write', candidate: 1 }, { stage: 'convert', candidate: 1 },
+        ...drop(2), { stage: 'write', candidate: 3 }, { stage: 'convert', candidate: 3 },
+        { stage: 'pick' }, { stage: 'fact-check', candidate: 1 },
+        { stage: 'fact-correction', candidate: 1 }, { stage: 'fact-recheck', candidate: 1 },
+        { stage: 'fact-check', candidate: 3 },
+      ]);
+      assert(second[7].session !== second[6].session, 'candidate 2 drop must restart before candidate 3 write');
+      if (process.env.V2_FRESH_TRACE_FILE) fs.writeFileSync(process.env.V2_FRESH_TRACE_FILE,
+        JSON.stringify({ candidate1Drop: first.map(({ stage, key }, index) => ({ stage, key,
+          newChat: index === 0 || first[index - 1].session !== first[index].session })),
+        candidate2Drop: second.map(({ stage, key }, index) => ({ stage, key,
+          newChat: index === 0 || second[index - 1].session !== second[index].session })) }, null, 2));
+    },
+  },
+  {
+    name: 'handoff bridge: v2 drop-path sabotage fails when rejected-submit fresh boundary is removed',
+    run: async () => {
+      const enginePath = path.resolve('electron/ipc/handoffBridge/engine.js');
+      const original = fs.readFileSync(enginePath, 'utf8');
+      const marker = "if (result.kind === 'rejected') {\n      const staged = await mutateLanes";
+      const start = original.indexOf(marker);
+      assert(start >= 0, 'rejected submit branch exists for sabotage');
+      const before = original.slice(0, start);
+      const after = original.slice(start);
+      const needle = 'freshContextBoundary = requiresFreshContextBoundary(result.handoff, {';
+      assert(after.includes(needle), 'fresh boundary exists in rejected submit branch');
+      let mutant = before + after.replace(needle, 'freshContextBoundary = false && requiresFreshContextBoundary(result.handoff, {');
+      mutant = mutant.replace(/from '(\.{1,2}\/[^']+)'/g, (_, relative) =>
+        `from '${new URL(relative, pathToFileURL(enginePath)).href}'`);
+      const mutantModule = await import(`data:text/javascript;base64,${Buffer.from(mutant).toString('base64')}`);
+      let sabotageFailed = false;
+      try { await assertV2FreshChatTrace([
+        { stage: 'write', candidate: 1 }, { stage: 'convert', candidate: 1, outcome: 'rejected' },
+        { stage: 'verify-correction', candidate: 1, outcome: 'rejected' },
+        { stage: 'verify-correction', candidate: 1, outcome: 'rejected' },
+        { stage: 'verify-correction', candidate: 1, outcome: 'rejected' },
+        { stage: 'write', candidate: 2 },
+      ], mutantModule.createHandoffEngine); } catch (error) {
+        sabotageFailed = /must close prior chat/.test(String(error?.message));
+      }
+      assert(sabotageFailed, 'removing rejected-submit fresh boundary must fail the full trace');
+    },
+  },
   {
     name: 'handoff bridge: an accepted fresh-context successor excludes only its serving worker and admits a sibling immediately',
     run: async () => {

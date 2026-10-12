@@ -218,6 +218,8 @@ export default [
       assert(mapApplicationStatus({ status: 'failed', folder: '/safe', stage: 'requirements-audit-disagreement', message: 'Audit disagreed.' }).reason === 'job_broken', 'the other typed terminal maps as before');
       assert(mapApplicationStatus({ ...stop, terminalKind: 'requirements-audit-disagreement' }).reason === 'job_broken' && mapApplicationStatus({ ...stop, terminalKind: 'anything-else' }).reason === 'job_broken',
         'another marker value is not the stop');
+      assert(mapApplicationStatus({ ...stop, terminalKind: 'requirements-audit-human-stop' }).reason === 'review_stop',
+        'the bounded V3 requirements audit stop has its own typed human-stop marker');
       assert(mapApplicationStatus({ ...stop, folder: null }).phase === 'gone', 'a removed folder is gone whatever it was');
       assert(mapApplicationStatus({ status: 'queued', terminalKind: 'blind-review-human-stop' }).reason === undefined && mapApplicationStatus({ status: 'saved', terminalKind: 'blind-review-human-stop' }).phase === 'done',
         'the marker means nothing on a job that did not fail');

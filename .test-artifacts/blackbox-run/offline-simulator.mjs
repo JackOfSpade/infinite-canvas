@@ -594,8 +594,11 @@ async function initFromSavedCard({ userData, canvasRoot, card, options }) {
   if (Number.isInteger(parsedSource.schemaVersion)) fixture.schemaVersion = parsedSource.schemaVersion;
   writeJsonAtomic(canvasFilePath, fixture);
   const job = harness.projectSavedJobCardForAcceptanceHarness(node.data);
-  const queued = await prod.la.queueLocalApplicationJob({
+  const queueApplication = options.legacy === true
+    ? prod.la.__queueLegacyLocalApplicationFixtureForTests : prod.la.queueLocalApplicationJob;
+  const queued = await queueApplication({
     nodeId: node.id, canvasFilePath, transport: 'paste', careerSnapshotId: snapshotId, job,
+    ...(options['application-protocol'] === 'v2' ? { applicationProtocol: 'write-then-verify.v2' } : {}),
     additionalNotes: String(node.data.additionalNotes || ''), reasoning: node.data.reasoning, matchScore: node.data.matchScore,
   });
   node.data.careerSnapshotId = snapshotId;
@@ -658,7 +661,11 @@ async function initSynthetic({ userData, canvasRoot, card, options }) {
   const canvasFilePath = path.join(canvasRoot, 'canvas.json');
   fs.writeFileSync(canvasFilePath, '{"version":1}', { mode: 0o600, flag: 'wx' });
   const { snapshotId, texts } = await writeSyntheticSnapshot({ spec, snapshotRoot: snapshots.careerSnapshotStorageRoot(userData) });
-  const queued = await prod.la.queueLocalApplicationJob({ transport: 'paste', canvasFilePath, careerSnapshotId: snapshotId, job: { title: spec.title, company: spec.employer, snippet: texts.listing } });
+  const queueApplication = options.legacy === true
+    ? prod.la.__queueLegacyLocalApplicationFixtureForTests : prod.la.queueLocalApplicationJob;
+  const queued = await queueApplication({ transport: 'paste', canvasFilePath, careerSnapshotId: snapshotId,
+    ...(options['application-protocol'] === 'v2' ? { applicationProtocol: 'write-then-verify.v2' } : {}),
+    job: { title: spec.title, company: spec.employer, snippet: texts.listing } });
   return {
     queued, canvasFilePath, snapshotId, job: { company: spec.employer, title: spec.title, listingChars: texts.listing.length }, source: null,
     synthetic: { key: spec.key, matchGap: options['match-gap'] === true },
@@ -666,6 +673,9 @@ async function initSynthetic({ userData, canvasRoot, card, options }) {
 }
 
 export async function initRun(options) {
+  if (options['application-protocol'] != null && !['legacy', 'v2'].includes(options['application-protocol'])) {
+    throw new SimError('--application-protocol must be legacy or v2.');
+  }
   const card = parseCardArg(options.card);
   const dir = assertSafeRunDir(options.dir, options);
   const guardRoots = protectedRootsFor(options);
@@ -1187,7 +1197,7 @@ function usage() {
   node --import ./scripts/test-stubs/register.mjs .test-artifacts/blackbox-run/offline-simulator.mjs <command> [options]
 
   init     --card affirm|anthropic|node:<id>|synthetic[:key] --dir DIR [--snapshot-id ID] [--match-gap]
-           [--real-canvas FILE] [--real-user-data DIR] [--json]   (sources are read-only; DIR must be empty)
+           [--real-canvas FILE] [--real-user-data DIR] [--application-protocol legacy|v2] [--json]   (sources are read-only; DIR must be empty)
   next     --dir DIR [--auto-ack] [--reread] [--json]   print the next handoff (also written to DIR/handoff-<n>.txt/.json)
   submit   --dir DIR --file response.json [--code CODE] [--auto-ack] [--json]
   status   --dir DIR [--json]
@@ -1306,7 +1316,7 @@ export async function autoplay(ctx, { maxHandoffs = 200, findingsCycles = 0, all
 // CLI.
 // ---------------------------------------------------------------------------
 const FLAGS = {
-  init: { values: ['card', 'dir', 'snapshot-id', 'real-canvas', 'real-user-data'], booleans: ['match-gap', 'json'] },
+  init: { values: ['card', 'dir', 'snapshot-id', 'real-canvas', 'real-user-data', 'application-protocol'], booleans: ['match-gap', 'legacy', 'json'] },
   next: { values: ['dir'], booleans: ['auto-ack', 'reread', 'json'] },
   submit: { values: ['dir', 'file', 'code'], booleans: ['auto-ack', 'json'] },
   status: { values: ['dir'], booleans: ['json'] },

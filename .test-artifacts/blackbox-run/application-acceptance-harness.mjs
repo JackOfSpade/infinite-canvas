@@ -1739,6 +1739,7 @@ export async function pinAndQueue({ canvas, userData, destination, cardName, req
   }
   const queued = await queueLocalApplicationJob({
     nodeId: node.id, canvasFilePath: canvas, transport: 'paste', careerSnapshotId: id,
+    applicationProtocol: 'write-then-verify.v2',
     job: queuedJobPayload, additionalNotes: String(node.data.additionalNotes || ''),
     reasoning: node.data.reasoning, matchScore: node.data.matchScore,
     __acceptanceHarnessReservationCapability: jobIdReservation.capability,

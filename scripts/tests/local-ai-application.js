@@ -5,7 +5,7 @@ import { getRecentLogs } from '../../electron/logger.js';
 import { acceptApplicationBlindReviewCursorResponse, applicationBlindReviewScopeCount, applicationBlindReviewWorkAt, assert, assertCandidateDashPunctuation, assertSourceQuoteLinksFinalText, pasteAttributionScopeErrors, sanitizeQualityReview, buildCoverLetterDocument, buildLocalGenerationAuditArtifact, buildResumeDocument, careerDataRoleLocation, createApplicationBlindReviewPlan, createApplicationBlindReviewSourceAccessor, sanitizeDocumentMainHtml, checkAnchorRelevance, checkDirectWelcomeClosing, checkPriorEmployerOpening, checkResumeBulletLength, checkResumeRoleBulletBudget, evaluateResumeProseChecks, extractResumeEvidence, inspectApplicationExport, renderStructuredApplicationResume, resumeProjectProvenanceFailures, resumeRoleBlockSample, resumeRoleLocationFailures, RESUME_ROLE_BULLET_CEILING, ROLE_BULLET_EVIDENCE_EXCLUSIVITY_RULE, STRUCTURED_RESUME_SCHEMA_VERSION, validateStructuredApplicationResume, webFontFacesReadyExpression, canRegenerateLocalApplication, canSaveImportedLocalApplication, createAuthorityLedgerStore, createStoreAuthorityWorkflowRoot, createStoreMatchReceipt, discardLocalApplicationJob, discoverLocalApplicationJobs, ensureDirectoryWithinRoot, fs, getApplicationTelemetry, getLocalApplicationHandoff, ipcMain, isPendingApplicationWorkspaceSaveInFlight, JSDOM, openAuthorityLedgerStore, os, path, PDFLib, LOCAL_AI_APPLICATION_VERSION, LOCAL_AI_CARD_POLL_IDLE_STATUSES, LOCAL_AI_FALLBACK_IDLE_STATUSES, LOCAL_AI_JOB_INTEGRITY_ERROR_CODE, brokenLocalAiJobDriveState, jobIntegrityFailureMessage, collectNodesDeep, deepUpdateNode, importLocalApplicationJob, isJobCardMounted, localApplicationStatus, projectEvidenceCoverageGaps, projectedCareerProjectEvidenceBlocks, queueLocalApplicationJob, queuedLocalApplicationSettlement, readRegisteredApplicationArtifact, registerJobApplicationHandlers, registerLocalAiApplicationHandlers, registerMountedJobCard, registerPendingApplicationWorkspace, replacedLocalApplicationForCleanup, resolveLocalOutputBundleRoot, selectFallbackLocalAiJobs, selectOrphanedLocalAiJobs, storeRequirementCatalogPairDescriptor, submitLocalApplicationHandoff, unregisterMountedJobCard, validateLocalApplicationResult, withLocalAiJobPruneClaim, withUnregisteredApplicationWorkspacePruneClaim, __setAuthorityLedgerStoreFaultHookForTests } from '../test-dependencies.js';
 import { localAiSkillsCoverageTelemetry, subscribeLocalApplicationDiscards, APPLICATION_QUALITY_CHECKLIST_VERSION, APPLICATION_QUALITY_CRITERIA, COVER_LETTER_SECONDARY_NARRATIVE_ROLES, LOCAL_AI_GENERATION_AUDIT_VERSION, MAX_CORRECTION_STAGE_PROMPT_SHARE, MAX_SOURCE_GROUNDING_QUOTE_CHARS, MIN_SHARED_SOURCE_TERMS, __advanceBlindReviewRollingForTests, __assertAuthorityStateGraphForTests, __assertCurrentAuthorityDispositionProofCandidatesForTests, __authorityPasteContextEvidencePlanForTests, __authorityReviewConvergenceValidationForTests, __blindReviewDocumentProjectionForTests, __blindReviewRollingSeedForTests, __blindReviewUnresolvedFindingDigestForTests, __currentAuthorityDispositionProofMaterialForTests, __currentAuthorityDraftSelectionForTests, __currentAuthorityFinalResumeArtifactErrorsForTests, __currentAuthorityRolelessResumeRuleForTests, __relinkListingQuoteToExactSliceForTests, __selectedSourceRolesForTests, __snapshotCareerSkillEvidenceForTests, __validateStoredBlindReviewCoverageForTests, __localAiApplicationOutputTelemetryForTests, __localAiCoverLetterTelemetryForTests, BLIND_REVIEW_DOCUMENT_PROJECTION_MAX_BYTES_FOR_TESTS, DISPOSITION_PROOF_CANDIDATE_BYTES, MAX_DISPOSITION_PROOF_CANDIDATES_PER_DOCUMENT, MAX_DISPOSITION_PROOF_CANDIDATES_PER_REQUIREMENT, MAX_DISPOSITION_PROOF_MATERIAL_BYTES, __setAuthorityLedgerPersistenceFaultHookForTests, __setLegacyAuthorityLedgerAccessHookForTests, __setLocalAiRenderPdfForTests, _resetPasteCorrectionsForTests, _resetPasteRejectionStreakForTests, boundedRejectionError, localAiHandoffEvent, pasteCorrectionPrompt, pasteRejectionCheckIds, pasteRejectionChangeDocuments, pasteRejectionReason, stageLocalApplicationWorkspaceArtifacts } from '../../electron/ipc/localAiApplication.js';
 import { APPLICATION_PDF_MISMATCH_IS_DETERMINISTIC, APPLICATION_PDF_PAGINATION_GEOMETRY_REVISION, APPLICATION_PDF_RECONCILE_REVISION, APPLICATION_PDF_VARIANT_REVISION, checkResumeBulletOpeningVariety } from '../../electron/ipc/jobApplication.js';
-import { __assertCurrentAuthorityBlindRepairCompletionForTests, __blindReviewBoundedTailoringPagesForTests, __blindReviewFactEvidenceForTests, __currentAuthorityBlindRepairPageForTests, __reserveNextLocalApplicationJobIdForAcceptanceHarness, queueLocalApplicationJob as queueCurrentLocalApplicationJob } from '../../electron/ipc/localAiApplication.js';
+import { __assertCurrentAuthorityBlindRepairCompletionForTests, __blindReviewBoundedTailoringPagesForTests, __blindReviewFactEvidenceForTests, __currentAuthorityBlindRepairPageForTests, __reserveNextLocalApplicationJobIdForAcceptanceHarness, queueLocalApplicationJob as queueCurrentLocalApplicationJob, __queueLegacyLocalApplicationFixtureForTests } from '../../electron/ipc/localAiApplication.js';
 import { checkEndedRoleCurrentEmployment } from '../../electron/ipc/coverLetterChecks.js';
 import { inspectLocalAiHandoff, waitForLocalAiHandoff } from '../../local_ai/wait-for-handoff.mjs';
 import { _resetPasteHandoffDiagnostics, buildPasteHandoffDiagnosticsMarkdown, getPasteHandoffDiagnosticsSnapshot, recordPasteHandoffDiagnostic } from '../../electron/ipc/pasteHandoffDiagnostics.js';
@@ -1820,18 +1820,28 @@ export default [
         await runCase({ label: `${domain.label}-duplicate`, fixture,
           rows: [{ requirement: domain.requirement, candidateEvidence: [fixture.projectDescription, fixture.same] }],
           expectedProject: false, expectedNullObligation: true });
+        await runCase({ label: `${domain.label}-cross-requirement`, fixture,
+          rows: [
+            { requirement: domain.requirement, candidateEvidence: [fixture.projectDescription] },
+            { requirement: `${domain.requirement} controls`, candidateEvidence: [fixture.same] },
+          ], expectedProject: false, expectedNullObligation: true });
         const mutation = buildFixture({ projectId: `project-${domain.label}`, projectName: domain.name,
           projectDescription: domain.project, sameClaim: domain.other });
         await runCase({ label: `${domain.label}-mutated-role`, fixture: mutation,
           rows: [{ requirement: domain.requirement, candidateEvidence: [mutation.projectDescription, mutation.same] }],
           expectedProject: true });
+        await runCase({ label: `${domain.label}-cross-requirement-mutated`, fixture: mutation,
+          rows: [
+            { requirement: domain.requirement, candidateEvidence: [mutation.projectDescription] },
+            { requirement: `${domain.requirement} controls`, candidateEvidence: [mutation.same] },
+          ], expectedProject: true });
       }
       const lowOverlap = await runCase({ label: 'linked-low-overlap', rows: [{ requirement: 'reconciliation workflow', candidateEvidence: [linked.projectDescription, linked.distinct] }], expectedProject: true });
       const soleProof = await runCase({ label: 'linked-sole-proof', rows: [{ requirement: 'reconciliation workflow', candidateEvidence: [linked.projectDescription] }], expectedProject: true });
       const mixedContribution = await runCase({ label: 'linked-mixed', rows: [
         { requirement: 'reconciliation workflow', candidateEvidence: [linked.projectDescription, linked.same] },
         { requirement: 'incident response', candidateEvidence: [linked.projectName] },
-      ], expectedProject: true });
+      ], expectedProject: false, expectedNullObligation: true });
       const unlinkedOverlap = await runCase({ label: 'unlinked-overlap', linked: false, rows: [{ requirement: 'reconciliation workflow', candidateEvidence: [unlinked.projectDescription, unlinked.same] }], expectedProject: true });
       const sharedProjectionId = 'alpha-bravo-charl-delta-echoo-foxtt-gulff-hotel-india-julie-kiloo-limaa';
       const richerProject = buildFixture({
@@ -1849,8 +1859,9 @@ export default [
         rows: [{ requirement: 'delivery', candidateEvidence: [idLabelOnly.projectDescription, idLabelOnly.same] }], expectedProject: true });
       return {
         suppressedProjectIds: highOverlap.selectedProjectIds,
-        retainedProjectIds: [lowOverlap, soleProof, mixedContribution, unlinkedOverlap, richerProjectRetained, idLabelOnlyRetained]
+        retainedProjectIds: [lowOverlap, soleProof, unlinkedOverlap, richerProjectRetained, idLabelOnlyRetained]
           .map(selection => selection.selectedProjectIds),
+        duplicateProjectIds: [mixedContribution].map(selection => selection.selectedProjectIds),
       };
     },
   },
@@ -2936,7 +2947,7 @@ export default [
           && !/\bachievements\s*:/.test(queuePayload)
           && !/\bmineAllowed\s*:/.test(queuePayload),
         'JobCardNode refuses an unpinned card before IPC and sends only the immutable snapshot pin, never mutable career authority fields');
-        const queued = await queueCurrentLocalApplicationJob({
+        const queued = await __queueLegacyLocalApplicationFixtureForTests({
           transport: 'paste', canvasFilePath: project.canvasFilePath, careerSnapshotId: snapshotId,
           __acceptanceHarnessReservationCapability: reservation.capability,
           // These deliberately disagree with the approved snapshot. A pinned
@@ -2951,6 +2962,8 @@ export default [
           'a rejected malformed pin does not consume a pending acceptance-harness reservation before a valid current snapshot queues');
         const input = JSON.parse(await fs.promises.readFile(path.join(queued.folder, 'input.json'), 'utf8'));
         const queuedManifest = JSON.parse(await fs.promises.readFile(path.join(queued.folder, 'manifest.json'), 'utf8'));
+        assert(input.applicationProtocol === undefined, 'a default queued job must use the unchanged legacy application stages');
+        assert(queuedManifest.paste.writeVerify === undefined, 'a default job must not initialize the v2 pipeline');
         assert(input.careerSnapshotId === snapshotId
           && input.careerAuthority?.snapshotId === snapshotId
           && /^[a-f0-9]{64}$/u.test(input.careerAuthority?.snapshotDigest || '')

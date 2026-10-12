@@ -318,6 +318,25 @@ export default [
     },
   },
   {
+    name: 'target-company-binding: three domains keep past tools under this role and reject flipped future targets',
+    run: () => {
+      for (const [target, prior, tool] of [
+        ['Northstar Labs', 'Acme', 'Python APIs'],
+        ['Harbor Clinic', 'City Hospital', 'Epic Workflows'],
+        ['River Library', 'County Archive', 'MARC Records'],
+      ]) {
+        const bound = `For this role, I would bring my experience with ${tool} to your team.`;
+        const namedTarget = `I would bring my experience with ${tool} to ${target}'s team.`;
+        const flipped = `I would bring my experience for ${tool} to this role.`;
+        const priorTarget = `I would bring that experience to the team at ${prior}.`;
+        assert(checkTargetCompanyBinding([bound], target, [prior]).passed === true, bound);
+        assert(checkTargetCompanyBinding([namedTarget], target, [prior]).passed === true, namedTarget);
+        assert(checkTargetCompanyBinding([flipped], target, [prior]).passed === false, flipped);
+        assert(checkTargetCompanyBinding([priorTarget], target, [prior]).passed === false, priorTarget);
+      }
+    },
+  },
+  {
     name: 'dash range grammar: shared predicate accepts supported endpoints and rejects prose lookalikes',
     run: () => {
       const corpus = [

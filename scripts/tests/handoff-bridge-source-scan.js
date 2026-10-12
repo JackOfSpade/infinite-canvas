@@ -74,6 +74,7 @@ export const SOURCE_SCAN_ROWS = Object.freeze({
   'telemetry.js': { allow: ['./log.js', '../../../src/utils/handoffScheduler.js'] },
   'restartContext.js': { allow: [] },
   'sources/application.js': { allow: ['../../localAiApplication.js'] },
+  'sources/syntheticPreflight.js': { allow: ['node:crypto', './application.js'] },
   'sources/push.js': { allow: ['../../nonApiAi.js', '../../ipcUtils.js', '../constants.js'] },
   'controller.js': { allow: sibling('node:crypto') },
   'pairing.js': { allow: sibling('node:crypto') },
@@ -81,7 +82,7 @@ export const SOURCE_SCAN_ROWS = Object.freeze({
   'uiDialogs.js': { allow: sibling('electron') },
   'tray.js': { allow: sibling('electron') },
   'power.js': { allow: sibling('electron') },
-  'index.js': { allow: sibling('electron', 'node:fs', 'node:path', 'node:os', 'node:http', 'node:crypto', '../../../src/utils/handoffBridgeConfig.js', './sources/application.js', './sources/push.js', './tunnel/index.js', '../bugReport/helpers.js', '../nonApiAi.js') },
+  'index.js': { allow: sibling('electron', 'node:fs', 'node:path', 'node:os', 'node:http', 'node:crypto', '../../../src/utils/handoffBridgeConfig.js', './sources/application.js', './sources/syntheticPreflight.js', './sources/push.js', './tunnel/index.js', '../bugReport/helpers.js', '../nonApiAi.js') },
   'tunnel/constants.js': { allow: [] },
   'tunnel/validate.js': { allow: ['../../../../src/utils/handoffBridgeConfig.js', '../constants.js', './constants.js'] },
   'tunnel/config.js': { allow: ['./constants.js', './validate.js'] },
@@ -350,7 +351,7 @@ export default [
   {
     name: 'handoff bridge: source-scan: complete table skips absent planned modules and rejects a no-row module',
     run: () => {
-      assert(Object.keys(SOURCE_SCAN_ROWS).length === 50, 'every planned handoffBridge module needs exactly one row');
+      assert(Object.keys(SOURCE_SCAN_ROWS).length === 51, 'every planned handoffBridge module needs exactly one row');
       assert(scanHandoffBridgeSource().length === 0, 'the current subset and absent planned rows must conform');
       const root = makeScratchBridge();
       try {
@@ -483,6 +484,10 @@ export default [
       assert(index.includes('if (testMode) installPairingTestHook(candidate)')
         && index.includes('delete globalThis.__icHandoffBridgeTest')
         && index.includes('removePairingTestHook(current)'), 'the pairing hook is test-mode-only and removed when a candidate is hard-stopped/detached');
+      assert(index.includes('if (current.testMode === true && current.syntheticPreflight)')
+        && index.includes("registeredIpcMain?.handle?.('handoff-bridge:test-synthetic-preflight'")
+        && index.includes("registeredIpcMain?.removeHandler?.('handoff-bridge:test-synthetic-preflight')"),
+      'synthetic preflight IPC must exist only for the isolated test runtime and be removed on teardown');
       assert(SOURCE_SCAN_ROWS['tunnel/supervisor.js'].allow.includes('./redact.js') && supervisor.includes("from './redact.js'"), 'the reviewed bounded/redacted tunnel log relay must be allow-listed');
     },
   },

@@ -16,6 +16,20 @@ const surfaceHash = tools => crypto.createHash('sha256').update(JSON.stringify(t
 
 export default [
   {
+    name: 'handoff bridge: judge PNGs are actual image blocks with bounded transport',
+    async run() {
+      const picture = { candidateId: 'candidate-1', document: 'resume', mimeType: 'image/png', data: 'aGVsbG8=' };
+      const handler = createMcpHandler({ port: { get: async () => ({ status: 'served', prompt: 'Judge', pageImages: [picture],
+        pageImageOrder: [{ candidateId: picture.candidateId, document: picture.document }] }), submit: async () => ({}) } });
+      const response = await handler({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'get_handoff', arguments: { session: 'S' } } });
+      const blocks = response.body.result.content;
+      assert(blocks.length === 2 && blocks[1].type === 'image' && blocks[1].mimeType === 'image/png' && blocks[1].data === picture.data,
+        'the judge must receive image content rather than a file path or base64 inside text');
+      assert(JSON.parse(blocks[0].text).pageImageOrder[0].candidateId === 'candidate-1'
+        && !blocks[0].text.includes('aGVsbG8='), 'image order labels stay in text without duplicating data');
+    },
+  },
+  {
     name: 'handoff bridge: mcp: OAuth wire golden has the frozen v2s surface and hash',
     run: () => {
       const tools = JSON.parse(fs.readFileSync(toolsUrl, 'utf8'));

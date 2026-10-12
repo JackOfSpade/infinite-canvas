@@ -1046,7 +1046,7 @@ export default [
         const extraNeed = await runSelection({ ...layout,
           requirements: [{ text: spec.requirement, priority: 'highest' }, { text: 'another needed capability', priority: 'highest' }],
           matchFor: (index, ids) => (index === 0 ? [ids.projDescId, ids.sameId] : [ids.projDescId]) });
-        assert(decision(extraNeed) === 'pinned', `${profile}: a requirement only the project answers keeps it, wherever the pages fall`);
+        assert(decision(extraNeed) === 'suppressed', `${profile}: a duplicate source claim remains one résumé contribution even when matches assign it to another requirement`);
         const bothCovered = await runSelection({ ...layout,
           requirements: [{ text: spec.requirement, priority: 'highest' }, { text: 'another needed capability', priority: 'highest' }],
           matchFor: (_index, ids) => [ids.projDescId, ids.sameId] });

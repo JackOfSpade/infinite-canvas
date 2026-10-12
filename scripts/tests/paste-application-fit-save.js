@@ -1,5 +1,5 @@
 import { assert, fs, getLocalApplicationHandoff, importLocalApplicationJob, ipcMain, os, path, queueLocalApplicationJob, registerJobApplicationHandlers, registerPendingApplicationWorkspace, submitLocalApplicationHandoff } from '../test-dependencies.js';
-import { APPLICATION_QUALITY_CHECKLIST_VERSION, APPLICATION_QUALITY_CRITERIA, LOCAL_AI_GENERATION_AUDIT_VERSION, __setLocalAiRenderPdfForTests, localApplicationStatus } from '../../electron/ipc/localAiApplication.js';
+import { APPLICATION_QUALITY_CHECKLIST_VERSION, APPLICATION_QUALITY_CRITERIA, LOCAL_AI_GENERATION_AUDIT_VERSION, __measuredResumeFitFindingForTests, __setLocalAiRenderPdfForTests, localApplicationStatus } from '../../electron/ipc/localAiApplication.js';
 import { _resetPasteHandoffDiagnostics, getPasteHandoffDiagnosticsSnapshot } from '../../electron/ipc/pasteHandoffDiagnostics.js';
 import { PDFDocument } from '../test-dependencies.js';
 
@@ -1167,4 +1167,34 @@ const documentIdentityHashTests = [
   },
 ];
 
-export default [...measuredFitSaveTests, ...deltaReviewTests, ...deadlockRegressionTests, ...staleBaselineAndUnverifiableFieldTests, ...documentIdentityHashTests];
+const measuredFitGuidanceTests = [{
+  name: 'Measured fit finding gives bounded span feedback and preserves evidence on revision across unrelated synthetic careers',
+  run() {
+    const careers = [
+      { label: 'freight dispatcher', target: 1, pageCount: 2, contentHeightPx: 820, typeAreaHeightPx: 800 },
+      { label: 'clinic coordinator', target: 1, pageCount: 2, contentHeightPx: 880, typeAreaHeightPx: 800 },
+      { label: 'museum registrar', target: 2, pageCount: 3, contentHeightPx: 1760, typeAreaHeightPx: 800 },
+    ];
+    for (const career of careers) {
+      const args = { pageCount: career.pageCount, targetPageCount: career.target,
+        layout: { contentHeightPx: career.contentHeightPx, typeAreaHeightPx: career.typeAreaHeightPx }, revisionRound: 1 };
+      const finding = __measuredResumeFitFindingForTests(args);
+      assert(finding.id === 'host-resume-fit-1' && finding.document === 'resume' && finding.targetId === 'document',
+        `${career.label}: measured finding keeps the same hard-fit target`);
+      assert(finding.issue.includes(`Measured ${career.pageCount} pages; target is ${career.target}.`)
+        && finding.issue.includes('of the target') && finding.issue.includes('understate printed overflow'),
+      `${career.label}: the finding exposes the measured span with its uncertainty`);
+      assert(/shortens wording/u.test(finding.fix) && /distinct cited achievements/u.test(finding.fix)
+        && /rendered résumé must meet the measured page target/u.test(finding.fix),
+      `${career.label}: an evidence-preserving first edit never weakens the page-fit gate`);
+      const changed = __measuredResumeFitFindingForTests({ ...args, layout: { ...args.layout, contentHeightPx: career.contentHeightPx + 80 } });
+      assert(changed.issue !== finding.issue && changed.fix === finding.fix,
+        `${career.label}: mutating the measurement changes only the reported observation`);
+      const missing = __measuredResumeFitFindingForTests({ ...args, layout: null });
+      assert(!missing.issue.includes('type-area span') && missing.issue.includes(`Measured ${career.pageCount} pages`),
+        `${career.label}: an unavailable span never becomes a fabricated measurement`);
+    }
+  },
+}];
+
+export default [...measuredFitSaveTests, ...deltaReviewTests, ...deadlockRegressionTests, ...staleBaselineAndUnverifiableFieldTests, ...documentIdentityHashTests, ...measuredFitGuidanceTests];

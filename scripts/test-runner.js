@@ -23,6 +23,7 @@ import application_authority_ledger_store from './tests/application-authority-le
 import application_authority_match_queue from './tests/application-authority-match-queue.js';
 import current_authority_parallel_match from './tests/current-authority-parallel-match.js';
 import application_career_authority from './tests/application-career-authority.js';
+import application_write_verify from './tests/application-write-verify.js';
 import paste_application_assembly from './tests/paste-application-assembly.js';
 import paste_application_flow from './tests/paste-application-flow.js';
 import paste_application_fit_save from './tests/paste-application-fit-save.js';
@@ -174,6 +175,7 @@ const testGroups = [
   ['application-authority-match-queue.js', application_authority_match_queue],
   ['current-authority-parallel-match.js', current_authority_parallel_match],
   ['application-career-authority.js', application_career_authority],
+  ['application-write-verify.js', application_write_verify],
   ['paste-application-assembly.js', paste_application_assembly],
   ['paste-application-flow.js', paste_application_flow],
   ['paste-application-fit-save.js', paste_application_fit_save],

@@ -50,7 +50,11 @@ const execFileP = promisify(execFile);
 const REPO_ROOT = fileURLToPath(new URL('../..', import.meta.url));
 const REGISTER = fileURLToPath(new URL('../test-stubs/register.mjs', import.meta.url));
 const SIM = fileURLToPath(new URL('../../.test-artifacts/blackbox-run/offline-simulator.mjs', import.meta.url));
-const cliArgs = args => ['--import', REGISTER, SIM, ...args];
+// These fixtures prove the pre-snapshot legacy adapter through --legacy.
+// Ordinary simulator init uses the default legacy application protocol;
+// --application-protocol v2 is an explicit opt-in for current snapshots.
+const cliArgs = args => ['--import', REGISTER, SIM, ...args,
+  ...(args[0] === 'init' ? ['--legacy'] : [])];
 
 async function cli(args, { env = {} } = {}) {
   try {
@@ -168,6 +172,15 @@ export default [
           assert(resume.includes(spec.name) && resume.includes(spec.employer) && resume.includes(spec.tech), `${label}: the résumé text carries this career (${resume.slice(0, 200)})`);
           assert(letter.includes(spec.name) && letter.includes(`${spec.tech} service used by ${spec.users} users`), `${label}: the letter text carries this career's evidence`);
           for (const other of SYNTHETIC_SPECS.filter(item => item !== spec)) assert(!resume.includes(other.employer) && !letter.includes(other.employer), `${label}: no other career's employer leaks into the documents`);
+          const letterHandoff = fs.readdirSync(dir).filter(name => /^handoff-\d+\.json$/u.test(name))
+            .map(name => JSON.parse(fs.readFileSync(path.join(dir, name), 'utf8')))
+            .find(item => item.stage === 'cover-letter');
+          assert(letterHandoff?.prompt.includes('add a decision, constraint, or reason that the finished résumé does not already state')
+            && letterHandoff.prompt.includes('when the quote supports it'),
+          `${label}: the current letter writer sees the A/B-backed, source-bounded added-information guidance`);
+          assert(letterHandoff.prompt.includes(`${spec.tech} service used by ${spec.users} users`)
+            && SYNTHETIC_SPECS.filter(item => item !== spec).every(other => !letterHandoff.prompt.includes(`${other.tech} service used by ${other.users} users`)),
+          `${label}: flipping the frozen career changes the cited letter facts while the rule stays generic`);
           measured[spec.key] = { total: log.totals.submits, stages: stageCounts(log) };
           return log;
         };
