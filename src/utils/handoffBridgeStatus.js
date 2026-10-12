@@ -61,6 +61,7 @@ const ALARM_KINDS = Object.freeze(['unknown_key', 'unknown_handoff', 'refresh_re
 const APPLICATION_STAGES = Object.freeze([
   'evidence-plan', 'resume', 'cover-letter', 'requirement-disposition',
   'review', 'blind-review', 'blind-repair-context', 'refinement-judge',
+  'write', 'convert', 'verify-correction', 'fit-correction', 'pick', 'fact-check', 'fact-correction', 'fact-recheck', 'write-verify-human-stop',
 ]);
 const MAX_STRING = 200;
 const MAX_JOBS = 50;

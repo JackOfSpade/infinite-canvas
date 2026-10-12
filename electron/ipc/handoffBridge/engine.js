@@ -2997,14 +2997,21 @@ export function createHandoffEngine({
         lane.counters.rejections++;
         lane.counters.junkStreak = 0;
         lane.counters.errStreak = 0;
+        const priorStage = lane.current?.stage;
+        const predecessorWorker = worker;
+        const predecessorIncarnation = lane.servedWorkerContextIncarnation;
         const returned = normalizeCurrentHandoff(result.handoff, stamp);
+        let freshContextBoundary = false;
         if (returned) {
           if (!codeGuard.equal(returned.code, currentCode)) {
             tombstoneCode(tombstones, currentCode, 'rotated', { laneOrd: lane.ord, at: stamp }, CONSTANTS.TOMBSTONES_PER_ENGINE, codeGuard);
             codeIndex.delete(codeGuard.key(currentCode));
           }
           lane.current = returned;
-          adoptFreshContextKey(lane, result.handoff);
+          const { prior: priorContext, next: nextContext } = adoptFreshContextKey(lane, result.handoff);
+          freshContextBoundary = requiresFreshContextBoundary(result.handoff, {
+            priorStage, nextStage: returned.stage, priorContext, nextContext,
+          }) && requireFreshContextForSuccessor(lane, predecessorWorker, predecessorIncarnation);
           rememberIssuedCode(lane, returned.code, codeGuard);
           indexLaneCode(codeIndex, lane, { epochN: expectedEpoch.n, servedAt: null }, CONSTANTS.CODE_INDEX_PER_LANE, codeGuard);
         }
@@ -3025,7 +3032,7 @@ export function createHandoffEngine({
           lane.servedAt = stamp;
           lane.servedEpochN = expectedEpoch.n;
         }
-        const body = makeRejectedBody({
+        const body = freshContextBoundary ? makeResultBody('session_full', { remaining: combinedRemaining() }) : makeRejectedBody({
           handoffCode: lane.current?.code ?? currentCode,
           attempt: lane.counters.rejections + 1,
           validationErrors: errors,

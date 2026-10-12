@@ -77,6 +77,7 @@ function copyHandoff(value) {
     stage: handoff.stage,
     revision: Number.isInteger(handoff.revision) ? handoff.revision : 0,
     prompt: handoff.prompt,
+    ...(Array.isArray(handoff.pageImages) ? { pageImages: handoff.pageImages } : {}),
     corrections: Array.isArray(handoff.corrections) ? handoff.corrections.filter(item => typeof item === 'string') : [],
     correctionPrompt: typeof handoff.correctionPrompt === 'string' ? handoff.correctionPrompt : '',
     recovered: Boolean(handoff.correctionsRecovered),
@@ -326,13 +327,14 @@ export function createApplicationSourceAdapter(options) {
 
 export function classifyApplicationThrow(error) {
   const code = typeof error?.code === 'string' ? error.code : '';
-  const safeCode = ['LOCAL_AI_JOB_INTEGRITY', 'ENOENT', 'EACCES', 'EPERM'].includes(code) ? code : 'internal_error';
+  const safeCode = ['LOCAL_AI_JOB_INTEGRITY', 'APPLICATION_V2_LIMIT', 'ENOENT', 'EACCES', 'EPERM'].includes(code) ? code : 'internal_error';
   return Object.freeze({
     code: safeCode,
     integrity: code === 'LOCAL_AI_JOB_INTEGRITY',
     enoent: code === 'ENOENT',
     eaccess: code === 'EACCES' || code === 'EPERM',
     ...(code === 'LOCAL_AI_JOB_INTEGRITY' ? { message: INTEGRITY_MESSAGE } : {}),
+    ...(code === 'APPLICATION_V2_LIMIT' ? { message: String(error?.message || 'Application v2 handoff exceeds its limit.') } : {}),
   });
 }
 
@@ -349,7 +351,7 @@ export function mapApplicationStatus(status) {
   if (value?.status === 'saved') return { kind: 'done', phase: 'done' };
   if (value?.status === 'failed') {
     if (value.folder === null) return { kind: 'gone', phase: 'gone' };
-    return value.terminalKind === BLIND_REVIEW_HUMAN_STOP_TERMINAL
+    return [BLIND_REVIEW_HUMAN_STOP_TERMINAL, 'write-verify-human-stop', 'requirements-audit-human-stop'].includes(value.terminalKind)
       ? { kind: 'needs_user', phase: 'needs_user', reason: 'review_stop' }
       : { kind: 'needs_user', phase: 'needs_user', reason: 'job_broken' };
   }

@@ -366,6 +366,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   handoffBridgeHoldJob: (payload) => ipcRenderer.invoke('handoff-bridge:hold-job', payload),
   handoffBridgeAckAlarm: (payload) => ipcRenderer.invoke('handoff-bridge:ack-alarm', payload),
   handoffBridgeGetActivity: () => ipcRenderer.invoke('handoff-bridge:get-activity'),
+  // Main registers this channel only for an unpackaged test-mode synthetic
+  // source. No production UI calls it and packaged runs have no handler.
+  handoffBridgeTestSyntheticPreflight: action => ipcRenderer.invoke('handoff-bridge:test-synthetic-preflight', action),
   handoffBridgePublishJobs: (payload) => ipcRenderer.send('handoff-bridge:publish-jobs', payload),
   onHandoffBridgeStatus: createListener('handoff-bridge:status'),
   onHandoffBridgeJobChanged: createListener('handoff-bridge:job-changed'),

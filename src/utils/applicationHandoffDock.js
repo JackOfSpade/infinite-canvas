@@ -181,6 +181,15 @@ const STAGE_LABELS = {
   'cover-letter': 'Cover letter',
   review: 'Review and edit',
   'refinement-judge': 'Compare revisions',
+  write: 'Write application',
+  convert: 'Convert application',
+  'verify-correction': 'Correct application',
+  'fit-correction': 'Trim to one page',
+  pick: 'Rank candidates',
+  'fact-check': 'Fact-check winner',
+  'fact-correction': 'Correct fact finding',
+  'fact-recheck': 'Recheck facts',
+  'write-verify-human-stop': 'Application needs review',
 };
 
 export function applicationStageLabel(stage) {

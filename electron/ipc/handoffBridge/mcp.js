@@ -42,13 +42,19 @@ function copyArguments(params, toolName) {
 }
 
 function toolResult(id, body) {
+  const images = Array.isArray(body?.pageImages) ? body.pageImages : [];
+  const textBody = images.length ? Object.fromEntries(Object.entries(body).filter(([key]) => key !== 'pageImages')) : body;
   let text;
-  try { text = JSON.stringify(body); } catch { text = undefined; }
+  try { text = JSON.stringify(textBody); } catch { text = undefined; }
   if (typeof text !== 'string') text = JSON.stringify({ status: 'app_unavailable', note: 'The app result could not be sent.' });
-  if (Buffer.byteLength(text, 'utf8') > CONSTANTS.MAX_TOOL_RESULT_BYTES) {
+  const validImages = images.every(row => row?.mimeType === 'image/png' && typeof row.data === 'string'
+    && /^[A-Za-z0-9+/]+={0,2}$/u.test(row.data));
+  const content = [{ type: 'text', text }, ...images.map(row => ({ type: 'image', mimeType: 'image/png', data: row.data }))];
+  if (!validImages || Buffer.byteLength(JSON.stringify({ content }), 'utf8') > CONSTANTS.MAX_TOOL_RESULT_BYTES) {
     text = JSON.stringify({ status: 'app_unavailable', note: 'The result was too large to send.' });
+    return rpcResult(id, { content: [{ type: 'text', text }] });
   }
-  return rpcResult(id, { content: [{ type: 'text', text }] });
+  return rpcResult(id, { content });
 }
 
 /**

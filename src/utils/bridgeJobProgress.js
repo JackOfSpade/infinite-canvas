@@ -41,7 +41,8 @@ export const PROGRESS_ACTIONS = Object.freeze(['start-chat', 'continue-chat']);
 // The current-authority workflow has verification and independent-review
 // handoffs after it writes the cover letter. They all belong to the final
 // user-facing review step; unknown stage names still make no progress claim.
-const REVIEW_PROGRESS_STAGES = new Set(['requirement-disposition', 'blind-review', 'blind-repair-context', 'refinement-judge']);
+const REVIEW_PROGRESS_STAGES = new Set(['requirement-disposition', 'blind-review', 'blind-repair-context', 'refinement-judge',
+  'write', 'convert', 'verify-correction', 'fit-correction', 'pick', 'fact-check', 'fact-correction', 'fact-recheck', 'write-verify-human-stop']);
 
 const isObject = value => value !== null && typeof value === 'object' && !Array.isArray(value);
 const object = value => (isObject(value) ? value : {});

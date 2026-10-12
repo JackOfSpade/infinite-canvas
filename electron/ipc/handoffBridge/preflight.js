@@ -77,6 +77,11 @@ export function classifySubmission({ response, lane, lanes = [], kind = 'applica
 
   const parsed = parseJson(text);
   const identity = extractPasteEnvelopeIdentity(text);
+  if (lane?.current?.stage === 'write' && !parsed.ok) {
+    const fingerprint = responseFingerprint(text);
+    if (fingerprint && lanes.some(other => other !== lane && hasAcceptedFingerprint(other, fingerprint))) return 'misrouted';
+    return text.trim().length >= 40 ? 'pass' : 'junk';
+  }
   if (!parsed.ok) {
     if (identity.jobId && identity.jobId !== lane?.jobId) return 'misrouted';
     return text.trim().length >= 64 && text.includes('{') ? 'pass' : 'junk';

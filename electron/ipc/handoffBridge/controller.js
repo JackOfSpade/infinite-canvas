@@ -46,6 +46,7 @@ const LANE_PHASES = new Set(['unread', 'awaiting', 'host', 'needs_user', 'held',
 const APPLICATION_STAGES = new Set([
   'evidence-plan', 'resume', 'cover-letter', 'requirement-disposition',
   'review', 'blind-review', 'blind-repair-context', 'refinement-judge',
+  'write', 'convert', 'verify-correction', 'fit-correction', 'pick', 'fact-check', 'fact-correction', 'fact-recheck', 'write-verify-human-stop',
 ]);
 // The closed vocabulary of task names that may reach the renderer. It was
 // just 'job-scoring' while that was the only bridgeable task; every other
@@ -72,7 +73,7 @@ const PAUSE_CAUSES = new Set(['user', 'idle', 'anomaly', 'revoked', 'quit']);
 const FAULT_CODES = new Set(['socket_unavailable', 'tunnel_failed', 'state_unreadable', 'persist_failed', 'internal_error']);
 const TOOL_OUTCOMES = Object.freeze({
   get: new Set(['served', 'waiting', 'queue_empty', 'empty', 'paused', 'session_full', 'needs_user', 'retry', 'error_retryable', 'app_unavailable', 'session_ended', 'unauthorized', 'rate_limited']),
-  submit: new Set(['accepted', 'rejected', 'duplicate', 'junk', 'superseded', 'held', 'needs_user', 'misrouted', 'too_large', 'unknown_handoff', 'retry', 'error_retryable', 'app_unavailable', 'session_ended', 'unauthorized', 'rate_limited', 'paused']),
+  submit: new Set(['accepted', 'rejected', 'duplicate', 'junk', 'superseded', 'held', 'needs_user', 'misrouted', 'too_large', 'unknown_handoff', 'retry', 'error_retryable', 'app_unavailable', 'session_ended', 'session_full', 'unauthorized', 'rate_limited', 'paused']),
 });
 const AVAILABILITY_REASONS = new Set(['e2e', 'env-disabled', 'dev-build']);
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;

@@ -96,6 +96,7 @@ export function normalizeCurrentHandoff(handoff, readAt = 0) {
     stage: handoff.stage,
     revision: Number.isInteger(handoff.revision) ? handoff.revision : 0,
     prompt: handoff.prompt,
+    ...(Array.isArray(handoff.pageImages) ? { pageImages: handoff.pageImages } : {}),
     promptBytes: Buffer.byteLength(handoff.prompt, 'utf8'),
     corrections: Array.isArray(handoff.corrections) ? handoff.corrections.filter(item => typeof item === 'string') : [],
     correctionPrompt: typeof handoff.correctionPrompt === 'string' ? handoff.correctionPrompt : '',

@@ -109,6 +109,10 @@ export function makeServedBody({
     prompt: current.prompt ?? '',
     remaining,
   };
+  if (Array.isArray(current.pageImages) && current.pageImages.length) {
+    body.pageImages = current.pageImages;
+    body.pageImageOrder = current.pageImages.map(({ candidateId, document }) => ({ candidateId, document }));
+  }
   if (current.corrections?.length) {
     body.corrections = current.corrections.slice(0, 30).map(item => clipCorrectionItem(item));
     if (recovered) {

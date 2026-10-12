@@ -14,6 +14,7 @@ import { setReportRedactedHosts } from '../bugReport/helpers.js';
 import { createAuditSink } from './audit.js';
 import { createHandoffBridgeLog } from './log.js';
 import { createApplicationSource, subscribeApplicationDiscards } from './sources/application.js';
+import { createSyntheticPreflightSource } from './sources/syntheticPreflight.js';
 import { createPushSource } from './sources/push.js';
 import { createHandoffEngine } from './engine.js';
 import { createHandoffCodeGuard } from './lanes.js';
@@ -35,6 +36,7 @@ import { createHandoffBridgePower } from './power.js';
 import { clearBridgeChatCopyDiagnostic, clearBridgeQueueDiagnostic, clearClientAuthDiagnostic, clearFailedStartDiagnostic, clearMcpRateLimitDiagnostic, clearOAuthRejectionDiagnostic, clearSourceRejectionDiagnostic, getFailedStartDiagnosticLines, recordClientAuthDiagnostic, recordFailedStartDiagnostic, recordMcpRateLimitDiagnostic, recordOAuthRejectionDiagnostic, recordSourceRejectionDiagnostic, retireBridgeQueueDiagnosticProvider, setBridgeQueueDiagnosticProvider } from './telemetry.js';
 
 let registered = false;
+let registeredIpcMain = null;
 let startPromise = null;
 let runtime = null;
 let controllerBridge = null;
@@ -903,7 +905,9 @@ export function composeHandoffBridge({ userData, config, tunnelState, setupState
   const audit = deps.audit || createAuditSink({ userDataPath: userData, fsImpl: deps.fsImpl });
   const laneStore = deps.laneStore || createLaneStore({ userDataPath: userData, fsImpl: deps.fsImpl });
   const codeGuard = deps.codeGuard || createHandoffCodeGuard();
-  const application = deps.application || createApplicationSource({ api: deps.applicationApi, setTimeoutImpl: timers.setTimeout, clearTimeoutImpl: timers.clearTimeout, codeGuard });
+  const syntheticPreflight = testMode === true && deps.syntheticPreflight === true
+    ? createSyntheticPreflightSource({ testMode, codeGuard }) : null;
+  const application = syntheticPreflight?.source || deps.application || createApplicationSource({ api: deps.applicationApi, setTimeoutImpl: timers.setTimeout, clearTimeoutImpl: timers.clearTimeout, codeGuard });
   const hubKey = (canvasFilePath, nodeId) => crypto.createHash('sha256').update(`${canvasFilePath}\n${nodeId}`, 'utf8').digest('hex');
   const push = deps.push || createPushSource({ seam: deps.pushSeam, now, timers, windows, hubKey, codeGuard, autoSelectHubs: true });
   let pairing;
@@ -1274,28 +1278,42 @@ export function composeHandoffBridge({ userData, config, tunnelState, setupState
   // show a hub to release; without this, discovery only ran after clicking a
   // hub that an empty panel could never render.
   const unsubscribePushHandoffs = onNonApiAiEvent(() => { void controller.refreshPushDiscovery?.({ dirty: true }); });
-  return Object.freeze({ bridgeQueueProvider, userData, config, socketPath, testMode, audit, log: bridgeLog, laneStore, application, push, oauth, openPairing, get engine() { return engine; }, mcp, requestHandler, listener, tunnel, pairing, controller, dialogs, power, tray, unsubscribeUi, unsubscribePushHandoffs, readPairingCode: () => pairingCode });
+  return Object.freeze({ bridgeQueueProvider, userData, config, socketPath, testMode, audit, log: bridgeLog, laneStore, application, syntheticPreflight, push, oauth, openPairing, get engine() { return engine; }, mcp, requestHandler, listener, tunnel, pairing, controller, dialogs, power, tray, unsubscribeUi, unsubscribePushHandoffs, readPairingCode: () => pairingCode });
 }
 
 function removePairingTestHook(current = null) {
   if (current && pairingTestHookRuntime !== current) return;
   try { delete globalThis.__icHandoffBridgeTest; } catch { /* an exotic global must not block teardown */ }
+  try { registeredIpcMain?.removeHandler?.('handoff-bridge:test-synthetic-preflight'); } catch { /* test-only cleanup is best effort */ }
   pairingTestHookRuntime = null;
 }
 
 function installPairingTestHook(current) {
   pairingTestHookRuntime = current;
-  // Test-mode only: the bridge smoke uses an injected memory clipboard so it
-  // never writes a synthetic starter to the person's system clipboard. Keep
-  // this raw capability confined to the existing main-process test hook; it
-  // is unavailable in packaged/normal runs and never crosses renderer IPC.
-  globalThis.__icHandoffBridgeTest = Object.freeze({
+  // Test-mode only: read the starter that the user copied in the bridge panel.
+  // This raw capability is unavailable in packaged and normal runs.
+  const hook = Object.freeze({
     readPairingCode: () => current.readPairingCode?.() ?? null,
     readStarterClipboard: () => {
-      try { return bootstrapContext?.deps?.clipboard?.readText?.() ?? null; }
+      try { return (bootstrapContext?.deps?.clipboard || electronPkg.clipboard)?.readText?.() ?? null; }
       catch { return null; }
     },
+    releaseSyntheticPreflight: () => current.syntheticPreflight
+      ? current.engine.release({ jobs: [{ jobId: current.syntheticPreflight.jobId,
+        canvasFilePath: current.syntheticPreflight.canvasFilePath }] }) : { ok: false, code: 'not_test_preflight' },
+    syntheticPreflightProgress: () => current.syntheticPreflight?.progress() || null,
   });
+  globalThis.__icHandoffBridgeTest = hook;
+  if (current.testMode === true && current.syntheticPreflight) {
+    registeredIpcMain?.removeHandler?.('handoff-bridge:test-synthetic-preflight');
+    registeredIpcMain?.handle?.('handoff-bridge:test-synthetic-preflight', async (_event, action) => {
+      if (runtime !== current) return { ok: false, code: 'unavailable' };
+      if (action === 'progress') return current.syntheticPreflight.progress();
+      if (action === 'release') return hook.releaseSyntheticPreflight();
+      if (action === 'starter') return hook.readStarterClipboard();
+      return { ok: false, code: 'invalid_action' };
+    });
+  }
 }
 
 function invokeOwner(port, methods) {
@@ -1647,6 +1665,7 @@ export function getHandoffBridgeStatus() {
 export function registerHandoffBridgeHandlers({ ipcMain = electronPkg.ipcMain, deps = {} } = {}) {
   if (registered && typeof ipcMain?.__getInvokeHandler === 'function' && !ipcMain.__getInvokeHandler('handoff-bridge:get-status')) registered = false;
   if (registered) return false;
+  registeredIpcMain = ipcMain;
   const app = appFor(deps);
   const bootstrapUserData = userDataFor(deps, app);
   const priorUserData = bootstrapContext?.userData;
@@ -1827,6 +1846,9 @@ export function startHandoffBridge({ reason = 'manual', deps = {} } = {}) {
     try { setup = (typeof composedDeps.readTunnelState === 'function' ? composedDeps.readTunnelState(userData, { fsImpl: composedDeps.fsImpl }) : null) || {}; } catch { setup = {}; }
   }
   const testMode = resolveTestMode({ env, isPackaged, paths: { binaryPath: setup.binaryPath, credentialsPath: setup.credentialsPath, userData }, tmpdir: composedDeps.tmpdir || os.tmpdir(), realpath: composedDeps.realpath || fs.realpathSync.native });
+  // An explicit TEST-only environment gate enables the synthetic checksum
+  // source. Packaged apps cannot enter testMode, and no production UI exposes it.
+  if (testMode && env.INFINITE_CANVAS_HANDOFF_BRIDGE_SYNTHETIC_PREFLIGHT === '1') composedDeps.syntheticPreflight = true;
   const environment = environmentRefusal(env, isPackaged, testMode);
   if (environment) return Promise.resolve(refusalResult(environment, reason));
   // tunnel.json records an explicit pin/approval on the app-owned copy. The
