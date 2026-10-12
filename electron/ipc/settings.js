@@ -4,6 +4,7 @@ import { handleSafe } from './ipcUtils.js';
 import { normalizeMarketplaceWatchUrls } from '../../src/utils/marketplaceWatchUrls.js';
 import { isValidCompensationExperienceBandLadder } from './jobCompensation.js';
 import { logger } from '../logger.js';
+import { applicationProtocolSetting, LEGACY_APPLICATION_PROTOCOL_SETTING } from './applicationProtocolSetting.js';
 
 const { BrowserWindow, safeStorage } = electronPkg;
 
@@ -126,6 +127,7 @@ function getStore() {
       // by platformId: dashboards, notification centers, messages, sold-items
       // tabs, etc. Legacy per-listing checks also use them as extra evidence.
       marketplaceWatchUrls: {},
+      application: { protocol: LEGACY_APPLICATION_PROTOCOL_SETTING },
       // Per-source credentials for job-search APIs that require keys. Used by
       // electron/ipc/jobs.js fetchApiSources. Storing here (vs .env) lets the
       // user configure via the Settings UI and persists across sessions.
@@ -214,6 +216,7 @@ export function rendererStoreSnapshot(data) {
     // consumes these two sections; an allowlist means a future main-process
     // credential cannot leak merely because it was added to electron-store.
     marketplaceWatchUrls: storeData.marketplaceWatchUrls || {},
+    application: { protocol: applicationProtocolSetting(storeData.application?.protocol) },
     jobs: rendererJobsSettingsSnapshot(storeData.jobs),
   };
 }
@@ -239,6 +242,10 @@ export function registerSettingsHandlers() {
   handleSafe('update-settings', async (_event, updates) => {
     const s = getStore();
     for (const [section, value] of Object.entries(updates || {})) {
+      if (section === 'application') {
+        if (typeof value?.protocol === 'string') s.set('application.protocol', applicationProtocolSetting(value.protocol));
+        continue;
+      }
       // `jobs` is the one section that carries main-process-only secrets.
       // Route every shape through its renderer allowlist before the generic
       // setter below: null, arrays, and primitives must be harmless no-ops,

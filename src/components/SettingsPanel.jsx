@@ -407,6 +407,7 @@ export function SettingsPanel({ isOpen, onClose, settings, updateSetting, update
   const { addToast } = useToast();
   const [capturingId, setCapturingId] = useState(null);
   const [jobsSettings, setJobsSettings] = useState(null);
+  const [applicationProtocol, setApplicationProtocol] = useState('legacy');
   const [watchUrlsByPlatform, setWatchUrlsByPlatform] = useState({});
   const watchUrlsByPlatformRef = useRef(watchUrlsByPlatform);
   useLayoutEffect(() => {
@@ -434,6 +435,7 @@ export function SettingsPanel({ isOpen, onClose, settings, updateSetting, update
       .then((storeData) => {
         if (cancelled) return;
         if (storeData && storeData.jobs) setJobsSettings(storeData.jobs);
+        setApplicationProtocol(storeData?.application?.protocol === 'write-then-verify.v2' ? 'write-then-verify.v2' : 'legacy');
         if (storeData && storeData.marketplaceWatchUrls) {
           watchUrlsByPlatformRef.current = storeData.marketplaceWatchUrls;
           setWatchUrlsByPlatform(storeData.marketplaceWatchUrls);
@@ -527,6 +529,23 @@ export function SettingsPanel({ isOpen, onClose, settings, updateSetting, update
 
         {/* Scrollable Content */}
         <div className="min-w-0 px-6 py-5 space-y-6 overflow-y-auto custom-scrollbar flex-1">
+
+          <div>
+            <div className="text-white/30 text-[10px] font-semibold uppercase tracking-wider mb-2">Application protocol</div>
+            <select
+              aria-label="Application protocol"
+              value={applicationProtocol}
+              onChange={(event) => {
+                const protocol = event.target.value;
+                setApplicationProtocol(protocol);
+                persistSettings({ application: { protocol } });
+              }}
+              className="w-full bg-black/40 border border-white/10 rounded-md px-2 py-1.5 text-xs text-white/80"
+            >
+              <option value="legacy">Legacy (default)</option>
+              <option value="write-then-verify.v2">Write then verify (v2)</option>
+            </select>
+          </div>
 
           {/* ── Job Sources ─────────────────────────────────────────── */}
           {/* Per-source credentials for job-search APIs that require keys.
