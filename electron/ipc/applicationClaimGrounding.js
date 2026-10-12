@@ -274,9 +274,19 @@ export function assessStrengthFamily(familyId, sentence, evidenceBodies, ctx) {
   for (const mention of claim) {
     const supported = evidence.some(entry => entry.mentions.some(found => found.level >= mention.level && found.rank >= mention.rank)
       && overlapCount(tokens, entry.body, ctx) >= threshold);
+    // A bound authority entity may split the description of its work and the
+    // candidate's authorship disposition into separate approved units. The
+    // latter still needs a literal authorship word, and a bound description
+    // from that same entity must identify the work in this claim.
+    const entitySupported = familyId === 'author' && Array.isArray(ctx.authorshipEntityGroups)
+      && ctx.authorshipEntityGroups.some(group => group.some((body, index) =>
+        scanStrengthMentions(body, 'evidence').some(found => found.family === 'author' && found.self
+          && found.level >= mention.level && found.rank >= mention.rank)
+        && group.some((description, descriptionIndex) => descriptionIndex !== index
+          && overlapCount(tokens, description, ctx) >= threshold)));
     // The class the claim asked for: an origination claim ("founded") that only
     // a lower class ("built") supports is answered by different forms.
-    if (!supported) return { match: mention.match, rank: mention.rank };
+    if (!supported && !entitySupported) return { match: mention.match, rank: mention.rank };
   }
   return null;
 }

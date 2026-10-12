@@ -3762,6 +3762,8 @@ export function checkTargetCompanyBinding(paragraphs = [], companyName = '', pri
     sentences(paragraph).forEach((sentence, sentenceIndex) => {
       const value = text(sentence);
       if (!PROSPECTIVE_COMPANY_FRAME.test(value)) return;
+      const explicitlyTargetBound = /\b(?:for|in|to)\s+this\s+role\b|\b(?:your|this)\s+(?:team|company|organization|organisation|mission|platform|product)\b/iu.test(value)
+        || targetAliases.some(alias => occursAsWholeName(alias, normalized(value)));
       const namedEmployers = [
         ...[...value.matchAll(NAMED_COMPANY_AFTER_PREPOSITION)].map(match => ({
           value: match[2], index: match.index ?? -1, preposition: match[1].toLowerCase(), prefixEnd: (match.index ?? 0) + match[0].length - match[2].length,
@@ -3779,6 +3781,10 @@ export function checkTargetCompanyBinding(paragraphs = [], companyName = '', pri
         if (!knownPrior) {
           if (namesOnlyTools(named)) continue;
           if (occursAsWholeName(named, postingCorpus) || occursAsWholeName(named, evidenceCorpus)) continue;
+          // A "with X" phrase names past tools or experience when the same
+          // sentence explicitly binds the proposed work to this target.
+          // Keep "for X", "at X", and known prior employers as targets.
+          if (explicitlyTargetBound && employer.preposition === 'with' && !COMPANY_SUFFIX_RE.test(named)) continue;
           // “with” takes a product, a language or a client far more often than
           // a new employer; a single word after it is read only when it is
           // known to be an employer, which the branches above already did.
