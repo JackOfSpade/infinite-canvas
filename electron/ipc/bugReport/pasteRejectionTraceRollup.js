@@ -62,7 +62,8 @@ const MAX_TRACE_FILE_BYTES = 512_000;
 // same reason.
 const PASTE_REJECTION_TRACE_FILE = 'Paste Rejections.json';
 const HANDOFF_RECEIPTS_DIR = 'handoff-receipts';
-const PASTE_APPLICATION_STAGES = new Set(['evidence-plan', 'resume', 'cover-letter', 'review']);
+const PASTE_APPLICATION_STAGES = new Set(['evidence-plan', 'resume', 'cover-letter', 'review',
+  'write', 'convert', 'verify-correction', 'fit-correction', 'pick', 'fact-check', 'fact-correction', 'fact-recheck', 'write-verify-human-stop']);
 const PASTE_REJECTION_REASONS = new Set([
   'STALE_HANDOFF_ECHO',
   'DOMAIN_VALIDATION_FAILED',

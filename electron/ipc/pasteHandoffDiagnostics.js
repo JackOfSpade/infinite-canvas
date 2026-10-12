@@ -33,7 +33,8 @@ const CHECK_FINGERPRINT_HEX_CHARS = 8;
 const CHECK_FINGERPRINT_RE = new RegExp(`^[0-9a-f]{${CHECK_FINGERPRINT_HEX_CHARS}}$`, 'u');
 const REPORT_LIMIT = 20;
 
-const SAFE_STAGES = new Set(['evidence-plan', 'resume', 'cover-letter', 'review']);
+const SAFE_STAGES = new Set(['evidence-plan', 'resume', 'cover-letter', 'review',
+  'write', 'convert', 'verify-correction', 'fit-correction', 'pick', 'fact-check', 'fact-correction', 'fact-recheck', 'write-verify-human-stop']);
 const SAFE_OUTCOMES = new Set(['accepted', 'rejected']);
 const SAFE_REASONS = new Set([
   'INVALID_JSON',

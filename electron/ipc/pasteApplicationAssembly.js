@@ -722,8 +722,9 @@ export function assemblePasteApplicationResult({
   // The only check in this module that still takes the host's unattributed
   // default, and honestly: paste.finalReview IS the response this round
   // returned, whole, so "return a different response" is exactly the repair.
-  const finalReview = record(state.finalReview, 'paste.finalReview');
-  const semanticQualityReview = record(finalReview.qualityReview, 'paste.finalReview.qualityReview', ['qualityReview']);
+  const writeVerifyV2 = jobInput.applicationProtocol === 'write-then-verify.v2';
+  const finalReview = writeVerifyV2 ? null : record(state.finalReview, 'paste.finalReview');
+  const semanticQualityReview = writeVerifyV2 ? null : record(finalReview.qualityReview, 'paste.finalReview.qualityReview', ['qualityReview']);
 
   // Which evidence each rendered part cites is a property of the document that
   // cites it, and citing different evidence is one of the two ways either
@@ -744,7 +745,7 @@ export function assemblePasteApplicationResult({
   })));
   // Preserve the model's canonical checklist notes verbatim. Host code only
   // projects exact source bindings from accepted evidence identifiers.
-  const qualityReview = {
+  const qualityReview = writeVerifyV2 ? null : {
     ...deepClone(semanticQualityReview),
     // The paste sequence has completed editorial review before its first
     // legacy import. The existing measured-fit pipeline still needs to know
@@ -760,16 +761,17 @@ export function assemblePasteApplicationResult({
     ...deepClone(suppliedArgument),
     roleThesis: state.coverLetter.roleThesis || state.coverLetter.controllingThesis || suppliedArgument.roleThesis,
   };
-  const generationAudit = finalReview.generationAudit || state.coverLetter.generationAudit;
-  if (!generationAudit) fail('final review must retain a current generationAudit with exact paragraph and sentence bindings.', ['generationAudit']);
+  const generationAudit = writeVerifyV2 ? null : (finalReview.generationAudit || state.coverLetter.generationAudit);
+  if (!writeVerifyV2 && !generationAudit) fail('final review must retain a current generationAudit with exact paragraph and sentence bindings.', ['generationAudit']);
   // The two explicit failures inside already name the audit; the shape checks
   // on a bound paragraph — empty text, an unsafe control character in a field
   // about to be copied into the durable audit — are repaired in the same field
   // and were reaching the host with no repair at all.
-  withRepairs(['generationAudit'], () => assertAuditBindsFinalParagraphs(generationAudit, letter.paragraphs));
+  if (!writeVerifyV2) withRepairs(['generationAudit'], () => assertAuditBindsFinalParagraphs(generationAudit, letter.paragraphs));
 
   return {
     version: Number(jobInput.version || 1),
+    ...(writeVerifyV2 ? { applicationProtocol: 'write-then-verify.v2' } : {}),
     jobId: frozenState(FROZEN_JOB_RECORD, () => text(jobInput.jobId, 'input.jobId')),
     status: 'completed',
     // App selected; never sourced from the paste response.
