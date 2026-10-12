@@ -407,7 +407,7 @@ export function SettingsPanel({ isOpen, onClose, settings, updateSetting, update
   const { addToast } = useToast();
   const [capturingId, setCapturingId] = useState(null);
   const [jobsSettings, setJobsSettings] = useState(null);
-  const [applicationProtocol, setApplicationProtocol] = useState('legacy');
+  const [applicationProtocol, setApplicationProtocol] = useState('write-then-verify.v2');
   const [watchUrlsByPlatform, setWatchUrlsByPlatform] = useState({});
   const watchUrlsByPlatformRef = useRef(watchUrlsByPlatform);
   useLayoutEffect(() => {
@@ -435,7 +435,7 @@ export function SettingsPanel({ isOpen, onClose, settings, updateSetting, update
       .then((storeData) => {
         if (cancelled) return;
         if (storeData && storeData.jobs) setJobsSettings(storeData.jobs);
-        setApplicationProtocol(storeData?.application?.protocol === 'write-then-verify.v2' ? 'write-then-verify.v2' : 'legacy');
+        setApplicationProtocol(storeData?.application?.protocol === 'legacy' ? 'legacy' : 'write-then-verify.v2');
         if (storeData && storeData.marketplaceWatchUrls) {
           watchUrlsByPlatformRef.current = storeData.marketplaceWatchUrls;
           setWatchUrlsByPlatform(storeData.marketplaceWatchUrls);
@@ -542,8 +542,8 @@ export function SettingsPanel({ isOpen, onClose, settings, updateSetting, update
               }}
               className="w-full bg-black/40 border border-white/10 rounded-md px-2 py-1.5 text-xs text-white/80"
             >
-              <option value="legacy">Legacy (default)</option>
-              <option value="write-then-verify.v2">Write then verify (v2)</option>
+              <option value="legacy">Legacy</option>
+              <option value="write-then-verify.v2">Write then verify (v2, default)</option>
             </select>
           </div>
 

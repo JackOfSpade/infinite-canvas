@@ -443,6 +443,14 @@ export default [
         const needs = Array.from({ length: 13 }, (_unused, index) => `Dense requirement ${index + 1}`);
         const filler = Array.from({ length: 60 }, (_unused, index) => `Contextual prose ${index + 1}.`);
         const commaSentence = 'Own delivery, reliability, and observability.';
+        const defaultQueued = await queueCurrentLocalApplicationJob({ transport: 'paste', canvasFilePath: project.canvasFilePath, careerSnapshotId: snapshotId,
+          job: { title: 'Software Engineer', company: 'Acme', snippet: 'Reliable service delivery.' } });
+        const defaultInput = JSON.parse(await fs.promises.readFile(path.join(defaultQueued.folder, 'input.json'), 'utf8'));
+        const defaultManifest = JSON.parse(await fs.promises.readFile(path.join(defaultQueued.folder, 'manifest.json'), 'utf8'));
+        assert(defaultInput.applicationProtocol === 'write-then-verify.v2'
+          && defaultManifest.paste.writeVerify?.version === 'write-then-verify.v2',
+        'a new snapshot-pinned job uses the v2 path by default');
+        await discardLocalApplicationJob(defaultQueued.id, project.canvasFilePath);
         const queued = await queueLocalApplicationJob({ transport: 'paste', canvasFilePath: project.canvasFilePath, careerSnapshotId: snapshotId,
           job: { title: 'Software Engineer', company: 'Acme', snippet: `${commaSentence}\n${needs.map(need => `${need}.`).join('\n')}\n${filler.join('\n')}` } });
         const current = async () => (await getLocalApplicationHandoff({ jobId: queued.id, canvasFilePath: project.canvasFilePath })).handoff;
@@ -2949,6 +2957,7 @@ export default [
         'JobCardNode refuses an unpinned card before IPC and sends only the immutable snapshot pin, never mutable career authority fields');
         const queued = await __queueLegacyLocalApplicationFixtureForTests({
           transport: 'paste', canvasFilePath: project.canvasFilePath, careerSnapshotId: snapshotId,
+          applicationProtocol: 'legacy',
           __acceptanceHarnessReservationCapability: reservation.capability,
           // These deliberately disagree with the approved snapshot. A pinned
           // job is never permitted to freeze mutable renderer state instead.
@@ -2962,8 +2971,8 @@ export default [
           'a rejected malformed pin does not consume a pending acceptance-harness reservation before a valid current snapshot queues');
         const input = JSON.parse(await fs.promises.readFile(path.join(queued.folder, 'input.json'), 'utf8'));
         const queuedManifest = JSON.parse(await fs.promises.readFile(path.join(queued.folder, 'manifest.json'), 'utf8'));
-        assert(input.applicationProtocol === undefined, 'a default queued job must use the unchanged legacy application stages');
-        assert(queuedManifest.paste.writeVerify === undefined, 'a default job must not initialize the v2 pipeline');
+        assert(input.applicationProtocol === undefined, 'an explicit legacy job must use the unchanged legacy application stages');
+        assert(queuedManifest.paste.writeVerify === undefined, 'an explicit legacy job must not initialize the v2 pipeline');
         assert(input.careerSnapshotId === snapshotId
           && input.careerAuthority?.snapshotId === snapshotId
           && /^[a-f0-9]{64}$/u.test(input.careerAuthority?.snapshotDigest || '')

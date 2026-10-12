@@ -45,6 +45,7 @@ import { boundedUnsupportedNeeds, COVER_LETTER_WRITER_GUIDANCE, LETTER_REWRITE_B
 import { describeRoleStrengthFinding, roleStrengthFindings } from './applicationRoleStrength.js';
 import { WRITE_VERIFY_PROTOCOL, WRITE_VERIFY_STAGES, WRITE_VERIFY_MAX_CORRECTIONS, WRITE_VERIFY_MAX_FIT_CORRECTIONS, acceptedWriteVerifyCandidates, factCorrectionTransition, fullApprovedHand, initialWriteVerifyState, isWriteVerifyJob, validateWriteVerifyRanking, writeVerifyCandidateCount, writeVerifyNextAfterCandidate, writeVerifyPrompt, writeVerifySourcePrompt, writeVerifyStageKey, writeVerifyFactFindingErrors, writeVerifyChangedFindingErrors } from './applicationWriteVerify.js';
 import { applicationProtocolSetting } from './applicationProtocolSetting.js';
+import { v2RejectionEvidencePaths } from './applicationV2RejectionEvidence.js';
 import { tryGetStore } from './settings.js';
 import { assertApplicationV2PromptLimit, assertApplicationV2ReplyLimit } from './applicationV2Limits.js';
 import { writeVerifyLengthBudgets } from './applicationV2LengthBudget.js';
@@ -11911,13 +11912,18 @@ async function submitWriteVerifyHandoff({ jobId, dir, manifest, input, frozen, s
   if (errors.length) {
     // Private job evidence: exact rejected output and production wording for
     // every v2 stage, including a judge or fact-check response that retries.
-    const rejectionDir = path.join(dir, 'rejections');
-    await fs.promises.mkdir(rejectionDir, { recursive: true, mode: 0o700 });
-    await atomicJson(path.join(rejectionDir,
-      `revision-${state.revision}-${outgoingStage}-${pasteJsonHash(rawText)}.json`), {
+    // Successful saves remove the job directory, so retain the same record in
+    // the canvas's ignored .local-ai evidence area as well.
+    const rejectionFilename = `revision-${state.revision}-${outgoingStage}-${pasteJsonHash(rawText)}.json`;
+    const rejectionPaths = v2RejectionEvidencePaths(dir, jobId, rejectionFilename);
+    await fs.promises.mkdir(path.dirname(rejectionPaths.working), { recursive: true, mode: 0o700 });
+    await fs.promises.mkdir(path.dirname(rejectionPaths.retained), { recursive: true, mode: 0o700 });
+    const rejectionEvidence = {
       stage: outgoingStage, revision: state.revision, candidateId: outgoingCandidateId || null,
       response: rawText, errors, checkIds: pasteRejectionCheckIds(errors).checkIds,
-    });
+    };
+    await atomicJson(rejectionPaths.working, rejectionEvidence);
+    await atomicJson(rejectionPaths.retained, rejectionEvidence);
   }
   if (errors.length && !['write', 'convert', 'verify-correction', 'fit-correction', 'fact-correction'].includes(outgoingStage)) {
     return { accepted: false, validationErrors: errors, handoff: await writeVerifyHandoffRecord({ jobId, input, state, corrections: errors }) };

@@ -4,7 +4,7 @@ import { handleSafe } from './ipcUtils.js';
 import { normalizeMarketplaceWatchUrls } from '../../src/utils/marketplaceWatchUrls.js';
 import { isValidCompensationExperienceBandLadder } from './jobCompensation.js';
 import { logger } from '../logger.js';
-import { applicationProtocolSetting, LEGACY_APPLICATION_PROTOCOL_SETTING } from './applicationProtocolSetting.js';
+import { applicationProtocolSetting, V2_APPLICATION_PROTOCOL_SETTING } from './applicationProtocolSetting.js';
 
 const { BrowserWindow, safeStorage } = electronPkg;
 
@@ -127,7 +127,7 @@ function getStore() {
       // by platformId: dashboards, notification centers, messages, sold-items
       // tabs, etc. Legacy per-listing checks also use them as extra evidence.
       marketplaceWatchUrls: {},
-      application: { protocol: LEGACY_APPLICATION_PROTOCOL_SETTING },
+      application: { protocol: V2_APPLICATION_PROTOCOL_SETTING },
       // Per-source credentials for job-search APIs that require keys. Used by
       // electron/ipc/jobs.js fetchApiSources. Storing here (vs .env) lets the
       // user configure via the Settings UI and persists across sessions.

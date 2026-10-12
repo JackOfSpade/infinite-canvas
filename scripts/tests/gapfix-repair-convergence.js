@@ -102,7 +102,7 @@ export async function createFlow(spec) {
     inputFingerprint: corpus.inputFingerprint, sourceFingerprint: corpus.sourceFingerprint, compilationContract: CAREER_SNAPSHOT_COMPILATION_CONTRACT,
     pagePlan: { maxSegments: 32, maxSourceChars: 48_000, pageCount: pages.length, pageDigest: kit.sha256(kit.canonicalJson(pages.map(page => ({ id: page.id, index: page.index, segmentIds: page.segmentIds })))) },
     reconciliation: emptyCareerReconciliationReceipt(), approvedAt: '2026-10-07T00:00:00.000Z', sources: corpus.sources, segments: corpus.segments, profile, auditHistory: kit.cleanCareerSnapshotAuditHistory(corpus, profile) });
-  const queued = await queueLocalApplicationJob({ transport: 'paste', canvasFilePath: project.canvasFilePath, careerSnapshotId: snapshotId,
+  const queued = await queueLocalApplicationJob({ transport: 'paste', applicationProtocol: 'legacy', canvasFilePath: project.canvasFilePath, careerSnapshotId: snapshotId,
     job: { title: spec.title, company: spec.employer, snippet: texts.listing } });
   const flow = { spec, texts, project, queued, accepted: null, manifestPath: path.join(queued.folder, 'manifest.json') };
   flow.current = async () => (await getLocalApplicationHandoff({ jobId: queued.id, canvasFilePath: project.canvasFilePath })).handoff;

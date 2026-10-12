@@ -51,8 +51,8 @@ const REPO_ROOT = fileURLToPath(new URL('../..', import.meta.url));
 const REGISTER = fileURLToPath(new URL('../test-stubs/register.mjs', import.meta.url));
 const SIM = fileURLToPath(new URL('../../.test-artifacts/blackbox-run/offline-simulator.mjs', import.meta.url));
 // These fixtures prove the pre-snapshot legacy adapter through --legacy.
-// Ordinary simulator init uses the default legacy application protocol;
-// --application-protocol v2 is an explicit opt-in for current snapshots.
+// These tests force the historical --legacy fixture; the product default for
+// new snapshot-pinned jobs is v2. The simulator accepts --application-protocol v2.
 const cliArgs = args => ['--import', REGISTER, SIM, ...args,
   ...(args[0] === 'init' ? ['--legacy'] : [])];
 

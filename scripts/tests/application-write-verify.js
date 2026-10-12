@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import {
   WRITE_VERIFY_PROTOCOL, WRITE_VERIFY_STAGES, WRITE_VERIFY_MAX_FIT_CORRECTIONS, acceptedWriteVerifyCandidates,
   factCorrectionTransition, fullApprovedHand, initialWriteVerifyState, isWriteVerifyJob,
@@ -24,6 +26,7 @@ import { approvedCareerEvidenceCatalog, CAREER_SNAPSHOT_STATUS_APPROVED } from '
 import { assessStrengthFamily } from '../../electron/ipc/applicationClaimGrounding.js';
 import { MAX_REQUIREMENTS_REEPOCHS, requirementsAdjudicationBindings, requirementsBindingErrors, requirementsAuditCapTerminal } from '../../electron/ipc/applicationRequirementsAuditPolicy.js';
 import { applicationProtocolSetting } from '../../electron/ipc/applicationProtocolSetting.js';
+import { v2RejectionEvidencePaths } from '../../electron/ipc/applicationV2RejectionEvidence.js';
 
 const domains = [
   ['freight', 'dispatch'], ['clinic', 'scheduling'], ['library', 'cataloguing'],
@@ -32,11 +35,36 @@ const JOB_ID = '11111111-1111-4111-8111-111111111111';
 
 export default [
   {
-    name: 'application protocol setting defaults to legacy and requires an explicit v2 value',
+    name: 'v2 rejection evidence remains outside the removed private job directory',
+    async run() {
+      const root = fs.mkdtempSync(path.join(os.tmpdir(), 'v2-rejection-evidence-'));
+      const jobDir = path.join(root, '.local-ai', 'jobs', JOB_ID);
+      const filename = `revision-2-convert-${'a'.repeat(64)}.json`;
+      try {
+        for (const [domain] of domains) {
+          const paths = v2RejectionEvidencePaths(jobDir, JOB_ID, filename);
+          assert(paths.working.startsWith(jobDir + path.sep), domain);
+          assert(!paths.retained.startsWith(jobDir + path.sep), domain);
+          fs.mkdirSync(path.dirname(paths.working), { recursive: true });
+          fs.mkdirSync(path.dirname(paths.retained), { recursive: true });
+          fs.writeFileSync(paths.working, domain);
+          fs.writeFileSync(paths.retained, domain);
+          fs.rmSync(jobDir, { recursive: true, force: true });
+          assert.equal(fs.readFileSync(paths.retained, 'utf8'), domain);
+          // Sabotage: retaining a second copy below jobs/<id> loses the proof.
+          assert(!paths.retained.includes(`${path.sep}jobs${path.sep}${JOB_ID}${path.sep}`), domain);
+        }
+        assert.throws(() => v2RejectionEvidencePaths(jobDir, JOB_ID, '../escape.json'));
+      } finally { fs.rmSync(root, { recursive: true, force: true }); }
+    },
+  },
+  {
+    name: 'application protocol setting defaults to v2 and preserves explicit legacy',
     run() {
-      assert.equal(applicationProtocolSetting(undefined), 'legacy');
-      assert.equal(applicationProtocolSetting('unexpected'), 'legacy');
+      assert.equal(applicationProtocolSetting(undefined), WRITE_VERIFY_PROTOCOL);
+      assert.equal(applicationProtocolSetting('unexpected'), WRITE_VERIFY_PROTOCOL);
       assert.equal(applicationProtocolSetting(WRITE_VERIFY_PROTOCOL), WRITE_VERIFY_PROTOCOL);
+      assert.equal(applicationProtocolSetting('legacy'), 'legacy');
     },
   },
   {
