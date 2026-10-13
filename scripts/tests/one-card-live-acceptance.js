@@ -6,6 +6,7 @@ import { runCurrentSnapshotResolutionSelfTest } from '../acceptance/currentCaree
 import { deferOwnedBridgeLaneCleanup } from '../acceptance/bridgeLaneCleanup.mjs';
 import { passiveInspectSelfTest, projectSavedJobCardForAcceptanceHarness } from '../../.test-artifacts/blackbox-run/application-acceptance-harness.mjs';
 import {
+  assertPartialRollbackBaseline,
   archiveRunRestoreResidue,
   assertFrozenQueuedJobMatchesSavedCard,
   normalizedListingTextForAcceptance,
@@ -14,6 +15,36 @@ import {
 import { assert } from './testHelpers.js';
 
 export default [
+  {
+    name: 'one-card partial restore resumes only from exact owned baselines',
+    run: () => {
+      const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ic-partial-restore-'));
+      const userData = path.join(root, 'user-data');
+      const jobId = '12345678-1234-1234-1234-123456789abc';
+      try {
+        const jobs = path.join(root, '.local-ai', 'jobs');
+        fs.mkdirSync(jobs, { recursive: true, mode: 0o700 });
+        fs.chmodSync(path.join(root, '.local-ai'), 0o700);
+        const absent = { present: false, entries: [] };
+        const baseline = {
+          localAi: { present: true, rootMode: 0o700, entries: [{ path: 'jobs', type: 'dir', mode: 0o700 }] },
+          appliedJobs: absent, careerSnapshotStore: absent, authorityAnchors: absent,
+        };
+        const input = { root, jobId, baseline, userData };
+        assertPartialRollbackBaseline(input);
+        fs.mkdirSync(path.join(jobs, jobId));
+        nodeAssert.throws(() => assertPartialRollbackBaseline(input), /owned application job/);
+        fs.rmdirSync(path.join(jobs, jobId));
+        fs.mkdirSync(path.join(root, 'Applied Jobs'));
+        nodeAssert.throws(() => assertPartialRollbackBaseline(input), /every owned tree/);
+        fs.rmdirSync(path.join(root, 'Applied Jobs'));
+        assertPartialRollbackBaseline(input);
+        return { baselineRequired: true, jobResidueRejected: true, bundleResidueRejected: true };
+      } finally {
+        fs.rmSync(root, { recursive: true, force: true });
+      }
+    },
+  },
   {
     name: 'one-card restore preserves diagnostic archives and Finder residue before baseline verification',
     run: () => {
@@ -24,15 +55,21 @@ export default [
         const job = path.join(root, '.local-ai', 'jobs', jobId);
         const rejected = path.join(job, 'rejected-handoffs');
         const shortlists = path.join(job, 'writer-shortlists');
+        const liveRejected = path.join(root, '.local-ai', 'rejected-handoffs', jobId);
+        const liveShortlists = path.join(root, '.local-ai', 'writer-shortlists', jobId);
         const v2Archive = path.join(root, '.local-ai', 'evidence-archive', jobId);
         const bundle = path.join(root, 'Applied Jobs', 'test-bundle');
         fs.mkdirSync(rejected, { recursive: true });
         fs.mkdirSync(shortlists);
+        fs.mkdirSync(liveRejected, { recursive: true });
+        fs.mkdirSync(liveShortlists, { recursive: true });
         fs.mkdirSync(v2Archive, { recursive: true });
         fs.mkdirSync(bundle, { recursive: true });
         fs.writeFileSync(canvas, '{}');
         fs.writeFileSync(path.join(rejected, 'revision-1.json'), 'rejected');
         fs.writeFileSync(path.join(shortlists, 'revision-2.json'), 'shortlist');
+        fs.writeFileSync(path.join(liveRejected, 'revision-3.json'), 'live rejection');
+        fs.writeFileSync(path.join(liveShortlists, 'revision-4.json'), 'live shortlist');
         const archiveName = `00003-convert-candidate-final-${'a'.repeat(64)}.json`;
         fs.writeFileSync(path.join(v2Archive, archiveName), 'accepted candidate');
         fs.writeFileSync(path.join(job, 'manifest.json'), 'untouched');
@@ -41,9 +78,12 @@ export default [
         const evidenceRoot = path.join(root, 'evidence', 'restore-residue');
         const input = { canvas, jobId, evidenceRoot, baseline: { localAi: { entries: [] }, appliedJobs: { entries: [] } } };
         const saved = archiveRunRestoreResidue(input);
-        assert(saved.length === 5 && saved.every(row => fs.existsSync(path.join(evidenceRoot, row.path)))
+        assert(saved.length === 7 && saved.every(row => fs.existsSync(path.join(evidenceRoot, row.path)))
           && fs.readFileSync(path.join(evidenceRoot, '.local-ai', 'evidence-archive', jobId, archiveName), 'utf8') === 'accepted candidate',
         'restore must preserve accepted candidates, diagnostic archives and Finder files');
+        assert(!fs.existsSync(path.join(root, '.local-ai', 'rejected-handoffs'))
+          && !fs.existsSync(path.join(root, '.local-ai', 'writer-shortlists')),
+        'restore must retire the actual live archive directories after preserving them');
         assert(fs.readFileSync(path.join(job, 'manifest.json'), 'utf8') === 'untouched',
           'restore residue cleanup must not alter ordinary job content');
         assert(archiveRunRestoreResidue(input).length === 0, 'restore residue cleanup must be idempotent');

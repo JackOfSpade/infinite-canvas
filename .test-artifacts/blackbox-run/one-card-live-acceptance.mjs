@@ -340,6 +340,17 @@ function removeFixtureLocalAiScaffold(paths, baseline, { afterValidationForTest 
     throw new Error('Owned fixture Local-AI scaffold survived cleanup.');
   }
 }
+export function assertPartialRollbackBaseline({ root, jobId, baseline, userData }) {
+  if (lstatIfPresent(path.join(root, '.local-ai', 'jobs', jobId))) {
+    throw new Error('Partial restore still has its owned application job.');
+  }
+  if (!sameTreeRecord(treeRecord(path.join(root, '.local-ai')), baseline.localAi)
+    || !sameTreeRecord(treeRecord(path.join(root, 'Applied Jobs')), baseline.appliedJobs)
+    || !sameTreeRecord(treeRecord(careerSnapshotStorageRoot(userData)), baseline.careerSnapshotStore)
+    || !sameTreeRecord(treeRecord(path.join(userData, 'local-ai-authority-anchors')), baseline.authorityAnchors)) {
+    throw new Error('Partial restore has not returned every owned tree to baseline.');
+  }
+}
 function writeJsonNew(file, value) {
   fs.writeFileSync(file, `${JSON.stringify(value, null, 2)}\n`, { encoding: 'utf8', mode: 0o600, flag: 'wx' });
 }
@@ -415,11 +426,17 @@ export function archiveRunRestoreResidue({ canvas, jobId, evidenceRoot, baseline
   };
   const job = path.join(root, '.local-ai', 'jobs', jobId);
   for (const folder of ['rejected-handoffs', 'writer-shortlists']) {
-    const directory = path.join(job, folder);
-    const stat = lstatIfPresent(directory);
-    if (!stat) continue;
-    if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error(`Restore archive is not a regular directory: ${directory}`);
-    for (const name of fs.readdirSync(directory)) archive(path.join(directory, name), path.join('.local-ai', 'jobs', jobId, folder, name));
+    for (const relativeRoot of [path.join('.local-ai', 'jobs', jobId, folder), path.join('.local-ai', folder, jobId)]) {
+      const directory = path.join(root, relativeRoot);
+      const stat = lstatIfPresent(directory);
+      if (!stat) continue;
+      if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error(`Restore archive is not a regular directory: ${directory}`);
+      for (const name of fs.readdirSync(directory)) archive(path.join(directory, name), path.join(relativeRoot, name));
+      if (relativeRoot.startsWith(`${path.join('.local-ai', folder)}${path.sep}`)) {
+        fs.rmdirSync(directory);
+        if (fs.readdirSync(path.dirname(directory)).length === 0) fs.rmdirSync(path.dirname(directory));
+      }
+    }
   }
   const v2Archive = path.join(root, '.local-ai', 'evidence-archive', jobId);
   const v2ArchiveStat = lstatIfPresent(v2Archive);
@@ -826,19 +843,26 @@ async function launch({ id }) {
 async function restore({ id, preserveChangedProtectedState = false }) {
   const paths = runPaths(id); const manifest = readManifest(paths);
   assertNoPackagedAppRunning();
-  assertPreparedFixture(paths, manifest);
+  const baseline = JSON.parse(fs.readFileSync(path.join(paths.rollback, 'baseline.json'), 'utf8'));
+  let rollbackAlreadyRestoredCanvas = false;
+  try { assertByteRecord(byteRecord(paths.canvas), baseline.canvas, 'Restored isolated fixture'); rollbackAlreadyRestoredCanvas = true; } catch { /* Inspect the active fixture below. */ }
+  if (!rollbackAlreadyRestoredCanvas) assertPreparedFixture(paths, manifest);
+  else if (!manifest.launch?.at) throw new Error('A baseline canvas without a recorded launch is not a resumable restore.');
   const protectedStateForCleanup = protectedBridgeStateForCleanup(manifest.protectedBridgeState, { preserveChangedProtectedState });
   assertOAuthStateStructure();
   // Inspection re-attests an advanced card pointer and may claim exactly one
   // receipt-declared pre-reserved bundle before the harness does its CAS
   // cleanup. No arbitrary bundle path is ever adopted.
-  await inspect({ id });
-  const baseline = JSON.parse(fs.readFileSync(path.join(paths.rollback, 'baseline.json'), 'utf8'));
+  if (!rollbackAlreadyRestoredCanvas) await inspect({ id });
   const restoreResidue = archiveRunRestoreResidue({
     canvas: paths.canvas, jobId: manifest.queue.jobId,
     evidenceRoot: path.join(paths.root, 'evidence', 'restore-residue'), baseline,
   });
-  await restoreRun({ canvas: paths.canvas, userData: PRODUCTION_USER_DATA, destination: paths.rollback, execute: true, allowNonproduction: true });
+  if (!rollbackAlreadyRestoredCanvas) {
+    await restoreRun({ canvas: paths.canvas, userData: PRODUCTION_USER_DATA, destination: paths.rollback, execute: true, allowNonproduction: true });
+  } else {
+    assertPartialRollbackBaseline({ root: paths.root, jobId: manifest.queue.jobId, baseline, userData: PRODUCTION_USER_DATA });
+  }
   const bridgeLaneCleanup = deferBridgeLaneCleanup(manifest.queue.jobId, paths.canvas);
   assertProtectedBridgeState(protectedStateForCleanup);
   assertOAuthStateStructure();
