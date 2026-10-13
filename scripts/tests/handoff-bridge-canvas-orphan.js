@@ -183,8 +183,9 @@ export default [
       try {
         const { folder, canvasFilePath } = makeProject(root, project, { canvas: true, jobFolder: true });
         const missing = new Set();
+        let presenceProbes = 0;
         const clock = createFakeClock();
-        engine = createHandoffEngine({ source: sourceFor({ missing }),
+        engine = createHandoffEngine({ source: sourceFor({ missing, onPresence: () => { presenceProbes += 1; } }),
           restoredLanes: [heldLane(1, project, canvasFilePath)], now: clock.now, timers: clock, holdMs: 0 });
         await tickAndSettle(engine, clock);
         assert(rowFor(engine, project.jobId), 'the initially live held lane remains available');
@@ -192,9 +193,11 @@ export default [
         fs.rmSync(path.join(folder, '.local-ai', 'jobs', project.jobId), { recursive: true });
         missing.add(project.jobId);
         await tickAndSettle(engine, clock, 5 * 60_000 + 1);
+        await waitUntil(() => presenceProbes >= 1, 'first later orphan probe');
+        await settle();
         assert(rowFor(engine, project.jobId), 'the first later orphan probe cannot retire the lane');
         await tickAndSettle(engine, clock, 5 * 60_000 + 1);
-        assert(!rowFor(engine, project.jobId), 'the second later orphan probe retires it');
+        await waitUntil(() => !rowFor(engine, project.jobId), 'second later orphan probe retires it');
       } finally {
         await engine?.close();
         fs.rmSync(root, { recursive: true, force: true });
