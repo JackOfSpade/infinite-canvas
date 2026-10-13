@@ -3,7 +3,7 @@ import { APPLICATION_V2_LIMITS } from './applicationV2Limits.js';
 import { isCareerSkillIndexEligible } from './careerSnapshot.js';
 import { cleanCareerSkillNames } from './careerCleanLayer.js';
 export const WRITE_VERIFY_PROTOCOL = 'write-then-verify.v2';
-export const WRITE_VERIFY_DEFAULT_CANDIDATES = 3;
+export const WRITE_VERIFY_DEFAULT_CANDIDATES = 5;
 export const WRITE_VERIFY_MAX_CORRECTIONS = 3;
 export const WRITE_VERIFY_MAX_FIT_CORRECTIONS = 4;
 export const WRITE_VERIFY_BRIEF = 'Write the best honest one-page résumé and cover letter. Lead with the strongest true evidence for the posting. Write specific, natural English. The letter adds what the quoted evidence states beyond the résumé. Never claim more than a cited quote states.';

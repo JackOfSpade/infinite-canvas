@@ -68,6 +68,7 @@ const INIT_MARKER = '.simulator-init-incomplete';
 const LOCK_FILE = '.simulator.lock';
 const WRITER_MEMORY = 'scripted-writer.json';
 const RUN_VERSION = 1;
+const SIMULATOR_V2_DEFAULT_CANDIDATES = 5;
 
 // The real, read-only sources. Both are overridable (the test suite points
 // them at synthetic fixtures); neither is ever written.
@@ -598,7 +599,7 @@ async function initFromSavedCard({ userData, canvasRoot, card, options }) {
     ? prod.la.__queueLegacyLocalApplicationFixtureForTests : prod.la.queueLocalApplicationJob;
   const queued = await queueApplication({
     nodeId: node.id, canvasFilePath, transport: 'paste', careerSnapshotId: snapshotId, job,
-    ...(options['application-protocol'] === 'v2' ? { applicationProtocol: 'write-then-verify.v2' } : {}),
+    ...(options['application-protocol'] === 'v2' ? { applicationProtocol: 'write-then-verify.v2', candidateCount: SIMULATOR_V2_DEFAULT_CANDIDATES } : {}),
     additionalNotes: String(node.data.additionalNotes || ''), reasoning: node.data.reasoning, matchScore: node.data.matchScore,
   });
   node.data.careerSnapshotId = snapshotId;
@@ -664,7 +665,7 @@ async function initSynthetic({ userData, canvasRoot, card, options }) {
   const queueApplication = options.legacy === true
     ? prod.la.__queueLegacyLocalApplicationFixtureForTests : prod.la.queueLocalApplicationJob;
   const queued = await queueApplication({ transport: 'paste', canvasFilePath, careerSnapshotId: snapshotId,
-    ...(options['application-protocol'] === 'v2' ? { applicationProtocol: 'write-then-verify.v2' } : {}),
+    ...(options['application-protocol'] === 'v2' ? { applicationProtocol: 'write-then-verify.v2', candidateCount: SIMULATOR_V2_DEFAULT_CANDIDATES } : {}),
     job: { title: spec.title, company: spec.employer, snippet: texts.listing } });
   return {
     queued, canvasFilePath, snapshotId, job: { company: spec.employer, title: spec.title, listingChars: texts.listing.length }, source: null,
@@ -1197,7 +1198,7 @@ function usage() {
   node --import ./scripts/test-stubs/register.mjs .test-artifacts/blackbox-run/offline-simulator.mjs <command> [options]
 
   init     --card affirm|anthropic|node:<id>|synthetic[:key] --dir DIR [--snapshot-id ID] [--match-gap]
-           [--real-canvas FILE] [--real-user-data DIR] [--application-protocol legacy|v2] [--json]   (sources are read-only; DIR must be empty)
+           [--real-canvas FILE] [--real-user-data DIR] [--application-protocol legacy|v2] [--json]   (v2 uses five candidates; sources are read-only; DIR must be empty)
   next     --dir DIR [--auto-ack] [--reread] [--json]   print the next handoff (also written to DIR/handoff-<n>.txt/.json)
   submit   --dir DIR --file response.json [--code CODE] [--auto-ack] [--json]
   status   --dir DIR [--json]

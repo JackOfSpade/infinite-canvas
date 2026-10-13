@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {
-  WRITE_VERIFY_PROTOCOL, WRITE_VERIFY_STAGES, WRITE_VERIFY_MAX_FIT_CORRECTIONS, acceptedWriteVerifyCandidates,
+  WRITE_VERIFY_PROTOCOL, WRITE_VERIFY_DEFAULT_CANDIDATES, WRITE_VERIFY_STAGES, WRITE_VERIFY_MAX_FIT_CORRECTIONS, acceptedWriteVerifyCandidates,
   factCorrectionTransition, fullApprovedHand, initialWriteVerifyState, isWriteVerifyJob,
   validateWriteVerifyRanking, writeVerifyCandidateCount,
   writeVerifyChangedFindingErrors, writeVerifyFactFindingErrors,
@@ -361,8 +361,9 @@ export default [
   {
     name: 'v2 candidate count, drop, accepted-only rank, and fresh stage keys fail closed',
     run() {
-      assert.equal(writeVerifyCandidateCount(), 3);
-      assert.equal(initialWriteVerifyState().candidates.length, 3);
+      assert.equal(WRITE_VERIFY_DEFAULT_CANDIDATES, 5);
+      assert.equal(writeVerifyCandidateCount(), 5);
+      assert.equal(initialWriteVerifyState().candidates.length, 5);
       assert.equal(writeVerifyCandidateCount(8), 8);
       assert.throws(() => writeVerifyCandidateCount(0));
       const state = initialWriteVerifyState(5);
@@ -415,6 +416,23 @@ export default [
       const served = makeServedBody({ lane: { current }, remaining: {} });
       assert.deepEqual(served.pageImageOrder, images.map(({ candidateId, document }) => ({ candidateId, document })));
       assert.deepEqual([...new Set(served.pageImageOrder.map(row => row.candidateId))], acceptedWriteVerifyCandidates(state).map(row => row.id));
+    },
+  },
+  {
+    name: 'v2 default N sabotage: reverting to three fails the five-candidate contract while the judge cutoff stays six',
+    async run() {
+      const moduleUrl = new URL('../../electron/ipc/applicationWriteVerify.js', import.meta.url);
+      const source = fs.readFileSync(moduleUrl, 'utf8');
+      assert.ok(source.includes('export const WRITE_VERIFY_DEFAULT_CANDIDATES = 5;'), 'the default declaration is present for sabotage');
+      const sabotaged = source.replace('export const WRITE_VERIFY_DEFAULT_CANDIDATES = 5;', 'export const WRITE_VERIFY_DEFAULT_CANDIDATES = 3;')
+        .replace(/from '(\.\/[^']+)'/gu, (_, relative) => `from '${new URL(relative, moduleUrl).href}'`);
+      const mutant = await import(`data:text/javascript;base64,${Buffer.from(sabotaged).toString('base64')}`);
+      assert.equal(mutant.writeVerifyCandidateCount(), 3, 'the sabotage actually changes the default');
+      assert.throws(() => assert.equal(mutant.initialWriteVerifyState().candidates.length, 5), /3 !== 5/u,
+        'the five-candidate contract rejects the sabotaged default');
+      const host = fs.readFileSync(new URL('../../electron/ipc/localAiApplication.js', import.meta.url), 'utf8');
+      assert.match(host, /acceptedWriteVerifyCandidates\(work\)\.length > 6/u, 'seven accepted candidates still trigger elimination');
+      assert.match(host, /winners\.length > 6/u, 'elimination still ends at six winners');
     },
   },
   {

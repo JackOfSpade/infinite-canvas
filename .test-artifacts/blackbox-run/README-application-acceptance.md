@@ -4,7 +4,7 @@ The acceptance harness creates a disposable one-card canvas and queues one real 
 
 ## Protocol measured
 
-Requirements extraction and audit run first, with binding adjudication and at most two re-epochs. The default is three independent candidates. Each candidate has a fresh write chat and a fresh convert chat; content and fit corrections remain in that candidate's convert chat. Content correction has a three-round cap, and measured one-page fit has a separate four-round cap. Every applicable truth and hygiene check runs unchanged. Accepted candidates are ranked by one blind judge handoff when there is more than one; the winner gets a fresh fact-check, with correction/recheck and ranked fallback if needed. The app then saves and renders the bundle. Rejected raw responses and exact check IDs are retained in ignored evidence.
+Requirements extraction and audit run first, with binding adjudication and at most two re-epochs. The default is five independent candidates. Each candidate has a fresh write chat and a fresh convert chat; content and fit corrections remain in that candidate's convert chat. Content correction has a three-round cap, and measured one-page fit has a separate four-round cap. Every applicable truth and hygiene check runs unchanged. Accepted candidates are ranked by one blind judge handoff when there is more than one; the winner gets a fresh fact-check, with correction/recheck and ranked fallback if needed. The app then saves and renders the bundle. Rejected raw responses and exact check IDs are retained in ignored evidence.
 
 A run's handoff count includes variable requirements pages and audit, two base handoffs per candidate, any content or fit corrections, a judge for multiple accepted candidates, and fact-check/recheck handoffs for ranked candidates attempted. No two candidates or stage roles share a fresh-chat key. The clean career-text sidecar is verified against original quotes; the original remains provenance. See `local_ai/PASTE_BACK_APPLICATION.md` for the stage contract and `electron/ipc/applicationV2Limits.js` for measured transport and prompt limits.
 
@@ -34,7 +34,7 @@ Quit the packaged app before `restore`. The harness removes only its run-owned c
 
 ## Offline simulator
 
-`.test-artifacts/blackbox-run/offline-simulator.mjs` runs the same v2 host transitions in an isolated profile. It can initialize a synthetic career or a saved card's approved snapshot, serve handoffs through CLI or spool transport, and submit recorded responses. The simulator does not replace the packaged-app bridge acceptance: it cannot establish live ChatGPT delivery, page-image review, or actual wall-clock timing. Keep simulator and panel evidence in ignored run folders; tracked tests may contain only synthetic careers and postings.
+`.test-artifacts/blackbox-run/offline-simulator.mjs` runs the same v2 host transitions in an isolated profile. With `--application-protocol v2`, it queues five candidates by default. It can initialize a synthetic career or a saved card's approved snapshot, serve handoffs through CLI or spool transport, and submit recorded responses. The simulator does not replace the packaged-app bridge acceptance: it cannot establish live ChatGPT delivery, page-image review, or actual wall-clock timing. Keep simulator and panel evidence in ignored run folders; tracked tests may contain only synthetic careers and postings.
 
 ## Local gates
 

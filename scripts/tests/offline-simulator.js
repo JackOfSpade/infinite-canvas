@@ -92,6 +92,25 @@ const newWriter = (spec, options = {}) => createScriptedWriter({ spec, kit, crit
 export default [
 
   {
+    name: 'Offline simulator: explicit v2 initialization freezes five candidates in input and state',
+    async run() {
+      const root = await scratch('v2-default');
+      try {
+        const dir = path.join(root, 'run');
+        const init = await cliJson(['init', '--card', `synthetic:${SYNTHETIC_SPECS[0].key}`, '--dir', dir, '--application-protocol', 'v2']);
+        assert(init.code === 0 && init.json?.jobId, `v2 init succeeds (${init.stderr.slice(-400)})`);
+        const jobDir = path.join(dir, 'canvas', '.local-ai', 'jobs', init.json.jobId);
+        const input = JSON.parse(fs.readFileSync(path.join(jobDir, 'input.json'), 'utf8'));
+        const manifest = JSON.parse(fs.readFileSync(path.join(jobDir, 'manifest.json'), 'utf8'));
+        assert(input.applicationProtocol === 'write-then-verify.v2' && input.candidateCount === 5,
+          'the simulator freezes the five-candidate v2 default in input');
+        assert(manifest.paste.writeVerify.count === 5 && manifest.paste.writeVerify.candidates.length === 5,
+          'the host initializes all five candidates');
+      } finally { await cleanup([root]); }
+    },
+  },
+
+  {
     name: 'Offline simulator: init from a saved job card copies the approved snapshot byte for byte, never changes either source, and the first prompt carries that card (flip the card, the prompt flips)',
     async run() {
       const root = await scratch('card');
