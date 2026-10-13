@@ -33,8 +33,11 @@ export function countWorkerPoolUnits({ tasks = [], applicationCount = 0, applica
     queued = add(queued, Math.max(whole(entry?.forecast), whole(entry?.pending)));
     materialized = add(materialized, whole(entry?.pending));
   }
-  queued = add(queued, whole(applicationForecastCount));
-  materialized = add(materialized, whole(applicationCount));
+  const readyApplications = whole(applicationCount);
+  // A stale forecast may lag already materialized application lanes. It must
+  // never make the plan claim there is less queued work than ready work.
+  queued = add(queued, Math.max(whole(applicationForecastCount), readyApplications));
+  materialized = add(materialized, readyApplications);
   return Object.freeze({ queued, materialized });
 }
 

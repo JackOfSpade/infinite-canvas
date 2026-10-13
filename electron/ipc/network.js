@@ -39,11 +39,10 @@ export function registerNetworkHandlers({ onNodeDeleted = null, ipcMainInstance 
 
   registerHandler('fetch-url-title', async (event, url, signal) => {
     try {
-      let fetchUrl = url;
-      if (!fetchUrl.startsWith('http://') && !fetchUrl.startsWith('https://')) {
-        fetchUrl = 'https://' + fetchUrl;
-      }
-      const res = await fetch(fetchUrl, {
+      const suppliedUrl = typeof url === 'string' ? url.trim() : '';
+      const fetchUrl = new URL(/^https?:\/\//i.test(suppliedUrl) ? suppliedUrl : `https://${suppliedUrl}`);
+      if (!['http:', 'https:'].includes(fetchUrl.protocol)) return { title: null };
+      const res = await fetch(fetchUrl.href, {
         signal,
         headers: { 'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)' },
       });
@@ -61,8 +60,13 @@ export function registerNetworkHandlers({ onNodeDeleted = null, ipcMainInstance 
         while (true) {
           const { done, value } = await reader.read();
           if (done) break;
-          text += decoder.decode(value, { stream: true });
-          bytesRead += value.length;
+          // A stream may return a chunk larger than our entire scan budget.
+          // Clip before decoding and matching so a late title cannot escape
+          // the first-MiB limit merely because it arrived in one chunk.
+          const remaining = MAX_SIZE - bytesRead;
+          const inspected = value.subarray(0, remaining);
+          text += decoder.decode(inspected, { stream: true });
+          bytesRead += inspected.byteLength;
           
           const earlyMatch = text.match(TITLE_REGEX);
           if (earlyMatch) {
@@ -73,6 +77,7 @@ export function registerNetworkHandlers({ onNodeDeleted = null, ipcMainInstance 
             break;
           }
         }
+        text += decoder.decode();
       } finally {
         await reader.cancel().catch(() => {});
       }

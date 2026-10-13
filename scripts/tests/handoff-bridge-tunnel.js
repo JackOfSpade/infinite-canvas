@@ -671,6 +671,30 @@ stopc`, 'watchdog program bytes drifted from the measured interruptible TERM TER
     },
   },
   {
+    name: 'handoff bridge: tunnel: reaper reports a process-table failure after SIGKILL without claiming an orphan is stuck',
+    async run() {
+      const root = '/tmp/reap-post-kill-ps'; const configPath = `${root}/handoff-bridge/tunnel/config.yml`; const pidfile = `${root}/handoff-bridge/tunnel/tunnel.pid.json`;
+      const command = `${root}/handoff-bridge/tunnel/bin/cloudflared-deadbeef tunnel --config ${configPath} --no-autoupdate run ${TUNNEL_ID}`;
+      const row = `750 1 750 Mon Jan  1 00:00:00 2026 ${command}`;
+      let identityChecks = 0; const signals = []; const removed = [];
+      const fsPort = { existsSync: target => target === pidfile, readFileSync: () => JSON.stringify({ pid: 750, pgid: 750, lstart: 'Mon Jan  1 00:00:00 2026', configPath }), unlinkSync: target => removed.push(target) };
+      const result = await reapOrphans({
+        userData: root, configPath, fsImpl: fsPort,
+        exec: (_name, args) => {
+          if (args.includes('-axww')) return row;
+          identityChecks += 1;
+          if (identityChecks === 4) throw new Error('process table unavailable');
+          return row;
+        },
+        kill: (...args) => signals.push(args), wait: async () => undefined,
+      });
+      assert(signals.map(([, signal]) => signal).join(',') === 'SIGTERM,SIGTERM,SIGKILL',
+        'the fixture must reach the final identity probe after the bounded escalation');
+      assert(result.reaped === 0 && result.notices.includes('ps-failed') && !result.notices.includes('orphan-stuck') && removed.length === 0,
+        'an unreadable process table after SIGKILL is an unknown state, not proof that the process survived');
+    },
+  },
+  {
     name: 'handoff bridge: tunnel: reaper handles absent corrupt dead live foreign and ps-failure rows without unsafe signals',
     async run() {
       const root = '/tmp/reap-table'; const configPath = `${root}/handoff-bridge/tunnel/config.yml`; const pidfile = `${root}/handoff-bridge/tunnel/tunnel.pid.json`;

@@ -73,6 +73,7 @@ export async function reapOrphans({ userData, configPath, parentPid = process.pi
   if (remaining === undefined) return { ok: true, reaped: 0, notices: [...notices, 'ps-failed'] };
   if (remaining === 'pid-reused') return { ok: true, reaped: 0, notices: [...notices, 'pid-reused'] };
   if (remaining) { signalGroup(groupId, 'SIGKILL', { kill }); await wait(1500); remaining = alive(); }
+  if (remaining === undefined) return { ok: true, reaped: 0, notices: [...notices, 'ps-failed'] };
   if (remaining === 'pid-reused') return { ok: true, reaped: 0, notices: [...notices, 'pid-reused'] };
   if (remaining) return { ok: true, reaped: 0, notices: [...notices, 'orphan-stuck'] };
   remove(fsImpl, pidfile);

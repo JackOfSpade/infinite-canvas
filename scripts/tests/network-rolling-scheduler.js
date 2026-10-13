@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { assert } from '../test-dependencies.js';
 import { runRollingWorkers } from '../../src/utils/handoffScheduler.js';
+import { registerNetworkHandlers } from '../../electron/ipc/network.js';
 
 const diceExtractorSource = readFileSync(new URL('../../electron/extractors/apiExtractors.js', import.meta.url), 'utf8');
 const stealthBrowserSource = readFileSync(new URL('../../electron/ipc/stealthBrowser.js', import.meta.url), 'utf8');
@@ -33,6 +34,47 @@ export default [{
     await scheduler;
     assert(active === 0 && peak === 2, 'the rolling network roster must drain without exceeding its cap');
     return { startedBeforeSlowSettled: started.length, peak };
+  },
+}, {
+  name: 'URL title fetch normalizes uppercase schemes and never scans past the first MiB of an oversized chunk',
+  run: async () => {
+    let titleHandler;
+    registerNetworkHandlers({
+      ipcMainInstance: { on: () => {}, handle: () => {} },
+      registerHandler: (channel, handler) => {
+        if (channel === 'fetch-url-title') titleHandler = handler;
+      },
+    });
+    const previousFetch = globalThis.fetch;
+    const visited = [];
+    let reads = 0;
+    let cancelled = 0;
+    try {
+      globalThis.fetch = async url => {
+        visited.push(url);
+        return {
+          body: {
+            getReader: () => ({
+              read: async () => {
+                reads += 1;
+                // A single legal stream chunk can be larger than the scan cap.
+                // The title beyond that cap must remain invisible.
+                return { done: false, value: Buffer.from(`${'x'.repeat(1024 * 1024)}<title>Too late</title>`) };
+              },
+              cancel: async () => { cancelled += 1; },
+            }),
+          },
+        };
+      };
+      const result = await titleHandler({ sender: { isDestroyed: () => false } }, '  HTTPS://example.test/path  ', new AbortController().signal);
+      assert(visited.length === 1 && visited[0] === 'https://example.test/path',
+        `uppercase HTTPS URL was changed incorrectly: ${JSON.stringify(visited)}`);
+      assert(result.title === null && reads === 1 && cancelled === 1,
+        'a title after the first MiB of one oversized chunk must not be read');
+      return { normalizedUrl: visited[0], scannedChunks: reads, cancelled };
+    } finally {
+      globalThis.fetch = previousFetch;
+    }
   },
 }, {
   name: 'Network rolling workers stop claiming new probes after a cooperative early result',
