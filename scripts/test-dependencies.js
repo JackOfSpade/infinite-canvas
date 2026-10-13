@@ -54,13 +54,6 @@ export {
   storeRequirementCatalogPairDescriptor,
   validateBlindReviewCoverage,
 } from '../electron/ipc/applicationAuthorityWorkflow.js';
-export {
-  acceptApplicationBlindReviewCursorResponse,
-  applicationBlindReviewScopeCount,
-  applicationBlindReviewWorkAt,
-  createApplicationBlindReviewPlan,
-  createApplicationBlindReviewSourceAccessor,
-} from '../electron/ipc/applicationBlindReview.js';
 export { runJobApiProbe } from './run-api-tests.js';
 export { __discardJobAnalysisSnapshotForTests, __getJobAnalysisRetirementStateForTests, buildResolvedDescriptionWarning, buildRoleFamilyBatchResearchPrompt, getJobSourceResolveConfig, mergeRecoveredScoreRows, packCompensationAssessmentBatches, packCompensationResearchBatches, planPartialScoreRecovery, planRoleFamilyAssessmentBatches, planRoleFamilyResearchBatches, reconcileSearchFunnel, validateJobScoringSubmission } from '../electron/ipc/jobs.js';
 import { __saveJobAnalysisSnapshotForTests as saveJobAnalysisSnapshotFixture } from '../electron/ipc/jobs.js';
@@ -116,7 +109,7 @@ export { formatOriginalJobListingMarkdown, sanitizeApplicationBundlePart } from 
 export { APPLICATION_PDF_PAGINATION_GEOMETRY_REVISION, GENERATION_AUDIT_VERSION, RESUME_ROLE_BULLET_CEILING, applicationVariantAttrsForJob, assertRetainedResumeRoleBullets, checkResumeBulletFocus, checkResumeBulletLength, checkResumeBulletOpeningVariety, checkResumeRoleBulletBudget, careerDataRoleLocation, evaluateResumeProseChecks, extractResumeEvidence, formatTypeAreaUtilization, inspectApplicationExport, inspectGeneratedApplicationPdf, isPendingApplicationWorkspaceSaveInFlight, normalizeApplicationAdditionalNotes, readRegisteredApplicationArtifact, registerJobApplicationHandlers, registerPendingApplicationWorkspace, resumeProjectProvenanceFailures, resumeRoleBlockSample, resumeRoleLocationFailures, retainedResumeRolesWithoutBullets, getApplicationTelemetry, recordApplicationTelemetry, resolvePendingApplicationWorkspaceForOwner, targetPageCountForJob, resumeTypeAreaUtilization, withUnregisteredApplicationWorkspacePruneClaim } from '../electron/ipc/jobApplication.js';
 export { projectContactChannels, projectTrustedIdentity, renderStructuredApplicationResume, ROLE_BULLET_EVIDENCE_EXCLUSIVITY_RULE, STRUCTURED_RESUME_SCHEMA_VERSION, validateStructuredApplicationResume } from '../electron/ipc/structuredResume.js';
 export { applicationConvergenceInstruction, createApplicationConvergenceTracker, expectedApplicationQualityDecision } from '../electron/ipc/applicationConvergence.js';
-export { LOCAL_AI_APPLICATION_VERSION, __validateStoredBlindReviewCoverageForTests, assertSourceQuoteLinksFinalText, pasteAttributionScopeErrors, sanitizeQualityReview, buildLocalGenerationAuditArtifact, getLocalApplicationHandoff, projectEvidenceCoverageGaps, projectedCareerProjectEvidenceBlocks, discardLocalApplicationJob, discoverLocalApplicationJobs, localApplicationStatus, importLocalApplicationJob, registerLocalAiApplicationHandlers, resolveLocalOutputBundleRoot, submitLocalApplicationHandoff, validateLocalApplicationResult, withLocalAiJobPruneClaim } from '../electron/ipc/localAiApplication.js';
+export { LOCAL_AI_APPLICATION_VERSION, assertSourceQuoteLinksFinalText, pasteAttributionScopeErrors, sanitizeQualityReview, buildLocalGenerationAuditArtifact, getLocalApplicationHandoff, projectEvidenceCoverageGaps, projectedCareerProjectEvidenceBlocks, discardLocalApplicationJob, discoverLocalApplicationJobs, localApplicationStatus, importLocalApplicationJob, registerLocalAiApplicationHandlers, resolveLocalOutputBundleRoot, submitLocalApplicationHandoff, validateLocalApplicationResult, withLocalAiJobPruneClaim } from '../electron/ipc/localAiApplication.js';
 import { __queueLegacyLocalApplicationFixtureForTests } from '../electron/ipc/localAiApplication.js';
 
 // Legacy recovery tests construct pre-snapshot folders intentionally. Keep

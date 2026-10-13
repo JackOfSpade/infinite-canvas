@@ -28,8 +28,7 @@
 //                              pasteAttributionScopeErrors (ownership, figures,
 //                              durations, populations, employer-years, result and
 //                              scope words, responsibilities in final prose),
-//                              __blindReviewFactEvidenceForTests,
-//                              validateLocalApplicationResult (completion gate)
+//                            //                              validateLocalApplicationResult (completion gate)
 //   coverLetterChecks          findUnsupportedDurationClaim, checkTargetCompanyBinding,
 //                              checkParagraphArgumentLinks / evidence-grounding (reached
 //                              through the completion gate: the need quote is from the
@@ -108,9 +107,6 @@ import {
   APPLICATION_QUALITY_CHECKLIST_VERSION,
   APPLICATION_QUALITY_CRITERIA,
   LOCAL_AI_GENERATION_AUDIT_VERSION,
-  __blindReviewBoundedTailoringPagesForTests,
-  __blindReviewDocumentProjectionForTests,
-  __blindReviewFactEvidenceForTests,
   __snapshotCareerSkillEvidenceForTests,
   assertSourceQuoteLinksFinalText,
   pasteAttributionScopeErrors,
@@ -128,15 +124,6 @@ import {
   validateDispositionResponse,
   validateMatchResponse,
 } from '../../electron/ipc/applicationAuthorityWorkflow.js';
-import {
-  applicationBlindReviewDocumentPageIndex,
-  applicationBlindReviewScopeAt,
-  applicationBlindReviewScopeCount,
-  applicationBlindReviewWorkAt,
-  createApplicationBlindReviewPlan,
-  createApplicationBlindReviewSourceAccessor,
-} from '../../electron/ipc/applicationBlindReview.js';
-
 // ---------------------------------------------------------------------------
 // Small helpers
 // ---------------------------------------------------------------------------
@@ -778,69 +765,6 @@ function workflowFor(context, L) {
 }
 
 // ---------------------------------------------------------------------------
-// Blind-review fact channel (the exact production sequence, minus the store)
-// ---------------------------------------------------------------------------
-
-function roleIdOfEvidence(context, id) {
-  const match = /^host\.career\.(achievement|skill|role)\.([^.]+)\./u.exec(id);
-  if (!match) return undefined;
-  if (match[1] === 'role') return match[2];
-  return context.profile.roles.find(role => (match[1] === 'achievement' ? role.achievementIds : role.skillIds).includes(match[2]))?.id;
-}
-
-function blindState(context, L, { bullet, bulletEvidenceIds, paragraph, paragraphEvidenceIds, extraEvidence = [] }) {
-  return {
-    evidencePlan: {
-      evidence: [
-        ...context.catalog.map(item => ({ id: item.id, sourceId: item.sourceId, quote: item.quote, roleId: roleIdOfEvidence(context, item.id) })),
-        ...listingEvidence(L), ...extraEvidence,
-      ],
-    },
-    resume: {
-      identity: context.trustedIdentity,
-      roles: context.sourceRoles.map((role, index) => ({
-        ...role,
-        bullets: [{
-          id: `bullet-${role.id}`, text: index === 0 ? bullet : achievementLine(context.spec.roles[index].achievements[0]),
-          evidenceIds: index === 0 ? bulletEvidenceIds : [evidenceId(context.spec.roles[index].achievements[0].id)],
-        }],
-      })),
-    },
-    coverLetter: { name: context.trustedIdentity.name, contact: context.trustedIdentity.contact, paragraphs: [{ id: 'paragraph-1', text: paragraph, evidenceIds: paragraphEvidenceIds }] },
-  };
-}
-
-/** Build the blind-review plan and read back every scope's host-projected context. */
-function blindScopes(context, L, state) {
-  const input = { sourceRoles: context.sourceRoles };
-  const projection = __blindReviewDocumentProjectionForTests(state);
-  const fact = __blindReviewFactEvidenceForTests(state, input);
-  const requirements = [
-    { id: 'req-tool', text: listingToolSentence(L), priority: 'highest' },
-    { id: 'req-need', text: `Deliver ${L.need} on every shift.`, priority: 'high' },
-  ];
-  const tailoringPages = __blindReviewBoundedTailoringPagesForTests(requirements, requirements.map(row => ({
-    requirementId: row.id, disposition: 'omitted-no-evidence', justification: 'No candidate evidence states this requirement.', proofs: [],
-  })), 'req');
-  const sourceAccessor = createApplicationBlindReviewSourceAccessor({
-    resume: projection.resume, coverLetter: projection.coverLetter, citedEvidencePages: fact.pages, tailoringPages,
-    factClaims: fact.factClaims.map(claim => ({ ...claim, pageIndex: applicationBlindReviewDocumentPageIndex(claim.document === 'resume' ? projection.resume : projection.coverLetter, claim.text) })),
-  });
-  const plan = createApplicationBlindReviewPlan({ sourceAccessor });
-  const scopes = [];
-  for (let ordinal = 0; ordinal < applicationBlindReviewScopeCount(plan); ordinal += 1) {
-    const work = applicationBlindReviewWorkAt(plan, { scopeOrdinal: ordinal, sourceAccessor });
-    scopes.push({ track: work.track, json: JSON.stringify(applicationBlindReviewScopeAt(plan, ordinal, { sourceAccessor }).context) });
-  }
-  return { fact, scopes };
-}
-
-const factScopeText = scopes => scopes.filter(scope => scope.track === 'fact-fidelity').map(scope => scope.json).join('\n');
-const tailoringScopeText = scopes => scopes.filter(scope => scope.track === 'tailoring-ats').map(scope => scope.json).join('\n');
-// A JSON-escaped dollar/percent/etc. string compares equal to its plain form.
-const jsonHas = (json, value) => json.includes(JSON.stringify(String(value)).slice(1, -1));
-
-// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -1320,50 +1244,6 @@ export default [
           resume: resumeDraft(A, []), coverLetter: { paragraphs: [] },
         }));
         assert(!unselected.ok && /unselected authority evidence/u.test(unselected.message), `${label}: a real but unselected career citation is refused (${unselected.message})`);
-      }
-    },
-  },
-  {
-    name: 'Blind review: the fact channel carries a claim and its cited CAREER evidence only, never the listing, and follows the recompiled source',
-    run() {
-      for (const { spec, L } of PAIRS) {
-        const A = build(spec);
-        const base = baseOf(spec);
-        const baseId = evidenceId(base.id);
-        const label = `${spec.key}/${L.key}`;
-        const kind = claimKind('ownership');
-        const claim = kind.claim(base, L);
-        const state = (context, bulletEvidenceIds) => blindState(context, L, { bullet: claim, bulletEvidenceIds, paragraph: `I ${lcfirst(base.verb)} ${base.obj}.`, paragraphEvidenceIds: [baseId, 'job-need'] });
-        const listingFacts = [L.tool, L.company, L.need, L.population, L.budget, listingToolSentence(L)];
-        const a = blindScopes(A, L, state(A, ['job-need', baseId]));
-        const aFact = factScopeText(a.scopes);
-        assert(a.fact.factClaims.every(item => !item.citedEvidenceIds.includes('job-need') && !item.citedEvidenceIds.includes('job-tool')), `${label}: listing citations are stripped from every fact claim`);
-        assert(jsonHas(aFact, catalogItem(A, baseId).quote) && jsonHas(aFact, claim), `${label}: the fact reviewer sees the claim and the cited career quote`);
-        assert(listingFacts.every(fact => !jsonHas(aFact, fact)), `${label}: no listing fact reaches the fact reviewer`);
-        assert(jsonHas(tailoringScopeText(a.scopes), L.need) && jsonHas(tailoringScopeText(a.scopes), listingToolSentence(L)), `${label}: the listing is confined to the tailoring track`);
-        assert(!jsonHas(tailoringScopeText(a.scopes), catalogItem(A, baseId).quote), `${label}: and the tailoring track does not carry career quotes as facts`);
-        // A claim whose only citation is listing evidence has nothing to be reviewed against.
-        const noCareer = attempt(() => __blindReviewFactEvidenceForTests(state(A, ['job-need']), { sourceRoles: A.sourceRoles }));
-        assert(!noCareer.ok && /no cited career-data evidence/u.test(noCareer.message), `${label}: a listing-only claim is refused before review (${noCareer.message})`);
-        // B: the recompiled evidence appears on the reviewer's page; C: it is gone again.
-        const B = build(spec, [extraFor(spec, kind.support(base, L))]);
-        const supportId = evidenceId('ach-listing');
-        const b = blindScopes(B, L, state(B, [baseId, supportId]));
-        assert(jsonHas(factScopeText(b.scopes), catalogItem(B, supportId).quote), `${label}: the reviewer is shown the line the recompiled source adds`);
-        const C = build(spec, [], { fresh: true });
-        const c = blindScopes(C, L, state(C, [baseId, supportId]));
-        assert(!jsonHas(factScopeText(c.scopes), catalogItem(B, supportId).quote) && c.fact.factClaims[0].citedEvidenceIds.join() === baseId,
-          `${label}: after removal the unresolved citation is dropped and the reviewer sees the base quote only`);
-        // Employer attribution in prose needs evidence scoped to that employer's role.
-        const second = A.sourceRoles[1];
-        const crossRole = attempt(() => __blindReviewFactEvidenceForTests(blindState(A, L, {
-          bullet: claim, bulletEvidenceIds: [baseId], paragraph: `I supported colleagues at ${second.company}.`, paragraphEvidenceIds: [baseId],
-        }), { sourceRoles: A.sourceRoles }));
-        assert(!crossRole.ok && /without career evidence deterministically scoped/u.test(crossRole.message), `${label}: naming an employer without role-scoped evidence is refused (${crossRole.message})`);
-        const scoped = attempt(() => __blindReviewFactEvidenceForTests(blindState(A, L, {
-          bullet: claim, bulletEvidenceIds: [baseId], paragraph: `I supported colleagues at ${second.company}.`, paragraphEvidenceIds: [evidenceId(spec.roles[1].achievements[0].id)],
-        }), { sourceRoles: A.sourceRoles }));
-        assert(scoped.ok, `${label}: the same sentence is accepted with that role's own evidence (${scoped.message})`);
       }
     },
   },

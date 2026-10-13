@@ -16,7 +16,7 @@ import {
 import { classifySubmission } from '../../electron/ipc/handoffBridge/preflight.js';
 import { createSyntheticPreflightSource } from '../../electron/ipc/handoffBridge/sources/syntheticPreflight.js';
 import { createHandoffCodeGuard } from '../../electron/ipc/handoffBridge/lanes.js';
-import { pasteRejectionCheckIds } from '../../electron/ipc/localAiApplication.js';
+import { __persistedValidatorBuildForTests, __setApplicationValidatorStampForTests, applicationValidatorStamp, pasteRejectionCheckIds } from '../../electron/ipc/localAiApplication.js';
 import { writeVerifyLengthBudgetForStructure, writeVerifyLengthBudgets } from '../../electron/ipc/applicationV2LengthBudget.js';
 import { makeServedBody } from '../../electron/ipc/handoffBridge/framing.js';
 import { normalizeCurrentHandoff } from '../../electron/ipc/handoffBridge/lanes.js';
@@ -107,6 +107,23 @@ export default [
       assert.equal(applicationProtocolSetting('unexpected'), WRITE_VERIFY_PROTOCOL);
       assert.equal(applicationProtocolSetting(WRITE_VERIFY_PROTOCOL), WRITE_VERIFY_PROTOCOL);
       assert.equal(applicationProtocolSetting('legacy'), 'legacy');
+    },
+  },
+  {
+    name: 'v2 manifests classify a matching, stale, or absent validator stamp without changing the manifest',
+    run() {
+      const current = applicationValidatorStamp();
+      const manifest = { validatorStamp: current, paste: { writeVerify: { version: WRITE_VERIFY_PROTOCOL } } };
+      const before = JSON.stringify(manifest);
+      assert.match(current, /^[0-9a-f]{64}$/u);
+      assert.equal(__persistedValidatorBuildForTests(manifest).kind, 'same-build');
+      try {
+        __setApplicationValidatorStampForTests('a1'.repeat(32));
+        assert.equal(__persistedValidatorBuildForTests(manifest).kind, 'other-build');
+        assert.equal(JSON.stringify(manifest), before);
+      } finally { __setApplicationValidatorStampForTests(null); }
+      assert.equal(__persistedValidatorBuildForTests({ paste: manifest.paste }).kind, 'unstamped');
+      assert.equal(__persistedValidatorBuildForTests(manifest).kind, 'same-build');
     },
   },
   {

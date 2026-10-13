@@ -59,7 +59,6 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { assert } from './testHelpers.js';
-import { FLOW_SPECS, createFlow } from './gapfix-repair-convergence.js';
 import * as guidance from '../../electron/ipc/applicationWriterGuidance.js';
 import {
   APPLICATION_QUALITY_CRITERIA, __currentAuthorityDraftSelectionForTests, __currentAuthorityUnsupportedNeedsForTests,
@@ -73,11 +72,6 @@ import { createStoreAuthorityWorkflowRoot, createStoreMatchReceipt, storeRequire
 import { CAREER_SNAPSHOT_STATUS_APPROVED, approvedCareerEvidenceCatalog } from '../../electron/ipc/careerSnapshot.js';
 import { buildApplicationCareerAuthority } from '../../electron/ipc/applicationCareerAuthority.js';
 import { APPLICATION_COVER_LETTER_SCHEMA, APPLICATION_DIRECT_COVER_LETTER_SCHEMA } from '../../electron/ipc/aiSchemas.js';
-
-const count = (text, part) => text.split(part).length - 1;
-const CONTEXT_MARKER = '\n\nAuthoritative context:\n';
-const contractOf = prompt => prompt.slice(0, prompt.lastIndexOf(CONTEXT_MARKER));
-const contextOf = prompt => JSON.parse(prompt.slice(prompt.lastIndexOf(CONTEXT_MARKER) + CONTEXT_MARKER.length));
 
 // ---------------------------------------------------------------------------
 // Fixtures.
@@ -164,49 +158,6 @@ const REQUIREMENT_SETS = Object.freeze([
     { id: 'p-2', text: 'Plan backhaul loads for regional carriers', priority: 'high' },
   ] },
 ]);
-
-// The blind-review drivers, adapted from gapfix-repair-convergence.js (they use only the flow object that module's createFlow returns).
-async function runBlindCycle(flow, reviewer) {
-  const review = await flow.current();
-  assert(review.stage === 'review', `expected a review handoff before blind review, found ${review.stage}`);
-  const reviewContext = flow.contextOf(review);
-  flow.accepted = await flow.submit(review, flow.quality(reviewContext.coverLetter.paragraphs[0].text, reviewContext.resume.roles[0].bullets[0].text));
-  assert(flow.accepted.accepted && flow.accepted.handoff?.stage === 'blind-review', `the review pass must enter blind review (${JSON.stringify(flow.accepted.validationErrors || [])})`);
-  while (flow.accepted.handoff?.stage === 'blind-review') {
-    const handoff = await flow.current(); const prompt = handoff.prompt;
-    const track = /TRACK: ([^\n]+)/u.exec(prompt)[1]; const scopeDigest = /"scopeDigest":"([a-f0-9]{64})"/u.exec(prompt)[1];
-    const pageIndex = Number(/"pageIndex":(\d+)/u.exec(prompt)[1]); const predecessor = /"previousPageDigest":(null|"[a-f0-9]{64}")/u.exec(prompt)[1];
-    const scopeOrdinal = Number(/Each finding id (?:MUST begin|begins) "(\d+)-\d+-"/u.exec(prompt)[1]);
-    const context = JSON.parse(/<untrusted-evidence-json>\n([\s\S]*?)\n<\/untrusted-evidence-json>/u.exec(prompt)[1]);
-    const raw = track === 'fact-fidelity' && Array.isArray(context.claims)
-      ? context.claims.flatMap(claim => reviewer({ track, scopeOrdinal, context: { ...context, claim }, prompt }) || [])
-      : reviewer({ track, scopeOrdinal, context, prompt }) || [];
-    const findings = raw.map((finding, index) => ({ id: `${scopeOrdinal}-${pageIndex}-${index + 1}`, ruleId: 'review-rule', ...finding }));
-    flow.accepted = await flow.submit(handoff, { version: 1, scopeDigest, pageIndex, previousPageDigest: predecessor === 'null' ? null : JSON.parse(predecessor),
-      complete: true, decision: findings.length ? 'issues' : 'pass', findings });
-  }
-}
-
-async function acknowledgeRepairPages(flow) {
-  while (flow.accepted.handoff?.stage === 'blind-repair-context') {
-    const handoff = await flow.current(); const context = flow.contextOf(handoff);
-    const ids = context.packets.map(packet => packet.finding.id);
-    flow.accepted = await flow.submit(handoff, { version: 1, planDigest: context.planDigest, pageIndex: context.pageIndex, pageDigest: context.pageDigest, acknowledgedFindingIds: ids });
-  }
-}
-
-// A minimal local edit to the flagged paragraph that keeps every deterministic check and the argument mapping satisfied.
-const LOCAL_EDITS = Object.freeze([(text, spec) => text.replace(`I built ${spec.tech} service`, `I built the ${spec.tech} service`)]);
-
-async function answerRepair(flow, { paragraph }) {
-  const handoff = await flow.current();
-  assert(handoff.stage === 'review', `expected the repair review, found ${handoff.stage}`);
-  const documents = flow.documentsFor({ paragraph });
-  flow.accepted = await flow.submit(handoff, { ...flow.quality(paragraph), decision: 'revised',
-    findings: [{ id: 'writer-note-1', document: 'coverLetter', targetId: 'paragraph-1', issue: 'Reworked the flagged text.', fix: 'Replaced it with a tighter supported statement.' }], coverLetter: documents.coverLetter });
-  assert(flow.accepted.accepted && flow.accepted.handoff?.stage === 'requirement-disposition', `the repair must be accepted and restart disposition (${JSON.stringify(flow.accepted.validationErrors || [])})`);
-  await flow.completeDispositions();
-}
 
 export default [ {
     name: 'Opening: an opening that names the role and the employer from the job record and states the closest capability passes the whole battery, and one that announces the application does not (A / B, 3 domains)',
@@ -327,39 +278,4 @@ export default [ {
         assert(printed.omitted === 0 && printed.requirements.length === baseline.length, `${career.key}: the prompt context lists every row`);
       }
     },
-  },  {
-    name: 'Blind repair brief: the writer’s rule prints the two fixed sentences once, and a real repair cycle shows the typed fields, the 480-character rung, and unitRaisedCycles read from the signed tally across cycles (3 careers, A / B / C)',
-    async run() {
-      for (const spec of FLOW_SPECS) {
-        const flow = await createFlow(spec);
-        try {
-          // Two cycles re-raise the same unit with different words; the first fix is 300 characters, which the old 240-character limit cut and the new limit shows whole.
-          const midFix = `Rewrite this paragraph so that it states the delivery claim once, with the proof beside it. Keep the first sentence and the figure exactly as they are. ${'Name the constraint the team set before the claim. '.repeat(3)}`.trim();
-          assert(midFix.length > 240 && midFix.length <= 480, `the fixture fix sits between the old and the new limit (${midFix.length})`);
-          const longFix = `${'Reword the claim in plain words. '.repeat(25)}Keep the figure exactly as it is.`;
-          assert(longFix.length > 480, 'the long fix exceeds the limit');
-          await runBlindCycle(flow, ({ track, context }) => (track === 'fact-fidelity' && context.claim.id.startsWith('letter-')
-            ? [{ document: 'cover-letter', targetId: context.claim.id, issue: 'The paragraph repeats one delivery claim without a distinct proof.', fix: midFix }] : []));
-          await acknowledgeRepairPages(flow);
-          const first = await flow.current(); const firstBrief = contextOf(first.prompt).blindRepairBrief;
-          const row = firstBrief.clusters.find(cluster => cluster.unit?.kind === 'letter-paragraph');
-          // A: the typed fields exist, the rung is the widest, the 300-character fix is shown whole, and the unit has been raised once.
-          assert(firstBrief.textChars === 480 && row.fixTruncated === false && row.issueTruncated === false && row.fix === midFix && row.unitRaisedCycles === 1,
-            `${spec.id}/A: first cycle: the fix is whole at the widest rung and the unit is raised once (${JSON.stringify({ textChars: firstBrief.textChars, raised: row.unitRaisedCycles, truncated: row.fixTruncated, length: row.fix.length })})`);
-          assert(count(contractOf(first.prompt), BLIND_REPAIR_RAISED_CYCLES_RULE) === 1 && count(contractOf(first.prompt), BLIND_REPAIR_TRUNCATION_RULE) === 1, `${spec.id}/A: the two fixed sentences are printed once in the contract`);
-          for (const key of ['unitRaisedCycles', 'issueTruncated', 'fixTruncated']) assert(BLIND_REPAIR_RAISED_CYCLES_RULE.includes(key) || BLIND_REPAIR_TRUNCATION_RULE.includes(key), `${spec.id}/A: the rule names the key ${key} the rows carry`);
-          // B: the same unit raised in a second cycle, worded differently and with a fix the limit cuts, is counted twice and flagged cut.
-          await answerRepair(flow, { paragraph: LOCAL_EDITS[0](flow.texts.paragraph, spec) });
-          await runBlindCycle(flow, ({ track, context }) => (track === 'fact-fidelity' && context.claim.id.startsWith('letter-')
-            ? [{ document: 'cover-letter', targetId: context.claim.id, issue: 'Still no distinct proof appears for the repeated delivery claim here.', fix: longFix }] : []));
-          await acknowledgeRepairPages(flow);
-          const second = await flow.current(); const secondBrief = contextOf(second.prompt).blindRepairBrief;
-          const again = secondBrief.clusters.find(cluster => cluster.unit?.kind === 'letter-paragraph');
-          assert(again.unitRaisedCycles === 2 && again.fixTruncated === true && again.fix.length <= 480 && again.fix.includes('Keep the figure exactly as it is'),
-            `${spec.id}/B: second cycle: raised twice, the long fix is flagged cut and keeps its constraint (${JSON.stringify({ raised: again.unitRaisedCycles, truncated: again.fixTruncated, length: again.fix.length })})`);
-          // C: the count is the tally's, not the wording's: a clean cycle in between would have reset it, and the row after a clean cycle starts again at one.
-          assert(again.unitRaisedCycles > row.unitRaisedCycles, `${spec.id}/C: the count grew with the cycle although the wording changed`);
-        } finally { await flow.cleanup(); }
-      }
-    },
-  },];
+  },  ];

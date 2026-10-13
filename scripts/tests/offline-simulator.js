@@ -35,7 +35,6 @@ import { once } from 'node:events';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import readline from 'node:readline';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
 import { assert } from './testHelpers.js';
@@ -94,39 +93,6 @@ const listTree = root => {
 const envelope = (shared, fields) => JSON.stringify({ protocol: shared.protocol, jobId: shared.jobId, stage: shared.stage, handoffCode: shared.handoffCode, baseHashes: shared.baseHashes, ...fields });
 const newWriter = (spec, options = {}) => createScriptedWriter({ spec, kit, criteria: APPLICATION_QUALITY_CRITERIA, ...options });
 
-// A JSON-lines client for `serve`.
-function startServe(dir, extra = []) {
-  const child = spawn(process.execPath, cliArgs(['serve', '--dir', dir, ...extra]), { cwd: REPO_ROOT, stdio: ['pipe', 'pipe', 'pipe'] });
-  const lines = readline.createInterface({ input: child.stdout });
-  const waiting = [];
-  let stderr = '';
-  child.stderr.on('data', chunk => { stderr += chunk; });
-  lines.on('line', line => { const next = waiting.shift(); if (next) { try { next.resolve(JSON.parse(line)); } catch (error) { next.reject(error); } } });
-  child.on('exit', code => { while (waiting.length) waiting.shift().reject(new Error(`serve exited (${code}): ${stderr.slice(-400)}`)); });
-  return {
-    request: payload => new Promise((resolve, reject) => { waiting.push({ resolve, reject }); child.stdin.write(`${JSON.stringify(payload)}\n`); }),
-    async close() { child.stdin.end(); await once(child, 'exit'); },
-  };
-}
-
-// Drive a run to its end over serve: get_handoff, answer with the scripted writer, submit_handoff.
-async function driveServe(client, writer, { maxSteps = 120, onServed = null } = {}) {
-  const steps = [];
-  for (let index = 0; index < maxSteps; index += 1) {
-    const got = await client.request({ id: `g${index}`, tool: 'get_handoff' });
-    assert(got.ok === true, `get_handoff failed: ${JSON.stringify(got)}`);
-    if (got.result.status !== 'served') return { steps, ended: got.result.status, sim: got.sim };
-    onServed?.(got.result);
-    const shared = sharedFieldsOfPrompt(got.result.prompt);
-    const fields = await writer.respond({ stage: got.result.stage, prompt: got.result.prompt });
-    const sent = await client.request({ id: `s${index}`, tool: 'submit_handoff', handoffCode: got.result.handoffCode, response: envelope(shared, fields) });
-    assert(sent.ok === true, `submit_handoff failed: ${JSON.stringify(sent)}`);
-    steps.push({ stage: got.result.stage, outcome: sent.result.status, errors: sent.result.validationErrors });
-    assert(sent.result.status === 'accepted', `${got.result.stage} was not accepted: ${JSON.stringify(sent.result.validationErrors || sent.result)}`);
-  }
-  throw new Error('the run did not end within the step budget');
-}
-
 // Drive one stage over the spawned CLI: next --json, then submit --file.
 async function cliStep(dir, writer, workDir, { expectStage = null } = {}) {
   const served = await cliJson(['next', '--dir', dir]);
@@ -141,90 +107,8 @@ async function cliStep(dir, writer, workDir, { expectStage = null } = {}) {
   return { body, result };
 }
 
-const stageCounts = log => Object.fromEntries(Object.entries(log.stages).map(([stage, row]) => [stage, row.submits]));
-const AUTHORING_STAGES = ['requirements', 'requirements-audit', 'career-match', 'resume', 'cover-letter', 'review'];
-
-function assertCompleted(spec, log, status, label) {
-  assert(log.terminal?.kind === 'completed', `${label}: the run ends in the completed terminal state (${JSON.stringify(log.terminal)})`);
-  assert(status.job.manifestStatus === 'paste-completed' && status.host.status.status === 'completed', `${label}: the host reports the job completed (${JSON.stringify(status.job)})`);
-  for (const stage of AUTHORING_STAGES) assert(log.stages[stage]?.submits === 1 && log.stages[stage].accepted === 1, `${label}: ${stage} takes exactly one accepted handoff (${JSON.stringify(log.stages[stage])})`);
-  assert(log.stages['requirement-disposition']?.accepted >= 1 && log.stages['blind-review']?.accepted >= 1, `${label}: dispositions and blind review each accept at least one handoff`);
-  assert(log.totals.rejected === 0 && log.totals.bridgeRefused === 0, `${label}: the scripted run is never rejected`);
-  assert(log.totals.submits === Object.values(stageCounts(log)).reduce((sum, count) => sum + count, 0), `${label}: the per-stage counts add up to the total`);
-}
-
 export default [
-  {
-    name: 'Offline simulator: a scripted run reaches the completed terminal state through the CLI, the serve loop and autoplay for three unrelated careers, with the same handoff count per stage',
-    async run() {
-      const root = await scratch('run');
-      try {
-        const [freight, clinic, library] = SYNTHETIC_SPECS;
-        const measured = {};
-        const check = async (spec, dir, label) => {
-          const log = (await cliJson(['log', '--dir', dir])).json;
-          const status = (await cliJson(['status', '--dir', dir])).json;
-          assertCompleted(spec, log, status, label);
-          const docs = await cliJson(['docs', '--dir', dir]);
-          assert(docs.code === 0 && docs.json.source.startsWith('result.json'), `${label}: docs reads the final host-rendered result (${docs.stdout})`);
-          const resume = fs.readFileSync(docs.json.files.resume, 'utf8');
-          const letter = fs.readFileSync(docs.json.files.coverLetter, 'utf8');
-          assert(resume.includes(spec.name) && resume.includes(spec.employer) && resume.includes(spec.tech), `${label}: the résumé text carries this career (${resume.slice(0, 200)})`);
-          assert(letter.includes(spec.name) && letter.includes(`${spec.tech} service used by ${spec.users} users`), `${label}: the letter text carries this career's evidence`);
-          for (const other of SYNTHETIC_SPECS.filter(item => item !== spec)) assert(!resume.includes(other.employer) && !letter.includes(other.employer), `${label}: no other career's employer leaks into the documents`);
-          const letterHandoff = fs.readdirSync(dir).filter(name => /^handoff-\d+\.json$/u.test(name))
-            .map(name => JSON.parse(fs.readFileSync(path.join(dir, name), 'utf8')))
-            .find(item => item.stage === 'cover-letter');
-          assert(letterHandoff?.prompt.includes('add a decision, constraint, or reason that the finished résumé does not already state')
-            && letterHandoff.prompt.includes('when the quote supports it'),
-          `${label}: the current letter writer sees the A/B-backed, source-bounded added-information guidance`);
-          assert(letterHandoff.prompt.includes(`${spec.tech} service used by ${spec.users} users`)
-            && SYNTHETIC_SPECS.filter(item => item !== spec).every(other => !letterHandoff.prompt.includes(`${other.tech} service used by ${other.users} users`)),
-          `${label}: flipping the frozen career changes the cited letter facts while the rule stays generic`);
-          measured[spec.key] = { total: log.totals.submits, stages: stageCounts(log) };
-          return log;
-        };
 
-        // A: the first three stages over spawned next/submit, the rest over the serve loop.
-        const dirA = path.join(root, 'a');
-        const init = await cliJson(['init', '--card', `synthetic:${freight.key}`, '--dir', dirA]);
-        assert(init.code === 0 && init.json?.complete === true && init.json.kind === 'synthetic', `init succeeds (${init.stderr.slice(-300)})`);
-        const writerA = newWriter(freight);
-        for (const stage of ['requirements', 'requirements-audit', 'career-match']) {
-          const { result } = await cliStep(dirA, writerA, root, { expectStage: stage });
-          assert(result.code === 0 && result.json.status === 'accepted', `${stage}: the spawned submit is accepted (${result.stdout})`);
-        }
-        const serveA = startServe(dirA);
-        const endedA = await driveServe(serveA, writerA);
-        await serveA.close();
-        assert(['queue_empty'].includes(endedA.ended) && endedA.sim.terminal.kind === 'completed', `A: serve ends with queue_empty and a completed terminal (${JSON.stringify(endedA)})`);
-        const logA = await check(freight, dirA, 'A (cli + serve)');
-
-        // B: the whole run over serve, for a different career.
-        const dirB = path.join(root, 'b');
-        assert((await cli(['init', '--card', `synthetic:${clinic.key}`, '--dir', dirB])).code === 0, 'init B succeeds');
-        const serveB = startServe(dirB);
-        await driveServe(serveB, newWriter(clinic));
-        await serveB.close();
-        const logB = await check(clinic, dirB, 'B (serve)');
-
-        // C: autoplay (the scripted writer inside the CLI), for a third career.
-        const dirC = path.join(root, 'c');
-        assert((await cli(['init', '--card', `synthetic:${library.key}`, '--dir', dirC])).code === 0, 'init C succeeds');
-        const play = await cliJson(['autoplay', '--dir', dirC]);
-        assert(play.code === 0 && play.json.ended === 'terminal' && play.json.terminal.kind === 'completed', `autoplay ends completed (${play.stdout.slice(-300)}${play.stderr.slice(-300)})`);
-        const logC = await check(library, dirC, 'C (autoplay)');
-
-        // The flow's shape is a property of the host, not of the career or the transport.
-        assert(JSON.stringify(stageCounts(logA)) === JSON.stringify(stageCounts(logB)) && JSON.stringify(stageCounts(logB)) === JSON.stringify(stageCounts(logC)),
-          `the handoff count per stage is the same for three careers and three transports (${JSON.stringify(measured)})`);
-        // Once terminal, next says so and exits clean.
-        const after = await cli(['next', '--dir', dirC]);
-        assert(after.code === 0 && /NO OPEN HANDOFF: completed/u.test(after.stdout), `next after the end reports the terminal state (${after.stdout.slice(-200)})`);
-        return measured;
-      } finally { await cleanup([root]); }
-    },
-  },
   {
     name: 'Offline simulator: init from a saved job card copies the approved snapshot byte for byte, never changes either source, and the first prompt carries that card (flip the card, the prompt flips)',
     async run() {
@@ -469,31 +353,7 @@ export default [
       } finally { await cleanup([root]); }
     },
   },
-  {
-    name: 'Offline simulator: --auto-ack answers the acknowledgement-only repair pages, and without it the page is served to the writer (two careers)',
-    async run() {
-      const root = await scratch('ack');
-      try {
-        assert(JSON.stringify(ACK_ONLY_STAGES) === JSON.stringify(['blind-repair-context']), `the acknowledgement-only stages are exactly the repair-context page (${ACK_ONLY_STAGES})`);
-        const outcomes = {};
-        for (const [spec, autoAck] of [[SYNTHETIC_SPECS[0], true], [SYNTHETIC_SPECS[2], false]]) {
-          const dir = path.join(root, spec.key);
-          assert((await cli(['init', '--card', `synthetic:${spec.key}`, '--dir', dir])).code === 0, `${spec.key}: init succeeds`);
-          const served = [];
-          const client = startServe(dir, autoAck ? ['--auto-ack'] : []);
-          const ended = await driveServe(client, newWriter(spec, { findingsCycles: 1 }), { onServed: body => served.push(body.stage) });
-          await client.close();
-          assert(ended.ended === 'queue_empty' && ended.sim.terminal.kind === 'completed', `${spec.key}: the run with a repair cycle completes (${JSON.stringify(ended.sim)})`);
-          const log = (await cliJson(['log', '--dir', dir])).json;
-          outcomes[spec.key] = { autoAck, servedRepairPage: served.includes('blind-repair-context'), autoAcknowledged: log.totals.autoAcknowledged, submits: log.totals.submits, reviews: log.stages.review.submits };
-          assert(log.stages.review.submits >= 2 && log.stages['blind-repair-context']?.accepted >= 1, `${spec.key}: the repair cycle happened (a revised review and an accepted repair page) (${JSON.stringify(log.stages)})`);
-        }
-        assert(outcomes[SYNTHETIC_SPECS[0].key].servedRepairPage === false && outcomes[SYNTHETIC_SPECS[0].key].autoAcknowledged >= 1, `with --auto-ack the repair page is absorbed (${JSON.stringify(outcomes)})`);
-        assert(outcomes[SYNTHETIC_SPECS[2].key].servedRepairPage === true && outcomes[SYNTHETIC_SPECS[2].key].autoAcknowledged === 0, `without it the page is served to the writer (${JSON.stringify(outcomes)})`);
-        return outcomes;
-      } finally { await cleanup([root]); }
-    },
-  },
+
   {
     name: 'Offline simulator: the spool transport answers the same get_handoff JSON the CLI prints, and submit_handoff through it advances the host',
     async run() {

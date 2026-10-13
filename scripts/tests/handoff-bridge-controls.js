@@ -252,7 +252,7 @@ export default [
       && custom.controller.snapshot(false).config.pluginName === 'My Bridge 2',
     'controller snapshots must repair only blank legacy plugin names');
   } },
-  { name: 'handoff bridge: controls: post-letter application stages survive the closed controller projection', run() {
+  { name: 'handoff bridge: controls: application stages survive the closed controller projection', run() {
     // Every stage the engine and the bug report share, so the controller's
     // own closed copy cannot silently drop one of them.
     const stages = [...APPLICATION_QUEUE_STAGES];
@@ -261,11 +261,11 @@ export default [
         applications: { ready: 0, working: stages.length, needsYou: 0, held: 0, done: 0 },
         jobs: stages.map((stage, index) => ({ jobId: `550e8400-e29b-41d4-a716-${String(index + 1).padStart(12, '0')}`, phase: 'awaiting', stage })),
       },
-      chat: { state: 'working', jobsCap: 2, outstanding: { kind: 'application', stage: 'blind-review' } }, counts: {},
+      chat: { state: 'working', jobsCap: 2, outstanding: { kind: 'application', stage: 'fact-check' } }, counts: {},
     }) });
     const status = controllerHarness({ engine }).controller.snapshot(false);
     assert(status.queue.jobs.map(job => job.stage).join(',') === stages.join(',')
-      && status.chat.outstanding?.stage === 'blind-review',
+      && status.chat.outstanding?.stage === 'fact-check',
     'each allowed post-letter stage must reach the renderer while the projection remains closed');
   } },
   { name: 'handoff bridge: controls: the review-stop reason reaches the renderer through the closed status projection, and an unknown reason does not', run() {

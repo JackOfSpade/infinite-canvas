@@ -268,7 +268,7 @@ export default [
       }
       // 2. Every string literal of the sources that print or throw text a writer reads.
       for (const file of ['electron/ipc/coverLetterChecks.js', 'electron/ipc/localAiApplication.js', 'electron/ipc/aiSchemas.js', 'electron/ipc/applicationWriterGuidance.js',
-        'electron/ipc/applicationRepairConvergence.js', 'electron/ipc/applicationBlindReview.js', 'electron/ipc/pasteReviewDelta.js']) {
+        'electron/ipc/applicationRepairConvergence.js', 'electron/ipc/pasteReviewDelta.js']) {
         for (const literal of stringLiterals(read(file))) scan(file, literal);
       }
       // 3. Every document that describes the contract.

@@ -45,7 +45,7 @@ const LANE_PHASES = new Set(['unread', 'awaiting', 'host', 'needs_user', 'held',
 // policy boundary. Post-letter work projects to the dock's final review step.
 const APPLICATION_STAGES = new Set([
   'evidence-plan', 'resume', 'cover-letter', 'requirement-disposition',
-  'review', 'blind-review', 'blind-repair-context',
+  'review',
   'write', 'convert', 'verify-correction', 'fit-correction', 'pick', 'fact-check', 'fact-correction', 'fact-recheck', 'write-verify-human-stop',
 ]);
 // The closed vocabulary of task names that may reach the renderer. It was

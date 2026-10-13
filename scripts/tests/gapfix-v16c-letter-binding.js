@@ -31,10 +31,6 @@
 //
 // Nothing in production names any of the fixtures.
 import { assert } from './testHelpers.js';
-import {
-  APPLICATION_BLIND_REVIEW_LETTER_CONVENTIONS, APPLICATION_BLIND_REVIEW_LETTER_CONVENTIONS_TRACKS, APPLICATION_BLIND_REVIEW_LETTER_CONVENTIONS_V6, applicationBlindReviewConventionsFor,
-  buildApplicationBlindReviewLetterConventions,
-} from '../../electron/ipc/applicationBlindReview.js';
 import { checkParagraphArgumentLinks, paragraphArgumentSpanGaps } from '../../electron/ipc/coverLetterChecks.js';
 
 const DOMAINS = Object.freeze([
@@ -152,42 +148,6 @@ export default [
         const claimDeleted = gate(domain, { body: `${domain.proof} ${domain.natural}`, mapping: { proof: domain.proof, relevance: domain.natural, jobNeedQuote: domain.posting[0] } });
         assert(!claimDeleted.passed && claimDeleted.detail.includes('argumentMapping.claim is missing'), `${domain.key}/C: deleting the claim phrase is refused (${detailOf(claimDeleted)})`);
       }
-    },
-  },
-  {
-    name: 'Reviewer clause v7, wording: it states a legal correction per required function, labels the projected quote as the posting span the writer bound, exempts only sentences grounded in a cited career quote, waives nothing, and reaches exactly the letter-reading scopes (A/B/C)',
-    run() {
-      const text = APPLICATION_BLIND_REVIEW_LETTER_CONVENTIONS;
-      // A: per function. The claim phrase may be reworded, shortened or merged; the relevance sentence may be reworded or shortened and stays apart from the proof.
-      for (const part of ['A correction keeps the function:', 'reword, shorten or merge into the proof sentence the claim phrase', 'reword or shorten the relevance sentence, kept apart from the proof', 'never delete the only span doing a required function']) {
-        assert(text.includes(part), `the clause says: ${part}`);
-      }
-      assert(!text.includes('merge it into the proof sentence or shorten it'), 'the one correction the host refuses for the relevance sentence is not offered for both');
-      assert(APPLICATION_BLIND_REVIEW_LETTER_CONVENTIONS_V6.includes('merge it into the proof sentence or shorten it'), 'v6 keeps its frozen text (a v6 root must keep reconstructing)');
-      // B: the label of the quote, and the narrowed exemption: only a sentence grounded in a cited CAREER quote is excused for generality; one that only echoes the posting is reportable.
-      for (const part of ['the posting span the writer bound it to (jobNeedQuote: posting text, not proof)', 'A sentence grounded in a cited career quote is no abstraction or cross-document defect merely for being general',
-        'echoing the jobNeedQuote about the candidate, is reportable']) {
-        assert(text.includes(part), `the clause says: ${part}`);
-      }
-      assert(!text.includes('or in the jobNeedQuote'), 'the jobNeedQuote is no longer something a sentence can be grounded in');
-      assert(text.indexOf('A sentence grounded in a cited career quote') > text.indexOf('citedCareerQuotes'), 'the exemption comes after the label of both projected items');
-      // C: nothing is waived, nothing names a document, the budgets still move the wording, and the clause reaches exactly the scopes that read the letter.
-      const waivers = /\b(?:ignore|skip|exempt|exempts|pass)\b|(?:do not|never|must not|need not|no need to) (?:report|flag)|(?:not|never) a (?:finding|reason to report)/iu;
-      assert(!waivers.test(text) && text.includes('This waives nothing: every finding still needs a correction.'), 'the clause waives nothing');
-      assert(!/\d/u.test(text), 'and prints no figure');
-      for (const domain of DOMAINS) {
-        const lowered = text.toLowerCase();
-        for (const sentence of [domain.opening, domain.claim, domain.proof, domain.natural, domain.second, ...domain.posting]) {
-          const tokens = sentence.toLowerCase().match(/[a-z0-9']+/gu);
-          for (let index = 0; index + 3 <= tokens.length; index += 1) assert(!lowered.includes(tokens.slice(index, index + 3).join(' ')), `${domain.key}: the clause holds no run of the fixtures (${tokens.slice(index, index + 3).join(' ')})`);
-        }
-      }
-      const two = 'each of the first 2 proof-bearing paragraphs of the letter';
-      assert(buildApplicationBlindReviewLetterConventions({ claimParagraphs: two, proofParagraphs: two }).includes('reword or shorten the relevance sentence, kept apart from the proof'), 'a wider budget keeps the per-function corrections');
-      for (const track of ['letter-argument-editorial', 'cross-document-coherence', 'bundle-editorial']) {
-        assert(APPLICATION_BLIND_REVIEW_LETTER_CONVENTIONS_TRACKS.includes(track) && applicationBlindReviewConventionsFor('artifact-repair-only-v7', track).includes(text), `${track} receives the v7 clause`);
-      }
-      for (const track of ['fact-fidelity', 'resume-hiring-quality']) assert(!applicationBlindReviewConventionsFor('artifact-repair-only-v7', track).includes(text), `${track} does not`);
     },
   },
   {

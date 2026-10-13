@@ -96,7 +96,6 @@ import application_bridge_page from './tests/application-bridge-page.js';
 import application_bridge_page_render from './tests/application-bridge-page-render.js';
 import application_bridge_page_dock from './tests/application-bridge-page-dock.js';
 import application_authority_workflow from './tests/application-authority-workflow.js';
-import application_blind_review from './tests/application-blind-review.js';
 import one_card_live_acceptance from './tests/one-card-live-acceptance.js';
 import pointer_occlusion_probe from './tests/pointer-occlusion-probe.js';
 import test_runner_watchdog from './tests/test-runner-watchdog.js';
@@ -119,13 +118,10 @@ import gapfix_claim_grounding from './tests/gapfix-claim-grounding.js';
 import gapfix_letter_evidence from './tests/gapfix-letter-evidence.js';
 import gapfix_career_validators from './tests/gapfix-career-validators.js';
 import gapfix_letter_proportion from './tests/gapfix-letter-proportion.js';
-import gapfix_repair_convergence from './tests/gapfix-repair-convergence.js';
 import gapfix_grounding_locality from './tests/gapfix-grounding-locality.js';
 import gapfix_transfer_budget from './tests/gapfix-transfer-budget.js';
-import gapfix_poll_integrity from './tests/gapfix-poll-integrity.js';
 import gapfix_host_owned_fields from './tests/gapfix-host-owned-fields.js';
 import gapfix_v16_claim_budget from './tests/gapfix-v16-claim-budget.js';
-import gapfix_v16_letter_conventions from './tests/gapfix-v16-letter-conventions.js';
 import gapfix_v16_prompts from './tests/gapfix-v16-prompts.js';
 import gapfix_v16_repair_brief from './tests/gapfix-v16-repair-brief.js';
 import gapfix_v16_resume_dates from './tests/gapfix-v16-resume-dates.js';
@@ -134,7 +130,6 @@ import gapfix_v16b_closing_authorship from './tests/gapfix-v16b-closing-authorsh
 import gapfix_v16b_contract_consistency from './tests/gapfix-v16b-contract-consistency.js';
 import gapfix_v16b_letter_truthfulness from './tests/gapfix-v16b-letter-truthfulness.js';
 import gapfix_v16b_relevance_budget from './tests/gapfix-v16b-relevance-budget.js';
-import gapfix_v16b_reviewer_context from './tests/gapfix-v16b-reviewer-context.js';
 import gapfix_v16b_verb_fidelity from './tests/gapfix-v16b-verb-fidelity.js';
 import gapfix_v16c_closing_gate from './tests/gapfix-v16c-closing-gate.js';
 import gapfix_v16c_letter_binding from './tests/gapfix-v16c-letter-binding.js';
@@ -145,7 +140,6 @@ import gapfix_v17_resume_dispositions from './tests/gapfix-v17-resume-dispositio
 import gapfix_v17_letter_dispositions from './tests/gapfix-v17-letter-dispositions.js';
 import gapfix_v17_truth_recall from './tests/gapfix-v17-truth-recall.js';
 import expense_outcome_contractions from './tests/expense-outcome-contractions.js';
-import application_blind_review_panel from './tests/application-blind-review-panel.js';
 import offline_simulator from './tests/offline-simulator.js';
 import oracle_leak_gate from './tests/oracle-leak-gate.js';
 
@@ -249,7 +243,6 @@ const testGroups = [
   ['application-bridge-page-render.js', application_bridge_page_render],
   ['application-bridge-page-dock.js', application_bridge_page_dock],
   ['application-authority-workflow.js', application_authority_workflow],
-  ['application-blind-review.js', application_blind_review],
   ['one-card-live-acceptance.js', one_card_live_acceptance],
   ['pointer-occlusion-probe.js', pointer_occlusion_probe],
   ['test-runner-watchdog.js', test_runner_watchdog],
@@ -272,13 +265,10 @@ const testGroups = [
   ['gapfix-letter-evidence.js', gapfix_letter_evidence],
   ['gapfix-career-validators.js', gapfix_career_validators],
   ['gapfix-letter-proportion.js', gapfix_letter_proportion],
-  ['gapfix-repair-convergence.js', gapfix_repair_convergence],
   ['gapfix-grounding-locality.js', gapfix_grounding_locality],
   ['gapfix-transfer-budget.js', gapfix_transfer_budget],
-  ['gapfix-poll-integrity.js', gapfix_poll_integrity],
   ['gapfix-host-owned-fields.js', gapfix_host_owned_fields],
   ['gapfix-v16-claim-budget.js', gapfix_v16_claim_budget],
-  ['gapfix-v16-letter-conventions.js', gapfix_v16_letter_conventions],
   ['gapfix-v16-prompts.js', gapfix_v16_prompts],
   ['gapfix-v16-repair-brief.js', gapfix_v16_repair_brief],
   ['gapfix-v16-resume-dates.js', gapfix_v16_resume_dates],
@@ -287,7 +277,6 @@ const testGroups = [
   ['gapfix-v16b-contract-consistency.js', gapfix_v16b_contract_consistency],
   ['gapfix-v16b-letter-truthfulness.js', gapfix_v16b_letter_truthfulness],
   ['gapfix-v16b-relevance-budget.js', gapfix_v16b_relevance_budget],
-  ['gapfix-v16b-reviewer-context.js', gapfix_v16b_reviewer_context],
   ['gapfix-v16b-verb-fidelity.js', gapfix_v16b_verb_fidelity],
   ['gapfix-v16c-closing-gate.js', gapfix_v16c_closing_gate],
   ['gapfix-v16c-letter-binding.js', gapfix_v16c_letter_binding],
@@ -298,7 +287,6 @@ const testGroups = [
   ['gapfix-v17-letter-dispositions.js', gapfix_v17_letter_dispositions],
   ['gapfix-v17-truth-recall.js', gapfix_v17_truth_recall],
   ['expense-outcome-contractions.js', expense_outcome_contractions],
-  ['application-blind-review-panel.js', application_blind_review_panel],
   ['offline-simulator.js', offline_simulator],
   ['oracle-leak-gate.js', oracle_leak_gate],
 ];
