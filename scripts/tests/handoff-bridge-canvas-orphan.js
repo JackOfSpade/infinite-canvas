@@ -79,7 +79,10 @@ function sourceFor({ missing, fresh = null, onPresence = null }) {
 }
 
 async function tickAndSettle(engine, clock, advanceMs = 0) {
-  if (advanceMs) clock.advance(advanceMs);
+  // These tests drive engine.tick explicitly. Running every due interval while
+  // jumping the fake clock also starts concurrent, unawaited ticks, so the
+  // orphan observations can race the assertion that follows.
+  if (advanceMs) clock.advanceTime(advanceMs);
   await engine.tick(clock.now());
   await settle();
 }

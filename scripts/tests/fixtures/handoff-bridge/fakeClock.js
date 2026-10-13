@@ -55,6 +55,7 @@ export function createFakeClock(startAt = 1_700_000_000_000) {
     setInterval: (fn, delay) => schedule(fn, intervalDelay(delay), intervalDelay(delay)),
     clearInterval: clear,
     advance(ms, limit) { now += normalizeDelay(ms); return runDue(limit); },
+    advanceTime(ms) { now += normalizeDelay(ms); return now; },
     runAll(limit = 10_000) {
       let count = 0;
       while (pending().length) {
