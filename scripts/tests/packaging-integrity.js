@@ -38,6 +38,72 @@ function listTrackedFiles(root) {
 
 export default [
   {
+    name: 'launcher source manifest: content changes trigger a rebuild even with unchanged size and mtime',
+    run: async () => {
+      const { sourceManifestDigest } = await import('../../scripts/source-manifest.mjs');
+      const root = await fs.mkdtemp(path.join(os.tmpdir(), 'ic-source-manifest-'));
+      const external = await fs.mkdtemp(path.join(os.tmpdir(), 'ic-source-manifest-external-'));
+      try {
+        const source = path.join(root, 'source.js');
+        const env = path.join(root, '.env');
+        await fs.writeFile(source, 'alpha');
+        await fs.writeFile(env, 'PRIVATE=value-a');
+        const fixedTime = new Date('2024-01-01T00:00:00.000Z');
+        await fs.utimes(source, fixedTime, fixedTime);
+        const beforeStat = await fs.stat(source);
+        const before = sourceManifestDigest(root, ['source.js', '.env']);
+
+        await fs.writeFile(source, 'omega');
+        await fs.utimes(source, fixedTime, fixedTime);
+        const afterStat = await fs.stat(source);
+        const afterSourceEdit = sourceManifestDigest(root, ['source.js', '.env']);
+        assert(beforeStat.size === afterStat.size && beforeStat.mtimeMs === afterStat.mtimeMs && before !== afterSourceEdit,
+          'a same-size source edit with the original mtime must change the rebuild stamp');
+
+        await fs.writeFile(env, 'PRIVATE=value-b');
+        const afterEnvEdit = sourceManifestDigest(root, ['source.js', '.env']);
+        assert(afterEnvEdit !== afterSourceEdit && !afterEnvEdit.includes('PRIVATE'),
+          'an ignored .env edit changes the digest without exposing secret text');
+
+        const cli = spawnSync(process.execPath, [path.join(process.cwd(), 'scripts', 'source-manifest.mjs')], {
+          cwd: root, encoding: 'utf8', input: 'source.js\0.env\0',
+        });
+        assert(cli.status === 0 && cli.stdout.trim() === afterEnvEdit,
+          `the launcher helper reads the NUL-delimited inventory (${cli.status}: ${cli.stderr})`);
+        await fs.rm(source);
+        assert(sourceManifestDigest(root, ['source.js', '.env']) !== afterEnvEdit,
+          'removing a tracked file also changes the digest');
+        let unsafe = false;
+        try { sourceManifestDigest(root, ['../outside']); } catch { unsafe = true; }
+        assert(unsafe, 'the helper refuses inventory paths outside the workspace');
+
+        const externalFile = path.join(external, 'private.txt');
+        await fs.writeFile(externalFile, 'outside-a');
+        await fs.symlink(externalFile, path.join(root, 'source-link'));
+        let symlinkRejected = false;
+        try { sourceManifestDigest(root, ['source-link']); }
+        catch (error) { symlinkRejected = /does not support symlinks/.test(error.message); }
+        assert(symlinkRejected,
+          'the launcher fails closed on symlinked input instead of reading outside the workspace or stamping a stale target');
+        await fs.symlink(external, path.join(root, 'linked-parent'), 'dir');
+        let linkedParentRejected = false;
+        try { sourceManifestDigest(root, ['linked-parent/private.txt']); }
+        catch (error) { linkedParentRejected = /parent must be a real directory/.test(error.message); }
+        assert(linkedParentRejected,
+          'a symlinked parent directory cannot make an indexed child read outside the workspace');
+
+        await fs.mkdir(path.join(root, 'source-directory'));
+        let directoryRejected = false;
+        try { sourceManifestDigest(root, ['source-directory']); } catch { directoryRejected = true; }
+        assert(directoryRejected, 'a directory cannot be misread as a source file');
+        return { ok: true };
+      } finally {
+        await fs.rm(root, { recursive: true, force: true });
+        await fs.rm(external, { recursive: true, force: true });
+      }
+    },
+  },
+  {
     name: 'macOS packaging: workspace lock serializes direct builds and safely recovers stale owners',
     run: async () => {
       const { acquirePackagingLock, packagingLockPath, packagingReclaimGuardPath, withPackagingLock } = await import('../../scripts/build-macos.mjs');
@@ -351,6 +417,53 @@ export default [
       assert(verifyApp.includes('codesign --verify --deep --strict "$RELEASE_APP"')
         && !verifyApp.includes('codesign --verify "$RELEASE_APP"'),
       'the launcher must use the same strict deep codesign policy as npm run build before opening an existing bundle');
+      assert(launcher.includes('node "$PROJECT_DIR/scripts/source-manifest.mjs"')
+        && !launcher.includes("stat -f '%N|%m|%z'"),
+      'the launcher must use the content digest instead of a filename/mtime/size stamp');
+      const buildStart = launcher.indexOf('npm run build 2>&1 | tee "$LOG"');
+      const postBuild = launcher.indexOf('postbuild_manifest="$(source_manifest)"', buildStart);
+      const changedDuringBuild = launcher.indexOf('[[ "$postbuild_manifest" != "$manifest" ]]', postBuild);
+      const stampWrite = launcher.indexOf('print -r -- "$manifest" > "$STAMP"', changedDuringBuild);
+      assert(buildStart >= 0 && postBuild > buildStart && changedDuringBuild > postBuild && stampWrite > changedDuringBuild
+        && launcher.includes('setopt local_options pipe_fail')
+        && launcher.includes('ls-files -z --cached --others --exclude-standard || return 1'),
+      'the launcher fails closed on inventory errors and writes a success stamp only when the source is unchanged after build');
+      if (!spawnSync('zsh', ['-c', 'exit 0']).error) {
+        const functionStart = launcher.indexOf('source_manifest() {');
+        const functionEnd = launcher.indexOf('\n}', functionStart);
+        const manifestFunction = launcher.slice(functionStart, functionEnd + 2);
+        const failingGit = spawnSync('zsh', ['-c', `
+          git() {
+            if [[ "$*" == *ls-files* ]]; then return 79; fi
+            command git "$@"
+          }
+          ${manifestFunction}
+          source_manifest
+        `], { cwd: process.cwd(), encoding: 'utf8', env: { ...process.env, PROJECT_DIR: process.cwd() } });
+        assert(failingGit.status !== 0,
+          `a failed source-list producer must not be hidden by a successful digest consumer (${failingGit.status}: ${failingGit.stderr})`);
+        const failingFind = spawnSync('zsh', ['-c', `
+          git() { return 1; }
+          find() { return 79; }
+          ${manifestFunction}
+          source_manifest
+        `], { cwd: process.cwd(), encoding: 'utf8', env: { ...process.env, PROJECT_DIR: process.cwd() } });
+        assert(failingFind.status !== 0,
+          `a failed fallback source walk must not be hidden by a successful digest consumer (${failingFind.status}: ${failingFind.stderr})`);
+        const noEnvRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'ic-launcher-no-env-'));
+        try {
+          await fs.mkdir(path.join(noEnvRoot, 'scripts'));
+          await fs.copyFile(path.join(process.cwd(), 'scripts', 'source-manifest.mjs'), path.join(noEnvRoot, 'scripts', 'source-manifest.mjs'));
+          await fs.writeFile(path.join(noEnvRoot, 'source.js'), 'const answer = 42;\n');
+          const noEnv = spawnSync('zsh', ['-c', `${manifestFunction}\nsource_manifest`], {
+            cwd: noEnvRoot, encoding: 'utf8', env: { ...process.env, PROJECT_DIR: noEnvRoot },
+          });
+          assert(noEnv.status === 0 && /^[a-f0-9]{64}\n$/.test(noEnv.stdout),
+            `a valid source tree without optional .env still produces a digest (${noEnv.status}: stdout=${JSON.stringify(noEnv.stdout)}, stderr=${JSON.stringify(noEnv.stderr)})`);
+        } finally {
+          await fs.rm(noEnvRoot, { recursive: true, force: true });
+        }
+      }
       return { ok: true };
     },
   },

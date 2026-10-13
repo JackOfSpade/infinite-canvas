@@ -48,33 +48,38 @@ notify() {
 }
 
 # Prints a sha256 over the project's tracked/untracked-but-not-ignored source
-# tree (name|mtime|size per file). Used instead of Info.plist's mtime because
-# that mtime survives an interrupted codesign pass and can lie "up to date".
+# paths and bytes. A same-size edit with a restored mtime still requires a
+# rebuild; Info.plist's mtime can also survive an interrupted codesign pass.
 source_manifest() {
+  setopt local_options pipe_fail
   {
     if git -C "$PROJECT_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
       # -z + --cached --others --exclude-standard: honours .gitignore exactly
       # (node_modules/dist/dist-electron/release/.env/.claude/.DS_Store all
       # excluded automatically) and catches added AND deleted files, which a
       # plain `find -newer` cannot.
-      git -C "$PROJECT_DIR" ls-files -z --cached --others --exclude-standard
+      git -C "$PROJECT_DIR" ls-files -z --cached --others --exclude-standard || return 1
     else
       find . \( -path './node_modules' -o -path './.git' -o -path './release' \
                  -o -path './dist' -o -path './dist-electron' -o -path './out' \) -prune \
-             -o -type f ! -name '.DS_Store' -print0
+             -o \( -type f -o -type l \) ! -name '.DS_Store' -print0 || return 1
     fi
     # .env is deliberately gitignored (secrets), so the listing above never
     # sees it — but Vite INLINES the VITE_-prefixed vars at BUILD time into
     # both the renderer and the bundled main process, and .env is not shipped
-    # inside the .app. An .env edit therefore needs a rebuild to take effect,
-    # and without this it would silently never get one. Only name|mtime|size
-    # is hashed here, never file contents, so no secret reaches the stamp.
+    # inside the .app. An .env edit therefore needs a rebuild to take effect.
+    # The helper hashes its bytes into one digest; no secret text reaches the
+    # stamp or log.
     for envfile in .env .env.*(N); do
-      [[ -f "$envfile" ]] && printf '%s\0' "$envfile"
+      if [[ -f "$envfile" ]]; then
+        printf '%s\0' "$envfile" || return 1
+      fi
     done
-    # NUL-delimited list is piped straight into xargs below, never captured
-    # into a variable/command-substitution — zsh mangles embedded NULs.
-  } | xargs -0 stat -f '%N|%m|%z' 2>/dev/null | sort | shasum -a 256 | awk '{print $1}'
+    # An absent optional .env is normal; the producer still succeeded.
+    :
+    # NUL-delimited list is piped straight into Node, never captured into a
+    # variable/command-substitution — zsh mangles embedded NULs.
+  } | node "$PROJECT_DIR/scripts/source-manifest.mjs"
 }
 
 # Integrity gate: true only if the app exists, its binary is executable, and
@@ -235,7 +240,7 @@ unset ELECTRON_RUN_AS_NODE          # electron-builder must NOT run under ELECTR
 
 mkdir -p "$STATE_DIR"
 
-manifest="$(source_manifest)"
+manifest="$(source_manifest)" || fail "Source inventory failed."
 
 need_build=0
 if [[ ! -d "$RELEASE_APP" ]]; then
@@ -263,7 +268,7 @@ if [[ "$need_build" -eq 1 ]]; then
   # is part of the manifest. Recompute after the install, otherwise we'd record
   # the pre-install hash and every subsequent launch would see a mismatch and
   # rebuild forever.
-  manifest="$(source_manifest)"
+  manifest="$(source_manifest)" || fail "Source inventory failed."
 
   # Delete the success sentinel before the build itself touches the app
   # bundle. If this build is interrupted or killed, no stale sentinel
@@ -279,6 +284,13 @@ if [[ "$need_build" -eq 1 ]]; then
 
   if [[ "$build_status" -ne 0 ]]; then
     fail "Build failed (npm run build exited $build_status)."
+  fi
+
+  # A source edit made while packaging was running may not be in the bundle.
+  # Leave the success sentinel absent so the next launch must rebuild it.
+  postbuild_manifest="$(source_manifest)" || fail "Source inventory failed after build."
+  if [[ "$postbuild_manifest" != "$manifest" ]]; then
+    fail "Source changed during the build. Launch again to build the latest files."
   fi
 
   # Only record success after a clean build exit - this is what makes the
