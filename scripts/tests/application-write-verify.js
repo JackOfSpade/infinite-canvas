@@ -225,6 +225,15 @@ export default [
         const target = `I maintained ${work}. The ${title} role appeals to me because it involves this work.`;
         const errors = text => __pasteUnitGroundingErrorsForTests({ ...args, finalText: text });
         assert.deepEqual(errors(target), [], `${title}: target title is licensed`);
+        const fragment = title.split(' ').slice(-2).join(' ');
+        assert.deepEqual(errors(`I maintained ${work}. The ${fragment} team appeals to me because it involves this work.`), [],
+          `${title}: contiguous target-title fragment is licensed in a target reference`);
+        assert.deepEqual(errors(`I am interested in the ${fragment} role because it connects to the ${work} I maintained.`), [],
+          `${title}: explicit target reference remains licensed when a separate clause mentions past work`);
+        assert.ok(errors(`I maintained ${work} on the ${fragment} team.`).some(error => error.includes('names')),
+          `${title}: fragment in past-experience mutation fails`);
+        assert.ok(errors(`I maintained ${work}. The Orbital Systems team appeals to me because it involves this work.`)
+          .some(error => error.includes('names')), `${title}: invented fragment fails`);
         assert.deepEqual(errors(`I maintained ${work}. I would bring this work to ${company}.`), [], `${company}: target employer is licensed`);
         assert.ok(errors(`I worked as a ${title} on ${work}.`).some(error => error.includes('names')), `${title}: past title mutation fails`);
         assert.ok(errors(`I maintained ${work} at ${company}.`).some(error => error.includes('names')), `${company}: past employer mutation fails`);
@@ -232,6 +241,9 @@ export default [
           .some(error => error.includes('Orbital Systems Engineer')), `${title}: unlisted title mutation fails`);
         assert.ok(__pasteUnitGroundingErrorsForTests({ ...args, targetTitle: '', finalText: target })
           .some(error => error.includes('names')), `${title}: removing the frozen-title binding restores rejection`);
+        assert.ok(__pasteUnitGroundingErrorsForTests({ ...args, targetTitle: '',
+          finalText: `I maintained ${work}. The ${fragment} team appeals to me because it involves this work.` })
+          .some(error => error.includes('names')), `${title}: sabotage removing frozen title rejects fragment`);
       }
     },
   },

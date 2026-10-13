@@ -17144,20 +17144,45 @@ function sentenceClaimFindings(sentence, quotes, ctx) {
 // employer being addressed. License only occurrences inside an explicit target
 // reference, never the same words in a claim about prior work.
 function targetIdentityNameLicensed(sentence, finding, ctx) {
-  if (finding?.code !== 'name' || !reportsNoPastWork(sentence)) return false;
+  if (finding?.code !== 'name') return false;
   const text = String(sentence ?? '');
+  const noPastWork = reportsNoPastWork(text);
+  const forwardReference = index => /\b(?:apply(?:ing)? for|interested in|would\b[^.!?]{0,100}\b(?:bring|contribute|support)\b|could\b[^.!?]{0,100}\b(?:contribute|support)\b)[^.!?]{0,140}$/iu.test(text.slice(0, index));
   const escape = value => String(value).replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
   const phrase = value => attributionTerms(value).map(escape).join('[^\\p{L}\\p{N}]+');
   const spans = [];
   const title = String(ctx?.targetTitle || '').trim();
   if (title) {
-    const pattern = new RegExp(`(?<![\\p{L}\\p{N}])${phrase(title)}(?=\\s+(?:role|position|job|opportunity)\\b)`, 'giu');
-    for (const match of text.matchAll(pattern)) spans.push([match.index, match.index + match[0].length]);
+    const pattern = new RegExp(`(?<![\\p{L}\\p{N}])${phrase(title)}(?=[^\\p{L}\\p{N}]*(?:role|position|job|opportunity)\\b)`, 'giu');
+    for (const match of text.matchAll(pattern)) if (noPastWork || forwardReference(match.index)) spans.push([match.index, match.index + match[0].length]);
+    const terms = attributionTerms(title);
+    for (let first = 0; first < terms.length; first += 1) {
+      for (let last = first + 2; last <= terms.length; last += 1) {
+        const fragment = terms.slice(first, last).map(escape).join('[^\\p{L}\\p{N}]+');
+        const target = new RegExp(`(?<![\\p{L}\\p{N}])${fragment}(?=[^\\p{L}\\p{N}]*(?:role|position|job|opportunity|team|group|product|department)\\b)`, 'giu');
+        for (const match of text.matchAll(target)) if (noPastWork || forwardReference(match.index)) spans.push([match.index, match.index + match[0].length]);
+        if (fragment && ctx?.targetCompany) {
+          const employer = phrase(ctx.targetCompany);
+          const owned = new RegExp(`(?<![\\p{L}\\p{N}])${employer}['’]s\\s+${fragment}(?![\\p{L}\\p{N}])`, 'giu');
+          for (const match of text.matchAll(owned)) if (noPastWork || forwardReference(match.index)) spans.push([match.index, match.index + match[0].length]);
+        }
+        if (sentenceAddressesTarget(text, ctx?.targetCompany || '')) {
+          const recipient = new RegExp(`\\b(?:to|for|on)\\s+(?:the\\s+)?${fragment}(?![\\p{L}\\p{N}])`, 'giu');
+          for (const match of text.matchAll(recipient)) if (noPastWork || forwardReference(match.index)) spans.push([match.index, match.index + match[0].length]);
+        }
+        const named = new RegExp(`(?<![\\p{L}\\p{N}])${fragment}(?![\\p{L}\\p{N}])`, 'giu');
+        for (const match of text.matchAll(named)) if (forwardReference(match.index)) spans.push([match.index, match.index + match[0].length]);
+      }
+    }
+    for (const term of terms.filter(value => /^(?:I|II|III|IV|V|VI|VII|VIII|IX|X)$/iu.test(value))) {
+      const level = new RegExp(`\\blevel\\s+${escape(term)}(?=\\s+(?:role|position|job|opportunity)\\b)`, 'giu');
+      for (const match of text.matchAll(level)) if (noPastWork || forwardReference(match.index)) spans.push([match.index, match.index + match[0].length]);
+    }
   }
   const company = String(ctx?.targetCompany || '').trim();
   if (company && sentenceAddressesTarget(text, company)) {
     const pattern = new RegExp(`(?<![\\p{L}\\p{N}])${phrase(company)}(?![\\p{L}\\p{N}])`, 'giu');
-    for (const match of text.matchAll(pattern)) spans.push([match.index, match.index + match[0].length]);
+    for (const match of text.matchAll(pattern)) if (noPastWork || forwardReference(match.index)) spans.push([match.index, match.index + match[0].length]);
   }
   if (!spans.length || !finding.term) return false;
   const pattern = new RegExp(`(?<![\\p{L}\\p{N}])${phrase(finding.term)}(?![\\p{L}\\p{N}])`, 'giu');
