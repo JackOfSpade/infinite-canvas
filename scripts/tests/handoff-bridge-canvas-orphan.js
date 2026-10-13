@@ -104,12 +104,14 @@ async function assertOrphanRetires(factory = createHandoffEngine) {
     const project = PROJECTS[0];
     const { canvasFilePath } = makeProject(root, project, { canvas: false });
     const clock = createFakeClock();
-    engine = factory({ source: sourceFor({ missing: new Set([project.jobId]) }),
+    let presenceProbes = 0;
+    engine = factory({ source: sourceFor({ missing: new Set([project.jobId]), onPresence: () => { presenceProbes += 1; } }),
       restoredLanes: [heldLane(1, project, canvasFilePath)], now: clock.now, timers: clock, holdMs: 0 });
     await tickAndSettle(engine, clock);
+    await waitUntil(() => presenceProbes >= 1, 'first orphan observation before confirmation time advances');
     assert(rowFor(engine, project.jobId), 'one orphan observation cannot drop the lane');
     await tickAndSettle(engine, clock, CONFIRM_MS + 1);
-    assert(!rowFor(engine, project.jobId), 'repeated orphan proof must retire the lane');
+    await waitUntil(() => !rowFor(engine, project.jobId), 'repeated orphan proof must retire the lane');
   } finally {
     await engine?.close();
     fs.rmSync(root, { recursive: true, force: true });
