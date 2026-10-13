@@ -40,6 +40,7 @@ coverage/
 .test-artifacts/blackbox-run/*
 !.test-artifacts/blackbox-run/*.mjs
 !.test-artifacts/blackbox-run/README*.md
+**/.local-ai/
 
 # Build caches and scratch dirs
 *.tsbuildinfo

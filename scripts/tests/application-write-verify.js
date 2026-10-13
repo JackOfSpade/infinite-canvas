@@ -27,6 +27,7 @@ import { assessStrengthFamily } from '../../electron/ipc/applicationClaimGroundi
 import { MAX_REQUIREMENTS_REEPOCHS, requirementsAdjudicationBindings, requirementsBindingErrors, requirementsAuditCapTerminal } from '../../electron/ipc/applicationRequirementsAuditPolicy.js';
 import { applicationProtocolSetting } from '../../electron/ipc/applicationProtocolSetting.js';
 import { v2RejectionEvidencePaths } from '../../electron/ipc/applicationV2RejectionEvidence.js';
+import { splitWriteVerifyWriterResponse, v2WriterShortlistEvidencePaths } from '../../electron/ipc/applicationV2WriterShortlist.js';
 
 const domains = [
   ['freight', 'dispatch'], ['clinic', 'scheduling'], ['library', 'cataloguing'],
@@ -34,6 +35,43 @@ const domains = [
 const JOB_ID = '11111111-1111-4111-8111-111111111111';
 
 export default [
+  {
+    name: 'v2 writer shortlist is a working step retained outside conversion across three synthetic careers',
+    run() {
+      for (const [domain, action] of domains) {
+        const ids = Array.from({ length: 6 }, (_, index) => `host.career.achievement.${domain}-${index + 1}.1`);
+        const state = initialWriteVerifyState(1);
+        const envelope = { protocol: 'paste-application.v1', jobId: JOB_ID, stage: 'write' };
+        const writePrompt = writeVerifyPrompt({ stage: 'write', state, sourcePrompt: `${domain} posting and full grouped catalog`, envelope });
+        assert.ok(writePrompt.includes('Before the résumé, list the 6–10 strongest true evidence items'), domain);
+        assert.ok(writePrompt.includes('EVIDENCE SHORTLIST (WORKING NOTES)'), domain);
+        const response = `EVIDENCE SHORTLIST (WORKING NOTES)\n\n${ids.map((id, index) => `${index + 1}. ${id} — ${action} reason ${index + 1}.`).join('\n')}\n\nRÉSUMÉ\n${action} work.\n\nCOVER LETTER\nI would bring ${action} experience.`;
+        const separated = splitWriteVerifyWriterResponse(response, ids);
+        assert.equal(separated.shortlist.split('\n').length, 6, domain);
+        assert.ok(separated.shortlist.includes(ids[0]), domain);
+        assert.ok(!separated.plainText.includes('EVIDENCE SHORTLIST') && !separated.plainText.includes(ids[0]), domain);
+        const withWorkingNote = response.replace('\n\nRÉSUMÉ', '\n\nThe source supports a short application.\n\nRÉSUMÉ');
+        assert.ok(!splitWriteVerifyWriterResponse(withWorkingNote, ids).plainText.includes('The source supports'), domain);
+        state.candidates[0].plainText = separated.plainText;
+        const convertPrompt = writeVerifyPrompt({ stage: 'convert', state, sourcePrompt: `${domain} posting and full grouped catalog`, envelope });
+        assert.ok(convertPrompt.includes(`RÉSUMÉ\n${action} work.`), domain);
+        assert.ok(!convertPrompt.includes('EVIDENCE SHORTLIST') && !convertPrompt.includes(`${action} reason`), domain);
+        assert.throws(() => splitWriteVerifyWriterResponse(response.replace(ids[0], 'host.career.achievement.invented.1'), ids), /approved catalog ID/, domain);
+        assert.throws(() => splitWriteVerifyWriterResponse(response.replace(ids[1], ids[0]), ids), /must be distinct/, domain);
+        assert.throws(() => splitWriteVerifyWriterResponse(response.replace('EVIDENCE SHORTLIST (WORKING NOTES)', 'WORKING NOTES'), ids), /must begin with EVIDENCE SHORTLIST/, domain);
+        assert.throws(() => splitWriteVerifyWriterResponse(`${response}\n${ids[0]}`, ids), /must not contain catalog evidence IDs/, domain);
+        assert.throws(() => splitWriteVerifyWriterResponse(`${response}\nEVIDENCE SHORTLIST (WORKING NOTES)`, ids), /must stay before the résumé/, domain);
+        // Sabotage: storing the unseparated response would send working notes to conversion.
+        state.candidates[0].plainText = response;
+        const sabotagedPrompt = writeVerifyPrompt({ stage: 'convert', state, sourcePrompt: `${domain} posting and full grouped catalog`, envelope });
+        assert.ok(sabotagedPrompt.includes('EVIDENCE SHORTLIST') && sabotagedPrompt.includes(`${action} reason`), domain);
+        const paths = v2WriterShortlistEvidencePaths(path.join(os.tmpdir(), '.local-ai', 'jobs', JOB_ID), JOB_ID,
+          `revision-1-write-${'a'.repeat(64)}.json`);
+        assert.ok(paths.retained.includes(`${path.sep}.local-ai${path.sep}writer-shortlists${path.sep}`), domain);
+        assert.ok(!paths.retained.includes(`${path.sep}jobs${path.sep}`), domain);
+      }
+    },
+  },
   {
     name: 'v2 rejection evidence remains outside the removed private job directory',
     async run() {
