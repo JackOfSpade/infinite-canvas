@@ -57,7 +57,7 @@ const MARKETPLACE_PUSH_TASKS = new Set([
 // telemetry. This is the release_one policy vocabulary from sources/push.js.
 const STATUS_PUSH_TASKS = new Set([
   'price-synthesis', 'price-synthesis-batch', 'bundle-price-synthesis', 'platform-fit-assessment',
-  'resume-parse', 'career-profile-compile', 'career-profile-audit-completeness', 'career-profile-audit-grounding',
+  'resume-parse', 'career-profile-compile', 'career-profile-clean', 'career-profile-audit-completeness', 'career-profile-audit-grounding',
   'career-profile-audit-attribution', 'career-profile-audit-metrics', 'career-profile-audit-skills',
   'career-profile-audit-conflicts', 'career-profile-repair',
   'job-compensation-research', 'job-compensation-research-batch',
@@ -83,7 +83,8 @@ const STATUS_REASONS = new Set([
 ]);
 // Closed drop cause -> the per-cause counter it increments.
 const DROP_COUNTER = Object.freeze({
-  bundle_discarded: 'droppedDiscarded', bundle_pruned: 'droppedPruned', bundle_missing: 'droppedMissing', bundle_saved: 'droppedSaved',
+  bundle_discarded: 'droppedDiscarded', bundle_pruned: 'droppedPruned', bundle_missing: 'droppedMissing',
+  canvas_orphaned: 'droppedMissing', bundle_saved: 'droppedSaved',
 });
 const LOG_EPOCH_CAUSES = new Set(['continued', 'rotated', 'drained', 'source_ended', 'closed', 'link_changed']);
 const LOG_PAUSE_CAUSES = new Set(['user', 'idle', 'anomaly', 'revoked', 'quit']);
@@ -2244,8 +2245,8 @@ export function createHandoffEngine({
 
   // A status probe could not open the lane's canvas. Ask the source what the
   // released location still holds (a closed enum; see the application
-  // source). The answer is never a drop cause: it only refines what a held
-  // canvas_unavailable row tells the person.
+  // source). One answer is never a drop cause; repeated orphaned answers can
+  // retire a held lane after the confirmation window.
   async function probeMissingCanvas(target, generation) {
     if (typeof application.canvasPresence !== 'function') return { cause: null, alive: false, ran: true };
     const timedOut = Symbol('canvas-presence-timeout');
@@ -2257,13 +2258,12 @@ export function createHandoffEngine({
     return { cause: null, alive: false, ran: true, canvas: ['present', 'orphaned', 'unavailable'].includes(presence) ? presence : 'unavailable' };
   }
 
-  // A canvas_unavailable lane whose released location has kept proving
-  // 'orphaned' for this long is shown as "canvas missing" with an explicit
-  // Remove. One observation is never enough: a sync client, a Save As, or a
-  // remount can leave a folder briefly empty.
+  // A lane whose released location has kept proving 'orphaned' for this long
+  // can be retired. One observation is never enough: a sync client, a Save As,
+  // or a remount can leave a folder briefly empty.
   const CANVAS_ORPHAN_CONFIRM_MS = 60_000;
   function canvasOrphanConfirmed(lane) {
-    return lane.phase === 'needs_user' && lane.reason === 'canvas_unavailable'
+    return ['held', 'needs_user'].includes(lane.phase)
       && Number.isFinite(lane.canvasOrphanSince) && Number.isFinite(lane.canvasOrphanSeenAt)
       && lane.canvasOrphanSeenAt - lane.canvasOrphanSince >= CANVAS_ORPHAN_CONFIRM_MS;
   }
@@ -2271,7 +2271,7 @@ export function createHandoffEngine({
   // Returns true when the public row changed.
   function noteCanvasPresence(lane, presence, stamp) {
     const before = canvasOrphanConfirmed(lane);
-    if (presence === 'orphaned' && lane.phase === 'needs_user' && lane.reason === 'canvas_unavailable') {
+    if (presence === 'orphaned' && ['held', 'needs_user'].includes(lane.phase)) {
       if (!Number.isFinite(lane.canvasOrphanSince)) lane.canvasOrphanSince = stamp;
       lane.canvasOrphanSeenAt = stamp;
     } else {
@@ -2281,8 +2281,7 @@ export function createHandoffEngine({
     return canvasOrphanConfirmed(lane) !== before;
   }
   // A lane that just lost its canvas keeps being checked at the restored-lane
-  // cadence, so a canvas that comes back (or is proven gone) is noticed, and a
-  // truly orphaned one can be offered for explicit removal.
+  // cadence, so a canvas that comes back (or is proven gone) is noticed.
   function armCanvasProbe(lane) {
     lane.canvasOrphanSince = null;
     lane.canvasOrphanSeenAt = null;
@@ -2320,16 +2319,16 @@ export function createHandoffEngine({
 
   // Stranded lanes: restored from a lanes.json written before their bundle was
   // discarded, pruned, saved elsewhere or deleted by hand while the bridge was
-  // off. They would sit as held/restart ("needs you") and hold a slot until a
-  // chat read them. Each restored lane is probed; only proof drops it, and one
-  // that could not be checked is retried on later ticks a bounded number of
-  // times (serve-time revalidation still covers it after that).
+  // off. Probe held lanes periodically, including those that initially proved
+  // alive, because an acceptance restore can remove the canvas after startup
+  // without an app-side discard event.
   const RESTORE_PROBE_ATTEMPTS = 5;
   // After the fast attempts a lane that still could not be checked is retried
   // at this slow cadence, so a probe that failed five times in a row does not
   // leave a really-gone lane counted as "needs you" until the person acts.
   const RESTORE_REPROBE_MS = 5 * 60_000;
-  // `restoreProbes` is null once a probe answered conclusively (gone or alive).
+  // `restoreProbes` is null only for a terminal lane. A live held lane is
+  // checked again at the slow cadence so later external removal is noticed.
   function restoreProbeDue(lane, stamp) {
     return scope.applications && Number.isInteger(lane.restoreProbes)
       && ['held', 'needs_user'].includes(lane.phase)
@@ -2370,21 +2369,24 @@ export function createHandoffEngine({
               await mutateLanes(() => {
                 if (!sourceCurrent(generation) || !lanes.includes(lane) || laneRevision(lane) !== claim.revision
                     || !restoreProbeDue(lane, safeNow(now))) return;
-                lane.restoreProbes = null;
+                lane.restoreProbes = 0;
+                lane.restoreProbeAt = safeNow(now) + RESTORE_REPROBE_MS;
                 if (noteCanvasPresence(lane, 'present', safeNow(now))) touchLane(lane);
               });
               continue;
             }
             if (!outcome.ran) continue;
-            await mutateLanes(() => {
+            const orphanRevision = await mutateLanes(() => {
               if (!sourceCurrent(generation) || !lanes.includes(lane) || laneRevision(lane) !== claim.revision
-                  || !restoreProbeDue(lane, safeNow(now))) return;
+                  || !restoreProbeDue(lane, safeNow(now))) return null;
               // Any answer other than 'orphaned' (including no answer at all)
               // restarts the confirmation window.
               if (noteCanvasPresence(lane, outcome.canvas ?? null, safeNow(now))) touchLane(lane);
               if (lane.restoreProbes > 0) lane.restoreProbes -= 1;
               if (lane.restoreProbes === 0) lane.restoreProbeAt = safeNow(now) + RESTORE_REPROBE_MS;
+              return canvasOrphanConfirmed(lane) ? laneRevision(lane) : null;
             });
+            if (orphanRevision !== null) await dropProvenGoneLane(lane, 'canvas_orphaned', generation, orphanRevision);
           }
         } while (sourceCurrent(generation) && restoreProbeRequest > passRequest);
       } finally { restoreProbe = null; }

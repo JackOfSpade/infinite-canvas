@@ -3,21 +3,20 @@
 // a lane from becoming a permanent, unclearable "needs you" row:
 //   * the application source classifies the released location from
 //     filesystem shape only ('present' | 'orphaned' | 'unavailable');
-//   * the engine re-probes held canvas lanes and, only after a bounded
-//     confirmation window, refines the public reason to 'canvas_missing';
-//   * nothing is ever removed silently (restart keeps the lane), and the
-//     person's explicit Remove (unrelease) is durable across restart;
+//   * the engine re-probes held canvas lanes and retires a lane only after a
+//     bounded confirmation window with repeated orphaned observations;
+//   * a returning canvas or a surviving job folder prevents retirement;
 //   * a stale canvas lane never blocks a newly released job.
 import fs from 'node:fs';
 import fsPromises from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { assert } from './testHelpers.js';
 import { createFakeClock } from './fixtures/handoff-bridge/fakeClock.js';
 import { createHandoffEngine } from '../../electron/ipc/handoffBridge/engine.js';
 import { createLaneStore } from '../../electron/ipc/handoffBridge/laneStore.js';
 import { createApplicationSource, probeApplicationCanvasPresence } from '../../electron/ipc/handoffBridge/sources/application.js';
-import { reduceBridgeQueue } from '../../electron/ipc/handoffBridge/telemetry.js';
 import { normalizeBridgeStatus, EMPTY_BRIDGE_STATUS } from '../../src/utils/handoffBridgeStatus.js';
 import { describeJobRow } from '../../src/utils/handoffBridgeView.js';
 import { JOB_ROW_COPY, BRIDGE_UI_COPY } from '../../src/utils/handoffBridgeCopy.js';
@@ -82,7 +81,43 @@ async function tickAndSettle(engine, clock, advanceMs = 0) {
 
 function rowFor(engine, jobId) { return engine.snapshot().queue.jobs.find(job => job.jobId === jobId); }
 
+async function assertOrphanRetires(factory = createHandoffEngine) {
+  const root = tempRoot('sabotage');
+  let engine;
+  try {
+    const project = PROJECTS[0];
+    const { canvasFilePath } = makeProject(root, project, { canvas: false });
+    const clock = createFakeClock();
+    engine = factory({ source: sourceFor({ missing: new Set([project.jobId]) }),
+      restoredLanes: [heldLane(1, project, canvasFilePath)], now: clock.now, timers: clock, holdMs: 0 });
+    await tickAndSettle(engine, clock);
+    assert(rowFor(engine, project.jobId), 'one orphan observation cannot drop the lane');
+    await tickAndSettle(engine, clock, CONFIRM_MS + 1);
+    assert(!rowFor(engine, project.jobId), 'repeated orphan proof must retire the lane');
+  } finally {
+    await engine?.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+}
+
 export default [
+  {
+    name: 'handoff bridge: canvas orphan: sabotage of confirmed retirement fails the lifecycle proof',
+    run: async () => {
+      await assertOrphanRetires();
+      const enginePath = path.resolve('electron/ipc/handoffBridge/engine.js');
+      const original = fs.readFileSync(enginePath, 'utf8');
+      const needle = "if (orphanRevision !== null) await dropProvenGoneLane(lane, 'canvas_orphaned', generation, orphanRevision);";
+      assert(original.includes(needle), 'the confirmed retirement branch exists for sabotage');
+      const mutant = original.replace(needle, 'if (false) await dropProvenGoneLane(lane, \'canvas_orphaned\', generation, orphanRevision);')
+        .replace(/from '(\.{1,2}\/[^']+)'/g, (_whole, relative) => `from '${new URL(relative, pathToFileURL(enginePath)).href}'`);
+      const module = await import(`data:text/javascript;base64,${Buffer.from(mutant).toString('base64')}`);
+      let failed = false;
+      try { await assertOrphanRetires(module.createHandoffEngine); }
+      catch (error) { failed = /repeated orphan proof must retire/.test(String(error?.message)); }
+      assert(failed, 'the lifecycle test fails without the confirmed retirement branch');
+    },
+  },
   {
     name: 'handoff bridge: canvas orphan: presence probe classifies three synthetic project layouts and flips with the evidence',
     run: async () => {
@@ -124,7 +159,34 @@ export default [
     },
   },
   {
-    name: 'handoff bridge: canvas orphan: a restored orphaned lane becomes canvas_missing only after the confirmation window, survives restart, and an explicit Remove is durable',
+    name: 'handoff bridge: canvas orphan: a previously live held lane is rechecked after external restore removes its bundle',
+    run: async () => {
+      const root = tempRoot('later-restore');
+      const project = PROJECTS[1];
+      let engine;
+      try {
+        const { folder, canvasFilePath } = makeProject(root, project, { canvas: true, jobFolder: true });
+        const missing = new Set();
+        const clock = createFakeClock();
+        engine = createHandoffEngine({ source: sourceFor({ missing }),
+          restoredLanes: [heldLane(1, project, canvasFilePath)], now: clock.now, timers: clock, holdMs: 0 });
+        await tickAndSettle(engine, clock);
+        assert(rowFor(engine, project.jobId), 'the initially live held lane remains available');
+        fs.unlinkSync(canvasFilePath);
+        fs.rmSync(path.join(folder, '.local-ai', 'jobs', project.jobId), { recursive: true });
+        missing.add(project.jobId);
+        await tickAndSettle(engine, clock, 5 * 60_000 + 1);
+        assert(rowFor(engine, project.jobId), 'the first later orphan probe cannot retire the lane');
+        await tickAndSettle(engine, clock, 5 * 60_000 + 1);
+        assert(!rowFor(engine, project.jobId), 'the second later orphan probe retires it');
+      } finally {
+        await engine?.close();
+        fs.rmSync(root, { recursive: true, force: true });
+      }
+    },
+  },
+  {
+    name: 'handoff bridge: canvas orphan: restored lanes retire only after repeated orphan proof and stay retired across restart',
     run: async () => {
       const root = tempRoot('restart');
       const userDataPath = path.join(root, 'user-data');
@@ -158,34 +220,13 @@ export default [
         await tickAndSettle(engine, clock, CONFIRM_MS / 2 + 1);
         for (const project of PROJECTS) {
           const row = rowFor(engine, project.jobId);
-          assert(row?.phase === 'needs_user' && row.reason === 'canvas_missing', `${project.folder}: confirmed orphan reads canvas_missing (got ${row?.phase}/${row?.reason})`);
+          assert(!row, `${project.folder}: repeated orphan proof retires the lane`);
         }
-        assert(engine.snapshot().queue.applications.needsYou === 3, 'the rows still need the person; nothing was dropped');
         const onDisk = createLaneStore({ userDataPath }).readLanes();
-        assert(onDisk.length === 3 && onDisk.every(lane => lane.reason === 'canvas_unavailable'),
-          'canvas_missing is a public refinement only; the durable reason stays canvas_unavailable');
-        const telemetry = reduceBridgeQueue({ lanes: engine.snapshot().queue.jobs }, clock.now());
-        assert(JSON.stringify(telemetry).includes('canvas_missing'), 'bug-report queue telemetry keeps the closed canvas_missing reason');
-
-        // Restart: every lane comes back; the refinement is re-proved from scratch.
+        assert(onDisk.length === 0, 'retirement persists to the lane store');
         await engine.close();
         engine = start();
-        for (const project of PROJECTS) {
-          assert(rowFor(engine, project.jobId)?.reason === 'canvas_unavailable', 'a restart never silently removes or pre-confirms an orphaned lane');
-        }
-        await tickAndSettle(engine, clock);
-        await tickAndSettle(engine, clock, CONFIRM_MS + 1);
-        assert(rowFor(engine, PROJECTS[0].jobId)?.reason === 'canvas_missing', 'the restarted engine re-confirms the orphan');
-
-        // The person removes one row explicitly.
-        const removed = await engine.unrelease(PROJECTS[0].jobId);
-        assert(removed?.ok === true, `explicit Remove succeeds (${JSON.stringify(removed)})`);
-        await createLaneStore({ userDataPath }).flush();
-        const afterRemove = createLaneStore({ userDataPath }).readLanes().map(lane => lane.jobId);
-        assert(!afterRemove.includes(PROJECTS[0].jobId) && afterRemove.length === 2, 'the Remove is persisted');
-        await engine.close();
-        engine = start();
-        assert(!rowFor(engine, PROJECTS[0].jobId) && engine.snapshot().queue.jobs.length === 2, 'a removed lane never comes back after restart');
+        assert(engine.snapshot().queue.jobs.length === 0, 'retired lanes never return after restart');
       } finally {
         for (const engine of engines) { try { await engine.close(); } catch { /* closed */ } }
         fs.rmSync(root, { recursive: true, force: true });
@@ -212,18 +253,21 @@ export default [
           now: clock.now, timers: clock, holdMs: 0,
         });
         engines.push(engine);
-        for (let index = 0; index < 8; index += 1) await tickAndSettle(engine, clock, index === 0 ? 0 : 5 * 60_000 + 1);
+        await tickAndSettle(engine, clock);
+        await tickAndSettle(engine, clock, CONFIRM_MS / 2);
         assert(rowFor(engine, PROJECTS[0].jobId)?.reason === 'canvas_unavailable', 'a missing project folder stays canvas_unavailable indefinitely');
         assert(rowFor(engine, PROJECTS[1].jobId)?.reason === 'canvas_unavailable', 'a surviving job folder stays canvas_unavailable indefinitely');
-        assert(rowFor(engine, PROJECTS[2].jobId)?.reason === 'canvas_missing', 'the true orphan is confirmed');
-        assert(engine.snapshot().queue.jobs.length === 3, 'no lane is ever dropped without proof or the person');
+        assert(rowFor(engine, PROJECTS[2].jobId)?.reason === 'canvas_unavailable', 'one orphan observation cannot retire a lane');
+        assert(engine.snapshot().queue.jobs.length === 3, 'no lane is dropped on one observation');
         // The canvas comes back: the app answers again and the row is no
         // longer called missing (it stays held for the person to resume).
         fs.writeFileSync(back.canvasFilePath, '{}\n');
         missing.delete(PROJECTS[2].jobId);
         await tickAndSettle(engine, clock, 5 * 60_000 + 1);
         const row = rowFor(engine, PROJECTS[2].jobId);
-        assert(row?.phase === 'needs_user' && row.reason === 'canvas_unavailable', `a returning canvas clears canvas_missing (got ${row?.reason})`);
+        assert(row?.phase === 'needs_user' && row.reason === 'canvas_unavailable', `a returning canvas retains the lane (got ${row?.reason})`);
+        await tickAndSettle(engine, clock, 5 * 60_000 + 1);
+        assert(engine.snapshot().queue.jobs.length === 3, 'a returning canvas and surviving job state defeat retirement');
       } finally {
         for (const engine of engines) { try { await engine.close(); } catch { /* closed */ } }
         fs.rmSync(root, { recursive: true, force: true });
@@ -252,7 +296,7 @@ export default [
         assert(rowFor(engine, PROJECTS[0].jobId)?.reason === 'canvas_unavailable', 'the lane is held canvas_unavailable');
         await tickAndSettle(engine, clock);
         await tickAndSettle(engine, clock, CONFIRM_MS + 1);
-        assert(rowFor(engine, PROJECTS[0].jobId)?.reason === 'canvas_missing', 'a runtime canvas hold is re-probed and confirmed missing');
+        assert(!rowFor(engine, PROJECTS[0].jobId), 'a runtime canvas hold is retired after repeated orphan proof');
       } finally {
         for (const engine of engines) { try { await engine.close(); } catch { /* closed */ } }
         fs.rmSync(root, { recursive: true, force: true });
@@ -275,9 +319,10 @@ export default [
         await tickAndSettle(engine, clock, CONFIRM_MS + 1);
         const chat = await engine.newChat({ linkId: LINK });
         const idle = await engine.get({ session: chat.sessionCode, linkId: LINK });
-        assert(idle.status === 'paused' && idle.reason === 'needs_user', `with nothing else to do the worker is told the person is needed (${idle.status})`);
+        assert(idle.status !== 'served', `retired stale lanes cannot be served (${idle.status})`);
         assert((await engine.release({ jobs: [{ jobId: FRESH_JOB, canvasFilePath: fresh.canvasFilePath }] })).ok, 'a new job releases beside the stale rows');
-        const next = await engine.get({ session: chat.sessionCode, linkId: LINK });
+        const nextChat = await engine.newChat({ linkId: LINK });
+        const next = await engine.get({ session: nextChat.sessionCode, linkId: LINK });
         assert(next.status === 'served' && next.handoffCode === `CODE-${FRESH_JOB.slice(0, 4)}`,
           `the newly released job is served ahead of the stale needs-you rows (${next.status}/${next.reason || ''})`);
       } finally {
