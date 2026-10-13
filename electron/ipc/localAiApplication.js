@@ -54,7 +54,7 @@ import { tryGetStore } from './settings.js';
 import { assertApplicationV2PromptLimit, assertApplicationV2ReplyLimit } from './applicationV2Limits.js';
 import { writeVerifyLengthBudgets } from './applicationV2LengthBudget.js';
 import { applicationV2PagePng } from './applicationV2PageImages.js';
-import { requirementsAdjudicationBindings, requirementsBindingErrors, requirementsAuditCapTerminal } from './applicationRequirementsAuditPolicy.js';
+import { requirementsAdjudicationBindings, requirementsBindingErrors, requirementsAuditCapTerminal, requirementsSingletonBinding } from './applicationRequirementsAuditPolicy.js';
 
 const { shell, app } = electronPkg;
 // `matches` is deliberately kept in canonical requirement×catalog order so
@@ -298,7 +298,7 @@ const REQUIREMENTS_ADJUDICATIONS_STREAM = 'requirements-adjudications';
 // This definition is intentionally compact and reused byte-for-byte in all
 // three independent classification prompts. It is generic enough to avoid
 // leading any classifier toward a particular listing's answer.
-const AUTHORITY_REQUIREMENT_CLASSIFICATION_DEFINITION = 'A requirement is a unit assigning a candidate or role qualification, expected action or responsibility, or material role constraint. Team or company description, marketing, benefits or compensation, EEO or privacy text, and metadata alone are not requirements. Never merge mere context into a requirement.';
+const AUTHORITY_REQUIREMENT_CLASSIFICATION_DEFINITION = 'A requirement is a unit assigning a candidate or role qualification, expected action or responsibility, or material role constraint. A descriptive sentence about the pace or changing priorities of a role, without an explicit candidate ability or duty, is context rather than a requirement. Team or company description, marketing, benefits or compensation, EEO or privacy text, and metadata alone are not requirements. Never merge mere context into a requirement.';
 const AUTHORITY_LEDGER_PAGES_DIR = 'application-authority-ledger-pages';
 const MAX_APPLICATION_AUTHORITY_LEDGER_PAGE_BYTES = 1_000_000;
 const AUTHORITY_LEDGER_JOURNAL_FILE = 'application-authority-ledger.journal.json';
@@ -1637,6 +1637,24 @@ function authorityEffectiveSemanticAuditReceipt(page, disagreement, adjudication
   };
 }
 
+function authorityBoundSingletonAuditReceipt(page, disagreement, bindingRows) {
+  const binding = requirementsSingletonBinding(disagreement.differingUnitIds, bindingRows, page.dispositions);
+  if (!binding) throw new Error('A single-unit audit override has no matching prior adjudication.');
+  return {
+    version: AUTHORITY_LISTING_COVERAGE_VERSION,
+    auditDigest: page.auditDigest,
+    pageIndex: page.index,
+    pageDigest: page.digest,
+    rows: authoritySemanticAuditRows(page.dispositions),
+    bindingOverride: {
+      disagreementDigest: disagreement.digest,
+      unitId: binding.unitId,
+      disposition: binding.disposition,
+      bindingRowsDigest: pasteJsonHash(bindingRows),
+    },
+  };
+}
+
 function requirementsAuditDisagreementTerminal(paste, input = null) {
   return [AUTHORITY_PROTOCOL_V2, AUTHORITY_PROTOCOL_V3].includes(authorityProtocolFor(input))
     && paste?.stage === REQUIREMENTS_AUDIT_DISAGREEMENT_TERMINAL_KIND
@@ -1854,7 +1872,20 @@ async function assertAuthorityListingSemanticAuditReceipts(store, { requirements
       && direct?.version === AUTHORITY_LISTING_COVERAGE_VERSION && direct.pageIndex === index
       && direct.auditDigest === expected.auditDigest && direct.pageDigest === expected.digest
       && canonicalFrozenValue(direct.rows) === canonicalFrozenValue(authoritySemanticAuditRows(expected.dispositions));
-    if (normal && !direct.adjudication) continue;
+    if (normal && !direct.adjudication && !direct.bindingOverride) continue;
+    if (page.records?.length === 1 && page.records[0]?.kind === 'listing-semantic-audit' && direct?.bindingOverride) {
+      const disagreement = await authorityFindDisagreementReceipt(store, direct.bindingOverride.disagreementDigest, { epoch, requirementsStream, auditStream });
+      const bindingRows = await authorityPriorAdjudicationBindings(store, epoch, expected.units);
+      const submittedRows = authoritySemanticAuditRows(disagreement.rows);
+      const discoveryRows = authoritySemanticAuditRows(expected.dispositions);
+      const differing = submittedRows.filter((row, rowIndex) => row.disposition !== discoveryRows[rowIndex]?.disposition).map(row => row.unitId);
+      if (disagreement.auditDigest !== expected.auditDigest || disagreement.pageIndex !== index || disagreement.pageDigest !== expected.digest
+        || canonicalFrozenValue(differing) !== canonicalFrozenValue(disagreement.differingUnitIds)
+        || canonicalFrozenValue(direct) !== canonicalFrozenValue(authorityBoundSingletonAuditReceipt(expected, disagreement, bindingRows))) {
+        throw new Error('The single-unit semantic audit override does not bind its prior adjudication.');
+      }
+      continue;
+    }
     const adjudication = page.records?.[0]?.receipt;
     const effective = page.records?.[1]?.receipt;
     if (page.records?.length !== 2 || page.records[0]?.kind !== 'requirements-adjudication'
@@ -1882,8 +1913,11 @@ async function authorityResolvedAdjudicationDisagreementDigests(store, auditStre
   const resolved = new Set();
   for (let index = 0; index < count; index += 1) {
     const page = await store.getReceiptPage(auditStream, index);
-    if (page.records?.length !== 2 || page.records[0]?.kind !== 'requirements-adjudication') continue;
-    const digest = page.records[0]?.receipt?.disagreementDigest;
+    const digest = page.records?.length === 2 && page.records[0]?.kind === 'requirements-adjudication'
+      ? page.records[0]?.receipt?.disagreementDigest
+      : page.records?.length === 1 && page.records[0]?.kind === 'listing-semantic-audit'
+        ? page.records[0]?.receipt?.bindingOverride?.disagreementDigest : null;
+    if (!digest) continue;
     if (typeof digest !== 'string' || !/^[a-f0-9]{64}$/u.test(digest) || resolved.has(digest)) {
       throw new Error('The effective semantic listing-audit receipt has an invalid adjudication provenance pointer.');
     }
@@ -7975,18 +8009,30 @@ export async function submitLocalApplicationHandoff({ jobId, canvasFilePath, han
       const store = state.authorityStore; const page = state.authorityListingAuditPage; const audit = parsed.__authorityListingAuditReceipt;
       if (!store || !page || !page.auditStream || !audit) throw new Error('Current authority semantic-audit state is missing its exact immutable epoch receipt.');
       const disagreement = parsed.__authorityListingAuditDisagreement;
+      let boundSingleton = false;
       if (disagreement) {
-        await store.appendReceiptPage('requirements-audit-disagreements', [{ id: `requirements-audit-disagreement:${page.index}:${disagreement.digest}`, kind: 'listing-semantic-disagreement', receipt: disagreement }], { holdJournal: true });
         if (isRequirementsAdjudicationProtocol(input)) {
           const bindingRows = await authorityPriorAdjudicationBindings(store, page.epoch, page.units);
-          const terminal = requirementsAuditCapTerminal(page.epoch, disagreement.differingUnitIds, bindingRows);
-          if (terminal) { next.terminal = terminal; next.stage = REQUIREMENTS_AUDIT_DISAGREEMENT_TERMINAL_KIND; }
-          else {
-            const caseRecord = await authorityPendingAdjudicationCase(store, input);
-            next.authorityAdjudication = authorityAdjudicationManifestPointer(caseRecord);
-            next.stage = 'requirements-adjudication';
+          boundSingleton = Boolean(requirementsSingletonBinding(disagreement.differingUnitIds, bindingRows, page.dispositions));
+          const terminal = boundSingleton ? null : requirementsAuditCapTerminal(page.epoch, disagreement.differingUnitIds, bindingRows);
+          if (boundSingleton) {
+            const effective = authorityBoundSingletonAuditReceipt(page, disagreement, bindingRows);
+            if (page.index + 1 === page.pageCount) await currentAuthorityWorkflow(store, input);
+            await store.appendReceiptPages([
+              { stream: 'requirements-audit-disagreements', records: [{ id: `requirements-audit-disagreement:${page.index}:${disagreement.digest}`, kind: 'listing-semantic-disagreement', receipt: disagreement }] },
+              { stream: page.auditStream, records: [{ id: `requirements-audit:${page.index}:${audit.auditDigest}:bound`, kind: 'listing-semantic-audit', receipt: effective }] },
+            ], { holdJournal: true });
+          } else {
+            await store.appendReceiptPage('requirements-audit-disagreements', [{ id: `requirements-audit-disagreement:${page.index}:${disagreement.digest}`, kind: 'listing-semantic-disagreement', receipt: disagreement }], { holdJournal: true });
+            if (terminal) { next.terminal = terminal; next.stage = REQUIREMENTS_AUDIT_DISAGREEMENT_TERMINAL_KIND; }
+            else {
+              const caseRecord = await authorityPendingAdjudicationCase(store, input);
+              next.authorityAdjudication = authorityAdjudicationManifestPointer(caseRecord);
+              next.stage = 'requirements-adjudication';
+            }
           }
         } else {
+          await store.appendReceiptPage('requirements-audit-disagreements', [{ id: `requirements-audit-disagreement:${page.index}:${disagreement.digest}`, kind: 'listing-semantic-disagreement', receipt: disagreement }], { holdJournal: true });
           next.terminal = {
             kind: REQUIREMENTS_AUDIT_DISAGREEMENT_TERMINAL_KIND,
             message: REQUIREMENTS_AUDIT_DISAGREEMENT_MESSAGE,
@@ -8002,7 +8048,7 @@ export async function submitLocalApplicationHandoff({ jobId, canvasFilePath, han
         await store.appendReceiptPage(page.auditStream, [{ id: `requirements-audit:${page.index}:${audit.auditDigest}`, kind: 'listing-semantic-audit', receipt: audit }], { holdJournal: true });
       }
       authorityStoreToWrite = store; next.authorityStore = authorityStoreReceipt(store);
-      if (disagreement) {
+      if (disagreement && !boundSingleton) {
         // A v2 terminal never advances into candidate matching. V3 instead
         // routes through the isolated third-context adjudicator above.
       } else if (page.index + 1 < page.pageCount) next.stage = 'requirements-audit';

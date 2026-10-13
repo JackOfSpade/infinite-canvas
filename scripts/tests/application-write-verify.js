@@ -24,7 +24,7 @@ import { __pasteUnitGroundingErrorsForTests } from '../../electron/ipc/localAiAp
 import { buildApplicationCareerAuthority } from '../../electron/ipc/applicationCareerAuthority.js';
 import { approvedCareerEvidenceCatalog, CAREER_SNAPSHOT_STATUS_APPROVED } from '../../electron/ipc/careerSnapshot.js';
 import { assessStrengthFamily } from '../../electron/ipc/applicationClaimGrounding.js';
-import { MAX_REQUIREMENTS_REEPOCHS, requirementsAdjudicationBindings, requirementsBindingErrors, requirementsAuditCapTerminal } from '../../electron/ipc/applicationRequirementsAuditPolicy.js';
+import { MAX_REQUIREMENTS_REEPOCHS, requirementsAdjudicationBindings, requirementsBindingErrors, requirementsAuditCapTerminal, requirementsSingletonBinding } from '../../electron/ipc/applicationRequirementsAuditPolicy.js';
 import { applicationProtocolSetting } from '../../electron/ipc/applicationProtocolSetting.js';
 import { v2RejectionEvidencePaths } from '../../electron/ipc/applicationV2RejectionEvidence.js';
 import { archiveV2Content, v2EvidenceArchiveDirectory, V2_EVIDENCE_MAX_BYTES } from '../../electron/ipc/applicationV2EvidenceArchive.js';
@@ -219,12 +219,12 @@ export default [
     },
   },
   {
-    name: 'requirements adjudication binds a disputed unit and stops after two re-epochs across three synthetic postings',
+    name: 'requirements adjudication binds one ambiguous unit across three postings while multi-unit loops retain the cap',
     run() {
       const postings = [
-        { domain: 'freight', unit: 'u-freight', quote: 'Maintain route manifests for freight dispatch.' },
-        { domain: 'clinic', unit: 'u-clinic', quote: 'Coordinate appointment schedules for clinic visits.' },
-        { domain: 'library', unit: 'u-library', quote: 'Preserve catalog records for circulating books.' },
+        { domain: 'freight', unit: 'u-freight', quote: 'Priorities may shift as freight volumes change.' },
+        { domain: 'clinic', unit: 'u-clinic', quote: 'This clinic role operates in a changing environment.' },
+        { domain: 'library', unit: 'u-library', quote: 'Library projects vary from one season to another.' },
       ];
       assert.equal(MAX_REQUIREMENTS_REEPOCHS, 2);
       for (const posting of postings) {
@@ -236,21 +236,27 @@ export default [
         assert.match(requirementsBindingErrors(mutation, bindings)[0], /prior independent adjudicator.*binding disposition/);
         assert.equal(requirementsAuditCapTerminal(0, [posting.unit]), null);
         assert.equal(requirementsAuditCapTerminal(1, [posting.unit]), null);
-        const terminal = requirementsAuditCapTerminal(2, [posting.unit]);
-        assert.equal(terminal.kind, 'requirements-audit-disagreement');
+        assert.equal(requirementsAuditCapTerminal(2, [posting.unit]), null);
+        assert.equal(requirementsAuditCapTerminal(1, [posting.unit], bindings), null);
+        assert.deepEqual(requirementsSingletonBinding([posting.unit], bindings, mutation), null);
+        assert.deepEqual(requirementsSingletonBinding([posting.unit], bindings,
+          [{ unitId: posting.unit, disposition: 'not-a-requirement' }]), bindings[0]);
+        const multi = [posting.unit, `${posting.unit}-other`];
+        const terminal = requirementsAuditCapTerminal(2, multi);
         assert.equal(terminal.reason, 'audit-re-epoch-cap');
-        assert.deepEqual(terminal.disputedUnitIds, [posting.unit]);
-        assert.ok(terminal.message.includes(posting.unit));
-        const repeated = requirementsAuditCapTerminal(1, [posting.unit], bindings);
-        assert.equal(repeated.reason, 'prior-adjudication-conflict');
-        assert.ok(repeated.message.includes(posting.unit));
-        // Sabotage proof: the same assertions reject a binding bypass and an unbounded audit loop.
+        assert.equal(requirementsAuditCapTerminal(1, multi, bindings).reason, 'prior-adjudication-conflict');
+        // Mutation and sabotage proofs: a changed discovery row cannot inherit the
+        // binding, and removing either the singleton gate or multi-unit cap fails.
         const assertBinding = gate => assert.match(gate(mutation, bindings)[0], /prior independent adjudicator.*binding disposition/);
-        const assertCap = gate => assert.equal(gate(2, [posting.unit])?.kind, 'requirements-audit-disagreement');
+        const assertCap = gate => assert.equal(gate(2, multi)?.kind, 'requirements-audit-disagreement');
+        const assertSingleton = gate => assert.deepEqual(gate([posting.unit], bindings,
+          [{ unitId: posting.unit, disposition: 'not-a-requirement' }]), bindings[0]);
         assertBinding(requirementsBindingErrors);
         assertCap(requirementsAuditCapTerminal);
+        assertSingleton(requirementsSingletonBinding);
         assert.throws(() => assertBinding(() => []), /string/);
         assert.throws(() => assertCap(() => null), /requirements-audit-disagreement/);
+        assert.throws(() => assertSingleton(() => null), /deep-equal/);
       }
       assert.throws(() => requirementsAdjudicationBindings([
         { rows: [{ unitId: 'u-one', disposition: 'requirement' }] },
@@ -259,6 +265,7 @@ export default [
       const source = fs.readFileSync(new URL('../../electron/ipc/localAiApplication.js', import.meta.url), 'utf8');
       assert.ok(source.includes('requirementsBindingErrors(coverage, source.bindingRows)')
         && source.includes('requirementsAuditCapTerminal(page.epoch, disagreement.differingUnitIds, bindingRows)')
+        && source.includes('authorityBoundSingletonAuditReceipt(page, disagreement, bindingRows)')
         && source.includes('bindingRows = await authorityPriorAdjudicationBindings(store, epoch.epoch, windowUnits)'),
       'production discovery and audit paths must invoke both binding and cap checks');
     },

@@ -33,6 +33,9 @@ export function requirementsAuditCapTerminal(epoch, disputedUnitIds, bindingRows
   }
   const bound = new Set(bindingRows.map(row => row.unitId));
   const repeated = disputedUnitIds.filter(id => bound.has(id));
+  // A lone disputed sentence has an independent, binding adjudication path.
+  // Keep the cap for disputes that continue to involve multiple source units.
+  if (new Set(disputedUnitIds).size === 1) return null;
   if (epoch < MAX_REQUIREMENTS_REEPOCHS && !repeated.length) return null;
   const reason = repeated.length ? 'prior-adjudication-conflict' : 'audit-re-epoch-cap';
   return {
@@ -44,4 +47,12 @@ export function requirementsAuditCapTerminal(epoch, disputedUnitIds, bindingRows
       ? `Requirements audit stopped for human review because it disputed a binding prior adjudication. Disputed source units: ${[...new Set(disputedUnitIds)].join(', ')}.`
       : `Requirements audit stopped for human review after ${MAX_REQUIREMENTS_REEPOCHS} re-epochs. Disputed source units: ${[...new Set(disputedUnitIds)].join(', ')}.`,
   };
+}
+
+export function requirementsSingletonBinding(disputedUnitIds, bindingRows = [], discoveryRows = []) {
+  if (disputedUnitIds?.length !== 1) return null;
+  const unitId = disputedUnitIds[0];
+  const binding = bindingRows.find(row => row.unitId === unitId);
+  const discovery = discoveryRows.find(row => row.unitId === unitId);
+  return binding && discovery?.disposition === binding.disposition ? binding : null;
 }

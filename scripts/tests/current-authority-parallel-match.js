@@ -765,7 +765,7 @@ export default [{
     }
   },
 }, {
-  name: 'current authority requirements adjudication: repeated dispute stops with bound source unit named',
+  name: 'current authority requirements adjudication: a repeated singleton audit dispute obeys the binding and advances',
   run: async () => {
     const fixture = await makeCurrentAuthorityParallelMatchFixture();
     try {
@@ -790,13 +790,25 @@ export default [{
       const repeated = secondAudit.rows.find(row => row.unitId === disputedId);
       assert(!!repeated, 'the prior disputed unit is present in the second independent audit');
       repeated.disposition = repeated.disposition === 'requirement' ? 'not-a-requirement' : 'requirement';
-      const stopped = await submitLocalApplicationHandoff({ jobId: queued.id, canvasFilePath: fixture.canvasFilePath,
+      let continued = await submitLocalApplicationHandoff({ jobId: queued.id, canvasFilePath: fixture.canvasFilePath,
         handoffCode: epochOne.handoff.handoffCode, response: epochOne.reply(epochOne.handoff, secondAudit) });
+      assert(continued.accepted && ['requirements-audit', 'write'].includes(continued.handoff?.stage) && !continued.terminal,
+        `a repeated single-unit disagreement is resolved by its prior signed binding (${JSON.stringify({ stage: continued.handoff?.stage, terminal: continued.terminal, errors: continued.validationErrors })})`);
+      const store = await openAuthorityLedgerStore(path.join(fixture.root, '.local-ai', 'jobs', queued.id, 'context'), { namespace: 'application-authority' });
+      const effectivePage = await store.getReceiptPage('requirements-audit-e1', 0);
+      assert(effectivePage.records[0].receipt.bindingOverride?.unitId === disputedId
+        && effectivePage.records[0].receipt.bindingOverride?.disposition === firstAudit.rows[0].disposition
+        && effectivePage.records[0].receipt.bindingOverride?.disagreementDigest,
+      'the effective audit receipt retains a signed override reference');
+      while (continued.handoff?.stage === 'requirements-audit') {
+        const context = contextOf(continued.handoff);
+        continued = await submitLocalApplicationHandoff({ jobId: queued.id, canvasFilePath: fixture.canvasFilePath,
+          handoffCode: continued.handoff.handoffCode, response: epochOne.reply(continued.handoff,
+            semanticAuditFor(context, epochOne.evidence, epochOne.requirements)) });
+      }
       const status = await localApplicationStatus(queued.id, fixture.canvasFilePath);
-      assert(stopped.accepted && !stopped.handoff && status.status === 'failed'
-        && status.terminalKind === 'requirements-audit-human-stop'
-        && status.disputedUnitIds.includes(disputedId) && status.message.includes(disputedId),
-      'a repeated independent dispute becomes a typed human-stop naming the bound unit');
+      assert(continued.accepted && continued.handoff?.stage === 'write' && status.status === 'queued',
+        'the binding survives audit replay and allows the job to write');
     } finally {
       await fs.promises.rm(fixture.root, { recursive: true, force: true });
     }
