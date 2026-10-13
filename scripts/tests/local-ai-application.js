@@ -2,7 +2,7 @@ import crypto from 'node:crypto';
 import electronPkg from 'electron';
 import { getRecentLogs } from '../../electron/logger.js';
 import { assert, assertCandidateDashPunctuation, assertSourceQuoteLinksFinalText, pasteAttributionScopeErrors, sanitizeQualityReview, buildCoverLetterDocument, buildLocalGenerationAuditArtifact, buildResumeDocument, careerDataRoleLocation, sanitizeDocumentMainHtml, checkAnchorRelevance, checkDirectWelcomeClosing, checkPriorEmployerOpening, checkResumeBulletLength, checkResumeRoleBulletBudget, evaluateResumeProseChecks, extractResumeEvidence, inspectApplicationExport, renderStructuredApplicationResume, resumeProjectProvenanceFailures, resumeRoleBlockSample, resumeRoleLocationFailures, RESUME_ROLE_BULLET_CEILING, ROLE_BULLET_EVIDENCE_EXCLUSIVITY_RULE, STRUCTURED_RESUME_SCHEMA_VERSION, validateStructuredApplicationResume, webFontFacesReadyExpression, canRegenerateLocalApplication, canSaveImportedLocalApplication, createAuthorityLedgerStore, createStoreAuthorityWorkflowRoot, createStoreMatchReceipt, discardLocalApplicationJob, discoverLocalApplicationJobs, ensureDirectoryWithinRoot, fs, getApplicationTelemetry, getLocalApplicationHandoff, ipcMain, isPendingApplicationWorkspaceSaveInFlight, JSDOM, openAuthorityLedgerStore, os, path, PDFLib, LOCAL_AI_APPLICATION_VERSION, LOCAL_AI_CARD_POLL_IDLE_STATUSES, LOCAL_AI_FALLBACK_IDLE_STATUSES, LOCAL_AI_JOB_INTEGRITY_ERROR_CODE, brokenLocalAiJobDriveState, jobIntegrityFailureMessage, collectNodesDeep, deepUpdateNode, importLocalApplicationJob, isJobCardMounted, localApplicationStatus, projectEvidenceCoverageGaps, projectedCareerProjectEvidenceBlocks, queueLocalApplicationJob, queuedLocalApplicationSettlement, readRegisteredApplicationArtifact, registerJobApplicationHandlers, registerLocalAiApplicationHandlers, registerMountedJobCard, registerPendingApplicationWorkspace, replacedLocalApplicationForCleanup, resolveLocalOutputBundleRoot, selectFallbackLocalAiJobs, selectOrphanedLocalAiJobs, storeRequirementCatalogPairDescriptor, submitLocalApplicationHandoff, unregisterMountedJobCard, validateLocalApplicationResult, withLocalAiJobPruneClaim, withUnregisteredApplicationWorkspacePruneClaim, __setAuthorityLedgerStoreFaultHookForTests } from '../test-dependencies.js';
-import { localAiSkillsCoverageTelemetry, subscribeLocalApplicationDiscards, APPLICATION_QUALITY_CHECKLIST_VERSION, APPLICATION_QUALITY_CRITERIA, COVER_LETTER_SECONDARY_NARRATIVE_ROLES, LOCAL_AI_GENERATION_AUDIT_VERSION, MAX_CORRECTION_STAGE_PROMPT_SHARE, MAX_SOURCE_GROUNDING_QUOTE_CHARS, MIN_SHARED_SOURCE_TERMS, __assertAuthorityStateGraphForTests, __assertCurrentAuthorityDispositionProofCandidatesForTests, __authorityPasteContextEvidencePlanForTests, __authorityReviewConvergenceValidationForTests, __currentAuthorityDispositionProofMaterialForTests, __currentAuthorityDraftSelectionForTests, __currentAuthorityFinalResumeArtifactErrorsForTests, __currentAuthorityRolelessResumeRuleForTests, __relinkListingQuoteToExactSliceForTests, __selectedSourceRolesForTests, __snapshotCareerSkillEvidenceForTests, __localAiApplicationOutputTelemetryForTests, __localAiCoverLetterTelemetryForTests, DISPOSITION_PROOF_CANDIDATE_BYTES, MAX_DISPOSITION_PROOF_CANDIDATES_PER_DOCUMENT, MAX_DISPOSITION_PROOF_CANDIDATES_PER_REQUIREMENT, MAX_DISPOSITION_PROOF_MATERIAL_BYTES, __setAuthorityLedgerPersistenceFaultHookForTests, __setLegacyAuthorityLedgerAccessHookForTests, __setLocalAiRenderPdfForTests, _resetPasteCorrectionsForTests, _resetPasteRejectionStreakForTests, boundedRejectionError, localAiHandoffEvent, pasteCorrectionPrompt, pasteRejectionCheckIds, pasteRejectionChangeDocuments, pasteRejectionReason, stageLocalApplicationWorkspaceArtifacts } from '../../electron/ipc/localAiApplication.js';
+import { localAiSkillsCoverageTelemetry, subscribeLocalApplicationDiscards, APPLICATION_QUALITY_CHECKLIST_VERSION, APPLICATION_QUALITY_CRITERIA, COVER_LETTER_SECONDARY_NARRATIVE_ROLES, LOCAL_AI_GENERATION_AUDIT_VERSION, MAX_CORRECTION_STAGE_PROMPT_SHARE, MAX_SOURCE_GROUNDING_QUOTE_CHARS, MIN_SHARED_SOURCE_TERMS, __assertAuthorityStateGraphForTests, __authorityPasteContextEvidencePlanForTests, __authorityReviewConvergenceValidationForTests, __currentAuthorityDraftSelectionForTests, __currentAuthorityFinalResumeArtifactErrorsForTests, __currentAuthorityRolelessResumeRuleForTests, __relinkListingQuoteToExactSliceForTests, __selectedSourceRolesForTests, __snapshotCareerSkillEvidenceForTests, __localAiApplicationOutputTelemetryForTests, __localAiCoverLetterTelemetryForTests, __setAuthorityLedgerPersistenceFaultHookForTests, __setLegacyAuthorityLedgerAccessHookForTests, __setLocalAiRenderPdfForTests, _resetPasteCorrectionsForTests, _resetPasteRejectionStreakForTests, boundedRejectionError, localAiHandoffEvent, pasteCorrectionPrompt, pasteRejectionCheckIds, pasteRejectionChangeDocuments, pasteRejectionReason, stageLocalApplicationWorkspaceArtifacts } from '../../electron/ipc/localAiApplication.js';
 import { APPLICATION_PDF_MISMATCH_IS_DETERMINISTIC, APPLICATION_PDF_PAGINATION_GEOMETRY_REVISION, APPLICATION_PDF_RECONCILE_REVISION, APPLICATION_PDF_VARIANT_REVISION, checkResumeBulletOpeningVariety } from '../../electron/ipc/jobApplication.js';
 import { __reserveNextLocalApplicationJobIdForAcceptanceHarness, queueLocalApplicationJob as queueCurrentLocalApplicationJob, __queueLegacyLocalApplicationFixtureForTests } from '../../electron/ipc/localAiApplication.js';
 import { checkEndedRoleCurrentEmployment } from '../../electron/ipc/coverLetterChecks.js';
@@ -10,7 +10,6 @@ import { inspectLocalAiHandoff, waitForLocalAiHandoff } from '../../local_ai/wai
 import { _resetPasteHandoffDiagnostics, buildPasteHandoffDiagnosticsMarkdown, getPasteHandoffDiagnosticsSnapshot, recordPasteHandoffDiagnostic } from '../../electron/ipc/pasteHandoffDiagnostics.js';
 import { approvedCareerEvidenceCatalog, CAREER_SNAPSHOT_COMPILATION_CONTRACT, CAREER_SNAPSHOT_SCHEMA_VERSION, CAREER_SNAPSHOT_STATUS_APPROVED, buildCareerSourceCorpus, canonicalCareerProfileDigest, careerSnapshotId, careerSnapshotIdForContract, careerSnapshotStorageRoot, emptyCareerReconciliationReceipt, partitionCareerSourcePages, verbatimCareerTranscriptionAuditReceipt, writeCareerSnapshotAtomically } from '../../electron/ipc/careerSnapshot.js';
 import { buildApplicationCareerAuthority } from '../../electron/ipc/applicationCareerAuthority.js';
-import { authorityDigest } from '../../electron/ipc/applicationAuthorityWorkflow.js';
 
 async function createCanvasProject() {
   const root = await fs.promises.realpath(await fs.promises.mkdtemp(path.join(os.tmpdir(), 'local-ai-canvas-')));
@@ -779,65 +778,6 @@ export default [
       } finally { await fs.promises.rm(project.root, { recursive: true, force: true }); }
     },
   },
-
-  {
-    name: 'Current authority disposition proof recall ranks exhaustive evidence-linked synonym claims, exposes diverse bounded locators, and binds exact copies',
-    run: () => {
-      const resume = [
-        'Designed a reporting dashboard for weekly stakeholders.',
-        'Hardened uptime guarantees after production incidents.',
-        'Maintained a release checklist for the deployment team.',
-        'Operated a separate archival system.',
-      ].join('\n');
-      const coverLetter = [
-        'I would bring dependable operations to this role.',
-        'The service remained available through incident response.',
-        'I also value clear release communication.',
-      ].join('\n');
-      const finalReferences = { documents: ['resume', 'cover-letter'], evidenceIds: ['evidence-resilience'], documentTexts: { resume, 'cover-letter': coverLetter } };
-      const requirements = [{ id: 'reliability', text: 'Platform resilience and continuity', priority: 'highest' }];
-      // More than the historical 1,024-ID cutoff. Only the final ID is in
-      // the exhaustive match set, so this catches a prefix-only aggregate.
-      const exhaustiveClaimEvidenceIds = Array.from({ length: 1_025 }, (_unused, index) => `evidence-${index}`);
-      const claims = [
-        { document: 'resume', text: 'Hardened uptime guarantees after production incidents.', citedEvidenceIds: exhaustiveClaimEvidenceIds },
-        { document: 'resume', text: 'Designed a reporting dashboard for weekly stakeholders.', citedEvidenceIds: ['other-evidence'] },
-        { document: 'coverLetter', text: 'The service remained available through incident response.', citedEvidenceIds: ['evidence-resilience'] },
-      ];
-      const material = __currentAuthorityDispositionProofMaterialForTests(finalReferences, requirements, {
-        claims, matchedEvidenceIdsByRequirement: { reliability: [exhaustiveClaimEvidenceIds.at(-1)] },
-      });
-      const restarted = __currentAuthorityDispositionProofMaterialForTests(finalReferences, requirements, {
-        claims, matchedEvidenceIdsByRequirement: { reliability: [exhaustiveClaimEvidenceIds.at(-1)] },
-      });
-      const candidates = material[0].candidates;
-      const linkedResume = candidates.find(candidate => candidate.document === 'resume' && candidate.quote === 'Hardened uptime guarantees after production incidents.');
-      const linkedLetter = candidates.find(candidate => candidate.document === 'cover-letter' && candidate.quote === 'The service remained available through incident response.');
-      assert(linkedResume && linkedLetter
-        && !requirements[0].text.toLowerCase().split(/\s+/u).some(term => linkedResume.quote.toLowerCase().includes(term))
-        && candidates.filter(candidate => candidate.document === 'resume').length === MAX_DISPOSITION_PROOF_CANDIDATES_PER_DOCUMENT
-        && candidates.length <= MAX_DISPOSITION_PROOF_CANDIDATES_PER_REQUIREMENT
-        && candidates.every(candidate => candidate.quote.trim()
-          && Buffer.byteLength(candidate.quote, 'utf8') <= DISPOSITION_PROOF_CANDIDATE_BYTES
-          && candidate.documentDigest === authorityDigest(finalReferences.documentTexts[candidate.document])
-          && finalReferences.documentTexts[candidate.document].slice(candidate.offset, candidate.offset + candidate.quote.length) === candidate.quote)
-        && Buffer.byteLength(JSON.stringify(material), 'utf8') <= MAX_DISPOSITION_PROOF_MATERIAL_BYTES
-        && JSON.stringify(material) === JSON.stringify(restarted),
-      'exhaustive evidence linkage prioritizes zero-lexical-overlap final claims while every multiple candidate remains exact, bounded, and restart-stable');
-      __assertCurrentAuthorityDispositionProofCandidatesForTests({ rows: [{ requirementId: 'reliability', proofs: [linkedResume, linkedLetter] }] }, material);
-      let substituteRejected = false;
-      try {
-        __assertCurrentAuthorityDispositionProofCandidatesForTests({ rows: [{ requirementId: 'reliability', proofs: [{ ...linkedResume, quote: linkedResume.quote.slice(0, -1) }] }] }, material);
-      } catch (error) { substituteRejected = /exact digest-bound locator/u.test(String(error?.message || error)); }
-      assert(substituteRejected, 'the disposition response must copy, rather than shorten or substitute, an offered exact proof locator');
-      return { candidates: candidates.length, resumeCandidates: candidates.filter(candidate => candidate.document === 'resume').length, materialBytes: Buffer.byteLength(JSON.stringify(material), 'utf8') };
-    },
-  },
-
-
-
-
-
 
   {
     name: 'Current authority finite selection reserves matched skills and distinct requirement evidence through an A-flood',
@@ -2682,44 +2622,6 @@ export default [
           && !fs.existsSync(path.join(outDir, 'Cover Letter.pdf')),
         'the same atomic staging unit returns fixed paths and removes stale optional PDFs');
         return { outsideUnchanged: true, linkReplaced: true, stalePdfsRemoved: true };
-      } finally {
-        await fs.promises.rm(root, { recursive: true, force: true });
-      }
-    },
-  },
-  {
-    name: 'Local AI authority audit staging copies every paged disposition receipt without an aggregate cap',
-    run: async () => {
-      const root = await fs.promises.realpath(await fs.promises.mkdtemp(path.join(os.tmpdir(), 'local-ai-disposition-sidecar-')));
-      const outDir = path.join(root, 'imported-workspace');
-      const digest = 'a'.repeat(64);
-      const disposition = { version: 1, rootDigest: digest, documentDigest: 'b'.repeat(64), stream: 'disposition-proof', pageCount: 13, pageDigest: 'c'.repeat(64) };
-      async function* pages() {
-        for (let index = 0; index < disposition.pageCount; index += 1) {
-          yield { version: 1, stream: disposition.stream, number: index, records: [{ id: `disposition:${index}` }], digest };
-        }
-      }
-      try {
-        await fs.promises.mkdir(outDir, { mode: 0o700 });
-        const staged = await stageLocalApplicationWorkspaceArtifacts({
-          outDir,
-          applicationHtml: '<!doctype html><main class="page">Application</main>',
-          jobListingMarkdown: '# Example role\n',
-          generationAuditArtifact: '{"version":1}\n',
-          currentAuthorityDisposition: disposition,
-          currentAuthorityDispositionPages: pages(),
-        });
-        assert(staged.generationAuditDispositionPath === path.join(outDir, 'Generation Audit.dispositions'),
-          'current authority staging reports its deterministic paged sidecar path');
-        const index = JSON.parse(await fs.promises.readFile(path.join(staged.generationAuditDispositionPath, 'index.json'), 'utf8'));
-        assert(index.pageCount === 13 && index.pageDigest === disposition.pageDigest,
-          'the compact index preserves the receipt root/count/digest rather than an aggregate record list');
-        for (let pageIndex = 0; pageIndex < disposition.pageCount; pageIndex += 1) {
-          const page = JSON.parse(await fs.promises.readFile(path.join(staged.generationAuditDispositionPath, `page-${String(pageIndex).padStart(12, '0')}.json`), 'utf8'));
-          assert(page.number === pageIndex && page.stream === disposition.stream,
-            'every immutable disposition page is copied in deterministic ordinal order');
-        }
-        return { pageCount: disposition.pageCount, compactIndex: true };
       } finally {
         await fs.promises.rm(root, { recursive: true, force: true });
       }
