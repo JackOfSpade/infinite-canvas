@@ -9,6 +9,7 @@ import { CAREER_SNAPSHOT_CAPABILITY_KINDS, isCareerSkillIndexEligible } from './
 import { CASE_SENSITIVE_SKILL_NAME_MAX_CHARS, resolveApprovedSkillByName } from './applicationCareerAuthority.js';
 import { boundedExpectedValue } from './hostOwnedText.js';
 import { resumeCheckDisposition } from './resumeCheckDispositions.js';
+import { verifyCareerCleanText } from './careerCleanLayer.js';
 
 export const STRUCTURED_RESUME_SCHEMA_VERSION = 'structured-resume.v1';
 
@@ -359,6 +360,8 @@ function snapshotCareerSkills(careerSkillEvidence) {
     const normalized = {
       id,
       name,
+      ...(typeof skill.cleanName === 'string' && skill.cleanName && verifyCareerCleanText(name, skill.cleanName)
+        ? { cleanName: skill.cleanName } : {}),
       // Older approved snapshots have no editorial eligibility classification.
       // `null` deliberately means "may be rendered only under its exact
       // approved spelling, but is not forced into every ATS index". A future
@@ -392,7 +395,8 @@ function snapshotSkillTermOccurs(name, text) {
 }
 
 function snapshotSkillEvidenceSupports(skill, careerEntries) {
-  return careerEntries.some(entry => snapshotSkillTermOccurs(skill.name, entry.quote));
+  return careerEntries.some(entry => [entry.quote, entry.cleanQuote].some(quote => typeof quote === 'string'
+    && (snapshotSkillTermOccurs(skill.name, quote) || (skill.cleanName && snapshotSkillTermOccurs(skill.cleanName, quote)))));
 }
 
 function snapshotRequiredSkillTerms(evidenceCatalog, careerSkillEvidence, { postingOnly = false } = {}) {
@@ -407,11 +411,13 @@ function snapshotRequiredSkillTerms(evidenceCatalog, careerSkillEvidence, { post
     // A profile skill remains source-limited: only require it where the
     // accepted plan carries career evidence that actually names it.
     .filter(skill => snapshotSkillEvidenceSupports(skill, careerEntries))
-    .filter(skill => !postingOnly || listingEntries.some(entry => snapshotSkillTermOccurs(skill.name, entry.quote)))
+    .filter(skill => !postingOnly || listingEntries.some(entry => snapshotSkillTermOccurs(skill.name, entry.quote)
+      || (skill.cleanName && snapshotSkillTermOccurs(skill.cleanName, entry.quote))))
     .map((skill, index) => {
-      const listingMatches = listingEntries.filter(entry => snapshotSkillTermOccurs(skill.name, entry.quote));
+      const listingMatches = listingEntries.filter(entry => snapshotSkillTermOccurs(skill.name, entry.quote)
+        || (skill.cleanName && snapshotSkillTermOccurs(skill.cleanName, entry.quote)));
       return {
-        name: skill.name,
+        name: skill.cleanName || skill.name,
         bestPriority: listingMatches.length
           ? listingMatches.reduce((best, entry) => Math.min(best, PRIORITY_RANK.get(entry.priority) ?? 3), 3)
           : 4,
@@ -1660,9 +1666,13 @@ function normalizeSkills(value, allowedEvidenceIds, careerEvidenceIds, careerEvi
     // case, compatibility or spacing variant of an approved name is the same
     // skill, and a name that resolves to no approved skill stays as written so
     // the approval check below can refuse it for what it is.
-    const approvedByItem = items.map(item => (approvedSnapshotSkills ? resolveApprovedSkillByName(approvedSnapshotSkills, item) : null));
+    const approvedByItem = items.map(item => (approvedSnapshotSkills
+      ? resolveApprovedSkillByName(approvedSnapshotSkills, item)
+        || approvedSnapshotSkills.find(skill => skill.cleanName
+          && item.normalize('NFKC').toLocaleLowerCase() === skill.cleanName.normalize('NFKC').toLocaleLowerCase())
+      : null));
     const canonicalItems = items.map((item, itemIndex) => (approvedByItem[itemIndex] && approvedByItem[itemIndex].indexEligible !== false
-      ? approvedByItem[itemIndex].name : item));
+      ? approvedByItem[itemIndex].cleanName || approvedByItem[itemIndex].name : item));
     unique(canonicalItems, `skills[${index}].items`);
     const offensesBefore = skillOffenses.length;
     const evidenceIds = normalizeEvidenceIds(group.evidenceIds, `skills[${index}].evidenceIds`, allowedEvidenceIds, careerEvidenceIds, { requireCareerEvidence: true, collect: skillOffenses });
@@ -1860,7 +1870,8 @@ export function validateStructuredResumeDraft(raw, { sourceRoles, evidenceIds, e
     : null;
   const careerEvidenceQuotesById = new Map(verifiedEvidence
     .filter(entry => entry?.sourceId === 'career-data' && typeof entry?.quote === 'string')
-    .map(entry => [id(entry.id, 'verified evidenceCatalog id'), entry.quote]));
+    .map(entry => [id(entry.id, 'verified evidenceCatalog id'), entry.cleanQuote && entry.cleanQuote !== entry.quote
+      ? [entry.quote, entry.cleanQuote] : entry.quote]));
   // The posting's own half of the catalog, which nothing rendered has ever
   // been measured against until now: it is what says a project answers this
   // job rather than merely being true of the candidate.

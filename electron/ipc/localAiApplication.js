@@ -31,6 +31,7 @@ import { removeChatGptContentReferenceArtifacts } from './jsonRepair.js';
 import { applyPasteDocumentPatches, mergePasteReviewDelta, requiredPasteReviewDeltaEntries, TARGET_FORMS_RULE as PASTE_REVIEW_DELTA_TARGET_FORMS_RULE, VALID_OPS as PASTE_REVIEW_DELTA_VALID_OPS } from './pasteReviewDelta.js';
 import { recordPasteHandoffDiagnostic } from './pasteHandoffDiagnostics.js';
 import { approvedCareerEvidenceCatalog, CAREER_SNAPSHOT_SCHEMA_VERSION, careerSnapshotStorageRoot, isCareerSkillIndexEligible, projectApprovedCareerSnapshotForApplication, projectLegacyCareerProfile, readCareerSnapshot, readPinnedCareerSnapshot, vettedCareerSkillInventory } from './careerSnapshot.js';
+import { cleanCareerSkillNames, readCareerCleanLayer } from './careerCleanLayer.js';
 import { authorityEntityEvidenceQuotes, buildApplicationCareerAuthority, resolveAuthorityCertification, resolveAuthorityEducation, resolveAuthorityEvidence, resolveAuthorityProject, resolveAuthorityRole, validateAuthorityCertificationEvidence, validateAuthorityEducationEvidence, validateAuthorityIdentityAndLocation, validateAuthorityProjectEvidence, validateAuthorityRoleEvidence, validateAuthoritySkillGroup } from './applicationCareerAuthority.js';
 import { MAX_SOURCE_GROUNDING_QUOTE_CHARS as SOURCE_GROUNDING_QUOTE_CHARS } from './applicationSourceLimits.js';
 import { canonicalizeHostOwnedResumeFields } from './hostOwnedResumeFields.js';
@@ -6107,7 +6108,7 @@ function pasteCareerQuotesForEvidenceIds(evidenceIds, acceptedEvidence) {
   return (Array.isArray(evidenceIds) ? evidenceIds : [])
     .map(evidenceId => (Array.isArray(acceptedEvidence) ? acceptedEvidence : []).find(item => item?.id === evidenceId))
     .filter(item => item?.sourceId === 'career-data' && typeof item?.quote === 'string')
-    .map(item => item.quote);
+    .flatMap(item => item.cleanQuote && item.cleanQuote !== item.quote ? [item.quote, item.cleanQuote] : [item.quote]);
 }
 
 // An education or certification field is accepted when it occurs in the career
@@ -6185,7 +6186,7 @@ function validateAuthorityResumeArtifacts(resume, acceptedEvidence, authority, s
     } catch (error) { errors.push(`Resume credential ${String(item?.id)}: ${error.message}`); }
   }
   for (const group of (Array.isArray(resume?.skills) ? resume.skills : [])) {
-    try { validateAuthoritySkillGroup(authority, group?.items, careerIds(group?.evidenceIds)); }
+    try { validateAuthoritySkillGroup(authority, group?.items, careerIds(group?.evidenceIds), acceptedEvidence.__cleanSkillNames); }
     catch (error) { errors.push(`Resume skill group ${String(group?.id)}: ${error.message}`); }
   }
   return errors;
@@ -8710,7 +8711,7 @@ async function writeVerifyFrozenContext(input, state) {
   }
   if (!requirements.length || !listingEvidence.length) throw new Error('Application v2 has no complete frozen requirements and listing quotes.');
   const posting = jobListingQuoteSource(input.job);
-  const catalog = hydrated.catalog;
+  const catalog = hydrated.cleanCatalog || hydrated.catalog;
   const hand = fullApprovedHand(hydrated.snapshot.profile, catalog);
   const lengthBudget = writeVerifyLengthBudgets(hydrated.snapshot.profile, hydrated.sourceRoles);
   const sourcePrompt = writeVerifySourcePrompt({
@@ -8718,7 +8719,7 @@ async function writeVerifyFrozenContext(input, state) {
     sourceRoles: hydrated.sourceRoles, profile: hydrated.snapshot.profile, catalog, lengthBudget,
   });
   return { posting, requirements, listingEvidence, catalog, hand, sourcePrompt,
-    evidencePlan: { evidence: [...catalog, ...listingEvidence], requirements } };
+    evidencePlan: { evidence: [...hydrated.catalog, ...listingEvidence], requirements } };
 }
 
 async function writeVerifyHandoffRecord({ jobId, input, state, corrections = [] }) {
@@ -8763,7 +8764,21 @@ async function writeVerifyCandidateGate({ raw, state, input, frozen, manifest, f
   const resume = raw?.resume;
   const coverLetter = raw?.coverLetter;
   const selectedRoleIds = Array.isArray(resume?.roles) ? resume.roles.map(role => role?.id) : [];
-  const base = { ...state, selectedRoleIds };
+  // The sidecar is revalidated against the pinned original catalog on each
+  // submission. It is a runtime spelling aid, never part of the durable plan.
+  const approvedCatalog = Array.isArray(input.hostCareerEvidenceCatalog) ? input.hostCareerEvidenceCatalog : [];
+  const cleanLayer = input.careerAuthority && approvedCatalog.length
+    ? await readCareerCleanLayer(careerSnapshotStorageRoot(app.getPath('userData')), input.careerAuthority.snapshotId, approvedCatalog)
+    : null;
+  const cleanById = new Map((cleanLayer?.catalog || []).map(row => [row.id, row.cleanQuote]));
+  const evidencePlan = cleanById.size && state.evidencePlan
+    ? { ...state.evidencePlan, evidence: state.evidencePlan.evidence.map(row => row.sourceId === 'career-data'
+      ? { ...row, cleanQuote: cleanById.get(row.id) || row.quote } : row) }
+    : state.evidencePlan;
+  if (evidencePlan?.evidence) Object.defineProperty(evidencePlan.evidence, '__cleanSkillNames', {
+    value: input.__careerCleanSkillNames || null, enumerable: false,
+  });
+  const base = { ...state, selectedRoleIds, evidencePlan };
   const canonical = canonicalizeParsedResumeForHost({ resume }, { ...base, stage: 'resume' }, input).parsed;
   const normalizedResume = canonical.resume;
   const envelope = stage => ({ protocol: PASTE_APPLICATION_PROTOCOL_VERSION, jobId: input.jobId,
@@ -8781,6 +8796,8 @@ async function writeVerifyCandidateGate({ raw, state, input, frozen, manifest, f
       const packageState = { ...renderState, coverLetter, skillSelection: frozenSkillSelection(normalizedResume, input) };
       const sourceRoles = selectedSourceRoles(packageState, input);
       const packageRaw = assemblePasteApplicationResult({ input: { ...input, sourceRoles,
+        __careerCleanSkillNames: input.__careerCleanSkillNames,
+        __careerCleanQuoteById: input.__careerCleanQuoteById,
         careerSkillEvidence: frozen.careerSkillEvidence }, paste: packageState,
         careerData: frozen.careerData, jobListing: frozen.jobListing, authority: frozen.authority,
         authorityListingReceiptValidated: isCurrentAuthorityProtocol(input) });
@@ -9160,7 +9177,10 @@ function selectedAuthorityCareerSkillEvidence(input, state) {
   const inventory = input?.careerSkillEvidence ?? null;
   if (!inventory || !isCurrentAuthorityProtocol(input)) return inventory;
   const selectedIds = state?.authoritySelection?.skillSelection?.selectedSkillIds;
-  if (!Array.isArray(selectedIds)) return inventory;
+  const withCleanNames = skill => isWriteVerifyJob(input) && input.__careerCleanSkillNames?.has(skill.id)
+    ? { ...skill, cleanName: input.__careerCleanSkillNames.get(skill.id) } : skill;
+  if (!Array.isArray(selectedIds)) return isWriteVerifyJob(input)
+    ? { ...inventory, skills: inventory.skills.map(withCleanNames) } : inventory;
   const byId = new Map((Array.isArray(inventory.skills) ? inventory.skills : []).map(skill => [skill?.id, skill]));
   const skills = selectedIds.map(id => byId.get(id));
   if (skills.some(skill => !skill || skill.indexEligible !== true)) throw new Error('The receipt-selected skill projection references an unavailable or non-index-eligible approved skill.');
@@ -9170,7 +9190,7 @@ function selectedAuthorityCareerSkillEvidence(input, state) {
     // exact selected order, and this descriptor makes the immutable selected
     // receipt—not a source-order slice—the authority exposed to the writer.
     version: inventory.version,
-    skills,
+    skills: skills.map(withCleanNames),
     selectionReceipt: {
       kind: 'current-authority-skill-selection.v1',
       rootDigest: selection?.draftContext?.rootDigest || null,
@@ -9206,9 +9226,12 @@ function frozenSkillSelection(resume, input) {
   if (!catalog.length) return null;
   const selected = (Array.isArray(resume?.skills) ? resume.skills : []).flatMap(group => Array.isArray(group?.items) ? group.items : []);
   const selectedNames = new Set(selected.map(value => String(value).normalize('NFKC').toLowerCase()));
+  const includesSkill = skill => selectedNames.has(String(skill?.name || '').normalize('NFKC').toLowerCase())
+    || (isWriteVerifyJob(input) && input.__careerCleanSkillNames?.has(skill.id)
+      && selectedNames.has(input.__careerCleanSkillNames.get(skill.id).normalize('NFKC').toLowerCase()));
   return {
-    selected: catalog.filter(skill => selectedNames.has(String(skill?.name || '').normalize('NFKC').toLowerCase())).map(skill => skill.id),
-    omitted: catalog.filter(skill => !selectedNames.has(String(skill?.name || '').normalize('NFKC').toLowerCase()))
+    selected: catalog.filter(includesSkill).map(skill => skill.id),
+    omitted: catalog.filter(skill => !includesSkill(skill))
       .map(skill => ({ id: skill.id, reason: 'not selected for the bounded final résumé skills layout' })),
   };
 }
@@ -9413,7 +9436,11 @@ function pasteUnitCareerQuotes(evidenceIds, acceptedEvidence) {
     const value = normalizeSourceGroundingText(quote);
     if (value && !normalized.includes(value)) normalized.push(value);
   }
-  return { distinct, normalized };
+  const citationCount = new Set((Array.isArray(evidenceIds) ? evidenceIds : [])
+    .map(id => (Array.isArray(acceptedEvidence) ? acceptedEvidence : []).find(item => item?.id === id))
+    .filter(item => item?.sourceId === 'career-data' && typeof item.quote === 'string')
+    .map(item => item.quote)).size;
+  return { distinct, normalized, citationCount };
 }
 
 function normalizedAttributionText(value) {
@@ -9720,16 +9747,17 @@ function boundAuthorityEntityQuoteGroups(evidenceIds, acceptedEvidence, authorit
     const key = `${resolved.kind}:${resolved.entityId}`;
     if (!groups.has(key)) groups.set(key, []);
     groups.get(key).push(normalizeSourceGroundingText(item.quote));
+    if (item.cleanQuote && item.cleanQuote !== item.quote) groups.get(key).push(normalizeSourceGroundingText(item.cleanQuote));
   }
   return [...groups.values()];
 }
 
 function pasteUnitGroundingErrors({ unitLabel, unitId, finalText, evidenceIds, acceptedEvidence, identityTokens, label, sourceRoles = [], careerData = '', authority = null, projects = [], targetCompany = '', targetTitle = '', postingText = '' }) {
   const errors = [];
-  const { distinct, normalized } = pasteUnitCareerQuotes(evidenceIds, acceptedEvidence);
+  const { normalized, citationCount } = pasteUnitCareerQuotes(evidenceIds, acceptedEvidence);
   if (!normalized.length) return errors;
-  if (distinct.length > MAX_UNIT_CAREER_DATA_QUOTES) {
-    errors.push(`${unitLabel} ${JSON.stringify(String(unitId ?? ''))} cites ${distinct.length} distinct career-data quotes; assembly binds at most ${MAX_UNIT_CAREER_DATA_QUOTES} to one unit, so retain only the evidence IDs that actually support it.`);
+  if (citationCount > MAX_UNIT_CAREER_DATA_QUOTES) {
+    errors.push(`${unitLabel} ${JSON.stringify(String(unitId ?? ''))} cites ${citationCount} distinct career-data quotes; assembly binds at most ${MAX_UNIT_CAREER_DATA_QUOTES} to one unit, so retain only the evidence IDs that actually support it.`);
   }
   for (const quote of normalized) {
     if (sourceQuoteIsSpecific(quote)) continue;
@@ -11960,7 +11988,8 @@ async function submitWriteVerifyHandoff({ jobId, dir, manifest, input, frozen, s
     next.skillSelection = frozenSkillSelection(next.resume, input);
     next.baseHashes = pasteBaseHashesFor(next);
     const validationOptions = completedResultValidationOptions({ manifest, frozen, sourceRoles: selectedSourceRoles(next, input) });
-    const raw = assemblePasteApplicationResult({ input: { ...input, sourceRoles: selectedSourceRoles(next, input), careerSkillEvidence: frozen.careerSkillEvidence },
+    const raw = assemblePasteApplicationResult({ input: { ...input, sourceRoles: selectedSourceRoles(next, input), careerSkillEvidence: frozen.careerSkillEvidence,
+      __careerCleanSkillNames: input.__careerCleanSkillNames, __careerCleanQuoteById: input.__careerCleanQuoteById },
       paste: next, careerData: frozen.careerData, jobListing: frozen.jobListing, authority: frozen.authority,
       authorityListingReceiptValidated: isCurrentAuthorityProtocol(input) });
     validateLocalApplicationResult(raw, jobId, input.canvasRoot, input.job, validationOptions);
@@ -13833,11 +13862,18 @@ export async function hydratePinnedCareerAuthority(input) {
     if (canonicalFrozenValue(authority) !== canonicalFrozenValue(expected)) {
       throw new Error(`The pinned career authority no longer matches approved snapshot ${authority.snapshotId}.`);
     }
+    const catalog = approvedCareerEvidenceCatalog(snapshot);
+    const cleanLayer = isWriteVerifyJob(input)
+      ? await readCareerCleanLayer(careerSnapshotStorageRoot(app.getPath('userData')), snapshot.snapshotId, catalog)
+      : null;
     return {
       snapshot,
       authority: buildApplicationCareerAuthority(snapshot),
       careerData: projectApprovedCareerSnapshotForApplication(snapshot),
-      catalog: approvedCareerEvidenceCatalog(snapshot),
+      catalog,
+      cleanCatalog: cleanLayer?.catalog || catalog,
+      cleanSkillNames: cleanCareerSkillNames(snapshot.profile, cleanLayer?.catalog || catalog),
+      cleanQuoteById: new Map((cleanLayer?.catalog || []).map(row => [row.id, row.cleanQuote])),
       sourceRoles: snapshotSourceRoles(snapshot),
       skillEvidence: snapshotCareerSkillEvidence(snapshot),
     };
@@ -13863,6 +13899,8 @@ function withHydratedPinnedCareerAuthority(input, hydrated) {
   // ephemeral index through validation, but JSON.stringify, prompt context,
   // manifests, and logs cannot serialize it.
   Object.defineProperty(runtime, '__careerAuthorityIndex', { value: hydrated.authority, enumerable: false });
+  Object.defineProperty(runtime, '__careerCleanSkillNames', { value: hydrated.cleanSkillNames, enumerable: false });
+  Object.defineProperty(runtime, '__careerCleanQuoteById', { value: hydrated.cleanQuoteById, enumerable: false });
   if (typeof input?.jobId === 'string' && input.jobId) hydratedCareerAuthorityByJobId.set(input.jobId, {
     snapshotDigest: input.careerAuthority?.snapshotDigest,
     authority: hydrated.authority,
@@ -20954,8 +20992,9 @@ async function localApplicationStatusUnlocked(jobId, canvasFilePath, options = {
  *                   present (the canvas file alone was moved or renamed), a
  *                   symlinked app folder, malformed input, or any fs error.
  *                   These can come back, so they are never reported orphaned.
- * Callers (the handoff bridge) only change what the person is told; removing
- * a released job is always the person's explicit action.
+ * The handoff bridge may retire a released lane only after repeated orphaned
+ * observations across its confirmation window. An unavailable result never
+ * authorizes automatic retirement.
  */
 export async function localApplicationCanvasPresence({ jobId, canvasFilePath } = {}) {
   if (typeof jobId !== 'string' || !JOB_ID_RE.test(jobId)

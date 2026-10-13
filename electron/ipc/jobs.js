@@ -14,6 +14,7 @@ import { readPlainTextDocument } from './docUtils.js';
 import { isRendererSensitivePath, isSystemSensitivePath, registerRendererPrivateAppRoot } from '../utils/pathSafety.js';
 import {
   careerDataFromCareerSnapshot,
+  approvedCareerEvidenceCatalog,
   careerAttachmentRegionPartPageId,
   careerSnapshotId,
   careerSnapshotInputFingerprint,
@@ -28,6 +29,7 @@ import {
   verbatimCareerTranscriptionAuditReceipt,
   writeCareerSnapshotAtomically,
 } from './careerSnapshot.js';
+import { produceCareerCleanLayer } from './careerCleanLayer.js';
 import { buildScoredJob } from './jobBatchReconcile.js';
 import { nonScoringJobConstraintKind, validateAndNormalizeFitAssessment } from './jobFitAssessment.js';
 import { buildScoringAudit, scoringAuditRowsFromBatches, scoringSimilarityKey } from './scoringAudit.js';
@@ -801,6 +803,12 @@ const CAREER_FILE_BOUNDARY_AUDIT_PROMPT = 'Independently inspect only the join b
 const PDFJS_LEGACY_MODULE = 'pdfjs-dist/legacy/build/pdf.mjs';
 function careerSnapshotRoot() {
   return careerSnapshotStorageRoot(app.getPath('userData'));
+}
+
+async function ensureCareerCleanLayer(snapshot, signal) {
+  return produceCareerCleanLayer({ snapshotId: snapshot.snapshotId,
+    catalog: approvedCareerEvidenceCatalog(snapshot), root: careerSnapshotRoot(),
+    callText: callLLMText, signal });
 }
 
 async function resolvePinnedScoringInput({ careerSnapshotId, root = careerSnapshotRoot(), readSnapshot = readCareerSnapshot } = {}) {
@@ -11729,6 +11737,7 @@ function registerJobsHandlersWithDependencies(dependencies = {}) {
       // cached profile, so an edit that races the staging copy never appears as
       // an accepted current input merely because an older snapshot exists.
       await assertCareerInputDescriptorsStillMatch(paths, fileDescriptors);
+      await ensureCareerCleanLayer(indexedSnapshot, signal);
       cacheTelemetry.ts = Date.now();
       cacheTelemetry.outcome = 'hit';
       cacheTelemetry.snapshot = indexedSnapshot.snapshotId.slice(0, 12);
@@ -11814,6 +11823,7 @@ function registerJobsHandlersWithDependencies(dependencies = {}) {
     if (!approved || !approvedSnapshotMatchesCareerDescriptors(approved, fileDescriptors)) {
       throw new Error('The approved career snapshot could not be verified after publication. No job search was started.');
     }
+    await ensureCareerCleanLayer(approved, signal);
     // Publishing and re-reading are asynchronous. Recheck the live ordered
     // descriptors once more at the return boundary so an edit in that small
     // interval cannot hand the renderer a profile for bytes that are no

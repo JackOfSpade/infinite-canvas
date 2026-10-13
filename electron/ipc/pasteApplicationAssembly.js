@@ -9,6 +9,7 @@
  */
 import { assertTrustedSourceRoles, isUnsafeControlCharacter, projectContactChannels, projectTrustedIdentity, renderStructuredResume } from './structuredResume.js';
 import { resolveAuthorityEvidence, resolveAuthorityRole } from './applicationCareerAuthority.js';
+import { verifyCareerCleanText } from './careerCleanLayer.js';
 export { MAX_FROZEN_SOURCE_CHARS } from './applicationSourceLimits.js';
 import { MAX_FROZEN_SOURCE_CHARS } from './applicationSourceLimits.js';
 
@@ -696,6 +697,13 @@ export function assemblePasteApplicationResult({
   });
 
   const evidenceById = assertFrozenEvidencePlan(state.evidencePlan, frozenCareerData, frozenJobListing, { authority, authorityListingReceiptValidated });
+  if (jobInput.applicationProtocol === 'write-then-verify.v2' && jobInput.__careerCleanQuoteById instanceof Map) {
+    for (const item of evidenceById.values()) {
+      if (item.sourceId !== 'career-data') continue;
+      const cleanQuote = jobInput.__careerCleanQuoteById.get(item.id);
+      if (typeof cleanQuote === 'string' && verifyCareerCleanText(item.quote, cleanQuote)) item.cleanQuote = cleanQuote;
+    }
+  }
   const renderedEvidenceIds = new Set([
     ...(resume.roles || []).flatMap(role => (role.bullets || []).flatMap(bullet => bullet.evidenceIds || [])),
     ...(resume.projects || []).flatMap(project => project.evidenceIds || []),
@@ -711,7 +719,14 @@ export function assemblePasteApplicationResult({
     sourceRoles,
     evidenceCatalog: [...evidenceById.values()],
     careerData: renderCareerData,
-    careerSkillEvidence: jobInput.careerSkillEvidence ?? null,
+    careerSkillEvidence: jobInput.applicationProtocol === 'write-then-verify.v2'
+      && jobInput.__careerCleanSkillNames instanceof Map && jobInput.careerSkillEvidence
+      ? { ...jobInput.careerSkillEvidence, skills: (jobInput.careerSkillEvidence.skills || []).map(skill => {
+        const cleanName = jobInput.__careerCleanSkillNames.get(skill.id);
+        return typeof cleanName === 'string' && verifyCareerCleanText(skill.name, cleanName)
+          ? { ...skill, cleanName } : skill;
+      }) }
+      : jobInput.careerSkillEvidence ?? null,
     authorityMode: Boolean(authority),
     ...(trustedIdentity != null ? { trustedIdentity } : {}),
   }));

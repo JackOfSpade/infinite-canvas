@@ -1,6 +1,7 @@
 import crypto from 'node:crypto';
 import { approvedCareerEvidenceCatalog, CAREER_SNAPSHOT_STATUS_APPROVED, isCareerSkillIndexEligible, projectLegacyCareerProfile, vettedCareerSkillInventory } from './careerSnapshot.js';
 import { expectedExactlyClause } from './hostOwnedText.js';
+import { verifyCareerCleanText } from './careerCleanLayer.js';
 
 const privateState = new WeakMap();
 
@@ -351,7 +352,7 @@ export function validateAuthoritySkill(authority, skillId, name, evidenceIds) {
   return skill;
 }
 
-export function validateAuthoritySkillGroup(authority, items, evidenceIds) {
+export function validateAuthoritySkillGroup(authority, items, evidenceIds, cleanNames = null) {
   if (!Array.isArray(items) || !items.length) throw new Error('Skill group items must be nonempty.');
   if (!Array.isArray(evidenceIds) || !evidenceIds.length) throw new Error('Skill group evidence must be nonempty.');
   const state = stateOf(authority);
@@ -359,7 +360,11 @@ export function validateAuthoritySkillGroup(authority, items, evidenceIds) {
   const selected = new Map();
   for (const name of items) {
     // The canonical approved skill, however the case or spacing of the written name differs.
-    const matching = resolveApprovedSkillByName(eligible, name);
+    const matching = resolveApprovedSkillByName(eligible, name)
+      || eligible.find(skill => cleanNames instanceof Map
+        && typeof cleanNames.get(skill.id) === 'string'
+        && verifyCareerCleanText(skill.name, cleanNames.get(skill.id))
+        && String(name).normalize('NFKC').toLocaleLowerCase() === cleanNames.get(skill.id).normalize('NFKC').toLocaleLowerCase());
     if (!matching) throw new Error(`Skill item ${JSON.stringify(name)} is not an exact index-eligible approved skill.`);
     if (selected.has(matching.id)) throw new Error(`Skill item ${JSON.stringify(name)} repeats approved skill ${JSON.stringify(matching.name)} within the same group.`);
     selected.set(matching.id, matching);

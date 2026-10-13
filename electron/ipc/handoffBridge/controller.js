@@ -59,7 +59,7 @@ const TASK_IDS = new Set([
   'job-compensation-research', 'job-compensation-research-batch', 'job-preference-evaluation',
   'job-preference-interpretation', 'job-preference-research', 'job-preference-research-assessment',
   'job-preference-research-batch', 'job-preference-research-batch-assessment', 'job-query-generation',
-  'career-profile-compile', 'career-profile-audit-completeness', 'career-profile-audit-grounding',
+  'career-profile-compile', 'career-profile-clean', 'career-profile-audit-completeness', 'career-profile-audit-grounding',
   'career-profile-audit-attribution', 'career-profile-audit-metrics', 'career-profile-audit-skills',
   'career-profile-audit-conflicts', 'career-profile-repair',
   'job-location-consolidation-confirmation', 'job-role-audit', 'job-role-screen', 'job-role-screen-batch', 'job-scoring', 'job-taxonomy-classify',

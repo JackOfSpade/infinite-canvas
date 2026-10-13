@@ -139,6 +139,7 @@ const TECHNOLOGY_LEDGER_COMPLETENESS_INSTRUCTION = 'For every achievement/projec
 // separate, drifting set of career ingestion limits. Values never exceed its
 // globally usable response ceiling.
 export const CAREER_SNAPSHOT_TASK_OUTPUT_TOKEN_LIMITS = Object.freeze({
+  'career-profile-clean': 12_288,
   'career-profile-compile': 15_360,
   'career-profile-repair': 15_360,
   'career-profile-audit-completeness': 8_192,

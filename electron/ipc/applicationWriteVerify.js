@@ -1,6 +1,7 @@
 /** Application protocol v2 state and prompt policy. No candidate data is kept here. */
 import { APPLICATION_V2_LIMITS } from './applicationV2Limits.js';
 import { isCareerSkillIndexEligible } from './careerSnapshot.js';
+import { cleanCareerSkillNames } from './careerCleanLayer.js';
 export const WRITE_VERIFY_PROTOCOL = 'write-then-verify.v2';
 export const WRITE_VERIFY_DEFAULT_CANDIDATES = 3;
 export const WRITE_VERIFY_MAX_CORRECTIONS = 3;
@@ -58,7 +59,7 @@ export function fullApprovedHand(profile, catalog) {
     for (const row of catalogEntityRows(catalog, kind, unit.id)) {
       if (seen.has(row.id)) throw new Error(`Duplicate approved catalog ID ${row.id}.`);
       seen.add(row.id);
-      lines.push(`[${row.id}] ${row.quote}`);
+      lines.push(`[${row.id}] ${row.cleanQuote || row.quote}`);
     }
   };
   for (const role of profile.roles || []) {
@@ -81,8 +82,9 @@ export function fullApprovedHand(profile, catalog) {
 
 export function writeVerifySourcePrompt({ posting, requirements, listingEvidence, identity, sourceRoles, profile, catalog, lengthBudget }) {
   const hand = fullApprovedHand(profile, catalog);
+  const cleanSkills = cleanCareerSkillNames(profile, catalog);
   const skillIndex = (profile.skills || []).filter(isCareerSkillIndexEligible).map(skill => ({
-    name: skill.name,
+    name: cleanSkills.get(skill.id) || skill.name,
     evidenceIds: catalog.filter(row => row.id?.startsWith(`host.career.skill.${skill.id}.`)).map(row => row.id),
   }));
   return [

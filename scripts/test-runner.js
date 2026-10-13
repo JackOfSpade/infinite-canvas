@@ -48,6 +48,7 @@ import job_analysis_operation_authority_adversarial from './tests/job-analysis-o
 import job_continuation_authority_contract from './tests/job-continuation-authority-contract.js';
 import career_canvas_file_import from './tests/career-canvas-file-import.js';
 import career_profile_compilation from './tests/career-profile-compilation.js';
+import career_clean_layer from './tests/career-clean-layer.js';
 import non_api_ai from './tests/non-api-ai.js';
 import job_workflow_documentation from './tests/job-workflow-documentation.js';
 import job_run_staging from './tests/job-run-staging.js';
@@ -200,6 +201,7 @@ const testGroups = [
   ['job-continuation-authority-contract.js', job_continuation_authority_contract],
   ['career-canvas-file-import.js', career_canvas_file_import],
   ['career-profile-compilation.js', career_profile_compilation],
+  ['career-clean-layer.js', career_clean_layer],
   ['non-api-ai.js', non_api_ai],
   ['job-workflow-documentation.js', job_workflow_documentation],
   ['job-run-staging.js', job_run_staging],

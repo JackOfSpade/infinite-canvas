@@ -53,6 +53,7 @@ const KNOWN_TASKS = new Set([
   'career-file-transcription-audit',
   'career-file-boundary-audit',
   'career-profile-compile',
+  'career-profile-clean',
   'career-profile-audit-completeness',
   'career-profile-audit-grounding',
   'career-profile-audit-attribution',
@@ -173,6 +174,7 @@ const TASK_MAX_TOKENS = {
   // independent audit passes return discrepancy rows rather than copies of the
   // corpus, while repair returns the complete corrected candidate snapshot.
   'career-profile-compile': CAREER_SNAPSHOT_TASK_OUTPUT_TOKEN_LIMITS['career-profile-compile'],
+  'career-profile-clean': CAREER_SNAPSHOT_TASK_OUTPUT_TOKEN_LIMITS['career-profile-clean'],
   'career-profile-audit-completeness': CAREER_SNAPSHOT_TASK_OUTPUT_TOKEN_LIMITS['career-profile-audit-completeness'],
   'career-profile-audit-grounding': CAREER_SNAPSHOT_TASK_OUTPUT_TOKEN_LIMITS['career-profile-audit-grounding'],
   'career-profile-audit-attribution': CAREER_SNAPSHOT_TASK_OUTPUT_TOKEN_LIMITS['career-profile-audit-attribution'],
