@@ -44,6 +44,10 @@ import { pruneSavedBugReports } from './ipc/bugReport/reportFile.js';
 import { registerNetworkHandlers } from './ipc/network.js';
 import { registerSettingsHandlers } from './ipc/settings.js';
 import { flushNonApiAiPersistence, hasPendingNonApiAiRequestsForSender, registerNonApiAiHandlers } from './ipc/nonApiAi.js';
+import { __runWithIpcRequestContextForTests } from './ipc/ipcUtils.js';
+import { buildCareerCleanLayer, produceCareerCleanLayer, readCareerCleanLayer } from './ipc/careerCleanLayer.js';
+import { approvedCareerEvidenceCatalog, careerSnapshotStorageRoot, readCareerSnapshot } from './ipc/careerSnapshot.js';
+import { callLLMText } from './ipc/llm.js';
 import { holdHandoffBridgeForQuit, registerHandoffBridgeHandlers, resumeHandoffBridgeAfterQuitCancel, scheduleHandoffBridgeLaunch, startHandoffBridge, stopHandoffBridge } from './ipc/handoffBridge/index.js';
 import { IPC_EVENTS as HANDOFF_BRIDGE_IPC_EVENTS } from './ipc/handoffBridge/contracts.js';
 import { readTunnelState, writeTunnelState } from './ipc/handoffBridge/tunnel/files.js';
@@ -1634,6 +1638,43 @@ if (!gotTheLock) {
     });
     registerSettingsHandlers();
     registerNonApiAiHandlers();
+    // A synthetic, isolated-profile bridge smoke must start the real in-app
+    // LLM task from this bundled module graph. Importing source modules from
+    // the driver would create a second pending-handoff registry.
+    if (!app.isPackaged && process.env.INFINITE_CANVAS_HANDOFF_BRIDGE_TEST === '1'
+      && isBackgroundE2ERuntime(process.env)) {
+      const readCleanFixture = async snapshotId => {
+        const root = careerSnapshotStorageRoot(app.getPath('userData'));
+        const snapshot = await readCareerSnapshot(root, snapshotId);
+        if (!snapshot) throw new Error('Synthetic approved snapshot missing from isolated profile.');
+        return { root, catalog: approvedCareerEvidenceCatalog(snapshot) };
+      };
+      globalThis.__icCareerCleanBridgeProbe = {
+        state: null,
+        async start(snapshotId) {
+          const { root, catalog } = await readCleanFixture(snapshotId);
+          const sender = [...canvasWindows][0]?.webContents;
+          if (!sender) throw new Error('Synthetic canvas window missing.');
+          this.state = { state: 'pending', catalogCount: catalog.length };
+          void __runWithIpcRequestContextForTests({
+            sender, nodeId: 'synthetic-career-clean-node', channel: 'synthetic-career-clean-probe',
+            manualAiRunId: 'synthetic-career-clean-run',
+          }, () => produceCareerCleanLayer({ snapshotId, catalog, root, callText: callLLMText }))
+            .then(value => { this.state = { state: 'done', catalogCount: catalog.length,
+              reused: value.reused, changed: value.layer?.items?.filter((item, index) => item.clean !== catalog[index].quote).length }; },
+            error => { this.state = { state: 'error', message: String(error?.message || error) }; });
+          return { catalogCount: catalog.length };
+        },
+        async verify(snapshotId, response) {
+          const { root, catalog } = await readCleanFixture(snapshotId);
+          const actual = await readCareerCleanLayer(root, snapshotId, catalog);
+          const expected = buildCareerCleanLayer(snapshotId, catalog, [response]);
+          return { present: Boolean(actual), sameAsDirectVerifier: JSON.stringify(actual?.layer) === JSON.stringify(expected),
+            changed: actual?.layer?.items?.filter((item, index) => item.clean !== catalog[index].quote).length ?? null,
+            rejections: actual?.layer?.rejections?.length ?? null };
+        },
+      };
+    }
     try {
       bridgeUserData = app.getPath('userData');
       const tunnelSetup = createHandoffBridgeTunnelSetup(bridgeUserData);
