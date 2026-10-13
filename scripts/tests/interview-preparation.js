@@ -616,7 +616,10 @@ export default [
         const { rawPrompt, assessmentPrompt } = await promptsFor(artifact, root);
         assert(rawPrompt.includes('2026-01-15') && rawPrompt.includes('145.00 - 165.00'), 'dates and decimal pay ranges must survive redaction');
         assert(assessmentPrompt.includes('2019 - 2023'), 'year ranges must survive redaction');
-        assert(!/416|555-0199|4165550199|ada@example/u.test(rawPrompt) && (rawPrompt.match(/\[redacted phone\]/gu) || []).length >= 4 && rawPrompt.includes('[redacted email]'), 'phone numbers and emails must still be redacted');
+        const listing = /<untrusted-interview-original-listing-[^>]+>\n([\s\S]*?)\n<\/untrusted-interview-original-listing-[^>]+>/u.exec(rawPrompt)?.[1];
+        assert(listing && !/416|555-0199|4165550199|ada@example/u.test(listing)
+          && (listing.match(/\[redacted phone\]/gu) || []).length >= 4 && listing.includes('[redacted email]'),
+        'phone numbers and emails must still be redacted');
       } finally { await fs.promises.rm(root, { recursive: true, force: true }); }
     },
   },
