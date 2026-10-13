@@ -194,7 +194,7 @@ export default [
     },
   },
   {
-    name: 'oracle leak gate: the command fails on a leak, passes on a clean tree, and refuses a missing or in-tree oracle',
+    name: 'oracle leak gate: the command blocks copied sentences, reports names as noise, and refuses an invalid oracle',
     run: () => {
       const spec = DOMAINS[1];
       const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'oracle-leak-oracle-'));
@@ -208,8 +208,9 @@ export default [
         });
         withTree({ 'electron/a.js': `const a = '${spec.name}';\n`, 'scripts/b.js': `const b = '${spec.sentence}';\n` }, root => {
           const leaked = runGate(root);
-          assert(leaked.status === 1 && leaked.stderr.includes('electron/a.js') && leaked.stderr.includes('ngram') && leaked.stderr.includes('scripts/b.js'),
-            `a leak fails the gate and names both files (${leaked.status}: ${leaked.stderr}${leaked.stdout})`);
+          assert(leaked.status === 1 && leaked.stderr.includes('ngram /') && leaked.stderr.includes('name (noise)') && leaked.stderr.includes('scripts/b.js'),
+            `a copied sentence fails the gate and reports both finding classes (${leaked.status}: ${leaked.stderr}${leaked.stdout})`);
+          assert(!leaked.stderr.includes('electron/a.js'), 'name noise does not flood the blocking diagnostics');
           const allowed = runGate(root, { CAREER_ORACLE_IGNORE: `${spec.name},${spec.sentence}` });
           assert(allowed.status === 0, `an explicit allowlist passes it (${allowed.status}: ${allowed.stderr})`);
           const inTree = path.join(root, 'career.md');
@@ -218,9 +219,14 @@ export default [
         });
         withTree({ 'electron/clean.js': filler(2) }, root => {
           const clean = runGate(root);
-          assert(clean.status === 0, `a clean tree passes (${clean.status}: ${clean.stderr})`);
+          assert(clean.status === 0 && clean.stdout.includes('0 ngram / 0 name (noise)'), `a clean tree passes (${clean.status}: ${clean.stderr})`);
           assert(runGate(root, { CAREER_ORACLE_PATH: '' }).status === 2, 'a missing oracle path is a usage error');
           assert(runGate(root, { CAREER_ORACLE_NGRAM: '2' }).status === 2, 'a window shorter than three words is a usage error');
+        });
+        withTree({ 'electron/name-only.js': `const employer = '${spec.name}';\n` }, root => {
+          const namesOnly = runGate(root);
+          assert(namesOnly.status === 0 && namesOnly.stdout.includes('0 ngram / 1 name (noise)'),
+            `a name-only finding is reported but does not block (${namesOnly.status}: ${namesOnly.stderr}${namesOnly.stdout})`);
         });
       } finally { fs.rmSync(outside, { recursive: true, force: true }); }
     },

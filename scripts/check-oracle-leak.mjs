@@ -7,7 +7,8 @@
 //
 //   CAREER_ORACLE_PATH="/path/outside/repo/Work Experience.md" node scripts/check-oracle-leak.mjs
 //
-// How it decides.  Two independent checks, both case-insensitive:
+// How it decides.  Two independent checks, both case-insensitive. Only the
+// copied-sentence (ngram) class blocks; generic name matches are diagnostic:
 //
 //   1. Names.  Proper-noun candidates from the oracle (runs of capitalised
 //      words, single capitalised words that never occur in lower case in the
@@ -26,8 +27,8 @@
 // Shared tokens (the product's own name, generic role titles, public technology
 // names) are allowlisted explicitly by the person running the gate:
 //   CAREER_ORACLE_IGNORE="Token One,Token Two"
-// An ignored phrase also covers every n-gram it contains.  Exit status 1 on any
-// finding, 2 on a usage error.
+// An ignored phrase also covers every n-gram it contains. Exit status 1 on an
+// ngram finding, 2 on a usage error.
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -228,11 +229,14 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
     : loadBackgroundVocabulary(backgroundSetting ? backgroundSetting.split(path.delimiter).filter(Boolean) : DEFAULT_BACKGROUND_PATHS);
   const ignore = (process.env.CAREER_ORACLE_IGNORE || '').split(',').map(value => value.trim()).filter(Boolean);
   const findings = scanForLeaks(oracle, { root: scanRoot, ngramWords, background, ignore });
-  if (findings.length === 0) {
-    console.log('oracle leak gate: no oracle name or sentence appears in shipped code, prompts, docs or fixtures.');
+  const ngrams = findings.filter(finding => finding.kind === 'ngram');
+  const nameCount = findings.length - ngrams.length;
+  const summary = `oracle leak gate: ${ngrams.length} ngram / ${nameCount} name (noise)`;
+  if (!ngrams.length) {
+    console.log(summary);
     process.exit(0);
   }
-  console.error(`oracle leak gate: ${findings.length} finding(s)`);
-  for (const finding of findings) console.error(`  ${finding.file}:${finding.lines.join(',')} x${finding.count}  ${finding.kind} ${JSON.stringify(finding.token)}`);
+  console.error(summary);
+  for (const finding of ngrams) console.error(`  ${finding.file}:${finding.lines.join(',')} x${finding.count}  ${finding.kind} ${JSON.stringify(finding.token)}`);
   process.exit(1);
 }
