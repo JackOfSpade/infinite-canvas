@@ -76,16 +76,20 @@ function pdfRgbOperands(hex) {
 
 /* Absolute CSS lengths → pt, so 0.6in and 15.24mm can be compared. */
 function toPt(value) {
-  var m = /^\s*(-?[\d.]+)\s*(pt|in|mm|cm|px)\s*$/.exec(String(value));
+  var m = /^\s*(-?(?:\d+(?:\.\d+)?|\.\d+))\s*(pt|in|mm|cm|px)\s*$/.exec(String(value));
   if (!m) throw new Error('not an absolute length: ' + value);
-  var n = parseFloat(m[1]);
+  var n = Number(m[1]);
+  if (!Number.isFinite(n)) throw new Error('not a finite absolute length: ' + value);
+  var points;
   switch (m[2]) {
-    case 'pt': return n;
-    case 'in': return n * 72;
-    case 'mm': return n * 72 / 25.4;
-    case 'cm': return n * 720 / 25.4;
-    case 'px': return n * 0.75;
+    case 'pt': points = n; break;
+    case 'in': points = n * 72; break;
+    case 'mm': points = n * 72 / 25.4; break;
+    case 'cm': points = n * 720 / 25.4; break;
+    case 'px': points = n * 0.75; break;
   }
+  if (!Number.isFinite(points)) throw new Error('not a finite absolute length: ' + value);
+  return points;
 }
 
 module.exports = {

@@ -1,4 +1,4 @@
-/* @ds-bundle: {"format":4,"namespace":"JobApplicationDesignSystem_895a4b","components":[],"sourceHashes":{"build/annotation-budget-test.js":"645527f59d68","build/annotation-typography-test.js":"45b5e4e71b74","build/ats-parse-test.js":"225855c96a52","build/bullet-redundancy-gate-doc-test.js":"fa0e3538c1da","build/css-tokens.js":"cd9a99afed16","build/dual-mode-pdf.js":"2baecfd80478","build/education-placement-test.js":"4f7e567ccf91","build/fixture-safety-test.js":"548a45aad8c5","build/harness.js":"ed3529261dc9","build/page-policy-doc-test.js":"ed9f21c03ff5","build/parallelism-gate-doc-test.js":"97da1de7fa75","build/synthesis-scope-gate-doc-test.js":"58c28bf21c4f","build/test.js":"3b6f0b1d06e0","build/token-sync-test.js":"0c4b05fcada9","handoff/pagination-contract-check.js":"ea0805ee741d"},"inlinedExternals":[],"unexposedExports":[]} */
+/* @ds-bundle: {"format":4,"namespace":"JobApplicationDesignSystem_895a4b","components":[],"sourceHashes":{"build/annotation-budget-test.js":"645527f59d68","build/annotation-typography-test.js":"45b5e4e71b74","build/ats-parse-test.js":"225855c96a52","build/bullet-redundancy-gate-doc-test.js":"fa0e3538c1da","build/css-tokens.js":"f8a1824a49ed","build/dual-mode-pdf.js":"2baecfd80478","build/education-placement-test.js":"4f7e567ccf91","build/fixture-safety-test.js":"548a45aad8c5","build/harness.js":"ed3529261dc9","build/page-policy-doc-test.js":"ed9f21c03ff5","build/parallelism-gate-doc-test.js":"97da1de7fa75","build/synthesis-scope-gate-doc-test.js":"58c28bf21c4f","build/test.js":"3b6f0b1d06e0","build/token-sync-test.js":"a3fea44beecb","handoff/pagination-contract-check.js":"ea0805ee741d"},"inlinedExternals":[],"unexposedExports":[]} */
 
 (() => {
 
@@ -801,21 +801,30 @@ function pdfRgbOperands(hex) {
 
 /* Absolute CSS lengths → pt, so 0.6in and 15.24mm can be compared. */
 function toPt(value) {
-  var m = /^\s*(-?[\d.]+)\s*(pt|in|mm|cm|px)\s*$/.exec(String(value));
+  var m = /^\s*(-?(?:\d+(?:\.\d+)?|\.\d+))\s*(pt|in|mm|cm|px)\s*$/.exec(String(value));
   if (!m) throw new Error('not an absolute length: ' + value);
-  var n = parseFloat(m[1]);
+  var n = Number(m[1]);
+  if (!Number.isFinite(n)) throw new Error('not a finite absolute length: ' + value);
+  var points;
   switch (m[2]) {
     case 'pt':
-      return n;
+      points = n;
+      break;
     case 'in':
-      return n * 72;
+      points = n * 72;
+      break;
     case 'mm':
-      return n * 72 / 25.4;
+      points = n * 72 / 25.4;
+      break;
     case 'cm':
-      return n * 720 / 25.4;
+      points = n * 720 / 25.4;
+      break;
     case 'px':
-      return n * 0.75;
+      points = n * 0.75;
+      break;
   }
+  if (!Number.isFinite(points)) throw new Error('not a finite absolute length: ' + value);
+  return points;
 }
 module.exports = {
   ROOT: ROOT,
@@ -2613,6 +2622,17 @@ var TOL_PT = 0.01;
 function norm(s) {
   return String(s).replace(/\s+/g, ' ').trim();
 }
+function rejectsLength(value) {
+  try {
+    T.toPt(value);
+    return false;
+  } catch (error) {
+    return /not (?:an|a finite) absolute length/.test(error.message);
+  }
+}
+assert(Math.abs(T.toPt('.5in') - 36) < TOL_PT && Math.abs(T.toPt('0.6in') - 43.2) < TOL_PT, 'absolute length parser accepts valid decimal CSS lengths');
+assert(['1..0pt', '1.2.3pt', '1.pt', '.pt', '1e3pt'].every(rejectsLength), 'absolute length parser rejects malformed numbers instead of using a parseFloat prefix');
+assert(rejectsLength('9'.repeat(400) + 'pt') && rejectsLength('9'.repeat(308) + 'in'), 'absolute length parser rejects numeric and unit-conversion overflow');
 
 /* The balanced body of `@page <name> { … }`, margin boxes included. */
 function atPage(css, name) {

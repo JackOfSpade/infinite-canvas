@@ -34,6 +34,17 @@ var TOL_PT = 0.01;
 
 function norm(s) { return String(s).replace(/\s+/g, ' ').trim(); }
 
+function rejectsLength(value) {
+  try { T.toPt(value); return false; } catch (error) { return /not (?:an|a finite) absolute length/.test(error.message); }
+}
+
+assert(Math.abs(T.toPt('.5in') - 36) < TOL_PT && Math.abs(T.toPt('0.6in') - 43.2) < TOL_PT,
+  'absolute length parser accepts valid decimal CSS lengths');
+assert(['1..0pt', '1.2.3pt', '1.pt', '.pt', '1e3pt'].every(rejectsLength),
+  'absolute length parser rejects malformed numbers instead of using a parseFloat prefix');
+assert(rejectsLength('9'.repeat(400) + 'pt') && rejectsLength('9'.repeat(308) + 'in'),
+  'absolute length parser rejects numeric and unit-conversion overflow');
+
 /* The balanced body of `@page <name> { … }`, margin boxes included. */
 function atPage(css, name) {
   var re = new RegExp('@page\\s+' + name + '\\s*\\{');
