@@ -6910,6 +6910,11 @@ async function getPasteApplicationState(jobId, canvasFilePath) {
   // it also has to come before the gates that would end the job.
   assertManifestCanvasOwnership(manifest, input, canvas);
   if (manifest?.transport !== 'paste' || !manifest?.paste) throw new Error('This is a legacy Local AI coding-agent job, not a paste-back job.');
+  if (!isWriteVerifyJob(input) || manifest.paste.writeVerify?.version !== WRITE_VERIFY_PROTOCOL) {
+    const error = new Error(LEGACY_APPLICATION_REGENERATE_MESSAGE);
+    error.code = 'LOCAL_AI_LEGACY_APPLICATION';
+    throw error;
+  }
   let authorityLedger = null;
   let authorityStore = null;
   let authorityListingPage = null;
@@ -8549,6 +8554,18 @@ function blindReviewHumanStopStatus(args) {
 function writeVerifyHumanStopStatus(args) {
   return { ...requirementsAuditDisagreementStatus(args), terminalKind: 'write-verify-human-stop',
     checkIds: args.paste?.terminal?.checkIds || [] };
+}
+
+const LEGACY_APPLICATION_REGENERATE_MESSAGE = 'This application was made by an older version, so regenerate it.';
+
+function legacyApplicationRegenerateStatus({ jobId, dir, canvas, manifest }) {
+  return {
+    id: jobId, status: 'failed', mode: 'paste', folder: dir,
+    canvasFilePath: canvas.canonicalCanvasFilePath, createdAt: manifest.createdAt || null,
+    revision: manifest.paste?.revision || 0, logCount: manifest.paste?.logCount || 0,
+    stage: manifest.paste?.stage || null, resultSha256: null,
+    terminalKind: 'legacy-application-regenerate', message: LEGACY_APPLICATION_REGENERATE_MESSAGE,
+  };
 }
 
 // The same fault, rebuilt from the record the manifest kept, so every later
@@ -15609,6 +15626,11 @@ async function localApplicationStatusUnlocked(jobId, canvasFilePath, options = {
   // question the other two surfaces ask.
   const inputRaw = await readFrozenJobFile({ subject: FROZEN_JOB_RECORD, label: 'input record', root, candidate: path.join(dir, 'input.json'), maxBytes: MAX_LOCAL_AI_INPUT_BYTES });
   const persistedInput = frozenState(FROZEN_JOB_RECORD, () => parseFrozenJobJson(inputRaw, 'input record'));
+  assertManifestCanvasOwnership(manifest, persistedInput, canvas);
+  if (manifest.transport === 'paste' && manifest.paste
+    && (!isWriteVerifyJob(persistedInput) || manifest.paste.writeVerify?.version !== WRITE_VERIFY_PROTOCOL)) {
+    return legacyApplicationRegenerateStatus({ jobId, dir, canvas, manifest });
+  }
   const jobListingRaw = await readJobListingForInput({ root, dir, input: persistedInput });
   let hydratedAuthority;
   try { hydratedAuthority = await hydratePinnedCareerAuthority(persistedInput); }

@@ -101,12 +101,12 @@ export default [
     },
   },
   {
-    name: 'application protocol setting defaults to v2 and preserves explicit legacy',
+    name: 'application protocol setting is v2-only',
     run() {
       assert.equal(applicationProtocolSetting(undefined), WRITE_VERIFY_PROTOCOL);
       assert.equal(applicationProtocolSetting('unexpected'), WRITE_VERIFY_PROTOCOL);
       assert.equal(applicationProtocolSetting(WRITE_VERIFY_PROTOCOL), WRITE_VERIFY_PROTOCOL);
-      assert.equal(applicationProtocolSetting('legacy'), 'legacy');
+      assert.equal(applicationProtocolSetting('legacy'), WRITE_VERIFY_PROTOCOL);
     },
   },
   {

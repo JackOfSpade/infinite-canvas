@@ -310,6 +310,41 @@ export const currentAuthorityFlowKit = Object.freeze({
 });
 
 export default [
+  {
+    name: 'older application protocol is reported as a typed regenerate state without advancing its handoff',
+    run: async () => {
+      const project = await createCanvasProject();
+      try {
+        for (const oldField of ['input', 'manifest']) {
+          const queued = await queueDiscardFixture(project);
+          const inputPath = path.join(queued.folder, 'input.json');
+          const manifestPath = path.join(queued.folder, 'manifest.json');
+          if (oldField === 'input') {
+            const oldInput = JSON.parse(await fs.promises.readFile(inputPath, 'utf8'));
+            delete oldInput.applicationProtocol;
+            await fs.promises.writeFile(inputPath, `${JSON.stringify(oldInput, null, 2)}\n`, 'utf8');
+          } else {
+            const oldManifest = JSON.parse(await fs.promises.readFile(manifestPath, 'utf8'));
+            delete oldManifest.paste.writeVerify;
+            await fs.promises.writeFile(manifestPath, `${JSON.stringify(oldManifest, null, 2)}\n`, 'utf8');
+          }
+          const before = await fs.promises.readFile(manifestPath, 'utf8');
+          const status = await localApplicationStatus(queued.id, project.canvasFilePath);
+          assert(status.status === 'failed' && status.terminalKind === 'legacy-application-regenerate'
+            && status.message === 'This application was made by an older version, so regenerate it.',
+          `${oldField}: older jobs report a terminal, user-visible regenerate instruction`);
+          let handoffError = null;
+          try { await getLocalApplicationHandoff({ jobId: queued.id, canvasFilePath: project.canvasFilePath }); }
+          catch (error) { handoffError = error; }
+          assert(handoffError?.code === 'LOCAL_AI_LEGACY_APPLICATION'
+            && handoffError.message === status.message,
+          `${oldField}: an older job cannot dispatch another handoff`);
+          assert(await fs.promises.readFile(manifestPath, 'utf8') === before,
+            `${oldField}: reporting an older job leaves the existing manifest untouched`);
+        }
+      } finally { await fs.promises.rm(project.root, { recursive: true, force: true }); }
+    },
+  },
 
   {
     name: 'Listing quote relink stores only one exact source slice and rejects ambiguous or semantic lookalikes',
@@ -811,7 +846,7 @@ export default [
           reconciliation: emptyCareerReconciliationReceipt(),
           sources: corpus.sources, segments: corpus.segments, profile, auditHistory: cleanCareerSnapshotAuditHistory(corpus, profile),
         });
-        const deletedPinJob = await queueLocalApplicationJob({
+        const deletedPinJob = await queueCurrentLocalApplicationJob({
           transport: 'paste', canvasFilePath: project.canvasFilePath, careerSnapshotId: snapshotId,
           job: { title: 'Engineer', company: 'Acme', snippet: 'Reliable Python service delivery.' },
         });
