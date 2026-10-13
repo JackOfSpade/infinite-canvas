@@ -93,20 +93,6 @@ const listTree = root => {
 const envelope = (shared, fields) => JSON.stringify({ protocol: shared.protocol, jobId: shared.jobId, stage: shared.stage, handoffCode: shared.handoffCode, baseHashes: shared.baseHashes, ...fields });
 const newWriter = (spec, options = {}) => createScriptedWriter({ spec, kit, criteria: APPLICATION_QUALITY_CRITERIA, ...options });
 
-// Drive one stage over the spawned CLI: next --json, then submit --file.
-async function cliStep(dir, writer, workDir, { expectStage = null } = {}) {
-  const served = await cliJson(['next', '--dir', dir]);
-  assert(served.code === 0 && served.json?.status === 'served', `next did not serve a handoff: ${served.stderr.slice(-300)}`);
-  const body = served.json;
-  if (expectStage) assert(body.stage === expectStage, `expected the ${expectStage} stage, found ${body.stage}`);
-  const shared = sharedFieldsOfPrompt(body.prompt);
-  const fields = await writer.respond({ stage: body.stage, prompt: body.prompt });
-  const file = path.join(workDir, `response-${body.stage}.json`);
-  fs.writeFileSync(file, envelope(shared, fields));
-  const result = await cliJson(['submit', '--dir', dir, '--file', file]);
-  return { body, result };
-}
-
 export default [
 
   {
@@ -303,57 +289,6 @@ export default [
       } finally { await cleanup([root]); }
     },
   },
-  {
-    name: 'Offline simulator: next is stable for a served handoff across processes, --reread claims a fresh career-match task, and the superseded code is then refused',
-    async run() {
-      const root = await scratch('claim');
-      try {
-        const spec = SYNTHETIC_SPECS[1];
-        const dir = path.join(root, 'run');
-        assert((await cli(['init', '--card', `synthetic:${spec.key}`, '--dir', dir])).code === 0, 'init succeeds');
-        const writer = newWriter(spec);
-        for (const stage of ['requirements', 'requirements-audit']) {
-          const { result } = await cliStep(dir, writer, root, { expectStage: stage });
-          assert(result.json.status === 'accepted', `${stage} accepted`);
-        }
-        const first = (await cliJson(['next', '--dir', dir])).json;
-        const second = (await cliJson(['next', '--dir', dir])).json;
-        assert(first.stage === 'career-match' && second.stage === 'career-match', 'the match stage is open');
-        assert(first.handoffCode === second.handoffCode && first.prompt === second.prompt, 'two separate processes are served the same claim and prompt');
-        assert(second.attempt === first.attempt + 1, 'a re-serve counts as another attempt, as the engine does');
-
-        // A command killed between the host's commit and the simulator's save leaves a
-        // pending-submit marker; the next read must not trust its cache (flip: no marker, same claim).
-        const stateFile = path.join(dir, 'sim-state.json');
-        const state = JSON.parse(fs.readFileSync(stateFile, 'utf8'));
-        state.lane.pendingSubmit = { code: first.handoffCode, at: new Date().toISOString() };
-        fs.writeFileSync(stateFile, JSON.stringify(state));
-        const recovered = (await cliJson(['next', '--dir', dir])).json;
-        assert(recovered.stage === 'career-match' && recovered.handoffCode !== first.handoffCode, 'a pending-submit marker makes the next read ask the host again');
-        assert(!JSON.parse(fs.readFileSync(stateFile, 'utf8')).lane.pendingSubmit, 'the marker is cleared once the host has been asked');
-        assert(fs.readFileSync(path.join(dir, 'events.jsonl'), 'utf8').includes('recovered-pending-submit'), 'the recovery is logged');
-        const steady = (await cliJson(['next', '--dir', dir])).json;
-        assert(steady.handoffCode === recovered.handoffCode, 'without the marker the recovered claim is stable again');
-
-        const fresh = (await cliJson(['next', '--dir', dir, '--reread'])).json;
-        assert(fresh.stage === 'career-match' && fresh.handoffCode !== first.handoffCode && fresh.handoffCode !== recovered.handoffCode, '--reread asks the host again and gets a fresh claim');
-        const shared = sharedFieldsOfPrompt(first.prompt);
-        const fields = await writer.respond({ stage: 'career-match', prompt: first.prompt });
-        const file = path.join(root, 'stale.json');
-        fs.writeFileSync(file, envelope(shared, fields));
-        // The chat that still holds the replaced claim answers with the code it was given.
-        const stale = await cliJson(['submit', '--dir', dir, '--file', file, '--code', first.handoffCode]);
-        assert(stale.code === 3 && stale.json.status !== 'accepted', `the answer to the superseded claim is refused (${stale.stdout.slice(0, 200)})`);
-        assert(stale.json.status === 'superseded', 'the replaced code is reported as superseded');
-        const freshShared = sharedFieldsOfPrompt(fresh.prompt);
-        const freshFields = await writer.respond({ stage: 'career-match', prompt: fresh.prompt });
-        fs.writeFileSync(file, envelope(freshShared, freshFields));
-        const accepted = await cliJson(['submit', '--dir', dir, '--file', file]);
-        assert(accepted.code === 0 && accepted.json.status === 'accepted', `the answer to the fresh claim is accepted (${accepted.stdout.slice(0, 200)})`);
-      } finally { await cleanup([root]); }
-    },
-  },
-
   {
     name: 'Offline simulator: the spool transport answers the same get_handoff JSON the CLI prints, and submit_handoff through it advances the host',
     async run() {

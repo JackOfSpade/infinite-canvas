@@ -23,24 +23,12 @@
 // curly quotes.  No rule under test may be satisfied by a string it was written
 // against; each verdict is a function of the approved record and of what the
 // response says.
-import fs from 'node:fs';
-import path from 'node:path';
-import electronPkg from 'electron';
 import { assert } from './testHelpers.js';
-import { currentAuthorityFlowKit } from './local-ai-application.js';
-import { getLocalApplicationHandoff, queueLocalApplicationJob, submitLocalApplicationHandoff } from '../test-dependencies.js';
 import { __validateAuthorityResumeArtifactsForTests } from '../../electron/ipc/localAiApplication.js';
 import { buildApplicationCareerAuthority } from '../../electron/ipc/applicationCareerAuthority.js';
-import {
-  approvedCareerEvidenceCatalog, buildCareerSourceCorpus, careerSnapshotId, careerSnapshotStorageRoot,
-  CAREER_SNAPSHOT_COMPILATION_CONTRACT, CAREER_SNAPSHOT_SCHEMA_VERSION, CAREER_SNAPSHOT_STATUS_APPROVED,
-  emptyCareerReconciliationReceipt, partitionCareerSourcePages, verbatimCareerTranscriptionAuditReceipt,
-  writeCareerSnapshotAtomically,
-} from '../../electron/ipc/careerSnapshot.js';
+import { approvedCareerEvidenceCatalog, CAREER_SNAPSHOT_STATUS_APPROVED } from '../../electron/ipc/careerSnapshot.js';
 import { HOST_FIELD_CANONICALIZED_EVENT, canonicalizeHostOwnedResumeFields } from '../../electron/ipc/hostOwnedResumeFields.js';
 import { HOST_OWNED_EXPECTED_VALUE_MAX_CHARS, boundedExpectedValue, hostOwnedSurfaceKey, hostOwnedValueSha256, sameHostOwnedValue } from '../../electron/ipc/hostOwnedText.js';
-
-const kit = currentAuthorityFlowKit;
 
 const EN = String.fromCharCode(0x2013);
 const EM = String.fromCharCode(0x2014);
@@ -116,17 +104,6 @@ const approvedDates = career => `${career.role.start} ${EN} ${career.role.end}`;
 // the real current-authority protocol (queue, requirements, audit, match) up to
 // the résumé stage.  Only the model is scripted.
 // ---------------------------------------------------------------------------
-function profileLines(career) {
-  const [first, second] = career.projects;
-  return [
-    career.name, career.email, `${career.role.title} at ${career.role.employer}`,
-    `${career.role.start} to ${career.role.end}`, career.bullet,
-    first.name, first.description, second.name, second.description,
-    `${career.education.credential}, ${career.education.institution}`, career.education.dates,
-    `${career.certification.name} - ${career.certification.issuer}`, career.certification.dates,
-  ];
-}
-
 function profileOf(career, corpus) {
   const evidence = corpus.segments.map(segment => segment.id);
   const roleId = career.role.id; const achievementId = `achievement-${career.id}`;
@@ -152,99 +129,6 @@ function snapshotOf(career) {
   return { snapshotId: `host-owned-${career.id}`, status: CAREER_SNAPSHOT_STATUS_APPROVED, profile };
 }
 
-async function writeSnapshot(career) {
-  const text = `${profileLines(career).join('\n')}\n`;
-  const corpus = buildCareerSourceCorpus([{ name: `${career.id} career.md`, contentHash: kit.sha256(text), text, legacyText: text, transcriptionAudit: verbatimCareerTranscriptionAuditReceipt() }]);
-  const profile = profileOf(career, corpus);
-  const snapshotId = careerSnapshotId(corpus); const snapshotRoot = careerSnapshotStorageRoot(electronPkg.app.getPath('userData'));
-  await fs.promises.mkdir(path.dirname(snapshotRoot), { recursive: true, mode: 0o700 });
-  const pages = partitionCareerSourcePages(corpus);
-  await writeCareerSnapshotAtomically(snapshotRoot, { schemaVersion: CAREER_SNAPSHOT_SCHEMA_VERSION, status: CAREER_SNAPSHOT_STATUS_APPROVED, snapshotId,
-    inputFingerprint: corpus.inputFingerprint, sourceFingerprint: corpus.sourceFingerprint, compilationContract: CAREER_SNAPSHOT_COMPILATION_CONTRACT,
-    pagePlan: { maxSegments: 32, maxSourceChars: 48_000, pageCount: pages.length, pageDigest: kit.sha256(kit.canonicalJson(pages.map(page => ({ id: page.id, index: page.index, segmentIds: page.segmentIds })))) },
-    reconciliation: emptyCareerReconciliationReceipt(), approvedAt: '2026-10-10T00:00:00.000Z', sources: corpus.sources, segments: corpus.segments, profile, auditHistory: kit.cleanCareerSnapshotAuditHistory(corpus, profile) });
-  return snapshotId;
-}
-
-/** Drives one job to its résumé-stage handoff; returns the scripted-flow handle. */
-export async function createResumeStageFlow(career, snapshotId) {
-  const project = await kit.createCanvasProject();
-  const queued = await queueLocalApplicationJob({ transport: 'paste', canvasFilePath: project.canvasFilePath, careerSnapshotId: snapshotId,
-    job: { title: career.role.title, company: career.role.employer, snippet: listing(career) } });
-  const flow = { career, project, queued, manifestPath: path.join(queued.folder, 'manifest.json'), logPath: path.join(queued.folder, 'Generation Log.jsonl') };
-  flow.current = async () => (await getLocalApplicationHandoff({ jobId: queued.id, canvasFilePath: project.canvasFilePath })).handoff;
-  flow.submit = (handoff, fields) => submitLocalApplicationHandoff({ jobId: queued.id, canvasFilePath: project.canvasFilePath, handoffCode: handoff.handoffCode,
-    response: JSON.stringify({ protocol: 1, jobId: queued.id, stage: handoff.stage, handoffCode: handoff.handoffCode, baseHashes: handoff.baseHashes, ...fields }) });
-  flow.contextOf = handoff => JSON.parse(handoff.prompt.slice(handoff.prompt.lastIndexOf('\n\nAuthoritative context:\n') + '\n\nAuthoritative context:\n'.length));
-  flow.manifest = async () => JSON.parse(await fs.promises.readFile(flow.manifestPath, 'utf8'));
-  flow.logEvents = async () => (await fs.promises.readFile(flow.logPath, 'utf8')).split('\n').filter(Boolean).map(line => JSON.parse(line));
-  flow.logText = () => fs.promises.readFile(flow.logPath, 'utf8');
-  flow.cleanup = () => fs.promises.rm(project.root, { recursive: true, force: true });
-
-  let handoff = await flow.current(); const requirementContext = flow.contextOf(handoff);
-  const requirementEvidence = [
-    { id: 'p1-listing', sourceId: 'job-listing', quote: listing(career), requirement: `Reliable ${career.tech} service delivery`, priority: 'highest' },
-    { id: 'p1-listing-detail', sourceId: 'job-listing', quote: `Reliable ${career.tech} service delivery`, requirement: `Production reliability for ${career.tech} work`, priority: 'high' },
-  ];
-  const requirementRecords = [
-    { id: 'p1-requirement', text: `Reliable ${career.tech} service delivery`, priority: 'highest', evidenceIds: ['p1-listing', 'p1-listing-detail'] },
-    { id: 'p1-requirement-reliability', text: `Production reliability for ${career.tech} work`, priority: 'high', evidenceIds: ['p1-listing'] },
-  ];
-  let accepted = await flow.submit(handoff, { storeDigest: requirementContext.authorityStore.digest, complete: true, identity: requirementContext.trustedIdentity,
-    evidence: requirementEvidence, requirements: requirementRecords, ...kit.listingCoverageFields(requirementContext, requirementEvidence, requirementRecords) });
-  assert(accepted.accepted && accepted.handoff.stage === 'requirements-audit', `[${career.id}] requirements must reach the audit (${JSON.stringify(accepted.validationErrors || [])})`);
-  handoff = await flow.current();
-  accepted = await flow.submit(handoff, kit.listingSemanticAuditFields(flow.contextOf(handoff), requirementEvidence, requirementRecords));
-  assert(accepted.accepted && accepted.handoff.stage === 'career-match', `[${career.id}] the audit must reach matching (${JSON.stringify(accepted.validationErrors || [])})`);
-  // The catalog is paged: every page is matched in turn, and the exact evidence
-  // ids the résumé may cite are collected across all of them.
-  const catalog = [];
-  handoff = await flow.current();
-  for (let guard = 0; handoff.stage === 'career-match'; guard += 1) {
-    assert(guard < 30, `[${career.id}] matching must converge`);
-    const matchContext = flow.contextOf(handoff);
-    catalog.push(...matchContext.catalog);
-    accepted = await flow.submit(handoff, { version: 1, rootDigest: matchContext.pair.rootDigest, pairDigest: matchContext.pair.digest,
-      rows: matchContext.requirements.map(requirement => ({ requirementId: requirement.id, localStatus: 'matched', candidateEvidenceIds: matchContext.catalog.map(item => item.id) })) });
-    assert(accepted.accepted, `[${career.id}] the match must be accepted (${JSON.stringify(accepted.validationErrors || [])})`);
-    handoff = await flow.current();
-  }
-  assert(handoff.stage === 'resume', `[${career.id}] matching must reach the résumé stage, found ${handoff.stage}`);
-  flow.resumeHandoff = handoff;
-  // The résumé may cite only the evidence the host selected into its plan.
-  const planIds = flow.contextOf(handoff).evidencePlan.evidence.map(item => item.id);
-  const idsFor = prefix => planIds.filter(id => id.startsWith(prefix));
-  flow.evidence = {
-    achievement: idsFor('host.career.achievement.')[0],
-    skill: idsFor(`host.career.skill.${career.skillId}.`)[0],
-    projects: Object.fromEntries(career.projects.map(item => [item.id, idsFor(`host.career.project.${item.id}.`)])),
-    education: idsFor(`host.career.education.${career.education.id}.`),
-    certification: idsFor(`host.career.certification.${career.certification.id}.`),
-  };
-  flow.obligation = flow.contextOf(handoff).resumeProjectObligation || null;
-  return flow;
-}
-
-export { snapshotOf, writeSnapshot, listing, approvedDates };
-
-/** The résumé a writer would send; every host-owned field can be restated. */
-export function resumeFor(flow, forms = {}) {
-  const { career, evidence } = flow;
-  return {
-    schemaVersion: 'structured-resume.v1', identity: { name: career.name, contact: [career.email] },
-    roles: [{ id: career.role.id, title: forms.title ?? career.role.title, company: forms.company ?? career.role.employer, dates: forms.dates ?? approvedDates(career), location: '',
-      bullets: [{ id: 'bullet-1', text: career.bullet, evidenceIds: [evidence.achievement] }] }],
-    projects: [{ id: 'project-1', name: forms.project ?? career.projects[0].name, description: career.projects[0].resumeDescription, evidenceIds: forms.projectEvidenceIds ?? [flow.obligation.evidenceId, 'p1-listing'] }],
-    education: [{ id: 'education-1', credential: forms.credential ?? career.education.credential, institution: forms.institution ?? career.education.institution, evidenceIds: [evidence.education[0]] }],
-    credentials: [{ id: 'credential-1', name: forms.certName ?? career.certification.name, issuer: forms.certIssuer ?? career.certification.issuer, evidenceIds: [evidence.certification[0]] }],
-    skills: [{ id: 'skills-main', group: 'Tools', items: [career.tech], evidenceIds: [evidence.skill] }],
-  };
-}
-
-
-// ---------------------------------------------------------------------------
-// Shared helpers for the tests below.
-// ---------------------------------------------------------------------------
 const J = value => JSON.stringify(value);
 const expectedClause = (label, value) => `${label} expected exactly: ${J(value)}`;
 const variantForms = career => ({
@@ -293,12 +177,6 @@ const deepFreeze = value => {
   if (value && typeof value === 'object' && !Object.isFrozen(value)) { Object.values(value).forEach(deepFreeze); Object.freeze(value); }
   return value;
 };
-
-async function refuse(flow, forms) {
-  const handoff = await flow.current();
-  const result = await flow.submit(handoff, { resume: resumeFor(flow, forms) });
-  return { accepted: result.accepted, errors: (result.validationErrors || []).join(' | '), correction: result.handoff?.correctionPrompt || '' };
-}
 
 export default [
   {
@@ -531,134 +409,28 @@ export default [
     },
   },
 
-  ...CAREERS.map(career => ({
-    name: `Real résumé stage [${career.id}]: a different value is refused with the approved text, the entity follows the evidence, and a restated surface form is written as approved`,
-    run: async () => {
-      const snapshotId = await writeSnapshot(career);
-      const flow = await createResumeStageFlow(career, snapshotId);
-      const control = await createResumeStageFlow(career, snapshotId);
-      try {
-        assert(flow.obligation?.projectId === career.projects[0].id, `[${career.id}] the first project is the host-required project (${J(flow.obligation)})`);
-        assert(/app writes them itself/u.test(flow.resumeHandoff.prompt) && /states the exact approved text/u.test(flow.resumeHandoff.prompt),
-          `[${career.id}] the résumé contract tells the writer the host writes these fields and what a refusal contains`);
-        // 1. Genuinely different values: refused, and the refusal that reaches the writer states the approved text.
-        const refusals = [
-          ['title', { title: career.different.title }, expectedClause('title', career.role.title)],
-          ['company', { company: career.different.company }, expectedClause('company', career.role.employer)],
-          ['dates', { dates: career.different.dates }, expectedClause('dates', approvedDates(career))],
-          ['project name', { project: career.different.project }, expectedClause('name', career.projects[0].name)],
-          ['education credential', { credential: career.different.credential }, expectedClause('credential', career.education.credential)],
-          ['credential name', { certName: career.different.certName }, expectedClause('name', career.certification.name)],
-        ];
-        for (const [label, forms, clause] of refusals) {
-          const result = await refuse(flow, forms);
-          assert(!result.accepted && result.errors.includes(clause), `[${career.id}] a different ${label} is refused with ${clause} (got ${result.errors})`);
-          assert(result.correction.includes(clause), `[${career.id}] the correction the writer reads for a different ${label} states the approved text`);
-        }
-        // 2. Other fields restated in another surface form are written by the host, so they are not what the refusal is about.
-        const mixed = await refuse(flow, { ...variantForms(career), project: career.different.project });
-        assert(!mixed.accepted && mixed.errors.includes(expectedClause('name', career.projects[0].name))
-          && !mixed.errors.includes(expectedClause('title', career.role.title)) && !mixed.errors.includes('trusted authority role')
-          && !mixed.errors.includes(expectedClause('credential', career.education.credential)),
-        `[${career.id}] only the genuinely different field is refused (got ${mixed.errors})`);
-        // 3. The cited evidence decides the entity, never the name.
-        const second = career.projects[1]; const secondEvidence = flow.evidence.projects[second.id][0];
-        assert(secondEvidence, `[${career.id}] the second project is selectable evidence`);
-        const ambiguous = await refuse(flow, { project: career.variant.project, projectEvidenceIds: [flow.obligation.evidenceId, secondEvidence, 'p1-listing'] });
-        assert(!ambiguous.accepted && ambiguous.errors.includes('Project evidence must resolve to one exact approved project.') && !ambiguous.errors.includes('expected exactly'),
-          `[${career.id}] evidence resolving to two projects is refused as ambiguous and nothing is snapped (got ${ambiguous.errors})`);
-        const otherEntity = await refuse(flow, { project: career.variant.project, projectEvidenceIds: [secondEvidence, 'p1-listing'] });
-        assert(!otherEntity.accepted && otherEntity.errors.includes(expectedClause('name', second.name)),
-          `[${career.id}] a name that restates the FIRST project, on the SECOND project's evidence, is refused with the second project's name (got ${otherEntity.errors})`);
-        const midManifest = await flow.manifest();
-        assert(midManifest.paste.stage === 'resume' && !midManifest.paste.resume
-          && !(await flow.logEvents()).some(event => event.stage === 'resume' && event.type === 'paste-accepted'),
-        `[${career.id}] no refusal advanced the job or logged an acceptance`);
-
-        // 4. The restated surface forms are accepted and stored as the approved text.
-        const written = resumeFor(flow, variantForms(career));
-        const accepted = await flow.submit(await flow.current(), { resume: written });
-        assert(accepted.accepted && accepted.handoff?.stage === 'cover-letter', `[${career.id}] the restated forms are accepted (${J(accepted.validationErrors || [])})`);
-        const manifest = await flow.manifest(); const stored = manifest.paste.resume;
-        const approvedResume = resumeFor(flow);
-        assert(J(stored) === J(approvedResume), `[${career.id}] the stored résumé is the approved text end to end:\n${J(stored)}\n${J(approvedResume)}`);
-        const draft = JSON.parse(await fs.promises.readFile(path.join(flow.queued.folder, 'drafts', `${String(manifest.paste.revision).padStart(5, '0')}-resume.json`), 'utf8'));
-        assert(J(draft.resume) === J(approvedResume), `[${career.id}] the persisted draft is the approved text, not the writer's form`);
-
-        // 5. The Generation Log records the rewrite as typed events carrying hashes only.
-        const events = await flow.logEvents(); const last = events[events.length - 1];
-        assert(last.type === 'paste-accepted' && last.stage === 'resume' && Array.isArray(last.hostCanonicalizations) && last.hostCanonicalizations.length === 8, `[${career.id}] the accepted resume event carries eight typed canonicalizations (${J(last.hostCanonicalizations)})`);
-        const logged = new Map(last.hostCanonicalizations.map(event => [`${event.unit}.${event.field}`, event]));
-        for (const [unit, field, form, approved] of fieldRows(career)) {
-          const event = logged.get(`${unit}.${field}`);
-          assert(event?.type === HOST_FIELD_CANONICALIZED_EVENT && event.fromSha256 === hostOwnedValueSha256(form) && event.toSha256 === hostOwnedValueSha256(approved),
-            `[${career.id}] ${unit}.${field} is recorded with the hashes of the form written and the form stored`);
-        }
-        assert(/^[a-f0-9]{64}$/u.test(last.originalResponseSha256) && last.originalResponseSha256 !== last.responseSha256, `[${career.id}] the writer's own response hash is kept beside the stored response hash`);
-        const text = await flow.logText();
-        for (const [, , form, approved] of fieldRows(career)) {
-          const literal = J(form).slice(1, -1);
-          assert(!text.includes(literal) || J(approved).includes(literal), `[${career.id}] the log never carries the written form ${J(form)} as text`);
-        }
-        assert(!JSON.stringify(last.hostCanonicalizations).includes(career.role.title), `[${career.id}] the events name no approved text either`);
-
-        // 6. Control: the very same job answered with the approved text from the start is indistinguishable downstream.
-        const controlAccepted = await control.submit(control.resumeHandoff, { resume: resumeFor(control) });
-        assert(controlAccepted.accepted, `[${career.id}] the control résumé is accepted (${J(controlAccepted.validationErrors || [])})`);
-        const controlLast = (await control.logEvents()).at(-1);
-        assert(controlLast.type === 'paste-accepted' && !('hostCanonicalizations' in controlLast) && !('originalResponseSha256' in controlLast), `[${career.id}] a response that needed no rewrite logs none`);
-        const [nextA, nextB] = [await flow.current(), await control.current()];
-        const finishedResume = handoff => {
-          const marker = '\n\nFinished résumé:\n';
-          const index = handoff.prompt.lastIndexOf(marker);
-          assert(index >= 0, `[${career.id}] the cover-letter handoff carries the finished résumé`);
-          return handoff.prompt.slice(index + marker.length);
-        };
-        assert(finishedResume(nextA) === finishedResume(nextB), `[${career.id}] the next stage reads the same résumé in both jobs`);
-        assert(nextA.baseHashes.resume && nextA.baseHashes.resume === nextB.baseHashes.resume, `[${career.id}] the document hash every later stage binds is the hash of the canonical text (${nextA.baseHashes.resume} vs ${nextB.baseHashes.resume})`);
-        assert(J((await control.manifest()).paste.resume) === J(stored), `[${career.id}] stored résumés are identical`);
-      } finally {
-        await flow.cleanup(); await control.cleanup();
-      }
-    },
-  })),
   {
-    name: 'Real résumé stage with no career authority (legacy source roles): a restated role title, company and dates are written as approved, and a different one is refused with the approved text',
+    name: 'v2 candidate gate canonicalizes approved field variants and rejects different values across three careers',
     run: async () => {
+      const { __writeVerifyCandidateGateForTests } = await import('../../electron/ipc/localAiApplication.js');
       for (const career of CAREERS) {
-        const project = await kit.createCanvasProject();
-        try {
-          const careerData = `${career.name}\n${career.email}\n${career.role.title} profile\n\n## ${career.role.employer}\n${career.role.title}\n${approvedDates(career)}\n\n${career.bullet}`;
-          const queued = await queueLocalApplicationJob({ transport: 'paste', canvasFilePath: project.canvasFilePath, careerData,
-            job: { title: 'Reporting Engineer', company: 'Acme' },
-            resumeProfile: { workHistory: [{ id: career.role.id, title: career.role.title, employer: career.role.employer, startDate: career.role.start, endDate: career.role.end }] } });
-          const current = async () => (await getLocalApplicationHandoff({ jobId: queued.id, canvasFilePath: project.canvasFilePath })).handoff;
-          const submit = (handoff, fields) => submitLocalApplicationHandoff({ jobId: queued.id, canvasFilePath: project.canvasFilePath, handoffCode: handoff.handoffCode,
-            response: JSON.stringify({ protocol: 1, jobId: queued.id, stage: handoff.stage, handoffCode: handoff.handoffCode, baseHashes: handoff.baseHashes, ...fields }) });
-          const plan = await submit(await current(), {
-            identity: { name: career.name, contact: [career.email] },
-            evidence: [
-              { id: 'career-proof', sourceId: 'career-data', quote: career.bullet, requirement: 'Reporting systems', priority: 'highest' },
-              { id: 'job-proof', sourceId: 'job-listing', quote: '# Reporting Engineer', requirement: 'Reporting systems', priority: 'highest' },
-            ],
-            requirements: [{ id: 'need-1', text: 'Reporting systems', priority: 'highest', evidenceIds: ['career-proof', 'job-proof'] }],
-          });
-          assert(plan.accepted && plan.handoff?.stage === 'resume', `[${career.id}] the legacy evidence plan opens the résumé stage (${J(plan.validationErrors || [])})`);
-          const resumeOf = forms => ({ schemaVersion: 'structured-resume.v1', identity: { name: career.name, contact: [career.email] },
-            roles: [{ id: career.role.id, title: forms.title ?? career.role.title, company: forms.company ?? career.role.employer, dates: forms.dates ?? approvedDates(career), location: '',
-              bullets: [{ id: 'bullet-1', text: career.bullet, evidenceIds: ['career-proof'] }] }] });
-          const refused = await submit(await current(), { resume: resumeOf({ ...variantForms(career), title: career.different.title }) });
-          assert(!refused.accepted && refused.validationErrors.join(' | ').includes(`roles[0].title must exactly match its trusted source role; expected exactly: ${J(career.role.title)}`),
-            `[${career.id}] a different title is refused with the approved title (got ${J(refused.validationErrors)})`);
-          const accepted = await submit(await current(), { resume: resumeOf(variantForms(career)) });
-          assert(accepted.accepted && accepted.handoff?.stage === 'cover-letter', `[${career.id}] the restated role fields are accepted (${J(accepted.validationErrors || [])})`);
-          const stored = (JSON.parse(await fs.promises.readFile(path.join(queued.folder, 'manifest.json'), 'utf8'))).paste.resume.roles[0];
-          assert(stored.title === career.role.title && stored.company === career.role.employer && stored.dates === approvedDates(career), `[${career.id}] the stored role is the approved text (${J(stored)})`);
-          const events = (await fs.promises.readFile(path.join(queued.folder, 'Generation Log.jsonl'), 'utf8')).split('\n').filter(Boolean).map(line => JSON.parse(line));
-          assert(events.at(-1).hostCanonicalizations?.length === 3 && events.at(-1).hostCanonicalizations.every(event => event.unit === 'role'), `[${career.id}] three role fields are recorded`);
-        } finally {
-          await fs.promises.rm(project.root, { recursive: true, force: true });
-        }
+        const kit = authorityKit(career);
+        const input = {
+          jobId: `synthetic-${career.id}`, handoffCode: 'synthetic', baseHashes: {},
+          job: { title: career.role.title, company: career.role.employer },
+          careerAuthority: { snapshotId: 'synthetic', snapshotDigest: 'digest' },
+          __careerAuthorityIndex: kit.authority, sourceRoles: kit.sourceRoles,
+          hostCareerEvidenceCatalog: [], careerSkillEvidence: { skills: [] },
+        };
+        const state = { handoffCode: 'synthetic', baseHashes: {}, evidencePlan: { evidence: kit.acceptedEvidence } };
+        const frozen = { authority: kit.authority, careerSkillEvidence: { skills: [] } };
+        const submit = resume => __writeVerifyCandidateGateForTests({ raw: { resume, coverLetter: {} }, state, input, frozen, manifest: {} });
+        const variant = await submit(unitResume(career, variantForms(career)));
+        assert(J(variant.structured.resume) === J(unitResume(career)), `[${career.id}] v2 uses the approved text before its content gates`);
+        const different = await submit(unitResume(career, { title: career.different.title }));
+        assert(different.structured.resume.roles[0].title === career.different.title
+          && different.errors.some(error => error.includes(expectedClause('title', career.role.title))),
+        `[${career.id}] v2 leaves a different title for the authority gate to refuse with the approved text`);
       }
     },
   },

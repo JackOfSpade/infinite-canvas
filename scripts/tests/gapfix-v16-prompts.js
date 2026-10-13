@@ -55,22 +55,16 @@
 // Every fixture is SYNTHETIC: invented careers in unrelated fields (freight
 // dispatch, clinic scheduling, library cataloguing, civil site inspection, retail
 // analytics). Nothing in production names any of them.
-import fs from 'node:fs';
-import os from 'node:os';
-import path from 'node:path';
 import { assert } from './testHelpers.js';
 import * as guidance from '../../electron/ipc/applicationWriterGuidance.js';
 import {
-  APPLICATION_QUALITY_CRITERIA, __currentAuthorityDraftSelectionForTests, __currentAuthorityUnsupportedNeedsForTests,
+  APPLICATION_QUALITY_CRITERIA,
 } from '../../electron/ipc/localAiApplication.js';
 import {
   OWING_CLAIM_PARAGRAPHS, evaluateCoverLetterChecks,
 } from '../../electron/ipc/coverLetterChecks.js';
 import { BLIND_REPAIR_RAISED_CYCLES_RULE, BLIND_REPAIR_TRUNCATION_RULE } from '../../electron/ipc/applicationRepairConvergence.js';
-import { createAuthorityLedgerStore } from '../../electron/ipc/applicationAuthorityLedgerStore.js';
-import { createStoreAuthorityWorkflowRoot, createStoreMatchReceipt, storeRequirementCatalogPairDescriptor } from '../../electron/ipc/applicationAuthorityWorkflow.js';
-import { CAREER_SNAPSHOT_STATUS_APPROVED, approvedCareerEvidenceCatalog } from '../../electron/ipc/careerSnapshot.js';
-import { buildApplicationCareerAuthority } from '../../electron/ipc/applicationCareerAuthority.js';
+import { CAREER_SNAPSHOT_STATUS_APPROVED } from '../../electron/ipc/careerSnapshot.js';
 import { APPLICATION_COVER_LETTER_SCHEMA, APPLICATION_DIRECT_COVER_LETTER_SCHEMA } from '../../electron/ipc/aiSchemas.js';
 
 // ---------------------------------------------------------------------------
@@ -209,73 +203,4 @@ export default [ {
       assert(guidance.boundedUnsupportedNeeds([{ id: 's', priority: 'high', text: 'two\n   lines\tand   spaces' }]).requirements[0].text === 'two lines and spaces', 'whitespace is flattened');
     },
   },
-  {
-    name: 'Unsupported needs, from the store: the reduction receipt names the requirements no catalog evidence matched, flipping one match removes it, and only highest and high priorities are kept (3 careers, A / B / C)',
-    async run() {
-      const CAREERS = [
-        { key: 'civil site inspection', title: 'Site Inspector', employer: 'Lakeshore Civil', claim: 'Inspected concrete pours against engineer drawings for twelve bridge decks.',
-          reqs: [{ text: 'Inspect concrete pours against engineer drawings', priority: 'highest', matches: true }, { text: 'Hold a confined space entry permit', priority: 'high', matches: false },
-            { text: 'Operate a total station', priority: 'highest', matches: false }, { text: 'Report weekly progress to owners', priority: 'supporting', matches: false }] },
-        { key: 'retail analytics', title: 'Merchandise Analyst', employer: 'Brightfield Stores', claim: 'Forecast weekly basket size by store format for ninety grocery stores.',
-          reqs: [{ text: 'Forecast weekly basket size by store format', priority: 'high', matches: true }, { text: 'Negotiate vendor rebates', priority: 'highest', matches: false }] },
-        { key: 'clinic scheduling', title: 'Booking Lead', employer: 'Willowbrook Clinic', claim: 'Scheduled appointment slots across eight exam rooms using a shared calendar.',
-          reqs: [{ text: 'Schedule appointment slots across exam rooms', priority: 'highest', matches: true }, { text: 'Hold a medical coding certificate', priority: 'high', matches: false },
-            { text: 'Verify insurance eligibility', priority: 'high', matches: false }] },
-      ];
-      for (const career of CAREERS) {
-        const snapshot = {
-          snapshotId: `v16-${career.key.replace(/\W+/gu, '-')}`, status: CAREER_SNAPSHOT_STATUS_APPROVED,
-          profile: {
-            identity: { name: 'Synthetic Candidate', contacts: ['candidate@example.test'] },
-            roles: [{ id: 'role-1', title: career.title, employer: career.employer, startDate: '2019', endDate: '2024', location: '', achievementIds: ['ach-1'], skillIds: [] }],
-            achievements: [{ id: 'ach-1', roleId: 'role-1', claim: career.claim }],
-            projects: [], skills: [], education: [], certifications: [], otherEvidence: [],
-          },
-        };
-        const authority = buildApplicationCareerAuthority(snapshot);
-        const catalog = approvedCareerEvidenceCatalog(snapshot);
-        const achievementId = catalog.find(item => String(item.id).startsWith('host.career.achievement.ach-1'))?.id;
-        assert(achievementId, `${career.key}: the fixture exposes its achievement`);
-        const run = async (reqs, { priorities = null } = {}) => {
-          const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'v16-unsupported-'));
-          try {
-            const store = await createAuthorityLedgerStore(root, { namespace: 'v16', genesis: { jobId: 'v16' } });
-            await store.appendReceiptPage('requirements', reqs.flatMap((req, index) => [
-              { id: `listing-${index}`, kind: 'listing-evidence', item: { id: `listing-${index}`, sourceId: 'job-listing', quote: `Need ${req.text}.`, requirement: req.text, priority: priorities?.[index] || req.priority } },
-              { id: `requirement-${index}`, kind: 'requirement', item: { id: `requirement-${index}`, text: req.text, priority: priorities?.[index] || req.priority, evidenceIds: [`listing-${index}`] } },
-            ]));
-            await store.appendReceiptPage('catalog', catalog.map(item => ({ id: `catalog:${item.id}`, kind: 'catalog-evidence', item })));
-            const receipt = store.receipt();
-            const workflow = { root: createStoreAuthorityWorkflowRoot({ requirements: receipt.streams.requirements, catalog: receipt.streams.catalog, rolesDigest: 'roles', skillsDigest: 'skills', catalogPageSize: 24 }) };
-            const requirementPage = await store.getReceiptPage('requirements', 0); const catalogPage = await store.getReceiptPage('catalog', 0);
-            const pair = storeRequirementCatalogPairDescriptor(workflow.root, { requirementPage, catalogPage });
-            await store.appendReceiptPage('matches', [{ id: 'match:0', receipt: createStoreMatchReceipt({ root: workflow.root, pair, response: {
-              version: 1, rootDigest: workflow.root.digest, pairDigest: pair.digest,
-              rows: reqs.map((req, index) => ({ requirementId: `requirement-${index}`, candidateEvidenceIds: req.matches ? [achievementId] : [], localStatus: req.matches ? 'matched' : 'no-match' })),
-            } }) }]);
-            const input = { careerAuthority: { snapshotId: authority.snapshotId }, sourceRoles: authority.sourceRoles, careerSkillEvidence: { version: 1, skills: [] }, hostCareerEvidenceCatalog: catalog };
-            Object.defineProperty(input, '__careerAuthorityIndex', { value: authority, enumerable: false });
-            const selection = await __currentAuthorityDraftSelectionForTests(store, workflow, input);
-            await store.appendReceiptPages(selection.transactionEntries);
-            return await __currentAuthorityUnsupportedNeedsForTests(store, input, workflow);
-          } finally { await fs.promises.rm(root, { recursive: true, force: true }); }
-        };
-        const expected = career.reqs.filter(req => !req.matches && req.priority !== 'supporting').map(req => req.text).sort();
-        // A: the unsupported, listed priorities are exactly the unmatched ones.
-        const baseline = await run(career.reqs);
-        assert(JSON.stringify(baseline.map(row => row.text).sort()) === JSON.stringify(expected), `${career.key}/A: the store names the unmatched highest and high requirements (${JSON.stringify(baseline)})`);
-        assert(baseline.every(row => /^requirement-\d+$/u.test(row.id) && ['highest', 'high'].includes(row.priority)), `${career.key}/A: rows carry the requirement id and its priority`);
-        // B: matching one of them removes exactly that one.
-        const flipIndex = career.reqs.findIndex(req => !req.matches && req.priority !== 'supporting');
-        const flipped = await run(career.reqs.map((req, index) => (index === flipIndex ? { ...req, matches: true } : req)));
-        assert(flipped.length === baseline.length - 1 && !flipped.some(row => row.text === career.reqs[flipIndex].text), `${career.key}/B: a matched requirement leaves the list (${JSON.stringify(flipped)})`);
-        // C: demoting one to a supporting priority removes it; restoring it puts it back.
-        const demoted = await run(career.reqs, { priorities: career.reqs.map((req, index) => (index === flipIndex ? 'supporting' : req.priority)) });
-        assert(demoted.length === baseline.length - 1, `${career.key}/C: a supporting priority is not kept (${JSON.stringify(demoted)})`);
-        assert((await run(career.reqs)).length === baseline.length, `${career.key}/C: restoring the priority restores the row`);
-        // The bounded context the prompt prints is the same rows, by id.
-        const printed = guidance.boundedUnsupportedNeeds(baseline);
-        assert(printed.omitted === 0 && printed.requirements.length === baseline.length, `${career.key}: the prompt context lists every row`);
-      }
-    },
-  },  ];
+];

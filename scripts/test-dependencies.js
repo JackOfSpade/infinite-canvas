@@ -25,35 +25,7 @@ export {
   createAuthorityLedgerStore,
   openAuthorityLedgerStore,
 } from '../electron/ipc/applicationAuthorityLedgerStore.js';
-export {
-  APPLICATION_AUTHORITY_MATCH_PAGE_EVIDENCE,
-  APPLICATION_AUTHORITY_WORKFLOW_VERSION,
-  aggregateBlindFindings,
-  assertDispositionCoverage,
-  assertMatchCoverage,
-  assertReviewConverges,
-  authorityDigest,
-  createAuthorityWorkflowRoot,
-  createBlindReviewerReceipt,
-  createBlindReviewerScopes,
-  createDispositionPlan,
-  createDispositionReceipt,
-  createMatchReceipt,
-  createStoreAuthorityWorkflowRoot,
-  createStoreDispositionReceipt,
-  createStoreMatchReceipt,
-  createStoreReductionPage,
-  createStoreReductionPageFromReceiptAt,
-  enumerateRequirementCatalogPairs,
-  invalidateBlindReviewerReceipts,
-  reduceRequirementMatches,
-  reviewConvergenceState,
-  selectDraftEvidence,
-  selectDraftRoles,
-  selectDraftSkills,
-  storeRequirementCatalogPairDescriptor,
-  validateBlindReviewCoverage,
-} from '../electron/ipc/applicationAuthorityWorkflow.js';
+export { APPLICATION_AUTHORITY_MATCH_PAGE_EVIDENCE, APPLICATION_AUTHORITY_WORKFLOW_VERSION, authorityDigest, createStoreAuthorityWorkflowRoot } from '../electron/ipc/applicationAuthorityWorkflow.js';
 export { runJobApiProbe } from './run-api-tests.js';
 export { __discardJobAnalysisSnapshotForTests, __getJobAnalysisRetirementStateForTests, buildResolvedDescriptionWarning, buildRoleFamilyBatchResearchPrompt, getJobSourceResolveConfig, mergeRecoveredScoreRows, packCompensationAssessmentBatches, packCompensationResearchBatches, planPartialScoreRecovery, planRoleFamilyAssessmentBatches, planRoleFamilyResearchBatches, reconcileSearchFunnel, validateJobScoringSubmission } from '../electron/ipc/jobs.js';
 import { __saveJobAnalysisSnapshotForTests as saveJobAnalysisSnapshotFixture } from '../electron/ipc/jobs.js';

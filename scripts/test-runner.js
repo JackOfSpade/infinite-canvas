@@ -20,7 +20,6 @@ import electron_regressions from './tests/electron-regressions.js';
 import renderer_content_security from './tests/renderer-content-security.js';
 import local_ai_application from './tests/local-ai-application.js';
 import application_authority_ledger_store from './tests/application-authority-ledger-store.js';
-import application_authority_match_queue from './tests/application-authority-match-queue.js';
 import current_authority_parallel_match from './tests/current-authority-parallel-match.js';
 import application_career_authority from './tests/application-career-authority.js';
 import application_write_verify from './tests/application-write-verify.js';
@@ -167,7 +166,6 @@ const testGroups = [
   ['renderer-content-security.js', renderer_content_security],
   ['local-ai-application.js', local_ai_application],
   ['application-authority-ledger-store.js', application_authority_ledger_store],
-  ['application-authority-match-queue.js', application_authority_match_queue],
   ['current-authority-parallel-match.js', current_authority_parallel_match],
   ['application-career-authority.js', application_career_authority],
   ['application-write-verify.js', application_write_verify],

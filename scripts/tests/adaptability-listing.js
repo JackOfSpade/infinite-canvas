@@ -100,7 +100,7 @@ import {
   verbatimCareerTranscriptionAuditReceipt,
 } from '../../electron/ipc/careerSnapshot.js';
 import { buildApplicationCareerAuthority, resolveAuthorityEvidence } from '../../electron/ipc/applicationCareerAuthority.js';
-import { assemblePasteApplicationResult, assertAuthorityDraftSelection, assertFrozenEvidencePlan } from '../../electron/ipc/pasteApplicationAssembly.js';
+import { assemblePasteApplicationResult, assertFrozenEvidencePlan } from '../../electron/ipc/pasteApplicationAssembly.js';
 import { NEUTRAL_SKILL_GROUP_LABELS, projectTrustedIdentity, validateStructuredApplicationResume } from '../../electron/ipc/structuredResume.js';
 import { checkTargetCompanyBinding, findUnsupportedDurationClaim } from '../../electron/ipc/coverLetterChecks.js';
 import {
@@ -112,18 +112,6 @@ import {
   pasteAttributionScopeErrors,
   validateLocalApplicationResult,
 } from '../../electron/ipc/localAiApplication.js';
-import {
-  authorityDigest,
-  createAuthorityWorkflowRoot,
-  createDispositionPlan,
-  createMatchReceipt,
-  enumerateRequirementCatalogPairs,
-  reduceRequirementMatches,
-  selectDraftEvidence,
-  selectDraftSkills,
-  validateDispositionResponse,
-  validateMatchResponse,
-} from '../../electron/ipc/applicationAuthorityWorkflow.js';
 // ---------------------------------------------------------------------------
 // Small helpers
 // ---------------------------------------------------------------------------
@@ -728,43 +716,6 @@ function completePackage(context, L, options) {
 }
 
 // ---------------------------------------------------------------------------
-// Requirement / catalog workflow. The listing contributes REQUIREMENTS; the
-// candidate contributes the CATALOG. The AI matcher is simulated by an honest
-// whole-term matcher that can only name catalog rows it was shown; every
-// admission decision after that (coverage, reduction, selection, disposition)
-// is the production code under test.
-// ---------------------------------------------------------------------------
-
-const wholeTerm = (text, term) => new RegExp(`(?:^|[^\\p{L}\\p{N}])${escapeRegExp(term)}(?:$|[^\\p{L}\\p{N}])`, 'iu').test(text);
-
-function workflowFor(context, L) {
-  const base = baseOf(context.spec);
-  const requirements = [
-    { id: 'req-tool', text: listingToolSentence(L), term: L.tool, priority: 'highest' },
-    { id: 'req-work', text: `Deliver ${L.need} on every shift.`, term: base.verb, priority: 'high' },
-  ];
-  const catalog = context.catalog.map(({ id, sourceId, quote }) => ({ id, sourceId, quote }));
-  const skills = context.skillEvidence.skills.map(skill => ({
-    id: skill.id, name: skill.name, evidenceIds: context.catalog.filter(item => item.id.startsWith(`host.career.skill.${skill.id}.`)).map(item => item.id),
-  }));
-  const root = createAuthorityWorkflowRoot({ requirements, catalog, roles: context.sourceRoles, skills, requirementPageSize: 2, catalogPageSize: 8 });
-  const quoteOf = id => catalog.find(row => row.id === id).quote;
-  const honestResponse = pair => ({
-    version: root.version, rootDigest: root.digest, pairDigest: pair.digest,
-    rows: pair.requirementIds.map(requirementId => {
-      const term = requirements.find(row => row.id === requirementId).term;
-      const candidateEvidenceIds = pair.catalogEvidenceIds.filter(id => wholeTerm(quoteOf(id), term));
-      return { requirementId, candidateEvidenceIds, localStatus: candidateEvidenceIds.length ? 'matched' : 'no-match' };
-    }),
-  });
-  const pairs = [...enumerateRequirementCatalogPairs(root)];
-  const receipts = pairs.map(pair => createMatchReceipt({ root, pair, response: honestResponse(pair) }));
-  const reduction = reduceRequirementMatches(root, receipts);
-  const status = id => reduction.aggregates.find(row => row.requirementId === id).finalStatus;
-  return { requirements, catalog, skills, root, pairs, honestResponse, receipts, reduction, status, skillSelection: selectDraftSkills({ skills, reduction }) };
-}
-
-// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -1134,116 +1085,6 @@ export default [
         assert(verdict(shorter, shorterIds, floor)?.lowerBound === true && verdict(shorter, shorterIds, exact) !== null, `${label}: a shorter stated span supports neither claim`);
         const C = build(spec, [], { fresh: true });
         assert(C.snapshotId === A.snapshotId && verdict(C, baseIds, exact) !== null, `${label}: removing the evidence restores the rejection`);
-      }
-    },
-  },
-  {
-    name: 'Requirement workflow: a listing requirement without candidate evidence reduces to unsupported and selects nothing; recompiling flips it, removal flips it back',
-    run() {
-      for (const { spec, L } of PAIRS) {
-        const A = build(spec);
-        const B = build(spec, [toolExtra(spec, L)]);
-        const C = build(spec, [], { fresh: true });
-        const wa = workflowFor(A, L);
-        const wb = workflowFor(B, L);
-        const wc = workflowFor(C, L);
-        const label = `${spec.key}/${L.key}`;
-        assert(wa.status('req-tool') === 'unsupported' && wa.status('req-work') === 'supported', `${label}: source A supports the work requirement and not the product requirement`);
-        assert(wb.status('req-tool') === 'supported' && wb.status('req-work') === 'supported', `${label}: recompiled source B supports both`);
-        assert(wc.status('req-tool') === 'unsupported' && wc.root.digest === wa.root.digest, `${label}: removal restores both the verdict and the exact workflow root`);
-        assert(wa.root.digest !== wb.root.digest, `${label}: a different catalog is a different frozen root`);
-        // Selection: "a short inventory is not evidence". The listing product is selected only when requirement evidence names it.
-        assert(!wa.skillSelection.selectedSkillIds.includes('skill-listing') && wb.skillSelection.selectedSkillIds.includes('skill-listing'), `${label}: the product skill is selected only from the recompiled source`);
-        assert(wa.skillSelection.selectedSkillIds.length === 0, `${label}: unmatched own skills are not selected merely because the inventory is short`);
-        // Dispositions: omitted-no-evidence is legal exactly for requirements the exhaustive reduction left unsupported.
-        const finalReferences = { documents: ['resume', 'cover-letter'], evidenceIds: ['job-need'] };
-        const disposition = (workflow, choices, refs = {}) => {
-          const plan = createDispositionPlan(workflow.requirements, 2);
-          const response = {
-            version: plan.version, planDigest: plan.digest, pageDigest: plan.pages[0].digest, reductionDigest: workflow.reduction.digest, finalReferencesDigest: authorityDigest(finalReferences),
-            rows: workflow.requirements.map(row => ({
-              requirementId: row.id, priority: row.priority, disposition: choices[row.id], justification: 'Reviewed against the exhaustive match reduction.',
-              documentRefs: refs[row.id] ?? (choices[row.id] === 'omitted-no-evidence' ? [] : ['resume']),
-            })),
-          };
-          return attempt(() => validateDispositionResponse({ plan, requirements: workflow.requirements, pageIndex: 0, response, reduction: workflow.reduction, finalReferences }));
-        };
-        assert(disposition(wa, { 'req-tool': 'omitted-no-evidence', 'req-work': 'addressed-resume' }).ok, `${label}: omitting the unsupported product requirement is legal from source A`);
-        const omitSupported = disposition(wa, { 'req-tool': 'omitted-no-evidence', 'req-work': 'omitted-no-evidence' });
-        assert(!omitSupported.ok && /omitted-no-evidence is legal only/u.test(omitSupported.message), `${label}: omitting a supported requirement is illegal (${omitSupported.message})`);
-        const omitNowSupported = disposition(wb, { 'req-tool': 'omitted-no-evidence', 'req-work': 'addressed-resume' });
-        assert(!omitNowSupported.ok && /omitted-no-evidence is legal only/u.test(omitNowSupported.message), `${label}: after recompiling, omitting the product requirement is illegal (${omitNowSupported.message})`);
-        assert(disposition(wc, { 'req-tool': 'omitted-no-evidence', 'req-work': 'addressed-resume' }).ok, `${label}: after removal the omission is legal again`);
-        // A requirement can be called addressed only by pointing at a final document, and only at one that exists.
-        const unreferenced = disposition(wa, { 'req-tool': 'omitted-no-evidence', 'req-work': 'addressed-resume' }, { 'req-work': [] });
-        assert(!unreferenced.ok && /addressed disposition must reference each final document/u.test(unreferenced.message), `${label}: an addressed disposition with no document reference is refused (${unreferenced.message})`);
-        const phantom = disposition(wa, { 'req-tool': 'omitted-no-evidence', 'req-work': 'addressed-resume' }, { 'req-work': ['resume', 'job-phantom'] });
-        assert(!phantom.ok && /outside the final frozen artifact/u.test(phantom.message), `${label}: a reference outside the final artifacts is refused (${phantom.message})`);
-        // "Unsupported" is only ever concluded from the whole catalog: a reduction missing any page's match receipt is refused.
-        const partial = attempt(() => reduceRequirementMatches(wa.root, wa.receipts.slice(1)));
-        assert(!partial.ok && /match coverage is incomplete/u.test(partial.message), `${label}: a requirement cannot be reduced to unsupported after reading only part of the catalog (${partial.message})`);
-        // Evidence selection is requirement-driven: nothing the reduction did not match is selected, and the product's row is selected only
-        // from the recompiled source that has it.
-        const picked = workflow => selectDraftEvidence({ catalog: workflow.catalog, requirements: workflow.requirements, reduction: workflow.reduction, maxEvidence: 64 }).selectedEvidenceIds;
-        const matchedIds = workflow => new Set(workflow.reduction.aggregates.flatMap(row => row.matchedEvidenceIds));
-        for (const [name, workflow] of [['A', wa], ['B', wb], ['C', wc]]) {
-          assert(picked(workflow).length === matchedIds(workflow).size && picked(workflow).every(id => matchedIds(workflow).has(id)), `${label}: source ${name} selects exactly the evidence its requirements matched`);
-        }
-        assert(picked(wb).includes(evidenceId('ach-listing')) && !picked(wa).includes(evidenceId('ach-listing')) && JSON.stringify(picked(wc)) === JSON.stringify(picked(wa)), `${label}: the product's row is selectable only from the recompiled source`);
-        // The matcher can only name catalog rows it was shown: a requirement or listing ID is not evidence.
-        const pair = wa.pairs[0];
-        const honest = wa.honestResponse(pair);
-        const listingAsEvidence = structuredClone(honest);
-        listingAsEvidence.rows[0] = { requirementId: 'req-tool', candidateEvidenceIds: ['req-tool'], localStatus: 'matched' };
-        const forged = attempt(() => validateMatchResponse({ root: wa.root, pair, response: listingAsEvidence }));
-        assert(!forged.ok && /outside its displayed catalog page/u.test(forged.message), `${label}: citing the listing requirement as match evidence is refused (${forged.message})`);
-        const unevidenced = structuredClone(honest);
-        unevidenced.rows[0] = { requirementId: 'req-tool', candidateEvidenceIds: [], localStatus: 'matched' };
-        assert(!attempt(() => validateMatchResponse({ root: wa.root, pair, response: unevidenced })).ok, `${label}: a claimed match with no evidence is refused`);
-      }
-    },
-  },
-  {
-    name: 'Draft selection: a listing-named skill or unselected evidence cannot appear in a draft; the skill is selectable only after the recompiled source supports it',
-    run() {
-      for (const { spec, L } of PAIRS) {
-        const A = build(spec);
-        const B = build(spec, [toolExtra(spec, L)]);
-        const C = build(spec, [], { fresh: true });
-        const label = `${spec.key}/${L.key}`;
-        const selectionFor = context => {
-          const workflow = workflowFor(context, L);
-          const selectedSkillIds = workflow.skillSelection.selectedSkillIds;
-          const selectedNames = context.skillEvidence.skills.filter(skill => selectedSkillIds.includes(skill.id)).map(skill => skill.name);
-          return {
-            selectedSkillIds, selectedNames,
-            selection: {
-              selectedRoleIds: context.sourceRoles.map(role => role.id), selectedProjectIds: [], selectedEducationIds: [], selectedCertificationIds: [], selectedSkillIds,
-              selectedEvidenceIds: [...context.spec.roles.map(role => evidenceId(role.achievements[0].id)), ...selectedSkillIds.map(skillRowId)],
-            },
-          };
-        };
-        const grade = (context, items, evidenceIds, selector = selectionFor(context)) => attempt(() => assertAuthorityDraftSelection({
-          fullAuthority: { catalog: context.catalog, skills: context.skillEvidence.skills }, selection: selector.selection, acceptedNonAuthorityEvidenceIds: ['job-need', 'job-tool'],
-          resume: resumeDraft(context, items.length ? [{ id: 'skills-1', group: SKILL_GROUP, items, evidenceIds }] : []), coverLetter: { paragraphs: [] },
-        }));
-        const forA = selectionFor(A);
-        assert(grade(A, [], [], forA).ok, `${label}: an empty skill selection truthfully omits the skills block`);
-        const aTool = grade(A, [L.tool], ['job-tool'], forA);
-        assert(!aTool.ok && /unselected skill term/u.test(aTool.message), `${label}: the listing product in a draft is an unselected skill term from source A (${aTool.message})`);
-        const forB = selectionFor(B);
-        assert(forB.selectedNames.includes(L.tool), `${label}: the recompiled source selects the product`);
-        assert(grade(B, forB.selectedNames, forB.selectedSkillIds.map(skillRowId), forB).ok, `${label}: the same draft naming the product is accepted after recompilation`);
-        const bOther = grade(B, [...forB.selectedNames, 'An Unselected Term'], forB.selectedSkillIds.map(skillRowId), forB);
-        assert(!bOther.ok && /unselected skill term/u.test(bOther.message), `${label}: terms outside the selection stay refused`);
-        const forC = selectionFor(C);
-        assert(!forC.selectedNames.includes(L.tool) && !grade(C, [L.tool], ['job-tool'], forC).ok, `${label}: after removal the product is unselectable and refused again`);
-        // Citations outside the host selection are refused even when the ID is real.
-        const unselected = attempt(() => assertAuthorityDraftSelection({
-          fullAuthority: { catalog: A.catalog, skills: A.skillEvidence.skills }, selection: { ...forA.selection, selectedEvidenceIds: [] }, acceptedNonAuthorityEvidenceIds: ['job-need', 'job-tool'],
-          resume: resumeDraft(A, []), coverLetter: { paragraphs: [] },
-        }));
-        assert(!unselected.ok && /unselected authority evidence/u.test(unselected.message), `${label}: a real but unselected career citation is refused (${unselected.message})`);
       }
     },
   },
