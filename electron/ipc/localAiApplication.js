@@ -48,6 +48,7 @@ import { WRITE_VERIFY_PROTOCOL, WRITE_VERIFY_STAGES, WRITE_VERIFY_MAX_CORRECTION
 import { applicationProtocolSetting } from './applicationProtocolSetting.js';
 import { targetIdentityNameLicensed, validateSharedApplicationContent } from './applicationTruthGates.js';
 import { v2RejectionEvidencePaths } from './applicationV2RejectionEvidence.js';
+import { archiveV2Content } from './applicationV2EvidenceArchive.js';
 import { splitWriteVerifyWriterResponse, v2WriterShortlistEvidencePaths } from './applicationV2WriterShortlist.js';
 import { tryGetStore } from './settings.js';
 import { assertApplicationV2PromptLimit, assertApplicationV2ReplyLimit } from './applicationV2Limits.js';
@@ -4760,6 +4761,11 @@ async function writeVerifyHandoffRecord({ jobId, input, state, corrections = [] 
   }
   Object.defineProperty(record, 'freshContextKey', { value: writeVerifyStageKey(state.writeVerify, state.stage, jobId), enumerable: false });
   Object.defineProperty(record, 'freshContextRequired', { value: true, enumerable: false });
+  await archiveV2Content({ jobDir: path.join(input.canvasRoot, '.local-ai', 'jobs', jobId), jobId,
+    stage: state.stage, revision: state.revision, kind: 'prompt',
+    candidateId: state.stage === 'pick' ? null : ['fact-check', 'fact-correction', 'fact-recheck'].includes(state.stage)
+      ? state.writeVerify.ranking[state.writeVerify.factIndex] : state.writeVerify.candidates[state.writeVerify.ordinal]?.id || null,
+    content: { prompt, ...(record.pageImages ? { pageImages: record.pageImages } : {}) } });
   return record;
 }
 
@@ -7393,6 +7399,8 @@ async function submitWriteVerifyHandoff({ jobId, dir, manifest, input, frozen, s
     ? work.ranking[work.factIndex] : outgoingStage === 'pick' ? null : candidate?.id;
   const rawText = typeof response === 'string' ? response : '';
   assertApplicationV2ReplyLimit(rawText);
+  await archiveV2Content({ jobDir: dir, jobId, stage: outgoingStage, revision: state.revision,
+    kind: 'reply', candidateId: outgoingCandidateId || null, content: { response: rawText } });
   const envelopeErrors = parsed => {
     const expected = { protocol: PASTE_APPLICATION_PROTOCOL_VERSION, jobId, stage: outgoingStage,
       handoffCode: state.handoffCode, baseHashes: state.baseHashes };
@@ -7439,6 +7447,12 @@ async function submitWriteVerifyHandoff({ jobId, dir, manifest, input, frozen, s
           const winner = work.candidates.find(row => row.id === work.ranking[work.factIndex]);
           winner.structured = gate.structured;
         } else { candidate.structured = gate.structured; candidate.status = 'accepted'; }
+        await archiveV2Content({ jobDir: dir, jobId, stage: outgoingStage, revision: state.revision,
+          kind: 'candidate-final', candidateId: outgoingStage === 'fact-correction'
+            ? work.ranking[work.factIndex] : candidate.id,
+          content: { plainText: outgoingStage === 'fact-correction'
+            ? work.candidates.find(row => row.id === work.ranking[work.factIndex])?.plainText : candidate.plainText,
+          structured: gate.structured } });
       }
     }
   }

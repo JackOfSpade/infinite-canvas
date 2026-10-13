@@ -421,6 +421,19 @@ export function archiveRunRestoreResidue({ canvas, jobId, evidenceRoot, baseline
     if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error(`Restore archive is not a regular directory: ${directory}`);
     for (const name of fs.readdirSync(directory)) archive(path.join(directory, name), path.join('.local-ai', 'jobs', jobId, folder, name));
   }
+  const v2Archive = path.join(root, '.local-ai', 'evidence-archive', jobId);
+  const v2ArchiveStat = lstatIfPresent(v2Archive);
+  if (v2ArchiveStat) {
+    if (!v2ArchiveStat.isDirectory() || v2ArchiveStat.isSymbolicLink()) throw new Error('Application v2 evidence archive is not a regular directory.');
+    for (const name of fs.readdirSync(v2Archive)) {
+      if (!/^[0-9]{5}-[a-z-]+-(?:prompt|reply|candidate-final)-[a-f0-9]{64}\.json$/u.test(name)) {
+        throw new Error(`Unexpected application v2 evidence archive entry: ${name}`);
+      }
+      archive(path.join(v2Archive, name), path.join('.local-ai', 'evidence-archive', jobId, name));
+    }
+    fs.rmdirSync(v2Archive);
+    if (fs.readdirSync(path.dirname(v2Archive)).length === 0) fs.rmdirSync(path.dirname(v2Archive));
+  }
   walk(path.join(root, '.local-ai'), '.local-ai', baseline?.localAi?.entries || []);
   walk(path.join(root, 'Applied Jobs'), 'Applied Jobs', baseline?.appliedJobs?.entries || []);
   archive(path.join(root, '.DS_Store'), '.DS_Store');

@@ -27,6 +27,7 @@ import { assessStrengthFamily } from '../../electron/ipc/applicationClaimGroundi
 import { MAX_REQUIREMENTS_REEPOCHS, requirementsAdjudicationBindings, requirementsBindingErrors, requirementsAuditCapTerminal } from '../../electron/ipc/applicationRequirementsAuditPolicy.js';
 import { applicationProtocolSetting } from '../../electron/ipc/applicationProtocolSetting.js';
 import { v2RejectionEvidencePaths } from '../../electron/ipc/applicationV2RejectionEvidence.js';
+import { archiveV2Content, v2EvidenceArchiveDirectory, V2_EVIDENCE_MAX_BYTES } from '../../electron/ipc/applicationV2EvidenceArchive.js';
 import { splitWriteVerifyWriterResponse, v2WriterShortlistEvidencePaths } from '../../electron/ipc/applicationV2WriterShortlist.js';
 
 const domains = [
@@ -35,6 +36,45 @@ const domains = [
 const JOB_ID = '11111111-1111-4111-8111-111111111111';
 
 export default [
+  {
+    name: 'v2 archives each handoff and accepted candidate outside the removable job with a hard cap',
+    async run() {
+      const hostSource = fs.readFileSync(new URL('../../electron/ipc/localAiApplication.js', import.meta.url), 'utf8');
+      assert.match(hostSource, /kind: 'prompt'[\s\S]*?return record;/u);
+      assert.match(hostSource, /assertApplicationV2ReplyLimit\(rawText\);\s*await archiveV2Content\(/u);
+      assert.match(hostSource, /kind: 'candidate-final'[\s\S]*?structured: gate\.structured/u);
+      for (const [domain] of domains) {
+        const root = fs.mkdtempSync(path.join(os.tmpdir(), `v2-content-archive-${domain}-`));
+        const jobDir = path.join(root, '.local-ai', 'jobs', JOB_ID);
+        try {
+          const prompt = await archiveV2Content({ jobDir, jobId: JOB_ID, stage: 'write', revision: 1,
+            kind: 'prompt', candidateId: 'candidate-1', content: { prompt: `${domain} prompt` } });
+          const reply = await archiveV2Content({ jobDir, jobId: JOB_ID, stage: 'write', revision: 1,
+            kind: 'reply', candidateId: 'candidate-1', content: { response: `${domain} reply` } });
+          const final = await archiveV2Content({ jobDir, jobId: JOB_ID, stage: 'convert', revision: 2,
+            kind: 'candidate-final', candidateId: 'candidate-1', content: { plainText: domain, structured: { resume: {}, coverLetter: {} } } });
+          const archive = v2EvidenceArchiveDirectory(jobDir, JOB_ID);
+          assert.ok([prompt, reply, final].every(file => file.startsWith(`${archive}${path.sep}`)));
+          assert.equal((await archiveV2Content({ jobDir, jobId: JOB_ID, stage: 'write', revision: 1,
+            kind: 'prompt', candidateId: 'candidate-1', content: { prompt: `${domain} prompt` } })), prompt);
+          fs.rmSync(jobDir, { recursive: true, force: true });
+          assert.equal(JSON.parse(fs.readFileSync(final, 'utf8')).content.plainText, domain);
+          await assert.rejects(archiveV2Content({ jobDir, jobId: JOB_ID, stage: 'convert', revision: 3,
+            kind: 'reply', candidateId: 'candidate-1', content: { response: 'x'.repeat(V2_EVIDENCE_MAX_BYTES) } }), /cap/);
+          const outside = path.join(root, 'outside');
+          fs.mkdirSync(outside);
+          fs.rmSync(archive, { recursive: true });
+          fs.symlinkSync(outside, archive);
+          await assert.rejects(archiveV2Content({ jobDir, jobId: JOB_ID, stage: 'pick', revision: 4,
+            kind: 'prompt', content: { prompt: 'judge' } }), /regular directory/);
+          // Sabotage proof: writing only under jobs would erase the accepted document on save.
+          const sabotaged = path.join(jobDir, 'evidence.json');
+          assert.equal(fs.existsSync(sabotaged), false);
+          assert.equal(fs.readdirSync(outside).length, 0);
+        } finally { fs.rmSync(root, { recursive: true, force: true }); }
+      }
+    },
+  },
   {
     name: 'v2 writer shortlist is a working step retained outside conversion across three synthetic careers',
     run() {

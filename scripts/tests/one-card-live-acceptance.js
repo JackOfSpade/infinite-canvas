@@ -24,21 +24,26 @@ export default [
         const job = path.join(root, '.local-ai', 'jobs', jobId);
         const rejected = path.join(job, 'rejected-handoffs');
         const shortlists = path.join(job, 'writer-shortlists');
+        const v2Archive = path.join(root, '.local-ai', 'evidence-archive', jobId);
         const bundle = path.join(root, 'Applied Jobs', 'test-bundle');
         fs.mkdirSync(rejected, { recursive: true });
         fs.mkdirSync(shortlists);
+        fs.mkdirSync(v2Archive, { recursive: true });
         fs.mkdirSync(bundle, { recursive: true });
         fs.writeFileSync(canvas, '{}');
         fs.writeFileSync(path.join(rejected, 'revision-1.json'), 'rejected');
         fs.writeFileSync(path.join(shortlists, 'revision-2.json'), 'shortlist');
+        const archiveName = `00003-convert-candidate-final-${'a'.repeat(64)}.json`;
+        fs.writeFileSync(path.join(v2Archive, archiveName), 'accepted candidate');
         fs.writeFileSync(path.join(job, 'manifest.json'), 'untouched');
         fs.writeFileSync(path.join(bundle, '.DS_Store'), 'finder');
         fs.writeFileSync(path.join(root, '.DS_Store'), 'root finder');
         const evidenceRoot = path.join(root, 'evidence', 'restore-residue');
         const input = { canvas, jobId, evidenceRoot, baseline: { localAi: { entries: [] }, appliedJobs: { entries: [] } } };
         const saved = archiveRunRestoreResidue(input);
-        assert(saved.length === 4 && saved.every(row => fs.existsSync(path.join(evidenceRoot, row.path))),
-          'restore must preserve both diagnostic archives and both Finder files');
+        assert(saved.length === 5 && saved.every(row => fs.existsSync(path.join(evidenceRoot, row.path)))
+          && fs.readFileSync(path.join(evidenceRoot, '.local-ai', 'evidence-archive', jobId, archiveName), 'utf8') === 'accepted candidate',
+        'restore must preserve accepted candidates, diagnostic archives and Finder files');
         assert(fs.readFileSync(path.join(job, 'manifest.json'), 'utf8') === 'untouched',
           'restore residue cleanup must not alter ordinary job content');
         assert(archiveRunRestoreResidue(input).length === 0, 'restore residue cleanup must be idempotent');

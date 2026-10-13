@@ -1,6 +1,6 @@
 # Application acceptance — write then verify v2
 
-The acceptance harness creates a disposable one-card canvas and queues one real v2 application against an already approved career snapshot. It does not change the user's source canvas or snapshot. Its run data, generated files, handoff archives and panel reviews stay under ignored `.test-artifacts/blackbox-run/` paths. The packaged app, production validators, renderer, PDFs and bridge are exercised for live acceptance.
+The acceptance harness creates a disposable one-card canvas and queues one real v2 application against an already approved career snapshot. It does not change the user's source canvas or snapshot. Its run data, generated files, handoff archives and panel reviews stay under ignored `.test-artifacts/blackbox-run/` paths. The packaged app, production validators, renderer, PDFs and bridge are exercised for live acceptance. Every v2 prompt and reply, every accepted candidate's final structured documents and writer text, correction versions, and judge prompt and ranking are retained in a bounded, content-only `.local-ai/evidence-archive/<jobId>` directory outside the removable job folder. Restore moves that archive into the run's ignored `evidence/restore-residue` folder before baseline verification.
 
 ## Protocol measured
 
@@ -19,7 +19,7 @@ node --import ./scripts/test-stubs/register.mjs .test-artifacts/blackbox-run/one
 node --import ./scripts/test-stubs/register.mjs .test-artifacts/blackbox-run/one-card-live-acceptance.mjs launch --run-id <unique-id> --execute
 ```
 
-Use the bridge panel's **Copy worker starter** to attach a worker. Poll the run passively; inspect the manifest, generation log, and bridge status without submitting or altering a handoff. Close only worker tabs created for the run. Do not run a second live application before the first is terminal and restored.
+Use the bridge panel's **Copy worker starter** to attach a worker. Before pasting it into each new Chrome worker chat, set and verify GPT-6 (or the latest available model) with Extra High thinking in the composer. Never use Pro or a lower effort; stop if Extra High is unavailable or does not hold. Record the observed model and effort for each chat in the run's ignored evidence. Poll the run passively; inspect the manifest, generation log, and bridge status without submitting or altering a handoff. Close only worker tabs created for the run. Do not run a second live application before the first is terminal and restored.
 
 ## Inspect, score, restore
 
