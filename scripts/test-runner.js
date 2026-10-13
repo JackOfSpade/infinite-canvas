@@ -143,6 +143,7 @@ import gapfix_v16c_verb_fidelity from './tests/gapfix-v16c-verb-fidelity.js';
 import gapfix_v17_resume_dispositions from './tests/gapfix-v17-resume-dispositions.js';
 import gapfix_v17_letter_dispositions from './tests/gapfix-v17-letter-dispositions.js';
 import gapfix_v17_truth_recall from './tests/gapfix-v17-truth-recall.js';
+import expense_outcome_contractions from './tests/expense-outcome-contractions.js';
 import application_refinement from './tests/application-refinement.js';
 import application_blind_review_panel from './tests/application-blind-review-panel.js';
 import application_refinement_flow from './tests/application-refinement-flow.js';
@@ -296,6 +297,7 @@ const testGroups = [
   ['gapfix-v17-resume-dispositions.js', gapfix_v17_resume_dispositions],
   ['gapfix-v17-letter-dispositions.js', gapfix_v17_letter_dispositions],
   ['gapfix-v17-truth-recall.js', gapfix_v17_truth_recall],
+  ['expense-outcome-contractions.js', expense_outcome_contractions],
   ['application-refinement.js', application_refinement],
   ['application-blind-review-panel.js', application_blind_review_panel],
   ['application-refinement-flow.js', application_refinement_flow],

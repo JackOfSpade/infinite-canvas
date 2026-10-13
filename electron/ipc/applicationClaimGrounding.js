@@ -305,8 +305,17 @@ const NAME_ALLOWANCE = new Set([
 const CURRENCY_NOUNS = new Set(['dollar', 'dollars', 'euro', 'euros', 'pound', 'pounds', 'yen', 'yuan', 'rupee', 'rupees', 'peso', 'pesos', 'franc', 'francs', 'krona', 'kronor']);
 const NAME_CONNECTORS = new Set(['of', 'and', 'for', 'the', 'de', 'la', '&']);
 const NAME_ALLOWED_PATTERNS = [/^Q[1-4]$/u, /^H[12]$/u, /^FY\d{2,4}$/u];
+// These complete English words are grammatical contractions, never entity
+// names. Keep this closed: stripping an apostrophe suffix from arbitrary words
+// would also exempt real people, products and credentials.
+const NAME_CONTRACTIONS = new Set([
+  "i've", "i'm", "i'd", "i'll", "we're", "we've", "we'd", "we'll",
+  "it's", "don't", "doesn't", "didn't", "can't", "won't", "isn't", "aren't",
+  "they're", "they've", "you're", "you've", "that's", "there's",
+]);
 
 function isNamedPiece(piece, clauseInitial) {
+  if (NAME_CONTRACTIONS.has(String(piece).toLowerCase().replace(APOSTROPHES, "'"))) return false;
   if (!/\p{L}/u.test(piece)) return false;
   const letters = piece.replace(/[^\p{L}]/gu, '');
   const upper = (piece.match(/\p{Lu}/gu) || []).length;

@@ -37,6 +37,7 @@ import { MAX_SOURCE_GROUNDING_QUOTE_CHARS as SOURCE_GROUNDING_QUOTE_CHARS } from
 import { canonicalizeHostOwnedResumeFields } from './hostOwnedResumeFields.js';
 import { expectedExactlyClause } from './hostOwnedText.js';
 import { CLAIM_GROUNDING_RULE, SPELLED_NUMBER_PATTERN, assessBulkQuantity, assessComparativeMagnitude, assessScaleWord, assessStrengthFamily, claimGroundingFindings, claimedIntervals, clauseIndexesContaining, describeClaimFinding, evidenceBody, groundingClauses, quoteVerbHints, relatedQuoteIndexes, spelledNumberValue, statedBesideSameWords, statedIntervals } from './applicationClaimGrounding.js';
+import { supportsExpensePurpose } from './expenseOutcomeEquivalence.js';
 import { createAuthorityLedgerStore, openAuthorityLedgerStore } from './applicationAuthorityLedgerStore.js';
 import { APPLICATION_AUTHORITY_MATCH_PAGE_EVIDENCE, APPLICATION_AUTHORITY_WORKFLOW_VERSION, authorityDigest, createStoreAuthorityWorkflowRoot, createStoreDispositionReceipt, createStoreMatchReceipt, createStoreReductionPageFromReceiptAt, storeAuthorityRequirementsStream, storeRequirementCatalogPairDescriptor } from './applicationAuthorityWorkflow.js';
 import { APPLICATION_BLIND_REVIEW_PROMPT_MODE, applicationBlindReviewPlanHasLetterGrounding, applicationBlindReviewValidatorStamp, isApplicationBlindReviewValidatorStamp, isCurrentApplicationBlindReviewPromptMode, applicationBlindReviewTrackAt, APPLICATION_BLIND_REVIEW_FACT_SCOPE_MODE, APPLICATION_BLIND_REVIEW_PANEL_FACT_SCOPE_MODE, APPLICATION_BLIND_REVIEW_PANEL_MAX_PROMPT_BYTES, APPLICATION_BLIND_REVIEW_LEGACY_FACT_SCOPE_MODE, APPLICATION_BLIND_REVIEW_MAX_CONTEXT_BYTES, APPLICATION_BLIND_REVIEW_MAX_PROMPT_BYTES, APPLICATION_BLIND_REVIEW_VERSION, acceptApplicationBlindReviewCursorResponse, applicationBlindReviewDocumentPageIndex, applicationBlindReviewReceiptCursor, applicationBlindReviewScopeAt, applicationBlindReviewScopeCount, applicationBlindReviewWorkAt, buildApplicationBlindReviewPrompt, createApplicationBlindReviewPlan, createApplicationBlindReviewSourceAccessor, validateApplicationBlindReviewStoredReceipt } from './applicationBlindReview.js';
@@ -16683,7 +16684,7 @@ const SOURCE_GROUNDING_QUALIFIER_RULES = Object.freeze([
   { label: 'high-volume status', inBrief: false, assess: (text, bodies) => assessScaleWord('high-volume', text, bodies), accepts: 'high-volume, high-throughput, high-traffic, large/heavy volume(s)' },
   { label: 'geographic scope', inBrief: false, assess: (text, bodies) => assessScaleWord('geographic', text, bodies), accepts: 'global, worldwide, nationwide, <department/site/state/...>-wide, or entire/whole/across the <unit>' },
   { label: 'improvement outcome', inflects: true, claim: /\bimprov(?:e|ed|es|ing|ement|ements)\b/iu, source: /\bimprov(?:e|ed|es|ing|ement|ements)\b/iu, accepts: 'improve(d/s/ing), improvement(s)' },
-  { label: 'reduction outcome', inflects: true, claim: /\b(?:reduc(?:e|ed|es|ing|tion|tions)|lower(?:ed|ing)?|cut)\b/iu, source: /\b(?:reduc(?:e|ed|es|ing|tion|tions)|lower(?:s|ed|ing)?|cut|cuts)\b/iu, accepts: 'reduce(d/s/ing), reduction(s), lower(s/ed/ing), cut(s/ting)' },
+  { label: 'reduction outcome', inflects: true, claim: /\b(?:reduc(?:e|ed|es|ing|tion|tions)|lower(?:ed|ing)?|cut)\b/iu, source: /\b(?:reduc(?:e|ed|es|ing|tion|tions)|lower(?:s|ed|ing)?|cut|cuts)\b/iu, assess: (text, bodies) => assessReductionOutcome(text, bodies), accepts: 'reduce(d/s/ing), reduction(s), lower(s/ed/ing), cut(s/ting); or same-expense offloading intent for purpose phrasing only' },
   { label: 'increase outcome', inflects: true, claim: /\b(?:increas(?:e|ed|es|ing)|grew|raised)\b/iu, source: /\b(?:increas(?:e|ed|es|ing)|grew|growth|raised|raises)\b/iu, accepts: 'increase(d/s/ing), grew, growth, raised, raises, raising' },
   // No inflects: "saving parsed work to disk" is not a savings outcome (see above).
   { label: 'savings outcome', claim: /\b(?:saved|savings)\b/iu, source: /\b(?:saves|saved|savings)\b/iu, accepts: 'saves, saved, savings' },
@@ -16732,6 +16733,30 @@ function qualifierSourcePattern(rule, claimed) {
   const forms = claimWordInflections(claimed);
   if (!forms.length) return rule.source;
   return new RegExp(`${rule.source.source}|(?<![\\p{L}\\p{N}-])(?:${forms.join('|')})(?![\\p{L}\\p{N}]|-\\p{L})`, rule.source.flags);
+}
+
+function assessReductionOutcome(text, bodies) {
+  const rule = SOURCE_GROUNDING_QUALIFIER_RULES.find(entry => entry.label === 'reduction outcome');
+  const claim = String(text ?? '');
+  const matches = [...claim.matchAll(new RegExp(rule.claim.source, 'giu'))];
+  if (!matches.length) return null;
+  const quoteBodies = Array.isArray(bodies) ? bodies : [];
+  for (const found of matches) {
+    const purpose = /\bto\s*$/iu.test(claim.slice(Math.max(0, found.index - 8), found.index))
+      && /^(?:reduce|lower)$/iu.test(found[0]);
+    const accomplished = /^(?:reduced|lowered|cut)$/iu.test(found[0]) && !purpose;
+    const literal = qualifierSourcePattern(rule, found[0]);
+    if (quoteBodies.some(quote => {
+      if (!literal.test(quote)) return false;
+      if (!accomplished) return true;
+      // A proposed reduction is not evidence that the reduction happened.
+      return /\b(?:reduced|reducing|lowered|lowering|cut|cutting)\b/iu.test(quote)
+        && !/\b(?:to|would|could|might|may|planned|intended|aimed)\s+(?:reduce|reducing|lower|lowering|cut|cutting)\b/iu.test(quote);
+    })) continue;
+    if (matches.length === 1 && purpose && supportsExpensePurpose(claim, quoteBodies)) continue;
+    return { match: found[0] };
+  }
+  return null;
 }
 
 // The résumé stage checks a bullet's CITATION; assertSupportedSourceQualifiers
@@ -17523,7 +17548,9 @@ function assertSupportedSourceQualifiers(finalText, sourceQuotes, unit, groundin
   // the writer guessing which wordings count and cost a revision round.
   throw new Error(
     `${unit} uses ${unsupportedQualifierLead(first.rule.label)}${first.match}\u201d); its bound career-data quotes must state that qualifier `
-    + `in one of these forms: ${first.rule.accepts}. Matching is on the literal word form, not on meaning, so either quote a passage `
+    + `in one of these forms: ${first.rule.accepts}. ${first.rule.label === 'reduction outcome'
+      ? 'A cost or expense purpose may also cite the same actor’s intent to move that same expense away; a completed reduction still needs a stated result. Otherwise, quote a passage '
+      : 'Matching is on the literal word form, not on meaning, so either quote a passage '}`
     + 'that uses one of them or drop the qualifier from the bullet.'
     + (unsupported.some(entry => entry.rule.strength)
       ? ' An ownership or authorship word must be said of the candidate (not of a person the quote describes), at no lower a level than claimed (co-led, helped lead and contributed to support neither led nor built), in a quote about the same work.'
