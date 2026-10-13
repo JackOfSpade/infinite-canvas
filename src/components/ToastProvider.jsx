@@ -67,7 +67,7 @@ export function ToastProvider({ children }) {
       {children}
       
       {/* Toast container */}
-      <div className="fixed top-4 right-4 z-[10001] flex flex-col gap-2 pointer-events-none">
+      <div role="region" aria-label="Notifications" aria-live="polite" className="fixed top-4 right-4 z-[10001] flex flex-col gap-2 pointer-events-none">
         {toasts.map((toast) => (
           <ToastCard key={toast.id} toast={toast} onRemove={removeToast} />
         ))}
@@ -109,7 +109,9 @@ function ToastCard({ toast, onRemove }) {
           </button>
         )}
       </div>
-      <button 
+      <button
+        type="button"
+        aria-label={`Dismiss ${toast.title || 'notification'}`}
         onClick={() => onRemove(toast.id)}
         className="text-white/40 hover:text-white transition-colors p-1 -mr-1 -mt-1"
       >

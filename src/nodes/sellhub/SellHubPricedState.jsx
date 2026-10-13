@@ -3,6 +3,7 @@ import { PhotoStrip } from '../../components/PhotoStrip';
 import { syncUncontrolledTextValue } from '../../utils/uncontrolledTextValue';
 import { Check, Copy, RefreshCw, ChevronDown, ChevronRight, Plus, Activity, Sparkles, TrendingUp, TrendingDown, Minus, ChevronUp, CheckSquare, Square, CopyPlus } from 'lucide-react';
 import { TIMINGS } from '../../utils/timings';
+import { cancelTimeout, replaceTimeout } from '../../utils/latestTimeout';
 import { SELL_PLATFORMS } from '../../utils/constants';
 import { useToast } from '../../components/ToastProvider';
 import { ScrapeWarningsPanel } from '../../components/ScrapeWarningsPanel';
@@ -223,13 +224,16 @@ function PriceDropReminderPlan({ plan, locked, onChange, applyTargetCount = 0, o
 function ExpandableTitle({ title, addToast }) {
   const [expanded, setExpanded] = useState(false);
   const [justCopied, setJustCopied] = useState(false);
+  const copiedTimerRef = useRef(null);
+
+  useEffect(() => () => cancelTimeout(copiedTimerRef), []);
 
   const handleCopy = async (e) => {
     e.stopPropagation();
     try {
       await navigator.clipboard.writeText(title);
       setJustCopied(true);
-      setTimeout(() => setJustCopied(false), TIMINGS.FEEDBACK_MS);
+      replaceTimeout(copiedTimerRef, () => setJustCopied(false), TIMINGS.FEEDBACK_MS);
       addToast?.({ title: 'Title copied', description: title, type: 'success' });
     } catch {
       addToast?.({ title: 'Copy failed', description: 'Clipboard unavailable', type: 'error' });
@@ -238,17 +242,20 @@ function ExpandableTitle({ title, addToast }) {
 
   return (
     <div className="flex items-start gap-1.5">
-      <div
+      <button
+        type="button"
         onClick={() => setExpanded(v => !v)}
         onPointerDown={(e) => e.stopPropagation()}
         title={expanded ? 'Click to collapse' : 'Click to show full title'}
-        className={`nodrag flex-1 text-white/80 text-sm font-semibold cursor-pointer rounded px-1 -mx-1 py-0.5 hover:bg-white/5 transition-colors ${
+        aria-expanded={expanded}
+        className={`nodrag flex-1 min-w-0 text-left text-white/80 text-sm font-semibold cursor-pointer rounded px-1 -mx-1 py-0.5 hover:bg-white/5 transition-colors ${
           expanded ? 'whitespace-normal break-words leading-snug' : 'truncate'
         }`}
       >
         {title}
-      </div>
+      </button>
       <button
+        type="button"
         onClick={handleCopy}
         onPointerDown={(e) => e.stopPropagation()}
         title="Copy title to clipboard"

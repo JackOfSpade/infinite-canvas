@@ -1,5 +1,5 @@
 import React, { useState, useCallback, useRef, useEffect, useContext } from 'react';
-import { useReactFlow } from '@xyflow/react';
+import { useReactFlow, useStoreApi } from '@xyflow/react';
 import { Search, X, ChevronUp, ChevronDown } from 'lucide-react';
 import { CanvasNavigationContext } from '../contexts/CanvasNavigationContext';
 import { getNodeDims } from '../utils/constants';
@@ -22,6 +22,7 @@ export const SearchBar = React.memo(function SearchBar() {
   const [matchCount, setMatchCount] = useState(0);
   const [isExpanded, setIsExpanded] = useState(false);
   const { setCenter, getViewport, getNodes } = useReactFlow();
+  const store = useStoreApi();
   const inputRef = useRef(null);
   const autoDiveTimeoutRef = useRef(null);
   const focusTimeoutRef = useRef(null);
@@ -148,19 +149,31 @@ export const SearchBar = React.memo(function SearchBar() {
   };
 
   useEffect(() => {
-    if (searchQuery.trim() === '') {
-      return;
-    }
+    if (searchQuery.trim() === '') return undefined;
 
-    const timer = setTimeout(() => {
-      setMatchCount(getMatches().length);
-    }, TIMINGS.SEARCH_RECOUNT_DEBOUNCE_MS);
+    let timer = null;
+    const recount = () => setMatchCount(getMatches().length);
+    const scheduleRecount = () => {
+      if (timer !== null) clearTimeout(timer);
+      timer = setTimeout(recount, TIMINGS.SEARCH_RECOUNT_DEBOUNCE_MS);
+    };
+    let previousNodes = store.getState().nodes;
+    scheduleRecount();
+    // getNodes() reads the latest store, but by itself does not subscribe the
+    // search bar. Without this, renaming, adding or deleting nodes leaves the
+    // match badge and navigation arrows stale until the query changes.
+    const unsubscribe = store.subscribe(state => {
+      if (state.nodes === previousNodes) return;
+      previousNodes = state.nodes;
+      scheduleRecount();
+    });
 
     return () => {
-      clearTimeout(timer);
+      unsubscribe();
+      if (timer !== null) clearTimeout(timer);
       cancelTimeout(autoDiveTimeoutRef);
     };
-  }, [searchQuery, getMatches]);
+  }, [searchQuery, getMatches, store]);
 
   return (
     <div

@@ -85,6 +85,7 @@ import handoff_bridge_ui from './tests/handoff-bridge-ui.js';
 import handoff_bridge_render from './tests/handoff-bridge-render.js';
 import handoff_bridge_canvas_orphan from './tests/handoff-bridge-canvas-orphan.js';
 import issue_reporter from './tests/issue-reporter.js';
+import search_bar_render from './tests/search-bar-render.js';
 import network_rolling_scheduler from './tests/network-rolling-scheduler.js';
 import handoff_scheduler from './tests/handoff-scheduler.js';
 import application_slot_queue from './tests/application-slot-queue.js';
@@ -239,6 +240,7 @@ const testGroups = [
   ['handoff-bridge-render.js', handoff_bridge_render],
   ['handoff-bridge-canvas-orphan.js', handoff_bridge_canvas_orphan],
   ['issue-reporter.js', issue_reporter],
+  ['search-bar-render.js', search_bar_render],
   ['network-rolling-scheduler.js', network_rolling_scheduler],
   ['handoff-scheduler.js', handoff_scheduler],
   ['application-slot-queue.js', application_slot_queue],
