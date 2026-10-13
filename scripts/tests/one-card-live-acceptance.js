@@ -6,6 +6,7 @@ import { runCurrentSnapshotResolutionSelfTest } from '../acceptance/currentCaree
 import { deferOwnedBridgeLaneCleanup } from '../acceptance/bridgeLaneCleanup.mjs';
 import { passiveInspectSelfTest, projectSavedJobCardForAcceptanceHarness } from '../../.test-artifacts/blackbox-run/application-acceptance-harness.mjs';
 import {
+  archiveRunRestoreResidue,
   assertFrozenQueuedJobMatchesSavedCard,
   normalizedListingTextForAcceptance,
   rawSavedListingText,
@@ -13,6 +14,48 @@ import {
 import { assert } from './testHelpers.js';
 
 export default [
+  {
+    name: 'one-card restore preserves diagnostic archives and Finder residue before baseline verification',
+    run: () => {
+      const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ic-restore-residue-'));
+      const jobId = '12345678-1234-1234-1234-123456789abc';
+      try {
+        const canvas = path.join(root, 'canvas.json');
+        const job = path.join(root, '.local-ai', 'jobs', jobId);
+        const rejected = path.join(job, 'rejected-handoffs');
+        const shortlists = path.join(job, 'writer-shortlists');
+        const bundle = path.join(root, 'Applied Jobs', 'test-bundle');
+        fs.mkdirSync(rejected, { recursive: true });
+        fs.mkdirSync(shortlists);
+        fs.mkdirSync(bundle, { recursive: true });
+        fs.writeFileSync(canvas, '{}');
+        fs.writeFileSync(path.join(rejected, 'revision-1.json'), 'rejected');
+        fs.writeFileSync(path.join(shortlists, 'revision-2.json'), 'shortlist');
+        fs.writeFileSync(path.join(job, 'manifest.json'), 'untouched');
+        fs.writeFileSync(path.join(bundle, '.DS_Store'), 'finder');
+        fs.writeFileSync(path.join(root, '.DS_Store'), 'root finder');
+        const evidenceRoot = path.join(root, 'evidence', 'restore-residue');
+        const input = { canvas, jobId, evidenceRoot, baseline: { localAi: { entries: [] }, appliedJobs: { entries: [] } } };
+        const saved = archiveRunRestoreResidue(input);
+        assert(saved.length === 4 && saved.every(row => fs.existsSync(path.join(evidenceRoot, row.path))),
+          'restore must preserve both diagnostic archives and both Finder files');
+        assert(fs.readFileSync(path.join(job, 'manifest.json'), 'utf8') === 'untouched',
+          'restore residue cleanup must not alter ordinary job content');
+        assert(archiveRunRestoreResidue(input).length === 0, 'restore residue cleanup must be idempotent');
+        const baselineFinder = path.join(root, '.local-ai', '.DS_Store');
+        fs.writeFileSync(baselineFinder, 'preexisting');
+        assert(archiveRunRestoreResidue({ ...input, baseline: { ...input.baseline, localAi: { entries: [{ path: '.DS_Store' }] } } }).length === 0
+          && fs.readFileSync(baselineFinder, 'utf8') === 'preexisting',
+        'restore residue cleanup must preserve baseline Finder metadata');
+        fs.symlinkSync(path.join(root, 'outside'), path.join(shortlists, 'unsafe.json'));
+        nodeAssert.throws(() => archiveRunRestoreResidue({ ...input, baseline: { ...input.baseline, localAi: { entries: [{ path: '.DS_Store' }] } } }), /not a regular file|symbolic link/,
+          'restore residue cleanup must fail closed on a symlink');
+        return { archivesPreserved: true, finderResiduePreserved: true, idempotent: true, symlinkRejected: true };
+      } finally {
+        fs.rmSync(root, { recursive: true, force: true });
+      }
+    },
+  },
   {
     name: 'one-card live acceptance resolves only the deterministic current career snapshot',
     run: async () => {

@@ -369,6 +369,63 @@ function runPaths(id) {
     manifest: safeChild(root, RUN_MANIFEST, 'run manifest'),
   });
 }
+
+/** Preserve run-created diagnostic files before the production rollback compares the baseline. */
+export function archiveRunRestoreResidue({ canvas, jobId, evidenceRoot, baseline }) {
+  const root = path.dirname(path.resolve(canvas));
+  if (typeof jobId !== 'string' || !/^[a-f0-9-]{36}$/i.test(jobId)) throw new Error('Restore residue needs the reserved job id.');
+  if (!isBelow(root, path.resolve(evidenceRoot))) throw new Error('Restore evidence must stay inside the isolated run.');
+  assertRegularDirectory(root, 'Isolated run root');
+  const saved = [];
+  const ensureEvidenceParent = destination => {
+    let current = root;
+    for (const part of path.relative(root, path.dirname(destination)).split(path.sep)) {
+      current = path.join(current, part);
+      const stat = lstatIfPresent(current);
+      if (!stat) fs.mkdirSync(current, { mode: 0o700 });
+      else if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error(`Restore evidence parent is not a regular directory: ${current}`);
+    }
+  };
+  const archive = (source, relative) => {
+    const stat = lstatIfPresent(source);
+    if (!stat) return;
+    if (!stat.isFile() || stat.isSymbolicLink()) throw new Error(`Restore residue is not a regular file: ${source}`);
+    const destination = safeChild(evidenceRoot, relative, 'restore residue destination');
+    if (lstatIfPresent(destination)) throw new Error(`Restore residue evidence already exists: ${destination}`);
+    ensureEvidenceParent(destination);
+    fs.renameSync(source, destination);
+    saved.push({ path: relative, ...byteRecord(destination) });
+  };
+  const walk = (tree, prefix, baselineEntries = []) => {
+    const prior = new Set(baselineEntries.map(entry => entry.path));
+    const visit = (directory, relative = '') => {
+      const stat = lstatIfPresent(directory);
+      if (!stat) return;
+      if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error(`Restore residue tree is not a regular directory: ${directory}`);
+      for (const name of fs.readdirSync(directory)) {
+        const childRelative = relative ? path.join(relative, name) : name;
+        const child = path.join(directory, name);
+        const childStat = fs.lstatSync(child);
+        if (childStat.isSymbolicLink()) throw new Error(`Restore residue tree contains a symbolic link: ${child}`);
+        if (childStat.isDirectory()) visit(child, childRelative);
+        else if (name === '.DS_Store' && !prior.has(childRelative)) archive(child, path.join(prefix, childRelative));
+      }
+    };
+    visit(tree);
+  };
+  const job = path.join(root, '.local-ai', 'jobs', jobId);
+  for (const folder of ['rejected-handoffs', 'writer-shortlists']) {
+    const directory = path.join(job, folder);
+    const stat = lstatIfPresent(directory);
+    if (!stat) continue;
+    if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error(`Restore archive is not a regular directory: ${directory}`);
+    for (const name of fs.readdirSync(directory)) archive(path.join(directory, name), path.join('.local-ai', 'jobs', jobId, folder, name));
+  }
+  walk(path.join(root, '.local-ai'), '.local-ai', baseline?.localAi?.entries || []);
+  walk(path.join(root, 'Applied Jobs'), 'Applied Jobs', baseline?.appliedJobs?.entries || []);
+  archive(path.join(root, '.DS_Store'), '.DS_Store');
+  return saved;
+}
 function walkNodes(nodes, visit) {
   for (const node of nodes || []) {
     visit(node);
@@ -763,11 +820,15 @@ async function restore({ id, preserveChangedProtectedState = false }) {
   // receipt-declared pre-reserved bundle before the harness does its CAS
   // cleanup. No arbitrary bundle path is ever adopted.
   await inspect({ id });
+  const baseline = JSON.parse(fs.readFileSync(path.join(paths.rollback, 'baseline.json'), 'utf8'));
+  const restoreResidue = archiveRunRestoreResidue({
+    canvas: paths.canvas, jobId: manifest.queue.jobId,
+    evidenceRoot: path.join(paths.root, 'evidence', 'restore-residue'), baseline,
+  });
   await restoreRun({ canvas: paths.canvas, userData: PRODUCTION_USER_DATA, destination: paths.rollback, execute: true, allowNonproduction: true });
   const bridgeLaneCleanup = deferBridgeLaneCleanup(manifest.queue.jobId, paths.canvas);
   assertProtectedBridgeState(protectedStateForCleanup);
   assertOAuthStateStructure();
-  const baseline = JSON.parse(fs.readFileSync(path.join(paths.rollback, 'baseline.json'), 'utf8'));
   assertByteRecord(byteRecord(paths.canvas), baseline.canvas, 'Restored isolated fixture');
   const registry = path.join(PRODUCTION_USER_DATA, 'application-sync-workspaces.json');
   if (baseline.applicationSync?.present) assertByteRecord(byteRecord(registry), baseline.applicationSync, 'Restored isolated Application Sync registry');
@@ -784,7 +845,7 @@ async function restore({ id, preserveChangedProtectedState = false }) {
   writeJsonReplace(paths.manifest, { ...readManifest(paths), restoredAt: new Date().toISOString(), fixtureRemoved: true });
   return {
     ok: true, runId: id, fixtureRemoved: paths.canvas, jobId: manifest.queue.jobId,
-    applicationSyncRestored: true, bridgeLaneCleanup,
+    applicationSyncRestored: true, bridgeLaneCleanup, restoreResidue,
     preservedChangedProtectedState: preserveChangedProtectedState,
   };
 }
