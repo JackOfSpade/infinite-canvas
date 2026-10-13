@@ -1,5 +1,12 @@
 # STYLE.md — Job Application Design System
 
+In write then verify v2, this file guides the writer and the app's renderer.
+The application handoff sequence is in `local_ai/PASTE_BACK_APPLICATION.md`:
+requirements and audit, independent writing and conversion, production truth
+and hygiene checks, measured one-page fit, blind ranking, fact-check, then
+save and render. Its stylistic examples are advisory; citation grounding and
+actual page fit are hard gates.
+
 In the Infinite Canvas application workflow, the style and wording limits
 below guide writing and layout. The host measures actual one-page fit and
 rejects truth, provenance, schema and safety failures. A numerical prose

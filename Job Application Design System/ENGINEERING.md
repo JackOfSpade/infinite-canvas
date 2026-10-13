@@ -1,5 +1,13 @@
 # ENGINEERING.md — build, packaging and provenance
 
+Infinite Canvas uses the write then verify v2 application sequence described
+in `local_ai/PASTE_BACK_APPLICATION.md`. The design system supplies layout and
+editorial references to that sequence; the host owns deterministic truth and
+hygiene checks, measured one-page fit, PDF rendering, and saved output. The
+v2 limits and their measured sources are in
+`electron/ipc/applicationV2Limits.js`, and live acceptance uses
+`.test-artifacts/blackbox-run/README-application-acceptance.md`.
+
 Developer material for the design system: where files live, how the PDF
 is produced, what is tested and by what, and how the folder should be
 packaged.

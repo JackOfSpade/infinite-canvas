@@ -1,5 +1,11 @@
 # Job Application Design System
 
+The current application protocol is write then verify v2, described in
+`local_ai/PASTE_BACK_APPLICATION.md`. These content rules guide drafting and
+ranking. The host checks every cited claim against the original approved
+quote and any verified orthographic clean layer, then measures one-page fit.
+Editorial examples are not independent hard rejection rules.
+
 Application quality means playing the approved career evidence well: choose
 and order the strongest true work, write clearly, and use the letter to add
 cited context. Honest adjacent experience is preferable to implied direct

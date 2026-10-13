@@ -1018,7 +1018,6 @@ export default [
           'a stale/mismatched receipt cannot masquerade as terminal success ahead of matching feedback');
 
         const helperSource = await fs.promises.readFile(path.resolve('local_ai/wait-for-handoff.mjs'), 'utf8');
-        const routineSource = await fs.promises.readFile(path.resolve('local_ai/LOCAL_AI_APPLICATION_ROUTINE.md'), 'utf8');
         const ipcSource = await fs.promises.readFile(path.resolve('electron/ipc/localAiApplication.js'), 'utf8');
         assert(!helperSource.includes('LOCAL_AI_HANDOFF_WAIT_MS')
           && helperSource.includes('deadlineMs = null')
@@ -1027,15 +1026,6 @@ export default [
           && helperSource.includes('5 * LOCAL_AI_HANDOFF_POLL_MS')
           && !helperSource.includes('mtime')
           && !/\bstat\b/.test(helperSource)
-          && routineSource.includes('node local_ai/wait-for-handoff.mjs')
-          && routineSource.includes('Do not substitute `stat`, file mtime,')
-          && routineSource.includes('shell arithmetic')
-          && !routineSource.includes('--deadline-ms')
-          && !routineSource.includes('6 minutes')
-          && !routineSource.includes('six-minute')
-          && routineSource.includes('15-second settlement window')
-          && routineSource.includes('`revision-exhausted` feedback as a resumable measured revision request')
-          && !routineSource.includes('If matching feedback says `revision-exhausted`, stop')
           && ipcSource.includes("'wait-for-handoff.mjs'")
           && ipcSource.includes('Local AI handoff wait helper'),
         'production handoff polling is unbounded without result-file mtime/stat arithmetic; an explicit deadline remains test-only, and standalone projects receive the shared helper beside the routine');
@@ -6961,24 +6951,19 @@ Personal Projects`;
     },
   },
   {
-    name: 'Local AI contract: the routine states retained truth, provenance and audit rules',
+    name: 'Local AI contract: the v2 routine states retained truth and provenance rules',
     async run() {
       // Markdown prose wraps, so every assertion below runs against a
       // whitespace-normalized copy — the same convention the version-2
       // contract assertions earlier in this file use.
       const routine = fs.readFileSync(new URL('../../local_ai/LOCAL_AI_APPLICATION_ROUTINE.md', import.meta.url), 'utf8').replace(/\s+/g, ' ');
-      // Retain the truth, provenance and audit instructions after retiring the
-      // deterministic taste grammar.
+      // The v2 routine documents only checks that its handoffs actually run.
       for (const [label, needle] of [
         ['literal-form qualifier matching', 'The match is on the literal word form'],
         ['personal-project provenance', 'A source-stated project category is factual provenance'],
-        ['generation audit input contract', '`manifest.json.generationAudit` both have `version: 1` and `required: true`'],
-        ['legacy generation audit compatibility', 'A queued legacy job may have no `generationAudit` contract'],
-        ['generation audit mismatch handling', 'If only one file has the contract or their values differ, stop and report the mismatch'],
-        ['exact audit paragraph binding', 'must bind every final cover-letter paragraph exactly once'],
-        ['exact audit sentence binding', 'must do the same for every sentence in that paragraph'],
-        ['audit chain-of-thought boundary', 'Do not add private reasoning, intermediate drafts, discarded alternatives, hidden chain-of-thought'],
-        ['app-owned audit output', 'the app writes the durable file from the validated, projected fields'],
+        ['original quote provenance', 'The original quote is permanent provenance'],
+        ['clean-layer guardrail', 'deterministic orthographic verification'],
+        ['exact argument span binding', 'Every supplied span must be an exact substring'],
       ]) {
         assert(routine.includes(needle), `the routine must state the enforced ${label}`);
       }

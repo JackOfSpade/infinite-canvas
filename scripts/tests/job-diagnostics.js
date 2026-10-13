@@ -5908,15 +5908,17 @@ export default [
     },
   },
 {
-    name: 'Application prompts preserve evidence scope and reject pseudo-growth metrics',
+    name: 'Application documentation preserves v2 evidence and claim scope',
     run: () => {
       const source = fs.readFileSync(path.join(process.cwd(), 'electron', 'ipc', 'jobApplication.js'), 'utf8');
       const routine = fs.readFileSync(path.join(process.cwd(), 'local_ai', 'LOCAL_AI_APPLICATION_ROUTINE.md'), 'utf8');
       assert(!source.includes('_retiredRemoteApplicationGeneration')
         && !source.includes("from './llm.js'")
-        && routine.includes('Never add an unrecorded outcome')
+        && routine.includes('Never turn support into authorship')
+        && routine.includes('an accomplished result')
+        && routine.includes('The original quote is permanent provenance')
         && !/legal work status|work authorization/iu.test(routine),
-      'application truthfulness and letter-scope rules live exclusively in the Local AI routine, which polices no work authorization; the retired API authoring path is absent');
+      'the v2 routine describes the provenance and claim-strength boundary without restoring a retired API authoring path');
       return { localOnly: true };
 
     },

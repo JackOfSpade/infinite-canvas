@@ -5,6 +5,15 @@ description: Use this skill to generate editorial-modernist, developer-literate 
 
 # Job Application Design System
 
+Infinite Canvas applications use write then verify v2: frozen requirements,
+three independent plain-text drafts by default, a separate structured
+conversion for each, unchanged truth and hygiene gates, measured one-page fit,
+blind ranking of accepted candidates, and a fresh cited-quote fact-check. The
+host saves and renders the selected pair. The sequence and handoff counts are
+specified in `local_ai/PASTE_BACK_APPLICATION.md`. The template and editorial
+directions below are design references; they are not a second application
+protocol or deterministic taste gates.
+
 For Infinite Canvas application generation, use this design system to improve
 selection, ordering, clarity and page layout. Its numerical writing budgets
 and sentence-form rules are editorial guidance. The application host blocks
@@ -52,7 +61,7 @@ post-processes it into the right print variant for the recipient.
 | `preview/`                    | Standalone preview cards for each design subsystem. Reference material only.       |
 | `handoff/`                    | Frozen developer handoff for the paginated screen preview. Reference only; no shipped code reads it. |
 
-## The pipeline
+## Direct template rendering reference
 
 End-to-end, given candidate data + job description:
 
