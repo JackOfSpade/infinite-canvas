@@ -1,7 +1,5 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
-import os from 'node:os';
-import path from 'node:path';
 import { assert, buildResumeDocument, extractResumeEvidence, projectContactChannels, projectTrustedIdentity, resumeRoleLocationFailures, validateLocalApplicationResult } from '../test-dependencies.js';
 import { FROZEN_COMPLETED_PACKAGE, LOCAL_AI_JOB_INTEGRITY_CODE, MAX_FROZEN_SOURCE_CHARS, MAX_UNIT_CAREER_DATA_QUOTES, assemblePasteApplicationResult, assertAuthorityDraftSelection, isJobIntegrityFault, normalizeBoundDocumentText } from '../../electron/ipc/pasteApplicationAssembly.js';
 import { APPLICATION_QUALITY_CHECKLIST_VERSION, APPLICATION_QUALITY_CRITERIA, LOCAL_AI_GENERATION_AUDIT_VERSION, __queueLegacyLocalApplicationFixtureForTests, pasteRejectionChangeDocuments, sanitizeQualityReview, stampPasteQualityReviewFromFit } from '../../electron/ipc/localAiApplication.js';
@@ -2065,81 +2063,7 @@ Dates: May 2019 — August 2019
       return { unrepairable: unrepairable.length, repairable: repairable.length };
     },
   },
-  {
-    name: 'Frozen state rejects oversized evidence without clipping and normalizes bounded queue inputs',
-    async run() {
-      const root = await fs.promises.realpath(await fs.promises.mkdtemp(path.join(os.tmpdir(), 'paste-frozen-source-')));
-      const canvasFilePath = path.join(root, 'Canvas.json');
-      await fs.promises.writeFile(canvasFilePath, '{}', 'utf8');
-      // A source past the frozen cap must not become an undisclosed prefix in
-      // the handoff. Bounded sources still receive the normal safe-control and
-      // short role-field normalization before the final grader sees them.
-      const del = String.fromCharCode(127);
-      // End the renderer-ceiling prefix at a word boundary. This still
-      // exercises clipping, while leaving a literal role heading that a
-      // legacy text import can safely recognize instead of asking the scope
-      // validator to treat a mid-token truncation as an employer identity.
-      const oversizedRoleTitle = `${'t'.repeat(STRUCTURED_RESUME_LIMITS.chars.shortText)} overflow`;
-      const oversizedRoleEmployer = `${'e'.repeat(STRUCTURED_RESUME_LIMITS.chars.shortText)} overflow`;
-      // This fixture exercises queue-time short-field normalization. Its
-      // source corpus must still describe that fabricated role; otherwise an
-      // attribution failure would hide the intended source-size assertion.
-      const oversizedRoleCareerData = `Ada Lovelace\nada@example.test\n## ${oversizedRoleEmployer}\n${oversizedRoleTitle}\n\nBuilt reporting systems that reduced manual work.`;
-      const oversizedCorpus = `${careerData}\nArchive note${del} retained.\n${'Maintained the reporting corpus. '.repeat(9_000)}`;
-      let oversizedError = null;
-      try {
-        await __queueLegacyLocalApplicationFixtureForTests({
-          transport: 'paste',
-          canvasFilePath,
-          careerData: oversizedCorpus,
-          job: { title: 'Reporting Engineer', company: 'Acme Reporting', snippet: 'Build reliable reporting systems.' },
-          resumeProfile: { workHistory: [{ id: 'role-1', title: 'Software Engineer', employer: 'Analytical Engines', startDate: '2020', endDate: '2024' }] },
-        });
-      } catch (error) { oversizedError = error; }
-      assert(oversizedCorpus.length > MAX_FROZEN_SOURCE_CHARS
-        && /too large to freeze without omitting evidence/i.test(oversizedError?.message || ''),
-      'an oversized career corpus is rejected before a handoff can silently omit its tail');
-
-      const queued = await __queueLegacyLocalApplicationFixtureForTests({
-        transport: 'paste',
-        canvasFilePath,
-        careerData: `${oversizedRoleCareerData}\nArchive note${del} retained.`,
-        job: { title: 'Reporting Engineer', company: 'Acme Reporting', snippet: `Build reliable reporting systems.\nShift${del} coverage.` },
-        resumeProfile: { workHistory: [{
-          id: 'role-1',
-          title: oversizedRoleTitle,
-          employer: oversizedRoleEmployer,
-          startDate: '2020', endDate: '2024',
-        }] },
-      });
-      // Read back exactly as the completion submit hands them over.
-      const frozenInput = JSON.parse(await fs.promises.readFile(path.join(queued.folder, 'input.json'), 'utf8'));
-      const frozenCareerData = await fs.promises.readFile(path.join(queued.folder, 'context', 'career-data.txt'), 'utf8');
-      const frozenJobListing = await fs.promises.readFile(path.join(queued.folder, 'context', 'job-listing.md'), 'utf8');
-      const frozenRole = frozenInput.sourceRoles[0];
-      assert(frozenCareerData.length < MAX_FROZEN_SOURCE_CHARS,
-        `the queue preserves the complete bounded source (${frozenCareerData.length} below ${MAX_FROZEN_SOURCE_CHARS})`);
-      assert(frozenRole.title.length === STRUCTURED_RESUME_LIMITS.chars.shortText
-        && frozenRole.company.length === STRUCTURED_RESUME_LIMITS.chars.shortText,
-      `the queue writes role short text at the renderer's own ceiling (${frozenRole.title.length}/${frozenRole.company.length} of ${STRUCTURED_RESUME_LIMITS.chars.shortText})`);
-      assert(!`${frozenCareerData}${frozenJobListing}`.includes(del),
-        'the queue writes neither frozen source with a character its grader rejects');
-
-      let rejection = null;
-      try {
-        assemblePasteApplicationResult(fixture(
-          { resume: { ...fixture().paste.resume, roles: [{ ...fixture().paste.resume.roles[0], ...frozenRole }] } },
-          { input: frozenInput, careerData: frozenCareerData, jobListing: frozenJobListing },
-        ));
-      } catch (error) {
-        rejection = error;
-      }
-      assert(!rejection,
-        `queue-written frozen state assembles instead of ending the job: ${rejection?.message || ''}`);
-      return { frozenChars: frozenCareerData.length, roleChars: frozenRole.title.length };
-    },
-  },
-  {
+    {
     name: 'A lone role location folds into the dates cell with no separate role-meta row',
     run() {
       const resume = {

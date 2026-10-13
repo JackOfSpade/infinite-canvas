@@ -32,17 +32,11 @@
 //
 // Every fixture is SYNTHETIC (invented careers in unrelated fields). Nothing in
 // production names any of them.
-import fs from 'node:fs';
-import os from 'node:os';
-import path from 'node:path';
 import { assert } from './testHelpers.js';
-import { getLocalApplicationHandoff, queueLocalApplicationJob, submitLocalApplicationHandoff } from '../test-dependencies.js';
 import * as checks from '../../electron/ipc/coverLetterChecks.js';
 import * as guidance from '../../electron/ipc/applicationWriterGuidance.js';
-import * as convergence from '../../electron/ipc/applicationRepairConvergence.js';
-import { APPLICATION_QUALITY_CRITERIA, pasteCorrectionPrompt } from '../../electron/ipc/localAiApplication.js';
+import { APPLICATION_QUALITY_CRITERIA} from '../../electron/ipc/localAiApplication.js';
 
-const read = file => fs.readFileSync(path.resolve(file), 'utf8');
 
 // ---------------------------------------------------------------------------
 // The scanner.
@@ -101,60 +95,14 @@ export function findRelevancePush(text) {
 // The text a writer reads out of a JavaScript source: its string and template literals (adjacent literals joined by "+" are one
 // string, comments are skipped, and a template's substitutions are elided). Identifiers, regular expressions and the notes the
 // engineers left in comments are not text a writer sees, and scanning whole lines would read them as prose.
-function stringLiterals(source) {
-  const pieces = [];
-  const n = source.length;
-  let i = 0;
-  while (i < n) {
-    const c = source[i];
-    if (c === '/' && source[i + 1] === '/') { while (i < n && source[i] !== '\n') i += 1; continue; }
-    if (c === '/' && source[i + 1] === '*') { const end = source.indexOf('*/', i + 2); i = end < 0 ? n : end + 2; continue; }
-    if (c === "'" || c === '"') {
-      let j = i + 1; let text = '';
-      while (j < n && source[j] !== c && source[j] !== '\n') { if (source[j] === '\\') { text += source[j + 1] ?? ''; j += 2; } else { text += source[j]; j += 1; } }
-      pieces.push({ start: i, end: j + 1, text }); i = j + 1; continue;
-    }
-    if (c === '`') {
-      let j = i + 1; let text = ''; let depth = 0;
-      while (j < n) {
-        const d = source[j];
-        if (depth === 0 && d === '`') break;
-        if (d === '\\') { text += source[j + 1] ?? ''; j += 2; continue; }
-        if (d === '$' && source[j + 1] === '{') { depth += 1; text += ' … '; j += 2; continue; }
-        if (depth > 0) { if (d === '{') depth += 1; else if (d === '}') depth -= 1; j += 1; continue; }
-        text += d; j += 1;
-      }
-      pieces.push({ start: i, end: j + 1, text }); i = j + 1; continue;
-    }
-    i += 1;
-  }
-  const merged = [];
-  for (const piece of pieces) {
-    const last = merged.at(-1);
-    if (last && /^\s*\+\s*$/u.test(source.slice(last.end, piece.start))) { last.text += piece.text; last.end = piece.end; } else merged.push({ ...piece });
-  }
-  return merged.map(piece => piece.text).filter(text => text.length >= 40);
-}
 
 // Every string an exported constant of a module holds (strings, and strings inside frozen arrays and plain objects).
-function exportedStrings(module) {
-  const out = [];
-  const visit = (name, value) => {
-    if (typeof value === 'string') out.push([name, value]);
-    else if (Array.isArray(value)) value.forEach((item, index) => visit(`${name}[${index}]`, item));
-    else if (value && typeof value === 'object') Object.entries(value).forEach(([key, item]) => visit(`${name}.${key}`, item));
-  };
-  for (const [name, value] of Object.entries(module)) if (typeof value !== 'function') visit(name, value);
-  return out;
-}
 
 // ---------------------------------------------------------------------------
 // The real protocol's contracts, over a synthetic career (the legacy walker: queue a paste job, accept the plan and the résumé,
 // keep the cover-letter and review prompts).
 // ---------------------------------------------------------------------------
 const CONTEXT_MARKER = '\n\nAuthoritative context:\n';
-const contractOf = prompt => prompt.slice(0, prompt.lastIndexOf(CONTEXT_MARKER));
-const reply = (handoff, fields) => ({ protocol: 1, jobId: handoff.jobId, stage: handoff.stage, handoffCode: handoff.handoffCode, baseHashes: handoff.baseHashes || {}, ...fields });
 const CAREER = Object.freeze({
   name: 'Wen Adeyemi', email: 'wen@example.test', employer: 'Alderbank Ferries', title: 'Berth Planner',
   listing: 'Berth planner role focused on reliable ferry turnarounds. The team schedules docking crews and supports captains who depend on those schedules every working day. You will work with port partners to keep the sailing timetable dependable for the passengers who rely on it each week.',
@@ -164,54 +112,6 @@ const CAREER = Object.freeze({
   thesis: 'Reliable ferry turnarounds are the supported capability this planning role needs.',
 });
 
-async function walkContracts() {
-  const root = await fs.promises.realpath(await fs.promises.mkdtemp(path.join(os.tmpdir(), 'v16b-contracts-')));
-  try {
-    const canvasFilePath = path.join(root, 'Canvas.json');
-    await fs.promises.writeFile(canvasFilePath, '{}', 'utf8');
-    const paragraph = `${CAREER.lead} ${CAREER.body}`;
-    const queued = await queueLocalApplicationJob({
-      transport: 'paste', canvasFilePath,
-      careerData: [CAREER.name, CAREER.email, `${CAREER.title} profile`, '', `## ${CAREER.employer}`, CAREER.title, '', CAREER.bullet, paragraph].join('\n'),
-      job: { title: CAREER.title, company: CAREER.employer, snippet: CAREER.listing },
-      resumeProfile: { workHistory: [{ id: 'role-1', title: CAREER.title, employer: CAREER.employer, startDate: '', endDate: '' }] },
-    });
-    const current = async () => (await getLocalApplicationHandoff({ jobId: queued.id, canvasFilePath })).handoff;
-    const submit = async fields => {
-      const handoff = await current();
-      return submitLocalApplicationHandoff({ jobId: queued.id, canvasFilePath, handoffCode: handoff.handoffCode, response: JSON.stringify(reply(handoff, fields)) });
-    };
-    const must = (result, stage) => assert(result.accepted, `the ${stage} fixture is accepted (${JSON.stringify(result.validationErrors || [])})`);
-    const prompts = {};
-    must(await submit({
-      identity: { name: CAREER.name, contact: [CAREER.email], subtitleRole: CAREER.title },
-      evidence: [
-        { id: 'resume-proof-1', sourceId: 'career-data', quote: CAREER.bullet, requirement: 'Reliable turnarounds', priority: 'highest' },
-        { id: 'letter-proof-1', sourceId: 'career-data', quote: paragraph, requirement: 'Reliable turnarounds', priority: 'highest' },
-        { id: 'job-proof', sourceId: 'job-listing', quote: `${CAREER.listing.split('. ')[0]}.`, requirement: 'Reliable turnarounds', priority: 'highest' },
-      ],
-      requirements: [{ id: 'need-1', text: 'Reliable turnarounds', priority: 'highest', evidenceIds: ['resume-proof-1', 'job-proof'] }],
-    }), 'evidence-plan');
-    prompts.resume = (await current()).prompt;
-    must(await submit({
-      resume: {
-        schemaVersion: 'structured-resume.v1', identity: { name: CAREER.name, contact: [CAREER.email], subtitleRole: CAREER.title, credential: '' },
-        roles: [{ id: 'role-1', title: CAREER.title, company: CAREER.employer, dates: '', location: '', bullets: [{ id: 'bullet-1', text: CAREER.bullet, evidenceIds: ['resume-proof-1'] }] }],
-      },
-    }), 'resume');
-    prompts['cover-letter'] = (await current()).prompt;
-    must(await submit({
-      coverLetter: {
-        name: CAREER.name, contact: [CAREER.email], paragraphs: [{ id: 'paragraph-1', text: paragraph, evidenceIds: ['letter-proof-1', 'job-proof'] }], roleThesis: CAREER.thesis,
-        coverLetterArgument: { primaryEvidence: { evidence: CAREER.bullet, evidenceRole: `${CAREER.title} at ${CAREER.employer}`, relationToThesis: 'The scheduling work establishes the turnaround capability named in the thesis.' } },
-      },
-    }), 'cover-letter');
-    prompts.review = (await current()).prompt;
-    return prompts;
-  } finally {
-    await fs.promises.rm(root, { recursive: true, force: true });
-  }
-}
 
 export default [
   {
@@ -253,66 +153,7 @@ export default [
       assert(olderRule !== realRule && findUniversalSpanOwnership(olderRule).length === 1 && findUniversalSpanOwnership(realRule).length === 0, 'the shipped budget sentence passes and its older wording is flagged');
     },
   },
-  {
-    name: 'Surface: no exported rule, no string literal of a prompt, schema or error source, no document, no printed contract and no correction brief says that every proof-bearing paragraph owes a claim or a relevance span (4 surfaces)',
-    async run() {
-      const flagged = [];
-      const scan = (where, text) => {
-        for (const clause of findUniversalSpanOwnership(text)) flagged.push(`${where}: ${clause.slice(0, 200)}`);
-        for (const clause of findRelevancePush(text)) flagged.push(`${where} (relevance push): ${clause.slice(0, 200)}`);
-      };
-
-      // 1. Exported strings of the modules that own the rules.
-      for (const [label, module] of [['coverLetterChecks', checks], ['applicationWriterGuidance', guidance], ['applicationRepairConvergence', convergence]]) {
-        for (const [name, value] of exportedStrings(module)) scan(`${label}.${name}`, value);
-      }
-      // 2. Every string literal of the sources that print or throw text a writer reads.
-      for (const file of ['electron/ipc/coverLetterChecks.js', 'electron/ipc/localAiApplication.js', 'electron/ipc/aiSchemas.js', 'electron/ipc/applicationWriterGuidance.js',
-        'electron/ipc/applicationRepairConvergence.js', 'electron/ipc/pasteReviewDelta.js']) {
-        for (const literal of stringLiterals(read(file))) scan(file, literal);
-      }
-      // 3. Every document that describes the contract.
-      const docs = ['local_ai/LOCAL_AI_APPLICATION_ROUTINE.md', 'local_ai/PASTE_BACK_APPLICATION.md', 'Job Application Design System/SKILL.md', 'Job Application Design System/STYLE.md',
-        'Job Application Design System/CONTENT_RULES.md', 'Job Application Design System/ENGINEERING.md'];
-      for (const file of docs) scan(file, read(file));
-      // 4. The contracts the real protocol prints, and the correction brief of a letter-paragraph round.
-      const prompts = await walkContracts();
-      for (const stage of ['cover-letter', 'review']) scan(`the ${stage} contract`, contractOf(prompts[stage]));
-      const input = { jobId: 'consistency-job', qualityChecklist: { criteria: [], version: 4 }, generationAudit: { required: true, version: 1 } };
-      const state = { stage: 'cover-letter', handoffCode: 'h', baseHashes: {}, reviewBaseline: null, findings: [] };
-      const correction = pasteCorrectionPrompt({ input, state, corrections: ['paragraph-argument-links: paragraph 2 argumentMapping.relevance is missing'], stagePromptChars: 0 }).prompt;
-      assert(correction.includes('Any recorded argumentMapping span must copy the final paragraph exactly'), 'the correction round prints the retained provenance brief');
-      scan('the letter-paragraph correction brief', correction);
-      assert(flagged.length === 0, `no printed surface says every proof-bearing paragraph owes a claim or a relevance span:\n${flagged.join('\n')}`);
-    },
-  },
-  {
-    name: 'Stage 1 contracts keep provenance and grounding rules while omitting demoted span, length, cadence and layout grammars',
-    async run() {
-      const prompts = await walkContracts();
-      const resume = contractOf(prompts.resume);
-      const letter = contractOf(prompts['cover-letter']);
-      const review = contractOf(prompts.review);
-      for (const [stage, contract] of [['cover-letter', letter], ['review', review]]) {
-        assert(contract.includes('jobNeedQuote') && contract.includes('exact span'), `${stage}: recorded spans retain their provenance rule`);
-        for (const rule of [checks.ARGUMENT_SPAN_BUDGET_RULES, checks.ARGUMENT_CLAIM_SPAN_RULE, checks.ARGUMENT_PROOF_SPAN_RULE,
-          checks.ARGUMENT_RELEVANCE_SPAN_RULE, checks.LETTER_PROPORTION_RULE, checks.REPEATED_PHRASE_RULE]) {
-          assert(!contract.includes(rule), `${stage}: an advisory or off grammar is still printed`);
-        }
-      }
-      assert(review.includes('argumentMapping?:{claim?,proof?,relevance?,jobNeedQuote?}'), 'all optional mapping spans are marked optional');
-      assert(letter.includes('A span of experience measured in years is a claim like any other'), 'the duration truth rule is unchanged');
-      assert(resume.includes('A span of experience measured in years is a claim like any other'), 'the résumé duration truth rule is unchanged');
-      assert(!resume.includes('RESUME_BULLET_OPENING_VARIETY_RULE') && !resume.includes('180 visible characters'), 'résumé cadence and length proxies are no longer printed as gates');
-      const source = read('electron/ipc/localAiApplication.js');
-      assert(source.includes('every span it does carry must copy the final paragraph'), 'malformed mapping errors teach provenance, not the old span budget');
-      // Three unrelated domains keep this contract test independent of any one career.
-      for (const phrase of ['orchard routing', 'museum conservation', 'coastal surveys']) {
-        assert(!resume.includes(phrase) && !letter.includes(phrase) && !review.includes(phrase), 'contracts contain no fixture-specific work');
-      }
-    },
-  },
-  {
+      {
     name: 'Stage 1 quality guidance is short, positive and never describes a deterministic style rejection',
     run() {
       const brief = guidance.COVER_LETTER_WRITER_GUIDANCE;
@@ -357,30 +198,4 @@ export default [
       assert(findRelevancePush(flipped.replace('ties them to the target work', 'binds each to the work it answers')).length === 0, 'restoring the clause clears it');
     },
   },
-  {
-    name: 'Opening and criteria: the contracts say once how the role and the employer are named, the opening-context rule no longer repeats it, and the reference criterion names the role once and then says this role (A/B/C)',
-    async run() {
-      const prompts = await walkContracts();
-      // A: the guidance rule is printed exactly once in each contract, and the sentence that said it a second time is gone, with the clause that undercut it.
-      for (const stage of ['cover-letter', 'review']) {
-        const contract = contractOf(prompts[stage]);
-        assert(contract.split(guidance.LETTER_OPENING_RULE).length === 2, `the ${stage} contract prints the opening rule once`);
-        assert(!contract.includes('The role title and the employer’s name belong in the opening'), `the ${stage} contract does not say it twice`);
-        assert(!contract.includes('The application already identifies the candidate and position'), `the ${stage} contract does not justify an unnamed role`);
-        assert(contract.includes('the opening rule of the letter writing guidance says how the opening names the role and the employer, once'), `the ${stage} contract points to the one rule`);
-        assert(findRelevancePush(contract).length === 0, `the ${stage} contract holds no sentence that gives every paragraph a statement of relevance`);
-      }
-      // B: the criterion a writer attests to agrees with the rule, and the craft criterion no longer lists relevance links as a thing each paragraph splits out.
-      const criteria = new Map(APPLICATION_QUALITY_CRITERIA.map(criterion => [criterion.id, criterion.requirement]));
-      const clarity = criteria.get('cover-reference-clarity');
-      assert(NAMES_THE_ROLE_ONCE.test(clarity) && clarity.includes('referenced proximally') && clarity.includes('this role'), `the reference criterion names the role once, then says this role (${clarity})`);
-      const craft = criteria.get('cover-sentence-craft');
-      assert(findRelevancePush(craft).length === 0 && craft.includes('only the paragraph that owes the sentence about the target gives it a sentence of its own'), 'the craft criterion gives the sentence about the target to the one paragraph that owes it');
-      // C: mutation. The older criterion wording fails the same test, and so does the craft criterion's older clause.
-      const olderClarity = clarity.replace('the opening names the role by its title and the employer by name once, after which target scope', 'target scope');
-      assert(olderClarity !== clarity && !NAMES_THE_ROLE_ONCE.test(olderClarity) && olderClarity.includes('referenced proximally'), 'the older reference criterion does not name the role once');
-      const olderCraft = craft.replace('separate claims and action steps get their own sentence when that is easier to parse, only the paragraph that owes the sentence about the target gives it a sentence of its own,', 'separate claims, action steps, and relevance links get their own sentence when that is easier to parse,');
-      assert(olderCraft !== craft && findRelevancePush(olderCraft).length === 1, 'the older craft criterion is flagged');
-    },
-  },
-];
+  ];

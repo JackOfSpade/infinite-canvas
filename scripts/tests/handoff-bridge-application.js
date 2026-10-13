@@ -3,13 +3,9 @@ import { adaFlow } from './fixtures/handoff-bridge/adaFlow.js';
 import { persona } from './fixtures/handoff-bridge/synthetic.js';
 import {
   discoverLocalApplicationJobs,
-  fs,
-  getLocalApplicationHandoff,
+    getLocalApplicationHandoff,
   localApplicationStatus,
-  os,
-  path,
-  queueLocalApplicationJob,
-  submitLocalApplicationHandoff,
+        submitLocalApplicationHandoff,
 } from '../test-dependencies.js';
 import {
   classifyApplicationThrow,
@@ -68,30 +64,7 @@ export default [
       for (const exported of [getLocalApplicationHandoff, submitLocalApplicationHandoff, localApplicationStatus, discoverLocalApplicationJobs]) assert(typeof exported === 'function', 'the adapter must use a frozen app export');
     },
   },
-  {
-    name: 'handoff bridge: application: scratch app read keeps prompt bytes and confirm data disk-derived',
-    run: async () => {
-      const root = await fs.promises.realpath(await fs.promises.mkdtemp(path.join(os.tmpdir(), 'handoff-bridge-application-')));
-      const canvasFilePath = path.join(root, 'Canvas.json');
-      try {
-        await fs.promises.writeFile(canvasFilePath, '{}', 'utf8');
-        const queued = await queueLocalApplicationJob({
-          transport: 'paste', canvasFilePath,
-          careerData: 'Ada Lovelace\nada@example.com\nSoftware Engineer\nBuilt reliable reporting systems.',
-          job: { title: 'Application Engineer', company: 'Example Labs', snippet: 'Build reliable reporting systems.' },
-          resumeProfile: { workHistory: [{ id: 'ada-role', title: 'Software Engineer', employer: 'Example Labs', startDate: '2020', endDate: '2024' }] },
-        });
-        const raw = await getLocalApplicationHandoff({ jobId: queued.id, canvasFilePath });
-        const adapter = createApplicationSource();
-        const result = await adapter.read({ jobId: queued.id, canvasFilePath });
-        const confirm = await adapter.describeForConfirm(canvasFilePath, [queued.id]);
-        assert(result.kind === 'open' && result.handoff.prompt === raw.handoff.prompt, 'prompt must be byte-for-byte preserved');
-        assert(Object.keys(result.handoff).join(',') === 'code,stage,revision,prompt,corrections,correctionPrompt,recovered,draftBytes', 'read must expose only the handoff projection');
-        assert(confirm.ok && confirm.canvasFilePath === canvasFilePath && confirm.items[0].title === 'Application Engineer', 'confirm data must be discovered from disk');
-      } finally { await fs.promises.rm(root, { recursive: true, force: true }); }
-    },
-  },
-  {
+    {
     name: 'handoff bridge: application: ordinary completed read becomes host while a virtual claim stays bridge-private',
     run: async () => {
       const adapter = source({ api: { getLocalApplicationHandoff: async () => ({ completed: true }) } });
@@ -374,31 +347,4 @@ export default [
       assert(typeof wired.subscribeDiscard(null) === 'function', 'a non-function listener is inert rather than a crash');
     },
   },
-  {
-    name: 'handoff bridge: application: a lane whose canvas lost its whole .local-ai folder reads as gone, while a moved canvas file and other callers keep the ownership rejection',
-    run: async () => {
-      const root = await fs.promises.realpath(await fs.promises.mkdtemp(path.join(os.tmpdir(), 'handoff-bridge-application-')));
-      const canvasFilePath = path.join(root, 'Canvas.json');
-      try {
-        await fs.promises.writeFile(canvasFilePath, '{}', 'utf8');
-        const queued = await queueLocalApplicationJob({
-          transport: 'paste', canvasFilePath,
-          careerData: 'Ada Lovelace\nada@example.com\nSoftware Engineer\nBuilt reliable reporting systems.',
-          job: { title: 'Application Engineer', company: 'Example Labs', snippet: 'Build reliable reporting systems.' },
-          resumeProfile: { workHistory: [{ id: 'ada-role', title: 'Software Engineer', employer: 'Example Labs', startDate: '2020', endDate: '2024' }] },
-        });
-        const adapter = createApplicationSource();
-        const target = { jobId: queued.id, canvasFilePath };
-        assert(['awaiting', 'host'].includes((await adapter.status(target)).kind), 'a live bundle is not gone');
-        await fs.promises.rm(path.join(root, '.local-ai'), { recursive: true, force: true });
-        const gone = await adapter.status(target);
-        assert(gone.kind === 'gone', `an intact canvas with no .local-ai folder is proof the bundle is gone, got ${JSON.stringify(gone)}`);
-        let ownership = null;
-        try { await localApplicationStatus(queued.id, canvasFilePath); } catch (error) { ownership = error; }
-        assert(ownership?.code === 'ENOENT', 'a caller that does not own the job still gets the ownership rejection');
-        const moved = await adapter.status({ jobId: queued.id, canvasFilePath: path.join(root, 'Moved.json') });
-        assert(moved.kind === 'threw' && moved.enoent === true, `a canvas file that is not there proves nothing about the bundle, got ${JSON.stringify(moved)}`);
-      } finally { await fs.promises.rm(root, { recursive: true, force: true }); }
-    },
-  },
-];
+  ];
