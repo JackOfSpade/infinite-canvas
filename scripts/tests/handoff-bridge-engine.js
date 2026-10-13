@@ -80,7 +80,12 @@ async function assertV2FreshChatTrace(steps, createEngine = createHandoffEngine)
     ranking: ['candidate-2', 'candidate-3', 'candidate-1'], factIndex: 0, elimination: { round: 0 } };
   const keyFor = ({ stage, candidate }) => {
     if (candidate) state.ordinal = candidate - 1;
-    if (stage.startsWith('fact-')) state.factIndex = state.ranking.indexOf(`candidate-${candidate}`);
+    if (stage.startsWith('fact-')) {
+      // Fact-checking is reachable only for an accepted ranked candidate.
+      // Mirror the production transition before computing the fresh-chat key.
+      state.candidates[candidate - 1].status = 'accepted';
+      state.factIndex = state.ranking.indexOf(`candidate-${candidate}`);
+    }
     return writeVerifyStageKey(state, stage, JOB_A);
   };
   const expected = steps.map(step => ({ ...step, key: keyFor(step) }));
@@ -486,6 +491,9 @@ const tests = [
       const hostApplication = recommendWorkerPool({ applicationCount: 0, applicationForecastCount: 1 });
       assert(hostApplication.queued === 1 && hostApplication.materialized === 0 && hostApplication.recommended === 1,
         'app-owned host work remains planned capacity but is not presented as a released handoff');
+      const staleForecast = recommendWorkerPool({ applicationCount: 2, applicationForecastCount: 0 });
+      assert(staleForecast.queued === 2 && staleForecast.materialized === 2 && staleForecast.recommended === 2,
+        'a stale application forecast must not hide already materialized lanes from the worker plan');
       const restricted = recommendWorkerPool({
         tasks: [{ task: 'job-scoring', pending: 6 }],
         maxWorkers: 4,

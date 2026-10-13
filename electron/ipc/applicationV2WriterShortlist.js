@@ -2,6 +2,7 @@ import path from 'node:path';
 
 const SHORTLIST_HEADING = /^\s{0,3}#{0,6}\s*EVIDENCE SHORTLIST \(WORKING NOTES\)\s*:?[ \t]*$/iu;
 const RESUME_HEADING = /^\s{0,3}#{0,6}\s*(?:RÉSUMÉ|RESUME)\s*:?[ \t]*$/iu;
+const LETTER_HEADING = /^\s{0,3}#{0,6}\s*(?:COVER LETTER|LETTER)\s*:?[ \t]*$/iu;
 const CATALOG_ID = /host\.career\.[a-z]+\.[a-z0-9-]+\.[0-9]+/gu;
 
 export function splitWriteVerifyWriterResponse(response, allowedIds) {
@@ -30,10 +31,12 @@ export function splitWriteVerifyWriterResponse(response, allowedIds) {
     ids.push(matches[0]);
   }
   if (new Set(ids).size !== ids.length) throw new Error('Writer working shortlist IDs must be distinct.');
-  const plainText = lines.slice(resume).join('\n').trim();
-  if (!/\bcover\s+letter\b|\bletter\b/iu.test(plainText)) {
-    throw new Error('Writer must return both a résumé and cover letter.');
+  const letter = lines.findIndex((line, index) => index > resume && LETTER_HEADING.test(line));
+  if (letter < 0 || !lines.slice(resume + 1, letter).some(line => line.trim())
+    || !lines.slice(letter + 1).some(line => line.trim())) {
+    throw new Error('Writer must return nonempty résumé and cover letter sections with a COVER LETTER heading.');
   }
+  const plainText = lines.slice(resume).join('\n').trim();
   if (/EVIDENCE SHORTLIST\s*\(WORKING NOTES\)/iu.test(plainText)) {
     throw new Error('Working shortlist must stay before the résumé, outside application text.');
   }

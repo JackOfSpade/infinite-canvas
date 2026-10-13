@@ -102,10 +102,23 @@ export function writeVerifySourcePrompt({ posting, requirements, listingEvidence
 
 export function writeVerifyStageKey(state, stage, jobId) {
   if (typeof jobId !== 'string' || !jobId.trim()) throw new Error('Application v2 fresh-chat key requires a job id.');
-  const candidate = state.candidates[state.ordinal];
-  if (['write', 'convert', 'verify-correction', 'fit-correction'].includes(stage)) return `v2:${jobId}:${candidate.id}:${['verify-correction', 'fit-correction'].includes(stage) ? 'convert' : stage}`;
-  if (stage === 'pick') return `v2:${jobId}:judge:${state.elimination?.round || 0}`;
-  if (['fact-check', 'fact-correction', 'fact-recheck'].includes(stage)) return `v2:${jobId}:${state.ranking[state.factIndex]}:${stage}`;
+  if (['write', 'convert', 'verify-correction', 'fit-correction'].includes(stage)) {
+    const candidateId = state?.candidates?.[state.ordinal]?.id;
+    if (typeof candidateId !== 'string' || !candidateId.trim()) throw new Error('Application v2 fresh-chat key requires a current candidate.');
+    return `v2:${jobId}:${candidateId}:${['verify-correction', 'fit-correction'].includes(stage) ? 'convert' : stage}`;
+  }
+  if (stage === 'pick') {
+    const round = state?.elimination?.round ?? 0;
+    if (!Number.isSafeInteger(round) || round < 0) throw new Error('Application v2 fresh-chat key requires a valid judge round.');
+    return `v2:${jobId}:judge:${round}`;
+  }
+  if (['fact-check', 'fact-correction', 'fact-recheck'].includes(stage)) {
+    const candidateId = state?.ranking?.[state.factIndex];
+    if (typeof candidateId !== 'string' || !state.candidates?.some(row => row.id === candidateId && row.status === 'accepted')) {
+      throw new Error('Application v2 fresh-chat key requires a ranked accepted candidate.');
+    }
+    return `v2:${jobId}:${candidateId}:${stage}`;
+  }
   return `v2:${jobId}:${stage}`;
 }
 
@@ -182,7 +195,7 @@ const PRODUCTION_SHAPES = 'Return a single JSON object with production shapes: {
 export function writeVerifyPrompt({ stage, state, sourcePrompt, posting, hand, envelope, corrections = [] }) {
   const candidate = state.candidates[state.ordinal];
   const prefix = `APPLICATION V2 HANDOFF\n${JSON.stringify(envelope)}\nReply within ${APPLICATION_V2_LIMITS.chatReplyTokens} output tokens.\n`;
-  if (stage === 'write') return `${prefix}${WRITE_VERIFY_SHORTLIST_STEP}\n\n${sourcePrompt}\n\nOUTPUT FORMAT FOR THIS ARM:\nWrite the résumé and cover letter as plain text. No JSON. The labeled working shortlist is the sole exception to the no-ID rule; the résumé and letter contain no evidence IDs or citation markers. Include normal section headings and a skills block. Keep the wording you want published; a separate converter will only make changes required by the production structure.\n`;
+  if (stage === 'write') return `${prefix}${WRITE_VERIFY_SHORTLIST_STEP}\n\n${sourcePrompt}\n\nOUTPUT FORMAT FOR THIS ARM:\nWrite the résumé and cover letter as plain text. No JSON. The labeled working shortlist is the sole exception to the no-ID rule; the résumé and letter contain no evidence IDs or citation markers. Start the application with a standalone RÉSUMÉ heading, include a skills block, and start the letter with a standalone COVER LETTER heading. Put content in both sections. Keep the wording you want published; a separate converter will only make changes required by the production structure.\n`;
   if (stage === 'convert') return `${prefix}${sourcePrompt}\n\nPLAIN-TEXT WRITER RESULT TO CONVERT:\n${candidate.plainText}\n\nCONVERSION TASK:\nConvert that exact writer result to production shapes and attach IDs from the full approved catalog above. Change wording only where the production shape requires it. Do not add claims or alter the selection.\n\nOUTPUT FORMAT:\n${PRODUCTION_SHAPES}\nEcho the APPLICATION V2 HANDOFF fields at the top level of the returned JSON.\n`;
   if (stage === 'verify-correction' || stage === 'fit-correction' || stage === 'fact-correction') {
     const target = stage === 'fact-correction'

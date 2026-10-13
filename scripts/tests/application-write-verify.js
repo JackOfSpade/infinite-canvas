@@ -61,6 +61,10 @@ export default [
         assert.throws(() => splitWriteVerifyWriterResponse(response.replace('EVIDENCE SHORTLIST (WORKING NOTES)', 'WORKING NOTES'), ids), /must begin with EVIDENCE SHORTLIST/, domain);
         assert.throws(() => splitWriteVerifyWriterResponse(`${response}\n${ids[0]}`, ids), /must not contain catalog evidence IDs/, domain);
         assert.throws(() => splitWriteVerifyWriterResponse(`${response}\nEVIDENCE SHORTLIST (WORKING NOTES)`, ids), /must stay before the résumé/, domain);
+        assert.throws(() => splitWriteVerifyWriterResponse(response.replace('COVER LETTER\n', 'This résumé mentions a cover letter.\n'), ids), /nonempty résumé and cover letter sections/, domain);
+        assert.throws(() => splitWriteVerifyWriterResponse(response.replace(`RÉSUMÉ\n${action} work.`, 'RÉSUMÉ'), ids), /nonempty résumé and cover letter sections/, domain);
+        assert.throws(() => splitWriteVerifyWriterResponse(response.replace(`I would bring ${action} experience.`, ''), ids), /nonempty résumé and cover letter sections/, domain);
+        assert.ok(writePrompt.includes('standalone COVER LETTER heading'), domain);
         // Sabotage: storing the unseparated response would send working notes to conversion.
         state.candidates[0].plainText = response;
         const sabotagedPrompt = writeVerifyPrompt({ stage: 'convert', state, sourcePrompt: `${domain} posting and full grouped catalog`, envelope });
@@ -324,6 +328,16 @@ export default [
       state.ranking = ['candidate-5', 'candidate-3'];
       state.factIndex = 1;
       assert.equal(writeVerifyStageKey(state, 'fact-check', JOB_ID), `v2:${JOB_ID}:candidate-3:fact-check`);
+      const absentCandidate = structuredClone(state);
+      absentCandidate.ordinal = 99;
+      assert.throws(() => writeVerifyStageKey(absentCandidate, 'write', JOB_ID), /current candidate/);
+      const unrankedCandidate = structuredClone(state);
+      unrankedCandidate.ranking = ['candidate-1'];
+      unrankedCandidate.factIndex = 0;
+      assert.throws(() => writeVerifyStageKey(unrankedCandidate, 'fact-check', JOB_ID), /ranked accepted candidate/);
+      const invalidJudge = structuredClone(state);
+      invalidJudge.elimination = { round: -1 };
+      assert.throws(() => writeVerifyStageKey(invalidJudge, 'pick', JOB_ID), /valid judge round/);
       const images = [{ candidateId: 'candidate-3', document: 'resume', mimeType: 'image/png', data: 'aGVsbG8=' },
         { candidateId: 'candidate-3', document: 'cover-letter', mimeType: 'image/png', data: 'aGVsbG8=' },
         { candidateId: 'candidate-5', document: 'resume', mimeType: 'image/png', data: 'aGVsbG8=' },
