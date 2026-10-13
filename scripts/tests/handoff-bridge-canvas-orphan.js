@@ -57,8 +57,8 @@ function heldLane(ord, project, canvasFilePath) {
 
 // The production application source with only the app-side calls replaced.
 // Presence is the REAL filesystem probe, so the tests flip real folders.
-function sourceFor({ missing, fresh = null }) {
-  return createApplicationSource({
+function sourceFor({ missing, fresh = null, onPresence = null }) {
+  const source = createApplicationSource({
     getHandoff: async ({ jobId }) => {
       if (missing.has(jobId)) throw enoent();
       return { handoff: { handoffCode: `CODE-${jobId.slice(0, 4)}`, stage: 'resume', revision: 1, prompt: 'Synthetic prompt.' } };
@@ -71,6 +71,11 @@ function sourceFor({ missing, fresh = null }) {
     discover: async () => [],
     subscribeDiscards: () => () => undefined,
   });
+  return onPresence ? { ...source, async canvasPresence(lane) {
+    const result = await source.canvasPresence(lane);
+    onPresence(lane.jobId, result);
+    return result;
+  } } : source;
 }
 
 async function tickAndSettle(engine, clock, advanceMs = 0) {
@@ -80,6 +85,14 @@ async function tickAndSettle(engine, clock, advanceMs = 0) {
 }
 
 function rowFor(engine, jobId) { return engine.snapshot().queue.jobs.find(job => job.jobId === jobId); }
+
+async function waitUntil(predicate, label) {
+  const deadline = Date.now() + 10_000;
+  while (!predicate()) {
+    if (Date.now() > deadline) throw new Error(`Timed out waiting for ${label}`);
+    await new Promise(resolve => setImmediate(resolve));
+  }
+}
 
 async function assertOrphanRetires(factory = createHandoffEngine) {
   const root = tempRoot('sabotage');
@@ -201,10 +214,12 @@ export default [
         const store = createLaneStore({ userDataPath });
         assert(await store.saveLanes(lanes), 'synthetic lanes persist');
         const missing = new Set(PROJECTS.map(project => project.jobId));
+        const presenceCount = new Map();
+        const source = sourceFor({ missing, onPresence: jobId => presenceCount.set(jobId, (presenceCount.get(jobId) || 0) + 1) });
         const clock = createFakeClock();
         const start = () => {
           const engine = createHandoffEngine({
-            source: sourceFor({ missing }), store: createLaneStore({ userDataPath }),
+            source, store: createLaneStore({ userDataPath }),
             restoredLanes: createLaneStore({ userDataPath }).loadLanes(clock.now()), now: clock.now, timers: clock, holdMs: 0,
           });
           engines.push(engine);
@@ -212,12 +227,17 @@ export default [
         };
         let engine = start();
         await tickAndSettle(engine, clock);
+        await waitUntil(() => PROJECTS.every(project => presenceCount.get(project.jobId) >= 1), 'first orphan observation for each lane');
+        await settle();
         for (const project of PROJECTS) {
           assert(rowFor(engine, project.jobId)?.reason === 'canvas_unavailable', 'one orphaned observation is not enough to call a canvas missing');
         }
         await tickAndSettle(engine, clock, CONFIRM_MS / 2);
+        await waitUntil(() => PROJECTS.every(project => presenceCount.get(project.jobId) >= 2), 'second orphan observation for each lane');
+        await settle();
         assert(rowFor(engine, PROJECTS[0].jobId)?.reason === 'canvas_unavailable', 'still inside the confirmation window');
         await tickAndSettle(engine, clock, CONFIRM_MS / 2 + 1);
+        await waitUntil(() => PROJECTS.every(project => !rowFor(engine, project.jobId)), 'confirmed retirement for each lane');
         for (const project of PROJECTS) {
           const row = rowFor(engine, project.jobId);
           assert(!row, `${project.folder}: repeated orphan proof retires the lane`);
@@ -282,8 +302,10 @@ export default [
       try {
         const { canvasFilePath } = makeProject(root, PROJECTS[0], { canvas: true, jobFolder: true });
         const missing = new Set();
+        let presenceCount = 0;
         const clock = createFakeClock();
-        const engine = createHandoffEngine({ source: sourceFor({ missing }), now: clock.now, timers: clock, holdMs: 0 });
+        const engine = createHandoffEngine({ source: sourceFor({ missing, onPresence: () => { presenceCount += 1; } }),
+          now: clock.now, timers: clock, holdMs: 0 });
         engines.push(engine);
         assert((await engine.release({ jobs: [{ jobId: PROJECTS[0].jobId, canvasFilePath }] })).ok, 'the job releases');
         // The canvas and its job folder are deleted while the bridge runs.
@@ -295,7 +317,10 @@ export default [
         assert(got.status !== 'served', 'a missing canvas is never served');
         assert(rowFor(engine, PROJECTS[0].jobId)?.reason === 'canvas_unavailable', 'the lane is held canvas_unavailable');
         await tickAndSettle(engine, clock);
+        await waitUntil(() => presenceCount >= 1, 'first orphan observation before advancing the clock');
+        await settle();
         await tickAndSettle(engine, clock, CONFIRM_MS + 1);
+        await waitUntil(() => !rowFor(engine, PROJECTS[0].jobId), 'runtime orphan retirement');
         assert(!rowFor(engine, PROJECTS[0].jobId), 'a runtime canvas hold is retired after repeated orphan proof');
       } finally {
         for (const engine of engines) { try { await engine.close(); } catch { /* closed */ } }
