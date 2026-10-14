@@ -1134,10 +1134,9 @@ export const JOB_PREFERENCE_RESEARCH_BATCH_ASSESSMENT_SCHEMA = {
 // any of them to callLLM*. The equivalent field-level decisions instead live
 // as prose instructions to that handoff and as deterministic checks in
 // coverLetterChecks.js. See docs/resume-achievement-mining-design.md ("Application
-// generation is now a Local AI handoff") and docs/cover-letter-argument-harness-design.md
-// ("Status: design approved, not implemented"). Keep these in sync with the
-// design docs if the live pipeline is ever built, but editing them today does
-// not change any running behavior.
+// generation is now a Local AI handoff"). Keep these in sync with that design
+// doc if the live pipeline is ever built, but editing them today does not
+// change any running behavior.
 
 // ── Application skill opportunities: honest adjacent-skill analysis ────────
 // Runs before application generation. This is deliberately NOT résumé content:
