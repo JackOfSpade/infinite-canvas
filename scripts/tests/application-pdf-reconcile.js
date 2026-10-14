@@ -922,9 +922,11 @@ export default [
       });
       try {
         await new Promise(resolve => dom.window.setTimeout(resolve, 0));
-        assert(calls.length === 1 && calls[0].endpoint === 'http://127.0.0.1:43192/application-sync'
+        assert(calls.length === 2 && calls[0].endpoint === 'http://127.0.0.1:43192/application-sync'
           && calls[0].payload.action === 'reconcile' && calls[0].payload.token === '8'.repeat(64),
         `opening saved HTML must request capability-scoped PDF reconciliation, got ${JSON.stringify(calls)}`);
+        assert(calls[1].payload.action === 'status' && calls[1].payload.token === '8'.repeat(64),
+          'opening a saved bundle must read the improvement counter with its workspace capability');
         return { openCheck: calls[0].payload.action };
       } finally {
         dom.window.close();

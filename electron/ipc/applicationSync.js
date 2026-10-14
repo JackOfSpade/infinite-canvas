@@ -23,6 +23,7 @@ import {
 import { reconcileApplicationHtmlFromPdf } from './applicationPdfReconcile.js';
 import { replaceApplicationBundleAtomically } from './applicationFileTransaction.js';
 import { logger } from '../logger.js';
+import { improvementStatus, logSavedBundle } from './applicationEditLog.js';
 
 const { app } = electronPkg;
 
@@ -60,6 +61,7 @@ const GENERATION_AUDIT_OPTIONAL_PDF_HASH_KEYS = [
   'coverLetterPdfSha256',
 ];
 const workspaces = new Map();
+const editWatchers = new Map();
 const workspaceSyncQueues = new Map();
 let server = null;
 let loadPromise = null;
@@ -84,6 +86,28 @@ function updateSyncAttempt(attemptId, changes) {
 
 function statePath() {
   return path.join(app.getPath('userData'), STATE_FILE);
+}
+
+function watchWorkspaceEdits(workspace) {
+  const key = canonicalPathKey(workspace.workspaceDir);
+  if (editWatchers.has(key)) return;
+  const listener = (current, previous) => {
+    if (!current.mtimeMs || current.mtimeMs === previous.mtimeMs) return;
+    withApplicationSyncWorkspaceLock(workspace.workspaceDir, async () => {
+      const active = [...workspaces.values()].find(item => canonicalPathKey(item.workspaceDir) === key);
+      if (!active) return;
+      await captureOrVerifyWorkspaceIdentity(active);
+      const html = await readRegisteredWorkspaceHtml(active);
+      await logSavedBundle({ root: app.getPath('userData'), workspaceDir: active.workspaceDir, html });
+    }).catch(error => logger.warn(`[ApplicationSync] Could not capture saved application edit: ${error?.message || error}`));
+  };
+  fs.watchFile(workspace.applicationPath, { interval: 1000, persistent: false }, listener);
+  editWatchers.set(key, { path: workspace.applicationPath, listener });
+}
+
+function stopEditWatchers() {
+  for (const watcher of editWatchers.values()) fs.unwatchFile(watcher.path, watcher.listener);
+  editWatchers.clear();
 }
 
 function isInside(parent, child) {
@@ -543,6 +567,40 @@ function applicationSyncDataFromHtml(html) {
   }
 }
 
+function letterWasRemoved(html) {
+  const dom = new JSDOM(String(html || ''));
+  try {
+    return JSON.parse(dom.window.document.getElementById('ic-application-bundle-data')?.textContent || '{}').letterRemoved === true;
+  } catch { return false; }
+  finally { dom.window.close(); }
+}
+
+function withoutCoverLetter(html) {
+  const source = String(html || '');
+  const dom = new JSDOM(source, { includeNodeLocations: true });
+  try {
+    const doc = dom.window.document;
+    const panel = doc.querySelectorAll('[data-ic-document-panel="cover"]');
+    const tab = doc.querySelectorAll('[data-ic-document-tab="cover"]');
+    const bundle = doc.querySelectorAll('#ic-application-bundle-data');
+    if (panel.length !== 1 || tab.length !== 1 || bundle.length !== 1) throw new Error('Cover letter structure changed; removal was refused.');
+    const data = JSON.parse(bundle[0].textContent || '{}');
+    data.letterRemoved = true;
+    delete data.coverLetterAudit;
+    delete data.coverLetterPdfBase64;
+    data.sync.documents.cover = { pdfSha256: '', htmlSha256: '' };
+    const replacements = [
+      { node: panel[0], value: '' },
+      { node: tab[0], value: '' },
+      { node: bundle[0], value: `<script id="ic-application-bundle-data" type="application/json"${bundle[0].hasAttribute('nonce') ? ` nonce="${bundle[0].getAttribute('nonce')}"` : ''}>${JSON.stringify(data).replace(/</g, '\\u003c').replace(/>/g, '\\u003e')}</script>` },
+    ].map(({ node, value }) => ({ at: dom.nodeLocation(node), value })).sort((a, b) => b.at.startOffset - a.at.startOffset);
+    let result = source;
+    for (const item of replacements) result = result.slice(0, item.at.startOffset) + item.value + result.slice(item.at.endOffset);
+    return result;
+  } finally { dom.window.close(); }
+}
+export const __withoutCoverLetterForTests = withoutCoverLetter;
+
 function withApplicationDocumentRevision(html, documentKind, pdfBytes, token) {
   const existing = applicationSyncDataFromHtml(html);
   const documents = {
@@ -657,7 +715,8 @@ export function mergeSelectedApplicationPanel(incomingHtml, storedHtml, document
     const dom = new JSDOM(String(html || ''), { includeNodeLocations: true });
     const locations = {};
     try {
-      for (const kind of ['resume', 'cover']) {
+      const removed = letterWasRemoved(html);
+      for (const kind of removed ? ['resume'] : ['resume', 'cover']) {
         const nodes = dom.window.document.querySelectorAll(`[data-ic-document-panel="${kind}"]`);
         if (nodes.length !== 1) {
           throw new Error(`${label} application workspace must contain exactly one ${kind} panel (found ${nodes.length}).`);
@@ -685,6 +744,7 @@ export function mergeSelectedApplicationPanel(incomingHtml, storedHtml, document
         }
       }
       return {
+        removed,
         mains: locations,
         decisions: collectUniqueReviewState(
           dom,
@@ -709,9 +769,12 @@ export function mergeSelectedApplicationPanel(incomingHtml, storedHtml, document
   const stored = String(storedHtml || '');
   const incomingState = inspect(incoming, 'Incoming');
   const storedState = inspect(stored, 'Saved', { validateCapability: Boolean(expectedToken) });
+  if (incomingState.removed !== storedState.removed || (storedState.removed && selected === 'cover')) {
+    throw new Error('The removed cover letter cannot be synced.');
+  }
   const incomingLocations = incomingState.mains;
   const storedLocations = storedState.mains;
-  const replacements = ['resume', 'cover'].map((kind) => {
+  const replacements = (storedState.removed ? ['resume'] : ['resume', 'cover']).map((kind) => {
     const storedMain = sanitizeDocumentMainHtml(
       stored.slice(storedLocations[kind].startOffset, storedLocations[kind].endOffset),
       { documentKind: kind, allowHostState: true, allowTrustedDerivations: true },
@@ -821,9 +884,9 @@ export async function inspectApplicationSyncRevision({ applicationPath, pdfPath,
               && bundle?.sync?.token === token;
             row.htmlStructureValid = document.doctype?.name?.toLowerCase() === 'html'
               && resumePanels.length === 1
-              && coverPanels.length === 1
+              && (bundle.letterRemoved === true ? coverPanels.length === 0 : coverPanels.length === 1)
               && !!resumePanels[0].querySelector('main.page')
-              && !!coverPanels[0].querySelector('main.page')
+              && (bundle.letterRemoved === true || !!coverPanels[0].querySelector('main.page'))
               && row.syncConfigValid;
           } finally {
             dom.window.close();
@@ -882,6 +945,7 @@ async function reconcileWorkspacePdfs(payload) {
     await captureOrVerifyWorkspaceIdentity(workspace);
     const storedHtml = await readRegisteredWorkspaceHtml(workspace);
     let reconciledHtml = storedHtml;
+    const activeKinds = letterWasRemoved(storedHtml) ? ['resume'] : ['resume', 'cover'];
     let syncData = applicationSyncDataFromHtml(reconciledHtml);
     const importedDocuments = [];
     const staleDocuments = [];
@@ -895,7 +959,7 @@ async function reconcileWorkspacePdfs(payload) {
     const adoptedPdfs = {};
     let metadataChanged = false;
 
-    for (const documentKind of ['resume', 'cover']) {
+    for (const documentKind of activeKinds) {
       let pdfBytes;
       try {
         pdfBytes = await readRegisteredWorkspacePdf(workspace, documentKind);
@@ -926,7 +990,7 @@ async function reconcileWorkspacePdfs(payload) {
       }
     }
 
-    for (const documentKind of ['resume', 'cover']) {
+    for (const documentKind of activeKinds) {
       const pdfBytes = checkedPdfs.get(documentKind);
       if (!pdfBytes) continue;
       const actualPdfSha256 = sha256(pdfBytes);
@@ -1058,6 +1122,8 @@ async function reconcileWorkspacePdfs(payload) {
           return true;
         },
       });
+      try { await logSavedBundle({ root: app.getPath('userData'), workspaceDir: workspace.workspaceDir, html: reconciledHtml }); }
+      catch (error) { logger.warn(`[ApplicationSync] Could not record reconciled edit evidence: ${error?.message || error}`); }
     }
     return {
       importedDocuments,
@@ -1069,6 +1135,43 @@ async function reconcileWorkspacePdfs(payload) {
     };
   });
 }
+
+async function removeCoverLetter(payload) {
+  const { token, workspace } = registeredWorkspaceForToken(payload);
+  return withApplicationSyncWorkspaceLock(workspace.workspaceDir, async () => {
+    if (workspaces.get(token) !== workspace) throw Object.assign(new Error('This workspace was replaced.'), { statusCode: 409 });
+    await captureOrVerifyWorkspaceIdentity(workspace);
+    const storedHtml = await readRegisteredWorkspaceHtml(workspace);
+    if (letterWasRemoved(storedHtml)) return { removed: true };
+    const html = withoutCoverLetter(storedHtml);
+    let audit = null;
+    try { audit = await readRegisteredWorkspaceGenerationAudit(workspace); }
+    catch (error) { if (error?.code !== 'ENOENT') throw error; }
+    let nextAudit = null;
+    if (audit != null) {
+      const revised = JSON.parse(withSyncedGenerationAuditSavedArtifacts(audit, { applicationHtml: html, pdfs: {} }));
+      revised.savedArtifacts.coverLetterPdfSha256 = null;
+      nextAudit = JSON.stringify(revised, null, 2) + '\n';
+    }
+    // Capture the last saved letter before the destructive transaction.
+    await logSavedBundle({ root: app.getPath('userData'), workspaceDir: workspace.workspaceDir, html: storedHtml });
+    await replaceApplicationBundleAtomically([
+      { destination: workspace.applicationPath, data: html, expectedCurrentData: storedHtml },
+      { destination: workspace.coverLetterPdfPath, data: null },
+      ...(nextAudit == null ? [] : [{ destination: workspace.generationAuditPath, data: nextAudit, expectedCurrentData: audit }]),
+    ], { verify: async () => {
+      const saved = await readRegisteredWorkspaceHtml(workspace);
+      if (saved !== html || !letterWasRemoved(saved)) throw new Error('Cover letter removal failed HTML readback.');
+      if (fs.existsSync(workspace.coverLetterPdfPath)) throw new Error('Cover letter PDF remains after removal.');
+      if (nextAudit != null && await readRegisteredWorkspaceGenerationAudit(workspace) !== nextAudit) throw new Error('Cover letter removal failed audit readback.');
+      return true;
+    } });
+    try { await logSavedBundle({ root: app.getPath('userData'), workspaceDir: workspace.workspaceDir, html, letterRemoved: true }); }
+    catch (error) { logger.warn(`[ApplicationSync] Could not record removed letter: ${error?.message || error}`); }
+    return { removed: true };
+  });
+}
+export const __removeCoverLetterForTests = removeCoverLetter;
 
 async function syncWorkspace(payload) {
   const { token, workspace } = registeredWorkspaceForToken(payload);
@@ -1222,6 +1325,8 @@ async function syncWorkspace(payload) {
       updateSyncAttempt(attemptId, {
         status: 'completed', phase: 'completed', finishedAt: Date.now(), manifest,
       });
+      try { await logSavedBundle({ root: app.getPath('userData'), workspaceDir: workspace.workspaceDir, html: mergedHtml }); }
+      catch (error) { logger.warn(`[ApplicationSync] Could not record synced application edit: ${error?.message || error}`); }
       logger.info(`[ApplicationSync] Synced ${documentKind} and verified destination revision in ${workspace.workspaceDir}`);
       return {
         document: documentKind,
@@ -1291,6 +1396,7 @@ export async function registerApplicationSyncWorkspace(workspaceDir, requestedTo
     for (const [previousToken, previousWorkspace] of previous) workspaces.set(previousToken, previousWorkspace);
     throw error;
   }
+  if (server?.listening) watchWorkspaceEdits(workspace);
   return applicationSyncConfig(token);
 }
 
@@ -1305,7 +1411,11 @@ export async function startApplicationSyncServer() {
     if (request.method !== 'POST' || (origin && origin !== 'null' && origin !== 'file://')) return sendJson(response, 403, { success: false, error: 'Sync requests must come from a saved local application file.' }, origin);
     try {
       const payload = await readJson(request);
-      const result = payload?.action === 'reconcile'
+      const result = payload?.action === 'remove-cover'
+        ? await removeCoverLetter(payload)
+        : payload?.action === 'status'
+        ? await (async () => { registeredWorkspaceForToken(payload); return improvementStatus(app.getPath('userData')); })()
+        : payload?.action === 'reconcile'
         ? await reconcileWorkspacePdfs(payload)
         : await syncWorkspace(payload);
       sendJson(response, 200, { success: true, ...result }, origin);
@@ -1329,11 +1439,13 @@ export async function startApplicationSyncServer() {
     return false;
   }
   lastServerError = null;
+  for (const workspace of workspaces.values()) watchWorkspaceEdits(workspace);
   logger.info(`[ApplicationSync] Listening on 127.0.0.1:${APPLICATION_SYNC_PORT}`);
   return true;
 }
 
 export async function stopApplicationSyncServer() {
+  stopEditWatchers();
   if (!server) return;
   const current = server;
   server = null;

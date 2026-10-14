@@ -174,6 +174,61 @@ export default [
     },
   },
   {
+    name: 'application workspace: due notice follows counter and is absent from printed document pages',
+    run: async () => {
+      const doc = embedApplicationSyncConfig(buildResumeDocument({
+        docId: 'due-notice-test',
+        resumeMainHtml: '<main class="page"><p>Synthetic résumé</p></main>',
+        coverLetter: { name: 'Synthetic Applicant', paragraphs: ['Synthetic letter.'] },
+        downloadBundle: { company: 'Example', candidateName: 'Synthetic Applicant', jobMarkdown: '# Synthetic role' },
+      }), { endpoint: 'http://127.0.0.1:43192/application-sync', token: 'd'.repeat(64) });
+      const dom = new JSDOM(doc, {
+        runScripts: 'dangerously', url: 'file:///tmp/example/Application.html',
+        beforeParse(window) {
+          window.fetch = async (_url, options) => ({
+            ok: true,
+            json: async () => JSON.parse(options.body).action === 'status'
+              ? { success: true, due: true, count: 63 }
+              : { success: true, importedDocuments: [], staleDocuments: [], conflicts: [] },
+          });
+        },
+      });
+      try {
+        await new Promise(resolve => dom.window.setTimeout(resolve, 0));
+        const notice = dom.window.document.getElementById('ic-improvement-due');
+        assert(notice && !notice.hidden && notice.textContent.includes('63 new samples'), 'due count is visible on screen');
+        assert(!dom.window.document.querySelector('main.page #ic-improvement-due'), 'notice is outside PDF document pages');
+        assert(doc.includes('.ic-toolbar, .ic-banner { display: none !important; }'), 'print CSS hides the notice');
+      } finally { dom.window.close(); }
+    },
+  },
+  {
+    name: 'application workspace: remove cover letter requires confirmation and screen notice stays out of print',
+    run: async () => {
+      const doc = embedApplicationSyncConfig(buildResumeDocument({
+        docId: 'remove-cover-test',
+        resumeMainHtml: '<main class="page"><h1 class="name">Synthetic Applicant</h1></main>',
+        coverLetter: { name: 'Synthetic Applicant', paragraphs: ['Synthetic letter.'] },
+        downloadBundle: { company: 'Example', candidateName: 'Synthetic Applicant', jobMarkdown: '# Synthetic role' },
+      }), { endpoint: 'http://127.0.0.1:43192/application-sync', token: 'c'.repeat(64) });
+      assert(doc.includes('@media print') && doc.includes('.ic-toolbar, .ic-banner { display: none !important; }'), 'notice is screen only');
+      const dom = new JSDOM(doc, { runScripts: 'dangerously', url: 'file:///tmp/example/Application.html' });
+      try {
+        const button = dom.window.document.getElementById('ic-remove-cover-btn');
+        assert(button, 'remove control exists');
+        const calls = [];
+        dom.window.fetch = (_url, options) => { calls.push(JSON.parse(options.body)); return new Promise(() => {}); };
+        dom.window.confirm = () => false;
+        button.click();
+        assert(calls.length === 0, 'cancel leaves bundle alone');
+        dom.window.confirm = () => true;
+        button.click();
+        assert(calls.length === 1 && calls[0].action === 'remove-cover' && calls[0].token === 'c'.repeat(64), 'confirm sends scoped removal request');
+        assert(dom.window.document.querySelector('[data-ic-document-panel="resume"] main.page'), 'resume remains visible while removal is pending');
+      } finally { dom.window.close(); }
+    },
+  },
+  {
     name: 'application workspace: Sync replaces download and submits only the selected document to its saved bridge',
     run: async () => {
       let doc = buildResumeDocument({

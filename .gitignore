@@ -41,6 +41,7 @@ coverage/
 !.test-artifacts/blackbox-run/*.mjs
 !.test-artifacts/blackbox-run/README*.md
 **/.local-ai/
+.application-improvement/
 
 # Build caches and scratch dirs
 *.tsbuildinfo
@@ -56,7 +57,11 @@ scripts/indeed-probe.mjs
 electron/extractors/_archive/
 
 # Agent / editor local config (personal — keep out of the repo)
-.claude/
+.claude/*
+!.claude/skills/
+.claude/skills/*
+!.claude/skills/application-improvement/
+!.claude/skills/application-improvement/SKILL.md
 .codex/
 .cursor/
 

@@ -1708,6 +1708,8 @@ function buildSkillWorkspace({ skillInsights, skillHistogram, jobContext, jobUrl
   <div class="ic-toolbar" role="toolbar" aria-label="Document controls">
     <button type="button" id="ic-edit-toggle" class="ic-btn">Edit</button>
     <button type="button" id="ic-sync-btn" class="ic-btn ic-btn-primary">Sync résumé</button>
+    <button type="button" id="ic-remove-cover-btn" class="ic-btn">Remove cover letter</button>
+    <span id="ic-improvement-due" class="ic-banner" role="status" hidden></span>
     ${printVariantIndicator(jobContext)}
     <span id="ic-pdf-bundle-note" class="ic-restore-note" role="status"></span>
     <span id="ic-restore-note" class="ic-restore-note" hidden>Restored your edits from this browser.</span>
@@ -1800,6 +1802,13 @@ ${editableRuntimeSanitizerSource()}
   var BUNDLE_DATA = {};
   try { BUNDLE_DATA = JSON.parse(bundleDataElement ? bundleDataElement.textContent : '{}') || {}; } catch (e) {}
   var STORAGE_KEY = 'ic-edit:' + DOC_ID;
+  if (BUNDLE_DATA.letterRemoved) {
+    try {
+      ['', ':fingerprint', ':base-html-sha256', ':superseded'].forEach(function (suffix) {
+        localStorage.removeItem(STORAGE_KEY + ':cover' + suffix);
+      });
+    } catch (e) {}
+  }
   var main = document.querySelector('main.page') || document.querySelector('main');
   var resumeMain = main;
   var coverMain = document.querySelector('[data-ic-document-panel="cover"] main');
@@ -1807,6 +1816,8 @@ ${editableRuntimeSanitizerSource()}
   var documentTabs = Array.prototype.slice.call(document.querySelectorAll('[data-ic-document-tab]'));
   var editBtn = document.getElementById('ic-edit-toggle');
   var syncBtn = document.getElementById('ic-sync-btn');
+  var removeCoverBtn = document.getElementById('ic-remove-cover-btn');
+  var improvementDue = document.getElementById('ic-improvement-due');
   var printVariantNote = document.getElementById('ic-print-variant-note');
   var pdfBundleNote = document.getElementById('ic-pdf-bundle-note');
   var restoreNote = document.getElementById('ic-restore-note');
@@ -2307,6 +2318,46 @@ ${editableRuntimeSanitizerSource()}
         main.focus();
         editBtn.textContent = 'Done editing';
       }
+    });
+  }
+
+  if (HAS_APPLICATION_BUNDLE && typeof fetch === 'function' && BUNDLE_DATA.sync?.endpoint && BUNDLE_DATA.sync?.token) {
+    fetch(BUNDLE_DATA.sync.endpoint, {
+      method: 'POST', mode: 'cors', credentials: 'omit',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token: BUNDLE_DATA.sync.token, action: 'status' })
+    }).then(function (response) { return response.json(); }).then(function (body) {
+      if (improvementDue && body.success && body.due) {
+        improvementDue.textContent = 'Improvement session due: ' + body.count + ' new samples since last session. Run it from Claude Code or Codex.';
+        improvementDue.hidden = false;
+      }
+    }).catch(function () {});
+  }
+  if (removeCoverBtn) {
+    if (BUNDLE_DATA.letterRemoved || !coverMain) removeCoverBtn.remove();
+    else removeCoverBtn.addEventListener('click', function () {
+      if (!window.confirm('Permanently remove the cover letter and its PDF? This cannot be undone.')) return;
+      var sync = BUNDLE_DATA.sync || {};
+      if (!sync.endpoint || !sync.token) return;
+      removeCoverBtn.disabled = true;
+      fetch(sync.endpoint, {
+        method: 'POST', mode: 'cors', credentials: 'omit',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ token: sync.token, action: 'remove-cover' })
+      }).then(function (response) {
+        return response.json().then(function (body) {
+          if (!response.ok || !body.success) throw new Error(body.error || 'Could not remove the cover letter.');
+          try {
+            ['', ':fingerprint', ':base-html-sha256', ':superseded'].forEach(function (suffix) {
+              localStorage.removeItem(STORAGE_KEY + ':cover' + suffix);
+            });
+          } catch (e) {}
+          window.location.reload();
+        });
+      }).catch(function (error) {
+        removeCoverBtn.disabled = false;
+        window.alert(error.message || String(error));
+      });
     });
   }
 

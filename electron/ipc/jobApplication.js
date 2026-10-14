@@ -22,6 +22,7 @@ import { logger } from '../logger.js';
 import { sanitizeApplicationBundlePart } from './applicationBundle.js';
 import { applicationSyncConfig, applicationSyncStatusSnapshot, registerApplicationSyncWorkspace, withApplicationSyncWorkspaceLock } from './applicationSync.js';
 import { replaceApplicationBundleAtomically } from './applicationFileTransaction.js';
+import { logGeneratedBundle, logSavedBundle } from './applicationEditLog.js';
 import { ensureDirectoryWithinRoot, isRendererPrivateAppPath, isWithinDirectory, registerRendererPrivateAppRoot } from '../utils/pathSafety.js';
 import { isBackgroundE2E } from '../utils/backgroundE2e.js';
 import {
@@ -2467,6 +2468,17 @@ export function registerJobApplicationHandlers() {
       error.code = 'APPLICATION_SAVE_IN_FLIGHT';
       throw error;
     }
+    try {
+      const options = { workspaceIdentity: pending.workspaceIdentity, encoding: 'utf8' };
+      const [html, posting] = await Promise.all([
+        readRegisteredApplicationArtifact(resolvedWorkDir, pending.resumeHtmlPath, { ...options, expectedSha256: pending.artifactSha256?.resumeHtml }),
+        readRegisteredApplicationArtifact(resolvedWorkDir, pending.jobListingPath, { ...options, expectedSha256: pending.artifactSha256?.jobListing }),
+      ]);
+      await logGeneratedBundle({ root: app.getPath('userData'), workspaceDir: resolvedWorkDir, html, posting, appVersion: app.getVersion() });
+      await logSavedBundle({ root: app.getPath('userData'), workspaceDir: resolvedWorkDir, html });
+    } catch (error) {
+      logger.warn(`[JobApplication] Could not capture discarded application edit evidence: ${error?.message || error}`);
+    }
     await discardPendingApplicationArtifacts(resolvedWorkDir, pending, 'renderer discard');
     logger.info('[JobApplication] Discarded generated application workspace before save');
     return { discarded: true };
@@ -2795,6 +2807,14 @@ export function registerJobApplicationHandlers() {
           path.join(dir, 'Generation Audit.dispositions'),
           pending.workspaceIdentity,
         );
+      }
+      try {
+        await logGeneratedBundle({
+          root: app.getPath('userData'), workspaceDir: dir, html: generatedHtml,
+          posting: jobListingData?.toString('utf8') || '', appVersion: app.getVersion(),
+        });
+      } catch (error) {
+        logger.warn(`[JobApplication] Could not record generated application edit evidence: ${error?.message || error}`);
       }
       return saved;
     };

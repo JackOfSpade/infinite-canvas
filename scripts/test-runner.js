@@ -12,6 +12,7 @@ import marketplace_diagnostics_locks from './tests/marketplace-diagnostics-locks
 import platform_utils from './tests/platform-utils.js';
 import skill_opportunities from './tests/skill-opportunities.js';
 import resume_download_bundle from './tests/resume-download-bundle.js';
+import application_edit_log from './tests/application-edit-log.js';
 import application_multi_posting from './tests/application-multi-posting.js';
 import cover_letter_harness from './tests/cover-letter-harness.js';
 import job_collection_limits from './tests/job-collection-limits.js';
@@ -158,6 +159,7 @@ const testGroups = [
   ['platform-utils.js', platform_utils],
   ['skill-opportunities.js', skill_opportunities],
   ['resume-download-bundle.js', resume_download_bundle],
+  ['application-edit-log.js', application_edit_log],
   ['application-multi-posting.js', application_multi_posting],
   ['cover-letter-harness.js', cover_letter_harness],
   ['job-collection-limits.js', job_collection_limits],

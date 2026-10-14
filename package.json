@@ -59,6 +59,10 @@
       {
         "from": "local_ai",
         "to": "local_ai"
+      },
+      {
+        "from": "config/application-model.json",
+        "to": "config/application-model.json"
       }
     ]
   },
