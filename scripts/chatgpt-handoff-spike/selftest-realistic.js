@@ -31,7 +31,7 @@ const CODE_SHAPE = /^[A-Za-z0-9_-]{24}$/
 // sha256 of the advertised tool surface (names, titles, descriptions, schemas,
 // annotations). It changes ONLY when the frozen text changes, which means a manual
 // Refresh of the ChatGPT plugin (and possibly a new safety warm-up): update it
-// deliberately, together with docs/chatgpt-mcp-bridge-design.md section 6.
+// deliberately, together with the frozen surface in design-tools.js.
 const SURFACE_PIN = '568a60bf5593769bdfb07a057b39f271239c279117cddcad9838d77c2ef1c79d'
 const SURFACE_PINS = { v2s: '73c80b65180180ad3df73f3f6d79d7885ee1fc597d5e85e659206ee69e91d5a2', v2: '9ef062eeeeb1023deb138c65a648b1ccd7a6c2a59365c4db08b0c276503eb8de' }
 const surfaceHash = tools => crypto.createHash('sha256').update(JSON.stringify(tools.map(t => ({ name: t.name, title: t.title, description: t.description, inputSchema: t.inputSchema, annotations: t.annotations })).sort((a, b) => a.name.localeCompare(b.name)))).digest('hex')

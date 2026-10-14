@@ -1,6 +1,6 @@
 // The Phase 0 tool surfaces, registered on an McpServer.
 //
-// v1 is the design's fixed text from docs/chatgpt-mcp-bridge-design.md section 6:
+// v1 is the historical frozen tool surface for this spike:
 // names, titles, descriptions, parameter descriptions and annotations. Once a
 // plugin is created against a surface, changing any of it means a manual Refresh
 // in ChatGPT (and may reset its safety warm-up), so every surface here is frozen

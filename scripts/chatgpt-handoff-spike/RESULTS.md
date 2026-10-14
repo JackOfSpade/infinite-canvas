@@ -64,7 +64,7 @@ One-hotkey relay: press a global hotkey when ChatGPT finishes; the app grabs the
 
 ## Phase 0a results (real-shaped synthetic payloads), 2026-09-26
 
-**Verdict for this phase's questions: the drain works on real-sized, personal-data-shaped payloads (3 of 3 fresh clean chats), the model copied every 24-character code exactly, and the one hostile chat ignored the planted instruction. One new problem: ChatGPT flagged the frozen tool descriptions as a "Suspicious Instruction" and asked for per-call confirmation in the first chat.** Run book: `PHASE0A.md`. Fake data only (persona "Marisol Quenby"); prompts are byte-real output of the app's own `pastePrompt()`.
+**Verdict for this phase's questions: the drain works on real-sized, personal-data-shaped payloads (3 of 3 fresh clean chats), the model copied every 24-character code exactly, and the one hostile chat ignored the planted instruction. One new problem: ChatGPT flagged the frozen tool descriptions as a "Suspicious Instruction" and asked for per-call confirmation in the first chat.** Measurement details follow below. Fake data only (persona "Marisol Quenby"); prompts are byte-real output of the app's own `pastePrompt()`.
 
 Setup: plugin "Infinite Canvas" ("No auth", secret path) created in ChatGPT at 06:13:21 EDT; lab server (`SURFACE=design`, default plan, no designed rejection) behind `bridge-lab.lullascape.com`; four brand-new chats in the desktop app, one message each. First calls came at plugin ages of about 67, 95, 135 and 177 minutes (the report's age column reads about 2 minutes high because it counts from the server restart). The server does not record the model or effort, and the run sheets were not filled in.
 
@@ -205,7 +205,7 @@ JOBS=2 npm start                  # prints the secret path and setup steps
 cloudflared tunnel --url http://127.0.0.1:8787
 # restart with the same URL/codes: TOKEN=<32 hex> CODES=HANDOFF-…,… JOBS=2 npm start
 
-# Phase 0a (design surface, real-shaped synthetic payloads): see PHASE0A.md
+# Phase 0a (design surface, real-shaped synthetic payloads)
 npm run gen                       # renders fixtures/realistic (git-ignored) with the app's own prompt builder
 npm run selftest:realistic        # 36 steps
 SURFACE=design npm start          # prints one starter message per fresh chat

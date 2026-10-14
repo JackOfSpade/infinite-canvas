@@ -11,7 +11,7 @@
 //
 // Phase 0a ("design surface"): SURFACE=design serves real-SHAPED synthetic
 // application handoffs (rendered offline by npm run gen) through the frozen
-// tool surface from docs/chatgpt-mcp-bridge-design.md section 6. See PHASE0A.md.
+// historical tool surface from design-tools.js. See RESULTS.md.
 //   npm run gen && SURFACE=design npm start
 import fs from 'node:fs'
 import http from 'node:http'
