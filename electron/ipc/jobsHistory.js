@@ -24,6 +24,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { logger } from '../logger.js';
+import { dedupKeysFor } from '../../src/utils/jobListingIdentity.js';
+export { dedupKeysFor } from '../../src/utils/jobListingIdentity.js';
 
 // "Already seen" retention window for suppressing re-shown jobs. Deliberately a
 // fixed midpoint (NOT coupled to the max search window): a longer window stops
@@ -49,59 +51,6 @@ export function historyPathForCanvas(canvasFilePath) {
   const dir = path.dirname(canvasFilePath);
   const base = path.basename(canvasFilePath).replace(/\.json$/i, '');
   return path.join(dir, `${base}${SUFFIX}`);
-}
-
-// Query params that carry the LISTING IDENTITY on the sources whose URL PATH is
-// shared across every listing (see normUrl): `jk` = Indeed, `htidocid` = Google
-// for Jobs. Deliberately NOT a list of every source's job-id param — ZipRecruiter
-// (`jid`) and Glassdoor (`jl`) already have per-listing paths, and pinning their
-// key to a query param that can churn between scrapes would re-show jobs the user
-// has already seen. Order is the tie-break if a URL carries more than one.
-const IDENTITY_PARAMS = ['jk', 'htidocid'];
-
-function normUrl(url) {
-  if (!url || typeof url !== 'string') return '';
-  try {
-    const u = new URL(url);
-    // Force https and strip leading `www.` so cross-aggregator reposts
-    // (e.g. http://indeed.com vs https://www.indeed.com) collapse to one key.
-    const host = u.hostname.toLowerCase().replace(/^www\./, '');
-    const path = u.pathname.toLowerCase().replace(/\/+$/, '');
-    // Listing identity normally lives in the PATH, so the query (tracking
-    // params, session tokens) is dropped to canonicalize. Indeed inverts that:
-    // its scraped links are click-redirect stubs (`/rc/clk`, `/pagead/clk`)
-    // where the path is shared across every listing and the identity is the
-    // `jk` job-key in the query — while the rest of the query (`bb=`, `xkcb=`)
-    // is a session token that changes on every scrape. Dropping the whole
-    // query there collapsed EVERY indeed listing to one key, which both
-    // under-recorded history (only the first listing wrote a row) and
-    // over-suppressed dedup (every later listing looked already-seen). So:
-    //   - `jk` present → keep it as the stable identity (path?jk=…)
-    //   - redirect stub with no `jk` → '' so dedup falls back to title+company
-    //   - everything else → path as before (identity is in the path)
-    // Google for Jobs inverts it the same way Indeed does, but worse: EVERY card
-    // shares the path `/search` and the listing identity is the `htidocid` query
-    // param. Confirmed from a live run — all 10 Google jobs normalized to
-    // `https://google.com/search`, so 9 of them were silently dropped from the
-    // history write AND every future Google job on that canvas would then match
-    // that one poisoned key and be suppressed as "already seen".
-    const identity = IDENTITY_PARAMS.find(p => u.searchParams.get(p));
-    if (identity) {
-      const rawIdentity = u.searchParams.get(identity);
-      // Indeed jobkeys are hexadecimal and case-insensitive in practice.
-      // Google's htidocid is opaque/base64-like: lowercasing it changes the ID
-      // and can collapse two genuinely different cards onto one history key.
-      const identityValue = identity === 'htidocid' ? rawIdentity : rawIdentity.toLowerCase();
-      return `https://${host}${path}?${identity}=${encodeURIComponent(identityValue)}`;
-    }
-    if (/\/(?:rc|pagead)\/clk$/.test(path)) return '';
-    return `https://${host}${path}`;
-  } catch {
-    return String(url).split('?')[0].trim().toLowerCase()
-      .replace(/^https?:\/\//, 'https://')
-      .replace(/^https:\/\/www\./, 'https://')
-      .replace(/\/+$/, '');
-  }
 }
 
 function normText(s) {
@@ -154,33 +103,6 @@ function appearsToBeSameListing(first, duplicate) {
   const firstSource = normText(first?.source);
   const duplicateSource = normText(duplicate?.source);
   return visibleFieldsMatch && (!firstSource || !duplicateSource || firstSource === duplicateSource);
-}
-
-/**
- * A job with a stable listing URL is considered a duplicate only when that URL
- * repeats. A title/company/location tuple is a FALLBACK for records without a
- * usable URL. Treating both as simultaneous keys silently merged distinct,
- * same-employer requisitions in the same city merely because they shared a
- * generic title ("Front Desk Agent" is a common real-world example).
- *
- * Location is part of the key on purpose: a "Software Engineer" req at
- * Google NYC and one at Google SF are separate opportunities — the user
- * may want to apply to both. Same-title rows without a location fall back
- * to (title + company), which only matches other location-less rows, so
- * the worst case is one extra over-show against legacy CSV rows.
- */
-export function dedupKeysFor(item) {
-  const url = normUrl(item?.url || item?.googleCardUrl);
-  if (url) return [`u:${url}`];
-  const keys = [];
-  const title = normText(item?.title);
-  const company = normText(item?.company);
-  const location = normText(item?.location);
-  if (title && company) {
-    if (location) keys.push(`tcl:${title}|${company}|${location}`);
-    else keys.push(`tc:${title}|${company}`);
-  }
-  return keys;
 }
 
 // One record per LINE is a hard invariant here: loadJobsHistory splits the file

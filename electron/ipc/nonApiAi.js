@@ -2415,6 +2415,7 @@ export async function requestNonApiAi({
   maxOutputTokens,
   formulaSeed,
   attachmentPaths,
+  attachmentReader = null,
   // Optional content-bound names for `attachmentPaths` (see
   // cleanAttachmentIdentities).  Only a host that owns the attachment's staging
   // may supply them; `hostStagedAttachments` additionally promises that every
@@ -2714,6 +2715,8 @@ export async function requestNonApiAi({
     requestKind: requestKind === 'raw-text' ? 'raw-text' : 'structured-text',
     grounded: grounding === true,
     attachmentPaths: normalizedAttachmentPaths,
+    // Main-process closure only. Never persist it or expose paths/bytes through IPC.
+    attachmentReader: typeof attachmentReader === 'function' ? attachmentReader : null,
     // True only for host-staged private copies: the handoff must never be shown
     // (initially, replayed, or re-issued) while one of them is missing.
     hostStagedAttachments: hostStagedAttachments === true && normalizedAttachmentPaths.length > 0,
@@ -3106,8 +3109,18 @@ export const BRIDGE_RELEASE_ONE_TASKS = Object.freeze([
   'job-taxonomy-classify-batch', 'job-taxonomy-plan', 'platform-fit-assessment', 'price-synthesis',
   'price-synthesis-batch', 'resume-parse',
   'interview-brief-research', 'interview-brief-assessment',
+  'marketplace-hub-scan', 'marketplace-hub-scan-batch',
 ]);
 const bridgeReleaseOneTasks = new Set(BRIDGE_RELEASE_ONE_TASKS);
+// Enable attachment tasks individually only after their live checks pass.
+export const BRIDGE_ATTACHMENT_TRANSPORT_ENABLED = true;
+export const BRIDGE_ATTACHMENT_TASKS = Object.freeze([
+  'vision-product-analysis',
+]);
+export const BRIDGE_ENABLED_ATTACHMENT_TASKS = Object.freeze([
+  'vision-product-analysis',
+]);
+const bridgeAttachmentTasks = new Set(BRIDGE_ENABLED_ATTACHMENT_TASKS);
 
 function bridgeResponseFormat(record) {
   if (record?.responseSchema) return 'json';
@@ -3125,9 +3138,10 @@ function bridgeResponseFormat(record) {
 export function isMcpEligibleNonApiAiRecord(record) {
   return Boolean(
     record
-    && bridgeReleaseOneTasks.has(record.task)
     && Array.isArray(record.attachmentPaths)
-    && record.attachmentPaths.length === 0
+    && ((bridgeReleaseOneTasks.has(record.task) && record.attachmentPaths.length === 0)
+      || (BRIDGE_ATTACHMENT_TRANSPORT_ENABLED && bridgeAttachmentTasks.has(record.task)
+        && record.attachmentPaths.length > 0 && typeof record.attachmentReader === 'function'))
     && bridgeResponseFormat(record),
   );
 }
@@ -3143,7 +3157,9 @@ function bridgeExclusionReason(record, { allowTasks, allowNodeIds, allowWindowNo
   if (!record.sender || record.sender.isDestroyed?.() || record.signal?.aborted) return 'ending';
   if (record.settling) return 'settling';
   if (retryAfterMs(record) > 0) return 'cooldown';
-  if (record.attachmentPaths.length > 0) return 'attachment';
+  if (record.attachmentPaths.length > 0
+    && (!BRIDGE_ATTACHMENT_TRANSPORT_ENABLED || !bridgeAttachmentTasks.has(record.task)
+      || typeof record.attachmentReader !== 'function')) return 'attachment';
   if (!bridgeResponseFormat(record)) return 'free_text';
   // Preserve the existing local-draft diagnostic before applying the route
   // fence. A restored manual answer must be reported as person-owned, while
@@ -3283,6 +3299,8 @@ function bridgeListEntry(record) {
     rejections: record.lifecycle?.rejected ?? 0,
     // Sizes and flags only. The prompt is read separately, one handoff at a time.
     promptChars: record.materializedPrompt.length,
+    // Main-process source planning only; MCP framing and status omit this.
+    hasAttachments: record.attachmentPaths.length > 0,
     // False only for a step restored from before code enforcement: `{}` may be a
     // valid answer there, so the bridge must not treat it as junk.
     codeEnforced: record.handoffCodeVerificationVersion >= HANDOFF_CODE_VERIFICATION_VERSION,
@@ -3371,6 +3389,48 @@ export function readBridgeableNonApiAiHandoff({ requestId, handoffCode, allowTas
     responseFormat: bridgeResponseFormat(record),
     ...bridgeRetryView(record),
   });
+}
+
+const BRIDGE_ATTACHMENT_MIMES = Object.freeze({
+  '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
+  '.webp': 'image/webp', '.gif': 'image/gif', '.heic': 'image/heic',
+  '.heif': 'image/heif', '.pdf': 'application/pdf',
+  '.txt': 'text/plain', '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+});
+
+// Main-process only. The reader is a closure installed by llm.js after its
+// sensitive-path gate; host-staged career files use the stronger owned-stage
+// reader from jobs.js. Paths and bytes never enter renderer status or MCP.
+export async function readBridgeableNonApiAiAttachments({ requestId, handoffCode, allowTasks, allowNodeIds = null, allowWindowNodePairs = null } = {}) {
+  const record = typeof requestId === 'string' ? pendingRequests.get(requestId) : null;
+  if (!record || record.handoffCode !== handoffCode || record.handoffRoute !== 'mcp'
+    || bridgeExclusionReason(record, { allowTasks, allowNodeIds, allowWindowNodePairs })
+    || record.attachmentPaths.length < 1 || typeof record.attachmentReader !== 'function') return null;
+  const attachments = [];
+  let total = 0;
+  for (const filePath of record.attachmentPaths) {
+    const bytes = await record.attachmentReader(filePath);
+    if (!(bytes instanceof Uint8Array) || bytes.length < 1 || bytes.length > 50 * 1024 * 1024) return null;
+    total += bytes.length;
+    if (total > 100 * 1024 * 1024) return null;
+    const name = path.basename(filePath);
+    if (!name || attachments.some(item => item.name === name)) return null;
+    attachments.push({ name, mime: BRIDGE_ATTACHMENT_MIMES[path.extname(name).toLowerCase()] || 'application/octet-stream', bytes });
+  }
+  // The request may have been cancelled or rerouted while an async file read
+  // was in flight. Recheck ownership before giving bytes to the launcher.
+  if (pendingRequests.get(requestId) !== record || record.handoffCode !== handoffCode
+    || bridgeExclusionReason(record, { allowTasks, allowNodeIds, allowWindowNodePairs })) return null;
+  return { handoffCode, attachments };
+}
+
+export function fallbackBridgeAttachmentToManual({ requestId, allowTasks, allowNodeIds = null, allowWindowNodePairs = null } = {}) {
+  const record = typeof requestId === 'string' ? pendingRequests.get(requestId) : null;
+  if (!record || record.handoffRoute !== 'mcp' || record.attachmentPaths.length < 1
+    || bridgeExclusionReason(record, { allowTasks, allowNodeIds, allowWindowNodePairs })) return false;
+  record.handoffRoute = 'manual';
+  emitNonApiAiEvent();
+  return true;
 }
 
 /**

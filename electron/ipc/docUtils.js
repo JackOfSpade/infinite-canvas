@@ -198,76 +198,87 @@ const MARKDOWN_HIDDEN_RE = [
 const PLAIN_TEXT_MAX_BYTES = 4 * 1024 * 1024;
 
 /**
- * Read a plain-text document verbatim, or return null to defer to the normal
- * extraction path. Never throws: null means "not confidently clean text", and
- * every caller already has a working fallback, so a surprising file degrades to
- * the previous behaviour instead of failing the drop.
+ * Read a plain-text document verbatim, or return null when it is not
+ * confidently clean text. Never throws. `readPlainTextDocumentWithReason`
+ * returns the same decision with the refusal reason, so a caller can tell the
+ * person what to fix.
  */
-export async function readPlainTextDocument(filePath, { readUtf8 = null, includeAppPrivate = true } = {}) {
+export async function readPlainTextDocument(filePath, options = {}) {
+  return (await readPlainTextDocumentWithReason(filePath, options)).text;
+}
+
+// Refusal reasons, each a fixable property of the file:
+//   extension     not a plain-text extension
+//   sensitive     a system or credential path
+//   unreadable    missing, not a regular file, or could not be read
+//   too_large     over PLAIN_TEXT_MAX_BYTES
+//   encoding      not valid UTF-8 (a Latin-1 / Windows-1252 save)
+//   hidden_chars  control, invisible, private-use or separator characters
+//   hidden_markdown  HTML, comments, link-reference definitions or entities
+//   code_block    a fenced code block
+//   markdown      Markdown this reader will not guess at
+//   empty         no text
+export async function readPlainTextDocumentWithReason(filePath, { readUtf8 = null, includeAppPrivate = true } = {}) {
+  const refuse = reason => ({ text: null, reason });
   // The coercion is inside the guard: an argument whose toString throws (or a
   // null-prototype object) is a refusal like any other, not a rejection.
   let resolved;
   try {
     resolved = path.resolve(String(filePath || ''));
   } catch {
-    return null;
+    return refuse('unreadable');
   }
-  if (!PLAIN_TEXT_EXT.has(path.extname(resolved).toLowerCase())) return null;
-  // Deferring rather than throwing keeps ONE copy of this rule: the attachment
-  // path (llm.js callLLMDocument) raises the canonical refusal for a sensitive
-  // path, and it is where this file was already headed.
-  //
+  if (!PLAIN_TEXT_EXT.has(path.extname(resolved).toLowerCase())) return refuse('extension');
   // `includeAppPrivate: false` is for the one caller that owns an app-private
   // store: the career compiler classifies its OWN privately staged copy of the
   // user's file.  Renderer-denied app namespaces (career-input-staging among
-  // them) would otherwise make every staged .md/.txt look sensitive, silently
-  // demoting a plain-text file to AI attachment transcription.  System and
-  // credential paths stay denied either way, and such a caller must also pass
-  // `readUtf8`, a reader bound to the already-owned staged inode, so the
+  // them) would otherwise make every staged .md/.txt look sensitive.  System
+  // and credential paths stay denied either way, and such a caller must also
+  // pass `readUtf8`, a reader bound to the already-owned staged inode, so the
   // classification reads exactly the bytes the compiler will use.
-  if (isSensitivePath(resolved, { includeAppPrivate })) return null;
+  if (isSensitivePath(resolved, { includeAppPrivate })) return refuse('sensitive');
   let text;
   try {
     if (typeof readUtf8 === 'function') {
       text = await readUtf8(resolved);
-      if (typeof text !== 'string' || Buffer.byteLength(text, 'utf8') > PLAIN_TEXT_MAX_BYTES) return null;
+      if (typeof text !== 'string') return refuse('unreadable');
+      if (Buffer.byteLength(text, 'utf8') > PLAIN_TEXT_MAX_BYTES) return refuse('too_large');
     } else {
       const stats = await fs.stat(resolved);
-      if (!stats.isFile() || stats.size > PLAIN_TEXT_MAX_BYTES) return null;
+      if (!stats.isFile()) return refuse('unreadable');
+      if (stats.size > PLAIN_TEXT_MAX_BYTES) return refuse('too_large');
       text = await fs.readFile(resolved, 'utf8');
     }
   } catch {
-    return null;
+    return refuse('unreadable');
   }
-  // U+FFFD means Node substituted replacement characters for bytes that are not
-  // valid UTF-8 - a Latin-1/Windows-1252 save, say - and a NUL means the
-  // extension is lying about the contents. Either way this read is not faithful,
-  // so hand the file to the extractor rather than ingesting mojibake as if it
-  // were the candidate's career history.
   // A byte-order mark leading the file is an encoding signature (Windows editors
   // write one), not text: strip it. Node's utf8 decoding keeps it as U+FEFF.
   if (text.charCodeAt(0) === 0xFEFF) text = text.slice(1);
+  // U+FFFD means Node substituted replacement characters for bytes that are not
+  // valid UTF-8 - a Latin-1/Windows-1252 save, say - so this read is not
+  // faithful and must not become the candidate's career history.
+  if (text.includes('\uFFFD')) return refuse('encoding');
   // Text that renders as nothing, that reorders or hides the text around it, or that
   // is not text at all (control characters, private-use glyph slots, line and
   // paragraph separators, C1 controls) is not what a reader of the file sees, so a
-  // read carrying any is not faithful. The refusal set is FFFD, PUA, control
-  // characters incl. NUL, INVISIBLE_CHAR_RE incl. a stray BOM, C1 controls and
-  // U+2028/2029, which no career file legitimately holds.
-  // Deliberately conservative: such a character in a career file is far more likely
-  // to be pasted debris than intent, and the file still reads through the AI handoff.
-  if (text.includes('\uFFFD') || PUA_RE.test(text) || hasControlChar(text) || INVISIBLE_CHAR_RE.test(text) || C1_AND_SEPARATOR_RE.test(text)) return null;
+  // read carrying any is not faithful. Deliberately conservative: such a character
+  // in a career file is far more likely to be pasted debris than intent.
+  if (PUA_RE.test(text) || hasControlChar(text) || INVISIBLE_CHAR_RE.test(text) || C1_AND_SEPARATOR_RE.test(text)) return refuse('hidden_chars');
   const markdown = MARKDOWN_EXT.has(path.extname(resolved).toLowerCase());
   // An HTML comment is hidden when the Markdown is rendered, and so are the other
   // constructs MARKDOWN_HIDDEN_RE names.
-  if (markdown && (text.includes('<!--') || MARKDOWN_HIDDEN_RE.some(hidden => hidden.test(text)))) return null;
-  if (!markdown) return text.trim() || null;
+  if (markdown && (text.includes('<!--') || MARKDOWN_HIDDEN_RE.some(hidden => hidden.test(text)))) return refuse('hidden_markdown');
+  if (!markdown) return text.trim() ? { text: text.trim(), reason: null } : refuse('empty');
+  if (CODE_FENCE_RE.test(text)) return refuse('code_block');
   // The never-throw contract holds even if a pathological line exhausts the regexp
   // engine (a RangeError there is a refusal, not a crash).
   try {
     const plain = plainTextFromMarkdown(text);
-    return plain === null ? null : plain.trim() || null;
+    if (plain === null) return refuse('markdown');
+    return plain.trim() ? { text: plain.trim(), reason: null } : refuse('empty');
   } catch {
-    return null;
+    return refuse('markdown');
   }
 }
 

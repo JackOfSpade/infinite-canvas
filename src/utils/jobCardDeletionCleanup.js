@@ -1,6 +1,7 @@
 import { computeJobTreeView } from '../nodes/jobsearch/buildJobTree.js';
 import { deriveBoardCardStats } from '../nodes/jobboard/mergeJobs.js';
 import { hubCardFilter } from './jobCardFilters.js';
+import { jobAndVariantKeys } from './jobListingIdentity.js';
 
 // Before this existed, only the card's own X button (JobCardNode's
 // dismissCard) reflowed the job tree and recomputed the board's PERSISTED
@@ -58,7 +59,14 @@ export function planJobCardDeletionCleanup(deletedNodes, nodesAfterRemoval, getH
     if (!hubNode) continue;
     const hubData = hubNode.data || {};
     treeNodes = computeJobTreeView(treeNodes, hubId, hubCardFilter(hubData));
-    boardUpdates.push({ hubId, cardIds, stats: deriveBoardCardStats(treeNodes, hubId, hubData) });
+    const stats = deriveBoardCardStats(treeNodes, hubId, hubData);
+    if (hubNode.type === 'jobboard') {
+      const removedKeys = (Array.isArray(deletedNodes) ? deletedNodes : [])
+        .filter(node => node?.type === 'jobcard' && node?.data?.hubId === hubId)
+        .flatMap(node => jobAndVariantKeys(node.data));
+      stats.dismissedJobKeys = [...new Set([...(hubData.dismissedJobKeys || []), ...removedKeys])];
+    }
+    boardUpdates.push({ hubId, cardIds, stats });
   }
   return { treeNodes, boardUpdates };
 }

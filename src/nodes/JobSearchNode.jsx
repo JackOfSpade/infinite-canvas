@@ -97,6 +97,7 @@ import {
   toggleCareerCanvasFileSelection,
 } from '../utils/careerCanvasFileImport';
 import { isAppBundlePathOrName } from '../utils/hubNodeDrop';
+import { CAREER_TEXT_ONLY_MESSAGE, isCareerTextFileName } from '../utils/careerTextFiles';
 
 // ─── TESTING: optionally skip AI scoring after collection ────────────────────
 // Collection limits are always user-controlled; this switch affects scoring only.
@@ -8777,20 +8778,27 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       });
       return false;
     }
+    // Career data is plain text only. One non-text file refuses the whole
+    // drop: the module is bound to its first import, so silently dropping a
+    // file would leave a career corpus missing part of what was meant.
     const valid = [];
+    const refused = [];
     paths.forEach((p, i) => {
-      const nm = names[i] || p || '';
+      const nm = names[i] || (p ? p.split(/[\\/]/).pop() : '') || '';
       if (!p) return;
-      if (isAppBundlePathOrName(nm) || isAppBundlePathOrName(p)) {
-        EventLogger.log(`[JobSearch][${id}] Drop skipped: app bundle (${nm})`);
+      if (isAppBundlePathOrName(nm) || isAppBundlePathOrName(p) || !isCareerTextFileName(p)) {
+        refused.push(nm || p);
         return;
       }
       valid.push(p);
     });
-    if (valid.length === 0) {
+    if (refused.length > 0 || valid.length === 0) {
+      EventLogger.log(`[JobSearch][${id}] Drop rejected: ${refused.length} non-text file(s) ext=[${summarizeFileExtensions(refused.map(name => ({ name }))).join(', ') || 'none'}]`);
       addToast({
-        title: 'No usable files',
-        description: 'Drop PDF, DOCX, TXT, or image files of your career history (macOS apps are not accepted).',
+        title: 'Only .txt or .md files',
+        description: refused.length > 0
+          ? `${refused.slice(0, 3).join(', ')}${refused.length > 3 ? ` and ${refused.length - 3} more` : ''} ${refused.length === 1 ? 'is' : 'are'} not a .txt or .md file. ${CAREER_TEXT_ONLY_MESSAGE}`
+          : CAREER_TEXT_ONLY_MESSAGE,
         type: 'error',
       });
       return false;
@@ -13835,10 +13843,27 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
                   disabled={inputDropsBlocked || controlsLocked}
                   title={inputDropsBlocked || controlsLocked
                     ? 'This Job Search is not accepting career files right now'
-                    : 'Select compatible document files already on this canvas'}
+                    : 'Select .txt or .md files already on this canvas'}
                 >
                   Import from canvas files
                 </button>
+              )}
+              {!hasCareerIdentity && (
+                <label className="nodrag mt-1.5 cursor-pointer rounded-full border border-blue-500/20 bg-blue-500/10 px-3 py-1 text-[10px] text-blue-200 transition-colors hover:bg-blue-500/20 has-[:disabled]:cursor-not-allowed has-[:disabled]:opacity-45" onPointerDown={(event) => event.stopPropagation()}>
+                  Choose files from Mac
+                  <input
+                    type="file"
+                    multiple
+                    accept=".txt,.md,text/plain,text/markdown"
+                    className="sr-only"
+                    disabled={inputDropsBlocked || controlsLocked}
+                    onChange={(event) => {
+                      const payloads = filesToDropPayloads(event.target.files);
+                      event.target.value = '';
+                      acceptCareerFiles(payloads.map(file => file.path), payloads.map(file => file.name));
+                    }}
+                  />
+                </label>
               )}
               {/* Clearing career data retains the module's scan history, and
                   replacement files automatically continue from that date. */}

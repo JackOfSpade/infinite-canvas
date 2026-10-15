@@ -8,8 +8,11 @@ import { pauseBrowserPool } from '../browserPool.js';
 import { withMarketplaceBrowserLock } from '../marketplaceBrowserLock.js';
 import { findGoogleSafeChromePath, isLoggedOutTitleForPlatform, isLoginUrlPath, PUPPETEER_OSCRYPT_PARITY_ARGS } from './authWindows.js';
 import { isBackgroundE2E, backgroundE2EDisabledError } from '../../utils/backgroundE2e.js';
+import { isAppleEventsJsDisabledError } from './appleEvents.js';
+export { isAppleEventsJsDisabledError, runChromeAppleScript } from './appleEvents.js';
 
 const execFile = promisify(execFileCb);
+
 
 // ── Why this module exists ───────────────────────────────────────────────────
 // A few marketplaces gate their seller hubs behind anti-bot that detects the
@@ -72,12 +75,6 @@ const UNKNOWN_SETTLE_MS = 30000;
  * Detected so the bug report can tell the user exactly what to flip instead of
  * showing an opaque AppleScript error.
  */
-export function isAppleEventsJsDisabledError(msg) {
-  const s = String(msg || '');
-  return /JavaScript through AppleScript is turned off/i.test(s)
-    || /Allow JavaScript from Apple Events/i.test(s)
-    || /Executing JavaScript through AppleScript/i.test(s);
-}
 
 /**
  * A page that, even via native Chrome on a logged-in profile, is actually the

@@ -24,7 +24,7 @@ const LIMIT_KEYS = Object.freeze(Object.keys(DEFAULT_LIMITS));
 const LEGACY_LIMIT_KEYS = new Set([...LIMIT_KEYS, 'jobsPerChat', 'epochSoftBytes', 'epochHardBytes']);
 const SOURCE_POLICIES = new Set(['enforce', 'alert', 'off']);
 const CONFIG_FIELDS = new Set([
-  'hostname', 'pluginName', 'scope', 'autoStart', 'autoRelease', 'limits',
+  'hostname', 'pluginName', 'scope', 'autoStart', 'autoRelease', 'autoLaunchChats', 'limits',
   'prefs', 'telemetryInBugReports', 'consentVersion',
 ]);
 const PERSISTED_CONFIG_FIELDS = new Set(['v', ...CONFIG_FIELDS]);
@@ -55,6 +55,7 @@ export function emptyConfig() {
     // Existing persisted `false` values remain explicit opt-outs when read.
     scope: { applications: true, scoring: true, marketplace: true },
     autoStart: true,
+    autoLaunchChats: true,
     // This controls newly created application bundles only. Reviewed push hubs
     // have a separate main-owned auto-selection policy and explicit opt-outs.
     autoRelease: true,
@@ -116,12 +117,13 @@ function normalizeConfig(value) {
       || typeof prefs.pairingNetworkCheck !== 'boolean'
       || !limits) return null;
   const autoStart = Object.hasOwn(value, 'autoStart') ? value.autoStart : defaults.autoStart;
+  const autoLaunchChats = Object.hasOwn(value, 'autoLaunchChats') ? value.autoLaunchChats : defaults.autoLaunchChats;
   const autoRelease = Object.hasOwn(value, 'autoRelease') ? value.autoRelease : defaults.autoRelease;
   const telemetryInBugReports = Object.hasOwn(value, 'telemetryInBugReports')
     ? value.telemetryInBugReports
     : defaults.telemetryInBugReports;
   const consentVersion = Object.hasOwn(value, 'consentVersion') ? value.consentVersion : defaults.consentVersion;
-  if (typeof autoStart !== 'boolean' || typeof autoRelease !== 'boolean'
+  if (typeof autoStart !== 'boolean' || typeof autoLaunchChats !== 'boolean' || typeof autoRelease !== 'boolean'
       || typeof telemetryInBugReports !== 'boolean'
       || !Number.isInteger(consentVersion) || consentVersion < 0) return null;
   return freezeConfig({
@@ -132,6 +134,7 @@ function normalizeConfig(value) {
     pluginName: pluginName || defaults.pluginName,
     scope: { applications: scope.applications, scoring: scope.scoring, marketplace: scope.marketplace },
     autoStart,
+    autoLaunchChats,
     autoRelease,
     limits,
     prefs: { sourcePolicy: prefs.sourcePolicy, pairingNetworkCheck: prefs.pairingNetworkCheck },
@@ -162,6 +165,7 @@ function mergePatch(current, patch) {
     pluginName: current.pluginName,
     scope: { ...current.scope },
     autoStart: current.autoStart,
+    autoLaunchChats: current.autoLaunchChats,
     autoRelease: current.autoRelease,
     limits: { ...current.limits },
     prefs: { ...current.prefs },
@@ -188,7 +192,7 @@ function mergePatch(current, patch) {
       }
     }
   }
-  for (const key of ['autoStart', 'autoRelease', 'telemetryInBugReports']) {
+  for (const key of ['autoStart', 'autoLaunchChats', 'autoRelease', 'telemetryInBugReports']) {
     if (Object.hasOwn(patch, key)) {
       if (typeof patch[key] !== 'boolean') fieldError(fieldErrors, key);
       else next[key] = patch[key];

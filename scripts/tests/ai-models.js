@@ -622,8 +622,8 @@ export default [
         'reservedOutput is exactly the same task-specific ceiling taskMaxTokensFor would report for the identical task/hints');
       assert(Number.isFinite(fit.tokens) && fit.tokens > 0, 'tokens is a real (informational-only) local estimate, not left undefined');
       // A wildly larger prompt still fits — there is no size past which this flips.
-      const bigger = await checkPromptFits('y'.repeat(5_000_000), { task: 'career-file-extract' });
-      assert(bigger.fits === true && bigger.reservedOutput === taskMaxTokensFor('career-file-extract'),
+      const bigger = await checkPromptFits('y'.repeat(5_000_000), { task: 'career-profile-compile' });
+      assert(bigger.fits === true && bigger.reservedOutput === taskMaxTokensFor('career-profile-compile'),
         'even a multi-megabyte prompt reports fits:true with the correct task-specific reservedOutput');
       return { reservedOutput: fit.reservedOutput };
     },

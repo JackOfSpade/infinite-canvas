@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { useBridgeLaunchAccounts } from '../hooks/useBridgeLaunchAccounts';
 import { Check } from 'lucide-react';
 import { BRIDGE_PROGRESS_COPY, BRIDGE_UI_COPY, ipcErrorMessage } from '../utils/handoffBridgeCopy';
 import { deriveBridgeJobProgress, deriveBridgePushProgress, progressTimeLines } from '../utils/bridgeJobProgress';
@@ -55,7 +56,7 @@ function poolFromChat(chat, observedReleased = 0) {
     const quietReason = state === 'quiet' && typeof worker?.quietReason === 'string' && QUIET_REASONS.has(worker.quietReason)
       ? worker.quietReason
       : null;
-    return [{ ordinal, state, completed, lastCallAt, quietReason }];
+    return [{ ordinal, state, completed, lastCallAt, quietReason, launch: worker?.launch || null }];
   }).sort((left, right) => left.ordinal - right.ordinal) : [];
   const plan = pool?.plan && typeof pool.plan === 'object' ? pool.plan : {};
   const queued = Number.isSafeInteger(plan.queued) && plan.queued >= 0 ? plan.queued : 0;
@@ -116,6 +117,7 @@ function workerPoolProgress(pool, reportedPool, copiedWorkers, copiedWorkerStatu
       completed: reported?.completed || 0,
       lastCallAt: Number.isFinite(reported?.lastCallAt) && reported.lastCallAt >= 0 ? reported.lastCallAt : null,
       quietReason: state === 'quiet' && QUIET_REASONS.has(reported?.quietReason) ? reported.quietReason : null,
+      launch: reported?.launch || null,
     };
   });
   const summary = workers.reduce((result, worker) => {
@@ -196,6 +198,7 @@ export function BridgeProgress({
   observedReleased,
   workersOnly = false,
 }) {
+  const launchAccountName = useBridgeLaunchAccounts(status);
   const [now, setNow] = useState(() => Date.now());
   const [notice, setNotice] = useState('');
   const [busy, setBusy] = useState(false);
@@ -254,13 +257,13 @@ export function BridgeProgress({
   // application bundle must retain its lane and four-stage progress view.
   const view = isPush === true
     ? deriveBridgePushProgress({ chat, bridge: {
-      paused: status?.paused === true, pluginName,
+      paused: status?.paused === true, pluginName, autoLaunchChats: status?.autoLaunchChats === true,
       enabled: status?.enabled === true,
       serving: status?.serving,
       tunnelReachable: status?.setup?.tunnelReachable === true,
       linked: status?.setup?.linked === true,
     }, ownerWorker, awaitingClaim })
-    : deriveBridgeJobProgress({ job, chat, item, ownerWorker, now, bridge: { paused: status?.paused === true, pluginName } });
+    : deriveBridgeJobProgress({ job, chat, item, ownerWorker, now, bridge: { paused: status?.paused === true, pluginName, autoLaunchChats: status?.autoLaunchChats === true } });
   const lines = progressTimeLines(view, now);
   // The page-level worker block never prints the timer lines, so it must not
   // re-render once a second for them either.
@@ -417,6 +420,20 @@ export function BridgeProgress({
       if (mountedRef.current) setCopyingWorker(null);
     }
   };
+  const retryWorkerLaunch = async ordinal => {
+    if (!activeWorkerPool || busyRef.current) return;
+    busyRef.current = true;
+    setCopyingWorker(ordinal);
+    try {
+      const result = await invoke('handoffBridgeRetryWorkerLaunch', {
+        generation: activeWorkerPool.generation, workerOrdinal: ordinal,
+      });
+      if (mountedRef.current) setNotice(result?.success ? 'Opening a fresh ChatGPT worker chat…' : ipcErrorMessage(result?.code));
+    } finally {
+      busyRef.current = false;
+      if (mountedRef.current) setCopyingWorker(null);
+    }
+  };
 
   // The panel's gate for both chat buttons.
   const canStartChat = status?.enabled === true && status?.serving === 'live' && status?.paused !== true
@@ -517,15 +534,21 @@ export function BridgeProgress({
                 >
                   <span className="font-medium text-white/85">Worker {worker.ordinal}</span>
                   <span className={worker.state === 'quiet' ? 'text-amber-200' : worker.state === 'working' ? 'text-violet-200' : 'text-white/55'}>
-                    {BRIDGE_UI_COPY.workerState(worker.state, worker.quietReason)}
+                    {BRIDGE_UI_COPY.workerState(worker.state, worker.quietReason, worker.launch)}
                   </span>
+                    {worker.launch && <span className="basis-full text-sky-100/80">{BRIDGE_UI_COPY.workerLaunch(worker.launch, launchAccountName(activeWorkerPool.generation, worker.ordinal))}</span>}
+                  {['plugin_missing', 'reconnect_required', 'usage_limit', 'bridge_not_presented'].includes(worker.launch?.reason) && (
+                    <button type="button" className="ml-auto rounded-md border border-white/15 bg-white/5 px-2.5 py-1.5 text-[11px] font-medium text-white/85"
+                      disabled={busy || activeCopyingWorker !== null}
+                      onClick={() => void retryWorkerLaunch(worker.ordinal)}>Retry</button>
+                  )}
                   {worker.completed > 0 && <span className="text-white/45">{BRIDGE_UI_COPY.workerDone(worker.completed)}</span>}
                   {worker.state === 'quiet' && (
                     <>
                       <span className="basis-full text-amber-100/80">{BRIDGE_UI_COPY.workerQuiet(worker.quietReason)}</span>
                       <button
                         type="button"
-                        disabled={busy || activeCopyingWorker !== null}
+                        disabled={busy || activeCopyingWorker !== null || ['opening', 'checking', 'sent'].includes(worker.launch?.stage) || ['send_not_confirmed', 'bridge_not_presented'].includes(worker.launch?.reason)}
                         aria-busy={activeCopyingWorker === worker.ordinal || undefined}
                         onClick={() => void restartWorker(worker.ordinal)}
                         className="ml-auto rounded-md border border-white/15 bg-white/5 px-2.5 py-1.5 text-[11px] font-medium text-white/85 transition-colors hover:bg-white/10 hover:text-white disabled:cursor-not-allowed disabled:opacity-50"
@@ -539,7 +562,7 @@ export function BridgeProgress({
                   {['available', 'ready'].includes(worker.state) && (
                     <button
                       type="button"
-                      disabled={busy || activeCopyingWorker !== null}
+                      disabled={busy || activeCopyingWorker !== null || ['opening', 'checking', 'sent'].includes(worker.launch?.stage) || ['send_not_confirmed', 'bridge_not_presented'].includes(worker.launch?.reason)}
                       aria-busy={activeCopyingWorker === worker.ordinal || undefined}
                       onClick={() => void copyWorkerStarter(worker.ordinal)}
                       className="ml-auto rounded-md border border-white/15 bg-white/5 px-2.5 py-1.5 text-[11px] font-medium text-white/85 transition-colors hover:bg-white/10 hover:text-white disabled:cursor-not-allowed disabled:opacity-50"

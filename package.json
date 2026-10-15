@@ -30,7 +30,10 @@
     "target": "dir",
     "identity": "AI Chalkboard Local Code Signing",
     "forceCodeSigning": true,
-    "timestamp": "none"
+    "timestamp": "none",
+    "extendInfo": {
+      "NSAppleEventsUsageDescription": "Open and check ChatGPT worker chats in Google Chrome."
+    }
     },
     "directories": {
       "buildResources": "build",

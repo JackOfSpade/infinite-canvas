@@ -10,7 +10,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import electronPkg from 'electron';
-import { callLLMVision, callLLMText, hasExactDurableTextHandoff } from './llm.js';
+import { createHostStagedVisionCaller, callLLMText, hasExactDurableTextHandoff } from './llm.js';
 import {
   HANDOFF_CONCURRENCY,
   mapAutomaticHandoffs,
@@ -384,9 +384,13 @@ async function stageMarketplacePhotos(imagePaths, canvasFilePath, nodeId, runId,
   }
 }
 
-async function verifyStagedMarketplacePhotos(identities) {
+async function verifyStagedMarketplacePhotos(identities, canvasFilePath, nodeId, runId) {
+  const ownedDirectory = marketplacePhotoStageDir(canvasFilePath, nodeId, runId);
   let totalBytes = 0;
   for (const identity of identities) {
+    if (typeof identity?.stagedPath !== 'string' || path.dirname(identity.stagedPath) !== ownedDirectory) {
+      throw new Error('A staged marketplace photo is outside its owned recovery directory.');
+    }
     const snapshot = await readBoundedMarketplacePhoto(identity?.stagedPath);
     totalBytes += snapshot.size;
     if (totalBytes > MAX_MARKETPLACE_PHOTO_TOTAL_BYTES
@@ -1504,9 +1508,26 @@ export function registerMarketplaceHandlers() {
     // The handoff receives only immutable staged files. Re-verify their bytes
     // immediately before creating the prompt so the exact hashed attachment,
     // not a mutable original path, is what the AI chat will receive.
-    const stagedImagePaths = await verifyStagedMarketplacePhotos(imageIdentities);
+    const stagedImagePaths = await verifyStagedMarketplacePhotos(imageIdentities, canvasFilePath, nodeId, analysisRunId);
+    const callStagedVision = createHostStagedVisionCaller(
+      async paths => {
+        const verified = await verifyStagedMarketplacePhotos(imageIdentities, canvasFilePath, nodeId, analysisRunId);
+        if (JSON.stringify(paths) !== JSON.stringify(verified)) throw new Error('Marketplace photo stage ownership changed.');
+      },
+      async filePath => {
+        const identity = imageIdentities.find(item => item.stagedPath === filePath);
+        if (!identity || path.dirname(filePath) !== marketplacePhotoStageDir(canvasFilePath, nodeId, analysisRunId)) {
+          throw new Error('Marketplace photo stage ownership changed.');
+        }
+        const snapshot = await readBoundedMarketplacePhoto(filePath);
+        if (snapshot.canonicalPath !== identity.stagedPath || snapshot.size !== identity.size || snapshot.sha256 !== identity.sha256) {
+          throw new Error('Marketplace photo stage content changed.');
+        }
+        return snapshot.bytes;
+      },
+    );
     const aiMeta = {}; // populated with the model that actually served this call
-    const result = await callLLMVision(stagedImagePaths, `
+    const result = await callStagedVision(stagedImagePaths, `
 You are a marketplace listing expert. Analyze these product photos and identify what is being sold.
 
 Return a JSON object:

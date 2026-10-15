@@ -487,6 +487,13 @@ export const CAREER_FILE_BOUNDARY_AUDIT_SCHEMA = {
   },
 };
 
+// RETAINED FOR SNAPSHOT IDENTITY ONLY (2026-10-14): career files are now
+// plain text (.txt/.md) read verbatim, and nothing calls the attachment
+// transcription schemas below any more. They stay byte-identical because this
+// object's digest is part of every stored career snapshot; changing it would
+// force every existing career corpus to recompile. Narrowing the accepted
+// extensions did not change how an accepted file is read, so no revision bump.
+//
 // This object, rather than a prose comment, is folded into the immutable
 // career-snapshot compilation contract. Prompt/schema-policy edits must bump a
 // revision so an unchanged file cannot reuse a snapshot made before its

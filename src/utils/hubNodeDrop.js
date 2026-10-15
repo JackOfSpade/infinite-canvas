@@ -1,4 +1,5 @@
 import { isProductImageFile } from './fileDropUtils.js';
+import { isCareerTextFileName } from './careerTextFiles.js';
 import {
   canSellHubAcceptDisplayPhotoDrop,
   getHubDropRejectLabel,
@@ -29,7 +30,8 @@ export function fileSupportedByHub(hubType, file) {
   // accepting a disguised bundle here would bypass the same policy enforced by
   // Job Search's final admission filter.
   const names = [file?.filename, file?.filePath].filter(value => typeof value === 'string');
-  if (hubType === 'jobhub') return !names.some(isAppBundlePathOrName);
+  // Career data is plain text only: the real path must be .txt or .md.
+  if (hubType === 'jobhub') return !names.some(isAppBundlePathOrName) && isCareerTextFileName(file?.filePath);
   if (hubType === 'sellhub') return isProductImageFile(file);
   return false;
 }
@@ -52,6 +54,11 @@ export function buildHubHoverState(targetHub, dragSet) {
   }
 
   const acceptedFiles = filePayload.filter(file => fileSupportedByHub(targetHub.type, file));
+  // Job Search refuses a whole drop that holds any non-text file, so the cue
+  // must not promise "Use as resume" for a mixed selection.
+  if (targetHub.type === 'jobhub' && acceptedFiles.length !== filePayload.length) {
+    return { kind: 'reject', label: 'Text files only (.txt, .md)' };
+  }
   if (acceptedFiles.length === 0) {
     return {
       kind: 'reject',

@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Cable, Pause, Play, Settings2 } from 'lucide-react';
 import { ConfirmDialog } from './ConfirmDialog';
 import { useHandoffBridgeStatus } from '../hooks/useHandoffBridgeStatus';
-import { hasHandoffBridgeApi, hasHandoffBridgeStatusSnapshot, retryHandoffBridgeStatusSync, startHandoffBridgeStatusSync } from '../utils/handoffBridgeStore';
+import { getHandoffBridgeStatusReplayIssue, hasHandoffBridgeApi, hasHandoffBridgeStatusSnapshot, retryHandoffBridgeStatusSync, startHandoffBridgeStatusSync } from '../utils/handoffBridgeStore';
 import { openBridgePopover, openBridgeSetup } from '../utils/handoffBridgeUiStore';
 import { deriveBridgeHealth } from '../utils/handoffBridgeView';
 import { BRIDGE_COPY, BRIDGE_UI_COPY, ipcErrorMessage } from '../utils/handoffBridgeCopy';
@@ -143,7 +143,7 @@ export function HandoffBridgeSetup({ onOpenPanel }) {
           </label>
           {checking && (
             <div className="flex min-w-0 flex-wrap items-center gap-2">
-              <p className="break-words text-[11px] text-white/50">{BRIDGE_UI_COPY.checkingAvailability}</p>
+              <p className="break-words text-[11px] text-white/50">{BRIDGE_UI_COPY.checkingAvailability}{getHandoffBridgeStatusReplayIssue() ? ` (${getHandoffBridgeStatusReplayIssue()})` : ''}</p>
               <button type="button" onClick={retryHandoffBridgeStatusSync} className="bridge-button-secondary text-[11px]">
                 {BRIDGE_UI_COPY.retryAvailability}
               </button>
@@ -231,6 +231,16 @@ export function HandoffBridgeSetup({ onOpenPanel }) {
               onChange={event => void call('handoffBridgeSaveConfig', { patch: { autoStart: event.target.checked } })}
             />
             <span className="min-w-0">{BRIDGE_UI_COPY.autoStart}</span>
+          </label>
+          <label className="flex min-w-0 items-start gap-2 text-[11px] text-white/65">
+            <input
+              className="mt-0.5 shrink-0"
+              type="checkbox"
+              checked={status.autoLaunchChats}
+              disabled={controlsDisabled}
+              onChange={event => void call('handoffBridgeSaveConfig', { patch: { autoLaunchChats: event.target.checked } })}
+            />
+            <span className="min-w-0">Auto-start worker chats in Chrome</span>
           </label>
           <label className="flex min-w-0 items-start gap-2 text-[11px] text-white/65">
             <input

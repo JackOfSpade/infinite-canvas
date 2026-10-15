@@ -2,11 +2,14 @@ import fs from 'node:fs';
 import assert from 'node:assert';
 
 import {
+  boardHistoryAuthorityAvailable,
   combineSourceRunEntry,
   describeReceiptMismatch,
   jobSearchOutcomeReceiptMatches,
 } from '../../src/utils/jobBoardSourceAdmission.js';
 import { terminalJobSearchOutcome } from '../../src/utils/jobBoardPausedSourceContinuation.js';
+import { filterDismissedBoardJobs, jobAndVariantKeys, recoverBoardDismissedKeys } from '../../src/utils/jobListingIdentity.js';
+import { planJobCardDeletionCleanup } from '../../src/utils/jobCardDeletionCleanup.js';
 
 function readNodeSource() {
   return fs.readFileSync(
@@ -57,6 +60,44 @@ const bareLegacySource = () => ({
 });
 
 export default [
+  {
+    name: 'X dismissal survives a saved-results recombine, including posting variants',
+    run: () => {
+      const first = { title: 'First', company: 'Example', url: 'https://example.test/first' };
+      const second = { title: 'Second', company: 'Example', url: 'https://example.test/second',
+        postingVariants: [{ url: 'https://example.test/second' }, { url: 'https://example.test/second-sf' }] };
+      const board = { id: 'board', type: 'jobboard', data: { dismissedJobKeys: [] } };
+      const card = { id: 'card', type: 'jobcard', data: { hubId: 'board', ...second } };
+      const { boardUpdates } = planJobCardDeletionCleanup([card], [board], () => board);
+      const keys = boardUpdates[0].stats.dismissedJobKeys;
+      assert(keys.length === 2 && jobAndVariantKeys(second).every(key => keys.includes(key)),
+        'deleting the card records both represented postings');
+      assert(JSON.stringify(filterDismissedBoardJobs([first, second], keys)) === JSON.stringify([first]),
+        'a later Combine does not recreate the X’d card');
+      assert(recoverBoardDismissedKeys([first, second], [{ data: first }], false).length === 0,
+        'old missing cards cannot be inferred when source inputs changed');
+      assert(recoverBoardDismissedKeys([first, second], [{ data: first }], true).length === 2,
+        'exact old source inputs recover a pre-ledger dismissal');
+    },
+  },
+  {
+    name: 'legacy Board sources can display without a protected seen-history write',
+    run: () => {
+      const protectedSource = {
+        runId: 'run-1',
+        careerSnapshotId: 'snapshot-1',
+        operationAuthority: { operationId: 'operation-1' },
+      };
+      assert(boardHistoryAuthorityAvailable([protectedSource]) === true,
+        'complete modern source receipts must use host-validated history admission');
+      assert(boardHistoryAuthorityAvailable([protectedSource, { ...protectedSource, operationAuthority: null }]) === false,
+        'one legacy source must make the mixed Board skip protected seen-history recording');
+      assert(boardHistoryAuthorityAvailable([protectedSource, { ...protectedSource, runId: null }]) === false,
+        'run-less saved results must not claim exact history authority');
+      assert(boardHistoryAuthorityAvailable([protectedSource, { ...protectedSource, operationAuthority: 'invalid' }]) === true,
+        'a present but malformed receipt must reach host validation instead of taking the legacy fallback');
+    },
+  },
   {
     name: 'combine source run entry round-trips modern, displaced legacy, and bare legacy receipts',
     run: async () => {

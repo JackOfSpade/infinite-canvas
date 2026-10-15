@@ -5,8 +5,7 @@ import path from 'node:path';
 import electronPkg from 'electron';
 import { assert } from './testHelpers.js';
 import { isRendererSensitivePath, isSensitivePath } from '../../electron/utils/pathSafety.js';
-import { callLLMDocument } from '../../electron/ipc/llm.js';
-import { registerNonApiAiHandlers } from '../../electron/ipc/nonApiAi.js';
+import { callLLMVision } from '../../electron/ipc/llm.js';
 import { __runWithIpcRequestContextForTests } from '../../electron/ipc/ipcUtils.js';
 import {
   atomicWriteRendererWorkspaceFile,
@@ -37,7 +36,6 @@ import {
 import {
   __assertCareerInputDescriptorsStillMatchForTests,
   __assertOwnedStagedCareerAttachmentForTests,
-  __hostStagedDocumentCallerForTests,
   __readOwnedStagedCareerAttachmentForTests,
   __stageCareerInputFilesForTests,
 } from '../../electron/ipc/jobs.js';
@@ -1266,7 +1264,7 @@ export default [
     },
   },
   {
-    name: 'career staging: only an identity-bound host capability can attach private staged md, txt, and PDF inputs',
+    name: 'career staging: only an identity-bound host capability can read private staged md and txt inputs',
     run: async () => {
       const root = await fs.promises.mkdtemp(path.join(process.cwd(), '.career-host-stage-capability-'));
       const sourceDirectory = path.join(root, 'public-inputs');
@@ -1277,15 +1275,12 @@ export default [
         const sources = [
           path.join(sourceDirectory, 'profile.md'),
           path.join(sourceDirectory, 'notes.txt'),
-          path.join(sourceDirectory, 'resume.pdf'),
         ];
         await Promise.all([
           fs.promises.writeFile(sources[0], '# Candidate\n- Markdown input\n'),
           fs.promises.writeFile(sources[1], 'Plain text input\n'),
-          fs.promises.writeFile(sources[2], '%PDF-1.7\ncareer attachment\n'),
         ]);
         staged = await __stageCareerInputFilesForTests(sources, { stagingRoot });
-        const caller = __hostStagedDocumentCallerForTests(staged);
         const forged = {
           directory: staged.directory,
           stagedPaths: [...staged.stagedPaths],
@@ -1297,43 +1292,11 @@ export default [
           'a renderer-shaped clone cannot forge the module-private staged-run capability');
         assert(await rejects(() => __assertOwnedStagedCareerAttachmentForTests(staged, sources[0])),
           'the capability admits only exact host-created staged paths, never original renderer paths');
-        assert(await rejects(() => callLLMDocument(staged.stagedPaths[0], 'generic deny', {
-          task: 'career-file-extract', responseSchema: { type: 'object', required: ['text'], properties: { text: { type: 'string' } } },
-        })), 'generic callLLMDocument remains renderer-denied for the private staging namespace');
-
-        electronPkg.ipcMain.__clearInvokeHandlers();
-        registerNonApiAiHandlers();
-        const sent = [];
-        const sender = new EventEmitter();
-        sender.id = 9981;
-        sender.isDestroyed = () => false;
-        sender.send = (channel, payload) => sent.push({ channel, payload });
-        sender.once = () => {};
-        sender.removeListener = () => {};
-        const attachments = [];
-        for (const stagedPath of staged.stagedPaths) {
-          const pending = __runWithIpcRequestContextForTests({ sender, channel: 'test' }, () => (
-            caller(stagedPath, 'Extract this staged career input.', {
-              task: 'career-file-extract',
-              responseSchema: { type: 'object', required: ['text'], properties: { text: { type: 'string' } } },
-            })
-          ));
-          let request = null;
-          for (let attempt = 0; attempt < 20 && !request; attempt += 1) {
-            await new Promise(resolve => setTimeout(resolve, 5));
-            request = sent.filter(item => item.channel === 'non-api-ai-request').at(-1)?.payload || null;
-          }
-          assert(request && JSON.stringify(request.attachments) === JSON.stringify([stagedPath]),
-            `the host capability must send exactly its staged ${path.extname(stagedPath)} attachment through the document handoff`);
-          attachments.push(request.attachments[0]);
-          await electronPkg.ipcMain.__getInvokeHandler('cancel-non-api-ai-request')({ sender }, { requestId: request.requestId });
-          await pending.catch(() => {});
-        }
+        assert(await rejects(() => __readOwnedStagedCareerAttachmentForTests(forged, staged.stagedPaths[1], 'utf8')),
+          'a forged clone cannot read the staged bytes either');
         const readBack = await __readOwnedStagedCareerAttachmentForTests(staged, staged.stagedPaths[1], 'utf8');
-        assert(attachments.length === 3 && attachments.every((value, index) => value === staged.stagedPaths[index])
-          && readBack === 'Plain text input\n',
-        'host-owned md/txt/pdf copies reach the document transport while direct host reads remain identity-bound');
-        return { hostAttachments: attachments.length, rendererForgeryRejected: true };
+        assert(readBack === 'Plain text input\n', 'direct host reads of staged text remain identity-bound');
+        return { rendererForgeryRejected: true };
       } finally {
         await staged?.cleanup?.();
         await fs.promises.rm(root, { recursive: true, force: true });
@@ -1367,8 +1330,8 @@ export default [
         ]);
         electronPkg.app.getPath = name => name === 'userData' ? userData : originalGetPath(name);
         const privateSource = path.join(privateDirectory, 'private.md');
-        const genericUnknownUserDataDenied = await rejects(() => callLLMDocument(privateSource, 'generic deny', {
-          task: 'career-file-extract', responseSchema: { type: 'object', required: ['text'], properties: { text: { type: 'string' } } },
+        const genericUnknownUserDataDenied = await rejects(() => callLLMVision([privateSource], 'generic deny', {
+          task: 'vision-product-analysis', responseSchema: { type: 'object', required: ['title'], properties: { title: { type: 'string' } } },
         }));
         let privateAdmissionError = null;
         try { await __stageCareerInputFilesForTests([privateSource], { stagingRoot }); } catch (error) { privateAdmissionError = error; }
@@ -1381,14 +1344,14 @@ export default [
         await fs.promises.link(privateSource, hardlinkAlias);
         let hardlinkError = null;
         try { await __stageCareerInputFilesForTests([hardlinkAlias], { stagingRoot }); } catch (error) { hardlinkError = error; }
-        const genericHardlinkDenied = await rejects(() => callLLMDocument(hardlinkAlias, 'generic hardlink deny', {
-          task: 'career-file-extract', responseSchema: { type: 'object', required: ['text'], properties: { text: { type: 'string' } } },
+        const genericHardlinkDenied = await rejects(() => callLLMVision([hardlinkAlias], 'generic hardlink deny', {
+          task: 'vision-product-analysis', responseSchema: { type: 'object', required: ['title'], properties: { title: { type: 'string' } } },
         }));
         let genericSymlinkDenied = true;
         try {
           await fs.promises.symlink(privateSource, symlinkAlias);
-          genericSymlinkDenied = await rejects(() => callLLMDocument(symlinkAlias, 'generic symlink deny', {
-            task: 'career-file-extract', responseSchema: { type: 'object', required: ['text'], properties: { text: { type: 'string' } } },
+          genericSymlinkDenied = await rejects(() => callLLMVision([symlinkAlias], 'generic symlink deny', {
+            task: 'vision-product-analysis', responseSchema: { type: 'object', required: ['title'], properties: { title: { type: 'string' } } },
           }));
         } catch (error) {
           if (!['EPERM', 'EACCES', 'ENOTSUP'].includes(error?.code)) throw error;

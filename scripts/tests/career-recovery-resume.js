@@ -23,7 +23,7 @@ import {
 import {
   __assertCareerInputDescriptorsStillMatchForTests, __assertOwnedStagedCareerAttachmentForTests,
   __bindCareerCompileRunForTests, __careerCompileResumeStatusForTests, __extractCareerFileSectionsForTests,
-  __hostStagedDocumentCallerForTests, __readOwnedStagedCareerAttachmentForTests, __stageCareerInputFilesForTests,
+  __readOwnedStagedCareerAttachmentForTests, __stageCareerInputFilesForTests,
 } from '../../electron/ipc/jobs.js';
 import { careerSnapshotId, careerSnapshotInputFingerprint } from '../../electron/ipc/careerSnapshot.js';
 import { readPlainTextDocument } from '../../electron/ipc/docUtils.js';
@@ -69,18 +69,21 @@ async function waitForRequests(sent, count, timeoutMs = 2_000) {
   return sent.filter(item => item.channel === 'non-api-ai-request').map(item => item.payload);
 }
 
-// One "relaunch-able" attachment workflow: stage the person's file exactly as
+// One "relaunch-able" career workflow: stage the person's file exactly as
 // parse-career-data does (fresh random directory under a real
-// `career-input-staging` namespace), then ask for one attachment-bearing
-// handoff through the same host-staged caller production uses.
-function registerAttachmentWorkflow(channel, { sourcePath, stagingRoot, record }) {
+// `career-input-staging` namespace), then ask one text handoff whose prompt
+// carries the staged text. Career files are plain text, so a changed file is a
+// changed prompt and an unchanged file replays its accepted answer.
+// The task is a paste-delivered test task: bridge-eligible career tasks are
+// never shown in the dock, and this helper answers through the dock.
+function registerAttachmentWorkflow(channel, { sourcePath, stagingRoot, record, task = 'test-career-compile-step' }) {
   handleSafe(channel, async (_event, _args, signal) => {
     const staged = await __stageCareerInputFilesForTests([sourcePath], { stagingRoot });
     try {
       record.stagedPath = staged.stagedPaths[0];
-      const caller = __hostStagedDocumentCallerForTests(staged);
-      return { value: await caller(staged.stagedPaths[0], 'ATTACHMENT INVENTORY PROMPT', {
-        signal, task: 'career-file-inventory', responseSchema: SCHEMA,
+      const text = await __readOwnedStagedCareerAttachmentForTests(staged, staged.stagedPaths[0], 'utf8');
+      return { value: await requestNonApiAi({
+        prompt: `CAREER COMPILE PROMPT\n${text}`, task, responseSchema: SCHEMA, signal,
       }) };
     } finally {
       await staged.cleanup();
@@ -121,7 +124,7 @@ async function acceptOneAttachmentAnswer(label, { sourcePath, stagingRoot, runId
 const SYNTHETIC_DOMAINS = [
   { label: 'clinical', name: 'Clinical Record.md', text: '# Ward log\n\nCharge nurse on a surgical unit; coordinated discharge planning for a rotating team.\n' },
   { label: 'culinary', name: 'Kitchen History.txt', text: 'Sous chef for a tasting-menu line. Rebuilt the prep checklist and supplier rota.\n' },
-  { label: 'freight', name: 'Dispatch Summary.pdf', text: '%PDF-1.4 synthetic dispatch record: routed regional deliveries and audited carrier invoices.\n' },
+  { label: 'freight', name: 'Dispatch Summary.txt', text: 'Synthetic dispatch record: routed regional deliveries and audited carrier invoices.\n' },
 ];
 
 export default [
@@ -172,147 +175,6 @@ export default [
     },
   },
   {
-    name: 'career recovery: crash/relaunch replays an accepted attachment step even though the new staging has a different random path',
-    run: async () => {
-      ipcMain.__clearInvokeHandlers();
-      registerNonApiAiHandlers();
-      const directory = scratchDirectory('replay');
-      const stagingRoot = `${directory}/${STAGING_COMPONENT}`;
-      const runId = `career-replay-${process.pid}-${Date.now()}`;
-      try {
-        const source = writeSource(directory, 'Career File.pdf', '%PDF-1.4 fixture bytes that are not parsed here\n');
-        const first = {};
-        const invoke = registerAttachmentWorkflow('career-recovery-replay', { sourcePath: source, stagingRoot, record: first });
-        const sentA = [];
-        const senderA = makeSender(9101, sentA);
-        const runA = invoke({ sender: senderA }, { nodeId: 'career-node', manualAiRunId: runId });
-        const [requestA] = await waitForRequests(sentA, 1);
-        assert(requestA?.attachments?.length === 1 && requestA.attachments[0] === first.stagedPath,
-          'the first handoff shows the attachment staged for it');
-        assert(requestA.mcpEligible === false,
-          'an attachment-bearing handoff is never offered to a bridge chat, live or retired');
-        const submit = ipcMain.__getInvokeHandler('submit-non-api-ai-response');
-        await submit({ sender: senderA }, { requestId: requestA.requestId, response: `{"handoffCode":"${requestA.handoffCode}","answer":"accepted once"}` });
-        assert((await runA).value.answer === 'accepted once', 'the first launch completes the step');
-        assert(!fs.existsSync(first.stagedPath), 'staging is removed after the run, as in production');
-
-        // Relaunch: the process-local registry is gone, the durable file remains.
-        await ipcMain.__getInvokeHandler('flush-non-api-ai-persistence')({ sender: senderA });
-        await __reloadDurableStateForTests();
-        ipcMain.__clearInvokeHandlers();
-        registerNonApiAiHandlers();
-        const second = {};
-        const invokeAgain = registerAttachmentWorkflow('career-recovery-replay-2', { sourcePath: source, stagingRoot, record: second });
-        const sentB = [];
-        const senderB = makeSender(9102, sentB);
-        const relaunched = invokeAgain({ sender: senderB }, { nodeId: 'career-node', manualAiRunId: runId });
-        const outcome = await Promise.race([relaunched, sleep(1_500).then(() => 'asked-again')]);
-        if (outcome === 'asked-again') {
-          const [again] = sentB.filter(item => item.channel === 'non-api-ai-request').map(item => item.payload);
-          if (again) await ipcMain.__getInvokeHandler('cancel-non-api-ai-request')({ sender: senderB }, { requestId: again.requestId });
-          await relaunched;
-          assert(false, 'the accepted step was asked again after relaunch: its key still depends on the random staging path');
-        }
-        const resumed = outcome;
-        assert(second.stagedPath && second.stagedPath !== first.stagedPath,
-          'the relaunch staged the same file under a different random path');
-        assert(sentB.filter(item => item.channel === 'non-api-ai-request').length === 0,
-          'the accepted step replays silently: the person is not asked again');
-        assert(resumed.value.answer === 'accepted once', 'the replayed value is the originally accepted answer');
-        await ipcMain.__getInvokeHandler('complete-non-api-ai-run')({ sender: senderB }, { runId });
-      } finally {
-        fs.rmSync(directory, { recursive: true, force: true });
-      }
-    },
-  },
-  {
-    name: 'career recovery: a changed file never replays an answer given for different bytes',
-    run: async () => {
-      ipcMain.__clearInvokeHandlers();
-      registerNonApiAiHandlers();
-      const directory = scratchDirectory('changed');
-      const stagingRoot = `${directory}/${STAGING_COMPONENT}`;
-      const runId = `career-changed-${process.pid}-${Date.now()}`;
-      try {
-        const source = writeSource(directory, 'Career File.pdf', 'original bytes\n');
-        const first = {};
-        const invoke = registerAttachmentWorkflow('career-recovery-changed', { sourcePath: source, stagingRoot, record: first });
-        const sentA = [];
-        const senderA = makeSender(9111, sentA);
-        const runA = invoke({ sender: senderA }, { nodeId: 'career-node', manualAiRunId: runId });
-        const [requestA] = await waitForRequests(sentA, 1);
-        await ipcMain.__getInvokeHandler('submit-non-api-ai-response')({ sender: senderA }, { requestId: requestA.requestId, response: `{"handoffCode":"${requestA.handoffCode}","answer":"for original bytes"}` });
-        await runA;
-
-        await ipcMain.__getInvokeHandler('flush-non-api-ai-persistence')({ sender: senderA });
-        await __reloadDurableStateForTests();
-        ipcMain.__clearInvokeHandlers();
-        registerNonApiAiHandlers();
-        fs.writeFileSync(source, 'edited bytes\n');
-        const second = {};
-        const invokeAgain = registerAttachmentWorkflow('career-recovery-changed-2', { sourcePath: source, stagingRoot, record: second });
-        const sentB = [];
-        const senderB = makeSender(9112, sentB);
-        const runB = invokeAgain({ sender: senderB }, { nodeId: 'career-node', manualAiRunId: runId });
-        const [requestB] = await waitForRequests(sentB, 1);
-        assert(requestB, 'edited bytes are a new question and must be asked again');
-        assert(fs.existsSync(requestB.attachments[0]) && requestB.attachments[0] === second.stagedPath,
-          'the re-asked prompt names an attachment that exists right now');
-        await ipcMain.__getInvokeHandler('cancel-non-api-ai-request')({ sender: senderB }, { requestId: requestB.requestId });
-        await runB;
-        await ipcMain.__getInvokeHandler('complete-non-api-ai-run')({ sender: senderB }, { runId });
-      } finally {
-        fs.rmSync(directory, { recursive: true, force: true });
-      }
-    },
-  },
-  {
-    name: 'career recovery: a pending attachment handoff is re-presented after relaunch with a freshly staged, existing attachment and its draft',
-    run: async () => {
-      ipcMain.__clearInvokeHandlers();
-      registerNonApiAiHandlers();
-      const directory = scratchDirectory('pending');
-      const stagingRoot = `${directory}/${STAGING_COMPONENT}`;
-      const runId = `career-pending-${process.pid}-${Date.now()}`;
-      try {
-        const source = writeSource(directory, 'Career File.pdf', 'pending bytes\n');
-        const first = {};
-        const invoke = registerAttachmentWorkflow('career-recovery-pending', { sourcePath: source, stagingRoot, record: first });
-        const sentA = [];
-        const senderA = makeSender(9121, sentA);
-        const runA = invoke({ sender: senderA }, { nodeId: 'career-node', manualAiRunId: runId });
-        const [requestA] = await waitForRequests(sentA, 1);
-        await ipcMain.__getInvokeHandler('update-non-api-ai-draft')({ sender: senderA }, { requestId: requestA.requestId, response: '{"answer":"half typed"}' });
-        await ipcMain.__getInvokeHandler('flush-non-api-ai-persistence')({ sender: senderA });
-        senderA.emit('did-start-navigation', {}, 'file:///relaunch.html', false, true);
-        await runA;
-        assert(!fs.existsSync(first.stagedPath), 'the interrupted run cleaned its private copy up');
-
-        await __reloadDurableStateForTests();
-        ipcMain.__clearInvokeHandlers();
-        registerNonApiAiHandlers();
-        const second = {};
-        const invokeAgain = registerAttachmentWorkflow('career-recovery-pending-2', { sourcePath: source, stagingRoot, record: second });
-        const sentB = [];
-        const senderB = makeSender(9122, sentB);
-        const runB = invokeAgain({ sender: senderB }, { nodeId: 'career-node', manualAiRunId: runId });
-        const [requestB] = await waitForRequests(sentB, 1);
-        assert(requestB, 'the unfinished step is shown again');
-        assert(requestB.attachments.length === 1 && fs.existsSync(requestB.attachments[0]),
-          'the resumed prompt references an attachment that exists at the moment it is shown');
-        assert(requestB.attachments[0] === second.stagedPath && requestB.attachments[0] !== first.stagedPath,
-          'it is the new staging, never the vanished one');
-        assert(requestB.initialResponse === '{"answer":"half typed"}' && requestB.handoffCode === requestA.handoffCode,
-          'the same logical step keeps its draft and its handoff code');
-        await ipcMain.__getInvokeHandler('cancel-non-api-ai-request')({ sender: senderB }, { requestId: requestB.requestId });
-        await runB;
-        await ipcMain.__getInvokeHandler('complete-non-api-ai-run')({ sender: senderB }, { runId });
-      } finally {
-        fs.rmSync(directory, { recursive: true, force: true });
-      }
-    },
-  },
-  {
     name: 'career recovery: a host-staged handoff is refused before it can be shown or replayed once its attachment is gone',
     run: async () => {
       ipcMain.__clearInvokeHandlers();
@@ -323,7 +185,7 @@ export default [
         const sent = [];
         const sender = makeSender(9131, sent);
         handleSafe('career-recovery-missing-at-admission', async (_event, _args, signal) => requestNonApiAi({
-          prompt: 'NEEDS A FILE', task: 'career-file-inventory', responseSchema: SCHEMA, signal,
+          prompt: 'NEEDS A FILE', task: 'vision-product-analysis', responseSchema: SCHEMA, signal,
           attachmentPaths: [`${directory}/never-existed.pdf`], attachmentIdentities: ['career-input:0001:deadbeef'], hostStagedAttachments: true,
         }));
         const refused = await ipcMain.__getInvokeHandler('career-recovery-missing-at-admission')({ sender }, { nodeId: 'n', manualAiRunId: `career-missing-${process.pid}` });
@@ -334,7 +196,7 @@ export default [
         // The file vanishes AFTER admission (external cleanup): the dock-remount
         // replay must refuse rather than re-show a prompt that names a ghost.
         handleSafe('career-recovery-missing-at-replay', async (_event, _args, signal) => requestNonApiAi({
-          prompt: 'NEEDS A FILE TOO', task: 'career-file-inventory', responseSchema: SCHEMA, signal,
+          prompt: 'NEEDS A FILE TOO', task: 'vision-product-analysis', responseSchema: SCHEMA, signal,
           attachmentPaths: [present], attachmentIdentities: ['career-input:0001:cafe'], hostStagedAttachments: true,
         }));
         const pending = ipcMain.__getInvokeHandler('career-recovery-missing-at-replay')({ sender }, { nodeId: 'n2', manualAiRunId: `career-missing-2-${process.pid}` });
@@ -368,7 +230,7 @@ export default [
         const keys = [];
         for (const attachment of [a, b]) {
           handleSafe(`career-recovery-legacy-${keys.length}`, async (_event, _args, signal) => requestNonApiAi({
-            prompt: 'SAME PROMPT', task: 'career-file-inventory', responseSchema: SCHEMA, signal, attachmentPaths: [attachment],
+            prompt: 'SAME PROMPT', task: 'vision-product-analysis', responseSchema: SCHEMA, signal, attachmentPaths: [attachment],
           }));
           const run = ipcMain.__getInvokeHandler(`career-recovery-legacy-${keys.length}`)({ sender }, { nodeId: 'legacy-node', manualAiRunId: `career-legacy-${process.pid}-${keys.length}` });
           const requests = await waitForRequests(sent, keys.length + 1);
@@ -382,7 +244,7 @@ export default [
         const sharedKeys = [];
         for (const [index, attachment] of [a, b].entries()) {
           handleSafe(`career-recovery-legacy-shared-${index}`, async (_event, _args, signal) => requestNonApiAi({
-            prompt: 'SAME PROMPT', task: 'career-file-inventory', responseSchema: SCHEMA, signal, attachmentPaths: [attachment],
+            prompt: 'SAME PROMPT', task: 'vision-product-analysis', responseSchema: SCHEMA, signal, attachmentPaths: [attachment],
           }));
           const run = ipcMain.__getInvokeHandler(`career-recovery-legacy-shared-${index}`)({ sender }, { nodeId: 'legacy-node', manualAiRunId: runId });
           const requests = await waitForRequests(sent, keys.length + index + 1);
@@ -457,7 +319,7 @@ export default [
       const runId = `career-status-${process.pid}-${Date.now()}`;
       const sender = makeSender(9161, []);
       try {
-        const source = writeSource(directory, 'Career File.pdf', 'status bytes\n');
+        const source = writeSource(directory, 'Career File.txt', 'status bytes\n');
         assert((await __careerCompileResumeStatusForTests([source], runId, { stagingRoot })).mode === 'restart'
           && (await __careerCompileResumeStatusForTests([source], runId, { stagingRoot })).reason === 'run-missing',
         'no durable run means compilation starts over, and says so');
@@ -541,9 +403,8 @@ export default [
     run: () => {
       const known = [...getKnownTaskIds()];
       const careerTasks = known.filter(task => task.startsWith('career-') || task === 'resume-parse');
-      assert(careerTasks.includes('career-file-inventory') && careerTasks.includes('career-file-inventory-audit')
-        && careerTasks.includes('career-file-boundary-audit'),
-      'the stages that were silently missing from the old renderer lists exist');
+      assert(careerTasks.includes('career-profile-compile') && !careerTasks.some(task => task.startsWith('career-file-')),
+      'career files are read locally, so no career-file-* transcription stage exists');
       for (const task of careerTasks) assert(isCareerCompilerTask(task), `${task} must be recognised as career compiler work`);
       for (const task of known.filter(task => !task.startsWith('career-') && task !== 'resume-parse')) {
         assert(!isCareerCompilerTask(task), `${task} is not career compiler work`);

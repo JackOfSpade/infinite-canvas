@@ -183,7 +183,10 @@ function deriveInner({ job: rawJob, chat: rawChat, item: rawItem, bridge: rawBri
 
   // 3. Nobody to hand the job to yet.
   if (!hasChat) {
-    const [headline, detail] = BRIDGE_PROGRESS_COPY.noChat(bridge.pluginName);
+    const [headline, manualDetail] = BRIDGE_PROGRESS_COPY.noChat(bridge.pluginName);
+    const detail = bridge.autoLaunchChats === true
+      ? 'Infinite Canvas is starting fresh ChatGPT chats in Chrome automatically. If none opens within a minute, press Prepare worker plan.'
+      : manualDetail;
     return build({ kind: 'no-chat', steps }, { headline, detail, tone: 'attention', action: 'start-chat' });
   }
   if (state === 'awaiting-first-call') {
@@ -295,7 +298,10 @@ export function deriveBridgePushProgress({ chat: rawChat, bridge: rawBridge, own
   const hasChat = state !== 'none' && ordinal !== null && ordinal > 0;
   const lastHeard = hasChat ? ownerLastHeard(chat, ownerWorker) : null;
   if (!hasChat) {
-    const [headline, detail] = BRIDGE_PROGRESS_COPY.noChat(bridge.pluginName);
+    const [headline, manualDetail] = BRIDGE_PROGRESS_COPY.noChat(bridge.pluginName);
+    const detail = bridge.autoLaunchChats === true
+      ? 'Infinite Canvas is starting fresh ChatGPT chats in Chrome automatically. If none opens within a minute, press Prepare worker plan.'
+      : manualDetail;
     return build({ kind: 'push-no-chat', steps }, { headline, detail, tone: 'attention', action: 'start-chat' });
   }
   if (state === 'awaiting-first-call') {

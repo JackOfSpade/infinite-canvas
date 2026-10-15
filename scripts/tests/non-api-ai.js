@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { EventEmitter } from 'node:events';
-import { _resetNonApiAiHandoffLifecycle, abortNodeTasksAndWait, applyBugReportCode, assert, buildNonApiAiHandoffLifecycleMarkdown, callLLMDocument, callLLMRaw, callLLMText, callLLMVision, checkPromptFits, __durableStepKeysForTests, __reloadDurableStateForTests, __nonApiAiProgressScopeSnapshotForTests, __pruneInactiveEphemeralProgressScopesForTests, __selectDurableStepForTests, __selectUniqueAcceptedLegacyStepForTests, canonicalizeGeneratedUntrustedBoundaryNonces, deriveHandoffCode, durableRunHasAnyTask, durableRunSettlementSummary, electronPkg, fs, generateMarkdown, getKnownTaskIds, getNonApiAiHandoffLifecycle, handleSafe, HANDOFF_CODE_ALPHABET, hardenStructuredTaskPrompt, ipcMain, listingIdsForRootBatch, materializeNonApiPrompt, NON_API_AI_TRANSPORT, NonApiAiCodeMismatchError, registerNonApiAiHandlers, requestNonApiAi, runBoundedJobTaxonomy, runRewindableGroundedHandoff, SAFE_NON_API_AI_LOG_ERROR_CODES, SAFE_VALIDATION_DIAGNOSTIC_REASONS, taskModelRoutingSnapshot, validateCompensationEvidenceSubmission, validateJobPreferenceListingSubmission, validateNonApiAiSubmission, validateRoleFamilyExperienceBandsSubmission, wrapUntrustedText } from '../test-dependencies.js';
+import { _resetNonApiAiHandoffLifecycle, abortNodeTasksAndWait, applyBugReportCode, assert, buildNonApiAiHandoffLifecycleMarkdown, callLLMRaw, callLLMText, callLLMVision, createHostStagedVisionCaller, checkPromptFits, __durableStepKeysForTests, __reloadDurableStateForTests, __nonApiAiProgressScopeSnapshotForTests, __pruneInactiveEphemeralProgressScopesForTests, __selectDurableStepForTests, __selectUniqueAcceptedLegacyStepForTests, canonicalizeGeneratedUntrustedBoundaryNonces, deriveHandoffCode, durableRunHasAnyTask, durableRunSettlementSummary, electronPkg, fs, generateMarkdown, getKnownTaskIds, getNonApiAiHandoffLifecycle, handleSafe, HANDOFF_CODE_ALPHABET, hardenStructuredTaskPrompt, ipcMain, listingIdsForRootBatch, materializeNonApiPrompt, NON_API_AI_TRANSPORT, NonApiAiCodeMismatchError, registerNonApiAiHandlers, requestNonApiAi, runBoundedJobTaxonomy, runRewindableGroundedHandoff, SAFE_NON_API_AI_LOG_ERROR_CODES, SAFE_VALIDATION_DIAGNOSTIC_REASONS, taskModelRoutingSnapshot, validateCompensationEvidenceSubmission, validateJobPreferenceListingSubmission, validateNonApiAiSubmission, validateRoleFamilyExperienceBandsSubmission, wrapUntrustedText } from '../test-dependencies.js';
+import { BRIDGE_ATTACHMENT_TRANSPORT_ENABLED, readBridgeableNonApiAiAttachments } from '../../electron/ipc/nonApiAi.js';
 import { pendingManualHandoffsForActiveTasks } from '../../electron/ipc/bugReport.js';
 import { __claimAcceptedResponseFingerprintForTests, __defaultSafeValidationDiagnosticForTests, __nonApiAiHandoffLifecycleAggregateCountForTests, __nonApiAiLogErrorCodeForTests, __promptForRetryForTests, DUPLICATE_RESPONSE_MIN_LENGTH, getNonApiAiHandoffLifecycleSnapshot, NonApiAiCodeMissingError, NonApiAiDuplicateResponseError, submitNonApiAiResponseForBridge } from '../../electron/ipc/nonApiAi.js';
 import { getRecentLogs, logger } from '../../electron/logger.js';
@@ -85,10 +86,10 @@ export default [
         && sources.marketplace.includes('resolved = await mapAutomaticHandoffs(')
         && sources.marketplace.includes('await mapStableHandoffQueue('),
       'taxonomy, price synthesis, and prepared marketplace scans must refill the central roster');
-      assert(sources.jobs.includes('Career-file extraction carries a local document attachment')
-        && sources.jobs.includes('await mapManualHandoffWaves(')
+      assert(!sources.jobs.includes('mapManualHandoffWaves')
+        && !sources.jobs.includes('callLLMDocument')
         && !sources.jobs.includes('wavePromises = wave.map'),
-      'attachment extraction must use the central rolling policy and its orphan-cleanup contract');
+      'career files are plain text read locally: career extraction makes no AI handoff at all');
       return { automaticOwners: 4, manualOwners: 2 };
     },
   },
@@ -162,7 +163,7 @@ export default [
         && llmSource.includes('NON_API_AI_TRANSPORT')
         && llmSource.includes('requestNonApiAi'),
       'llm.js imports only manual-handoff helpers, never a provider SDK module');
-      for (const fn of ['callLLMText', 'callLLMRaw', 'callLLMVision', 'callLLMDocument']) {
+      for (const fn of ['callLLMText', 'callLLMRaw', 'callLLMVision']) {
         const start = llmSource.indexOf(`export async function ${fn}`);
         assert(start >= 0, `${fn} is exported from llm.js`);
         const nextExportAt = llmSource.indexOf('\nexport ', start + 1);
@@ -1166,7 +1167,7 @@ export default [
       handleSafe('non-api-attachment-test', async (_event, _args, signal) => ({
         result: await requestNonApiAi({
           prompt: 'Extract career evidence.',
-          task: 'career-file-extract',
+          task: 'vision-product-analysis',
           responseSchema: {
             type: 'object', required: ['text'], properties: { text: { type: 'string' } },
           },
@@ -1335,33 +1336,43 @@ export default [
     },
   },
   {
-    name: 'non-API AI: callLLMDocument forwards a single file as an attachment beside a structured-document handoff',
+    name: 'non-API AI: owned staged vision uses the private reader while still checking original photo paths',
     run: async () => {
       ipcMain.__clearInvokeHandlers();
       registerNonApiAiHandlers();
       const sent = [];
       const sender = {
-        id: 732, isDestroyed: () => false, once: () => {}, removeListener: () => {},
+        id: 733, isDestroyed: () => false, once: () => {}, removeListener: () => {},
         send: (channel, payload) => sent.push({ channel, payload }),
       };
-      const filePath = '/tmp/non-api-document-resume.pdf';
-      handleSafe('non-api-document-test', async (_event, _args, signal) => ({
-        result: await callLLMDocument(filePath, 'Extract the career profile.', {
-          signal, task: 'career-file-extract',
-          responseSchema: { type: 'object', required: ['text'], properties: { text: { type: 'string' } } },
+      const stagedPath = '/tmp/.ssh/owned-marketplace-photo.png';
+      let validated = 0;
+      let reads = 0;
+      const callOwnedVision = createHostStagedVisionCaller(
+        paths => { assert(JSON.stringify(paths) === JSON.stringify([stagedPath])); validated += 1; },
+        async filePath => { assert(filePath === stagedPath); reads += 1; return Buffer.from([1, 2, 3]); },
+      );
+      handleSafe('non-api-owned-vision-test', async (_event, _args, signal) => ({
+        result: await callOwnedVision([stagedPath], 'Describe this photo.', {
+          signal, task: 'vision-product-analysis', attachmentSourcePaths: ['/tmp/ordinary-photo.png'],
+          responseSchema: { type: 'object', required: ['title'], properties: { title: { type: 'string' } } },
         }),
       }));
-      const run = ipcMain.__getInvokeHandler('non-api-document-test')({ sender }, { nodeId: 'node-document-test' });
+      const run = ipcMain.__getInvokeHandler('non-api-owned-vision-test')({ sender }, { nodeId: 'node-owned-vision-test' });
       await new Promise(resolve => setImmediate(resolve));
       const request = sent.find(item => item.channel === 'non-api-ai-request')?.payload;
-      assert(request
-        && JSON.stringify(request.attachments) === JSON.stringify([filePath])
-        && request.prompt.includes('Request kind: structured-document')
-        && request.prompt.includes('Task: career-file-extract'),
-      'callLLMDocument hands its single filePath through requestNonApiAi as one Finder-revealable attachment on a structured-document handoff');
+      assert(request?.mcpEligible === BRIDGE_ATTACHMENT_TRANSPORT_ENABLED && validated === 1 && reads === 0,
+        'the host validates stage ownership before issuing a vision handoff under the current policy');
+      if (BRIDGE_ATTACHMENT_TRANSPORT_ENABLED) {
+        const prepared = await readBridgeableNonApiAiAttachments({
+          requestId: request.requestId, handoffCode: request.handoffCode,
+          allowTasks: new Set(['vision-product-analysis']),
+        });
+        assert(prepared?.attachments?.length === 1 && prepared.attachments[0].bytes.length === 3 && reads === 1,
+          'the bridge reads owned stage bytes through the private reader');
+      }
       await ipcMain.__getInvokeHandler('cancel-non-api-ai-request')({ sender }, { requestId: request.requestId });
       await run;
-      return { attachments: request.attachments.length };
     },
   },
   {
@@ -1375,7 +1386,7 @@ export default [
     // still be refused — and refused BEFORE the path is ever Finder-revealed
     // to the user as an attachment to paste into their own chat, i.e. before
     // requestNonApiAi dispatches a 'non-api-ai-request' at all.
-    name: 'non-API AI: callLLMVision and callLLMDocument refuse a sensitive attachment path before any handoff is requested',
+    name: 'non-API AI: callLLMVision refuses a sensitive attachment path before any handoff is requested',
     run: async () => {
       ipcMain.__clearInvokeHandlers();
       registerNonApiAiHandlers();
@@ -1401,24 +1412,9 @@ export default [
       const visionResult = await ipcMain.__getInvokeHandler('non-api-vision-sensitive-test')({ sender }, {});
       assert(visionResult?.success === false
         && visionResult?.error === 'Refusing to read a sensitive system/credential path as an AI attachment: /Users/x/.ssh/id_rsa',
-        'callLLMVision throws callLLMDocument\'s exact sensitive-path error, naming the offending (non-first) path');
+        'callLLMVision throws the exact sensitive-path error, naming the offending (non-first) path');
       assert(!sent.some(item => item.channel === 'non-api-ai-request'),
         'callLLMVision must throw before requestNonApiAi ever Finder-reveals the path or dispatches a handoff prompt');
-
-      // callLLMDocument's own pre-existing gate is the regression baseline —
-      // must still behave identically after adding callLLMVision's gate.
-      handleSafe('non-api-document-sensitive-test', async (_event, _args, signal) => ({
-        result: await callLLMDocument('/Users/x/.aws/credentials', 'Extract the career profile.', {
-          signal, task: 'career-file-extract',
-          responseSchema: { type: 'object', required: ['text'], properties: { text: { type: 'string' } } },
-        }),
-      }));
-      const docResult = await ipcMain.__getInvokeHandler('non-api-document-sensitive-test')({ sender }, {});
-      assert(docResult?.success === false
-        && docResult?.error === 'Refusing to read a sensitive system/credential path as an AI attachment: /Users/x/.aws/credentials',
-        'callLLMDocument keeps its own sensitive-path gate unchanged');
-      assert(!sent.some(item => item.channel === 'non-api-ai-request'),
-        'callLLMDocument must also throw before any handoff is requested');
 
       // A null/absent imagePaths (no attachments at all) must not crash the
       // gate's loop — only a REAL sensitive path throws. The handoff still
@@ -1437,7 +1433,7 @@ export default [
       await ipcMain.__getInvokeHandler('cancel-non-api-ai-request')({ sender }, { requestId: nullRequest.requestId });
       await nullRun;
 
-      return { sensitivePathsRejected: 2 };
+      return { sensitivePathsRejected: 1 };
     },
   },
   {
@@ -1450,7 +1446,6 @@ export default [
       for (const invoke of [
         () => callLLMText('structured result'),
         () => callLLMVision([], 'structured result'),
-        () => callLLMDocument('/tmp/fixture.pdf', 'structured result'),
       ]) {
         let caught = null;
         try { await invoke(); } catch (error) { caught = error; }
@@ -2775,11 +2770,11 @@ export default [
       };
       handleSafe('non-api-durable-attachment-test', async (_event, _args, signal) => {
         const first = await requestNonApiAi({
-          prompt: 'IDENTICAL DOCUMENT EXTRACTION PROMPT', task: 'career-file-extract',
+          prompt: 'IDENTICAL DOCUMENT EXTRACTION PROMPT', task: 'vision-product-analysis',
           responseSchema: schema, attachmentPaths: ['/tmp/career-file-one.pdf'], signal,
         });
         const second = await requestNonApiAi({
-          prompt: 'IDENTICAL DOCUMENT EXTRACTION PROMPT', task: 'career-file-extract',
+          prompt: 'IDENTICAL DOCUMENT EXTRACTION PROMPT', task: 'vision-product-analysis',
           responseSchema: schema, attachmentPaths: ['/tmp/career-file-two.pdf'], signal,
         });
         return { first: first.answer, second: second.answer };

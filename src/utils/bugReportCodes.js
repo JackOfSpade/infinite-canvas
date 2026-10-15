@@ -354,9 +354,9 @@ export const CODE_DEFINITIONS = {
 
   JOBBOARD: {
     label: 'Job Board Admission & Recovery',
-    description: 'Job Board selector/admission audit — connected Job Search readiness, interrupted Board ownership/recovery, fresh-career-import admission, and login-preflight timing. Keeps the redacted nodes, edges, and mounted selector state required to explain a disabled Board action while omitting unrelated drawings, layout internals, and media snapshots.',
+    description: 'Job Board selector/admission audit — connected Job Search readiness, interrupted Board ownership/recovery, mounted Combine stage and compensation progress, fresh-career-import admission, and login-preflight timing. Keeps the redacted nodes, edges, and mounted selector state required to explain a disabled Board action while omitting unrelated drawings, layout internals, and media snapshots.',
     logFilter: line =>
-      /\[JobBoard\]|\[JobSearch\]|job.?board|(?:search|combine).*(?:selected|resume|recover|admission|ready|unready)|career.?import|fresh.?import|preflight|login|log.?in|logged|sign.?in|auth|session|verify|verified|not connected|connected|glassdoor|indeed|ziprecruiter|linkedin|dice/i.test(line),
+      /\[JobBoard\]|\[JobSearch\]|job.?board|Board compensation|(?:search|combine).*(?:selected|resume|recover|admission|ready|unready)|career.?import|fresh.?import|preflight|login|log.?in|logged|sign.?in|auth|session|verify|verified|not connected|connected|glassdoor|indeed|ziprecruiter|linkedin|dice/i.test(line),
     // The Board diagnostic needs the live graph and mounted selector snapshot.
     // Keep `nodes`, `edges`, and `nodeComponentStates`; only unrelated bulky
     // visual/layout payloads are omitted.

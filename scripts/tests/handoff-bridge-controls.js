@@ -1255,6 +1255,21 @@ export default [
       && confirms === 1 && h.controller.snapshot().hold === null,
     'a capability minted by the guarded main UI adapter bypasses only the routine restart sheet');
   } },
+  { name: 'handoff bridge: controls: a worker-pool start carrying the UI capability clears the post-launch restart hold without a sheet', async run() {
+    let confirms = 0;
+    const h = controllerHarness({ ui: { confirmRestart: async () => { confirms += 1; return { response: 0 }; } } });
+    assert((await h.controller.enable({ confirmed: true, restartConfirmed: false })).success
+      && h.controller.snapshot().hold === 'restart', 'a fresh launch starts held for restart');
+    await h.controller.startWorkerPool({ restartContext: Object.freeze({}) });
+    assert(h.controller.snapshot().hold === 'restart',
+      'a forged renderer-shaped object never clears the restart hold through the pool path');
+    await h.controller.startWorkerPool({ restartContext: createUiRestartContext() });
+    assert(confirms === 0 || confirms === 1, 'only the forged attempt may have reached the native sheet');
+    const sheetsBefore = confirms;
+    assert(h.controller.snapshot().hold === null,
+      'the guarded UI capability (a Prepare press, or auto-launch) is the decision to serve again');
+    assert(confirms === sheetsBefore, 'the capability path itself never raises the native restart sheet');
+  } },
   { name: 'handoff bridge: controls: 2,000 authenticated calls cannot reset the human idle deadline', async run() {
     const h = controllerHarness(); await h.controller.enable();
     for (let index = 0; index < 2_000; index += 1) await h.controller.get({ sourceAllowed: true, grant: { linkId: 'synthetic' } });

@@ -1855,6 +1855,7 @@ const tests = [
       assert(SOURCE_ADAPTER_SHAPE.join(',') === 'read,status,submit', 'source adapter shape drifted');
       assert(TUNNEL_PORT_SHAPE.join(',') === 'start,stop,status,reapOrphans', 'tunnel port shape drifted');
       assert(STATUS_SNAPSHOT_EXAMPLE.v === 1 && STATUS_SNAPSHOT_EXAMPLE.power.keepAwake === false, 'status example must be safe and versioned');
+      assert(STATUS_SNAPSHOT_EXAMPLE.autoLaunchChats === true, 'inactive bridge status must include the launcher setting for renderer replay');
       assert(STATUS_SNAPSHOT_EXAMPLE.limits.idlePauseMinutes === 1440, 'status example must expose the accepted idle default');
       assert(Object.isFrozen(STATUS_SNAPSHOT_EXAMPLE.queue.applications), 'status contract must be deeply immutable');
       assert(!JSON.stringify(STATUS_SNAPSHOT_EXAMPLE).match(/prompt|handoffCode|canvasFilePath|label/i), 'status contract must not expose content or identifiers');
@@ -3082,7 +3083,7 @@ tests.push(
       assert(scoringOnly.has('job-scoring') && !scoringOnly.has('price-synthesis'), 'scoring consent injects scoring tasks but not marketplace tasks');
       engine.setScope({ applications: false, scoring: false, marketplace: true });
       const marketplaceOnly = received.at(-1);
-      assert(JSON.stringify([...marketplaceOnly].sort()) === JSON.stringify(['bundle-price-synthesis', 'platform-fit-assessment', 'price-synthesis', 'price-synthesis-batch']), 'marketplace-only consent injects exactly its closed task family');
+      assert(JSON.stringify([...marketplaceOnly].sort()) === JSON.stringify(['bundle-price-synthesis', 'marketplace-hub-scan', 'marketplace-hub-scan-batch', 'platform-fit-assessment', 'price-synthesis', 'price-synthesis-batch', 'vision-product-analysis']), 'marketplace-only consent injects exactly its closed task family');
     },
   },
   {

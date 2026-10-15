@@ -229,7 +229,9 @@ export const BRIDGE_UI_COPY = Object.freeze({
   // A worker's starter is one-time. These are deliberately status labels, not
   // replacement actions: a connected worker remains part of the pool even
   // while a later queue wave arrives.
-  workerState: (state, quietReason = null) => ({
+  workerState: (state, quietReason = null, launch = null) => state === 'ready' && ['opening', 'checking', 'sent'].includes(launch?.stage)
+    ? 'Starting in Chrome'
+    : ({
     available: 'Ready to start',
     ready: 'Starter copied',
     working: 'Working',
@@ -239,6 +241,28 @@ export const BRIDGE_UI_COPY = Object.freeze({
     waiting: 'Ready for later work',
     idle: 'Idle',
   })[state] || 'Worker active',
+  workerLaunch: (launch, accountName = '') => {
+    if (launch?.stage === 'opening') return 'Opening a new ChatGPT chat…';
+    if (launch?.stage === 'checking') return 'Checking ChatGPT model, effort, and sign-in…';
+    if (launch?.stage === 'sent') return 'Sent in ChatGPT; waiting for the bridge call…';
+    if (launch?.stage === 'presented') return 'ChatGPT worker connected.';
+    if (launch?.reason === 'model_selection_failed' || launch?.reason === 'effort_unavailable') return 'Could not confirm the highest model/effort in ChatGPT. Check it and press Send.';
+    if (launch?.reason === 'model_menu_missing') return 'ChatGPT model controls were unavailable. Check the open tab before sending.';
+    if (launch?.reason === 'editor_not_empty') return 'The existing chat has an unsent draft. Preserve it, then use Copy Continue.';
+    if (launch?.reason === 'account_unknown') return 'Sign in to ChatGPT in Chrome, then press Send.';
+    if (launch?.reason === 'send_unavailable') return 'ChatGPT Send is unavailable. Check the open tab and send when ready.';
+    if (launch?.reason === 'send_not_confirmed') return 'Send may have happened. Check this Chrome chat before trying again.';
+    if (launch?.reason === 'apple_events_js_off') return 'In Chrome, enable View → Developer → Allow JavaScript from Apple Events, then use Copy starter.';
+    if (launch?.reason === 'bridge_not_presented') return 'ChatGPT sent, but the bridge did not connect. Check the open chat.';
+    if (launch?.reason === 'plugin_missing') return `The ChatGPT account in Chrome${accountName ? ` (${accountName})` : ''} doesn't have the Infinite Canvas plugin. Set it up on that account, then press Retry.`;
+    if (launch?.reason === 'reconnect_required') return `Reconnect the Infinite Canvas plugin in ChatGPT${accountName ? ` for ${accountName}` : ''}, then press Retry. Complete consent and pairing there yourself.`;
+    if (launch?.reason === 'usage_limit') return 'ChatGPT reached its usage limit. Check the open chat, then press Retry.';
+    if (launch?.reason === 'safety_block') return 'ChatGPT stopped this worker for a safety block. The bridge will try a fresh chat after the quiet window.';
+    if (launch?.reason === 'attachment_draft_present') return 'ChatGPT restored an old attachment in the new chat. Remove that draft and use Copy starter.';
+    if (launch?.reason?.startsWith('attachment_prepare_')) return `The app could not prepare this file for ChatGPT (${launch.reason.slice('attachment_prepare_'.length)}). Use Copy starter and attach the file yourself.`;
+    if (['attachment_invalid', 'attachment_upload_failed', 'attachment_upload_timeout'].includes(launch?.reason)) return 'A file could not be attached or its upload did not finish. Use the manual Copy starter and attach the files yourself.';
+    return 'Chrome launch failed. Use Copy starter for this worker.';
+  },
   workerDone: count => `${count} ${count === 1 ? 'handoff completed' : 'handoffs completed'}`,
   workerQuiet: quietReason => quietReason === 'answer_silent'
     ? 'This worker has not made a bridge call for at least 5 min while it owns a handoff response. It may still be writing or may have stopped. Copy a replacement starter to resume the exact handoff.'
@@ -403,6 +427,6 @@ export const IPC_ERROR_COPY = Object.freeze({
   // This is action feedback, including an incomplete preload surface and a
   // failed bridge start. The authoritative status card alone may say that a
   // build is unavailable.
-  UNAVAILABLE: 'The bridge could not complete that action. Check its status and try again.', SENDER: 'That action is not allowed from this window.', BUSY: 'Another bridge dialog is open. Finish it first.', DECLINED: 'Cancelled.', INVALID: 'That value is not valid.', NO_WINDOW: 'Open a canvas window first.', NOT_READY: 'Finish setup first.', TUNNEL_NOT_READY: 'The tunnel is not reachable yet.', TUNNEL_NOT_SERVING: 'This public hostname is not serving the selected tunnel. In Cloudflare DNS, make sure its tunnel target matches the credentials file you chose.', NOT_LINKED: 'Link ChatGPT first.', PAUSED: 'The bridge is paused. Resume it first.', NO_CHAT: 'No chat has started yet. Use Copy chat starter.', QUEUE_EMPTY: 'There are no eligible handoffs queued right now.', POOL_ACTIVE: 'A worker pool is active. Use its worker starters; those chats will keep claiming handoffs automatically.', CLIPBOARD_FAILED: 'Could not copy to the clipboard. Try again.', NOT_FOUND: 'That item is no longer available.', LIMIT_REACHED: 'The bridge has reached its handoff limit.', UNKNOWN_JOB: 'That job is no longer available.', DISABLED: 'Turn on the bridge first.', LINK_WOULD_BREAK: 'Changing this breaks the ChatGPT link.', SESSION_STARTED: 'That worker has already started. Its chat will keep claiming handoffs automatically.', STARTER_COPIED: 'That unique starter was already copied. Paste, send, and pin that ChatGPT chat before starting another worker.', INTERNAL: 'Something went wrong in the bridge. Try again; if it repeats, copy a bug report.',
+  UNAVAILABLE: 'The bridge could not complete that action. Check its status and try again.', SENDER: 'That action is not allowed from this window.', BUSY: 'Another bridge dialog is open. Finish it first.', DECLINED: 'Cancelled.', INVALID: 'That value is not valid.', NO_WINDOW: 'Open a canvas window first.', NOT_READY: 'Finish setup first.', TUNNEL_NOT_READY: 'The tunnel is not reachable yet.', TUNNEL_NOT_SERVING: 'This public hostname is not serving the selected tunnel. In Cloudflare DNS, make sure its tunnel target matches the credentials file you chose.', NOT_LINKED: 'Link ChatGPT first.', PAUSED: 'The bridge is paused. Resume it first.', NO_CHAT: 'No chat has started yet. Use Copy chat starter.', QUEUE_EMPTY: 'There are no eligible handoffs queued right now.', POOL_ACTIVE: 'A worker pool is active. Use its worker starters; those chats will keep claiming handoffs automatically.', CLIPBOARD_FAILED: 'Could not copy to the clipboard. Try again.', LAUNCH_UNCONFIRMED: 'Chrome clicked Send, but the new chat could not be confirmed. Check the open ChatGPT tab before retrying.', NOT_FOUND: 'That item is no longer available.', LIMIT_REACHED: 'The bridge has reached its handoff limit.', UNKNOWN_JOB: 'That job is no longer available.', DISABLED: 'Turn on the bridge first.', LINK_WOULD_BREAK: 'Changing this breaks the ChatGPT link.', SESSION_STARTED: 'That worker has already started. Its chat will keep claiming handoffs automatically.', STARTER_COPIED: 'That unique starter was already copied. Paste, send, and pin that ChatGPT chat before starting another worker.', INTERNAL: 'Something went wrong in the bridge. Try again; if it repeats, copy a bug report.',
 });
 export function ipcErrorMessage(code) { return IPC_ERROR_COPY[code] || IPC_ERROR_COPY.INTERNAL; }

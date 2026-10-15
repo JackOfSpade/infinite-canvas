@@ -795,7 +795,7 @@ export default [
       const result = await startHandoffBridge({ deps: { env: {}, isPackaged: true, enabled: false, app: { getPath: () => { binds++; return '/not/read'; } }, readConfig: () => { writes++; return null; } } });
       assert(registerHandoffBridgeHandlers({ ipcMain: ipc, deps: { getCanvasWindows: () => [] } }), 'a complete inert fake IPC registry must register every bridge route');
       assert(result.code === 'not_enabled' && binds === 0 && writes === 0, 'off bridge must not bind, write or spawn');
-      assert(ipc.handlers.length === 28, 'off equivalence permits exactly 27 invokes and publish-jobs');
+      assert(ipc.handlers.length === 30, 'off equivalence permits exactly 29 invokes and publish-jobs');
       await stopHandoffBridge();
     },
   },

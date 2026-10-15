@@ -107,6 +107,27 @@ export const LOCAL_AI_APPLICATION_VERSION = 1;
 // contract, while newly queued jobs receive the current audit version.
 const LEGACY_LOCAL_AI_GENERATION_AUDIT_VERSION = 1;
 const JOB_ID_RE = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i;
+const generationSelections = new Map();
+export function recordLocalApplicationGenerationSelection({ jobId, canvasFilePath, stage, model, effort, fallback = false } = {}) {
+  const printable = value => typeof value === 'string' && value.length >= 1 && value.length <= 80
+    && [...value].every(character => character.charCodeAt(0) >= 32);
+  if (!JOB_ID_RE.test(jobId || '') || typeof canvasFilePath !== 'string' || !path.isAbsolute(canvasFilePath)
+    || typeof stage !== 'string' || !/^[a-z][a-z0-9-]{0,39}$/.test(stage)
+    || !printable(model) || !printable(effort)) return false;
+  const key = `${canvasFilePath}\u0000${jobId}`;
+  const rows = generationSelections.get(key) || [];
+  rows.push({ stage, model, effort, fallback: fallback === true });
+  if (!generationSelections.has(key) && generationSelections.size >= 256) generationSelections.delete(generationSelections.keys().next().value);
+  generationSelections.set(key, rows.slice(-100));
+  return true;
+}
+function generationSelectionSummary(canvasFilePath, jobId) {
+  const rows = generationSelections.get(`${canvasFilePath}\u0000${jobId}`) || [];
+  const distinct = [...new Map(rows.map(row => [`${row.model}\u0000${row.effort}\u0000${row.fallback}`, {
+    model: row.model, effort: row.effort, ...(row.fallback ? { fallback: true } : {}),
+  }])).values()];
+  return distinct.length ? distinct : null;
+}
 // Harness-only one-shot seam. It is deliberately not registered with IPC and
 // is consumed before any queue filesystem mutation, so production callers
 // retain crypto.randomUUID() while the guarded acceptance driver can reserve
@@ -9648,7 +9669,7 @@ async function ensureLocalAiHandoffReceiptsRoot(canvasRoot) {
 
 async function writeLocalAiTerminalReceipt({
   canvasRoot, canvasFilePath, jobId, resultRaw, resumeFit, coverLetterFit, targetPageCount, outputDir,
-  pasteRejectionTrace = [],
+  pasteRejectionTrace = [], selectedModelEffort = null,
 }) {
   const receiptsRoot = await ensureLocalAiHandoffReceiptsRoot(canvasRoot);
   // The private job folder is deleted right after this receipt is written, so
@@ -9685,6 +9706,7 @@ async function writeLocalAiTerminalReceipt({
       pageCount: Number.isFinite(coverLetterFit?.pageCount) ? coverLetterFit.pageCount : null,
       targetPageCount: 1,
     },
+    ...(selectedModelEffort ? { selectedModelEffort } : {}),
     // This is a durable diagnostic projection, deliberately separate from
     // generated output and limited to the metadata-only row whitelist.
     pasteRejectionTrace: {
@@ -16734,6 +16756,7 @@ async function importLocalApplicationJobAttempt({ jobId, canvasFilePath, senderI
         coverLetterFit, targetPageCount,
         outputDir: savedOutputDir,
         pasteRejectionTrace,
+        selectedModelEffort: generationSelectionSummary(canvas.canonicalCanvasFilePath, jobId),
       });
       // LOCAL_AI_JOB_PHASES's own header: written beside the receipt above,
       // not in place of it — the receipt is the strong, hash-bound proof of a
@@ -16749,6 +16772,7 @@ async function importLocalApplicationJobAttempt({ jobId, canvasFilePath, senderI
     },
     onBeforeSuccessfulCleanup: () => retireLocalAiJobForCleanup(root, dir, resultSha256),
     onAfterSuccessfulCleanup: () => {
+      generationSelections.delete(`${canvas.canonicalCanvasFilePath}\u0000${jobId}`);
       notifyLocalApplicationDiscarded({
         jobId,
         canvasFilePath: canvas.canonicalCanvasFilePath,

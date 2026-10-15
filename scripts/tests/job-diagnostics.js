@@ -15640,11 +15640,26 @@ export default [
           selectorBounds: { clientWidth: 260, clientHeight: 583, scrollWidth: 260, scrollHeight: 583 },
           sourceListBounds: { clientWidth: 236, clientHeight: 176, scrollWidth: 236, scrollHeight: 418 },
         },
+        jobBoardCombine: {
+          attempt: 2,
+          startedAt: Date.now() - 90_000,
+          phase: 'compensation',
+          phaseAt: Date.now() - 60_000,
+          status: 'running',
+          combining: true,
+          scanning: true,
+          activeCombineOwner: true,
+          compensationProcessed: 0,
+          compensationTotal: 82,
+          finalizingCommittedCombine: false,
+        },
       }]);
       assert(report.includes('Selector runtime: rows=3 · selected=3 · action=disabled (Search & combine)')
         && report.includes('reasons=selected-source-unready')
         && report.includes('selector=260×583 scroll=260×583')
         && report.includes('source-list=236×176 scroll=236×418 (y-scroll)')
+        && report.includes('Combine runtime: attempt=2 · status=running · phase=compensation')
+        && report.includes('compensation=0/82')
         && !report.includes('not-an-allowed-reason'),
       `FULL Board diagnostics must render the actual selector gate and bounded overflow facts, got:\n${report}`);
 
@@ -15661,6 +15676,7 @@ export default [
           eligibilityReasons: [privateText],
           selectorBounds: { clientWidth: Infinity },
         },
+        jobBoardCombine: { phase: privateText, status: privateText, lastPhase: privateText },
       }]);
       assert(sanitized.includes('Selector runtime: rows=not retained · selected=not retained · action=not retained')
         && !sanitized.includes(privateText),

@@ -33,7 +33,7 @@ const allBridgeSiblings = [
   './constants.js', './contracts.js', './respond.js', './wire.js', './http.js', './listener.js', './tools.js', './mcp.js',
   './oauth.js', './oauthPages.js', './clientAuth.js', './cimd.js', './egressProbe.js', './oauthStore.js', './store.js',
   './laneStore.js', './engine.js', './lanes.js', './workerPool.js', './preflight.js', './framing.js', './errors.js', './audit.js', './log.js',
-  './telemetry.js', './restartContext.js', './controller.js', './pairing.js', './ui.js', './uiDialogs.js', './tray.js', './power.js', './index.js',
+  './telemetry.js', './restartContext.js', './controller.js', './pairing.js', './ui.js', './chatLauncher.js', './uiDialogs.js', './tray.js', './power.js', './index.js',
 ];
 const sibling = (...imports) => [...imports, ...allBridgeSiblings];
 
@@ -78,11 +78,12 @@ export const SOURCE_SCAN_ROWS = Object.freeze({
   'sources/push.js': { allow: ['../../nonApiAi.js', '../../ipcUtils.js', '../constants.js'] },
   'controller.js': { allow: sibling('node:crypto') },
   'pairing.js': { allow: sibling('node:crypto') },
-  'ui.js': { allow: sibling('electron') },
+  'ui.js': { allow: sibling('electron', '../nonApiAi.js') },
+  'chatLauncher.js': { allow: ['../browser/appleEvents.js', 'node:crypto'] },
   'uiDialogs.js': { allow: sibling('electron') },
   'tray.js': { allow: sibling('electron') },
   'power.js': { allow: sibling('electron') },
-  'index.js': { allow: sibling('electron', 'node:fs', 'node:path', 'node:os', 'node:http', 'node:crypto', '../../../src/utils/handoffBridgeConfig.js', './sources/application.js', './sources/syntheticPreflight.js', './sources/push.js', './tunnel/index.js', '../bugReport/helpers.js', '../nonApiAi.js') },
+  'index.js': { allow: sibling('electron', 'node:fs', 'node:path', 'node:os', 'node:http', 'node:crypto', '../../../src/utils/handoffBridgeConfig.js', './sources/application.js', './sources/syntheticPreflight.js', './sources/push.js', './tunnel/index.js', '../bugReport/helpers.js', '../nonApiAi.js', '../localAiApplication.js') },
   'tunnel/constants.js': { allow: [] },
   'tunnel/validate.js': { allow: ['../../../../src/utils/handoffBridgeConfig.js', '../constants.js', './constants.js'] },
   'tunnel/config.js': { allow: ['./constants.js', './validate.js'] },
@@ -351,7 +352,7 @@ export default [
   {
     name: 'handoff bridge: source-scan: complete table skips absent planned modules and rejects a no-row module',
     run: () => {
-      assert(Object.keys(SOURCE_SCAN_ROWS).length === 51, 'every planned handoffBridge module needs exactly one row');
+      assert(Object.keys(SOURCE_SCAN_ROWS).length === 52, 'every planned handoffBridge module needs exactly one row');
       assert(scanHandoffBridgeSource().length === 0, 'the current subset and absent planned rows must conform');
       const root = makeScratchBridge();
       try {
@@ -503,7 +504,7 @@ export default [
         'pairing_closed', 'consent_requested', 'refresh_rotated', 'persist_failed', 'state_version',
         'tool_call', 'tool_deadline', 'port_error', 'probe', 'permit_leak', 'restart_confirmed',
         'epoch_closed', 'release', 'unrelease', 'new_chat', 'starter_recopied', 'continue', 'source_mismatch',
-        'worker_pool_started', 'worker_pool_expanded',
+        'worker_pool_started', 'worker_pool_expanded', 'attachment_prepare',
       ];
       assert(JSON.stringify(CREDENTIAL_LOG_CODES) === JSON.stringify(expectedCodes), 'the logger code surface is the frozen credential/control enum');
       assert(JSON.stringify(Object.keys(LOG_FIELDS_BY_CODE)) === JSON.stringify(expectedCodes), 'each logger code has a closed field allow-list');

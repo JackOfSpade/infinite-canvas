@@ -13,6 +13,8 @@ export const LINK_STATES = Object.freeze(['unlinked', 'pairing', 'linked', 'need
 export const CHAT_STATES = Object.freeze(['none', 'awaiting-first-call', 'reached', 'working', 'idle', 'full', 'ended', 'unknown']);
 export const POOL_WORKER_STATES = Object.freeze(['available', 'ready', 'working', 'quiet', 'waiting', 'idle']);
 export const POOL_WORKER_QUIET_REASONS = Object.freeze(['answer_silent', 'polling_stopped', 'fresh_context_required']);
+export const LAUNCH_STAGES = Object.freeze(['opening', 'checking', 'sent', 'presented', 'failed']);
+export const LAUNCH_REASONS = Object.freeze(['invalid_launch', 'tab_not_owned', 'tab_open_failed', 'editor_timeout', 'editor_not_empty', 'chat_changed', 'insert_mismatch', 'model_menu_missing', 'model_selection_failed', 'effort_unavailable', 'account_unknown', 'send_unavailable', 'send_not_confirmed', 'apple_events_js_off', 'chrome_unavailable', 'starter_unavailable', 'bridge_not_presented', 'plugin_missing', 'reconnect_required', 'usage_limit', 'safety_block', 'attachment_invalid', 'attachment_draft_present', 'attachment_upload_failed', 'attachment_upload_timeout', ...['list_error', 'epoch_changed', 'scope_changed', 'candidate_missing', 'reservation_missing', 'file_missing', 'file_permission', 'file_rejected', 'read_error', 'reservation_changed', 'payload_invalid', 'unavailable'].map(reason => `attachment_prepare_${reason}`)]);
 export const JOB_PHASES = Object.freeze(['unread', 'awaiting', 'host', 'done', 'needs_user', 'held', 'gone', 'unknown']);
 export const JOB_REASONS = Object.freeze([
   'user_hold', 'human_advance', 'rejection_cap', 'junk_cap', 'review_round_cap',
@@ -102,7 +104,7 @@ const blankCounts = () => ({
 export const EMPTY_BRIDGE_STATUS = Object.freeze({
   v: BRIDGE_STATUS_VERSION, seq: 0, at: 0,
   availability: Object.freeze({ ok: false, reason: 'dev-build' }),
-  enabled: false, autoStart: false, autoRelease: false, serving: 'off', paused: false,
+  enabled: false, autoStart: false, autoLaunchChats: true, autoRelease: false, serving: 'off', paused: false,
   pauseCause: null, hold: null, fault: null,
   config: Object.freeze({ hostname: null, pluginName: 'infinite_canvas', mcpUrl: null, scope: Object.freeze({ applications: false, scoring: false, marketplace: false }), telemetryInBugReports: false }),
   limits: Object.freeze({ releaseTtlHours: 0, chatKeyMaxAgeHours: 0, idlePauseMinutes: 1440, maxConcurrentHandoffs: HANDOFF_CONCURRENCY }), prefs: Object.freeze({ sourcePolicy: 'enforce', pairingNetworkCheck: true }),
@@ -138,7 +140,7 @@ export function normalizeBridgeStatus(raw) {
     const normalized = {
       v: BRIDGE_STATUS_VERSION, seq: number(value.seq), at: number(value.at),
       availability: { ok: availabilityOk, reason: availabilityOk ? null : nullableOneOf(availability.reason, AVAILABILITY_REASONS) || 'dev-build' },
-      enabled: bool(value.enabled), autoStart: bool(value.autoStart), autoRelease: bool(value.autoRelease), serving: oneOf(value.serving, SERVING_STATES, 'off'), paused: bool(value.paused), pauseCause: nullableOneOf(value.pauseCause, PAUSE_CAUSES), hold: nullableOneOf(value.hold, HOLDS), fault: isObject(value.fault) && nullableOneOf(value.fault.code, FAULT_CODES) ? { code: value.fault.code } : null,
+      enabled: bool(value.enabled), autoStart: bool(value.autoStart), autoLaunchChats: value.autoLaunchChats !== false, autoRelease: bool(value.autoRelease), serving: oneOf(value.serving, SERVING_STATES, 'off'), paused: bool(value.paused), pauseCause: nullableOneOf(value.pauseCause, PAUSE_CAUSES), hold: nullableOneOf(value.hold, HOLDS), fault: isObject(value.fault) && nullableOneOf(value.fault.code, FAULT_CODES) ? { code: value.fault.code } : null,
       config: { hostname: typeof config.hostname === 'string' ? string(config.hostname) : null, pluginName: string(config.pluginName, '') || 'infinite_canvas', mcpUrl: typeof config.mcpUrl === 'string' ? string(config.mcpUrl) : null, scope: { applications: bool(scope.applications), scoring: bool(scope.scoring), marketplace: bool(scope.marketplace) }, telemetryInBugReports: bool(config.telemetryInBugReports) },
       limits: { releaseTtlHours: number(limits.releaseTtlHours), chatKeyMaxAgeHours: number(limits.chatKeyMaxAgeHours), idlePauseMinutes: number(limits.idlePauseMinutes, 1440), maxConcurrentHandoffs: Number.isSafeInteger(limits.maxConcurrentHandoffs) && limits.maxConcurrentHandoffs >= 1 && limits.maxConcurrentHandoffs <= MAX_POOL_WORKERS ? limits.maxConcurrentHandoffs : HANDOFF_CONCURRENCY }, prefs: { sourcePolicy: oneOf(prefs.sourcePolicy, ['enforce', 'alert', 'off'], 'enforce'), pairingNetworkCheck: prefs.pairingNetworkCheck !== false },
       setup: { hostnameOk: bool(setup.hostnameOk), binaryApproved: bool(setup.binaryApproved), credentialsOk: bool(setup.credentialsOk), consentCurrent: bool(setup.consentCurrent), tunnelReachable: bool(setup.tunnelReachable), linked: bool(setup.linked), toolsListed: bool(setup.toolsListed), firstCallSeen: bool(setup.firstCallSeen) },
@@ -170,6 +172,8 @@ export function normalizeBridgeStatus(raw) {
               quietReason: state === 'quiet'
                 ? nullableOneOf(worker.quietReason, POOL_WORKER_QUIET_REASONS)
                 : null,
+              ...(isObject(worker.launch) && nullableOneOf(worker.launch.stage, LAUNCH_STAGES)
+                ? { launch: { stage: worker.launch.stage, reason: nullableOneOf(worker.launch.reason, LAUNCH_REASONS) } } : {}),
             });
           }
           workers.sort((left, right) => left.ordinal - right.ordinal);

@@ -1938,7 +1938,7 @@ const bridgeHeldCardTests = [
       const progressView = readFileSync(new URL('../../src/components/BridgeProgress.jsx', import.meta.url), 'utf8');
       assert(progressView.includes('isPush === true')
         && progressView.includes('const ownerWorker = isPush === true')
-        && progressView.includes('deriveBridgeJobProgress({ job, chat, item, ownerWorker, now, bridge: { paused: status?.paused === true, pluginName } })'),
+        && progressView.includes('deriveBridgeJobProgress({ job, chat, item, ownerWorker, now, bridge: { paused: status?.paused === true, pluginName, autoLaunchChats: status?.autoLaunchChats === true } })'),
       'the dock’s explicit request kind keeps a token-bearing application on the shared lane derivation while passing only its exact owner-worker projection');
       const dialog = readFileSync(new URL('../../src/components/NonApiAiDialog.jsx', import.meta.url), 'utf8');
       assert(dialog.includes('isBridgeHeldJob(bridgeStatus, activeRequest?.jobId)') && !dialog.includes('BRIDGE_WORKING_PHASES'), 'the dock uses the same shared rule rather than its own copy');

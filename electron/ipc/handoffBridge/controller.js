@@ -66,6 +66,7 @@ const TASK_IDS = new Set([
   'job-taxonomy-classify-batch', 'job-taxonomy-plan', 'platform-fit-assessment', 'price-synthesis',
   'price-synthesis-batch', 'resume-parse',
   'interview-brief-research', 'interview-brief-assessment',
+  'vision-product-analysis', 'marketplace-hub-scan', 'marketplace-hub-scan-batch',
 ]);
 const JOB_REASONS = new Set(['user_hold', 'human_advance', 'rejection_cap', 'junk_cap', 'review_round_cap', 'job_broken', 'render_retry', 'app_fix_required', 'canvas_unavailable', 'canvas_missing', 'read_failed', 'write_failed', 'submit_stuck', 'host_silent', 'lapsed', 'restart', 'review_stop', 'app_only_handoffs', 'commit_failed', 'person_editing', 'hub_not_selected', 'task_disabled', 'integrity_fault', 'failed', 'render_retry_required', 'user', 'answered_in_dock']);
 const ALARM_KINDS = new Set(['unknown_key', 'unknown_handoff', 'refresh_reuse', 'code_reuse', 'rate_limited', 'held_caps']);
@@ -160,7 +161,7 @@ function statusOf(port) {
 
 function defaultConfig() {
   return {
-    hostname: null, pluginName: 'infinite_canvas', autoStart: true, autoRelease: true,
+    hostname: null, pluginName: 'infinite_canvas', autoStart: true, autoLaunchChats: true, autoRelease: true,
     scope: { applications: true, scoring: true, marketplace: true },
     limits: {
       releaseTtlHours: CONSTANTS.RELEASE_TTL_HOURS,
@@ -182,6 +183,7 @@ function cleanConfig(value) {
     hostname: typeof value.hostname === 'string' ? value.hostname : null,
     pluginName: typeof value.pluginName === 'string' && value.pluginName ? value.pluginName : fallback.pluginName,
     autoStart: value.autoStart !== false,
+    autoLaunchChats: value.autoLaunchChats !== false,
     autoRelease: value.autoRelease !== false,
     scope: {
       applications: value.scope?.applications !== false,
@@ -535,7 +537,7 @@ export function createHandoffBridgeController(options = {}) {
     base.seq = seq; base.at = stamp;
     const availabilityReason = oneOf(options.availability?.reason, AVAILABILITY_REASONS, null);
     base.availability = { ok: options.availability?.ok !== false && availabilityReason === null, reason: availabilityReason };
-    base.enabled = enabled; base.autoStart = config.autoStart; base.autoRelease = config.autoRelease;
+    base.enabled = enabled; base.autoStart = config.autoStart; base.autoLaunchChats = config.autoLaunchChats; base.autoRelease = config.autoRelease;
     base.serving = serving; base.paused = serving === 'paused'; base.pauseCause = pauseCause;
     base.hold = !canvasOpen() && enabled ? 'no-window' : (!restartConfirmed && enabled ? 'restart' : null);
     base.fault = fault;
@@ -1782,6 +1784,15 @@ export function createHandoffBridgeController(options = {}) {
     // an internal caller cannot accidentally turn a bad value into an
     // unbounded/ambiguous worker target.
     if (args?.requestedWorkers !== undefined && requestedWorkers === null) return { success: false, code: 'INVALID' };
+    // Only ui.js can mint this capability: a "Prepare worker plan" press, or
+    // the launcher's automatic start while the person has auto-launch turned
+    // on, is itself the decision to serve work again after a restart. Without
+    // it the engine would raise the native restart sheet (internal callers
+    // keep that sheet).
+    if (isUiRestartContext(args?.restartContext) && !restartConfirmed
+      && !await confirmRestart([], { generation, activeEngine, dialogContext: args.restartContext })) {
+      return { success: false, code: 'PAUSED' };
+    }
     const linkId = currentLinkId();
     try {
       const result = await call(activeEngine, 'startWorkerPool', {
@@ -1856,6 +1867,38 @@ export function createHandoffBridgeController(options = {}) {
       return current;
     } catch { return false; }
   }
+  // Main-process launcher only. Attachment bytes and handoff code never enter
+  // a renderer snapshot or IPC response.
+  async function prepareWorkerAttachment(args = {}) {
+    const generation = lifecycleGeneration;
+    const activeEngine = engine;
+    if (!currentRuntime(generation, activeEngine) || serving !== 'live') {
+      record('attachment_prepare', { outcome: 'unavailable' });
+      return null;
+    }
+    const poolGeneration = args?.generation;
+    const workerOrdinal = args?.workerOrdinal;
+    if (!Number.isInteger(poolGeneration) || poolGeneration < 1
+      || !Number.isInteger(workerOrdinal) || workerOrdinal < 1 || workerOrdinal > CONSTANTS.MAX_LANES) {
+      record('attachment_prepare', { outcome: 'invalid_worker' });
+      return null;
+    }
+    try {
+      const payload = await call(activeEngine, 'prepareWorkerAttachment', {
+        linkId: currentLinkId(), generation: poolGeneration, workerOrdinal,
+      });
+      record('attachment_prepare', {
+        outcome: ['ready', 'none', 'failed'].includes(payload?.status) ? payload.status : 'missing',
+        ...(['list_error', 'epoch_changed', 'scope_changed', 'candidate_missing', 'reservation_missing', 'file_missing',
+          'file_permission', 'file_rejected', 'read_error', 'reservation_changed', 'payload_invalid'].includes(payload?.reason)
+          ? { reason: payload.reason } : {}),
+      });
+      return currentRuntime(generation, activeEngine) ? payload : null;
+    } catch {
+      record('attachment_prepare', { outcome: 'error' });
+      return null;
+    }
+  }
   async function restartWorker(args = {}) {
     const generation = lifecycleGeneration;
     const activeEngine = engine;
@@ -1866,7 +1909,8 @@ export function createHandoffBridgeController(options = {}) {
       return { copied: false, status: 'session_ended' };
     }
     try {
-      const result = await call(activeEngine, 'restartWorker', { linkId: currentLinkId(), generation: poolGeneration, workerOrdinal });
+      const result = await call(activeEngine, 'restartWorker', { linkId: currentLinkId(), generation: poolGeneration,
+        workerOrdinal, failedLaunch: args?.failedLaunch === true });
       if (!currentRuntime(generation, activeEngine)) return { copied: false, status: 'session_ended' };
       if (result?.copied === true) {
         humanAction();
@@ -1980,7 +2024,7 @@ export function createHandoffBridgeController(options = {}) {
   return Object.freeze({
     snapshot, status: snapshot, getState: snapshot, subscribe, tick, gate, get, submit,
     enable, disable, shutdownForQuit, pause, resume, revokeAll, forget, release, unrelease, onBundleDiscarded, releasePushHubs, unreleasePushHub,
-    newChat: args => chat('new', args), continueChat: args => chat('continue', args), startWorkerPool, copyWorkerStarter, abandonWorkerStarter, restartWorker,
+    newChat: args => chat('new', args), continueChat: args => chat('continue', args), startWorkerPool, copyWorkerStarter, prepareWorkerAttachment, abandonWorkerStarter, restartWorker,
     prepareChat, commitChat, abandonChat, confirmRestart, getActivity,
     holdForQuit, resumeAfterQuitCancel, notePairingAction, onPairingState, onAnonymous, onReconnectHint, onTransportCount, onSecurityEvent, onLinkChanged, reloadConfig, ackAlarm, refreshPushDiscovery,
   });

@@ -51,6 +51,7 @@ const MAX_APPLICATION_MATCH_LIVE_WAVE = 10;
 // task-policy table to decide which consent boundary a served task needs.
 const MARKETPLACE_PUSH_TASKS = new Set([
   'price-synthesis', 'price-synthesis-batch', 'bundle-price-synthesis', 'platform-fit-assessment',
+  'vision-product-analysis', 'marketplace-hub-scan', 'marketplace-hub-scan-batch',
 ]);
 // Status is a public, privacy-reduced surface. Keep its task labels closed so
 // an injected/generic push port cannot turn arbitrary task text into report
@@ -68,6 +69,7 @@ const STATUS_PUSH_TASKS = new Set([
   'job-preference-research-assessment', 'job-preference-research-batch-assessment',
   'job-location-consolidation-confirmation', 'job-role-audit', 'job-role-screen', 'job-role-screen-batch',
   'interview-brief-research', 'interview-brief-assessment',
+  'vision-product-analysis', 'marketplace-hub-scan', 'marketplace-hub-scan-batch',
 ]);
 const SCORING_PUSH_TASKS = new Set([...STATUS_PUSH_TASKS].filter(task => !MARKETPLACE_PUSH_TASKS.has(task)));
 const PUSH_EXCLUSION_REASONS = ['ending', 'settling', 'attachment', 'free_text', 'task_not_allowed', 'node_not_allowed', 'person_editing'];
@@ -254,6 +256,7 @@ export function createHandoffEngine({
   scope: initialScope,
   confirmRestart = async () => true,
   onJobChanged = () => undefined,
+  onApplicationServed = () => undefined,
   onServeAfterIdle = () => undefined,
   holdMs = CONSTANTS.GET_HOLD_MS,
   readWatchdogMs = CONSTANTS.LANE_READ_WATCHDOG_MS,
@@ -2157,6 +2160,9 @@ export function createHandoffEngine({
     counts.getServed++;
     worker.consecutiveWaits = 0; // work was served, so the wait streak is broken
     auditEvent('served', { tool: 'get_handoff', outcome: 'ok', stage: lane.current.stage });
+    try { onApplicationServed({ jobId: lane.jobId, canvasFilePath: lane.canvasFilePath,
+      stage: lane.current.stage, generation: expectedEpoch.poolGeneration || null,
+      chatOrdinal: expectedEpoch.n, workerOrdinal: worker.workerOrdinal }); } catch { /* observational metadata is optional */ }
     const idleNoticeMs = CONSTANTS.SERVE_AFTER_IDLE_NOTICE_HOURS * 3_600_000;
     if (stamp - lastHumanActionAt >= idleNoticeMs && stamp - lastIdleNoticeAt >= 3_600_000) {
       lastIdleNoticeAt = stamp;
@@ -2518,6 +2524,21 @@ export function createHandoffEngine({
 
   async function getAuthenticated(args, { expectedEpoch, worker, generation, claimId }) {
     const resumedDuringGet = () => !epochCurrent(expectedEpoch, generation);
+
+    // A chat with uploaded files is exclusively for its reserved push handoff.
+    // Once it completes, require a fresh chat before any application or other
+    // push work can be served into the old photo/document context.
+    if (worker?.attachmentBound === true) {
+      const decision = await readPush(generation, expectedEpoch, worker);
+      if (resumedDuringGet()) return makeResultBody('retry');
+      if (decision?.status === 'queue_empty') {
+        try { push?.releaseAttachment?.({ epoch: pushEpochId(expectedEpoch), worker: worker.id }); } catch { /* optional source */ }
+        worker.attachmentBound = false;
+        worker.freshContextRequired = true;
+        return makeResultBody('session_full', { remaining: combinedRemaining(decision.remaining) });
+      }
+      return framePushGet(decision, generation, expectedEpoch, worker);
+    }
 
     // A hinted host lane is re-probed here, before a push item is served, so its
     // continuation is not passed over. (A stale flag on a finished lane is inert.)
@@ -3929,19 +3950,41 @@ export function createHandoffEngine({
     if (!worker?.starterExported || worker.presented || worker.calls !== 0 || typeof worker.starterKey !== 'string') return false;
     if (!sameDigest(epochHash(linkId, worker.starterKey), worker.keyHash)) return false;
     worker.starterExported = false;
+    worker.attachmentBound = false;
+    try { push?.releaseAttachment?.({ epoch: pushEpochId(), worker: worker.id, manualFallback: true }); } catch { /* source is optional */ }
     return true;
+  }
+
+  async function prepareWorkerAttachment({ linkId, generation, workerOrdinal } = {}) {
+    if (!epoch?.poolStarted || generation !== epoch.poolGeneration || typeof linkId !== 'string' || !linkId
+      || !Number.isInteger(workerOrdinal)) return null;
+    const worker = workerForId(epoch, workerId(workerOrdinal));
+    if (!worker?.starterExported || worker.presented || worker.retiring) return null;
+    const currentKeyHash = worker.keyHash;
+    const expectedEpoch = epoch;
+    let payload;
+    try { payload = await push?.prepareAttachment?.({ epoch: pushEpochId(expectedEpoch), worker: worker.id }); }
+    catch { payload = null; }
+    if (epoch !== expectedEpoch || !sameDigest(worker.keyHash, currentKeyHash) || worker.presented || worker.retiring) {
+      try { push?.releaseAttachment?.({ epoch: pushEpochId(expectedEpoch), worker: worker.id }); } catch { /* stale source */ }
+      return null;
+    }
+    worker.attachmentBound = payload?.status === 'ready';
+    return payload;
   }
 
   // Replace only a quiet worker's session capability.  Keep its ordinal,
   // aggregate completion count, and lane/push ownership so a fresh chat can
   // safely re-get the exact outstanding handoff.  The prior key stays in the
   // ended-key ledger and can never authenticate again.
-  function restartWorker({ linkId, generation, workerOrdinal } = {}) {
+  function restartWorker({ linkId, generation, workerOrdinal, failedLaunch = false } = {}) {
     if (!epoch?.poolStarted || !Number.isInteger(generation) || generation !== epoch.poolGeneration) return { copied: false, status: 'session_ended' };
     if (typeof linkId !== 'string' || !linkId || !Number.isInteger(workerOrdinal) || workerOrdinal < 1 || workerOrdinal > MAX_WORKER_POOL_SIZE) return { copied: false, status: 'session_ended' };
     const worker = workerForId(epoch, workerId(workerOrdinal));
     if (worker?.retiring === true) return { copied: false, status: 'session_ended' };
-    if (!worker || !workerIsQuiet(worker)) return { copied: false, status: 'not_quiet' };
+    const unpresentedFailure = failedLaunch === true && worker?.starterExported === true
+      && worker.presented !== true && worker.firstCallAt == null;
+    if (!worker || (!workerIsQuiet(worker) && !unpresentedFailure)) return { copied: false, status: 'not_quiet' };
     const stamp = safeNow(now);
     // The live ledger already contains this digest, but stamp it again before
     // dropping the only credential that could authenticate it.
@@ -5056,6 +5099,7 @@ export function createHandoffEngine({
     continueChat,
     startWorkerPool,
     copyWorkerStarter,
+    prepareWorkerAttachment,
     abandonWorkerStarter,
     restartWorker,
     notePresented,

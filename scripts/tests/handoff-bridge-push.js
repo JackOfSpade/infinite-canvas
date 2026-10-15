@@ -8,7 +8,7 @@ import { PUSH_TASK_POLICY, assertPushTaskPolicy, createPushSource as createPushS
 import { createHandoffEngine } from '../../electron/ipc/handoffBridge/engine.js';
 import { createHandoffCodeGuard } from '../../electron/ipc/handoffBridge/lanes.js';
 import { TOOLS_LIST } from '../../electron/ipc/handoffBridge/tools.js';
-import { BRIDGE_RAW_RESEARCH_TASKS } from '../../electron/ipc/nonApiAi.js';
+import { BRIDGE_ATTACHMENT_TASKS, BRIDGE_ENABLED_ATTACHMENT_TASKS, BRIDGE_RAW_RESEARCH_TASKS } from '../../electron/ipc/nonApiAi.js';
 
 const CODE = 'HANDOFF-ABCDEF';
 const CLAIM = '22222222-2222-4222-8222-222222222222';
@@ -57,6 +57,65 @@ async function makeEngine({ pushGet, pushSubmit, appRead, submitBudgetMs = 25_00
 }
 
 export default [
+  { name: 'handoff bridge: an attachment reservation binds one handoff to one worker chat', run: async () => {
+    const attached = { ...entry, task: 'vision-product-analysis', hasAttachments: true };
+    const source = createPushSource({
+      experimentalAttachmentTasks: true,
+      seam: {
+        list: async () => ({ handoffs: [attached], excluded: {}, pending: 1 }),
+        read: async () => ({ ok: true, requestId: attached.requestId, handoffCode: CODE,
+          task: attached.task, responseFormat: 'json', prompt: 'Inspect the attached photo', attempt: 1 }),
+        attachments: async () => ({ handoffCode: CODE, attachments: [{ name: 'item.png', mime: 'image/png', bytes: Buffer.from('photo') }] }),
+        submit: async () => ({ outcome: 'accepted', accepted: true }),
+      },
+      windows: new Map([[71, { __canvasFilePath: '/tmp/ada.canvas' }]]), hubKey: testHubKey,
+    });
+    assert(source.selectHub({ windowId: 71, canvasFilePath: '/tmp/ada.canvas', nodeId: 'node-ada' }));
+    source.setAllowedTasks(new Set(['vision-product-analysis']));
+    const reserved = await source.prepareAttachment({ epoch: 'E', worker: 'worker-1' });
+    assert(reserved.status === 'ready' && reserved.handoffCode === CODE && reserved.attachments[0].name === 'item.png');
+    const other = await source.get({ epoch: 'E', worker: 'worker-2', keepWaiting: true });
+    assert(other.status !== 'served', 'another worker must not receive the attached handoff');
+    const own = await source.get({ epoch: 'E', worker: 'worker-1', keepWaiting: true });
+    assert(own.status === 'served' && own.handoffCode === CODE);
+    const accepted = await source.submit({ epoch: 'E', worker: 'worker-1', handoffCode: CODE,
+      response: JSON.stringify({ handoffCode: CODE, description: 'ok' }) });
+    assert(accepted.status === 'accepted');
+    const after = await source.get({ epoch: 'E', worker: 'worker-1', keepWaiting: true });
+    assert(after.status === 'queue_empty', 'the photo chat must not receive another handoff');
+  } },
+  { name: 'handoff bridge: failed attachment launch releases its lease to the manual dock', run: async () => {
+    const attached = { ...entry, task: 'vision-product-analysis', hasAttachments: true };
+    const fallbacks = [];
+    const source = createPushSource({ experimentalAttachmentTasks: true,
+      seam: { list: async () => ({ handoffs: [attached], excluded: {}, pending: 1 }),
+        attachments: async () => ({ handoffCode: CODE, attachments: [{ name: 'item.png', mime: 'image/png', bytes: Buffer.from('photo') }] }),
+        fallbackAttachment: args => { fallbacks.push(args.requestId); return true; } },
+      windows: new Map([[71, { __canvasFilePath: '/tmp/ada.canvas' }]]), hubKey: testHubKey });
+    assert(source.selectHub({ windowId: 71, canvasFilePath: '/tmp/ada.canvas', nodeId: 'node-ada' }));
+    source.setAllowedTasks(new Set(['vision-product-analysis']));
+    assert((await source.prepareAttachment({ epoch: 'E', worker: 'worker-1' })).status === 'ready');
+    assert(source.releaseAttachment({ epoch: 'E', worker: 'worker-1', manualFallback: true }));
+    assert(JSON.stringify(fallbacks) === JSON.stringify([attached.requestId]));
+    assert((await source.prepareAttachment({ epoch: 'E', worker: 'worker-2' })).status === 'ready');
+  } },
+  { name: 'handoff bridge: a transient discovery gap cannot release an attachment while its bytes are being read', run: async () => {
+    const attached = { ...entry, task: 'vision-product-analysis', hasAttachments: true };
+    const entered = deferred();
+    const finishRead = deferred();
+    let lists = 0;
+    const source = createPushSource({ seam: {
+      list: async () => ({ handoffs: ++lists === 2 ? [] : [attached], excluded: {}, pending: 1 }),
+      attachments: async () => { entered.resolve(); return finishRead.promise; },
+    }, windows: new Map([[71, { __canvasFilePath: '/tmp/ada.canvas' }]]), hubKey: testHubKey });
+    assert(source.selectHub({ windowId: 71, canvasFilePath: '/tmp/ada.canvas', nodeId: 'node-ada' }));
+    source.setAllowedTasks(new Set(['vision-product-analysis']));
+    const preparing = source.prepareAttachment({ epoch: 'E', worker: 'worker-1' });
+    await entered.promise;
+    await source.refreshHubs();
+    finishRead.resolve({ handoffCode: CODE, attachments: [{ name: 'product.png', mime: 'image/png', bytes: Buffer.from('png') }] });
+    assert((await preparing).status === 'ready');
+  } },
   { name: 'handoff bridge: push end to end: one chat automatically drains eleven role-screen batches through get and submit', run: async () => {
     const codeSuffixes = '23456789ABH';
     const pending = Array.from({ length: 11 }, (_unused, index) => ({
@@ -710,20 +769,23 @@ export default [
     for (const task of BRIDGE_RAW_RESEARCH_TASKS) {
       assert(releaseOne.has(task), `${task} must match the seam's reviewed raw-research exception`);
     }
-    // Photos (callLLMVision) and the file->text step itself (callLLMDocument)
-    // need attachment bytes that the MCP text surface cannot carry.
-    for (const task of [
-      'vision-product-analysis', 'marketplace-hub-scan', 'marketplace-hub-scan-batch',
-      'career-file-inventory', 'career-file-inventory-audit', 'career-file-boundary-audit',
-      'career-file-extract', 'career-file-transcription-audit',
-    ]) {
-      assert(!PUSH_TASK_POLICY[task].bridgeable && PUSH_TASK_POLICY[task].mode === 'never', `${task} cannot cross an MCP text tool`);
+    // The photo task passed its live upload check. The two hub scans use
+    // text-only llmText calls; document uploads retain manual delivery.
+    for (const task of BRIDGE_ENABLED_ATTACHMENT_TASKS) assert(PUSH_TASK_POLICY[task].bridgeable && PUSH_TASK_POLICY[task].mode === 'release_one');
+    for (const task of ['marketplace-hub-scan', 'marketplace-hub-scan-batch']) assert(releaseOne.has(task));
+    for (const task of BRIDGE_ATTACHMENT_TASKS.filter(task => !BRIDGE_ENABLED_ATTACHMENT_TASKS.includes(task))) {
+      assert(!PUSH_TASK_POLICY[task].bridgeable && PUSH_TASK_POLICY[task].mode === 'never');
     }
-    // Only photos and attachment-backed document checks remain. Nothing else is held back
-    // for want of review -- if a row is not release_one it must name a real
-    // reason, so a future task cannot quietly inherit paste-only status.
-    assert(Object.values(PUSH_TASK_POLICY).filter(row => row.mode === 'never').length === 8,
-      'the never list is exactly the work that cannot cross a text tool');
+    // Career files are plain text read locally (2026-10-14), so no career
+    // transcription task exists. Nothing is held back for want of review: if
+    // a row is not release_one it must name a real reason, so a future task
+    // cannot quietly inherit paste-only status.
+    for (const task of ['career-file-extract', 'career-file-transcription-audit', 'career-file-inventory', 'career-file-inventory-audit', 'career-file-boundary-audit']) {
+      assert(!Object.hasOwn(PUSH_TASK_POLICY, task), `${task} no longer exists`);
+    }
+    assert(Object.values(PUSH_TASK_POLICY).filter(row => row.mode === 'never').length
+      === BRIDGE_ATTACHMENT_TASKS.filter(task => !BRIDGE_ENABLED_ATTACHMENT_TASKS.includes(task)).length,
+    'the never list contains only attachment tasks still disabled');
     // Marketplace pricing rides the bridge now that scope.marketplace is the
     // consent boundary for listing data; engine.js fences it on that scope
     // specifically, never on scope.scoring.
@@ -743,14 +805,17 @@ export default [
     const declared = new Set([...block.matchAll(/'([a-z0-9-]+)'/g)].map(match => match[1]));
     const bridgeable = Object.entries(PUSH_TASK_POLICY).filter(([, row]) => row.mode === 'release_one').map(([task]) => task);
     for (const task of bridgeable) assert(declared.has(task), `controller TASK_IDS omits bridgeable task ${task}, so its name cannot reach the renderer`);
-    for (const task of declared) assert(PUSH_TASK_POLICY[task]?.mode === 'release_one', `controller TASK_IDS names ${task}, which the bridge never serves`);
+    for (const task of declared) assert(PUSH_TASK_POLICY[task]?.mode === 'release_one' || BRIDGE_ATTACHMENT_TASKS.includes(task), `controller TASK_IDS names ${task}, which the bridge never serves`);
   } },
   { name: 'handoff bridge: push: engine and report telemetry vocabularies exactly cover the isolated release-one policy', run: () => {
     // These modules deliberately do not import sources/push.js: engine accepts
     // a generic push-shaped port and telemetry must remain a standalone
     // privacy reducer. Their duplicated closed sets are therefore a drift risk
     // that this regression makes explicit.
-    const releaseOne = new Set(Object.entries(PUSH_TASK_POLICY).filter(([, row]) => row.mode === 'release_one').map(([task]) => task));
+    const releaseOne = new Set([
+      ...Object.entries(PUSH_TASK_POLICY).filter(([, row]) => row.mode === 'release_one').map(([task]) => task),
+      ...BRIDGE_ATTACHMENT_TASKS,
+    ]);
     const vocabulary = (relativePath, declaration) => {
       const source = fs.readFileSync(new URL(relativePath, import.meta.url), 'utf8');
       assert(!/from\s+['"][^'"]*sources\/push\.js/.test(source), `${relativePath} must stay isolated from the concrete push source`);
@@ -773,10 +838,11 @@ export default [
   { name: 'handoff bridge: push: digest routing accepts lower-case curly wrappers but rejects a same-prefix code', run: async () => { const lower = makeSource().source; await lower.get(); assert((await lower.submit({ handoffCode: '\u201c`handoff-abcdef`\u201d', response: '{"handoffCode":"HANDOFF-ABCDEF"}' })).status === 'accepted', 'push code canonicalization remains case-insensitive with curly wrappers'); const prefix = makeSource().source; await prefix.get(); assert((await prefix.submit({ handoffCode: 'HANDOFF-ABCDEG', response: '{"handoffCode":"HANDOFF-ABCDEG"}' })).status === 'unknown_handoff', 'a matching prefix cannot select a served route'); } },
   { name: 'handoff bridge: push: policy is deeply frozen and drift refuses an unknown task', run: () => { assert(Object.isFrozen(PUSH_TASK_POLICY) && Object.isFrozen(PUSH_TASK_POLICY['job-scoring']), 'policy must not be mutable at runtime'); let rejected = false; try { assertPushTaskPolicy(new Set([...getKnownTaskIds(), 'future-task'])); } catch { rejected = true; } assert(rejected, 'new LLM work must default deny'); } },
   { name: 'handoff bridge: push: seam list receives only the release-one task and selected node', run: async () => { let args; const { source } = makeSource({ read: async item => ({ ok: true, requestId: item.requestId, handoffCode: item.handoffCode, task: item.task, prompt: 'Synthetic prompt', attempt: 1 }) }); const original = source.get; assert(typeof original === 'function', 'source get surface exists'); const captured = createPushSource({ seam: { list: async value => { args = value; return { handoffs: [entry], excluded: {} }; }, read: async item => ({ ok: true, requestId: item.requestId, handoffCode: item.handoffCode, task: item.task, prompt: 'Synthetic prompt', attempt: 1 }), submit: async () => ({ outcome: 'accepted' }) }, windows: new Map([[71, { __canvasFilePath: '/tmp/ada.canvas' }]]), hubKey: testHubKey }); captured.selectHub({ windowId: 71, canvasFilePath: '/tmp/ada.canvas', nodeId: 'node-ada' }); await captured.get(); assert(args.allowTasks.has('job-scoring') && args.allowNodeIds.has('node-ada'), 'coarse seam gate is defence in depth');
-    // The allow-list is the release_one set exactly -- never a task the policy
-    // holds back, however the table grows.
-    for (const task of ['vision-product-analysis', 'career-file-extract', 'career-file-transcription-audit', 'marketplace-hub-scan', 'marketplace-hub-scan-batch']) {
-      assert(!args.allowTasks.has(task), `${task} must never reach the seam allow-list`);
+    // The allow-list is the release_one set exactly, including only attachment
+    // tasks whose live transport gate is enabled.
+    for (const task of BRIDGE_ATTACHMENT_TASKS) {
+      assert(args.allowTasks.has(task) === BRIDGE_ENABLED_ATTACHMENT_TASKS.includes(task),
+        `${task} allow-list membership must match the live transport gate`);
     }
     assert([...args.allowTasks].every(task => PUSH_TASK_POLICY[task]?.mode === 'release_one'), 'the seam allow-list must be exactly the release-one rows'); } },
   { name: 'handoff bridge: push: exact selected window-path-node triple gates serving', run: async () => { const { source } = makeSource(); assert((await source.get()).status === 'served', 'exact hub should serve'); source.clearHubs(); assert((await source.get()).status === 'needs_user', 'no hub must fail closed'); } },

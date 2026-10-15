@@ -21,6 +21,8 @@ export const IPC_CHANNELS = Object.freeze({
   START_WORKER_POOL: 'handoff-bridge:start-worker-pool',
   COPY_WORKER_STARTER: 'handoff-bridge:copy-worker-starter',
   RESTART_WORKER: 'handoff-bridge:restart-worker',
+  RETRY_WORKER_LAUNCH: 'handoff-bridge:retry-worker-launch',
+  GET_LAUNCH_ACCOUNT: 'handoff-bridge:get-launch-account',
   PAUSE: 'handoff-bridge:pause',
   RESUME: 'handoff-bridge:resume',
   REVOKE_ALL: 'handoff-bridge:revoke-all',
@@ -53,7 +55,7 @@ export const TUNNEL_PORT_SHAPE = Object.freeze(['start', 'stop', 'status', 'reap
 export const STATUS_SNAPSHOT_EXAMPLE = deepFreeze({
   v: 1, seq: 0, at: 0,
   availability: { ok: false, reason: null },
-  enabled: false, autoStart: true, autoRelease: true, serving: 'off', paused: false,
+  enabled: false, autoStart: true, autoLaunchChats: true, autoRelease: true, serving: 'off', paused: false,
   pauseCause: null, hold: null, fault: null,
   config: { hostname: null, pluginName: 'infinite_canvas', mcpUrl: null, scope: { applications: true, scoring: true, marketplace: true }, telemetryInBugReports: false },
   limits: { releaseTtlHours: 0, chatKeyMaxAgeHours: 0, idlePauseMinutes: 1440, maxConcurrentHandoffs: 10 },

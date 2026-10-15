@@ -287,7 +287,11 @@ export default [
 
             const startButtons = buttons(window).filter(button => button.textContent.trim() === BRIDGE_UI_COPY.startChat);
             assert(startButtons.length === 1, `exactly one start-workers button, got ${startButtons.length}`);
-            const detail = BRIDGE_PROGRESS_COPY.noChat('Infinite Canvas')[1];
+            // Auto-launch is on in this status, so the dock says chats start by
+            // themselves instead of asking the person to copy starters.
+            assert(given.autoLaunchChats === true, 'fixture keeps the launcher on');
+            assert(!text(window).includes(BRIDGE_PROGRESS_COPY.noChat('Infinite Canvas')[1]), 'with auto-launch on, the dock never asks for manual starter copies');
+            const detail = 'Infinite Canvas is starting fresh ChatGPT chats in Chrome automatically. If none opens within a minute, press Prepare worker plan.';
             assert(text(window).split(detail).length - 1 === 1, `the no-chat explanatory detail appears exactly once: ${detail}`);
 
             await bundle.module.act(async () => {

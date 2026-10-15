@@ -1,8 +1,12 @@
 import {
   BRIDGE_RELEASE_ONE_TASKS,
+  BRIDGE_ATTACHMENT_TASKS,
+  BRIDGE_ENABLED_ATTACHMENT_TASKS,
   BRIDGE_EXCLUSION_REASONS,
   listBridgeableNonApiAiHandoffs,
   readBridgeableNonApiAiHandoff,
+  readBridgeableNonApiAiAttachments,
+  fallbackBridgeAttachmentToManual,
   submitNonApiAiResponseForBridge,
 } from '../../nonApiAi.js';
 import { snapshotActiveNodeTasks } from '../../ipcUtils.js';
@@ -12,23 +16,18 @@ import { CONSTANTS } from '../constants.js';
 // reviewed. Only release_one rows can ever be given to the seam allow-list.
 //
 // Reviewed 2026-09-28 against what each task actually sends, not its name:
-//   never      -- structurally cannot cross an MCP text tool.
-//                 vision/hub-scan send product PHOTOS (callLLMVision,
-//                 marketplace.js); career-file inventory, boundary checks,
-//                 extraction, and transcription audit are attachment steps
-//                 (callLLMDocument, jobs.js) and have no text-only task to
-//                 serve.
+//   never      -- the remaining inventory and boundary tasks have no reviewed
+//                 bridge answer contract.
 //   paste_only -- no row uses it now. Kept as a mode so a future task can be
 //                 held back deliberately rather than by omission.
-//   release_one-- reviewed text-only work. Most rows return JSON; the reviewed raw
+//   release_one-- reviewed text and launcher-uploaded attachment work. Most rows return JSON; the reviewed raw
 //                 grounded-research rows additionally require the seam's exact
 //                 request-kind/grounding/validator contract.
 const policy = {
-  'vision-product-analysis': 'never', 'marketplace-hub-scan': 'never', 'marketplace-hub-scan-batch': 'never',
-  'career-file-extract': 'never', 'career-file-transcription-audit': 'never',
-  'career-file-inventory': 'never', 'career-file-inventory-audit': 'never', 'career-file-boundary-audit': 'never',
+  'vision-product-analysis': BRIDGE_ENABLED_ATTACHMENT_TASKS.includes('vision-product-analysis') ? 'release_one' : 'never',
   ...Object.fromEntries(BRIDGE_RELEASE_ONE_TASKS.map(task => [task, 'release_one'])),
 };
+const attachmentTasks = new Set(BRIDGE_ATTACHMENT_TASKS);
 
 const PUSH_TASK_MODES = new Set(['never', 'paste_only', 'release_one']);
 export const PUSH_TASK_POLICY = Object.freeze(Object.fromEntries(Object.entries(policy).map(([task, mode]) => [task, Object.freeze({ mode, bridgeable: mode === 'release_one' })])));
@@ -143,7 +142,7 @@ function workerKey(value) {
   return typeof value === 'string' && /^worker-[1-9][0-9]{0,2}$/.test(value) ? value : 'default';
 }
 
-export function createPushSource({ seam = {}, activeNodeTasks = snapshotActiveNodeTasks, windows = new Map(), hubKey = null, now = Date.now, timers = globalThis, graceMs = SUCCESSOR_GRACE_MS, pollMs = GET_POLL_MS, codeGuard = null, autoSelectHubs = false } = {}) {
+export function createPushSource({ seam = {}, activeNodeTasks = snapshotActiveNodeTasks, windows = new Map(), hubKey = null, now = Date.now, timers = globalThis, graceMs = SUCCESSOR_GRACE_MS, pollMs = GET_POLL_MS, codeGuard = null, autoSelectHubs = false, experimentalAttachmentTasks = false } = {}) {
   let guard = null;
   function setCodeGuard(value) {
     if (!value || typeof value.key !== 'function' || typeof value.digest !== 'function'
@@ -160,6 +159,8 @@ export function createPushSource({ seam = {}, activeNodeTasks = snapshotActiveNo
     exclusions: seam.BRIDGE_EXCLUSION_REASONS || BRIDGE_EXCLUSION_REASONS,
     list: seam.list || listBridgeableNonApiAiHandoffs,
     read: seam.read || readBridgeableNonApiAiHandoff,
+    attachments: seam.attachments || readBridgeableNonApiAiAttachments,
+    fallbackAttachment: seam.fallbackAttachment || fallbackBridgeAttachmentToManual,
     submit: seam.submit || submitNonApiAiResponseForBridge,
   };
   const selected = new Map();
@@ -225,6 +226,7 @@ export function createPushSource({ seam = {}, activeNodeTasks = snapshotActiveNo
         // synchronously here before awaiting the prompt so simultaneous pool
         // workers cannot both choose the same otherwise-fresh request.
         reservations: new Map(),
+        attachedWorkers: new Map(),
         reservationNonce: 0,
         byCode: new Map(), tombstones: new Map(), verdicts: new Map(), rejections: new Map(), commitFailures: new Map(), held: new Map(), budgeted: new Set(), lastAccept: null, remaining: { ready: 0, working: 0, needsYou: 0 },
       });
@@ -232,7 +234,10 @@ export function createPushSource({ seam = {}, activeNodeTasks = snapshotActiveNo
     return epochs.get(key);
   }
   function stateCurrent(value) { return Boolean(value && epochs.get(value.epochKey) === value); }
-  function policyTasks() { return new Set(Object.entries(PUSH_TASK_POLICY).filter(([, item]) => item.mode === 'release_one').map(([task]) => task)); }
+  function policyTasks() { return new Set([
+    ...Object.entries(PUSH_TASK_POLICY).filter(([, item]) => item.mode === 'release_one').map(([task]) => task),
+    ...(experimentalAttachmentTasks ? attachmentTasks : []),
+  ]); }
   function enabledTasks() {
     const policyAllowed = policyTasks();
     if (!allowedTasks) return policyAllowed;
@@ -380,7 +385,7 @@ export function createPushSource({ seam = {}, activeNodeTasks = snapshotActiveNo
         excluded,
       };
       prior.pending += 1;
-      if (typeof entry.task === 'string' && PUSH_TASK_POLICY[entry.task]?.mode === 'release_one') {
+      if (typeof entry.task === 'string' && policyTasks().has(entry.task)) {
         prior.tasks.set(entry.task, (prior.tasks.get(entry.task) || 0) + 1);
         const forecast = safeQueuedWorkForecast(entry.queuedWorkForecast);
         if (forecast) {
@@ -479,6 +484,7 @@ export function createPushSource({ seam = {}, activeNodeTasks = snapshotActiveNo
       for (const [requestId, nonce] of reservations) {
         if (live.has(requestId)) continue;
         const reservation = value.reservations.get(requestId);
+        if (reservation?.attachmentPreparing) continue;
         if (reservation?.nonce === nonce) releaseReservation(value, requestId, reservation);
       }
     }
@@ -544,6 +550,72 @@ export function createPushSource({ seam = {}, activeNodeTasks = snapshotActiveNo
     // request while its assigned worker is already fetching it.
     removeAvailableClaim(entry);
     return reservation;
+  }
+  async function prepareAttachment({ epoch = 'default', worker = 'default' } = {}) {
+    const value = state(epoch);
+    const workerId = workerKey(worker);
+    if (workerId === 'default') return { status: 'failed' };
+    const existingRequestId = value.attachedWorkers.get(workerId);
+    const revision = allowedTasksRevision;
+    let snapshot;
+    try { snapshot = await port.list({ allowTasks: enabledTasks(), allowNodeIds: selectedHubs(), allowWindowNodePairs: selectedWindowNodePairs() }); }
+    catch { return { status: 'failed', reason: 'list_error' }; }
+    if (!stateCurrent(value) || revision !== allowedTasksRevision) return { status: 'failed', reason: 'scope_changed' };
+    const entry = (snapshot?.handoffs || []).find(item => item?.hasAttachments === true
+      && enabledTasks().has(item.task) && !value.held.has(item.requestId)
+      && (existingRequestId
+        ? item.requestId === existingRequestId
+        : !value.served.has(item.requestId) && !value.reservations.has(item.requestId))
+      && hubMatches(item, selected.get(`${item.windowId}\u0000${item.nodeId}`), windows));
+    if (!entry) {
+      if (existingRequestId && !value.served.has(existingRequestId)) {
+        releaseAttachment({ epoch, worker });
+        return { status: 'none', reason: 'candidate_missing' };
+      }
+      return { status: existingRequestId ? 'failed' : 'none', reason: 'candidate_missing' };
+    }
+    const reservation = existingRequestId ? value.reservations.get(entry.requestId) : reserve(value, entry, workerId);
+    if (!existingRequestId && !reservation) return { status: 'failed', reason: 'reservation_missing' };
+    if (!existingRequestId) value.attachedWorkers.set(workerId, entry.requestId);
+    let payload;
+    let readFailure = null;
+    if (reservation) reservation.attachmentPreparing = true;
+    try { payload = await port.attachments(seamArgs(entry)); }
+    catch (error) {
+      payload = null;
+      readFailure = ['ENOENT', 'ENOTDIR'].includes(error?.code) ? 'file_missing'
+        : ['EPERM', 'EACCES'].includes(error?.code) ? 'file_permission'
+          : typeof error?.message === 'string' && error.message.startsWith('Refusing to read a sensitive system/credential path')
+            ? 'file_rejected' : 'read_error';
+    } finally { if (reservation) reservation.attachmentPreparing = false; }
+    const epochChanged = !stateCurrent(value);
+    const scopeChanged = revision !== allowedTasksRevision;
+    const reservationChanged = reservation && !reservationCurrent(value, entry.requestId, reservation);
+    if (epochChanged || scopeChanged || reservationChanged
+      || payload?.handoffCode !== entry.handoffCode || !Array.isArray(payload.attachments)
+      || payload.attachments.length < 1) {
+      if (!existingRequestId) {
+        releaseReservation(value, entry.requestId, reservation);
+        value.attachedWorkers.delete(workerId);
+        try { port.fallbackAttachment(seamArgs(entry)); } catch { /* manual fallback is best effort */ }
+      }
+      return { status: 'failed', reason: readFailure || (epochChanged ? 'epoch_changed'
+        : scopeChanged ? 'scope_changed' : reservationChanged ? 'reservation_changed' : 'payload_invalid') };
+    }
+    return { status: 'ready', handoffCode: entry.handoffCode, attachments: payload.attachments };
+  }
+  function releaseAttachment({ epoch = 'default', worker = 'default', manualFallback = false } = {}) {
+    const value = epochs.get(epochKey(epoch));
+    const workerId = workerKey(worker);
+    const requestId = value?.attachedWorkers.get(workerId);
+    if (!requestId || value.served.has(requestId)) return false;
+    value.attachedWorkers.delete(workerId);
+    releaseReservation(value, requestId);
+    if (manualFallback) {
+      try { port.fallbackAttachment({ requestId, allowTasks: enabledTasks(), allowNodeIds: selectedHubs(), allowWindowNodePairs: selectedWindowNodePairs() }); }
+      catch { /* manual fallback is best effort */ }
+    }
+    return true;
   }
   function reservationCurrent(value, requestId, reservation) {
     const current = value?.reservations.get(requestId);
@@ -694,10 +766,14 @@ export function createPushSource({ seam = {}, activeNodeTasks = snapshotActiveNo
       // only receive a fresh request which has no served route *and* no prompt
       // read reservation. The reserve below has no await between choice and
       // ownership, which makes same-epoch worker pulls atomic in JS.
+      const attachedRequestId = value.attachedWorkers.get(workerId);
       const ownServed = candidates.find(item => value.served.get(item.requestId)?.workerId === workerId);
       const ownReservation = candidates.find(item => value.reservations.get(item.requestId)?.workerId === workerId);
-      const fresh = candidates.find(item => !value.served.has(item.requestId) && !value.reservations.has(item.requestId));
-      const entry = ownServed || (ownReservation ? null : fresh);
+      const fresh = candidates.find(item => item.hasAttachments !== true
+        && !value.served.has(item.requestId) && !value.reservations.has(item.requestId));
+      const entry = attachedRequestId
+        ? (ownServed?.requestId === attachedRequestId ? ownServed : ownReservation?.requestId === attachedRequestId ? ownReservation : null)
+        : ownServed || (ownReservation ? null : fresh);
       if (!entry) {
         const excluded = snapshot?.excluded || {};
         const remaining = remainingForCandidates(value, candidates, excluded);
@@ -708,10 +784,12 @@ export function createPushSource({ seam = {}, activeNodeTasks = snapshotActiveNo
           continue;
         }
         const appOnly = (Array.isArray(snapshot?.handoffs) && snapshot.handoffs.length > 0) || remaining.needsYou > value.held.size;
+        if (attachedRequestId) return result('queue_empty', { remaining });
         if (ownReservation || remaining.working > 0 || successorLikely(value)) return result('waiting', { retryAfterSeconds: retryAfterSeconds(snapshot), remaining });
         return result(appOnly || value.held.size ? 'needs_user' : 'queue_empty', appOnly || value.held.size ? { reason: 'app_only_handoffs', remaining } : { remaining });
       }
-      const reservation = ownServed ? null : reserve(value, entry, workerId);
+      const reservation = ownServed ? null : ownReservation?.requestId === entry.requestId
+        ? value.reservations.get(entry.requestId) : reserve(value, entry, workerId);
       if (!ownServed && !reservation) continue;
       let view;
       const discoveryRevisionAtRead = discoveryRevision;
@@ -899,7 +977,7 @@ export function createPushSource({ seam = {}, activeNodeTasks = snapshotActiveNo
       needsYou: currentRemaining(value).needsYou,
     });
   }
-  return Object.freeze({ enabledTasks, setAllowedTasks, setDiscoveryOwner, selectedHubs, selectHub, selectHubKey, unselectHubKey, clearHubs, pruneHubs, refreshHubs, get, submit, nextAfterAccept, closeEpoch, status, setCodeGuard });
+  return Object.freeze({ enabledTasks, setAllowedTasks, setDiscoveryOwner, selectedHubs, selectHub, selectHubKey, unselectHubKey, clearHubs, pruneHubs, refreshHubs, prepareAttachment, releaseAttachment, get, submit, nextAfterAccept, closeEpoch, status, setCodeGuard });
 }
 
 export { canonicalCode as normalizePushHandoffCode };

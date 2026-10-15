@@ -8,6 +8,7 @@ import React, {
 import { Pause, Play, Settings, X } from 'lucide-react';
 import { ConfirmDialog } from './ConfirmDialog';
 import { useHandoffBridgeStatus } from '../hooks/useHandoffBridgeStatus';
+import { useBridgeLaunchAccounts } from '../hooks/useBridgeLaunchAccounts';
 import { startHandoffBridgeStatusSync } from '../utils/handoffBridgeStore';
 import {
   closeBridgePopover,
@@ -86,7 +87,7 @@ function workerPoolFromStatus(status) {
       const quietReason = state === 'quiet' && typeof worker?.quietReason === 'string' && QUIET_REASONS.has(worker.quietReason)
         ? worker.quietReason
         : null;
-      return [{ ordinal, state, completed, lastCallAt, quietReason }];
+      return [{ ordinal, state, completed, lastCallAt, quietReason, launch: worker?.launch || null }];
     }).sort((left, right) => left.ordinal - right.ordinal) : [];
     const plan = pool?.plan && typeof pool.plan === 'object'
       ? {
@@ -144,6 +145,7 @@ function workerPoolProgress(pool, reportedPool, copiedWorkers, copiedWorkerStatu
       completed: reported?.completed || 0,
       lastCallAt: Number.isFinite(reported?.lastCallAt) && reported.lastCallAt >= 0 ? reported.lastCallAt : null,
       quietReason: state === 'quiet' && QUIET_REASONS.has(reported?.quietReason) ? reported.quietReason : null,
+      launch: reported?.launch || null,
     };
   });
   const summary = workers.reduce((result, worker) => {
@@ -222,6 +224,7 @@ function itemLabel(item) {
 
 export function HandoffBridgePanel() {
   const status = useHandoffBridgeStatus();
+  const launchAccountName = useBridgeLaunchAccounts(status);
   const ui = useSyncExternalStore(subscribeBridgeUi, getBridgeUiState, getBridgeUiState);
   const [now, setNow] = useState(0);
   const [notice, setNotice] = useState('');
@@ -495,6 +498,18 @@ export function HandoffBridgePanel() {
     return result;
   }, [activeCopyingWorker, activeWorkerPool, activeWorkerProgress]);
 
+  const retryWorkerLaunch = useCallback(async workerOrdinal => {
+    if (!activeWorkerPool || activeCopyingWorker !== null) return;
+    setCopyingWorker(workerOrdinal);
+    const result = await invoke(bridgeApi(), 'handoffBridgeRetryWorkerLaunch', {
+      generation: activeWorkerPool.generation, workerOrdinal,
+    });
+    if (mountedRef.current) {
+      setCopyingWorker(null);
+      setNotice(result?.success ? 'Opening a fresh ChatGPT worker chat…' : ipcErrorMessage(result?.code || 'INTERNAL'));
+    }
+  }, [activeCopyingWorker, activeWorkerPool]);
+
   const runHealthAction = useCallback(id => {
     if (id === 'setup') {
       openBridgeSetup(1);
@@ -664,15 +679,20 @@ export function HandoffBridgePanel() {
                           >
                             <span className="font-medium text-white/85">Worker {worker.ordinal}</span>
                             <span className={worker.state === 'quiet' ? 'text-amber-200' : worker.state === 'working' ? 'text-violet-200' : 'text-white/55'}>
-                              {BRIDGE_UI_COPY.workerState(worker.state, worker.quietReason)}
+                              {BRIDGE_UI_COPY.workerState(worker.state, worker.quietReason, worker.launch)}
                             </span>
+                            {worker.launch && <span className="basis-full text-sky-100/80">{BRIDGE_UI_COPY.workerLaunch(worker.launch, launchAccountName(activeWorkerPool.generation, worker.ordinal))}</span>}
+                            {['plugin_missing', 'reconnect_required', 'usage_limit', 'bridge_not_presented'].includes(worker.launch?.reason) && (
+                              <button type="button" className="ml-auto bridge-button-secondary" disabled={activeCopyingWorker !== null}
+                                onClick={() => void retryWorkerLaunch(worker.ordinal)}>Retry</button>
+                            )}
                             {worker.completed > 0 && <span className="text-white/45">{BRIDGE_UI_COPY.workerDone(worker.completed)}</span>}
                             {worker.state === 'quiet' && (
                               <>
                                 <span className="basis-full text-amber-100/80">{BRIDGE_UI_COPY.workerQuiet(worker.quietReason)}</span>
                                 <button
                                   type="button"
-                                  disabled={activeCopyingWorker !== null}
+                                  disabled={activeCopyingWorker !== null || ['opening', 'checking', 'sent'].includes(worker.launch?.stage) || ['send_not_confirmed', 'bridge_not_presented'].includes(worker.launch?.reason)}
                                   aria-busy={activeCopyingWorker === worker.ordinal || undefined}
                                   onClick={() => void restartWorker(worker.ordinal)}
                                   className="ml-auto bridge-button-secondary"
@@ -686,7 +706,7 @@ export function HandoffBridgePanel() {
                             {['available', 'ready'].includes(worker.state) && (
                               <button
                                 type="button"
-                                disabled={activeCopyingWorker !== null}
+                                disabled={activeCopyingWorker !== null || ['opening', 'checking', 'sent'].includes(worker.launch?.stage) || ['send_not_confirmed', 'bridge_not_presented'].includes(worker.launch?.reason)}
                                 aria-busy={activeCopyingWorker === worker.ordinal || undefined}
                                 onClick={() => void copyWorkerStarter(worker.ordinal)}
                                 className="ml-auto bridge-button-secondary"

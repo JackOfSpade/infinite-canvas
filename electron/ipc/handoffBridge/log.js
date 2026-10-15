@@ -5,6 +5,7 @@ export const CREDENTIAL_LOG_CODES = Object.freeze([
   'tool_call', 'tool_deadline', 'port_error', 'probe', 'permit_leak', 'restart_confirmed', 'epoch_closed',
   'release', 'unrelease', 'new_chat', 'starter_recopied', 'continue', 'source_mismatch',
   'worker_pool_started', 'worker_pool_expanded',
+  'attachment_prepare',
 ]);
 
 const FIELD_VALUE = /^[a-z0-9_.:-]{1,40}$/;
@@ -72,6 +73,7 @@ export const LOG_FIELDS_BY_CODE = Object.freeze({
   // details remain out of this event.
   worker_pool_started: Object.freeze(['workers', 'recommended', 'queued']),
   worker_pool_expanded: Object.freeze(['workers', 'recommended', 'queued', 'added']),
+  attachment_prepare: Object.freeze(['outcome', 'reason']),
 });
 
 export function isSafeLogField(value) {

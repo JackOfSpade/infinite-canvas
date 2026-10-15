@@ -8,6 +8,8 @@ let syncGeneration = 0;
 let hasSnapshot = false;
 let requestToken = 0;
 let activeBridgeApi = null;
+let lastReplayIssue = null;
+let lastShapeIssue = null;
 
 function apiFor(supplied) {
   try { return supplied || globalThis.window?.electronAPI || null; } catch { return null; }
@@ -27,6 +29,7 @@ export function hasHandoffBridgeApi(api) { return Boolean(apiMethod(apiFor(api),
 // A missing initial snapshot means the preload is still being queried; it is
 // deliberately distinct from an authoritative unavailable snapshot.
 export function hasHandoffBridgeStatusSnapshot() { return hasSnapshot; }
+export function getHandoffBridgeStatusReplayIssue() { return lastReplayIssue; }
 export function getHandoffBridgeStatus() { return snapshot; }
 export function subscribeHandoffBridgeStatus(listener) { if (typeof listener !== 'function') return () => {}; listeners.add(listener); return () => listeners.delete(listener); }
 export function applyHandoffBridgeStatus(raw) {
@@ -34,6 +37,7 @@ export function applyHandoffBridgeStatus(raw) {
   if (next === EMPTY_BRIDGE_STATUS || (hasSnapshot && next.seq <= snapshot.seq)) return snapshot;
   snapshot = next;
   hasSnapshot = true;
+  lastReplayIssue = null;
   invalidatePendingReplay();
   notify();
   return snapshot;
@@ -46,24 +50,29 @@ function invalidatePendingReplay() {
 
 function isAuthoritativeStatus(raw) {
   try {
+    lastShapeIssue = null;
     const isRecord = value => value !== null && typeof value === 'object' && !Array.isArray(value);
     const nullableScalarPaths = new Set(['availability.reason', 'chat.expiresInMs']);
     const hasStatusShape = (value, template, path = '') => {
-      if (Array.isArray(template)) return Array.isArray(value);
+      if (Array.isArray(template)) { if (!Array.isArray(value)) lastShapeIssue = path; return Array.isArray(value); }
       if (isRecord(template)) {
-        if (!isRecord(value)) return false;
+        if (!isRecord(value)) { lastShapeIssue = path; return false; }
         return Object.keys(template).every(key => {
           const nextPath = path ? `${path}.${key}` : key;
-          return Object.hasOwn(value, key) && hasStatusShape(value[key], template[key], nextPath);
+          if (!Object.hasOwn(value, key)) { lastShapeIssue = nextPath; return false; }
+          return hasStatusShape(value[key], template[key], nextPath);
         });
       }
       // A null in the frozen renderer sentinel is a deliberately nullable
       // status leaf. Its concrete value is normalized below; functions,
       // symbols and undefined are never status data.
-      if (template === null) return value === null || ['string', 'number', 'boolean', 'object'].includes(typeof value);
-      if (value === null) return nullableScalarPaths.has(path);
-      if (typeof template === 'number') return Number.isSafeInteger(value) && value >= 0;
-      return typeof value === typeof template;
+      let valid;
+      if (template === null) valid = value === null || ['string', 'number', 'boolean', 'object'].includes(typeof value);
+      else if (value === null) valid = nullableScalarPaths.has(path);
+      else if (typeof template === 'number') valid = Number.isSafeInteger(value) && value >= 0;
+      else valid = typeof value === typeof template;
+      if (!valid) lastShapeIssue = path;
+      return valid;
     };
     if (!isRecord(raw) || raw.v !== 1
       || !Number.isSafeInteger(raw.seq) || raw.seq < 0
@@ -106,8 +115,11 @@ function requestReplay(bridgeApi, generation) {
     if (result?.success !== false && isAuthoritativeStatus(raw)) {
       invalidatePendingReplay();
       applyHandoffBridgeStatus(raw);
+    } else {
+      lastReplayIssue = result?.success === false ? (['SENDER', 'UNAVAILABLE', 'INTERNAL'].includes(result?.code) ? result.code : 'ipc_failed') : `schema_invalid${lastShapeIssue ? `:${lastShapeIssue}` : ''}`;
+      notify();
     }
-  }).catch(() => {});
+  }).catch(() => { lastReplayIssue = 'ipc_failed'; notify(); });
 }
 
 export function startHandoffBridgeStatusSync(api) {
@@ -152,4 +164,4 @@ function stop() {
   activeBridgeApi = null;
   syncGeneration += 1;
 }
-export function __resetHandoffBridgeStoreForTests() { try { if (typeof unsubscribeIpc === 'function') unsubscribeIpc(); } catch { /* best-effort test reset */ } invalidatePendingReplay(); snapshot = EMPTY_BRIDGE_STATUS; listeners = new Set(); references = 0; unsubscribeIpc = null; hasSnapshot = false; activeBridgeApi = null; syncGeneration += 1; }
+export function __resetHandoffBridgeStoreForTests() { try { if (typeof unsubscribeIpc === 'function') unsubscribeIpc(); } catch { /* best-effort test reset */ } invalidatePendingReplay(); snapshot = EMPTY_BRIDGE_STATUS; listeners = new Set(); references = 0; unsubscribeIpc = null; hasSnapshot = false; activeBridgeApi = null; lastReplayIssue = null; syncGeneration += 1; }

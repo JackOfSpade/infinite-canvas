@@ -47,11 +47,6 @@ const KNOWN_TASKS = new Set([
   'marketplace-hub-scan',
   'marketplace-hub-scan-batch',
   'resume-parse',
-  'career-file-extract',
-  'career-file-inventory',
-  'career-file-inventory-audit',
-  'career-file-transcription-audit',
-  'career-file-boundary-audit',
   'career-profile-compile',
   'career-profile-clean',
   'career-profile-audit-completeness',
@@ -158,18 +153,6 @@ const TASK_MAX_TOKENS = {
   // hand. Caps bill on actual output, so the headroom is free insurance.
   'resume-parse':              ({ promptLength = 0 } = {}) =>
     Math.min(12288, 4096 + Math.floor(promptLength / 4000) * 512),
-  // Career-file extract reproduces a whole document as faithful text, so it
-  // scales with the source. Sized generously: a truncated transcription
-  // silently DROPS the candidate's career history and weakens everything
-  // downstream (queries, scoring, the generated résumé). Caps are billed on
-  // actual output, so the headroom is free insurance, not a cost.
-  'career-file-extract':       MANUAL_AI_USABLE_OUTPUT_TOKENS,
-  'career-file-inventory':     MANUAL_AI_USABLE_OUTPUT_TOKENS,
-  'career-file-inventory-audit': MANUAL_AI_USABLE_OUTPUT_TOKENS,
-  // The independent attachment audit returns a complete replacement only if
-  // needed, so it needs the same no-truncation ceiling as extraction.
-  'career-file-transcription-audit': MANUAL_AI_USABLE_OUTPUT_TOKENS,
-  'career-file-boundary-audit': MANUAL_AI_USABLE_OUTPUT_TOKENS,
   // Career-profile compilation is a bounded structured evidence index.  Its
   // independent audit passes return discrepancy rows rather than copies of the
   // corpus, while repair returns the complete corrected candidate snapshot.
@@ -575,10 +558,24 @@ export async function hasExactDurableTextHandoff(prompt, {
   });
 }
 
+const HOST_STAGED_VISION_READER = Symbol('host-staged-vision-reader');
+
+// Only host code can install this closure. Renderer-owned options crossing IPC
+// cannot carry the private Symbol, and source paths still pass the normal gate.
+export function createHostStagedVisionCaller(assertOwnedPhotos, readOwnedPhoto) {
+  if (typeof assertOwnedPhotos !== 'function' || typeof readOwnedPhoto !== 'function') {
+    throw new TypeError('Host staged vision requires an ownership validator and reader.');
+  }
+  return async (imagePaths, prompt, opts = {}) => {
+    await assertOwnedPhotos(imagePaths);
+    return callLLMVision(imagePaths, prompt, { ...opts, [HOST_STAGED_VISION_READER]: readOwnedPhoto });
+  };
+}
+
 /** Vision call — image attachments are Finder-revealed for the human to attach to their chat. */
 export async function callLLMVision(imagePaths, prompt, opts = {}) {
-  // Vision attachments are sourced from the same untrusted canvas JSON as
-  // callLLMDocument's filePath below — imagePaths comes from a node's saved
+  // Vision attachments are sourced from untrusted canvas JSON — imagePaths
+  // comes from a node's saved
   // state, and a shared/untrusted canvas could point a node at a sensitive
   // system/credential path. Before this session this was enforced inside the
   // per-provider vision call sites themselves, each of which ran an
@@ -610,18 +607,13 @@ export async function callLLMVision(imagePaths, prompt, opts = {}) {
     progressScopeId: hints.progressScopeId, progressUnitId: hints.progressUnitId, progressUnits: hints.progressUnits,
     attemptKind: hints.attemptKind, rootBatchSize: hints.rootBatchSize,
     attachmentPaths: imagePaths, requestKind: 'structured-vision', responseValidator,
+    attachmentReader: typeof opts?.[HOST_STAGED_VISION_READER] === 'function'
+      ? opts[HOST_STAGED_VISION_READER] : readRendererAttachmentForBridge,
     measureProgressUnits: opts?.measureProgressUnits, signal,
   });
   if (meta) meta.model = 'non-api-ai';
   return result;
 }
-
-// This token is intentionally module-private.  A renderer can serialize any
-// JSON-shaped options object it likes, but it cannot manufacture this Symbol
-// or turn the public `callLLMDocument` function into a staging-capable call.
-// The only factory below is consumed by jobs.js after it has bound a private
-// stage run to host-owned inode identities.
-const HOST_STAGED_DOCUMENT_ATTACHMENT = Symbol('host-staged-document-attachment');
 
 function rendererAttachmentPathError(filePath) {
   return new Error(`Refusing to read a sensitive system/credential path as an AI attachment: ${filePath}`);
@@ -668,88 +660,25 @@ function assertRendererAttachmentPathAllowed(filePath) {
   }
 }
 
-function assertHostStagedDocumentCapability(filePath, capability = null) {
-  if (capability !== HOST_STAGED_DOCUMENT_ATTACHMENT) throw rendererAttachmentPathError(filePath);
-}
-
-/**
- * Create a document caller for a host-created, private attachment stage.
- *
- * This is deliberately not an option on callLLMDocument: options cross IPC
- * boundaries, while this closure and its private Symbol never do.  The caller
- * must revalidate the exact attachment immediately before each manual handoff
- * and return the canonical owned path.  jobs.js is the only production user.
- */
-export function createHostStagedDocumentCaller(assertOwnedStagedAttachment) {
-  if (typeof assertOwnedStagedAttachment !== 'function') {
-    throw new TypeError('A host staged document caller requires an attachment validator.');
-  }
-  return async function callHostStagedDocument(filePath, prompt, opts = {}) {
-    const approved = await assertOwnedStagedAttachment(filePath);
-    // The validator may return the bare canonical path (older seams) or the
-    // path plus the attachment's content-bound logical identity.
-    const approvedPath = typeof approved === 'string' ? approved : approved?.path;
-    const attachmentIdentity = typeof approved === 'object' && approved && typeof approved.identity === 'string'
-      ? approved.identity
-      : null;
-    if (typeof approvedPath !== 'string' || !approvedPath) {
-      const error = new Error('Host staged attachment ownership could not be verified.');
-      error.code = 'HOST_STAGED_ATTACHMENT_INVALID';
-      throw error;
-    }
-    // Keep this implementation separate from the public wrapper so the
-    // capability cannot be smuggled in through an opts property.
-    const { signal, task, hints, responseSchema, responseValidator } = normalizeOpts(opts);
-    assertStructuredResponseSchema(responseSchema, 'callHostStagedDocument');
-    const capHints = { promptLength: prompt?.length || 0, ...hints };
-    const { maxTokens, formulaSeed, handoffSettings } = manualRequestConfig(task, capHints, {
-      requestKind: 'structured-document',
-    });
-    // The validator above establishes this path's host-stage ownership.  Do
-    // not replace it with a generic path check here: its lexical component is
-    // intentionally renderer-denied (`career-input-staging`).  The private
-    // Symbol is consumed here rather than accepted through `opts`.
-    assertHostStagedDocumentCapability(approvedPath, HOST_STAGED_DOCUMENT_ATTACHMENT);
-    return requestNonApiAi({
-      prompt, task, responseSchema, maxOutputTokens: maxTokens,
-      formulaSeed, handoffSettings, batch: hints.batch, batchTotal: hints.batchTotal, itemCount: hints.itemCount,
-      itemsDone: hints.itemsDone, itemsTotal: hints.itemsTotal, planItemCount: hints.planItemCount, matchCount: hints.matchCount,
-      progressScopeId: hints.progressScopeId, progressUnitId: hints.progressUnitId, progressUnits: hints.progressUnits,
-      attemptKind: hints.attemptKind, rootBatchSize: hints.rootBatchSize,
-      attachmentPaths: [approvedPath], requestKind: 'structured-document', responseValidator,
-      // A host-owned staged copy gets a fresh random pathname on every
-      // staging.  Declaring it host-staged lets the handoff layer key durable
-      // work on the content-bound identity and refuse to show a prompt whose
-      // staged file has vanished.
-      ...(attachmentIdentity ? { attachmentIdentities: [attachmentIdentity], hostStagedAttachments: true } : {}),
-      measureProgressUnits: opts?.measureProgressUnits, signal,
-    });
-  };
-}
-
-export async function callLLMDocument(filePath, prompt, opts = {}) {
-  // A document node's filePath is sourced from loaded canvas JSON — an
-  // untrusted/shared canvas could point a node at a sensitive system/
-  // credential path. Gate here as the single shared entry point before the
-  // file is ever Finder-revealed to the user as an attachment.
+async function readRendererAttachmentForBridge(filePath) {
   assertRendererAttachmentPathAllowed(filePath);
-  const { signal, task, hints, responseSchema, responseValidator } = normalizeOpts(opts);
-  assertStructuredResponseSchema(responseSchema, 'callLLMDocument');
-  // The manual handoff does not use a cached prefix for document calls, so
-  // none is threaded through here.
-  const capHints = { promptLength: prompt?.length || 0, ...hints };
-  const { maxTokens, formulaSeed, handoffSettings } = manualRequestConfig(task, capHints, {
-    requestKind: 'structured-document',
-  });
-  return requestNonApiAi({
-    prompt, task, responseSchema, maxOutputTokens: maxTokens,
-    formulaSeed, handoffSettings, batch: hints.batch, batchTotal: hints.batchTotal, itemCount: hints.itemCount,
-    itemsDone: hints.itemsDone, itemsTotal: hints.itemsTotal, planItemCount: hints.planItemCount, matchCount: hints.matchCount,
-    progressScopeId: hints.progressScopeId, progressUnitId: hints.progressUnitId, progressUnits: hints.progressUnits,
-    attemptKind: hints.attemptKind, rootBatchSize: hints.rootBatchSize,
-    attachmentPaths: [filePath], requestKind: 'structured-document', responseValidator,
-    measureProgressUnits: opts?.measureProgressUnits, signal,
-  });
+  const before = await fs.promises.lstat(filePath);
+  const handle = await fs.promises.open(filePath, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0));
+  try {
+    const opened = await handle.stat();
+    if (!opened.isFile() || opened.dev !== before.dev || opened.ino !== before.ino
+      || Number(opened.nlink) !== 1 || opened.size < 1 || opened.size > 50 * 1024 * 1024) {
+      throw rendererAttachmentPathError(filePath);
+    }
+    const bytes = await handle.readFile();
+    const after = await handle.stat();
+    assertRendererAttachmentPathAllowed(filePath);
+    if (after.dev !== opened.dev || after.ino !== opened.ino || after.size !== opened.size
+      || after.mtimeMs !== opened.mtimeMs || bytes.length !== opened.size) {
+      throw rendererAttachmentPathError(filePath);
+    }
+    return bytes;
+  } finally { await handle.close(); }
 }
 
 // Back-compat shim: old call sites passed `signal` as the second positional.

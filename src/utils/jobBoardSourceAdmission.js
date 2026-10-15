@@ -163,6 +163,18 @@ export function combineSourceRunEntry(module) {
 }
 
 /**
+ * Old saved Search results predate host-issued operation authority. They can
+ * still be combined from the live canvas, but cannot authorize a protected
+ * seen-history write. A present receipt is always sent to the host for exact
+ * validation; this gate does not treat a malformed receipt as legacy.
+ */
+export function boardHistoryAuthorityAvailable(modules) {
+  return Array.isArray(modules) && modules.length > 0 && modules.every(module => (
+    Boolean(module?.runId && module?.careerSnapshotId && module?.operationAuthority)
+  ));
+}
+
+/**
  * Fixed, redacted reason code for why `jobSearchOutcomeReceiptMatches` rejects
  * a live receipt against a recorded one (null when it matches).  Diagnostic
  * only: it names the receipt SHAPE that failed, never ids or job content.

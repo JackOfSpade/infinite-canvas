@@ -5,6 +5,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import electronPkg from 'electron';
 import { onNonApiAiEvent } from '../nonApiAi.js';
+import { recordLocalApplicationGenerationSelection } from '../localAiApplication.js';
 import { CONSTANTS } from './constants.js';
 import { IPC_EVENTS, STATUS_SNAPSHOT_EXAMPLE } from './contracts.js';
 import { fixedError } from './errors.js';
@@ -700,7 +701,7 @@ function createControllerBridge() {
     forget: async () => forgetActiveRuntime(activeRuntimeForController(current), status),
     pause: call('pause'), resume: call('resume'), release: call('release'), unrelease: call('unrelease'),
     releasePushHubs: call('releasePushHubs'), unreleasePushHub: call('unreleasePushHub'),
-    newChat: call('newChat'), continueChat: call('continueChat'), startWorkerPool: call('startWorkerPool'), copyWorkerStarter: call('copyWorkerStarter'), restartWorker: call('restartWorker'), prepareChat: call('prepareChat'), commitChat: call('commitChat'), abandonChat: call('abandonChat'),
+    newChat: call('newChat'), continueChat: call('continueChat'), startWorkerPool: call('startWorkerPool'), copyWorkerStarter: call('copyWorkerStarter'), prepareWorkerAttachment: call('prepareWorkerAttachment'), abandonWorkerStarter: call('abandonWorkerStarter'), refreshPushDiscovery: call('refreshPushDiscovery'), restartWorker: call('restartWorker'), prepareChat: call('prepareChat'), commitChat: call('commitChat'), abandonChat: call('abandonChat'),
     getActivity: call('getActivity'),
     reloadConfig: async () => {
       const active = activeController(current);
@@ -975,6 +976,10 @@ export function composeHandoffBridge({ userData, config, tunnelState, setupState
     restoredLanes: laneStore.loadLanes?.(now()) || [], autoStart: config.autoStart === true,
     confirmRestart: async ords => (await controller?.confirmRestart?.(ords)) === true,
     onJobChanged: notifyOwningWindow,
+    onApplicationServed: served => {
+      const observed = uiRegistration?.applicationLaunchObservation?.(served);
+      if (observed) recordLocalApplicationGenerationSelection({ ...served, ...observed });
+    },
     codeGuard,
   });
   let engine = makeEngine();
@@ -1136,6 +1141,8 @@ export function composeHandoffBridge({ userData, config, tunnelState, setupState
       paused: 'Handoff bridge paused. Review it in Infinite Canvas.',
       'served-after-idle': 'Handoff bridge served after a long idle period. Review it in Infinite Canvas.',
       'link-expiring': 'ChatGPT link expires soon. Review it in Infinite Canvas.',
+      'plugin-missing': "The ChatGPT account in Chrome doesn't have the Infinite Canvas plugin. Set it up on that account, then press Retry.",
+      'plugin-reconnect': 'Reconnect the Infinite Canvas plugin in ChatGPT, then press Retry in Infinite Canvas.',
     }[kind];
     if (!body) return;
     try {
@@ -1278,7 +1285,7 @@ export function composeHandoffBridge({ userData, config, tunnelState, setupState
   // show a hub to release; without this, discovery only ran after clicking a
   // hub that an empty panel could never render.
   const unsubscribePushHandoffs = onNonApiAiEvent(() => { void controller.refreshPushDiscovery?.({ dirty: true }); });
-  return Object.freeze({ bridgeQueueProvider, userData, config, socketPath, testMode, audit, log: bridgeLog, laneStore, application, syntheticPreflight, push, oauth, openPairing, get engine() { return engine; }, mcp, requestHandler, listener, tunnel, pairing, controller, dialogs, power, tray, unsubscribeUi, unsubscribePushHandoffs, readPairingCode: () => pairingCode });
+  return Object.freeze({ bridgeQueueProvider, userData, config, socketPath, testMode, audit, log: bridgeLog, laneStore, application, syntheticPreflight, push, oauth, openPairing, get engine() { return engine; }, mcp, requestHandler, listener, tunnel, pairing, controller, dialogs, power, tray, notifyLaunchProblem: showFixedNotification, unsubscribeUi, unsubscribePushHandoffs, readPairingCode: () => pairingCode });
 }
 
 function removePairingTestHook(current = null) {
@@ -1778,6 +1785,9 @@ export function registerHandoffBridgeHandlers({ ipcMain = electronPkg.ipcMain, d
     nextRegistration = registerHandoffBridgeUi({ ipc: ipcMain, controller,
       store: { writeConfig: writeBootstrapConfig }, getCanvasWindows,
       dialogs: bootstrapDialogs, clipboard: deps.clipboard || electronPkg.clipboard,
+      chatLauncher: deps.chatLauncher || null,
+      notifyLaunchProblem: kind => runtime?.notifyLaunchProblem?.(kind),
+      enableChromeLauncher: bootstrapContext?.isPackaged === true && process.env.INFINITE_CANVAS_HANDOFF_BRIDGE_TEST !== '1' && !deps.clipboard,
       application: deps.application || runtimePort('application', ['describeForConfirm']),
       tunnel: tunnelUiPort(setupPortFromDeps(deps)),
       oauth: deps.oauth || Object.freeze({ openPairing: (...args) => openRuntimePairing(...args), cancelPairing: (...args) => runtime?.pairing?.cancel?.(...args) || Promise.resolve({ ok: false, code: 'NOT_READY' }) }),
@@ -1922,7 +1932,9 @@ export function scheduleHandoffBridgeLaunch({ userData = '', setTimeoutImpl = se
 }
 
 export async function stopHandoffBridge() {
-  return disposeCurrentRuntime({ graceful: true });
+  const result = await disposeCurrentRuntime({ graceful: true });
+  try { await uiRegistration?.closeOwnedChats?.(); } catch { /* Chrome may already be closed */ }
+  return result;
 }
 export async function holdHandoffBridgeForQuit() {
   if (runtime?.controller?.holdForQuit) return runtime.controller.holdForQuit();

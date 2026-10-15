@@ -219,6 +219,7 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
       ? { ...saved, status: 'completed', message: 'Resuming Local AI result import after restart…' }
       : saved;
   });
+  const [savedSelection, setSavedSelection] = useState(null);
   // Per-job context, deliberately separate from the originating hub's career
   // data: a candidate can add a relevant personal project or team-fit detail
   // without mutating the career corpus used by every other job card.
@@ -680,11 +681,17 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
         jobId, canvasFilePath, revealedRef: localAiOutputRevealedRef.current,
         onError: (error) => EventLogger.log(`[LocalAI] could not open saved bundle folder job=${jobId}: ${error}`),
       });
+      let savedReceipt = null;
+      try {
+        const status = await window.electronAPI?.getLocalApplicationStatus?.({ jobId, canvasFilePath });
+        if (status?.success && status.localJob?.status === 'saved') savedReceipt = status.localJob.receipt || null;
+      } catch { /* The save succeeded; the next status probe can recover its receipt. */ }
       if (isMountedRef.current) {
         setLocalApplication((current) => current?.id === jobId ? {
           ...current,
           status: 'saved',
           savedDir: saved.dir,
+          ...(savedReceipt ? { receipt: savedReceipt } : {}),
           message: missingArtifacts.length
             ? `Saved to ${saved.dir}, but ${missingArtifacts.join(' and ')} could not be rendered. Use Repair bundle to retry.`
             : resumeOverflow
@@ -932,6 +939,9 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
           // reconciliation — falls through to adoption below. The interval
           // was already cleared above, so a healthy save is never polled
           // forever.
+          if (needsSavedProbe && next.status === 'saved' && Array.isArray(next.receipt?.selectedModelEffort)) {
+            setSavedSelection({ jobId, rows: next.receipt.selectedModelEffort });
+          }
           if (needsSavedProbe && next.status === 'saved') return;
           // A restart can resume polling a job that reads 'saved' only from
           // its terminal receipt (the private folder is already gone). That
@@ -1539,6 +1549,13 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
                   ? 'Open the AI handoff, copy its self-contained prompt into your local AI chat, and paste back the requested JSON. Review prompts ask the AI to make edits in that same response; the app reviews again afterwards.'
                   : 'Open this canvas’s .local-ai job folder and run LOCAL_AI_PROMPT.md with a local coding agent. This card checks for its result automatically.')
                 : '')}</div>
+              {localApplication.status === 'saved' && (Array.isArray(localApplication.receipt?.selectedModelEffort)
+                || (savedSelection?.jobId === localApplication.id && Array.isArray(savedSelection.rows))) && (
+                <div className="mt-1 text-white/55">
+                  Model and effort observed at chat launch: {(localApplication.receipt?.selectedModelEffort
+                    || savedSelection.rows).map(row => `${row.model} · ${row.fallback ? `Pro unavailable → ${row.effort}` : row.effort}`).join('; ')}
+                </div>
+              )}
             </div>
           </div>
           {(localApplication.mode === 'paste' || localApplication.transport === 'paste') && applicationAwaitsPaste(localApplication.status) && (

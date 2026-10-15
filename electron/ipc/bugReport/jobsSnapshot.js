@@ -4128,6 +4128,25 @@ function boardSelectorRuntimeSummary(snapshot) {
   return `rows=${snapshot.rowCount ?? 'not retained'} · selected=${snapshot.selectedCount ?? 'not retained'} · action=${snapshot.actionVisible === false ? 'hidden (board up to date)' : `${snapshot.actionEligible === true ? 'enabled' : snapshot.actionEligible === false ? 'disabled' : 'not retained'}${snapshot.actionLabel ? ` (${snapshot.actionLabel})` : ''}`} · reasons=${reasons} · selector=${selectorBoundsSummary(snapshot.selectorBounds)} · source-list=${selectorBoundsSummary(snapshot.sourceListBounds)}`;
 }
 
+const JOB_BOARD_COMBINE_PHASES = new Set([
+  'admission', 'location-consolidation', 'taxonomy', 'compensation',
+  'card-build', 'history-preflight', 'commit', 'cleanup', 'settled', 'unknown',
+]);
+const JOB_BOARD_COMBINE_STATUSES = new Set(['running', 'completed', 'failed', 'stopped']);
+
+function boardCombineRuntimeSummary(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return 'not retained';
+  const phase = JOB_BOARD_COMBINE_PHASES.has(value.phase) ? value.phase : 'not retained';
+  const status = JOB_BOARD_COMBINE_STATUSES.has(value.status) ? value.status : 'not retained';
+  const lastPhase = JOB_BOARD_COMBINE_PHASES.has(value.lastPhase) ? value.lastPhase : null;
+  const startedAt = Number.isFinite(value.startedAt) ? value.startedAt : null;
+  const phaseAt = Number.isFinite(value.phaseAt) ? value.phaseAt : null;
+  const age = (at) => at == null ? 'not retained' : `${Math.max(0, Math.floor((Date.now() - at) / 1000))}s`;
+  const progress = nonnegativeCount(value.compensationProcessed);
+  const total = nonnegativeCount(value.compensationTotal);
+  return `attempt=${nonnegativeCount(value.attempt) ?? 'not retained'} · status=${status} · phase=${phase}${lastPhase ? ` (last ${lastPhase})` : ''} · started=${age(startedAt)} ago · phase-age=${age(phaseAt)} · combining=${boardDiagnosticBoolean(value.combining)} · scanning=${boardDiagnosticBoolean(value.scanning)} · owner=${boardDiagnosticBoolean(value.activeCombineOwner)} · compensation=${progress ?? 'not retained'}/${total ?? nonnegativeCount(value.compensationInput) ?? 'not retained'} · finalizing=${boardDiagnosticBoolean(value.finalizingCommittedCombine)}`;
+}
+
 /**
  * Return Board facts by canvas level, never by flattening every nested node
  * into one graph. Group canvas edges belong only to that group's immediate
@@ -4383,8 +4402,11 @@ export function buildJobBoardDiagnostics(nodes, edges, nodeComponentStates = [])
   for (const state of boardDiagnosticArray(nodeComponentStates) || []) {
     const stateId = boardDiagnosticValue(state, 'id');
     const selector = boardSelectorRuntimeDiagnostic(boardDiagnosticValue(state, 'jobBoardSelector'));
-    if (typeof stateId === 'string' && stateId && selector && !componentStateById.has(stateId)) {
-      componentStateById.set(stateId, selector);
+    if (typeof stateId === 'string' && stateId && !componentStateById.has(stateId)) {
+      componentStateById.set(stateId, {
+        selector,
+        combine: boardDiagnosticValue(state, 'jobBoardCombine'),
+      });
     }
   }
   const normalizedRows = boardRows.map((entry) => {
@@ -4419,7 +4441,7 @@ export function buildJobBoardDiagnostics(nodes, edges, nodeComponentStates = [])
       || boardDiagnosticValue(resume, 'cancellationCleanup') || boardDiagnosticValue(resume, 'cancellationCleanupsBySource');
     const recoverableFailure = boardDiagnosticValue(data, 'recoverableFailure') || boardDiagnosticValue(data, 'boardRecoverableFailure') || boardDiagnosticValue(resume, 'recoverableFailure');
     const boardId = boardDiagnosticValue(board, 'id');
-    const selectorRuntime = typeof boardId === 'string' && boardIdCounts.get(boardId) === 1
+    const componentRuntime = typeof boardId === 'string' && boardIdCounts.get(boardId) === 1
       ? componentStateById.get(boardId) || null
       : null;
     const consolidation = boardDiagnosticSafely(
@@ -4429,7 +4451,7 @@ export function buildJobBoardDiagnostics(nodes, edges, nodeComponentStates = [])
     return {
       board, data, resume, selected, connectedIds, connectedNodes, combined, cards, groups,
       hiddenChildren, resultCount, combineSourceRuns, resumeFacts, clear,
-      clearCount, cancellation, recoverableFailure, selectorRuntime, consolidation,
+      clearCount, cancellation, recoverableFailure, componentRuntime, consolidation,
       bounded, ambiguousOwnership, scope,
     };
   });
@@ -4450,7 +4472,7 @@ export function buildJobBoardDiagnostics(nodes, edges, nodeComponentStates = [])
     const {
       board, data, resume, selected, connectedIds, connectedNodes, combined, cards, groups,
       hiddenChildren, resultCount, combineSourceRuns, resumeFacts, clear,
-      clearCount, cancellation, recoverableFailure, selectorRuntime, consolidation,
+      clearCount, cancellation, recoverableFailure, componentRuntime, consolidation,
       bounded, ambiguousOwnership, scope,
     } = row;
     const countQualification = bounded ? ' · counts may be partial (input bounded)' : '';
@@ -4471,7 +4493,8 @@ export function buildJobBoardDiagnostics(nodes, edges, nodeComponentStates = [])
     }
     lines.push(`  - Resume: ${boardResumeSummary(resumeFacts, labelContext)}.`);
     lines.push(`  - Recovery provenance: recoverable-failure=${recoverableFailure ? 'recorded' : 'none'} · cancellation=${cancellation ? 'recorded' : 'none'} · clear=${clear ? `recorded${clearCount != null ? ` (prior results ${clearCount})` : ''}` : 'none'}.`);
-    lines.push(`  - Selector runtime: ${boardSelectorRuntimeSummary(selectorRuntime)}.`);
+    lines.push(`  - Selector runtime: ${boardSelectorRuntimeSummary(componentRuntime?.selector)}.`);
+    lines.push(`  - Combine runtime: ${boardCombineRuntimeSummary(componentRuntime?.combine)}.`);
     if (consolidation) {
       lines.push(
         '  - Location consolidation (metadata only): '

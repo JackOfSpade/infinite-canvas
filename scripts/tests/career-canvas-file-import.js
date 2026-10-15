@@ -87,7 +87,7 @@ export default [
       const source = read('src/nodes/JobSearchNode.jsx');
       assert(
         /if \(initialDropAcceptedRef\.current \|\| dropLockReason \|\| processingRunsRef\.current\.active\)[\s\S]*?return false;/.test(source)
-          && /if \(valid\.length === 0\)[\s\S]*?return false;/.test(source)
+          && /if \(refused\.length > 0 \|\| valid\.length === 0\)[\s\S]*?return false;/.test(source)
           && /initialDropAcceptedRef\.current = true;[\s\S]*?return true;/.test(source)
           && /return acceptCareerFiles\([\s\S]*?\) === true;/.test(source)
           && /careerCanvasImportAdmissionSucceeded\([\s\S]*?acceptCanvasDocumentCareerFiles\(selectedFiles, 'Canvas-file import'\)[\s\S]*?\)\) \{\s*setCanvasFileImportOpen\(false\);/.test(source),

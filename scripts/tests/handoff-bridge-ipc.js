@@ -1,4 +1,5 @@
 import { assert } from './testHelpers.js';
+import { isUiRestartContext } from '../../electron/ipc/handoffBridge/restartContext.js';
 import { IPC_CHANNELS, IPC_EVENTS, PUBLISH_JOBS_EXAMPLE } from '../../electron/ipc/handoffBridge/contracts.js';
 import { registerHandoffBridgeUi } from '../../electron/ipc/handoffBridge/ui.js';
 import { createHandoffBridgeTray } from '../../electron/ipc/handoffBridge/tray.js';
@@ -52,14 +53,14 @@ function setup({ windows = null, getCanvasWindows = null, controller = {}, dialo
 const invoke = (h, channel, payload) => h.ipc.handlers.get(channel)(h.event, payload);
 
 export default [
-  { name: 'handoff bridge: ipc: contract exposes exactly 27 invokes, one publish send and four events', run: () => {
-    const channelValues = Object.values(IPC_CHANNELS); assert(channelValues.length === 28 && new Set(channelValues).size === 28, 'IPC channel names must be closed and unique');
-    assert(IPC_CHANNELS.PUBLISH_JOBS === 'handoff-bridge:publish-jobs' && channelValues.filter(channel => channel !== IPC_CHANNELS.PUBLISH_JOBS).length === 27, 'publish-jobs is sole send-only channel');
+  { name: 'handoff bridge: ipc: contract exposes exactly 29 invokes, one publish send and four events', run: () => {
+    const channelValues = Object.values(IPC_CHANNELS); assert(channelValues.length === 30 && new Set(channelValues).size === 30, 'IPC channel names must be closed and unique');
+    assert(IPC_CHANNELS.PUBLISH_JOBS === 'handoff-bridge:publish-jobs' && channelValues.filter(channel => channel !== IPC_CHANNELS.PUBLISH_JOBS).length === 29, 'publish-jobs is sole send-only channel');
     assert(Object.values(IPC_EVENTS).length === 4 && new Set(Object.values(IPC_EVENTS)).size === 4
       && IPC_EVENTS.CANVAS_FILE_READY === 'handoff-bridge:canvas-file-ready', 'main-to-renderer events must be closed'); assert(!JSON.stringify({ IPC_CHANNELS, IPC_EVENTS, PUBLISH_JOBS_EXAMPLE }).includes('label'), 'IPC never carries renderer labels');
   } },
   { name: 'handoff bridge: ipc: registers exactly the frozen invokes and one publish listener', run: () => {
-    const h = setup(); assert(h.api.registration.ok && h.api.registration.invokes === 27 && h.api.registration.expectedInvokes === 27 && h.api.registration.publish, 'registration exposes a closed complete-route fact'); assert(h.ipc.handlers.size === 27 && h.ipc.listeners.size === 1 && h.ipc.listeners.has(IPC_CHANNELS.PUBLISH_JOBS), 'all and only contract channels register');
+    const h = setup(); assert(h.api.registration.ok && h.api.registration.invokes === 29 && h.api.registration.expectedInvokes === 29 && h.api.registration.publish, 'registration exposes a closed complete-route fact'); assert(h.ipc.handlers.size === 29 && h.ipc.listeners.size === 1 && h.ipc.listeners.has(IPC_CHANNELS.PUBLISH_JOBS), 'all and only contract channels register');
     assert([...h.ipc.handlers.keys()].every(channel => Object.values(IPC_CHANNELS).includes(channel)), 'no unlisted invoke channel is permitted');
   } },
   { name: 'handoff bridge: ipc: partial or missing IPC registration is reported false and leaves no route behind', run: () => {
@@ -115,7 +116,7 @@ export default [
   { name: 'handoff bridge: ipc: a failed replacement clears old and new bridge routes', run: () => {
     const ipc = fakeIpc();
     const initial = setup({ ipc });
-    assert(initial.api.registration.ok && ipc.handlers.size === 27 && ipc.listeners.size === 1,
+    assert(initial.api.registration.ok && ipc.handlers.size === 29 && ipc.listeners.size === 1,
       'the regression begins with a complete prior bridge registry');
 
     const realHandle = ipc.handle;
@@ -408,10 +409,10 @@ export default [
       && !Object.hasOwn(copied, 'sessionCode') && !Object.hasOwn(copied, 'starter')
       && clipboardText.includes('2ABCDEFGHJKLMNPQRSTUVWXYZ2') && clipboardText.includes('You are worker 2 of 3'),
     'the main process alone builds and copies the unique starter while the renderer receives no session capability');
-    assert(JSON.stringify(calls) === JSON.stringify([
-      ['start', {}],
-      ['copy', { generation: 7, workerOrdinal: 2 }],
-    ]), 'worker pool IPC sends the controller only closed, main-owned operation shapes');
+    assert(calls.length === 2 && calls[0][0] === 'start'
+      && Object.keys(calls[0][1]).join() === 'restartContext' && isUiRestartContext(calls[0][1].restartContext)
+      && JSON.stringify(calls[1]) === JSON.stringify(['copy', { generation: 7, workerOrdinal: 2 }]),
+    'worker pool IPC sends the controller only closed, main-owned operation shapes (a press carries only the main-minted restart capability)');
   } },
   { name: 'handoff bridge: ipc: re-copy preserves an already-exported worker starter when clipboard writing fails', async run() {
     const calls = [];
@@ -455,7 +456,8 @@ export default [
     const invalidExtra = await invoke(h, IPC_CHANNELS.START_WORKER_POOL, { requestedWorkers: 10, extra: true });
     assert(expanded.success && expanded.workerCount === 10 && expanded.recommended === 6 && expanded.materialized === 6
       && invalidLow.code === 'INVALID' && invalidExtra.code === 'INVALID'
-      && JSON.stringify(calls) === JSON.stringify([{ requestedWorkers: 10 }]),
+      && calls.length === 1 && Object.keys(calls[0]).sort().join() === 'requestedWorkers,restartContext'
+      && calls[0].requestedWorkers === 10 && isUiRestartContext(calls[0].restartContext),
     'only an exact request inside the reviewed worker ceiling reaches the controller; invalid renderer payloads cannot alter pool capacity');
   } },
   { name: 'handoff bridge: ipc: worker-pool copy rejects forged shapes and reports an already-started worker without retrying it', async run() {
