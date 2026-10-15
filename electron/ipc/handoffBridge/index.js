@@ -1787,6 +1787,7 @@ export function registerHandoffBridgeHandlers({ ipcMain = electronPkg.ipcMain, d
       dialogs: bootstrapDialogs, clipboard: deps.clipboard || electronPkg.clipboard,
       chatLauncher: deps.chatLauncher || null,
       notifyLaunchProblem: kind => runtime?.notifyLaunchProblem?.(kind),
+      recordLaunch: fields => { try { runtime?.audit?.serve?.('launch', fields)?.catch?.(() => {}); } catch { /* best effort */ } },
       enableChromeLauncher: bootstrapContext?.isPackaged === true && process.env.INFINITE_CANVAS_HANDOFF_BRIDGE_TEST !== '1' && !deps.clipboard,
       application: deps.application || runtimePort('application', ['describeForConfirm']),
       tunnel: tunnelUiPort(setupPortFromDeps(deps)),

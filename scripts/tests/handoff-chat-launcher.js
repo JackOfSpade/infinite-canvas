@@ -530,4 +530,31 @@ export default [
     assert(!pending.some(handle => [15_000, 45_000, 90_000].includes(handle.ms)), `${reason} schedules no one-off retry`);
     ui.dispose();
   } })),
+  { name: 'chat launcher: every launch outcome is written to the serve ledger as reason codes only', async run() {
+    const records = [];
+    const pending = [];
+    const snapshot = { autoLaunchChats: true, serving: 'live', config: { pluginName: 'infinite_canvas' },
+      chat: { pool: { active: true, generation: 11, workerCount: 1, workers: [{ ordinal: 1, state: 'available', restarts: 0 }] } } };
+    const ui = registerHandoffBridgeUi({
+      ipc: { handle() {}, removeHandler() {}, on() {}, removeListener() {} },
+      controller: {
+        snapshot: () => snapshot, subscribe: () => () => {},
+        copyWorkerStarter: async () => ({ copied: true, sessionCode: '2'.repeat(26), generation: 11, workerOrdinal: 1, workerCount: 1 }),
+        abandonWorkerStarter: async () => true,
+      },
+      chatLauncher: { launch: async () => ({ ok: false, reason: 'tab_open_failed' }), close: async () => true, owns: () => true, rekey: () => false },
+      recordLaunch: fields => records.push(fields),
+      timers: { setTimeout: (fn, ms) => { const handle = { fn, ms, unref() {} }; pending.push(handle); return handle; }, clearTimeout() {} },
+      getCanvasWindows: () => [],
+    });
+    ui.publishStatus(snapshot);
+    await new Promise(resolve => setTimeout(resolve, 5));
+    assert(records.some(item => item.outcome === 'failed' && item.reason === 'tab_open_failed'), JSON.stringify(records));
+    assert(records.some(item => item.outcome === 'retrying' && item.reason === 'tab_open_failed' && item.count === 1));
+    const text = JSON.stringify(records);
+    assert(!text.includes('2222222222') && !/chatgpt|starter|http/i.test(text), 'no session code, starter or URL is logged');
+    const { makeAuditLine } = await import('../../electron/ipc/handoffBridge/audit.js');
+    for (const fields of records) assert(JSON.stringify(makeAuditLine({ at: 1, event: 'launch', fields })).includes('"ev":"launch"'), 'every record passes the ledger whitelist');
+    ui.dispose();
+  } },
 ];

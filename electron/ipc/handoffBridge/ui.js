@@ -173,6 +173,9 @@ export function registerHandoffBridgeUi({
   clipboard = electronPkg.clipboard,
   chatLauncher = null,
   notifyLaunchProblem = noOp,
+  // Writes one closed-vocabulary launch outcome to the bridge's serve ledger
+  // so a failed launch can be diagnosed after the app has quit.
+  recordLaunch = noOp,
   enableChromeLauncher = false,
   launchPresentationTimeoutMs = 90_000,
   launchDiagnosisIntervalMs = 2_000,
@@ -223,10 +226,24 @@ export function registerHandoffBridgeUi({
   const TRANSIENT_LAUNCHES = new Set(TRANSIENT_LAUNCH_REASONS);
   const LAUNCH_RETRY_DELAYS_MS = Object.freeze([15_000, 45_000, 90_000]);
   const launchRetryCounts = new Map();
+  // Launch progress is shown in the dock and, for outcomes, written to the
+  // serve ledger as reason codes only.
+  const setLaunchProgress = (owner, progress) => {
+    launchProgress.set(owner, progress);
+    if (!['failed', 'retrying', 'presented'].includes(progress?.stage)) return;
+    try {
+      const attempt = launchRetryCounts.get(owner) || 0;
+      recordLaunch({
+        outcome: progress.stage,
+        ...(typeof progress.reason === 'string' && progress.reason ? { reason: progress.reason.slice(0, 40) } : {}),
+        count: attempt,
+      });
+    } catch { /* diagnostics are best effort */ }
+  };
   const launchRetryTimers = new Map();
   const launcher = chatLauncher || (enableChromeLauncher ? createChatLauncher({ onState(owner, stage, reason) {
     if (!/^worker:\d+:\d+$/.test(owner)) return;
-    launchProgress.set(owner, { stage, reason });
+    setLaunchProgress(owner, { stage, reason });
     if (latestStatus) publishStatus(latestStatus);
   } }) : { launch: async () => ({ ok: false, reason: 'chrome_unavailable' }), close: async () => false, owns: () => false, rekey: () => false });
   const workerOwner = (generation, ordinal) => `worker:${generation}:${ordinal}`;
@@ -334,7 +351,7 @@ export function registerHandoffBridgeUi({
       generation, workerOrdinal, ...(failedLaunch ? { failedLaunch: true } : {}),
     });
     if (result?.copied !== true || !WORKER_SESSION_CODE.test(result.sessionCode || '')) {
-      launchProgress.set(owner, { stage: 'failed', reason: 'starter_unavailable' });
+      setLaunchProgress(owner, { stage: 'failed', reason: 'starter_unavailable' });
       publishStatus(currentStatus());
       return false;
     }
@@ -346,7 +363,7 @@ export function registerHandoffBridgeUi({
       });
     } catch {
       await safeCall(controller, 'abandonWorkerStarter', { generation, workerOrdinal });
-      launchProgress.set(owner, { stage: 'failed', reason: 'starter_unavailable' });
+      setLaunchProgress(owner, { stage: 'failed', reason: 'starter_unavailable' });
       publishStatus(currentStatus());
       return false;
     }
@@ -361,7 +378,7 @@ export function registerHandoffBridgeUi({
       const prepareReason = ['list_error', 'epoch_changed', 'scope_changed', 'candidate_missing', 'reservation_missing',
         'file_missing', 'file_permission', 'file_rejected', 'read_error', 'reservation_changed',
         'payload_invalid'].includes(attachment?.reason) ? attachment.reason : 'unavailable';
-      launchProgress.set(owner, { stage: 'failed', reason: `attachment_prepare_${prepareReason}` });
+      setLaunchProgress(owner, { stage: 'failed', reason: `attachment_prepare_${prepareReason}` });
       publishStatus(currentStatus());
       return false;
     }
@@ -372,7 +389,7 @@ export function registerHandoffBridgeUi({
         ? { attachments: attachment.attachments, attachmentHandoffCode: attachment.handoffCode } : {}),
     });
     if (!launched.ok) {
-      launchProgress.set(owner, { stage: 'failed', reason: launched.reason || 'chrome_unavailable' });
+      setLaunchProgress(owner, { stage: 'failed', reason: launched.reason || 'chrome_unavailable' });
       if ((attachment?.status === 'ready' && launched.sendAttempted !== true)
         || ['tab_open_failed', 'editor_timeout', 'chrome_unavailable', 'apple_events_js_off',
         'attachment_invalid', 'attachment_draft_present', 'attachment_upload_failed', 'attachment_upload_timeout'].includes(launched.reason)) {
@@ -390,7 +407,7 @@ export function registerHandoffBridgeUi({
         ? current.workers?.find(item => item.ordinal === workerOrdinal) : null;
       if (!matching) return false;
       if (matching.firstCallAt != null && matching.firstCallAt >= started - launchPresentationTimeoutMs) {
-        launchProgress.set(owner, { stage: 'presented', reason: null }); publishStatus(currentStatus()); return true;
+        setLaunchProgress(owner, { stage: 'presented', reason: null }); publishStatus(currentStatus()); return true;
       }
       await new Promise(resolve => setTimeout(resolve, launchDiagnosisIntervalMs));
       lastDiagnosis = (await launcher.diagnose?.(owner, snapshot?.config?.pluginName))?.reason || 'none';
@@ -406,7 +423,7 @@ export function registerHandoffBridgeUi({
     if (lastDiagnosis === 'none') lastDiagnosis = (await launcher.diagnose?.(owner, snapshot?.config?.pluginName))?.reason || 'none';
     const reason = ['plugin_missing', 'reconnect_required', 'usage_limit', 'safety_block'].includes(lastDiagnosis)
       ? lastDiagnosis : 'bridge_not_presented';
-    launchProgress.set(owner, { stage: 'failed', reason });
+    setLaunchProgress(owner, { stage: 'failed', reason });
     // A safety refusal is specific to this chat. Let the engine's quiet
     // window trigger its normal fresh-context replacement for that worker.
     if (reason !== 'safety_block') autoLaunchPaused = reason;
@@ -463,7 +480,7 @@ export function registerHandoffBridgeUi({
     if (poolAutoStartStopped || autoLaunchPaused || !TRANSIENT_LAUNCHES.has(reason)
       || used >= LAUNCH_RETRY_DELAYS_MS.length || launchRetryTimers.has(owner)) return false;
     launchRetryCounts.set(owner, used + 1);
-    launchProgress.set(owner, { stage: 'retrying', reason });
+    setLaunchProgress(owner, { stage: 'retrying', reason });
     publishStatus(currentStatus());
     try {
       const timer = timers.setTimeout(async () => {
@@ -498,7 +515,7 @@ export function registerHandoffBridgeUi({
       for (const worker of pool.workers || []) {
         const owner = workerOwner(pool.generation, worker.ordinal);
         if (launchProgress.get(owner)?.stage === 'failed' && worker.firstCallAt != null) {
-          launchProgress.set(owner, { stage: 'presented', reason: null });
+          setLaunchProgress(owner, { stage: 'presented', reason: null });
           autoLaunchPaused = null;
         }
       }

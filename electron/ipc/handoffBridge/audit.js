@@ -10,7 +10,9 @@ export const SECURITY_AUDIT_EVENTS = Object.freeze([
   'new_chat', 'continue', 'epoch_closed', 'restart_confirmed', 'hostname_change',
   'source_mismatch', 'permit_leak', 'anonymous_summary', 'origin_seen',
 ]);
-export const SERVE_AUDIT_EVENTS = Object.freeze(['served', 'accepted', 'rejected', 'transition']);
+// 'launch' records each automatic ChatGPT chat launch outcome (kind, stage,
+// reason code, attempt), never a session code, starter, URL, or page text.
+export const SERVE_AUDIT_EVENTS = Object.freeze(['served', 'accepted', 'rejected', 'transition', 'launch']);
 
 const SECURITY_EVENTS = new Set(SECURITY_AUDIT_EVENTS);
 const SERVE_EVENTS = new Set(SERVE_AUDIT_EVENTS);

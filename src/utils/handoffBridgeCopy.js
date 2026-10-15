@@ -262,7 +262,16 @@ export const BRIDGE_UI_COPY = Object.freeze({
     if (launch?.reason === 'attachment_draft_present') return 'ChatGPT restored an old attachment in the new chat. Remove that draft and use Copy starter.';
     if (launch?.reason?.startsWith('attachment_prepare_')) return `The app could not prepare this file for ChatGPT (${launch.reason.slice('attachment_prepare_'.length)}). Use Copy starter and attach the file yourself.`;
     if (['attachment_invalid', 'attachment_upload_failed', 'attachment_upload_timeout'].includes(launch?.reason)) return 'A file could not be attached or its upload did not finish. Use the manual Copy starter and attach the files yourself.';
-    return 'Chrome launch failed after automatic retries. Press Retry, or use Copy starter.';
+    const cause = ({
+      editor_timeout: 'ChatGPT’s message box never loaded',
+      tab_open_failed: 'Chrome could not open a tab',
+      chrome_unavailable: 'Chrome did not respond',
+      insert_mismatch: 'the starter could not be typed into ChatGPT',
+      chat_changed: 'the ChatGPT tab moved to another chat',
+      starter_unavailable: 'the app could not prepare a starter for this worker',
+      tab_not_owned: 'the app no longer has this worker’s Chrome tab',
+    })[launch?.reason];
+    return `Chrome launch failed after automatic retries${cause ? `: ${cause}` : launch?.reason ? ` (${launch.reason})` : ''}. Press Retry, or use Copy starter.`;
   },
   workerDone: count => `${count} ${count === 1 ? 'handoff completed' : 'handoffs completed'}`,
   workerQuiet: quietReason => quietReason === 'answer_silent'
