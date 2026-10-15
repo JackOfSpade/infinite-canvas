@@ -317,7 +317,9 @@ export function scanHandoffBridgeSource(root = fileURLToPath(bridgeRoot)) {
     const row = SOURCE_SCAN_ROWS[file];
     if (!row) { errors.push(`${file} has no allow-list row`); continue; }
     const source = stripComments(read(file));
-    if (/\bimport\s*\(/.test(source)) errors.push(`${file} uses dynamic import`);
+    // An ES dynamic import is never a member call; `ObjC.import(...)` inside
+    // the launcher's JXA script text is not one.
+    if (/(?<![.\w$])import\s*\(/.test(source)) errors.push(`${file} uses dynamic import`);
     const imports = staticImports(source);
     for (const specifier of imports) if (!row.allow.includes(specifier)) errors.push(`${file} imports forbidden ${specifier}`);
     for (const [label, pattern] of GENERIC_FORBIDDEN) if (pattern.test(source)) errors.push(`${file} contains forbidden ${label}`);

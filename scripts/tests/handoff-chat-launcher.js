@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { runInNewContext } from 'node:vm';
 import { createChatLauncher } from '../../electron/ipc/handoffBridge/chatLauncher.js';
+import { pickUserChromePid } from '../../electron/ipc/browser/appleEvents.js';
 import { registerHandoffBridgeUi } from '../../electron/ipc/handoffBridge/ui.js';
 import { IPC_CHANNELS } from '../../electron/ipc/handoffBridge/contracts.js';
 import { isUiRestartContext } from '../../electron/ipc/handoffBridge/restartContext.js';
@@ -94,8 +95,8 @@ export default [
   } },
   { name: 'chat launcher: success and owned tab cleanup', async run() {
     const { launcher, calls, states } = harness();
-    assert(launcher.scripts.OPEN.includes('set t to active tab of w'));
-    assert(launcher.scripts.OPEN.includes('set URL of t to targetUrl'));
+    assert(launcher.scripts.OPEN.includes('const chrome = Application(Number(argv[0]));'), 'scripts address the person\'s Chrome by process id');
+    assert(launcher.scripts.OPEN.includes('t = w.activeTab;') && launcher.scripts.OPEN.includes('t.url = targetUrl;'));
     const result = await launcher.launch({ owner: 'worker:1:1', starter });
     assert.equal(result.ok, true);
     assert.equal(result.chatId, 'unique-chat-123');
@@ -556,5 +557,19 @@ export default [
     const { makeAuditLine } = await import('../../electron/ipc/handoffBridge/audit.js');
     for (const fields of records) assert(JSON.stringify(makeAuditLine({ at: 1, event: 'launch', fields })).includes('"ev":"launch"'), 'every record passes the ledger whitelist');
     ui.dispose();
+  } },
+  { name: 'chat launcher: targets the person\'s own Chrome, never the app\'s headless or login Chrome', run() {
+    const app = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
+    const ps = [
+      `84903 ${app} --no-first-run --user-data-dir=/Users/x/Library/Application Support/infinite-canvas/browser-data --headless=new --remote-debugging-port=0`,
+      `70001 ${app} --remote-debugging-port=9222`,
+      `70002 ${app} --user-data-dir=/Users/x/Library/Application Support/infinite-canvas/browser-data --no-first-run`,
+      `70003 /Applications/Google Chrome.app/Contents/Frameworks/Google Chrome Framework.framework/Helpers/Google Chrome Helper (Renderer).app/Contents/MacOS/Google Chrome Helper (Renderer) --type=renderer`,
+      `60486 ${app}`,
+    ].join('\n');
+    assert.equal(pickUserChromePid(ps), 60486);
+    assert.equal(pickUserChromePid(ps.split('\n').filter(line => !line.startsWith('60486')).join('\n')), null,
+      'with only app-owned Chromes running there is no user Chrome to script');
+    assert.equal(pickUserChromePid(`  512 ${app} --restore-last-session`), 512, 'ordinary user flags are fine');
   } },
 ];

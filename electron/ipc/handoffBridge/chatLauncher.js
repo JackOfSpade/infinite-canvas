@@ -1,4 +1,4 @@
-import { isAppleEventsJsDisabledError, runChromeAppleScript } from '../browser/appleEvents.js';
+import { isAppleEventsJsDisabledError, runUserChromeScript } from '../browser/appleEvents.js';
 import crypto from 'node:crypto';
 
 const CHAT_URL = 'https://chatgpt.com/';
@@ -7,58 +7,59 @@ const HANDOFF_CODE = /^HANDOFF-[2-9A-HJ-NP-Z]{6}$/i;
 const UPLOAD_CHUNK_BYTES = 48 * 1024;
 const MAX_UPLOAD_BYTES = 50 * 1024 * 1024;
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
-const OPEN = `on run argv
-  set previousApp to path to frontmost application
-  try
-  tell application "Google Chrome"
-    set wid to item 1 of argv
-    set targetUrl to item 2 of argv
-    set previousWindowId to 0
-    if (count of windows) > 0 then set previousWindowId to id of front window
-    if wid is "0" then
-      set w to make new window
-      set t to active tab of w
-      set URL of t to targetUrl
-    else
-      try
-        set w to first window whose id is (wid as integer)
-        set t to make new tab at end of tabs of w with properties {URL:targetUrl}
-      on error
-        set w to make new window
-        set t to active tab of w
-        set URL of t to targetUrl
-      end try
-    end if
-    set resultIds to (id of w as string) & ":" & (id of t as string)
-    if previousWindowId is not 0 and previousWindowId is not (id of w) then set index of (first window whose id is previousWindowId) to 1
-  end tell
-  on error errText number errNumber
-    tell application (previousApp as text) to activate
-    error errText number errNumber
-  end try
-  tell application (previousApp as text) to activate
-  return resultIds
-end run`;
-const EXEC = `on run argv
-  tell application "Google Chrome"
-    set w to first window whose id is (item 1 of argv as integer)
-    set t to first tab of w whose id is (item 2 of argv as integer)
-    return execute t javascript (item 3 of argv)
-  end tell
-end run`;
-const URL = `on run argv
-  tell application "Google Chrome"
-    set w to first window whose id is (item 1 of argv as integer)
-    set t to first tab of w whose id is (item 2 of argv as integer)
-    return URL of t
-  end tell
-end run`;
-const CLOSE = `on run argv
-  tell application "Google Chrome"
-    set w to first window whose id is (item 1 of argv as integer)
-    close (first tab of w whose id is (item 2 of argv as integer))
-  end tell
-end run`;
+// JXA, run against the person's own Chrome by process id (argv[0], supplied
+// by runUserChromeScript). The remaining argv match the original AppleScript
+// versions, so callers and test runners pass the same arguments.
+const OPEN = `ObjC.import('AppKit');
+function run(argv) {
+  const chrome = Application(Number(argv[0]));
+  const wid = argv[1];
+  const targetUrl = argv[2];
+  const previousApp = $.NSWorkspace.sharedWorkspace.frontmostApplication;
+  const restore = () => { try { previousApp.activateWithOptions(0); } catch (error) {} };
+  try {
+    const previousWindowId = chrome.windows.length > 0 ? chrome.windows[0].id() : 0;
+    let w = null;
+    let t = null;
+    if (wid !== '0') {
+      try {
+        w = chrome.windows.byId(Number(wid));
+        w.id();
+        w.tabs.push(chrome.Tab({ url: targetUrl }));
+        t = w.tabs[w.tabs.length - 1];
+      } catch (error) { w = null; }
+    }
+    if (!w) {
+      w = chrome.Window().make();
+      t = w.activeTab;
+      t.url = targetUrl;
+    }
+    const resultIds = String(w.id()) + ':' + String(t.id());
+    if (previousWindowId !== 0 && previousWindowId !== w.id()) {
+      try { chrome.windows.byId(previousWindowId).index = 1; } catch (error) {}
+    }
+    restore();
+    return resultIds;
+  } catch (error) {
+    restore();
+    throw error;
+  }
+}`;
+const EXEC = `function run(argv) {
+  const chrome = Application(Number(argv[0]));
+  const tab = chrome.windows.byId(Number(argv[1])).tabs.byId(Number(argv[2]));
+  const value = tab.execute({ javascript: argv[3] });
+  return value === undefined || value === null ? '' : String(value);
+}`;
+const URL = `function run(argv) {
+  const chrome = Application(Number(argv[0]));
+  return chrome.windows.byId(Number(argv[1])).tabs.byId(Number(argv[2])).url();
+}`;
+const CLOSE = `function run(argv) {
+  const chrome = Application(Number(argv[0]));
+  chrome.windows.byId(Number(argv[1])).tabs.byId(Number(argv[2])).close();
+  return '';
+}`;
 
 // The in-page code returns only bounded state. Starter text is never returned,
 // logged, put in a URL, or sent to a renderer.
@@ -229,7 +230,7 @@ const DIAGNOSE = pluginName => `(() => {
   return JSON.stringify({reason, assistantPresent: !!agent});
 })()`;
 
-export function createChatLauncher({ run = runChromeAppleScript, delay = sleep, onState = () => {}, now = Date.now } = {}) {
+export function createChatLauncher({ run = runUserChromeScript, delay = sleep, onState = () => {}, now = Date.now } = {}) {
   let windowId = null;
   let sequence = Promise.resolve();
   let lastStart = -Infinity;
