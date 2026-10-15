@@ -13,7 +13,18 @@ export const LINK_STATES = Object.freeze(['unlinked', 'pairing', 'linked', 'need
 export const CHAT_STATES = Object.freeze(['none', 'awaiting-first-call', 'reached', 'working', 'idle', 'full', 'ended', 'unknown']);
 export const POOL_WORKER_STATES = Object.freeze(['available', 'ready', 'working', 'quiet', 'waiting', 'idle']);
 export const POOL_WORKER_QUIET_REASONS = Object.freeze(['answer_silent', 'polling_stopped', 'fresh_context_required']);
-export const LAUNCH_STAGES = Object.freeze(['opening', 'checking', 'sent', 'presented', 'failed']);
+export const LAUNCH_STAGES = Object.freeze(['opening', 'checking', 'sent', 'presented', 'retrying', 'failed']);
+// One-off Chrome/ChatGPT page failures. The main process retries these in a
+// fresh tab by itself; after its retries, Retry starts another fresh tab.
+export const TRANSIENT_LAUNCH_REASONS = Object.freeze([
+  'tab_open_failed', 'editor_timeout', 'chat_changed', 'insert_mismatch', 'model_menu_missing',
+  'model_selection_failed', 'effort_unavailable', 'account_unknown', 'send_unavailable',
+  'chrome_unavailable', 'starter_unavailable', 'attachment_upload_failed', 'attachment_upload_timeout',
+]);
+// Every failed launch the dock may offer a Retry for, instead of a paste.
+export const RETRYABLE_LAUNCH_REASONS = Object.freeze([
+  'plugin_missing', 'reconnect_required', 'usage_limit', 'bridge_not_presented', ...TRANSIENT_LAUNCH_REASONS,
+]);
 export const LAUNCH_REASONS = Object.freeze(['invalid_launch', 'tab_not_owned', 'tab_open_failed', 'editor_timeout', 'editor_not_empty', 'chat_changed', 'insert_mismatch', 'model_menu_missing', 'model_selection_failed', 'effort_unavailable', 'account_unknown', 'send_unavailable', 'send_not_confirmed', 'apple_events_js_off', 'chrome_unavailable', 'starter_unavailable', 'bridge_not_presented', 'plugin_missing', 'reconnect_required', 'usage_limit', 'safety_block', 'attachment_invalid', 'attachment_draft_present', 'attachment_upload_failed', 'attachment_upload_timeout', ...['list_error', 'epoch_changed', 'scope_changed', 'candidate_missing', 'reservation_missing', 'file_missing', 'file_permission', 'file_rejected', 'read_error', 'reservation_changed', 'payload_invalid', 'unavailable'].map(reason => `attachment_prepare_${reason}`)]);
 export const JOB_PHASES = Object.freeze(['unread', 'awaiting', 'host', 'done', 'needs_user', 'held', 'gone', 'unknown']);
 export const JOB_REASONS = Object.freeze([

@@ -36,6 +36,7 @@ import {
   startBridgeJobPublisher,
 } from '../utils/handoffBridgeQueue';
 import { MAX_HANDOFF_CONCURRENCY } from '../utils/handoffScheduler';
+import { RETRYABLE_LAUNCH_REASONS } from '../utils/handoffBridgeStatus';
 
 const TONE_CLASS = Object.freeze({
   off: 'bg-slate-400',
@@ -682,7 +683,7 @@ export function HandoffBridgePanel() {
                               {BRIDGE_UI_COPY.workerState(worker.state, worker.quietReason, worker.launch)}
                             </span>
                             {worker.launch && <span className="basis-full text-sky-100/80">{BRIDGE_UI_COPY.workerLaunch(worker.launch, launchAccountName(activeWorkerPool.generation, worker.ordinal))}</span>}
-                            {['plugin_missing', 'reconnect_required', 'usage_limit', 'bridge_not_presented'].includes(worker.launch?.reason) && (
+                            {worker.launch?.stage === 'failed' && RETRYABLE_LAUNCH_REASONS.includes(worker.launch?.reason) && (
                               <button type="button" className="ml-auto bridge-button-secondary" disabled={activeCopyingWorker !== null}
                                 onClick={() => void retryWorkerLaunch(worker.ordinal)}>Retry</button>
                             )}

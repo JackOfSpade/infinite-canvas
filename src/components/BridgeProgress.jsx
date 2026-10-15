@@ -5,6 +5,7 @@ import { BRIDGE_PROGRESS_COPY, BRIDGE_UI_COPY, ipcErrorMessage } from '../utils/
 import { deriveBridgeJobProgress, deriveBridgePushProgress, progressTimeLines } from '../utils/bridgeJobProgress';
 import { MAX_HANDOFF_CONCURRENCY } from '../utils/handoffScheduler';
 import { HEADLINE_CLASS, TONE_CLASS } from '../utils/bridgeProgressStyles';
+import { RETRYABLE_LAUNCH_REASONS } from '../utils/handoffBridgeStatus';
 
 // Live progress for an application the bridge holds or a selected push handoff
 // awaiting/holding an exact claim. Its start action prepares the same adaptive
@@ -537,7 +538,7 @@ export function BridgeProgress({
                     {BRIDGE_UI_COPY.workerState(worker.state, worker.quietReason, worker.launch)}
                   </span>
                     {worker.launch && <span className="basis-full text-sky-100/80">{BRIDGE_UI_COPY.workerLaunch(worker.launch, launchAccountName(activeWorkerPool.generation, worker.ordinal))}</span>}
-                  {['plugin_missing', 'reconnect_required', 'usage_limit', 'bridge_not_presented'].includes(worker.launch?.reason) && (
+                  {worker.launch?.stage === 'failed' && RETRYABLE_LAUNCH_REASONS.includes(worker.launch?.reason) && (
                     <button type="button" className="ml-auto rounded-md border border-white/15 bg-white/5 px-2.5 py-1.5 text-[11px] font-medium text-white/85"
                       disabled={busy || activeCopyingWorker !== null}
                       onClick={() => void retryWorkerLaunch(worker.ordinal)}>Retry</button>

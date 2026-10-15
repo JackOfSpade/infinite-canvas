@@ -464,4 +464,70 @@ export default [
     await new Promise(resolve => setImmediate(resolve));
     assert.equal(starts, 2, 'nothing starts after dispose');
   } },
+  { name: 'chat launcher: a one-off launch failure retries in a fresh tab, then stops after three tries', async run() {
+    const pending = [];
+    let launches = 0;
+    let closes = 0;
+    const snapshot = { autoLaunchChats: true, serving: 'live', config: { pluginName: 'infinite_canvas' },
+      chat: { pool: { active: true, generation: 9, workerCount: 1, workers: [{ ordinal: 1, state: 'available', restarts: 0 }] } } };
+    const ui = registerHandoffBridgeUi({
+      ipc: { handle() {}, removeHandler() {}, on() {}, removeListener() {} },
+      controller: {
+        snapshot: () => snapshot, subscribe: () => () => {},
+        copyWorkerStarter: async () => ({ copied: true, sessionCode: '2'.repeat(26), generation: 9, workerOrdinal: 1, workerCount: 1 }),
+        abandonWorkerStarter: async () => true,
+      },
+      chatLauncher: {
+        launch: async () => { launches += 1; return { ok: false, reason: 'editor_timeout' }; },
+        close: async () => { closes += 1; return true; }, owns: () => true, rekey: () => false,
+      },
+      timers: { setTimeout: (fn, ms) => { const handle = { fn, ms, unref() {} }; pending.push(handle); return handle; }, clearTimeout() {} },
+      getCanvasWindows: () => [],
+    });
+    const settle = () => new Promise(resolve => setTimeout(resolve, 5));
+    ui.publishStatus(snapshot);
+    await settle();
+    assert.equal(launches, 1);
+    for (const [index, delay] of [15_000, 45_000, 90_000].entries()) {
+      const retry = pending.filter(handle => handle.ms === delay).at(-1);
+      assert(retry, `retry ${index + 1} is armed after ${delay} ms`);
+      await retry.fn();
+      await settle();
+      assert.equal(launches, index + 2, `retry ${index + 1} opens a new launch`);
+    }
+    assert(closes >= 3, 'each retry closes the failed tab first');
+    assert.equal(pending.filter(handle => [15_000, 45_000, 90_000].includes(handle.ms)).length, 3,
+      'exactly three retries are ever scheduled');
+    ui.publishStatus(snapshot);
+    await settle();
+    assert.equal(launches, 4, 'after three retries the worker waits for Retry instead of looping');
+    ui.dispose();
+  } },
+  ...[
+    'plugin_missing', 'send_not_confirmed', 'safety_block',
+  ].map(reason => ({ name: `chat launcher: ${reason} is never retried automatically as a one-off failure`, async run() {
+    const pending = [];
+    let launches = 0;
+    const snapshot = { autoLaunchChats: true, serving: 'live', config: { pluginName: 'infinite_canvas' },
+      chat: { pool: { active: true, generation: 10, workerCount: 1, workers: [{ ordinal: 1, state: 'available', restarts: 0 }] } } };
+    const ui = registerHandoffBridgeUi({
+      ipc: { handle() {}, removeHandler() {}, on() {}, removeListener() {} },
+      controller: {
+        snapshot: () => snapshot, subscribe: () => () => {},
+        copyWorkerStarter: async () => ({ copied: true, sessionCode: '2'.repeat(26), generation: 10, workerOrdinal: 1, workerCount: 1 }),
+        abandonWorkerStarter: async () => true,
+      },
+      chatLauncher: {
+        launch: async () => { launches += 1; return { ok: false, reason, sendAttempted: reason === 'send_not_confirmed' }; },
+        close: async () => true, owns: () => true, rekey: () => false, javascriptReady: async () => false,
+      },
+      timers: { setTimeout: (fn, ms) => { const handle = { fn, ms, unref() {} }; pending.push(handle); return handle; }, clearTimeout() {} },
+      getCanvasWindows: () => [],
+    });
+    ui.publishStatus(snapshot);
+    await new Promise(resolve => setTimeout(resolve, 5));
+    assert.equal(launches, 1);
+    assert(!pending.some(handle => [15_000, 45_000, 90_000].includes(handle.ms)), `${reason} schedules no one-off retry`);
+    ui.dispose();
+  } })),
 ];

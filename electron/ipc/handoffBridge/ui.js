@@ -7,6 +7,7 @@ import { createUiRestartContext } from './restartContext.js';
 import { recordBridgeChatCopyResult } from './telemetry.js';
 import { createChatLauncher } from './chatLauncher.js';
 import { BRIDGE_ENABLED_ATTACHMENT_TASKS } from '../nonApiAi.js';
+import { RETRYABLE_LAUNCH_REASONS, TRANSIENT_LAUNCH_REASONS } from '../../../src/utils/handoffBridgeStatus.js';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const DOCK_STATES = new Set(['awaiting', 'working', 'blocked', 'broken', 'unreadable']);
@@ -214,6 +215,15 @@ export function registerHandoffBridgeUi({
   let poolAutoStartAt = -Infinity;
   let poolAutoStartRetryTimer = null;
   let poolAutoStartStopped = false;
+  // A launch can fail for a one-off reason (ChatGPT loads slowly, the model
+  // menu has not rendered, Chrome is briefly busy). Those retry by themselves
+  // in a fresh tab before the person is asked to paste. Plugin, account-limit
+  // and safety outcomes are not one-off and keep their own handling, and a
+  // send that may already have reached ChatGPT is never resent.
+  const TRANSIENT_LAUNCHES = new Set(TRANSIENT_LAUNCH_REASONS);
+  const LAUNCH_RETRY_DELAYS_MS = Object.freeze([15_000, 45_000, 90_000]);
+  const launchRetryCounts = new Map();
+  const launchRetryTimers = new Map();
   const launcher = chatLauncher || (enableChromeLauncher ? createChatLauncher({ onState(owner, stage, reason) {
     if (!/^worker:\d+:\d+$/.test(owner)) return;
     launchProgress.set(owner, { stage, reason });
@@ -447,6 +457,30 @@ export function registerHandoffBridgeUi({
       } catch { poolAutoStartRetryTimer = null; }
     }).finally(() => { poolAutoStartInFlight = false; });
   }
+  function scheduleLaunchRetry(owner, attempt) {
+    const reason = launchProgress.get(owner)?.reason;
+    const used = launchRetryCounts.get(owner) || 0;
+    if (poolAutoStartStopped || autoLaunchPaused || !TRANSIENT_LAUNCHES.has(reason)
+      || used >= LAUNCH_RETRY_DELAYS_MS.length || launchRetryTimers.has(owner)) return false;
+    launchRetryCounts.set(owner, used + 1);
+    launchProgress.set(owner, { stage: 'retrying', reason });
+    publishStatus(currentStatus());
+    try {
+      const timer = timers.setTimeout(async () => {
+        launchRetryTimers.delete(owner);
+        if (poolAutoStartStopped) return;
+        // A fresh tab, never the half-filled one: the failed tab may hold an
+        // unsent starter or a stale menu.
+        try { await launcher.close(owner); } catch { /* tab already gone */ }
+        launchAttempted.delete(attempt);
+        if (launchProgress.get(owner)?.stage === 'retrying') launchProgress.delete(owner);
+        scheduleAutoLaunch(currentStatus());
+      }, LAUNCH_RETRY_DELAYS_MS[used]);
+      timer?.unref?.();
+      launchRetryTimers.set(owner, timer);
+    } catch { return false; }
+    return true;
+  }
   function scheduleAutoLaunch(snapshot) {
     const pool = snapshot?.chat?.pool;
     if (pool?.generation !== launchPoolGeneration) {
@@ -475,6 +509,12 @@ export function registerHandoffBridgeUi({
       const owner = attempt.split(':').slice(0, 3).join(':');
       if (!live.has(owner)) launchAttempted.delete(attempt);
     }
+    for (const owner of [...launchRetryCounts.keys()]) if (!live.has(owner)) launchRetryCounts.delete(owner);
+    for (const [owner, timer] of [...launchRetryTimers]) {
+      if (live.has(owner)) continue;
+      try { timers.clearTimeout?.(timer); } catch { /* optional */ }
+      launchRetryTimers.delete(owner);
+    }
     for (const worker of pool.workers || []) if (worker.state === 'idle' || worker.lastOutcome === 'session_full' || worker.lastOutcome === 'session_ended') {
       const owner = workerOwner(pool.generation, worker.ordinal);
       if (launcher.owns(owner)) void launcher.close(owner);
@@ -492,7 +532,9 @@ export function registerHandoffBridgeUi({
       void queueWorkerLaunch(async () => {
         try {
           if (autoLaunchPaused) { launchAttempted.delete(attempt); return; }
-          await runWorkerLaunch({ generation: pool.generation, workerOrdinal: worker.ordinal, restart });
+          const launched = await runWorkerLaunch({ generation: pool.generation, workerOrdinal: worker.ordinal, restart });
+          if (launched === true) launchRetryCounts.delete(owner);
+          else scheduleLaunchRetry(owner, attempt);
         } finally { launchInFlight.delete(owner); }
       });
     }
@@ -878,12 +920,23 @@ export function registerHandoffBridgeUi({
       const owner = workerOwner(generation, workerOrdinal);
       const reason = launchProgress.get(owner)?.reason;
       if (!generation || !workerOrdinal || pool?.generation !== generation || launchInFlight.has(owner)
-        || !['plugin_missing', 'reconnect_required', 'usage_limit', 'bridge_not_presented'].includes(reason)) return fixed('NOT_READY');
+        || !RETRYABLE_LAUNCH_REASONS.includes(reason)) return fixed('NOT_READY');
       autoLaunchPaused = null;
       launchInFlight.add(owner);
+      // A one-off failure never reached ChatGPT, so its unpresented starter
+      // is reused in a fresh tab. Plugin and limit failures did reach a chat,
+      // so they get a replacement starter.
+      const transient = TRANSIENT_LAUNCHES.has(reason);
       void queueWorkerLaunch(async () => {
-        try { await runWorkerLaunch({ generation, workerOrdinal, restart: true, failedLaunch: true }); }
-        finally { launchInFlight.delete(owner); scheduleAutoLaunch(currentStatus()); }
+        try {
+          if (transient) {
+            try { await launcher.close(owner); } catch { /* tab already gone */ }
+            const retryTimer = launchRetryTimers.get(owner);
+            if (retryTimer) { try { timers.clearTimeout?.(retryTimer); } catch { /* optional */ } launchRetryTimers.delete(owner); }
+          }
+          const launched = await runWorkerLaunch({ generation, workerOrdinal, restart: !transient, failedLaunch: true });
+          if (launched === true) launchRetryCounts.delete(owner);
+        } finally { launchInFlight.delete(owner); scheduleAutoLaunch(currentStatus()); }
       });
       return success({ started: true });
     }),
@@ -1353,6 +1406,8 @@ export function registerHandoffBridgeUi({
     for (const timer of chromePermissionRetryTimers.values()) try { timers.clearTimeout?.(timer); } catch { /* optional */ }
     chromePermissionRetryTimers.clear();
     poolAutoStartStopped = true;
+    for (const timer of launchRetryTimers.values()) try { timers.clearTimeout?.(timer); } catch { /* optional */ }
+    launchRetryTimers.clear();
     if (poolAutoStartRetryTimer !== null) try { timers.clearTimeout?.(poolAutoStartRetryTimer); } catch { /* optional */ }
     poolAutoStartRetryTimer = null;
     void launcher.closeAll?.();

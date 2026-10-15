@@ -78,7 +78,9 @@ export const SOURCE_SCAN_ROWS = Object.freeze({
   'sources/push.js': { allow: ['../../nonApiAi.js', '../../ipcUtils.js', '../constants.js'] },
   'controller.js': { allow: sibling('node:crypto') },
   'pairing.js': { allow: sibling('node:crypto') },
-  'ui.js': { allow: sibling('electron', '../nonApiAi.js') },
+  // The launch-retry reason lists are shared with the dock, which renders the
+  // Retry button; the status module is pure (it imports only the scheduler).
+  'ui.js': { allow: sibling('electron', '../nonApiAi.js', '../../../src/utils/handoffBridgeStatus.js') },
   'chatLauncher.js': { allow: ['../browser/appleEvents.js', 'node:crypto'] },
   'uiDialogs.js': { allow: sibling('electron') },
   'tray.js': { allow: sibling('electron') },

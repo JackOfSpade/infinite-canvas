@@ -246,6 +246,7 @@ export const BRIDGE_UI_COPY = Object.freeze({
     if (launch?.stage === 'checking') return 'Checking ChatGPT model, effort, and sign-in…';
     if (launch?.stage === 'sent') return 'Sent in ChatGPT; waiting for the bridge call…';
     if (launch?.stage === 'presented') return 'ChatGPT worker connected.';
+    if (launch?.stage === 'retrying') return 'Chrome launch hit a temporary problem. Retrying in a fresh tab automatically…';
     if (launch?.reason === 'model_selection_failed' || launch?.reason === 'effort_unavailable') return 'Could not confirm the highest model/effort in ChatGPT. Check it and press Send.';
     if (launch?.reason === 'model_menu_missing') return 'ChatGPT model controls were unavailable. Check the open tab before sending.';
     if (launch?.reason === 'editor_not_empty') return 'The existing chat has an unsent draft. Preserve it, then use Copy Continue.';
@@ -261,7 +262,7 @@ export const BRIDGE_UI_COPY = Object.freeze({
     if (launch?.reason === 'attachment_draft_present') return 'ChatGPT restored an old attachment in the new chat. Remove that draft and use Copy starter.';
     if (launch?.reason?.startsWith('attachment_prepare_')) return `The app could not prepare this file for ChatGPT (${launch.reason.slice('attachment_prepare_'.length)}). Use Copy starter and attach the file yourself.`;
     if (['attachment_invalid', 'attachment_upload_failed', 'attachment_upload_timeout'].includes(launch?.reason)) return 'A file could not be attached or its upload did not finish. Use the manual Copy starter and attach the files yourself.';
-    return 'Chrome launch failed. Use Copy starter for this worker.';
+    return 'Chrome launch failed after automatic retries. Press Retry, or use Copy starter.';
   },
   workerDone: count => `${count} ${count === 1 ? 'handoff completed' : 'handoffs completed'}`,
   workerQuiet: quietReason => quietReason === 'answer_silent'
