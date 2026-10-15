@@ -11623,8 +11623,13 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       }
       processingToken = processingRunsRef.current.start();
       if (!processingToken) return searchRunOutcome('busy', { error: 'This Job Search module is already running.' });
+      // Legacy results can predate scrape run tokens. Give their score-only
+      // revision a durable receipt too, including when every row is filtered.
+      // Publish it only with successful results; cancellation keeps the legacy
+      // input intact and completeRun:false leaves scan history untouched.
+      const reanalysisRunId = runData.jobRunId || manualAiRunId;
       reanalysisOperation = await claimAnalysisOperation('reanalyze-saved-jobs', {
-        runId: runData.jobRunId || manualAiRunId,
+        runId: reanalysisRunId,
         fingerprint: requestedFingerprint,
       });
       if (!reanalysisOperation) return searchRunOutcome('superseded');
@@ -11794,7 +11799,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
           remoteResidences: locationSnapshot.remoteResidences,
           snapshotContext: {
             sourceHubId: currentId,
-            runId: runData.jobRunId || null,
+            runId: reanalysisRunId,
             recoveryMode: manualAiRecoveryMode,
             analysisRevisionId: manualAiRunId,
             canvasFilePath,
@@ -11814,6 +11819,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
           throw new Error(snapshotResult?.error || 'Failed to save the re-analysis recovery snapshot');
         }
         const emptyReanalysisOutcome = await finishScoringAndSpawn({
+          jobRunId: reanalysisRunId,
           scoredJobs: [],
           careerSnapshotId: normalizedJobCareerSnapshotId(runData.careerSnapshotId),
           gatheredCount: runData.gatheredCount,
@@ -11875,7 +11881,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
           // Re-evaluation is downstream-only, but its scorer still writes a
           // durable analysis snapshot. Keep it correlated to the completed
           // scrape instead of replacing that snapshot with a tokenless copy.
-          runId: runData.jobRunId || null,
+          runId: reanalysisRunId,
           // A fresh saved-job brief keeps its original scrape runId, so carry
           // this opaque manual-AI revision separately. It lets durable backup
           // rotation distinguish a new re-analysis from a resumed handoff.
@@ -11898,6 +11904,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       }
 
       const scoredReanalysisOutcome = await finishScoringAndSpawn({
+        jobRunId: reanalysisRunId,
         scoredJobs: scoreResult.scoredJobs,
         careerSnapshotId: normalizedJobCareerSnapshotId(runData.careerSnapshotId),
         gatheredCount: runData.gatheredCount,

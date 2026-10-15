@@ -111,6 +111,90 @@ const RESULT_RESET_KEYS = [
 
 export default [
   {
+    name: 'legacy saved-job re-score commits a mergeable receipt for empty and populated results without advancing scan history',
+    run: async () => {
+      const search = readSource('../../src/nodes/JobSearchNode.jsx');
+      const callback = (name) => {
+        const start = search.indexOf(`const ${name} = useCallback(`) + `const ${name} = useCallback(`.length;
+        return search.slice(start, search.indexOf('\n  }, [', start) + '\n  }'.length);
+      };
+      for (const existingRunId of [null, 'original-scrape']) {
+        for (const filtered of [true, false]) {
+          const hub = rescoreHub('legacy', { dataExtra: {
+            jobRunId: existingRunId,
+            resumeProfile: { name: 'Replacement' },
+            lastCompletedRunAt: 1_790_500_000_000,
+            lastSearchCoverageStartedAt: 1_790_400_000_000,
+          } });
+          const history = jobSearchNextAnchor(hub.data, hub.id);
+          const manualAiRunId = 'job-search:legacy:score-only';
+          const expectedRunId = existingRunId || manualAiRunId;
+          let savedSnapshot;
+          let claimedRunId;
+          const ref = (current = null) => ({ current });
+          const bindings = {
+            id: hub.id, data: hub.data, getNode: () => hub,
+            getNodes: () => [hub], getEdges: () => [],
+            updateGlobal: (_id, update) => {
+              const patch = typeof update === 'function' ? update(hub) : update;
+              if (patch) hub.data = { ...hub.data, ...patch };
+            },
+            safeClone: structuredClone, addToast() {},
+            searchRunOutcome: (status, fields = {}) => ({ status, ...fields }),
+            isJobWorkflowDeletionPending: () => false,
+            isSavedJobReanalysisManualAiResume: () => false,
+            hasPendingManualAiRetirement: () => false,
+            staleOrdinaryManualAiResumeBlocksAdmission: () => false,
+            reanalysisInputFingerprint: () => 'unchanged-input',
+            reanalysisRestorePatch: () => ({}),
+            createManualAiRunId: () => manualAiRunId,
+            REANALYZE_SAVED_JOBS_MANUAL_AI_RECOVERY_MODE: 'reanalyze-saved-jobs',
+            processingRunsRef: ref({ start: () => 'processing-token', finish() {} }),
+            localQueueAdmissionRef: ref(), epoch: { start: () => () => false },
+            canCommitAnalysisOperation: () => true,
+            claimAnalysisOperation: async (_kind, { runId }) => { claimedRunId = runId; return 'operation'; },
+            reanalysisRestoreRef: ref(), activeManualAiRunIdRef: ref(),
+            isMountedRef: ref(true), canvasFilePath: '/test.canvas',
+            getSearchLocation: () => ({}), normalizeRemoteResidences: () => ({}),
+            normalizedJobCareerSnapshotId: value => value || null,
+            careerSnapshotBindingMatches: (data, snapshot) => data.careerSnapshotId === snapshot,
+            evaluatePreferencesForRun: async () => ({
+              jobs: filtered ? [] : JOBS, candidatePool: JOBS,
+              matchedCount: filtered ? 0 : JOBS.length,
+              filteredCount: filtered ? JOBS.length : 0,
+            }),
+            operationAuthorityFor: () => ({}), buildResumeSummary: () => '',
+            collectionScopeCaveatsForSavedJobReanalysis: () => [],
+            completeManualAiRun: async () => true,
+            savedJobsRescoreCompletionPatch,
+            setScoringProgress() {},
+            stampJobsWithCareerSnapshot: (jobs, careerSnapshotId) => jobs.map(job => ({ ...job, careerSnapshotId })),
+            normalizeCollectionScopeCaveats: value => value,
+            terminalFinalizationError: () => null,
+            completeJobRun: () => { throw new Error('A re-score must not complete a provider run'); },
+            EventLogger: { error() {} }, isNodeDeletedAbort: () => false,
+            window: { electronAPI: {
+              saveJobAnalysisSnapshot: async request => { savedSnapshot = request.snapshotContext; return { saved: true }; },
+              scoreJobs: async request => { savedSnapshot = request.snapshotContext; return { success: true, scoredJobs: JOBS }; },
+            } },
+          };
+          const instantiate = (body) => new Function(...Object.keys(bindings), `return (${body});`)(...Object.values(bindings));
+          bindings.finishScoringAndSpawn = instantiate(callback('finishScoringAndSpawn'));
+          const outcome = await instantiate(callback('handleReanalyze'))({
+            boardRun: { orchestratorNodeId: 'board', boardRunId: 'board-run' },
+          });
+          assert.strictEqual(outcome.status, 'completed');
+          assert.strictEqual(outcome.runId, expectedRunId);
+          assert.strictEqual(claimedRunId, expectedRunId);
+          assert.strictEqual(savedSnapshot.runId, expectedRunId);
+          assert.strictEqual(classifyJobBoardSourceAdmission(hub).kind, 'reuse-terminal');
+          assert.strictEqual(hub.data.savedJobsRescore, null);
+          assert.deepStrictEqual(jobSearchNextAnchor(hub.data, hub.id), history);
+        }
+      }
+    },
+  },
+  {
     name: 'savedJobCount / hubRetainsSavedJobs count only truthy entries of an array scoredJobs',
     run: async () => {
       assert.strictEqual(SAVED_JOBS_RESCORE_VERSION, 1);

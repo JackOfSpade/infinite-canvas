@@ -9586,7 +9586,8 @@ export default [
 
       assert(reanalysis.includes('const savedCandidatePool = savedPool.length > 0')
         && reanalysis.includes('dedupJobsAcrossSources([...savedPool, ...existingScoredJobs])')
-        && reanalysis.includes('runId: runData.jobRunId || null,')
+        && reanalysis.includes('const reanalysisRunId = runData.jobRunId || manualAiRunId;')
+        && reanalysis.includes('runId: reanalysisRunId,')
         && reanalysis.includes('if (preferenceResult.jobs.length === 0) {')
         && reanalysis.includes('const snapshotResult = await window.electronAPI.saveJobAnalysisSnapshot({')
         && reanalysis.includes('// The pool is persisted separately by the snapshot builder.')
