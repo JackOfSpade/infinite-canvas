@@ -266,6 +266,7 @@ export const BRIDGE_UI_COPY = Object.freeze({
       editor_timeout: 'ChatGPT’s message box never loaded',
       tab_open_failed: 'Chrome could not open a tab',
       chrome_unavailable: 'Chrome did not respond',
+      chrome_timeout: 'Chrome took too long to respond',
       insert_mismatch: 'the starter could not be typed into ChatGPT',
       chat_changed: 'the ChatGPT tab moved to another chat',
       starter_unavailable: 'the app could not prepare a starter for this worker',

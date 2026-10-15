@@ -229,8 +229,12 @@ export function registerHandoffBridgeUi({
   // Launch progress is shown in the dock and, for outcomes, written to the
   // serve ledger as reason codes only.
   const setLaunchProgress = (owner, progress) => {
+    const prior = launchProgress.get(owner);
     launchProgress.set(owner, progress);
     if (!['failed', 'retrying', 'presented'].includes(progress?.stage)) return;
+    // The launcher's own state callback repeats the failure runWorkerLaunch
+    // already recorded; write each outcome once.
+    if (prior?.stage === progress.stage && prior?.reason === progress.reason) return;
     try {
       const attempt = launchRetryCounts.get(owner) || 0;
       recordLaunch({
@@ -391,7 +395,7 @@ export function registerHandoffBridgeUi({
     if (!launched.ok) {
       setLaunchProgress(owner, { stage: 'failed', reason: launched.reason || 'chrome_unavailable' });
       if ((attachment?.status === 'ready' && launched.sendAttempted !== true)
-        || ['tab_open_failed', 'editor_timeout', 'chrome_unavailable', 'apple_events_js_off',
+        || ['tab_open_failed', 'editor_timeout', 'chrome_unavailable', 'chrome_timeout', 'apple_events_js_off',
         'attachment_invalid', 'attachment_draft_present', 'attachment_upload_failed', 'attachment_upload_timeout'].includes(launched.reason)) {
         await safeCall(controller, 'abandonWorkerStarter', { generation, workerOrdinal });
       }
@@ -489,7 +493,11 @@ export function registerHandoffBridgeUi({
         // A fresh tab, never the half-filled one: the failed tab may hold an
         // unsent starter or a stale menu.
         try { await launcher.close(owner); } catch { /* tab already gone */ }
-        launchAttempted.delete(attempt);
+        // Clear every attempt for this worker: its state may have moved from a
+        // restart to a first launch while the retry waited, which changes the
+        // attempt key. Leaving the new key behind made the retry launch nothing.
+        void attempt;
+        for (const prior of launchAttempted) if (prior.startsWith(`${owner}:`)) launchAttempted.delete(prior);
         if (launchProgress.get(owner)?.stage === 'retrying') launchProgress.delete(owner);
         scheduleAutoLaunch(currentStatus());
       }, LAUNCH_RETRY_DELAYS_MS[used]);
@@ -542,7 +550,9 @@ export function registerHandoffBridgeUi({
       if (!['available', 'ready'].includes(worker.state) && !restart) continue;
       const owner = workerOwner(pool.generation, worker.ordinal);
       const attempt = `${owner}:${restart ? `restart-${worker.restarts}` : 'first'}`;
-      if (launchAttempted.has(attempt) || launchInFlight.has(owner)) continue;
+      // A scheduled retry owns this worker until it fires: no immediate
+      // relaunch through a different attempt key.
+      if (launchAttempted.has(attempt) || launchInFlight.has(owner) || launchRetryTimers.has(owner)) continue;
       for (const prior of launchAttempted) if (prior.startsWith(`${owner}:`)) launchAttempted.delete(prior);
       launchAttempted.add(attempt);
       launchInFlight.add(owner);

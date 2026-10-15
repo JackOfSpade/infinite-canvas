@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { runInNewContext } from 'node:vm';
 import { createChatLauncher } from '../../electron/ipc/handoffBridge/chatLauncher.js';
 import { pickUserChromePid } from '../../electron/ipc/browser/appleEvents.js';
+import { buildWorkerStarterMessage } from '../../src/utils/handoffBridgeConfig.js';
 import { registerHandoffBridgeUi } from '../../electron/ipc/handoffBridge/ui.js';
 import { IPC_CHANNELS } from '../../electron/ipc/handoffBridge/contracts.js';
 import { isUiRestartContext } from '../../electron/ipc/handoffBridge/restartContext.js';
@@ -571,5 +572,65 @@ export default [
     assert.equal(pickUserChromePid(ps.split('\n').filter(line => !line.startsWith('60486')).join('\n')), null,
       'with only app-owned Chromes running there is no user Chrome to script');
     assert.equal(pickUserChromePid(`  512 ${app} --restore-last-session`), 512, 'ordinary user flags are fine');
+  } },
+  { name: 'chat launcher: our own starter text never reads as a ChatGPT usage limit (live page layout)', async run() {
+    const h = harness();
+    assert.equal((await h.launcher.launch({ owner: 'worker:1:1', starter })).ok, true);
+    await h.launcher.diagnose('worker:1:1', 'Infinite Canvas');
+    const script = h.calls.at(-1)?.args?.[2];
+    const realStarter = buildWorkerStarterMessage({ pluginName: 'Infinite Canvas', sessionCode: '2'.repeat(26), workerNumber: 1, workerCount: 1, resuming: true });
+    // Layout observed 2026-10-15: the agent marker's parent is ChatGPT's turn;
+    // its grandparent also holds "You said: <starter>".
+    const page = (assistantText, userText = realStarter) => {
+      const turn = { innerText: assistantText };
+      const marker = { parentElement: turn };
+      turn.parentElement = { innerText: `You said:\n${userText}\n${assistantText}` };
+      return JSON.parse(runInNewContext(script, { document: { querySelectorAll(selector) {
+        return selector === '[data-chatgpt-agent-turn-start]' ? [marker] : [];
+      } } }));
+    };
+    assert(/rate limit/i.test(realStarter), 'the starter really does mention rate limits');
+    assert.equal(page('Calling Infinite Canvas get_handoff').reason, 'none', 'the starter in the user turn is not read');
+    assert.equal(page('If I hit a rate limit I will back off and retry.').reason, 'none', 'a model talking about rate limits is not a limit');
+    assert.equal(page('Calling Infinite Canvas get_handoff', 'If you see "usage limit reached", stop.').reason, 'none',
+      'only ChatGPT\'s own turn is read, never the person\'s message');
+    assert.equal(page('You\'ve reached your usage limit for GPT-6. Try again tomorrow.').reason, 'usage_limit');
+    assert.equal(page('You\'ve hit the Pro limit. Try again after 4:00 PM.').reason, 'usage_limit');
+  } },
+  { name: 'chat launcher: a retry still relaunches when the worker state changes while it waits', async run() {
+    const pending = [];
+    let launches = 0;
+    const worker = { ordinal: 1, state: 'quiet', quietReason: 'fresh_context_required', restarts: 0 };
+    const snapshot = { autoLaunchChats: true, serving: 'live', config: { pluginName: 'infinite_canvas' },
+      chat: { pool: { active: true, generation: 12, workerCount: 1, workers: [worker] } } };
+    const ui = registerHandoffBridgeUi({
+      ipc: { handle() {}, removeHandler() {}, on() {}, removeListener() {} },
+      controller: {
+        snapshot: () => snapshot, subscribe: () => () => {},
+        // A restart moves the worker to 'available' (its starter was abandoned).
+        restartWorker: async () => { worker.state = 'available'; worker.quietReason = null; worker.restarts += 1; return { copied: true, sessionCode: '2'.repeat(26), generation: 12, workerOrdinal: 1, workerCount: 1 }; },
+        copyWorkerStarter: async () => ({ copied: true, sessionCode: '2'.repeat(26), generation: 12, workerOrdinal: 1, workerCount: 1 }),
+        abandonWorkerStarter: async () => true,
+      },
+      chatLauncher: {
+        launch: async () => { launches += 1; return { ok: false, reason: 'chrome_timeout' }; },
+        close: async () => true, owns: () => true, rekey: () => false,
+      },
+      timers: { setTimeout: (fn, ms) => { const handle = { fn, ms, unref() {} }; pending.push(handle); return handle; }, clearTimeout() {} },
+      getCanvasWindows: () => [],
+    });
+    const settle = () => new Promise(resolve => setTimeout(resolve, 5));
+    ui.publishStatus(snapshot);
+    await settle();
+    assert.equal(launches, 1, 'the restart launch ran once');
+    ui.publishStatus(snapshot);
+    await settle();
+    assert.equal(launches, 1, 'the changed state does not relaunch before the retry delay');
+    const retry = pending.find(handle => handle.ms === 15_000);
+    assert(retry, 'a retry is scheduled');
+    await retry.fn();
+    await settle();
+    assert.equal(launches, 2, 'the retry relaunches even though the attempt key changed');
+    ui.dispose();
   } },
 ];

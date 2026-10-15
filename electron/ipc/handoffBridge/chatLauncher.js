@@ -208,7 +208,10 @@ const SEND = `(() => {
 const EMPTY = `(() => JSON.stringify({empty: (document.querySelector('form [contenteditable="true"][role="textbox"]')?.innerText || '').trim() === ''}))()`;
 const DIAGNOSE = pluginName => `(() => {
   const agent = [...document.querySelectorAll('[data-chatgpt-agent-turn-start]')].at(-1);
-  const content = (agent?.parentElement?.parentElement?.innerText || '').slice(-4000);
+  // The marker's parent is ChatGPT's own turn. One level higher also holds
+  // the person's message, i.e. our starter, whose retry wording ("For a rate
+  // limit…") read as a usage limit and could restart a healthy chat.
+  const content = (agent?.parentElement?.innerText || '').slice(-4000);
   const lower = content.toLowerCase();
   const plugin = ${JSON.stringify(pluginName)}.toLowerCase();
   let reason = 'none';
@@ -223,7 +226,8 @@ const DIAGNOSE = pluginName => `(() => {
     });
   if (connectDialog) reason = 'reconnect_required';
   else if (/reconnect.{0,70}(?:infinite canvas|plugin)|connection has expired/i.test(content)) reason = 'reconnect_required';
-  else if (/(?:usage|daily|weekly|rate|pro)\\s+limit|limit reached|you.ve reached.{0,60}limit|try again tomorrow/i.test(content)) reason = 'usage_limit';
+  // ChatGPT's own limit notices, not a model merely mentioning rate limits.
+  else if (/usage limit|limit reached|you.ve (?:reached|hit) (?:your|the|a) .{0,40}limit|try again (?:tomorrow|after|in \\d)/i.test(content)) reason = 'usage_limit';
   else if ((lower.includes(plugin) || lower.includes('plugin'))
     && /not connected|not available|cannot find|can't find|don.t have access|not installed|unknown tool|don.t have that tool/i.test(content)) reason = 'plugin_missing';
   else if (/can.t help with this request|violates (?:our )?usage policies|blocked for safety/i.test(content)) reason = 'safety_block';
@@ -241,9 +245,11 @@ export function createChatLauncher({ run = runUserChromeScript, delay = sleep, o
   const localDay = () => new Date(now()).toDateString();
   const state = (owner, stage, reason = null) => { try { onState(owner, stage, reason); } catch { /* status is optional */ } };
   const safeRun = async (script, args) => {
-    try { return await run(script, args); }
+    // Opening a tab can take a while when Chrome is busy or just restarted.
+    try { return await run(script, args, script === OPEN ? { timeout: 30_000 } : undefined); }
     catch (error) {
       if (isAppleEventsJsDisabledError(error?.stderr || error?.message)) throw Object.assign(new Error('apple_events_js_off'), { code: 'apple_events_js_off' });
+      if (error?.killed === true || error?.signal === 'SIGTERM') throw Object.assign(new Error('chrome_timeout'), { code: 'chrome_timeout' });
       throw Object.assign(new Error('chrome_unavailable'), { code: 'chrome_unavailable' });
     }
   };
