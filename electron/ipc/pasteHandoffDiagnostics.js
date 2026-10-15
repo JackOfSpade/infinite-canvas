@@ -33,7 +33,14 @@ const CHECK_FINGERPRINT_HEX_CHARS = 8;
 const CHECK_FINGERPRINT_RE = new RegExp(`^[0-9a-f]{${CHECK_FINGERPRINT_HEX_CHARS}}$`, 'u');
 const REPORT_LIMIT = 20;
 
-const SAFE_STAGES = new Set(['evidence-plan', 'resume', 'cover-letter', 'review',
+// Every stage a paste handoff can be answered at — localAiApplication.js's
+// PASTE_APPLICATION_STAGES, restated rather than imported (this file carries
+// zero imports, see its header). A stage missing here prints as `unknown`,
+// which is how the requirements/career-match rounds of every current-protocol
+// job read on 2026-10-15; a cross-file test now pins the two lists together.
+const SAFE_STAGES = new Set(['requirements', 'requirements-audit', 'requirements-adjudication',
+  'requirements-audit-disagreement', 'career-match', 'evidence-plan', 'resume', 'cover-letter',
+  'requirement-disposition', 'review',
   'write', 'convert', 'verify-correction', 'fit-correction', 'pick', 'fact-check', 'fact-correction', 'fact-recheck', 'write-verify-human-stop']);
 const SAFE_OUTCOMES = new Set(['accepted', 'rejected']);
 const SAFE_REASONS = new Set([

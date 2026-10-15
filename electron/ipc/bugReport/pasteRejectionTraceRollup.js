@@ -62,7 +62,11 @@ const MAX_TRACE_FILE_BYTES = 512_000;
 // same reason.
 const PASTE_REJECTION_TRACE_FILE = 'Paste Rejections.json';
 const HANDOFF_RECEIPTS_DIR = 'handoff-receipts';
-const PASTE_APPLICATION_STAGES = new Set(['evidence-plan', 'resume', 'cover-letter', 'review',
+// localAiApplication.js's own PASTE_APPLICATION_STAGES, restated for the same
+// reason; a row from a stage missing here is dropped as untrusted.
+const PASTE_APPLICATION_STAGES = new Set(['requirements', 'requirements-audit', 'requirements-adjudication',
+  'requirements-audit-disagreement', 'career-match', 'evidence-plan', 'resume', 'cover-letter',
+  'requirement-disposition', 'review',
   'write', 'convert', 'verify-correction', 'fit-correction', 'pick', 'fact-check', 'fact-correction', 'fact-recheck', 'write-verify-human-stop']);
 const PASTE_REJECTION_REASONS = new Set([
   'STALE_HANDOFF_ECHO',
@@ -376,8 +380,15 @@ export function buildPasteRejectionTraceMarkdown(canvasFilePath, localApplicatio
       lines.push(`- ${jobLabel(item)}: not retained (no rejection trace on disk — either no paste round for this job was ever rejected, or the job folder is gone).`);
       continue;
     }
-    if (trace.state === 'unreadable' || trace.rows.length === 0) {
+    if (trace.state === 'unreadable') {
       lines.push(`- ${jobLabel(item)}: not retained (rejection trace file could not be read as a trusted, well-formed record).`);
+      continue;
+    }
+    // A trusted, well-formed record with no rows is a fact, not a read
+    // failure: a completed save whose terminal receipt carries `rows: []`
+    // said "unreadable" on 2026-10-15 for a job that was simply never traced.
+    if (trace.rows.length === 0) {
+      lines.push(`- ${jobLabel(item)}: no rejected round recorded${trace.source === 'terminal-receipt' ? ' (terminal-save receipt)' : ''}.`);
       continue;
     }
     const rows = trace.rows;

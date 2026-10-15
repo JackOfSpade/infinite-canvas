@@ -4,7 +4,8 @@ import { getRecentLogs } from '../../electron/logger.js';
 import { assert, assertCandidateDashPunctuation, assertSourceQuoteLinksFinalText, pasteAttributionScopeErrors, sanitizeQualityReview, buildCoverLetterDocument, buildLocalGenerationAuditArtifact, buildResumeDocument, careerDataRoleLocation, sanitizeDocumentMainHtml, checkAnchorRelevance, checkDirectWelcomeClosing, checkPriorEmployerOpening, checkResumeBulletLength, checkResumeRoleBulletBudget, evaluateResumeProseChecks, extractResumeEvidence, inspectApplicationExport, renderStructuredApplicationResume, resumeProjectProvenanceFailures, resumeRoleBlockSample, resumeRoleLocationFailures, RESUME_ROLE_BULLET_CEILING, ROLE_BULLET_EVIDENCE_EXCLUSIVITY_RULE, STRUCTURED_RESUME_SCHEMA_VERSION, validateStructuredApplicationResume, webFontFacesReadyExpression, canRegenerateLocalApplication, canSaveImportedLocalApplication, discardLocalApplicationJob, discoverLocalApplicationJobs, ensureDirectoryWithinRoot, fs, getApplicationTelemetry, getLocalApplicationHandoff, ipcMain, isPendingApplicationWorkspaceSaveInFlight, JSDOM, openAuthorityLedgerStore, os, path, PDFLib, LOCAL_AI_APPLICATION_VERSION, LOCAL_AI_CARD_POLL_IDLE_STATUSES, LOCAL_AI_FALLBACK_IDLE_STATUSES, LOCAL_AI_JOB_INTEGRITY_ERROR_CODE, brokenLocalAiJobDriveState, jobIntegrityFailureMessage, collectNodesDeep, deepUpdateNode, importLocalApplicationJob, isJobCardMounted, localApplicationStatus,   queueLocalApplicationJob, queuedLocalApplicationSettlement, readRegisteredApplicationArtifact, registerJobApplicationHandlers, registerLocalAiApplicationHandlers, registerMountedJobCard, registerPendingApplicationWorkspace, replacedLocalApplicationForCleanup, resolveLocalOutputBundleRoot, selectFallbackLocalAiJobs, selectOrphanedLocalAiJobs, submitLocalApplicationHandoff, unregisterMountedJobCard, validateLocalApplicationResult, withLocalAiJobPruneClaim, withUnregisteredApplicationWorkspacePruneClaim, __setAuthorityLedgerStoreFaultHookForTests } from '../test-dependencies.js';
 import { localAiSkillsCoverageTelemetry, subscribeLocalApplicationDiscards, APPLICATION_QUALITY_CHECKLIST_VERSION, APPLICATION_QUALITY_CRITERIA, COVER_LETTER_SECONDARY_NARRATIVE_ROLES, LOCAL_AI_GENERATION_AUDIT_VERSION, MAX_CORRECTION_STAGE_PROMPT_SHARE, MAX_SOURCE_GROUNDING_QUOTE_CHARS, MIN_SHARED_SOURCE_TERMS, __assertAuthorityStateGraphForTests, __authorityReviewConvergenceValidationForTests, __currentAuthorityFinalResumeArtifactErrorsForTests, __relinkListingQuoteToExactSliceForTests, __selectedSourceRolesForTests, __snapshotCareerSkillEvidenceForTests, __localAiApplicationOutputTelemetryForTests, __localAiCoverLetterTelemetryForTests, __setAuthorityLedgerPersistenceFaultHookForTests, __setLegacyAuthorityLedgerAccessHookForTests, __setLocalAiRenderPdfForTests, _resetPasteCorrectionsForTests, _resetPasteRejectionStreakForTests, boundedRejectionError, localAiHandoffEvent, pasteCorrectionPrompt, pasteRejectionCheckIds, pasteRejectionChangeDocuments, pasteRejectionReason, stageLocalApplicationWorkspaceArtifacts } from '../../electron/ipc/localAiApplication.js';
 import { APPLICATION_PDF_MISMATCH_IS_DETERMINISTIC, APPLICATION_PDF_PAGINATION_GEOMETRY_REVISION, APPLICATION_PDF_RECONCILE_REVISION, APPLICATION_PDF_VARIANT_REVISION, checkResumeBulletOpeningVariety } from '../../electron/ipc/jobApplication.js';
-import { __reserveNextLocalApplicationJobIdForAcceptanceHarness, queueLocalApplicationJob as queueCurrentLocalApplicationJob } from '../../electron/ipc/localAiApplication.js';
+import { __recordWriteVerifyRoundDiagnosticsForTests, __reserveNextLocalApplicationJobIdForAcceptanceHarness, PASTE_APPLICATION_STAGES, queueLocalApplicationJob as queueCurrentLocalApplicationJob } from '../../electron/ipc/localAiApplication.js';
+import { buildPasteRejectionTraceMarkdown } from '../../electron/ipc/bugReport/pasteRejectionTraceRollup.js';
 import { checkEndedRoleCurrentEmployment } from '../../electron/ipc/coverLetterChecks.js';
 import { inspectLocalAiHandoff, waitForLocalAiHandoff } from '../../local_ai/wait-for-handoff.mjs';
 import { _resetPasteHandoffDiagnostics, buildPasteHandoffDiagnosticsMarkdown, getPasteHandoffDiagnosticsSnapshot, recordPasteHandoffDiagnostic } from '../../electron/ipc/pasteHandoffDiagnostics.js';
@@ -310,6 +311,62 @@ export const currentAuthorityFlowKit = Object.freeze({
 });
 
 export default [
+  {
+    name: 'every paste application stage prints by name in the lifecycle receipt, never as unknown',
+    run: () => {
+      _resetPasteHandoffDiagnostics();
+      try {
+        for (const stage of PASTE_APPLICATION_STAGES) recordPasteHandoffDiagnostic({ stage, outcome: 'accepted' });
+        const stages = getPasteHandoffDiagnosticsSnapshot().receipts.map(item => item.stage);
+        assert(stages.length === PASTE_APPLICATION_STAGES.length && stages.every((stage, index) => stage === PASTE_APPLICATION_STAGES[index]),
+          `pasteHandoffDiagnostics SAFE_STAGES must cover PASTE_APPLICATION_STAGES; got ${stages.join(', ')}`);
+        return { stages: stages.length };
+      } finally {
+        _resetPasteHandoffDiagnostics();
+      }
+    },
+  },
+  {
+    name: 'a v2 write-verify round records its lifecycle receipt and a rejected round leaves a durable trace row the report renders',
+    run: async () => {
+      const { root: canvasRoot, canvasFilePath } = await createCanvasProject();
+      const jobId = '58585858-5858-4585-8585-585858585858';
+      const jobsRoot = path.join(canvasRoot, '.local-ai', 'jobs');
+      const dir = path.join(jobsRoot, jobId);
+      await fs.promises.mkdir(dir, { recursive: true });
+      _resetPasteHandoffDiagnostics();
+      try {
+        await __recordWriteVerifyRoundDiagnosticsForTests({ root: jobsRoot, dir, jobId,
+          state: { stage: 'convert', revision: 9, logCount: 9 }, rawText: '{"x":1}',
+          errors: ['unit-source-grounding: Résumé bullet "b1": PRIVATE_DETAIL_MUST_NOT_PERSIST'] });
+        await __recordWriteVerifyRoundDiagnosticsForTests({ root: jobsRoot, dir, jobId,
+          state: { stage: 'fit-correction', revision: 10, logCount: 10 }, rawText: '{"x":2}',
+          errors: ['résumé is 2 pages (target: 1)'], checkIdsOverride: ['measured-one-page-fit'] });
+        await __recordWriteVerifyRoundDiagnosticsForTests({ root: jobsRoot, dir, jobId,
+          state: { stage: 'verify-correction', revision: 11, logCount: 11 }, rawText: '{"x":3}', errors: [] });
+        const receipts = getPasteHandoffDiagnosticsSnapshot().receipts;
+        assert(receipts.length === 3
+          && receipts[0].stage === 'convert' && receipts[0].outcome === 'rejected' && receipts[0].reason === 'VALIDATION_FAILED'
+          && receipts[0].checkIds?.join(',') === 'unit-source-grounding' && receipts[0].responseChars === 7
+          && receipts[1].stage === 'fit-correction' && receipts[1].checkIds?.join(',') === 'measured-one-page-fit'
+          && receipts[2].stage === 'verify-correction' && receipts[2].outcome === 'accepted',
+        `v2 rounds must reach the lifecycle receipts, got ${JSON.stringify(receipts)}`);
+        const rows = JSON.parse(await fs.promises.readFile(path.join(dir, 'Paste Rejections.json'), 'utf8'));
+        assert(rows.length === 2 && rows[0].stage === 'convert' && rows[0].jobId === jobId
+          && rows[0].checkIds.join(',') === 'unit-source-grounding' && rows[1].stage === 'fit-correction'
+          && !JSON.stringify(rows).includes('PRIVATE_DETAIL_MUST_NOT_PERSIST'),
+        `only rejected v2 rounds append metadata-only trace rows, got ${JSON.stringify(rows)}`);
+        const markdown = buildPasteRejectionTraceMarkdown(canvasFilePath, [{ nodeId: 'card',
+          localApplication: { id: jobId, canvasFilePath, status: 'queued' } }]);
+        assert(markdown.includes('2 rejection(s) retained') && markdown.includes('stage `convert` · VALIDATION_FAILED · revision 9'),
+          `the bug report renders the v2 trace rows, got ${markdown}`);
+        return { receipts: receipts.length, rows: rows.length };
+      } finally {
+        _resetPasteHandoffDiagnostics();
+        await fs.promises.rm(canvasRoot, { recursive: true, force: true });
+      }
+    },
+  },
   {
     name: 'older application protocol is reported as a typed regenerate state without advancing its handoff',
     run: async () => {

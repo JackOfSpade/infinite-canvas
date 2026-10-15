@@ -251,10 +251,17 @@ export function registerHandoffBridgeUi({
     if (latestStatus) publishStatus(latestStatus);
   } }) : { launch: async () => ({ ok: false, reason: 'chrome_unavailable' }), close: async () => false, owns: () => false, rekey: () => false });
   const workerOwner = (generation, ordinal) => `worker:${generation}:${ordinal}`;
+  // Career compile (career data -> approved snapshot) gets the same maximum
+  // effort as application generation: it runs once per exact file and every
+  // later application is written from its output.
+  const careerCompilePending = snapshot => (snapshot?.queue?.scoring?.tasks || [])
+    .some(item => (item?.task === 'resume-parse' || String(item?.task || '').startsWith('career-profile-'))
+      && (Number(item?.pending) || 0) > 0);
   const applicationWorkPending = snapshot => {
     const applications = snapshot?.queue?.applications;
     return (applications?.ready || 0) + (applications?.working || 0) > 0
-      || (snapshot?.queue?.jobs || []).some(job => ['awaiting', 'unread', 'host'].includes(job?.phase));
+      || (snapshot?.queue?.jobs || []).some(job => ['awaiting', 'unread', 'host'].includes(job?.phase))
+      || careerCompilePending(snapshot);
   };
   const withLaunchProgress = snapshot => {
     const pool = snapshot?.chat?.pool;

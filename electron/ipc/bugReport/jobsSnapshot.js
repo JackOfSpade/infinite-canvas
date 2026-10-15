@@ -8760,7 +8760,10 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
       const effectiveIndex = indexed.length ? indexed : required;
       const effectiveAbsent = indexed.length || Array.isArray(cov.indexAbsent) ? indexAbsent : absent;
       const absentSuffix = effectiveAbsent.length
-        ? `⚠️ absent from the skills block: ${effectiveAbsent.join(', ')}`
+        // Both skills-completeness rules are advisory (resumeCheckDispositions.js:
+        // TASTE, never a gate), so say so: an unlabelled ⚠️ read as a gate
+        // that had let a defect ship.
+        ? `ℹ️ advisory — absent from the skills block (taste rule, not a gate): ${effectiveAbsent.join(', ')}`
         : 'none absent';
       // A block with zero rows cannot be told apart from "the posting named
       // nothing" by the counts above, so state the one observation that does:

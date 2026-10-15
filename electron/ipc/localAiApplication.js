@@ -252,7 +252,7 @@ const MAX_PASTE_REJECTION_TRACE_ROWS = 200;
 // against — that guard exists for a corrupted or tampered file, not this
 // one's normal ceiling.
 const MAX_PASTE_REJECTION_TRACE_BYTES = 512_000;
-const PASTE_APPLICATION_STAGES = ['requirements', 'requirements-audit', 'requirements-adjudication', 'requirements-audit-disagreement', 'career-match', 'evidence-plan', 'resume', 'cover-letter', 'requirement-disposition', 'review', ...WRITE_VERIFY_STAGES];
+export const PASTE_APPLICATION_STAGES = ['requirements', 'requirements-audit', 'requirements-adjudication', 'requirements-audit-disagreement', 'career-match', 'evidence-plan', 'resume', 'cover-letter', 'requirement-disposition', 'review', ...WRITE_VERIFY_STAGES];
 const APPLICATION_AUTHORITY_LEDGER_FILE = 'application-authority-ledger.json';
 const APPLICATION_AUTHORITY_LEDGER_VERSION = 1;
 // Historical `legacy-evidence-plan.v1` jobs retain their published aggregate
@@ -7446,7 +7446,43 @@ function missingPasteReviewDeltaEntries(delta, required, { currentAuthority = fa
   return missing;
 }
 
-async function submitWriteVerifyHandoff({ jobId, dir, manifest, input, frozen, state, response }) {
+// Every v2 round leaves the same two diagnostics a v1 paste round does: a
+// process-local lifecycle receipt and, for a rejected reply, a durable row in
+// the job's Paste Rejections.json (which the terminal-save receipt projects).
+// Before this, a v2 job's 5 rejected convert rounds on 2026-10-15 appeared in
+// neither, and the report read the empty trace as "could not be read". The
+// v1 escalation streak is deliberately not bumped: v2 correction prompts
+// never read it.
+async function recordWriteVerifyRoundDiagnostics({ root, dir, jobId, state, rawText, errors, checkIdsOverride = null }) {
+  const responseChars = rawText.length;
+  if (!errors.length) {
+    recordPasteHandoffDiagnostic({ stage: state.stage, outcome: 'accepted', responseChars,
+      revision: state.revision, logCount: state.logCount });
+    return;
+  }
+  const named = pasteRejectionCheckIds(errors);
+  const checkIds = checkIdsOverride || named.checkIds;
+  const checkFingerprints = checkIdsOverride ? {} : named.checkFingerprints;
+  const uncodedErrors = checkIdsOverride ? 0 : named.uncodedErrors;
+  const reason = pasteRejectionReason({ envelopeMismatch: false, validationErrors: errors, checkIds });
+  recordPasteHandoffDiagnostic({ stage: state.stage, outcome: 'rejected', reason, responseChars,
+    revision: state.revision, logCount: state.logCount,
+    errorCount: errors.length, checkIds, uncodedErrors, checkFingerprints });
+  try {
+    await appendPasteRejectionTrace(root, dir, {
+      jobId, revision: state.revision, stage: state.stage,
+      reason, checkIds, errorCount: errors.length, uncodedErrors, checkFingerprints,
+    });
+  } catch (logError) {
+    logger.warn(`[LocalAI] failed to append a rejection row to ${PASTE_REJECTION_TRACE_FILE} for job ${jobId}: ${logError?.message || logError}`);
+  }
+}
+
+export function __recordWriteVerifyRoundDiagnosticsForTests(args) {
+  return recordWriteVerifyRoundDiagnostics(args);
+}
+
+async function submitWriteVerifyHandoff({ root, jobId, dir, manifest, input, frozen, state, response }) {
   const outgoingStage = state.stage;
   const work = structuredClone(state.writeVerify);
   const candidate = work.candidates[work.ordinal];
@@ -7601,6 +7637,8 @@ async function submitWriteVerifyHandoff({ jobId, dir, manifest, input, frozen, s
     await atomicJson(rejectionPaths.working, rejectionEvidence);
     await atomicJson(rejectionPaths.retained, rejectionEvidence);
   }
+  await recordWriteVerifyRoundDiagnostics({ root, dir, jobId, state, rawText, errors,
+    checkIdsOverride: fitRejected ? ['measured-one-page-fit'] : null });
   if (errors.length && !['write', 'convert', 'verify-correction', 'fit-correction', 'fact-correction'].includes(outgoingStage)) {
     return { accepted: false, validationErrors: errors, handoff: await writeVerifyHandoffRecord({ jobId, input, state, corrections: errors }) };
   }
@@ -7680,7 +7718,7 @@ export async function submitLocalApplicationHandoff({ jobId, canvasFilePath, han
       throw new Error('That handoff code is stale. Copy the current prompt and try again.');
     }
     if (isWriteVerifyJob(input) && WRITE_VERIFY_STAGES.includes(state.stage)) {
-      return submitWriteVerifyHandoff({ jobId, dir, manifest, input, frozen, state, response });
+      return submitWriteVerifyHandoff({ root, jobId, dir, manifest, input, frozen, state, response });
     }
     let parsed;
     try {
@@ -16812,6 +16850,9 @@ async function importLocalApplicationJobAttempt({ jobId, canvasFilePath, senderI
  * a regular directory below the canonical jobs root and must have matching
  * manifest + input ownership before it is returned.
  */
+// Job folder names already reported as incomplete this process (bounded).
+const incompleteDiscoveredJobsLogged = new Set();
+
 export async function discoverLocalApplicationJobs(canvasFilePath) {
   const canvas = await resolveCanvasProject(canvasFilePath);
   const root = path.resolve(localJobsRoot(canvas.canvasRoot));
@@ -16861,6 +16902,20 @@ export async function discoverLocalApplicationJobs(canvasFilePath) {
       // A malformed or foreign folder must never gain recovery ownership. It
       // is left untouched for explicit diagnostics/recovery, while healthy
       // app-owned siblings continue to be discoverable.
+      if (error?.code === 'ENOENT') {
+        // A folder whose manifest/input does not exist yet is a job still
+        // being queued (or one mid-removal), not an untrusted one: on
+        // 2026-10-15 every 2.5 s discovery poll during one queue logged this
+        // as an "untrusted" WARN. Still skipped, but said once, as what it is.
+        if (!incompleteDiscoveredJobsLogged.has(entry.name)) {
+          incompleteDiscoveredJobsLogged.add(entry.name);
+          while (incompleteDiscoveredJobsLogged.size > 64) {
+            incompleteDiscoveredJobsLogged.delete(incompleteDiscoveredJobsLogged.values().next().value);
+          }
+          logger.info(`[LocalAI] Skipped incomplete job folder ${entry.name} (manifest or input not written yet)`);
+        }
+        continue;
+      }
       logger.warn(`[LocalAI] Ignored untrusted discovered job ${entry.name}: ${error?.message || error}`);
     }
   }

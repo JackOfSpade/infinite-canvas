@@ -313,6 +313,28 @@ export default [
     assert.deepEqual(closed, ['worker:9:1']);
     ui.dispose();
   } },
+  { name: 'chat launcher: career compile work launches at application (Pro) effort; other push work does not', async run() {
+    for (const [task, expected] of [['career-profile-audit-skills', true], ['resume-parse', true], ['job-scoring', false]]) {
+      const handlers = new Map();
+      const seen = [];
+      const snapshot = { autoLaunchChats: true, serving: 'live', config: { pluginName: 'Infinite Canvas' },
+        queue: { applications: { ready: 0, working: 0 }, scoring: { pending: 1, tasks: [{ task, pending: 1 }] } },
+        chat: { pool: { active: true, generation: 16, workerCount: 1, workers: [{ ordinal: 1, state: 'available', restarts: 0 }] } } };
+      const ui = registerHandoffBridgeUi({
+        ipc: { handle: (key, value) => handlers.set(key, value), removeHandler: key => handlers.delete(key), on() {}, removeListener() {} },
+        controller: { snapshot: () => snapshot, subscribe: () => () => {},
+          copyWorkerStarter: async () => ({ copied: true, sessionCode: '2'.repeat(26), workerCount: 1 }) },
+        chatLauncher: { launch: async args => { seen.push(args.application); return { ok: true }; }, close: async () => true,
+          diagnose: async () => ({ reason: 'none' }), owns: () => true, observation: () => null },
+        getCanvasWindows: () => [], launchPresentationTimeoutMs: 8, launchDiagnosisIntervalMs: 1,
+      });
+      ui.publishStatus(snapshot);
+      await new Promise(resolve => setTimeout(resolve, 40));
+      assert(seen.length >= 1, `${task}: a worker launch happened`);
+      assert.equal(seen[0], expected, `${task}: application effort flag`);
+      ui.dispose();
+    }
+  } },
   { name: 'chat launcher: usage limit replaces an unpresented worker at the next effort', async run() {
     const handlers = new Map();
     const calls = [];

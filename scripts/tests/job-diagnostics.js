@@ -276,6 +276,37 @@ export default [
     },
   },
   {
+    name: 'a well-formed empty rejection receipt reads as no rejection, and requirements-stage rows are kept',
+    run: () => {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ic-paste-rejection-empty-'));
+      const canvas = path.join(dir, 'canvas.canvas');
+      const emptyJobId = '59595959-5959-4595-8595-595959595959';
+      const reqJobId = '5a5a5a5a-5a5a-45a5-85a5-5a5a5a5a5a5a';
+      const receiptDir = path.join(dir, '.local-ai', 'handoff-receipts');
+      fs.mkdirSync(receiptDir, { recursive: true });
+      fs.writeFileSync(path.join(receiptDir, `${emptyJobId}.json`), JSON.stringify({
+        version: 2, jobId: emptyJobId, status: 'imported', canvasFilePath: canvas, pasteRejectionTrace: { version: 1, rows: [] } }));
+      const reqDir = path.join(dir, '.local-ai', 'jobs', reqJobId);
+      fs.mkdirSync(reqDir, { recursive: true });
+      fs.writeFileSync(path.join(reqDir, 'Paste Rejections.json'), JSON.stringify([{
+        at: '2026-10-15T06:51:00.000Z', stage: 'requirements-audit', reason: 'VALIDATION_FAILED', revision: 4, checkIds: ['redundancy'] }]));
+      try {
+        const markdown = buildPasteRejectionTraceMarkdown(canvas, [
+          { nodeId: 'a', localApplication: { id: emptyJobId, canvasFilePath: canvas, status: 'saved' } },
+          { nodeId: 'b', localApplication: { id: reqJobId, canvasFilePath: canvas, status: 'queued' } },
+        ]);
+        assert(markdown.includes('no rejected round recorded (terminal-save receipt)')
+          && !markdown.includes('could not be read'),
+        `an empty but trusted receipt must not read as unreadable, got: ${markdown}`);
+        assert(markdown.includes('stage `requirements-audit` · VALIDATION_FAILED · revision 4'),
+          `a requirements-stage rejection row must render, got: ${markdown}`);
+        return { emptyReceipt: true };
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  },
+  {
     name: 'the saved Local-AI rejection receipt never follows a symlinked receipt directory',
     run: () => {
       const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ic-paste-rejection-receipt-link-'));
@@ -15990,7 +16021,7 @@ export default [
         assert(markupIndex !== -1, 'report must include the résumé markup line');
         assert(coverageIndex === markupIndex + 1,
           'résumé skills block line must appear immediately after the résumé markup line');
-        assert(lines[coverageIndex] === '- Résumé skills block: 3 group(s) · 9 item(s) · prioritized career-attested index: 3 name(s) (3 posting-named) · ⚠️ absent from the skills block: Python, TypeScript',
+        assert(lines[coverageIndex] === '- Résumé skills block: 3 group(s) · 9 item(s) · prioritized career-attested index: 3 name(s) (3 posting-named) · ℹ️ advisory — absent from the skills block (taste rule, not a gate): Python, TypeScript',
           `unexpected skills coverage line: ${lines[coverageIndex]}`);
       } finally {
         recordApplicationTelemetry(prior);
