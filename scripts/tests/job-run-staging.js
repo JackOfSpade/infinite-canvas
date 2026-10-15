@@ -3449,7 +3449,7 @@ export default [
       const search = await fs.promises.readFile(path.resolve('src/nodes/JobSearchNode.jsx'), 'utf8');
       // Clear career files: the canonical unlock. Must ship the lock-clearing
       // fields in the SAME updateGlobal patch as the rest of the career wipe.
-      const clearStart = search.indexOf('const handleClearCareerFiles = useCallback(async (e) => {');
+      const clearStart = search.indexOf("const handleClearCareerFiles = useCallback(async (e, requestedMode = 'all') => {");
       const clearEnd = search.indexOf('\n  }, [', clearStart);
       assert(clearStart >= 0 && clearEnd > clearStart, 'handleClearCareerFiles must exist');
       const clearBody = search.slice(clearStart, clearEnd);
@@ -3755,7 +3755,16 @@ export default [
       const doneRerunButton = button(done, 'onClick={onRerun}');
       assert(doneRerunButton.includes('disabled={platformsVerifying}') && !doneRerunButton.includes('settingsFrozen'),
       'JobSearchDoneState.jsx Re-run Search button must disable only on platformsVerifying, never on settingsFrozen');
-      const doneClearButton = button(done, 'onClick={onClearCareerFiles}');
+      // The clears are two-step confirm buttons: bound the self-closing element.
+      const twoStep = (source, anchor) => {
+        const anchorIdx = source.indexOf(anchor);
+        assert(anchorIdx !== -1, `anchor not found in source: ${anchor}`);
+        const openIdx = source.lastIndexOf('<TwoStepConfirmButton', anchorIdx);
+        const closeIdx = source.indexOf('/>', anchorIdx);
+        assert(openIdx !== -1 && closeIdx !== -1, `could not bound a <TwoStepConfirmButton /> element around anchor: ${anchor}`);
+        return source.slice(openIdx, closeIdx + 2);
+      };
+      const doneClearButton = twoStep(done, 'onConfirm={onClearCareerFiles}');
       assert(!doneClearButton.includes('disabled'),
       'JobSearchDoneState.jsx Clear career data button must carry no disabled prop at all (settingsFrozen or otherwise)');
 
@@ -3770,10 +3779,10 @@ export default [
       'JobSearchNode.jsx Re-run Search button must carry no disabled prop at all (settingsFrozen or otherwise) — it is gated purely by conditional rendering');
       assert(search.includes('{hasRunnableCareerInput && !controlsLocked && !boardRecoveryOwnsActions && !resumeOffer?.incomplete && (\n                    <button'),
       'JobSearchNode.jsx Re-run Search button must be gated on !controlsLocked and the absence of an incomplete checkpoint (not settingsFrozen) via conditional rendering, not a disabled prop');
-      const searchClearButton = button(search, 'handleClearCareerFiles(e)');
+      const searchClearButton = twoStep(search, 'onConfirm={handleClearCareerFiles}');
       assert(!searchClearButton.includes('disabled'),
       'JobSearchNode.jsx Clear career data button must carry no disabled prop at all (settingsFrozen or otherwise) — it is gated purely by conditional rendering');
-      assert(search.includes('{!controlsLocked && !activeBoardRecoveryOwnerKey && (\n                    <button'),
+      assert(search.includes('{!controlsLocked && !activeBoardRecoveryOwnerKey && (\n                    <TwoStepConfirmButton'),
       'JobSearchNode.jsx Clear career data button must be gated on !controlsLocked (not settingsFrozen) via conditional rendering, not a disabled prop');
 
       return { actionsStayLive: true };

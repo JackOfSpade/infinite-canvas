@@ -5704,7 +5704,7 @@ export default [
       assert(emptyState.includes('inputDropsBlocked && hasCareerIdentity')
         && emptyState.includes('Re-scan with these files, or clear them to search with different ones')
         && emptyState.includes('Clear career files')
-        && emptyState.includes('handleClearCareerFiles(e);'),
+        && emptyState.includes('onConfirm={handleClearCareerFiles}'),
       'a hub holding career files must offer the clear action, and a hub holding none must not claim files are retained');
       // Both empty-state branches hide their actions while controlsLocked, so both
       // must say so instead of naming buttons that aren't rendered or inviting a
@@ -5803,15 +5803,17 @@ export default [
       // The hub rests at 'done' after every successful run, so the clear-data
       // action has to be reachable from there too — otherwise changing career
       // files costs a full Re-run + Reset just to reach the empty state.
-      assert((source.match(/onClearCareerFiles=\{activeBoardRecoveryOwnerKey \? null : handleClearCareerFiles\}/g) || []).length >= 2,
+      // The done state's Clear Career Data keeps saved jobs (handleClearCareerData);
+      // the paused state's is the full clear (handleClearCareerFiles).
+      assert((source.match(/onClearCareerFiles=\{activeBoardRecoveryOwnerKey \? null : handleClearCareer(?:Files|Data)\}/g) || []).length >= 2,
         'the done and paused states retain the clear action after a successful run, except while a durable Board recovery owns the module and would reject it');
       const doneState = fs.readFileSync(path.resolve('src/nodes/jobsearch/JobSearchDoneState.jsx'), 'utf8');
-      const doneClearStart = doneState.indexOf('{!locked && onClearCareerFiles && (');
-      const doneClearEnd = doneState.indexOf('</button>', doneClearStart);
-      const doneClearButton = doneState.slice(doneClearStart, doneClearEnd + '</button>'.length);
+      const doneClearStart = doneState.indexOf('{onClearCareerFiles && (!careerCleared || careerCompileFailed) && (');
+      const doneClearEnd = doneState.indexOf('/>', doneClearStart);
+      const doneClearButton = doneState.slice(doneClearStart, doneClearEnd + '/>'.length);
       assert(doneClearStart >= 0 && doneClearEnd > doneClearStart
-        && doneClearButton.includes('onClick={onClearCareerFiles}')
-        && doneClearButton.includes('Clear career data'),
+        && doneClearButton.includes('onConfirm={onClearCareerFiles}')
+        && doneClearButton.includes('label="Clear Career Data"'),
       'every idle completed hub must expose a visible Clear career data button wired to the existing clear handler; recovery can suppress it by omitting the callback');
       assert(doneState.includes('formatCompletionTimestamp(lastCompletedRunAt)'),
         'done-state and empty-state completion dates must share the same strict timestamp validator');

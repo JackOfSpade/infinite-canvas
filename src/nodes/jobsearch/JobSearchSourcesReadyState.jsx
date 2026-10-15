@@ -1,5 +1,6 @@
 import React from 'react';
 import { ShieldAlert, FastForward, Play, Square } from 'lucide-react';
+import { TwoStepConfirmButton } from './TwoStepConfirmButton';
 
 /**
  * JobSearchSourcesReadyState — paused-pipeline UI rendered when the hub's
@@ -112,15 +113,14 @@ export function JobSearchSourcesReadyState({
         </button>
       )}
       {!locked && onClearCareerFiles && (
-        <button
-          type="button"
-          onClick={onClearCareerFiles}
-          onPointerDown={(e) => e.stopPropagation()}
-          className="nodrag mt-1 w-full px-2 py-1.5 rounded-full bg-white/5 text-white/45 hover:bg-white/10 hover:text-white/70 text-[11px] font-medium transition-colors border border-white/10"
+        <TwoStepConfirmButton
+          label="Clear Career Data"
+          confirmLabel="Click again to clear career data"
+          onConfirm={onClearCareerFiles}
+          className="mt-1 w-full px-2 py-1.5 rounded-full bg-white/5 text-white/45 hover:bg-white/10 hover:text-white/70 text-[11px] font-medium transition-colors border border-white/10"
+          armedClassName="mt-1 w-full px-2 py-1.5 rounded-full bg-amber-500/25 text-amber-100 hover:bg-amber-500/35 text-[11px] font-medium transition-colors border border-amber-400/40"
           title="Clear career data and remove this paused search."
-        >
-          Clear career data
-        </button>
+        />
       )}
     </div>
   );

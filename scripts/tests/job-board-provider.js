@@ -3529,7 +3529,7 @@ export default [
           > retry.indexOf('const supersededCleanupReceipts = normalizeManualAiCleanupReceipts')
         && retry.indexOf("if (deferDirectSearchToBoard('Error retry')) return;")
           > retry.indexOf('if (manualRetirement?.runId && manualRetirement.retirementPending)')
-        && done.includes('Connected to Job Board · Results are ready to combine there; re-scan here to refresh them.')
+        && done.includes('Connected to Job Board · Results are ready to combine there.')
         && done.includes('Re-scan for New Jobs')
         && done.includes('boardRecoveryPending = false')
         && done.includes('Job Board recovery is in progress. Finish or cancel it on the Board to re-enable search actions.')
@@ -5861,8 +5861,8 @@ export default [
         && !compile.slice(failureCatch, activeOwnershipClear).includes('completeManualAiRun(manualAiRunId'),
       'a successful parser-only run must retire only its exact manual-AI marker before a non-error deferred result, while failed/cancelled work retains its recovery marker and finally releases only matching in-memory ownership');
       assert(accept.includes('if (platformsVerifyingRef.current)')
-        && accept.includes('compileCareerFilesRef.current?.(valid, careerImportCapability)')
-        && accept.indexOf('compileCareerFilesRef.current?.(valid, careerImportCapability)') < accept.indexOf('if (deferDirectSearchToBoard('),
+        && accept.includes('compileCareerFilesRef.current?.(valid, {\n      generation: careerImportCapability,')
+        && accept.indexOf('compileCareerFilesRef.current?.(valid, {\n      generation: careerImportCapability,') < accept.indexOf('if (deferDirectSearchToBoard('),
       'a verifying connection check must route an accepted career drop to compilation before any Board/search admission');
       assert(nativeDropStart >= 0 && nativeDropEnd > nativeDropStart
         && !nativeDrop.includes("'platforms-verifying'")

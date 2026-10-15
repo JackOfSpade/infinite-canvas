@@ -954,21 +954,27 @@ export function jobBoardSelectionPresentation(selectedModules) {
   const selected = Array.isArray(selectedModules) ? selectedModules : [];
   const freshCount = selected.filter(module => module?.boardAction === 'scan').length;
   const reusableCount = selected.filter(module => module?.boardAction === 'reuse').length;
+  // Saved jobs owed a re-score under replacement career data: AI scoring only.
+  const rescoreCount = selected.filter(module => module?.boardAction === 'rescore').length;
   const hasContinuation = selected.some(module => (
     module?.boardAction === 'continue'
     || /^(Finish saved search|Resume saved scoring|Resume pending search|Resume saved recovery)$/.test(module?.statusLabel || '')
   ));
   const hasTokenlessPaused = selected.some(module => module?.boardAction === 'continue-blocked');
   const runLabel = freshCount > 0
-    ? ((reusableCount > 0 || hasContinuation) ? 'Continue & combine' : 'Search & combine')
-    : hasContinuation
+    ? ((reusableCount > 0 || hasContinuation || rescoreCount > 0) ? 'Continue & combine' : 'Search & combine')
+    : rescoreCount > 0
+      ? 'Re-score & combine'
+      : hasContinuation
       ? 'Resume & combine'
       : reusableCount > 0
         ? 'Combine saved results'
         : 'Search selected & combine';
   const title = freshCount > 0
     ? 'Selected fresh sources will start and selected paused sources will continue. Completed selected sources are reused without another scan; the Board then combines every connected completed result.'
-    : hasContinuation
+    : rescoreCount > 0
+      ? 'Re-score the selected saved jobs against their new career data without scraping, then combine every connected completed result.'
+      : hasContinuation
       ? 'Continue the selected Job Search state. Completed results are reused without another scan; the Board then combines every connected completed result.'
       : reusableCount > 0
         ? 'Reuse the selected completed Job Search results without another scan, then combine every connected completed result.'
@@ -976,7 +982,7 @@ export function jobBoardSelectionPresentation(selectedModules) {
   const unreadyMessage = hasTokenlessPaused
     ? 'A selected paused Job Search has no recoverable run token. Resolve it from Job Search, or clear career data, re-import, then start fresh.'
     : 'Finish setting up the selected sources before running this board. Completed searches are reused here; to refresh one, choose Re-scan for New Jobs on its Job Search card, then return to the Board.';
-  return { freshCount, reusableCount, hasContinuation, hasTokenlessPaused, runLabel, title, unreadyMessage };
+  return { freshCount, reusableCount, rescoreCount, hasContinuation, hasTokenlessPaused, runLabel, title, unreadyMessage };
 }
 
 /**

@@ -7,6 +7,7 @@ import { JobPlatformSelectionControl } from '../../components/JobPlatformSelecti
 import { JobSearchLocationFields } from '../../components/JobSearchLocationFields';
 import { formatCompletionTimestamp } from '../../utils/completionTimestamp';
 import { hasGlassdoorCountryScopeCaveat } from '../../utils/jobCollectionScopeCaveats';
+import { TwoStepConfirmButton } from './TwoStepConfirmButton';
 
 // Maps a settingConflict's `setting` value (see
 // JOB_PREFERENCE_PLAN_SCHEMA.settingConflicts) to the human label of the
@@ -139,11 +140,26 @@ export function JobSearchDoneState({
   // Reassesses the saved listings only; it does not scrape or run the
   // duplicate/seen-job search path again.
   onReanalyze = null,
-  // Optional: drop the hub's career files (keeping its search settings) so fresh
-  // ones can be dropped on the same module. The hub rests here after every
-  // successful run, so without this the action is only reachable by burning a
-  // full re-scan + Reset just to get back to the empty state.
+  // Optional: "Clear Career Data" (two-step) drops the career files but keeps
+  // the saved jobs, search settings and scan history, so new files can be
+  // dropped and the saved jobs re-scored. Hidden while careerCleared, except
+  // after a failed compile, when it is the way to choose different files.
   onClearCareerFiles = null,
+  // Number of saved jobs still listed. While > 0 the listed results are
+  // finished first: re-scan is hidden and "Clear Scrape" (two-step) removes the
+  // jobs, keeping career data and scan history.
+  savedJobCount = 0,
+  onClearScrape = null,
+  // Career data was cleared but the saved jobs are kept, pending new files.
+  careerCleared = false,
+  careerCompiling = false,
+  careerCompileFailed = false,
+  careerCompileError = '',
+  onRetryCareerCompile = null,
+  // File-picker buttons supplied by the parent for dropping new career files.
+  careerImportControls = null,
+  // Career compiled; waiting for the Board to re-score the saved jobs.
+  rescorePendingText = '',
   // Search controls (passed back to the hub for next run)
   collectionLimits,
   setCollectionLimits,
@@ -331,9 +347,44 @@ export function JobSearchDoneState({
         </details>
       )}
 
+      {rescorePendingText && (
+        <p className="mt-1 w-full text-[9px] leading-snug text-emerald-300/70">
+          {rescorePendingText}
+        </p>
+      )}
+
+      {/* Career data was cleared but the saved jobs are kept: prompt for new
+          files here instead of offering re-scan / re-analyze. */}
+      {careerCleared && !locked && (
+        <div className="mt-2 w-full rounded-md border border-indigo-400/20 bg-indigo-500/5 px-2 py-1.5 text-[9px] leading-snug text-indigo-100/75">
+          <p className="font-medium text-indigo-200/85">Career data cleared</p>
+          <p className="mt-0.5">
+            {careerCompiling
+              ? 'Compiling new career data… saved jobs are kept.'
+              : careerCompileFailed
+                ? `Career compilation failed${careerCompileError ? `: ${careerCompileError}` : ''}.`
+                : `Drop new career files to re-score ${savedJobCount} saved job${savedJobCount === 1 ? '' : 's'}. Jobs are kept.`}
+          </p>
+          {!careerCompiling && careerCompileFailed && onRetryCareerCompile && (
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                onRetryCareerCompile(e);
+              }}
+              onPointerDown={(e) => e.stopPropagation()}
+              className="nodrag mt-1.5 w-full flex items-center justify-center px-2 py-1 rounded-full bg-blue-500/15 text-blue-300/90 hover:bg-blue-500/25 text-[10px] transition-colors border border-blue-500/20"
+            >
+              Retry Career Compilation
+            </button>
+          )}
+          {!careerCompiling && !careerCompileFailed && careerImportControls}
+        </div>
+      )}
+
       {!locked && (
         <div className="flex flex-col mt-2 w-full gap-1">
-          {onRerun && (
+          {onRerun && savedJobCount === 0 && !careerCleared && (
             <button
               type="button"
               onClick={onRerun}
@@ -350,12 +401,12 @@ export function JobSearchDoneState({
                 : 'Re-scan for New Jobs'}
             </button>
           )}
-          {onRerun && !platformsVerifying && (
+          {onRerun && savedJobCount === 0 && !careerCleared && !platformsVerifying && (
             <p className="px-2 text-center text-[9px] leading-snug text-white/25">
               Next re-scan: {nextSearchWindowDescription} through now (inclusive).
             </p>
           )}
-          {onReanalyze && (
+          {onReanalyze && !careerCleared && (
             <button
               type="button"
               onClick={onReanalyze}
@@ -379,7 +430,7 @@ export function JobSearchDoneState({
             {boardRecoveryPending
               ? 'Job Board recovery is in progress. Finish or cancel it on the Board to re-enable search actions.'
               : managedByJobBoard
-                ? 'Connected to Job Board · Results are ready to combine there; re-scan here to refresh them.'
+                ? 'Connected to Job Board · Results are ready to combine there.'
                 : 'Connect a Job Board to review these results.'}
           </p>
         </div>
@@ -418,17 +469,31 @@ export function JobSearchDoneState({
       {/* This needs to remain easy to find after a completed search: it is the
           path back to replacing the career identity without rebuilding the
           module. It is visually distinct from a re-scan because it clears the
-          current career data and results, while retaining search setup/history. */}
-      {!locked && onClearCareerFiles && (
-        <button
-          type="button"
-          onClick={onClearCareerFiles}
-          onPointerDown={(e) => e.stopPropagation()}
-          className="nodrag mt-2 w-full flex items-center justify-center px-3 py-1.5 rounded-full bg-amber-500/15 text-amber-100 hover:bg-amber-500/25 hover:text-amber-50 text-[10px] font-medium transition-colors border border-amber-400/40"
-          title="Clear career data and results — search settings are kept for fresh files"
-        >
-          Clear career data
-        </button>
+          current career data, while retaining saved jobs and scan history. Clear
+          Scrape is the independent counterpart that removes the listed jobs. */}
+      {!locked && ((onClearScrape && savedJobCount > 0) || (onClearCareerFiles && (!careerCleared || careerCompileFailed))) && (
+        <div className="flex gap-1 mt-2 w-full">
+          {onClearScrape && savedJobCount > 0 && (
+            <TwoStepConfirmButton
+              label="Clear Scrape"
+              confirmLabel={`Click again to clear ${savedJobCount} job${savedJobCount === 1 ? '' : 's'}`}
+              onConfirm={onClearScrape}
+              title="Remove these scraped jobs; career data and scan history are kept"
+              className="flex-1 flex items-center justify-center px-2 py-1.5 rounded-full bg-white/5 text-white/60 hover:bg-white/10 hover:text-white/80 text-[10px] font-medium transition-colors border border-white/15"
+              armedClassName="flex-1 flex items-center justify-center px-2 py-1.5 rounded-full bg-red-500/20 text-red-100 hover:bg-red-500/30 text-[10px] font-medium transition-colors border border-red-400/50"
+            />
+          )}
+          {onClearCareerFiles && (!careerCleared || careerCompileFailed) && (
+            <TwoStepConfirmButton
+              label="Clear Career Data"
+              confirmLabel="Click again to clear career data"
+              onConfirm={onClearCareerFiles}
+              title="Remove career data; saved jobs and scan history are kept"
+              className="flex-1 flex items-center justify-center px-2 py-1.5 rounded-full bg-amber-500/15 text-amber-100 hover:bg-amber-500/25 hover:text-amber-50 text-[10px] font-medium transition-colors border border-amber-400/40"
+              armedClassName="flex-1 flex items-center justify-center px-2 py-1.5 rounded-full bg-amber-500/35 text-amber-50 hover:bg-amber-500/45 text-[10px] font-medium transition-colors border border-amber-300/60"
+            />
+          )}
+        </div>
       )}
 
       {/* Settings are useful to inspect but need not dominate a completed result. */}

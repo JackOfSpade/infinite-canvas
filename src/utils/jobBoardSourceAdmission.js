@@ -11,6 +11,11 @@ import {
   isMergeableTerminalJobSearchOutcome,
   terminalJobSearchOutcome,
 } from './jobBoardPausedSourceContinuation.js';
+import {
+  isCareerClearedWithSavedJobs,
+  pendingSavedJobsRescore,
+  savedJobCount,
+} from './jobSearchSplitClear.js';
 
 /**
  * Classify a Job Search generation at the Board boundary.
@@ -26,6 +31,45 @@ export function classifyJobBoardSourceAdmission(source) {
   if (source?.type !== 'jobhub') return { kind: 'invalid' };
 
   if (data.hubState === 'done') {
+    // Career data was cleared but the saved jobs were kept: new files are needed
+    // before those jobs can be re-scored.
+    if (isCareerClearedWithSavedJobs(source)) {
+      return {
+        kind: 'career-cleared-awaiting-files',
+        reason: 'Career data was cleared. Drop new career files on this Job Search to re-score its saved jobs.',
+      };
+    }
+    // A marker, or a current-generation receipt that is still compiling or has
+    // failed, means a re-import is in flight; only matching generations count.
+    const compilation = careerImportCompilationAdmission(data, {
+      generation: data.careerImportGeneration,
+    });
+    if (compilation.kind === 'compiling') {
+      return {
+        kind: 'career-import-compiling',
+        reason: 'New career files are still being compiled and audited.',
+      };
+    }
+    if (compilation.kind === 'failed') {
+      return {
+        kind: 'career-import-failed',
+        reason: 'Career compilation failed. Retry it on the Job Search card, then re-score its saved jobs from the Board.',
+      };
+    }
+    const rescore = pendingSavedJobsRescore(data);
+    if (rescore) {
+      return {
+        kind: 'rescore-saved-jobs',
+        careerSnapshotId: rescore.careerSnapshotId,
+        savedJobCount: savedJobCount(data),
+      };
+    }
+    if (data.savedJobsRescore) {
+      return {
+        kind: 'career-import-requires-approval',
+        reason: 'The new career data no longer matches its approved snapshot. Clear career data and import it again.',
+      };
+    }
     const outcome = terminalJobSearchOutcome(source);
     if (outcome && isMergeableTerminalJobSearchOutcome(source, outcome)) {
       return { kind: 'reuse-terminal', outcome };
@@ -208,9 +252,12 @@ export function partitionJobBoardSourceAdmissions(sources) {
       partition.reusable.push(entry);
     } else if (admission.kind === 'fresh-imported-input') {
       partition.fresh.push(entry);
+    } else if (admission.kind === 'rescore-saved-jobs') {
+      partition.rescore.push(entry);
     } else if (admission.kind === 'continue-existing') {
       partition.continuations.push(entry);
     } else if (admission.kind === 'continuation-requires-run-token'
+      || admission.kind === 'career-cleared-awaiting-files'
       || admission.kind === 'fresh-import-requires-clear'
       || admission.kind === 'terminal-requires-fresh-input'
       || admission.kind === 'career-import-compiling'
@@ -222,6 +269,6 @@ export function partitionJobBoardSourceAdmissions(sources) {
     }
     return partition;
   }, {
-    reusable: [], fresh: [], continuations: [], blocked: [], other: [], invalid: [],
+    reusable: [], fresh: [], rescore: [], continuations: [], blocked: [], other: [], invalid: [],
   });
 }

@@ -306,6 +306,23 @@ function moduleSearchReadiness(node, verifyingPlatforms = null, {
   // this before platform/location setup: reuse must not be disabled merely
   // because a completed Search's current controls were later edited.
   const sourceAdmission = classifyJobBoardSourceAdmission(node);
+  if (sourceAdmission.kind === 'rescore-saved-jobs') {
+    const count = Number.isFinite(sourceAdmission.savedJobCount) ? sourceAdmission.savedJobCount : 0;
+    return {
+      ready: true,
+      boardAction: 'rescore',
+      readinessReason: 'New career data: its saved jobs will be re-scored without scraping, then combined.',
+      statusLabel: `${count} saved job${count === 1 ? '' : 's'} · re-score`,
+    };
+  }
+  if (sourceAdmission.kind === 'career-cleared-awaiting-files') {
+    return {
+      ready: false,
+      boardAction: 'career-cleared',
+      readinessReason: sourceAdmission.reason,
+      statusLabel: 'Needs career files',
+    };
+  }
   if (sourceAdmission.kind === 'reuse-terminal') {
     const count = Array.isArray(sourceData.scoredJobs) ? sourceData.scoredJobs.length : 0;
     return {
@@ -584,6 +601,22 @@ function nonMergeableSearchMessage(sourceData) {
 // Capture the mergeable terminal inputs from the live canvas. A Combine can
 // wait behind another Job Search run, then spend minutes in manual AI; render-
 // time closures are not authority at either boundary.
+// A Search whose saved jobs are waiting on replacement career data is not
+// Combine input: its rows are still scored against the old snapshot, and a
+// career-cleared hub has no snapshot to pin its cards to at all.
+const SAVED_JOBS_CAREER_REPLACEMENT_ADMISSIONS = new Set([
+  'career-cleared-awaiting-files',
+  'rescore-saved-jobs',
+  'career-import-compiling',
+  'career-import-failed',
+  'career-import-requires-approval',
+]);
+
+function isSavedJobsCareerReplacementPending(node) {
+  return (node?.data?.hubState || 'empty') === 'done'
+    && SAVED_JOBS_CAREER_REPLACEMENT_ADMISSIONS.has(classifyJobBoardSourceAdmission(node).kind);
+}
+
 function liveCombineInputs(boardId, nodes, edges) {
   const connected = new Set(getConnectedJobSearchIds(boardId, nodes, edges));
   const all = (Array.isArray(nodes) ? nodes : [])
@@ -618,7 +651,8 @@ function liveCombineInputs(boardId, nodes, edges) {
         remoteResidences,
         hubState: data.hubState || 'empty',
         include: !!terminal && isMergeableTerminalJobSearchOutcome(node, terminal)
-          && (count > 0 || authoritativeEmpty),
+          && (count > 0 || authoritativeEmpty)
+          && !isSavedJobsCareerReplacementPending(node),
       };
     });
   const completed = all.filter(module => module.include);

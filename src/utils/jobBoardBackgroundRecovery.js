@@ -96,6 +96,8 @@ export function prepareBackgroundBoardChildRequest({
     || data.locked
     || data.manualAiResume?.runId
     || data.terminalFinalizationRecovery
+    // A saved-jobs re-score is AI work, never an unattended provider request.
+    || data.savedJobsRescore
     || !(data.resumeProfile && typeof data.resumeProfile === 'object')
     || !fingerprint
     || !careerSnapshotId

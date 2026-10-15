@@ -147,6 +147,9 @@ export function getHubDropLockReason(hub) {
   if (ACTIVE_INPUT_STATES.has(hubState)) return 'busy';
   if (canSellHubReplaceFailedInitialPhotos(hub)) return null;
   if (hubHasAcceptedInitialDrop(hub)) return 'started';
+  // A done Search whose career data was cleared but whose saved jobs were kept
+  // accepts new career files, so those jobs can be re-scored against them.
+  if (hub.type === 'jobhub' && hubState === 'done' && hasItems(data.scoredJobs) && data.savedJobsCareerClearedAt) return null;
   if (hubState !== 'empty') return 'started';
 
   return null;
