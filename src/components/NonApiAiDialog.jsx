@@ -8,6 +8,8 @@ import { EventLogger } from '../utils/EventLogger';
 // HandoffBridgePanel uses, no new IPC channel — see isBridgeHeldApplication
 // below for the one thing this dock does with it.
 import { useHandoffBridgeStatus } from '../hooks/useHandoffBridgeStatus';
+import { CareerCompilationProgress } from './CareerCompilationProgress';
+import { careerCompilationProgressForRequest, recordCareerCompilationProgress } from '../utils/careerCompilationProgress';
 import { BridgeProgress } from './BridgeProgress';
 import { BridgeApplicationsPage } from './BridgeApplicationsPage';
 // The bridge-held rule is shared with the job card so the two cannot disagree.
@@ -328,6 +330,11 @@ const isJobSearchPauseEligible = (request) => (
  */
 export function NonApiAiDialog() {
   const [requests, setRequests] = useState([]);
+  const [careerProgressByRun, setCareerProgressByRun] = useState(() => new Map());
+  useEffect(() => window.electronAPI?.onCareerCompileProgress?.(progress => {
+    setCareerProgressByRun(previous => recordCareerCompilationProgress(previous, progress));
+  }), []);
+
   const [selectedRequestId, setSelectedRequestId] = useState(null);
   // A new queue must be immediately actionable. Minimize remains an explicit
   // choice for the current queue, but an empty dock opening again resets that
@@ -463,6 +470,7 @@ export function NonApiAiDialog() {
   }, [dismissedBrokenRequestIds]);
   const activeRequest = mergedRequests.find(request => request.requestId === selectedRequestId) || mergedRequests[0] || null;
   const activeRequestId = activeRequest?.requestId || null;
+  const activeCareerProgress = careerCompilationProgressForRequest(activeRequest, careerProgressByRun);
   // The shared application page, when the open request is one of its rows.
   const activeGroupEntry = activeRequestId ? groupEntryByRequestId.get(activeRequestId) || null : null;
   // Async clipboard/IPC completions must never update whichever queued prompt
@@ -1910,6 +1918,14 @@ export function NonApiAiDialog() {
         </header>
 
         <form ref={panelBodyRef} onSubmit={submit} className="min-h-0 flex-1 overflow-y-auto p-5 flex flex-col gap-4 custom-scrollbar">
+          {activeCareerProgress && <CareerCompilationProgress
+            key={`${activeRequest.nodeId}:${activeRequest.runId}`}
+            progress={activeCareerProgress}
+            onPauseAndSave={canPauseAndSaveJobSearch ? () => requestJobSearchPauseAndSave({
+              nodeId: activeRequest.nodeId, runId: activeRequest.runId, requestId: activeRequest.requestId,
+            }) : null}
+          />}
+
           {brokenApplicationMessage ? (
             // No prompt and no response box: this job takes no further paste,
             // and the message already names the action that replaces it.
@@ -2030,7 +2046,7 @@ export function NonApiAiDialog() {
               status={bridgeStatus}
               item={activeRequest}
               isPush={!isApplicationRequest}
-              canPauseAndSave={canPauseAndSaveJobSearch}
+              canPauseAndSave={canPauseAndSaveJobSearch && !activeCareerProgress}
               onPauseAndSave={requestJobSearchPauseAndSave}
             />
             </>
@@ -2043,7 +2059,7 @@ export function NonApiAiDialog() {
                     item={activeRequest}
                     isPush={!isApplicationRequest}
                     awaitingClaim
-                    canPauseAndSave={canPauseAndSaveJobSearch}
+                    canPauseAndSave={canPauseAndSaveJobSearch && !activeCareerProgress}
                     onPauseAndSave={requestJobSearchPauseAndSave}
                   />
                   <div className="flex flex-wrap items-center justify-end gap-2">

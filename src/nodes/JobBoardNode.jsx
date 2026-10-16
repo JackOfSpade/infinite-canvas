@@ -1,3 +1,4 @@
+import { jobBoardHasSavedAiContinuation } from '../utils/jobBoardSavedAiContinuation';
 import React, { useCallback, useContext, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { useReactFlow, useStore } from '@xyflow/react';
 import { LayoutGrid } from 'lucide-react';
@@ -311,7 +312,9 @@ function moduleSearchReadiness(node, verifyingPlatforms = null, {
     return {
       ready: true,
       boardAction: 'rescore',
-      readinessReason: 'New career data: its saved jobs will be re-scored without scraping, then combined.',
+      readinessReason: sourceAdmission.scoringOnly
+        ? 'Scoring repair: re-score these saved jobs using the complete career evidence. The job selection and preferences are kept.'
+        : 'New career data: its saved jobs will be re-scored without scraping, then combined.',
       statusLabel: `${count} saved job${count === 1 ? '' : 's'} · re-score`,
     };
   }
@@ -349,6 +352,9 @@ function moduleSearchReadiness(node, verifyingPlatforms = null, {
       readinessReason: sourceAdmission.reason,
       statusLabel: 'Clear + import required',
     };
+  }
+  if (sourceAdmission.kind === 'career-import-paused') {
+    return { ready: false, readinessReason: sourceAdmission.reason, statusLabel: 'Career compilation paused' };
   }
   if (sourceAdmission.kind === 'career-import-compiling') {
     return {
@@ -607,6 +613,7 @@ function nonMergeableSearchMessage(sourceData) {
 const SAVED_JOBS_CAREER_REPLACEMENT_ADMISSIONS = new Set([
   'career-cleared-awaiting-files',
   'rescore-saved-jobs',
+  'career-import-paused',
   'career-import-compiling',
   'career-import-failed',
   'career-import-requires-approval',
@@ -1373,6 +1380,7 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
     stale,
     connectedCount: connectedModules.length,
     completedCount: completedModules.length,
+    pendingSourceWork: connectedModules.some(module => module.boardAction && module.boardAction !== 'reuse'),
     combineSignature: data.combineSignature,
     liveSignature,
   });
@@ -1551,6 +1559,7 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
   const clearBoardChildren = useCallback(() => {
     deleteChildrenByHubId({
       getNodes, getEdges, deleteElements, hubId: id, childTypes: ['jobcard', 'jobgroup'],
+      displayReplacement: true,
       // The compact row is registered before React Flow settles deletion, so
       // describe the exact requested scope rather than claiming every removal
       // succeeded. Ordinary deletions remain itemized by EventLogger.
@@ -4131,17 +4140,27 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
           // A failed, invalid, or individually-cancelled child is terminal for
           // this Board run. Keep its exact attention row and retire its active
           // rollback so reload never starts a replacement provider run.
-          const status = result?.status === 'cancelled'
+          const disconnected = result?.status === 'cancelled' && !getEdges().some(edge => (
+            (edge.source === id && edge.target === sourceId)
+            || (edge.target === id && edge.source === sourceId)
+          ));
+          const status = disconnected
             ? 'disconnected'
             : result?.status || (error ? 'failed' : 'incomplete');
           const message = result?.error || error?.message || (
-            result?.status === 'completed'
+            result?.status === 'cancelled'
+              ? `${label} was ${disconnected ? 'disconnected' : 'cancelled'} before completing its search.`
+              : result?.status === 'completed'
               ? `${label} changed before its terminal result could be recorded.`
               : `${label} did not finish.`
           );
           if (!incompleteSearches.some(entry => entry?.sourceId === sourceId)) {
             incompleteSearches.push({ sourceId, label, status, error: message });
           }
+          EventLogger.error(
+            `[JobBoard] scan child incomplete id=${id} run=${boardRunId} source=${sourceId} status=${status}:`,
+            error || new Error(message),
+          );
           processed += 1;
           await removeActiveSource({
             completedSourceRuns: Object.fromEntries(completedOutcomes),
@@ -5121,7 +5140,7 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
             ? `${labels} paused. Resolve or skip their blocked sources, then run the board again.`
             : nonMergeableOnly
               ? `${labels} completed without hiring-fit scoring. Turn off Test Mode if enabled, then choose Re-scan for New Jobs on each Job Search card before using the Board.`
-              : `${labels} did not finish. Review those modules, then run the board again.`,
+              : incompleteSearches.map(entry => `${entry.label}: ${entry.error || 'Search did not finish.'}`).join(' ').slice(0, 1200),
           type: (pausedOnly || nonMergeableOnly) ? 'info' : 'error',
         });
         clearExactBoardScanResume(updateGlobal, id, boardRunId);
@@ -5378,6 +5397,7 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
       || data.boardCancellation
       || (recoveryError && !hasChangedSearchRecoveryInput)
       || scanRunRef.current
+      || scanPreflightRef.current
       || combineRunRef.current
       || cancellationInFlightRef.current
     ) return;
@@ -5450,6 +5470,16 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
         });
         if (settleRecoveredCombine(outcome, plan.boardRunId)) clearMatchingPlan();
       });
+      return;
+    }
+
+    const savedAiSources = [plan.activeSourceId, ...(plan.activeSourceIds || [])].filter(Boolean);
+    if (savedAiSources.some(sourceId => jobBoardHasSavedAiContinuation({
+      plan, boardNodeId: id, node: getNode(sourceId),
+      connected: getEdges().some(edge => (edge.source === id && edge.target === sourceId)
+        || (edge.target === id && edge.source === sourceId)),
+    }))) {
+      setSearchRecoveryError('Saved AI handoffs are paused after restart. Choose Continue saved AI handoff to resume unfinished batches using the accepted answers already saved.');
       return;
     }
 

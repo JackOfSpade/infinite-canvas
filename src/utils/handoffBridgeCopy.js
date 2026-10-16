@@ -229,7 +229,7 @@ export const BRIDGE_UI_COPY = Object.freeze({
   // A worker's starter is one-time. These are deliberately status labels, not
   // replacement actions: a connected worker remains part of the pool even
   // while a later queue wave arrives.
-  workerState: (state, quietReason = null, launch = null) => state === 'ready' && ['opening', 'checking', 'sent'].includes(launch?.stage)
+  workerState: (state, quietReason = null, launch = null) => launch?.reason === 'approval_required' ? 'Approval needed in ChatGPT' : state === 'ready' && ['opening', 'checking', 'sent'].includes(launch?.stage)
     ? 'Starting in Chrome'
     : ({
     available: 'Ready to start',
@@ -242,6 +242,9 @@ export const BRIDGE_UI_COPY = Object.freeze({
     idle: 'Idle',
   })[state] || 'Worker active',
   workerLaunch: (launch, accountName = '') => {
+    if (launch?.reason === 'approval_required') return 'Approval needed in ChatGPT. Open this worker’s chat and review the Infinite Canvas tool approval prompt. This chat is being kept open.';
+    if (launch?.reason === 'delivery_timeout') return 'ChatGPT’s response delivery timed out. The bridge will reopen this worker and resume its unfinished handoff after the quiet window.';
+    if (launch?.reason === 'conversation_unavailable') return 'ChatGPT could not load this worker’s conversation. The bridge will reopen it and resume its unfinished handoff after the quiet window.';
     if (launch?.stage === 'opening') return 'Opening a new ChatGPT chat…';
     if (launch?.stage === 'checking') return 'Checking ChatGPT model, effort, and sign-in…';
     if (launch?.stage === 'sent') return 'Sent in ChatGPT; waiting for the bridge call…';
@@ -276,7 +279,7 @@ export const BRIDGE_UI_COPY = Object.freeze({
   },
   workerDone: count => `${count} ${count === 1 ? 'handoff completed' : 'handoffs completed'}`,
   workerQuiet: quietReason => quietReason === 'answer_silent'
-    ? 'This worker has not made a bridge call for at least 5 min while it owns a handoff response. It may still be writing or may have stopped. Copy a replacement starter to resume the exact handoff.'
+    ? 'This worker has not made a bridge call for at least 5 min while it owns a handoff response. It may still be writing. The app keeps this chat running. Check it before choosing a replacement; if it has stopped, copy a replacement starter to resume the exact handoff.'
     : quietReason === 'fresh_context_required'
       ? 'This completed stage requires a fresh ChatGPT chat before the next stage can be served. Copy a replacement starter and send it in a new ChatGPT chat.'
       : 'This chat was told to poll again but has made no bridge call for at least 5 min. If this waiting chat is gone, copy a replacement starter and send it in a new ChatGPT chat.',

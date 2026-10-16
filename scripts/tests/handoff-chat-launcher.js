@@ -27,6 +27,7 @@ function harness(options = {}) {
       if (!appleEventsEnabled && script === launcher.scripts.EXEC) throw new Error('JavaScript through AppleScript is turned off');
       if (script === launcher.scripts.OPEN) { chatOrdinal += 1; activeUrl = args[1]; chromeRestarted = false; return `100:${199 + chatOrdinal}`; }
       if (script === launcher.scripts.CLOSE) return '';
+      if (script === launcher.scripts.FOCUS) return 'focused';
       if (script === launcher.scripts.URL) {
         if (chromeRestarted) throw new Error('tab no longer exists');
         if (options.noNavigation) return 'https://chatgpt.com/';
@@ -63,7 +64,7 @@ function harness(options = {}) {
       throw new Error('unexpected fake command');
     },
   });
-  return { launcher, calls, states, nextDay: () => { day += 1; }, enableAppleEvents: () => { appleEventsEnabled = true; }, restartChrome: () => { chromeRestarted = true; } };
+  return { launcher, calls, states, navigate: url => { activeUrl = url; }, nextDay: () => { day += 1; }, enableAppleEvents: () => { appleEventsEnabled = true; }, restartChrome: () => { chromeRestarted = true; } };
 }
 
 const starter = 'private-session-code-do-not-log';
@@ -114,6 +115,16 @@ export default [
     assert(calls.some(item => item.args?.[2]?.includes('[data-model-picker-power-slider] [role="slider"]')));
     assert(calls.some(item => item.args?.[2]?.includes('[data-model-picker-power-slider]')));
     assert(!JSON.stringify(states).includes(starter));
+  } },
+  { name: 'chat launcher: focus reveals only the exact owned worker chat', async run() {
+    const h = harness();
+    await h.launcher.launch({ owner: 'worker:1:1', starter });
+    assert.equal(await h.launcher.focus('worker:1:2'), false);
+    assert.equal(await h.launcher.focus('worker:1:1'), true);
+    assert.equal(h.calls.filter(call => call.script === h.launcher.scripts.FOCUS).length, 1);
+    h.navigate('https://chatgpt.com/c/unrelated-chat');
+    assert.equal(await h.launcher.focus('worker:1:1'), false);
+    assert.equal(h.calls.filter(call => call.script === h.launcher.scripts.FOCUS).length, 1);
   } },
   { name: 'chat launcher: continue reopens its recorded chat after Chrome restarts', async run() {
     const h = harness();
@@ -220,6 +231,138 @@ export default [
     assert.equal(page('Connect Google Drive\nPermissions always respected').reason, 'none', 'another app\'s consent dialog is not ours');
     assert.equal(page(null).reason, 'none');
   } },
+  { name: 'chat launcher: inline tool approval is detected without clicking or reading payload data', async run() {
+    const h = harness();
+    await h.launcher.launch({ owner: 'worker:1:1', starter });
+    await h.launcher.diagnose('worker:1:1', 'infinite_canvas');
+    const script = h.calls.at(-1).args[2];
+    const visible = { offsetWidth: 100, getClientRects: () => [1] };
+    const page = (heading, labels, hidden = false) => JSON.parse(runInNewContext(script, { document: { querySelectorAll(selector) {
+      if (selector !== 'form') return [];
+      return [{ ...visible, ...(hidden ? { offsetWidth: 0, getClientRects: () => [] } : {}), parentElement: { innerText: heading },
+        querySelectorAll: () => labels.map(innerText => ({ ...visible, innerText })) }];
+    } } }));
+    assert.equal(page('Infinite Canvas\nAllow ChatGPT to use Infinite Canvas?', ['DenyEsc', 'Allow once⏎']).reason, 'approval_required');
+    assert.equal(page('Allow ChatGPT to use Other App?', ['Deny', 'Allow once']).reason, 'none');
+    assert.equal(page('Allow ChatGPT to use Infinite Canvas?', ['Deny', 'Allow once'], true).reason, 'none');
+    assert.equal(page('Career text mentioning approval', ['Deny', 'Allow once']).reason, 'none');
+  } },
+  { name: 'chat launcher: visible ChatGPT delivery failures are distinct from a still-generating answer or quoted text', async run() {
+    const h = harness();
+    await h.launcher.launch({ owner: 'worker:1:1', starter });
+    await h.launcher.diagnose('worker:1:1');
+    const script = h.calls.at(-1).args[2];
+    const element = (innerText, visible = true) => ({ innerText, offsetWidth: visible ? 100 : 0,
+      getClientRects: () => visible ? [1] : [], getAttribute: () => null });
+    const page = ({ error = '', hidden = false, stop = false, conversation = false, prose = '' } = {}) => JSON.parse(runInNewContext(script, { document: {
+      querySelectorAll(selector) {
+        if (selector === '[data-chatgpt-agent-turn-start]') return conversation ? [] : [{ parentElement: { innerText: prose } }];
+        if (selector === 'main [role="alert"]') return error ? [element(error, !hidden)] : [];
+        if (selector === 'main button') return [...(stop ? [element('Stop')] : []), ...(conversation ? [element('Try again')] : [])];
+        return [];
+      },
+      querySelector: () => element(conversation ? 'Could not load this ChatGPT conversation' : prose),
+    } }));
+    assert.equal(page({ error: 'Message delivery timed out. Please try again.' }).reason, 'delivery_timeout');
+    assert.equal(page({ error: 'Message delivery timed out. Please try again.\nRetry' }).reason, 'delivery_timeout');
+    assert.equal(page({ conversation: true }).reason, 'conversation_unavailable');
+    assert.equal(page({ error: 'Message delivery timed out. Please try again.', stop: true }).reason, 'none');
+    assert.equal(page({ error: 'Message delivery timed out. Please try again.', hidden: true }).reason, 'none');
+    assert.equal(page({ prose: 'Message delivery timed out. Please try again.' }).reason, 'none');
+    assert.equal(page({ error: 'An unrelated alert' }).reason, 'none');
+  } },
+  { name: 'chat launcher: diagnosis never inspects a worker tab navigated to another chat', async run() {
+    const h = harness();
+    await h.launcher.launch({ owner: 'worker:1:1', starter });
+    h.navigate('https://chatgpt.com/c/unrelated-chat');
+    const before = h.calls.length;
+    assert.equal((await h.launcher.diagnose('worker:1:1')).reason, 'chat_changed');
+    assert.equal(h.calls.length - before, 1, 'only the URL is checked; unrelated page content is never read');
+  } },
+  { name: 'chat launcher: connected delivery failures recover only their quiet owner and ignore stale diagnosis', async run() {
+    for (const reason of ['delivery_timeout', 'conversation_unavailable']) {
+      for (const stale of [false, true]) {
+        let completeDiagnosis;
+        const diagnosis = new Promise(resolve => { completeDiagnosis = resolve; });
+        const calls = [];
+        const worker = { ordinal: 1, state: 'quiet', quietReason: 'answer_silent', firstCallAt: 1, lastCallAt: 1, restarts: 0 };
+        const snapshot = { autoLaunchChats: true, serving: 'live', config: { pluginName: 'Infinite Canvas' },
+          chat: { pool: { active: true, generation: 21, workerCount: 2, workers: [worker,
+            { ordinal: 2, state: 'working', firstCallAt: 2, lastCallAt: 2 }] } } };
+        const ui = registerHandoffBridgeUi({
+          ipc: { handle() {}, removeHandler() {}, on() {}, removeListener() {} },
+          controller: { snapshot: () => snapshot, subscribe: () => () => {},
+            restartWorker: async args => {
+              calls.push(['restart', args.workerOrdinal]);
+              worker.firstCallAt = null; worker.lastCallAt = null; worker.state = 'ready'; worker.restarts++;
+              return { copied: true, sessionCode: '3'.repeat(26), workerCount: 2 };
+            } },
+          chatLauncher: { owns: owner => owner === 'worker:21:1', diagnose: () => diagnosis,
+            close: async owner => { calls.push(['close', owner]); return true; },
+            launch: async () => {
+              calls.push(['launch', 1]); worker.firstCallAt = Date.now(); worker.state = 'working';
+              return { ok: true };
+            } },
+          getCanvasWindows: () => [],
+        });
+        try {
+          ui.publishStatus(snapshot);
+          await new Promise(resolve => setImmediate(resolve));
+          if (stale) { worker.lastCallAt = 3; worker.state = 'working'; }
+          completeDiagnosis({ reason });
+          for (let turn = 0; turn < 8; turn++) await new Promise(resolve => setImmediate(resolve));
+          assert.deepEqual(calls, stale ? [] : [['restart', 1], ['close', 'worker:21:1'], ['launch', 1]]);
+        } finally { ui.dispose(); }
+      }
+    }
+  } },
+  { name: 'chat launcher: connected consent waits preserve the chat and clear after approval disappears', async run() {
+    let tick = 20_000;
+    let diagnosis = 'approval_required';
+    let checks = 0;
+    let closes = 0;
+    let diagnosisTick;
+    let diagnosisTimerCleared = false;
+    const snapshot = { serving: 'live', autoLaunchChats: true, config: { pluginName: 'infinite_canvas' },
+      chat: { pool: { active: true, generation: 41, workers: [{ ordinal: 1, state: 'quiet', quietReason: 'answer_silent', firstCallAt: 1 }] } } };
+    const handlers = new Map();
+    const sender = { id: 81, __isCanvasRenderer: true };
+    const window = { webContents: sender, isDestroyed: () => false };
+    const focused = [];
+    const ui = registerHandoffBridgeUi({
+      ipc: { handle: (key, value) => handlers.set(key, value), removeHandler() {}, on() {}, removeListener() {} },
+      controller: { snapshot: () => snapshot, subscribe: listener => { listener(snapshot); return () => {}; } }, now: () => tick,
+      timers: { setTimeout(fn, ms) { if (ms === 15_000) diagnosisTick = fn; return { unref() {} }; }, clearTimeout() { diagnosisTimerCleared = true; } },
+      chatLauncher: { focus: async owner => { focused.push(owner); return true; }, owns: () => true, close: async () => { closes++; }, diagnose: async () => { checks++; return { reason: diagnosis }; } },
+      getCanvasWindows: () => [window],
+    });
+    ui.publishStatus(snapshot);
+    await new Promise(resolve => setImmediate(resolve));
+    const status = () => handlers.get(IPC_CHANNELS.GET_STATUS)({ sender: { __isCanvasRenderer: true } });
+    assert.equal((await status()).status.chat.pool.workers[0].launch.reason, 'approval_required');
+    const open = payload => handlers.get(IPC_CHANNELS.OPEN_WORKER_CHAT)({ sender }, payload);
+    assert.equal((await open({ generation: 40, workerOrdinal: 1 })).success, false);
+    assert.equal((await open({ generation: 41, workerOrdinal: 2 })).success, false);
+    assert.equal((await open({ generation: 41, workerOrdinal: 1, url: 'untrusted' })).success, false);
+    assert.equal((await open({ generation: 41, workerOrdinal: 1 })).success, true);
+    assert.deepEqual(focused, ['worker:41:1']);
+
+    ui.publishStatus(snapshot);
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(checks, 1, 'status bursts do not hammer Chrome');
+    tick += 15_000; diagnosis = 'none'; diagnosisTick();
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal((await status()).status.chat.pool.workers[0].launch.reason, null);
+    assert.equal(closes, 0, 'a consent wait never replaces the worker');
+    assert.equal(checks, 2, 'approval is rechecked without a status change or MCP call');
+    tick += 15_000; diagnosis = 'approval_required'; diagnosisTick();
+    await new Promise(resolve => setImmediate(resolve));
+    snapshot.chat.pool.workers[0].state = 'idle';
+    ui.publishStatus(snapshot);
+    assert.equal((await status()).status.chat.pool.workers[0].launch.reason, null, 'cancellation clears a stale approval alert');
+    ui.dispose();
+    assert.equal(diagnosisTimerCleared, true, 'disposing the dock stops observation');
+  } },
   { name: 'chat launcher: restored attachment or failed upload never sends', async run() {
     for (const options of [{ staleAttachment: true }, { uploadFailed: true }]) {
       const h = harness(options);
@@ -234,7 +377,6 @@ export default [
   ...[
     ['available', null, 'copyWorkerStarter'],
     ['quiet', 'fresh_context_required', 'restartWorker'],
-    ['quiet', 'answer_silent', 'restartWorker'],
     ['quiet', 'polling_stopped', 'restartWorker'],
   ].map(([state, quietReason, method]) => ({ name: `chat launcher: auto launch ${state} ${quietReason || ''} once`, async run() {
     const handlers = new Map();
@@ -358,6 +500,57 @@ export default [
     assert(calls.includes('cap'));
     assert(calls.some(item => item?.failedLaunch === true));
     ui.dispose();
+  } },
+  { name: 'chat launcher: queued replacement and delayed retry preserve a worker that reconnects', async run() {
+    for (const delayedRetry of [false, true]) {
+      const calls = []; let retry;
+      const worker = { ordinal: 1, state: delayedRetry ? 'available' : 'quiet', quietReason: delayedRetry ? null : 'polling_stopped', restarts: 0 };
+      const snapshot = { autoLaunchChats: true, serving: 'live', config: { pluginName: 'Infinite Canvas' },
+        chat: { pool: { active: true, generation: 21, workerCount: 1, workers: [worker] } } };
+      const ui = registerHandoffBridgeUi({
+        ipc: { handle() {}, removeHandler() {}, on() {}, removeListener() {} },
+        controller: { snapshot: () => snapshot, subscribe: () => () => {},
+          copyWorkerStarter: async () => ({ copied: true, sessionCode: '2'.repeat(26), workerCount: 1 }),
+          abandonWorkerStarter: async () => true,
+          restartWorker: async () => { calls.push('restart'); return { copied: false, status: 'not_quiet' }; } },
+        chatLauncher: { owns: () => true, close: async () => { calls.push('close'); return true; },
+          launch: async () => { calls.push('launch'); return { ok: false, reason: 'chrome_timeout' }; } },
+        timers: { setTimeout(fn, ms) { if (ms === 15_000) retry = fn; return { unref() {} }; }, clearTimeout() {} },
+        getCanvasWindows: () => [],
+      });
+      try {
+        ui.publishStatus(snapshot);
+        if (delayedRetry) await new Promise(resolve => setImmediate(resolve));
+        worker.state = 'working'; worker.quietReason = null; worker.firstCallAt = Date.now();
+        if (delayedRetry) { assert.equal(typeof retry, 'function'); await retry(); }
+        await new Promise(resolve => setImmediate(resolve));
+        assert.deepEqual(calls, delayedRetry ? ['launch'] : [], 'no delayed replacement may close or rekey a now-active chat');
+      } finally { ui.dispose(); }
+    }
+  } },
+  { name: 'chat launcher: unanswered long-running handoffs are never automatically closed or rekeyed', async run() {
+    const calls = [];
+    const worker = { ordinal: 1, state: 'quiet', quietReason: 'answer_silent', restarts: 0, firstCallAt: 1, completed: 0 };
+    const snapshot = { autoLaunchChats: true, serving: 'live', config: { pluginName: 'Infinite Canvas' },
+      chat: { pool: { active: true, generation: 20, workerCount: 1, workers: [worker] } } };
+    const ui = registerHandoffBridgeUi({
+      ipc: { handle() {}, removeHandler() {}, on() {}, removeListener() {} },
+      controller: { snapshot: () => snapshot, subscribe: () => () => {},
+        restartWorker: async () => { calls.push('rekey'); return { copied: true, sessionCode: '3'.repeat(26), workerCount: 1 }; } },
+      chatLauncher: { launch: async () => { calls.push('launch'); return { ok: true }; },
+        close: async () => { calls.push('close'); return true; }, owns: () => true },
+      getCanvasWindows: () => [],
+    });
+    try {
+      // Repeated quiet observations, including the report's 3 replacements /
+      // zero completions state, must preserve a possibly-thinking worker.
+      for (const restarts of [0, 1, 3, 14]) {
+        worker.restarts = restarts;
+        ui.publishStatus(snapshot); ui.publishStatus(snapshot);
+        await new Promise(resolve => setImmediate(resolve));
+      }
+      assert.deepEqual(calls, []);
+    } finally { ui.dispose(); }
   } },
   { name: 'chat launcher: safety block uses the engine quiet-window restart path', async run() {
     const calls = [];

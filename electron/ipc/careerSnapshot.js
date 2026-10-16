@@ -4062,7 +4062,7 @@ async function replacePageForFindings({
 async function runRollingPageAudits({
   corpus, pages, pageProfiles, profile, callText, signal, workerCount, maxPromptChars,
   pageIndexes = null, repair = false, replayRequirementsByScope = null, fallbackFindingsByPage = null,
-  convergenceCorrectionPageIndexes = null,
+  convergenceCorrectionPageIndexes = null, onProgress = () => {},
 }) {
   const selectedPages = pageIndexes == null
     ? pages
@@ -4079,6 +4079,9 @@ async function runRollingPageAudits({
       byCategory: new Map(AUDIT_TASKS.map(([category]) => [category, []])),
     }];
   }));
+  const total = [...stateByPage.values()].reduce((sum, state) => sum + state.remaining, 0);
+  let completed = 0;
+  onProgress({ completed, total });
   const receiptsByCategory = new Map(AUDIT_TASKS.map(([category]) => [category, []]));
   const diagnosticFindingsByCategory = new Map(AUDIT_TASKS.map(([category]) => [category, []]));
   const convergenceFindings = new Map();
@@ -4138,6 +4141,7 @@ async function runRollingPageAudits({
       // closed-schema/bounds validation before canonicalization so an unknown
       // category can never be silently repaired after return.
       const response = validateAuditSubmissionForLane(rawResponse, corpus, profile, category, bounds);
+      onProgress({ completed: ++completed, total });
       let findings = response.findings.map(finding => hostAttestAuditFinding(finding, category));
       const replayKey = `${page.index}\u0000${scope.scopeIndex}\u0000${category}`;
       if (repair && replayRequirementsByScope?.has(replayKey) && findings.length === 0) {
@@ -4244,7 +4248,10 @@ export async function compileAuditedCareerSnapshot({
   workerCount = HANDOFF_CONCURRENCY,
   scheduler = mapManualHandoffWaves,
   now = () => new Date().toISOString(),
+  onProgress = () => {},
 } = {}) {
+  // Progress is observational: a closed renderer must never fail compilation.
+  const reportProgress = (progress) => { try { onProgress(progress); } catch { /* observer only */ } };
   if (typeof callText !== 'function') throw new TypeError('compileAuditedCareerSnapshot requires callText.');
   if (typeof scheduler !== 'function') throw new TypeError('compileAuditedCareerSnapshot requires a handoff scheduler.');
   const corpus = buildCareerSourceCorpus(sourceFiles);
@@ -4260,6 +4267,7 @@ export async function compileAuditedCareerSnapshot({
   const pageProfiles = [];
   for (const page of pages) {
     throwIfAborted(signal);
+    reportProgress({ phase: 'compiling', completed: page.index, total: pages.length });
     const activeLedger = activeContextLedgerForPage(pageProfiles, page.index);
     const allActiveContextPages = activeContextPagesForPrompt(corpus, page, activeLedger, maxPromptChars);
     // Preserve the high-quality ordinary path while the complete active state
@@ -4315,6 +4323,7 @@ export async function compileAuditedCareerSnapshot({
     const checked = validateCareerProfilePage(shard, corpus, page, allKnownRoles, allKnownProjects, { hostMerged: true });
     if (!checked.valid) throwPageValidationError(page, checked.errors);
     pageProfiles.push(shard);
+    reportProgress({ phase: 'compiling', completed: pageProfiles.length, total: pages.length });
   }
 
   const auditHistory = [];
@@ -4346,8 +4355,10 @@ export async function compileAuditedCareerSnapshot({
     if (deterministic.valid) {
       auditReceipts = await runRollingPageAudits({
         corpus, pages, pageProfiles, profile, callText, signal, workerCount, maxPromptChars,
+        onProgress: counts => reportProgress({ phase: 'auditing', round: round + 1, ...counts }),
       });
     } else {
+      reportProgress({ phase: 'repairing', round: round + 1 });
       // Deterministic errors are repaired with page-owned bounded batches too.
       // Do not materialize the page×error matrix: each page is generated and
       // released before the next one is considered.
@@ -4457,6 +4468,7 @@ export async function compileAuditedCareerSnapshot({
         corpus, pages, pageProfiles, profile, callText, signal, workerCount, maxPromptChars,
         pageIndexes: affectedPageIndexes,
         repair: true,
+        onProgress: counts => reportProgress({ phase: 'repairing', round: round + 1, ...counts }),
         replayRequirementsByScope,
         fallbackFindingsByPage,
         convergenceCorrectionPageIndexes,

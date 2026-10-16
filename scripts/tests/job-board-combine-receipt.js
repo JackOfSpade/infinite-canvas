@@ -1,3 +1,5 @@
+import { deleteChildrenByHubId } from '../../src/nodes/_shared/hubChildCleanup.js';
+import { beginJobCardDisplayRemoval, isJobCardDisplayRemoval } from '../../src/utils/jobCardRemovalIntent.js';
 import fs from 'node:fs';
 import assert from 'node:assert';
 
@@ -60,6 +62,50 @@ const bareLegacySource = () => ({
 });
 
 export default [
+  {
+    name: 'Board recombine display replacement never records its old cards as dismissed',
+    run: async () => {
+      const board = { id: 'board', type: 'jobboard', data: { dismissedJobKeys: ['u:https://example.test/previously-dismissed'] } };
+      const card = { id: 'replace-card', type: 'jobcard', data: { hubId: 'board', ...scoredJob('Retained posting', 77) } };
+      const ordinary = { id: 'user-card', type: 'jobcard', data: { hubId: 'board', ...scoredJob('User dismissed posting', 60) } };
+      let replacementUpdates;
+      await deleteChildrenByHubId({
+        getNodes: () => [board, card], getEdges: () => [], hubId: 'board', childTypes: ['jobcard'], displayReplacement: true,
+        deleteElements: async () => {
+          await Promise.resolve();
+          assert(isJobCardDisplayRemoval(card.id), 'intent must survive React Flow asynchronous callbacks');
+          const deletedNodes = [card, ordinary].filter(node => !isJobCardDisplayRemoval(node.id));
+          replacementUpdates = planJobCardDeletionCleanup(deletedNodes, [board], () => board).boardUpdates;
+        },
+      });
+      assert(!isJobCardDisplayRemoval(card.id), 'successful deletion must release its exact intent');
+      const keys = replacementUpdates[0].stats.dismissedJobKeys;
+      assert(jobAndVariantKeys(card.data).every(key => !keys.includes(key)), 'replacing a scored card must not poison later combines');
+      assert(jobAndVariantKeys(ordinary.data).every(key => keys.includes(key)), 'an unrelated user dismissal must still be retained');
+      assert(filterDismissedBoardJobs([card.data], keys).length === 1, 'a second Combine must retain the same listing');
+      const realDismissal = planJobCardDeletionCleanup([card], [board], () => board).boardUpdates[0].stats.dismissedJobKeys;
+      assert(jobAndVariantKeys(card.data).every(key => realDismissal.includes(key)), 'a later real user deletion of the same ID must still dismiss it');
+      const hook = fs.readFileSync(new URL('../../src/hooks/useCanvasOSDeletion.js', import.meta.url), 'utf8');
+      assert(hook.includes('requestedDeletedNodes.filter(node => !isJobCardDisplayRemoval(node?.id))'), 'the actual deletion lifecycle must classify programmatic replacements before cancellation and dismissal bookkeeping');
+      assert(readNodeSource().includes('displayReplacement: true,'), 'Board cleanup must explicitly identify a display replacement; ordinary hub deletion stays destructive');
+    },
+  },
+  {
+    name: 'Board display removal intents release on failed or refused deletion and preserve overlapping owners',
+    run: async () => {
+      const card = { id: 'overlap-card', type: 'jobcard', data: { hubId: 'board' } };
+      const first = beginJobCardDisplayRemoval([card]); const second = beginJobCardDisplayRemoval([card]);
+      first(); assert(isJobCardDisplayRemoval(card.id), 'one owner must not release another pending replacement');
+      second(); assert(!isJobCardDisplayRemoval(card.id));
+      await deleteChildrenByHubId({ getNodes: () => [card], getEdges: () => [], hubId: 'board', childTypes: ['jobcard'], deleteElements: async () => {
+        assert(!isJobCardDisplayRemoval(card.id), 'ordinary hub cleanup must retain its original deletion and cancellation semantics');
+      } });
+      for (const deletion of [() => { throw new Error('refused'); }, async () => { throw new Error('rejected'); }, async () => ({ deletedNodes: [] })]) {
+        try { await deleteChildrenByHubId({ getNodes: () => [card], getEdges: () => [], hubId: 'board', childTypes: ['jobcard'], displayReplacement: true, deleteElements: deletion }); } catch { /* expected refusal */ }
+        assert(!isJobCardDisplayRemoval(card.id), 'failed or empty deletion must not suppress a later user dismissal');
+      }
+    },
+  },
   {
     name: 'X dismissal survives a saved-results recombine, including posting variants',
     run: () => {

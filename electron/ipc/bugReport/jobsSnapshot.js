@@ -1,9 +1,10 @@
 import electronPkg from 'electron';
+import { normalizeJobScoringIntegrity, summarizeJobScoringIntegrity } from '../../../src/utils/jobScoringContract.js';
 const { app } = electronPkg;
 import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
-import { getCurrentRequestJobAnalysisPaths, getJobsResumeAttributionForReport, getJobsSourceRunHistoryForReport, getJobsTelemetryForReport, getJobsTelemetryHubCountForReport, JOB_DESCRIPTION_EVIDENCE_MIN_CHARS, listDescriptionRecoveryCheckpointsSync } from '../jobs.js';
+import { getCurrentRequestJobAnalysisPaths, getJobsCareerCompilationForReport, getJobsResumeAttributionForReport, getJobsSourceRunHistoryForReport, getJobsTelemetryForReport, getJobsTelemetryHubCountForReport, JOB_DESCRIPTION_EVIDENCE_MIN_CHARS, listDescriptionRecoveryCheckpointsSync } from '../jobs.js';
 import { getNonApiAiHandoffLifecycleSnapshot, SAFE_NON_API_AI_LOG_ERROR_CODES, SAFE_VALIDATION_DIAGNOSTIC_REASONS } from '../nonApiAi.js';
 import { formatTypeAreaUtilization, getApplicationTelemetry } from '../jobApplication.js';
 import { getApplicationSyncTelemetry } from '../applicationSync.js';
@@ -3669,6 +3670,7 @@ const JOB_BOARD_DIAGNOSTIC_ACTIVE_SEARCH_STATES = new Set([
   'evaluating-preferences', 'scoring',
 ]);
 const JOB_BOARD_DIAGNOSTIC_ADMISSION_KINDS = new Set([
+  'rescore-saved-jobs', 'career-import-paused', 'career-cleared-awaiting-files',
   'invalid', 'reuse-terminal', 'terminal-requires-fresh-input',
   'fresh-imported-input', 'fresh-import-requires-clear', 'continue-existing',
   'continuation-requires-run-token', 'career-import-compiling',
@@ -3687,9 +3689,14 @@ function sourceAdmissionKind(source) {
   // admission needs only its zero/nonzero distinction, so restore one inert
   // sentinel rather than allocating (or exposing) every scored job.
   const scoredJobsCount = nonnegativeCount(boardDiagnosticValue(sourceData, 'scoredJobsCount'));
+  const summary = normalizeJobScoringIntegrity(boardDiagnosticValue(sourceData, 'scoringIntegrity'));
+  const sentinel = summary?.legacyPageMerge > 0
+    ? { careerSnapshotId: boardDiagnosticValue(sourceData, 'careerSnapshotId'),
+      fitAssessment: { confidence: { reported: 'unknown' }, requirementRows: Array(5).fill({}) } }
+    : {};
   const dataForAdmission = !Array.isArray(boardDiagnosticValue(sourceData, 'scoredJobs'))
     && scoredJobsCount != null && scoredJobsCount > 0
-    ? Object.assign(Object.create(sourceData), { scoredJobs: [{}] })
+    ? Object.assign(Object.create(sourceData), { scoredJobs: [sentinel] })
     : sourceData;
   const admission = boardDiagnosticSafely(
     () => classifyJobBoardSourceAdmission({
@@ -3736,6 +3743,9 @@ function sourceSelectorAdmissionDiagnostic(source, admissionKind) {
   if (admissionKind === 'continuation-requires-run-token') {
     return { ready: false, status: 'Paused run needs attention', reason: 'admission:continuation-requires-run-token' };
   }
+  if (admissionKind === 'rescore-saved-jobs') return { ready: true, status: 'Re-score saved jobs', reason: 'admission:rescore-saved-jobs' };
+  if (admissionKind === 'career-import-paused') return { ready: false, status: 'Career compilation paused', reason: 'admission:career-import-paused' };
+  if (admissionKind === 'career-cleared-awaiting-files') return { ready: false, status: 'Career files required', reason: 'admission:career-cleared-awaiting-files' };
   if (admissionKind === 'career-import-compiling') {
     return { ready: false, status: 'Auditing career data', reason: 'admission:career-import-compiling' };
   }
@@ -3901,6 +3911,14 @@ function connectedSourceDiagnosticSummary(source, selected, claimsByScope, scope
   const nextWindow = resolveJobSearchDateWindow(nextAnchor.timestamp, new Date(), initialLookbackDays);
   const nextWindowSummary = `${localCalendarDateLabel(nextWindow.startTimestamp)}→now/${nextAnchor.source}${nextAnchor.timestamp == null ? `/initial-${initialLookbackDays}d` : ''}${nextWindow.capped ? `/${nextWindow.capReason || 'cap'}` : ''}`;
   return `${boardDiagnosticIdList([sourceId], labelContext)} · selected=${selected.has(sourceId) ? 'yes' : 'no'} · hub-state=${receiptIdentifier(hubState, 'not retained')} · admission=${admissionKind} · selector-ready=${selector.ready === true ? 'yes' : selector.ready === false ? 'no' : 'not reproducible'} · selector-status=${selector.status} · selector-reason=${selector.reason} · re-scan=${rescanReadiness} · next-window=${nextWindowSummary} · fresh-capability=${consumption.freshCapability ? 'present' : 'absent'} · consumption-origin=${consumption.consumptionOrigin} · admission-version=${consumption.admissionVersion} · recovery-claim=${claimSummary || 'none'}`;
+}
+
+function savedSourceScoringSummary(source) {
+  const data = diagnosticSourceData(source);
+  const summary = normalizeJobScoringIntegrity(boardDiagnosticValue(data, 'scoringIntegrity'))
+    || summarizeJobScoringIntegrity(data);
+  if (!summary) return 'unavailable (score rows redacted without an integrity summary)';
+  return `inspected=${summary.inspected}/${summary.total}${summary.inspected < summary.total ? ' (bounded)' : ''} · current-contract=${summary.currentContract} · score-at-least-70=${summary.atLeast70} · raw-at-least-70-capped-below=${summary.cappedBelow70} · possible-legacy-page-merge=${summary.legacyPageMerge}`;
 }
 
 function diagnosticOpaqueIds(values, max = MAX_BOARD_DIAGNOSTIC_IDS) {
@@ -4480,6 +4498,11 @@ export function buildJobBoardDiagnostics(nodes, edges, nodeComponentStates = [])
     lines.push(`- Board \`${boardDiagnosticIdList([boardDiagnosticValue(board, 'id')], labelContext).replace(/`/g, '')}\`: scope=${scope} · state=\`${receiptIdentifier(boardDiagnosticValue(data, 'hubState'), 'not retained')}\` · results=${resultCount ?? 'not retained'} · groups=${groups} · cards=${cards} · hidden-children=${hiddenChildren} · stale=${boardDiagnosticBoolean(boardDiagnosticValue(data, 'stale'))} · hidden=${boardDiagnosticBoolean(boardDiagnosticValue(data, 'hidden') ?? boardDiagnosticValue(data, 'isHidden'))}${countQualification}${ownershipQualification}.`);
     lines.push(`  - Sources: selected=${boardDiagnosticIdList(selected, labelContext)} · connected=${boardDiagnosticIdList(connectedIds, labelContext)} · combined=${boardDiagnosticIdList(combined, labelContext)} · combine-source-runs=${combineSourceRuns.length}${combineSourceRuns.length ? ` (${boardDiagnosticIdList(combineSourceRuns.map(pair => pair.sourceHubId), labelContext)})` : ''} · combine-signature=${typeof boardDiagnosticValue(data, 'combineSignature') === 'string' ? 'present' : 'absent'} · combine-input=${typeof boardDiagnosticValue(resume, 'combineInputSignature') === 'string' ? 'present' : 'absent'}.`);
     const selectedIds = new Set(selected);
+    const savedScores = connectedNodes.slice(0, MAX_BOARD_DIAGNOSTIC_IDS).map(entry => boardDiagnosticSafely(
+      () => `${boardDiagnosticIdList([entry.id], labelContext)}: ${savedSourceScoringSummary(entry.node)}`,
+      null,
+    )).filter(Boolean);
+    if (savedScores.length) lines.push(`  - Saved scoring integrity (metadata only): ${savedScores.join(' | ')}.`);
     const sourceDiagnostics = connectedNodes
       .filter(entry => connectedIds.includes(opaqueHubIdForCorrelation(entry.id)))
       .slice(0, MAX_BOARD_DIAGNOSTIC_IDS)
@@ -5482,6 +5505,8 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
   // owners; otherwise preserve the historic node-set diagnostic seam.
   const telemetryOwners = arguments.length >= 6 ? currentJobHubIds : currentNodeIds;
   try { t = getJobsTelemetryForReport(telemetryOwners, reportWindowId); } catch { return ''; }
+  let careerCompilationOwners = [];
+  try { careerCompilationOwners = getJobsCareerCompilationForReport(telemetryOwners, reportWindowId); } catch { /* optional stage diagnostics */ }
   let sourceRunHistoryOwners = [];
   try { sourceRunHistoryOwners = getJobsSourceRunHistoryForReport(telemetryOwners, reportWindowId); } catch { /* optional bounded diagnostics */ }
   // `t` is null both when nothing ran and when several hubs each ran their own
@@ -5573,14 +5598,16 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
   // principle reach compensation research with those absent (e.g. replayed from
   // a batch-reconcile path). Omitting it here would risk the same silent
   // whole-section drop the resumeAttempts comment above already documents.
-  if (!t.search && !t.pipeline && !hasResolves && !hasLinkedInEnrich && !t.scoring && !t.scoringHeartbeat && !t.bucketing && !t.compensation && !t.history && !hasBrowserScrape && !scopedApplication && !applicationSync && !t.indeedSession && !hasResumeAttempts && !hasSourceRunHistory && !hasMultiHubAttribution && visibleLocalApplications.length === 0) return '';
+  // Compilation can wait on AI before any provider pipeline is created.
+  // Keep its diagnostics visible even when no search has started.
+  if (careerCompilationOwners.length === 0 && !t.careerSnapshotCache && !t.search && !t.pipeline && !hasResolves && !hasLinkedInEnrich && !t.scoring && !t.scoringHeartbeat && !t.bucketing && !t.compensation && !t.history && !hasBrowserScrape && !scopedApplication && !applicationSync && !t.indeedSession && !hasResumeAttempts && !hasSourceRunHistory && !hasMultiHubAttribution && visibleLocalApplications.length === 0) return '';
 
   const scope = pipelineScope(t.nodeId, t.windowId, currentNodeIds, reportWindowId, {
     label: 'Source hub',
     deletedNoun: 'hub',
   });
   if (scope.foreign) {
-    if (!scopedApplication && !applicationSync && visibleLocalApplications.length === 0 && !hasSourceRunHistory && !hasMultiHubAttribution) return `\n## Job Search Pipeline\n${scope.note}`;
+    if (careerCompilationOwners.length === 0 && !scopedApplication && !applicationSync && visibleLocalApplications.length === 0 && !hasSourceRunHistory && !hasMultiHubAttribution) return `\n## Job Search Pipeline\n${scope.note}`;
     // A local application generation/Sync must remain reportable even when a
     // different window owns the process-global last jobs run. Drop only that
     // foreign funnel rather than returning before the local sections render.
@@ -5604,8 +5631,13 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
   } catch { /* cache absent is fine — treat all platforms as unconfirmed */ }
 
   const lines = [];
-  if (t.careerSnapshotCache) {
-    const cache = t.careerSnapshotCache;
+  // Preserve legacy unowned/synthetic telemetry while real windows use the
+  // sender-local, per-hub inventory above. Never merge these stage records
+  // into a single owner's provider/search funnel.
+  if (careerCompilationOwners.length === 0 && t.careerSnapshotCache) {
+    careerCompilationOwners = [{ nodeId: t.nodeId, cache: t.careerSnapshotCache }];
+  }
+  for (const { nodeId, cache } of careerCompilationOwners) {
     // currentNodeIds is a Set (see receiptHubCorrelation/recoveryHubCorrelation
     // above) — this used to test Array.isArray/.includes, which is never true
     // for a Set, so the scope check was a permanent no-op and every window's
@@ -5619,7 +5651,14 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
         published: 'miss → published — the approved career snapshot was atomically stored',
       };
       lines.push('\n### Approved Career Snapshot Cache');
+      if (nodeId) lines.push(`- Career compilation hub: \`${reportCorrelationDigest(nodeId)}\``);
       lines.push(`- ${outcomes[cache.outcome] || cache.outcome || 'unknown'} · ${cache.fileCount || 0} file(s) · fingerprint \`${cache.fingerprint || 'unknown'}\`${ago(cache.ts)}`);
+      const progress = cache.progress;
+      if (['reading', 'compiling', 'auditing', 'repairing', 'saving', 'cleaning'].includes(progress?.phase)) {
+        const counts = Number.isFinite(progress.completed) && Number.isFinite(progress.total)
+          ? ` · ${progress.completed}/${progress.total} phase work items returned` : '';
+        lines.push(`- Last reported compilation stage: ${progress.phase}${counts}${Number.isFinite(progress.round) ? ` · round ${progress.round}` : ''}${ago(progress.updatedAt)} (stage observation, not proof of a live task).`);
+      }
       // Only present on a parse that actually ran pass 1 (a cache hit never sets
       // them), which is why this reads the counts rather than assuming a split.
       if (Number.isFinite(cache.readVerbatim) || Number.isFinite(cache.transcribed)) {

@@ -499,15 +499,15 @@ export function HandoffBridgePanel() {
     return result;
   }, [activeCopyingWorker, activeWorkerPool, activeWorkerProgress]);
 
-  const retryWorkerLaunch = useCallback(async workerOrdinal => {
+  const retryWorkerLaunch = useCallback(async (workerOrdinal, openExisting = false) => {
     if (!activeWorkerPool || activeCopyingWorker !== null) return;
     setCopyingWorker(workerOrdinal);
-    const result = await invoke(bridgeApi(), 'handoffBridgeRetryWorkerLaunch', {
+    const result = await invoke(bridgeApi(), openExisting ? 'handoffBridgeOpenWorkerChat' : 'handoffBridgeRetryWorkerLaunch', {
       generation: activeWorkerPool.generation, workerOrdinal,
     });
     if (mountedRef.current) {
       setCopyingWorker(null);
-      setNotice(result?.success ? 'Opening a fresh ChatGPT worker chat…' : ipcErrorMessage(result?.code || 'INTERNAL'));
+      setNotice(result?.success ? (openExisting ? 'Opened this worker’s ChatGPT chat. Review its approval prompt there.' : 'Opening a fresh ChatGPT worker chat…') : ipcErrorMessage(result?.code || 'INTERNAL'));
     }
   }, [activeCopyingWorker, activeWorkerPool]);
 
@@ -683,12 +683,16 @@ export function HandoffBridgePanel() {
                               {BRIDGE_UI_COPY.workerState(worker.state, worker.quietReason, worker.launch)}
                             </span>
                             {worker.launch && <span className="basis-full text-sky-100/80">{BRIDGE_UI_COPY.workerLaunch(worker.launch, launchAccountName(activeWorkerPool.generation, worker.ordinal))}</span>}
+                            {worker.launch?.reason === 'approval_required' && (
+                              <button type="button" className="rounded border border-amber-300/50 px-2 py-1 text-amber-100"
+                                disabled={activeCopyingWorker !== null} onClick={() => void retryWorkerLaunch(worker.ordinal, true)}>Open ChatGPT for approval</button>
+                            )}
                             {worker.launch?.stage === 'failed' && RETRYABLE_LAUNCH_REASONS.includes(worker.launch?.reason) && (
                               <button type="button" className="ml-auto bridge-button-secondary" disabled={activeCopyingWorker !== null}
                                 onClick={() => void retryWorkerLaunch(worker.ordinal)}>Retry</button>
                             )}
                             {worker.completed > 0 && <span className="text-white/45">{BRIDGE_UI_COPY.workerDone(worker.completed)}</span>}
-                            {worker.state === 'quiet' && (
+                            {worker.state === 'quiet' && worker.launch?.reason !== 'approval_required' && (
                               <>
                                 <span className="basis-full text-amber-100/80">{BRIDGE_UI_COPY.workerQuiet(worker.quietReason)}</span>
                                 <button

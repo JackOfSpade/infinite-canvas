@@ -1,3 +1,4 @@
+import { MAX_JOB_ANALYSIS_ARTIFACT_BYTES, assertJobAnalysisArtifactSize } from '../../electron/ipc/jobAnalysisArtifactLimits.js';
 import fs from 'node:fs';
 import crypto from 'node:crypto';
 import os from 'node:os';
@@ -1530,7 +1531,7 @@ export default [
         assert(transaction.admitted && afterLink.pendingPublications,
           'a symlinked publication must fail closed instead of being read/promoted');
         await fs.promises.unlink(paths.jsonPath);
-        await fs.promises.writeFile(paths.jsonPath, Buffer.alloc(64 * 1024 * 1024 + 1));
+        await fs.promises.writeFile(paths.jsonPath, Buffer.alloc(MAX_JOB_ANALYSIS_ARTIFACT_BYTES + 1));
         const oversized = await withCurrentJobAnalysisOperationAuthority({ canvasFilePath: canvas, hubId, ...s1.receipt }, () => ({ ok: true }));
         const afterOversize = JSON.parse(await fs.promises.readFile(paths.operationAuthorityPath, 'utf8'));
         assert(oversized.admitted && afterOversize.pendingPublications,
@@ -1624,6 +1625,51 @@ export default [
           'source supersession before UI/history commit must add no CSV side effect');
         return { senderBound: true, oneShot: true, supersessionBlocked: true };
       } finally { await fs.promises.rm(directory, { recursive: true, force: true }); }
+    },
+  },
+  {
+    name: 'operation authority: large saved pools remain readable across multi-source history and publication recovery',
+    run: async () => {
+      const directory = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'ic-large-board-history-'));
+      const canvas = path.join(directory, 'canvas.json');
+      const sender = { id: 81 };
+      try {
+        await fs.promises.writeFile(canvas, '{}');
+        const sources = [];
+        for (const hubId of ['canada', 'us', 'third']) {
+          const claim = await claimJobAnalysisOperationAuthority({ canvasFilePath: canvas, hubId, operationId: `large-${hubId}`, semanticBase: base() });
+          const saved = snapshot({ canvasFilePath: canvas, hubId, authority: claim.receipt });
+          if (hubId === 'us') saved.preferenceCandidatePool[0].description = 'x'.repeat(65 * 1024 * 1024);
+          await __saveJobAnalysisSnapshotForTests(saved);
+          sources.push({ hubId, runId: 'run-1', careerSnapshotId: pin, operationAuthority: claim.receipt });
+        }
+        const paths = getJobAnalysisPaths(canvas, null, 'us');
+        assert((await fs.promises.stat(paths.jsonPath)).size > 64 * 1024 * 1024, 'fixture must exceed the old reader ceiling');
+        const record = JSON.parse(await fs.promises.readFile(paths.operationAuthorityPath, 'utf8'));
+        record.pendingPublications = record.publications;
+        await fs.promises.writeFile(paths.operationAuthorityPath, JSON.stringify(record));
+        const prepared = await __boardHistoryAuthorityForTests.prepare({ sender }, { canvasFilePath: canvas, jobs: [], sources });
+        assert(prepared.success, 'unchanged large sealed pool must pass multi-source history preflight');
+        const recovered = JSON.parse(await fs.promises.readFile(paths.operationAuthorityPath, 'utf8'));
+        assert(recovered.pendingPublications === null, 'large publication map must recover after restart');
+        const consumed = await __boardHistoryAuthorityForTests.consume({ sender }, { canvasFilePath: canvas, jobs: [], historyToken: prepared.historyToken });
+        assert(consumed.success !== false && !consumed.operationSuperseded, 'large source must also pass history commit revalidation');
+        await claimJobAnalysisOperationAuthority({ canvasFilePath: canvas, hubId: 'us', operationId: 'new-us', semanticBase: base('search', { runId: 'run-2' }) });
+        const stale = await __boardHistoryAuthorityForTests.prepare({ sender }, { canvasFilePath: canvas, jobs: [], sources });
+        assert(stale.operationSuperseded, 'an inner source supersession must still reject the entire multi-source transaction');
+        return { largePoolAccepted: true, publicationRecovered: true, staleSourceRejected: true };
+      } finally { await fs.promises.rm(directory, { recursive: true, force: true }); }
+    },
+  },
+  {
+    name: 'operation authority: writer enforces the shared artifact byte bound before publication',
+    run: async () => {
+      const bounded = 'é'.repeat(MAX_JOB_ANALYSIS_ARTIFACT_BYTES / 2);
+      assert(assertJobAnalysisArtifactSize(bounded) === bounded, 'exact byte ceiling remains admissible');
+      let code;
+      try { assertJobAnalysisArtifactSize(`${bounded}x`); } catch (error) { code = error.code; }
+      assert(code === 'JOB_ANALYSIS_ARTIFACT_TOO_LARGE', 'UTF-8 byte overflow must fail explicitly');
+      return { utf8BoundEnforced: true };
     },
   },
   {

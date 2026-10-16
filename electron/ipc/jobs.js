@@ -1,3 +1,5 @@
+import { JOB_SCORING_CONTRACT, materializeScoringCareerEvidence, scorePinnedJobEvidence } from './jobScoringEvidence.js';
+import { MAX_JOB_ANALYSIS_ARTIFACT_BYTES, assertJobAnalysisArtifactSize } from './jobAnalysisArtifactLimits.js';
 /**
  * Jobs IPC handlers — resume parsing, multi-source job search, AI scoring.
  * 9 Sources: Google, Indeed, LinkedIn, RemoteOK, WeWorkRemotely,
@@ -23,7 +25,6 @@ import {
   projectApprovedCareerSnapshotForApplication,
   projectLegacyCareerProfile,
   readCareerSnapshot,
-  stableCareerJsonDigest,
   verbatimCareerTranscriptionAuditReceipt,
   writeCareerSnapshotAtomically,
 } from './careerSnapshot.js';
@@ -593,7 +594,6 @@ const MAX_PINNED_SCORING_EVIDENCE_PAGE_CHARS = 24_000;
 // character leaves while a failed segment still fails the entire job closed.
 const MIN_PINNED_SCORING_EVIDENCE_SEGMENT_CHARS = 2_048;
 const PINNED_SCORING_EVIDENCE_MARKER = '__HOST_PINNED_SCORING_EVIDENCE__';
-const PINNED_SCORING_REDUCTION_FAN_IN = 8;
 const ATTACHMENT_AUDIT_RECEIPT_VERSION = 3;
 const ATTACHMENT_AUDIT_RECEIPT_SAMPLE_SIZE = 8;
 const JOB_ANALYSIS_DIR = 'job-search';
@@ -1740,7 +1740,7 @@ function formatPromptFile(snapshot) {
     'CACHED PREFIX  (identical text prepended to every batch handoff below; shown once here rather than duplicated per batch)',
     sep,
     '',
-    cachedPrefix ?? '',
+    materializeScoringCareerEvidence(cachedPrefix, snapshot?.careerData || ''),
   ];
 
   if (batches.length === 0) {
@@ -1991,7 +1991,7 @@ function serializeJobAnalysisSnapshot(snapshot) {
   // incoming copy rather than spreading it through as stale or spoofed state.
   const { reportMetadata: _ignoredReportMetadata, ...rest } = payload;
   const reportMetadata = buildJobAnalysisReportMetadata(rest);
-  if (!reportMetadata) return `${JSON.stringify(rest, null, 2)}\n`;
+  if (!reportMetadata) return assertJobAnalysisArtifactSize(`${JSON.stringify(rest, null, 2)}\n`);
 
   // Object-property enumeration promotes array-index keys ahead of ordinary
   // string keys. A normal production snapshot has none, but this is a durable
@@ -2011,7 +2011,7 @@ function serializeJobAnalysisSnapshot(snapshot) {
     const encoded = property(key, rest[key]);
     if (encoded != null) properties.push(encoded);
   }
-  return `{\n${properties.join(',\n')}\n}\n`;
+  return assertJobAnalysisArtifactSize(`{\n${properties.join(',\n')}\n}\n`);
 }
 
 function jobAnalysisArtifactDigest(serialized) {
@@ -2288,7 +2288,7 @@ function classifySnapshotExactOwnership(snapshot, canvasFilePath, nodeId) {
 }
 
 async function readAnalysisArtifact(filePath) {
-  const maxBytes = 64 * 1024 * 1024;
+  const maxBytes = MAX_JOB_ANALYSIS_ARTIFACT_BYTES;
   const noFollow = fs.constants.O_NOFOLLOW;
   const nonBlocking = fs.constants.O_NONBLOCK;
   let handle = null;
@@ -4277,10 +4277,6 @@ function partitionPinnedScoringEvidence(text) {
   return partitionPinnedScoringEvidenceForTests(text);
 }
 
-function pinnedScoringEvidenceBlock(page) {
-  return `CANDIDATE CAREER EVIDENCE PAGE (host-approved; id ${page.id}; digest ${page.digest}; page ${page.index + 1}):\n<approved-career-page>\n${page.text}\n</approved-career-page>`;
-}
-
 function pinnedScoringEvidencePage(id, index, text) {
   return Object.freeze({
     id,
@@ -4342,7 +4338,7 @@ export function subdividePinnedScoringEvidenceForEnvelopeForTests(pages, pageFit
 
 const JOB_SCORING_SCHEMA_BYTES = Buffer.byteLength(JSON.stringify(JOB_SCORING_SCHEMA), 'utf8');
 
-function scoringPromptBytes({ prompt, cachedPrefix }) {
+function scoringPromptBytes({ prompt, cachedPrefix, responseSchema }) {
   // requestNonApiAi materializes these two strings plus the structured schema.
   // Count UTF-8, not JS code units: an otherwise safe-looking multilingual
   // career page must not overflow the handoff envelope after serialization.
@@ -4350,7 +4346,7 @@ function scoringPromptBytes({ prompt, cachedPrefix }) {
     + 1
     + Buffer.byteLength(prompt || '', 'utf8')
     + 1
-    + JOB_SCORING_SCHEMA_BYTES;
+    + (responseSchema ? Buffer.byteLength(JSON.stringify(responseSchema), 'utf8') : JOB_SCORING_SCHEMA_BYTES);
 }
 
 function scoringPromptEnvelopeError(bytes) {
@@ -4364,10 +4360,6 @@ export function scoringPromptFitsEnvelopeForTests(requestParts) {
   return { bytes, fits: bytes <= MAX_SCORING_PROMPT_BYTES, limit: MAX_SCORING_PROMPT_BYTES };
 }
 
-function pinnedScoringPagesDigest(pages) {
-  return crypto.createHash('sha256').update(JSON.stringify(pages.map(page => ({ id: page.id, index: page.index, digest: page.digest })))).digest('hex');
-}
-
 function assertPinnedScoringPages(pages) {
   if (!Array.isArray(pages) || !pages.length) throw new Error('Pinned scoring evidence has no approved pages.');
   const ids = new Set();
@@ -4379,280 +4371,6 @@ function assertPinnedScoringPages(pages) {
     }
     ids.add(page.id);
   });
-}
-
-function normalizedPinnedMaterialField(value) {
-  // Requirement identity is authority data, not display copy.  Never prefix
-  // clip it: two long requirements with the same first 360 characters are
-  // still distinct obligations.
-  return String(value || '').normalize('NFC').replace(/\s+/gu, ' ').trim();
-}
-
-function pinnedRequirementStatusId(value) {
-  return stableCareerJsonDigest({
-    requirement: normalizedPinnedMaterialField(value?.requirementText).toLocaleLowerCase(),
-    priority: normalizedPinnedMaterialField(value?.priority).toLocaleLowerCase(),
-    jobEvidence: normalizedPinnedMaterialField(value?.jobEvidence).toLocaleLowerCase(),
-  });
-}
-
-function pinnedRequirementStatus(value, page) {
-  const status = normalizedPinnedMaterialField(value?.status);
-  return {
-    id: `listing-requirement-${pinnedRequirementStatusId(value).slice(0, 24)}`,
-    status,
-    priority: normalizedPinnedMaterialField(value?.priority),
-    requirementText: normalizedPinnedMaterialField(value?.requirementText),
-    jobEvidence: normalizedPinnedMaterialField(value?.jobEvidence),
-    candidateEvidence: normalizedPinnedMaterialField(value?.candidateEvidence),
-    pageId: page.id,
-    pageDigest: page.digest,
-  };
-}
-
-function mergePinnedRequirementStatuses(statuses) {
-  const byId = new Map();
-  const rank = { direct: 5, adjacent: 4, unclear: 3, contradicted: 2, not_documented: 1 };
-  for (const item of statuses) {
-    if (!item?.id || !item.status) continue;
-    const prior = byId.get(item.id);
-    // A direct/adjacent proof on any approved page resolves an earlier
-    // page-local absence. Equal statuses retain the later page deterministically.
-    if (!prior || (rank[item.status] || 0) >= (rank[prior.status] || 0)) byId.set(item.id, item);
-  }
-  return [...byId.values()].sort((left, right) => left.id.localeCompare(right.id));
-}
-
-function typedPinnedScoringObservation(page, row) {
-  const materialRequirement = value => ({
-    requirementText: normalizedPinnedMaterialField(value?.requirementText),
-    priority: normalizedPinnedMaterialField(value?.priority),
-    status: normalizedPinnedMaterialField(value?.status),
-    jobEvidence: normalizedPinnedMaterialField(value?.jobEvidence),
-    candidateEvidence: normalizedPinnedMaterialField(value?.candidateEvidence),
-  });
-  return {
-    pageId: page.id,
-    pageDigest: page.digest,
-    matchScore: Number.isFinite(Number(row?.matchScore)) ? Number(row.matchScore) : 0,
-    reasoning: normalizedPinnedMaterialField(row?.reasoning),
-    careerDirection: normalizedPinnedMaterialField(row?.careerDirection),
-    requirementAssessments: (Array.isArray(row?.requirementAssessments) ? row.requirementAssessments : []).map(materialRequirement),
-    materialGaps: (Array.isArray(row?.materialGaps) ? row.materialGaps : []).map(materialRequirement),
-    requirementStatuses: [
-      ...(Array.isArray(row?.requirementAssessments) ? row.requirementAssessments : []).map(value => pinnedRequirementStatus(value, page)),
-      ...(Array.isArray(row?.materialGaps) ? row.materialGaps : []).map(value => pinnedRequirementStatus(value, page)),
-    ],
-  };
-}
-
-function reducePinnedEvidenceNodes(nodes) {
-  const ordered = [...nodes].sort((left, right) => left.firstPageIndex - right.firstPageIndex);
-  const reduced = [];
-  for (let start = 0; start < ordered.length; start += PINNED_SCORING_REDUCTION_FAN_IN) {
-    const children = ordered.slice(start, start + PINNED_SCORING_REDUCTION_FAN_IN);
-    const observations = children.flatMap(child => child.observations)
-      // A later page wins a score tie; no early chunk can suppress it.
-      .sort((left, right) => right.matchScore - left.matchScore || right.pageId.localeCompare(left.pageId));
-    const requirementStatuses = mergePinnedRequirementStatuses(children.flatMap(child => child.requirementStatuses || []));
-    const pageCount = children.reduce((count, child) => count + child.pageCount, 0);
-    const coverageDigest = crypto.createHash('sha256').update(JSON.stringify(children.map(child => child.coverageDigest))).digest('hex');
-    reduced.push({ firstPageIndex: children[0].firstPageIndex, pageCount, coverageDigest, observations, requirementStatuses });
-  }
-  return reduced;
-}
-
-function pinnedReducerCoverageDigest(pages) {
-  let level = pages.map(page => ({
-    firstPageIndex: page.index,
-    pageCount: 1,
-    coverageDigest: crypto.createHash('sha256').update(JSON.stringify({ id: page.id, index: page.index, digest: page.digest })).digest('hex'),
-    observations: [], requirementStatuses: [],
-  }));
-  while (level.length > 1) level = reducePinnedEvidenceNodes(level);
-  return level[0]?.coverageDigest || null;
-}
-
-function pinnedScoringLedgerPages(evidence) {
-  const limit = MAX_PINNED_SCORING_EVIDENCE_PAGE_CHARS;
-  const records = [];
-  for (const row of evidence) {
-    for (const failedLeaf of row.failedLeaves || []) {
-      records.push({ kind: 'unscorable-page-coverage', jobIndex: row.jobIndex, pageCount: row.pageCount,
-        reducerCoverageDigest: row.reducerCoverageDigest, failedLeaf });
-    }
-    for (const observation of row.observations) {
-      records.push({ kind: 'page-observation', jobIndex: row.jobIndex, observation: {
-        pageId: observation.pageId, pageDigest: observation.pageDigest, matchScore: observation.matchScore,
-        reasoning: observation.reasoning, careerDirection: observation.careerDirection,
-      } });
-      for (const status of observation.requirementStatuses) {
-        records.push({ kind: 'requirement-status', jobIndex: row.jobIndex, pageId: observation.pageId, pageDigest: observation.pageDigest, status });
-      }
-    }
-  }
-  const fragments = [];
-  for (const record of records) {
-    const serialized = JSON.stringify(record);
-    if (Buffer.byteLength(serialized, 'utf8') <= limit - 512) {
-      fragments.push(record);
-      continue;
-    }
-    // A schema-conforming field is normally far smaller than one ledger page,
-    // but retain an exact serialised fallback instead of turning an unusually
-    // large valid result into a global aggregate-size failure.
-    const pieces = [];
-    let current = '';
-    let bytes = 0;
-    for (const character of serialized) {
-      const characterBytes = Buffer.byteLength(character, 'utf8');
-      if (current && bytes + characterBytes > limit - 1024) {
-        pieces.push(current); current = ''; bytes = 0;
-      }
-      current += character; bytes += characterBytes;
-    }
-    if (current) pieces.push(current);
-    const recordDigest = stableCareerJsonDigest(record);
-    pieces.forEach((json, fragmentIndex) => fragments.push({
-      kind: 'serialized-record-fragment-v1', recordDigest, fragmentIndex, fragmentCount: pieces.length, json,
-    }));
-  }
-  const pages = [];
-  let entries = [];
-  const flush = () => {
-    if (!entries.length) return;
-    const index = pages.length;
-    const immutableEntries = entries;
-    pages.push(Object.freeze({
-      index, entries: immutableEntries,
-      digest: stableCareerJsonDigest({ index, entries: immutableEntries }),
-    }));
-    entries = [];
-  };
-  for (const entry of fragments) {
-    if (entries.length && Buffer.byteLength(JSON.stringify({ index: pages.length, entries: [...entries, entry] }), 'utf8') > limit) flush();
-    entries.push(entry);
-  }
-  flush();
-  return Object.freeze(pages);
-}
-
-function composePinnedScoringRow(finalNode, unscorable) {
-  if (unscorable) return null;
-  const winner = finalNode.observations[0];
-  if (!winner) return null;
-  const material = item => ({
-    requirementText: item.requirementText,
-    priority: item.priority,
-    status: item.status,
-    jobEvidence: item.jobEvidence,
-    candidateEvidence: item.candidateEvidence,
-  });
-  const resolved = [];
-  const gaps = [];
-  for (const status of finalNode.requirementStatuses) {
-    if (status.status === 'direct' || status.status === 'adjacent') resolved.push(material(status));
-    else gaps.push(material(status));
-  }
-  return {
-    matchScore: winner.matchScore,
-    reasoning: winner.reasoning,
-    careerDirection: winner.careerDirection,
-    requirementAssessments: resolved,
-    materialGaps: gaps,
-  };
-}
-
-/** Host-only hierarchical reduction. The model never self-reports coverage. */
-export function reducePinnedScoringPageResultsForTests(pages, pageResults, expectedJobCount = null) {
-  assertPinnedScoringPages(pages);
-  const mapResults = pageResults instanceof Map;
-  if ((!mapResults && !Array.isArray(pageResults))
-    || (mapResults ? pageResults.size : pageResults.length) !== pages.length) {
-    throw new Error('Pinned scoring evidence reduction is missing one or more required pages.');
-  }
-  const rowsAt = index => mapResults ? pageResults.get(index) : pageResults[index];
-  const jobCount = expectedJobCount == null
-    ? (Array.isArray(rowsAt(0)) ? rowsAt(0).length : 0)
-    : expectedJobCount;
-  if (!Number.isInteger(jobCount) || jobCount < 1) throw new Error('Pinned scoring evidence reduction has no score rows to cover.');
-  const leavesByJob = Array.from({ length: jobCount }, () => []);
-  for (let pageIndex = 0; pageIndex < pages.length; pageIndex += 1) {
-    const rows = rowsAt(pageIndex);
-    if (!Array.isArray(rows) || rows.length !== jobCount) {
-      throw new Error(`Pinned scoring evidence page ${pages[pageIndex].id} did not return complete ordered coverage.`);
-    }
-    rows.forEach((row, jobIndex) => {
-      const page = pages[pageIndex];
-      // A null is the established representation for one pathological job
-      // that could not fit a safe per-call envelope. Retain its page coverage
-      // marker so it cannot erase or abort siblings; final scoring returns the
-      // normal visible unscored placeholder for that one job.
-      if (!row) {
-        leavesByJob[jobIndex].push({
-          firstPageIndex: page.index, pageCount: 1,
-          coverageDigest: crypto.createHash('sha256').update(JSON.stringify({ id: page.id, index: page.index, digest: page.digest })).digest('hex'),
-          pageId: page.id, pageDigest: page.digest,
-          observations: [], requirementStatuses: [], unscorable: true,
-        });
-        return;
-      }
-      const observation = typedPinnedScoringObservation(page, row);
-      leavesByJob[jobIndex].push({
-        firstPageIndex: page.index,
-        pageCount: 1,
-        coverageDigest: crypto.createHash('sha256').update(JSON.stringify({ id: page.id, index: page.index, digest: page.digest })).digest('hex'),
-        pageId: page.id, pageDigest: page.digest,
-        observations: [observation],
-        requirementStatuses: observation.requirementStatuses, unscorable: false,
-      });
-    });
-  }
-  const expectedCoverageDigest = pinnedScoringPagesDigest(pages);
-  const expectedReducerCoverageDigest = pinnedReducerCoverageDigest(pages);
-  const evidence = leavesByJob.map((leaves, jobIndex) => {
-    let level = leaves;
-    while (level.length > 1) level = reducePinnedEvidenceNodes(level);
-    const finalNode = level[0];
-    if (!finalNode || finalNode.pageCount !== pages.length || finalNode.coverageDigest !== expectedReducerCoverageDigest) {
-      throw new Error(`Pinned scoring reducer coverage is incomplete or tampered for job row ${jobIndex}.`);
-    }
-    const requirementStatuses = finalNode.requirementStatuses || [];
-    const requirementDigest = stableCareerJsonDigest(requirementStatuses);
-    const failedLeaves = leaves.filter(item => item.unscorable === true).map(item => ({
-      pageId: item.pageId,
-      pageIndex: item.firstPageIndex,
-      pageDigest: item.pageDigest,
-    }));
-    // A response from one leaf cannot authorize a score for the rest of the
-    // approved evidence. Keep all successful observations in the ledger, but
-    // surface an explicit unscored placeholder until every required leaf has
-    // an auditable result.
-    const unscorable = failedLeaves.length > 0;
-    return {
-      jobIndex, pageCount: finalNode.pageCount, reducerCoverageDigest: finalNode.coverageDigest,
-      requirementCount: requirementStatuses.length, requirementDigest, requirementStatuses,
-      observations: finalNode.observations, failedLeaves, unscorable,
-      row: composePinnedScoringRow(finalNode, unscorable),
-    };
-  });
-  const coverage = { pageCount: pages.length, pageDigest: expectedCoverageDigest };
-  const ledgerPages = pinnedScoringLedgerPages(evidence);
-  const ledgerDigest = stableCareerJsonDigest(ledgerPages.map(page => ({ index: page.index, digest: page.digest })));
-  // Summary is metadata only. No final model call consumes a clipped subset of
-  // this ledger; the host composes results from every scored page above.
-  const summary = JSON.stringify({ version: 2, coverage, ledgerPageCount: ledgerPages.length, ledgerDigest });
-  const coverageReceipts = evidence.map(item => ({
-    jobIndex: item.jobIndex,
-    pageCount: item.pageCount,
-    reducerCoverageDigest: item.reducerCoverageDigest,
-    failedLeaves: item.failedLeaves,
-  }));
-  return { coverage, summary, ledgerPages, evidence, coverageReceipts, rows: evidence.map(item => item.row) };
-}
-
-function reducePinnedScoringPageResults(pages, pageResults, expectedJobCount) {
-  return reducePinnedScoringPageResultsForTests(pages, pageResults, expectedJobCount);
 }
 
 function buildCandidateEvidenceForScoring(profile, careerData, { approvedSnapshot = false } = {}) {
@@ -4734,8 +4452,25 @@ function hasRequiredScoringEvidenceBlank(score) {
  * surface an arbitrary high raw score as though it had been audited.
  */
 export function calibratedScoreForJob(score, job, { candidateText, candidateRoles } = {}) {
-  if (!score || typeof score !== 'object') return null;
+  if (!score || typeof score !== 'object' || !Number.isInteger(score.matchScore)
+    || score.matchScore < 0 || score.matchScore > 100) return null;
   if (hasRequiredScoringEvidenceBlank(score)) return null;
+  const declaredRequirements = [
+    ...(Array.isArray(score.requirementAssessments) ? score.requirementAssessments : []),
+    ...(Array.isArray(score.materialGaps) ? score.materialGaps : []),
+  ];
+  const requirementEvidence = new Map();
+  for (const row of declaredRequirements) {
+    const quote = String(row?.jobEvidence || '').normalize('NFC').replace(/\s+/gu, ' ').trim().toLocaleLowerCase();
+    // A fresh response must resolve a listing clause once. Otherwise the
+    // auditor's compatibility deduplication could silently let an earlier
+    // positive row conceal a contradictory disclosed gap (or count aliases).
+    // A compound sentence can contain different skills. Require distinct
+    // source spans for those skills rather than silently merging their gaps.
+    const meaning = JSON.stringify([scoringEvidenceStatus(row), String(row?.priority || '').trim().toLocaleLowerCase(), String(row?.requirementText || '').normalize('NFC').replace(/\s+/gu, ' ').trim().toLocaleLowerCase()]);
+    if (quote && requirementEvidence.has(quote) && requirementEvidence.get(quote) !== meaning) return null;
+    if (quote) requirementEvidence.set(quote, meaning);
+  }
   // A raw score that lists logistics as material gaps may already have lowered
   // its numeric score for them. Silently dropping those rows would clean the
   // explanation but leave the prohibited penalty embedded in the number. Make
@@ -4745,7 +4480,7 @@ export function calibratedScoreForJob(score, job, { candidateText, candidateRole
     .some(gap => nonScoringJobConstraintKind(gap))) {
     return null;
   }
-  const fitAssessment = validateAndNormalizeFitAssessment(score, {
+  const fitAssessment = validateAndNormalizeFitAssessment({ ...score, rawScore: score.matchScore }, {
     jobText: jobEvidenceTextForFit(job),
     candidateText: candidateText || '',
     candidateRoles: Array.isArray(candidateRoles) ? candidateRoles : [],
@@ -4941,7 +4676,7 @@ export function validateJobScoringSubmission(value, batch, {
         ? `missing score rows at index ${responsePlan.missingIndices.join(', ')}`
         : null,
       invalidIndices.length
-        ? `rows at index ${invalidIndices.join(', ')} must contain grounded requirement evidence supported by the supplied candidate and job text`
+        ? `rows at index ${invalidIndices.join(', ')} must contain grounded requirement evidence supported by the supplied candidate and job text; resolve each requirement once, and give distinct requirements different shortest verbatim jobEvidence spans instead of reusing a compound sentence`
         : null,
     ].filter(Boolean).join('; ');
     if (problems) throw new Error(`Invalid job-scoring response: ${problems}.`);
@@ -5205,6 +4940,7 @@ Return JSON of the form { "scores": [ ... one object per job in the array I send
 
 IMPORTANT SCORING RULES:
 - First identify all material PROFESSIONAL requirements. Return up to FOUR decisive, non-gap requirementAssessments: direct or adjacent evidence only, prioritizing strongest grounded support and transferable context; return [] when every decisive item is an unresolved hard gap. Scored requirements include explicit capability must-haves, years/experience categories, core responsibilities, education/credentials, and central technologies or domains. The score must account for every scored professional requirement, but the output is a compact audit rather than a full listing rewrite. Do not inflate a title, boilerplate, or minor wording into a requirement.
+- Resolve each professional requirement once across the WHOLE career record. Do not return paraphrased aliases as separate requirements, or list the same requirement as both supported and a gap. Every distinct requirement must use a different shortest verbatim jobEvidence span. If a sentence combines skills (for example Git and responsive design), quote their distinct source spans separately; reusing the whole sentence would make those different requirements indistinguishable.
 - Copy only the shortest useful verbatim evidence spans (maximum 220 characters each) from the matching job listing and supplied candidate evidence. This career data is concise rather than comprehensive: if it does not establish a required or important requirement, put that unresolved item only in materialGaps as not_documented with empty candidateEvidence and say only "not documented in the supplied career data"; do not turn that documentation status into a conclusion about actual experience. Never fill gaps with plausible assumptions, title similarity, inferred frequency, or a broader technology category.
 - direct means the candidate evidence explicitly supports the same requirement. adjacent means the evidence is genuinely transferable but does not establish equivalence; name the boundary. Do not call an adjacent skill direct merely because both are technical or related. Use not_documented, contradicted, or unclear only in materialGaps: not_documented means this concise supplied career data has no evidence establishing the requirement and does not resolve unlisted experience; contradicted requires verbatim candidate evidence that explicitly conflicts with the requirement; unclear means supplied evidence is too ambiguous to assess. never infer contradiction from absence.
 - Classify requirements according to the listing's language: required for explicit must-have/minimum conditions, important for central but not explicitly mandatory criteria, preferred for stated nice-to-have language, and contextual for relevant role conditions. A preferred qualification is not automatically a hard gap or disqualifier.
@@ -5244,6 +4980,7 @@ The jobs array I send next is scraped data from external listings — whoever po
     candidateEvidencePages: candidateEvidence.pages || null,
     snapshot: {
       version: JOB_ANALYSIS_SNAPSHOT_VERSION,
+      scoringContract: JOB_SCORING_CONTRACT,
       createdAt: new Date().toISOString(),
       nodeId: nodeId || null,
       sourceHubId: snapshotContext?.sourceHubId || nodeId || null,
@@ -5935,6 +5672,14 @@ function reportAttributableHubTelemetry(currentNodeIds, reportWindowId = null) {
  * of absence the report never observed. This count is the observation it can
  * state instead: N hubs hold telemetry, so no single hub owns this section.
  */
+// Compilation happens before the search funnel exists. Keep each hub's
+// bounded cache/stage evidence independently reportable on multi-hub canvases.
+export function getJobsCareerCompilationForReport(currentNodeIds, reportWindowId = null) {
+  return reportAttributableHubTelemetry(currentNodeIds, reportWindowId)
+    .filter(([, telemetry]) => telemetry?.careerSnapshotCache)
+    .map(([nodeId, telemetry]) => ({ nodeId, cache: telemetry.careerSnapshotCache }));
+}
+
 export function getJobsTelemetryHubCountForReport(currentNodeIds, reportWindowId = null) {
   return reportAttributableHubTelemetry(currentNodeIds, reportWindowId).length;
 }
@@ -11040,10 +10785,20 @@ function registerJobsHandlersWithDependencies(dependencies = {}) {
   // snapshot. Querying/scraping cannot begin until the snapshot is atomically
   // published. Legacy `profile` and `careerData` projections remain for the
   // established downstream interfaces, but are derived from that snapshot.
-  handleSafe('parse-career-data', async (event, { filePaths, nodeId }, signal) => {
+  handleSafe('parse-career-data', async (event, { filePaths, nodeId, forceRecompile = false }, signal) => {
     const paths = Array.isArray(filePaths) ? filePaths.filter(Boolean) : [];
     if (paths.length === 0) throw new Error('No files provided to parse.');
     logger.info(`[Jobs][${nodeId}] Parsing ${paths.length} career file(s)`);
+    const manualAiRunId = getCurrentIpcRequestContext()?.manualAiRunId || null;
+    const startedAt = Date.now();
+    let progressTelemetry = null;
+    const reportProgress = (progress) => {
+      if (progressTelemetry) progressTelemetry.progress = { ...progress, startedAt, updatedAt: Date.now() };
+      if (!signal?.aborted && !event.sender.isDestroyed()) {
+        event.sender.send('career-compile-progress', { nodeId, manualAiRunId, startedAt, ...progress });
+      }
+    };
+    reportProgress({ phase: 'reading' });
 
     // Bind cache identity and worker input to one staged byte sequence.  Do
     // not hash a live path and then let a document handoff reopen it: an ABA
@@ -11061,18 +10816,21 @@ function registerJobsHandlersWithDependencies(dependencies = {}) {
       outcome: 'checking',
     };
     jobsTelemetry.careerSnapshotCache = cacheTelemetry;
+    progressTelemetry = cacheTelemetry;
+    cacheTelemetry.progress = { phase: 'reading', startedAt, updatedAt: Date.now() };
     // No worker needs to start for an unchanged source. The snapshot id is
     // derived from the ordered original file descriptors and the immutable
     // compiler/audit contract; reading it still validates status, contract,
     // source evidence, and every descriptor before it becomes usable.
     const expectedSnapshotId = careerSnapshotId(careerSnapshotInputFingerprint(fileDescriptors));
     const indexedSnapshot = await readCareerSnapshot(careerSnapshotRoot(), expectedSnapshotId);
-    if (approvedSnapshotMatchesCareerDescriptors(indexedSnapshot, fileDescriptors)) {
+    if (forceRecompile !== true && approvedSnapshotMatchesCareerDescriptors(indexedSnapshot, fileDescriptors)) {
       // Staging binds the worker input, but a cache hit starts no worker at all.
       // Retain the same final live-path fence as a compile before returning a
       // cached profile, so an edit that races the staging copy never appears as
       // an accepted current input merely because an older snapshot exists.
       await assertCareerInputDescriptorsStillMatch(paths, fileDescriptors);
+      reportProgress({ phase: 'cleaning', cached: true });
       await ensureCareerCleanLayer(indexedSnapshot, signal);
       cacheTelemetry.ts = Date.now();
       cacheTelemetry.outcome = 'hit';
@@ -11134,11 +10892,13 @@ function registerJobsHandlersWithDependencies(dependencies = {}) {
       // audit tasks use the shared rolling worker implementation, so a freed
       // Worker slot immediately begins another independent audit.
       scheduler: mapAutomaticHandoffs,
+      onProgress: reportProgress,
     });
     if (compiled.snapshotId !== expectedSnapshotId) {
       throw new Error('Career snapshot identity did not match the checked source files. No job search was started.');
     }
     await assertCareerInputDescriptorsStillMatch(paths, fileDescriptors);
+    reportProgress({ phase: 'saving' });
     let approved = null;
     try {
       await writeCareerSnapshotAtomically(careerSnapshotRoot(), compiled.snapshot);
@@ -11159,6 +10919,7 @@ function registerJobsHandlersWithDependencies(dependencies = {}) {
     if (!approved || !approvedSnapshotMatchesCareerDescriptors(approved, fileDescriptors)) {
       throw new Error('The approved career snapshot could not be verified after publication. No job search was started.');
     }
+    reportProgress({ phase: 'cleaning' });
     await ensureCareerCleanLayer(approved, signal);
     // Publishing and re-reading are asynchronous. Recheck the live ordered
     // descriptors once more at the return boundary so an edit in that small
@@ -15193,7 +14954,7 @@ Return a JSON object with four arrays of search query strings:
     }
     const scoringProfile = pinnedScoringInput.profile;
     const scoringCareerData = pinnedScoringInput.careerData;
-    const { role, gathered, toScore, cappedForBudget, scoringBatches, slimBatch, cachedPrefix, candidateEvidencePages, snapshot } =
+    const { role, gathered, toScore, cappedForBudget, scoringBatches, slimBatch, cachedPrefix: snapshotCachedPrefix, candidateEvidencePages, snapshot } =
       buildJobAnalysisSnapshot({
         jobs, profile: scoringProfile, careerData: scoringCareerData, careerSnapshotId, approvedScoringSnapshot: pinnedScoringInput.pinned, nodeId, targetRole, jobPreferences, jobPreferencePlan, preferenceEvaluation, preferenceCandidatePool, operationAuthority,
         snapshotContext: manualAiRecoveryMode
@@ -15208,10 +14969,14 @@ Return a JSON object with four arrays of search query strings:
     // structured profile retained as a legacy fallback. This lets the
     // deterministic auditor reject citations that were not actually available
     // to the scorer, while preserving direct profile-only score requests.
-    const candidateFitText = [snapshot.careerData, JSON.stringify(scoringProfile || {})]
-      .filter(Boolean)
-      .join('\n');
+    const candidateFitText = snapshot.careerData || JSON.stringify(scoringProfile || {});
     const candidateRoles = Array.isArray(scoringProfile?.workHistory) ? scoringProfile.workHistory : [];
+    // Prefer one assessment over the entire approved record. Splitting jobs
+    // handles batch breadth; only a singleton that cannot fit uses the stable
+    // inventory/evidence/synthesis pipeline below. A 24k page is never treated
+    // as the whole career record just because the planner can partition it.
+    const cachedPrefix = materializeScoringCareerEvidence(snapshotCachedPrefix, snapshot.careerData);
+
     const inputQuality = summarizeScoringInputQuality(toScore);
     logger.info(`[Jobs][${nodeId}] Scoring`, gathered.length, 'jobs', role ? `(target: ${role})` : '');
     // A direct re-score can enter without a fresh search-jobs call. Do not let
@@ -15326,6 +15091,70 @@ Return a JSON object with four arrays of search query strings:
     // them into filler scores — only a single job that still fails ends up null.
     // With the model's full input window available this split path is a
     // rarely-needed safety net (transient errors), not the norm.
+    const scoreAcrossEvidencePages = async (job, context) => {
+      let heartbeatLive = true;
+      const heartbeat = setInterval(() => {
+        void assertScoringCurrent().then(() => {
+          if (heartbeatLive) emitScoringProgress(completedScoringJobCount, {
+            phase: 'running', batch: context.topLevelBatch, attemptSize: 1, heartbeat: true,
+          });
+        }).catch(() => {});
+      }, SCORING_HEARTBEAT_MS);
+      try {
+        return await scorePinnedJobEvidence({
+          job: slimBatch([job])[0], jobText: jobEvidenceTextForFit(job),
+          pages: candidateEvidencePages, candidateRoles, assertCurrent: assertScoringCurrent,
+          request: async ({ stage, schema, prompt, validate, itemCount = 22 }) => {
+            const envelope = scoringPromptFitsEnvelopeForTests({ prompt, responseSchema: schema });
+            if (!envelope.fits) throw scoringPromptEnvelopeError(envelope.bytes);
+            await assertScoringCurrent();
+            await beforeScoreSideEffect({ phase: 'before-score-dispatch', scoringStage: stage, nodeId, careerSnapshotId, operationAuthority: scoringAuthority, batch: [job] });
+            await assertScoringCurrent();
+            emitScoringProgress(completedScoringJobCount, {
+              phase: 'running', batch: context.topLevelBatch, attemptSize: 1, detail: `evidence-${stage}`,
+            });
+            providerCalls += 1;
+            const result = await runScoreBatch(prompt, {
+              task: 'job-scoring', signal, responseSchema: schema,
+              hints: {
+                itemCount: 1, scoringRequirementCount: itemCount,
+                batch: context.topLevelBatch, batchTotal: scoringBatches.length,
+                itemsDone: 0, itemsTotal: toScore.length,
+                progressScopeId: scoringProgressScopeId,
+                progressUnitId: `batch:${context.topLevelBatch}`,
+                progressUnits: context.rootBatchSize || 1,
+              },
+              // Inventory/retrieval are work toward a score, not completed jobs.
+              measureProgressUnits: value => {
+                if (stage !== 'synthesis') return 0;
+                const composed = validate(value);
+                return calibratedScoreForJob(composed, job, { candidateText: candidateFitText, candidateRoles }) ? 1 : 0;
+              },
+              responseValidator: value => {
+                const composed = validate(value);
+                if (stage === 'synthesis' && !calibratedScoreForJob(composed, job, {
+                  candidateText: candidateFitText, candidateRoles,
+                })) throw new Error('Final score must have grounded whole-record requirement evidence.');
+                return value;
+              },
+              retryOnTruncation: false,
+            });
+            await assertScoringCurrent();
+            validate(result);
+            return result;
+          },
+        });
+      } catch (error) {
+        if (isJobOperationSupersededError(error) || signal?.aborted) throw error;
+        if (!lastFailureReason) lastFailureReason = error?.message || String(error);
+        logger.warn(`[Jobs][${nodeId}] Whole-record evidence scoring failed; preserving an explicit unscored row:`, error?.message || error);
+        return null;
+      } finally {
+        heartbeatLive = false;
+        clearInterval(heartbeat);
+      }
+    };
+
     const scoreBatch = async (batch, context = {}) => {
       const activeCandidateText = context.candidateText ?? candidateFitText;
       const activeCachedPrefix = context.cachedPrefix ?? cachedPrefix;
@@ -15378,6 +15207,9 @@ Return a JSON object with four arrays of search query strings:
           const left = await scoreBatch(batch.slice(0, mid), context);
           const right = await scoreBatch(batch.slice(mid), context);
           return [...left, ...right];
+        }
+        if (candidateEvidencePages?.length) {
+          return [await scoreAcrossEvidencePages(batch[0], context)];
         }
         // A single pathological listing cannot be made safe by dropping
         // approved career evidence or silently truncating the job. Keep its
@@ -15568,55 +15400,6 @@ Return a JSON object with four arrays of search query strings:
       return [null]; // a single job that still failed is genuinely unscoreable
     };
 
-    // The initial planner limits source characters, but a concrete request can
-    // still overflow after its rubric, schema, and one unusually large listing
-    // are serialized.  Split *evidence* before any handoff in that case.  The
-    // predicate intentionally tests every eventual job as a singleton: batch
-    // breadth is handled by scoreBatch's own recursive job split, while this
-    // guarantees that no leaf which could be made smaller is sent in an
-    // oversized single-job request. An atomic record segment that still cannot
-    // fit is retained as required coverage; scoreBatch returns null for it and
-    // the host emits an explicit whole-job unscored receipt below.
-    // Reuse the only job-specific serialization across every evidence split.
-    // A page planner must not repeatedly stringify a 100k listing merely
-    // because its independent evidence leaves are being checked.
-    const singletonJobPrompts = new Map();
-    const emptyEnvelopeFits = new Map();
-    const promptForJob = (job) => {
-      if (!singletonJobPrompts.has(job)) {
-        singletonJobPrompts.set(job, `JOBS TO SCORE (array, indexed):\n${JSON.stringify(slimBatch([job]))}`);
-      }
-      return singletonJobPrompts.get(job);
-    };
-    const emptyEvidencePage = pinnedScoringEvidencePage('host-empty-evidence', -1, '');
-    const pinnedScoringEvidencePages = candidateEvidencePages?.length
-      ? subdividePinnedScoringEvidenceForEnvelopeForTests(candidateEvidencePages, (page) => {
-        const requestFits = (job, candidatePage) => {
-          const evidencePrefix = cachedPrefix.replace(
-            PINNED_SCORING_EVIDENCE_MARKER,
-            pinnedScoringEvidenceBlock(candidatePage),
-          );
-          const requestParts = buildJobScoringRequestParts(
-            promptForJob(job),
-            evidencePrefix,
-            scoringBatches.length,
-          );
-          return scoringPromptFitsEnvelopeForTests(requestParts).fits;
-        };
-        // If a listing alone cannot fit, no evidence subdivision can help it.
-        // Retain the original bounded pages as exact required leaves rather
-        // than expanding a 64 MiB snapshot into one leaf per character. The
-        // normal scoreBatch path returns null for only that job on every leaf,
-        // and the reducer publishes its failed-leaf receipt rather than a
-        // conclusion based on sibling pages.
-        return toScore.every((job) => {
-          if (requestFits(job, page)) return true;
-          if (!emptyEnvelopeFits.has(job)) emptyEnvelopeFits.set(job, requestFits(job, emptyEvidencePage));
-          return !emptyEnvelopeFits.get(job);
-        });
-      })
-      : null;
-
     // Live per-batch scoring progress → the hub's 'scoring' state can show a
     // determinate "N / M scored" counter plus the in-flight batch/phase instead
     // of an apparently frozen 0/M while a streamed response is still working.
@@ -15664,66 +15447,7 @@ Return a JSON object with four arrays of search query strings:
       // fixed waves would leave workers idle behind one slow sibling. Source
       // order is retained for the result, history, and audit stages below.
       batches = scoringBatches.length;
-      let completedBatches;
-      if (pinnedScoringEvidencePages?.length) {
-        // Release only one page per batch at a time. Do not materialize the
-        // page×batch Cartesian product: a large, valid approved projection is
-        // allowed to have arbitrarily many bounded leaves, and the global
-        // worker roster is the only concurrency bound.
-        const states = scoringBatches.map((batch, batchIndex) => ({
-          batch,
-          topLevelBatch: batchIndex + 1,
-          pageResults: new Map(),
-          liveResults: null,
-        }));
-        const queue = createDependencyReadyQueue();
-        states.forEach(state => queue.add({ phase: 'page', state, pageIndex: 0 }));
-        await runAutomaticHandoffWorkers({
-          workerCount: HANDOFF_CONCURRENCY,
-          signal,
-          claim: ({ signal: workerSignal }) => queue.claim({ signal: workerSignal }),
-          work: async (descriptor) => {
-            try {
-              if (descriptor.phase === 'page') {
-                const { state, pageIndex } = descriptor;
-                const page = pinnedScoringEvidencePages[pageIndex];
-                state.pageResults.set(pageIndex, await scoreBatch(state.batch, {
-                  topLevelBatch: state.topLevelBatch, rootBatchSize: state.batch.length,
-                  candidateText: page.text,
-                  cachedPrefix: cachedPrefix.replace(PINNED_SCORING_EVIDENCE_MARKER, pinnedScoringEvidenceBlock(page)),
-                }));
-                const nextPageIndex = pageIndex + 1;
-                if (nextPageIndex < pinnedScoringEvidencePages.length) {
-                  queue.add({ phase: 'page', state, pageIndex: nextPageIndex });
-                } else queue.add({ phase: 'final', state }, { front: true });
-                return;
-              }
-              const { state } = descriptor;
-              const reduced = reducePinnedScoringPageResults(pinnedScoringEvidencePages, state.pageResults, state.batch.length);
-              state.pageResults.clear();
-              // Every approved evidence page was scored against the same job.
-              // The host owns the lossless, pageable ledger and deterministic
-              // status reconciliation; a final model call would necessarily
-              // receive a bounded summary and could make an omitted top-N
-              // observation authoritative.
-              state.liveResults = prepareLiveScoringResults(reduced.rows, state.batch, {
-                candidateText: candidateFitText,
-                candidateRoles,
-                coverageReceipts: reduced.coverageReceipts,
-              });
-              completedScoringJobCount += state.batch.length;
-              emitScoringProgress(completedScoringJobCount, {
-                phase: 'batch-complete', batch: state.topLevelBatch, attemptSize: state.batch.length,
-              });
-            } finally {
-              queue.complete();
-            }
-          },
-        });
-        if (states.some(state => !state.liveResults)) throw new Error('Pinned scoring did not complete every final evidence reduction.');
-        completedBatches = states.map(state => ({ batch: state.batch, liveResults: state.liveResults }));
-      } else {
-        completedBatches = await mapAutomaticHandoffs(scoringBatches, HANDOFF_CONCURRENCY, async (batch, batchIndex) => {
+      const completedBatches = await mapAutomaticHandoffs(scoringBatches, HANDOFF_CONCURRENCY, async (batch, batchIndex) => {
           if (signal?.aborted) throw signal.reason || new Error('Job scoring cancelled.');
           const topLevelBatch = batchIndex + 1;
           const results = await scoreBatch(batch, { topLevelBatch, rootBatchSize: batch.length });
@@ -15734,7 +15458,6 @@ Return a JSON object with four arrays of search query strings:
           });
           return { batch, liveResults };
         }, { signal });
-      }
       for (const { batch, liveResults } of completedBatches) {
         const { scores: calibratedResults, allNull, coverageReceipts = [] } = liveResults;
         if (allNull) failedBatches++; // batch produced zero usable scores even after splitting
@@ -15744,7 +15467,15 @@ Return a JSON object with four arrays of search query strings:
           const score = calibratedResults[idx];
           // Shared with the Batch-API path so the matched/placeholder shape and the
           // two fallback strings stay in lockstep (see jobBatchReconcile.js).
-          const scoredJob = buildScoredJob(job, score, { fallbackScore: UNSCORED_FALLBACK_SCORE, allNull });
+          const scoredJob = buildScoredJob(job, score ? {
+            ...score,
+            scoringEvidenceReceipt: {
+              ...score.scoringEvidenceReceipt,
+              contract: JOB_SCORING_CONTRACT,
+              careerSnapshotId,
+              mode: score.scoringEvidenceReceipt?.version === 3 ? 'fixed-requirement-evidence' : 'complete-career-record',
+            },
+          } : null, { fallbackScore: UNSCORED_FALLBACK_SCORE, allNull });
           const coverageReceipt = coverageReceipts[idx];
           // Do not hide a failed required evidence leaf behind the ordinary
           // fallback card. The score is already null at this point; attaching
@@ -15892,7 +15623,9 @@ Return a JSON object with four arrays of search query strings:
       scoringSuperseded = true;
       return { jobs: [], operationSuperseded: true, error: 'This Job Search operation was superseded before the scoring reply.' };
     }
-    return { scoredJobs, clusters, aiSkipped: false, collectionOnly: false, testMode: false };
+    return { scoredJobs, clusters, aiSkipped: false, collectionOnly: false, testMode: false,
+      scoringComplete: placeholderCount === 0 && ungroundedScoreCount === 0 && scoredJobs.length === toScore.length,
+    };
   });
 
   // Board-stage compensation research. Called after successful taxonomy

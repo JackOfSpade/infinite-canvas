@@ -4625,6 +4625,20 @@ export function createHandoffEngine({
       if (push?.status) pushState = { ...pushState, ...push.status(pushEpochId()) };
     } catch { /* status is advisory and must never break the control plane */ }
     const stamp = safeNow(now);
+    // A renderer can cancel a push handoff without another worker call.
+    // Reconcile only against an authoritative claim roster and never while a
+    // get/submit is in flight; legacy adapters without a roster remain valid.
+    if (Array.isArray(pushState.claimWorkers)) {
+      const owners = new Set(pushState.claimWorkers.map(item => item?.workerOrdinal));
+      for (const worker of epochWorkers()) {
+        if (worker.activeTaskKind !== 'push' || !worker.activeTask || owners.has(worker.workerOrdinal)
+          || worker.getInFlight != null || worker.submitInFlight > 0) continue;
+        worker.activeTask = false;
+        worker.activeTaskKind = null;
+        worker.activeTaskSince = null;
+        worker.idleSince = stamp;
+      }
+    }
     const stallsNow = noteStalls(stamp);
     // The lane a chat is being waited on for: a stalled one first, otherwise the
     // first served to THIS chat with no accepted answer since.

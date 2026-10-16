@@ -32,6 +32,7 @@ export default [
         ['hubState sources-ready', { hubState: 'sources-ready' }, 'a sources-ready board must not be up to date'],
         ['hubState scoring', { hubState: 'scoring' }, 'a still-scoring board must not be up to date'],
         ['stale true', { stale: true }, 'a stale board must not be up to date'],
+        ['pending saved-job re-score', { pendingSourceWork: true }, 'a matching result signature must not hide a pending scoring repair or replacement-career re-score'],
         ['connectedCount 0', { connectedCount: 0, completedCount: 0 }, 'zero connected searches must not be up to date'],
         ['completedCount fewer', { completedCount: 1 }, 'an incomplete board must not be up to date'],
         ['completedCount more', { completedCount: 3 }, 'more completed than connected must not be up to date'],

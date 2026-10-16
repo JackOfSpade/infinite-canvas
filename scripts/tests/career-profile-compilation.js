@@ -830,7 +830,9 @@ export default [
       let repairCalls = 0;
       let regression = null;
       const prompts = [];
+      const progress = [];
       const result = await compileAuditedCareerSnapshot({
+        onProgress: event => progress.push(event),
         sourceFiles: files, maxPromptChars: 10_600,
         callText: async (prompt, options) => {
           if (options.task === 'career-profile-compile') return pageTransport(profile());
@@ -848,6 +850,10 @@ export default [
           throw new Error(`Unexpected task ${options.task}`);
         },
       });
+      assert(progress.some(event => event.phase === 'compiling' && event.completed === event.total)
+        && progress.some(event => event.phase === 'auditing' && event.completed === event.total)
+        && progress.some(event => event.phase === 'repairing'), 'real compiler reports page, audit, and repair progress');
+      assert(progress.every(event => !event.total || event.completed <= event.total), 'progress counts stay within their actual phase totals');
       const achievement = result.profile.achievements[0];
       const integration = result.profile.skills.find(skill => skill.name === 'Endpoint integration');
       const externalReferences = achievement.technologyReferences.filter(reference => /endpoint$/u.test(reference.technology));

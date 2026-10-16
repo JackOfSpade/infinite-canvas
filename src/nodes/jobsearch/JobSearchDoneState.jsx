@@ -154,6 +154,7 @@ export function JobSearchDoneState({
   careerCleared = false,
   careerCompiling = false,
   careerCompileFailed = false,
+  careerCompileUnstarted = false,
   careerCompileError = '',
   onRetryCareerCompile = null,
   // File-picker buttons supplied by the parent for dropping new career files.
@@ -357,15 +358,17 @@ export function JobSearchDoneState({
           files here instead of offering re-scan / re-analyze. */}
       {careerCleared && !locked && (
         <div className="mt-2 w-full rounded-md border border-indigo-400/20 bg-indigo-500/5 px-2 py-1.5 text-[9px] leading-snug text-indigo-100/75">
-          <p className="font-medium text-indigo-200/85">Career data cleared</p>
+          <p className="font-medium text-indigo-200/85">{careerCompiling || careerCompileFailed || careerCompileUnstarted ? 'Career compilation' : 'Career data cleared'}</p>
           <p className="mt-0.5">
             {careerCompiling
               ? 'Compiling new career data… saved jobs are kept.'
               : careerCompileFailed
                 ? `Career compilation failed${careerCompileError ? `: ${careerCompileError}` : ''}.`
+                : careerCompileUnstarted
+                  ? 'Career files retained. Compile them when you are ready; saved jobs are kept.'
                 : `Drop new career files to re-score ${savedJobCount} saved job${savedJobCount === 1 ? '' : 's'}. Jobs are kept.`}
           </p>
-          {!careerCompiling && careerCompileFailed && onRetryCareerCompile && (
+          {!careerCompiling && (careerCompileFailed || careerCompileUnstarted) && onRetryCareerCompile && (
             <button
               type="button"
               onClick={(e) => {
@@ -375,10 +378,10 @@ export function JobSearchDoneState({
               onPointerDown={(e) => e.stopPropagation()}
               className="nodrag mt-1.5 w-full flex items-center justify-center px-2 py-1 rounded-full bg-blue-500/15 text-blue-300/90 hover:bg-blue-500/25 text-[10px] transition-colors border border-blue-500/20"
             >
-              Retry Career Compilation
+              {careerCompileFailed ? 'Retry Career Compilation' : 'Compile Career Files'}
             </button>
           )}
-          {!careerCompiling && !careerCompileFailed && careerImportControls}
+          {!careerCompiling && !careerCompileFailed && !careerCompileUnstarted && careerImportControls}
         </div>
       )}
 

@@ -421,15 +421,15 @@ export function BridgeProgress({
       if (mountedRef.current) setCopyingWorker(null);
     }
   };
-  const retryWorkerLaunch = async ordinal => {
+  const retryWorkerLaunch = async (ordinal, openExisting = false) => {
     if (!activeWorkerPool || busyRef.current) return;
     busyRef.current = true;
     setCopyingWorker(ordinal);
     try {
-      const result = await invoke('handoffBridgeRetryWorkerLaunch', {
+      const result = await invoke(openExisting ? 'handoffBridgeOpenWorkerChat' : 'handoffBridgeRetryWorkerLaunch', {
         generation: activeWorkerPool.generation, workerOrdinal: ordinal,
       });
-      if (mountedRef.current) setNotice(result?.success ? 'Opening a fresh ChatGPT worker chat…' : ipcErrorMessage(result?.code));
+      if (mountedRef.current) setNotice(result?.success ? (openExisting ? 'Opened this worker’s ChatGPT chat. Review its approval prompt there.' : 'Opening a fresh ChatGPT worker chat…') : ipcErrorMessage(result?.code));
     } finally {
       busyRef.current = false;
       if (mountedRef.current) setCopyingWorker(null);
@@ -537,14 +537,18 @@ export function BridgeProgress({
                   <span className={worker.state === 'quiet' ? 'text-amber-200' : worker.state === 'working' ? 'text-violet-200' : 'text-white/55'}>
                     {BRIDGE_UI_COPY.workerState(worker.state, worker.quietReason, worker.launch)}
                   </span>
-                    {worker.launch && <span className="basis-full text-sky-100/80">{BRIDGE_UI_COPY.workerLaunch(worker.launch, launchAccountName(activeWorkerPool.generation, worker.ordinal))}</span>}
+                  {worker.launch && <span className="basis-full text-sky-100/80">{BRIDGE_UI_COPY.workerLaunch(worker.launch, launchAccountName(activeWorkerPool.generation, worker.ordinal))}</span>}
+                  {worker.launch?.reason === 'approval_required' && (
+                    <button type="button" className="rounded border border-amber-300/50 px-2 py-1 text-amber-100"
+                      disabled={busy || activeCopyingWorker !== null} onClick={() => void retryWorkerLaunch(worker.ordinal, true)}>Open ChatGPT for approval</button>
+                  )}
                   {worker.launch?.stage === 'failed' && RETRYABLE_LAUNCH_REASONS.includes(worker.launch?.reason) && (
                     <button type="button" className="ml-auto rounded-md border border-white/15 bg-white/5 px-2.5 py-1.5 text-[11px] font-medium text-white/85"
                       disabled={busy || activeCopyingWorker !== null}
                       onClick={() => void retryWorkerLaunch(worker.ordinal)}>Retry</button>
                   )}
                   {worker.completed > 0 && <span className="text-white/45">{BRIDGE_UI_COPY.workerDone(worker.completed)}</span>}
-                  {worker.state === 'quiet' && (
+                  {worker.state === 'quiet' && worker.launch?.reason !== 'approval_required' && (
                     <>
                       <span className="basis-full text-amber-100/80">{BRIDGE_UI_COPY.workerQuiet(worker.quietReason)}</span>
                       <button

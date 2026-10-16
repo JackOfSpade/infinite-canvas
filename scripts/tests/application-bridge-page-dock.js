@@ -72,16 +72,19 @@ async function withDock(run) {
     await withDom(async window => withConsoleCollector(async entries => {
       const priorCustomEvent = Object.getOwnPropertyDescriptor(globalThis, 'CustomEvent');
       Object.defineProperty(globalThis, 'CustomEvent', { configurable: true, writable: true, value: window.CustomEvent });
-      const calls = { discard: [], startPool: [] };
+      const calls = { discard: [], startPool: [], openWorker: [] };
+      let receivePush = () => {}; let receiveProgress = () => {};
       window.electronAPI = {
         handoffBridgeGetStatus: async () => ({ status: status(1) }),
         onHandoffBridgeStatus: () => () => {},
         handoffBridgeGetActivity: async () => ({ items: [] }),
         handoffBridgePublishJobs: () => undefined,
-        onNonApiAiRequest: () => () => {},
+        onNonApiAiRequest: callback => { receivePush = callback; return () => {}; },
+        onCareerCompileProgress: callback => { receiveProgress = callback; return () => {}; },
         onNonApiAiSettled: () => () => {},
         onNonApiAiCancelled: () => () => {},
         discardLocalApplication: async payload => { calls.discard.push(payload); return { success: true }; },
+        handoffBridgeOpenWorkerChat: async payload => { calls.openWorker.push(payload); return { success: true }; },
         handoffBridgeStartWorkerPool: async () => {
           calls.startPool.push(true);
           return { success: true, generation: 1, workerCount: 2, recommended: 2, queued: 2, materialized: 2, lockedWorkerOrdinals: [] };
@@ -110,6 +113,8 @@ async function withDock(run) {
           }),
           ...extra,
         }),
+        publishPush: request => act(async () => receivePush(request)),
+        emitCareerProgress: progress => act(async () => receiveProgress(progress)),
         render: () => act(async () => { rootNode.render(bundle.module.React.createElement(bundle.module.DockProbe)); }),
         setStatus: next => act(async () => { bundle.module.applyHandoffBridgeStatus(next); }),
         // The dock's own copy of the modal stack (bundled with it): what Settings,
@@ -144,6 +149,46 @@ async function withDock(run) {
 }
 
 export default [
+  { name: 'handoff popup reveals the exact worker chat when approval is required', async run() {
+    await withDock(async dock => {
+      await dock.render();
+      await dock.setStatus(withLanes(2, [lane(JOB_A, 'awaiting')], {
+        chat: { state: 'working', ordinal: 1, pool: { active: true, generation: 41, workerCount: 1,
+          workers: [{ ordinal: 1, state: 'quiet', completed: 0, quietReason: 'answer_silent', firstCallAt: NOW,
+            launch: { stage: 'presented', reason: 'approval_required' } }] } },
+      }));
+      await dock.publish([dock.item({ jobId: JOB_A, title: 'Engineer', company: 'Acme' })]);
+      const button = [...dock.document.querySelectorAll('button')].find(b => b.textContent === 'Open ChatGPT for approval');
+      assert(button && !button.disabled, 'the actual popup exposes the hidden approval prompt');
+      assert(dock.text().includes('Approval needed in ChatGPT'));
+      assert(!dock.text().includes('Copy replacement starter'), 'approval does not invite restarting the worker');
+      await dock.act(async () => { button.click(); await Promise.resolve(); });
+      assert(JSON.stringify(dock.calls.openWorker) === JSON.stringify([{ generation: 41, workerOrdinal: 1 }]));
+    });
+  } },
+
+  {
+    name: 'career progress appears inside the real handoff popup and its pause action names the exact run',
+    async run() {
+      await withDock(async dock => {
+        await dock.render();
+        await dock.emitCareerProgress({ nodeId: 'career-hub', manualAiRunId: 'career-run', phase: 'auditing', completed: 3, total: 6, round: 2, startedAt: Date.now() - 125000 });
+        await dock.publishPush({ requestId: 'career-request', nodeId: 'career-hub', runId: 'career-run', task: 'career-profile-audit-skills', prompt: 'Career audit fixture', mcpEligible: false });
+        const popup = dock.document.querySelector('#non-api-ai-handoff-panel');
+        const progress = popup?.querySelector('[aria-label="Career compilation progress"]');
+        assert(progress && progress.textContent.includes('3/6 checks returned') && progress.textContent.includes('round 2'), 'real popup shows the host stage, counts, and audit round');
+        assert(progress.querySelector('ol[aria-label] li[aria-current="step"]')?.textContent.includes('Audit'), 'popup uses the same stepper as application generation');
+        await dock.emitCareerProgress({ nodeId: 'other-hub', manualAiRunId: 'career-run', phase: 'repairing', completed: 99, total: 100 });
+        assert(!progress.textContent.includes('99/100'), 'another hub cannot overwrite the selected popup');
+        let paused;
+        dock.document.addEventListener('job-search-pause-and-save', event => {
+          paused = event.detail; event.detail.accept(); event.detail.acknowledge({ success: true });
+        });
+        await dock.click(progress.querySelector('button'));
+        assert(paused?.nodeId === 'career-hub' && paused.runId === 'career-run' && paused.requestId === 'career-request', 'popup pause retains exact node/run/request ownership');
+      });
+    },
+  },
   {
     name: 'application bridge page: dock: queued bundles the bridge holds share ONE page with a row each, no chips, one worker block',
     async run() {

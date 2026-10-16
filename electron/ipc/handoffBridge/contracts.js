@@ -21,6 +21,7 @@ export const IPC_CHANNELS = Object.freeze({
   START_WORKER_POOL: 'handoff-bridge:start-worker-pool',
   COPY_WORKER_STARTER: 'handoff-bridge:copy-worker-starter',
   RESTART_WORKER: 'handoff-bridge:restart-worker',
+  OPEN_WORKER_CHAT: 'handoff-bridge:open-worker-chat',
   RETRY_WORKER_LAUNCH: 'handoff-bridge:retry-worker-launch',
   GET_LAUNCH_ACCOUNT: 'handoff-bridge:get-launch-account',
   PAUSE: 'handoff-bridge:pause',

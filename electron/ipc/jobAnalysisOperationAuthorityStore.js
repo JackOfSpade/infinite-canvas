@@ -7,6 +7,7 @@
  * Revoke writes a tombstone rather than removing it, so an old artifact can
  * never become valid again merely because the app was restarted.
  */
+import { MAX_JOB_ANALYSIS_ARTIFACT_BYTES } from './jobAnalysisArtifactLimits.js';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -25,7 +26,7 @@ const MAX_PUBLICATIONS = 64;
 // Snapshot publication bytes can be substantially larger than the authority
 // ledger, but they are still bounded by the writer/rebind contract.  Never use
 // readFile here: this verifier runs on paths beside a user-controlled canvas.
-const MAX_PUBLICATION_ARTIFACT_BYTES = 64 * 1024 * 1024;
+const MAX_PUBLICATION_ARTIFACT_BYTES = MAX_JOB_ANALYSIS_ARTIFACT_BYTES;
 // These operations reuse a durable run, recovered artifact, or continuation
 // rather than beginning a fresh analysis. They must name exactly the prior
 // receipt; `kind === 'resume'` was too narrow for the real operation dialect.

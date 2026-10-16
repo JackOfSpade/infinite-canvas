@@ -53,14 +53,14 @@ function setup({ windows = null, getCanvasWindows = null, controller = {}, dialo
 const invoke = (h, channel, payload) => h.ipc.handlers.get(channel)(h.event, payload);
 
 export default [
-  { name: 'handoff bridge: ipc: contract exposes exactly 29 invokes, one publish send and four events', run: () => {
-    const channelValues = Object.values(IPC_CHANNELS); assert(channelValues.length === 30 && new Set(channelValues).size === 30, 'IPC channel names must be closed and unique');
-    assert(IPC_CHANNELS.PUBLISH_JOBS === 'handoff-bridge:publish-jobs' && channelValues.filter(channel => channel !== IPC_CHANNELS.PUBLISH_JOBS).length === 29, 'publish-jobs is sole send-only channel');
+  { name: 'handoff bridge: ipc: contract exposes exactly 30 invokes, one publish send and four events', run: () => {
+    const channelValues = Object.values(IPC_CHANNELS); assert(channelValues.length === 31 && new Set(channelValues).size === 31, 'IPC channel names must be closed and unique');
+    assert(IPC_CHANNELS.PUBLISH_JOBS === 'handoff-bridge:publish-jobs' && channelValues.filter(channel => channel !== IPC_CHANNELS.PUBLISH_JOBS).length === 30, 'publish-jobs is sole send-only channel');
     assert(Object.values(IPC_EVENTS).length === 4 && new Set(Object.values(IPC_EVENTS)).size === 4
       && IPC_EVENTS.CANVAS_FILE_READY === 'handoff-bridge:canvas-file-ready', 'main-to-renderer events must be closed'); assert(!JSON.stringify({ IPC_CHANNELS, IPC_EVENTS, PUBLISH_JOBS_EXAMPLE }).includes('label'), 'IPC never carries renderer labels');
   } },
   { name: 'handoff bridge: ipc: registers exactly the frozen invokes and one publish listener', run: () => {
-    const h = setup(); assert(h.api.registration.ok && h.api.registration.invokes === 29 && h.api.registration.expectedInvokes === 29 && h.api.registration.publish, 'registration exposes a closed complete-route fact'); assert(h.ipc.handlers.size === 29 && h.ipc.listeners.size === 1 && h.ipc.listeners.has(IPC_CHANNELS.PUBLISH_JOBS), 'all and only contract channels register');
+    const h = setup(); assert(h.api.registration.ok && h.api.registration.invokes === 30 && h.api.registration.expectedInvokes === 30 && h.api.registration.publish, 'registration exposes a closed complete-route fact'); assert(h.ipc.handlers.size === 30 && h.ipc.listeners.size === 1 && h.ipc.listeners.has(IPC_CHANNELS.PUBLISH_JOBS), 'all and only contract channels register');
     assert([...h.ipc.handlers.keys()].every(channel => Object.values(IPC_CHANNELS).includes(channel)), 'no unlisted invoke channel is permitted');
   } },
   { name: 'handoff bridge: ipc: partial or missing IPC registration is reported false and leaves no route behind', run: () => {
@@ -116,7 +116,7 @@ export default [
   { name: 'handoff bridge: ipc: a failed replacement clears old and new bridge routes', run: () => {
     const ipc = fakeIpc();
     const initial = setup({ ipc });
-    assert(initial.api.registration.ok && ipc.handlers.size === 29 && ipc.listeners.size === 1,
+    assert(initial.api.registration.ok && ipc.handlers.size === 30 && ipc.listeners.size === 1,
       'the regression begins with a complete prior bridge registry');
 
     const realHandle = ipc.handle;

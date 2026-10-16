@@ -1,3 +1,5 @@
+import { waitForJobRendererCommit } from '../utils/jobRendererCommit';
+import { hasLegacyPageScoring } from '../utils/jobScoringContract';
 import React, { useRef, useEffect, useCallback, useContext, useMemo, useState, useId, useSyncExternalStore } from 'react';
 import { useReactFlow, useStore } from '@xyflow/react';
 import { CanvasNavigationContext } from '../contexts/CanvasNavigationContext';
@@ -28,6 +30,7 @@ import { canAutomaticallyResolveJobSourceWarning, descriptionRecoveryCheckpointW
 import { collectionScopeCaveatsForSavedJobReanalysis, normalizeCollectionScopeCaveats } from '../utils/jobCollectionScopeCaveats';
 import { createRunOwnershipGuard } from '../utils/runOwnership';
 import { createJobAnalysisOperationLedger, jobAnalysisOperationMatches } from '../utils/jobAnalysisOperationLedger';
+import { jobAnalysisInputDigest } from '../utils/jobAnalysisInputDigest';
 import { createManualAiPreSearchRecovery, exactStagedOfferSupersedesPreSearchManualAiResume, isLiveManualAiRecoveryBoardOwner, isSavedJobReanalysisManualAiResume, isSavedScrapeManualAiResume, isStaleOrdinaryManualAiResume, manualAiPreSearchRecoveryForResume, REANALYZE_SAVED_JOBS_MANUAL_AI_RECOVERY_MODE, staleOrdinaryManualAiResumeBlocksAdmission } from '../utils/manualAiRecovery';
 import { isTerminalSourceStatus } from '../utils/sourceProgress';
 import { detectQueryOperators } from '../utils/jobTitleMatch';
@@ -75,7 +78,7 @@ import { classifyJobBoardSourceAdmission } from '../utils/jobBoardSourceAdmissio
 import { buildJobHubCareerOnlyClearPatch, buildJobHubScrapeClearPatch, buildSavedJobsRescoreMarker, hubRetainsSavedJobs, isCareerClearedWithSavedJobs, pendingSavedJobsRescore, savedJobCount as countSavedJobs, savedJobsRescoreCompletionPatch } from '../utils/jobSearchSplitClear';
 import { createJobCareerImportCapability, freshJobCareerImportCapability, jobCareerImportBoardAdmission, jobCareerImportConsumptionPatch, retryableUnstartedJobCareerImportCapability } from '../utils/jobCareerImportCapability';
 import { isCareerCompilerTask } from '../utils/careerCompilerTasks';
-import { approveCareerImportCompilation, beginCareerImportCompilation, careerCompileResumeExplanation, careerImportCompilationAdmission, careerResumeBannerStatus, careerImportCompilationMatches, careerResumeInputPaths, compileBeforeCareerProvider, currentApprovedCareerImportSnapshot, failCareerImportCompilation, resumableCareerImportCompilation } from '../utils/jobCareerCompilationReceipt';
+import { pausedCareerImportCompilation, restartCareerImportCompilationPatch, approveCareerImportCompilation, beginCareerImportCompilation, careerCompileResumeExplanation, careerImportCompilationAdmission, careerResumeBannerStatus, careerImportCompilationMatches, careerResumeInputPaths, currentApprovedCareerImportSnapshot, failCareerImportCompilation, resumableCareerImportCompilation } from '../utils/jobCareerCompilationReceipt';
 import { buildJobCareerQueryCacheKey, canClaimJobRunCollectionCompletion, careerSnapshotBindingMatches, exactJobRunCareerSnapshotBindingMatches, normalizedJobCareerSnapshotId } from '../utils/jobCareerSnapshotBinding';
 import { moduleFingerprint } from './jobboard/mergeJobs';
 import {
@@ -662,6 +665,7 @@ function searchRunOutcome(status, {
   runId = null,
   resultDisposition = null,
   error = null,
+  reason = null,
   transientReason = null,
   terminalStatus = null,
   terminalOutcome = null,
@@ -680,6 +684,7 @@ function searchRunOutcome(status, {
       : {}),
     ...(typeof fingerprint === 'string' && fingerprint ? { fingerprint } : {}),
     ...(manualAiRunId ? { manualAiRunId } : {}),
+    ...(typeof reason === 'string' && reason ? { reason } : {}),
     ...(typeof transientReason === 'string' && transientReason ? { transientReason } : {}),
     ...(error ? { error: error?.message || String(error) } : {}),
   };
@@ -1234,13 +1239,14 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         'reanalyze-saved-jobs', 'manual-ai-resume',
       ]);
       const isLineage = lineageKinds.has(disposition);
+      const isReanalysis = disposition === 'reanalyze-saved-jobs' || disposition === 'saved-jobs-reanalysis';
       const semanticBase = {
         kind: disposition,
         careerSnapshotId: normalizedJobCareerSnapshotId(getNode(id)?.data?.careerSnapshotId),
         runId: runId || null,
         fingerprint: fingerprint || null,
-        analysisRevisionId: disposition === 'reanalyze-saved-jobs' ? (runId || null) : null,
-        sourceArtifactFingerprint: disposition === 'reanalyze-saved-jobs' ? (fingerprint || null) : null,
+        analysisRevisionId: isReanalysis ? (runId || null) : null,
+        sourceArtifactFingerprint: isReanalysis ? (fingerprint || null) : null,
         continuationId: disposition.includes('continuation') ? (runId || null) : null,
       };
       const priorAuthority = predecessor
@@ -1253,16 +1259,29 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         // Every durable lineage dialect uses an exact immediate predecessor.
         ...(isLineage && priorAuthority ? { predecessor: priorAuthority } : {}),
       });
-      if (!admitted?.admitted) return null;
+      if (!admitted?.admitted) {
+        EventLogger.log(`[JobSearch] analysis admission declined kind=${disposition} reason=${String(admitted?.reason || 'no-receipt').slice(0, 100)}`);
+        return null;
+      }
       // Main's acknowledgement is the admission boundary. Only now can this
       // renderer synchronously revoke its prior local capability and commit the
       // exact host receipt into node data.
       const capability = analysisOperationLedgerRef.current.adopt(prepared, admitted.receipt);
       const localReceipt = analysisOperationLedgerRef.current.receiptFor(capability);
-      updateGlobal(id, () => ({
+      updateGlobal(id, () => analysisOperationLedgerRef.current.canCommit(capability) ? ({
         analysisOperation: { ...localReceipt, authority: admitted.receipt },
-      }));
-      return capability;
+      }) : null);
+      // A React write may remain batched after the host acknowledgement.
+      // Callers immediately check canCommitAnalysisOperation; returning before
+      // the exact receipt is visible makes that check cancel our own new run.
+      // Keep the normal ownership check strict and await this publication.
+      for (let attempt = 0; attempt <= 8; attempt += 1) {
+        if (!analysisOperationLedgerRef.current.canCommit(capability)) return null;
+        if (jobAnalysisOperationMatches(getNode(id)?.data, capability)) return capability;
+        if (attempt < 8) await waitForRendererCommitFrame();
+      }
+      EventLogger.log(`[JobSearch] analysis admission receipt not observable kind=${disposition}`);
+      return null;
     };
     const queued = analysisOperationClaimTailRef.current.then(runClaim, runClaim);
     // A rejected IPC must not poison a later explicit intent.
@@ -1807,7 +1826,13 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       recoveryCommitAccepted = true;
       return { errorMessage: null };
     });
-    if (!recoveryCommitAccepted) {
+    if (!await waitForJobRendererCommit({
+      isCurrent: () => !cancelled() && exactJobRunCareerSnapshotBindingMatches(getNode(id)?.data, {
+        runId, careerSnapshotId: admittedCareerSnapshotId,
+      }),
+      isCommitted: () => recoveryCommitAccepted && getNode(id)?.data?.errorMessage == null,
+      waitForFrame: waitForRendererCommitFrame,
+    })) {
       return searchRunOutcome('failed', {
         runId,
         resultDisposition: expectedDisposition,
@@ -1892,7 +1917,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
   const approvedCareerCompilation = currentApprovedCareerImportSnapshot(data, {
     generation: data.careerImportGeneration,
   });
-  const careerCompilationFailed = data.careerImportCompilation?.status === 'failed';
+  const careerCompilationFailed = data.careerImportCompilation?.status === 'failed' && !pausedCareerImportCompilation(data);
   // Retained paths/profile make clearing or retrying possible, but only a
   // published-and-re-read snapshot receipt can enable a search affordance.
   const hasRunnableCareerInput = !!approvedCareerCompilation && hasReusableCareerProfile;
@@ -3960,6 +3985,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     jobRunId = null, cancelled = () => false, completeRun = true,
     preferenceMatchedCount = null, preferenceFilteredCount = null,
     preferenceEvaluation = null, preferenceCandidatePool = null,
+    preservePreferenceCandidatePool = false,
     resultDisposition = 'scored',
     careerSnapshotId = null,
     analysisOperation = null,
@@ -4062,7 +4088,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       // `handleReanalyze` already falls back to `scoredJobs` when the pool is
       // empty, so dropping it here costs nothing and halves the persisted
       // job payload for anyone not using preferences.
-      preferenceCandidatePool: (preferenceMatchedCount == null && preferenceFilteredCount == null)
+      preferenceCandidatePool: (!preservePreferenceCandidatePool && preferenceMatchedCount == null && preferenceFilteredCount == null)
         ? null
         : (Array.isArray(preferenceCandidatePool) ? preferenceCandidatePool : null),
       scoringCareerSnapshotId: resolvedCareerSnapshotId,
@@ -4092,7 +4118,11 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       errorMessage: finalizationError,
       };
     });
-    if (!scoringCommitAccepted) return searchRunOutcome('superseded', { runId: jobRunId });
+    if (!await waitForJobRendererCommit({
+      isCurrent: () => !cancelled() && canCommit() && careerSnapshotIsStillCurrent(),
+      isCommitted: () => scoringCommitAccepted && getNode(id)?.data?.scoredJobs === displayed,
+      waitForFrame: waitForRendererCommitFrame,
+    })) return searchRunOutcome('superseded', { runId: jobRunId, error: 'Scored results were not published for the current operation.' });
     return finalizationError
       ? searchRunOutcome('recovery-finalization-failed', { runId: jobRunId, resultDisposition, error: finalizationError })
       : searchRunOutcome('completed', { runId: jobRunId, resultDisposition });
@@ -4539,7 +4569,13 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         errorMessage: finalizationError,
         };
       });
-      if (!emptyTerminalCommitAccepted) {
+      if (!await waitForJobRendererCommit({
+        isCurrent: () => !cancelled() && exactJobRunCareerSnapshotBindingMatches(getNode(id)?.data, {
+          runId: jobRunId, careerSnapshotId: admittedCareerSnapshotId,
+        }),
+        isCommitted: () => emptyTerminalCommitAccepted && getNode(id)?.data?.resultDisposition === 'empty-complete',
+        waitForFrame: waitForRendererCommitFrame,
+      })) {
         return { shouldScore: false, warnings, outcome: searchRunOutcome('superseded', { runId: jobRunId }) };
       }
       pendingJobsRef.current = null;
@@ -4588,6 +4624,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     // must remain this hub's id), but it must not try to acquire the same lane
     // again or the parent/child workflow would deadlock.
     queueManagedByBoard = false,
+    queueManagedExternally = false,
     parentCancelled = null,
     orchestratorNodeId = null,
     boardRunId = null,
@@ -4775,7 +4812,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     let compilationGeneration = null;
     let compilationAttempt = null;
     try {
-      if (!queueManagedByBoard) {
+      if (!queueManagedByBoard && !queueManagedExternally) {
         lease = await moduleRunQueue.acquireModuleRun({
           nodeId: currentId,
           kind: 'jobsearch',
@@ -4817,7 +4854,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
             updateGlobal(currentId, { queuedModuleRun: null });
           },
         });
-      } else {
+      } else if (queueManagedByBoard) {
         if (!orchestratorNodeId) throw new Error('A board-managed search requires an orchestrator node id.');
         updateGlobal(currentId, { queuedModuleRun: null });
         EventLogger.log(`[JobSearch][${currentId}] Queue delegated to Job Board ${orchestratorNodeId}`);
@@ -5293,7 +5330,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       const activeSearchTitles = deriveSearchTitles(activeTargetRole, jobPreferencesInterpretation);
       let rolePlanCommitAccepted = false;
       updateGlobal(currentId, (node) => {
-        if (!careerSnapshotBindingMatches({ careerSnapshotId: node?.data?.careerSnapshotId }, pinnedCareerSnapshotId)) return null;
+        if (cancelled() || !careerSnapshotBindingMatches({ careerSnapshotId: node?.data?.careerSnapshotId }, pinnedCareerSnapshotId)) return null;
         rolePlanCommitAccepted = true;
         return {
           hubState: 'querying', activeTargetRole, activeJobPreferences,
@@ -5302,7 +5339,11 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
           ...(freshRoleLockPatch || {}),
         };
       });
-      if (!rolePlanCommitAccepted) return searchRunOutcome('superseded', { runId: jobRunIdRef.current });
+      if (!await waitForJobRendererCommit({
+        isCurrent: () => !cancelled() && pinnedCareerSnapshotStillCurrent(),
+        isCommitted: () => rolePlanCommitAccepted && getNode(currentId)?.data?.hubState === 'querying',
+        waitForFrame: waitForRendererCommitFrame,
+      })) return searchRunOutcome('superseded', { runId: jobRunIdRef.current });
       const activePreferredLocation = locationToLegacyText(runLocationSnapshot.searchLocation);
       const queryCacheKey = buildJobCareerQueryCacheKey({
         careerSnapshotId: pinnedCareerSnapshotId,
@@ -5422,7 +5463,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       sourceWarningOverridesDuringSearchRef.current.clear();
       let providerPhaseCommitAccepted = false;
       updateGlobal(currentId, (node) => {
-        if (!careerSnapshotBindingMatches({ careerSnapshotId: node?.data?.careerSnapshotId }, pinnedCareerSnapshotId)) return null;
+        if (cancelled() || !careerSnapshotBindingMatches({ careerSnapshotId: node?.data?.careerSnapshotId }, pinnedCareerSnapshotId)) return null;
         providerPhaseCommitAccepted = true;
         return {
         hubState: 'searching',
@@ -5442,7 +5483,11 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         collectionScopeCaveats: [],
         };
       });
-      if (!providerPhaseCommitAccepted) return searchRunOutcome('superseded', { runId: jobRunIdRef.current });
+      if (!await waitForJobRendererCommit({
+        isCurrent: () => !cancelled() && pinnedCareerSnapshotStillCurrent(),
+        isCommitted: () => providerPhaseCommitAccepted && getNode(currentId)?.data?.hubState === 'searching',
+        waitForFrame: waitForRendererCommitFrame,
+      })) return searchRunOutcome('superseded', { runId: jobRunIdRef.current });
       const searchResult = await window.electronAPI.searchJobs({
         queries: allQueries,
         nodeId: currentId,
@@ -5691,7 +5736,13 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
           retryOperationFor: message,
           };
         });
-        if (!candidateSaveFailureAccepted) return searchRunOutcome('superseded', { runId: searchResult.runId || null });
+        if (!await waitForJobRendererCommit({
+          isCurrent: () => !cancelled() && exactJobRunCareerSnapshotBindingMatches(getNode(currentId)?.data, {
+            runId: searchResult.runId, careerSnapshotId: pinnedCareerSnapshotId,
+          }),
+          isCommitted: () => candidateSaveFailureAccepted && getNode(currentId)?.data?.pendingJobs === foundJobs,
+          waitForFrame: waitForRendererCommitFrame,
+        })) return searchRunOutcome('superseded', { runId: searchResult.runId || null });
         pendingJobsRef.current = foundJobs;
         gatheredCountRef.current = visibleGatheredCount;
         scrapeWarningsRef.current = finalWarnings;
@@ -5766,7 +5817,13 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
           errorMessage: finalizationError,
           };
         });
-        if (!emptyPreferenceCommitAccepted) return searchRunOutcome('superseded', { runId: searchResult.runId || null });
+        if (!await waitForJobRendererCommit({
+          isCurrent: () => !cancelled() && exactJobRunCareerSnapshotBindingMatches(getNode(currentId)?.data, {
+            runId: searchResult.runId, careerSnapshotId: pinnedCareerSnapshotId,
+          }),
+          isCommitted: () => emptyPreferenceCommitAccepted && getNode(currentId)?.data?.resultDisposition === 'preference-filtered',
+          waitForFrame: waitForRendererCommitFrame,
+        })) return searchRunOutcome('superseded', { runId: searchResult.runId || null });
         await completeManualAiRun(effectiveManualAiRunId);
         if (cancelled()) return searchRunOutcome('cancelled', { runId: searchResult.runId || null });
         return finalizationError
@@ -5864,7 +5921,13 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
           errorMessage: finalizationError,
           };
         });
-        if (!collectionOnlyCommitAccepted) return searchRunOutcome('superseded', { runId: searchResult.runId || null });
+        if (!await waitForJobRendererCommit({
+          isCurrent: () => !cancelled() && exactJobRunCareerSnapshotBindingMatches(getNode(currentId)?.data, {
+            runId: searchResult.runId, careerSnapshotId: pinnedCareerSnapshotId,
+          }),
+          isCommitted: () => collectionOnlyCommitAccepted && getNode(currentId)?.data?.resultDisposition === 'collection-only',
+          waitForFrame: waitForRendererCommitFrame,
+        })) return searchRunOutcome('superseded', { runId: searchResult.runId || null });
         await completeManualAiRun(effectiveManualAiRunId);
         if (cancelled()) return searchRunOutcome('cancelled', { runId: searchResult.runId || null });
         return finalizationError
@@ -6027,22 +6090,26 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     const filePaths = Array.isArray(fileOrFiles) ? fileOrFiles : (fileOrFiles ? [fileOrFiles] : []);
     const compile = compileCareerFilesRef.current;
     if (!compile) return searchRunOutcome('failed', { error: 'Career-file compiler is unavailable.' });
-    return compileBeforeCareerProvider({
-      compile: () => compile(filePaths, freshImportCapability),
-      provider: ({ profile, careerSnapshotId }) => runPipeline({
-      profile,
-      careerSnapshotId,
-      frameSourceCards,
-      runOrigin,
-      manualAiRunId,
-      queueManagedByBoard,
+    return compile(filePaths, {
+      generation: freshImportCapability,
+      queueManagedExternally: queueManagedByBoard,
       parentCancelled,
-      orchestratorNodeId,
-      boardRunId,
-      freshImportCapability,
-      providerPhaseOnly,
-      boardRecoveryClaim,
-    }),
+      onCompiled: ({ profile, careerSnapshotId }, queueOptions) => runPipeline({
+        ...queueOptions,
+        profile,
+        careerSnapshotId,
+        frameSourceCards,
+        runOrigin,
+        manualAiRunId,
+        queueManagedByBoard,
+        parentCancelled: () => queueOptions.parentCancelled()
+          || (typeof parentCancelled === 'function' && parentCancelled()),
+        orchestratorNodeId,
+        boardRunId,
+        freshImportCapability,
+        providerPhaseOnly,
+        boardRecoveryClaim,
+      }),
     });
   }, [runPipeline]);
 
@@ -6050,14 +6117,10 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
   // provider is contacted. Startup connection checks must not turn that local
   // ingestion into a dead drop: compile the career material now, then leave the
   // actual search for the normal source-readiness gate once checks settle.
-  // This intentionally does not acquire the job-search lane or create source
-  // cards — neither belongs to snapshot compilation.
+  // Compilation uses the same FIFO as providers and scoring. A dropped
+  // module retains its turn through its follow-up search, so a second drop
+  // cannot issue another AI prompt or overtake the first module's search.
   const compileCareerFiles = useCallback(async (filePaths, generationOrOptions = null) => {
-    if (!window.electronAPI?.parseCareerData) {
-      const error = 'Career-file processing is unavailable.';
-      updateGlobal(id, { hubState: 'empty', errorMessage: error, retryOperation: 'rerun', retryOperationFor: error });
-      return searchRunOutcome('failed', { error });
-    }
     // Legacy callers pass a generation string. A recovery can additionally
     // prove and reuse the exact manual-AI run that started this compilation;
     // accepting that narrow object here avoids manufacturing a second handoff
@@ -6065,167 +6128,249 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     const compileOptions = generationOrOptions && typeof generationOrOptions === 'object'
       ? generationOrOptions
       : { generation: generationOrOptions };
-    const requestedManualAiRunId = typeof compileOptions.manualAiRunId === 'string'
-      ? compileOptions.manualAiRunId.trim()
-      : '';
-    // Clear Career Data can keep the saved jobs. A replacement drop then
-    // compiles beside them: the hub stays `done` so the list remains visible,
-    // and the approved snapshot is marked as owed a saved-job re-score.
-    const retainSavedJobs = compileOptions.retainSavedJobs === true;
-    const processingToken = processingRunsRef.current.start();
-    if (!processingToken) return searchRunOutcome('busy', { error: 'This Job Search module is already running.' });
-    const locallyCancelled = epoch.start();
-    const manualAiRunId = requestedManualAiRunId || createManualAiRunId(id);
-    const compilationGeneration = compileOptions.generation
-      || getNode(id)?.data?.careerImportGeneration
-      || createJobCareerImportCapability(id);
-    const compilationAttempt = beginCareerImportCompilation({
-      generation: compilationGeneration,
-      manualAiRunId,
-    });
-    if (!compilationAttempt) return searchRunOutcome('failed', { error: 'Could not create a career compilation receipt.' });
-    const exactRecoveryMarkerStillOwns = (current) => !requestedManualAiRunId || (
-      current?.manualAiResume?.runId === manualAiRunId
-      && current?.careerImportGeneration === compilationGeneration
-    );
-    const exactRecoveryStillOwns = (current) => exactRecoveryMarkerStillOwns(current)
-      && (!requestedManualAiRunId || (
-        !!resumableCareerImportCompilation(current, {
-          generation: compilationGeneration,
-          manualAiRunId,
-        })
+    if (localQueueAdmissionRef.current || processingRunsRef.current.active) {
+      return searchRunOutcome('busy', { error: 'This Job Search module is already running.' });
+    }
+    const admissionToken = Symbol(`career-compilation:${id}`);
+    localQueueAdmissionRef.current = admissionToken;
+    const queuedCancelled = epoch.start();
+    const admittedGeneration = compileOptions.generation || getNode(id)?.data?.careerImportGeneration || null;
+    const cancelled = () => queuedCancelled() || !isMountedRef.current || !getNode(id)
+      || isJobWorkflowDeletionPending(id)
+      || (typeof compileOptions.parentCancelled === 'function' && compileOptions.parentCancelled());
+    const inputChanged = () => admittedGeneration
+      && getNode(id)?.data?.careerImportGeneration !== admittedGeneration;
+    const queueLabel = 'Compiling career files';
+    const updateQueuePosition = ({ position }) => {
+      if (!cancelled()) updateGlobal(id, { queuedModuleRun: { label: queueLabel, position } });
+    };
+    const clearQueueMarker = () => {
+      if (localQueueAdmissionRef.current !== admissionToken) return;
+      updateGlobal(id, (node) => (
+        node?.data?.queuedModuleRun?.label === queueLabel ? { queuedModuleRun: null } : null
       ));
+    };
+    let lease = null;
     try {
-      // `parseCareerData` can publish a manual-AI request before its promise
-      // settles. Claim its exact identity first, so a reset/cancellation can
-      // acknowledge that request even if the pending event is still in flight.
-      activeManualAiRunIdRef.current = manualAiRunId;
-      updateGlobal(id, (node) => {
-        const current = node?.data || {};
-        if (current.careerImportGeneration && current.careerImportGeneration !== compilationGeneration) return null;
-        // A saved compiler handoff may be cleared or replaced while its
-        // Continue click is awaiting a render. Never let that older click
-        // overwrite a new import/marker merely because the generation text
-        // happened to survive.
-        if (!exactRecoveryStillOwns(current)) return null;
-        return {
-          hubState: retainSavedJobs ? 'done' : 'parsing', errorMessage: null, rerunOutcome: null, rerunNotice: null,
-          careerImportGeneration: compilationGeneration,
-          careerImportCompilation: compilationAttempt,
-        };
+      // A Board re-scan already owns this lane for its exact child call.
+      if (compileOptions.queueManagedExternally !== true) lease = await moduleRunQueue.acquireModuleRun({
+        nodeId: id, kind: 'jobsearch', lane: 'job-search', label: queueLabel,
+        onQueued: updateQueuePosition,
+        onQueueUpdate: updateQueuePosition,
+        onStart: () => {
+          if (cancelled()) throw new Error('Career compilation cancelled');
+          clearQueueMarker();
+        },
       });
+      // The accepting drop's generation patch may still be waiting for React
+      // when an idle queue grants this turn in the next microtask.
       await waitForRendererCommitFrame();
-      if (
-        !careerImportCompilationMatches(getNode(id)?.data?.careerImportCompilation, compilationAttempt)
-        || !exactRecoveryMarkerStillOwns(getNode(id)?.data || {})
-      ) {
-        return searchRunOutcome('superseded', { error: 'Career input changed while compilation was starting.' });
-      }
-      const parseResult = await window.electronAPI.parseCareerData({ filePaths, nodeId: id, manualAiRunId });
-      if (locallyCancelled()) return searchRunOutcome('cancelled');
-      if (!parseResult?.success) throw new Error(parseResult?.error || 'Failed to parse career files');
-      const profile = parseResult.profile;
-      const approvedCompilation = approveCareerImportCompilation(compilationAttempt, {
-        generation: compilationGeneration,
-        attemptId: compilationAttempt.attemptId,
-        careerSnapshotId: parseResult.careerSnapshotId,
-        profileFingerprint: String(parseResult.fingerprint || ''),
+      if (cancelled()) return searchRunOutcome('cancelled');
+      if (inputChanged()) return searchRunOutcome('superseded');
+      if (getNode(id)?.data?.locked) return searchRunOutcome('not-ready', { error: 'This Job Search module is locked.' });
+      const compiled = await compile();
+      clearQueueMarker();
+      if (localQueueAdmissionRef.current === admissionToken) localQueueAdmissionRef.current = null;
+      if (compiled?.status !== 'compiled' || typeof compileOptions.onCompiled !== 'function') return compiled;
+      if (cancelled()) return searchRunOutcome('cancelled');
+      return await compileOptions.onCompiled(compiled, {
+        queueManagedExternally: true, parentCancelled: () => cancelled() || inputChanged(),
       });
-      if (!approvedCompilation) throw new Error('The career compiler did not return an approved snapshot id.');
-      updateGlobal(id, (node) => {
-        const current = node?.data || {};
-        if (
-          !careerImportCompilationMatches(current.careerImportCompilation, compilationAttempt)
-          || !exactRecoveryStillOwns(current)
-        ) return null;
-        const rescoreMarker = retainSavedJobs
-          ? buildSavedJobsRescoreMarker({
-            careerSnapshotId: parseResult.careerSnapshotId,
-            generation: compilationGeneration,
-          })
-          : null;
-        return {
-        // Keep the hub in its normal retained-input state. Re-scan remains the
-        // only path that can reach providers, and it rechecks readiness live.
-        // Saved jobs instead stay listed until their re-score replaces them.
-        hubState: retainSavedJobs ? 'done' : 'empty',
-        ...(retainSavedJobs ? { savedJobsRescore: rescoreMarker, savedJobsCareerClearedAt: null } : {}),
-        careerSnapshotId: typeof parseResult.careerSnapshotId === 'string' && parseResult.careerSnapshotId
-          ? parseResult.careerSnapshotId
-          : null,
-        resumeProfile: profile,
-        careerData: parseResult.careerData || '',
-        resumeSummary: buildResumeSummary(profile),
-        resumeFingerprint: String(parseResult.fingerprint || ''),
-        resumeContext: { skills: profile?.skills, experience: profile?.experience_years },
-        errorMessage: null,
-        retryOperation: null,
-        retryOperationFor: null,
-          careerImportCompilation: approvedCompilation,
-        };
-      });
-      // A clear/re-import may replace this node between parse resolution and
-      // the renderer commit.  Do not retire its manual-AI marker or return the
-      // old projection unless our exact generation/attempt/snapshot survived.
-      await waitForRendererCommitFrame();
-      const committedCompilation = getNode(id)?.data?.careerImportCompilation;
-      if (
-        !careerImportCompilationMatches(committedCompilation, compilationAttempt)
-        || committedCompilation?.status !== 'approved'
-        || committedCompilation?.careerSnapshotId !== parseResult.careerSnapshotId
-        || !exactRecoveryMarkerStillOwns(getNode(id)?.data || {})
-      ) {
-        return searchRunOutcome('superseded', { error: 'Career input changed before compilation could be approved.' });
-      }
-      // This is a terminal success for the parser-only workflow. Leaving its
-      // handoff marker behind would block the later Job Board search as if a
-      // recoverable manual-AI operation were still pending. If durable cleanup
-      // fails, `completeManualAiRun` records a retry marker and we surface that
-      // failure instead of silently treating the snapshot as clean.
-      if (!await completeManualAiRun(manualAiRunId, {
-        retirementReason: 'career-snapshot-compiled',
-      })) {
-        throw new Error('Career snapshot compiled, but manual-AI completion cleanup did not finish.');
-      }
-      EventLogger.log(`[JobSearch][${id}] Career snapshot compiled; provider admission remains separate`);
-      return {
-        status: 'compiled',
-        profile,
-        careerSnapshotId: parseResult.careerSnapshotId,
-        fingerprint: String(parseResult.fingerprint || ''),
-        retainedSavedJobs: retainSavedJobs,
-      };
     } catch (error) {
-      if (locallyCancelled()) return searchRunOutcome('cancelled');
-      const message = error?.message || 'Failed to parse career files';
-      EventLogger.error(`[JobSearch][${id}] Career snapshot compilation failed while platform connections verify:`, error);
-      updateGlobal(id, (node) => {
-        const current = node?.data || {};
-        if (
-          !careerImportCompilationMatches(current.careerImportCompilation, compilationAttempt)
-          || !exactRecoveryStillOwns(current)
-        ) return null;
-        const failed = failCareerImportCompilation(current.careerImportCompilation, {
-          generation: compilationGeneration, attemptId: compilationAttempt.attemptId, error: message,
-        });
-        // With saved jobs kept, the failed receipt is the whole failure: an
-        // errorMessage on a `done` hub would read as a failed search, and its
-        // Retry would route to a fresh scan instead of recompiling.
-        return retainSavedJobs
-          ? { hubState: 'done', ...(failed ? { careerImportCompilation: failed } : {}) }
-          : {
-            hubState: 'empty', errorMessage: message, retryOperation: 'rerun', retryOperationFor: message,
-            ...(failed ? { careerImportCompilation: failed } : {}),
-          };
-      });
+      if (cancelled()) return searchRunOutcome('cancelled');
+      EventLogger.error(`[JobSearch][${id}] Queued career import failed:`, error);
       return searchRunOutcome('failed', { error });
     } finally {
-      if (activeManualAiRunIdRef.current === manualAiRunId) {
-        activeManualAiRunIdRef.current = null;
-      }
-      if (isMountedRef.current) processingRunsRef.current.finish(processingToken);
+      clearQueueMarker();
+      if (localQueueAdmissionRef.current === admissionToken) localQueueAdmissionRef.current = null;
+      if (lease) await waitForRendererCommitFrame();
+      lease?.release();
     }
-  }, [completeManualAiRun, epoch, getNode, id, isMountedRef, updateGlobal]);
+
+    async function compile() {
+      if (!window.electronAPI?.parseCareerData) {
+        const error = 'Career-file processing is unavailable.';
+        updateGlobal(id, { hubState: 'empty', errorMessage: error, retryOperation: 'rerun', retryOperationFor: error });
+        return searchRunOutcome('failed', { error });
+      }
+      const requestedManualAiRunId = typeof compileOptions.manualAiRunId === 'string'
+        ? compileOptions.manualAiRunId.trim()
+        : '';
+      // Clear Career Data can keep the saved jobs. A replacement drop then
+      // compiles beside them: the hub stays `done` so the list remains visible,
+      // and the approved snapshot is marked as owed a saved-job re-score.
+      const retainSavedJobs = compileOptions.retainSavedJobs === true;
+      const processingToken = processingRunsRef.current.start();
+      if (!processingToken) return searchRunOutcome('busy', { error: 'This Job Search module is already running.' });
+      const locallyCancelled = epoch.start();
+      const manualAiRunId = requestedManualAiRunId || createManualAiRunId(id);
+      const compilationGeneration = compileOptions.generation
+        || getNode(id)?.data?.careerImportGeneration
+        || createJobCareerImportCapability(id);
+      const compilationAttempt = beginCareerImportCompilation({
+        generation: compilationGeneration,
+        manualAiRunId,
+      });
+      if (!compilationAttempt) return searchRunOutcome('failed', { error: 'Could not create a career compilation receipt.' });
+      const exactRecoveryMarkerStillOwns = (current) => !requestedManualAiRunId || (
+        current?.manualAiResume?.runId === manualAiRunId
+        && current?.careerImportGeneration === compilationGeneration
+      );
+      const exactRecoveryStillOwns = (current) => exactRecoveryMarkerStillOwns(current)
+        && (!requestedManualAiRunId || (
+          !!resumableCareerImportCompilation(current, {
+            generation: compilationGeneration,
+            manualAiRunId,
+          })
+        ));
+      try {
+        // `parseCareerData` can publish a manual-AI request before its promise
+        // settles. Claim its exact identity first, so a reset/cancellation can
+        // acknowledge that request even if the pending event is still in flight.
+        activeManualAiRunIdRef.current = manualAiRunId;
+        updateGlobal(id, (node) => {
+          const current = node?.data || {};
+          if (current.careerImportGeneration && current.careerImportGeneration !== compilationGeneration) return null;
+          // A saved compiler handoff may be cleared or replaced while its
+          // Continue click is awaiting a render. Never let that older click
+          // overwrite a new import/marker merely because the generation text
+          // happened to survive.
+          if (!exactRecoveryStillOwns(current)) return null;
+          return {
+            hubState: retainSavedJobs ? 'done' : 'parsing', errorMessage: null, rerunOutcome: null, rerunNotice: null,
+            careerImportGeneration: compilationGeneration,
+            careerImportCompilation: compilationAttempt,
+            ...(current.manualAiResume?.runId === manualAiRunId
+              ? { manualAiResume: { ...current.manualAiResume, pausedByUser: false } } : {}),
+          };
+        });
+        await waitForRendererCommitFrame();
+        if (
+          !careerImportCompilationMatches(getNode(id)?.data?.careerImportCompilation, compilationAttempt)
+          || !exactRecoveryMarkerStillOwns(getNode(id)?.data || {})
+        ) {
+          return searchRunOutcome('superseded', { error: 'Career input changed while compilation was starting.' });
+        }
+        const parseResult = await window.electronAPI.parseCareerData({ filePaths, nodeId: id, manualAiRunId, forceRecompile: compileOptions.forceRecompile === true });
+        if (locallyCancelled()) return searchRunOutcome('cancelled');
+        if (!parseResult?.success) throw new Error(parseResult?.error || 'Failed to parse career files');
+        const profile = parseResult.profile;
+        const approvedCompilation = approveCareerImportCompilation(compilationAttempt, {
+          generation: compilationGeneration,
+          attemptId: compilationAttempt.attemptId,
+          careerSnapshotId: parseResult.careerSnapshotId,
+          profileFingerprint: String(parseResult.fingerprint || ''),
+        });
+        if (!approvedCompilation) throw new Error('The career compiler did not return an approved snapshot id.');
+        updateGlobal(id, (node) => {
+          const current = node?.data || {};
+          if (
+            !careerImportCompilationMatches(current.careerImportCompilation, compilationAttempt)
+            || !exactRecoveryStillOwns(current)
+          ) return null;
+          const rescoreMarker = retainSavedJobs
+            ? buildSavedJobsRescoreMarker({
+              careerSnapshotId: parseResult.careerSnapshotId,
+              generation: compilationGeneration,
+            })
+            : null;
+          return {
+          // Keep the hub in its normal retained-input state. Re-scan remains the
+          // only path that can reach providers, and it rechecks readiness live.
+          // Saved jobs instead stay listed until their re-score replaces them.
+          hubState: retainSavedJobs ? 'done' : 'empty',
+          ...(retainSavedJobs ? { savedJobsRescore: rescoreMarker, savedJobsCareerClearedAt: null } : {}),
+          careerSnapshotId: typeof parseResult.careerSnapshotId === 'string' && parseResult.careerSnapshotId
+            ? parseResult.careerSnapshotId
+            : null,
+          resumeProfile: profile,
+          careerData: parseResult.careerData || '',
+          resumeSummary: buildResumeSummary(profile),
+          resumeFingerprint: String(parseResult.fingerprint || ''),
+          resumeContext: { skills: profile?.skills, experience: profile?.experience_years },
+          errorMessage: null,
+          retryOperation: null,
+          retryOperationFor: null,
+            careerImportCompilation: approvedCompilation,
+          };
+        });
+        // A clear/re-import may replace this node between parse resolution and
+        // the renderer commit.  Do not retire its manual-AI marker or return the
+        // old projection unless our exact generation/attempt/snapshot survived.
+        // A frame callback can run before React commits the functional node
+        // update, especially while the handoff dock is unmounting. Observe the
+        // exact approved receipt rather than treating one stale read as a new
+        // import and abandoning terminal cleanup.
+        for (let commitAttempt = 0; commitAttempt < 8; commitAttempt += 1) {
+          await waitForRendererCommitFrame();
+          if (locallyCancelled()) return searchRunOutcome('cancelled');
+          const observed = getNode(id)?.data?.careerImportCompilation;
+          if (careerImportCompilationMatches(observed, compilationAttempt)
+            && observed.status === 'approved' && observed.careerSnapshotId === parseResult.careerSnapshotId) break;
+          if (observed && !careerImportCompilationMatches(observed, compilationAttempt)) break;
+        }
+        const committedCompilation = getNode(id)?.data?.careerImportCompilation;
+        if (
+          !careerImportCompilationMatches(committedCompilation, compilationAttempt)
+          || committedCompilation?.status !== 'approved'
+          || committedCompilation?.careerSnapshotId !== parseResult.careerSnapshotId
+          || !exactRecoveryMarkerStillOwns(getNode(id)?.data || {})
+        ) {
+          return searchRunOutcome('superseded', { error: 'Career input changed before compilation could be approved.' });
+        }
+        // This is a terminal success for the parser-only workflow. Leaving its
+        // handoff marker behind would block the later Job Board search as if a
+        // recoverable manual-AI operation were still pending. If durable cleanup
+        // fails, `completeManualAiRun` records a retry marker and we surface that
+        // failure instead of silently treating the snapshot as clean.
+        if (!await completeManualAiRun(manualAiRunId, {
+          retirementReason: 'career-snapshot-compiled',
+        })) {
+          // Cleanup has its own durable retry receipt. The approved snapshot
+          // must remain approved even when retiring the answer journal fails.
+          return searchRunOutcome('not-ready', { reason: 'career-completion-cleanup',
+            error: 'Career snapshot is approved, but manual-AI completion cleanup did not finish.' });
+        }
+        EventLogger.log(`[JobSearch][${id}] Career snapshot compiled; provider admission remains separate`);
+        return {
+          status: 'compiled',
+          profile,
+          careerSnapshotId: parseResult.careerSnapshotId,
+          fingerprint: String(parseResult.fingerprint || ''),
+          retainedSavedJobs: retainSavedJobs,
+        };
+      } catch (error) {
+        if (locallyCancelled() || isJobBoardUserCancellation(error)) return searchRunOutcome('cancelled');
+        const message = error?.message || 'Failed to parse career files';
+        EventLogger.error(`[JobSearch][${id}] Career snapshot compilation failed while platform connections verify:`, error);
+        updateGlobal(id, (node) => {
+          const current = node?.data || {};
+          if (
+            !careerImportCompilationMatches(current.careerImportCompilation, compilationAttempt)
+            || !exactRecoveryStillOwns(current)
+          ) return null;
+          const failed = failCareerImportCompilation(current.careerImportCompilation, {
+            generation: compilationGeneration, attemptId: compilationAttempt.attemptId, error: message,
+          });
+          // With saved jobs kept, the failed receipt is the whole failure: an
+          // errorMessage on a `done` hub would read as a failed search, and its
+          // Retry would route to a fresh scan instead of recompiling.
+          return retainSavedJobs
+            ? { hubState: 'done', ...(failed ? { careerImportCompilation: failed } : {}) }
+            : {
+              hubState: 'empty', errorMessage: message, retryOperation: 'rerun', retryOperationFor: message,
+              ...(failed ? { careerImportCompilation: failed } : {}),
+            };
+        });
+        return searchRunOutcome('failed', { error });
+      } finally {
+        if (activeManualAiRunIdRef.current === manualAiRunId) {
+          activeManualAiRunIdRef.current = null;
+        }
+        if (isMountedRef.current) processingRunsRef.current.finish(processingToken);
+      }
+    }
+  }, [completeManualAiRun, epoch, getNode, id, isMountedRef, moduleRunQueue, updateGlobal]);
   useEffect(() => {
     compileCareerFilesRef.current = compileCareerFiles;
   }, [compileCareerFiles]);
@@ -6235,6 +6380,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       runOrigin = 'initial',
       manualAiRunId = null,
       queueManagedByBoard = false,
+      queueManagedExternally = false,
       parentCancelled = null,
       orchestratorNodeId = null,
       boardRunId = null,
@@ -6248,6 +6394,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       runOrigin,
       manualAiRunId,
       queueManagedByBoard,
+      queueManagedExternally,
       parentCancelled,
       orchestratorNodeId,
       boardRunId,
@@ -6569,7 +6716,13 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         errorMessage: finalizationError,
         };
       });
-      if (!pausedEmptyTerminalCommitAccepted) {
+      if (!await waitForJobRendererCommit({
+        isCurrent: () => !cancelled() && exactJobRunCareerSnapshotBindingMatches(getNode(id)?.data, {
+          runId: activeJobRunId, careerSnapshotId: admittedPausedCareerSnapshotId,
+        }),
+        isCommitted: () => pausedEmptyTerminalCommitAccepted && getNode(id)?.data?.resultDisposition === 'empty-complete',
+        waitForFrame: waitForRendererCommitFrame,
+      })) {
         return searchRunOutcome('superseded', { runId: activeJobRunId });
       }
       pendingJobsRef.current = null;
@@ -6855,7 +7008,13 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
           errorMessage: terminalFinalizationError(activeJobRunId, canvasFilePath, completion),
           };
         });
-        if (!pausedPreferenceTerminalCommitAccepted) {
+        if (!await waitForJobRendererCommit({
+          isCurrent: () => !cancelled() && exactJobRunCareerSnapshotBindingMatches(getNode(currentId)?.data, {
+            runId: activeJobRunId, careerSnapshotId: admittedPausedCareerSnapshotId,
+          }),
+          isCommitted: () => pausedPreferenceTerminalCommitAccepted && getNode(currentId)?.data?.resultDisposition === 'preference-filtered',
+          waitForFrame: waitForRendererCommitFrame,
+        })) {
           return searchRunOutcome('superseded', { runId: activeJobRunId });
         }
         await completeManualAiRun(manualAiRunId);
@@ -7876,7 +8035,13 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
           retryOperationFor: message,
           };
         });
-        if (!resumedCandidateSaveFailureAccepted) return searchRunOutcome('superseded', { runId: resumedRunId });
+        if (!await waitForJobRendererCommit({
+          isCurrent: () => !cancelled() && exactJobRunCareerSnapshotBindingMatches(getNode(currentId)?.data, {
+            runId: resumedRunId, careerSnapshotId: admittedResumeCareerSnapshotId,
+          }),
+          isCommitted: () => resumedCandidateSaveFailureAccepted && getNode(currentId)?.data?.pendingJobs === foundJobs,
+          waitForFrame: waitForRendererCommitFrame,
+        })) return searchRunOutcome('superseded', { runId: resumedRunId });
         pendingJobsRef.current = foundJobs;
         gatheredCountRef.current = visibleGatheredCount;
         scrapeWarningsRef.current = finalWarnings;
@@ -7938,7 +8103,13 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
           errorMessage: terminalFinalizationError(resumedRunId, cfp, completion),
           };
         });
-        if (!resumedPreferenceTerminalCommitAccepted) return searchRunOutcome('superseded', { runId: resumedRunId });
+        if (!await waitForJobRendererCommit({
+          isCurrent: () => !cancelled() && exactJobRunCareerSnapshotBindingMatches(getNode(currentId)?.data, {
+            runId: resumedRunId, careerSnapshotId: admittedResumeCareerSnapshotId,
+          }),
+          isCommitted: () => resumedPreferenceTerminalCommitAccepted && getNode(currentId)?.data?.resultDisposition === 'preference-filtered',
+          waitForFrame: waitForRendererCommitFrame,
+        })) return searchRunOutcome('superseded', { runId: resumedRunId });
         await completeManualAiRun(manualAiRunId);
         if (cancelled()) return searchRunOutcome('cancelled', { runId: searchResult?.runId || null });
         const completionError = terminalFinalizationError(resumedRunId, cfp, completion);
@@ -8793,7 +8964,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
   // A replacement career snapshot compiled beside kept saved jobs is owed a
   // re-score. Standalone hubs start it now; a connected Job Board owns it, so
   // the person runs it from there alongside any other selected searches.
-  const continueSavedJobsRescore = useCallback((compiled) => {
+  const continueSavedJobsRescore = useCallback((compiled, queueOptions = {}) => {
     if (compiled?.status !== 'compiled' || compiled.retainedSavedJobs !== true) return compiled;
     const count = countSavedJobs(getNode(id)?.data);
     const jobsText = `${count} saved job${count === 1 ? '' : 's'}`;
@@ -8809,7 +8980,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     }
     if (findJobSearchBoardActiveRecoveryOwner(id, getNodes(), getEdges())) return compiled;
     EventLogger.log(`[JobSearch][${id}] New career snapshot ready; re-scoring ${jobsText}`);
-    return handleReanalyzeRef.current?.({ savedJobsRescore: true });
+    return handleReanalyzeRef.current?.({ savedJobsRescore: true, ...queueOptions });
   }, [addToast, getEdges, getNode, getNodes, id]);
 
   // Handle file drops directly onto this node. Any NUMBER and TYPE of files are
@@ -8875,10 +9046,9 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     void Promise.resolve(compileCareerFilesRef.current?.(valid, {
       generation: careerImportCapability,
       retainSavedJobs,
-    }))
-      .then((compiled) => {
+      onCompiled: async (compiled, queueOptions) => {
         if (compiled?.status !== 'compiled') return;
-        if (compiled.retainedSavedJobs) return continueSavedJobsRescore(compiled);
+        if (compiled.retainedSavedJobs) return continueSavedJobsRescore(compiled, queueOptions);
         if (platformsVerifyingRef.current) {
           addToast({
             title: 'Career files ready',
@@ -8892,10 +9062,12 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
           'Career files saved. Use Search selected & combine on the connected Job Board when you are ready.',
         )) return;
         return startProcessingWithProfile(compiled.profile, {
+          ...queueOptions,
           freshImportCapability: careerImportCapability,
           careerSnapshotId: compiled.careerSnapshotId,
         });
-      });
+      },
+    }));
     // The synchronous latch is the only admission receipt the chooser needs:
     // compilation/search may settle later, but a second click must never claim
     // success after this import generation has already been reserved.
@@ -8911,8 +9083,17 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     void Promise.resolve(compileCareerFilesRef.current?.(paths, {
       generation: liveData.careerImportGeneration,
       retainSavedJobs: true,
-    })).then(continueSavedJobsRescore);
+      onCompiled: continueSavedJobsRescore,
+    }));
   }, [continueSavedJobsRescore, getNode, id]);
+
+  const compileRetainedCareerFiles = useCallback(() => {
+    const liveData = getNode(id)?.data || {};
+    const paths = careerResumeInputPaths(liveData);
+    if (liveData.locked || !paths.length || !liveData.careerImportGeneration) return;
+    // Restart a cancelled, unstarted import independently of provider logins.
+    void compileCareerFilesRef.current?.(paths, { generation: liveData.careerImportGeneration });
+  }, [getNode, id]);
 
   const handleDrop = useCallback((e) => {
     e.preventDefault();
@@ -9427,7 +9608,11 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
                 live.manualAiCleanupReceipts,
                 manualAiRunId,
               ),
-            } : { manualAiResume: pausedMarker }),
+            } : {
+              manualAiResume: pausedMarker,
+              ...(pausedCareerImportCompilation({ ...live, manualAiResume: pausedMarker })
+                ? { careerImportCompilation: pausedCareerImportCompilation({ ...live, manualAiResume: pausedMarker }) } : {}),
+            }),
             // A re-analysis always restores its completed owner state, even
             // when that state legitimately has zero scored rows but retains a
             // large preference candidate pool for a revised Search Brief.
@@ -11381,6 +11566,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       ? options.boardRun
       : null;
     const boardManaged = !!boardRun;
+    const queueManagedExternally = options.queueManagedExternally === true;
     const resumedManualAiRunId = typeof options?.manualAiRunId === 'string'
       ? options.manualAiRunId
       : null;
@@ -11461,6 +11647,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     const requestedData = safeClone(getNode(id)?.data || data);
     const requestedFingerprint = reanalysisInputFingerprint(requestedData);
     const existingScoredJobs = Array.isArray(requestedData.scoredJobs) ? requestedData.scoredJobs : [];
+    const scoringOnlyRepair = hasLegacyPageScoring(requestedData);
     // The pool must be a SUPERSET of what the hub is displaying, never an
     // alternative to it. `finishScoringAndSpawn` below REPLACES `scoredJobs`
     // with whatever this analyses, so any path that leaves the pool holding a
@@ -11497,13 +11684,13 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     // confidence, fitAssessment, rawScore, adjustedScore, adjustments, or
     // calibration would make that placeholder look like the old assessment.
     // Listing and compensation evidence intentionally remain intact.
-    const jobsToReanalyze = savedCandidatePool.map(job => {
+    const jobsToReanalyze = (scoringOnlyRepair ? existingScoredJobs : savedCandidatePool).map(job => {
       const listing = { ...(job || {}) };
       [
         'matchScore', 'reasoning', 'careerDirection', 'requirementAssessments',
         'materialGaps', 'strengths', 'experienceAssessment', 'confidence',
         'fitAssessment', 'rawScore', 'adjustedScore', 'adjustments', 'calibration',
-        'preferenceAssessment',
+        ...(!scoringOnlyRepair ? ['preferenceAssessment'] : []),
       ].forEach(field => delete listing[field]);
       return listing;
     });
@@ -11516,6 +11703,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     const epochCancelled = epoch.start();
     let reanalysisOperation = null;
     const cancelled = () => epochCancelled()
+      || (typeof options.parentCancelled === 'function' && options.parentCancelled())
       || (boardManaged && typeof boardRun.parentCancelled === 'function' && boardRun.parentCancelled())
       || (reanalysisOperation != null && !canCommitAnalysisOperation(reanalysisOperation));
     // The Board verifies a child's terminal receipt against the live hub, so
@@ -11533,7 +11721,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     let staleRecoveryBlockedAtLaneStart = false;
 
     try {
-      if (!boardManaged) lease = await moduleRunQueue.acquireModuleRun({
+      if (!boardManaged && !queueManagedExternally) lease = await moduleRunQueue.acquireModuleRun({
         nodeId: currentId,
         kind: 'jobsearch',
         lane: 'job-search',
@@ -11628,11 +11816,20 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       // Publish it only with successful results; cancellation keeps the legacy
       // input intact and completeRun:false leaves scan history untouched.
       const reanalysisRunId = runData.jobRunId || manualAiRunId;
-      reanalysisOperation = await claimAnalysisOperation('reanalyze-saved-jobs', {
+      // A fresh score pass is a new intent, including after Clear career data
+      // revoked the old authority. Only an exact saved handoff is a continuation.
+      const operationFingerprint = await jobAnalysisInputDigest(requestedFingerprint);
+      if (cancelled()) return searchRunOutcome('cancelled');
+      if (reanalysisInputFingerprint(getNode(currentId)?.data) !== requestedFingerprint) {
+        return searchRunOutcome('superseded', { error: 'The saved jobs or career data changed before re-evaluation started. Try again.' });
+      }
+      reanalysisOperation = await claimAnalysisOperation(resumingSavedReanalysis ? 'reanalyze-saved-jobs' : 'saved-jobs-reanalysis', {
         runId: reanalysisRunId,
-        fingerprint: requestedFingerprint,
+        fingerprint: operationFingerprint,
       });
-      if (!reanalysisOperation) return searchRunOutcome('superseded');
+      if (!reanalysisOperation) return searchRunOutcome('superseded', {
+        error: 'Saved-job re-evaluation could not claim the current analysis. Refresh the canvas and try again.',
+      });
       if (cancelled()) return searchRunOutcome('cancelled');
       restorePatch = reanalysisRestorePatch(runData);
       reanalysisRestoreRef.current = { token: processingToken, patch: restorePatch };
@@ -11667,9 +11864,14 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       // future re-scans use the new brief too, but never invoke a provider or
       // touch seen-history here. resolveSearchRoles also handles an empty
       // brief without an AI call, producing the correct empty role list.
-      let jobPreferencesInterpretation = null;
+      let jobPreferencesInterpretation = scoringOnlyRepair
+        ? (runData.searchBriefPlan || runData.jobPreferencePlan || runData.jobPreferencesInterpretation || null)
+        : null;
       let refreshedRoleLockPatch = null;
-      if (window.electronAPI?.resolveSearchRoles) {
+      if (scoringOnlyRepair) {
+        // This fixes assessment logic only. Keep the exact scored job selection
+        // and its saved preference decisions for a controlled comparison.
+      } else if (window.electronAPI?.resolveSearchRoles) {
         updateGlobal(currentId, () => cancelled() ? null : { hubState: 'interpreting-preferences' });
         const resolveResult = await window.electronAPI.resolveSearchRoles({
           profile: runData.resumeProfile,
@@ -11755,8 +11957,19 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
           ...(refreshedRoleLockPatch || {}),
         };
       });
-      if (!reanalysisRolePlanCommitAccepted) return searchRunOutcome('superseded');
-      const preferenceResult = await evaluatePreferencesForRun({
+      if (!await waitForJobRendererCommit({
+        isCurrent: () => !cancelled() && reanalysisSnapshotStillCurrent(),
+        isCommitted: () => reanalysisRolePlanCommitAccepted
+          && getNode(currentId)?.data?.jobPreferencePlan === jobPreferencesInterpretation,
+        waitForFrame: waitForRendererCommitFrame,
+      })) return searchRunOutcome('superseded', { error: 'The saved scoring preference receipt was not published for the current operation.' });
+      const preferenceResult = scoringOnlyRepair ? {
+        jobs: jobsToReanalyze,
+        candidatePool: savedCandidatePool,
+        evaluation: runData.preferenceEvaluation || null,
+        matchedCount: runData.preferenceMatchedCount,
+        filteredCount: runData.preferenceFilteredCount,
+      } : await evaluatePreferencesForRun({
         jobs: jobsToReanalyze,
         profile: runData.resumeProfile,
         careerData: runData.careerData,
@@ -11858,7 +12071,11 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         reanalysisScoringStateAccepted = true;
         return { hubState: 'scoring', jobCount: preferenceResult.jobs.length };
       });
-      if (!reanalysisScoringStateAccepted) return searchRunOutcome('superseded');
+      if (!await waitForJobRendererCommit({
+        isCurrent: () => !cancelled() && reanalysisSnapshotStillCurrent(),
+        isCommitted: () => reanalysisScoringStateAccepted && getNode(currentId)?.data?.hubState === 'scoring',
+        waitForFrame: waitForRendererCommitFrame,
+      })) return searchRunOutcome('superseded', { error: 'The saved scoring state was not published for the current operation.' });
       const scoreResult = await window.electronAPI.scoreJobs({
         jobs: preferenceResult.jobs,
         operationAuthority: operationAuthorityFor(reanalysisOperation),
@@ -11902,6 +12119,9 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       if (!scoreResult.success) {
         throw new Error(scoreResult.error || 'Failed to re-analyze hiring fit');
       }
+      if (scoreResult.scoringComplete === false) {
+        throw new Error('Some saved jobs could not be fully scored. Your previous scores were kept; retry the saved-job scoring repair.');
+      }
 
       const scoredReanalysisOutcome = await finishScoringAndSpawn({
         jobRunId: reanalysisRunId,
@@ -11923,6 +12143,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         preferenceFilteredCount: scoreResult.preferenceFilteredCount ?? preferenceResult.filteredCount,
         preferenceEvaluation: scoreResult.preferenceEvaluation ?? preferenceResult.evaluation,
         preferenceCandidatePool: scoreResult.preferenceCandidatePool ?? preferenceResult.candidatePool,
+        preservePreferenceCandidatePool: scoringOnlyRepair,
         cancelled,
         canCommit: () => !cancelled(),
         // This score-only action has no search run or history lifecycle.
@@ -11946,8 +12167,10 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
 
       if (!cancelled()) {
         addToast({
-          title: 'Saved Jobs Re-evaluated',
-          description: `Updated your preferences and hiring-fit assessments for ${savedCandidatePool.length} saved job${savedCandidatePool.length === 1 ? '' : 's'}.`,
+          title: scoringOnlyRepair ? 'Saved Job Scores Repaired' : 'Saved Jobs Re-evaluated',
+          description: scoringOnlyRepair
+            ? `Re-scored ${existingScoredJobs.length} saved jobs using complete career evidence. Job selection and preferences were kept.`
+            : `Updated your preferences and hiring-fit assessments for ${savedCandidatePool.length} saved job${savedCandidatePool.length === 1 ? '' : 's'}.`,
           type: 'success',
         });
       }
@@ -11990,7 +12213,12 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
           reanalysisNotice: error?.message || String(error),
         };
       });
-      if (!reanalysisFailureRestoreAccepted) return searchRunOutcome('superseded');
+      if (!await waitForJobRendererCommit({
+        isCurrent: () => !cancelled() && careerSnapshotBindingMatches(
+          { careerSnapshotId: getNode(currentId)?.data?.careerSnapshotId }, admittedReanalysisCareerSnapshotId),
+        isCommitted: () => reanalysisFailureRestoreAccepted && getNode(currentId)?.data?.hubState === 'done',
+        waitForFrame: waitForRendererCommitFrame,
+      })) return searchRunOutcome('superseded', { error: 'The previous scores could not be restored for the current operation.' });
       addToast({
         title: 'Saved Job Re-evaluation Failed',
         description: 'Your existing scores were kept. Try again when the AI handoff is available.',
@@ -12775,7 +13003,12 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         jobPreferencePlan: jobPreferencesInterpretation,
         };
       });
-      if (!savedRecoveryProjectionAccepted) return searchRunOutcome('superseded', { runId: snapshot.runId || null });
+      if (!await waitForJobRendererCommit({
+        isCurrent: () => !cancelled() && careerSnapshotBindingMatches(
+          { careerSnapshotId: getNode(currentId)?.data?.careerSnapshotId }, admittedSavedCareerSnapshotId),
+        isCommitted: () => savedRecoveryProjectionAccepted && getNode(currentId)?.data?.resumeProfile === profile,
+        waitForFrame: waitForRendererCommitFrame,
+      })) return searchRunOutcome('superseded', { runId: snapshot.runId || null });
 
       try {
         const locationSnapshot = snapshot.locationSnapshot || snapshot.snapshotContext?.locationSnapshot || (
@@ -12880,7 +13113,12 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
               errorMessage: terminalFinalizationError(completeSnapshotRun ? snapshot.runId : null, canvasFilePath, completion),
               };
             });
-            if (!savedPreferenceTerminalCommitAccepted) {
+            if (!await waitForJobRendererCommit({
+              isCurrent: () => !cancelled() && careerSnapshotBindingMatches(
+                { careerSnapshotId: getNode(currentId)?.data?.careerSnapshotId }, admittedSavedCareerSnapshotId),
+              isCommitted: () => savedPreferenceTerminalCommitAccepted && getNode(currentId)?.data?.resultDisposition === 'preference-filtered',
+              waitForFrame: waitForRendererCommitFrame,
+            })) {
               return searchRunOutcome('superseded', { runId: snapshot.runId || null });
             }
           }
@@ -12982,7 +13220,12 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
             rerunNotice: null,
           };
         });
-        if (!savedRecoveryFailureCommitAccepted) return searchRunOutcome('superseded', { runId: snapshot.runId || null });
+        if (!await waitForJobRendererCommit({
+          isCurrent: () => !cancelled() && careerSnapshotBindingMatches(
+            { careerSnapshotId: getNode(currentId)?.data?.careerSnapshotId }, admittedSavedCareerSnapshotId),
+          isCommitted: () => savedRecoveryFailureCommitAccepted && getNode(currentId)?.data?.retryOperation === 'resume-saved-scrape',
+          waitForFrame: waitForRendererCommitFrame,
+        })) return searchRunOutcome('superseded', { runId: snapshot.runId || null });
         return searchRunOutcome('failed', {
           runId: snapshot.runId || null,
           resultDisposition: hubHasResults ? 'incomplete' : null,
@@ -13050,6 +13293,27 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     // pre-search window it never created. A task name alone is insufficient;
     // the live generation receipt must bind the same manual-AI run.
     if (isCareerCompilationTask(resume?.task)) {
+      // The host can finish and publish its snapshot before an interrupted
+      // renderer retires the last handoff. Approval is terminal, so this exact
+      // run needs cleanup only; it must never re-enter compilation or reject
+      // its own approved receipt as an invalid resumable one.
+      const finished = currentApprovedCareerImportSnapshot(liveData, { generation: liveData.careerImportGeneration });
+      if (finished?.manualAiRunId === resume.runId) {
+        if (!await completeManualAiRun(resume.runId, { retirementReason: 'career-snapshot-compiled' })) {
+          return searchRunOutcome('not-ready', { error: 'Career snapshot is approved; completion cleanup needs another attempt.' });
+        }
+        updateGlobal(id, node => {
+          const current = node?.data || {};
+          const approved = currentApprovedCareerImportSnapshot(current, { generation: finished.generation });
+          if (approved?.manualAiRunId !== resume.runId || approved?.careerSnapshotId !== finished.careerSnapshotId) return null;
+          return { errorMessage: null, retryOperation: null, retryOperationFor: null };
+        });
+        EventLogger.log(`[JobSearch][${id}] Approved career compilation recovered; saved handoff retired without recompiling`);
+        const compiled = { status: 'compiled', profile: liveData.resumeProfile,
+          careerSnapshotId: finished.careerSnapshotId, fingerprint: liveData.resumeFingerprint,
+          retainedSavedJobs: liveData.hubState === 'done' && hubRetainsSavedJobs(liveData) };
+        return compiled.retainedSavedJobs ? continueSavedJobsRescore(compiled) : compiled;
+      }
       const compilation = resumableCareerImportCompilation(liveData, {
         generation: liveData.careerImportGeneration,
         manualAiRunId: resume.runId,
@@ -13073,8 +13337,8 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         generation: compilation.generation,
         manualAiRunId: resume.runId,
         retainSavedJobs,
+        onCompiled: retainSavedJobs ? continueSavedJobsRescore : undefined,
       });
-      if (compiled?.retainedSavedJobs) void continueSavedJobsRescore(compiled);
       return compiled;
     }
     if (!canvasFilePath || !window.electronAPI?.peekJobRun) {
@@ -13178,7 +13442,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       });
     }
     return failRecoveryInspection('This saved recovery no longer has the career input that created it. Use Clear career data before choosing new input.');
-  }, [canvasFilePath, continueSavedJobsRescore, data, getNode, handleReanalyze, handleResumeRun, handleResumeSavedScrape, id, runPipeline, updateGlobal]);
+  }, [completeManualAiRun, canvasFilePath, continueSavedJobsRescore, data, getNode, handleReanalyze, handleResumeRun, handleResumeSavedScrape, id, runPipeline, updateGlobal]);
 
   const autoResumedManualAiRunRef = useRef(null);
   const manualAiAutoResumeAttemptRef = useRef(null);
@@ -13375,6 +13639,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     // Resetting the one-shot latch is intentional: each button press is a new,
     // explicit request to run this exact durable marker, never an automatic
     // retry after a failed provider/auth preflight.
+    cancelledBoardManualAiRunIdsRef.current.delete(resume.runId);
     autoResumedManualAiRunRef.current = null;
     manualAiAutoResumeAttemptRef.current = null;
     manualAiStaleRecoveryActionRunIdRef.current = resume.runId;
@@ -13382,6 +13647,57 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     setManualAiExplicitResumeRequest({ runId: resume.runId, requestedAt: Date.now() });
     EventLogger.log(`[JobSearch][${id}] User continued saved manual AI run ${resume.runId}`);
   }, [canvasFilePath, getEdges, getNode, getNodes, id]);
+
+  const restartCareerCompilationBusyRef = useRef(false);
+  const [restartCareerCompilationBusy, setRestartCareerCompilationBusy] = useState(false);
+  const handleRestartCareerCompilation = useCallback(async () => {
+    const live = getNode(id)?.data || {};
+    const receipt = live.careerImportCompilation;
+    const runId = receipt?.manualAiRunId;
+    const generation = live.careerImportGeneration;
+    if (restartCareerCompilationBusyRef.current || live.locked || live.queuedModuleRun
+      || processingRunsRef.current.active || isJobWorkflowDeletionPending(id)
+      || hasPendingManualAiRetirement(live)
+      || findJobSearchBoardRecoveryOwner(id, runId, getNodes(), getEdges())
+      || !restartCareerImportCompilationPatch(live, { generation, runId })) return;
+    restartCareerCompilationBusyRef.current = true;
+    setRestartCareerCompilationBusy(true);
+    try {
+      // Retire the old answer journal before creating another run. A failed
+      // acknowledgement leaves the saved checkpoint and all inputs available.
+      epoch.bump();
+      await settleManualAiRetirement({ runId, marker: live.manualAiResume,
+        retirementReason: 'career-compilation-restart', requireCancellationAck: true });
+      let committed = false;
+      updateGlobal(id, node => {
+        const current = node?.data || {};
+        if (current.locked) return null;
+        const patch = restartCareerImportCompilationPatch(current, { generation, runId });
+        if (!patch) return null;
+        committed = true;
+        return patch;
+      });
+      await waitForRendererCommitFrame();
+      const current = getNode(id)?.data || {};
+      if (!committed || current.careerImportGeneration !== generation || current.careerImportCompilation
+        || current.manualAiResume || current.locked) return;
+      autoResumedManualAiRunRef.current = null;
+      manualAiAutoResumeAttemptRef.current = null;
+      manualAiStaleRecoveryActionRunIdRef.current = null;
+      setManualAiStaleRecoveryActionRunId(null);
+      setManualAiExplicitResumeRequest(null);
+      EventLogger.log(`[JobSearch][${id}] Career compilation restarted from beginning; files and saved jobs retained`);
+      const retainSavedJobs = current.hubState === 'done' && hubRetainsSavedJobs(current);
+      await compileCareerFilesRef.current?.(careerResumeInputPaths(current), { generation,
+        retainSavedJobs, forceRecompile: true,
+        onCompiled: retainSavedJobs ? continueSavedJobsRescore : undefined });
+    } catch (error) {
+      addToast({ title: 'Could not restart career compilation', description: error?.message || 'Cleanup did not finish. Try again.', type: 'error' });
+    } finally {
+      restartCareerCompilationBusyRef.current = false;
+      if (isMountedRef.current) setRestartCareerCompilationBusy(false);
+    }
+  }, [addToast, continueSavedJobsRescore, epoch, getEdges, getNode, getNodes, id, isMountedRef, settleManualAiRetirement, updateGlobal]);
 
   // What will Continue really do for a saved career compilation?  Answered by
   // the main process from the files' content and the compiler contract, never
@@ -13899,7 +14215,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       </div>
       <div className="text-amber-200/60 text-[10px] leading-snug mt-0.5">
         {careerResumeExplanation
-          ? `${careerResumeExplanation.body} Clear career data is the only way to remove it.`
+          ? `${careerResumeExplanation.body} Restart career compilation re-reads your career files and starts fresh AI compilation and audits. Your saved jobs are kept.`
           : savedReanalysisManualAiRecovery
           ? 'Your saved listings and revised Search Brief are retained. Continue re-evaluates those saved jobs only; it never starts a new scrape.'
           : pausedManualAiRecovery
@@ -13916,7 +14232,12 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
           onPointerDown={(e) => e.stopPropagation()}
           onClick={handleContinueManualAiRecovery}
           disabled={baseControlsLocked || manualAiRecoveryActionBusy || !canvasFilePath || careerResumeStillChecking}
-        >Continue</button>
+        >{careerResumeExplanation ? 'Continue saved compilation' : 'Continue'}</button>
+        {careerResumeExplanation && <button type="button"
+          className="nodrag px-2 py-0.5 rounded text-[10px] border border-amber-500/40 text-amber-200 disabled:opacity-50"
+          onClick={handleRestartCareerCompilation}
+          disabled={baseControlsLocked || manualAiRecoveryActionBusy || restartCareerCompilationBusy || !canvasFilePath || !careerResumePaths.length}
+        >Restart career compilation</button>}
       </div>
     </div>
   ) : null;
@@ -13935,6 +14256,25 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
   const careerCompilationRetryOwnsBanner = careerCompilationFailed
     && !data.terminalFinalizationRecovery;
 
+  const cancelQueuedSearch = useCallback((event) => {
+    event?.stopPropagation();
+    const live = getNode(id)?.data;
+    if (!live || live.locked || !live.queuedModuleRun) return;
+    // The queue removes only unstarted work owned by this Search. A Board
+    // may list this node as a dependency; cancelling here must not cancel it.
+    const removed = moduleRunQueue.cancelQueuedRunsOwnedByNode(id, 'Queued Job Search cancelled');
+    if (!removed) return; // It already started: leave the active run alone.
+    epoch.bump();
+    updateGlobal(id, {
+      queuedModuleRun: null,
+      ...(live.hubState === 'queued' ? { hubState: countSavedJobs(live) > 0 ? 'done' : 'empty' } : {}),
+    });
+    EventLogger.log(`[JobSearch][${id}] Queued work cancelled before starting; career files and saved jobs retained`);
+  }, [epoch, getNode, id, moduleRunQueue, updateGlobal]);
+  const careerCompilationUnstarted = hasCareerIdentity && !data.careerImportCompilation
+    && careerResumeInputPaths(data).length > 0;
+
+
   const banner = (
     <>
       {data.queuedModuleRun && !isProcessing && (
@@ -13946,6 +14286,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
           {data.queuedModuleRun.label || 'Job Search work'} is queued
           {Number.isFinite(data.queuedModuleRun.position) ? ` · position ${data.queuedModuleRun.position}` : ''}.
           {' '}Search controls are paused until it starts.
+          <button type="button" className="nodrag mt-1.5 block rounded border border-blue-300/25 px-2 py-1 text-blue-100 hover:bg-blue-400/15 disabled:opacity-40" onClick={cancelQueuedSearch} disabled={data.locked} aria-label="Cancel queued Job Search">Cancel queued work</button>
         </div>
       )}
       {resumeBanner}
@@ -14013,14 +14354,18 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     : null;
   const careerReplacementPending = hubState === 'done' && listedSavedJobCount > 0 && (
     isCareerClearedWithSavedJobs({ type: 'jobhub', data })
+    || careerCompilationUnstarted
     || replacementCompile?.status === 'compiling'
     || replacementCompile?.status === 'failed'
   );
-  const savedJobsRescorePending = !!pendingSavedJobsRescore(data);
+  const savedJobsRescoreRequest = pendingSavedJobsRescore(data);
+  const savedJobsRescorePending = !!savedJobsRescoreRequest;
   const savedJobsText = `${listedSavedJobCount} saved job${listedSavedJobCount === 1 ? '' : 's'}`;
   const rescorePendingText = !savedJobsRescorePending
     ? ''
-    : managedByJobBoard
+    : savedJobsRescoreRequest?.scoringOnly
+      ? `Scoring repair available · re-score ${savedJobsText} using complete career evidence${managedByJobBoard ? ' from the Job Board' : ''}. Job selection and preferences are kept.`
+      : managedByJobBoard
       ? `New career data is ready · use Search selected & combine on the Job Board to re-score ${savedJobsText}.`
       : isProcessing || data.queuedModuleRun
         ? `New career data is ready · re-scoring ${savedJobsText}…`
@@ -14071,14 +14416,14 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
                         ? 'Ready — run it from the connected Job Board, or clear these files'
                         : 'A Job Board recovery is settling. Direct search controls return when it finishes or is cancelled.')
                       : 'Re-scan with these files, or clear them to search with different ones'}</p>
-                  {careerCompilationFailed && !controlsLocked && !boardRecoveryOwnsActions && !resumeOffer?.incomplete && (
+                  {(careerCompilationFailed || careerCompilationUnstarted) && !controlsLocked && !boardRecoveryOwnsActions && !resumeOffer?.incomplete && (
                     <button
                       type="button"
                       className="nodrag mt-3 px-3 py-1 rounded-full bg-blue-500/15 text-blue-300 hover:bg-blue-500/25 text-[10px] border border-blue-500/20 transition-colors"
                       onPointerDown={(e) => e.stopPropagation()}
-                      onClick={(e) => { e.stopPropagation(); handleRerun({ frameSourceCards: false, runOrigin: 'career-compilation-retry' }); }}
+                      onClick={(e) => { e.stopPropagation(); if (careerCompilationUnstarted) compileRetainedCareerFiles(); else handleRerun({ frameSourceCards: false, runOrigin: 'career-compilation-retry' }); }}
                     >
-                      Retry Career Compilation
+                      {careerCompilationFailed ? 'Retry Career Compilation' : 'Compile Career Files'}
                     </button>
                   )}
                   {hasRunnableCareerInput && !controlsLocked && !boardRecoveryOwnsActions && !resumeOffer?.incomplete && (
@@ -14250,6 +14595,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
             onPauseAndSave={pauseAndSaveHandler}
             chromeLaunchInfo={chromeLaunchInfo}
             queuedRun={data.queuedModuleRun || null}
+            onCancelQueued={data.locked ? null : cancelQueuedSearch}
           />
         )}
 
@@ -14326,8 +14672,9 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
               onClearScrape={activeBoardRecoveryOwnerKey || !canClearScrape ? null : handleClearScrape}
               savedJobCount={listedSavedJobCount}
               careerCleared={careerReplacementPending}
-              careerCompiling={replacementCompile?.status === 'compiling'}
-              careerCompileFailed={replacementCompile?.status === 'failed'}
+              careerCompiling={replacementCompile?.status === 'compiling' && !(data.manualAiResume?.pausedByUser && data.manualAiResume?.runId === replacementCompile.manualAiRunId)}
+              careerCompileFailed={careerCompilationFailed}
+              careerCompileUnstarted={careerCompilationUnstarted}
               careerCompileError={replacementCompile?.status === 'failed' ? (replacementCompile.error || '') : ''}
               onRetryCareerCompile={controlsLocked || activeBoardRecoveryOwnerKey ? null : retrySavedJobsCareerCompile}
               careerImportControls={careerFilePickerControls}

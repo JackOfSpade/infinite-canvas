@@ -143,13 +143,14 @@ export function compsForPricing(soldAvailable = 0, activeAvailable = 0) {
   return { sold, active };
 }
 
-// A score needs a compact evidence-backed JSON row and enough reasoning to
-// compare it to the candidate profile.  The fresh packed contract gives the
-// fixed response envelope 1,600 tokens and reserves 600 per job.  22 jobs
-// estimate to 14,800; 23 would estimate to 15,400 and cross the 15,360 usable
-// ceiling, so the packer must stop at 22.
+// A whole-record score includes four evidence-backed strengths, the COMPLETE
+// professional-gap inventory, confidence and optional tenure/pay context. The
+// former 600-token allowance could not reliably fit that audit and packed 22
+// jobs into one response. Reserve 2,800 tokens per job; four jobs use 12,800
+// including framing, while a fifth would exceed the 15,360 usable envelope.
 const JOB_SCORING_BASE_TOKENS = 1600;
-const JOB_SCORING_TOKENS_PER_JOB = 600;
+const JOB_SCORING_TOKENS_PER_JOB = 2800;
+const LEGACY_JOB_SCORING_TOKENS_PER_JOB = 600;
 export const LEGACY_JOB_SCORING_BATCH_SIZE = 15;
 
 export function jobScoringEstimatedTokens(itemCount = 1) {
@@ -169,7 +170,7 @@ export function jobScoringBatchFits(itemCount = 1) {
 // accepted/pending durable scoring step. Fresh work never uses this cap.
 export function legacyJobScoringMaxTokens(itemCount = 1) {
   const items = Math.max(1, Math.floor(Number(itemCount) || 1));
-  return Math.min(12000, JOB_SCORING_BASE_TOKENS + items * JOB_SCORING_TOKENS_PER_JOB);
+  return Math.min(12000, JOB_SCORING_BASE_TOKENS + items * LEGACY_JOB_SCORING_TOKENS_PER_JOB);
 }
 
 /**

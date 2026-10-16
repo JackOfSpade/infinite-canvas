@@ -5,6 +5,7 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { assert } from './testHelpers.js';
 import { createFakeClock } from './fixtures/handoff-bridge/fakeClock.js';
+import { registerHandoffBridgeUi } from '../../electron/ipc/handoffBridge/ui.js';
 import { createHandoffEngine } from '../../electron/ipc/handoffBridge/engine.js';
 import { createHandoffBridgePower } from '../../electron/ipc/handoffBridge/power.js';
 import { MAX_LIVE_LANES, createLaneStore } from '../../electron/ipc/handoffBridge/laneStore.js';
@@ -1342,6 +1343,23 @@ const tests = [
       assert(slowSnapshot.chat.pool.workers[0]?.state === 'quiet'
         && slowSnapshot.chat.pool.workers[0]?.quietReason === 'answer_silent',
       'an unanswered preference handoff becomes an actionable answer-silent warning at the five-minute boundary');
+      let replacements = 0; let closedChats = 0;
+      const ui = registerHandoffBridgeUi({
+        ipc: { handle() {}, removeHandler() {}, on() {}, removeListener() {} },
+        controller: { snapshot: () => ({ ...engine.snapshot(), autoLaunchChats: true, serving: 'live' }),
+          subscribe: () => () => {}, restartWorker: args => { replacements++; return engine.restartWorker({ linkId: LINK, ...args }); } },
+        chatLauncher: { owns: () => true, close: async () => { closedChats++; return true; }, launch: async () => ({ ok: true }) },
+        getCanvasWindows: () => [], timers: clock,
+      });
+      try {
+        for (let interval = 0; interval < 4; interval++) {
+          clock.advance(CONSTANTS.STALL_NOTICE_MS);
+          ui.publishStatus({ ...engine.snapshot(), autoLaunchChats: true, serving: 'live' });
+          await settle();
+        }
+        assert(replacements === 0 && closedChats === 0,
+          'a 25-minute response remains in its original chat through repeated quiet observations');
+      } finally { ui.dispose(); }
       const accepted = await engine.submit({
         session: starter.sessionCode, linkId: LINK, handoffCode: served.handoffCode,
         response: 'Synthetic completed preference response '.repeat(8),
@@ -1431,6 +1449,33 @@ const tests = [
       await engine.get({ session: starter.sessionCode, grant: { linkId: LINK } });
       assert(engine.snapshot().chat.pool.workerCount === 10,
         'a later smaller forecast never silently retires live workers or copied starters');
+      await engine.close();
+    },
+  },
+  {
+    name: 'handoff bridge: cancelled push claims clear phantom answer-silent workers',
+    async run() {
+      const clock = createFakeClock();
+      let claims = [{ claimId: JOB_A, workerOrdinal: 1 }];
+      const push = {
+        refreshHubs: async () => true,
+        status: () => ({ claimWorkers: claims, claimed: claims.map(item => item.claimId),
+          discovered: [{ tasks: [{ task: 'job-scoring', pending: claims.length }] }], working: claims.length }),
+        get: async () => ({ status: 'served', handoffCode: 'PUSH-CANCEL', task: 'job-scoring', prompt: 'Synthetic prompt', remaining: { ready: 0, working: 1, needsYou: 0 } }),
+        submit: async () => ({ status: 'unknown_handoff' }),
+        closeEpoch() {},
+      };
+      const engine = createHandoffEngine({ sources: { application: source().api, push },
+        scope: { applications: false, scoring: true, marketplace: false }, now: clock.now, timers: clock, holdMs: 0 });
+      const pool = await engine.startWorkerPool({ linkId: LINK, requestedWorkers: 1 });
+      const worker = engine.copyWorkerStarter({ linkId: LINK, generation: pool.generation, workerOrdinal: 1 });
+      assert((await engine.get({ session: worker.sessionCode, linkId: LINK })).status === 'served');
+      clock.advance(CONSTANTS.STALL_NOTICE_MS);
+      assert(engine.snapshot().chat.pool.workers[0].quietReason === 'answer_silent');
+      claims = [];
+      const cleared = engine.snapshot().chat.pool.workers[0];
+      assert(cleared.state === 'idle' && cleared.quietReason == null, 'external cancellation must remove phantom owned work');
+      assert(cleared.completed === 0, 'cancellation is not successful completion');
       await engine.close();
     },
   },

@@ -172,11 +172,11 @@ const TASK_MAX_TOKENS = {
   'job-query-generation':      4096,  // 3 query arrays — small JSON, thinking-heavy
   'interview-brief-research':  6144,
   'interview-brief-assessment': 4096,
-  // Manual scoring returns a bounded decisive-evidence audit (not a complete,
-  // duplicated JD transcription). Fresh batches contain at most 22 jobs:
-  // 1,600 + 22*600 = 14,800, safely below the 15,360 usable output ceiling.
-  'job-scoring':               ({ itemCount = 10 } = {}) =>
-    jobScoringMaxTokens(itemCount),
+  // Whole-record scoring needs room for the complete professional-gap audit.
+  // Four fresh jobs reserve 1,600 + 4*2,800 = 12,800 tokens. A one-job evidence
+  // phase can separately name its requirement workload for output guidance.
+  'job-scoring':               ({ itemCount = 10, scoringRequirementCount = 0 } = {}) =>
+    jobScoringMaxTokens(Math.max(itemCount, scoringRequirementCount)),
   // Taxonomy planning is fed only bounded aggregate statistics and returns a
   // tiny role/range/mapping object. Large manual caps made this otherwise
   // mechanical step look like it was hanging.

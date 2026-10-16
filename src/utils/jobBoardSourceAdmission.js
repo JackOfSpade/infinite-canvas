@@ -5,6 +5,7 @@ import {
 } from './jobCareerImportCapability.js';
 import {
   careerImportCompilationAdmission,
+  careerResumeInputPaths,
   currentApprovedCareerImportSnapshot,
 } from './jobCareerCompilationReceipt.js';
 import {
@@ -44,6 +45,9 @@ export function classifyJobBoardSourceAdmission(source) {
     const compilation = careerImportCompilationAdmission(data, {
       generation: data.careerImportGeneration,
     });
+    if (compilation.kind === 'paused') {
+      return { kind: 'career-import-paused', reason: 'Career compilation is paused. Continue it on the Job Search card before using the Board.' };
+    }
     if (compilation.kind === 'compiling') {
       return {
         kind: 'career-import-compiling',
@@ -56,12 +60,19 @@ export function classifyJobBoardSourceAdmission(source) {
         reason: 'Career compilation failed. Retry it on the Job Search card, then re-score its saved jobs from the Board.',
       };
     }
+    // Cancelling an unstarted import or resetting its compiler keeps the
+    // historical rows, but cannot make those old scores current for this input.
+    if (compilation.kind === 'missing' && data.careerImportGeneration
+      && !data.careerSnapshotId && careerResumeInputPaths(data).length > 0) {
+      return { kind: 'career-import-requires-approval', reason: 'Career files are ready to compile. Choose Compile Career Files on the Job Search card before re-scoring its saved jobs.' };
+    }
     const rescore = pendingSavedJobsRescore(data);
     if (rescore) {
       return {
         kind: 'rescore-saved-jobs',
         careerSnapshotId: rescore.careerSnapshotId,
         savedJobCount: savedJobCount(data),
+        ...(rescore.scoringOnly === true ? { scoringOnly: true } : {}),
       };
     }
     if (data.savedJobsRescore) {
@@ -86,6 +97,9 @@ export function classifyJobBoardSourceAdmission(source) {
     const compilation = careerImportCompilationAdmission(data, {
       generation: data.careerImportGeneration,
     });
+    if (compilation.kind === 'paused') {
+      return { kind: 'career-import-paused', reason: 'Career compilation is paused. Continue it on the Job Search card before using the Board.' };
+    }
     if (compilation.kind === 'compiling') {
       return {
         kind: 'career-import-compiling',
@@ -260,6 +274,7 @@ export function partitionJobBoardSourceAdmissions(sources) {
       || admission.kind === 'career-cleared-awaiting-files'
       || admission.kind === 'fresh-import-requires-clear'
       || admission.kind === 'terminal-requires-fresh-input'
+      || admission.kind === 'career-import-paused'
       || admission.kind === 'career-import-compiling'
       || admission.kind === 'career-import-failed'
       || admission.kind === 'career-import-requires-approval') {

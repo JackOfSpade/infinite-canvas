@@ -181,6 +181,11 @@ function deriveInner({ job: rawJob, chat: rawChat, item: rawItem, bridge: rawBri
   // ChatGPT and has not yet received an accepted answer.
   const awaiting = !unread && job.awaitingAnswer === true;
 
+  if (awaiting && ownerWorker?.launch?.reason === 'approval_required') {
+    return build(base(steps), { headline: 'Approval needed in ChatGPT',
+      detail: 'Open this worker’s ChatGPT chat and review the Infinite Canvas tool approval prompt.', tone: 'attention', lastHeard });
+  }
+
   // 3. Nobody to hand the job to yet.
   if (!hasChat) {
     const [headline, manualDetail] = BRIDGE_PROGRESS_COPY.noChat(bridge.pluginName);
@@ -292,6 +297,10 @@ export function deriveBridgePushProgress({ chat: rawChat, bridge: rawBridge, own
       detail: 'Turn on the bridge and make sure its tunnel and ChatGPT link are reachable before this selected handoff can be delivered.',
       tone: 'attention',
     });
+  }
+  if (ownerWorker?.launch?.reason === 'approval_required') {
+    return build({ kind: 'push-approval-required', steps }, { headline: 'Approval needed in ChatGPT',
+      detail: 'Open this worker’s ChatGPT chat and review the Infinite Canvas tool approval prompt.', tone: 'attention' });
   }
   const state = typeof chat.state === 'string' ? chat.state : 'none';
   const ordinal = time(chat.ordinal);

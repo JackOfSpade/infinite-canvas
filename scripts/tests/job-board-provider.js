@@ -22,7 +22,10 @@ import { prepareBackgroundBoardChildRequest } from '../../src/utils/jobBoardBack
 import { buildJobHubCareerClearPatch } from '../../src/utils/hubDropEligibility.js';
 import { providerTotalShortfallRecoveryReceipt, resolveManualSourceStopReason, zipRecruiterProviderShortfallRecoveryOutcome, zipRecruiterProviderTotalShortfallWarning } from '../../electron/ipc/browser/manualScraper.js';
 
+import careerCompilationQueueTests from './careerCompilationQueueFixture.mjs';
+
 export default [
+  ...careerCompilationQueueTests,
   {
     name: 'Career-derived retained state is bound to one exact approved snapshot',
     run() {
@@ -158,6 +161,12 @@ export default [
       const replacement = beginCareerImportCompilation({ generation: 'career-import:search-1:generation-b', attemptId: 'attempt-b' });
       assert(careerImportCompilationAdmission({ careerImportCompilation: first }, { generation }).kind === 'compiling',
         'a Board/provider turn must defer while the exact career import is compiling');
+      assert(classifyJobBoardSourceAdmission({ id: 'retained', type: 'jobhub', data: {
+        hubState: 'done', scoredJobs: [{ id: 'saved' }], filePath: '/fixture/input.md', careerImportGeneration: generation,
+      } }).kind === 'career-import-requires-approval', 'an unstarted compiler must not make historical scores mergeable for replacement input');
+      const paused = { careerImportCompilation: first, manualAiResume: { runId: 'manual-a', pausedByUser: true } };
+      assert(careerImportCompilationAdmission(paused, { generation }).kind === 'paused', 'a saved compiler pause is not active auditing');
+      assert(careerImportCompilationAdmission({ ...paused, manualAiResume: { runId: 'other', pausedByUser: true } }, { generation }).kind === 'compiling', 'another run cannot pause the current compiler');
       assert(!careerImportCompilationMatches(replacement, first),
         'a late compiler settlement cannot match a replacement generation/attempt');
       assert(approveCareerImportCompilation(replacement, {
@@ -306,7 +315,7 @@ export default [
         && renderer.includes('const careerCompilationRetryOwnsBanner = careerCompilationFailed')
         && renderer.includes('onRetry={careerCompilationRetryOwnsBanner || boardRecoveryOwnsActions ? null : handleRetryFailed}')
         && renderer.includes('onDismiss={careerCompilationRetryOwnsBanner || data.terminalFinalizationRecovery ? null : handleDismissError}')
-        && (renderer.match(/>\s*Retry Career Compilation\s*<\/button>/gu) || []).length === 1,
+        && (renderer.match(/careerCompilationFailed \? 'Retry Career Compilation' : 'Compile Career Files'/gu) || []).length === 1,
       'the retained-input UI must show one compiler-retry action, never an inert dismiss or duplicate generic retry, and must not advertise a profile/path projection as runnable authority');
       return { failedBlocked: true, mismatchedBlocked: true, exactApprovedReady: true };
     },
@@ -4259,7 +4268,7 @@ export default [
         activeSettlementAt,
       );
       assert(pipelineStart >= 0 && pipelineEnd > pipelineStart
-        && pipeline.includes('if (!queueManagedByBoard) {\n        lease = await moduleRunQueue.acquireModuleRun')
+        && pipeline.includes('if (!queueManagedByBoard && !queueManagedExternally) {\n        lease = await moduleRunQueue.acquireModuleRun')
         && pipeline.includes("if (!orchestratorNodeId) throw new Error('A board-managed search requires an orchestrator node id.')")
         && childRunnerStart >= 0 && childRunnerEnd > childRunnerStart
         && childRunner.includes('queueManagedByBoard: true')
@@ -5842,15 +5851,15 @@ export default [
       const pipeline = search.slice(pipelineStart, pipelineEnd);
 
       assert(compileStart >= 0 && compileEnd > compileStart
-        && compile.includes('window.electronAPI.parseCareerData({ filePaths, nodeId: id, manualAiRunId })')
+        && compile.includes('window.electronAPI.parseCareerData({ filePaths, nodeId: id, manualAiRunId, forceRecompile: compileOptions.forceRecompile === true })')
         && compile.includes('careerSnapshotId: typeof parseResult.careerSnapshotId')
         && compile.includes("hubState: 'empty'")
         && compile.includes("status: 'compiled'"),
       'career ingestion must compile and retain the v5 snapshot without entering a source-search state');
       const parseCall = compile.indexOf('const parseResult = await window.electronAPI.parseCareerData');
-      const successCleanup = compile.indexOf("await completeManualAiRun(manualAiRunId, {\n        retirementReason: 'career-snapshot-compiled',");
+      const successCleanup = compile.indexOf("await completeManualAiRun(manualAiRunId, {\n          retirementReason: 'career-snapshot-compiled',");
       const deferredResult = compile.indexOf("status: 'compiled'");
-      const failureCatch = compile.indexOf('} catch (error) {');
+      const failureCatch = compile.indexOf('} catch (error) {', deferredResult);
       const activeOwnershipClear = compile.indexOf('if (activeManualAiRunIdRef.current === manualAiRunId)');
       assert(compile.indexOf('activeManualAiRunIdRef.current = manualAiRunId;') < parseCall
         && successCleanup > parseCall

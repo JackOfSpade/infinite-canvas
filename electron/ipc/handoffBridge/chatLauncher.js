@@ -61,6 +61,19 @@ const CLOSE = `function run(argv) {
   return '';
 }`;
 
+const FOCUS = `function run(argv) {
+  const chrome = Application(Number(argv[0]));
+  const w = chrome.windows.byId(Number(argv[1]));
+  const target = Number(argv[2]);
+  const tabs = w.tabs();
+  const index = tabs.findIndex(tab => tab.id() === target);
+  if (index < 0) return 'missing';
+  w.activeTabIndex = index + 1;
+  w.index = 1;
+  chrome.activate();
+  return 'focused';
+}`;
+
 // The in-page code returns only bounded state. Starter text is never returned,
 // logged, put in a URL, or sent to a renderer.
 const EDITOR = `(() => { const editor = document.querySelector('form [contenteditable="true"][role="textbox"]');
@@ -213,7 +226,7 @@ const DIAGNOSE = pluginName => `(() => {
   // limit…") read as a usage limit and could restart a healthy chat.
   const content = (agent?.parentElement?.innerText || '').slice(-4000);
   const lower = content.toLowerCase();
-  const plugin = ${JSON.stringify(pluginName)}.toLowerCase();
+  const plugin = ${JSON.stringify(pluginName)}.toLowerCase().replace(/[_-]+/g, ' ');
   let reason = 'none';
   // ChatGPT can also hold the message behind a modal "Connect <plugin>" /
   // "Reconnect" consent screen instead of replying, so check visible dialogs.
@@ -224,7 +237,29 @@ const DIAGNOSE = pluginName => `(() => {
       return (text.startsWith('connect ' + plugin) || text.startsWith('reconnect ' + plugin))
         || (text.includes(plugin) && /\\b(?:connect|reconnect)\\b/.test(text) && /connectors? may introduce risk|permissions always respected|connection has expired/.test(text));
     });
-  if (connectDialog) reason = 'reconnect_required';
+  // Tool approval is inline in the assistant turn, separate from connector
+  // setup. Require ChatGPT's visible approval controls, not prompt prose.
+  const approval = [...document.querySelectorAll('form')].filter(visible).some(form => {
+    const heading = (form.parentElement?.innerText || '').slice(0, 200).toLowerCase();
+    const labels = [...form.querySelectorAll('button')].filter(visible)
+      .map(e => (e.innerText || '').trim().toLowerCase());
+    return heading.includes('allow chatgpt to use ' + plugin + '?')
+      && labels.some(label => /^allow once(?:\\s*⏎)?$/.test(label))
+      && labels.some(label => /^deny(?:\\s*esc)?$/.test(label));
+  });
+  // Transport failures sit outside the assistant-turn marker. Prompt prose
+  // is not evidence of failure, and a visible Stop control means work is live.
+  const responding = [...document.querySelectorAll('main button')].filter(visible)
+    .some(e => /^(?:stop|stop generating|stop streaming)$/i.test((e.getAttribute('aria-label') || e.innerText || '').trim()));
+  const deliveryFailed = !responding && [...document.querySelectorAll('main [role="alert"]')].filter(visible)
+    .some(e => /^message delivery timed out\\.?(?:\\s+please try again\\.?)?(?:\\s+retry)?$/i.test((e.innerText || '').trim()));
+  const conversationFailed = !responding && !agent
+    && [...document.querySelectorAll('main button')].filter(visible).some(e => /^try again$/i.test((e.innerText || '').trim()))
+    && /could not load this chatgpt conversation/i.test(document.querySelector('main')?.innerText || '');
+  if (approval) reason = 'approval_required';
+  else if (connectDialog) reason = 'reconnect_required';
+  else if (deliveryFailed) reason = 'delivery_timeout';
+  else if (conversationFailed) reason = 'conversation_unavailable';
   else if (/reconnect.{0,70}(?:infinite canvas|plugin)|connection has expired/i.test(content)) reason = 'reconnect_required';
   // ChatGPT's own limit notices, not a model merely mentioning rate limits.
   else if (/usage limit|limit reached|you.ve (?:reached|hit) (?:your|the|a) .{0,40}limit|try again (?:tomorrow|after|in \\d)/i.test(content)) reason = 'usage_limit';
@@ -464,12 +499,23 @@ export function createChatLauncher({ run = runUserChromeScript, delay = sleep, o
     await sequence;
     return Promise.all([...new Set([...tabs.keys(), ...chatIds.keys()])].map(close));
   };
+  const focus = async owner => {
+    const tab = tabs.get(owner);
+    if (!tab) return false;
+    try {
+      const currentUrl = await safeRun(URL, [tab.windowId, tab.tabId]);
+      if (!tab.chatId || currentUrl.match(CHAT_ID)?.[1] !== tab.chatId) return false;
+      return await safeRun(FOCUS, [tab.windowId, tab.tabId]) === 'focused';
+    } catch { return false; }
+  };
   const diagnose = async (owner, pluginName = 'Infinite Canvas') => {
     const tab = tabs.get(owner);
     if (!tab) return { reason: 'tab_not_owned', assistantPresent: false };
     try {
+      const url = await safeRun(URL, [tab.windowId, tab.tabId]);
+      if (!tab.chatId || url.match(CHAT_ID)?.[1] !== tab.chatId) return { reason: 'chat_changed', assistantPresent: false };
       const value = JSON.parse(await js(tab, DIAGNOSE(pluginName)));
-      return { reason: ['none', 'reconnect_required', 'usage_limit', 'plugin_missing', 'safety_block'].includes(value?.reason)
+      return { reason: ['none', 'approval_required', 'delivery_timeout', 'conversation_unavailable', 'reconnect_required', 'usage_limit', 'plugin_missing', 'safety_block'].includes(value?.reason)
         ? value.reason : 'none', assistantPresent: value?.assistantPresent === true };
     } catch { return { reason: 'chrome_unavailable', assistantPresent: false }; }
   };
@@ -480,7 +526,7 @@ export function createChatLauncher({ run = runUserChromeScript, delay = sleep, o
   };
   return Object.freeze({ launch, close, closeAll, rekey, owns: owner => tabs.has(owner) || chatIds.has(owner),
     markProUnavailable: () => { proUnavailableDay = localDay(); },
-    diagnose, javascriptReady, accountName: owner => tabs.get(owner)?.accountName || '',
+    focus, diagnose, javascriptReady, accountName: owner => tabs.get(owner)?.accountName || '',
     observation: owner => tabs.get(owner)?.observed || null,
-    scripts: Object.freeze({ OPEN, EXEC, URL, CLOSE }) });
+    scripts: Object.freeze({ OPEN, EXEC, URL, CLOSE, FOCUS }) });
 }

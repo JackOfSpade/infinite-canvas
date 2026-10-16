@@ -7456,6 +7456,11 @@ export default [
         // were given to this run) and is true regardless of the cache outcome.
         assert(!report.includes('career files reparsed'),
         'a snapshot-cache hit and the Trigger line no longer contradict each other — the Trigger line describes input, not an asserted compile action');
+        telemetry.pipeline = null;
+        telemetry.careerSnapshotCache.progress = { phase: 'auditing', completed: 3, total: 6, round: 2, updatedAt: Date.now() };
+        const compileOnly = buildJobsPipelineSnapshot(new Set(['rerun-provenance-diagnostics']), null, null);
+        assert(compileOnly.includes('Last reported compilation stage: auditing · 3/6 phase work items returned · round 2'),
+          'a pre-provider career compilation must keep stage diagnostics visible without a search pipeline');
       } finally {
         Object.assign(telemetry, saved);
       }
@@ -9428,12 +9433,12 @@ export default [
       const displayedJobsAt = handler.indexOf('const existingScoredJobs = Array.isArray(requestedData.scoredJobs)', requestedFingerprintAt);
       const savedPoolAt = handler.indexOf('const savedPool = Array.isArray(requestedData.preferenceCandidatePool)', displayedJobsAt);
       const savedUnionAt = handler.indexOf('dedupJobsAcrossSources([...savedPool, ...existingScoredJobs])', savedPoolAt);
-      const preparedJobsAt = handler.indexOf('const jobsToReanalyze = savedCandidatePool.map', savedUnionAt);
+      const preparedJobsAt = handler.indexOf('const jobsToReanalyze = (scoringOnlyRepair ? existingScoredJobs : savedCandidatePool).map', savedUnionAt);
       const leaseAt = handler.indexOf('lease = await moduleRunQueue.acquireModuleRun', preparedJobsAt);
       const liveDataAt = handler.indexOf('runData = getNode(currentId)?.data || requestedData;', leaseAt);
       const liveFingerprintAt = handler.indexOf('if (reanalysisInputFingerprint(runData) !== requestedFingerprint)', liveDataAt);
       const processingAt = handler.indexOf('processingToken = processingRunsRef.current.start();', liveFingerprintAt);
-      const preferenceAt = handler.indexOf('const preferenceResult = await evaluatePreferencesForRun({', processingAt);
+      const preferenceAt = handler.indexOf('const preferenceResult = scoringOnlyRepair ?', processingAt);
       const scoreAt = handler.indexOf('const scoreResult = await window.electronAPI.scoreJobs({', preferenceAt);
       assert(requestedDataAt >= 0 && requestedFingerprintAt > requestedDataAt
         && displayedJobsAt > requestedFingerprintAt && savedPoolAt > displayedJobsAt
@@ -13850,6 +13855,31 @@ export default [
     },
   },
   {
+    name: 'career compilation stages survive multi-hub reports without borrowing another window',
+    run() {
+      __resetJobsTelemetryForTests();
+      const sender = { id: 791 }; const other = { id: 792 };
+      const inContext = (owner, nodeId, callback) => __runWithIpcRequestContextForTests({ sender: owner, nodeId, channel: nodeId ? 'parse-career-data' : 'bug-report' }, callback);
+      try {
+        for (const [owner, nodeId, phase, completed] of [[sender, 'compile-a', 'compiling', 0], [sender, 'compile-b', 'auditing', 3], [other, 'foreign-compile', 'repairing', 5]]) {
+          inContext(owner, nodeId, () => Object.assign(getJobsTelemetry(), {
+            nodeId, windowId: owner.id,
+            careerSnapshotCache: { nodeId, outcome: 'miss', fileCount: 1, fingerprint: 'abc123', ts: Date.now(),
+              progress: { phase, completed, total: 6, round: 1, updatedAt: Date.now() } },
+          }));
+        }
+        const ids = new Set(['compile-a', 'compile-b', 'foreign-compile']);
+        const report = inContext(sender, null, () => buildJobsPipelineSnapshot(ids, sender.id, null));
+        assert((report.match(/Career compilation hub:/g) || []).length === 2
+          && report.includes('stage: compiling · 0/6') && report.includes('stage: auditing · 3/6')
+          && !report.includes('stage: repairing') && !report.includes('compile-a') && !report.includes('compile-b'),
+          'each local hub keeps its own redacted stage and counts without joining funnels or borrowing foreign compilation');
+        const wrong = inContext(sender, null, () => buildJobsPipelineSnapshot(ids, other.id, null));
+        assert(!wrong.includes('Career compilation hub:'), 'mismatched report window must fail closed');
+      } finally { __resetJobsTelemetryForTests(); }
+    },
+  },
+  {
     name: 'multi-hub source scheduling history remains window-local without weakening single-owner funnel attribution',
     run: () => {
       __resetJobsTelemetryForTests();
@@ -15763,6 +15793,23 @@ export default [
       'a numeric actionVisible must be dropped and never mistaken for hidden');
 
       return { selectorRows: 3, verticalOverflow: true };
+    },
+  },
+  {
+    name: 'Job Board diagnostics identify approved re-score and paused compiler states',
+    run() {
+      const snapshotId = 'a'.repeat(64);
+      const report = buildJobBoardDiagnostics([
+        { id: 'board', type: 'jobboard', data: { hubState: 'empty', selectedSearchModuleIds: ['approved', 'paused'] } },
+        { id: 'approved', type: 'jobhub', data: { hubState: 'done', scoredJobs: [{}], careerImportGeneration: 'generation',
+          careerSnapshotId: snapshotId, careerImportCompilation: { version: 1, status: 'approved', generation: 'generation', careerSnapshotId: snapshotId },
+          savedJobsRescore: { version: 1, generation: 'generation', careerSnapshotId: snapshotId } } },
+        { id: 'paused', type: 'jobhub', data: { hubState: 'done', scoredJobs: [{}], careerImportGeneration: 'generation',
+          careerImportCompilation: { version: 1, status: 'paused', generation: 'generation', manualAiRunId: 'private-run' } } },
+      ], [{ source: 'board', target: 'approved' }, { source: 'board', target: 'paused' }]);
+      assert(report.includes('admission=rescore-saved-jobs') && report.includes('selector-status=Re-score saved jobs'));
+      assert(report.includes('admission=career-import-paused') && report.includes('selector-status=Career compilation paused'));
+      assert(!report.includes('admission=not-retained') && !report.includes('private-run'));
     },
   },
   {

@@ -3,7 +3,7 @@ import { writeApprovedCareerSnapshotFixture } from './careerSnapshotFixture.mjs'
 import { normalizeJobsMarkup, repairJobsMojibake } from '../../src/utils/textEncoding.js';
 import { careerFilesCleanupNeedsWarning, isJobAnalysisSnapshotAfterClear, nextJobAnalysisClearWatermark, normalizeJobAnalysisClearRunId, normalizeJobAnalysisClearWatermark } from '../../src/utils/jobAnalysisRecovery.js';
 import { getJobDescriptionRecoveryCheckpointPath } from '../../electron/ipc/jobAnalysisPaths.js';
-import { __assertCareerInputDescriptorsStillMatchForTests, __extractCareerFileSectionsForTests, __pruneStaleCareerInputStagesForTests, __recordJobSourceResumeAttemptForTests, __resolvePinnedScoringInputForTests, __stageCareerInputFilesForTests, buildJobAnalysisSnapshot, getJobsResumeAttributionForReport, getJobsTelemetryHubCountForReport, partitionPinnedScoringEvidenceForTests, reducePinnedScoringPageResultsForTests, registerJobsHandlers, scoringPromptFitsEnvelopeForTests, subdividePinnedScoringEvidenceForEnvelopeForTests } from '../../electron/ipc/jobs.js';
+import { __assertCareerInputDescriptorsStillMatchForTests, __extractCareerFileSectionsForTests, __pruneStaleCareerInputStagesForTests, __recordJobSourceResumeAttemptForTests, __resolvePinnedScoringInputForTests, __stageCareerInputFilesForTests, buildJobAnalysisSnapshot, getJobsResumeAttributionForReport, getJobsTelemetryHubCountForReport, partitionPinnedScoringEvidenceForTests, registerJobsHandlers, scoringPromptFitsEnvelopeForTests, subdividePinnedScoringEvidenceForEnvelopeForTests } from '../../electron/ipc/jobs.js';
 import { finishRunWithSavedListings, isRunCollectionFinishedWithSavedListings } from '../../electron/ipc/jobRunStaging.js';
 import { receiptTime } from '../../electron/ipc/bugReport/jobsSnapshot.js';
 import { discardDeletedJobAnalysisSnapshots, discardDeletedJobRuns } from '../../src/utils/canvasInteractions.js';
@@ -150,48 +150,6 @@ export default [
     },
   },
   {
-    name: 'pinned scoring pages every approved evidence slice and hierarchically reduces complete ordered coverage',
-    run: () => {
-      const pages = partitionPinnedScoringEvidenceForTests([
-        'FIRST_PAGE_UNIQUE_EVIDENCE\n',
-        ...Array.from({ length: 8 }, (_, index) => `middle ${index} ${'x'.repeat(47_000)}\n`),
-        `LAST_PAGE_UNIQUE_EVIDENCE ${'y'.repeat(47_000)}\n`,
-      ].join(''));
-      const pageResults = pages.map((page, index) => [{
-        matchScore: index === pages.length - 1 ? 98 : index === 0 ? 91 : 20,
-        reasoning: index === pages.length - 1 ? 'Late approved evidence is the strongest direct match.' : 'Earlier approved evidence.',
-        careerDirection: 'Engineering',
-        requirementAssessments: [{ requirementText: 'Core skill', priority: 'required', status: 'direct', jobEvidence: 'Need core skill', candidateEvidence: index === pages.length - 1 ? 'LAST_PAGE_UNIQUE_EVIDENCE' : 'FIRST_PAGE_UNIQUE_EVIDENCE' }],
-        materialGaps: index === pages.length - 1 ? [{ requirementText: 'Required regulated credential', priority: 'required', status: 'not_documented', jobEvidence: 'Credential is required', candidateEvidence: '' }] : [],
-      }]);
-      const reduced = reducePinnedScoringPageResultsForTests(pages, pageResults, 1);
-      const reducedFromRollingMap = reducePinnedScoringPageResultsForTests(
-        pages,
-        new Map(pageResults.map((rows, index) => [index, rows])),
-        1,
-      );
-      let missing = null;
-      let tampered = null;
-      try { reducePinnedScoringPageResultsForTests(pages, pageResults.slice(0, -1), 1); } catch (error) { missing = error; }
-      try { reducePinnedScoringPageResultsForTests([{ ...pages[0], digest: '0'.repeat(64) }, ...pages.slice(1)], pageResults, 1); } catch (error) { tampered = error; }
-      const summary = JSON.parse(reduced.summary);
-      assert(pages.length > 8
-        && summary.coverage.pageCount === pages.length
-        && reduced.evidence[0].observations[0].pageId === pages.at(-1).id
-        && reduced.evidence[0].observations[0].requirementAssessments[0].candidateEvidence === 'LAST_PAGE_UNIQUE_EVIDENCE'
-        && reduced.evidence[0].requirementCount >= 2
-        && reduced.evidence[0].requirementStatuses.some(item => item.status === 'not_documented' && item.requirementText === 'Required regulated credential')
-        && reduced.rows[0].requirementAssessments.some(item => item.candidateEvidence === 'LAST_PAGE_UNIQUE_EVIDENCE')
-        && reduced.ledgerPages.length >= 1
-        && reducedFromRollingMap.coverage.pageDigest === reduced.coverage.pageDigest
-        && reducedFromRollingMap.rows[0]?.matchScore === reduced.rows[0]?.matchScore
-        && /missing one or more required pages/.test(missing?.message || '')
-        && /identity or digest is invalid/.test(tampered?.message || ''),
-      'all deterministic evidence pages are required before final scoring, hierarchical coverage stays bounded, a late high-value page outranks early evidence, and missing/tampered pages fail closed');
-      return { pages: pages.length, lateEvidenceWins: true, rollingMapReduction: true, missingRejected: true, tamperRejected: true };
-    },
-  },
-  {
     name: 'pinned scoring measures the complete UTF-8 prompt envelope rather than only career-page characters',
     run: () => {
       const safe = scoringPromptFitsEnvelopeForTests({ cachedPrefix: 'rubric', prompt: 'job plus page' });
@@ -219,60 +177,6 @@ export default [
         && atomic.length === 1 && atomic[0].text === atomicSource,
       'an envelope-too-large evidence page is recursively split into bounded record groups with exact concatenation, while an atomic long source record never becomes millions of character leaves');
       return { initialPages: initial.length, leafPages: leaves.length, sourceChars: source.length, atomicChars: atomicSource.length };
-    },
-  },
-  {
-    name: 'pinned scoring never authorizes a partial-page score when any required leaf is null',
-    run: () => {
-      const pages = partitionPinnedScoringEvidenceForTests(`APPROVED_GOOD_EVIDENCE\n${'x'.repeat(24_100)}`);
-      const pageResults = pages.map((_page, index) => [index === 0 ? {
-        matchScore: 93,
-        reasoning: 'The first leaf contains direct evidence.',
-        careerDirection: 'Engineering',
-        requirementAssessments: [{ requirementText: 'Core skill', priority: 'required', status: 'direct', jobEvidence: 'Need core skill', candidateEvidence: 'APPROVED_GOOD_EVIDENCE' }],
-        materialGaps: [],
-      } : null]);
-      const reduced = reducePinnedScoringPageResultsForTests(pages, pageResults, 1);
-      const receipt = reduced.coverageReceipts[0];
-      assert(pages.length > 1
-        && reduced.rows[0] === null
-        && reduced.evidence[0].unscorable
-        && reduced.evidence[0].observations.length === 1
-        && receipt.pageCount === pages.length
-        && receipt.failedLeaves.length === pages.length - 1
-        && receipt.failedLeaves.every(leaf => pages[leaf.pageIndex]?.id === leaf.pageId && pages[leaf.pageIndex]?.digest === leaf.pageDigest)
-        && reduced.ledgerPages.some(page => page.entries.some(entry => entry.kind === 'unscorable-page-coverage')),
-      'one valid page cannot make a full pinned score authoritative when another required page failed; the resulting placeholder carries exact failed-leaf coverage');
-      return { pages: pages.length, failedLeaves: receipt.failedLeaves.length, partialScoreRejected: true };
-    },
-  },
-  {
-    name: 'pinned scoring keeps full requirement identity and pages an oversized status ledger without a final summary call',
-    run: () => {
-      const pages = partitionPinnedScoringEvidenceForTests('APPROVED_FULL_EVIDENCE\n');
-      const sharedPrefix = `Required control ${'X'.repeat(420)}`;
-      const requirements = [
-        { requirementText: `${sharedPrefix} A`, priority: 'required', status: 'not_documented', jobEvidence: 'Control A is mandatory.', candidateEvidence: '' },
-        { requirementText: `${sharedPrefix} B`, priority: 'required', status: 'not_documented', jobEvidence: 'Control B is mandatory.', candidateEvidence: '' },
-        ...Array.from({ length: 260 }, (_value, index) => ({
-          requirementText: `Distinct required evidence ${index}: ${'q'.repeat(120)}`,
-          priority: 'required', status: 'not_documented',
-          jobEvidence: `Posting control ${index}: ${'p'.repeat(120)}`,
-          candidateEvidence: '',
-        })),
-      ];
-      const reduced = reducePinnedScoringPageResultsForTests(pages, [[{
-        matchScore: 72, reasoning: 'Every complete page-local requirement is retained by the host ledger.', careerDirection: 'Engineering',
-        requirementAssessments: [], materialGaps: requirements,
-      }]], 1);
-      const statuses = reduced.evidence[0].requirementStatuses;
-      const prefixStatuses = statuses.filter(item => item.requirementText.startsWith(sharedPrefix));
-      assert(prefixStatuses.length === 2 && new Set(prefixStatuses.map(item => item.id)).size === 2
-        && reduced.rows[0].materialGaps.length === requirements.length
-        && reduced.ledgerPages.length > 1
-        && reduced.ledgerPages.every((page, index) => page.index === index && /^[a-f0-9]{64}$/u.test(page.digest)),
-      'full normalized material fields, not truncated prefixes, identify requirements; every status/evidence record is retained in bounded ledger pages rather than a 24k aggregate reducer abort');
-      return { requirements: requirements.length, ledgerPages: reduced.ledgerPages.length, prefixCollisionRejected: true };
     },
   },
   {

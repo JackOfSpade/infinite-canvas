@@ -973,7 +973,7 @@ export function jobBoardSelectionPresentation(selectedModules) {
   const title = freshCount > 0
     ? 'Selected fresh sources will start and selected paused sources will continue. Completed selected sources are reused without another scan; the Board then combines every connected completed result.'
     : rescoreCount > 0
-      ? 'Re-score the selected saved jobs against their new career data without scraping, then combine every connected completed result.'
+      ? 'Re-score the selected saved jobs against their approved career data without scraping, then combine every connected completed result.'
       : hasContinuation
       ? 'Continue the selected Job Search state. Completed results are reused without another scan; the Board then combines every connected completed result.'
       : reusableCount > 0
@@ -996,10 +996,11 @@ export function jobBoardSelectionPresentation(selectedModules) {
  */
 export function isJobBoardUpToDate(state) {
   const {
-    hubState, stale, connectedCount, completedCount, combineSignature, liveSignature,
+    hubState, stale, connectedCount, completedCount, combineSignature, liveSignature, pendingSourceWork,
   } = state && typeof state === 'object' ? state : {};
   return hubState === 'done'
     && stale !== true
+    && pendingSourceWork !== true
     && Number.isSafeInteger(connectedCount) && connectedCount > 0
     && completedCount === connectedCount
     && typeof combineSignature === 'string' && combineSignature !== ''

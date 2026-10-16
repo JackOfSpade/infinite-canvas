@@ -1074,6 +1074,8 @@ function buildNodeDiagnosticsMarkdown(nodeInternals, nodeComponentStates, nodes,
         const dropLock = getHubDropLockReason({ type: 'jobhub', data: d });
         previewParts.push(`careerIdentity: ${hubHasAcceptedInitialDrop({ type: 'jobhub', data: d }) ? 'present' : 'none'}`);
         previewParts.push(`dropLock: ${dropLock || 'none'}`);
+        if (d.careerImportCompilation) previewParts.push(`careerCompilation: ${['compiling', 'paused', 'failed', 'approved'].includes(d.careerImportCompilation.status) ? d.careerImportCompilation.status : 'unknown'}`);
+        if (d.manualAiResume) previewParts.push(`manualAiRecovery: ${d.manualAiResume.pausedByUser ? 'paused' : 'saved'}; compilerRunMatches: ${!!d.manualAiResume.runId && d.manualAiResume.runId === d.careerImportCompilation?.manualAiRunId}`);
         // Surface completion history without exposing career-file or job
         // payload. Clearing career identity retains these timestamps as module
         // history, and replacement searches continue from that history.

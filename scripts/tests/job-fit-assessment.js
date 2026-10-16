@@ -338,7 +338,8 @@ export default [
   {
     name: 'Job fit assessment: legacy absence labels normalize to not_documented without asserting candidate absence',
     run: () => {
-      const absenceJob = 'Requires platform operations, release engineering, security review, and incident response.';
+      const clauses = ['platform operations', 'release engineering', 'security review', 'incident response', 'production logging', 'build pipelines', 'quality review', 'database operations'];
+      const absenceJob = `Requires ${clauses.join(', ')}.`;
       const labels = ['missing', 'absent', 'no support', 'no supporting evidence', 'not supported', 'unsupported', 'not established', 'unmet'];
       const result = validateAndNormalizeFitAssessment({
         score: 96,
@@ -347,7 +348,7 @@ export default [
           requirement: `Requirement ${index + 1}`,
           priority: 'important',
           status,
-          jobEvidence: ['platform operations', 'release engineering', 'security review', 'incident response'][index % 4],
+          jobEvidence: clauses[index],
           candidateEvidence: '',
         })),
       }, { jobText: absenceJob, candidateText });

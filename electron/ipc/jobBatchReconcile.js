@@ -13,11 +13,21 @@
  * @returns {object} the scored-job record
  */
 export function buildScoredJob(job, scoreOrNull, { fallbackScore, allNull }) {
+  // A saved-job re-score can receive a previously scored row. Neither a failed
+  // retry nor a fresh success may inherit its old score, audit, or unscored
+  // marker simply because the new response omitted that optional field.
+  const cleanJob = { ...job };
+  for (const key of [
+    'index', 'matchScore', 'rawScore', 'adjustedScore', 'reasoning', 'careerDirection',
+    'requirementAssessments', 'materialGaps', 'confidence', 'compensationContext',
+    'strengths', 'experienceAssessment', 'fitAssessment', 'scoringEvidenceReceipt',
+    'scoreStatus', 'scoringCoverageReceipt',
+  ]) delete cleanJob[key];
   if (scoreOrNull) {
-    return { ...job, ...scoreOrNull };
+    return { ...cleanJob, ...scoreOrNull };
   }
   return {
-    ...job,
+    ...cleanJob,
     matchScore: fallbackScore,
     reasoning: allNull ? 'AI format error' : 'Unable to score',
     careerDirection: 'Other',

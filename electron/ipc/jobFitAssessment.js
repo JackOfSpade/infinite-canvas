@@ -119,9 +119,9 @@ function rowCollection(raw) {
   // requirement inventory and score calibration. Preserve it unless the main
   // array already represents the same posting evidence (or, without usable
   // evidence, the same requirement label).
-  const merged = [...requirements];
-  for (const gap of disclosedGaps) {
-    if (!merged.some(row => rowsDuplicate(row, gap))) merged.push(gap);
+  const merged = [];
+  for (const row of [...requirements, ...disclosedGaps]) {
+    if (!merged.some(prior => rowsDuplicate(prior, row))) merged.push(row);
   }
   return merged;
 }
@@ -699,6 +699,70 @@ function statusCounts(rows) {
   }), {});
 }
 
+export const JOB_FIT_CALIBRATION_VERSION = 2;
+
+// Evaluate every applicable ceiling. A critical gap cannot mask a stronger
+// important-gap ceiling: adding an unresolved requirement must never raise fit.
+export function calibrateGroundedJobRequirements(rawScore, requirementRows, { legacy = false } = {}) {
+  const criticalGaps = requirementRows.filter(row => row.priority === 'critical' && row.materialGap);
+  const importantGaps = requirementRows.filter(row => row.priority === 'important' && row.materialGap);
+  const materialGaps = requirementRows.filter(row => row.materialGap);
+  const criticalAdjacent = requirementRows.filter(row => row.priority === 'critical'
+    && row.scoreImpact === 'scored'
+    && row.grounding.requirementGrounded && row.effectiveStatus === 'adjacent');
+  let adjustedScore = rawScore;
+  const adjustments = [];
+  const cap = (maximum, code, reason) => {
+    if (adjustedScore > maximum) {
+      adjustments.push({ code, reason, from: adjustedScore, to: maximum });
+      adjustedScore = maximum;
+    }
+  };
+  if (!legacy) {
+    if (criticalGaps.length >= 2) {
+      cap(69, 'multiple-critical-gaps', `Two or more grounded critical requirements are ${gapCondition(criticalGaps)}.`);
+    } else if (criticalGaps.length === 1) {
+      cap(79, 'critical-gap', `One grounded critical requirement is ${gapCondition(criticalGaps)}.`);
+    }
+    if (importantGaps.length >= 3) {
+      cap(69, 'multiple-important-gaps', `Three or more grounded important requirements are ${gapCondition(importantGaps)}.`);
+    } else if (importantGaps.length >= 2) {
+      cap(79, 'multiple-important-gaps', `Two grounded important requirements are ${gapCondition(importantGaps)}.`);
+    }
+    if (materialGaps.length > 0) {
+      cap(84, 'material-gap', `A grounded material requirement is ${gapCondition(materialGaps)}.`);
+    }
+    if (criticalAdjacent.length > 0) {
+      cap(84, 'critical-adjacent', 'A grounded critical requirement is supported only by adjacent experience.');
+    }
+  }
+  return { adjustedScore, adjustments };
+}
+
+// Reapply deterministic policy to an already grounded audit without asking an
+// AI to reinterpret its evidence, priorities, tenure, confidence, or raw score.
+export function recalibrateAuditedFitAssessment(audit) {
+  if (audit?.auditStatus !== 'audited' || audit.schemaVersion !== 1
+    || !Number.isInteger(audit.rawScore) || audit.rawScore < 0 || audit.rawScore > 100
+    || !Array.isArray(audit.requirementRows) || !audit.requirementRows.length
+    || !audit.confidence || audit.requirementRows.some(row => !row?.grounding
+      || !STATUSES.has(row.effectiveStatus))) return null;
+  const rows = audit.requirementRows;
+  const { adjustedScore, adjustments } = calibrateGroundedJobRequirements(audit.rawScore, rows);
+  const reasoning = calibratedReasoning({
+    legacy: false,
+    strengths: rows.filter(row => row.effectiveStatus === 'direct' && row.scoreImpact === 'scored'
+      && row.grounding.requirementGrounded && row.grounding.candidateClaimGrounded),
+    adjacentMatches: rows.filter(row => row.effectiveStatus === 'adjacent' && row.scoreImpact === 'scored'
+      && row.grounding.requirementGrounded && row.grounding.candidateClaimGrounded),
+    materialGaps: rows.filter(row => row.materialGap),
+    rejectedRows: rows.filter(row => !row.grounding.requirementGrounded
+      || row.grounding.rejectedJobEvidence.length > 0 || row.grounding.rejectedCandidateEvidence.length > 0),
+    adjustments, rawScore: audit.rawScore, adjustedScore, confidence: audit.confidence,
+  });
+  return { ...audit, calibrationVersion: JOB_FIT_CALIBRATION_VERSION, adjustedScore, adjustments, reasoning };
+}
+
 /**
  * Converts an LLM assessment into an auditable, calibrated object.  The
  * function is deliberately pure so current and future scoring pipelines can
@@ -717,11 +781,6 @@ export function validateAndNormalizeFitAssessment(raw, {
   const experience = normalizeExperience(safeRaw, candidateRoles, { asOf }, { candidateText, jobText });
   const requirementRows = applyDatedTenureToRequirements(normalizedRows, experience);
   const legacy = sourceRows.length === 0;
-  const criticalGaps = requirementRows.filter(row => row.priority === 'critical' && row.materialGap);
-  const importantGaps = requirementRows.filter(row => row.priority === 'important' && row.materialGap);
-  const criticalAdjacent = requirementRows.filter(row => row.priority === 'critical'
-    && row.scoreImpact === 'scored'
-    && row.grounding.requirementGrounded && row.effectiveStatus === 'adjacent');
   const materialGaps = requirementRows.filter(row => row.materialGap);
   const strengths = requirementRows.filter(row => row.effectiveStatus === 'direct'
     && row.scoreImpact === 'scored'
@@ -729,29 +788,7 @@ export function validateAndNormalizeFitAssessment(raw, {
   const adjacentMatches = requirementRows.filter(row => row.effectiveStatus === 'adjacent'
     && row.scoreImpact === 'scored'
     && row.grounding.requirementGrounded && row.grounding.candidateClaimGrounded);
-  let adjustedScore = rawScore;
-  const adjustments = [];
-  const cap = (maximum, code, reason) => {
-    if (adjustedScore > maximum) {
-      adjustments.push({ code, reason, from: adjustedScore, to: maximum });
-      adjustedScore = maximum;
-    }
-  };
-  if (!legacy) {
-    if (criticalGaps.length >= 2) {
-      cap(69, 'multiple-critical-gaps', `Two or more grounded critical requirements are ${gapCondition(criticalGaps)}.`);
-    } else if (criticalGaps.length === 1) {
-      cap(79, 'critical-gap', `One grounded critical requirement is ${gapCondition(criticalGaps)}.`);
-    } else if (importantGaps.length >= 3) {
-      cap(69, 'multiple-important-gaps', `Three or more grounded important requirements are ${gapCondition(importantGaps)}.`);
-    } else if (importantGaps.length >= 2) {
-      cap(79, 'multiple-important-gaps', `Two grounded important requirements are ${gapCondition(importantGaps)}.`);
-    } else if (materialGaps.length > 0) {
-      cap(84, 'material-gap', `A grounded material requirement is ${gapCondition(materialGaps)}.`);
-    } else if (criticalAdjacent.length > 0) {
-      cap(84, 'critical-adjacent', 'A grounded critical requirement is supported only by adjacent experience.');
-    }
-  }
+  const { adjustedScore, adjustments } = calibrateGroundedJobRequirements(rawScore, requirementRows, { legacy });
   const rejectedRequirementRows = requirementRows.filter(row => !row.grounding.requirementGrounded);
   // Include a label for any row whose cited posting or candidate evidence was
   // rejected. The public explanation deliberately omits the rejected quote.
@@ -783,6 +820,7 @@ export function validateAndNormalizeFitAssessment(raw, {
   });
   return {
     schemaVersion: 1,
+    calibrationVersion: JOB_FIT_CALIBRATION_VERSION,
     scoreInterpretation: 'hiring-fit-not-probability',
     auditStatus: legacy ? 'legacy-unverified' : 'audited',
     rawScore,

@@ -8,6 +8,7 @@ import {
   hubHasAcceptedInitialDrop,
 } from './hubDropEligibility.js';
 import { normalizeJobAnalysisClearRunId } from './jobAnalysisRecovery.js';
+import { hasLegacyPageScoring, JOB_SCORING_CONTRACT } from './jobScoringContract.js';
 import {
   approveCareerImportCompilation,
   beginCareerImportCompilation,
@@ -76,6 +77,17 @@ export function buildSavedJobsRescoreMarker({ careerSnapshotId, generation, now 
 // the approved snapshot that generation compiled.
 export function pendingSavedJobsRescore(data) {
   const marker = data?.savedJobsRescore;
+  if (!marker && (data?.hubState || 'empty') === 'done' && hasLegacyPageScoring(data)) {
+    const approved = currentApprovedCareerImportSnapshot(data, { generation: data.careerImportGeneration });
+    if (approved?.careerSnapshotId === data.careerSnapshotId) return {
+      version: SAVED_JOBS_RESCORE_VERSION,
+      careerSnapshotId: data.careerSnapshotId,
+      generation: data.careerImportGeneration,
+      reason: 'scoring-evidence-repair',
+      scoringContract: JOB_SCORING_CONTRACT,
+      scoringOnly: true,
+    };
+  }
   if (!marker || marker.version !== SAVED_JOBS_RESCORE_VERSION) return null;
   if ((data.hubState || 'empty') !== 'done' || !hubRetainsSavedJobs(data)) return null;
   if (!marker.generation || marker.generation !== data.careerImportGeneration) return null;

@@ -5,6 +5,7 @@
  * keyed by the full resolved canvas path rather than a shared friendly filename
  * (or merely a basename, which still collides for differently located files).
  */
+import { MAX_JOB_ANALYSIS_ARTIFACT_BYTES } from './jobAnalysisArtifactLimits.js';
 import crypto from 'crypto';
 import path from 'path';
 import fs from 'fs';
@@ -17,12 +18,7 @@ const JOB_ANALYSIS_LAST_SUCCESS_JSON = 'job-search-last-successful-scrape.json';
 // numbered names add two older, owner-scoped recovery points.
 const JOB_ANALYSIS_SUCCESSFUL_GENERATIONS = 3;
 const JOB_ANALYSIS_PROMPT = 'job-search-scoring-AI-prompt.txt';
-// A populated Job Search snapshot/checkpoint can legitimately contain a large
-// recovered candidate pool. The production report captured a 59.5 MiB record,
-// so a 32 MiB rebind ceiling made Save As/rename reject valid recovery data.
-// Keep a finite per-artifact cap (not an unbounded directory read) while
-// allowing that known real-world payload with a little operational headroom.
-const MAX_REBIND_ARTIFACT_BYTES = 64 * 1024 * 1024;
+const MAX_REBIND_ARTIFACT_BYTES = MAX_JOB_ANALYSIS_ARTIFACT_BYTES;
 
 async function fsyncDirectory(directory) {
   const handle = await fs.promises.open(directory, 'r').catch(() => null);

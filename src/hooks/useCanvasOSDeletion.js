@@ -1,3 +1,4 @@
+import { isJobCardDisplayRemoval } from '../utils/jobCardRemovalIntent.js';
 import { useCallback, useRef } from 'react';
 import { EventLogger } from '../utils/EventLogger';
 import {
@@ -362,7 +363,11 @@ export function useCanvasOSDeletion({
     if (!transaction) return;
     if (pendingCommits.length === 0) committedTransactionsRef.current.delete(transactionKey);
 
-    const { deletedNodes, deletedWorkflowIds, pendingWorkflowIds } = transaction;
+    const { deletedNodes: requestedDeletedNodes, deletedWorkflowIds, pendingWorkflowIds } = transaction;
+    // A Board re-combine retires old rendered cards before publishing its new
+    // tree/stats. Those removals must neither dismiss listings nor cancel a
+    // protected card's work nor overwrite the replacement's result counts.
+    const deletedNodes = requestedDeletedNodes.filter(node => !isJobCardDisplayRemoval(node?.id));
     const committedIds = new Set((committedNodes || []).map(node => node?.id).filter(Boolean));
     // The normal change batch already removes these nodes. This direct update
     // additionally covers hub-owned cards the user had locked: a lock protects

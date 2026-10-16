@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import careerCompilationProgressTests from './careerCompilationProgressFixture.mjs';
 import assert from 'node:assert';
 
 function readSource(relativePath) {
@@ -10,6 +11,7 @@ const done = () => readSource('../../src/nodes/jobsearch/JobSearchDoneState.jsx'
 const sourcesReady = () => readSource('../../src/nodes/jobsearch/JobSearchSourcesReadyState.jsx');
 
 export default [
+  ...careerCompilationProgressTests,
   {
     name: 'TwoStepConfirmButton never uses a browser confirm/alert dialog',
     run: async () => {
@@ -118,13 +120,13 @@ export default [
     run: async () => {
       const src = done();
       assert(src.includes('{careerCleared && !locked && ('), 'panel gated on careerCleared && !locked');
-      assert(src.includes('Career data cleared</p>'), 'panel heading');
+      assert(src.includes("? 'Career compilation' : 'Career data cleared'"), 'panel heading');
       assert(src.includes("'Compiling new career data… saved jobs are kept.'"), 'compiling body');
       assert(src.includes("`Career compilation failed${careerCompileError ? `: ${careerCompileError}` : ''}.`"), 'failed body');
       assert(src.includes("`Drop new career files to re-score ${savedJobCount} saved job${savedJobCount === 1 ? '' : 's'}. Jobs are kept.`"), 'default body');
-      assert(src.includes('{!careerCompiling && careerCompileFailed && onRetryCareerCompile && ('), 'retry gate');
+      assert(src.includes('{!careerCompiling && (careerCompileFailed || careerCompileUnstarted) && onRetryCareerCompile && ('), 'retry gate');
       assert(src.includes('Retry Career Compilation'), 'retry label');
-      assert(src.includes('{!careerCompiling && !careerCompileFailed && careerImportControls}'), 'import controls gate');
+      assert(src.includes('{!careerCompiling && !careerCompileFailed && !careerCompileUnstarted && careerImportControls}'), 'import controls gate');
       assert(/\{rescorePendingText && \(\s*<p className="[^"]*text-emerald-[^"]*">/.test(src), 'rescore note in emerald');
     },
   },

@@ -66,6 +66,37 @@ export function failCareerImportCompilation(receipt, { generation, attemptId, er
   };
 }
 
+// Cancellation is a saved disposition, never a compiler failure. Legacy
+// receipts can carry the cancellation string after an IPC/renderer race.
+export function pausedCareerImportCompilation(data) {
+  const receipt = data?.careerImportCompilation;
+  const marker = data?.manualAiResume;
+  if (!receipt || receipt.generation !== data?.careerImportGeneration
+    || !text(receipt.manualAiRunId) || receipt.manualAiRunId !== marker?.runId
+    || marker.pausedByUser !== true || !['compiling', 'failed', 'paused'].includes(receipt.status)) return null;
+  if (receipt.status === 'failed' && receipt.error !== 'Manual AI job cancelled') return null;
+  return { ...receipt, status: 'paused', error: undefined, failedAt: undefined };
+}
+
+// This patch deliberately changes only compilation/recovery metadata. In
+// particular saved jobs, input paths, identity and Board links remain intact.
+export function restartCareerImportCompilationPatch(data, { generation, runId } = {}) {
+  const receipt = data?.careerImportCompilation;
+  if (!receipt || receipt.generation !== generation || data?.careerImportGeneration !== generation
+    || receipt.manualAiRunId !== runId || !text(runId)
+    || !['compiling', 'failed', 'paused'].includes(receipt.status)
+    || (data.manualAiResume?.runId && data.manualAiResume.runId !== runId)
+    || careerResumeInputPaths(data).length === 0) return null;
+  return {
+    careerImportCompilation: null, manualAiResume: null,
+    careerSnapshotId: null, resumeProfile: null, careerData: null,
+    resumeSummary: null, resumeFingerprint: null, resumeContext: null,
+    savedJobsRescore: null, queuedModuleRun: null,
+    errorMessage: null, rerunOutcome: null, rerunNotice: null,
+    retryOperation: null, retryOperationFor: null,
+  };
+}
+
 export function approvedCareerImportCompilation(data, { generation } = {}) {
   const receipt = data?.careerImportCompilation;
   return receipt?.version === 1
@@ -91,6 +122,9 @@ export function currentApprovedCareerImportSnapshot(data, { generation } = {}) {
 export function careerImportCompilationAdmission(data, { generation } = {}) {
   const receipt = data?.careerImportCompilation;
   if (!receipt || text(receipt.generation) !== text(generation)) return { kind: 'missing' };
+  const paused = pausedCareerImportCompilation({ ...data, careerImportGeneration: generation });
+  if (paused) return { kind: 'paused', receipt: paused };
+  if (receipt.status === 'paused') return { kind: 'paused', receipt };
   if (receipt.status === 'compiling') return { kind: 'compiling', receipt };
   if (receipt.status === 'failed') return { kind: 'failed', receipt };
   const approved = currentApprovedCareerImportSnapshot(data, { generation });
@@ -114,7 +148,7 @@ export function resumableCareerImportCompilation(data, {
     !normalizedGeneration
     || !normalizedManualAiRunId
     || receipt?.version !== 1
-    || !['compiling', 'failed'].includes(receipt.status)
+    || !['compiling', 'failed', 'paused'].includes(receipt.status)
     || text(receipt.generation) !== normalizedGeneration
     || text(receipt.manualAiRunId) !== normalizedManualAiRunId
   ) return null;

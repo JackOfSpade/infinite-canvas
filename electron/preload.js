@@ -193,6 +193,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   appendJobsHistory: (args) => ipcRenderer.invoke('append-jobs-history', args),
   prepareBoardJobsHistory: (args) => ipcRenderer.invoke('prepare-board-jobs-history', args),
 
+  onCareerCompileProgress: createListener('career-compile-progress'),
   onJobSourceProgress: createListener('job-source-progress'),
   // Per-batch AI-scoring progress (real-time path). Payload: { nodeId, scored, total, batch, batchTotal }.
   onScoringProgress: createListener('scoring-progress'),
@@ -355,6 +356,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   handoffBridgeStartWorkerPool: (payload) => ipcRenderer.invoke('handoff-bridge:start-worker-pool', payload),
   handoffBridgeCopyWorkerStarter: (payload) => ipcRenderer.invoke('handoff-bridge:copy-worker-starter', payload),
   handoffBridgeRestartWorker: (payload) => ipcRenderer.invoke('handoff-bridge:restart-worker', payload),
+  handoffBridgeOpenWorkerChat: (payload) => ipcRenderer.invoke('handoff-bridge:open-worker-chat', payload),
   handoffBridgeRetryWorkerLaunch: (payload) => ipcRenderer.invoke('handoff-bridge:retry-worker-launch', payload),
   handoffBridgeGetLaunchAccount: (payload) => ipcRenderer.invoke('handoff-bridge:get-launch-account', payload),
   handoffBridgePause: () => ipcRenderer.invoke('handoff-bridge:pause'),

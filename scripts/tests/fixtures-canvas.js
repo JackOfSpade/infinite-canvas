@@ -6337,7 +6337,7 @@ export default [
       const cBig = compsForPricing(1000, 1000);
       assert(cBig.sold === cBig.active && cBig.sold > 15, 'Job date and cap helpers: large comp set should scale proportionally above the old caps');
       assert(priceSynthesisMaxTokens(cBig.sold + cBig.active) < 24576, 'Job date and cap helpers: fed comp count must fit the synthesis token budget (no clamp/truncate)');
-      assert(jobScoringBatchSize() === 22, 'Job date and collection-limit helpers: scoring batch must fill the 15,360-token manual-output budget');
+      assert(jobScoringBatchSize() === 4, 'Job date and collection-limit helpers: whole-record scoring batches must reserve room for the complete gap audit');
       return { filtered: filtered.length, scoringBatch: jobScoringBatchSize(), defaultPages: JOB_COLLECTION_LIMITS_DEFAULT.pagesPerPlatform };
     },
   },

@@ -1823,7 +1823,7 @@ export default [
       // There is no learned/self-calibrating cap left on this transport (that
       // was API-only retry telemetry, now deleted along with the API path).
       // What still matters is that the manual handoff's stated output ceiling
-      // is the real per-item job-scoring formula (1600 + itemCount*600), not
+      // is the real per-item job-scoring formula (1600 + itemCount*2800), not
       // a stale or flat number, so the human's chat app gets an accurate
       // budget for the actual batch size.
       const sent = [];
@@ -1835,21 +1835,21 @@ export default [
         result: await callLLMText('RETURN COMPACT JSON.', {
           signal,
           task: 'job-scoring',
-          hints: { itemCount: 22 },
+          hints: { itemCount: 4 },
           responseSchema: { type: 'object', required: ['result'], properties: { result: { type: 'string' } } },
         }),
       }));
       const run = ipcMain.__getInvokeHandler('non-api-manual-cap-test')({ sender }, { nodeId: 'manual-cap-node' });
       await new Promise(resolve => setImmediate(resolve));
       const request = sent.find(item => item.channel === 'non-api-ai-request')?.payload;
-      assert(request?.itemCount === 22
-        && request?.prompt.includes('Maximum output tokens: 14800')
-        && request.prompt.includes('Output-cap formula seed: 14800')
+      assert(request?.itemCount === 4
+        && request?.prompt.includes('Maximum output tokens: 12800')
+        && request.prompt.includes('Output-cap formula seed: 12800')
         && !request.prompt.includes('Maximum output tokens: 48000'),
-      'manual job scoring exposes its 22-item workload and uses the bounded per-item formula, never a flat historical cap');
+      'manual job scoring exposes its four-job workload and uses the bounded per-item formula, never a flat historical cap');
       await ipcMain.__getInvokeHandler('cancel-non-api-ai-request')({ sender }, { requestId: request.requestId });
       await run;
-      return { manualCap: 14800 };
+      return { manualCap: 12800 };
     },
   },
   {

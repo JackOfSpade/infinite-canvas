@@ -1519,7 +1519,7 @@ const dockTests = [
         && heldBlock.includes('status={bridgeStatus}')
         && heldBlock.includes('item={activeRequest}')
         && heldBlock.includes('isPush={!isApplicationRequest}')
-        && heldBlock.includes('canPauseAndSave={canPauseAndSaveJobSearch}')
+        && heldBlock.includes('canPauseAndSave={canPauseAndSaveJobSearch && !activeCareerProgress}')
         && heldBlock.includes('onPauseAndSave={requestJobSearchPauseAndSave}')
         && dock.includes("import { BridgeProgress } from './BridgeProgress';")
         && heldBlock.indexOf('<BridgeProgress') > heldBlock.lastIndexOf('</div>') - 200

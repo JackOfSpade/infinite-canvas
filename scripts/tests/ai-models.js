@@ -1,3 +1,4 @@
+import { legacyJobScoringMaxTokens } from '../../electron/ipc/resultCaps.js';
 // AI task/model sizing — NOT provider routing. Every AI call in the app now
 // goes through the single human copy/paste handoff (electron/ipc/nonApiAi.js,
 // NON_API_AI_TRANSPORT === 'non-api-ai'); there is no Gemini/Claude API call,
@@ -25,10 +26,11 @@ export default [
 {
     name: 'llm: compensation and scoring token-budget floors accommodate larger cohorts',
     run: () => {
-      assert(taskMaxTokensFor('job-scoring', { itemCount: 22 }) === 14800
+      assert(taskMaxTokensFor('job-scoring', { itemCount: 4 }) === 12800
         && taskMaxTokensFor('job-scoring', { itemCount: 23 }) === 15360
-        && taskMaxTokensFor('job-scoring', { itemCount: 15 }) === 10600,
-        'job-scoring keeps old 15-row handoffs byte-stable while fresh 22-row work uses the 15,360-token packed ceiling');
+        && taskMaxTokensFor('job-scoring', { itemCount: 15 }) === 15360
+        && legacyJobScoringMaxTokens(15) === 10600,
+        'fresh whole-record scoring budgets the complete audit while the explicit legacy formula stays byte-stable');
       assert(taskMaxTokensFor('job-compensation-assessment', { itemCount: 100 }) === 12288,
         'per-cohort compensation assessment has the larger 12,288-token ceiling');
       assert(taskMaxTokensFor('job-compensation-assessment', { itemCount: 15 }) === 11048,
@@ -705,12 +707,12 @@ export default [
       // cap is fixed, so the function is zero-arg now.
       assert(jobScoringBatchSize.length === 0, 'jobScoringBatchSize takes no argument (no per-model sizing survives)');
       const size = jobScoringBatchSize();
-      assert(size === 22
-        && jobScoringEstimatedTokens(size) === 14800
+      assert(size === 4
+        && jobScoringEstimatedTokens(size) === 12800
         && jobScoringBatchFits(size)
         && !jobScoringBatchFits(size + 1)
-        && jobScoringMaxTokens(size) === 14800,
-        `jobScoringBatchSize packs the maximum 22 jobs below 15,360 output tokens (got ${size})`);
+        && jobScoringMaxTokens(size) === 12800,
+        `jobScoringBatchSize packs the maximum 4 whole-record jobs below 15,360 output tokens (got ${size})`);
       assert(jobScoringBatchSize() === size, 'the result is stable across repeated calls (no hidden state/model drift)');
       return { batchSize: size };
     },

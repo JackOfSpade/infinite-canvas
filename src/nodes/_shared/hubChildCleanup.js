@@ -1,3 +1,4 @@
+import { beginJobCardDisplayRemoval } from '../../utils/jobCardRemovalIntent.js';
 import { EventLogger } from '../../utils/EventLogger.js';
 
 /**
@@ -17,11 +18,12 @@ import { EventLogger } from '../../utils/EventLogger.js';
  * @param {string}   args.hubId         The owning hub node id
  * @param {string[]} args.childTypes    Node types to consider as children
  *                                      (e.g. ['jobcard', 'jobgroup'])
+ * @param {boolean}  [args.displayReplacement] Preserve user dismissal/task intent when replacing Board display cards.
  * @param {string}   [args.removalLogSummary] Optional single-line summary for
  *                                      this known bulk deletion. Ordinary
  *                                      child cleanup remains itemized.
  */
-export function deleteChildrenByHubId({ getNodes, getEdges, deleteElements, hubId, childTypes, removalLogSummary }) {
+export function deleteChildrenByHubId({ getNodes, getEdges, deleteElements, hubId, childTypes, removalLogSummary, displayReplacement = false }) {
   const typeSet = new Set(childTypes);
   const owned = getNodes().filter(n => typeSet.has(n.type) && n.data?.hubId === hubId);
   if (owned.length === 0) return;
@@ -39,11 +41,13 @@ export function deleteChildrenByHubId({ getNodes, getEdges, deleteElements, hubI
       summary: removalLogSummary,
     })
     : null;
+  const finishDisplayRemoval = displayReplacement ? beginJobCardDisplayRemoval(owned) : () => {};
   try {
     const deletion = deleteElements({
       nodes: owned.map(n => ({ id: n.id })),
       edges: edgesToDelete,
     });
+    Promise.resolve(deletion).then(finishDisplayRemoval, finishDisplayRemoval);
     if (removalBatch) {
       let expiryTimer = null;
       const finishRemovalBatch = () => {
@@ -63,6 +67,7 @@ export function deleteChildrenByHubId({ getNodes, getEdges, deleteElements, hubI
     }
     return deletion;
   } catch (error) {
+    finishDisplayRemoval();
     EventLogger.endRemovalBatch(removalBatch);
     throw error;
   }

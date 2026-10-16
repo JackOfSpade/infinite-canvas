@@ -15,6 +15,7 @@ export function JobSearchProcessingState({
   onPauseAndSave,
   chromeLaunchInfo,
   queuedRun,
+  onCancelQueued,
 }) {
   const finishingWithSavedListings = resumeCheckpoint?.mode === 'finish-with-saved-listings';
   const activeSourceName = JOB_SOURCE_BY_ID[activeSourceId]?.name || activeSourceId;
@@ -29,14 +30,16 @@ export function JobSearchProcessingState({
   const descriptionProgress = hasDescriptionProgress
     ? `${Math.max(0, Math.min(rawActivityCompleted, rawActivityTotal))}/${rawActivityTotal} descriptions checked`
     : null;
-  const primaryStatus = finishingWithSavedListings
+  const primaryStatus = queuedRun
+    ? 'Queued'
+    : finishingWithSavedListings
     ? 'Finishing with saved listings…'
     : isDescriptionEnrichment
     ? `Enriching ${activeSourceName} descriptions…`
     : hubState === 'searching' && activeSourceId
     ? `Scanning ${activeSourceName}...`
     : statusLabel;
-  const queuedStatus = hubState === 'queued'
+  const queuedStatus = queuedRun
     ? `${queuedRun?.label || 'Job search'} · Position ${queuedRun?.position || 1}`
     : null;
   const collectedStatus = hubState === 'searching' && totalSourceJobs > 0
@@ -101,10 +104,10 @@ export function JobSearchProcessingState({
     }
   };
 
-  if (chromeLaunchInfo) {
+  if (chromeLaunchInfo && !queuedRun) {
     return (
       <div className="group flex flex-col py-4 px-3 relative gap-2.5">
-        {onPauseAndSave && (
+        {onPauseAndSave && !queuedRun && (
           <button
             type="button"
             onClick={onPauseAndSave}
@@ -151,7 +154,7 @@ export function JobSearchProcessingState({
 
   return (
     <div className="group flex flex-col items-center justify-center py-6 px-4 relative">
-      {onPauseAndSave && (
+      {onPauseAndSave && !queuedRun && (
         <button
           type="button"
           onClick={onPauseAndSave}
@@ -176,6 +179,7 @@ export function JobSearchProcessingState({
         </p>
         {checkpointContext}
         {queuedStatus && <p className="text-blue-400/60 text-[10px] mt-1">{queuedStatus}</p>}
+        {queuedRun && onCancelQueued && <button type="button" onClick={onCancelQueued} onPointerDown={event => event.stopPropagation()} className="nodrag mt-2 rounded border border-blue-300/25 px-2 py-1 text-[10px] text-blue-100 hover:bg-blue-400/15" aria-label="Cancel queued Job Search">Cancel queued work</button>}
         {descriptionProgress && (
           <p className="text-blue-300/65 text-[10px] mt-1 tabular-nums">{descriptionProgress}</p>
         )}
