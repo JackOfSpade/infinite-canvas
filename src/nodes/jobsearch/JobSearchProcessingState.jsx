@@ -93,6 +93,9 @@ export function JobSearchProcessingState({
         {scoringProgress.phase === 'recovering-missing-rows' && scoringProgress.attemptSize != null && (
           <> · recovering {scoringProgress.attemptSize} unresolved score row{scoringProgress.attemptSize === 1 ? '' : 's'}…</>
         )}
+        {scoringProgress.phase === 'gap-review' && scoringProgress.attemptSize != null && (
+          <> · reviewing the gaps that capped {scoringProgress.attemptSize} job{scoringProgress.attemptSize === 1 ? '' : 's'} below the bar…</>
+        )}
       </>
     : null;
 

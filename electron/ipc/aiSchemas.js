@@ -1566,6 +1566,47 @@ export const JOB_SCORING_SCHEMA = {
 // Converts grounded salary research into compact, auditable numeric evidence.
 // The code—not the model—unions comparable ranges and applies the final
 // below-market threshold, so this schema intentionally contains evidence only.
+// Second, independent check of the requirement gaps that pulled a job's
+// calibrated fit below the application bar (electron/ipc/jobGapReview.js).
+// The reviewer never re-scores: it can only confirm a gap, lower its
+// priority with the posting's own softer wording, supply overlooked verbatim
+// candidate evidence, or mark one row a duplicate of another. The host
+// re-grounds every quote and recomputes the score deterministically.
+export const JOB_GAP_REVIEW_SCHEMA = {
+  type: 'object',
+  required: ['reviews'],
+  properties: {
+    reviews: {
+      type: 'array',
+      items: {
+        type: 'object',
+        required: ['index', 'rows'],
+        properties: {
+          index: { type: 'integer', description: 'Position in the input batch (0-based).' },
+          rows: {
+            type: 'array',
+            description: 'Exactly one entry for every listed gap row of this job, in any order.',
+            items: {
+              type: 'object',
+              required: ['id', 'verdict', 'priority', 'status', 'jobEvidence', 'candidateEvidence', 'duplicateOf', 'explanation'],
+              properties: {
+                id: { type: 'string', maxLength: 80, description: 'The listed gap row id, copied exactly.' },
+                verdict: { type: 'string', enum: ['confirmed', 'priority', 'evidence', 'duplicate'], description: 'confirmed = the gap stands as classified; priority = the posting itself presents this requirement more softly than its label; evidence = the supplied career evidence establishes it; duplicate = another listed row is the same posting requirement.' },
+                priority: { type: 'string', enum: ['required', 'important', 'preferred', 'unchanged'], description: 'For verdict priority: the lower priority the posting wording supports. Otherwise unchanged.' },
+                status: { type: 'string', enum: ['direct', 'adjacent', 'unchanged'], description: 'For verdict evidence: direct = the candidate evidence explicitly supports the same requirement; adjacent = genuinely transferable but not equivalent. Otherwise unchanged.' },
+                jobEvidence: { type: 'string', maxLength: 220, description: 'For verdict priority: the shortest verbatim posting span showing the softer wording. Otherwise empty.' },
+                candidateEvidence: { type: 'string', maxLength: 220, description: 'For verdict evidence: the shortest verbatim span of the supplied career evidence. Otherwise empty.' },
+                duplicateOf: { type: 'string', maxLength: 80, description: 'For verdict duplicate: the id of the other listed row describing the same posting requirement. Otherwise empty.' },
+                explanation: { type: 'string', maxLength: 200, description: 'Evidence-qualified reason for the verdict.' },
+              },
+            },
+          },
+        },
+      },
+    },
+  },
+};
+
 export const JOB_COMPENSATION_EVIDENCE_SCHEMA = {
   type: 'object',
   required: ['assessments'],

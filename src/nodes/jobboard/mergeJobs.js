@@ -368,6 +368,10 @@ export function moduleFingerprint(scoredJobs) {
       continue;
     }
     fold(j.matchScore);
+    // A placeholder that becomes a real score (or the reverse) on a re-score
+    // changes the card's review badge and its filter visibility even when the
+    // number happens to stay at the sentinel, so the marker is board input.
+    fold(j.scoreStatus);
     fold(j.title);
     fold(j.company);
     fold(j.location);

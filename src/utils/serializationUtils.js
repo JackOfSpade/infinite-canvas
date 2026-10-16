@@ -9,6 +9,7 @@ import {
 import { stripNonRestorableNodeDataForUndo } from './undoNonRestorableState.js';
 import { isRestorableMarketplaceRecovery } from './marketplaceRunRecovery.js';
 import { consolidateBoardCascadeNodes } from './jobLocationConsolidation.js';
+import { isLegacyUnscoredPlaceholder, UNSCORED_SCORE_STATUS } from './jobCardFilters.js';
 
 /** Stable, pure snapshot fingerprint — no hook needed. */
 export function fingerprint(snap) {
@@ -111,7 +112,7 @@ const JOBCARD_SCORED_FIELDS = [
   'title', 'company', 'location', 'salary', 'snippet', 'matchScore',
   'reasoning', 'careerDirection', 'requirementAssessments', 'materialGaps',
   'strengths', 'experienceAssessment', 'confidence', 'fitAssessment', 'rawScore',
-  'adjustedScore', 'adjustments', 'calibration', 'source', 'url', 'posted',
+  'adjustedScore', 'adjustments', 'calibration', 'scoreStatus', 'source', 'url', 'posted',
   'language', 'resumeProfile', 'googleCardUrl', 'applySource', 'originHubId', 'careerSnapshotId',
   // These arrived after the original on-canvas jobcard shape but can occur in
   // an unversioned/exported legacy canvas. Preserve them during the broad
@@ -533,6 +534,47 @@ export function migrateConsolidateBoardLocations(nodes) {
   return migrated;
 }
 
+/**
+ * Stamp `scoreStatus: 'unscored'` on placeholder results saved before the
+ * scorer wrote that marker (v11).
+ *
+ * A job the AI never scored was stored as the fixed fallback number with one
+ * of two fixed explanations and no audit. The Board's card filter now keeps
+ * such a card visible as a review card instead of hiding it below the slider
+ * as if it had been assessed and found low, but it keys off the structural
+ * marker, never the number — so cards and hub `scoredJobs` rows from an older
+ * build need the marker backfilled once. Shape-gated on the exact legacy
+ * placeholder shape (isLegacyUnscoredPlaceholder); an honestly assessed 50
+ * carries an audit and is left alone. Idempotent: a stamped row no longer
+ * matches.
+ */
+export function migrateUnscoredPlaceholderStatus(nodes) {
+  if (!Array.isArray(nodes)) return nodes;
+  let changed = false;
+  const out = nodes.map(n => {
+    const d = n?.data;
+    if (!d || typeof d !== 'object') return n;
+    if (n.type === 'jobcard') {
+      if (!isLegacyUnscoredPlaceholder(d)) return n;
+      changed = true;
+      return { ...n, data: { ...d, scoreStatus: UNSCORED_SCORE_STATUS } };
+    }
+    if (n.type === 'jobhub' && Array.isArray(d.scoredJobs)) {
+      let rowsChanged = false;
+      const scoredJobs = d.scoredJobs.map(job => {
+        if (!isLegacyUnscoredPlaceholder(job)) return job;
+        rowsChanged = true;
+        return { ...job, scoreStatus: UNSCORED_SCORE_STATUS };
+      });
+      if (!rowsChanged) return n;
+      changed = true;
+      return { ...n, data: { ...d, scoredJobs } };
+    }
+    return n;
+  });
+  return changed ? out : nodes;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Versioned node-migration framework
 //
@@ -566,6 +608,7 @@ const MIGRATIONS = [
   { version: 8, name: 'targetRole→search-brief',         migrate: migrateMergedTargetRoleIntoBrief, selfRecursive: false },
   { version: 9, name: 'jobhub-titlesource→single-mode',  migrate: migrateJobHubTitleSourceSingleMode, selfRecursive: false },
   { version: 10, name: 'jobboard-location-consolidation', migrate: migrateConsolidateBoardLocations, selfRecursive: false },
+  { version: 11, name: 'jobcard-unscored-placeholder-status', migrate: migrateUnscoredPlaceholderStatus, selfRecursive: false },
 ];
 
 export const CURRENT_SCHEMA_VERSION = MIGRATIONS.length ? MIGRATIONS[MIGRATIONS.length - 1].version : 0;

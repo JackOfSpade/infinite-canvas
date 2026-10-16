@@ -58,6 +58,7 @@ const KNOWN_TASKS = new Set([
   'career-profile-repair',
   'job-query-generation',
   'job-scoring',
+  'job-gap-review',
   'job-taxonomy-plan',
   'job-taxonomy-classify',
   'job-taxonomy-classify-batch',
@@ -175,6 +176,11 @@ const TASK_MAX_TOKENS = {
   // Whole-record scoring needs room for the complete professional-gap audit.
   // Four fresh jobs reserve 1,600 + 4*2,800 = 12,800 tokens. A one-job evidence
   // phase can separately name its requirement workload for output guidance.
+  // One verdict object per listed gap row (about 160 tokens each) plus a
+  // small per-job envelope. The row count is the real driver, so the caller
+  // passes it as a hint; the job count alone is only a floor.
+  'job-gap-review':            ({ itemCount = 1, reviewRowCount = 0 } = {}) =>
+    Math.min(MANUAL_AI_USABLE_OUTPUT_TOKENS, 1024 + Math.max(1, itemCount) * 256 + Math.max(0, reviewRowCount) * 160),
   'job-scoring':               ({ itemCount = 10, scoringRequirementCount = 0 } = {}) =>
     jobScoringMaxTokens(Math.max(itemCount, scoringRequirementCount)),
   // Taxonomy planning is fed only bounded aggregate statistics and returns a

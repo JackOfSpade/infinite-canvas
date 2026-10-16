@@ -49,7 +49,7 @@ export default [
       }
       const retained = { ...after, calibrationVersion: 1, adjustedScore: 79, adjustments: [], reasoning: 'Prior calibration' };
       const repaired = recalibrateAuditedFitAssessment(retained);
-      assert(repaired.adjustedScore === 69 && repaired.rawScore === 96 && repaired.calibrationVersion === 2 && repaired.reasoning.includes('96 to 69'), 'saved audited scores must receive the same transparent deterministic correction');
+      assert(repaired.adjustedScore === 69 && repaired.rawScore === 96 && repaired.calibrationVersion === 3 && repaired.reasoning.includes('96 to 69'), 'saved audited scores must receive the same transparent deterministic correction');
       assert(repaired.requirementRows === retained.requirementRows && repaired.confidence === retained.confidence && repaired.experience === retained.experience && retained.adjustedScore === 79, 'recalibration must preserve all AI evidence, confidence and tenure without mutating the retained result');
       assert(recalibrateAuditedFitAssessment({ ...retained, auditStatus: 'legacy-unverified' }) === null, 'unverified legacy numbers are not authority for deterministic repair');
     },
@@ -187,7 +187,13 @@ export default [
       assert(ledger[0].observations.length === 2 && ledger[0].observations.some(row => row.status === 'contradicted'), 'a positive observation cannot erase a real conflicting quote');
       const composed = composeScoringSynthesis(finalResult(requirements, { assessments: requirements.map((requirement, index) => assessment(requirement, index === 0 ? 'unclear' : 'not_documented', index === 0 ? pages[1].text : '')) }), requirements, ledger);
       const calibrated = calibratedScoreForJob(composed, job, { candidateText: pages.map(page => page.text).join('\n') });
-      assert(calibrated?.matchScore === 69 && calibrated.fitAssessment.adjustments[0]?.code === 'multiple-critical-gaps', 'two genuine unresolved global requirements still cap an inflated score');
+      // One required requirement is not documented and the other is `unclear`
+      // (conflicting pages). Both block 85+ and together they reach the 79
+      // ceiling; the 69 ceiling needs two HARD critical gaps.
+      assert(calibrated?.matchScore === 79 && calibrated.fitAssessment.adjustments[0]?.code === 'critical-gap', 'two genuine unresolved global requirements, one of them inconclusive, still cap an inflated score at 79');
+      // The conflicting page is a grounded contradiction, which is a HARD gap.
+      const bothHard = calibratedScoreForJob(composeScoringSynthesis(finalResult(requirements, { assessments: requirements.map((requirement, index) => assessment(requirement, index === 0 ? 'contradicted' : 'not_documented', index === 0 ? pages[1].text : '')) }), requirements, ledger), job, { candidateText: pages.map(page => page.text).join('\n') });
+      assert(bothHard?.matchScore === 69 && bothHard.fitAssessment.adjustments[0]?.code === 'multiple-critical-gaps', 'a grounded contradiction plus a documentation gap are two hard unresolved global requirements and cap an inflated score at 69');
     },
   },
   {

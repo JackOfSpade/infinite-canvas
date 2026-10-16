@@ -11690,6 +11690,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         'matchScore', 'reasoning', 'careerDirection', 'requirementAssessments',
         'materialGaps', 'strengths', 'experienceAssessment', 'confidence',
         'fitAssessment', 'rawScore', 'adjustedScore', 'adjustments', 'calibration',
+        'scoreStatus', 'scoringCoverageReceipt',
         ...(!scoringOnlyRepair ? ['preferenceAssessment'] : []),
       ].forEach(field => delete listing[field]);
       return listing;

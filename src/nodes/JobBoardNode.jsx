@@ -1398,14 +1398,15 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
   // ── Cascade filters (score slider + per-source), scoped to THIS board's cards.
   // computeJobTreeView REMOVES non-matching cards and any branch with no matching
   // descendant (vs. just dimming) and reflows, composing with expand/collapse.
-  const applyCardFilters = useCallback(({ sourceFilter: sf, scoreThreshold: st } = {}) => {
-    const base = hubCardFilter({ sourceFilter: data.sourceFilter, scoreThreshold: data.scoreThreshold });
+  const applyCardFilters = useCallback(({ sourceFilter: sf, scoreThreshold: st, showReviewCards: rc } = {}) => {
+    const base = hubCardFilter({ sourceFilter: data.sourceFilter, scoreThreshold: data.scoreThreshold, showReviewCards: data.showReviewCards });
     const filter = {
       sourceFilter: sf !== undefined ? sf : base.sourceFilter,
       scoreThreshold: st !== undefined ? st : base.scoreThreshold,
+      showReviewCards: rc !== undefined ? rc : base.showReviewCards,
     };
     setNodes((nodes) => computeJobTreeView(nodes, id, filter));
-  }, [data.sourceFilter, data.scoreThreshold, id, setNodes]);
+  }, [data.sourceFilter, data.scoreThreshold, data.showReviewCards, id, setNodes]);
 
   const toggleSourceFilter = useCallback((sourceId) => {
     const newFilter = (data.sourceFilter || null) === sourceId ? null : sourceId;
@@ -1420,14 +1421,24 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
     EventLogger.log(`[JobBoard] hiring-fit filter ≥${val}/100 id=${id}`);
   }, [id, updateGlobal, applyCardFilters]);
 
+  // Review cards (unscored placeholders, and scores the evidence-gap rule
+  // pulled from above the slider to below it) stay visible under the slider
+  // by default; this switch hides them. Persisted like the other two knobs.
+  const setShowReviewCards = useCallback((val) => {
+    const show = val !== false;
+    updateGlobal(id, { showReviewCards: show });
+    applyCardFilters({ showReviewCards: show });
+    EventLogger.log(`[JobBoard] review cards ${show ? 'shown' : 'hidden'} below the hiring-fit filter id=${id}`);
+  }, [id, updateGlobal, applyCardFilters]);
+
   // Re-apply filters on mount — card opacities are stripped from save files.
   useEffect(() => {
     if (data.stale) return; // stale → cascade is hidden; don't reveal it here
     const min = data.scoreRangeMin ?? 0;
-    const hasFilter = data.sourceFilter || (data.scoreThreshold ?? min) > min;
+    const hasFilter = data.sourceFilter || (data.scoreThreshold ?? min) > min || data.showReviewCards === false;
     if (!hasFilter) return;
     applyCardFilters({});
-  }, [applyCardFilters, data.scoreThreshold, data.scoreRangeMin, data.sourceFilter, data.stale]);
+  }, [applyCardFilters, data.scoreThreshold, data.scoreRangeMin, data.sourceFilter, data.showReviewCards, data.stale]);
 
   // Hide every spawned card/group (results "disappear") without touching their
   // expand/collapse state, so the exact view can be restored later.
@@ -1449,8 +1460,8 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
   // from each group's preserved `data.expanded` × the active filter, so the prior
   // expand/collapse + filter view comes back intact.
   const showBoardChildren = useCallback(() => {
-    setNodes((nodes) => computeJobTreeView(nodes, id, hubCardFilter({ sourceFilter: data.sourceFilter, scoreThreshold: data.scoreThreshold })));
-  }, [id, setNodes, data.sourceFilter, data.scoreThreshold]);
+    setNodes((nodes) => computeJobTreeView(nodes, id, hubCardFilter({ sourceFilter: data.sourceFilter, scoreThreshold: data.scoreThreshold, showReviewCards: data.showReviewCards })));
+  }, [id, setNodes, data.sourceFilter, data.scoreThreshold, data.showReviewCards]);
 
   // Use one guarded path for every place a changing connected Search can
   // supersede a prior Combine. This is deliberately imperative too: Combine
@@ -6358,6 +6369,8 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
           sourceFilter={data.sourceFilter || null}
           toggleSourceFilter={toggleSourceFilter}
           sourceCounts={data.finalSourceCounts || {}}
+          showReviewCards={data.showReviewCards !== false}
+          setShowReviewCards={setShowReviewCards}
           onRecombine={null}
           onClear={handleClear}
           combining={scanning || combining}

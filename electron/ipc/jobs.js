@@ -30,7 +30,12 @@ import {
 } from './careerSnapshot.js';
 import { produceCareerCleanLayer } from './careerCleanLayer.js';
 import { buildScoredJob } from './jobBatchReconcile.js';
-import { nonScoringJobConstraintKind, validateAndNormalizeFitAssessment } from './jobFitAssessment.js';
+import { nonScoringJobConstraintKind, summarizeFitCalibration, validateAndNormalizeFitAssessment } from './jobFitAssessment.js';
+import {
+  JOB_GAP_REVIEW_BATCH_SIZE, JOB_GAP_REVIEW_SCHEMA, JOB_GAP_REVIEW_TASK,
+  applyGapReview, buildGapReviewPrompt, gapReviewRowsForJob, selectGapReviewCandidates,
+  summarizeGapReviews, validateGapReviewSubmission,
+} from './jobGapReview.js';
 import { buildScoringAudit, scoringAuditRowsFromBatches, scoringSimilarityKey } from './scoringAudit.js';
 import { buildJobScoringRequestParts } from './jobScoringCache.js';
 import { JOB_SCORING_SCHEMA, JOB_COMPENSATION_EVIDENCE_SCHEMA, JOB_COMPENSATION_EVIDENCE_BATCH_SCHEMA, ROLE_FAMILY_EXPERIENCE_BANDS_SCHEMA, ROLE_FAMILY_EXPERIENCE_BANDS_BATCH_SCHEMA, JOB_QUERY_GENERATION_SCHEMA, JOB_LOCATION_RESOLUTION_SCHEMA } from './aiSchemas.js';
@@ -572,7 +577,7 @@ const MAX_SOURCE_RUN_HISTORY_PER_SOURCE = 3;
 // "unscored" rather than asserting a real fit — the bug-report telemetry counts
 // these (placeholderCount) so a scoring failure stays visible instead of being
 // laundered into a plausible number.
-const UNSCORED_FALLBACK_SCORE = 50;
+export const UNSCORED_FALLBACK_SCORE = 50;
 const JOB_ANALYSIS_SNAPSHOT_VERSION = 2;
 const JOB_ANALYSIS_REPORT_METADATA_VERSION = 1;
 export const JOB_DESCRIPTION_EVIDENCE_MIN_CHARS = 400;
@@ -5831,6 +5836,8 @@ export function buildJobRunCompletionReceipt(runId, completedAt = Date.now(), te
         failedBatches: scoring.failedBatches,
         cappedForBudget: scoring.cappedForBudget,
         providerCalls: scoring.providerCalls,
+        ...(scoring.calibration ? { calibration: scoring.calibration } : {}),
+        ...(scoring.gapReview ? { gapReview: scoring.gapReview } : {}),
       },
     } : {}),
     ...(hasRunScopedRecovery ? { recovery: { mergeNet: recoveryMergeNet } } : {}),
@@ -10764,6 +10771,7 @@ function registerJobsHandlersWithDependencies(dependencies = {}) {
   const resolveRequiredPinnedCareerInputForHandler = dependencies.resolveRequiredPinnedCareerInput || resolveRequiredPinnedCareerInput;
   const beforeScoreSideEffect = dependencies.beforeScoreSideEffect || (async () => {});
   const runScoreBatch = dependencies.runScoreBatch || callLLMText;
+  const runGapReview = dependencies.runGapReview || callLLMText;
   const runHttpSources = dependencies.fetchHttpSources || fetchHttpSources;
   const beforeSearchStageWrite = dependencies.beforeSearchStageWrite || (async () => {});
   const afterSearchProviderResult = dependencies.afterSearchProviderResult || (async () => {});
@@ -15523,6 +15531,97 @@ Return a JSON object with four arrays of search query strings:
       return { jobs: [], operationSuperseded: true, error: 'This Job Search operation was superseded before scoring could finish.' };
     }
 
+    // ── Targeted gap review ────────────────────────────────────────────────
+    // The evidence-gap ceilings are deterministic policy over the model's own
+    // gap inventory, so a mislabelled priority, one posting clause split into
+    // two gap rows, or overlooked candidate evidence can pull a job the model
+    // placed at or above the application bar below it. Re-scoring everything
+    // twice would double every scoring handoff; this stage spends one small
+    // handoff on exactly those capped-across-bar jobs and asks only about the
+    // rows that caused the cap (jobGapReview.js). The host re-grounds every
+    // quote and recomputes the score with the same rules, so a review can
+    // never lift a score above the model's raw number. A failed review leaves
+    // the calibrated scores exactly as they were and says so in telemetry.
+    const gapReviewThreshold = COMPENSATION_MIN_FIT_SCORE;
+    const gapReviewTelemetry = {
+      threshold: gapReviewThreshold, candidates: 0, batches: 0, reviewedJobs: 0, skippedOversized: 0, failed: null,
+    };
+    const gapReviewIndexes = selectGapReviewCandidates(scoredJobs, { threshold: gapReviewThreshold });
+    gapReviewTelemetry.candidates = gapReviewIndexes.length;
+    if (gapReviewIndexes.length > 0 && !signal?.aborted) {
+      const reviewUnits = gapReviewIndexes.map(index => ({
+        index,
+        rows: gapReviewRowsForJob(scoredJobs[index]),
+        jobText: jobEvidenceTextForFit(scoredJobs[index]),
+      }));
+      const reviewBatches = [];
+      for (let start = 0; start < reviewUnits.length; start += JOB_GAP_REVIEW_BATCH_SIZE) {
+        reviewBatches.push(reviewUnits.slice(start, start + JOB_GAP_REVIEW_BATCH_SIZE));
+      }
+      const runReviewBatch = async (units, topLevelBatch) => {
+        const batch = units.map((unit, position) => ({ index: position, jobText: unit.jobText, rows: unit.rows }));
+        const prompt = buildGapReviewPrompt({ jobs: batch, candidateText: candidateFitText });
+        const envelope = scoringPromptFitsEnvelopeForTests({ prompt, responseSchema: JOB_GAP_REVIEW_SCHEMA });
+        if (!envelope.fits) {
+          if (units.length > 1) {
+            const mid = Math.ceil(units.length / 2);
+            await runReviewBatch(units.slice(0, mid), topLevelBatch);
+            await runReviewBatch(units.slice(mid), topLevelBatch);
+            return;
+          }
+          // One job's posting plus the career evidence does not fit a single
+          // handoff. Its calibrated score stands; the report counts the skip.
+          gapReviewTelemetry.skippedOversized += 1;
+          logger.warn(`[Jobs] Gap review prompt for one job is ${envelope.bytes.toLocaleString()} UTF-8 bytes, above the ${envelope.limit.toLocaleString()}-byte handoff envelope; leaving its calibrated score as is.`);
+          return;
+        }
+        await assertScoringCurrent();
+        gapReviewTelemetry.batches += 1;
+        providerCalls += 1;
+        const reviewMeta = {};
+        const response = await runGapReview(prompt, {
+          signal,
+          task: JOB_GAP_REVIEW_TASK,
+          responseSchema: JOB_GAP_REVIEW_SCHEMA,
+          meta: reviewMeta,
+          hints: {
+            itemCount: units.length,
+            reviewRowCount: units.reduce((count, unit) => count + unit.rows.length, 0),
+            batch: topLevelBatch,
+            batchTotal: reviewBatches.length,
+          },
+          // A rejected response re-prompts with the exact observation (which
+          // row, what was not found); the same validator runs again below so
+          // nothing reaches a card on the transport's word alone.
+          responseValidator: value => validateGapReviewSubmission(value, batch, { candidateText: candidateFitText }),
+          retryOnTruncation: false,
+        });
+        await assertScoringCurrent();
+        const { reviews } = validateGapReviewSubmission(response, batch, { candidateText: candidateFitText });
+        for (const review of reviews) {
+          const unit = units[review.index];
+          scoredJobs[unit.index] = applyGapReview(scoredJobs[unit.index], review, {
+            candidateText: candidateFitText, jobText: unit.jobText, threshold: gapReviewThreshold,
+          });
+          gapReviewTelemetry.reviewedJobs += 1;
+        }
+      };
+      try {
+        emitScoringProgress(completedScoringJobCount, {
+          phase: 'gap-review', batch: scoringBatches.length, attemptSize: gapReviewIndexes.length,
+        });
+        for (const [position, units] of reviewBatches.entries()) await runReviewBatch(units, position + 1);
+      } catch (error) {
+        if (isJobOperationSupersededError(error) || signal?.aborted) throw error;
+        gapReviewTelemetry.failed = String(error?.message || error).slice(0, 240);
+        logger.warn('[Jobs] Gap review handoff failed; capped scores stay as calibrated:', error?.message || error);
+      }
+      if (!await scoringIsCurrent()) {
+        scoringSuperseded = true;
+        return { jobs: [], operationSuperseded: true, error: 'This Job Search operation was superseded during the gap review.' };
+      }
+    }
+
     // Hiring fit remains the primary sort. For equal fit scores, preserve the
     // user's soft Job Preferences as a separate deterministic tie-breaker;
     // preferenceScore never contributes to or mutates matchScore itself.
@@ -15561,6 +15660,13 @@ Return a JSON object with four arrays of search query strings:
       scored: scoredJobs.length,
       placeholders: placeholderCount,
       ungroundedScores: ungroundedScoreCount,
+      // How often the deterministic evidence-gap ceilings moved a score, and
+      // how many jobs they moved from at-or-above the application bar to
+      // below it. Count-only; the per-job detail lives in each card's audit.
+      calibration: summarizeFitCalibration(scoredJobs, { threshold: COMPENSATION_MIN_FIT_SCORE }),
+      // The targeted gap review's own counts (candidates, handoffs, failures)
+      // plus the per-job outcomes read back from each reviewed audit.
+      gapReview: { ...gapReviewTelemetry, ...summarizeGapReviews(scoredJobs, { threshold: gapReviewThreshold }) },
       batches,
       failedBatches,
       providerCalls,

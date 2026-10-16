@@ -175,7 +175,7 @@ export function nonScoringJobConstraintKind(row) {
   return null;
 }
 
-function isMaterialGap(priority, status, requirementGrounded, scoreImpact = 'scored') {
+export function isMaterialGap(priority, status, requirementGrounded, scoreImpact = 'scored') {
   return requirementGrounded
     && scoreImpact === 'scored'
     && priority !== 'preferred'
@@ -657,6 +657,7 @@ function calibratedReasoning({
   materialGaps,
   rejectedRows,
   adjustments,
+  mergedGapClusters = [],
   rawScore,
   adjustedScore,
   confidence,
@@ -679,6 +680,9 @@ function calibratedReasoning({
   const rejectedLabels = requirementLabels(rejectedRows.filter(row => row.scoreImpact === 'scored'));
   if (rejectedLabels.length) clauses.push(`Assessment limitation: cited evidence for ${joinLabels(rejectedLabels)} could not be verified against the supplied records`);
   clauses.push(coverageDescription(confidence));
+  for (const cluster of mergedGapClusters) {
+    if (cluster.requirements.length > 1) clauses.push(`Overlapping gap rows ${joinLabels(cluster.requirements)} describe one posting requirement and were counted once for calibration`);
+  }
   if (adjustments.length) clauses.push(`The score was calibrated from ${rawScore} to ${adjustedScore} under the evidence-gap rule`);
   return `${clauses.join('. ')}.`;
 }
@@ -699,13 +703,152 @@ function statusCounts(rows) {
   }), {});
 }
 
-export const JOB_FIT_CALIBRATION_VERSION = 2;
+// 3: ceilings count distinct requirements (overlapping gap rows merge) and
+//    only hard gaps (not documented / contradicted) reach the 69 ceilings.
+export const JOB_FIT_CALIBRATION_VERSION = 3;
+
+/**
+ * Aggregate how often the deterministic ceilings above actually moved a score,
+ * across one scoring run. Pure and count-only: no candidate or posting text.
+ *
+ * `threshold` is the user's application bar. `cappedAcrossThreshold` counts
+ * jobs the model placed at or above it that a cap pulled below it — the exact
+ * population where a mislabelled priority, a duplicated gap, or a tenure
+ * shortfall turns "apply" into "skip". `adjustmentCodes` counts every applied
+ * cap by rule so a run can show WHICH rule did the lowering.
+ */
+export function summarizeFitCalibration(scoredJobs, { threshold } = {}) {
+  const bar = Number.isFinite(Number(threshold)) ? Number(threshold) : null;
+  const summary = {
+    threshold: bar,
+    scored: 0,
+    calibrated: 0,
+    capped: 0,
+    cappedAcrossThreshold: 0,
+    unscored: 0,
+    adjustmentCodes: {},
+  };
+  for (const job of Array.isArray(scoredJobs) ? scoredJobs : []) {
+    if (!job || typeof job !== 'object') continue;
+    summary.scored += 1;
+    if (typeof job.scoreStatus === 'string' && job.scoreStatus.startsWith('unscored')) {
+      summary.unscored += 1;
+      continue;
+    }
+    const raw = Number(job.rawScore);
+    const adjusted = Number(job.adjustedScore ?? job.matchScore);
+    if (!Number.isFinite(raw) || !Number.isFinite(adjusted)) continue;
+    summary.calibrated += 1;
+    const adjustments = Array.isArray(job.fitAssessment?.adjustments)
+      ? job.fitAssessment.adjustments
+      : Array.isArray(job.adjustments) ? job.adjustments : [];
+    for (const adjustment of adjustments) {
+      const code = typeof adjustment?.code === 'string' && adjustment.code.trim() ? adjustment.code.trim() : 'unknown';
+      summary.adjustmentCodes[code] = (summary.adjustmentCodes[code] || 0) + 1;
+    }
+    if (adjusted < raw) summary.capped += 1;
+    if (bar !== null && raw >= bar && adjusted < bar) summary.cappedAcrossThreshold += 1;
+  }
+  return summary;
+}
+
+// A gap whose status asserts something about the record (nothing documented,
+// or a documented conflict), as opposed to `unclear`, which only says the
+// supplied evidence could not settle the question. Both are material gaps
+// and both block 85+; only hard gaps count toward the 69 ceilings, because a
+// 69 means "do not apply" under the user's bar and inconclusive evidence is
+// not enough to conclude that.
+const HARD_GAP_STATUSES = new Set(['not_documented', 'contradicted']);
+const OVERLAP_MIN_CHARS = 4;
+
+function overlapText(value) {
+  return normalizeText(value).replace(/[^\p{L}\p{N}\s]+/gu, ' ').replace(/\s+/gu, ' ').trim();
+}
+
+function textsOverlap(left, right) {
+  if (!left || !right) return false;
+  if (left === right) return true;
+  const shorter = left.length <= right.length ? left : right;
+  const longer = shorter === left ? right : left;
+  return shorter.length >= OVERLAP_MIN_CHARS && longer.includes(shorter);
+}
+
+// Two gap rows describe one posting requirement when one's grounded posting
+// span sits inside the other's (the same clause quoted twice at different
+// lengths: "AWS" and "deploy services on AWS"), or when one requirement label
+// contains the other ("Cloud platform" / "Cloud platform experience"). The
+// scorer is told to quote distinct spans for distinct requirements, so a
+// nested span is the model's own signal that it split one requirement in two.
+// Unrelated requirements ("AWS" / "GCP") share neither and stay separate.
+function gapRowsOverlap(left, right) {
+  // A gap review (jobGapReview.js) may record that one row duplicates another
+  // by id; that verdict is host-validated and links the two rows outright.
+  const leftId = text(left?.id);
+  const rightId = text(right?.id);
+  if ((leftId && text(right?.duplicateOf) === leftId) || (rightId && text(left?.duplicateOf) === rightId)) return true;
+  const leftQuotes = (Array.isArray(left?.jobEvidence) ? left.jobEvidence : []).map(overlapText).filter(Boolean);
+  const rightQuotes = (Array.isArray(right?.jobEvidence) ? right.jobEvidence : []).map(overlapText).filter(Boolean);
+  if (leftQuotes.some(a => rightQuotes.some(b => textsOverlap(a, b)))) return true;
+  return textsOverlap(overlapText(left?.requirement), overlapText(right?.requirement));
+}
+
+/**
+ * Group material-gap rows that describe the same posting requirement so the
+ * ceilings count DISTINCT requirements, not rows. Every row stays in the audit;
+ * only the ceiling arithmetic changes. A cluster counts toward every priority
+ * its members carry and is "hard" for a priority when a member of that
+ * priority has a hard status — so adding a row can only ever add to a count,
+ * never move one, which keeps "more gaps never raise the score" true.
+ */
+export function clusterMaterialGaps(requirementRows) {
+  const clusters = [];
+  for (const row of requirementRows.filter(row => row?.materialGap)) {
+    const linked = clusters.filter(cluster => cluster.rows.some(member => gapRowsOverlap(member, row)));
+    if (linked.length === 0) {
+      clusters.push({ rows: [row] });
+      continue;
+    }
+    const [target, ...others] = linked;
+    target.rows.push(row);
+    for (const other of others) {
+      target.rows.push(...other.rows);
+      clusters.splice(clusters.indexOf(other), 1);
+    }
+  }
+  return clusters.map(cluster => ({
+    rows: cluster.rows,
+    critical: cluster.rows.some(row => row.priority === 'critical'),
+    important: cluster.rows.some(row => row.priority === 'important'),
+    criticalHard: cluster.rows.some(row => row.priority === 'critical' && HARD_GAP_STATUSES.has(row.effectiveStatus)),
+    importantHard: cluster.rows.some(row => row.priority === 'important' && HARD_GAP_STATUSES.has(row.effectiveStatus)),
+  }));
+}
+
+function clusterRows(clusters) {
+  return clusters.flatMap(cluster => cluster.rows);
+}
+
+function mergedClusterSummaries(clusters) {
+  return clusters
+    .filter(cluster => cluster.rows.length > 1)
+    .map(cluster => ({
+      ids: cluster.rows.map(row => text(row.id)).filter(Boolean),
+      requirements: [...new Set(cluster.rows.map(row => text(row.requirement)).filter(Boolean))],
+    }));
+}
 
 // Evaluate every applicable ceiling. A critical gap cannot mask a stronger
 // important-gap ceiling: adding an unresolved requirement must never raise fit.
+//
+// Ceilings count distinct requirements (see clusterMaterialGaps). The 69
+// ceilings need HARD gaps (not documented or contradicted); an `unclear` gap
+// still counts toward the 79 ceilings and the 84 material-gap ceiling.
 export function calibrateGroundedJobRequirements(rawScore, requirementRows, { legacy = false } = {}) {
-  const criticalGaps = requirementRows.filter(row => row.priority === 'critical' && row.materialGap);
-  const importantGaps = requirementRows.filter(row => row.priority === 'important' && row.materialGap);
+  const clusters = clusterMaterialGaps(requirementRows);
+  const criticalClusters = clusters.filter(cluster => cluster.critical);
+  const criticalHardClusters = clusters.filter(cluster => cluster.criticalHard);
+  const importantClusters = clusters.filter(cluster => cluster.important);
+  const importantHardClusters = clusters.filter(cluster => cluster.importantHard);
   const materialGaps = requirementRows.filter(row => row.materialGap);
   const criticalAdjacent = requirementRows.filter(row => row.priority === 'critical'
     && row.scoreImpact === 'scored'
@@ -718,16 +861,20 @@ export function calibrateGroundedJobRequirements(rawScore, requirementRows, { le
       adjustedScore = maximum;
     }
   };
+  const inconclusiveNote = (all, hard) => (all.length > hard.length
+    ? ' An inconclusive (unclear) requirement counts toward the 79 ceiling but not the 69 ceiling.'
+    : '');
   if (!legacy) {
-    if (criticalGaps.length >= 2) {
-      cap(69, 'multiple-critical-gaps', `Two or more grounded critical requirements are ${gapCondition(criticalGaps)}.`);
-    } else if (criticalGaps.length === 1) {
-      cap(79, 'critical-gap', `One grounded critical requirement is ${gapCondition(criticalGaps)}.`);
+    if (criticalHardClusters.length >= 2) {
+      cap(69, 'multiple-critical-gaps', `Two or more distinct grounded critical requirements are ${gapCondition(clusterRows(criticalHardClusters))}.`);
+    } else if (criticalClusters.length >= 1) {
+      const rows = clusterRows(criticalClusters);
+      cap(79, 'critical-gap', `${criticalClusters.length === 1 ? 'One' : 'More than one'} grounded critical requirement ${criticalClusters.length === 1 ? 'is' : 'are'} ${gapCondition(rows)}.${inconclusiveNote(criticalClusters, criticalHardClusters)}`);
     }
-    if (importantGaps.length >= 3) {
-      cap(69, 'multiple-important-gaps', `Three or more grounded important requirements are ${gapCondition(importantGaps)}.`);
-    } else if (importantGaps.length >= 2) {
-      cap(79, 'multiple-important-gaps', `Two grounded important requirements are ${gapCondition(importantGaps)}.`);
+    if (importantHardClusters.length >= 3) {
+      cap(69, 'multiple-important-gaps', `Three or more distinct grounded important requirements are ${gapCondition(clusterRows(importantHardClusters))}.`);
+    } else if (importantClusters.length >= 2) {
+      cap(79, 'multiple-important-gaps', `Two or more distinct grounded important requirements are ${gapCondition(clusterRows(importantClusters))}.${inconclusiveNote(importantClusters, importantHardClusters)}`);
     }
     if (materialGaps.length > 0) {
       cap(84, 'material-gap', `A grounded material requirement is ${gapCondition(materialGaps)}.`);
@@ -736,31 +883,82 @@ export function calibrateGroundedJobRequirements(rawScore, requirementRows, { le
       cap(84, 'critical-adjacent', 'A grounded critical requirement is supported only by adjacent experience.');
     }
   }
-  return { adjustedScore, adjustments };
+  return { adjustedScore, adjustments, mergedGapClusters: mergedClusterSummaries(clusters) };
 }
 
 // Reapply deterministic policy to an already grounded audit without asking an
 // AI to reinterpret its evidence, priorities, tenure, confidence, or raw score.
+//
+// Every derived view of the rows (material gaps, strengths, adjacent matches,
+// status counts, effective confidence and coverage) is rebuilt from the rows
+// too, so a caller that corrected a row — the gap review in jobGapReview.js —
+// gets one consistent audit back instead of a new score beside stale lists.
+// The model's reported confidence, tenure and raw score are never touched.
 export function recalibrateAuditedFitAssessment(audit) {
   if (audit?.auditStatus !== 'audited' || audit.schemaVersion !== 1
     || !Number.isInteger(audit.rawScore) || audit.rawScore < 0 || audit.rawScore > 100
     || !Array.isArray(audit.requirementRows) || !audit.requirementRows.length
     || !audit.confidence || audit.requirementRows.some(row => !row?.grounding
       || !STATUSES.has(row.effectiveStatus))) return null;
-  const rows = audit.requirementRows;
-  const { adjustedScore, adjustments } = calibrateGroundedJobRequirements(audit.rawScore, rows);
-  const reasoning = calibratedReasoning({
-    legacy: false,
-    strengths: rows.filter(row => row.effectiveStatus === 'direct' && row.scoreImpact === 'scored'
-      && row.grounding.requirementGrounded && row.grounding.candidateClaimGrounded),
-    adjacentMatches: rows.filter(row => row.effectiveStatus === 'adjacent' && row.scoreImpact === 'scored'
-      && row.grounding.requirementGrounded && row.grounding.candidateClaimGrounded),
-    materialGaps: rows.filter(row => row.materialGap),
-    rejectedRows: rows.filter(row => !row.grounding.requirementGrounded
-      || row.grounding.rejectedJobEvidence.length > 0 || row.grounding.rejectedCandidateEvidence.length > 0),
-    adjustments, rawScore: audit.rawScore, adjustedScore, confidence: audit.confidence,
+  // Keep the caller's references whenever nothing changed: an untouched audit
+  // must recalibrate to the same rows and confidence objects it came with.
+  const recomputed = audit.requirementRows.map(row => {
+    const materialGap = isMaterialGap(row.priority, row.effectiveStatus, row.grounding.requirementGrounded, row.scoreImpact);
+    return materialGap === row.materialGap ? row : { ...row, materialGap };
   });
-  return { ...audit, calibrationVersion: JOB_FIT_CALIBRATION_VERSION, adjustedScore, adjustments, reasoning };
+  const rows = recomputed.some((row, index) => row !== audit.requirementRows[index]) ? recomputed : audit.requirementRows;
+  const { adjustedScore, adjustments, mergedGapClusters } = calibrateGroundedJobRequirements(audit.rawScore, rows);
+  const strengths = rows.filter(row => row.effectiveStatus === 'direct' && row.scoreImpact === 'scored'
+    && row.grounding.requirementGrounded && row.grounding.candidateClaimGrounded);
+  const adjacentMatches = rows.filter(row => row.effectiveStatus === 'adjacent' && row.scoreImpact === 'scored'
+    && row.grounding.requirementGrounded && row.grounding.candidateClaimGrounded);
+  const materialGaps = rows.filter(row => row.materialGap);
+  const rejectedEvidenceRows = rows.filter(row => !row.grounding.requirementGrounded
+    || row.grounding.rejectedJobEvidence.length > 0 || row.grounding.rejectedCandidateEvidence.length > 0);
+  const scoredRequirementRows = rows.filter(row => row.scoreImpact === 'scored');
+  const groundedRows = scoredRequirementRows.filter(row => row.grounding.requirementGrounded);
+  const reported = confidenceLevel(audit.confidence.reported);
+  const rebuiltConfidence = {
+    ...audit.confidence,
+    reported,
+    effective: effectiveConfidence(reported, rows, false),
+    groundedRequirementCount: groundedRows.length,
+    requirementCount: scoredRequirementRows.length,
+    groundedRequirementRatio: scoredRequirementRows.length ? groundedRows.length / scoredRequirementRows.length : 0,
+  };
+  const confidence = ['reported', 'effective', 'groundedRequirementCount', 'requirementCount', 'groundedRequirementRatio']
+    .every(key => rebuiltConfidence[key] === audit.confidence[key])
+    ? audit.confidence
+    : rebuiltConfidence;
+  const reasoning = calibratedReasoning({
+    mergedGapClusters,
+    legacy: false,
+    strengths,
+    adjacentMatches,
+    materialGaps,
+    rejectedRows: rejectedEvidenceRows,
+    adjustments, rawScore: audit.rawScore, adjustedScore, confidence,
+  });
+  return {
+    ...audit,
+    calibrationVersion: JOB_FIT_CALIBRATION_VERSION,
+    adjustedScore,
+    adjustments,
+    mergedGapClusters,
+    confidence,
+    statusCounts: statusCounts(rows),
+    requirementRows: rows,
+    strengths: strengths.map(row => ({ id: row.id, requirement: row.requirement, priority: row.priority })),
+    adjacentMatches: adjacentMatches.map(row => ({ id: row.id, requirement: row.requirement, priority: row.priority })),
+    materialGaps: materialGaps.map(row => ({
+      id: row.id,
+      requirement: row.requirement,
+      priority: row.priority,
+      status: row.effectiveStatus,
+      reportedStatus: row.reportedStatus,
+    })),
+    reasoning,
+  };
 }
 
 /**
@@ -788,7 +986,7 @@ export function validateAndNormalizeFitAssessment(raw, {
   const adjacentMatches = requirementRows.filter(row => row.effectiveStatus === 'adjacent'
     && row.scoreImpact === 'scored'
     && row.grounding.requirementGrounded && row.grounding.candidateClaimGrounded);
-  const { adjustedScore, adjustments } = calibrateGroundedJobRequirements(rawScore, requirementRows, { legacy });
+  const { adjustedScore, adjustments, mergedGapClusters } = calibrateGroundedJobRequirements(rawScore, requirementRows, { legacy });
   const rejectedRequirementRows = requirementRows.filter(row => !row.grounding.requirementGrounded);
   // Include a label for any row whose cited posting or candidate evidence was
   // rejected. The public explanation deliberately omits the rejected quote.
@@ -814,6 +1012,7 @@ export function validateAndNormalizeFitAssessment(raw, {
     materialGaps,
     rejectedRows: rejectedEvidenceRows,
     adjustments,
+    mergedGapClusters,
     rawScore,
     adjustedScore,
     confidence,
@@ -826,6 +1025,9 @@ export function validateAndNormalizeFitAssessment(raw, {
     rawScore,
     adjustedScore,
     adjustments,
+    // Gap rows the ceilings counted as one posting requirement (ids and
+    // labels only). Empty when every gap row was distinct.
+    mergedGapClusters,
     confidence,
     // Stable, canonical evidence-status counts let the UI and saved audits
     // distinguish absent documentation from an explicit contradiction without

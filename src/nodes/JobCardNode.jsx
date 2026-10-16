@@ -15,7 +15,7 @@ import { normalizeExternalHttpUrl } from '../utils/urlSafety';
 import { openExternalFailureMessage, openExternalUrl } from '../utils/openExternal';
 import { normalizeJobListingExternalUrl, summarizeJobListingUrl } from '../utils/jobListingUrl';
 import { brokenLocalAiJobDriveState, LOCAL_AI_CARD_POLL_IDLE_STATUSES, LOCAL_AI_RESULT_SETTLE_MS, LOCAL_AI_STATUS_ERROR_STREAK_LIMIT, registerMountedJobCard, revealSavedLocalApplicationOutputOnce, unregisterMountedJobCard } from '../utils/localAiFallback';
-import { hubCardFilter } from '../utils/jobCardFilters';
+import { hubCardFilter, isUnscoredPlaceholderCard } from '../utils/jobCardFilters';
 import { canRegenerateLocalApplication, canSaveImportedLocalApplication, queuedLocalApplicationSettlement, replacedLocalApplicationForCleanup } from '../utils/localAiApplicationLifecycle';
 import {
   APPLICATION_HANDOFF_LIMIT,
@@ -157,7 +157,25 @@ function compactHiringFitAudit(assessment) {
   const provenance = Number.isFinite(modelScore) || Number.isFinite(calibratedScore)
     ? { modelScore: Number.isFinite(modelScore) ? modelScore : null, calibratedScore: Number.isFinite(calibratedScore) ? calibratedScore : null }
     : null;
+  // The targeted gap review (second look at the rows that capped a job below
+  // the application bar). Counts and the score movement only; the row
+  // verdicts stay in the audit.
+  const review = assessment.gapReview && typeof assessment.gapReview === 'object' ? assessment.gapReview : null;
+  const reviewBefore = Number(review?.before?.adjustedScore);
+  const reviewAfter = Number(review?.after?.adjustedScore);
+  const reviewChanges = Array.isArray(review?.changes) ? review.changes : [];
+  const gapReview = review && Number.isFinite(reviewBefore) && Number.isFinite(reviewAfter)
+    ? {
+      before: reviewBefore,
+      after: reviewAfter,
+      outcome: typeof review.outcome === 'string' ? review.outcome : '',
+      corrected: reviewChanges.filter((change) => ['priority', 'evidence', 'duplicate'].includes(change?.kind)).length,
+      confirmed: reviewChanges.filter((change) => change?.kind === 'confirmed').length,
+      rejected: reviewChanges.filter((change) => change?.kind === 'rejected').length,
+    }
+    : null;
   return {
+    gapReview,
     isAudited: assessment.auditStatus === 'audited',
     directStrengths,
     adjacentMatches,
@@ -448,7 +466,17 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
   const hiringFitAudit = useMemo(() => compactHiringFitAudit(data.fitAssessment), [data.fitAssessment]);
 
   const score = data.matchScore || 0;
-  const accentColor = scoreColor(score);
+  // Review badges. An unscored placeholder carries a fixed sentinel number,
+  // not an assessment, so its chip reads "—" and takes the neutral colour. A
+  // capped card keeps its calibrated number but says what the model assigned
+  // before the evidence-gap rule lowered it, so a 69 that began as an 86 is
+  // never mistaken for a confident 69.
+  const unscoredPlaceholder = isUnscoredPlaceholderCard(data);
+  const cappedFrom = !unscoredPlaceholder && Number.isFinite(Number(data.rawScore)) && Number(data.rawScore) > score
+    ? Number(data.rawScore)
+    : null;
+  const gapReviewed = hiringFitAudit?.gapReview || null;
+  const accentColor = unscoredPlaceholder ? '#6b7280' : scoreColor(score);
   const compensationBorderColor = COMPENSATION_BORDER_COLORS[compensationAssessment.status] || COMPENSATION_NEUTRAL_BORDER;
   const hasExpandedDisclosure = showScoreAudit || showCompensationDetails;
   // NodeHandles is React.memo'd; an inline object literal here would create a
@@ -1263,15 +1291,50 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
         <div
           className="shrink-0 mt-0.5 w-[52px] h-10 rounded-lg flex flex-col items-center justify-center leading-none"
           style={{ backgroundColor: accentColor + '20', color: accentColor }}
-          title={`Evidence-based hiring-fit score: ${score} out of 100. This is a comparative assessment, not a probability or guaranteed outcome.`}
-          aria-label={`Evidence-based hiring-fit score ${score} out of 100. This is a comparative assessment, not a probability or guaranteed outcome.`}
+          title={unscoredPlaceholder
+            ? 'No hiring-fit score: the AI never returned a usable assessment for this job. The stored number is a placeholder, not a result.'
+            : `Evidence-based hiring-fit score: ${score} out of 100. This is a comparative assessment, not a probability or guaranteed outcome.`}
+          aria-label={unscoredPlaceholder
+            ? 'No hiring-fit score: the AI never returned a usable assessment for this job.'
+            : `Evidence-based hiring-fit score ${score} out of 100. This is a comparative assessment, not a probability or guaranteed outcome.`}
         >
           <span className="text-[9px] font-medium uppercase tracking-wide">Hiring fit</span>
-          <span className="mt-0.5 text-xs font-bold">{score}/100</span>
+          {unscoredPlaceholder
+            ? <span className="mt-0.5 text-xs font-bold">—</span>
+            : <span className="mt-0.5 text-xs font-bold">{score}/100</span>}
         </div>
         <div className="flex-1 min-w-0 pr-6 relative">
           <div className="text-white/90 text-sm font-semibold leading-tight truncate">{data.title || 'Untitled'}</div>
           <div className="text-white/50 text-xs mt-0.5 truncate">{data.company}{subtitleLocation ? ` · ${subtitleLocation}` : ''}</div>
+          {(unscoredPlaceholder || cappedFrom !== null || gapReviewed) && (
+            <div className="mt-1 flex flex-wrap gap-1">
+              {gapReviewed && !unscoredPlaceholder && (
+                <span
+                  className={`px-1.5 py-0.5 rounded-full text-[9px] font-medium border ${gapReviewed.after > gapReviewed.before ? 'bg-emerald-500/15 text-emerald-300/90 border-emerald-500/30' : 'bg-white/10 text-white/60 border-white/15'}`}
+                  title={gapReviewed.after > gapReviewed.before
+                    ? `A second, independent review of the gap rows that capped this score corrected ${gapReviewed.corrected} row${gapReviewed.corrected === 1 ? '' : 's'} (re-grounded against the posting and the career evidence) and recalibrated the score from ${gapReviewed.before} to ${gapReviewed.after}. Open "Why this score?" for the rows.`
+                    : `A second, independent review of the gap rows that capped this score confirmed them; the score stays at ${gapReviewed.after}.`}
+                >
+                  {gapReviewed.after > gapReviewed.before ? `Reviewed ${gapReviewed.before} → ${gapReviewed.after}` : 'Reviewed · gaps confirmed'}
+                </span>
+              )}
+              {unscoredPlaceholder ? (
+                <span
+                  className="px-1.5 py-0.5 rounded-full text-[9px] font-medium bg-white/10 text-white/70 border border-white/15"
+                  title="The AI never returned a usable score for this job, so it has no hiring-fit assessment. It stays visible below the Board's minimum as a review card; re-score the search to assess it."
+                >
+                  Unscored · review
+                </span>
+              ) : (
+                <span
+                  className="px-1.5 py-0.5 rounded-full text-[9px] font-medium bg-amber-500/15 text-amber-300/90 border border-amber-500/30"
+                  title={`The AI assigned ${cappedFrom}/100. The evidence-gap rule lowered it to ${score}/100 because grounded requirements were not documented, contradicted, or unclear in the supplied career data. Open "Why this score?" to see which rule applied and which requirements it counted.`}
+                >
+                  Capped from {cappedFrom}
+                </span>
+              )}
+            </div>
+          )}
           {data.salary && (
             <div className="text-emerald-400/80 text-xs mt-0.5">
               <span>{data.salary}</span>
@@ -1499,6 +1562,14 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
                         {hiringFitAudit.provenance.calibratedScore !== null && hiringFitAudit.provenance.modelScore === hiringFitAudit.provenance.calibratedScore
                           ? <>Validation: unchanged</>
                           : hiringFitAudit.provenance.calibratedScore !== null && <>Evidence-calibrated score: {hiringFitAudit.provenance.calibratedScore}/100</>}
+                      </div>
+                    )}
+                    {hiringFitAudit.gapReview && (
+                      <div>
+                        Gap review: {hiringFitAudit.gapReview.before}/100 → {hiringFitAudit.gapReview.after}/100
+                        {' · '}{hiringFitAudit.gapReview.corrected} row{hiringFitAudit.gapReview.corrected === 1 ? '' : 's'} corrected
+                        {', '}{hiringFitAudit.gapReview.confirmed} confirmed
+                        {hiringFitAudit.gapReview.rejected > 0 && <>{', '}{hiringFitAudit.gapReview.rejected} rejected (quote not found)</>}
                       </div>
                     )}
                   </div>

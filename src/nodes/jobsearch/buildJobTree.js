@@ -972,6 +972,10 @@ export function buildJobTreeNodes({
         adjustedScore: job.adjustedScore,
         adjustments: job.adjustments,
         calibration: job.calibration,
+        // Structural "never scored" marker (jobBatchReconcile.js). The board's
+        // card filter and the card badge read this, not the sentinel number,
+        // so an honestly assessed 50 is never mistaken for a placeholder.
+        scoreStatus: job.scoreStatus,
         // Preserve the compensation research verbatim. JobCardNode normalizes
         // it defensively for legacy/future schemas, and it must travel through
         // every valid AI-taxonomized board tree.

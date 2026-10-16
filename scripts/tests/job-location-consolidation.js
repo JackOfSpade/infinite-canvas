@@ -266,7 +266,9 @@ export default [
   {
     name: 'migration: version 10 consolidates a saved cascade, prunes emptied groups, and is idempotent',
     run: () => {
-      assert(CURRENT_SCHEMA_VERSION === 10, `current schema version must be 10, got ${CURRENT_SCHEMA_VERSION}`);
+      // v10 is this migration's own slot; later migrations (v11 stamps the
+      // unscored-placeholder marker) append after it without moving it.
+      assert(CURRENT_SCHEMA_VERSION >= 10, `current schema version must be at least 10, got ${CURRENT_SCHEMA_VERSION}`);
       const base = brightfieldStyleFourLocation();
       const boardId = 'board-1';
       const nodes = [

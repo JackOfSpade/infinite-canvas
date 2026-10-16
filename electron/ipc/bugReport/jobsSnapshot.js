@@ -8129,6 +8129,45 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
     if (s.unscored > 0) {
       lines.push(`- ⚠️ **${s.unscored} job(s) never scored** — the abort signal cut the batch loop short before they were sent to the scorer.`);
     }
+    const calibration = s.calibration && typeof s.calibration === 'object' ? s.calibration : null;
+    if (calibration && Number.isFinite(Number(calibration.calibrated))) {
+      // The evidence-gap rule is deterministic policy over the model's own gap
+      // inventory. A capped-across-threshold job is one the model placed at or
+      // above the application bar and the rule pulled below it — the exact
+      // population a mislabelled priority or duplicated gap would hide, so it
+      // is reported as a review count, never folded into "scored low".
+      const codes = Object.entries(calibration.adjustmentCodes || {})
+        .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+        .map(([code, count]) => `${code}=${count}`)
+        .join(', ');
+      const bar = Number.isFinite(Number(calibration.threshold)) ? Number(calibration.threshold) : null;
+      lines.push(`- Evidence-gap calibration: ${calibration.capped || 0}/${calibration.calibrated} audited score(s) lowered below the AI-assigned number${codes ? ` (${codes})` : ''}.`);
+      if (bar !== null) {
+        const across = Number(calibration.cappedAcrossThreshold) || 0;
+        lines.push(across > 0
+          ? `  - ⚠️ **${across} capped across the ${bar} bar** — AI-assigned ≥${bar}, calibrated <${bar}. Shown on the Board as review cards (badge "Capped"); each card's hiring-fit audit names the gap rule that applied.`
+          : `  - 0 capped across the ${bar} bar.`);
+      }
+    }
+    const gapReview = s.gapReview && typeof s.gapReview === 'object' ? s.gapReview : null;
+    if (gapReview) {
+      // The targeted gap review spends one small handoff on exactly the
+      // capped-across-bar jobs and asks only about their gap rows. Its counts
+      // say whether the second look changed anything; the per-row verdicts
+      // live in each card's audit (fitAssessment.gapReview).
+      const candidates = Number(gapReview.candidates) || 0;
+      const reviewed = Number(gapReview.reviewed ?? gapReview.reviewedJobs) || 0;
+      const changes = gapReview.changes && typeof gapReview.changes === 'object' ? gapReview.changes : {};
+      const changeText = ['priority', 'evidence', 'duplicate', 'confirmed', 'rejected']
+        .filter(kind => Number(changes[kind]) > 0)
+        .map(kind => `${kind}=${Number(changes[kind])}`)
+        .join(', ');
+      lines.push(`- Gap review: ${candidates} candidate(s) → ${reviewed} reviewed in ${Number(gapReview.batches) || 0} handoff(s)`
+        + `${reviewed > 0 ? ` · raised above the ${Number(gapReview.threshold) || '?'} bar: ${Number(gapReview.raisedAboveThreshold) || 0} · raised but still below: ${Number(gapReview.raised) || 0} · unchanged: ${Number(gapReview.unchanged) || 0}` : ''}`
+        + `${changeText ? ` · row verdicts: ${changeText}` : ''}.`);
+      if (Number(gapReview.skippedOversized) > 0) lines.push(`  - ⚠️ ${gapReview.skippedOversized} candidate(s) skipped: the review prompt for that job alone exceeded the handoff envelope.`);
+      if (gapReview.failed) lines.push(`  - ⚠️ Gap review handoff failed; capped scores stayed as calibrated: \`${String(gapReview.failed).slice(0, 240)}\``);
+    }
     const audit = s.audit;
     if (audit && Array.isArray(audit.rows) && audit.rows.length > 0) {
       const anomalies = Array.isArray(audit.anomalies) ? audit.anomalies : [];

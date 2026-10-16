@@ -26,6 +26,10 @@ export function JobBoardDoneState({
   sourceFilter = null,
   toggleSourceFilter,
   sourceCounts = {},
+  // Review bucket: unscored placeholders and scores the evidence-gap rule
+  // pulled from above the slider to below it stay visible unless switched off.
+  showReviewCards = true,
+  setShowReviewCards,
   // Actions
   onRecombine,
   onClear,
@@ -35,7 +39,8 @@ export function JobBoardDoneState({
 
   const sliderUsable = scoreRangeMax > scoreRangeMin;
   const sliderActive = sliderUsable && scoreThreshold > scoreRangeMin;
-  const hasActiveFilters = sliderActive || sourceFilter;
+  const reviewCardsHidden = showReviewCards === false;
+  const hasActiveFilters = sliderActive || sourceFilter || reviewCardsHidden;
   const sources = Object.keys(sourceCounts || {}).sort();
 
   return (
@@ -96,6 +101,16 @@ export function JobBoardDoneState({
             Hiring fit ≥{scoreThreshold}/100
             {!locked && (
               <button onClick={() => setScoreThreshold?.(scoreRangeMin)} onPointerDown={(e) => e.stopPropagation()}>
+                <X size={8} />
+              </button>
+            )}
+          </span>
+        )}
+        {!stale && reviewCardsHidden && (
+          <span className="flex items-center gap-0.5 px-1.5 py-0.5 rounded-full bg-amber-500/15 text-amber-300/80 text-[9px]">
+            Review cards hidden
+            {!locked && (
+              <button onClick={() => setShowReviewCards?.(true)} onPointerDown={(e) => e.stopPropagation()} aria-label="Show review cards">
                 <X size={8} />
               </button>
             )}
@@ -179,6 +194,22 @@ export function JobBoardDoneState({
               </div>
             </div>
           )}
+
+          {/* Review bucket. The slider compares one number; these two kinds of
+              card carry a number that does not mean "assessed and found low". */}
+          <label
+            className="flex items-start gap-1.5 text-[10px] text-white/50 cursor-pointer"
+            title="Keep two kinds of card visible even below the minimum: jobs the AI never returned a usable score for (shown as Unscored), and jobs whose AI-assigned score was at or above the minimum before the evidence-gap rule lowered it below (shown as Capped). Both carry a badge on the card."
+          >
+            <input
+              type="checkbox"
+              className="mt-0.5 accent-amber-400 cursor-pointer"
+              checked={showReviewCards !== false}
+              aria-label="Keep review cards visible below the minimum"
+              onChange={(e) => setShowReviewCards?.(e.target.checked)}
+            />
+            <span>Keep review cards (Unscored / Capped) visible below the minimum</span>
+          </label>
 
           {sources.length > 1 && (
             <div className="space-y-1">

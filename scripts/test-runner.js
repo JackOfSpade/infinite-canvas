@@ -58,6 +58,8 @@ import job_autoresume_recovery from './tests/job-autoresume-recovery.js';
 import job_board_recovery_notice from './tests/job-board-recovery-notice.js';
 import job_board_action_visibility from './tests/job-board-action-visibility.js';
 import job_search_split_clear from './tests/job-search-split-clear.js';
+import job_card_review_bucket from './tests/job-card-review-bucket.js';
+import job_gap_review from './tests/job-gap-review.js';
 import job_search_clear_ui from './tests/job-search-clear-ui.js';
 import job_board_combine_receipt from './tests/job-board-combine-receipt.js';
 import job_api_probe from './tests/job-api-probe.js';
@@ -210,6 +212,8 @@ const testGroups = [
   ['job-board-recovery-notice.js', job_board_recovery_notice],
   ['job-board-action-visibility.js', job_board_action_visibility],
   ['job-search-split-clear.js', job_search_split_clear],
+  ['job-card-review-bucket.js', job_card_review_bucket],
+  ['job-gap-review.js', job_gap_review],
   ['job-search-clear-ui.js', job_search_clear_ui],
   ['job-board-combine-receipt.js', job_board_combine_receipt],
   ['job-api-probe.js', job_api_probe],
