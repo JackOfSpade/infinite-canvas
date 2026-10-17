@@ -44,6 +44,7 @@ const LANE_PHASES = new Set(['unread', 'awaiting', 'host', 'needs_user', 'held',
 // Fixed application workflow identifiers allowed across the main-to-renderer
 // policy boundary. Post-letter work projects to the dock's final review step.
 const APPLICATION_STAGES = new Set([
+  'requirements', 'requirements-audit', 'requirements-adjudication', 'career-match',
   'evidence-plan', 'resume', 'cover-letter', 'requirement-disposition',
   'review',
   'write', 'convert', 'verify-correction', 'fit-correction', 'pick', 'fact-check', 'fact-correction', 'fact-recheck', 'write-verify-human-stop',

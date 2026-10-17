@@ -342,8 +342,8 @@ export function createChatLauncher({ run = runUserChromeScript, delay = sleep, o
   const readMenu = async tab => {
     const raw = await poll(() => js(tab, READ_MODEL), value => {
       try {
-        const menu = JSON.parse(value);
-        return !!menu.topModel && (!menu.topSelected || menu.sliderReady === true);
+        const decoded = JSON.parse(value);
+        return !!decoded.topModel && (!decoded.topSelected || decoded.sliderReady === true);
       } catch { return false; }
     }, 10_000);
     if (!raw) return null;
