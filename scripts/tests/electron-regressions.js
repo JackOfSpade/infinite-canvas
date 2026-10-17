@@ -1,3 +1,5 @@
+import { attachRendererRecovery, hasStoppedRenderer, recordRendererCrash, readRendererCrashes, buildRendererCrashMarkdown } from '../../electron/rendererRecovery.js';
+import { estimateUndoSnapshotBytes, undoHistoryLimit, UNDO_MEMORY_BUDGET_BYTES } from '../../src/utils/undoMemoryBudget.js';
 import { EventEmitter } from 'node:events';
 import { pathToFileURL } from 'node:url';
 import { getRecentLogs } from '../../electron/logger.js';
@@ -64,6 +66,74 @@ const waitFor = async (predicate, description, timeoutMs = 3000) => {
 };
 
 export default [
+  { name: 'renderer recovery: only a confirmed dead renderer can skip the editor quit fence', run() {
+    assert(hasStoppedRenderer({ isDestroyed: () => false, webContents: { isCrashed: () => true } }));
+    assert(!hasStoppedRenderer({ isDestroyed: () => false, webContents: { isCrashed: () => false } }));
+    assert(hasStoppedRenderer({ __rendererStopped: true, isDestroyed: () => false, webContents: { isCrashed: () => false } }));
+    assert(!hasStoppedRenderer({ isDestroyed: () => true, webContents: { isCrashed: () => true } }));
+  } },
+  { name: 'renderer recovery: pending IPC aborts on a renderer crash without waiting for reload or window destruction', async run() {
+    const event = senderEvent();
+    let observedSignal;
+    handleSafe('test-renderer-crash-abort', async (_event, _args, signal) => {
+      observedSignal = signal;
+      await new Promise(resolve => signal.addEventListener('abort', resolve, { once: true }));
+      return 'settled';
+    });
+    const handler = electronPkg.ipcMain.__getInvokeHandler('test-renderer-crash-abort');
+    const pending = handler(event, {});
+    await waitFor(() => !!observedSignal, 'pending IPC signal');
+    event.sender.emit('render-process-gone', {}, { reason: 'oom' });
+    await pending;
+    assert(observedSignal.aborted && observedSignal.reason.message === 'Renderer stopped');
+    assert(event.sender.listenerCount('render-process-gone') === 0);
+    electronPkg.ipcMain.removeHandler('test-renderer-crash-abort');
+  } },
+  { name: 'renderer recovery: crash receipts are bounded, restart-readable and contain no private crash text', run() {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'renderer-crash-'));
+    try {
+      for (let index = 0; index < 14; index++) recordRendererCrash(root,
+        { reason: 'oom', exitCode: 134, privateText: 'secret-path-and-canvas' }, null, () => index);
+      const rows = readRendererCrashes(root);
+      assert(rows.length === 10 && rows[0].at === 4 && rows[9].reason === 'oom');
+      assert(!JSON.stringify(rows).includes('secret'));
+      const report = buildRendererCrashMarkdown(root);
+      assert(report.includes('reason `oom`') && report.includes('exit 134'));
+      fs.writeFileSync(path.join(root, 'renderer-crashes.json'), '[{"at":1e99,"reason":"oom"}]');
+      assert(readRendererCrashes(root).length === 0);
+      assert(buildRendererCrashMarkdown(root).includes('older builds'));
+    } finally { fs.rmSync(root, { recursive: true, force: true }); }
+  } },
+  { name: 'renderer recovery: a crash offers one reload and respects cancellation, closing and quit', async run() {
+    for (const action of ['reload', 'cancel', 'close', 'quit', 'clean-exit']) {
+      const wc = new EventEmitter(); let destroyed = false; let quitting = false;
+      const win = { webContents: wc, isDestroyed: () => destroyed };
+      let resolveDialog; let dialogs = 0; let reloads = 0; let records = 0;
+      const detach = attachRendererRecovery(win, {
+        isQuitting: () => quitting, record: () => records++, reload: async () => reloads++,
+        showMessageBox: async () => { dialogs++; return new Promise(resolve => { resolveDialog = resolve; }); },
+      });
+      wc.emit('render-process-gone', {}, { reason: action === 'clean-exit' ? 'clean-exit' : 'oom' });
+      if (action === 'clean-exit') { assert(dialogs === 0 && records === 0); detach(); continue; }
+      wc.emit('render-process-gone', {}, { reason: 'oom' });
+      assert(dialogs === 1, 'repeated notifications must not stack recovery dialogs');
+      assert(hasStoppedRenderer(win));
+      destroyed = action === 'close'; quitting = action === 'quit';
+      resolveDialog({ response: action === 'cancel' ? 1 : 0 });
+      await new Promise(resolve => setImmediate(resolve));
+      assert(reloads === (action === 'reload' ? 1 : 0));
+      detach(); assert(wc.listenerCount('render-process-gone') === 0);
+    }
+  } },
+  { name: 'undo memory: estimates full nested canvases and caps large snapshots while retaining one undo', run() {
+    const nested = { nodes: [{ type: 'group', data: { canvasData: { nodes: [{ data: { payload: 'x'.repeat(1024 * 1024) } }] } } }] };
+    assert(estimateUndoSnapshotBytes(nested) > 2 * 1024 * 1024);
+    assert(undoHistoryLimit(nested, 100) < 100);
+    assert(undoHistoryLimit({ nodes: [] }, 100) === 100);
+    assert(undoHistoryLimit({ payload: new Uint8Array(UNDO_MEMORY_BUDGET_BYTES) }, 100) === 2);
+    const cycle = {}; cycle.self = cycle;
+    assert(Number.isFinite(estimateUndoSnapshotBytes(cycle)));
+  } },
   {
     name: 'command-line canvas paths canonicalize safely and preserve first/second-instance behavior',
     run: async () => {

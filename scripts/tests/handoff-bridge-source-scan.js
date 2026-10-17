@@ -71,7 +71,7 @@ export const SOURCE_SCAN_ROWS = Object.freeze({
   'errors.js': { allow: sibling('node:crypto') },
   'audit.js': { allow: ['node:fs', 'node:path', 'node:crypto', '../logger.js'] },
   'log.js': { allow: ['../logger.js'] },
-  'telemetry.js': { allow: ['./log.js', '../../../src/utils/handoffScheduler.js'] },
+  'telemetry.js': { allow: ['./log.js', '../../../src/utils/handoffScheduler.js', '../../../src/utils/handoffBridgeStatus.js'] },
   'restartContext.js': { allow: [] },
   'sources/application.js': { allow: ['../../localAiApplication.js'] },
   'sources/syntheticPreflight.js': { allow: ['node:crypto', './application.js'] },

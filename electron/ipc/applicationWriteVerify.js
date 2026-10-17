@@ -68,6 +68,8 @@ export function fullApprovedHand(profile, catalog) {
     for (const achievement of profile.achievements || []) if (achievement.roleId === role.id) emit('achievement', achievement);
     for (const project of profile.projects || []) if (project.roleId === role.id) emit('project', project);
   }
+  lines.push('\n## Standalone achievements');
+  for (const achievement of profile.achievements || []) if (!achievement.roleId) emit('achievement', achievement);
   lines.push('\n## Standalone projects');
   for (const project of profile.projects || []) if (!project.roleId) emit('project', project);
   for (const [heading, kind, units] of [

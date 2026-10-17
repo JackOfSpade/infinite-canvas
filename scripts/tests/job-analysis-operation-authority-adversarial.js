@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import crypto from 'node:crypto';
 import os from 'node:os';
 import path from 'node:path';
+import { stageDisplayedJobsHistory, finalizeDisplayedJobsHistory, loadJobsHistory, dedupAgainstHistory } from '../../electron/ipc/jobsHistory.js';
 import {
   __loadJobAnalysisSnapshotForTests,
   __createDescriptionRecoveryCheckpointForTests,
@@ -98,6 +99,88 @@ async function settlesWithin(promise, ms = 2_000) {
 }
 
 export default [
+  {
+    name: 'seen history: host stages only scored displayed rows and finalizes each source independently',
+    async run() {
+      const directory = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'ic-scored-display-history-'));
+      const canvas = path.join(directory, 'canvas.json');
+      const sender = { id: 813 };
+      const row = name => ({ source: 'remoteok', company: 'Example', title: name, location: 'Toronto', url: `https://example.test/${name}` });
+      const first = row('first'), second = row('second'), hidden = row('hidden'), placeholder = row('placeholder'), forged = row('forged');
+      try {
+        await fs.promises.writeFile(canvas, '{}');
+        const sources = [];
+        for (const hubId of ['a', 'b']) {
+          const authority = await claimJobAnalysisOperationAuthority({ canvasFilePath: canvas, hubId, operationId: `display-${hubId}`, semanticBase: base() });
+          const saved = snapshot({ canvasFilePath: canvas, hubId, authority: authority.receipt });
+          saved.jobs = hubId === 'a'
+            ? [{ ...first, matchScore: 70 }, { ...hidden, matchScore: 90 }, { ...placeholder, matchScore: 50, scoreStatus: 'unscored-evidence-incomplete' }]
+            : [{ ...second, matchScore: 60 }];
+          await __saveJobAnalysisSnapshotForTests(saved);
+          sources.push({ hubId, runId: 'run-1', careerSnapshotId: pin, operationAuthority: authority.receipt });
+        }
+        const jobs = [first, second, placeholder, forged];
+        const prepared = await __boardHistoryAuthorityForTests.prepare({ sender }, { canvasFilePath: canvas, jobs, sources });
+        assert(prepared.success, 'sealed inputs prepare a display token');
+        const consumed = await __boardHistoryAuthorityForTests.consume({ sender }, { canvasFilePath: canvas, jobs, historyToken: prepared.historyToken });
+        assert(consumed.staged === 2 && consumed.written === 0, 'only two genuinely scored and displayed source rows are eligible');
+        assert((await loadJobsHistory(canvas)).length === 0, 'displayed rows remain unseen');
+        await finalizeDisplayedJobsHistory(canvas, 'a', { deleted: true });
+        let remaining = dedupAgainstHistory(jobs, await loadJobsHistory(canvas)).kept;
+        assert(!remaining.includes(first) && remaining.includes(second) && remaining.includes(placeholder) && remaining.includes(forged), 'deleting source A cannot mark source B or unscored/unowned rows seen');
+        await finalizeDisplayedJobsHistory(canvas, 'b', { excludeRunId: 'next-run' });
+        remaining = dedupAgainstHistory([hidden, placeholder, forged], await loadJobsHistory(canvas)).kept;
+        assert(remaining.length === 3 && (await loadJobsHistory(canvas)).length === 2, 'undisplayed and unscored rows stay unseen after both boundaries');
+      } finally { await fs.promises.rm(directory, { recursive: true, force: true }); }
+    },
+  },
+  {
+    name: 'seen history: failed finalization retains durable pending rows for retry',
+    async run() {
+      const directory = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'ic-history-retry-'));
+      const canvas = path.join(directory, 'canvas.json');
+      const csv = path.join(directory, 'canvas.jobs-history.csv');
+      try {
+        await stageDisplayedJobsHistory(canvas, [{ hubId: 'a', runId: 'one', rows: [{ source: 'remoteok', title: 'Role', company: 'Example', location: '', url: 'https://example.test/role' }] }]);
+        await fs.promises.mkdir(csv);
+        let failed = false;
+        try { await finalizeDisplayedJobsHistory(canvas, 'a', { deleted: true }); } catch { failed = true; }
+        assert(failed && JSON.parse(await fs.promises.readFile(`${csv}.pending.json`, 'utf8')).sources.length === 1, 'failed CSV write must retain the receipt');
+        await fs.promises.rmdir(csv);
+        const retry = await finalizeDisplayedJobsHistory(canvas, 'a', { deleted: true });
+        assert(retry.written === 1 && (await loadJobsHistory(canvas)).length === 1, 'retry safely finalizes the retained row');
+      } finally { await fs.promises.rm(directory, { recursive: true, force: true }); }
+    },
+  },
+  {
+    name: 'seen history: displayed jobs stay unseen through board deletion and restart until their own source boundary',
+    async run() {
+      const directory = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'ic-provisional-history-'));
+      const canvas = path.join(directory, 'canvas.json');
+      const row = name => ({ source: 'remoteok', company: 'Example', title: name, location: 'Toronto', url: `https://example.test/${name}` });
+      const first = row('first'), second = row('second');
+      try {
+        const receipt = [{ hubId: 'source-a', runId: 'run-a', rows: [first] }, { hubId: 'source-b', runId: 'run-b', rows: [second] }];
+        await stageDisplayedJobsHistory(canvas, receipt);
+        assert((await loadJobsHistory(canvas)).length === 0, 'scored/displayed jobs are not seen yet');
+        // Read through a fresh module instance: pending receipts are durable,
+        // independent of the disposable board and of process-local maps.
+        const reopened = await import(`../../electron/ipc/jobsHistory.js?restart=${Date.now()}`);
+        await reopened.stageDisplayedJobsHistory(canvas, receipt);
+        await reopened.finalizeDisplayedJobsHistory(canvas, 'board', { deleted: true });
+        assert(dedupAgainstHistory([first, second], await loadJobsHistory(canvas)).kept.length === 2, 'board deletion/recombine does not suppress either listing');
+        await reopened.finalizeDisplayedJobsHistory(canvas, 'source-a', { excludeRunId: 'run-a' });
+        assert((await loadJobsHistory(canvas)).length === 0, 'resuming the same source run keeps it unseen');
+        await reopened.finalizeDisplayedJobsHistory(canvas, 'source-a', { excludeRunId: 'next-a' });
+        assert(dedupAgainstHistory([first, second], await loadJobsHistory(canvas)).kept[0] === second, 'next scrape commits only its own source');
+        await reopened.finalizeDisplayedJobsHistory(canvas, 'source-b', { deleted: true });
+        assert((await loadJobsHistory(canvas)).length === 2, 'source deletion commits its previously displayed rows');
+        assert((await reopened.stageDisplayedJobsHistory(canvas, [{ hubId: 'source-b', runId: 'late', rows: [row('late')] }])).staged === 0, 'late display cannot recreate provisional history after deletion');
+        assert((await loadJobsHistory(canvas)).length === 3, 'a confirmed late display finalizes directly after source deletion');
+        assert((await reopened.finalizeDisplayedJobsHistory(canvas, 'source-b', { deleted: true })).written === 0, 'boundary retries are idempotent');
+      } finally { await fs.promises.rm(directory, { recursive: true, force: true }); }
+    },
+  },
   {
     name: 'operation authority: exact receipt revision and semantic base fence revoke after restart',
     run: async () => {
@@ -926,6 +1009,10 @@ export default [
       try {
         await fs.promises.writeFile(canvas, '{}');
         const s1 = await claimJobAnalysisOperationAuthority({ canvasFilePath: canvas, hubId, operationId: 's1', semanticBase: base() });
+        await stageDisplayedJobsHistory(canvas, [{ hubId, runId: 'previous-displayed-run', rows: [{
+          source: 'remoteok', title: 'Previously displayed', company: 'Example', location: '', url: 'https://example.test/previous',
+        }] }]);
+        assert((await loadJobsHistory(canvas)).length === 0, 'previous display is unseen before fresh scrape admission');
         __registerJobsHandlersForTests({
           resolveRequiredPinnedCareerInput: async () => ({ profile: {}, careerData: '', pinned: true }),
           fetchHttpSources: async (...args) => {
@@ -933,6 +1020,7 @@ export default [
             const beforeSourceDispatch = args[10];
             const afterProviderResult = args[11];
             await beforeSourceDispatch('remoteok');
+            assert((await loadJobsHistory(canvas)).length === 1, 'new scrape must finalize its prior displayed generation before provider dispatch');
             providerCompleted();
             await providerRelease;
             const providerResult = { sourceId: 'remoteok', jobs: [], gathered: 0 };
@@ -1592,8 +1680,10 @@ export default [
       try {
         await fs.promises.writeFile(canvas, '{}');
         const s1 = await claimJobAnalysisOperationAuthority({ canvasFilePath: canvas, hubId, operationId: 'history-s1', semanticBase: base() });
-        await __saveJobAnalysisSnapshotForTests(snapshot({ canvasFilePath: canvas, hubId, authority: s1.receipt }));
         const rows = [{ source: 'remoteok', company: 'Example', title: 'Role', location: 'Toronto', url: 'https://example.test/role' }];
+        const saved = snapshot({ canvasFilePath: canvas, hubId, authority: s1.receipt });
+        saved.jobs = [{ ...rows[0], matchScore: 70 }];
+        await __saveJobAnalysisSnapshotForTests(saved);
         const prepared = await __boardHistoryAuthorityForTests.prepare({ sender }, {
           canvasFilePath: canvas, jobs: rows,
           sources: [{ hubId, runId: 'run-1', careerSnapshotId: pin, operationAuthority: s1.receipt }],
@@ -1609,8 +1699,9 @@ export default [
         const replay = await __boardHistoryAuthorityForTests.consume({ sender }, {
           canvasFilePath: canvas, jobs: rows, historyToken: prepared.historyToken,
         });
-        assert(committed.written === 1 && replay.operationSuperseded,
+        assert(committed.written === 0 && committed.staged === 1 && replay.operationSuperseded,
           'a host history capability must be consumed exactly once after the Board commit');
+        assert((await loadJobsHistory(canvas)).length === 0, 'display only stages unseen rows');
         const supersedePrepared = await __boardHistoryAuthorityForTests.prepare({ sender }, {
           canvasFilePath: canvas, jobs: rows,
           sources: [{ hubId, runId: 'run-1', careerSnapshotId: pin, operationAuthority: s1.receipt }],
@@ -1620,6 +1711,7 @@ export default [
         const stale = await __boardHistoryAuthorityForTests.consume({ sender }, {
           canvasFilePath: canvas, jobs: rows, historyToken: supersedePrepared.historyToken,
         });
+        await finalizeDisplayedJobsHistory(canvas, hubId, { excludeRunId: 'run-2' });
         const history = await fs.promises.readFile(`${canvas.replace(/\.json$/, '')}.jobs-history.csv`, 'utf8');
         assert(stale.operationSuperseded && history.trim().split(/\r?\n/).length === 2,
           'source supersession before UI/history commit must add no CSV side effect');

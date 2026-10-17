@@ -1482,7 +1482,7 @@ const dockTests = [
       const heldRule = readFileSync(new URL('../../src/utils/bridgeHeldApplication.js', import.meta.url), 'utf8');
       assert(
         heldRule.includes('Array.isArray(jobs)')
-        && heldRule.includes('job?.jobId === jobId && BRIDGE_WORKING_PHASES.has(job?.phase)')
+        && heldRule.includes('job?.jobId === jobId && (BRIDGE_WORKING_PHASES.has(job?.phase)')
         && heldRule.includes("new Set(['unread', 'awaiting', 'host'])"),
         'the shared held rule must read status.queue.jobs defensively in the three lane phases',
       );
@@ -1603,7 +1603,7 @@ const bridgeJobProgressTests = [
     run: () => {
       const needs = progress({ job: progressJob({ phase: 'needs_user', reason: 'write_failed' }) });
       assert(needs.tone === 'problem' && needs.headline === BRIDGE_PROGRESS_COPY.needsYou, 'needs_user is a problem headline');
-      assert(needs.detail === 'The app could not save this answer.', `reason copy must come from JOB_ROW_COPY without the row prefix or "See the dock": ${needs.detail}`);
+      assert(needs.detail.includes('The app could not process the worker’s answer') && needs.detail.includes('manual copy and paste will not fix it'), `reason copy explains app failure without suggesting manual paste: ${needs.detail}`);
       assert(needs.since === PROGRESS_NOW - 600000, 'a stopped job times itself from changedAt');
       const capped = progress({ job: progressJob({ phase: 'held', reason: 'rejection_cap' }) });
       assert(capped.tone === 'attention' && capped.headline === BRIDGE_PROGRESS_COPY.needsYou && capped.detail.includes('rejected too many times'), 'a cap hold that needs the person is attention with its reason');
@@ -1842,7 +1842,12 @@ const bridgeJobProgressTests = [
       assert(formatProgressDuration(20000) === '20s' && formatProgressDuration(120000) === '2 min' && formatProgressDuration(3900000) === '1 h 5 min' && formatProgressDuration(3600000) === '1 h', 'duration format');
       assert(formatProgressDuration(-1) === null && formatProgressDuration(NaN) === null && formatProgressDuration('5') === null, 'bad durations are null');
       const lines = progressTimeLines({ since: PROGRESS_NOW - 120000, lastHeard: PROGRESS_NOW - 20000 }, PROGRESS_NOW);
-      assert(lines.elapsed === 'for 2 min' && lines.heard === 'Last heard from ChatGPT 20s ago', `${lines.elapsed} / ${lines.heard}`);
+      assert(lines.elapsed === 'Elapsed: 2 min' && lines.heard === null, `${lines.elapsed} / ${lines.heard}`);
+      const duplicate = progressTimeLines({ kind: 'writing', since: PROGRESS_NOW - 4000, lastHeard: PROGRESS_NOW - 4000 }, PROGRESS_NOW);
+      assert(duplicate.elapsed === 'Elapsed: 4s' && duplicate.heard === null, 'normal work shows one labeled clock');
+      const overdue = progressTimeLines({ kind: 'response-overdue', since: PROGRESS_NOW - 120000, lastHeard: PROGRESS_NOW - 20000 }, PROGRESS_NOW);
+      assert(overdue.heard === 'Last heard from ChatGPT 20s ago', 'overdue work preserves distinct activity context');
+      assert(progressTimeLines({ kind: 'response-overdue', since: PROGRESS_NOW - 4000, lastHeard: PROGRESS_NOW - 4000 }, PROGRESS_NOW).heard === null, 'even attention states do not repeat an identical duration');
       assert(progressTimeLines({ since: null, lastHeard: null }, PROGRESS_NOW).elapsed === null && progressTimeLines({ since: null, lastHeard: null }, PROGRESS_NOW).heard === null, 'no anchor, no line');
       assert(progressTimeLines({ lastHeard: PROGRESS_NOW + 5000 }, PROGRESS_NOW).heard === 'Last heard from ChatGPT just now', 'a clock skew clamps to just now');
       assert(progressTimeLines(null, PROGRESS_NOW).elapsed === null && progressTimeLines({ since: 5 }, undefined).elapsed === null, 'malformed input yields no lines');

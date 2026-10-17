@@ -266,6 +266,9 @@ const tests = [
       const replacement = engine.restartWorker({ linkId: LINK, generation: pool.generation, workerOrdinal: 1 });
       assert(replacement.copied && replacement.sessionCode !== original.sessionCode && engine.snapshot().chat.pool.workers[0]?.restarts === 1,
         'a forced-quiet worker must be immediately restartable with a rotated credential');
+      assert(engine.snapshot().chat.pool.workers[0]?.lastOutcome === null
+        && engine.snapshot().chat.pool.workers[0]?.lastOutcomeAt === null,
+      'the replacement must not inherit the old chat’s terminal result');
       assert((await engine.get({ session: original.sessionCode, linkId: LINK })).status === 'session_ended', 'the old credential is invalid after replacement');
       const fresh = await engine.get({ session: replacement.sessionCode, linkId: LINK });
       const rejected = await engine.submit({ session: replacement.sessionCode, linkId: LINK, handoffCode: fresh.handoffCode, response: answer({ code: fresh.handoffCode, stage: fresh.stage }) });
@@ -2746,6 +2749,44 @@ const tests = [
       const state = await started({ clock, engineOptions: { onServeAfterIdle: () => { notices++; throw new Error('synthetic callback'); } } });
       clock.advance(CONSTANTS.SERVE_AFTER_IDLE_NOTICE_HOURS * 3_600_000); await state.engine.get({ session: state.session, linkId: LINK }); await state.engine.get({ session: state.session, linkId: LINK });
       assert(notices === 1, 'idle notice must not repeat on an immediate re-serve');
+    },
+  },
+  {
+    name: 'handoff bridge: engine: a settled transient submission retry is attempted again without waiting for verdict TTL',
+    run: async () => {
+      let calls = 0;
+      const state = await served({ sourceOverrides: {
+        submit: async () => ++calls <= 3 ? { kind: 'threw', code: 'internal_error' } : { kind: 'accepted', completed: true },
+      } });
+      try {
+        const args = { session: state.session, linkId: LINK, handoffCode: state.result.handoffCode,
+          response: answer({ code: state.result.handoffCode, stage: state.result.stage }) };
+        const first = await state.engine.submit(args);
+        assert(first.status === 'retry' && first.inFlight === false, 'a settled app failure is distinct from an in-flight submit');
+        const second = await state.engine.submit(args);
+        assert(second.status === 'accepted' && calls === 4, 'a cached retry must not block a recovered app for a minute');
+      } finally { state.engine.close(); }
+    },
+  },
+  {
+    name: 'handoff bridge: engine: unchanged prompt reads cannot reset consecutive submission failures',
+    run: async () => {
+      let calls = 0;
+      const state = await served({ sourceOverrides: {
+        submit: async () => { calls++; return { kind: 'threw', code: 'internal_error' }; },
+      } });
+      try {
+        let result;
+        for (let attempt = 0; attempt < CONSTANTS.APPLICATION_ERROR_STREAK; attempt++) {
+          result = await state.engine.submit({ session: state.session, linkId: LINK,
+            handoffCode: state.result.handoffCode, response: answer({ code: state.result.handoffCode, stage: state.result.stage }) });
+          if (result.status === 'needs_user') break;
+          state.clock.advanceTime(CONSTANTS.VERDICT_CACHE_MS + 1);
+          await state.engine.get({ session: state.session, linkId: LINK });
+        }
+        assert(result.status === 'needs_user' && result.reason === 'write_failed',
+          `repeated identical host failures must pause instead of looping; got ${result.status} after ${calls} host calls`);
+      } finally { state.engine.close(); }
     },
   },
   {

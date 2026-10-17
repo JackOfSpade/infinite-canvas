@@ -19,7 +19,7 @@ export const LAUNCH_STAGES = Object.freeze(['opening', 'checking', 'sent', 'pres
 export const TRANSIENT_LAUNCH_REASONS = Object.freeze([
   'tab_open_failed', 'editor_timeout', 'chat_changed', 'insert_mismatch', 'model_menu_missing',
   'model_selection_failed', 'effort_unavailable', 'account_unknown', 'send_unavailable',
-  'chrome_unavailable', 'chrome_timeout', 'starter_unavailable', 'attachment_upload_failed', 'attachment_upload_timeout',
+  'chrome_unavailable', 'chrome_timeout', 'tab_not_owned', 'starter_unavailable', 'attachment_upload_failed', 'attachment_upload_timeout',
 ]);
 // Every failed launch the dock may offer a Retry for, instead of a paste.
 export const RETRYABLE_LAUNCH_REASONS = Object.freeze([
@@ -149,7 +149,7 @@ export function normalizeBridgeStatus(raw) {
     const push = object(value.push); const limits = object(value.limits); const prefs = object(value.prefs); const power = object(value.power); const countInput = object(value.counts);
     const availabilityOk = bool(availability.ok);
     const normalized = {
-      v: BRIDGE_STATUS_VERSION, seq: number(value.seq), at: number(value.at),
+      v: BRIDGE_STATUS_VERSION, seq: number(value.seq), at: number(value.at), uiRevision: Number.isSafeInteger(value.uiRevision) && value.uiRevision >= 0 ? value.uiRevision : 0,
       availability: { ok: availabilityOk, reason: availabilityOk ? null : nullableOneOf(availability.reason, AVAILABILITY_REASONS) || 'dev-build' },
       enabled: bool(value.enabled), autoStart: bool(value.autoStart), autoLaunchChats: value.autoLaunchChats !== false, autoRelease: bool(value.autoRelease), serving: oneOf(value.serving, SERVING_STATES, 'off'), paused: bool(value.paused), pauseCause: nullableOneOf(value.pauseCause, PAUSE_CAUSES), hold: nullableOneOf(value.hold, HOLDS), fault: isObject(value.fault) && nullableOneOf(value.fault.code, FAULT_CODES) ? { code: value.fault.code } : null,
       config: { hostname: typeof config.hostname === 'string' ? string(config.hostname) : null, pluginName: string(config.pluginName, '') || 'infinite_canvas', mcpUrl: typeof config.mcpUrl === 'string' ? string(config.mcpUrl) : null, scope: { applications: bool(scope.applications), scoring: bool(scope.scoring), marketplace: bool(scope.marketplace) }, telemetryInBugReports: bool(config.telemetryInBugReports) },
@@ -184,7 +184,8 @@ export function normalizeBridgeStatus(raw) {
                 ? nullableOneOf(worker.quietReason, POOL_WORKER_QUIET_REASONS)
                 : null,
               ...(isObject(worker.launch) && nullableOneOf(worker.launch.stage, LAUNCH_STAGES)
-                ? { launch: { stage: worker.launch.stage, reason: nullableOneOf(worker.launch.reason, LAUNCH_REASONS) } } : {}),
+                ? { launch: { stage: worker.launch.stage, reason: nullableOneOf(worker.launch.reason, LAUNCH_REASONS),
+                  ...(typeof worker.launch.canReveal === 'boolean' ? { canReveal: worker.launch.canReveal } : {}) } } : {}),
             });
           }
           workers.sort((left, right) => left.ordinal - right.ordinal);

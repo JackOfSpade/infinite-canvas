@@ -227,6 +227,28 @@ async function mount(bundle, window, { initialData = {}, nodes = [], nodeId = 'i
 }
 
 export default [
+  { name: 'Undo memory: large nested workspace history is bounded and unchanged snapshots do not clone', async run() {
+    await withUndoHarness(async d => {
+      const large = d.note('H', { type: 'group', data: { canvasData: {
+        nodes: [d.note('hub', { type: 'jobhub', data: { preferenceCandidatePool: 'x'.repeat(34 * 1024 * 1024) } })],
+        edges: [], drawings: [],
+      } } });
+      await d.mount([large]);
+      await d.step(() => d.api.takeSnapshot());
+      for (const id of ['A', 'B', 'C', 'D']) await d.edit(id);
+      await d.step(() => d.api.undo());
+      d.expect('HABC', 'one prior large state is retained');
+      assert(!d.api.canUndo, 'large history must not retain all older full workspace clones');
+      await d.step(() => d.api.redo());
+      d.expect('HABCD', 'bounded history still supports redo');
+      // A poison clone sentinel verifies a no-op never allocates another copy.
+      const original = globalThis.structuredClone;
+      let clones = 0;
+      globalThis.structuredClone = value => { clones++; return original(value); };
+      try { await d.step(() => d.api.takeSnapshot()); assert(clones === 0); }
+      finally { globalThis.structuredClone = original; }
+    });
+  } },
   {
     name: 'interview helper render: empty state requires an approved Job Search snapshot',
     async run() {

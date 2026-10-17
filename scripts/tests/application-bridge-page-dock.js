@@ -72,7 +72,7 @@ async function withDock(run) {
     await withDom(async window => withConsoleCollector(async entries => {
       const priorCustomEvent = Object.getOwnPropertyDescriptor(globalThis, 'CustomEvent');
       Object.defineProperty(globalThis, 'CustomEvent', { configurable: true, writable: true, value: window.CustomEvent });
-      const calls = { discard: [], startPool: [], openWorker: [] };
+      const calls = { discard: [], startPool: [], openWorker: [], retryWorker: [] };
       let receivePush = () => {}; let receiveProgress = () => {};
       window.electronAPI = {
         handoffBridgeGetStatus: async () => ({ status: status(1) }),
@@ -85,6 +85,7 @@ async function withDock(run) {
         onNonApiAiCancelled: () => () => {},
         discardLocalApplication: async payload => { calls.discard.push(payload); return { success: true }; },
         handoffBridgeOpenWorkerChat: async payload => { calls.openWorker.push(payload); return { success: true }; },
+        handoffBridgeRetryWorkerLaunch: async payload => { calls.retryWorker.push(payload); return { success: true, started: true }; },
         handoffBridgeStartWorkerPool: async () => {
           calls.startPool.push(true);
           return { success: true, generation: 1, workerCount: 2, recommended: 2, queued: 2, materialized: 2, lockedWorkerOrdinals: [] };
@@ -149,6 +150,50 @@ async function withDock(run) {
 }
 
 export default [
+  { name: 'handoff popup shows Open only for intervention and applies reconnect failure without a controller sequence change', async run() {
+    await withDock(async dock => {
+      await dock.render();
+      const waiting = (uiRevision, launch) => withLanes(2, [lane(JOB_A, 'unread')], {
+        uiRevision,
+        chat: { state: 'awaiting-first-call', ordinal: 1, pool: { active: true, generation: 51, workerCount: 1,
+          workers: [{ ordinal: 1, state: 'ready', completed: 0, firstCallAt: null, launch }] } },
+      });
+      await dock.setStatus(waiting(1, { stage: 'sent', reason: null }));
+      await dock.publish([dock.item({ jobId: JOB_A, title: 'Engineer', company: 'Acme' })]);
+      const open = () => [...dock.document.querySelectorAll('button')].find(b => b.textContent === 'Open worker chat');
+      assert(!open(), 'ordinary startup must not show an intervention button');
+      await dock.setStatus(waiting(2, { stage: 'failed', reason: 'reconnect_required' }));
+      assert(dock.text().includes('Reconnect'), 'a same-controller-sequence failure replaces Sent');
+      assert(!dock.text().includes('Sent in ChatGPT; waiting'), 'the stale Sent state is removed');
+      assert(open() && !open().disabled, 'reconnect exposes Open');
+      await dock.click(open());
+      assert(JSON.stringify(dock.calls.openWorker) === JSON.stringify([{ generation: 51, workerOrdinal: 1 }]));
+      assert([...dock.document.querySelectorAll('button')].some(b => b.textContent === 'Retry'), 'reconnect exposes Retry');
+      await dock.setStatus(waiting(1, { stage: 'sent', reason: null }));
+      assert(dock.text().includes('Reconnect'), 'a stale UI revision cannot undo the failure');
+      await dock.setStatus(waiting(3, { stage: 'presented', reason: null }));
+      assert(!open(), 'a connected worker hides the intervention button again');
+    });
+  } },
+
+  { name: 'handoff popup offers launch recovery instead of opening a worker tab that does not exist', async run() {
+    await withDock(async dock => {
+      await dock.render();
+      await dock.setStatus(withLanes(2, [lane(JOB_A, 'awaiting')], {
+        autoLaunchChats: true, chat: { state: 'awaiting-first-call', ordinal: 1,
+          pool: { active: true, generation: 41, workerCount: 1,
+            workers: [{ ordinal: 1, state: 'available', completed: 4,
+              launch: { stage: 'failed', reason: 'chrome_unavailable', canReveal: false } }] } },
+      }));
+      await dock.publish([dock.item({ jobId: JOB_A, title: 'Engineer', company: 'Acme' })]);
+      assert(![...dock.document.querySelectorAll('button')].some(b => b.textContent === 'Open worker chat'), 'no Open button without an owned tab');
+      const retry = [...dock.document.querySelectorAll('button')].find(b => b.textContent === 'Retry');
+      assert(retry && !retry.disabled, 'failed startup offers the working launch action');
+      await dock.click(retry);
+      assert(JSON.stringify(dock.calls.retryWorker) === JSON.stringify([{ generation: 41, workerOrdinal: 1 }]));
+      assert(dock.text().includes('Opening a fresh ChatGPT worker chat'));
+    });
+  } },
   { name: 'handoff popup reveals the exact worker chat when approval is required', async run() {
     await withDock(async dock => {
       await dock.render();
@@ -285,6 +330,28 @@ export default [
         assert(dock.document.querySelector('textarea'), 'the needs_user bundle shows its paste textarea');
         assert(dock.text().includes('PROMPT_aaaa'), 'the needs_user prompt text is shown');
         assert(dock.document.querySelectorAll('[data-application-row]').length === 0, 'no rows remain once every grouped bundle leaves');
+      });
+    },
+  },
+  {
+    name: 'application bridge page: dock: app commit failure stays in worker view without manual paste instructions',
+    async run() {
+      await withDock(async dock => {
+        await dock.render();
+        await dock.setStatus(withLanes(2, [lane(JOB_A, 'awaiting', 'requirements-audit')]));
+        await dock.publish([dock.item({ jobId: JOB_A, stage: 'requirements-audit' })]);
+        await dock.setStatus(withLanes(3, [{ ...lane(JOB_A, 'needs_user', 'requirements-audit'), reason: 'write_failed' }], {
+          autoLaunchChats: true, chat: { pool: { active: true, generation: 1, workerCount: 1,
+            workers: [{ ordinal: 1, state: 'connected', completed: 2, lastCallAt: NOW }], plan: { queued: 0, materialized: 0, recommended: 0 } } },
+        }));
+        assert(dock.page(), 'app failure retains the shared worker page');
+        assert(!dock.document.querySelector('textarea'), 'pasting cannot fix an app commit failure');
+        assert(!dock.text().includes('PROMPT_aaaa'), 'does not ask to copy the stage prompt');
+        assert(dock.text().includes('The app could not process the worker’s answer'), 'explains the app-side failure');
+        assert(!dock.document.querySelector('[data-workers-only]'), 'does not offer worker starters for a host failure');
+        await dock.setStatus(withLanes(4, [{ ...lane(JOB_A, 'held', 'requirements-audit'), reason: 'restart' }]));
+        assert(dock.page() && !dock.document.querySelector('textarea'), 'restart recovery also stays on the automatic route');
+        assert(dock.document.querySelector('[data-workers-only] button'), 'restart recovery offers the existing worker start action');
       });
     },
   },

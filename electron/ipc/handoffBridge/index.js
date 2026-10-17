@@ -34,7 +34,7 @@ import { createHandoffBridgeDialogs } from './uiDialogs.js';
 import { registerHandoffBridgeUi } from './ui.js';
 import { createHandoffBridgeTray } from './tray.js';
 import { createHandoffBridgePower } from './power.js';
-import { clearBridgeChatCopyDiagnostic, clearBridgeQueueDiagnostic, clearClientAuthDiagnostic, clearFailedStartDiagnostic, clearMcpRateLimitDiagnostic, clearOAuthRejectionDiagnostic, clearSourceRejectionDiagnostic, getFailedStartDiagnosticLines, recordClientAuthDiagnostic, recordFailedStartDiagnostic, recordMcpRateLimitDiagnostic, recordOAuthRejectionDiagnostic, recordSourceRejectionDiagnostic, retireBridgeQueueDiagnosticProvider, setBridgeQueueDiagnosticProvider } from './telemetry.js';
+import { clearApplicationSubmitFailures, recordApplicationSubmitFailure, clearBridgeChatOpenDiagnostic, clearBridgeLaunchDiagnostic, clearBridgeChatCopyDiagnostic, clearBridgeQueueDiagnostic, clearClientAuthDiagnostic, clearFailedStartDiagnostic, clearMcpRateLimitDiagnostic, clearOAuthRejectionDiagnostic, clearSourceRejectionDiagnostic, getFailedStartDiagnosticLines, recordClientAuthDiagnostic, recordFailedStartDiagnostic, recordMcpRateLimitDiagnostic, recordOAuthRejectionDiagnostic, recordSourceRejectionDiagnostic, retireBridgeQueueDiagnosticProvider, setBridgeQueueDiagnosticProvider } from './telemetry.js';
 
 let registered = false;
 let registeredIpcMain = null;
@@ -908,7 +908,7 @@ export function composeHandoffBridge({ userData, config, tunnelState, setupState
   const codeGuard = deps.codeGuard || createHandoffCodeGuard();
   const syntheticPreflight = testMode === true && deps.syntheticPreflight === true
     ? createSyntheticPreflightSource({ testMode, codeGuard }) : null;
-  const application = syntheticPreflight?.source || deps.application || createApplicationSource({ api: deps.applicationApi, setTimeoutImpl: timers.setTimeout, clearTimeoutImpl: timers.clearTimeout, codeGuard });
+  const application = syntheticPreflight?.source || deps.application || createApplicationSource({ api: deps.applicationApi, onSubmitFailure: ({ stage, error }) => recordApplicationSubmitFailure({ telemetry: bridgeDiagnosticsEnabled(), at: now(), stage, error }), setTimeoutImpl: timers.setTimeout, clearTimeoutImpl: timers.clearTimeout, codeGuard });
   const hubKey = (canvasFilePath, nodeId) => crypto.createHash('sha256').update(`${canvasFilePath}\n${nodeId}`, 'utf8').digest('hex');
   const push = deps.push || createPushSource({ seam: deps.pushSeam, now, timers, windows, hubKey, codeGuard, autoSelectHubs: true });
   let pairing;
@@ -1142,6 +1142,7 @@ export function composeHandoffBridge({ userData, config, tunnelState, setupState
       'served-after-idle': 'Handoff bridge served after a long idle period. Review it in Infinite Canvas.',
       'link-expiring': 'ChatGPT link expires soon. Review it in Infinite Canvas.',
       'plugin-missing': "The ChatGPT account in Chrome doesn't have the Infinite Canvas plugin. Set it up on that account, then press Retry.",
+      'approval-required': 'ChatGPT is waiting for tool approval. Open the AI handoff dock in Infinite Canvas, then choose Open ChatGPT for approval.',
       'plugin-reconnect': 'Reconnect the Infinite Canvas plugin in ChatGPT, then press Retry in Infinite Canvas.',
     }[kind];
     if (!body) return;
@@ -1750,6 +1751,7 @@ export function registerHandoffBridgeHandlers({ ipcMain = electronPkg.ipcMain, d
       // An explicit telemetry opt-out must also remove an already retained
       // in-memory failed-start receipt before any later FULL report is built.
       if (Object.hasOwn(safePatch, 'telemetryInBugReports') && safePatch.telemetryInBugReports !== true) {
+        clearApplicationSubmitFailures(); clearBridgeLaunchDiagnostic(); clearBridgeChatOpenDiagnostic();
         clearFailedStartDiagnostic();
         clearOAuthRejectionDiagnostic(); clearSourceRejectionDiagnostic(); clearClientAuthDiagnostic(); clearMcpRateLimitDiagnostic(); clearBridgeChatCopyDiagnostic(); clearBridgeQueueDiagnostic();
       }

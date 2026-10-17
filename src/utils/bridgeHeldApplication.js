@@ -4,8 +4,10 @@
 // True only when the bridge's live status lists this exact jobId in a lane
 // phase where ChatGPT is the one to answer it (unread, awaiting, host). A lane
 // the bridge kept for the person (held, e.g. "Keep for me"), handed back
-// (needs_user) or finished with (gone, done) is exactly where the person has
-// to paste, so those keep the normal paste UI.
+// (needs_user) or finished with (gone, done) keeps the normal paste UI, except
+// an app commit failure: manual paste hits the same host error, so that bundle
+// stays in the worker view with its app-side failure explanation. Restart
+// holds also keep that view so its Start workers action resumes automation.
 //
 // Never throws: a missing or malformed status (bridge disabled, preload still
 // connecting, an older main process) is simply "not held".
@@ -18,7 +20,9 @@ export function findBridgeHeldJob(status, jobId) {
   if (typeof jobId !== 'string' || jobId.length === 0) return null;
   const jobs = status?.queue?.jobs;
   if (!Array.isArray(jobs)) return null;
-  return jobs.find(job => job?.jobId === jobId && BRIDGE_WORKING_PHASES.has(job?.phase)) || null;
+  return jobs.find(job => job?.jobId === jobId && (BRIDGE_WORKING_PHASES.has(job?.phase)
+    || (job?.phase === 'needs_user' && job?.reason === 'write_failed')
+    || (['held', 'needs_user'].includes(job?.phase) && job?.reason === 'restart'))) || null;
 }
 
 export function isBridgeHeldJob(status, jobId) {

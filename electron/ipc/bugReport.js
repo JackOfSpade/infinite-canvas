@@ -26,6 +26,7 @@ import { buildFilterSummaryMarkdown, codeIncludesFull } from './bugReport/filter
 import { codeIncludesApplicationOutput } from './bugReport/applicationOutput.js';
 import { buildPasteHandoffDiagnosticsMarkdown } from './pasteHandoffDiagnostics.js';
 import { buildPasteRejectionTraceMarkdown } from './bugReport/pasteRejectionTraceRollup.js';
+import { buildRendererCrashMarkdown } from '../rendererRecovery.js';
 import { buildWindowSizeLine, buildPointerProbeMarkdown } from './bugReport/pointerProbeMarkdown.js';
 import { writeSavedBugReport, buildClipboardPointer } from './bugReport/reportFile.js';
 import { resolveNodePresence } from '../../src/utils/nodePresence.js';
@@ -48,7 +49,7 @@ import {
 import { getHubDropLockReason, hubHasAcceptedInitialDrop } from '../../src/utils/hubDropEligibility.js';
 import { completionTimestampIso } from '../../src/utils/completionTimestamp.js';
 import { isBackgroundE2E } from '../utils/backgroundE2e.js';
-import { getBridgeChatCopyDiagnostic, getBridgeQueueDiagnostic, getClientAuthDiagnostic, getFailedStartDiagnostic, getMcpRateLimitDiagnostic, getOAuthRejectionDiagnostic, getSourceRejectionDiagnostic } from './handoffBridge/telemetry.js';
+import { getApplicationSubmitFailures, getBridgeChatOpenDiagnostic, getBridgeLaunchDiagnostic, getBridgeChatCopyDiagnostic, getBridgeQueueDiagnostic, getClientAuthDiagnostic, getFailedStartDiagnostic, getMcpRateLimitDiagnostic, getOAuthRejectionDiagnostic, getSourceRejectionDiagnostic } from './handoffBridge/telemetry.js';
 import { getHandoffBridgeBootstrapDiagnostic } from './handoffBridge/index.js';
 import { validateIssueReportDescription } from '../../src/utils/issueReportDescription.js';
 
@@ -2156,6 +2157,18 @@ function buildHandoffBridgeDiagnosticsMarkdown() {
   const observedMcpRateLimit = mcpRateLimit?.telemetry === true;
   const queue = getBridgeQueueDiagnostic();
   const chatCopies = getBridgeChatCopyDiagnostic();
+  const submitFailures = getApplicationSubmitFailures();
+  const submitFailuresMarkdown = submitFailures.length === 0 ? '' : `
+- Application host submission failures: ${submitFailures.length} retained (newest last; error text and content withheld)
+${submitFailures.map(entry => `  - ${new Date(entry.at).toISOString()} · stage \`${entry.stage || 'unknown'}\` · class \`${entry.name}\` · code \`${entry.code}\`${entry.line === null ? '' : ` · application module line ${entry.line}:${entry.column}`}`).join('\n')}`;
+  const chatOpens = getBridgeChatOpenDiagnostic();
+  const chatOpenMarkdown = chatOpens.length === 0 ? '' : `
+- Open worker chat interactions: ${chatOpens.length} retained (newest last; no URLs or tab identifiers)
+${chatOpens.map(entry => `  - ${new Date(entry.at).toISOString()} · worker ${entry.workerOrdinal} · outcome \`${entry.outcome}\` · reason \`${entry.reason || 'none'}\``).join('\n')}`;
+  const launches = getBridgeLaunchDiagnostic();
+  const launchMarkdown = launches.length === 0 ? '' : `
+- Automatic worker launch outcomes: ${launches.length} retained (newest last; no chat content)
+${launches.map(entry => `  - ${new Date(entry.at).toISOString()} · worker ${entry.workerOrdinal} · stage \`${entry.stage}\` · reason \`${entry.reason || 'none'}\` · retry ${entry.attempt}`).join('\n')}`;
   const bootstrapMarkdown = `
 - Bridge bootstrap: config \`${bootstrap.config}\` · consent \`${bootstrap.consent}\` · configured auto-start \`${bootstrap.autoStart}\` · enabled \`${bootstrap.enabled}\` · runtime \`${bootstrap.runtime}\` · tunnel \`${bootstrap.tunnel}\`
 - Setup readiness: hostname \`${bootstrap.setup.hostname}\` · binary \`${bootstrap.setup.binary}\` · credentials \`${bootstrap.setup.credentials}\` · public tunnel \`${bootstrap.setup.tunnelReachable}\`
@@ -2392,7 +2405,7 @@ ${chatCopies.map(entry => {
   }).join('\n')}`;
   return `
 ## Handoff Bridge Diagnostics
-${bootstrapMarkdown}${queueMarkdown}${failedStartMarkdown}${oauthRejectionMarkdown}${sourceRejectionMarkdown}${clientAuthMarkdown}${mcpRateLimitMarkdown}${chatCopyMarkdown}
+${bootstrapMarkdown}${submitFailuresMarkdown}${chatOpenMarkdown}${launchMarkdown}${queueMarkdown}${failedStartMarkdown}${oauthRejectionMarkdown}${sourceRejectionMarkdown}${clientAuthMarkdown}${mcpRateLimitMarkdown}${chatCopyMarkdown}
 `;
 }
 
@@ -2504,7 +2517,7 @@ export function generateMarkdown(payload, reportWindowId = null, options = {}) {
   catch { /* never break the report on diagnostic failure */ }
 
   let handoffBridgeDiagnosticsMarkdown = '';
-  if (isFullReport || reportCodes.has('BRIDGE') || reportCodes.has('BRIDGEWORKERS')) try { handoffBridgeDiagnosticsMarkdown = buildHandoffBridgeDiagnosticsMarkdown(); }
+  if (isFullReport || reportCodes.has('BRIDGE') || reportCodes.has('BRIDGEWORKERS') || reportCodes.has('BRIDGELAUNCH') || reportCodes.has('BRIDGEFOCUS') || reportCodes.has('BRIDGESUBMIT')) try { handoffBridgeDiagnosticsMarkdown = buildHandoffBridgeDiagnosticsMarkdown(); }
   catch { /* a diagnostic receipt must never block the report */ }
 
   // Same guard as every other section builder: a malformed row in the renderer
@@ -2674,11 +2687,11 @@ export function generateMarkdown(payload, reportWindowId = null, options = {}) {
   // already filtered by the code vocabulary; apply the equivalent predicate to
   // the otherwise-global main-process ring as well. FULL remains byte-for-byte
   // global even when combined with either code.
-  const mainProcessLogFilter = !isFullReport && (reportCodes.has('AIHANDOFF') || reportCodes.has('BRIDGE') || reportCodes.has('BRIDGEWORKERS'))
+  const mainProcessLogFilter = !isFullReport && (reportCodes.has('AIHANDOFF') || reportCodes.has('BRIDGE') || reportCodes.has('BRIDGEWORKERS') || reportCodes.has('BRIDGELAUNCH') || reportCodes.has('BRIDGEFOCUS') || reportCodes.has('BRIDGESUBMIT'))
     ? entry => {
       const message = String(entry?.message || '');
       return (reportCodes.has('AIHANDOFF') && AIHANDOFF_MAIN_PROCESS_LOG_PATTERN.test(message))
-        || ((reportCodes.has('BRIDGE') || reportCodes.has('BRIDGEWORKERS')) && BRIDGE_MAIN_PROCESS_LOG_PATTERN.test(message));
+        || ((reportCodes.has('BRIDGE') || reportCodes.has('BRIDGEWORKERS') || reportCodes.has('BRIDGELAUNCH') || reportCodes.has('BRIDGEFOCUS') || reportCodes.has('BRIDGESUBMIT')) && BRIDGE_MAIN_PROCESS_LOG_PATTERN.test(message));
     }
     : null;
   let mainProcessLogLines = [];
@@ -3055,6 +3068,7 @@ ${filterSummaryMarkdown}
 - OS: ${systemInfo.platform} ${systemInfo.arch}
 ${viewportBlock}
 
+${buildRendererCrashMarkdown(app.getPath('userData'))}
 ## Runtime Identity
 - App: ${systemInfo.appVersion} · ${systemInfo.packaged ? 'packaged' : 'development'}
 - Runtime: Electron ${systemInfo.electronVersion || '?'} · Chromium ${systemInfo.chromiumVersion || '?'} · Node ${systemInfo.nodeVersion || '?'}

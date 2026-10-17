@@ -429,7 +429,7 @@ export function BridgeProgress({
       const result = await invoke(openExisting ? 'handoffBridgeOpenWorkerChat' : 'handoffBridgeRetryWorkerLaunch', {
         generation: activeWorkerPool.generation, workerOrdinal: ordinal,
       });
-      if (mountedRef.current) setNotice(result?.success ? (openExisting ? 'Opened this worker’s ChatGPT chat. Review its approval prompt there.' : 'Opening a fresh ChatGPT worker chat…') : ipcErrorMessage(result?.code));
+      if (mountedRef.current) setNotice(result?.success ? (openExisting && result?.started !== true ? 'Opened this worker’s ChatGPT chat. Complete any approval or reconnect request there.' : 'Opening a fresh ChatGPT worker chat…') : ipcErrorMessage(result?.code));
     } finally {
       busyRef.current = false;
       if (mountedRef.current) setCopyingWorker(null);
@@ -472,6 +472,9 @@ export function BridgeProgress({
   // worker chat is needed (when there is an actionable chat), then exposes the
   // shared worker pool and its start/continue control plus any transient
   // notice. Nothing to show means nothing is rendered.
+  // The row already explains a host commit failure. Copying starters or
+  // opening more workers cannot repair it and would suggest manual recovery.
+  if (workersOnly && job?.phase === 'needs_user' && job?.reason === 'write_failed') return null;
   if (workersOnly && !view.action && !activeWorkerPool && !notice) return null;
 
   return (
@@ -538,9 +541,9 @@ export function BridgeProgress({
                     {BRIDGE_UI_COPY.workerState(worker.state, worker.quietReason, worker.launch)}
                   </span>
                   {worker.launch && <span className="basis-full text-sky-100/80">{BRIDGE_UI_COPY.workerLaunch(worker.launch, launchAccountName(activeWorkerPool.generation, worker.ordinal))}</span>}
-                  {worker.launch?.reason === 'approval_required' && (
+                  {worker.launch?.canReveal !== false && (worker.launch?.stage === 'failed' || ['approval_required', 'delivery_timeout', 'conversation_unavailable'].includes(worker.launch?.reason) || worker.state === 'quiet') && (
                     <button type="button" className="rounded border border-amber-300/50 px-2 py-1 text-amber-100"
-                      disabled={busy || activeCopyingWorker !== null} onClick={() => void retryWorkerLaunch(worker.ordinal, true)}>Open ChatGPT for approval</button>
+                      disabled={busy || activeCopyingWorker !== null} onClick={() => void retryWorkerLaunch(worker.ordinal, true)}>{worker.launch?.reason === 'approval_required' ? 'Open ChatGPT for approval' : 'Open worker chat'}</button>
                   )}
                   {worker.launch?.stage === 'failed' && RETRYABLE_LAUNCH_REASONS.includes(worker.launch?.reason) && (
                     <button type="button" className="ml-auto rounded-md border border-white/15 bg-white/5 px-2.5 py-1.5 text-[11px] font-medium text-white/85"

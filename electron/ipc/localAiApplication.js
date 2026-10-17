@@ -3660,6 +3660,8 @@ const PASTE_VALIDATION_ERROR_ID_SET = new Set([
   'unsupported-experience-span', 'unit-source-grounding',
   'host-owned-field-equality', 'candidate-dash-punctuation',
   'structured-resume', 'paragraph-argument-links', 'measured-one-page-fit', 'schema-invalid',
+  'handoff-echo-protocol', 'handoff-echo-job-id', 'handoff-echo-stage',
+  'handoff-echo-code', 'handoff-echo-base-hashes',
 ]);
 const PASTE_VALIDATION_ERROR_PROSE_UNITS = Object.freeze({
   'unsupported-experience-span': 'prose-unit',
@@ -3670,9 +3672,15 @@ const PASTE_VALIDATION_ERROR_PROSE_UNITS = Object.freeze({
   'structured-resume': 'field',
   'measured-one-page-fit': 'field',
   'schema-invalid': 'field',
+  'handoff-echo-protocol': 'field', 'handoff-echo-job-id': 'field',
+  'handoff-echo-stage': 'field', 'handoff-echo-code': 'field',
+  'handoff-echo-base-hashes': 'field',
 });
 function inferredPasteValidationErrorId(message) {
   const value = String(message || '');
+  const echoField = /^Application v2 response must echo the current (protocol|jobId|stage|handoffCode|baseHashes) exactly\.$/u.exec(value)?.[1];
+  if (echoField) return { protocol: 'handoff-echo-protocol', jobId: 'handoff-echo-job-id',
+    stage: 'handoff-echo-stage', handoffCode: 'handoff-echo-code', baseHashes: 'handoff-echo-base-hashes' }[echoField];
   if (/Continue the Local AI routine with measured revision \d+ using fit-feedback\.json/iu.test(value)) return 'measured-one-page-fit';
   if (/experience span|span of years|unsupported-experience-span/iu.test(value)) return 'unsupported-experience-span';
   if (/source.?grounding|source quote|career-data quote|cited evidence|career-data evidence|attribution scope/iu.test(value)) return 'unit-source-grounding';
@@ -16607,7 +16615,7 @@ async function importLocalApplicationJobAttempt({ jobId, canvasFilePath, senderI
       applicationOutput: localAiApplicationOutputTelemetry(result),
       render: {
         targetPageCount, initialPageCount: resumeFit.attempts[0]?.pageCount ?? null,
-        finalPageCount: resumeFit.pageCount, baselinePageCount: resumeFit.attempts[0]?.pageCount ?? null,
+        finalPageCount: resumeFit.pageCount, baselinePageCount: resumeFit.pageCount,
         baselinePdfProduced: false, baselineFontsLoaded: resumeFit.fontsLoaded,
         attempts: resumeFit.attempts, compactApplied: resumeFit.compactApplied,
         revisionApplied: false, error: resumeFit.renderError,
@@ -16722,7 +16730,7 @@ async function importLocalApplicationJobAttempt({ jobId, canvasFilePath, senderI
     applicationOutput: localAiApplicationOutputTelemetry(result),
     render: {
       targetPageCount, initialPageCount: resumeFit.attempts[0]?.pageCount ?? null,
-      finalPageCount: resumeFit.pageCount, baselinePageCount: resumeFit.attempts[0]?.pageCount ?? null,
+      finalPageCount: resumeFit.pageCount, baselinePageCount: resumeFit.pageCount,
       baselinePdfProduced: Boolean(resumePdf), baselineFontsLoaded: resumeFit.fontsLoaded,
       attempts: resumeFit.attempts, compactApplied: resumeFit.compactApplied,
       // No local model call is made during import. A page overflow remains in

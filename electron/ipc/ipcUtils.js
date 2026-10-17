@@ -305,6 +305,7 @@ export function snapshotActiveNodeTasks(senderId = null) {
 function createSenderAbortController(event, timeoutMs = 0) {
   const ac = new AbortController();
   const onSenderDestroyed = () => ac.abort(new Error('Sender destroyed'));
+  const onRendererGone = () => ac.abort(new Error('Renderer stopped'));
   // A renderer reload replaces its IPC world but keeps the same WebContents.
   // Without this listener, an invoke already waiting on a manual-AI paste is
   // orphaned forever: the old renderer cannot receive its result and the new
@@ -316,6 +317,7 @@ function createSenderAbortController(event, timeoutMs = 0) {
   };
   
   event.sender.once('destroyed', onSenderDestroyed);
+  event.sender.once('render-process-gone', onRendererGone);
   event.sender.on?.('did-start-navigation', onMainFrameNavigation);
 
   let timeoutId = null;
@@ -329,6 +331,7 @@ function createSenderAbortController(event, timeoutMs = 0) {
     cleanup: () => {
       if (timeoutId) clearTimeout(timeoutId);
       event.sender.removeListener?.('did-start-navigation', onMainFrameNavigation);
+      event.sender.removeListener?.('render-process-gone', onRendererGone);
       if (!event.sender.isDestroyed()) {
         event.sender.removeListener('destroyed', onSenderDestroyed);
       }

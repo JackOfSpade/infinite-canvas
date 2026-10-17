@@ -9,7 +9,7 @@ import { MAX_HANDOFF_CONCURRENCY } from './handoffScheduler.js';
 /**
  * True when this dock request belongs on the shared application page. Only a
  * readable, non-integrity application whose job the bridge still holds (in one
- * of the working phases) is grouped; blocked, integrity-flagged or unreadable
+ * of the working phases, or paused after a restart/app commit failure) is grouped; blocked, integrity-flagged or unreadable
  * requests, and anything the bridge no longer holds, keep a normal chip/page.
  */
 export function isGroupableBridgeApplication(request, status) {

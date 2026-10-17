@@ -214,11 +214,9 @@ function withHistoryLock(filePath, fn) {
 }
 
 /**
- * Read only after every append already admitted for this canvas has settled.
- * A Board commits its visible cards before its diagnostic/history IPC drains;
- * without this barrier the next queued search can read the old file and show
- * those same cards again. The locked append path calls the raw reader below so
- * it never waits on its own tail.
+ * Read after every admitted history transition has settled. Board display
+ * receipts are provisional; only finalized source generations suppress rows.
+ * The locked append path uses the raw reader so it never waits on its own tail.
  */
 export async function loadJobsHistory(canvasFilePath, stats = null) {
   const filePath = historyPathForCanvas(canvasFilePath);
@@ -226,6 +224,87 @@ export async function loadJobsHistory(canvasFilePath, stats = null) {
   const pendingWrite = _historyTails.get(filePath);
   if (pendingWrite) await pendingWrite;
   return loadJobsHistoryUnlocked(canvasFilePath, stats);
+}
+
+// Display is provisional. Keep its minimal identity rows separate from the
+// suppression CSV until the owning Search is deleted or starts another run.
+// Share the CSV mutex so a boundary cannot race an admitted display receipt,
+// and a new search's history read waits for that boundary to finish.
+async function readDisplayedHistory(filePath) {
+  try {
+    const stat = await fs.promises.lstat(filePath);
+    if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 64 * 1024 * 1024) throw new Error('Invalid pending job history file.');
+    const data = JSON.parse(await fs.promises.readFile(filePath, 'utf8'));
+    if (data?.version !== 1 || !Array.isArray(data.sources)
+      || (data.closedHubs !== undefined && (!Array.isArray(data.closedHubs) || data.closedHubs.some(hub => typeof hub !== 'string')))
+      || data.sources.some(source =>
+      typeof source?.hubId !== 'string' || !source.hubId || typeof source.runId !== 'string' || !source.runId
+      || !Array.isArray(source.rows) || source.rows.some(row => !row || ['source', 'company', 'title', 'location', 'url'].some(key => typeof row[key] !== 'string')))) {
+      throw new Error('Invalid pending job history receipt.');
+    }
+    return data;
+  } catch (error) {
+    if (error?.code === 'ENOENT') return { version: 1, sources: [] };
+    throw error;
+  }
+}
+
+export async function stageDisplayedJobsHistory(canvasFilePath, sources) {
+  const filePath = historyPathForCanvas(canvasFilePath);
+  if (!filePath) return { written: 0, staged: 0 };
+  return withHistoryLock(filePath, async () => {
+    const pendingPath = `${filePath}.pending.json`;
+    const data = await readDisplayedHistory(pendingPath);
+    let staged = 0; let written = 0;
+    for (const { hubId, runId, rows } of sources) {
+      // A confirmed display can arrive after deletion's IPC. That source has
+      // already crossed the boundary, so finish directly instead of leaving
+      // an orphan pending receipt that will never receive another boundary.
+      if (data.closedHubs?.includes(hubId)) {
+        const result = await appendJobsHistoryLocked(canvasFilePath, filePath, rows);
+        if (result.error) throw new Error('Could not finalize a deleted source’s displayed job history.');
+        written += result.written || 0;
+        continue;
+      }
+      if (!rows.length) continue;
+      let entry = data.sources.find(source => source.hubId === hubId && source.runId === runId);
+      if (!entry) { entry = { hubId, runId, rows: [] }; data.sources.push(entry); }
+      const keys = new Set(entry.rows.map(row => JSON.stringify(row)));
+      for (const row of rows) {
+        const key = JSON.stringify(row);
+        if (!keys.has(key)) { entry.rows.push(row); keys.add(key); staged += 1; }
+      }
+    }
+    if (staged) await atomicWriteHistory(pendingPath, JSON.stringify(data));
+    return { written, staged };
+  });
+}
+
+export async function finalizeDisplayedJobsHistory(canvasFilePath, hubId, { excludeRunId = null, deleted = false } = {}) {
+  const filePath = historyPathForCanvas(canvasFilePath);
+  if (!filePath || typeof hubId !== 'string' || !hubId) return { written: 0, finalized: 0 };
+  return withHistoryLock(filePath, async () => {
+    const pendingPath = `${filePath}.pending.json`;
+    const data = await readDisplayedHistory(pendingPath);
+    const closed = new Set(data.closedHubs || []);
+    if (deleted) closed.add(hubId);
+    else if (excludeRunId) closed.delete(hubId);
+    const markerChanged = JSON.stringify([...closed]) !== JSON.stringify(data.closedHubs || []);
+    data.closedHubs = [...closed];
+    const selected = data.sources.filter(source => source.hubId === hubId && source.runId !== excludeRunId);
+    if (!selected.length) {
+      if (markerChanged) await atomicWriteHistory(pendingPath, JSON.stringify(data));
+      return { written: 0, finalized: 0 };
+    }
+    const rows = selected.flatMap(source => source.rows);
+    const result = await appendJobsHistoryLocked(canvasFilePath, filePath, rows);
+    if (result.error) throw new Error('Could not finalize displayed job history. Pending receipts were retained.');
+    // A crash between the CSV commit and receipt removal is safe: append is
+    // idempotent, so retry finishes cleanup without losing or duplicating rows.
+    data.sources = data.sources.filter(source => !selected.includes(source));
+    await atomicWriteHistory(pendingPath, JSON.stringify(data));
+    return { ...result, finalized: rows.length };
+  });
 }
 
 /**

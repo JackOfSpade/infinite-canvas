@@ -133,6 +133,7 @@ export function createApplicationSource({
   getStatus = api.localApplicationStatus || localApplicationStatus,
   discover = api.discoverLocalApplicationJobs || discoverLocalApplicationJobs,
   watchdogMs = WATCHDOG_MS,
+  onSubmitFailure = () => {},
   setTimeoutImpl = globalThis.setTimeout,
   clearTimeoutImpl = globalThis.clearTimeout,
   codeGuard = null,
@@ -272,6 +273,7 @@ export function createApplicationSource({
         }
         return { kind: 'threw', shape: true };
       } catch (error) {
+        try { onSubmitFailure({ stage: lane?.stage, error }); } catch { /* diagnostics cannot change the submission verdict */ }
         return { kind: 'threw', ...classifyApplicationThrow(error) };
       }
     },

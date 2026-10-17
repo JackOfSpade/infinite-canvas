@@ -840,6 +840,15 @@ export function isSafeJobAnalysisCleanupNoop(result) {
 export function discardDeletedJobAnalysisSnapshots(nodes, canvasFilePath, onFailure = null, clearedAt = Date.now()) {
   const discards = collectDeletedJobAnalysisDiscards(nodes, canvasFilePath, clearedAt);
   for (const discard of discards) {
+    // These entries contain Search hubs only, including nested hubs removed
+    // with a canvas. Deleting a Board or its result hierarchy leaves history
+    // provisional and the saved source listings available for recombination.
+    try {
+      const finalized = window.electronAPI?.finalizeDisplayedJobHistory?.({ canvasFilePath, nodeId: discard.nodeId });
+      if (finalized) Promise.resolve(finalized).then(result => {
+        if (result?.success === false) onFailure?.(new Error(result.error || 'Job history finalization failed'), discard, result);
+      }).catch(error => onFailure?.(error, discard, null));
+    } catch (error) { onFailure?.(error, discard, null); }
     const discardSnapshot = window.electronAPI?.discardJobAnalysisSnapshot;
     if (!discardSnapshot) {
       onFailure?.(new Error('Saved Job Search recovery cleanup is unavailable'), discard, null);

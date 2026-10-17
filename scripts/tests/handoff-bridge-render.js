@@ -1409,7 +1409,7 @@ export default [
             assert(text(window).includes('Waiting for chat 1'), 'first-call headline');
             const list = window.document.querySelector('ol[aria-label="Application steps"]');
             assert(list && list.querySelectorAll('li').length === 4, 'the stepper is an ordered list of four steps');
-            assert(!/Last heard|\bfor \d/.test(text(window)), 'a chat that never called has no timer line');
+            assert(!/Last heard|Elapsed:/.test(text(window)), 'a chat that never called has no timer line');
             assert(timers.size === 0, `no timer anchors means no interval while mounted: ${timers.size}`);
             const current = [...list.querySelectorAll('li[aria-current="step"]')];
             assert(current.length === 1 && current[0].textContent.includes('Evidence plan') && current[0].textContent.includes('current step'), 'exactly one step is aria-current, and its state is also text');
@@ -1598,16 +1598,16 @@ export default [
           async check({ window, timers, act }) {
             const region = live(window);
             assert(region && region.getAttribute('aria-live') === 'polite' && region.textContent.includes('ChatGPT is working on: Résumé') && region.textContent.includes('In progress'), 'the headline and its tone word sit in the polite live region');
-            assert([...window.document.querySelectorAll('[role="status"], [aria-live]')].every(item => !item.textContent.includes('Last heard') && !/\bfor \d/.test(item.textContent)), 'the ticking timer lines must stay outside every live region');
+            assert([...window.document.querySelectorAll('[role="status"], [aria-live]')].every(item => !item.textContent.includes('Last heard') && !item.textContent.includes('Elapsed:')), 'the ticking timer lines must stay outside every live region');
             const states = [...window.document.querySelectorAll('ol[aria-label="Application steps"] li')].map(item => item.textContent);
             assert(states[0].includes('done') && states[1].includes('current step') && states[2].includes('not started yet'), `step states must be text, not colour alone: ${states.join(' | ')}`);
-            assert(/for 2 min/.test(text(window)) && /Last heard from ChatGPT (just now|\d+s ago)/.test(text(window)), `elapsed and last-heard lines: ${text(window)}`);
+            assert(/Elapsed: 2 min/.test(text(window)) && !/Last heard from ChatGPT/.test(text(window)), `normal work has one labeled clock: ${text(window)}`);
             assert(!window.document.querySelector('button'), 'a job ChatGPT is writing needs no button');
             assert(timers.size === 1, `exactly one interval while mounted with timer lines: ${timers.size}`);
             const realNow = Date.now; Date.now = () => realNow() + 90000;
             try {
               await act(async () => { await new Promise(resolve => setTimeout(resolve, 1100)); });
-              assert(/for 3 min/.test(text(window)) && /Last heard from ChatGPT 1 min ago/.test(text(window)), `the timer lines must tick with the clock: ${text(window)}`);
+              assert(/Elapsed: 3 min/.test(text(window)) && !/Last heard from ChatGPT/.test(text(window)), `the single timer must tick with the clock: ${text(window)}`);
             } finally { Date.now = realNow; }
           },
         });
@@ -1668,7 +1668,7 @@ export default [
           status: view({ servedAt: clock - 9 * 60000, stalled: true, stalledSince: clock - 9 * 60000 }, { outstanding: { servedAt: clock - 9 * 60000, kind: 'application', stage: 'resume', stalled: true, stalledSince: clock - 9 * 60000, stallsLastHour: 1 }, lastCallAt: clock - 20000 }),
           async check({ window, calls }) {
             assert(live(window).textContent.includes('ChatGPT is working on: Résumé') && !live(window).textContent.includes('Needs attention'), 'a slow answer stays working even with an old stalled marker');
-            assert(/for 9 min/.test(text(window)), `and its timer line agrees: ${text(window)}`);
+            assert(/Elapsed: 9 min/.test(text(window)), `and its timer line agrees: ${text(window)}`);
             assert(!button(window, 'Prepare worker plan') && calls.length === 0, 'age-only markers never offer or invoke a replacement action');
           },
         });
@@ -1686,8 +1686,8 @@ export default [
         await scenario('needs_user', {
           status: view({ phase: 'needs_user', reason: 'write_failed' }, {}),
           async check({ window, timers }) {
-            assert(timers.size === 1 && /for 10 min/.test(text(window)) && !text(window).includes('Last heard'), `a since-only view ticks one interval: ${timers.size} ${text(window)}`);
-            assert(live(window).textContent.includes('Problem') && live(window).textContent.includes('This job needs you') && live(window).textContent.includes('The app could not save this answer.'), 'needs_user names the problem in text');
+            assert(timers.size === 1 && /Elapsed: 10 min/.test(text(window)) && !text(window).includes('Last heard'), `a since-only view ticks one interval: ${timers.size} ${text(window)}`);
+            assert(live(window).textContent.includes('Problem') && live(window).textContent.includes('This job needs you') && live(window).textContent.includes('The app could not process the worker’s answer'), 'needs_user names the problem in text');
             assert(!window.document.querySelector('button'), 'needs_user offers no chat button');
             assert(window.document.querySelectorAll('li[aria-current="step"]').length === 1, 'the stopped step is still marked');
           },
@@ -1757,7 +1757,7 @@ export default [
           item: { jobId: JOB, stage: 'cover-letter', corrections: [] },
           async check({ window, timers }) {
             assert(live(window).textContent.includes('Queued for ChatGPT') && !live(window).textContent.includes('ChatGPT is working on'), `served-but-answered must read as queued: ${live(window).textContent}`);
-            assert(!/\bfor \d/.test(text(window)), 'and claims no elapsed "working" timer');
+            assert(!text(window).includes('Elapsed:'), 'and claims no elapsed "working" timer');
             assert(timers.size === 1 && /Last heard from ChatGPT/.test(text(window)), 'only the chat\'s last-heard line remains');
           },
         });
@@ -1765,7 +1765,7 @@ export default [
           status: view({ servedAt: clock - 60000 }, { jobsAssigned: 2, outstanding: { servedAt: clock - 20 * 60000, kind: 'application', stage: 'evidence-plan', stalled: true, stalledSince: clock - 15 * 60000, stallsLastHour: 1 } }),
           async check({ window }) {
             assert(live(window).textContent.includes('ChatGPT is working on: Résumé') && !live(window).textContent.includes('quiet'), `another lane's stall must not paint this job stalled: ${live(window).textContent}`);
-            assert(/for 1 min/.test(text(window)) && !/for 20 min/.test(text(window)), `the elapsed line is this job's own hand-over time: ${text(window)}`);
+            assert(/Elapsed: 1 min/.test(text(window)) && !/Elapsed: 20 min/.test(text(window)), `the elapsed line is this job's own hand-over time: ${text(window)}`);
           },
         });
 
@@ -1778,7 +1778,7 @@ export default [
               // Same root element type as the first render, so this is an update and not a remount.
               const React = bundle.module.React;
               await act(async () => { rootNode.render(React.createElement(React.StrictMode, null, React.createElement(bundle.module.ProgressProbe, { status: view({}, {}), item: { jobId: JOB, stage: 'resume', corrections: [] } }))); await Promise.resolve(); });
-              assert(/for 3 min/.test(text(window)), `the first frame after the lines appear must already use the current clock, not the mount-time one: ${text(window)}`);
+              assert(/Elapsed: 3 min/.test(text(window)), `the first frame after the lines appear must already use the current clock, not the mount-time one: ${text(window)}`);
               assert(timers.size === 1, 'the interval starts once there is a line to update');
             } finally { Date.now = realNow; }
           },

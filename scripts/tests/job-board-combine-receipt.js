@@ -12,6 +12,7 @@ import {
 import { terminalJobSearchOutcome } from '../../src/utils/jobBoardPausedSourceContinuation.js';
 import { filterDismissedBoardJobs, jobAndVariantKeys, recoverBoardDismissedKeys } from '../../src/utils/jobListingIdentity.js';
 import { planJobCardDeletionCleanup } from '../../src/utils/jobCardDeletionCleanup.js';
+import { discardDeletedJobAnalysisSnapshots } from '../../src/utils/canvasInteractions.js';
 
 function readNodeSource() {
   return fs.readFileSync(
@@ -63,6 +64,27 @@ const bareLegacySource = () => ({
 
 export default [
   {
+    name: 'history source deletion: only deleting a Job Search finalizes its provisional display receipts',
+    async run() {
+      const previous = Object.getOwnPropertyDescriptor(globalThis, 'window');
+      const calls = [];
+      Object.defineProperty(globalThis, 'window', { configurable: true, value: { electronAPI: {
+        finalizeDisplayedJobHistory: async args => { calls.push(args); return { success: true }; },
+        discardJobAnalysisSnapshot: async () => ({ success: true, ok: true }),
+      } } });
+      try {
+        discardDeletedJobAnalysisSnapshots([{ id: 'board', type: 'jobboard' }, { id: 'tree', type: 'jobgroup' }, { id: 'card', type: 'jobcard' }], '/tmp/synthetic-canvas.json');
+        assert.equal(calls.length, 0, 'board/tree/card deletion cannot finalize history');
+        discardDeletedJobAnalysisSnapshots([{ id: 'search', type: 'jobhub', data: {} }], '/tmp/synthetic-canvas.json');
+        assert.deepEqual(calls, [{ canvasFilePath: '/tmp/synthetic-canvas.json', nodeId: 'search' }], 'source deletion finalizes exactly its own owner');
+        await Promise.resolve();
+      } finally {
+        if (previous) Object.defineProperty(globalThis, 'window', previous);
+        else delete globalThis.window;
+      }
+    },
+  },
+  {
     name: 'Board recombine display replacement never records its old cards as dismissed',
     run: async () => {
       const board = { id: 'board', type: 'jobboard', data: { dismissedJobKeys: ['u:https://example.test/previously-dismissed'] } };
@@ -81,10 +103,10 @@ export default [
       assert(!isJobCardDisplayRemoval(card.id), 'successful deletion must release its exact intent');
       const keys = replacementUpdates[0].stats.dismissedJobKeys;
       assert(jobAndVariantKeys(card.data).every(key => !keys.includes(key)), 'replacing a scored card must not poison later combines');
-      assert(jobAndVariantKeys(ordinary.data).every(key => keys.includes(key)), 'an unrelated user dismissal must still be retained');
+      assert(keys.length === 0, 'view deletion must not create a persistent suppression list');
       assert(filterDismissedBoardJobs([card.data], keys).length === 1, 'a second Combine must retain the same listing');
       const realDismissal = planJobCardDeletionCleanup([card], [board], () => board).boardUpdates[0].stats.dismissedJobKeys;
-      assert(jobAndVariantKeys(card.data).every(key => realDismissal.includes(key)), 'a later real user deletion of the same ID must still dismiss it');
+      assert(realDismissal.length === 0, 'a later real user deletion also leaves the source listing available');
       const hook = fs.readFileSync(new URL('../../src/hooks/useCanvasOSDeletion.js', import.meta.url), 'utf8');
       assert(hook.includes('requestedDeletedNodes.filter(node => !isJobCardDisplayRemoval(node?.id))'), 'the actual deletion lifecycle must classify programmatic replacements before cancellation and dismissal bookkeeping');
       assert(readNodeSource().includes('displayReplacement: true,'), 'Board cleanup must explicitly identify a display replacement; ordinary hub deletion stays destructive');
@@ -107,7 +129,7 @@ export default [
     },
   },
   {
-    name: 'X dismissal survives a saved-results recombine, including posting variants',
+    name: 'view deletion preserves all posting variants for a saved-results recombine',
     run: () => {
       const first = { title: 'First', company: 'Example', url: 'https://example.test/first' };
       const second = { title: 'Second', company: 'Example', url: 'https://example.test/second',
@@ -116,10 +138,12 @@ export default [
       const card = { id: 'card', type: 'jobcard', data: { hubId: 'board', ...second } };
       const { boardUpdates } = planJobCardDeletionCleanup([card], [board], () => board);
       const keys = boardUpdates[0].stats.dismissedJobKeys;
-      assert(keys.length === 2 && jobAndVariantKeys(second).every(key => keys.includes(key)),
-        'deleting the card records both represented postings');
-      assert(JSON.stringify(filterDismissedBoardJobs([first, second], keys)) === JSON.stringify([first]),
-        'a later Combine does not recreate the X’d card');
+      assert(keys.length === 0, 'deleting the card does not suppress either represented posting');
+      assert(JSON.stringify(filterDismissedBoardJobs([first, second], keys)) === JSON.stringify([first, second]),
+        'a later Combine recreates the deleted card');
+      const boardSource = readNodeSource();
+      assert(!boardSource.includes('union = filterDismissedBoardJobs(') && boardSource.includes('const dismissedJobKeysAtCombine = [];'),
+        'Combine also ignores legacy persisted dismissal lists and does not infer suppression from missing cards');
       assert(recoverBoardDismissedKeys([first, second], [{ data: first }], false).length === 0,
         'old missing cards cannot be inferred when source inputs changed');
       assert(recoverBoardDismissedKeys([first, second], [{ data: first }], true).length === 2,

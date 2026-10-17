@@ -34,7 +34,8 @@ export function getHandoffBridgeStatus() { return snapshot; }
 export function subscribeHandoffBridgeStatus(listener) { if (typeof listener !== 'function') return () => {}; listeners.add(listener); return () => listeners.delete(listener); }
 export function applyHandoffBridgeStatus(raw) {
   const next = normalizeBridgeStatus(raw);
-  if (next === EMPTY_BRIDGE_STATUS || (hasSnapshot && next.seq <= snapshot.seq)) return snapshot;
+  if (next === EMPTY_BRIDGE_STATUS || (hasSnapshot && (next.seq < snapshot.seq
+    || (next.seq === snapshot.seq && next.uiRevision <= (snapshot.uiRevision || 0))))) return snapshot;
   snapshot = next;
   hasSnapshot = true;
   lastReplayIssue = null;
@@ -76,6 +77,7 @@ function isAuthoritativeStatus(raw) {
     };
     if (!isRecord(raw) || raw.v !== 1
       || !Number.isSafeInteger(raw.seq) || raw.seq < 0
+      || (raw.uiRevision !== undefined && (!Number.isSafeInteger(raw.uiRevision) || raw.uiRevision < 0))
       || !Number.isSafeInteger(raw.at) || raw.at < 0
       || !hasStatusShape(raw, EMPTY_BRIDGE_STATUS)) return false;
     const records = [

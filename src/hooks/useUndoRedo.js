@@ -3,6 +3,7 @@ import { DEFAULT_SHORTCUTS } from './useSettings';
 import { EventLogger } from '../utils/EventLogger';
 import { fingerprint } from '../utils/serializationUtils';
 import { TIMINGS, maxUndoHistory } from '../utils/timings';
+import { undoHistoryLimit } from '../utils/undoMemoryBudget';
 import {
   hasActiveExternalRunState,
   mergeNonRestorableEdgesFromLive,
@@ -34,6 +35,7 @@ export function useUndoRedo({ nodes, edges, drawings, setNodes, setEdges, setDra
   const isRestoringRef     = useRef(false);
   const debounceTimerRef   = useRef(null);
   const lastFingerprintRef = useRef(null);
+  const historyLimitRef = useRef(MAX_HISTORY);
 
   const [historyLens, setHistoryLens] = useState({ past: 0, future: 0 });
   const [isStateDirty, setIsStateDirty] = useState(false);
@@ -45,6 +47,12 @@ export function useUndoRedo({ nodes, edges, drawings, setNodes, setEdges, setDra
 
   const stateRef = useRef({ nodes, edges, drawings });
   useEffect(() => { stateRef.current = { nodes, edges, drawings }; }, [nodes, edges, drawings]);
+
+  const constrainHistory = useCallback(() => {
+    historyLimitRef.current = Math.min(historyLimitRef.current, undoHistoryLimit(stateRef.current, MAX_HISTORY));
+    pastRef.current = pastRef.current.slice(-historyLimitRef.current);
+    futureRef.current = futureRef.current.slice(-historyLimitRef.current);
+  }, []);
 
   const deepCloneState = useCallback(() => {
     const { nodes: n, edges: e, drawings: d } = stateRef.current;
@@ -64,12 +72,12 @@ export function useUndoRedo({ nodes, edges, drawings, setNodes, setEdges, setDra
 
   const takeSnapshot = useCallback(() => {
     if (isRestoringRef.current) return;
-    const snap = deepCloneState();
+    const live = stateRef.current;
     // A running Board/Search owns backend state and a mutable source-card
     // graph that an undo snapshot cannot restart atomically. Keep the last
     // stable snapshot until the transaction reaches a terminal state.
-    if (hasActiveExternalRunState(snap.nodes, { recursive: false })) return;
-    const fp   = fingerprint(snap);
+    if (hasActiveExternalRunState(live.nodes, { recursive: false })) return;
+    const fp = fingerprint(live);
     if (fp === lastFingerprintRef.current) {
       // Use ref to avoid closing over stale isStateDirty state value
       if (isStateDirtyRef.current) {
@@ -78,14 +86,19 @@ export function useUndoRedo({ nodes, edges, drawings, setNodes, setEdges, setDra
       }
       return;
     }
+    // Trim before allocating the next clone. The cap never grows during a
+    // history session, so older, larger entries remain covered after deletion.
+    constrainHistory();
+    pastRef.current = pastRef.current.slice(-(historyLimitRef.current - 1));
+    futureRef.current = [];
+    const snap = deepCloneState();
     lastFingerprintRef.current = fp;
-
-    pastRef.current   = [...pastRef.current.slice(-(MAX_HISTORY - 1)), snap];
+    pastRef.current = [...pastRef.current, snap];
     futureRef.current = []; // any new action clears redo
     syncHistoryLen();
     isStateDirtyRef.current = false;
     setIsStateDirty(false); // State is freshly saved, no longer dirty
-  }, [deepCloneState, syncHistoryLen]); // isStateDirty intentionally omitted — read via ref
+  }, [deepCloneState, syncHistoryLen, constrainHistory]); // isStateDirty intentionally omitted — read via ref
 
   // ── KEY FIX ─────────────────────────────────────────────────────────────────
   // When state changes while we have redo entries AND we're not restoring,
@@ -136,6 +149,7 @@ export function useUndoRedo({ nodes, edges, drawings, setNodes, setEdges, setDra
   const undo = useCallback(() => {
     if (isAnimatingRef?.current) return;
     if (hasActiveExternalRunState(stateRef.current.nodes, { recursive: false })) return;
+    constrainHistory();
     const past = pastRef.current;
     if (past.length === 0) return;
 
@@ -207,11 +221,12 @@ export function useUndoRedo({ nodes, edges, drawings, setNodes, setEdges, setDra
     isStateDirtyRef.current = false;
     setIsStateDirty(false);
     requestAnimationFrame(() => { isRestoringRef.current = false; });
-  }, [deepCloneState, setNodes, setEdges, setDrawings, syncHistoryLen, isAnimatingRef]);
+  }, [deepCloneState, setNodes, setEdges, setDrawings, syncHistoryLen, isAnimatingRef, constrainHistory]);
 
   const redo = useCallback(() => {
     if (isAnimatingRef?.current) return;
     if (hasActiveExternalRunState(stateRef.current.nodes, { recursive: false })) return;
+    constrainHistory();
     let future = futureRef.current;
     while (
       future.length > 0
@@ -250,7 +265,8 @@ export function useUndoRedo({ nodes, edges, drawings, setNodes, setEdges, setDra
     const pastNow = pastRef.current;
     const topIsLive = pastNow.length > 0 && fingerprint(pastNow[pastNow.length - 1]) === fingerprint(currentState);
     const committed = { ...next, nodes: restoredNodes, edges: restoredEdges };
-    pastRef.current = [...(topIsLive ? pastNow : [...pastNow, currentState]), committed];
+    pastRef.current = [...(topIsLive ? pastNow : [...pastNow, currentState]), committed]
+      .slice(-historyLimitRef.current);
     stateRef.current = committed; // see undo(): publish the committed state for chained presses
     setNodes(restoredNodes);
     setEdges(restoredEdges);
@@ -264,7 +280,7 @@ export function useUndoRedo({ nodes, edges, drawings, setNodes, setEdges, setDra
     isStateDirtyRef.current = false;
     setIsStateDirty(false);
     requestAnimationFrame(() => { isRestoringRef.current = false; });
-  }, [deepCloneState, setNodes, setEdges, setDrawings, syncHistoryLen, isAnimatingRef]);
+  }, [deepCloneState, setNodes, setEdges, setDrawings, syncHistoryLen, isAnimatingRef, constrainHistory]);
 
   const modalCount = useModalStackCount();
 
@@ -310,6 +326,7 @@ export function useUndoRedo({ nodes, edges, drawings, setNodes, setEdges, setDra
     pastRef.current   = [];
     futureRef.current = [];
     lastFingerprintRef.current = null;
+    historyLimitRef.current = MAX_HISTORY;
     syncHistoryLen();
     isStateDirtyRef.current = false;
     setIsStateDirty(false);

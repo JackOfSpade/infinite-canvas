@@ -30,7 +30,6 @@ import { getSearchLocation, hasRequiredLocations, locationValidationMessage } fr
 import { exactInterruptedRecoveryAdmission } from '../utils/jobBoardRecoveryAdmission';
 import { cancelJobBoardChildrenSequentially, promoteJobBoardPausedSourceResolution, runJobBoardChildFanout } from '../utils/jobBoardChildFanout';
 import { boardHistoryAuthorityAvailable, classifyJobBoardSourceAdmission, combineSourceRunEntry, completedJobSearchOutcomeMatches, describeReceiptMismatch, jobSearchOutcomeReceiptMatches, partitionJobBoardSourceAdmissions } from '../utils/jobBoardSourceAdmission';
-import { filterDismissedBoardJobs, recoverBoardDismissedKeys } from '../utils/jobListingIdentity.js';
 import { getRunnableJobSourceIds, normalizeEnabledJobSourceIds } from '../utils/jobPlatformSelection';
 import { normalizeJobCollectionLimits } from '../utils/jobCollectionLimits';
 import { getJobAuthPreflightSourceIds } from '../utils/jobAuthPreflight';
@@ -2437,6 +2436,7 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
       scoreThreshold: 0, scoreRangeMin: 0, scoreRangeMax: 100,
       sourceFilter: null, jobTaxonomy: null, finalSourceCounts: {}, mergeStats: null,
       combineSignature: null, combineSourceRuns: null, stale: false, staleReason: null,
+      dismissedJobKeys: [],
       clearProvenance,
       manualAiResume: null,
       boardScanResume: null,
@@ -2960,15 +2960,9 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
       );
       const protectedBoardCards = existingBoardCards.filter(isProtectedJobCard);
       const candidateCountBeforeDismissal = union.length;
-      const previousBoardData = getNode(id)?.data || {};
-      const priorInputsExactlyMatch = previousBoardData.hubState === 'done'
-        && previousBoardData.combineSignature === sigAtCombine
-        && (existingBoardCards.length > 0 || previousBoardData.resultCount === 0);
-      const dismissedJobKeysAtCombine = [...new Set([
-        ...(Array.isArray(previousBoardData.dismissedJobKeys) ? previousBoardData.dismissedJobKeys : []),
-        ...recoverBoardDismissedKeys(union, existingBoardCards, priorInputsExactlyMatch),
-      ])];
-      union = filterDismissedBoardJobs(union, dismissedJobKeysAtCombine);
+      // Card/tree deletion changes the view only. Every Combine rebuilds the
+      // complete saved scored source union, including legacy dismissed rows.
+      const dismissedJobKeysAtCombine = [];
       let locationStats = {
         candidateGroups: 0, postingsCollapsed: 0, protectedRetained: 0,
         representedPostings: 0, alreadyConsolidated: 0,

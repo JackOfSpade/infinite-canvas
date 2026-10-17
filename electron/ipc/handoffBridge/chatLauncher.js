@@ -23,13 +23,24 @@ function run(argv) {
     let t = null;
     if (wid !== '0') {
       try {
-        w = chrome.windows.byId(Number(wid));
-        w.id();
-        w.tabs.push(chrome.Tab({ url: targetUrl }));
-        t = w.tabs[w.tabs.length - 1];
-      } catch (error) { w = null; }
+        const candidate = chrome.windows.byId(Number(wid));
+        candidate.id();
+        if (candidate.mode() === 'normal') w = candidate;
+      } catch (error) { /* the previous worker window may have closed */ }
     }
     if (!w) {
+      // Reuse the person's frontmost regular window. Incognito windows do
+      // not share its ChatGPT login and must not become worker containers.
+      for (const candidate of chrome.windows()) {
+        if (candidate.mode() === 'normal') { w = candidate; break; }
+      }
+    }
+    if (w) {
+      const previousTabIndex = w.activeTabIndex();
+      w.tabs.push(chrome.Tab({ url: targetUrl }));
+      t = w.tabs[w.tabs.length - 1];
+      w.activeTabIndex = previousTabIndex;
+    } else {
       w = chrome.Window().make();
       t = w.activeTab;
       t.url = targetUrl;
@@ -64,10 +75,14 @@ const CLOSE = `function run(argv) {
 const FOCUS = `function run(argv) {
   const chrome = Application(Number(argv[0]));
   const w = chrome.windows.byId(Number(argv[1]));
-  const target = Number(argv[2]);
+  // Chrome's scripting dictionary declares IDs as text. Older builds may
+  // return numbers; compare canonical text rather than rejecting a live tab.
+  const target = String(argv[2]);
   const tabs = w.tabs();
-  const index = tabs.findIndex(tab => tab.id() === target);
+  const index = tabs.findIndex(tab => String(tab.id()) === target);
   if (index < 0) return 'missing';
+  w.minimized = false;
+  w.visible = true;
   w.activeTabIndex = index + 1;
   w.index = 1;
   chrome.activate();
@@ -136,6 +151,7 @@ const INSERT = starter => `(() => {
 const OPEN_MODEL = `(() => {
   const b = document.querySelector('form button[aria-label="Select ChatGPT model"]');
   if (!b) return 'missing';
+  if (b.getAttribute('aria-expanded') === 'true') return 'opened';
   for (const type of ['pointerdown','mousedown','pointerup','mouseup','click']) b.dispatchEvent(new MouseEvent(type, {bubbles:true, cancelable:true}));
   return 'opened';
 })()`;
@@ -168,11 +184,6 @@ const READ_BLOCKER = `(() => {
   const alerts = [...document.querySelectorAll('[role="alert"],[role="status"]')]
     .filter(visible).some(e => /limit reached|limit exceeded|you.ve reached.{0,60}limit|(?:usage|daily|weekly|rate|pro)\\s+limit\\s+(?:reached|exceeded|used up)|(?:no|0%)\\s+usage remaining|pro effort unavailable/i.test((e.innerText || '').slice(0,500)));
   return JSON.stringify({blocked: dialogs.length > 0 || alerts});
-})()`;
-const CLOSE_BLOCKER = `(() => {
-  const dialog = [...document.querySelectorAll('[role="dialog"]')].at(-1);
-  if (dialog) dialog.dispatchEvent(new KeyboardEvent('keydown', {key:'Escape', code:'Escape', bubbles:true}));
-  return 'closed';
 })()`;
 const SELECT_TOP_MODEL = `(() => {
   const menu = document.querySelector('[role="menu"]');
@@ -276,8 +287,6 @@ export function createChatLauncher({ run = runUserChromeScript, delay = sleep, o
   const tabs = new Map();
   const chatIds = new Map();
   const usedIds = new Set();
-  let proUnavailableDay = null;
-  const localDay = () => new Date(now()).toDateString();
   const state = (owner, stage, reason = null) => { try { onState(owner, stage, reason); } catch { /* status is optional */ } };
   const safeRun = async (script, args) => {
     // Opening a tab can take a while when Chrome is busy or just restarted.
@@ -331,22 +340,26 @@ export function createChatLauncher({ run = runUserChromeScript, delay = sleep, o
     return null;
   };
   const readMenu = async tab => {
-    const raw = await poll(() => js(tab, READ_MODEL), value => value.includes('"topModel"'), 10_000);
+    const raw = await poll(() => js(tab, READ_MODEL), value => {
+      try {
+        const menu = JSON.parse(value);
+        return !!menu.topModel && (!menu.topSelected || menu.sliderReady === true);
+      } catch { return false; }
+    }, 10_000);
     if (!raw) return null;
     try { return JSON.parse(raw); } catch { return null; }
   };
-  const configureModelAndEffort = async (tab, application) => {
+  const configureModelAndEffort = async tab => {
     const opened = await poll(() => js(tab, OPEN_MODEL), value => value === 'opened', 10_000);
     if (!opened) return { ok: false, reason: 'model_menu_missing' };
     let menu = await readMenu(tab);
-    if (!menu?.topModel || !menu.sliderReady) {
+    if (!menu?.topModel || (menu.topSelected && !menu.sliderReady)) {
       // ChatGPT can replace the picker while the editor settles after a long
       // insertion. Reopen once after the first bounded read has failed.
       if (await js(tab, MENU_OPEN) !== 'true') await js(tab, OPEN_MODEL);
       menu = await readMenu(tab);
     }
-    if (!menu?.topModel || !menu.sliderReady || !Number.isInteger(menu.min)
-      || !Number.isInteger(menu.max) || menu.max <= menu.min || !Number.isInteger(menu.now)) {
+    if (!menu?.topModel) {
       return { ok: false, reason: 'model_menu_missing' };
     }
     if (!menu.topSelected) {
@@ -356,55 +369,28 @@ export function createChatLauncher({ run = runUserChromeScript, delay = sleep, o
       menu = await readMenu(tab);
       if (!menu?.topSelected) return { ok: false, reason: 'model_selection_failed' };
     }
+    if (!menu.sliderReady || !Number.isInteger(menu.min) || !Number.isInteger(menu.max)
+      || menu.max <= menu.min || !Number.isInteger(menu.now)) return { ok: false, reason: 'effort_unavailable' };
     // The observed five-position control reserves its rightmost position for
     // Pro effort. A shorter control has no separate Pro position to skip.
-    let target = application && proUnavailableDay === localDay() ? menu.max - 1
-      : application || menu.max - menu.min + 1 < 5 ? menu.max : menu.max - 1;
+    const target = menu.max - menu.min + 1 < 5 ? menu.max : menu.max - 1;
     if (target < menu.min) return { ok: false, reason: 'effort_unavailable' };
-    let fallback = application && target < menu.max;
     for (let step = 0; step < 8 && menu.now !== target; step += 1) {
       const before = menu.now;
       if (await js(tab, MOVE_EFFORT(target > before ? 'right' : 'left')) !== 'moved') return { ok: false, reason: 'effort_unavailable' };
-      const next = await poll(() => readMenu(tab), value => value?.now !== before, 1500);
-      if (!next) {
-        if (application && target === menu.max) { target = menu.max - 1; fallback = true; proUnavailableDay = localDay(); continue; }
-        return { ok: false, reason: 'effort_unavailable' };
-      }
-      menu = next;
+      menu = await poll(() => readMenu(tab), value => value?.now !== before, 1500);
+      if (!menu) return { ok: false, reason: 'effort_unavailable' };
     }
     await delay(150);
     menu = await readMenu(tab);
-    if (application && target === menu?.max) {
-      let blocked = menu.locked === true;
-      try { blocked ||= JSON.parse(await js(tab, READ_BLOCKER)).blocked === true; } catch { blocked = true; }
-      if (blocked) {
-        await js(tab, CLOSE_BLOCKER);
-        const dismissed = await poll(async () => {
-          try { return JSON.parse(await js(tab, READ_BLOCKER)).blocked !== true; } catch { return false; }
-        }, Boolean, 3000);
-        if (!dismissed) return { ok: false, reason: 'effort_unavailable' };
-        proUnavailableDay = localDay();
-        fallback = true;
-        target = menu.max - 1;
-        if (await js(tab, MENU_OPEN) !== 'true') await js(tab, OPEN_MODEL);
-        menu = await readMenu(tab);
-        if (!menu?.sliderReady || target < menu.min) return { ok: false, reason: 'effort_unavailable' };
-        for (let step = 0; step < 8 && menu.now !== target; step += 1) {
-          const before = menu.now;
-          if (await js(tab, MOVE_EFFORT('left')) !== 'moved') return { ok: false, reason: 'effort_unavailable' };
-          menu = await poll(() => readMenu(tab), value => value?.now !== before, 1500);
-          if (!menu) return { ok: false, reason: 'effort_unavailable' };
-        }
-      }
-    }
     if (!menu || menu.now !== target || !menu.topSelected || !menu.label) return { ok: false, reason: 'effort_unavailable' };
     try { if (JSON.parse(await js(tab, READ_BLOCKER)).blocked) return { ok: false, reason: 'effort_unavailable' }; }
     catch { return { ok: false, reason: 'effort_unavailable' }; }
     if (await js(tab, CLOSE_MENU) !== 'closed') return { ok: false, reason: 'model_menu_missing' };
     if (!await poll(() => js(tab, MENU_CLOSED), value => value === 'true', 3000)) return { ok: false, reason: 'model_menu_missing' };
-    return { ok: true, observed: { model: menu.model, effort: menu.label, effortPosition: menu.now, effortMax: menu.max, fallback } };
+    return { ok: true, observed: { model: menu.model, effort: menu.label, effortPosition: menu.now, effortMax: menu.max, fallback: false } };
   };
-  const launch = async ({ owner, starter, continueChat = false, application = false, attachments = [], attachmentHandoffCode = null } = {}) => {
+  const launch = async ({ owner, starter, continueChat = false, attachments = [], attachmentHandoffCode = null } = {}) => {
     if (!owner || typeof starter !== 'string' || !starter) return { ok: false, reason: 'invalid_launch' };
     if (!Array.isArray(attachments) || (attachments.length > 0 && !HANDOFF_CODE.test(attachmentHandoffCode || ''))
       || (attachments.length === 0 && attachmentHandoffCode != null)) return { ok: false, reason: 'attachment_invalid' };
@@ -442,7 +428,7 @@ export function createChatLauncher({ run = runUserChromeScript, delay = sleep, o
         if (continueChat && ready.empty !== true) return { ok: false, reason: 'editor_not_empty' };
         state(owner, 'checking');
         if (await js(tab, INSERT(message)) !== 'match') return { ok: false, reason: 'insert_mismatch' };
-        const configured = await configureModelAndEffort(tab, application);
+        const configured = await configureModelAndEffort(tab);
         if (!configured.ok) return configured;
         const observed = configured.observed;
         if (await js(tab, OPEN_PROFILE) !== 'opened') return { ok: false, reason: 'account_unknown' };
@@ -459,6 +445,7 @@ export function createChatLauncher({ run = runUserChromeScript, delay = sleep, o
         // Settings were selected and read back before the click.
         if (await js(tab, SEND) !== 'clicked') return { ok: false, reason: 'send_unavailable' };
         sendAttempted = true;
+        tab.sendAttempted = true;
         const landed = await poll(async () => {
           const url = await safeRun(URL, [tab.windowId, tab.tabId]);
           const id = url.match(CHAT_ID)?.[1];
@@ -499,15 +486,43 @@ export function createChatLauncher({ run = runUserChromeScript, delay = sleep, o
     await sequence;
     return Promise.all([...new Set([...tabs.keys(), ...chatIds.keys()])].map(close));
   };
-  const focus = async owner => {
-    const tab = tabs.get(owner);
-    if (!tab) return false;
+  const reveal = async owner => {
+    let tab = tabs.get(owner);
+    const recordedId = chatIds.get(owner) || tab?.chatId;
+    if (!tab && !recordedId) return { ok: false, reason: 'tab_not_owned' };
+    let reopened = false;
     try {
-      const currentUrl = await safeRun(URL, [tab.windowId, tab.tabId]);
-      if (!tab.chatId || currentUrl.match(CHAT_ID)?.[1] !== tab.chatId) return false;
-      return await safeRun(FOCUS, [tab.windowId, tab.tabId]) === 'focused';
-    } catch { return false; }
+      let matches = false;
+      if (tab) {
+        try {
+          const currentUrl = await safeRun(URL, [tab.windowId, tab.tabId]);
+          matches = recordedId ? currentUrl.match(CHAT_ID)?.[1] === recordedId
+            : currentUrl === CHAT_URL || (tab.sendAttempted === true && CHAT_ID.test(currentUrl));
+        } catch { /* Chrome or the owned tab may have closed */ }
+      }
+      if (!matches) {
+        // A person's explicit Open press can reopen this recorded conversation
+        // without sending another starter or changing an unrelated tab.
+        if (!recordedId) {
+          tabs.delete(owner);
+          return { ok: false, reason: 'tab_missing' };
+        }
+        const ids = (await safeRun(OPEN, [windowId || '0', `${CHAT_URL}c/${recordedId}`])).split(':');
+        if (ids.length !== 2 || !ids.every(id => /^\d+$/.test(id))) return { ok: false, reason: 'tab_open_failed' };
+        reopened = true;
+        tab = { ...tab, windowId: ids[0], tabId: ids[1], chatId: recordedId };
+        windowId = ids[0];
+        tabs.set(owner, tab);
+        if (!await poll(async () => (await safeRun(URL, [tab.windowId, tab.tabId])).match(CHAT_ID)?.[1] === recordedId, Boolean, 10_000)) return { ok: false, reason: 'chat_changed' };
+      }
+      const focused = await safeRun(FOCUS, [tab.windowId, tab.tabId]);
+      return focused === 'focused' ? { ok: true, outcome: reopened ? 'reopened' : 'focused' }
+        : { ok: false, reason: focused === 'missing' ? 'tab_missing' : 'activation_failed' };
+    } catch (error) {
+      return { ok: false, reason: ['chrome_timeout', 'chrome_unavailable', 'apple_events_js_off'].includes(error?.code) ? error.code : 'activation_failed' };
+    }
   };
+  const focus = async owner => (await reveal(owner)).ok === true;
   const diagnose = async (owner, pluginName = 'Infinite Canvas') => {
     const tab = tabs.get(owner);
     if (!tab) return { reason: 'tab_not_owned', assistantPresent: false };
@@ -525,8 +540,7 @@ export function createChatLauncher({ run = runUserChromeScript, delay = sleep, o
     try { return await js(tab, "'ready'") === 'ready'; } catch { return false; }
   };
   return Object.freeze({ launch, close, closeAll, rekey, owns: owner => tabs.has(owner) || chatIds.has(owner),
-    markProUnavailable: () => { proUnavailableDay = localDay(); },
-    focus, diagnose, javascriptReady, accountName: owner => tabs.get(owner)?.accountName || '',
+    focus, reveal, diagnose, javascriptReady, accountName: owner => tabs.get(owner)?.accountName || '',
     observation: owner => tabs.get(owner)?.observed || null,
     scripts: Object.freeze({ OPEN, EXEC, URL, CLOSE, FOCUS }) });
 }

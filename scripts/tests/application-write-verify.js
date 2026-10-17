@@ -36,6 +36,36 @@ const domains = [
 const JOB_ID = '11111111-1111-4111-8111-111111111111';
 
 export default [
+  { name: 'v2 rejection diagnostics name each fixed envelope field without retaining its value', run() {
+    const names = { protocol: 'protocol', jobId: 'job-id', stage: 'stage', handoffCode: 'code', baseHashes: 'base-hashes' };
+    for (const [field, suffix] of Object.entries(names)) {
+      const diagnostic = pasteRejectionCheckIds([`Application v2 response must echo the current ${field} exactly.`]);
+      assert.deepEqual(diagnostic.checkIds, [`handoff-echo-${suffix}`]);
+      assert.equal(diagnostic.uncodedErrors, 0);
+    }
+    assert.deepEqual(pasteRejectionCheckIds(['Application v2 response must echo the current private-field exactly.']).checkIds, ['schema-invalid']);
+  } },
+  {
+    name: 'v2 approved hand preserves standalone achievements alongside employer evidence',
+    run() {
+      for (const [domain] of domains) {
+        for (const roles of [[], [{ id: 'employer' }]]) {
+          const profile = { roles, achievements: [{ id: 'independent' }, { id: 'also-independent', roleId: null }], projects: [] };
+          const catalog = profile.achievements.flatMap(unit => [1, 2].map(index => ({
+            id: `host.career.achievement.${unit.id}.${index}`, quote: `${domain} independent evidence ${index}`,
+            cleanQuote: `${domain} approved independent evidence ${index}`,
+          })));
+          const hand = fullApprovedHand(profile, catalog);
+          for (const row of catalog) {
+            assert.equal(hand.split(`[${row.id}]`).length - 1, 1);
+            assert.ok(hand.includes(row.cleanQuote));
+          }
+          assert.ok(hand.includes('## Standalone achievements'));
+          assert.throws(() => fullApprovedHand(profile, [...catalog, { id: 'host.career.achievement.missing.1', quote: 'unknown' }]), /omitted/);
+        }
+      }
+    },
+  },
   {
     name: 'v2 archives each handoff and accepted candidate outside the removable job with a hard cap',
     async run() {

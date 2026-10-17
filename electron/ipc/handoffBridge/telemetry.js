@@ -4,6 +4,52 @@ import {
   MAX_HANDOFF_CONCURRENCY,
 } from '../../../src/utils/handoffScheduler.js';
 
+import { LAUNCH_REASONS } from '../../../src/utils/handoffBridgeStatus.js';
+
+// Kept independently of lanes: discarding a stuck bundle must not erase why
+// its chat failed to start. No URLs, page text, account names or capabilities.
+let launchDiagnostics = [];
+const launchReasons = new Set(LAUNCH_REASONS);
+export function clearBridgeLaunchDiagnostic() { launchDiagnostics = []; }
+export function recordBridgeLaunchDiagnostic({ telemetry = false, at, workerOrdinal, stage, reason, attempt } = {}) {
+  if (telemetry !== true || !['failed', 'retrying', 'presented'].includes(stage)
+    || !Number.isSafeInteger(workerOrdinal) || workerOrdinal < 1 || workerOrdinal > MAX_HANDOFF_CONCURRENCY
+    || !Number.isFinite(at) || at < 0 || at > 8_640_000_000_000_000) return;
+  launchDiagnostics.push(Object.freeze({ at: Math.round(at), workerOrdinal, stage,
+    reason: launchReasons.has(reason) ? reason : null,
+    attempt: Number.isSafeInteger(attempt) && attempt >= 0 ? Math.min(999, attempt) : 0 }));
+  launchDiagnostics = launchDiagnostics.slice(-20);
+}
+export function getBridgeLaunchDiagnostic() { return [...launchDiagnostics]; }
+
+const CHAT_OPEN_REASONS = new Set(['worker_ended', 'tab_not_owned', 'tab_missing', 'tab_open_failed', 'chat_changed', 'activation_failed', 'chrome_timeout', 'chrome_unavailable', 'apple_events_js_off']);
+let chatOpenDiagnostics = [];
+export function clearBridgeChatOpenDiagnostic() { chatOpenDiagnostics = []; }
+export function recordBridgeChatOpenDiagnostic({ telemetry = false, at, workerOrdinal, outcome, reason } = {}) {
+  if (telemetry !== true || !['focused', 'reopened', 'failed'].includes(outcome)
+    || !Number.isSafeInteger(workerOrdinal) || workerOrdinal < 1 || workerOrdinal > MAX_HANDOFF_CONCURRENCY
+    || !Number.isFinite(at) || at < 0 || at > 8_640_000_000_000_000) return;
+  chatOpenDiagnostics.push(Object.freeze({ at: Math.round(at), workerOrdinal, outcome,
+    reason: CHAT_OPEN_REASONS.has(reason) ? reason : null }));
+  chatOpenDiagnostics = chatOpenDiagnostics.slice(-20);
+}
+export function getBridgeChatOpenDiagnostic() { return [...chatOpenDiagnostics]; }
+
+let applicationSubmitFailures = [];
+export function clearApplicationSubmitFailures() { applicationSubmitFailures = []; }
+export function recordApplicationSubmitFailure({ telemetry = false, at = Date.now(), stage, error } = {}) {
+  if (telemetry !== true || !Number.isFinite(at) || at < 0 || at > 8_640_000_000_000_000) return;
+  const name = ['Error', 'TypeError', 'RangeError', 'ReferenceError', 'SyntaxError'].includes(error?.name) ? error.name : 'Error';
+  const code = ['LOCAL_AI_JOB_INTEGRITY', 'APPLICATION_V2_LIMIT', 'ENOENT', 'EACCES', 'EPERM', 'EIO', 'ENOSPC'].includes(error?.code) ? error.code : 'internal_error';
+  // Export only an app-owned module and numeric source position, never the
+  // stack, error message, local path, prompt, answer or candidate data.
+  const frame = /(?:localAiApplication\.js|local-application\.cjs):(\d+):(\d+)/u.exec(typeof error?.stack === 'string' ? error.stack : '');
+  applicationSubmitFailures.push(Object.freeze({ at: Math.round(at), stage: QUEUE_STAGES.has(stage) ? stage : null,
+    name, code, line: frame ? Number(frame[1]) : null, column: frame ? Number(frame[2]) : null }));
+  applicationSubmitFailures = applicationSubmitFailures.slice(-20);
+}
+export function getApplicationSubmitFailures() { return [...applicationSubmitFailures]; }
+
 // A single redacted failed-start receipt survives runtime disposal so a FULL
 // bug report can distinguish a rejected tunnel configuration from a readiness
 // timeout. This module deliberately accepts and retains only closed values.
@@ -319,6 +365,7 @@ const QUEUE_PHASES = new Set(['unread', 'awaiting', 'host', 'needs_user', 'held'
 // never collapse to null in a bug report (the post-letter stages once did,
 // because this list was a hand-kept copy that missed them).
 export const APPLICATION_QUEUE_STAGES = Object.freeze([
+  'requirements', 'requirements-audit', 'requirements-adjudication', 'career-match',
   'evidence-plan', 'resume', 'cover-letter', 'requirement-disposition',
   'review',
   'write', 'convert', 'verify-correction', 'fit-correction', 'pick', 'fact-check', 'fact-correction', 'fact-recheck', 'write-verify-human-stop',

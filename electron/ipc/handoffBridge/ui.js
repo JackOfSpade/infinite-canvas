@@ -4,7 +4,7 @@ import { CONSTANTS } from './constants.js';
 import { buildContinueMessage, buildStarterMessage, buildWorkerStarterMessage } from './framing.js';
 import { sanitizeActivityItem } from './log.js';
 import { createUiRestartContext } from './restartContext.js';
-import { recordBridgeChatCopyResult } from './telemetry.js';
+import { recordBridgeChatCopyResult, recordBridgeLaunchDiagnostic, recordBridgeChatOpenDiagnostic } from './telemetry.js';
 import { createChatLauncher } from './chatLauncher.js';
 import { BRIDGE_ENABLED_ATTACHMENT_TASKS } from '../nonApiAi.js';
 import { RETRYABLE_LAUNCH_REASONS, TRANSIENT_LAUNCH_REASONS } from '../../../src/utils/handoffBridgeStatus.js';
@@ -54,7 +54,7 @@ const plain = value => value && typeof value === 'object' && !Array.isArray(valu
 // failures: an optimistic renderer reply would make a failed Disable, revoke,
 // or setup write indistinguishable from success.
 const acknowledged = (value, { allowTrue = false } = {}) => value?.success === true || value?.ok === true || (allowTrue && value === true);
-const IPC_CODES = new Set(['UNAVAILABLE', 'SENDER', 'BUSY', 'DECLINED', 'INVALID', 'NO_WINDOW', 'NOT_READY', 'TUNNEL_NOT_READY', 'TUNNEL_NOT_SERVING', 'NOT_LINKED', 'PAUSED', 'NO_CHAT', 'QUEUE_EMPTY', 'POOL_ACTIVE', 'CLIPBOARD_FAILED', 'LAUNCH_UNCONFIRMED', 'NOT_FOUND', 'UNKNOWN_JOB', 'LIMIT_REACHED', 'DISABLED', 'LINK_WOULD_BREAK', 'SESSION_STARTED', 'STARTER_COPIED', 'INTERNAL']);
+const IPC_CODES = new Set(['UNAVAILABLE', 'SENDER', 'BUSY', 'DECLINED', 'INVALID', 'NO_WINDOW', 'WORKER_CHAT_ENDED', 'WORKER_CHAT_UNAVAILABLE', 'WORKER_CHAT_OPEN_FAILED', 'NOT_READY', 'TUNNEL_NOT_READY', 'TUNNEL_NOT_SERVING', 'NOT_LINKED', 'PAUSED', 'NO_CHAT', 'QUEUE_EMPTY', 'POOL_ACTIVE', 'CLIPBOARD_FAILED', 'LAUNCH_UNCONFIRMED', 'NOT_FOUND', 'UNKNOWN_JOB', 'LIMIT_REACHED', 'DISABLED', 'LINK_WOULD_BREAK', 'SESSION_STARTED', 'STARTER_COPIED', 'INTERNAL']);
 const INTERNAL_CODES = Object.freeze({
   cancelled: 'DECLINED', declined: 'DECLINED', invalid: 'INVALID', invalid_arguments: 'INVALID',
   unknown_job: 'UNKNOWN_JOB', not_found: 'NOT_FOUND', lane_limit: 'LIMIT_REACHED',
@@ -160,6 +160,10 @@ function anomalyResumeDetails(status) {
  * fixed failure codes: no exception, renderer payload, path, or secret is
  * echoed to a renderer.
  */
+// Launch progress changes independently of controller.seq. Keep a separate
+// monotonic presentation revision across UI re-registration in this process.
+let uiStatusRevision = 0;
+
 export function registerHandoffBridgeUi({
   ipc = electronPkg.ipcMain,
   controller = {},
@@ -241,6 +245,11 @@ export function registerHandoffBridgeUi({
     if (prior?.stage === progress.stage && prior?.reason === progress.reason) return;
     try {
       const attempt = launchRetryCounts.get(owner) || 0;
+      recordBridgeLaunchDiagnostic({
+        telemetry: currentStatus()?.config?.telemetryInBugReports === true,
+        at: Number(now()), workerOrdinal: Number(owner.split(':')[2]),
+        stage: progress.stage, reason: progress.reason, attempt,
+      });
       recordLaunch({
         outcome: progress.stage,
         ...(typeof progress.reason === 'string' && progress.reason ? { reason: progress.reason.slice(0, 40) } : {}),
@@ -267,11 +276,15 @@ export function registerHandoffBridgeUi({
       || (snapshot?.queue?.jobs || []).some(job => ['awaiting', 'unread', 'host'].includes(job?.phase))
       || careerCompilePending(snapshot);
   };
-  const withLaunchProgress = snapshot => {
+  const withLaunchProgress = raw => {
+    const snapshot = { ...raw, uiRevision: ++uiStatusRevision };
     const pool = snapshot?.chat?.pool;
     if (!pool?.active || !Array.isArray(pool.workers)) return snapshot;
     return { ...snapshot, chat: { ...snapshot.chat, pool: { ...pool, workers: pool.workers.map(worker => ({
-      ...worker, launch: launchProgress.get(workerOwner(pool.generation, worker.ordinal)) || null,
+      ...worker, launch: launchProgress.has(workerOwner(pool.generation, worker.ordinal))
+        ? { ...launchProgress.get(workerOwner(pool.generation, worker.ordinal)),
+          canReveal: launcher.owns(workerOwner(pool.generation, worker.ordinal)) === true }
+        : null,
     })) } } };
   };
   const canvasWindows = () => {
@@ -366,7 +379,7 @@ export function registerHandoffBridgeUi({
     return worker.quietReason === 'answer_silent'
       && ['safety_block', 'delivery_timeout', 'conversation_unavailable'].includes(launchProgress.get(workerOwner(generation, worker.ordinal))?.reason);
   }
-  async function runWorkerLaunch({ generation, workerOrdinal, restart = false, failedLaunch = false, limitRetry = false } = {}) {
+  async function runWorkerLaunch({ generation, workerOrdinal, restart = false, failedLaunch = false } = {}) {
     const owner = workerOwner(generation, workerOrdinal);
     const snapshot = currentStatus();
     if (snapshot?.chat?.pool?.generation !== generation || snapshot.serving !== 'live' || autoLaunchPaused) return false;
@@ -420,13 +433,16 @@ export function registerHandoffBridgeUi({
         ? { attachments: attachment.attachments, attachmentHandoffCode: attachment.handoffCode } : {}),
     });
     if (!launched.ok) {
-      setLaunchProgress(owner, { stage: 'failed', reason: launched.reason || 'chrome_unavailable' });
-      if ((attachment?.status === 'ready' && launched.sendAttempted !== true)
+      // A Chrome error after Send is an unknown delivery result, not a safe
+      // pre-send retry. Preserve its chat/capability instead of sending twice.
+      const reason = launched.sendAttempted === true ? 'send_not_confirmed' : launched.reason || 'chrome_unavailable';
+      setLaunchProgress(owner, { stage: 'failed', reason });
+      if (launched.sendAttempted !== true && ((attachment?.status === 'ready')
         || ['tab_open_failed', 'editor_timeout', 'chrome_unavailable', 'chrome_timeout', 'apple_events_js_off',
-        'attachment_invalid', 'attachment_draft_present', 'attachment_upload_failed', 'attachment_upload_timeout'].includes(launched.reason)) {
+        'attachment_invalid', 'attachment_draft_present', 'attachment_upload_failed', 'attachment_upload_timeout'].includes(reason))) {
         await safeCall(controller, 'abandonWorkerStarter', { generation, workerOrdinal });
       }
-      if (launched.reason === 'apple_events_js_off') retryAfterChromePermission(owner, generation, workerOrdinal);
+      if (reason === 'apple_events_js_off') retryAfterChromePermission(owner, generation, workerOrdinal);
       publishStatus(currentStatus());
       return false;
     }
@@ -443,10 +459,6 @@ export function registerHandoffBridgeUi({
       await new Promise(resolve => setTimeout(resolve, launchDiagnosisIntervalMs));
       lastDiagnosis = (await launcher.diagnose?.(owner, snapshot?.config?.pluginName))?.reason || 'none';
       if (lastDiagnosis === 'usage_limit') {
-        if (application && !limitRetry) {
-          launcher.markProUnavailable?.();
-          return runWorkerLaunch({ generation, workerOrdinal, restart: true, failedLaunch: true, limitRetry: true });
-        }
         break;
       }
       if (['reconnect_required', 'approval_required', 'delivery_timeout', 'conversation_unavailable'].includes(lastDiagnosis)) break;
@@ -458,8 +470,8 @@ export function registerHandoffBridgeUi({
     // A safety refusal is specific to this chat. Let the engine's quiet
     // window trigger its normal fresh-context replacement for that worker.
     if (!['safety_block', 'delivery_timeout', 'conversation_unavailable'].includes(reason)) autoLaunchPaused = reason;
-    if (reason === 'plugin_missing' || reason === 'reconnect_required') {
-      try { notifyLaunchProblem(reason === 'plugin_missing' ? 'plugin-missing' : 'plugin-reconnect'); } catch { /* optional */ }
+    if (['plugin_missing', 'reconnect_required', 'approval_required'].includes(reason)) {
+      try { notifyLaunchProblem(reason === 'approval_required' ? 'approval-required' : reason === 'plugin_missing' ? 'plugin-missing' : 'plugin-reconnect'); } catch { /* optional */ }
     }
     publishStatus(currentStatus());
     return false;
@@ -630,8 +642,12 @@ export function registerHandoffBridgeUi({
       try { timers.clearTimeout?.(timer); } catch { /* optional */ }
       launchRetryTimers.delete(owner);
     }
-    for (const worker of pool.workers || []) if (worker.state === 'idle' || worker.lastOutcome === 'session_full' || worker.lastOutcome === 'session_ended') {
+    for (const worker of pool.workers || []) if (worker.state === 'idle'
+      || (worker.firstCallAt != null && ['session_full', 'session_ended'].includes(worker.lastOutcome))) {
       const owner = workerOwner(pool.generation, worker.ordinal);
+      // The ordinal is reused across replacement chats. Old terminal status
+      // must never close a tab currently being opened for its successor.
+      if (launchInFlight.has(owner)) continue;
       if (launchProgress.get(owner)?.reason === 'approval_required') setLaunchProgress(owner, { stage: 'presented', reason: null });
       if (launcher.owns(owner)) void launcher.close(owner);
     }
@@ -661,6 +677,42 @@ export function registerHandoffBridgeUi({
       });
     }
   }
+  function retryWorkerLaunch(generation, workerOrdinal) {
+    const pool = currentStatus()?.chat?.pool;
+    const owner = workerOwner(generation, workerOrdinal);
+    const reason = launchProgress.get(owner)?.reason;
+    if (!generation || !workerOrdinal || pool?.generation !== generation || launchInFlight.has(owner)
+      || !RETRYABLE_LAUNCH_REASONS.includes(reason)) return fixed('NOT_READY');
+    autoLaunchPaused = null;
+    launchInFlight.add(owner);
+    // A one-off failure reuses its unpresented starter. A connected chat with
+    // a plugin/limit failure requires the existing replacement procedure.
+    const transient = TRANSIENT_LAUNCHES.has(reason);
+    void queueWorkerLaunch(async () => {
+      try {
+        const livePool = currentStatus()?.chat?.pool;
+        const worker = livePool?.generation === generation
+          ? livePool.workers?.find(worker => worker.ordinal === workerOrdinal) : null;
+        if (!worker) return;
+        if (transient && (worker.firstCallAt != null || ['working', 'waiting', 'idle'].includes(worker.state))) {
+          // An explicit retry can wait behind another launch. A late bridge
+          // connection wins over the stale click, just as for timed retries.
+          setLaunchProgress(owner, { stage: 'presented', reason: null });
+          publishStatus(currentStatus());
+          return;
+        }
+        if (transient) {
+          try { await launcher.close(owner); } catch { /* tab already gone */ }
+          const timer = launchRetryTimers.get(owner);
+          if (timer) { try { timers.clearTimeout?.(timer); } catch { /* optional */ } launchRetryTimers.delete(owner); }
+        }
+        const launched = await runWorkerLaunch({ generation, workerOrdinal, restart: !transient, failedLaunch: true });
+        if (launched === true) launchRetryCounts.delete(owner);
+      } finally { launchInFlight.delete(owner); scheduleAutoLaunch(currentStatus()); }
+    });
+    return success({ started: true });
+  }
+
   const guard = (event, checkWindow = false) => {
     const sender = event?.sender;
     if (!isCanvasSender(sender)) return { code: 'SENDER', sender: null, window: null };
@@ -1039,39 +1091,53 @@ export function registerHandoffBridgeUi({
       if (!plain(payload) || Object.keys(payload).some(key => !['generation', 'workerOrdinal'].includes(key))) return fixed('INVALID');
       const generation = poolGeneration(payload.generation);
       const workerOrdinal = poolWorkerCount(payload.workerOrdinal);
-      const pool = currentStatus()?.chat?.pool;
-      if (!generation || !workerOrdinal || !pool?.active || pool.generation !== generation
-        || !pool.workers?.some(worker => worker.ordinal === workerOrdinal)) return fixed('NOT_READY');
-      const focused = await launcher.focus?.(workerOwner(generation, workerOrdinal));
-      return focused === true ? success() : fixed('NOT_READY');
+      const status = currentStatus();
+      const pool = status?.chat?.pool;
+      if (!generation || !workerOrdinal) return fixed('INVALID');
+      const record = result => recordBridgeChatOpenDiagnostic({ telemetry: status?.config?.telemetryInBugReports === true,
+        at: Number(now()), workerOrdinal, outcome: result.ok ? result.outcome : 'failed', reason: result.reason });
+      if (!pool?.active || pool.generation !== generation
+        || !pool.workers?.some(worker => worker.ordinal === workerOrdinal)) {
+        record({ ok: false, reason: 'worker_ended' });
+        return fixed('WORKER_CHAT_ENDED');
+      }
+      let result;
+      try {
+        result = typeof launcher.reveal === 'function'
+          ? await launcher.reveal(workerOwner(generation, workerOrdinal))
+          : { ok: await launcher.focus?.(workerOwner(generation, workerOrdinal)) === true, outcome: 'focused', reason: 'activation_failed' };
+      } catch { result = { ok: false, reason: 'activation_failed' }; }
+      record(result);
+      if (result.ok === true) return success();
+      if (!stillOwnsWindow(sender, window)) return fixed('NO_WINDOW');
+      const liveStatus = currentStatus();
+      const livePool = liveStatus?.chat?.pool;
+      const liveWorker = livePool?.active && livePool.generation === generation
+        ? livePool.workers?.find(worker => worker.ordinal === workerOrdinal) : null;
+      if (!liveWorker) return fixed('WORKER_CHAT_ENDED');
+      if (['tab_not_owned', 'tab_missing'].includes(result.reason) && !launcher.owns(workerOwner(generation, workerOrdinal))) {
+        if (['send_not_confirmed', 'bridge_not_presented'].includes(launchProgress.get(workerOwner(generation, workerOrdinal))?.reason)) {
+          publishStatus(currentStatus());
+          return fixed('LAUNCH_UNCONFIRMED');
+        }
+        if (!['available', 'ready'].includes(liveWorker.state) || liveWorker.firstCallAt != null) return fixed('WORKER_CHAT_UNAVAILABLE');
+        // Nothing was sent from an unstarted worker. An explicit Open press
+        // can start it safely, instead of sending the person around a missing
+        // tab/retry loop. Never replace a connected or unanswered worker here.
+        setLaunchProgress(workerOwner(generation, workerOrdinal), { stage: 'failed', reason: 'tab_not_owned' });
+        publishStatus(currentStatus());
+        if (liveStatus.serving === 'live' && liveStatus.autoLaunchChats === true) {
+          if (launchInFlight.has(workerOwner(generation, workerOrdinal))) return success({ started: true });
+          return retryWorkerLaunch(generation, workerOrdinal);
+        }
+      }
+      return fixed(['tab_not_owned', 'tab_missing'].includes(result.reason) ? 'WORKER_CHAT_UNAVAILABLE' : 'WORKER_CHAT_OPEN_FAILED');
     }),
     [IPC_CHANNELS.RETRY_WORKER_LAUNCH]: invoke(async ({ sender, window }, payload) => {
       if (!window || !stillOwnsWindow(sender, window)) return fixed('NO_WINDOW');
       const generation = poolGeneration(payload?.generation);
       const workerOrdinal = poolWorkerCount(payload?.workerOrdinal);
-      const pool = currentStatus()?.chat?.pool;
-      const owner = workerOwner(generation, workerOrdinal);
-      const reason = launchProgress.get(owner)?.reason;
-      if (!generation || !workerOrdinal || pool?.generation !== generation || launchInFlight.has(owner)
-        || !RETRYABLE_LAUNCH_REASONS.includes(reason)) return fixed('NOT_READY');
-      autoLaunchPaused = null;
-      launchInFlight.add(owner);
-      // A one-off failure never reached ChatGPT, so its unpresented starter
-      // is reused in a fresh tab. Plugin and limit failures did reach a chat,
-      // so they get a replacement starter.
-      const transient = TRANSIENT_LAUNCHES.has(reason);
-      void queueWorkerLaunch(async () => {
-        try {
-          if (transient) {
-            try { await launcher.close(owner); } catch { /* tab already gone */ }
-            const retryTimer = launchRetryTimers.get(owner);
-            if (retryTimer) { try { timers.clearTimeout?.(retryTimer); } catch { /* optional */ } launchRetryTimers.delete(owner); }
-          }
-          const launched = await runWorkerLaunch({ generation, workerOrdinal, restart: !transient, failedLaunch: true });
-          if (launched === true) launchRetryCounts.delete(owner);
-        } finally { launchInFlight.delete(owner); scheduleAutoLaunch(currentStatus()); }
-      });
-      return success({ started: true });
+      return retryWorkerLaunch(generation, workerOrdinal);
     }),
     [IPC_CHANNELS.GET_LAUNCH_ACCOUNT]: invoke(async ({ sender, window }, payload) => {
       if (!window || !stillOwnsWindow(sender, window)) return fixed('NO_WINDOW');

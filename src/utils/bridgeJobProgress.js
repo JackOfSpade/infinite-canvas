@@ -364,7 +364,7 @@ export function formatProgressDuration(ms) {
   return rest ? `${hours} h ${rest} min` : `${hours} h`;
 }
 
-/** The two timer lines for a view model, or null for each that has no anchor. */
+/** One elapsed clock during normal work; activity adds context only when overdue. */
 export function progressTimeLines(view, now) {
   const clock = time(now);
   const since = time(view?.since);
@@ -372,8 +372,10 @@ export function progressTimeLines(view, now) {
   const elapsed = clock !== null && since !== null ? formatProgressDuration(Math.max(0, clock - since)) : null;
   const heardMs = clock !== null && heard !== null ? Math.max(0, clock - heard) : null;
   const ago = heardMs === null ? null : heardMs < 2000 ? BRIDGE_PROGRESS_COPY.justNow : BRIDGE_PROGRESS_COPY.ago(formatProgressDuration(heardMs));
+  const overdue = view?.kind === 'response-overdue' || view?.kind === 'push-response-overdue';
+  const showHeard = !elapsed || (overdue && formatProgressDuration(heardMs) !== elapsed);
   return {
     elapsed: elapsed ? BRIDGE_PROGRESS_COPY.elapsed(elapsed) : null,
-    heard: ago ? BRIDGE_PROGRESS_COPY.lastHeard(ago) : null,
+    heard: ago && showHeard ? BRIDGE_PROGRESS_COPY.lastHeard(ago) : null,
   };
 }

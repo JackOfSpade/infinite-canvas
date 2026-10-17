@@ -191,6 +191,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   saveApplication: (args) => ipcRenderer.invoke('save-application', args),
   discardApplication: (args) => ipcRenderer.invoke('discard-application', args),
   appendJobsHistory: (args) => ipcRenderer.invoke('append-jobs-history', args),
+  finalizeDisplayedJobHistory: (args) => ipcRenderer.invoke('finalize-displayed-job-history', args),
   prepareBoardJobsHistory: (args) => ipcRenderer.invoke('prepare-board-jobs-history', args),
 
   onCareerCompileProgress: createListener('career-compile-progress'),

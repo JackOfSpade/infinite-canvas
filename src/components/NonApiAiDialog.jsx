@@ -489,8 +489,8 @@ export function NonApiAiDialog() {
   // where ChatGPT is the one to answer it (unread, awaiting, host) — never for
   // a push item, and never for an application item the bridge has not taken.
   // A lane the bridge kept for the person (held, e.g. "Keep for me"), handed
-  // back (needs_user) or finished with (gone, done) is exactly where the
-  // person has to paste, so those keep the normal paste UI.
+  // back (needs_user) or finished with (gone, done) keeps the normal paste UI.
+  // App commit failures stay on the worker page: pasting cannot fix them.
   // Degrades to false, never throws, if bridgeStatus/queue/jobs is missing
   // or malformed (bridge disabled, preload still connecting, or an older
   // main process): Array.isArray guards the .some() below, and optional

@@ -5,6 +5,9 @@ import { pickUserChromePid } from '../../electron/ipc/browser/appleEvents.js';
 import { buildWorkerStarterMessage } from '../../src/utils/handoffBridgeConfig.js';
 import { registerHandoffBridgeUi } from '../../electron/ipc/handoffBridge/ui.js';
 import { IPC_CHANNELS } from '../../electron/ipc/handoffBridge/contracts.js';
+import { applyHandoffBridgeStatus, getHandoffBridgeStatus, __resetHandoffBridgeStoreForTests } from '../../src/utils/handoffBridgeStore.js';
+import { IPC_ERROR_COPY } from '../../src/utils/handoffBridgeCopy.js';
+import { clearBridgeChatOpenDiagnostic, getBridgeChatOpenDiagnostic, clearBridgeLaunchDiagnostic, getBridgeLaunchDiagnostic } from '../../electron/ipc/handoffBridge/telemetry.js';
 import { isUiRestartContext } from '../../electron/ipc/handoffBridge/restartContext.js';
 
 function harness(options = {}) {
@@ -13,22 +16,27 @@ function harness(options = {}) {
   let tick = 0;
   let day = 0;
   let chatOrdinal = 0;
+  let modelReads = 0;
   let selectedModel = options.model || 'GPT-6';
   let appleEventsEnabled = options.appleEventsOff !== true;
   let effortPosition = options.effortPosition ?? 3;
   let upsellDismissed = false;
   let activeUrl = 'https://chatgpt.com/';
   let chromeRestarted = false;
+  let nativeTabClosed = false;
+  let urlReadError = options.urlReadError === true;
   const launcher = createChatLauncher({
     now: () => day * 86_400_000 + (tick += 500), delay: async () => {},
-    onState: (...values) => states.push(values),
+    onState: (...values) => { states.push(values); options.onState?.(...values); },
     run: async (script, args) => {
       calls.push({ script, args });
       if (!appleEventsEnabled && script === launcher.scripts.EXEC) throw new Error('JavaScript through AppleScript is turned off');
-      if (script === launcher.scripts.OPEN) { chatOrdinal += 1; activeUrl = args[1]; chromeRestarted = false; return `100:${199 + chatOrdinal}`; }
-      if (script === launcher.scripts.CLOSE) return '';
+      if (script === launcher.scripts.OPEN) { chatOrdinal += 1; activeUrl = args[1]; chromeRestarted = false; nativeTabClosed = false; return `100:${199 + chatOrdinal}`; }
+      if (script === launcher.scripts.CLOSE) { nativeTabClosed = options.closeInvalidatesTab === true; return ''; }
+      if (nativeTabClosed) throw new Error('owned tab was closed');
       if (script === launcher.scripts.FOCUS) return 'focused';
       if (script === launcher.scripts.URL) {
+        if (urlReadError) throw new Error('Chrome stopped responding after Send');
         if (chromeRestarted) throw new Error('tab no longer exists');
         if (options.noNavigation) return 'https://chatgpt.com/';
         if (activeUrl === 'https://chatgpt.com/') activeUrl = `https://chatgpt.com/c/unique-chat-${122 + chatOrdinal}`;
@@ -43,7 +51,7 @@ function harness(options = {}) {
       if (code.includes('const expected =')) return JSON.stringify({ complete: true, progress: 0 });
       if (code.includes("return 'cleared'")) return 'cleared';
       if (code.includes("document.execCommand('insertText'")) return options.insertMismatch ? 'mismatch' : 'match';
-      if (code.includes('const models =')) return JSON.stringify({ model: selectedModel, topModel: 'GPT-6', topSelected: selectedModel === 'GPT-6', min: 0, max: options.maxPosition ?? 4, now: effortPosition, label: effortPosition === 4 ? 'Pro' : effortPosition === 3 ? 'Extra High' : 'High', sliderReady: true, locked: options.lockedPro === true && effortPosition === 4 });
+      if (code.includes('const models =')) { modelReads += 1; return JSON.stringify({ model: selectedModel, topModel: 'GPT-6', topSelected: selectedModel === 'GPT-6', min: 0, max: options.maxPosition ?? 4, now: effortPosition, label: effortPosition === 4 ? 'Pro' : effortPosition === 3 ? 'Extra High' : 'High', sliderReady: modelReads > (options.partialModelReads || 0) && !(options.sliderOnlyForTop && selectedModel !== 'GPT-6'), locked: options.lockedPro === true && effortPosition === 4 }); }
       if (code.includes('const visible =')) return JSON.stringify({ blocked: options.upsellPro === true && effortPosition === 4 && !upsellDismissed });
       if (code.includes('const dialog =')) { upsellDismissed = true; return 'closed'; }
       if (code.includes('const item = [...')) { if (!options.selectionStuck) selectedModel = 'GPT-6'; return 'selected'; }
@@ -64,7 +72,7 @@ function harness(options = {}) {
       throw new Error('unexpected fake command');
     },
   });
-  return { launcher, calls, states, navigate: url => { activeUrl = url; }, nextDay: () => { day += 1; }, enableAppleEvents: () => { appleEventsEnabled = true; }, restartChrome: () => { chromeRestarted = true; } };
+  return { launcher, calls, states, navigate: url => { activeUrl = url; }, nextDay: () => { day += 1; }, enableAppleEvents: () => { appleEventsEnabled = true; }, restartChrome: () => { chromeRestarted = true; }, recoverChrome: () => { urlReadError = false; } };
 }
 
 const starter = 'private-session-code-do-not-log';
@@ -79,6 +87,148 @@ const cases = [
 ];
 
 export default [
+  { name: 'chat launcher: opening an expanded model picker does not toggle it closed', async run() {
+    const { launcher, calls } = harness();
+    await launcher.launch({ owner: 'expanded-menu', starter });
+    const script = calls.find(call => call.args?.[2]?.includes('button[aria-label="Select ChatGPT model"]')).args[2];
+    let clicks = 0;
+    const button = { getAttribute: () => 'true', dispatchEvent: () => { clicks++; } };
+    assert.equal(runInNewContext(script, { document: { querySelector: () => button } }), 'opened');
+    assert.equal(clicks, 0);
+  } },
+  { name: 'chat launcher: a model slider that never mounts cannot send a worker starter', async run() {
+    const { launcher, calls } = harness({ partialModelReads: Infinity });
+    assert.equal((await launcher.launch({ owner: 'missing-slider', starter })).ok, false);
+    assert.equal(calls.some(call => call.args?.[2]?.includes('button[aria-label="Send"]')), false);
+  } },
+  { name: 'chat launcher: waits for the selected model slider to finish mounting', async run() {
+    const { launcher, calls } = harness({ partialModelReads: 4 });
+    assert.equal((await launcher.launch({ owner: 'delayed-menu', starter })).ok, true);
+    const scripts = calls.map(call => call.args?.[2] || '');
+    assert.equal(scripts.filter(code => code.includes('button[aria-label="Select ChatGPT model"]')).length, 1,
+      'a partially mounted picker must settle without another toggle closing it');
+  } },
+  { name: 'chat launcher: selects the latest model before requiring its effort slider', async run() {
+    const { launcher } = harness({ model: 'Earlier model', sliderOnlyForTop: true });
+    const result = await launcher.launch({ owner: 'switch-model', starter });
+    assert.equal(result.ok, true);
+    assert.equal(result.observed.model, 'GPT-6');
+    assert.equal(result.observed.effort, 'Extra High');
+  } },
+  { name: 'chat launcher: stale Open recovery cannot launch after connection, pool replacement or window removal', async run() {
+    for (const change of ['connected', 'pool', 'window']) {
+      let resolveReveal; const reveal = new Promise(resolve => { resolveReveal = resolve; });
+      const handlers = new Map(); const sender = { id: 814, __isCanvasRenderer: true };
+      const window = { webContents: sender, isDestroyed: () => false }; let present = true;
+      const worker = { ordinal: 1, state: 'available', firstCallAt: null };
+      const snapshot = { serving: 'live', autoLaunchChats: true, chat: { pool: { active: true, generation: 63, workerCount: 1, workers: [worker] } } };
+      let launches = 0;
+      const ui = registerHandoffBridgeUi({
+        ipc: { handle: (key, value) => handlers.set(key, value), removeHandler() {}, on() {}, removeListener() {} },
+        controller: { snapshot: () => snapshot, subscribe: () => () => {}, copyWorkerStarter: async () => { launches++; return null; } },
+        chatLauncher: { reveal: async () => reveal, owns: () => false, close: async () => { launches++; } },
+        getCanvasWindows: () => present ? [window] : [],
+      });
+      try {
+        const opening = handlers.get(IPC_CHANNELS.OPEN_WORKER_CHAT)({ sender }, { generation: 63, workerOrdinal: 1 });
+        await new Promise(resolve => setImmediate(resolve));
+        if (change === 'connected') { worker.state = 'working'; worker.firstCallAt = Date.now(); }
+        else if (change === 'pool') snapshot.chat.pool.generation = 64;
+        else present = false;
+        resolveReveal({ ok: false, reason: 'tab_not_owned' });
+        const result = await opening;
+        assert.equal(result.code, change === 'connected' ? 'WORKER_CHAT_UNAVAILABLE' : change === 'pool' ? 'WORKER_CHAT_ENDED' : 'NO_WINDOW');
+        assert.equal(launches, 0, 'stale recovery cannot close or rekey another live chat');
+      } finally { ui.dispose(); }
+    }
+  } },
+  { name: 'chat launcher: explicit Retry preserves a worker that connects before its queued launch starts', async run() {
+    const handlers = new Map(); const sender = { id: 815, __isCanvasRenderer: true };
+    const window = { webContents: sender, isDestroyed: () => false };
+    const worker = { ordinal: 1, state: 'available', firstCallAt: null };
+    const snapshot = { serving: 'live', autoLaunchChats: true, config: {}, chat: { pool: { active: true, generation: 65, workerCount: 1, workers: [worker] } } };
+    let launches = 0; let closes = 0;
+    const ui = registerHandoffBridgeUi({
+      ipc: { handle: (key, value) => handlers.set(key, value), removeHandler() {}, on() {}, removeListener() {} },
+      controller: { snapshot: () => snapshot, subscribe: () => () => {},
+        copyWorkerStarter: async () => ({ copied: true, sessionCode: '2'.repeat(26), workerCount: 1 }), abandonWorkerStarter: async () => true },
+      chatLauncher: { owns: () => true, close: async () => { closes++; },
+        launch: async () => { launches++; return { ok: false, reason: 'chrome_timeout' }; } },
+      timers: { setTimeout() { return { unref() {} }; }, clearTimeout() {} }, getCanvasWindows: () => [window],
+    });
+    try {
+      ui.publishStatus(snapshot);
+      for (let turn = 0; turn < 10; turn++) await new Promise(resolve => setImmediate(resolve));
+      const retry = handlers.get(IPC_CHANNELS.RETRY_WORKER_LAUNCH)({ sender }, { generation: 65, workerOrdinal: 1 });
+      worker.state = 'working'; worker.firstCallAt = Date.now();
+      await retry;
+      for (let turn = 0; turn < 10; turn++) await new Promise(resolve => setImmediate(resolve));
+      assert.equal(launches, 1); assert.equal(closes, 0);
+    } finally { ui.dispose(); }
+  } },
+  { name: 'chat launcher: Open preserves the original tab when Send landed but confirmation failed', async run() {
+    const h = harness({ urlReadError: true });
+    const result = await h.launcher.launch({ owner: 'worker:1:1', starter });
+    assert.equal(result.sendAttempted, true);
+    assert.equal(result.ok, false);
+    h.recoverChrome(); h.navigate('https://chatgpt.com/c/unconfirmed-worker-chat');
+    assert.equal((await h.launcher.reveal('worker:1:1')).ok, true);
+    assert.equal(h.calls.filter(call => call.script === h.launcher.scripts.OPEN).length, 1, 'Open keeps the existing sent tab');
+    assert.equal(h.calls.filter(call => call.args?.[2]?.includes('button[aria-label="Send"]')).length, 1, 'Open never repeats Send');
+  } },
+  { name: 'chat launcher: Open recovers a missing unstarted worker once and never replaces an answered chat', async run() {
+    const handlers = new Map(); const sender = { id: 813, __isCanvasRenderer: true };
+    const window = { webContents: sender, isDestroyed: () => false };
+    const worker = { ordinal: 1, state: 'available', firstCallAt: null, completed: 4, restarts: 4 };
+    const snapshot = { serving: 'live', autoLaunchChats: true, config: { pluginName: 'Infinite Canvas' },
+      chat: { pool: { active: true, generation: 62, workerCount: 1, workers: [worker] } } };
+    let launches = 0; let starters = 0; let owns = false;
+    const ui = registerHandoffBridgeUi({
+      ipc: { handle: (key, value) => handlers.set(key, value), removeHandler() {}, on() {}, removeListener() {} },
+      controller: { snapshot: () => snapshot, subscribe: () => () => {},
+        copyWorkerStarter: async () => { starters++; return { copied: true, sessionCode: '2'.repeat(26), workerCount: 1 }; },
+        restartWorker: async () => { throw new Error('must not replace credentials'); } },
+      chatLauncher: { owns: () => owns, reveal: async () => ({ ok: false, reason: 'tab_not_owned' }), close: async () => true,
+        launch: async () => { launches++; owns = true; worker.firstCallAt = Date.now(); worker.state = 'working'; return { ok: true }; } },
+      getCanvasWindows: () => [window], launchPresentationTimeoutMs: 8,
+    });
+    try {
+      const open = () => handlers.get(IPC_CHANNELS.OPEN_WORKER_CHAT)({ sender }, { generation: 62, workerOrdinal: 1 });
+      const results = await Promise.all([open(), open()]);
+      assert(results.every(result => result.success && result.started), 'stale Open presses start recovery instead of returning a retry loop');
+      for (let turn = 0; turn < 20; turn++) await new Promise(resolve => setImmediate(resolve));
+      assert.equal(launches, 1); assert.equal(starters, 1);
+      owns = false;
+      assert.equal((await open()).code, 'WORKER_CHAT_UNAVAILABLE');
+      assert.equal(starters, 1, 'Open never resets a connected worker’s capability');
+    } finally { ui.dispose(); }
+  } },
+  { name: 'chat launcher: replacement launch survives status callbacks carrying the previous session_full result', async run() {
+    let ui;
+    const worker = { ordinal: 1, state: 'available', lastOutcome: 'session_full', firstCallAt: null, completed: 4, restarts: 4 };
+    const snapshot = { serving: 'live', autoLaunchChats: true, config: { pluginName: 'Infinite Canvas' },
+      chat: { pool: { active: true, generation: 61, workerCount: 1, workers: [worker] } } };
+    const h = harness({ closeInvalidatesTab: true, onState(_owner, stage) {
+      if (stage === 'sent') { worker.firstCallAt = Date.now(); worker.state = 'working'; worker.lastOutcome = 'served'; }
+      ui?.publishStatus(snapshot);
+    } });
+    ui = registerHandoffBridgeUi({
+      ipc: { handle() {}, removeHandler() {}, on() {}, removeListener() {} },
+      controller: { snapshot: () => snapshot, subscribe: () => () => {},
+        copyWorkerStarter: async () => ({ copied: true, sessionCode: '2'.repeat(26), workerCount: 1 }),
+        abandonWorkerStarter: async () => true },
+      chatLauncher: h.launcher, getCanvasWindows: () => [], launchPresentationTimeoutMs: 8,
+      timers: { setTimeout() { return { unref() {} }; }, clearTimeout() {} },
+    });
+    try {
+      ui.publishStatus(snapshot);
+      for (let turn = 0; turn < 40; turn++) await new Promise(resolve => setImmediate(resolve));
+      assert.equal(h.calls.filter(call => call.script === h.launcher.scripts.CLOSE).length, 0, 'a prior incarnation result must never close the new tab');
+      assert.equal(h.states.at(-1)?.[1], 'sent');
+      assert.equal(h.launcher.owns('worker:61:1'), true);
+      assert.equal((await h.launcher.reveal('worker:61:1')).ok, true);
+    } finally { ui.dispose(); }
+  } },
   ...cases.map(([name, options, reason]) => ({ name: `chat launcher: ${name}`, async run() {
     const { launcher, states } = harness(options);
     const result = await launcher.launch({ owner: 'worker:1:1', starter });
@@ -116,6 +266,86 @@ export default [
     assert(calls.some(item => item.args?.[2]?.includes('[data-model-picker-power-slider]')));
     assert(!JSON.stringify(states).includes(starter));
   } },
+  { name: 'chat launcher: Open is independent of setup and reports specific reveal failures', async run() {
+    const handlers = new Map();
+    const sender = { id: 83, __isCanvasRenderer: true };
+    const window = { webContents: sender, isDestroyed: () => false };
+    const snapshot = { serving: 'off', autoLaunchChats: false, config: { telemetryInBugReports: true }, setup: { linked: false },
+      chat: { pool: { active: true, generation: 3, workers: [{ ordinal: 1, state: 'ready' }] } } };
+    let result = { ok: true, outcome: 'focused' };
+    let calls = 0;
+    const ui = registerHandoffBridgeUi({
+      ipc: { handle: (key, value) => handlers.set(key, value), removeHandler() {}, on() {}, removeListener() {} },
+      controller: { snapshot: () => snapshot, subscribe: () => () => {} },
+      chatLauncher: { reveal: async owner => { assert.equal(owner, 'worker:3:1'); calls++; return result; }, owns: () => true, close: async () => true },
+      getCanvasWindows: () => [window],
+    });
+    clearBridgeChatOpenDiagnostic();
+    try {
+      const open = () => handlers.get(IPC_CHANNELS.OPEN_WORKER_CHAT)({ sender }, { generation: 3, workerOrdinal: 1 });
+      assert.equal((await open()).success, true, 'revealing an existing chat does not require setup, linking or a running tunnel');
+      result = { ok: false, reason: 'activation_failed' };
+      const failed = await open();
+      assert.equal(failed.code, 'WORKER_CHAT_OPEN_FAILED');
+      assert(!IPC_ERROR_COPY[failed.code].includes('setup'));
+      result = { ok: false, reason: 'tab_not_owned' };
+      assert.equal((await open()).code, 'WORKER_CHAT_UNAVAILABLE');
+      snapshot.chat.pool.active = false;
+      assert.equal((await open()).code, 'WORKER_CHAT_ENDED');
+      assert.equal(calls, 3, 'a stale worker cannot reveal an unrelated chat');
+      assert.deepEqual(getBridgeChatOpenDiagnostic().map(row => row.reason), [null, 'activation_failed', 'tab_not_owned', 'worker_ended']);
+    } finally { ui.dispose(); clearBridgeChatOpenDiagnostic(); }
+  } },
+  { name: 'chat launcher: native opening script reuses regular Chrome windows and preserves the selected tab', run() {
+    const { launcher } = harness();
+    for (const fixture of [
+      { modes: ['normal'], remembered: '0', expected: '100', created: false },
+      { modes: ['normal'], remembered: '999', expected: '100', created: false },
+      { modes: ['incognito', 'normal'], remembered: '0', expected: '101', created: false },
+      { modes: ['normal', 'normal'], remembered: '101', expected: '101', created: false },
+      { modes: ['incognito', 'normal'], remembered: '100', expected: '101', created: false },
+      { modes: [], remembered: '0', expected: '900', created: true },
+      { modes: ['incognito'], remembered: '0', expected: '900', created: true },
+    ]) {
+      let created = 0; let restored = 0;
+      const makeWindow = (id, mode) => {
+        let selected = 1;
+        const w = { id: () => id, mode: () => mode, tabs: [{ id: () => '200' }], activeTab: { id: () => '201' } };
+        Object.defineProperty(w, 'activeTabIndex', { get: () => () => selected, set: value => { selected = value; } });
+        return w;
+      };
+      const all = fixture.modes.map((mode, i) => makeWindow(String(100 + i), mode));
+      const windows = () => all;
+      Object.defineProperty(windows, 'length', { value: all.length });
+      for (let i = 0; i < all.length; i++) windows[i] = all[i];
+      windows.byId = id => { const w = all.find(w => w.id() === String(id)); if (!w) throw new Error('closed'); return w; };
+      const chrome = { windows, Tab: ({ url }) => ({ id: () => '201', url }), Window: () => ({ make: () => { created++; return makeWindow('900', 'normal'); } }) };
+      const run = runInNewContext(`${launcher.scripts.OPEN}; run`, { Application: () => chrome, ObjC: { import() {} },
+        $: { NSWorkspace: { sharedWorkspace: { frontmostApplication: { activateWithOptions: () => { restored++; } } } } } });
+      assert.equal(run(['777', fixture.remembered, 'https://chatgpt.com/']), `${fixture.expected}:201`);
+      assert.equal(created, fixture.created ? 1 : 0);
+      assert.equal(restored, 1);
+      for (const w of all) assert.equal(w.activeTabIndex(), 1, 'automatic startup does not steal the selected tab');
+    }
+  } },
+  { name: 'chat launcher: native foreground script accepts Chrome text IDs and restores the exact minimized window', run() {
+    const { launcher } = harness();
+    for (const tabId of ['200', 200]) {
+      const changes = [];
+      const w = { tabs: () => [{ id: () => '199' }, { id: () => tabId }],
+        set minimized(value) { changes.push(['minimized', value]); },
+        set visible(value) { changes.push(['visible', value]); },
+        set activeTabIndex(value) { changes.push(['tab', value]); },
+        set index(value) { changes.push(['index', value]); } };
+      const chrome = { windows: { byId: id => { assert.equal(id, 100); return w; } }, activate: () => changes.push(['activate']) };
+      const run = runInNewContext(`${launcher.scripts.FOCUS}; run`, { Application: () => chrome });
+      assert.equal(run(['777', '100', '200']), 'focused');
+      assert.deepEqual(changes, [['minimized', false], ['visible', true], ['tab', 2], ['index', 1], ['activate']]);
+      changes.length = 0;
+      assert.equal(run(['777', '100', '999']), 'missing');
+      assert.deepEqual(changes, [], 'missing target must not activate an unrelated tab');
+    }
+  } },
   { name: 'chat launcher: focus reveals only the exact owned worker chat', async run() {
     const h = harness();
     await h.launcher.launch({ owner: 'worker:1:1', starter });
@@ -123,8 +353,24 @@ export default [
     assert.equal(await h.launcher.focus('worker:1:1'), true);
     assert.equal(h.calls.filter(call => call.script === h.launcher.scripts.FOCUS).length, 1);
     h.navigate('https://chatgpt.com/c/unrelated-chat');
-    assert.equal(await h.launcher.focus('worker:1:1'), false);
-    assert.equal(h.calls.filter(call => call.script === h.launcher.scripts.FOCUS).length, 1);
+    assert.equal(await h.launcher.focus('worker:1:1'), true);
+    assert.equal(h.calls.filter(call => call.script === h.launcher.scripts.FOCUS).length, 2);
+    assert(h.calls.some(call => call.script === h.launcher.scripts.OPEN && call.args[1] === 'https://chatgpt.com/c/unique-chat-123'));
+    assert.equal(h.calls.filter(call => call.args?.[2]?.includes('button[aria-label="Send"]')).length, 1, 'Open never sends another starter');
+  } },
+  { name: 'chat launcher: Open restores the exact conversation after Chrome closes without sending again', async run() {
+    const h = harness();
+    const launched = await h.launcher.launch({ owner: 'worker:1:1', starter });
+    h.restartChrome();
+    assert.equal(await h.launcher.focus('worker:1:1'), true);
+    assert(h.calls.some(call => call.script === h.launcher.scripts.OPEN && call.args[1] === `https://chatgpt.com/c/${launched.chatId}`));
+    assert.equal(h.calls.filter(call => call.args?.[2]?.includes('button[aria-label="Send"]')).length, 1);
+  } },
+  { name: 'chat launcher: Open can reveal the owned unsent tab after a model-menu failure', async run() {
+    const h = harness({ effortPosition: 2, stuckEffort: true, noNavigation: true });
+    assert.equal((await h.launcher.launch({ owner: 'worker:1:1', starter })).ok, false);
+    assert.equal(await h.launcher.focus('worker:1:1'), true);
+    assert.equal(h.calls.filter(call => call.script === h.launcher.scripts.OPEN).length, 1);
   } },
   { name: 'chat launcher: continue reopens its recorded chat after Chrome restarts', async run() {
     const h = harness();
@@ -153,35 +399,15 @@ export default [
     assert.equal(result.ok, true);
     assert.equal(result.observed.effortPosition, 3);
   } },
-  { name: 'chat launcher: application uses rightmost Pro effort, then falls back if unavailable', async run() {
-    const first = harness();
-    const pro = await first.launcher.launch({ owner: 'worker:1:1', starter, application: true });
-    assert.equal(pro.ok, true);
-    assert.equal(pro.observed.effortPosition, 4);
-    assert.equal(pro.observed.fallback, false);
-    const second = harness({ proUnavailable: true });
-    const fallback = await second.launcher.launch({ owner: 'worker:1:1', starter, application: true });
-    assert.equal(fallback.ok, true);
-    assert.equal(fallback.observed.effortPosition, 3);
-    assert.equal(fallback.observed.fallback, true);
-  } },
-  { name: 'chat launcher: locked or upsell Pro falls back for the local day', async run() {
-    for (const option of ['lockedPro', 'upsellPro']) {
-      const h = harness({ [option]: true });
-      const first = await h.launcher.launch({ owner: 'worker:1:1', starter, application: true });
-      assert.equal(first.ok, true);
-      assert.equal(first.observed.effortPosition, 3);
-      assert.equal(first.observed.fallback, true);
-      const movesBefore = h.calls.filter(item => item.args?.[2]?.includes('const slider = document.querySelector')).length;
-      const second = await h.launcher.launch({ owner: 'worker:1:2', starter, application: true });
-      assert.equal(second.ok, true);
-      assert.equal(second.observed.effortPosition, 3);
-      assert.equal(h.calls.filter(item => item.args?.[2]?.includes('const slider = document.querySelector')).length, movesBefore);
-      h.nextDay();
-      const third = await h.launcher.launch({ owner: 'worker:1:3', starter, application: true });
-      assert.equal(third.ok, true);
-      assert.equal(third.observed.fallback, true);
-      assert(h.calls.filter(item => item.args?.[2]?.includes('const slider = document.querySelector')).length > movesBefore);
+  { name: 'chat launcher: application workers always use Extra High, including when Pro is available', async run() {
+    for (const options of [{}, { effortPosition: 4 }, { proUnavailable: true }, { lockedPro: true }, { upsellPro: true }]) {
+      const h = harness(options);
+      const result = await h.launcher.launch({ owner: 'worker:1:1', starter, application: true });
+      assert.equal(result.ok, true);
+      assert.equal(result.observed.effortPosition, 3);
+      assert.equal(result.observed.effort, 'Extra High');
+      assert.equal(result.observed.fallback, false);
+      assert(!h.calls.some(item => item.args?.[2]?.includes("key:'ArrowRight'")), 'never attempt the Pro position');
     }
   } },
   { name: 'chat launcher: attachments are chunked and bound to one handoff before Send', async run() {
@@ -455,7 +681,7 @@ export default [
     assert.deepEqual(closed, ['worker:9:1']);
     ui.dispose();
   } },
-  { name: 'chat launcher: career compile work launches at application (Pro) effort; other push work does not', async run() {
+  { name: 'chat launcher: career compile work retains the application work flag; other push work does not', async run() {
     for (const [task, expected] of [['career-profile-audit-skills', true], ['resume-parse', true], ['job-scoring', false]]) {
       const handlers = new Map();
       const seen = [];
@@ -477,7 +703,74 @@ export default [
       ui.dispose();
     }
   } },
-  { name: 'chat launcher: usage limit replaces an unpresented worker at the next effort', async run() {
+  { name: 'chat launcher: main-process launch failures reach the renderer without a controller sequence change', async run() {
+    const handlers = new Map();
+    const sender = { id: 4, __isCanvasRenderer: true };
+    const window = { webContents: { id: 4, send() {} }, isDestroyed: () => false };
+    const snapshot = { v: 1, seq: 40, at: Date.now(), autoLaunchChats: true, serving: 'live', config: { pluginName: 'Infinite Canvas' },
+      chat: { pool: { active: true, generation: 25, workerCount: 1, workers: [{ ordinal: 1, state: 'available', completed: 0 }] } } };
+    const ui = registerHandoffBridgeUi({
+      ipc: { handle: (key, value) => handlers.set(key, value), removeHandler() {}, on() {}, removeListener() {} },
+      controller: { snapshot: () => snapshot, subscribe: () => () => {},
+        copyWorkerStarter: async () => ({ copied: true, sessionCode: '2'.repeat(26), workerCount: 1 }) },
+      chatLauncher: { launch: async () => ({ ok: true }), close: async () => true,
+        diagnose: async () => ({ reason: 'reconnect_required' }), owns: () => true },
+      getCanvasWindows: () => [window], launchPresentationTimeoutMs: 8, launchDiagnosisIntervalMs: 1,
+    });
+    __resetHandoffBridgeStoreForTests();
+    try {
+      const getStatus = () => handlers.get(IPC_CHANNELS.GET_STATUS)({ sender });
+      const before = (await getStatus()).status;
+      applyHandoffBridgeStatus(before);
+      ui.publishStatus(snapshot);
+      await new Promise(resolve => setTimeout(resolve, 35));
+      const after = (await getStatus()).status;
+      assert.equal(before.seq, after.seq);
+      assert(after.uiRevision > before.uiRevision);
+      applyHandoffBridgeStatus(after);
+      assert.equal(getHandoffBridgeStatus().chat.pool.workers[0].launch.reason, 'reconnect_required');
+      applyHandoffBridgeStatus(before);
+      assert.equal(getHandoffBridgeStatus().chat.pool.workers[0].launch.reason, 'reconnect_required', 'old replay cannot erase the failure');
+    } finally { ui.dispose(); __resetHandoffBridgeStoreForTests(); }
+  } },
+  { name: 'chat launcher: first-call approval notifies once, preserves the tab and resumes the pool after approval', async run() {
+    const notifications = [];
+    const launches = [];
+    const closes = [];
+    const snapshot = { autoLaunchChats: true, serving: 'live', config: { pluginName: 'Infinite Canvas', telemetryInBugReports: true },
+      chat: { pool: { active: true, generation: 25, workerCount: 2, workers: [
+        { ordinal: 1, state: 'available', restarts: 0 }, { ordinal: 2, state: 'available', restarts: 0 },
+      ] } } };
+    const ui = registerHandoffBridgeUi({
+      ipc: { handle() {}, removeHandler() {}, on() {}, removeListener() {} },
+      controller: { snapshot: () => snapshot, subscribe: () => () => {},
+        copyWorkerStarter: async () => ({ copied: true, sessionCode: '2'.repeat(26), workerCount: 2 }) },
+      chatLauncher: { launch: async ({ owner }) => {
+        launches.push(owner);
+        if (owner === 'worker:25:2') snapshot.chat.pool.workers[1].firstCallAt = Date.now();
+        return { ok: true };
+      }, close: async owner => { closes.push(owner); return true; },
+        diagnose: async () => ({ reason: 'approval_required' }), owns: () => true },
+      notifyLaunchProblem: kind => notifications.push(kind),
+      getCanvasWindows: () => [], launchPresentationTimeoutMs: 8, launchDiagnosisIntervalMs: 1,
+    });
+    clearBridgeLaunchDiagnostic();
+    try {
+      ui.publishStatus(snapshot);
+      await new Promise(resolve => setTimeout(resolve, 35));
+      assert.deepEqual(notifications, ['approval-required']);
+      assert(getBridgeLaunchDiagnostic().some(entry => entry.workerOrdinal === 1 && entry.reason === 'approval_required'));
+      assert.deepEqual(launches, ['worker:25:1']);
+      assert.deepEqual(closes, [], 'approval must keep the exact chat alive');
+      snapshot.chat.pool.workers[0] = { ...snapshot.chat.pool.workers[0], state: 'working', firstCallAt: Date.now() };
+      ui.publishStatus(snapshot);
+      await new Promise(resolve => setTimeout(resolve, 35));
+      assert.deepEqual(launches, ['worker:25:1', 'worker:25:2']);
+      assert.deepEqual(notifications, ['approval-required']);
+      assert.deepEqual(closes, []);
+    } finally { ui.dispose(); clearBridgeLaunchDiagnostic(); }
+  } },
+  { name: 'chat launcher: usage limit preserves the unpresented worker without retrying at Pro effort', async run() {
     const handlers = new Map();
     const calls = [];
     const snapshot = { autoLaunchChats: true, serving: 'live', config: { pluginName: 'Infinite Canvas' },
@@ -496,9 +789,8 @@ export default [
     });
     ui.publishStatus(snapshot);
     await new Promise(resolve => setTimeout(resolve, 40));
-    assert.equal(launches, 2);
-    assert(calls.includes('cap'));
-    assert(calls.some(item => item?.failedLaunch === true));
+    assert.equal(launches, 1);
+    assert.deepEqual(calls, []);
     ui.dispose();
   } },
   { name: 'chat launcher: queued replacement and delayed retry preserve a worker that reconnects', async run() {
@@ -721,7 +1013,7 @@ export default [
     ui.dispose();
   } },
   ...[
-    'plugin_missing', 'send_not_confirmed', 'safety_block',
+    'plugin_missing', 'send_not_confirmed', 'safety_block', 'chrome_unavailable_after_send',
   ].map(reason => ({ name: `chat launcher: ${reason} is never retried automatically as a one-off failure`, async run() {
     const pending = [];
     let launches = 0;
@@ -735,7 +1027,8 @@ export default [
         abandonWorkerStarter: async () => true,
       },
       chatLauncher: {
-        launch: async () => { launches += 1; return { ok: false, reason, sendAttempted: reason === 'send_not_confirmed' }; },
+        launch: async () => { launches += 1; return { ok: false, reason: reason === 'chrome_unavailable_after_send' ? 'chrome_unavailable' : reason,
+          sendAttempted: ['send_not_confirmed', 'chrome_unavailable_after_send'].includes(reason) }; },
         close: async () => true, owns: () => true, rekey: () => false, javascriptReady: async () => false,
       },
       timers: { setTimeout: (fn, ms) => { const handle = { fn, ms, unref() {} }; pending.push(handle); return handle; }, clearTimeout() {} },

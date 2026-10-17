@@ -72,7 +72,8 @@ import { withSharedProfileLock } from './sharedProfileLock.js';
 import { startRun as startJobRun, recordSourcePage, markSourceStatus, markProviderGathered, setStage as setJobRunStage, readRunState, readLastRunReceipt, clearRunWithResult, completeRunWithReceipt, computeResumeStartPagesByQuery, normalizeJobRunProfileFingerprint, sanitizeJobSearchWindow, collectionCompletedAtForManifest, providerGatheredAtForManifest, finishRunWithSavedListings, isRunCollectionFinishedWithSavedListings, isJobRunAutomaticRecoveryEligible, pauseRunForManualResume, activateRunForResume, rebindRunOperationAuthority } from './jobRunStaging.js';
 import { beginJobContinuation, checkpointJobContinuationResult, claimJobContinuation, clearJobContinuations, completeJobContinuation, listJobContinuations, pauseJobContinuations, readJobContinuationResult, releaseJobContinuationExecution, validateJobContinuationAuthority } from './jobContinuation.js';
 import { claimJobBoardRunExecution, releaseJobBoardRunExecution, validateJobBoardRunExecution } from './jobBoardRunLease.js';
-import { loadJobsHistory, appendJobsHistory, dedupAgainstHistory, filterHistoryForResume, historyPathForCanvas } from './jobsHistory.js';
+import { loadJobsHistory, stageDisplayedJobsHistory, finalizeDisplayedJobsHistory, dedupAgainstHistory, historyPathForCanvas } from './jobsHistory.js';
+import { isLegacyUnscoredPlaceholder, isUnscoredPlaceholderCard } from '../../src/utils/jobCardFilters.js';
 import { filterJobsByPostedSince, parsePostedDate } from './jobDateFilter.js';
 import {
   getJobsSettings,
@@ -182,7 +183,7 @@ async function withHistorySourceAuthorities(canvasFilePath, sources, callback, i
   });
 }
 
-async function verifySealedHistorySources(canvasFilePath, sources, records) {
+async function verifySealedHistorySources(canvasFilePath, sources, records, displayedRows = []) {
   const sealed = [];
   for (let index = 0; index < sources.length; index += 1) {
     const source = sources[index];
@@ -195,7 +196,19 @@ async function verifySealedHistorySources(canvasFilePath, sources, records) {
       || snapshot?.careerSnapshotId !== source.careerSnapshotId
       || !authorityReceiptMatches(snapshotOperationAuthority(snapshot), source.authority)
       || !scopedPublicationMatches(records[index], 'current', read.serialized, source.authority)) return null;
-    sealed.push({ ...source, artifactFingerprint: jobAnalysisArtifactDigest(read.serialized) });
+    const scoredRows = canonicalHistoryRows((snapshot.jobs || []).filter(job =>
+      Number.isFinite(job?.matchScore) && job.matchScore >= 0 && job.matchScore <= 100
+      && !isUnscoredPlaceholderCard(job) && !isLegacyUnscoredPlaceholder(job)
+      && job?.preferenceAssessment?.status !== 'filtered').flatMap(job => (
+      Array.isArray(job.postingVariants) && job.postingVariants.length
+        ? job.postingVariants.map(variant => ({ source: variant.source || job.source, company: job.company,
+          title: job.title, location: variant.location || job.location, url: variant.url || job.url }))
+        : [job]
+    )));
+    if (!scoredRows) return null;
+    const notDisplayed = new Set(dedupAgainstHistory(scoredRows, displayedRows).kept);
+    sealed.push({ ...source, artifactFingerprint: jobAnalysisArtifactDigest(read.serialized),
+      displayedRows: scoredRows.filter(row => !notDisplayed.has(row)) });
   }
   return sealed;
 }
@@ -211,7 +224,7 @@ async function prepareBoardHistoryWrite(event, { canvasFilePath, jobs, sources }
     return { success: false, operationSuperseded: true, error: 'Ambiguous Board history sources.' };
   }
   const admission = await withHistorySourceAuthorities(canvasFilePath, normalizedSources,
-    records => verifySealedHistorySources(canvasFilePath, normalizedSources, records));
+    records => verifySealedHistorySources(canvasFilePath, normalizedSources, records, rows));
   const sealed = admission?.admitted ? admission.value : null;
   if (!sealed) return { success: false, operationSuperseded: true, error: 'Board inputs were superseded before display commit.' };
   purgeExpiredHistoryTokens();
@@ -240,18 +253,23 @@ async function consumeBoardHistoryWrite(event, { canvasFilePath, jobs, historyTo
   }
   entry.inFlight = true;
   try {
-    const admission = await withHistorySourceAuthorities(entry.canvasFilePath, entry.sources,
-      records => verifySealedHistorySources(entry.canvasFilePath, entry.sources, records));
-    const sealed = admission?.admitted ? admission.value : null;
-    if (!sealed || sealed.some((source, index) => source.artifactFingerprint !== entry.sources[index].artifactFingerprint)) {
+    const admission = await withHistorySourceAuthorities(entry.canvasFilePath, entry.sources, async records => {
+      const sealed = await verifySealedHistorySources(entry.canvasFilePath, entry.sources, records, rows);
+      if (!sealed || sealed.some((source, index) => source.artifactFingerprint !== entry.sources[index].artifactFingerprint)) return null;
+      // Stage while the exact source locks are still held. A fresh scrape
+      // cannot finalize the old generation and then admit a late display.
+      return stageDisplayedJobsHistory(entry.canvasFilePath,
+        sealed.map(source => ({ hubId: source.hubId, runId: source.runId, rows: source.displayedRows })));
+    });
+    if (!admission?.admitted || !admission.value) {
       return { success: false, operationSuperseded: true, error: 'Board inputs changed before history commit.' };
     }
-    const result = await appendJobsHistory(entry.canvasFilePath, rows);
+    const result = admission.value;
     pendingHistoryWrites.delete(token);
     return result;
   } finally {
     // A write error leaves the same exact capability retryable until expiry;
-    // appendJobsHistory itself is idempotent at listing-key level.
+    // staging itself is idempotent at listing-key level.
     if (pendingHistoryWrites.get(token) === entry) entry.inFlight = false;
   }
 }
@@ -5325,9 +5343,9 @@ function createJobsTelemetry() {
   linkedinCooldown: null,
   // The seen-history CSV is the durable "do not re-show" record. Search-stage
   // rows are deliberately deferred: a review gate, scoring failure, cancel, or
-  // crash must not suppress jobs the user never received. The renderer writes
-  // only a Job Board's displayed result set (including rows recovered through
-  // Solve). { preScoring?: { ... }, boardDisplay?: { ... } }
+  // crash must not suppress jobs the user never received. A Board display
+  // stages the exact scored rows; deletion of the source Search or its next
+  // scrape finalizes them. { preScoring?: { ... }, boardDisplay?: { ... } }
     history: null,
   };
 }
@@ -5434,6 +5452,7 @@ function historyWriteTelemetry(input, result = {}) {
     ts: Date.now(),
     input: Array.isArray(input) ? input.length : Number(input) || 0,
     written: Number(result.written) || 0,
+    staged: Number(result.staged) || 0,
     pruned: Number(result.pruned) || 0,
     skipped: result.skipped || null,
     // Why the input jobs that produced no row produced no row (per key kind and
@@ -12321,6 +12340,13 @@ Return a JSON object with four arrays of search query strings:
       // crash-recovery manifest: diagnostics still need to distinguish this
       // search from the prior one even when staging is unavailable.
     }
+    // A fresh provider run closes the previous displayed generation. Resume
+    // can retry a failed boundary write, but never marks its own displayed
+    // rows seen. Re-scoring/combining saved jobs never enters this path.
+    const historyAdmission = await withCurrentJobAnalysisOperationAuthority({
+      canvasFilePath, hubId: nodeId, ...authorityReceipt,
+    }, () => finalizeDisplayedJobsHistory(canvasFilePath, nodeId, { excludeRunId: activeRunId }));
+    if (!historyAdmission.admitted) return searchSupersededResult();
     jobsTelemetry.pipeline = {
       ...(jobsTelemetry.pipeline || {}),
       runId: activeRunId,
@@ -13367,21 +13393,11 @@ Return a JSON object with four arrays of search query strings:
     let historyDropSamples = [];
     if (canvasFilePath) {
       await assertSearchCurrent();
-      let history = await loadJobsHistory(canvasFilePath);
+      const history = await loadJobsHistory(canvasFilePath);
       await assertSearchCurrent();
       logger.info(`[Jobs][${nodeId}] History: ${history.length} entries loaded from ${path.basename(historyPathForCanvas(canvasFilePath) || canvasFilePath)}`);
-      // A RESUMED run must not be dedup'd against the history rows the crashed
-      // run wrote about these very jobs (the pre-scoring append below runs
-      // before scoring, so a crash in the scoring/'gathered' window left every
-      // recovered staged job already "seen" — and the whole recovery collapsed
-      // to ~0). Exempt exactly those rows; older-run history still applies.
-      if (resumeScope && recoveredStaged.length > 0 && priorRunStartedAt) {
-        const before = history.length;
-        history = filterHistoryForResume(history, recoveredStaged, priorRunStartedAt);
-        if (history.length !== before) {
-          logger.info(`[Jobs][${nodeId}] History: exempted ${before - history.length} row(s) written by the resumed run itself`);
-        }
-      }
+      // Current-run display receipts never enter this CSV. Resume must retain
+      // suppression from finalized earlier generations, even on the same day.
       const result = dedupAgainstHistory(roleScreened, history);
       kept = result.kept;
       historyDropped = result.removed;
@@ -14904,11 +14920,19 @@ Return a JSON object with four arrays of search query strings:
   // ── Jobs history (60-day rolling CSV next to the canvas JSON) ─────────────
   handleSafe('prepare-board-jobs-history', async (event, args = {}) => prepareBoardHistoryWrite(event, args));
 
+  // Called only by the committed Job Search deletion path. Board/tree/card
+  // removal never crosses this boundary, and callers cannot supply rows.
+  handleSafe('finalize-displayed-job-history', async (_event, { canvasFilePath, nodeId } = {}) => {
+    if (!canvasFilePath || !normalizeJobAnalysisIdentifier(nodeId)) return { success: false, error: 'Missing Job Search history owner.' };
+    return finalizeDisplayedJobsHistory(canvasFilePath, nodeId, { deleted: true });
+  });
+
   handleSafe('append-jobs-history', async (event, { canvasFilePath, jobs, nodeId, historyStage, historyToken = null } = {}) => {
     // A Board may write only after the renderer has committed its cards. The
     // host-issued one-shot token binds those rows to the exact sealed source
     // artifacts it checked before that UI commit; arbitrary renderer rows can
-    // no longer poison seen-history ahead of display.
+    // no longer stage history ahead of display. Display receipts remain
+    // provisional until source deletion or the source's next scrape.
     const result = historyStage === 'boardDisplay'
       ? await consumeBoardHistoryWrite(event, { canvasFilePath, jobs, historyToken })
       : { success: false, operationSuperseded: true, error: 'History writes require a Board display receipt.' };

@@ -53,6 +53,13 @@ export const CODE_DEFINITIONS = {
       /JS-ERROR|UNHANDLED-PROMISE|CONSOLE-ERROR|CONSOLE-WARN/i.test(line),
   },
 
+  RENDERER: {
+    label: 'Renderer Crash Recovery',
+    description: 'Durable renderer-crash reasons, exit codes and saved-workspace sizes, plus renderer/recovery event logs. Included automatically in FULL. Use for a white or blank app window or a renderer that stopped unexpectedly.',
+    logFilter: line => /renderer|RendererRecovery|crash|JS-ERROR|UNHANDLED-PROMISE|CONSOLE-ERROR/i.test(line),
+    excludeSections: ['nodes', 'edges', 'drawings', 'nodeInternals', 'nodeComponentStates', 'imageState', 'mediaState'],
+  },
+
   UI: {
     label: 'UI Interactions',
     description: 'Confirm dialogs, node add, remove, move, resize, and edge events',
@@ -299,6 +306,13 @@ export const CODE_DEFINITIONS = {
     excludeSections: ['nodes', 'edges', 'drawings', 'nodeInternals', 'nodeComponentStates', 'imageState', 'mediaState'],
   },
 
+  APPVALIDATION: {
+    label: 'Application Validation',
+    description: 'Application response rejection checks, including fixed envelope-field mismatch codes, correction stages, durable rejection history and final save verification. Includes bridge launch outcomes. Included automatically in FULL; no prompts, answers or checksum values are exported.',
+    logFilter: line => /LocalAI|HandoffBridge|validation|handoff|JobApplication|ApplicationSync/i.test(line),
+    excludeSections: ['nodes', 'edges', 'drawings', 'nodeInternals', 'nodeComponentStates', 'imageState', 'mediaState'],
+  },
+
   APPOUTPUT: {
     label: 'Application Output',
     description: 'Complete, sanitized in-memory projection of final cover-letter and résumé output so prose quality can be reviewed. Included automatically in FULL; this narrow code selects it directly. It never reads artifact paths, raw career source, hidden files, or job-listing text. Use while the output is still available in this app process.',
@@ -368,6 +382,27 @@ export const CODE_DEFINITIONS = {
     description: 'ChatGPT bridge setup, tunnel, pairing, OAuth, MCP handoff, and starter/Continue copy diagnostics — including discovered push hubs, default selection and explicit exclusions, exact MCP claim/handback, closed cross-origin refusal, and copy-interaction receipts. Use after plugin pairing, authorization, tunnel, discover/claim/release, or starter-copy failures. Included automatically in FULL; drops heavy canvas/media dumps while retaining the bridge timeline.',
     logFilter: line =>
       /\[HandoffBridge\]|handoff[ -]?bridge|\b(?:oauth|pairing|cloudflared|tunnel|mcp)\b/i.test(line),
+    excludeSections: ['nodes', 'edges', 'drawings', 'nodeInternals', 'nodeComponentStates', 'imageState', 'mediaState'],
+  },
+
+  BRIDGESUBMIT: {
+    label: 'Application Submission Failures',
+    description: 'Bridge submission retry/commit failures with closed exception classes, codes, application stage and app-module source positions. Excludes exception text, stack paths and answer content. Included automatically in FULL.',
+    logFilter: line => /\[HandoffBridge\]|submit|retry|commit|LocalAI/i.test(line),
+    excludeSections: ['nodes', 'edges', 'drawings', 'nodeInternals', 'nodeComponentStates', 'imageState', 'mediaState'],
+  },
+
+  BRIDGEFOCUS: {
+    label: 'Open Worker Chat',
+    description: 'Closed outcomes for Open worker chat: revealed, reopened, missing tab, expired worker, or Chrome activation failure. No chat URLs, window IDs or conversation content. Included automatically in FULL.',
+    logFilter: line => /\[HandoffBridge\]|worker|launch|approval|reconnect/i.test(line),
+    excludeSections: ['nodes', 'edges', 'drawings', 'nodeInternals', 'nodeComponentStates', 'imageState', 'mediaState'],
+  },
+
+  BRIDGELAUNCH: {
+    label: 'ChatGPT Worker Launch',
+    description: 'Automatic Chrome worker launch outcomes, retries, model-menu failures and tool-approval waits. Keeps the last 20 closed outcomes even after a bundle is discarded. Included automatically in FULL.',
+    logFilter: line => /\[HandoffBridge\]|handoff[ -]?bridge|worker|launch|approval/i.test(line),
     excludeSections: ['nodes', 'edges', 'drawings', 'nodeInternals', 'nodeComponentStates', 'imageState', 'mediaState'],
   },
 

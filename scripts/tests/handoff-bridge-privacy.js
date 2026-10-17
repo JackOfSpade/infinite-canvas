@@ -24,7 +24,7 @@ import {
   redactReportUrlsInText,
   setReportRedactedHosts,
 } from '../../electron/ipc/bugReport/helpers.js';
-import { clearBridgeChatCopyDiagnostic, clearBridgeQueueDiagnostic, getBridgeQueueDiagnostic, reduceBridgeQueue, retireBridgeQueueDiagnosticProvider, setBridgeQueueDiagnosticProvider, clearClientAuthDiagnostic, clearFailedStartDiagnostic, clearMcpRateLimitDiagnostic, clearOAuthRejectionDiagnostic, clearSourceRejectionDiagnostic, getFailedStartDiagnosticLines, recordBridgeChatCopyDiagnostic, recordBridgeChatCopyResult, recordClientAuthDiagnostic, recordFailedStartDiagnostic, recordMcpRateLimitDiagnostic, recordOAuthRejectionDiagnostic, recordSourceRejectionDiagnostic } from '../../electron/ipc/handoffBridge/telemetry.js';
+import { clearApplicationSubmitFailures, recordApplicationSubmitFailure, clearBridgeChatOpenDiagnostic, recordBridgeChatOpenDiagnostic, clearBridgeLaunchDiagnostic, recordBridgeLaunchDiagnostic, clearBridgeChatCopyDiagnostic, clearBridgeQueueDiagnostic, getBridgeQueueDiagnostic, reduceBridgeQueue, retireBridgeQueueDiagnosticProvider, setBridgeQueueDiagnosticProvider, clearClientAuthDiagnostic, clearFailedStartDiagnostic, clearMcpRateLimitDiagnostic, clearOAuthRejectionDiagnostic, clearSourceRejectionDiagnostic, getFailedStartDiagnosticLines, recordBridgeChatCopyDiagnostic, recordBridgeChatCopyResult, recordClientAuthDiagnostic, recordFailedStartDiagnostic, recordMcpRateLimitDiagnostic, recordOAuthRejectionDiagnostic, recordSourceRejectionDiagnostic } from '../../electron/ipc/handoffBridge/telemetry.js';
 
 const fixtureDirectory = fileURLToPath(new URL('./fixtures/handoff-bridge/', import.meta.url));
 const repoRoot = fileURLToPath(new URL('../../', import.meta.url));
@@ -100,7 +100,67 @@ function syntheticTimers(start = 0) {
   return { now: () => now, set(value) { now = value; flush(); }, flush, timers };
 }
 
-export default [{
+export default [
+  { name: 'handoff bridge: privacy: host submission exceptions survive discard with source positions and no error text', run() {
+    const base = { description: 'Submission retry loop.', nodes: [], edges: [], drawings: [], frontEndState: {}, nodeInternals: [], nodeComponentStates: [], eventLogs: [] };
+    const privateText = 'PRIVATE-CANDIDATE-DATA';
+    const error = Object.assign(new TypeError(privateText), { code: 'PRIVATE-CODE', stack: `${privateText}\n at submit (/private/candidate/localAiApplication.js:6400:12)` });
+    clearApplicationSubmitFailures();
+    try {
+      recordApplicationSubmitFailure({ telemetry: false, stage: 'requirements-audit', error });
+      assert(!generateMarkdown({ ...base, filterCode: 'FULL' }).markdown.includes('Application host submission failures'));
+      for (let i = 0; i < 25; i++) recordApplicationSubmitFailure({ telemetry: true, at: 1000 + i, stage: 'requirements-audit', error });
+      clearBridgeQueueDiagnostic();
+      for (const filterCode of ['FULL', 'BRIDGESUBMIT']) {
+        const markdown = generateMarkdown({ ...base, filterCode }).markdown;
+        assert(markdown.includes('Application host submission failures: 20 retained'));
+        assert(markdown.includes('stage `requirements-audit`') && markdown.includes('class `TypeError`') && markdown.includes('code `internal_error`'));
+        assert(markdown.includes('application module line 6400:12'));
+        assert(!markdown.includes(privateText) && !markdown.includes('/private/candidate') && !markdown.includes('PRIVATE-CODE'));
+      }
+    } finally { clearApplicationSubmitFailures(); }
+  } },
+
+  { name: 'handoff bridge: privacy: FULL and BRIDGEFOCUS explain reveal failures with bounded content-free receipts', run() {
+    const base = { description: 'Open worker chat failed.', nodes: [], edges: [], drawings: [], frontEndState: {}, nodeInternals: [], nodeComponentStates: [], eventLogs: [] };
+    const secret = 'PRIVATE-CHAT-URL /Users/jack/private';
+    clearBridgeChatOpenDiagnostic();
+    try {
+      recordBridgeChatOpenDiagnostic({ telemetry: false, at: 1000, workerOrdinal: 1, outcome: 'failed', reason: 'activation_failed' });
+      assert(!generateMarkdown({ ...base, filterCode: 'FULL' }).markdown.includes('Open worker chat interactions'));
+      for (let i = 0; i < 25; i++) recordBridgeChatOpenDiagnostic({ telemetry: true, at: 2000 + i, workerOrdinal: 1,
+        outcome: 'failed', reason: i === 24 ? 'tab_missing' : 'activation_failed', chatId: secret });
+      recordBridgeChatOpenDiagnostic({ telemetry: true, at: 3000, workerOrdinal: 1, outcome: 'reopened', reason: secret });
+      for (const filterCode of ['FULL', 'BRIDGEFOCUS']) {
+        const markdown = generateMarkdown({ ...base, filterCode }).markdown;
+        assert(markdown.includes('Open worker chat interactions: 20 retained'));
+        assert(markdown.includes('reason `tab_missing`') && markdown.includes('outcome `reopened`'));
+        assert(!markdown.includes(secret) && !markdown.includes('1970-01-01T00:00:02.000Z'));
+      }
+    } finally { clearBridgeChatOpenDiagnostic(); }
+  } },
+
+  { name: 'handoff bridge: privacy: launch failures survive discard in FULL and BRIDGELAUNCH with closed metadata only', run() {
+    const secret = 'PRIVATE-LAUNCH /Users/jack/chat-session';
+    const base = { description: 'Application did not start.', nodes: [], edges: [], drawings: [], frontEndState: {}, nodeInternals: [], nodeComponentStates: [], eventLogs: [] };
+    clearBridgeLaunchDiagnostic();
+    try {
+      recordBridgeLaunchDiagnostic({ telemetry: false, at: 1000, workerOrdinal: 1, stage: 'failed', reason: 'model_menu_missing' });
+      assert(!generateMarkdown({ ...base, filterCode: 'FULL' }).markdown.includes('Automatic worker launch outcomes'));
+      for (let i = 0; i < 25; i++) recordBridgeLaunchDiagnostic({ telemetry: true, at: 2000 + i, workerOrdinal: 1,
+        stage: 'failed', reason: i === 24 ? 'approval_required' : 'model_menu_missing', attempt: i, url: secret });
+      recordBridgeLaunchDiagnostic({ telemetry: true, at: 3000, workerOrdinal: 1, stage: 'failed', reason: secret });
+      clearBridgeQueueDiagnostic(); // no live pool or lane remains after discard
+      for (const filterCode of ['FULL', 'BRIDGELAUNCH', 'BRIDGEWORKERS']) {
+        const markdown = generateMarkdown({ ...base, filterCode }).markdown;
+        assert(markdown.includes('Automatic worker launch outcomes: 20 retained'));
+        assert(markdown.includes('reason `approval_required`') && markdown.includes('reason `model_menu_missing`'));
+        assert(markdown.includes('reason `none`') && !markdown.includes(secret));
+        assert(!markdown.includes('1970-01-01T00:00:02.000Z'), 'bounded ring evicts oldest outcomes');
+      }
+    } finally { clearBridgeLaunchDiagnostic(); }
+  } },
+{
   name: 'handoff bridge: privacy: answer-silent diagnostics identify the stale worker without exporting its claim or session',
   run: () => {
     const claim = '22222222-2222-4222-8222-222222222222';

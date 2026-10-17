@@ -507,7 +507,7 @@ export function HandoffBridgePanel() {
     });
     if (mountedRef.current) {
       setCopyingWorker(null);
-      setNotice(result?.success ? (openExisting ? 'Opened this worker’s ChatGPT chat. Review its approval prompt there.' : 'Opening a fresh ChatGPT worker chat…') : ipcErrorMessage(result?.code || 'INTERNAL'));
+      setNotice(result?.success ? (openExisting && result?.started !== true ? 'Opened this worker’s ChatGPT chat. Complete any approval or reconnect request there.' : 'Opening a fresh ChatGPT worker chat…') : ipcErrorMessage(result?.code || 'INTERNAL'));
     }
   }, [activeCopyingWorker, activeWorkerPool]);
 
@@ -683,9 +683,9 @@ export function HandoffBridgePanel() {
                               {BRIDGE_UI_COPY.workerState(worker.state, worker.quietReason, worker.launch)}
                             </span>
                             {worker.launch && <span className="basis-full text-sky-100/80">{BRIDGE_UI_COPY.workerLaunch(worker.launch, launchAccountName(activeWorkerPool.generation, worker.ordinal))}</span>}
-                            {worker.launch?.reason === 'approval_required' && (
+                            {worker.launch?.canReveal !== false && (worker.launch?.stage === 'failed' || ['approval_required', 'delivery_timeout', 'conversation_unavailable'].includes(worker.launch?.reason) || worker.state === 'quiet') && (
                               <button type="button" className="rounded border border-amber-300/50 px-2 py-1 text-amber-100"
-                                disabled={activeCopyingWorker !== null} onClick={() => void retryWorkerLaunch(worker.ordinal, true)}>Open ChatGPT for approval</button>
+                                disabled={activeCopyingWorker !== null} onClick={() => void retryWorkerLaunch(worker.ordinal, true)}>{worker.launch?.reason === 'approval_required' ? 'Open ChatGPT for approval' : 'Open worker chat'}</button>
                             )}
                             {worker.launch?.stage === 'failed' && RETRYABLE_LAUNCH_REASONS.includes(worker.launch?.reason) && (
                               <button type="button" className="ml-auto bridge-button-secondary" disabled={activeCopyingWorker !== null}

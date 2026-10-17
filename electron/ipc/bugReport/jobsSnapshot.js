@@ -3563,7 +3563,7 @@ export function buildJobCompletionAssessment(
       ? `- Seen-history write: ❌ failed for ${nonnegativeCount(historyWrite.input) ?? '?'} job(s) — these listings will be offered again on the next search.`
       : historyWrite.skipped
         ? `- Seen-history write: deferred (${receiptIdentifier(historyWrite.skipped, 'reason omitted')}).`
-        : `- Seen-history write: ✅ ${nonnegativeCount(historyWrite.input) ?? '?'} job(s) → ${nonnegativeCount(historyWrite.written) ?? 0} new row(s).`;
+        : `- Seen-history write: ✅ ${nonnegativeCount(historyWrite.input) ?? '?'} job(s) → ${nonnegativeCount(historyWrite.staged) ?? 0} provisional row(s), ${nonnegativeCount(historyWrite.written) ?? 0} committed row(s). Provisional rows stay unseen until their Job Search is deleted or starts another scrape.`;
 
   const boardLine = (totalBoards === 0
     ? '- Job Board consumers: none recorded.'

@@ -1757,7 +1757,10 @@ export function createHandoffEngine({
           }
           updateApplicationForecast(lane);
           if (collapseVirtualApplicationFamily(lane, stamp)) persist = true;
-          lane.counters.errStreak = 0;
+          // Reading the prompt proves it is readable, not that its retained
+          // answer can be committed. Recovery GETs must not erase submission
+          // failures; an accepted/rejected submit clears the retained answer.
+          if (!lane.retained) lane.counters.errStreak = 0;
           if (result.handoff?.stage === 'career-match') {
             const advertised = advertisedVirtualMatchTaskIds(result, claimedTaskId);
             if (advertised.taskIds !== null && reconcileVirtualMatchFamily(lane, advertised.taskIds, stamp)) persist = true;
@@ -2778,7 +2781,7 @@ export function createHandoffEngine({
     const submitEligible = () => epochCurrent(expectedEpoch, generation) && lanes.includes(lane)
       && lane.phase === 'awaiting' && codeGuard.equal(lane.current?.code, code);
     const task = Promise.resolve().then(() => submitEligible()
-      ? application.submit({ jobId: lane.jobId, canvasFilePath: lane.canvasFilePath, matchTaskId: lane.matchTaskId ?? undefined }, { code, text })
+      ? application.submit({ jobId: lane.jobId, canvasFilePath: lane.canvasFilePath, matchTaskId: lane.matchTaskId ?? undefined, stage: lane.current?.stage }, { code, text })
       : skipped);
     const reserved = await mutateLanes(() => {
       if (!submitEligible()) return false;
@@ -3117,7 +3120,7 @@ export function createHandoffEngine({
           holdLane(lane, 'write_failed', safeNow(now));
           return { body: makeResultBody('needs_user', { reason: 'write_failed' }), persist: true, revision: touchLane(lane) };
         }
-        return { body: makeResultBody('retry', { inFlight: false }), persist: true, revision: touchLane(lane) };
+        return { body: makeResultBody('retry', { inFlight: false, retryAfterSeconds: 3, note: 'The app could not commit this response. Retry the same submission after 3 seconds; repeated failures will pause this bundle for attention.' }), persist: true, revision: touchLane(lane) };
       });
       if (!staged?.persist) return staged;
       if (!await persistLanes(generation)) reconcileLanes(generation);
@@ -3452,6 +3455,13 @@ export function createHandoffEngine({
     verdicts.set(key, record);
     promise.then(verdict => {
       if (!epochCurrent(expectedEpoch, generation)) return;
+      // A completed retry is not a verdict. Caching it for a minute prevents
+      // the next attempt from reaching the app, even after a transient fault
+      // cleared. Only an unsettled promise may answer still-processing.
+      if (verdict?.status === 'retry') {
+        if (verdicts.get(key) === record) verdicts.delete(key);
+        return;
+      }
       record.verdict = verdict; record.promise = null;
     }, () => { if (epochCurrent(expectedEpoch, generation)) verdicts.delete(key); });
     for (const [cacheKey, value] of verdicts) if (safeNow(now) - value.at > CONSTANTS.VERDICT_CACHE_MS) verdicts.delete(cacheKey);
@@ -4010,6 +4020,10 @@ export function createHandoffEngine({
     worker.lastCallKind = null;
     worker.lastGetAt = null;
     worker.lastSubmitAt = null;
+    // Outcomes describe this credential incarnation. A prior session_full
+    // must not make the UI retire the replacement while it is opening.
+    worker.lastOutcome = null;
+    worker.lastOutcomeAt = null;
     worker.calls = 0;
     worker.getInFlight = null;
     worker.submitInFlight = 0;

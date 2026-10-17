@@ -27,6 +27,7 @@ import {
 } from './canvasCommandLine.js';
 import { isTrustedCanvasNavigation } from './canvasNavigation.js';
 import { logger } from './logger.js';
+import { attachRendererRecovery, hasStoppedRenderer, recordRendererCrash } from './rendererRecovery.js';
 import { registerJobsHandlers } from './ipc/jobs.js';
 import { loadInterviewHelperCareerSnapshot, registerInterviewHelperHandlers } from './ipc/interviewHelper.js';
 import { loadInterviewPreparationBundle, registerInterviewPreparationHandlers } from './ipc/interviewPreparation.js';
@@ -705,6 +706,10 @@ function requestSaveAndWait(win, { skipDocumentSessions = false, forceCanvasSave
 }
 
 function requestQuitCommitAndWait(win) {
+  // A dead renderer has no mutable editor to fence and cannot ACK. Continue
+  // to checkUnsavedChanges, which still requires explicit native confirmation
+  // before abandoning unverified work. Hung/live renderers keep the fence.
+  if (hasStoppedRenderer(win)) return Promise.resolve(true);
   return new Promise(resolve => {
     const expectedSender = win.webContents;
     const requestId = ++rendererHandshakeRequestId;
@@ -844,6 +849,8 @@ async function checkUnsavedChanges(win, actionType = 'close') {
   if (!win || win.isDestroyed() || !win.webContents || win.webContents.isDestroyed()) {
     return { action: 'proceed' };
   }
+
+  if (hasStoppedRenderer(win)) return { action: showUnverifiedSaveStateDialog(win, actionType) };
 
   const expectedSender = win.webContents;
   const requestId = ++rendererHandshakeRequestId;
@@ -1007,16 +1014,28 @@ function createWindow(initSpec = { mode: 'auto' }) {
   lastFocusedCanvasWindow = win;
   win.on('focus', () => { lastFocusedCanvasWindow = win; });
 
-  const query = { init: initSpec?.mode || 'auto' };
-  if (initSpec?.mode === 'file' && initSpec.filePath) query.file = initSpec.filePath;
-
-  if (process.env.VITE_DEV_SERVER_URL) {
-    const devUrl = new URL(process.env.VITE_DEV_SERVER_URL);
-    for (const [k, v] of Object.entries(query)) devUrl.searchParams.set(k, v);
-    win.loadURL(devUrl.href).catch(err => console.error('Failed to load dev server:', err));
-  } else {
-    win.loadFile(path.join(__dirname, '../dist/index.html'), { query }).catch(err => console.error('Failed to load local file:', err));
-  }
+  const loadCanvas = (spec) => {
+    const query = { init: spec?.mode || 'auto' };
+    if (spec?.mode === 'file' && spec.filePath) query.file = spec.filePath;
+    if (process.env.VITE_DEV_SERVER_URL) {
+      const devUrl = new URL(process.env.VITE_DEV_SERVER_URL);
+      for (const [key, value] of Object.entries(query)) devUrl.searchParams.set(key, value);
+      return win.loadURL(devUrl.href);
+    }
+    return win.loadFile(path.join(__dirname, '../dist/index.html'), { query });
+  };
+  // A native crash bypasses React's ErrorBoundary. Keep recovery in the main
+  // process, bound to this window's last host-verified saved canvas path.
+  const detachRecovery = attachRendererRecovery(win, {
+    isQuitting: () => isQuitting || quitHandshakeInFlight || win.__closeHandshakeInFlight === true,
+    record: details => recordRendererCrash(app.getPath('userData'), details, win.webContents.__canvasPath),
+    showMessageBox: (...args) => electronPkg.dialog.showMessageBox(...args),
+    reload: () => loadCanvas(win.webContents.__canvasPath
+      ? { mode: 'file', filePath: win.webContents.__canvasPath } : initSpec),
+    log: message => logger.error(`[RendererRecovery] ${message}`),
+  });
+  win.once('closed', detachRecovery);
+  loadCanvas(initSpec).catch(() => logger.error('[Main] Failed to load canvas renderer'));
 
   // ── Spellcheck context menu ──────────────────────────────────────────────
   // Chromium's spellchecker is on by default and underlines misspelled words.

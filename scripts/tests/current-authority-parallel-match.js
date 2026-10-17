@@ -139,7 +139,28 @@ async function assertAuthorityRootReferencesExist(contextDir, root, label) {
   assert(missing.length === 0, `${label} (${missing.join(', ')})`);
 }
 
-export default [{
+export default [
+  { name: 'current authority requirements audit: agreed audit advances a compact write-verify job into writing', async run() {
+    const fixture = await makeCurrentAuthorityParallelMatchFixture();
+    fixture.requirements = fixture.requirements.slice(0, 2);
+    fixture.job.snippet = fixture.requirements.join('\n');
+    try {
+      const queued = await queueLocalApplicationJob({ transport: 'paste', canvasFilePath: fixture.canvasFilePath, careerSnapshotId: fixture.snapshotId, job: fixture.job });
+      const discovery = await completeRequirementsDiscovery({ fixture, queued });
+      let handoff = discovery.handoff;
+      let count = 0;
+      while (handoff.stage === 'requirements-audit') {
+        assert(++count < 10, 'the audit must make bounded cursor progress');
+        const audit = semanticAuditFor(contextOf(handoff), discovery.evidence, discovery.requirements);
+        const result = await submitLocalApplicationHandoff({ jobId: queued.id, canvasFilePath: fixture.canvasFilePath,
+          handoffCode: handoff.handoffCode, response: discovery.reply(handoff, audit) });
+        assert(result.accepted, `agreed audit must be accepted: ${JSON.stringify(result.validationErrors || [])}`);
+        handoff = result.handoff;
+      }
+      assert(handoff.stage === 'write', `agreed audit reaches writing, got ${handoff.stage}`);
+    } finally { await fs.promises.rm(fixture.root, { recursive: true, force: true }); }
+  } },
+{
   name: 'current authority requirements: compact schema replay keeps coverage cascades and durable diagnostics structural',
   run: async () => {
     const highVolume = pasteCorrectionPrompt({

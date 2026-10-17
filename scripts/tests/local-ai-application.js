@@ -3606,9 +3606,10 @@ export default [
         const fixturePdf = await PDFLib.PDFDocument.create();
         fixturePdf.addPage([612, 792]);
         const fixturePdfBytes = Buffer.from(await fixturePdf.save());
+        let fitRenderCount = 0;
         __setLocalAiRenderPdfForTests(async () => ({
           bytes: Buffer.from(fixturePdfBytes),
-          pageCount: 1,
+          pageCount: ++fitRenderCount === 1 ? 2 : 1,
           fontsLoaded: true,
           missingFontFaces: [],
           layout: { contentHeightPx: 760, typeAreaHeightPx: 800 },
@@ -3620,6 +3621,11 @@ export default [
           senderId: 9131,
           expectedResultSha256: result.sha256,
         });
+
+        const fitTelemetry = getApplicationTelemetry().render;
+        assert(fitTelemetry.initialPageCount === 2 && fitTelemetry.finalPageCount === 1
+          && fitTelemetry.baselinePageCount === 1 && fitTelemetry.baselinePdfProduced,
+        'saved baseline telemetry must describe the compact one-page PDF, not the initial two-page attempt');
 
         registerJobApplicationHandlers();
         const saveApplication = ipcMain.__getInvokeHandler('save-application');

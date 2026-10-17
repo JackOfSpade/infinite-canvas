@@ -47,6 +47,16 @@ function source(overrides = {}) {
 }
 
 export default [
+  { name: 'handoff bridge: application: submission exception observation retains stage without exporting raw error', async run() {
+    const observations = [];
+    const error = new TypeError('PRIVATE-ERROR-TEXT');
+    const adapter = source({ options: { onSubmitFailure: value => observations.push(value), submitHandoff: async () => { throw error; } } });
+    const result = await adapter.submit({ ...lane, stage: 'requirements-audit' }, { code: handoff.handoffCode, text: '{}' });
+    assert(result.kind === 'threw' && result.code === 'internal_error');
+    assert(observations.length === 1 && observations[0].stage === 'requirements-audit' && observations[0].error === error);
+    assert(!JSON.stringify(result).includes('PRIVATE-ERROR-TEXT'));
+  } },
+
   {
     name: 'handoff bridge: application: injected guard makes rotated-code detection timing-safe and wrapper-aware',
     run: async () => {
