@@ -9,6 +9,8 @@ import { useEscapeToClose } from '../hooks/useEscapeToClose';
  * Props:
  *   x, y        — viewport coordinates to render at
  *   items       — array of { label, onClick?, icon?, divider?: boolean, danger?: boolean }
+ *                 or a swatch row { label?, swatches: [{ value, label }], selected, onSelect(value) }
+ *                 (a swatch with value null renders as a "clear" chip)
  *   onClose     — called when menu should close
  */
 export function ContextMenu({ x, y, items, onClose }) {
@@ -57,6 +59,40 @@ export function ContextMenu({ x, y, items, onClose }) {
         {items.map((item, i) => {
           if (item.divider) {
             return <div key={`div-${i}`} className="border-t border-white/8 my-1" />;
+          }
+
+          if (item.swatches) {
+            return (
+              <div key={`swatches-${i}`} className="px-3 py-1.5">
+                {item.label && <div className="text-[11px] text-white/45 mb-1.5">{item.label}</div>}
+                <div className="flex items-center gap-1.5">
+                  {item.swatches.map((swatch) => {
+                    const isSelected = item.selected === swatch.value;
+                    return (
+                      <button
+                        key={swatch.value ?? 'none'}
+                        type="button"
+                        title={swatch.label}
+                        aria-label={swatch.label}
+                        aria-pressed={isSelected}
+                        className={`w-5 h-5 rounded-full border transition-transform hover:scale-110 ${
+                          isSelected ? 'ring-2 ring-white/80 ring-offset-1 ring-offset-[#1a1a1a]' : ''
+                        } ${swatch.value ? 'border-white/20' : 'border-white/40 text-white/60 text-[11px] leading-none flex items-center justify-center'}`}
+                        style={swatch.value ? { backgroundColor: swatch.value } : undefined}
+                        onPointerDown={(e) => {
+                          e.stopPropagation();
+                          if (e.button !== 0) return;
+                          item.onSelect(swatch.value);
+                          onClose();
+                        }}
+                      >
+                        {!swatch.value && '×'}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            );
           }
 
           const isDanger = !!item.danger;

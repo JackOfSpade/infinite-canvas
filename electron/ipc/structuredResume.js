@@ -2061,6 +2061,25 @@ function renderCredentials(items) {
   return `<section class="section certifications" aria-labelledby="sec-credentials">${sectionHead('Certifications', 'sec-credentials')}<dl class="credentials-list">${items.map(item => `<div class="credential-item"><dt>${escapeHtml(item.name)}</dt><dd>${[item.issuer, formatRoleDateForPresentation(item.dates)].filter(Boolean).map(escapeHtml).join(' · ')}</dd></div>`).join('')}</dl></section>`;
 }
 
+// A writer can split one category across two groups (each citing different
+// evidence, or to keep a row short), which printed the same `<dt>` twice. The
+// reader sees one category, so its rows merge into the first-seen position at
+// render time only: validation, evidence and the writer loop are unchanged,
+// and a merged row never takes more lines than the rows it replaces.
+function mergeSameLabelSkillGroups(groups) {
+  const merged = new Map();
+  for (const group of groups) {
+    const label = titleCaseSkillGroupLabel(group.group);
+    const key = label.toLowerCase();
+    const row = merged.get(key) || { label, items: [] };
+    for (const item of group.items) {
+      if (!row.items.some(existing => existing.toLowerCase() === item.toLowerCase())) row.items.push(item);
+    }
+    merged.set(key, row);
+  }
+  return [...merged.values()];
+}
+
 /** Build design-system-safe HTML after validating against trusted IDs. */
 export function renderStructuredResume(raw, context = {}) {
   const draft = validateStructuredResumeDraft(raw, context);
@@ -2070,7 +2089,7 @@ export function renderStructuredResume(raw, context = {}) {
   const header = `<header class="resume-header"><h1 class="name" itemprop="name">${escapeHtml(draft.identity.name)}</h1>${subtitle ? `<p class="tagline">${subtitle}</p>` : ''}<p class="contact" role="group" aria-label="Contact">${draft.identity.contact.map(escapeHtml).join(separator())}</p></header>`;
   const experience = draft.roles.length ? `<section class="section" aria-labelledby="sec-experience">${sectionHead('Experience', 'sec-experience')}${draft.roles.map(renderRole).join('')}</section>` : '';
   const projects = draft.projects.length ? renderProjects(draft.projects, context.careerData, context.authorityMode === true) : '';
-  const skills = draft.skills.length ? `<section class="section" aria-labelledby="sec-skills">${sectionHead('Skills', 'sec-skills')}<dl class="skills">${draft.skills.map(group => `<dt>${escapeHtml(titleCaseSkillGroupLabel(group.group))}</dt><dd>${group.items.map(escapeHtml).join(SKILL_ITEM_SEPARATOR)}</dd>`).join('')}</dl></section>` : '';
+  const skills = draft.skills.length ? `<section class="section" aria-labelledby="sec-skills">${sectionHead('Skills', 'sec-skills')}<dl class="skills">${mergeSameLabelSkillGroups(draft.skills).map(row => `<dt>${escapeHtml(row.label)}</dt><dd>${row.items.map(escapeHtml).join(SKILL_ITEM_SEPARATOR)}</dd>`).join('')}</dl></section>` : '';
   const education = draft.education.length ? renderEducation(draft.education) : '';
   const credentials = draft.credentials.length ? renderCredentials(draft.credentials) : '';
   const resumeMainHtml = `<main class="page" role="document" itemscope itemtype="https://schema.org/Person">${header}${experience}${projects}${education}${credentials}${skills}</main>`;

@@ -205,13 +205,20 @@ function text(value) {
 // the unmodified job.company value.
 const TRAILING_PARENTHESIZED_ACRONYM_RE = /^(.*?)\s+\(\s*([A-Z0-9.&/+_-]+)\s*\)$/u;
 
+// The same display rule covers a legal-entity suffix: "Dear Reddit, Inc.
+// Hiring Team" reads like a contract, not a letter. Only abbreviated or purely
+// legal forms strip; "Company" and "Co." stay because they are often part of
+// the name people actually say ("The Walt Disney Company").
+const SALUTATION_LEGAL_SUFFIX_RE = /[,\s]+(?:incorporated|corporation|limited|l\.l\.c\.?|llc|inc\.?|ltd\.?|corp\.?|plc|gmbh|pbc)\s*$/iu;
+
 function salutationCompanyName(value = '') {
   const company = text(value);
   const match = TRAILING_PARENTHESIZED_ACRONYM_RE.exec(company);
-  if (!match) return company;
   // Require an actual initialism rather than removing a one-letter or numeric qualifier.
-  const acronymCharacters = match[2].replace(/[^A-Z0-9]/g, '');
-  return acronymCharacters.length >= 2 && /[A-Z]/.test(acronymCharacters) ? text(match[1]) : company;
+  const acronymCharacters = match ? match[2].replace(/[^A-Z0-9]/g, '') : '';
+  const withoutAcronym = match && acronymCharacters.length >= 2 && /[A-Z]/.test(acronymCharacters) ? text(match[1]) : company;
+  const withoutSuffix = withoutAcronym.replace(SALUTATION_LEGAL_SUFFIX_RE, '').trim();
+  return withoutSuffix || withoutAcronym;
 }
 
 // Cover letters identify their preparation period without implying a

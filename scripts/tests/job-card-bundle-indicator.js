@@ -158,7 +158,9 @@ export default [
       assert.strictEqual((svg.match(/<line /g) || []).length, 2, 'two diagonals form the X');
 
       // The salary border and its title share one colour source.
-      assert.ok(source.includes('style={{ borderColor: compensationBorderColor }}'), 'card border still comes from the compensation verdict');
+      assert.ok(/style=\{\{\s*borderColor: compensationBorderColor,/.test(source), 'card border still comes from the compensation verdict');
+      // The user's right-click border color is an outline ring, never the border itself.
+      assert.ok(source.includes('outline: `3px solid ${data.markColor}`'), 'user mark color draws as an outline outside the salary border');
       assert.ok(source.includes('{ color: compensationBorderColor }'), 'salary title uses the exact border colour');
 
       // The overlay depends on the card root being the positioned `group`.

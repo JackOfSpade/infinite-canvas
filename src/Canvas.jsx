@@ -344,7 +344,6 @@ export function Canvas() {
     takeSnapshot,
     updateNodeData,
     addElementsGlobally: navigation.addElementsGlobally,
-    extractToLevel: navigation.extractToParent,
     isAnimatingRef: isNavigationAnimatingRef,
     isInteractionRef,
   });
@@ -741,8 +740,6 @@ export function Canvas() {
     screenToFlowPosition,
     clearCanvas,
     duplicateNodes,
-    extractToParent: navigation.extractToParent,
-    depth: navigation.depth,
     isAnimatingRef: isNavigationAnimatingRef
   });
 

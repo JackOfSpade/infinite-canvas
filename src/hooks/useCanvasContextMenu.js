@@ -5,6 +5,17 @@ import { NODE_FACTORIES } from '../utils/nodeFactory';
 import { computeTidiedNodes } from '../utils/layoutUtils';
 import { nodeSupportsCustomization } from '../utils/nodeCustomization';
 
+const JOB_CARD_MARK_COLORS = [
+  { value: '#ef4444', label: 'Red' },
+  { value: '#f97316', label: 'Orange' },
+  { value: '#eab308', label: 'Yellow' },
+  { value: '#22c55e', label: 'Green' },
+  { value: '#3b82f6', label: 'Blue' },
+  { value: '#a855f7', label: 'Purple' },
+  { value: '#ec4899', label: 'Pink' },
+  { value: null, label: 'No border color' },
+];
+
 // Helper to determine if an action applies to a single clicked node or the entire selected group
 const getTargetNodeIds = (reactFlow, menuNodeId) => {
   const selectedNodes = reactFlow.getNodes().filter(n => n.selected);
@@ -20,8 +31,6 @@ export function useCanvasContextMenu({
   setNodes,
   screenToFlowPosition,
   clearCanvas,
-  extractToParent,
-  depth,
   duplicateNodes,
   isAnimatingRef
 }) {
@@ -175,6 +184,28 @@ export function useCanvasContextMenu({
     setMenu(null);
   }, [menu, setNodes, takeSnapshot, reactFlow, isAnimatingRef]);
 
+  // A user-chosen highlight ring on job cards. It lives in node.data, so it
+  // survives the card being hidden when its parent group collapses (collapse
+  // only flips `hidden`; the node and its data stay on the canvas).
+  const setJobCardMarkColor = useCallback((color) => {
+    if (isAnimatingRef?.current) return;
+    if (!menu?.node) return;
+    takeSnapshot();
+
+    const targetIds = new Set(getTargetNodeIds(reactFlow, menu.node.id));
+    let count = 0;
+    setNodes(nds => nds.map(n => {
+      if (!targetIds.has(n.id) || n.type !== 'jobcard') return n;
+      count += 1;
+      const data = { ...n.data };
+      if (color) data.markColor = color;
+      else delete data.markColor;
+      return { ...n, data };
+    }));
+    EventLogger.log(`[JobCard] border color ${color || 'cleared'} for ${count} card(s)`);
+    setMenu(null);
+  }, [menu, setNodes, takeSnapshot, reactFlow, isAnimatingRef]);
+
   const closeMenu = useCallback(() => setMenu(null), []);
 
   // useMemo: computes a value (items array) for the current menu state.
@@ -215,18 +246,6 @@ export function useCanvasContextMenu({
       items.push({ divider: true });
       items.push({ label: 'Duplicate', onClick: duplicateNode });
 
-      if (depth > 0) {
-        items.push({
-          label: 'Move to Parent Canvas',
-          disabled: isLocked,
-          onClick: () => {
-            const targetIds = getTargetNodeIds(reactFlow, menu.node.id);
-            extractToParent(targetIds);
-            setMenu(null);
-          }
-        });
-      }
-
       items.push({ label: 'Bring to Front', onClick: bringToFront, disabled: isLocked });
       items.push({ label: 'Send to Back',   onClick: sendToBack,   disabled: isLocked });
 
@@ -255,6 +274,16 @@ export function useCanvasContextMenu({
         });
       }
 
+      if (menu.node.type === 'jobcard') {
+        items.push({ divider: true });
+        items.push({
+          label: 'Border Color',
+          swatches: JOB_CARD_MARK_COLORS,
+          selected: menu.node.data?.markColor ?? null,
+          onSelect: setJobCardMarkColor,
+        });
+      }
+
       if (isText) {
         items.push({ divider: true });
         items.push({ label: menu.node.data?.isSticky ? 'Remove Sticky Style' : 'Make Sticky Note', onClick: toggleStickyNote, disabled: isLocked });
@@ -273,7 +302,7 @@ export function useCanvasContextMenu({
       return items;
     }
     return [];
-  }, [menu, spawnNode, duplicateNode, bringToFront, sendToBack, deleteSelectedNode, toggleLockNode, clearCanvas, tidyNodes, toggleStickyNote, closeMenu, depth, extractToParent, reactFlow]);
+  }, [menu, spawnNode, duplicateNode, bringToFront, sendToBack, deleteSelectedNode, toggleLockNode, clearCanvas, tidyNodes, toggleStickyNote, setJobCardMarkColor, closeMenu, reactFlow]);
   /* eslint-enable react-hooks/refs */
 
   return {

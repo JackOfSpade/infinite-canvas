@@ -616,6 +616,12 @@ export default [
           `${label}: the draft's own advisories partition as advisory, never blocking`);
         const html = renderStructuredApplicationResume(draft, kit.legacy());
         assert(html.includes(kit.spec.roles[0].company) && html.includes(kit.spec.tools[0]), `${label}: an advisory-only draft still renders`);
+        // Two groups under one label render as one row, items in order, no repeat.
+        const splitLabel = baseDraft(kit);
+        splitLabel.skills = [group(0, 'tools', [tools[0], tools[1]], [kit.ids.tools]), group(1, 'Tools', [tools[1], tools[2]], [kit.ids.tools])];
+        const splitHtml = renderStructuredApplicationResume(splitLabel, kit.legacy());
+        assert((splitHtml.match(/<dt>/g) || []).length === 1 && splitHtml.includes(`<dd>${[tools[0], tools[1], tools[2]].join(' · ')}</dd>`),
+          `${label}: same-label skill groups merge into one rendered row`);
         const rendered = renderStructuredResume(draft, kit.legacy());
         assert(rendered.advisories === rendered.draft.advisories && rendered.advisories.length === advisoryOnly.validated.advisories.length,
           `${label}: the render result carries the same advisories`);

@@ -2,6 +2,19 @@ import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 import electron from 'vite-plugin-electron'
 import tailwindcss from '@tailwindcss/vite'
+import { execFileSync } from 'node:child_process'
+
+// package.json stays at 0.0.0, so stamp the main bundle with the commit it was
+// built from; generation logs use it to tell builds apart.
+function appBuild() {
+  try {
+    const git = args => execFileSync('git', args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim()
+    const dirty = git(['status', '--porcelain']) ? '+dirty' : ''
+    return `${git(['rev-parse', '--short', 'HEAD'])}${dirty} built ${new Date().toISOString()}`
+  } catch {
+    return `unknown commit built ${new Date().toISOString()}`
+  }
+}
 
 // https://vite.dev/config/
 export default defineConfig({
@@ -33,6 +46,7 @@ export default defineConfig({
           // diagnostics. Renderer/preload builds keep their normal semantics.
           define: {
             'import.meta': '{}',
+            __APP_BUILD__: JSON.stringify(appBuild()),
           },
           build: {
             // Main-process dependencies are intentionally bundled into a few

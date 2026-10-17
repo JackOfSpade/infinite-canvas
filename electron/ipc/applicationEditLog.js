@@ -61,25 +61,114 @@ export function documentSnapshot(html) {
   } finally { dom.window.close(); }
 }
 
-function editSummaries(generated, saved, id, at) {
+/** Build identity stamped by vite.config.js; source runs (tests, scripts) have none. */
+export function appBuild() {
+  // eslint-disable-next-line no-undef
+  return typeof __APP_BUILD__ === 'string' ? __APP_BUILD__ : 'unbundled source';
+}
+
+const BLOCKS = 'h1, h2, h3, p, li, dt, dd, article.project';
+const squash = value => String(value || '').replace(/\s+/g, ' ').trim();
+
+/** Leaf content blocks in reading order, each tagged with its section heading. */
+function contentBlocks(html) {
+  if (!html) return [];
+  const dom = new JSDOM(html);
+  try {
+    const rows = [];
+    let section = '';
+    for (const el of dom.window.document.querySelectorAll(BLOCKS)) {
+      if (el.parentElement?.closest(BLOCKS)) continue;
+      const text = squash(el.textContent);
+      if (el.tagName === 'H2') section = text;
+      if (!text) continue;
+      const kind = el.tagName.toLowerCase() + (el.classList[0] ? `.${el.classList[0]}` : '');
+      rows.push({ text, section, kind });
+    }
+    return rows;
+  } finally { dom.window.close(); }
+}
+
+function commonWords(a, b) {
+  const table = Array.from({ length: a.length + 1 }, () => new Uint16Array(b.length + 1));
+  for (let i = a.length - 1; i >= 0; i--) {
+    for (let j = b.length - 1; j >= 0; j--) {
+      table[i][j] = a[i] === b[j] ? table[i + 1][j + 1] + 1 : Math.max(table[i + 1][j], table[i][j + 1]);
+    }
+  }
+  return table[0][0];
+}
+
+/** Indexes of `values` outside one longest increasing run: the entries that changed order. */
+function outOfOrder(values) {
+  const tails = [];
+  const previous = new Array(values.length).fill(-1);
+  for (let k = 0; k < values.length; k++) {
+    let lo = 0;
+    let hi = tails.length;
+    while (lo < hi) { const mid = (lo + hi) >> 1; if (values[tails[mid]] < values[k]) lo = mid + 1; else hi = mid; }
+    if (lo > 0) previous[k] = tails[lo - 1];
+    tails[lo] = k;
+  }
+  const kept = new Set();
+  for (let k = tails.at(-1) ?? -1; k >= 0; k = previous[k]) kept.add(k);
+  return new Set(values.map((_, k) => k).filter(k => !kept.has(k)));
+}
+
+/**
+ * One row per changed block: what the user did (added, removed, rewritten,
+ * moved, markup) and where, without any document text. Classifying the edit
+ * (truth, evidence, wording...) is left to the improvement session.
+ */
+export function editSummaries(generated, saved, id, at) {
   const rows = [];
-  const visibleText = value => {
-    const dom = new JSDOM(value);
-    try { return dom.window.document.body.textContent || ''; }
-    finally { dom.window.close(); }
-  };
-  for (const [kind, key] of [['resume', 'resume'], ['letter', 'letter']]) {
-    const before = generated?.[key] || '';
-    const after = saved?.[key] || '';
-    if (before === after) continue;
-    const beforeText = visibleText(before);
-    const afterText = visibleText(after);
-    const category = !after ? 'removed' : beforeText === afterText ? 'structure' : 'wording';
-    const beforeLines = beforeText.split(/\n/);
-    const afterLines = afterText.split(/\n/);
-    let line = 0;
-    while (line < Math.min(beforeLines.length, afterLines.length) && beforeLines[line] === afterLines[line]) line++;
-    rows.push({ id, at, category, location: `${kind}:line-${line + 1}`, size: Math.abs(afterText.length - beforeText.length) });
+  for (const document of ['resume', 'letter']) {
+    const beforeHtml = generated?.[document] || '';
+    const afterHtml = saved?.[document] || '';
+    if (beforeHtml === afterHtml) continue;
+    const before = contentBlocks(beforeHtml);
+    const after = contentBlocks(afterHtml);
+    const row = (block, extra) => rows.push({ id, at, document, section: block.section, kind: block.kind, ...extra });
+    const pairs = [];
+    const freeAfter = new Set(after.keys());
+    const freeBefore = [];
+    for (const [i, block] of before.entries()) {
+      const j = [...freeAfter].find(index => after[index].text === block.text);
+      if (j === undefined) freeBefore.push(i);
+      else { freeAfter.delete(j); pairs.push({ i, j }); }
+    }
+    // A leftover block in the same section and kind that keeps at least half its words is a rewrite.
+    const candidates = [];
+    for (const i of freeBefore) {
+      const a = before[i].text.split(' ');
+      for (const j of freeAfter) {
+        if (after[j].kind !== before[i].kind || after[j].section !== before[i].section) continue;
+        const b = after[j].text.split(' ');
+        const kept = commonWords(a, b);
+        const score = (2 * kept) / (a.length + b.length);
+        if (score >= 0.5) candidates.push({ i, j, score, wordsRemoved: a.length - kept, wordsAdded: b.length - kept });
+      }
+    }
+    const rewrittenBefore = new Set();
+    for (const candidate of candidates.sort((x, y) => y.score - x.score)) {
+      if (rewrittenBefore.has(candidate.i) || !freeAfter.has(candidate.j)) continue;
+      rewrittenBefore.add(candidate.i);
+      freeAfter.delete(candidate.j);
+      pairs.push({ ...candidate, rewritten: true });
+    }
+    pairs.sort((x, y) => x.i - y.i);
+    const moved = outOfOrder(pairs.map(pair => pair.j));
+    for (const [k, pair] of pairs.entries()) {
+      const block = before[pair.i];
+      const next = after[pair.j];
+      const move = moved.has(k) ? { moved: true, to: next.section } : {};
+      if (pair.rewritten) {
+        row(block, { op: 'rewritten', chars: [block.text.length, next.text.length], wordsRemoved: pair.wordsRemoved, wordsAdded: pair.wordsAdded, ...move });
+      } else if (moved.has(k)) row(block, { op: 'moved', to: next.section });
+    }
+    for (const i of freeBefore) if (!rewrittenBefore.has(i)) row(before[i], { op: 'removed', chars: [before[i].text.length, 0] });
+    for (const j of freeAfter) row(after[j], { op: 'added', chars: [0, after[j].text.length] });
+    if (!rows.some(item => item.document === document)) rows.push({ id, at, document, op: 'markup', section: '', kind: '' });
   }
   return rows;
 }
@@ -108,9 +197,15 @@ export async function logGeneratedBundle({ root, workspaceDir, html, posting, ap
     const at = new Date().toISOString();
     const snapshot = documentSnapshot(html);
     if (!snapshot.resume) throw new Error('Cannot log a bundle without its résumé panel.');
+    // A regeneration overwrites the folder's bundle, so the earlier pair was never sent.
+    for (const prior of state.pairs) {
+      if (prior.workspaceId !== workspaceId || prior.supersededAt) continue;
+      prior.supersededAt = at;
+      state.summaries.push({ id: prior.id, at, document: 'bundle', op: 'regenerated', section: '', kind: '' });
+    }
     const pair = {
       id, workspaceId, posting: String(posting || ''), generated: snapshot, saved: snapshot,
-      generatedAt: at, savedAt: at, appVersion: String(appVersion || ''), modelLabel: state.modelLabel,
+      generatedAt: at, savedAt: at, appVersion: String(appVersion || ''), build: appBuild(), modelLabel: state.modelLabel,
       letterRemoved: false,
     };
     state.pairs.push(pair);
@@ -136,8 +231,9 @@ export async function logSavedBundle({ root, workspaceDir, html, letterRemoved =
     }
     state.pairs = state.pairs.filter(item => item.id !== id);
     state.pairs.push(pair);
-    state.summaries = state.summaries.filter(row => row.id !== id);
+    state.summaries = state.summaries.filter(row => row.id !== id || row.op === 'regenerated');
     state.summaries.push(...editSummaries(pair.generated, pair.saved, id, at));
+    if (pair.letterRemoved) state.summaries.push({ id, at, document: 'letter', op: 'not needed', section: '', kind: '' });
     await write(root, prune(state));
     return pair;
   });

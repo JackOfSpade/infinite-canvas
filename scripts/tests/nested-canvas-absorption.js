@@ -916,8 +916,11 @@ export default [
       // caller cannot derive the true moved set from the ids it passed in.
       assert(navSource.includes('return finalIds;'),
         'extractToLevel: must return the ids it actually extracted (the resolved closure, finalIds), not the originally requested ids');
-      assert(dragSource.includes('const extractedIds = extractToLevel('),
-        'onNodeDragStop breadcrumb handler: must capture and log extractToLevel’s return value (what actually moved) rather than the ids it requested — the closure can silently pull in more');
+      // Breadcrumb drops no longer extract: copy/paste is the only way up a level.
+      assert(!dragSource.includes('extractToLevel('),
+        'onNodeDragStop breadcrumb handler: must not move nodes to a parent canvas (copy/paste is the only path)');
+      assert(dragSource.includes('restoreDragStartPositions(draggedIds);\n      EventLogger.log(`Breadcrumb drop'),
+        'onNodeDragStop breadcrumb handler: a breadcrumb drop snaps the dragged nodes back');
     },
   },
 {

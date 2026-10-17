@@ -290,8 +290,12 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
       // card was unmounted-or-racing, the terminal 'saved' state arrives via
       // data. Adopt it — clobbering it back would resurrect a job whose
       // directory the completed save already removed.
+      // The one exception is the status probe's missing-output verdict: the
+      // saved bundle folder was deleted, so 'saved' is no longer true and
+      // re-adopting it would put back the cross and a dead Open folder button.
       const external = data.localApplication;
-      if (external?.status === 'saved' && external?.id && external.id === localApplication?.id && localApplication?.status !== 'saved') {
+      const outputMissing = localApplication?.savedOutputMissing === true;
+      if (!outputMissing && external?.status === 'saved' && external?.id && external.id === localApplication?.id && localApplication?.status !== 'saved') {
         setLocalApplication(external);
         return;
       }
@@ -304,7 +308,7 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
       const cardState = localApplication || null;
       updateGlobal(id, (node) => {
         const live = node?.data?.localApplication;
-        if (live?.status === 'saved' && live?.id && live.id === cardState?.id && cardState?.status !== 'saved') return null;
+        if (!outputMissing && live?.status === 'saved' && live?.id && live.id === cardState?.id && cardState?.status !== 'saved') return null;
         return { localApplication: cardState };
       });
     }
@@ -417,6 +421,9 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
   // also keeps rewriting card state. Retries within this one probe follow the
   // existing bounded status-error streak below.
   const localSavedProbeRef = useRef(new Set());
+  // Bumped when the bundle folder (or a parent) changes on disk, so the poll
+  // effect below re-runs its one-shot saved probe for this card.
+  const [savedFolderRecheck, setSavedFolderRecheck] = useState(0);
   // jobId → already asked main to open this saved bundle's output folder.
   // A poll tick keeps re-observing 'saved' long after the one save that
   // earned it, so this guards the one-time reveal the same way the fallback
@@ -1000,7 +1007,32 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
     check();
     interval = window.setInterval(check, 2500);
     return () => { cancelled = true; if (interval !== null) window.clearInterval(interval); };
-  }, [localApplication?.id, localApplication?.status, localApplication?.canvasFilePath, nav, importCompletedLocalApplication, isMountedRef]);
+  }, [localApplication?.id, localApplication?.status, localApplication?.canvasFilePath, nav, importCompletedLocalApplication, isMountedRef, savedFolderRecheck]);
+
+  // A saved bundle folder deleted in Finder while the app runs: main watches
+  // the canvas folder (event-driven, no polling) and reports changed paths.
+  // Only a change to this card's folder itself or one of its parents re-arms
+  // the saved probe; edits to files inside the folder do not.
+  const savedFolder = localApplication?.status === 'saved'
+    ? (localApplication.savedDir || localApplication.receipt?.outputDir || null)
+    : null;
+  useEffect(() => {
+    const jobId = localApplication?.id;
+    const api = window.electronAPI;
+    if (!jobId || !savedFolder || !api?.watchApplicationBundles || !api.onApplicationBundlesChanged) return undefined;
+    const canvasFilePath = localApplication?.canvasFilePath
+      || (nav?.getCurrentFile ? nav.getCurrentFile() : nav?.currentFile ?? null);
+    if (!canvasFilePath) return undefined;
+    api.watchApplicationBundles({ canvasFilePath }).catch(() => {});
+    const unsubscribe = api.onApplicationBundlesChanged(({ paths } = {}) => {
+      const hit = (paths || []).some(changed => savedFolder === changed
+        || savedFolder.startsWith(`${changed}/`) || savedFolder.startsWith(`${changed}\\`));
+      if (!hit) return;
+      localSavedProbeRef.current.delete(jobId);
+      setSavedFolderRecheck(count => count + 1);
+    });
+    return unsubscribe;
+  }, [localApplication?.id, localApplication?.canvasFilePath, savedFolder, nav]);
 
   // ── Full application (tailored résumé + cover letter HTML) ─────────────────
   // New generation reads only the approved snapshot pinned to this scored
@@ -1261,7 +1293,12 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
   return (
     <div
       className={`${hasExpandedDisclosure ? 'w-[420px]' : 'w-[280px]'} relative rounded-2xl bg-neutral-900/95 border-2 shadow-lg overflow-hidden group`}
-      style={{ borderColor: compensationBorderColor }}
+      style={{
+        borderColor: compensationBorderColor,
+        // The border carries the salary verdict; the user's right-click border
+        // color (data.markColor) is an outline ring outside it so both stay legible.
+        ...(data.markColor ? { outline: `3px solid ${data.markColor}`, outlineOffset: '3px' } : {}),
+      }}
     >
       {/* A red X across the whole card marks a saved application bundle. It is
           purely visual (pointer-events-none) and fades out while the pointer or
@@ -1658,7 +1695,15 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
                   || (nav?.getCurrentFile ? nav.getCurrentFile() : nav?.currentFile ?? null);
                 // Never send the stored path back to main — it re-resolves the
                 // directory itself from its own durable receipt for this job.
-                window.electronAPI.openLocalApplicationOutput({ jobId: localApplication.id, canvasFilePath });
+                // A folder that no longer opens re-arms the saved probe, which
+                // adopts the missing-output state instead of a silent no-op.
+                const jobId = localApplication.id;
+                window.electronAPI.openLocalApplicationOutput({ jobId, canvasFilePath })
+                  .then((result) => { if (!result?.opened && !result?.skipped) throw new Error(result?.error || 'not opened'); })
+                  .catch(() => {
+                    localSavedProbeRef.current.delete(jobId);
+                    setSavedFolderRecheck(count => count + 1);
+                  });
               }}
               className="mt-2 rounded-md border border-emerald-400/20 bg-emerald-400/10 px-2 py-1 text-[10px] font-medium text-emerald-200 transition-colors hover:bg-emerald-400/15"
               title="Open the saved application bundle's folder."

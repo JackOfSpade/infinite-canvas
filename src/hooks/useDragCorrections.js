@@ -55,7 +55,7 @@ function logHoverTransition(kind, previousId, nextId, hoverState) {
   EventLogger.log(`drag-hover ${kind} target=${nextId || 'none'} was=${previousId || 'none'} verdict=${verdict}`);
 }
 
-export function useDragCorrections({ setNodes, setEdges, getNodes, getEdges, getIntersectingNodes, getNode, takeSnapshot, updateNodeData, addElementsGlobally, extractToLevel, isAnimatingRef, isInteractionRef }) {
+export function useDragCorrections({ setNodes, setEdges, getNodes, getEdges, getIntersectingNodes, getNode, takeSnapshot, updateNodeData, addElementsGlobally, isAnimatingRef, isInteractionRef }) {
   const resizeDragActiveRef    = useRef(new Set());
   const titleZoneDragActiveRef = useRef(new Set());
   const targetGroupIdRef       = useRef(null);
@@ -316,21 +316,15 @@ export function useDragCorrections({ setNodes, setEdges, getNodes, getEdges, get
       }
     }
 
+    // Dropping on a breadcrumb no longer moves nodes to that level: copy and
+    // paste is the only way to bring something up to a parent canvas. A drop
+    // there snaps the dragged nodes back instead of leaving them stranded
+    // under the breadcrumb bar.
     if (droppedOnBreadcrumbDepth !== null) {
-      if (extractToLevel) {
-        const nodesToExtract = (draggedNodes && draggedNodes.length > 0) ? draggedNodes.map(n => n.id) : [node.id];
-        // Log what extractToLevel actually moved, not what was requested: it
-        // resolves the same ownership closure the absorption path uses, so
-        // dragging a Board out by itself also carries its cards. It returns
-        // undefined when it refused (locked child, active run, bad level).
-        const extractedIds = extractToLevel(nodesToExtract, droppedOnBreadcrumbDepth);
-        if (extractedIds && extractedIds.length > 0) {
-          EventLogger.log(`Extracted nodes [${extractedIds.join(',')}] to breadcrumb level ${droppedOnBreadcrumbDepth} (requested [${nodesToExtract.join(',')}])`);
-        } else {
-          EventLogger.log(`Extraction of [${nodesToExtract.join(',')}] to breadcrumb level ${droppedOnBreadcrumbDepth} was refused`);
-        }
-      }
-      return; 
+      const draggedIds = (draggedNodes && draggedNodes.length > 0) ? draggedNodes.map(n => n.id) : [node.id];
+      restoreDragStartPositions(draggedIds);
+      EventLogger.log(`Breadcrumb drop of [${draggedIds.join(',')}] ignored (level ${droppedOnBreadcrumbDepth}); use copy/paste to move nodes between canvases`);
+      return;
     }
 
     // Existing document nodes can be dropped onto workflow hubs as shortcuts to
@@ -510,7 +504,7 @@ export function useDragCorrections({ setNodes, setEdges, getNodes, getEdges, get
     // and group-absorption drops return earlier (they either snap back or have
     // already taken their own snapshot before mutating).
     if (takeSnapshot) takeSnapshot();
-  }, [setNodes, setEdges, getNodes, getEdges, getIntersectingNodes, getNode, takeSnapshot, updateNodeData, addElementsGlobally, extractToLevel, isAnimatingRef, isInteractionRef, restoreDragStartPositions, clearHubHover]);
+  }, [setNodes, setEdges, getNodes, getEdges, getIntersectingNodes, getNode, takeSnapshot, updateNodeData, addElementsGlobally, isAnimatingRef, isInteractionRef, restoreDragStartPositions, clearHubHover]);
 
   return { onNodeDragStart, onNodeDrag, onNodeDragStop };
 }

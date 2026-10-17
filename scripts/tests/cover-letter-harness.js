@@ -2803,6 +2803,13 @@ export default [
         && acronymEnvelope.salutation === 'Dear Orchard Interactive Entertainment Hiring Team,'
         && acronymJob.company === acronymCompany,
       'a trailing parenthesized acronym is omitted only from the salutation, without changing the job company value used elsewhere');
+      const legalSuffixCompany = 'Reddit, Inc.';
+      const legalSuffixJob = { company: legalSuffixCompany };
+      assert(authorCoverLetterEnvelope({ job: legalSuffixJob, evidence }).salutation === 'Dear Reddit Hiring Team,'
+        && authorCoverLetterEnvelope({ job: { company: 'Orchard Labs LLC (OL)' }, evidence }).salutation === 'Dear Orchard Labs Hiring Team,'
+        && authorCoverLetterEnvelope({ job: { company: 'The Walt Disney Company' }, evidence }).salutation === 'Dear The Walt Disney Company Hiring Team,'
+        && legalSuffixJob.company === legalSuffixCompany,
+      'a legal-entity suffix is omitted only from the salutation, while a spoken "Company" stays');
       const qualifiedEnvelope = authorCoverLetterEnvelope({ job: { company: 'Acme (Canada)' }, evidence });
       assert(qualifiedEnvelope.salutation === 'Dear Acme (Canada) Hiring Team,',
         'a descriptive parenthetical qualifier is not mistaken for an acronym in the salutation');

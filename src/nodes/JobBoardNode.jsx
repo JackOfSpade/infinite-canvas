@@ -2363,8 +2363,17 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
     }).catch((error) => {
       EventLogger.error(`[JobBoard] child cancellation during unmount failed; recovery receipt retained id=${id}:`, error);
     });
-    clearBoardChildren();
-  }, [cancelActiveSearchModule, cancelBoardTaskAndRetireManualAi, clearBoardChildren, data.boardScanResume, epoch, getNode, id, moduleRunQueue, persistBoardCancellationIntent, updateGlobal]);
+    // Leaving a sub-canvas unmounts this Board AFTER the shared store already
+    // holds the parent level, so a blind hubId sweep deleted any card of this
+    // Board that had been pasted (or moved) up there. Only cascade when this
+    // Board's own tree is on the current level; its cards in the canvas being
+    // left were already stashed with that level.
+    const ownTreeOnThisLevel = getNodes().some(n => (
+      n.data?.hubId === id && n.type === 'jobgroup'
+    ));
+    if (ownTreeOnThisLevel) clearBoardChildren();
+    else EventLogger.log(`[JobBoard] unmount cascade skipped: Board tree not on this level id=${id}`);
+  }, [getNodes,cancelActiveSearchModule, cancelBoardTaskAndRetireManualAi, clearBoardChildren, data.boardScanResume, epoch, getNode, id, moduleRunQueue, persistBoardCancellationIntent, updateGlobal]);
 
   useUnmountEffect(cleanupBoard);
 

@@ -10121,6 +10121,9 @@ function missingSavedApplicationOutputStatus({ jobId, canvas }) {
     createdAt: null,
     resultSha256: null,
     savedDir: null,
+    // The one verdict allowed to replace a 'saved' card for the same job; the
+    // card's saved-is-terminal sync guard keys on it.
+    savedOutputMissing: true,
     message: 'The saved application bundle folder for this job is gone — it was deleted or moved after the save finished. Generate again to build and save a fresh application bundle.',
   };
 }

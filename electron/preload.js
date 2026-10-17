@@ -184,6 +184,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   updateLocalApplicationDraft: (args) => ipcRenderer.invoke('update-local-application-draft', args),
   discardLocalApplication: (args) => ipcRenderer.invoke('discard-local-application', args),
   getLocalApplicationStatus: (args) => ipcRenderer.invoke('get-local-application-status', args),
+  watchApplicationBundles: (args) => ipcRenderer.invoke('watch-application-bundles', args),
+  onApplicationBundlesChanged: createListener('application-bundles-changed'),
   discoverLocalApplications: (args) => ipcRenderer.invoke('discover-local-applications', args),
   openLocalApplicationFolder: (args) => ipcRenderer.invoke('open-local-application-folder', args),
   openLocalApplicationOutput: (args) => ipcRenderer.invoke('open-local-application-output', args),
