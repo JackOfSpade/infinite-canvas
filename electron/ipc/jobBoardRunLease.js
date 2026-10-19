@@ -69,6 +69,8 @@ function hookSender(sender) {
  * can never both run the same phase.
  */
 export async function claimJobBoardRunExecution(args = {}, { sender = null } = {}) {
+  if (!sender) return { ok: false, reason: 'missing-ownership' };
+  if (sender.isDestroyed?.()) return { ok: false, reason: 'sender-destroyed' };
   const recoveryLease = await acquireCanvasRecoveryRead(args.canvasFilePath, { owner: sender });
   const owner = recoveryLease.canvasFilePath
     ? executionOwner({ ...args, canvasFilePath: recoveryLease.canvasFilePath })
@@ -77,6 +79,13 @@ export async function claimJobBoardRunExecution(args = {}, { sender = null } = {
   if (!owner || !sender) {
     recoveryLease.release();
     return { ok: false, reason: 'missing-ownership' };
+  }
+  // Admission can wait behind Save As or another Board execution. A closed
+  // window has already emitted destroyed, so installing a claim afterwards
+  // would orphan both this execution and its long-lived recovery read lease.
+  if (sender.isDestroyed?.()) {
+    recoveryLease.release();
+    return { ok: false, reason: 'sender-destroyed' };
   }
 
   const attemptKey = `${owner.ownerKey}\u0000${owner.boardRunId}\u0000${operation}`;

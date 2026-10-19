@@ -29,6 +29,8 @@ export function JobSearchCoordinatorProvider({ children }) {
     (...args) => registry.cancelBoardModule(...args),
     [registry],
   );
+  const pauseSearchModule = useCallback((...args) => registry.pauseSearchModule(...args), [registry]);
+  const pauseBoardModule = useCallback((...args) => registry.pauseBoardModule(...args), [registry]);
 
   const value = useMemo(() => ({
     registerSearchModule,
@@ -37,7 +39,9 @@ export function JobSearchCoordinatorProvider({ children }) {
     hasSearchModule,
     registerBoardModule,
     cancelBoardModule,
-  }), [cancelBoardModule, cancelSearchModule, hasSearchModule, registerBoardModule, registerSearchModule, runSearchModule]);
+    pauseSearchModule,
+    pauseBoardModule,
+  }), [cancelBoardModule, cancelSearchModule, hasSearchModule, pauseBoardModule, pauseSearchModule, registerBoardModule, registerSearchModule, runSearchModule]);
 
   return (
     <JobSearchCoordinatorContext.Provider value={value}>

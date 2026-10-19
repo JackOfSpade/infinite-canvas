@@ -24,7 +24,7 @@ export function createJobSearchCoordinatorRegistry() {
   const searchRegistrations = new Map();
   const boardRegistrations = new Map();
 
-  const registerSearchModule = (nodeId, runner, canceller = null) => {
+  const registerSearchModule = (nodeId, runner, canceller = null, pauser = null) => {
     if (typeof nodeId !== 'string' || !nodeId.trim()) {
       throw new Error('registerSearchModule requires a node id');
     }
@@ -34,7 +34,7 @@ export function createJobSearchCoordinatorRegistry() {
     if (canceller != null && typeof canceller !== 'function') {
       throw new Error(`registerSearchModule requires a cancellation handler for ${nodeId}`);
     }
-    const registration = { runner, canceller, closing: false };
+    const registration = { runner, canceller, pauser, closing: false };
     searchRegistrations.set(nodeId, registration);
     return () => {
       registration.closing = true;
@@ -74,11 +74,11 @@ export function createJobSearchCoordinatorRegistry() {
     }
   };
 
-  const registerBoardModule = (nodeId, canceller) => {
+  const registerBoardModule = (nodeId, canceller, pauser = null) => {
     if (typeof nodeId !== 'string' || !nodeId.trim() || typeof canceller !== 'function') {
       throw new Error('registerBoardModule requires a node id and cancellation handler');
     }
-    const registration = { canceller, closing: false };
+    const registration = { canceller, pauser, closing: false };
     boardRegistrations.set(nodeId, registration);
     return () => {
       // A Board has no runner to fence. Keep its exact canceller available
@@ -99,6 +99,19 @@ export function createJobSearchCoordinatorRegistry() {
     }
   };
 
+  // Pause is deliberately distinct from cancellation: cancellation rolls back
+  // Board inputs and retires accepted AI steps. Quit must retain both.
+  const pauseModule = (kind, registrations, nodeId, options) => {
+    const registration = registrations.get(nodeId);
+    if (!registration || registration.closing || typeof registration.pauser !== 'function') {
+      return Promise.reject(unavailable(kind, nodeId));
+    }
+    try { return Promise.resolve(registration.pauser(options)); }
+    catch (error) { return Promise.reject(error); }
+  };
+  const pauseSearchModule = (nodeId, options = {}) => pauseModule('search', searchRegistrations, nodeId, options);
+  const pauseBoardModule = (nodeId, options = {}) => pauseModule('board', boardRegistrations, nodeId, options);
+
   return {
     registerSearchModule,
     hasSearchModule,
@@ -106,5 +119,7 @@ export function createJobSearchCoordinatorRegistry() {
     cancelSearchModule,
     registerBoardModule,
     cancelBoardModule,
+    pauseSearchModule,
+    pauseBoardModule,
   };
 }

@@ -93,6 +93,9 @@ export function useLocalAiFallbackManager({ navigation, getCurrentFile, addToast
       return node?.data?.localApplication?.id === jobId ? node : null;
     };
 
+    const hasLiveJobCardOwner = jobId => (ctxRef.current.navigation?.enumerateAllNodes?.() || [])
+      .some(node => node?.type === 'jobcard' && node.data?.localApplication?.id === jobId);
+
     // Merge `patch` into the LIVE localApplication. Declines (null → identity
     // preserved, nothing dirtied) when the node/job is gone, a terminal
     // 'saved' would be downgraded, or the content is unchanged. Returns
@@ -173,6 +176,7 @@ export function useLocalAiFallbackManager({ navigation, getCurrentFile, addToast
         generation,
       });
       if (disposed || importBusyRef.current || !isCurrentQuitGeneration(generation)) return;
+      if (isOrphan && hasLiveJobCardOwner(jobId)) return;
       // Liveness: the card may have been dismissed/deleted since this tick's
       // enumeration — never import (and auto-save into Applied Jobs) a job the
       // user discarded.  A discovered on-disk job deliberately has no card:
@@ -195,13 +199,14 @@ export function useLocalAiFallbackManager({ navigation, getCurrentFile, addToast
       if (isOrphan && activeCanvasFilePath !== saveCanvasFilePath) {
         return;
       }
+      const jobCanvasFilePath = local.canvasFilePath || saveCanvasFilePath;
       importBusyRef.current = true;
       if (!isOrphan) writeImportState({ status: 'importing', message: 'Local AI result found — importing…' });
       EventLogger.log(`[LocalAI] fallback import start job=${jobId} ${isOrphan ? 'orphaned-card' : `card=${nodeId} (card unmounted)`}`);
       try {
         const imported = await window.electronAPI.importLocalApplication({
           jobId,
-          canvasFilePath: local.canvasFilePath || saveCanvasFilePath,
+          canvasFilePath: jobCanvasFilePath,
           expectedResultSha256: resultSha256,
         });
         if (disposed || !isCurrentQuitGeneration(generation)) return;
@@ -322,7 +327,7 @@ export function useLocalAiFallbackManager({ navigation, getCurrentFile, addToast
         if (!isCurrentQuitGeneration(generation)) return;
         if (!isOrphan) {
           revealSavedLocalApplicationOutputOnce({
-            jobId, canvasFilePath: saveCanvasFilePath, revealedRef: revealedOutputRef.current,
+            jobId, canvasFilePath: jobCanvasFilePath, revealedRef: revealedOutputRef.current,
             onError: (error) => EventLogger.log(`[LocalAI] could not open saved bundle folder job=${jobId}: ${error}`),
           });
         }
@@ -373,6 +378,10 @@ export function useLocalAiFallbackManager({ navigation, getCurrentFile, addToast
           if (!isOrphan) ctxRef.current.addToast?.({ title: 'Local AI Job Cannot Be Completed', description: broken.message, type: 'error', dedupeKey: `local-ai-broken:${jobId}` });
           return;
         }
+        if (error?.code === 'APP_QUIT_PAUSED') {
+          if (!isOrphan) writeImportState({ status: 'completed', message: 'Application result retained for continuation.' });
+          return;
+        }
         if (error?.code === 'LOCAL_AI_RESULT_CHANGED') {
           settlingRef.current.delete(jobId);
           if (!isOrphan) writeImportState({ status: 'completed', message: 'Local AI saved a newer result — waiting briefly for the final save…' });
@@ -402,6 +411,7 @@ export function useLocalAiFallbackManager({ navigation, getCurrentFile, addToast
         generation,
       });
       if (!isCurrentQuitGeneration(generation)) return;
+      if (isOrphan && hasLiveJobCardOwner(jobId)) return;
       // A terminal 'saved' this manager already committed may have been lost
       // from state (same-flush navigation swap). Re-assert it rather than
       // polling the save-deleted job dir and misdiagnosing the outcome.
@@ -422,6 +432,7 @@ export function useLocalAiFallbackManager({ navigation, getCurrentFile, addToast
         // The card may have mounted while the IPC round-trip was in flight —
         // it owns the job now.
         if (disposed || !isCurrentQuitGeneration(generation) || isJobCardMounted(nodeId)) return;
+        if (isOrphan && hasLiveJobCardOwner(jobId)) return;
         // Same rule as the mounted card: a broken job is terminal, and the
         // throw below would park it in the transient retry loop instead.
         const broken = brokenLocalAiJobDriveState(statusResult);
@@ -598,11 +609,16 @@ export function useLocalAiFallbackManager({ navigation, getCurrentFile, addToast
           EventLogger.log(`[LocalAI] fallback orphan discovery failed: ${discovery?.error || 'unknown error'}`);
           return;
         }
+        if (disposed || !isCurrentQuitGeneration(generation)
+          || ctxRef.current.getCurrentFile?.() !== canvasFilePath) return;
         // Any card in the full graph owns its exact job, whether mounted or
         // hidden. Only folders with no canvas owner are eligible for automatic
         // recovery; this preserves an explicit card dismissal as a dismissal,
         // not an instruction to recreate UI state.
-        const knownJobIds = new Set(allNodes
+        // Pending imports and disk discovery can both await while Generate,
+        // Undo, or navigation attaches a live card. That card's driver owns
+        // its job; the snapshot taken at the start of this tick is obsolete.
+        const knownJobIds = new Set((ctxRef.current.navigation?.enumerateAllNodes?.() || [])
           .map((node) => node?.data?.localApplication?.id)
           .filter(Boolean));
         const orphaned = selectOrphanedLocalAiJobs(discovery.localJobs, knownJobIds);

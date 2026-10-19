@@ -12,6 +12,8 @@ export function ModuleRunQueueProvider({ children }) {
     cancelQueuedRunsForNode: queue.cancelQueuedRunsForNode,
     cancelQueuedRunsOwnedByNode: queue.cancelQueuedRunsOwnedByNode,
     getSnapshot: queue.getSnapshot,
+    suspendAdmissions: queue.suspendAdmissions,
+    waitForActiveRunsToSettle: queue.waitForActiveRunsToSettle,
     snapshot,
   }), [queue, snapshot]);
 

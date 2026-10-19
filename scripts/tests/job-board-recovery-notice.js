@@ -5,6 +5,7 @@ import {
   SAVED_HANDOFF_READY_MESSAGE,
   combineCommitMismatchReason,
   isLiveCombineOwnedMarker,
+  pauseBoardCombine,
 } from '../../src/nodes/jobboard/boardRecoveryNotice.js';
 
 function readNodeSource() {
@@ -15,6 +16,34 @@ function readNodeSource() {
 }
 
 export default [
+  {
+    name: 'Board Pause & save preserves its exact checkpoint before stopping and requires host acknowledgement',
+    run: async () => {
+      let marker = { runId: 'board-run', combineInputSignature: 'inputs', combineSourceRuns: [{ runId: 'source' }] };
+      const steps = [];
+      const ports = {
+        runId: 'board-run', getMarker: () => marker,
+        saveMarker: value => { marker = value; steps.push('save'); },
+        waitForCommit: async () => { steps.push('commit'); },
+        fence: () => { steps.push('fence'); },
+        pauseBackend: async () => { steps.push('stop'); return { settled: true }; },
+        settle: () => { steps.push('settle'); },
+      };
+      assert.deepStrictEqual(await pauseBoardCombine(ports), { success: true });
+      assert.deepStrictEqual(steps, ['save', 'commit', 'fence', 'stop', 'settle']);
+      assert(marker.pausedByUser && marker.autoResumeEligible === false && marker.combineInputSignature === 'inputs');
+      assert.deepStrictEqual(marker.combineSourceRuns, [{ runId: 'source' }]);
+      steps.length = 0;
+      await assert.rejects(pauseBoardCombine({ ...ports, runId: 'stale' }), /changed/);
+      assert.deepStrictEqual(steps, [], 'a stale request cannot touch another run');
+      await assert.rejects(pauseBoardCombine({ ...ports, pauseBackend: async () => ({ settled: false }) }), /did not confirm/);
+      assert(!steps.includes('settle') && marker.pausedByUser, 'an unacknowledged stop keeps recovery and cannot report success');
+      steps.length = 0;
+      await assert.rejects(pauseBoardCombine({ ...ports, saveMarker: () => { marker = { runId: 'newer' }; } }), /not saved/);
+      assert.deepStrictEqual(steps, ['commit'], 'a changed owner cannot abort backend work');
+    },
+  },
+
   {
     name: 'board recovery notice constant text is exact and mismatch reason reports the first failing invariant',
     run: async () => {

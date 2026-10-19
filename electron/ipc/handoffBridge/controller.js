@@ -254,6 +254,8 @@ export function createHandoffBridgeController(options = {}) {
   // old request never calls a replacement engine in a fresh runtime.
   let lifecycleGeneration = 0;
   let stateBeforeQuit = null;
+  let quitHoldPromise = null;
+  const activeToolCalls = new Set();
   let restartConfirmed = options.restartConfirmed === true;
   let lastHumanActionAt = safeNow(now);
   let serveIdleNoticeAt = 0;
@@ -1304,7 +1306,7 @@ export function createHandoffBridgeController(options = {}) {
     }).catch(noOp);
     return true;
   }
-  async function get(ctx = {}) {
+  async function getTool(ctx = {}) {
     if (ctx.signal?.aborted) { notePresentedKey(ctx); return { status: 'retry' }; }
     const startedAt = safeNow(now);
     const access = await gate(ctx);
@@ -1364,7 +1366,7 @@ export function createHandoffBridgeController(options = {}) {
       return failureResult;
     }
   }
-  async function submit(ctx = {}) {
+  async function submitTool(ctx = {}) {
     const startedAt = safeNow(now);
     const access = await gate(ctx);
     if (!access.allow) {
@@ -1921,10 +1923,37 @@ export function createHandoffBridgeController(options = {}) {
     } catch { return { copied: false, status: 'session_ended' }; }
   }
   async function holdForQuit() {
-    try { if (serving === 'off' || pauseCause === 'quit') return { success: true, status: snapshot(false) }; stateBeforeQuit = { serving, pauseCause }; pauseInternal('quit'); return { success: true, status: snapshot(false) }; }
-    catch { return { success: false, status: snapshot(false) }; }
+    if (quitHoldPromise) return quitHoldPromise;
+    if (serving === 'off') return { success: true, status: snapshot(false) };
+    if (!stateBeforeQuit) stateBeforeQuit = { serving, pauseCause };
+    pauseInternal('quit');
+    const startup = operation;
+    // Close transport admission synchronously, before yielding to drain the
+    // requests whose tool/source writes were already accepted.
+    const holding = call(listener, typeof listener.holdAdmission === 'function' ? 'holdAdmission' : 'quiesce');
+    const hold = (async () => {
+      try {
+        await holding;
+        if (startup) await startup;
+        if (serving === 'off' || serving === 'error') return { success: true, status: snapshot(false) };
+        if (stateBeforeQuit?.serving === 'starting') stateBeforeQuit = { serving: 'live', pauseCause: null };
+        if (pauseCause !== 'quit') pauseInternal('quit');
+        const drained = await boundedCall(listener, 'drain', [{ drainMs: SHUTDOWN_DRAIN_TIMEOUT_MS }], {
+          timers, timeoutMs: SHUTDOWN_DRAIN_TIMEOUT_MS, code: 'DRAIN_FAILED',
+        });
+        if (drained !== true) return { success: false, code: 'DRAIN_FAILED', status: snapshot(false) };
+        await boundedCall(() => Promise.allSettled([...activeToolCalls]), null, [], {
+          timers, timeoutMs: SHUTDOWN_DRAIN_TIMEOUT_MS, code: 'DRAIN_FAILED',
+        });
+        return { success: true, status: snapshot(false) };
+      } catch { return { success: false, code: 'DRAIN_FAILED', status: snapshot(false) }; }
+    })();
+    quitHoldPromise = hold;
+    try { return await hold; }
+    finally { if (quitHoldPromise === hold) quitHoldPromise = null; }
   }
   async function resumeAfterQuitCancel() {
+    if (quitHoldPromise) await quitHoldPromise;
     const generation = lifecycleGeneration;
     const activeEngine = engine;
     try {
@@ -1932,6 +1961,9 @@ export function createHandoffBridgeController(options = {}) {
         const prior = stateBeforeQuit;
         if (prior.serving === 'live') await call(activeEngine, 'resume');
         if (!currentRuntime(generation, activeEngine)) return { success: false, status: snapshot(false) };
+        if (typeof listener.resumeAdmission === 'function' && await call(listener, 'resumeAdmission') !== true) {
+          return { success: false, status: snapshot(false) };
+        }
         serving = prior.serving; pauseCause = prior.pauseCause; stateBeforeQuit = null;
         change();
       }
@@ -1939,6 +1971,21 @@ export function createHandoffBridgeController(options = {}) {
     }
     catch { return { success: false, status: snapshot(false) }; }
   }
+
+  function trackToolCall(run) {
+    let finish;
+    const settled = new Promise(resolve => { finish = resolve; });
+    activeToolCalls.add(settled);
+    try {
+      return Promise.resolve(run()).finally(() => { activeToolCalls.delete(settled); finish(); });
+    } catch (error) {
+      activeToolCalls.delete(settled);
+      finish();
+      return Promise.reject(error);
+    }
+  }
+  function get(ctx = {}) { return trackToolCall(() => getTool(ctx)); }
+  function submit(ctx = {}) { return trackToolCall(() => submitTool(ctx)); }
   function notePairingAction() {
     // Composition calls this only after the main-owned pairing sheet has
     // opened successfully. Failed or remote authorize attempts never reach

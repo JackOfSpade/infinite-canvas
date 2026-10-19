@@ -1781,7 +1781,8 @@ export default [
         && !generationScope.includes('const originHub ='),
       'the queue payload must carry only the immutable career snapshot pin, never mutable hub authority or an origin-hub recovery path');
       assert(source.includes('getLocalApplicationStatus({ jobId, canvasFilePath })')
-        && source.includes('canvasFilePath: queuedCanvasFilePath || canvasFilePath')
+        && source.includes('const jobCanvasFilePath = queuedCanvasFilePath || canvasFilePath;')
+        && source.includes('canvasFilePath: jobCanvasFilePath,')
         && source.includes('expectedResultSha256')
         && source.includes('openLocalApplicationFolder({ jobId: localApplication.id, canvasFilePath })'),
       'poll, import, and open operations must keep using the canvas path that owns the queued job');
@@ -1805,14 +1806,16 @@ export default [
       // invariant asserted here is unchanged: resolve against the complete
       // navigation graph, never isMountedRef or a level-scoped getNode.
       assert(!generationScope.includes('if (!isMountedRef.current) return;')
-        && generationScope.includes('if (!getLiveNode(idRef.current)) {')
-        && generationScope.includes('const expectedPriorLocalApplication = getLiveNode(idRef.current)?.data?.localApplication || null;')
+        && generationScope.includes('const cardBeforeQueue = getLiveNode(idRef.current);')
+        && generationScope.includes('queuedLocalApplicationStartDecision(cardBeforeQueue, getLiveNode(cardBeforeQueue?.data?.hubId))')
+        && generationScope.includes('const expectedPriorLocalApplication = cardBeforeQueue.data?.localApplication || null;')
         && generationScope.includes('const settlement = queuedLocalApplicationSettlement(')
         && generationScope.includes('expectedPriorLocalApplication,')
         && generationScope.includes('discardLocalApplication'),
       'a hidden-but-extant card must persist or deliberately replace its durable handoff globally, while an actually deleted or superseded card discards that exact handoff');
       assert(source.includes("cancelQueuedRunsForNode(id, 'Job card dismissed before generation started')")
-        && source.includes('if (!getLiveNode(idRef.current))') && source.includes('cancelledBeforeStart = true;'),
+        && generationScope.includes('queuedLocalApplicationStartDecision(card, getLiveNode(card?.data?.hubId))')
+        && generationScope.includes('if (!decision.allowed) {') && generationScope.includes('cancelledBeforeStart = true;'),
       'a removed queued card must be cancelled or rejected at turn start before it can invoke generation IPC');
       assert(source.includes('Additional notes for AI')
         && source.includes('additionalNotes: additionalNotes.trim()')
@@ -4871,14 +4874,14 @@ export default [
         && preload.includes('sendQuitResponse: (state, requestId)')
         && persistence.includes('sendQuitResponse(response, requestId);'),
       'quit responses must echo a monotonic request ID so a late timed-out response cannot satisfy a later close');
-      assert(persistence.includes('let response = { hasUnsavedChanges: true, documentSaveFailed: true };')
+      assert(persistence.includes('let response = { hasUnsavedChanges: true, documentSaveFailed: true, draftSaveFailed: true };')
         && persistence.includes("console.error('Could not prepare quit response:'")
         && persistence.includes('sendQuitResponse(response, requestId);')
         && persistence.includes('let success = false;')
         && persistence.includes("console.error('Could not prepare save response:'")
         && persistence.includes('sendSaveResponse(success, requestId);'),
       'unexpected async renderer callback failures must return correlated fail-closed quit/save responses instead of leaving main waiting');
-      assert((main.match(/responseRequestId !== requestId/g) || []).length === 2
+      assert((main.match(/responseRequestId !== requestId/g) || []).length >= 3
         && main.includes("safeMenuSend(win, 'request-save-and-respond', {")
         && main.includes('forceCanvasSave,')
         && main.includes("return { action: 'save', skipDocumentSessions, forceCanvasSave: true };")
@@ -4911,24 +4914,26 @@ export default [
         && main.includes("safeMenuSend(win, 'quit-commit-request', { requestId })")
         && main.includes('function releaseQuitCommit(windows)')
         && main.includes('const commitWindows = [...canvasWindows].filter(win => !win.isDestroyed());')
-        && main.includes('if (!await requestQuitCommitAndWait(win))')
-        && main.includes('for (const win of commitWindows) {\n      if (!await settleWindowForQuit(win))')
+        && main.includes('freezeRenderer: requestQuitCommitAndWait,')
+        && main.includes('if (!await quitAttempt.run()) return;')
         && main.includes('if (quitHandshakeInFlight || isQuitting) return null;')
         && preload.includes("onQuitCommitRequest: createListener('quit-commit-request')")
         && persistence.includes('document.body.inert = true')
         && persistence.includes('document.body.inert = false'),
-      'global quit must freeze every acknowledged stable renderer, revalidate while inert, and reject new canvases before final destruction');
+      'global quit must use the ordered pause/save coordinator and reject new canvases before final destruction');
       const globalQuit = main.slice(main.indexOf("app.on('before-quit'"));
       const windowClose = main.slice(main.indexOf("win.on('close'"), main.indexOf("win.on('closed'"));
-      assert(globalQuit.indexOf('if (!await requestQuitCommitAndWait(win))')
-          < globalQuit.indexOf('for (const win of commitWindows) {\n      if (!await settleWindowForQuit(win))')
-        && (globalQuit.match(/const result = await checkUnsavedChanges\(win, 'quit'\);/g) || []).length === 1
+      const autosave = fs.readFileSync(path.resolve('electron/utils/quitAutosave.js'), 'utf8');
+      assert(autosave.indexOf('await pauseRenderer(win)') < autosave.indexOf('await drainSender(win)')
+        && autosave.indexOf('await drainSender(win)') < autosave.indexOf('await freezeRenderer(win)')
+        && autosave.indexOf('await freezeRenderer(win)') < autosave.indexOf('await saveRenderer(win, paused.get(win))')
+        && !globalQuit.includes("checkUnsavedChanges(win, 'quit')")
         && windowClose.indexOf('if (!await requestQuitCommitAndWait(win)) return;')
           < windowClose.indexOf("const result = await checkUnsavedChanges(win, 'close');")
         && windowClose.includes('if (commitRequested && !win.isDestroyed()) releaseQuitCommit([win]);')
         && windowClose.includes('pendingGlobalQuit.consumeAfterClose(closeSucceeded)')
         && windowClose.includes('setImmediate(() => {'),
-      'both global quit and one-window close must acknowledge the renderer state fence before one-and-only-one unsaved-work validation, release an aborted close, and resume a deferred Cmd+Q only after its close succeeds');
+      'app Quit pauses and drains before freezing and automatically saving; Close retains its correlated prompt and releases cancellation before a deferred Quit');
       const canvas = fs.readFileSync(path.resolve('src/Canvas.jsx'), 'utf8');
       const navigation = fs.readFileSync(path.resolve('src/hooks/useCanvasNavigation.js'), 'utf8');
       const initialization = fs.readFileSync(path.resolve('src/hooks/useCanvasInitialization.js'), 'utf8');
@@ -4985,6 +4990,8 @@ export default [
       assert(persistence.includes('const saveOperationRef = useRef(null);')
         && persistence.includes('const activeOperation = saveOperationRef.current;')
         && persistence.includes('activeSucceeded = Boolean(await activeOperation);')
+        && persistence.includes('if (activeSucceeded && !forceFresh) return true;')
+        && persistence.includes('saveCanvas({ forceFresh: true })')
         && persistence.indexOf('activeSucceeded = Boolean(await activeOperation);')
           < persistence.indexOf('const operation = performCanvasSave();')
         && initialization.includes('if (saveOperationRef) saveOperationRef.current = operation;')
@@ -4993,10 +5000,11 @@ export default [
         && canvas.includes('saveOperationRef,\n  });'),
       'a close-time Save must wait for an in-flight autosave lane and then save the still-dirty frozen snapshot instead of returning false on the transient autosaving status');
       const releaseFinally = main.slice(main.indexOf("app.on('before-quit'"));
-      assert(main.includes('const attemptedCommitWindows = new Set();')
-        && main.includes('attemptedCommitWindows.add(win);')
-        && releaseFinally.includes('if (!isQuitting) {\n      // `document.body.inert` survives')
-        && releaseFinally.includes('releaseQuitCommit(attemptedCommitWindows);')
+      assert(autosave.includes('const attempted = new Set();')
+        && autosave.includes('attempted.add(win);')
+        && releaseFinally.includes('if (!isQuitting) {')
+        && releaseFinally.includes('await quitAttempt.release();')
+        && autosave.includes('releaseRenderer(win);')
         && releaseFinally.includes('quitHandshakeInFlight = false;'),
       'any commit request that was sent must be released from inert in the outer quit finalizer, including a rejected final persistence barrier');
       return {

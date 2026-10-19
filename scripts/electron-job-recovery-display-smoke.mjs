@@ -32,7 +32,13 @@ try {
       selectedSearchModuleIds: ['ca', 'us'], activeSourceId: 'us', activeSourceIds: ['ca', 'us'],
       activeSourceManualAiRunIds: { us: 'us-ai' }, awaitingSourceResolution: { sourceId: 'us', jobRunId: 'us-run' } },
   } };
-  await fs.writeFile(canvas, JSON.stringify({ schemaVersion: 1, nodes: [ca, us, board],
+  const reviewed = { id: 'reviewed-card', type: 'jobcard', position: { x: 900, y: 0 }, data: {
+    hubId: 'board', title: 'Synthetic reviewed role', company: 'Example', matchScore: 71, rawScore: 71,
+    fitAssessment: { auditStatus: 'audited', rawScore: 71, adjustedScore: 71,
+      gapReview: { before: { adjustedScore: 69 }, after: { adjustedScore: 71 }, changes: [] } },
+  } };
+  const capped = { ...reviewed, id: 'capped-card', position: { x: 1200, y: 0 }, data: { ...reviewed.data, rawScore: 83 } };
+  await fs.writeFile(canvas, JSON.stringify({ schemaVersion: 1, nodes: [ca, us, board, reviewed, capped],
     edges: [{ id: 'ca-board', source: 'ca', target: 'board' }, { id: 'us-board', source: 'us', target: 'board' }], drawings: [] }));
   application = await electron.launch({ args: ['.', `--user-data-dir=${path.join(directory, 'profile')}`], env });
   const page = await application.firstWindow();
@@ -56,6 +62,10 @@ try {
   assert.match(await usa.innerText(), /Continue saved AI handoff or Retry recovery/);
   assert.equal(await usa.getByRole('button', { name: 'Continue', exact: true }).count(), 0);
   assert.equal(await usa.getByRole('button', { name: 'Open prompt', exact: true }).count(), 0);
+  const reviewedCard = page.locator('.react-flow__node[data-id="reviewed-card"]');
+  await reviewedCard.getByText('Reviewed 69 → 71', { exact: true }).waitFor();
+  assert.equal(await reviewedCard.getByText(/Capped from/).count(), 0, 'a corrected uncapped score has no empty cap badge');
+  await page.locator('.react-flow__node[data-id="capped-card"]').getByText('Capped from 83', { exact: true }).waitFor();
   assert.deepEqual(errors, []);
   // Reproduce the report's second shape: a completed Board already consumed
   // this exact result, while its Search still carries an obsolete cleanup lock.

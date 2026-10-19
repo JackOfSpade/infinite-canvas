@@ -28,6 +28,135 @@ import careerCompilationQueueTests from './careerCompilationQueueFixture.mjs';
 export default [
   ...careerCompilationQueueTests,
   {
+    name: 'a candidate snapshot failure cannot resurrect fresh or resumed scoring after saved Pause',
+    async run() {
+      const source = readFileSync(new URL('../../src/nodes/JobSearchNode.jsx', import.meta.url), 'utf8');
+      const anchors = ['// This is the durable boundary between collection and preference',
+        '// Persist the raw gathered universe before preference filtering just as'];
+      const pin = 'a'.repeat(64);
+      for (const anchor of anchors) {
+        const anchorAt = source.indexOf(anchor);
+        const start = source.indexOf('} catch (snapshotError) {', anchorAt) + '} catch (snapshotError) {'.length;
+        const end = source.indexOf('\n      }\n', start);
+        assert(anchorAt >= 0 && end > start, 'the actual candidate snapshot error boundary is available');
+        for (const mode of ['already-paused', 'pause-before-functional-commit', 'active']) {
+          let cancelled = mode === 'already-paused';
+          const gathered = [{ id: 'gathered-job' }];
+          const priorPending = [{ id: 'saved-pending-job' }];
+          const hub = { data: { hubState: 'empty', jobRunId: 'saved-run', careerSnapshotId: pin,
+            pendingJobs: priorPending, manualAiResume: { runId: 'manual-run', pausedByUser: true } } };
+          const before = JSON.stringify(hub.data);
+          const queuedUpdates = [];
+          const ref = current => ({ current });
+          const apply = update => { const patch = typeof update === 'function' ? update(hub) : update; if (patch) Object.assign(hub.data, patch); };
+          const env = { currentId: 'hub', getNode: () => hub, cancelled: () => cancelled,
+            snapshotError: new Error('Synthetic storage failure'), searchResult: { runId: 'saved-run' }, resumedRunId: 'saved-run',
+            pinnedCareerSnapshotId: pin, admittedResumeCareerSnapshotId: pin, foundJobs: gathered,
+            activeCareerData: 'synthetic career data', liveData: { careerData: 'synthetic career data' },
+            activeTargetRole: '', activeJobPreferences: '', jobPreferencesInterpretation: null,
+            visibleGatheredCount: 3, finalWarnings: [], finalCollectionScopeCaveats: [],
+            pendingJobsRef: ref(priorPending), gatheredCountRef: ref(2), scrapeWarningsRef: ref([]),
+            exactJobRunCareerSnapshotBindingMatches: (data, expected) => data.jobRunId === expected.runId && data.careerSnapshotId === expected.careerSnapshotId,
+            updateGlobal: (_id, update) => mode === 'pause-before-functional-commit' ? queuedUpdates.push(update) : apply(update),
+            waitForJobRendererCommit: async args => {
+              if (mode === 'pause-before-functional-commit') {
+                cancelled = true;
+                queuedUpdates.splice(0).forEach(apply);
+              }
+              return args.isCurrent() && args.isCommitted();
+            },
+            waitForRendererCommitFrame: async () => {}, EventLogger: { error() {} },
+            searchRunOutcome: (status, details) => ({ status, ...details }),
+          };
+          const failureBoundary = runInNewContext(`(async () => { ${source.slice(start, end)} })`, env);
+          const outcome = await failureBoundary();
+          if (mode === 'active') {
+            assert(outcome.status === 'paused' && hub.data.hubState === 'sources-ready'
+              && hub.data.pendingJobs === gathered && env.pendingJobsRef.current === gathered,
+            'an active storage failure still offers retry against the exact gathered rows');
+          } else {
+            assert(['cancelled', 'superseded'].includes(outcome.status) && JSON.stringify(hub.data) === before
+              && env.pendingJobsRef.current === priorPending && env.gatheredCountRef.current === 2,
+            `${anchor}: ${mode} keeps the saved Pause receipt and never resurrects scoring state or refs`);
+          }
+        }
+      }
+      return { freshAndResumed: true, immediateAndDeferredPause: true, activeRetryRetained: true };
+    },
+  },
+  {
+    name: 'paused scoring respects live locks before both populated scoring and empty finalization lane turns',
+    async run() {
+      const source = readFileSync(new URL('../../src/nodes/JobSearchNode.jsx', import.meta.url), 'utf8');
+      const start = source.indexOf('const resumeScoring = useCallback(') + 'const resumeScoring = useCallback('.length;
+      const end = source.indexOf('\n  }, [', start) + '\n  }'.length;
+      const ref = current => ({ current });
+      for (const populated of [false, true]) {
+        for (const lockedAtEntry of [false, true]) {
+          const pending = populated ? [{ id: 'gathered-job' }] : [];
+          const priorScores = [{ id: 'prior-job', matchScore: 70 }];
+          const hub = { id: 'hub', type: 'jobhub', data: {
+            hubState: 'sources-ready', locked: lockedAtEntry, jobRunId: 'saved-run',
+            careerSnapshotId: 'a'.repeat(64), pendingCareerSnapshotId: 'a'.repeat(64),
+            pendingJobs: pending, resumeProfile: {}, pendingCareerData: 'synthetic career data',
+            pendingTargetRole: '', pendingJobPreferences: '', gatheredCount: 2,
+            scoredJobs: priorScores, scrapeWarnings: [], locationSnapshot: {},
+            analysisOperation: { authority: { operationId: 'saved-authority' } },
+          } };
+          const queue = createModuleRunQueue();
+          const blocker = lockedAtEntry ? null : await queue.acquireModuleRun({ nodeId: 'other', lane: 'job-search' });
+          const work = [];
+          const env = {
+            id: 'hub', data: hub.data, canvasFilePath: '/tmp/synthetic-canvas.json', useCallback: fn => fn,
+            getNode: () => hub, getNodes: () => [hub], getEdges: () => [],
+            updateGlobal: (_id, update) => { const patch = typeof update === 'function' ? update(hub) : update; if (patch) Object.assign(hub.data, patch); },
+            moduleRunQueue: queue, epoch: { start: () => () => false },
+            isJobWorkflowDeletionPending: () => false, hasPendingManualAiRetirement: () => false,
+            isJobSearchConnectedToBoard: () => false, pausedCareerInputMatches: () => true,
+            staleOrdinaryManualAiResumeBlocksAdmission: () => false, isLiveManualAiRecoveryBoardOwner: () => false,
+            findJobSearchBoardRecoveryOwner: () => null, findJobSearchBoardActiveRecoveryOwner: () => null,
+            findJobSearchBoardPausedContinuationOwner: () => null,
+            processingRunsRef: ref({ active: false, start: () => { work.push('processing'); return Symbol('run'); }, finish: () => true }),
+            scoringContinuationAdmissionRef: ref(null), jobRunIdRef: ref('saved-run'),
+            pendingJobsRef: ref(pending), gatheredCountRef: ref(2), scrapeWarningsRef: ref([]),
+            isMountedRef: ref(true), activeManualAiRunIdRef: ref(null), pendingUSAJobsRefreshRef: ref(false),
+            normalizedJobCareerSnapshotId: value => value, createManualAiRunId: () => 'manual-run',
+            searchRunOutcome: (status, details) => ({ status, ...details }),
+            exactJobRunCareerSnapshotBindingMatches: () => true, moduleFingerprint: () => 'fingerprint',
+            EventLogger: { log() {}, error() {} }, addToast() {}, setTimeout,
+            isNodeDeletedAbort: () => false, canCommitAnalysisOperation: () => true,
+            operationAuthorityFor: () => ({ operationId: 'authority' }),
+            claimAnalysisOperation: async () => { work.push('authority'); return {}; },
+            evaluatePreferencesForRun: async () => { work.push('preferences'); return { jobs: pending }; },
+            runScoringAndSpawn: async () => { work.push('scoring'); return { status: 'completed' }; },
+            completeJobRun: async () => { work.push('complete'); return { ok: true, cleared: true }; },
+            completeManualAiRun: async () => true, triggerUSAJobsBackgroundSearch() {},
+            terminalFinalizationError: () => null, waitForRendererCommitFrame: async () => {},
+            waitForJobRendererCommit: async () => true, waitForCommittedSearchOutcome: async ({ outcome }) => outcome,
+            window: { electronAPI: { saveJobAnalysisSnapshot: async () => { work.push('snapshot'); return { saved: true }; } } },
+          };
+          const resume = runInNewContext(`(${source.slice(start, end)})`, env);
+          const result = resume();
+          if (blocker) {
+            assert(queue.getSnapshot().queued.length === 1, 'the actual continuation waits for its shared lane');
+            hub.data.locked = true;
+            blocker.release();
+          }
+          const outcome = await result;
+          assert(outcome?.status === 'not-ready' && /locked/i.test(outcome.error || ''),
+            `${populated ? 'scoring' : 'empty'}: a lock at ${lockedAtEntry ? 'entry' : 'lane start'} refuses new work`);
+          assert(work.length === 0 && hub.data.hubState === 'sources-ready'
+            && hub.data.pendingJobs === pending && hub.data.scoredJobs === priorScores,
+          'locking preserves gathered rows and previous results without snapshots, authority claims, AI work, or completion');
+          assert(env.scoringContinuationAdmissionRef.current === null && !hub.data.queuedModuleRun
+            && queue.getSnapshot().active === null && queue.getSnapshot().queued.length === 0,
+          'a refused continuation clears its own admission and queue receipt');
+        }
+      }
+      return { emptyAndPopulated: true, entryAndQueuedLocks: true };
+    },
+  },
+  {
     name: 'completed Board leaves no stale Search cleanup marker after automatic receipt-only reconciliation',
     async run() {
       const source = readFileSync(new URL('../../src/nodes/JobSearchNode.jsx', import.meta.url), 'utf8');
@@ -4559,7 +4688,7 @@ export default [
         && childRunner.includes('const runFreshBoardImport = () => {')
         && childRunner.includes("runOrigin: 'job-board-scan'")
         && childRunner.includes('parentCancelled: cancelled')
-        && childRunner.includes('jobSearchCoordinator.registerSearchModule(id, runForJobBoard, cancelBoardRun)'),
+        && childRunner.includes('jobSearchCoordinator.registerSearchModule(id, runForJobBoard, cancelBoardRun,'),
       'a Board-invoked child must bypass only its top-level lane acquisition while retaining exact orchestration identity and parent cancellation; otherwise it deadlocks behind the Board lease');
 
       const outcomeDeclarationAt = childRunner.indexOf('let outcome;');
@@ -4609,13 +4738,13 @@ export default [
       assert(coordinator.includes('createJobSearchCoordinatorRegistry')
         && coordinator.includes('registry.registerSearchModule')
         && coordinator.includes('registry.cancelBoardModule')
-        && coordinatorRegistry.includes('const registration = { runner, canceller, closing: false };')
+        && coordinatorRegistry.includes('const registration = { runner, canceller, pauser, closing: false };')
         && coordinatorRegistry.includes('searchRegistrations.get(nodeId) !== registration')
         && coordinatorRegistry.includes('registration.closing = true;')
         && coordinatorRegistry.includes("'JOB_SEARCH_MODULE_UNAVAILABLE'")
         && coordinatorRegistry.includes('return registration.runner(options);')
         && coordinatorRegistry.includes('return Promise.resolve(registration.canceller(options));')
-        && coordinatorRegistry.includes('const registration = { canceller, closing: false };'),
+        && coordinatorRegistry.includes('const registration = { canceller, pauser, closing: false };'),
       'the coordinator registry must normalize runner settlement, start exact cancellation authorization synchronously, normalize cancellation throws, reject unavailable modules, and prevent stale effect cleanup from deleting a newer registration');
       assert(app.includes('<ModuleRunQueueProvider>')
         && app.includes('<JobSearchCoordinatorProvider>')
@@ -4726,7 +4855,7 @@ export default [
       const ownedQueueCancelAt = reset.indexOf('moduleRunQueue.cancelQueuedRunsOwnedByNode(id)');
       const durableOwnerAt = reset.indexOf('let durableBoardOwner = findJobSearchBoardActiveRecoveryOwner(');
       const durableParentCancelAt = reset.indexOf('jobSearchCoordinator.cancelBoardModule(', durableOwnerAt);
-      const lockGuardAt = reset.indexOf('if (getNode(id)?.data?.locked ?? data.locked)');
+      const lockGuardAt = reset.indexOf('if (!lifecycleQuit && (getNode(id)?.data?.locked ?? data.locked))');
       assert(exactRouteStart >= 0
         && exactRoute.includes('const control = boardRunControlRef.current;')
         && exactRoute.includes('orchestratorNodeId: control.orchestratorNodeId')
@@ -5832,8 +5961,8 @@ export default [
       assert(bucket >= 0 && taxonomy > bucket && compensation > taxonomy && enrichedUnion > compensation && build > enrichedUnion,
         'Combine must validate bucketing before compensation, then build cards only from the enriched returned union');
       const snapshot = combine.indexOf("new CustomEvent('canvas-take-snapshot')", build);
-      const clear = combine.indexOf('clearBoardChildren();', build);
-      const add = combine.indexOf('addElementsGlobally(id, newNodes, newEdges', clear);
+      const clear = combine.indexOf('replaceBoardDisplayChildren({', build);
+      const add = combine.indexOf('addElementsGlobally(id, addedNodes, addedEdges', clear);
       const publish = combine.indexOf("hubState: 'done'", add);
       const completion = combine.indexOf('[JobBoard] combine completed', publish);
       assert(snapshot > build && clear > snapshot && add > clear && publish > add && completion > publish,
@@ -5900,7 +6029,8 @@ export default [
       const leaseAt = combine.indexOf('await moduleRunQueue.acquireModuleRun');
       const snapshotAt = combine.indexOf('const inputsAtCombine = liveCombineInputs(id, getNodes(), getEdges());');
       const guardAt = combine.indexOf('const liveStateBeforeCommit = liveCombineInputs(id, getNodes(), getEdges());');
-      const clearChildrenAt = combine.indexOf('clearBoardChildren();', guardAt);
+      const historyPreflightAt = combine.indexOf('await window.electronAPI?.prepareBoardJobsHistory?.({');
+      const clearChildrenAt = combine.indexOf('replaceBoardDisplayChildren({', guardAt);
       const historyAt = combine.indexOf('appendJobsHistory', guardAt);
       const committedBoundaryAt = combine.indexOf(
         'committedCombineRef.current = { token: combineToken, manualAiRunId };',
@@ -5925,7 +6055,7 @@ export default [
         && combine.includes('boardInputSignature(\n          liveInputsBeforeCommit,\n          liveStateBeforeCommit.all,')
         && combine.includes('boundedCombinedSourceRuns(completedAtCombine)')
         && combine.includes('moduleCount: completedAtCombine.length')
-        && guardAt > snapshotAt && clearChildrenAt > guardAt && historyAt > guardAt
+        && historyPreflightAt > snapshotAt && guardAt > historyPreflightAt && clearChildrenAt > guardAt && historyAt > guardAt
         && combine.includes('combine superseded before commit'),
       'post-queue live inputs drive the union/provenance, live locks stop both queued and post-provider work, and a second signature check runs before card deletion or history writes');
       assert(combine.includes('const historyWrite = window.electronAPI?.appendJobsHistory?.({')

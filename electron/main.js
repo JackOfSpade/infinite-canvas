@@ -46,7 +46,7 @@ import { pruneSavedBugReports } from './ipc/bugReport/reportFile.js';
 import { registerNetworkHandlers } from './ipc/network.js';
 import { registerSettingsHandlers } from './ipc/settings.js';
 import { flushNonApiAiPersistence, hasPendingNonApiAiRequestsForSender, registerNonApiAiHandlers } from './ipc/nonApiAi.js';
-import { __runWithIpcRequestContextForTests } from './ipc/ipcUtils.js';
+import { __runWithIpcRequestContextForTests, beginSenderQuitPause, releaseSenderQuitPause, drainSenderNodeTasksForQuit } from './ipc/ipcUtils.js';
 import { buildCareerCleanLayer, produceCareerCleanLayer, readCareerCleanLayer } from './ipc/careerCleanLayer.js';
 import { approvedCareerEvidenceCatalog, careerSnapshotStorageRoot, readCareerSnapshot } from './ipc/careerSnapshot.js';
 import { callLLMText } from './ipc/llm.js';
@@ -63,6 +63,7 @@ import { promisify } from 'node:util';
 import { isBackgroundE2E as isBackgroundE2ERuntime, runBackgroundE2EShutdownCleanup } from './utils/backgroundE2e.js';
 import { acceptanceActivationPolicy, shouldSuppressNativeApplicationMenu } from './utils/acceptanceNoNativeMenu.js';
 import { createPendingGlobalQuitDeferral } from './utils/quitDeferral.js';
+import { createQuitAutosaveAttempt } from './utils/quitAutosave.js';
 
 const execFile = promisify(execFileCb);
 
@@ -742,6 +743,40 @@ function requestQuitCommitAndWait(win) {
   });
 }
 
+function requestQuitPauseAndWait(win) {
+  if (win.isDestroyed() || hasStoppedRenderer(win)) return Promise.resolve({ success: false });
+  return new Promise(resolve => {
+    const expectedSender = win.webContents;
+    const requestId = ++rendererHandshakeRequestId;
+    let timer;
+    let settled = false;
+    const finish = result => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      electronPkg.ipcMain.removeListener('quit-pause-ack', handler);
+      expectedSender.removeListener('destroyed', onUnavailable);
+      expectedSender.removeListener('did-start-navigation', onNavigation);
+      expectedSender.removeListener('render-process-gone', onUnavailable);
+      resolve(result);
+    };
+    const handler = (event, { requestId: responseRequestId, success, requiresCanvasSave } = {}) => {
+      if (event.sender !== expectedSender || responseRequestId !== requestId) return;
+      finish({ success: success === true, requiresCanvasSave: requiresCanvasSave === true });
+    };
+    const onUnavailable = () => finish({ success: false });
+    const onNavigation = (_event, _url, isInPlace, isMainFrame) => {
+      if (isMainFrame && !isInPlace) onUnavailable();
+    };
+    electronPkg.ipcMain.on('quit-pause-ack', handler);
+    expectedSender.once('destroyed', onUnavailable);
+    expectedSender.on('did-start-navigation', onNavigation);
+    expectedSender.once('render-process-gone', onUnavailable);
+    timer = setTimeout(onUnavailable, 120000);
+    if (!safeMenuSend(win, 'quit-pause-request', { requestId })) onUnavailable();
+  });
+}
+
 function releaseQuitCommit(windows) {
   for (const win of windows) safeMenuSend(win, 'quit-commit-release');
 }
@@ -869,9 +904,9 @@ async function checkUnsavedChanges(win, actionType = 'close') {
       expectedSender.removeListener('render-process-gone', onRenderProcessGone);
       resolve(state);
     };
-    const handler = (event, { hasUnsavedChanges, documentSaveFailed = false, requestId: responseRequestId } = {}) => {
+    const handler = (event, { hasUnsavedChanges, documentSaveFailed = false, draftSaveFailed = false, requestId: responseRequestId } = {}) => {
       if (event.sender !== expectedSender || responseRequestId !== requestId) return;
-      finish({ hasUnsavedChanges, documentSaveFailed });
+      finish({ hasUnsavedChanges, documentSaveFailed, draftSaveFailed });
     };
     const onDestroyed = () => finish({ destroyed: true });
     const onMainFrameNavigation = (_event, _url, isInPlace, isMainFrame) => {
@@ -904,6 +939,15 @@ async function checkUnsavedChanges(win, actionType = 'close') {
 
   if (rendererState.timeout) {
     return { action: showUnverifiedSaveStateDialog(win, actionType) };
+  }
+  if (rendererState.draftSaveFailed) {
+    try {
+      electronPkg.dialog.showMessageBoxSync(win, {
+        type: 'error', buttons: ['Keep Open'], title: 'Could Not Save AI Draft',
+        message: 'An application or AI response draft could not be saved. The window will stay open so you can retry.',
+      });
+    } catch { /* Keep the window open even if its explanatory dialog failed. */ }
+    return { action: 'cancel' };
   }
 
   // A document conflict/read/write failure is resolved in its own editor; do
@@ -1808,7 +1852,7 @@ if (!gotTheLock) {
 }
 
 app.on('before-quit', async (event) => {
-  if (isBackgroundE2E) {
+  if (isBackgroundE2E && !(process.env.INFINITE_CANVAS_E2E_QUIT_HANDSHAKE === '1' && !app.isPackaged)) {
     // Do not run renderer handshakes, restore/minimize windows, or focus a
     // hidden smoke window. Still close every owned background resource before
     // forcing the disposable process down, otherwise a headless browser can
@@ -1857,57 +1901,32 @@ app.on('before-quit', async (event) => {
   // quit, so subsequent events can safely no-op until it completes or cancels.
   if (quitHandshakeInFlight) return;
   quitHandshakeInFlight = true;
-  void holdHandoffBridgeForQuit();
-  // A request can reach a renderer just before its ACK is lost to navigation or
-  // timeout, so record it *before* awaiting the response. Every recorded
-  // renderer must be released on every non-terminating path, including an
-  // unexpected rejection during the final persistence barrier.
-  const attemptedCommitWindows = new Set();
+  const commitWindows = [...canvasWindows].filter(win => !win.isDestroyed());
+  const quitAttempt = createQuitAutosaveAttempt({
+    windows: commitWindows,
+    beginPause: win => beginSenderQuitPause(win.webContents),
+    releasePause: win => releaseSenderQuitPause(win.webContents),
+    holdBridge: holdHandoffBridgeForQuit,
+    resumeBridge: resumeHandoffBridgeAfterQuitCancel,
+    pauseRenderer: requestQuitPauseAndWait,
+    // An admitted bundle import can spend a minute verifying PDFs. Give its
+    // durable transaction time to finish before treating the quit as failed.
+    drainSender: win => drainSenderNodeTasksForQuit(win.webContents, { timeoutMs: 120000 }),
+    flushPersistence: flushNonApiAiPersistence,
+    freezeRenderer: requestQuitCommitAndWait,
+    saveRenderer: (win, paused) => requestSaveAndWait(win, {
+      forceCanvasSave: paused.requiresCanvasSave || hasPendingNonApiAiRequestsForSender(win.webContents),
+    }),
+    releaseRenderer: win => releaseQuitCommit([win]),
+    windowsAreCurrent: () => commitWindows.length === [...canvasWindows].filter(win => !win.isDestroyed()).length
+      && commitWindows.every(win => canvasWindows.has(win) && !win.isDestroyed()),
+  });
 
   try {
-    const settleWindowForQuit = async (win) => {
-      if (win.isDestroyed()) return true;
-      const result = await checkUnsavedChanges(win, 'quit');
-      if (result.action === 'cancel') return false;
-      if (result.action === 'save') {
-        if (win.isMinimized()) win.restore();
-        win.focus();
-        const saved = await requestSaveAndWait(win, {
-          skipDocumentSessions: result.skipDocumentSessions,
-          forceCanvasSave: result.forceCanvasSave,
-        });
-        if (!saved) return false;
-      }
-      return flushNonApiAiPersistenceForLifecycle(win, 'quit');
-    };
-
-    // Freeze the stable window set before asking any save/discard question.
-    // The renderer ACK comes only after its Canvas mutation gate is live and
-    // already-accepted controlled batches have settled. This makes the one
-    // validation pass below final without re-prompting a deliberate discard.
-    const commitWindows = [...canvasWindows].filter(win => !win.isDestroyed());
-    for (const win of commitWindows) {
-      attemptedCommitWindows.add(win);
-      if (!await requestQuitCommitAndWait(win)) {
-        return;
-      }
-    }
-    if (commitWindows.length !== [...canvasWindows].filter(win => !win.isDestroyed()).length
-        || commitWindows.some(win => !canvasWindows.has(win) || win.isDestroyed())) {
-      return;
-    }
-    // Each window gets one user-visible check/save/discard pass while every
-    // renderer remains frozen. An unresponsive renderer is explicitly
-    // verified/discarded by the user rather than assumed clean.
-    for (const win of commitWindows) {
-      if (!await settleWindowForQuit(win)) {
-        return;
-      }
-    }
+    if (!await quitAttempt.run()) return;
 
     isQuitting = true;
-    // All canvas windows have now either saved or explicitly discarded their
-    // state. Destroy them before the potentially long browser/profile cleanup:
+    // All canvas windows have paused and saved. Destroy them before cleanup:
     // leaving an editable renderer alive here would allow new edits that the
     // final app.exit() could drop. The `isQuitting` close branch and reentrant
     // before-quit guard keep window-all-closed from taking over termination.
@@ -1961,17 +1980,23 @@ app.on('before-quit', async (event) => {
     // `before-quit` is also an EventEmitter callback; an escaped rejection is
     // reported as an unhandledRejection rather than a recoverable failed quit.
     logger.error(`[Main] Could not complete app quit safely: ${error?.message || error}`);
+    const win = commitWindows.find(candidate => !candidate.isDestroyed());
+    if (win && !isBackgroundE2E) {
+      try {
+        await electronPkg.dialog.showMessageBox(win, {
+          type: 'error', buttons: ['Keep Open'], title: 'Quit paused',
+          message: 'The app could not finish pausing and saving. Your windows will stay open.',
+          detail: error?.message || 'Please retry after resolving the save issue.',
+        });
+      } catch { /* The owning window may already have closed. */ }
+    }
   } finally {
     // On a cancelled/failed save, allow a later explicit quit to try again.
     // A successful path sets isQuitting and exits from the inner finally.
     if (!isQuitting) {
-      // `document.body.inert` survives an exception in the frozen settle (for
-      // example an unexpected handshake failure). Do this in the outer
-      // finally rather than only at expected early returns so a surviving UI is
-      // never stranded non-interactive.
-      releaseQuitCommit(attemptedCommitWindows);
-      void resumeHandoffBridgeAfterQuitCancel();
-      quitHandshakeInFlight = false;
+      try { await quitAttempt.release(); }
+      catch (error) { logger.error(`[Main] Could not release quit pause: ${error?.message || error}`); }
+      finally { quitHandshakeInFlight = false; }
     }
   }
 });

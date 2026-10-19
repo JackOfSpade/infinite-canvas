@@ -45,7 +45,7 @@ import { JOB_SCORING_SCHEMA, JOB_COMPENSATION_EVIDENCE_SCHEMA, JOB_COMPENSATION_
 import { runBoundedJobTaxonomy } from './jobTaxonomy.js';
 import { confirmSimilarJobLocationPairs } from './jobLocationConsolidation.js';
 import electronPkg from 'electron';
-import { abortNodeTasksAndWait, getCurrentIpcRequestContext, handleSafe, nodeCancellationError } from './ipcUtils.js';
+import { abortNodeTasksAndWait, drainNodeTasksForQuit, getCurrentIpcRequestContext, handleSafe, isAppQuitPauseReason, nodeCancellationError } from './ipcUtils.js';
 import { clearBrowserSession, getBrowserSessionResetBlocker, resetPlatformSession } from './stealthBrowser.js';
 import { buildPhysicalCardWalkPlan, scrapeManualSources, resetManualScraperDiagnostics, resetManualScraperTelemetry, enrichResolvedJobDescriptions, preloadResolvedJobList } from './browser/manualScraper.js';
 import { orderBrowserSources, resetManualSolveTracking, markManualSolveRequired, recordVerificationOutcome, wasManualSolveRequired, getVerificationSnapshot } from './scrapeVerification.js';
@@ -336,7 +336,7 @@ function continuationTerminalResult(operation, result) {
 
 function checkpointContinuationBeforeReply(operation) {
   return async ({ event, args, signal, result }) => {
-    if (!args?.continuationIntentId || signal?.aborted) return;
+    if (!args?.continuationIntentId || (signal?.aborted && !isAppQuitPauseReason(signal.reason))) return;
     const admission = await validateJobContinuationAuthority(args.canvasFilePath, {
       nodeId: args.nodeId,
       parentRunId: args.jobRunId,
@@ -1999,13 +1999,19 @@ function successfulSnapshotIdentity(snapshot, serialized) {
   return owner && runId ? `${owner}\u0000${runId}` : serialized;
 }
 
-async function readValidSuccessfulGeneration(filePath, canvasFilePath, nodeId) {
+async function readValidSuccessfulGeneration(filePath, canvasFilePath, nodeId, slot, authorityRecord) {
   try {
-    const snapshot = JSON.parse(await fs.promises.readFile(filePath, 'utf8'));
+    const read = await readAnalysisArtifact(filePath);
+    if (read.state !== 'present') return null;
+    const { snapshot, serialized } = read;
     if (classifySnapshotExactOwnership(snapshot, canvasFilePath, nodeId) !== 'owned'
       || !isPopulatedSuccessfulJobAnalysisSnapshot(snapshot)) return null;
-    const serialized = serializeJobAnalysisSnapshot(snapshot);
-    return { filePath, snapshot, serialized, identity: successfulSnapshotIdentity(snapshot, serialized) };
+    const publication = scopedPublicationFor(authorityRecord, slot, serialized, snapshotOperationAuthority(snapshot));
+    if (!publication) return null;
+    // Keep the exact sealed bytes and receipt. Re-serializing a retained backup
+    // would require a new seal and could promote altered/unpublished content.
+    return { filePath, snapshot, serialized, publication, fileIdentity: read.identity,
+      identity: successfulSnapshotIdentity(snapshot, serialized) };
   } catch {
     // A recovery generation is optional. Never overwrite an unparseable or
     // foreign record merely because its filename happens to be in this scope.
@@ -2018,12 +2024,15 @@ async function readValidSuccessfulGeneration(filePath, canvasFilePath, nodeId) {
 // the final generation-1 rename, the prior newest recovery point remains
 // intact. A crash can leave a harmless duplicate but never makes all valid
 // populated recovery points disappear.
-async function rotateSuccessfulJobAnalysisGenerations(paths, snapshot, serialized) {
-  if (!isPopulatedSuccessfulJobAnalysisSnapshot(snapshot)) return { rotated: false, retainedGenerations: 0 };
+async function planSuccessfulJobAnalysisGenerations(paths, snapshot, serialized, authorityRecord) {
+  if (!isPopulatedSuccessfulJobAnalysisSnapshot(snapshot)) return null;
   const owner = jobAnalysisSnapshotOwner(snapshot);
   const previous = [];
-  for (const filePath of paths.lastSuccessJsonPaths || [paths.lastSuccessJsonPath]) {
-    const record = await readValidSuccessfulGeneration(filePath, snapshot.canvasFilePath, owner);
+  const destinations = paths.lastSuccessJsonPaths || [paths.lastSuccessJsonPath];
+  const validByPath = new Map();
+  for (const [index, filePath] of destinations.entries()) {
+    const record = await readValidSuccessfulGeneration(filePath, snapshot.canvasFilePath, owner, `success:${index + 1}`, authorityRecord);
+    if (record) validByPath.set(filePath, record);
     if (record && !previous.some(candidate => candidate.identity === record.identity)) previous.push(record);
   }
   const next = [{
@@ -2034,17 +2043,25 @@ async function rotateSuccessfulJobAnalysisGenerations(paths, snapshot, serialize
   }];
   for (const record of previous) {
     if (record.identity !== next[0].identity) next.push(record);
-    if (next.length >= (paths.lastSuccessJsonPaths || []).length) break;
+    if (next.length >= destinations.length) break;
   }
-  const destinations = paths.lastSuccessJsonPaths || [paths.lastSuccessJsonPath];
+  return {
+    next, destinations,
+    retainedPublications: next.slice(1).map((record, index) => ({ ...record.publication, slot: `success:${index + 2}` })),
+    surplus: destinations.slice(next.length).map(filePath => validByPath.get(filePath)).filter(Boolean),
+  };
+}
+
+async function rotateSuccessfulJobAnalysisGenerations(plan) {
+  if (!plan) return { rotated: false, retainedGenerations: 0 };
+  const { next, destinations } = plan;
   for (let index = next.length - 1; index >= 0; index -= 1) {
     await writeJobAnalysisFileAtomically(destinations[index], next[index].serialized);
   }
   // Do not remove a corrupt/foreign surplus record. A valid, owned fourth
   // record is safely retired only after its three newer successors exist.
-  for (let index = next.length; index < destinations.length; index += 1) {
-    const record = await readValidSuccessfulGeneration(destinations[index], snapshot.canvasFilePath, owner);
-    if (record) await fs.promises.unlink(destinations[index]).catch(() => {});
+  for (const record of plan.surplus) {
+    await removeAnalysisArtifactIfUnchanged(record.filePath, record.fileIdentity);
   }
   return { rotated: true, retainedGenerations: next.length };
 }
@@ -2123,7 +2140,7 @@ async function saveJobAnalysisSnapshot(snapshot) {
   const authority = snapshotOperationAuthority(snapshot);
   const transaction = await withCurrentJobAnalysisOperationAuthority({
     canvasFilePath: snapshot.canvasFilePath, hubId: jobAnalysisSnapshotOwner(snapshot), ...authority,
-  }, (_authority, stagePublication) => withJobAnalysisSnapshotLock(jsonPath, async () => {
+  }, (authorityRecord, stagePublication) => withJobAnalysisSnapshotLock(jsonPath, async () => {
     if (isRetiredJobAnalysisSnapshot(snapshot)) {
       await recordAnalysisRecoveryLifecycle({
         operation: 'snapshot-save', result: 'retired', reason: 'retired-before-write',
@@ -2134,20 +2151,20 @@ async function saveJobAnalysisSnapshot(snapshot) {
     }
     if (!snapshot.canvasFilePath) await fs.promises.mkdir(dir, { recursive: true });
     const serialized = serializeJobAnalysisSnapshot(snapshot);
-    const rotates = isPopulatedSuccessfulJobAnalysisSnapshot(snapshot);
+    const rotationPlan = await planSuccessfulJobAnalysisGenerations(paths, snapshot, serialized, authorityRecord);
     await stagePublication({
       publications: [
         { slot: 'current', digest: jobAnalysisArtifactDigest(serialized) },
-        ...(rotates ? [{ slot: 'success:1', digest: jobAnalysisArtifactDigest(serialized) }] : []),
+        ...(rotationPlan ? [{ slot: 'success:1', digest: jobAnalysisArtifactDigest(serialized) }] : []),
       ],
-      rotateSuccessful: rotates,
+      ...(rotationPlan ? { retainedSuccessfulPublications: rotationPlan.retainedPublications } : {}),
     });
     await writeJobAnalysisFileAtomically(jsonPath, serialized);
     // Keep a durable recovery copy of the most recent populated gather. A valid
     // empty run may replace the current diagnostic snapshot, but it must not
     // erase the only detailed copy of opportunities that durable seen-history
     // will correctly suppress from future reruns.
-    const rotation = await rotateSuccessfulJobAnalysisGenerations(paths, snapshot, serialized);
+    const rotation = await rotateSuccessfulJobAnalysisGenerations(rotationPlan);
     await writeJobAnalysisFileAtomically(promptPath, formatPromptFile(snapshot));
     const lifecycle = {
       canvasFilePath: snapshot.canvasFilePath,
@@ -2531,10 +2548,14 @@ function authorityReceiptMatches(left, right) {
   return sameJobAnalysisOperationAuthority(left, right);
 }
 
+function scopedPublicationFor(record, slot, serialized, authority) {
+  const digest = jobAnalysisArtifactDigest(serialized);
+  return [record?.publications?.[slot], record?.pendingPublications?.[slot]]
+    .find(publication => publication?.digest === digest && authorityReceiptMatches(publication.receipt, authority)) || null;
+}
+
 function scopedPublicationMatches(record, slot, serialized, authority) {
-  const publication = record?.publications?.[slot] || record?.pendingPublications?.[slot];
-  return !!publication && publication.digest === jobAnalysisArtifactDigest(serialized)
-    && authorityReceiptMatches(publication.receipt, authority);
+  return !!scopedPublicationFor(record, slot, serialized, authority);
 }
 
 /**
@@ -3536,7 +3557,7 @@ async function saveDescriptionRecoverySnapshotIfCurrent(snapshot, { nodeId, jobR
     nodeId,
   );
   const { dir, jsonPath, lastSuccessJsonPath, promptPath } = paths;
-  const publish = async stagePublication => {
+  const publish = async (stagePublication, authorityRecord) => {
     const checkpoint = await saveDescriptionRecoveryCheckpoint(snapshot, { stagePublication });
     if (!checkpoint.saved) return checkpoint;
     return withJobAnalysisSnapshotLock(jsonPath, async () => {
@@ -3551,16 +3572,16 @@ async function saveDescriptionRecoverySnapshotIfCurrent(snapshot, { nodeId, jobR
     }
     if (!snapshot.canvasFilePath) await fs.promises.mkdir(dir, { recursive: true });
     const serialized = serializeJobAnalysisSnapshot(snapshot);
-    const rotates = isPopulatedSuccessfulJobAnalysisSnapshot(snapshot);
+    const rotationPlan = await planSuccessfulJobAnalysisGenerations(paths, snapshot, serialized, authorityRecord);
     await stagePublication({
       publications: [
         { slot: 'current', digest: jobAnalysisArtifactDigest(serialized) },
-        ...(rotates ? [{ slot: 'success:1', digest: jobAnalysisArtifactDigest(serialized) }] : []),
+        ...(rotationPlan ? [{ slot: 'success:1', digest: jobAnalysisArtifactDigest(serialized) }] : []),
       ],
-      rotateSuccessful: rotates,
+      ...(rotationPlan ? { retainedSuccessfulPublications: rotationPlan.retainedPublications } : {}),
     });
     await writeJobAnalysisFileAtomically(jsonPath, serialized);
-    await rotateSuccessfulJobAnalysisGenerations(paths, snapshot, serialized);
+    await rotateSuccessfulJobAnalysisGenerations(rotationPlan);
     await writeJobAnalysisFileAtomically(promptPath, formatPromptFile(snapshot));
       return { saved: true, globalSaved: true, checkpointPath: checkpoint.checkpointPath, jsonPath, lastSuccessJsonPath, promptPath };
     });
@@ -3577,7 +3598,7 @@ async function saveDescriptionRecoverySnapshotIfCurrent(snapshot, { nodeId, jobR
   }
   const transaction = await withCurrentJobAnalysisOperationAuthority({
     canvasFilePath: snapshot.canvasFilePath, hubId: nodeId, ...authority,
-  }, (_current, stagePublication) => publish(stagePublication));
+  }, (current, stagePublication) => publish(stagePublication, current));
   return transaction.admitted ? transaction.value : { saved: false, globalSaved: false, reason: transaction.reason || 'operation-superseded' };
 }
 
@@ -14439,6 +14460,18 @@ Return a JSON object with four arrays of search query strings:
       return { ok: false, paused: false, settled: false, reason: 'missing-node' };
     }
 
+    // Quit closes work admission first. Let an already-started checkpoint or
+    // terminal continuation result commit under its still-active authority,
+    // then mark the exact saved run manual. Revoking first would prevent its
+    // final durable receipt from being written.
+    const appQuitPause = cause === 'app-quit';
+    const quitAcknowledgement = appQuitPause
+      ? await drainNodeTasksForQuit(ownerNodeId, event.sender)
+      : null;
+    if (appQuitPause && quitAcknowledgement?.settled !== true) {
+      return { ...quitAcknowledgement, ok: false, paused: false, reason: 'quit-pause-not-settled' };
+    }
+
     const state = canvasFilePath
       ? await readRunState(canvasFilePath, Date.now(), { nodeId: ownerNodeId })
       : null;
@@ -14498,6 +14531,7 @@ Return a JSON object with four arrays of search query strings:
     // A standalone late append has no primary manifest or dedicated Resume UI;
     // explicit Stop cancels that exact intent instead of leaving an invisible
     // manual tombstone that would suppress every future credentials retry.
+    // App quit preserves every intent for restart, including standalone work.
     const continuationRunId = pauseReceipt?.runId || state?.manifest?.runId
       || (typeof runId === 'string' && runId.trim() ? runId.trim() : null);
     const continuationPause = canvasFilePath && continuationRunId
@@ -14505,12 +14539,12 @@ Return a JSON object with four arrays of search query strings:
           canvasFilePath,
           nodeId: ownerNodeId,
           parentRunId: continuationRunId,
-          mode: state?.manifest ? 'pause' : 'clear',
+          mode: state?.manifest || appQuitPause ? 'pause' : 'clear',
           now: Date.now(),
           // pauseRunForManualResume tombstones the exact authority before we
           // reach its continuation sidecars. Only this host control path may
           // use the exact-revoked cleanup admission.
-          allowRevokedExactAuthority: Boolean(state?.manifest),
+          allowRevokedExactAuthority: Boolean(state?.manifest) || appQuitPause,
           pauseAuthority: jobAnalysisOperationAuthorityReceipt(operationAuthority),
         })
       : { ok: true, paused: 0, removed: 0, matched: 0 };
@@ -14520,10 +14554,8 @@ Return a JSON object with four arrays of search query strings:
       return { ok: false, paused: false, settled: false, reason: 'continuation-pause-failed' };
     }
 
-    const acknowledgement = await abortNodeTasksAndWait(
-      ownerNodeId,
-      event.sender,
-      nodeCancellationError(cause),
+    const acknowledgement = quitAcknowledgement || await abortNodeTasksAndWait(
+      ownerNodeId, event.sender, nodeCancellationError(cause),
     );
     logger.info(`[Jobs] saved_pause outcome=${acknowledgement?.settled === true ? 'saved' : 'not-settled'} checkpoint=${pauseReceipt?.paused === true ? 'manual' : 'absent'}`);
     return {

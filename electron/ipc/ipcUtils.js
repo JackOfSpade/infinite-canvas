@@ -29,7 +29,49 @@ export function __runWithIpcRequestContextForTests(context, callback) {
 // open canvas. Sender ownership keeps cancellation local while still letting
 // diagnostics take an app-wide snapshot.
 const nodeTasks = new Map();
+// File exports/imports can own durable transactions without a canvas node id.
+// Track every invoke by sender as well, so quit can drain those transactions
+// before destroying their renderer. Diagnostics keep using the node-only map.
+const senderTasks = new Map();
 const taskRegistrySenders = new WeakSet();
+const quitPausedSenders = new WeakSet();
+const QUIT_PAUSE_WORK_CHANNELS = new Set([
+  'claim-job-analysis-operation', 'begin-job-continuation', 'claim-job-continuation', 'claim-job-board-run',
+  'parse-career-data', 'resolve-job-search-location', 'interpret-job-preferences', 'resolve-search-roles',
+  'evaluate-job-preferences', 'generate-job-queries', 'search-jobs', 'search-jobs-single-source', 'score-jobs',
+  'research-job-compensation', 'confirm-job-location-consolidations', 'bucket-jobs', 'resolve-job-source', 'resume-job-source',
+  'queue-local-application', 'import-local-application', 'save-application', 'build-interview-brief',
+  'analyze-photos', 'scrape-price-comps', 'synthesize-price', 'synthesize-prices-batch', 'synthesize-bundle-price',
+  'rescrape-source', 'resolve-captcha', 'assess-platform-fit',
+]);
+// An admitted import may already be promoting output or issuing its export
+// capability. Let already-admitted import/export transactions finish; new ones
+// remain gated and their persisted application result is recoverable on restart.
+// Claims/queue admissions likewise must return their allocated identity rather
+// than orphan a lease or persisted job behind an aborted invoke response.
+const QUIT_FINISH_COMMIT_CHANNELS = new Set([
+  'claim-job-analysis-operation', 'begin-job-continuation', 'claim-job-continuation', 'claim-job-board-run',
+  'queue-local-application', 'import-local-application', 'save-application',
+]);
+
+/** Main-owned admission fence; lifecycle save/pause/read IPC remains available. */
+export function beginSenderQuitPause(sender) {
+  if (!sender || sender.isDestroyed?.()) return false;
+  quitPausedSenders.add(sender);
+  return true;
+}
+
+export function releaseSenderQuitPause(sender) {
+  return sender ? quitPausedSenders.delete(sender) : false;
+}
+
+export function appQuitPauseError() {
+  return cancellationError('App paused for quit', 'app-quit');
+}
+
+export function isAppQuitPauseReason(reason) {
+  return reason?.message === 'App paused for quit' && reason?.cancelCause === 'app-quit';
+}
 // Aborted controllers remain registered until their handleSafe `finally` runs.
 // That makes repeated acknowledged cancellation join the same cleanup barrier
 // instead of falsely reporting success merely because an earlier raw abort
@@ -94,18 +136,15 @@ function ensureSenderRegistryCleanup(sender) {
   if (!sender || taskRegistrySenders.has(sender)) return;
   taskRegistrySenders.add(sender);
   sender.once('destroyed', () => {
-    const tasks = nodeTasks.get(sender);
-    if (tasks) {
-      for (const controllers of tasks.values()) {
-        for (const ac of controllers.keys()) {
-          if (!ac.signal.aborted) ac.abort(new Error('Sender destroyed'));
-        }
-      }
+    for (const ac of senderTasks.get(sender)?.keys() || []) {
+      if (!ac.signal.aborted) ac.abort(new Error('Sender destroyed'));
     }
     // A handler is expected to settle cooperatively, but a broken dependency
     // can ignore AbortSignal forever. Do not retain the destroyed WebContents
     // in diagnostics/registry state while waiting for that detached promise.
     nodeTasks.delete(sender);
+    senderTasks.delete(sender);
+    quitPausedSenders.delete(sender);
     acknowledgedManualAiRunIds.delete(sender);
   });
 }
@@ -130,9 +169,6 @@ function registerNodeTask(sender, nodeId, ac, channel, manualAiRunId = null, log
   if (!tasks.has(nodeId)) {
     tasks.set(nodeId, new Map());
   }
-  let resolveSettled;
-  const settled = new Promise(resolve => { resolveSettled = resolve; });
-  nodeTaskSettlements.set(ac, { settled, resolveSettled });
   tasks.get(nodeId).set(ac, {
     registeredAt: Date.now(),
     channel: channel || null,
@@ -162,9 +198,64 @@ function unregisterNodeTask(sender, nodeId, ac) {
     if (set.size === 0) tasks.delete(nodeId);
     if (tasks.size === 0) nodeTasks.delete(sender);
   }
-  const settlement = nodeTaskSettlements.get(ac);
-  settlement?.resolveSettled?.();
+}
+
+function registerSenderTask(sender, ac, { channel, nodeId, manualAiRunId }) {
+  ensureSenderRegistryCleanup(sender);
+  let tasks = senderTasks.get(sender);
+  if (!tasks) { tasks = new Map(); senderTasks.set(sender, tasks); }
+  let resolveSettled;
+  const settled = new Promise(resolve => { resolveSettled = resolve; });
+  nodeTaskSettlements.set(ac, { settled, resolveSettled });
+  tasks.set(ac, { channel, nodeId: nodeId || null, manualAiRunId: manualAiRunId || null });
+}
+
+function unregisterSenderTask(sender, ac) {
+  const tasks = senderTasks.get(sender);
+  tasks?.delete(ac);
+  if (tasks?.size === 0) senderTasks.delete(sender);
+  nodeTaskSettlements.get(ac)?.resolveSettled?.();
   nodeTaskSettlements.delete(ac);
+}
+
+async function drainQuitTasks(sender, { nodeId = null, timeoutMs = 30_000 } = {}) {
+  const deadline = Date.now() + Math.max(1, Number(timeoutMs) || 30_000);
+  let abortedCount = 0;
+  const manualAiRunIds = new Set();
+  for (;;) {
+    const entries = [...(senderTasks.get(sender)?.entries() || [])]
+      .filter(([, meta]) => !nodeId || meta.nodeId === nodeId);
+    if (entries.length === 0) return { settled: true, abortedCount, manualAiRunIds: [...manualAiRunIds] };
+    const settlements = entries.map(([controller]) => nodeTaskSettlements.get(controller)?.settled).filter(Boolean);
+    for (const [controller, meta] of entries) {
+      if (meta.manualAiRunId) manualAiRunIds.add(meta.manualAiRunId);
+      if (QUIT_PAUSE_WORK_CHANNELS.has(meta.channel) && !QUIT_FINISH_COMMIT_CHANNELS.has(meta.channel)
+        && !controller.signal.aborted) {
+        controller.abort(appQuitPauseError());
+        abortedCount += 1;
+      }
+    }
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) return { settled: false, abortedCount, manualAiRunIds: [...manualAiRunIds] };
+    let timer;
+    const settled = await Promise.race([
+      Promise.allSettled(settlements).then(() => true),
+      new Promise(resolve => { timer = setTimeout(() => resolve(false), remaining); }),
+    ]);
+    if (timer) clearTimeout(timer);
+    if (!settled) return { settled: false, abortedCount, manualAiRunIds: [...manualAiRunIds] };
+    // Include persistence invocations already dispatched by an import's
+    // completion before its renderer sees the new admission fence.
+    await new Promise(resolve => setImmediate(resolve));
+  }
+}
+
+export function drainSenderNodeTasksForQuit(sender, options = {}) {
+  return drainQuitTasks(sender, options);
+}
+
+export function drainNodeTasksForQuit(nodeId, sender, options = {}) {
+  return drainQuitTasks(sender, { ...options, nodeId });
 }
 
 /**
@@ -415,8 +506,12 @@ export function handleSafe(channel, handler, timeoutOrOptions = 0) {
     : {};
   const timeoutMs = Number.isFinite(timeoutOrOptions) ? timeoutOrOptions : 0;
   ipcMain.handle(channel, async (event, args) => {
+    if (quitPausedSenders.has(event.sender) && QUIT_PAUSE_WORK_CHANNELS.has(channel)) {
+      return { success: false, pausedForQuit: true, errorCode: 'APP_QUIT_PAUSED', error: 'App paused for quit' };
+    }
     const { ac, signal, cleanup } = createSenderAbortController(event, timeoutMs);
     let nodeId = null;
+    let senderTaskRegistered = false;
 
     try {
       // This must stay ahead of every `args.nodeId` read. Node IDs feed the
@@ -431,6 +526,9 @@ export function handleSafe(channel, handler, timeoutOrOptions = 0) {
       }
 
       nodeId = args?.nodeId;
+      registerSenderTask(event.sender, ac, { channel, nodeId,
+        manualAiRunId: typeof args?.manualAiRunId === 'string' ? args.manualAiRunId : null });
+      senderTaskRegistered = true;
       if (nodeId) {
         registerNodeTask(
           event.sender,
@@ -499,7 +597,8 @@ export function handleSafe(channel, handler, timeoutOrOptions = 0) {
       if (nodeId) {
         unregisterNodeTask(event.sender, nodeId, ac);
       }
-      cleanup();
+      try { cleanup(); }
+      finally { if (senderTaskRegistered) unregisterSenderTask(event.sender, ac); }
     }
   });
 }

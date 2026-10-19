@@ -18,7 +18,7 @@ import { createHandoffBridgeLog } from '../../electron/ipc/handoffBridge/log.js'
 import { APPLICATION_QUEUE_STAGES } from '../../electron/ipc/handoffBridge/telemetry.js';
 import { discardLocalApplicationJob, queueLocalApplicationJob } from '../test-dependencies.js';
 import { createLaneStore } from '../../electron/ipc/handoffBridge/laneStore.js';
-import { composeHandoffBridge, ENABLE_CONSENT_VERSION, handleApplicationBundleRemoved, registerHandoffBridgeHandlers, scheduleHandoffBridgeLaunch, startHandoffBridge, stopHandoffBridge } from '../../electron/ipc/handoffBridge/index.js';
+import { composeHandoffBridge, ENABLE_CONSENT_VERSION, handleApplicationBundleRemoved, holdHandoffBridgeForQuit, registerHandoffBridgeHandlers, resumeHandoffBridgeAfterQuitCancel, scheduleHandoffBridgeLaunch, startHandoffBridge, stopHandoffBridge } from '../../electron/ipc/handoffBridge/index.js';
 import { createTunnelSupervisor } from '../../electron/ipc/handoffBridge/tunnel/supervisor.js';
 import { createFakeClock } from './fixtures/handoff-bridge/fakeClock.js';
 import { createFakeProcessTable } from './fixtures/handoff-bridge/fakeProcessTable.js';
@@ -60,7 +60,7 @@ function enginePort(overrides = {}) {
 
 function controllerHarness(overrides = {}) {
   let stamp = 1_000_000; const timers = overrides.timers || fakeTimers(); const currentNow = typeof overrides.now === 'function' ? overrides.now : () => stamp; const engine = overrides.engine || enginePort(); const auditLines = []; const notifications = [];
-  const listener = { async start() { return { ok: true }; }, async stop() {}, async quiesce() {}, async drain() {} };
+  const listener = { async start() { return { ok: true }; }, async stop() {}, async quiesce() {}, async drain() { return true; } };
   const tunnel = { async start() { return { ok: true }; }, async stop() {}, status: () => ({ state: 'online', credentialsMode: 'ok' }) };
   const controller = createHandoffBridgeController({
     now: currentNow, timers, config: { hostname: HOST, limits: { idlePauseMinutes: 1440, releaseTtlHours: 24, chatKeyMaxAgeHours: 24, jobsPerChat: 2, epochSoftBytes: 500000, epochHardBytes: 750000 }, prefs: { sourcePolicy: 'enforce' } },
@@ -115,7 +115,7 @@ function lifecycleHarness(overrides = {}) {
   };
   const listener = {
     start: track(() => { lifecycle.listener = true; return { ok: true }; }),
-    quiesce: track(NOOP), drain: track(NOOP), close: track(() => { lifecycle.listener = false; }),
+    quiesce: track(NOOP), drain: track(() => true), close: track(() => { lifecycle.listener = false; }),
   };
   const tunnel = {
     start: track(() => { lifecycle.child = true; return { ok: true }; }),
@@ -1531,6 +1531,96 @@ export default [
   { name: 'handoff bridge: controls: quit restores only its own pause cause', async run() {
     const h = controllerHarness(); await h.controller.enable(); await h.controller.holdForQuit(); await h.controller.resumeAfterQuitCancel(); assert(h.controller.snapshot().serving === 'live', 'cancelled quit restores live');
     await h.controller.pause('user'); await h.controller.holdForQuit(); await h.controller.resumeAfterQuitCancel(); assert(h.controller.snapshot().pauseCause === 'user', 'cancelled quit never erases a user pause');
+  } },
+  { name: 'handoff bridge: controls: quit holds an absent runtime and restores deferred scheduled launch only after cancellation', async run() {
+    await stopHandoffBridge();
+    const callbacks = []; let starts = 0; let reads = 0;
+    try {
+      assert((await holdHandoffBridgeForQuit()).success, 'an absent runtime still acquires global quit admission');
+      scheduleHandoffBridgeLaunch({
+        userData: '/tmp/synthetic-quit-scheduled', setTimeoutImpl: callback => { callbacks.push(callback); return { unref: NOOP }; },
+        stat: async () => { reads++; throw new Error('No pidfile'); },
+        readConfig: () => ({ config: { autoStart: true, consentVersion: ENABLE_CONSENT_VERSION } }),
+        start: async () => { starts++; return { success: true }; },
+      });
+      await callbacks[0]();
+      const refused = await startHandoffBridge({ deps: { enabled: true, activate: true, app: { getPath() { throw new Error('Must not inspect setup during quit'); } } } });
+      assert(starts === 0 && reads === 0 && refused.code === 'QUIT_PAUSED', 'neither a delayed auto-start nor a new explicit start crosses the quit gate');
+      assert((await resumeHandoffBridgeAfterQuitCancel()).success, 'a cancelled quit releases absent-runtime admission');
+      await settle(20);
+      assert(starts === 1 && reads === 1, 'the original delayed launch is replayed once after cancellation');
+    } finally { await resumeHandoffBridgeAfterQuitCancel(); await stopHandoffBridge(); }
+  } },
+  { name: 'handoff bridge: controls: quit fences queued enable and drains an enable already attaching its runtime', async run() {
+    for (const phase of ['queued-enable', 'active-enable']) {
+      await stopHandoffBridge();
+      const entered = deferred(); const enableGate = deferred(); let enables = 0; let holds = 0; let live = false;
+      const config = { hostname: HOST, autoStart: true, consentVersion: ENABLE_CONSENT_VERSION,
+        scope: { applications: true, scoring: false }, limits: { idlePauseMinutes: 1440 }, prefs: { sourcePolicy: 'enforce', pairingNetworkCheck: true } };
+      const deps = {
+        userData: `/tmp/synthetic-quit-${phase}`, isPackaged: true, env: {}, enabled: true, activate: true,
+        loadedConfig: { state: 'ok', config },
+        tunnelState: { binaryPath: '/tmp/fake-cloudflared', binaryTrusted: true, credentialsPath: '/tmp/fake-credentials' },
+        compose: () => ({ controller: {
+          snapshot: () => ({ enabled: live, serving: live ? 'live' : 'off' }),
+          enable: async () => { enables++; entered.resolve(); if (phase === 'active-enable') await enableGate.promise; live = true; return { success: true }; },
+          holdForQuit: async () => { holds++; return { success: true }; },
+          resumeAfterQuitCancel: async () => ({ success: true }),
+          disable: async () => ({ success: true }), shutdownForQuit: async () => ({ success: true }),
+        } }),
+      };
+      try {
+        const starting = startHandoffBridge({ reason: 'auto-start', deps });
+        if (phase === 'active-enable') await entered.promise;
+        let held = false;
+        const holding = holdHandoffBridgeForQuit().then(result => { held = true; return result; });
+        if (phase === 'active-enable') {
+          await settle();
+          assert(!held, 'the global hold cannot acknowledge while admitted runtime activation is still pending');
+          enableGate.resolve();
+        }
+        const result = await starting;
+        assert((await holding).success, 'global admission is stable before quit proceeds');
+        if (phase === 'queued-enable') assert(result.code === 'QUIT_PAUSED' && enables === 0, 'an enable not yet invoked is deferred');
+        else assert(result.success && holds === 1, 'the runtime that finished activation is paused and drained');
+        await resumeHandoffBridgeAfterQuitCancel();
+        await settle(30);
+        assert(enables === 1, 'cancelled quit preserves exactly one prior startup intent');
+      } finally { enableGate.resolve(); await resumeHandoffBridgeAfterQuitCancel(); await stopHandoffBridge(); }
+    }
+  } },
+  { name: 'handoff bridge: controls: reversible quit hold drains admitted writes before acknowledging', async run() {
+    const entered = deferred(); const saved = deferred(); let writes = 0; let accepting = true; let gets = 0;
+    const h = controllerHarness({
+      engine: enginePort({ async get() { gets++; entered.resolve(); await saved.promise; writes++; return { status: 'empty' }; } }),
+      listener: { async start() { return { ok: true }; }, holdAdmission() { accepting = false; return true; },
+        async drain() { return true; }, resumeAdmission() { accepting = true; return true; } },
+    });
+    await h.controller.enable();
+    const request = h.controller.get({ grant: { linkId: 'synthetic' }, sourceAllowed: true });
+    await entered.promise;
+    let acknowledged = false;
+    const holding = h.controller.holdForQuit().then(result => { acknowledged = true; return result; });
+    await settle();
+    assert(!accepting && !acknowledged && writes === 0, 'quit closes admission while an accepted write is still draining');
+    assert((await h.controller.get({ grant: { linkId: 'synthetic' }, sourceAllowed: true })).status === 'paused' && gets === 1,
+      'a later request cannot reach the engine');
+    saved.resolve(); await request;
+    assert((await holding).success && writes === 1, 'the hold acknowledges only after the admitted source write settles');
+    assert((await h.controller.resumeAfterQuitCancel()).success && accepting && h.controller.snapshot().serving === 'live',
+      'a cancelled quit reopens the same listener and prior live bridge');
+  } },
+  { name: 'handoff bridge: controls: a failed quit drain stays paused and can restore the prior user pause', async run() {
+    let accepting = true;
+    const h = controllerHarness({ listener: {
+      async start() { return { ok: true }; }, holdAdmission() { accepting = false; return true; },
+      async drain() { return false; }, resumeAdmission() { accepting = true; return true; },
+    } });
+    await h.controller.enable(); await h.controller.pause('user');
+    const held = await h.controller.holdForQuit();
+    assert(held.success === false && held.code === 'DRAIN_FAILED' && !accepting, 'an unconfirmed drain cannot approve quit');
+    assert((await h.controller.resumeAfterQuitCancel()).success && accepting && h.controller.snapshot().pauseCause === 'user',
+      'failed quit restores the existing user pause without resetting the engine/runtime');
   } },
   { name: 'handoff bridge: controls: status is closed and excludes free text and paths', run: () => {
     const engine = enginePort({ status: () => ({ queue: { jobs: [{ jobId: JOB, phase: 'awaiting', stage: 'resume', reason: 'secret prompt', servedToChat: 7, changedAt: 1 }] }, counts: {} }) });

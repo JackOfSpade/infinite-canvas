@@ -4,6 +4,7 @@ import { EventEmitter } from 'node:events';
 import { pathToFileURL } from 'node:url';
 import { getRecentLogs } from '../../electron/logger.js';
 import { createPendingGlobalQuitDeferral } from '../../electron/utils/quitDeferral.js';
+import { beginSenderQuitPause, drainSenderNodeTasksForQuit, isAppQuitPauseReason, releaseSenderQuitPause } from '../../electron/ipc/ipcUtils.js';
 import {
   initialCanvasWindowSpec,
   openOrFocusCanvasWindow,
@@ -1109,6 +1110,81 @@ export default [
       assert(watcher.closed,
         'a send race must be contained and release the final watcher subscription');
       return { broadcastSendRaceContained: true };
+    },
+  },
+  {
+    name: 'IPC quit pause: sender gate rejects new work and node-less exports while permitting lifecycle persistence',
+    async run() {
+      electronPkg.ipcMain.__clearInvokeHandlers();
+      const first = senderEvent(); const second = senderEvent();
+      const calls = [];
+      for (const channel of ['score-jobs', 'queue-local-application', 'import-local-application', 'save-application',
+        'save-workspace', 'save-job-analysis-snapshot', 'peek-job-run']) {
+        handleSafe(channel, async () => { calls.push(channel); return { completed: true }; });
+      }
+      try {
+        assert(beginSenderQuitPause(first.sender));
+        for (const channel of ['score-jobs', 'queue-local-application', 'import-local-application', 'save-application']) {
+          const denied = await electronPkg.ipcMain.__getInvokeHandler(channel)(first, {});
+          assert(denied.success === false && denied.pausedForQuit && denied.errorCode === 'APP_QUIT_PAUSED', `${channel} must reject before side effects`);
+        }
+        assert(calls.length === 0 && snapshotActiveNodeTasks(first.sender.id).length === 0, 'gate denials cannot register or dispatch work');
+        for (const channel of ['save-workspace', 'save-job-analysis-snapshot', 'peek-job-run']) {
+          assert((await electronPkg.ipcMain.__getInvokeHandler(channel)(first, {})).success, `${channel} must remain available to save lifecycle state`);
+        }
+        assert((await electronPkg.ipcMain.__getInvokeHandler('score-jobs')(second, {})).success, 'another window must retain its own admission');
+        releaseSenderQuitPause(first.sender);
+        assert((await electronPkg.ipcMain.__getInvokeHandler('score-jobs')(first, {})).success, 'cancelled quit must release the exact sender gate');
+      } finally { releaseSenderQuitPause(first.sender); }
+    },
+  },
+  {
+    name: 'IPC quit pause: drain includes node-less import/export commits and terminal checkpoint hooks across one sender only',
+    async run() {
+      electronPkg.ipcMain.__clearInvokeHandlers();
+      const first = senderEvent(); const second = senderEvent();
+      let finishImport; let finishExport; let finishCheckpoint; let finishClaim;
+      const importGate = new Promise(resolve => { finishImport = resolve; });
+      const exportGate = new Promise(resolve => { finishExport = resolve; });
+      const checkpointGate = new Promise(resolve => { finishCheckpoint = resolve; });
+      const claimGate = new Promise(resolve => { finishClaim = resolve; });
+      let importSignal; let exportSignal; let claimSignal; let searchSignal; let otherSignal; let checkpointEntered = false;
+      handleSafe('import-local-application', async (_event, _args, signal) => { importSignal = signal; await importGate; return { imported: true }; });
+      handleSafe('save-application', async (_event, _args, signal) => { exportSignal = signal; await exportGate; return { saved: true }; });
+      handleSafe('claim-job-board-run', async (_event, _args, signal) => { claimSignal = signal; await claimGate; return { claimToken: 'retained-claim-token' }; });
+      handleSafe('search-jobs', async (event, _args, signal) => {
+        if (event.sender === first.sender) searchSignal = signal; else otherSignal = signal;
+        await new Promise(resolve => signal.addEventListener('abort', resolve, { once: true }));
+        return { jobs: [] };
+      }, { beforeReply: async ({ event }) => { if (event.sender === first.sender) { checkpointEntered = true; await checkpointGate; } } });
+      const importing = electronPkg.ipcMain.__getInvokeHandler('import-local-application')(first, { jobId: 'importing' });
+      const exporting = electronPkg.ipcMain.__getInvokeHandler('save-application')(first, { workDir: '/tmp/synthetic-export' });
+      const claiming = electronPkg.ipcMain.__getInvokeHandler('claim-job-board-run')(first, { nodeId: 'claiming-board' });
+      const searching = electronPkg.ipcMain.__getInvokeHandler('search-jobs')(first, { nodeId: 'same-node', manualAiRunId: 'retained-ai-run' });
+      const otherSearch = electronPkg.ipcMain.__getInvokeHandler('search-jobs')(second, { nodeId: 'same-node' });
+      try {
+        beginSenderQuitPause(first.sender);
+        let drained = false;
+        const draining = drainSenderNodeTasksForQuit(first.sender, { timeoutMs: 2_000 }).then(result => { drained = true; return result; });
+        await waitFor(() => checkpointEntered, 'the aborted search terminal checkpoint');
+        assert(searchSignal.aborted && isAppQuitPauseReason(searchSignal.reason), 'quit must carry a distinct non-destructive abort reason');
+        assert(!importSignal.aborted && !exportSignal.aborted && !claimSignal.aborted && !otherSignal.aborted,
+          'admitted import/export/claim commits and another window cannot be aborted by this sender drain');
+        finishImport(); finishExport(); finishClaim();
+        await Promise.all([importing, exporting]);
+        assert((await claiming).claimToken === 'retained-claim-token', 'an admitted lease claim must return its token so normal ownership cleanup can release it');
+        await Promise.resolve();
+        assert(!drained, 'drain must include the handler beforeReply durability hook');
+        finishCheckpoint();
+        const result = await draining;
+        assert(result.settled && result.abortedCount === 1 && result.manualAiRunIds.includes('retained-ai-run'), 'every existing sender transaction must reach settlement');
+        assert((await searching).error === 'App paused for quit' && snapshotActiveNodeTasks(first.sender.id).length === 0);
+      } finally {
+        finishImport(); finishExport(); finishCheckpoint(); finishClaim();
+        releaseSenderQuitPause(first.sender);
+        abortNodeTasks('same-node', second.sender);
+        await Promise.allSettled([importing, exporting, claiming, searching, otherSearch]);
+      }
     },
   },
   {

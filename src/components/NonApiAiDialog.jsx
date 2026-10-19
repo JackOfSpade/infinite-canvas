@@ -20,12 +20,39 @@ import { buildDockNav, isGroupOnlyNav } from '../utils/applicationBridgePage';
 import { isBridgeHeldPush } from '../utils/bridgeHeldPush';
 import { isWorkflowSuccessor, selectionAfterHandoffSettlement, successorPreferenceAfterSettlement } from '../utils/nonApiAiNavigation';
 import { assessPastedResponse, responseFingerprint } from '../utils/pasteIdentityGuard';
-import { applicationRequestId, applicationStageLabel, assignApplicationOrdinals, mergeDockQueue, registerApplicationDraftFlusher, requestApplicationHandoffRefresh, setDismissedApplicationBundles, subscribeApplicationHandoffFocus, subscribeApplicationHandoffs, trackApplicationDraftWrite, usesPushHandoffCode } from '../utils/applicationHandoffDock';
+import { applicationRequestId, applicationStageLabel, assignApplicationOrdinals, forgetApplicationDraftWrite, mergeDockQueue, registerApplicationDraftFlusher, requestApplicationHandoffRefresh, setDismissedApplicationBundles, subscribeApplicationHandoffFocus, subscribeApplicationHandoffs, trackApplicationDraftWrite, usesPushHandoffCode } from '../utils/applicationHandoffDock';
 // A failed submit result may carry the job-integrity code: the job's own
 // frozen state failed, not the pasted response, and no further paste can
 // answer that. See applicationHandoffDock.js's doc comment for the shared
 // dock contract this file adapts application handoffs into.
 import { jobIntegrityFailureMessage } from '../utils/localAiFallback';
+
+const applicationDraftKey = payload => JSON.stringify([payload.canvasFilePath, payload.jobId, payload.handoffCode]);
+const writeApplicationDraft = payload => trackApplicationDraftWrite(
+  async () => {
+    let result;
+    let failure;
+    try { result = await window.electronAPI.updateLocalApplicationDraft(payload); }
+    catch (error) { failure = error; }
+    if (failure || result?.success === false || result?.saved === false) {
+      // A successful submit can rotate the stage before an older debounced
+      // draft reaches disk. Only an authoritative newer/terminal handoff may
+      // retire that obsolete recovery text; a failed read retains its retry.
+      try {
+        const current = await window.electronAPI.getLocalApplicationHandoff?.({
+          jobId: payload.jobId, canvasFilePath: payload.canvasFilePath,
+        });
+        if (current?.success === true && (current.gone === true || current.completed === true
+          || (current.handoff?.handoffCode && current.handoff.handoffCode !== payload.handoffCode))) {
+          return { saved: true, superseded: true };
+        }
+      } catch { /* the original failure remains retryable */ }
+    }
+    if (failure) throw failure;
+    return result;
+  },
+  applicationDraftKey(payload),
+);
 
 const stringifyValidationError = (value) => {
   if (Array.isArray(value)) return value.filter(Boolean).join('\n');
@@ -1138,7 +1165,7 @@ export function NonApiAiDialog() {
     for (const [, pending] of applicationDraftTimersRef.current) {
       clearTimeout(pending.timer);
       if (window.electronAPI?.updateLocalApplicationDraft) {
-        void window.electronAPI.updateLocalApplicationDraft(pending.payload).catch(() => {});
+        void writeApplicationDraft(pending.payload).catch(() => {});
       }
     }
   }, []);
@@ -1152,7 +1179,7 @@ export function NonApiAiDialog() {
       timers.delete(requestId);
       // Tracked so the quit handshake can await this write; a debounced edit
       // must not trail window destruction.
-      trackApplicationDraftWrite(window.electronAPI.updateLocalApplicationDraft(payload)).catch(() => {});
+      writeApplicationDraft(payload).catch(() => {});
     }, 350);
     timers.set(requestId, { timer, payload });
   }, []);
@@ -1164,7 +1191,7 @@ export function NonApiAiDialog() {
     timers.delete(requestId);
     clearTimeout(pending.timer);
     if (window.electronAPI?.updateLocalApplicationDraft) {
-      trackApplicationDraftWrite(window.electronAPI.updateLocalApplicationDraft(pending.payload)).catch(() => {});
+      writeApplicationDraft(pending.payload).catch(() => {});
     }
   }, []);
 
@@ -1333,9 +1360,9 @@ export function NonApiAiDialog() {
           // does not restore the rejected text the dock just discarded.
           flushApplicationDraftSave(requestId);
           if (window.electronAPI?.updateLocalApplicationDraft) {
-            trackApplicationDraftWrite(window.electronAPI.updateLocalApplicationDraft({
+            writeApplicationDraft({
               jobId, canvasFilePath: activeRequest.canvasFilePath, handoffCode: activeRequest.handoffCode, draft: '',
-            })).catch(() => {});
+            }).catch(() => {});
           }
           // The next discovery read supplies whatever corrections and revised
           // prompt the durable stage machine issued for this rejection.
@@ -1345,6 +1372,7 @@ export function NonApiAiDialog() {
         // Do not close optimistically: discovery re-reads the authoritative
         // stage, and this item's requestId reappears — unchanged or advanced
         // — once that refresh republishes it.
+        forgetApplicationDraftWrite(applicationDraftKey({ jobId, canvasFilePath: activeRequest.canvasFilePath, handoffCode: activeRequest.handoffCode }));
         setAcceptedRequestIds(previous => new Set(previous).add(requestId));
         // This bundle now keeps its chip while the app finishes it. Before
         // that it VANISHED here and focus fell through to whatever was first,
@@ -1549,6 +1577,7 @@ export function NonApiAiDialog() {
       requestId,
       jobId: request.jobId,
       canvasFilePath: request.canvasFilePath,
+      handoffCode: request.handoffCode,
       nodeId: request.nodeId || null,
       label: request.subject || request.label || '',
     });
@@ -1563,7 +1592,7 @@ export function NonApiAiDialog() {
     }
   }, [cancelConfirmTarget, mergedRequests]);
 
-  const performDiscardApplication = useCallback(async ({ requestId, jobId, canvasFilePath, nodeId }) => {
+  const performDiscardApplication = useCallback(async ({ requestId, jobId, canvasFilePath, handoffCode, nodeId }) => {
     if (!requestId || actionRequestIdsRef.current.has(requestId)) return;
     actionRequestIdsRef.current.add(requestId);
     setDiscardingRequestIds(previous => new Set(previous).add(requestId));
@@ -1575,6 +1604,9 @@ export function NonApiAiDialog() {
           [requestId]: result?.error || 'Could not discard this application bundle. Please try again.',
         }));
         return;
+      }
+      if (result?.success === true && result?.discarded === true) {
+        forgetApplicationDraftWrite(applicationDraftKey({ jobId, canvasFilePath, handoffCode }));
       }
       // The IPC call only deletes the on-disk bundle. The job card's own
       // node.data.localApplication pointer is renderer state this dock

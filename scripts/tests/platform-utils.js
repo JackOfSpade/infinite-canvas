@@ -3,6 +3,38 @@ import { NON_API_AI_TRANSPORT } from '../test-dependencies.js';
 
 export default [
   {
+    name: 'jobs history: expired rows stop suppressing jobs before another history write',
+    run: async () => {
+      const base = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'ic-jobs-history-expiry-'));
+      const canvasPath = path.join(base, 'job-search.json');
+      const historyPath = path.join(base, 'job-search.jobs-history.csv');
+      const day = age => new Date(Date.now() - age * 86400000).toISOString().slice(0, 10);
+      try {
+        const content = `seen_date,source,company,title,location,url\n${day(61)},indeed,Example,Old role,Toronto,https://example.test/old\n${day(59)},indeed,Example,Recent role,Toronto,https://example.test/recent\ninvalid,indeed,Example,Invalid date role,Toronto,https://example.test/invalid\n`;
+        await fs.promises.writeFile(historyPath, content, 'utf8');
+        const stats = {};
+        const history = await loadJobsHistory(canvasPath, stats);
+        const result = dedupAgainstHistory([
+          { source: 'indeed', company: 'Example', title: 'Old role', location: 'Toronto', url: 'https://example.test/old' },
+          { source: 'indeed', company: 'Example', title: 'Recent role', location: 'Toronto', url: 'https://example.test/recent' },
+        ], history);
+        assert(history.length === 1 && history[0].title === 'Recent role'
+          && result.removed === 1 && result.kept[0].title === 'Old role',
+        'read-time suppression honors 60-day expiry without waiting for an append');
+        assert(stats.parsed === 3 && await fs.promises.readFile(historyPath, 'utf8') === content,
+          'a suppression read retains physical diagnostics and never rewrites history');
+        const appended = await appendJobsHistory(canvasPath, [
+          { source: 'indeed', company: 'Example', title: 'New role', location: 'Toronto', url: 'https://example.test/new' },
+        ]);
+        assert(appended.written === 1 && appended.pruned === 2,
+          'the later durable append still reports both physical expired/invalid rows as pruned');
+        return { readRows: history.length, resurfaced: result.kept.length, pruned: appended.pruned };
+      } finally {
+        await fs.promises.rm(base, { recursive: true, force: true });
+      }
+    },
+  },
+  {
     name: 'latestTimeout: a newer navigation cancels a stale delayed action',
     run: async () => {
       const timeoutRef = { current: null };

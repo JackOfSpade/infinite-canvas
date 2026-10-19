@@ -28,6 +28,7 @@ export function createListener({ socketPath, handler, httpModule = http, fsModul
   let ownsSocket = false;
   let stopping = false;
   let inFlight = 0;
+  let admissionHeld = false;
   let binding = null;
   let restartTimer = null;
   let restartAttempt = 0;
@@ -257,7 +258,7 @@ export function createListener({ socketPath, handler, httpModule = http, fsModul
         return null;
       }
       ownsSocket = true;
-      accepting = true;
+      accepting = !admissionHeld;
       return { path: socketPath };
     })();
     return binding.finally(() => { binding = null; });
@@ -348,10 +349,18 @@ export function createListener({ socketPath, handler, httpModule = http, fsModul
     get accepting() { return accepting; },
     get inFlight() { return inFlight; },
     quiesce,
+    holdAdmission() { admissionHeld = true; accepting = false; return true; },
+    resumeAdmission() {
+      if (stopping) return false;
+      admissionHeld = false;
+      accepting = Boolean(server && !binding && !recovering);
+      return accepting;
+    },
     drain,
     selfProbe,
     async stop({ drainMs = DEFAULT_DRAIN_MS } = {}) {
       stopping = true;
+      admissionHeld = false;
       quiesce();
       generation++;
       if (restartTimer !== null) {

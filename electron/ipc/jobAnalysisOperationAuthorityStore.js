@@ -488,7 +488,7 @@ export async function withCurrentJobAnalysisOperationAuthority({
       await atomicWrite(scopeValue.authorityPath, { ...current, updatedAt: new Date().toISOString() });
     }
     let pending = null;
-    const stage = async ({ publications: proposed = [], rotateSuccessful = false } = {}) => {
+    const stage = async ({ publications: proposed = [], rotateSuccessful = false, retainedSuccessfulPublications = null } = {}) => {
       // Exact revoked receipt retries are cleanup-only. Never hand a tombstone
       // a publication capability merely because a future callback happens to
       // invoke the common transaction helper.
@@ -499,8 +499,28 @@ export async function withCurrentJobAnalysisOperationAuthority({
       // artifact in separate locked writes. Accumulate its already-fsynced
       // pending map rather than dropping the earlier sibling publication.
       const nextPublications = { ...(pending || current.pendingPublications || current.publications || {}) };
+      if (retainedSuccessfulPublications != null) {
+        // The host rotation planner can compact missing/corrupt slots or retry
+        // the same run without shifting the remaining files. Its exact map
+        // must preserve already-sealed bytes/receipts, never manufacture a
+        // publication for an old or renderer-supplied snapshot.
+        if (!Array.isArray(retainedSuccessfulPublications) || retainedSuccessfulPublications.length > 2
+          || !proposed.some(item => item?.slot === 'success:1')) throw new Error('Invalid retained successful publications.');
+        const priorSuccessful = [current.publications, current.pendingPublications, pending]
+          .flatMap(map => Object.values(map || {})).filter(item => /^success:[1-3]$/.test(item.slot));
+        const retained = retainedSuccessfulPublications.map((raw, index) => {
+          const item = publication(raw);
+          if (!item || item.slot !== `success:${index + 2}`
+            || !priorSuccessful.some(prior => prior.digest === item.digest && sameReceipt(prior.receipt, item.receipt))) {
+            throw new Error('Retained successful publication is not already sealed.');
+          }
+          return item;
+        });
+        for (const slot of ['success:1', 'success:2', 'success:3']) delete nextPublications[slot];
+        for (const item of retained) nextPublications[item.slot] = item;
+      }
       // Shift the old receipt map BEFORE overlaying newly-written success:1.
-      if (rotateSuccessful) {
+      if (rotateSuccessful && retainedSuccessfulPublications == null) {
         if (nextPublications['success:2']) nextPublications['success:3'] = { ...nextPublications['success:2'], slot: 'success:3' };
         if (nextPublications['success:1']) nextPublications['success:2'] = { ...nextPublications['success:1'], slot: 'success:2' };
       }

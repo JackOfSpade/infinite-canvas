@@ -462,7 +462,10 @@ export default [
       const stop = main.indexOf('stopHandoffBridge()', cleanup);
       const authClose = main.indexOf('await closeAllAuthWindows()', cleanup);
       assert(cleanup >= 0 && stop > cleanup && authClose > stop, 'hard stop must begin cleanup before auth windows close');
-      assert(main.includes('holdHandoffBridgeForQuit()') && main.includes('resumeHandoffBridgeAfterQuitCancel()'), 'quit handoff hooks remain additive');
+      assert(main.includes('const quitAttempt = createQuitAutosaveAttempt({')
+        && main.includes('holdBridge: holdHandoffBridgeForQuit,')
+        && main.includes('resumeBridge: resumeHandoffBridgeAfterQuitCancel,'),
+      'the reversible quit coordinator owns bridge hold and cancelled-quit resume');
       const packageJson = JSON.parse(read('package.json'));
       assert(Object.keys(packageJson.scripts).includes('test:e2e:bridge'), 'B0 bridge smoke script remains registered');
       assert(main.includes('requestSingleInstanceLock'), 'main must retain the single-instance guard');

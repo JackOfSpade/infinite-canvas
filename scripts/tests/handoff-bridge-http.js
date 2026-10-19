@@ -186,6 +186,8 @@ export default [
       const listener = createListener({ socketPath: fixture.socketPath, handler() {}, fsModule: fixture.fs, netModule: fixture.net, httpModule: { createServer: () => server } });
       await listener.start();
       assert(listener.accepting && server.maxConnections === 256 && events.has('checkContinue') && events.has('upgrade') && events.has('connect'), 'only the listener must configure socket limits and close alternate HTTP transports');
+      assert(listener.holdAdmission() === true && !listener.accepting, 'quit can reversibly close admission on the existing socket');
+      assert(listener.resumeAdmission() === true && listener.accepting, 'cancelled quit resumes the same bound socket');
       for (const event of ['upgrade', 'connect']) {
         let destroyed = false;
         events.get(event)({}, { destroy() { destroyed = true; } });

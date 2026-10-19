@@ -15,45 +15,71 @@ import logger from '../logger.js';
 const DEBOUNCE_MS = 300;
 const watchers = new Map(); // realpath of canvas dir → { watcher, senders, pending, timer }
 
-function flush(entry) {
+function removeSender(entry, sender) {
+  const onDestroyed = entry.destroyedListeners.get(sender);
+  if (onDestroyed) sender.removeListener('destroyed', onDestroyed);
+  entry.destroyedListeners.delete(sender);
+  entry.senders.delete(sender);
+}
+
+function closeWatch(root, entry) {
+  clearTimeout(entry.timer);
+  entry.timer = null;
+  entry.pending.clear();
+  for (const sender of entry.senders) removeSender(entry, sender);
+  entry.watcher.close();
+  if (watchers.get(root) === entry) watchers.delete(root);
+}
+
+function flush(root, entry) {
   entry.timer = null;
   const paths = [...entry.pending];
   entry.pending.clear();
   for (const sender of entry.senders) {
-    if (sender.isDestroyed()) entry.senders.delete(sender);
-    else sender.send('application-bundles-changed', { paths });
+    if (sender.isDestroyed()) removeSender(entry, sender);
+    else {
+      // A renderer's frame can become unavailable even while its WebContents
+      // still exists. A best-effort filesystem notification must never turn
+      // that send failure into an uncaught main-process timer exception.
+      try { sender.send('application-bundles-changed', { paths }); }
+      catch (error) { logger.warn(`[applicationBundleWatch] could not notify renderer: ${error?.message || error}`); }
+    }
   }
+  if (entry.senders.size === 0) closeWatch(root, entry);
 }
 
 async function ensureWatch(sender, canvasFilePath) {
   if (typeof canvasFilePath !== 'string' || !path.isAbsolute(canvasFilePath)) return { watching: false };
   const root = await fs.promises.realpath(path.dirname(canvasFilePath));
+  // realpath yields to renderer teardown. The destroyed event may already
+  // have fired, so registering its once-listener below would never clean up.
+  if (sender.isDestroyed()) return { watching: false };
   let entry = watchers.get(root);
   if (!entry) {
     const watcher = fs.watch(root, { recursive: true, persistent: false });
-    entry = { watcher, senders: new Set(), pending: new Set(), timer: null };
+    entry = { watcher, senders: new Set(), destroyedListeners: new Map(), pending: new Set(), timer: null };
     watcher.on('change', (_type, filename) => {
-      if (!filename) return;
-      entry.pending.add(path.join(root, String(filename)));
-      if (!entry.timer) entry.timer = setTimeout(() => flush(entry), DEBOUNCE_MS);
+      // fs.watch may omit filename. Recheck the root in that case instead of
+      // silently missing a folder deletion the saved cards need to reconcile.
+      entry.pending.add(filename ? path.join(root, String(filename)) : root);
+      if (!entry.timer) entry.timer = setTimeout(() => flush(root, entry), DEBOUNCE_MS);
     });
     watcher.on('error', (error) => {
       logger.warn(`[applicationBundleWatch] watcher for ${root} stopped: ${error?.message || error}`);
-      watcher.close();
-      watchers.delete(root);
+      closeWatch(root, entry);
     });
     watchers.set(root, entry);
   }
   if (!entry.senders.has(sender)) {
     entry.senders.add(sender);
-    sender.once('destroyed', () => {
-      entry.senders.delete(sender);
+    const onDestroyed = () => {
+      removeSender(entry, sender);
       if (entry.senders.size === 0 && watchers.get(root) === entry) {
-        clearTimeout(entry.timer);
-        entry.watcher.close();
-        watchers.delete(root);
+        closeWatch(root, entry);
       }
-    });
+    };
+    entry.destroyedListeners.set(sender, onDestroyed);
+    sender.once('destroyed', onDestroyed);
   }
   return { watching: true };
 }

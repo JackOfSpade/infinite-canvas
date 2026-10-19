@@ -1,4 +1,5 @@
 const { contextBridge, ipcRenderer, webUtils } = require('electron');
+import { createDraftWriteBarrier } from './utils/draftWriteBarrier.js';
 
 /**
  * Creates a listener wrapper for IPC channels.
@@ -52,23 +53,12 @@ function onFileChanged(callback) {
 // Draft updates are intentionally non-blocking while the user types. Keep the
 // promises in preload (which also owns the quit bridge) so shutdown can await
 // every update before asking main to flush its deferred disk checkpoint.
-const pendingNonApiAiDraftWrites = new Set();
-function updateNonApiAiDraft(requestId, response) {
-  const write = ipcRenderer.invoke('update-non-api-ai-draft', { requestId, response });
-  pendingNonApiAiDraftWrites.add(write);
-  void write.then(
-    () => pendingNonApiAiDraftWrites.delete(write),
-    () => pendingNonApiAiDraftWrites.delete(write),
-  );
-  return write;
-}
-
-async function flushNonApiAiPersistence() {
-  while (pendingNonApiAiDraftWrites.size > 0) {
-    await Promise.allSettled([...pendingNonApiAiDraftWrites]);
-  }
-  return ipcRenderer.invoke('flush-non-api-ai-persistence');
-}
+const nonApiAiDraftBarrier = createDraftWriteBarrier({
+  write: (requestId, response) => ipcRenderer.invoke('update-non-api-ai-draft', { requestId, response }),
+  flush: () => ipcRenderer.invoke('flush-non-api-ai-persistence'),
+});
+const updateNonApiAiDraft = (requestId, response) => nonApiAiDraftBarrier.write(requestId, response);
+const flushNonApiAiPersistence = () => nonApiAiDraftBarrier.flush();
 
 contextBridge.exposeInMainWorld('electronAPI', {
 
@@ -111,6 +101,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
   onMenuSave: createListener('menu-save'),
   onMenuExportPng: createListener('menu-export-png'),
   onQuitRequest: createListener('quit-request'),
+  onQuitPauseRequest: createListener('quit-pause-request'),
+  sendQuitPauseAck: (state, requestId) => ipcRenderer.send('quit-pause-ack', {
+    success: state?.success === true,
+    requiresCanvasSave: state?.requiresCanvasSave === true,
+    requestId,
+  }),
   onQuitCommitRequest: createListener('quit-commit-request'),
   onQuitCommitRelease: createListener('quit-commit-release'),
   sendQuitResponse: (state, requestId) => ipcRenderer.send('quit-response', {

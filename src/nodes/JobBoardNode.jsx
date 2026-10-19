@@ -1,3 +1,6 @@
+import { pauseBoardCombine } from './jobboard/boardRecoveryNotice';
+import { settlePreFenceCanvasBatches } from '../utils/quitCommitSettle';
+import { jobWorkflowNeedsQuitPause, savedWorkflowQuitPausePatch } from '../utils/quitWorkflowPause';
 import { jobBoardHasSavedAiContinuation } from '../utils/jobBoardSavedAiContinuation';
 import React, { useCallback, useContext, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { useReactFlow, useStore } from '@xyflow/react';
@@ -22,6 +25,7 @@ import { attachProtectedCards, consolidateJobLocations, isProtectedJobCard } fro
 import { SAVED_HANDOFF_READY_MESSAGE, isLiveCombineOwnedMarker, combineCommitMismatchReason } from './jobboard/boardRecoveryNotice';
 import { JobBoardDoneState } from './jobboard/JobBoardDoneState';
 import { JobBoardSearchSelection } from './jobboard/JobBoardSearchSelection';
+import { replaceBoardDisplayChildren } from './jobboard/replaceBoardDisplayChildren';
 import { isJobBoardUserCancellation, isLegacyUnbucketedJobBoard, validateJobBoardTaxonomy } from '../utils/jobBoardAiProvider';
 import { boundedCombinedSourceRuns, normalizeBoardResultCount } from '../utils/jobBoardProvenance';
 import { allocateJobBoardAdmissionOrder, findJobSearchBoardActiveRecoveryOwner, findJobSearchBoardRecoveryOwner, getConnectedJobSearchIds, getSelectedConnectedJobSearchIds, isJobBoardUpToDate, moveJobSearchExecutionOrder, normalizeJobBoardAdmissionOrder, normalizeJobBoardRecoveryTimestamp, orderJobSearchIds, toggleSelectedJobSearchId } from '../utils/jobBoardSearchSelection';
@@ -1567,10 +1571,11 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
   }, [hubState, data, data.locked, liveSignature, data.combineSignature, data.stale, data.staleReason, completedModules, connectedModules, id, getNodes, updateGlobal, hideBoardChildren, showBoardChildren, keepCompletedSnapshotDuringActiveSearch]);
 
   // Cascade-delete the board's spawned cards/groups (re-combine, clear, unmount).
-  const clearBoardChildren = useCallback(() => {
-    deleteChildrenByHubId({
+  const clearBoardChildren = useCallback(({ preserveNodeIds = [] } = {}) => {
+    return deleteChildrenByHubId({
       getNodes, getEdges, deleteElements, hubId: id, childTypes: ['jobcard', 'jobgroup'],
       displayReplacement: true,
+      preserveNodeIds,
       // The compact row is registered before React Flow settles deletion, so
       // describe the exact requested scope rather than claiming every removal
       // succeeded. Ordinary deletions remain itemized by EventLogger.
@@ -2616,6 +2621,75 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
     return { status: 'cancelled', cancelled: true };
   }, [addToast, cancelActiveSearchModule, cancelBoardTaskAndRetireManualAi, data, epoch, getNode, id, moduleRunQueue, persistBoardCancellationIntent, updateGlobal]);
 
+  const pauseBoardForQuit = useCallback(async ({ pauseSearchModule, isQuitPauseCurrent = () => true } = {}) => {
+    const live = getNode(id)?.data || data;
+    if (!jobWorkflowNeedsQuitPause({ type: 'jobboard', data: live })
+      && !scanRunRef.current && !scanPreflightRef.current && !combineRunRef.current
+      && !combineRecoveryTokenClaimRef.current && !activeCombineManualAiRunRef.current
+      && !activeSearchModuleIdRef.current && activeSearchModuleIdsRef.current.size === 0) {
+      return { success: true, settled: true, idle: true };
+    }
+    const plan = live.boardScanResume;
+    const activeCombine = activeCombineManualAiRunRef.current;
+    const marker = live.manualAiResume || (activeCombine?.runId ? {
+      runId: activeCombine.runId, startedAt: activeCombine.startedAt,
+      combineInputSignature: combineInputSignaturesRef.current.get(activeCombine.runId) || null,
+      combineSourceRuns: combineSourceRunsRef.current.get(activeCombine.runId) || null,
+    } : null);
+    const sourceIds = [...new Set([
+      ...activeSearchModuleIdsRef.current,
+      activeSearchModuleIdRef.current,
+      ...(plan?.activeSourceIds || []), plan?.activeSourceId,
+      plan?.awaitingSourceResolution?.sourceId,
+      ...(plan?.awaitingSourceResolutions || []).map(item => item?.sourceId),
+    ].filter(Boolean))];
+    let pauseCommitted = false;
+    updateGlobal(id, node => {
+      if (!isQuitPauseCurrent()) return null;
+      if (plan?.boardRunId && node?.data?.boardScanResume?.boardRunId !== plan.boardRunId) return null;
+      if (live.manualAiResume?.runId && node?.data?.manualAiResume?.runId !== live.manualAiResume.runId) return null;
+      pauseCommitted = true;
+      return {
+        queuedModuleRun: null,
+        ...(plan ? { boardScanResume: { ...node.data.boardScanResume, autoResumeEligible: false, pausedByUser: true, updatedAt: Date.now() } } : {}),
+        ...(marker ? { manualAiResume: { ...marker, ...node.data.manualAiResume, autoResumeEligible: false, pausedByUser: true, updatedAt: Date.now() } } : {}),
+      };
+    });
+    if (sourceIds.length && typeof pauseSearchModule !== 'function') throw new Error('The Board cannot save its active Search owners.');
+    // Install each child's pauseCompletion synchronously before the parent
+    // epoch changes. Those controls route aborted workers to saved Pause,
+    // instead of the ordinary Board cancellation/rollback path.
+    const childPauses = sourceIds.map(sourceId => pauseSearchModule(sourceId));
+    const childSettlement = Promise.allSettled(childPauses);
+    epoch.bump();
+    moduleRunQueue.cancelQueuedRunsOwnedByNode(id, 'App paused for quit');
+    const acknowledgement = await window.electronAPI?.pauseJobRunAndCancel?.({
+      canvasFilePath, nodeId: id, cause: 'app-quit',
+    });
+    const children = await childSettlement;
+    if (!isQuitPauseCurrent()) return { success: false, error: 'This quit request was released.' };
+    if (acknowledgement?.settled !== true || acknowledgement?.ok === false
+      || children.some(result => result.status === 'rejected' || result.value?.success !== true)) {
+      throw new Error('The Job Board and its active Searches did not confirm their saved pause.');
+    }
+    scanRunRef.current = null;
+    scanPreflightRef.current = null;
+    combineRunRef.current = null;
+    activeCombineManualAiRunRef.current = null;
+    compensationRequestIdRef.current = null;
+    setScanning(false);
+    setScanProgress(null);
+    setCombining(false);
+    setCompensationProgress(null);
+    setRecoveryError(SAVED_HANDOFF_READY_MESSAGE);
+    updateGlobal(id, node => isQuitPauseCurrent() ? savedWorkflowQuitPausePatch(node, acknowledgement) : null);
+    await settlePreFenceCanvasBatches();
+    const committed = getNode(id)?.data;
+    if (!pauseCommitted || (committed?.boardScanResume && committed.boardScanResume.autoResumeEligible !== false)
+      || (committed?.manualAiResume && committed.manualAiResume.pausedByUser !== true)) throw new Error('The Job Board pause was not committed.');
+    return { success: true, settled: true };
+  }, [canvasFilePath, data, epoch, getNode, id, moduleRunQueue, updateGlobal]);
+
   useEffect(() => jobSearchCoordinator.registerBoardModule(id, async (options = {}) => {
     const result = await handleCancelRun({
       expectedBoardRunId: options.boardRunId || null,
@@ -2623,7 +2697,7 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
       suppressToast: options.suppressToast === true,
     });
     return result;
-  }), [handleCancelRun, id, jobSearchCoordinator]);
+  }, pauseBoardForQuit), [handleCancelRun, id, jobSearchCoordinator, pauseBoardForQuit]);
 
   useEffect(() => {
     const receipt = data.boardCancellation;
@@ -3145,8 +3219,55 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
         throw err;
       }
 
-      // A source can finish, reset, or be reconnected while taxonomy or
-      // compensation was awaiting the manual handoff. Never replace cards,
+      // Prepare, but do not consume, the durable seen-history capability
+      // before this Board's visible cascade is committed. The host binds it to
+      // the exact source receipts/current artifacts; a later source change or
+      // cancellation makes the pending token unusable rather than recording
+      // listings that were never displayed.
+      const historyRows = union.flatMap((j) => {
+        if (Array.isArray(j.postingVariants) && j.postingVariants.length > 0) {
+          return j.postingVariants.map((variant) => ({
+            source: variant.source || j.source,
+            company: j.company,
+            title: j.title,
+            location: variant.location || j.location,
+            url: variant.url || j.url,
+          }));
+        }
+        return [{ source: j.source, company: j.company, title: j.title, location: j.location, url: j.url }];
+      });
+      let historyToken = null;
+      const historyAuthorityAvailable = boardHistoryAuthorityAvailable(completedAtCombine);
+      if (union.length > 0 && canvasFilePath && historyAuthorityAvailable) {
+        recordCombineStage('history-preflight');
+        const prepared = await window.electronAPI?.prepareBoardJobsHistory?.({
+          canvasFilePath,
+          jobs: historyRows,
+          sources: completedAtCombine.map((module) => ({
+            hubId: module.id,
+            runId: module.runId,
+            careerSnapshotId: module.careerSnapshotId,
+            operationAuthority: module.operationAuthority,
+          })),
+        });
+        if (cancelled() || !getNode(id)) return { status: 'cancelled' };
+        if (prepared?.success !== true || !prepared.historyToken) {
+          EventLogger.log(`[JobBoard] history preflight rejected id=${id} outcome=${prepared?.operationSuperseded ? 'superseded' : 'unavailable'}`);
+          if (prepared?.operationSuperseded === true) {
+            autoResumedManualAiRunRef.current = null;
+            await completeManualAiRun(manualAiRunId);
+            return { status: 'superseded', error: prepared?.error || 'Board inputs changed before display commit.' };
+          }
+          throw new Error(prepared?.error || 'Board history preflight did not finish.');
+        }
+        historyToken = prepared.historyToken;
+      } else if (union.length > 0 && canvasFilePath) {
+        EventLogger.log(`[JobBoard] history preflight skipped id=${id} reason=legacy-source-authority-unavailable sources=${completedAtCombine.length}`);
+      }
+
+      // A source can finish, reset, or be reconnected during any provider or
+      // history-preflight await. Keep this fence after the final await before
+      // building/replacing the visible cascade. Never replace cards,
       // write provenance, or append seen-history for that obsolete union.
       if (getNode(id)?.data?.locked) {
         autoResumedManualAiRunRef.current = null;
@@ -3209,6 +3330,23 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
         return { status: 'superseded' };
       }
 
+      // An application can be queued on an existing card while the Board is
+      // awaiting taxonomy/history. Its newly protected identity was not part
+      // of the consolidation plan; rebuilding that plan would invalidate the
+      // already validated taxonomy indices. Retry rather than delete its card.
+      const liveProtectedBoardCards = getNodes().filter(
+        node => node?.data?.hubId === id && isProtectedJobCard(node),
+      );
+      const protectedCardIdsAtCombine = new Set(protectedBoardCards.map(card => card.id));
+      if (liveProtectedBoardCards.length !== protectedCardIdsAtCombine.size
+        || liveProtectedBoardCards.some(card => !protectedCardIdsAtCombine.has(card.id))) {
+        autoResumedManualAiRunRef.current = null;
+        await completeManualAiRun(manualAiRunId);
+        EventLogger.log(`[JobBoard] combine superseded before commit id=${id} reason=protected-cards-changed`);
+        addToast({ title: 'Combine paused', description: 'Application cards changed while Combine was running. Run Combine saved results again to keep their current application state.', type: 'info' });
+        return { status: 'superseded' };
+      }
+
       const originalPos = getNode(id)?.position || { x: 0, y: 0 };
       const baseNodeId = `board-${id}-${Date.now()}`;
       const { newNodes, newEdges, scoreRangeMin, scoreRangeMax, taxonomy } = buildJobTreeNodes({
@@ -3219,71 +3357,32 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
         baseNodeId,
         // Reuse protected card ids/state so an application-linked card survives
         // a live Combine unchanged (same node id, localApplication preserved).
-        protectedCards: protectedBoardCards,
+        protectedCards: liveProtectedBoardCards,
       });
 
-      // Prepare, but do not consume, the durable seen-history capability
-      // before this Board's visible cascade is committed. The host binds it to
-      // the exact source receipts/current artifacts; a later source change or
-      // cancellation makes the pending token unusable rather than recording
-      // listings that were never displayed.
-      const historyRows = union.flatMap((j) => {
-        if (Array.isArray(j.postingVariants) && j.postingVariants.length > 0) {
-          return j.postingVariants.map((variant) => ({
-            source: variant.source || j.source,
-            company: j.company,
-            title: j.title,
-            location: variant.location || j.location,
-            url: variant.url || j.url,
-          }));
-        }
-        return [{ source: j.source, company: j.company, title: j.title, location: j.location, url: j.url }];
-      });
-      let historyToken = null;
-      const historyAuthorityAvailable = boardHistoryAuthorityAvailable(completedAtCombine);
-      if (newNodes.length > 0 && canvasFilePath && historyAuthorityAvailable) {
-        recordCombineStage('history-preflight');
-        const prepared = await window.electronAPI?.prepareBoardJobsHistory?.({
-          canvasFilePath,
-          jobs: historyRows,
-          sources: completedAtCombine.map((module) => ({
-            hubId: module.id,
-            runId: module.runId,
-            careerSnapshotId: module.careerSnapshotId,
-            operationAuthority: module.operationAuthority,
-          })),
-        });
-        if (cancelled() || !getNode(id)) return { status: 'cancelled' };
-        if (prepared?.success !== true || !prepared.historyToken) {
-          EventLogger.log(`[JobBoard] history preflight rejected id=${id} outcome=${prepared?.operationSuperseded ? 'superseded' : 'unavailable'}`);
-          if (prepared?.operationSuperseded === true) {
-            autoResumedManualAiRunRef.current = null;
-            await completeManualAiRun(manualAiRunId);
-            return { status: 'superseded', error: prepared?.error || 'Board inputs changed before display commit.' };
-          }
-          throw new Error(prepared?.error || 'Board history preflight did not finish.');
-        }
-        historyToken = prepared.historyToken;
-      } else if (newNodes.length > 0 && canvasFilePath) {
-        EventLogger.log(`[JobBoard] history preflight skipped id=${id} reason=legacy-source-authority-unavailable sources=${completedAtCombine.length}`);
-      }
-
-      // Replace the prior combine only now that the new cascade is BUILT — the
-      // clear used to run before the multi-second bucketing await, so any
-      // failure in that window left a board claiming "N unique jobs" over an
-      // empty canvas. Clearing and adding back-to-back (no await between)
-      // closes that orphan window: a throw above leaves the old board intact.
+      // Replace only after the complete cascade and its authority checks are
+      // ready. Reused application card ids stay live while the older groups and
+      // unprotected cards pass through the normal asynchronous deletion path.
       // Snapshot before asking ReactFlow to delete anything. `deleteElements`
       // currently yields internally, but undo correctness must not depend on
       // that implementation detail or a future synchronous deletion path.
       if (newNodes.length > 0) {
         document.dispatchEvent(new CustomEvent('canvas-take-snapshot'));
       }
-      clearBoardChildren();
       if (newNodes.length > 0) {
-        if (addElementsGlobally) addElementsGlobally(id, newNodes, newEdges, 'sibling');
-        else { addNodes(newNodes); addEdges(newEdges); }
+        replaceBoardDisplayChildren({
+          hubId: id, newNodes, newEdges, getNodes,
+          clearChildren: clearBoardChildren,
+          updateNodeData: updateGlobal,
+          setNodes,
+          addElements: (addedNodes, addedEdges) => {
+            if (addElementsGlobally) addElementsGlobally(id, addedNodes, addedEdges, 'sibling');
+            else { addNodes(addedNodes); addEdges(addedEdges); }
+          },
+        });
         requestAnimationFrame(() => fitView({ duration: 600, padding: 0.2 }));
+      } else {
+        clearBoardChildren();
       }
 
       const finalSourceCounts = {};
@@ -3388,6 +3487,9 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
       await completeManualAiRun(manualAiRunId);
       return { status: 'completed' };
     } catch (err) {
+      if (err?.code === 'APP_QUIT_PAUSED' || err?.message === 'App paused for quit') {
+        return { status: 'paused', reason: 'awaiting-explicit-ai-continue' };
+      }
       if (
         cancelled()
         || !getNode(id)
@@ -3426,7 +3528,7 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
         if (!cancelled() && getNode(id)) setCombining(false);
       }
     }
-  }, [readyModules, allConnectedModulesDone, canReplaceWithEmpty, getNodes, getEdges, getNode, id, clearBoardChildren, hideBoardChildren, requestEmptyReplacement, addElementsGlobally, addNodes, addEdges, fitView, updateGlobal, addToast, epoch, canvasFilePath, completeManualAiRun, moduleRunQueue, keepCompletedSnapshotDuringActiveSearch, recordCombineStage]);
+  }, [readyModules, allConnectedModulesDone, canReplaceWithEmpty, getNodes, getEdges, getNode, id, clearBoardChildren, hideBoardChildren, requestEmptyReplacement, addElementsGlobally, addNodes, addEdges, fitView, updateGlobal, setNodes, addToast, epoch, canvasFilePath, completeManualAiRun, moduleRunQueue, keepCompletedSnapshotDuringActiveSearch, recordCombineStage]);
 
   const handleSearchSelected = useCallback(async (request = null) => {
     if (isJobWorkflowDeletionPending(id)) return { status: 'cancelled' };
@@ -5384,6 +5486,7 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
       foreignRecoveryWaitSigRef.current = null;
       return;
     }
+    if (data.manualAiResume?.pausedByUser === true || plan.autoResumeEligible === false) return;
     if (boardRecoveryTouchesPendingDeletion(id, plan, data.manualAiResume)) {
       // onBeforeDelete is reversible. Do not consume the durable recovery
       // receipt (or its one-shot latch) while its Board/input is only pending
@@ -5878,6 +5981,47 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
   }, [boardRecoverySig, canvasFilePath, combining, connectedSig, data.boardCancellation, data.boardScanResume, data.locked, data.manualAiResume, deletionLifecycleRevision, getEdges, getNode, getNodes, handleCancelRun, handleCombine, handleSearchSelected, id, recoveryError, scanning, settleRecoveredCombine, updateGlobal, verifyingPlatforms]);
 
   useEffect(() => {
+    let pausing = false;
+    const onPause = (event) => {
+      const detail = event?.detail || {};
+      if (detail.nodeId !== id) return;
+      const active = activeCombineManualAiRunRef.current;
+      if (pausing || !active?.runId || active.runId !== detail.runId
+        || active.token !== combineRunRef.current) return;
+      detail.accept?.();
+      pausing = true;
+      void pauseBoardCombine({
+        runId: detail.runId,
+        getMarker: () => getNode(id)?.data?.manualAiResume,
+        saveMarker: marker => updateGlobal(id, { manualAiResume: marker }),
+        waitForCommit: async () => {
+          for (let attempt = 0; attempt < 4; attempt++) {
+            await waitForBoardRendererCommitFrame();
+            if (getNode(id)?.data?.manualAiResume?.pausedByUser === true) return;
+          }
+        },
+        fence: () => { epoch.bump(); },
+        pauseBackend: () => window.electronAPI?.pauseJobRunAndCancel?.({
+          canvasFilePath, nodeId: id, cause: 'user-paused-board',
+        }),
+        settle: () => {
+          if (combineRunRef.current === active.token) combineRunRef.current = null;
+          if (activeCombineManualAiRunRef.current === active) activeCombineManualAiRunRef.current = null;
+          compensationRequestIdRef.current = null;
+          setCompensationProgress(null);
+          setCombining(false);
+          setRecoveryError(SAVED_HANDOFF_READY_MESSAGE);
+          EventLogger.log(`[JobBoard] Pause & save acknowledged id=${id} run=${detail.runId}`);
+        },
+      }).then(detail.acknowledge, error => {
+        detail.acknowledge?.({ success: false, error: error?.message || 'The Job Board could not pause.' });
+      }).finally(() => { pausing = false; });
+    };
+    document.addEventListener('job-search-pause-and-save', onPause);
+    return () => document.removeEventListener('job-search-pause-and-save', onPause);
+  }, [canvasFilePath, epoch, getNode, id, updateGlobal]);
+
+  useEffect(() => {
     const onManualAiNodeCancelled = (event) => {
       const cancelledNodeId = event.detail?.nodeId || null;
       const childPlan = getNode(id)?.data?.boardScanResume || null;
@@ -6250,6 +6394,12 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
   const handleRetryRecovery = useCallback(() => {
     const liveData = getNode(id)?.data || {};
     const plan = liveData.boardScanResume;
+    if (plan?.autoResumeEligible === false) {
+      updateGlobal(id, { boardScanResume: { ...plan, autoResumeEligible: true, pausedByUser: false } });
+    }
+    if (liveData.manualAiResume?.pausedByUser === true) {
+      updateGlobal(id, { manualAiResume: { ...liveData.manualAiResume, pausedByUser: false } });
+    }
     setRecoveryError(null);
     if (liveData.boardCancellation?.operationId) {
       autoRetriedBoardCancellationRef.current = null;

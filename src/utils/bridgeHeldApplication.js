@@ -8,6 +8,7 @@
 // an app commit failure: manual paste hits the same host error, so that bundle
 // stays in the worker view with its app-side failure explanation. Restart
 // holds also keep that view so its Start workers action resumes automation.
+// A readable recovered review stop stays here while the bridge rechecks it.
 //
 // Never throws: a missing or malformed status (bridge disabled, preload still
 // connecting, an older main process) is simply "not held".
@@ -21,7 +22,7 @@ export function findBridgeHeldJob(status, jobId) {
   const jobs = status?.queue?.jobs;
   if (!Array.isArray(jobs)) return null;
   return jobs.find(job => job?.jobId === jobId && (BRIDGE_WORKING_PHASES.has(job?.phase)
-    || (job?.phase === 'needs_user' && job?.reason === 'write_failed')
+    || (job?.phase === 'needs_user' && ['write_failed', 'review_stop'].includes(job?.reason))
     || (['held', 'needs_user'].includes(job?.phase) && job?.reason === 'restart'))) || null;
 }
 

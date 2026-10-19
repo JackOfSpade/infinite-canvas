@@ -19,13 +19,15 @@ import { EventLogger } from '../../utils/EventLogger.js';
  * @param {string[]} args.childTypes    Node types to consider as children
  *                                      (e.g. ['jobcard', 'jobgroup'])
  * @param {boolean}  [args.displayReplacement] Preserve user dismissal/task intent when replacing Board display cards.
+ * @param {Set<string>|string[]} [args.preserveNodeIds] Existing cards reused by a replacement tree; keep their node lifecycle alive.
  * @param {string}   [args.removalLogSummary] Optional single-line summary for
  *                                      this known bulk deletion. Ordinary
  *                                      child cleanup remains itemized.
  */
-export function deleteChildrenByHubId({ getNodes, getEdges, deleteElements, hubId, childTypes, removalLogSummary, displayReplacement = false }) {
+export function deleteChildrenByHubId({ getNodes, getEdges, deleteElements, hubId, childTypes, removalLogSummary, displayReplacement = false, preserveNodeIds = [] }) {
   const typeSet = new Set(childTypes);
-  const owned = getNodes().filter(n => typeSet.has(n.type) && n.data?.hubId === hubId);
+  const preservedIds = preserveNodeIds instanceof Set ? preserveNodeIds : new Set(preserveNodeIds);
+  const owned = getNodes().filter(n => typeSet.has(n.type) && n.data?.hubId === hubId && !preservedIds.has(n.id));
   if (owned.length === 0) return;
   const ownedIds = new Set(owned.map(n => n.id));
   const edgesToDelete = getEdges()

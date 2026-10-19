@@ -929,8 +929,8 @@ export function createHandoffEngine({
         const pollingAfterWait = workerIsPollingAfterWait(worker);
         const state = worker.restartPending === true
           ? (worker.starterExported === true ? 'ready' : 'available')
-          : worker.idleSince != null ? 'idle'
-            : quiet ? 'quiet'
+          : quiet ? 'quiet'
+            : worker.idleSince != null ? 'idle'
               : worker.activeTask === true || (worker.getInFlight != null && !pollingAfterWait) ? 'working'
                 : worker.presented === true || worker.calls > 0 ? 'waiting'
                   : worker.starterExported === true ? 'ready' : 'available';
@@ -1483,6 +1483,7 @@ export function createHandoffEngine({
   function markChatStopped(target) {
     if (target && epochWorkers(epoch).includes(target)) {
       target.idleSince ??= safeNow(now);
+      target.stoppedPushClaims = new Set(currentAvailablePushClaims());
       target.activeTask = false;
       target.activeTaskKind = null;
       target.activeTaskSince = null;
@@ -1557,9 +1558,22 @@ export function createHandoffEngine({
     return stamp - anchor >= CONSTANTS.STALL_NOTICE_MS;
   }
 
+  function currentAvailablePushClaims() {
+    if (paused || (!scope.scoring && !scope.marketplace) || !pushDiscoveryCurrent || !ownsPushDiscovery()) return [];
+    try {
+      const available = push?.status?.(pushEpochId())?.available;
+      return Array.isArray(available) ? available.filter(value => typeof value === 'string' && JOB_ID_RE.test(value)) : [];
+    } catch { return []; }
+  }
+
   function workerQuietReason(worker, stamp = safeNow(now)) {
     if (worker?.submitInFlight > 0) return null;
     if (worker?.freshContextRequired === true) return 'fresh_context_required';
+    // A stop instruction is final for that chat, but not for a later run.
+    // Only newly available, unclaimed push work may wake a stopped worker;
+    // retained holds and the same unserviceable queue cannot cause a loop.
+    if (worker?.idleSince != null && worker.getInFlight == null && !worker.activeTask
+      && currentAvailablePushClaims().some(claim => !worker.stoppedPushClaims?.has(claim))) return 'polling_stopped';
     if (workerAnswerSilent(worker, stamp)) return 'answer_silent';
     if (paused || !worker || worker.getInFlight != null || !Number.isFinite(worker.waitingSince)) return null;
     const anchors = [worker.waitingSince, worker.quietFrom].filter(Number.isFinite);
@@ -2249,7 +2263,8 @@ export function createHandoffEngine({
     if (result.kind === 'threw' && result.code === 'ENOENT') return probeMissingCanvas(target, generation);
     if (result.kind === 'gone') return { cause: 'bundle_missing', alive: false, ran: true };
     if (includeSaved && result.kind === 'done') return { cause: 'bundle_saved', alive: false, ran: true };
-    return { cause: null, alive: ['awaiting', 'host', 'needs_user', 'open'].includes(result.kind), ran: true };
+    return { cause: null, alive: ['awaiting', 'host', 'needs_user', 'open'].includes(result.kind),
+      answerable: result.kind === 'awaiting' && result.read === true, ran: true };
   }
 
   // A status probe could not open the lane's canvas. Ask the source what the
@@ -2375,6 +2390,13 @@ export function createHandoffEngine({
               continue;
             }
             if (outcome.alive) {
+              // The app may reopen an obsolete review stop from its signed
+              // receipts. A healthy status proves that the already-released
+              // bundle is answerable again; a stale bridge hold must not send
+              // it back to manual paste. Human holds and real stops stay held.
+              if (outcome.answerable && lane.phase === 'needs_user' && lane.reason === 'review_stop' && !lane.matchTaskId) {
+                await resume({ jobId: lane.jobId }, { reviewRecovery: { lane, generation, revision: claim.revision } });
+              }
               await mutateLanes(() => {
                 if (!sourceCurrent(generation) || !lanes.includes(lane) || laneRevision(lane) !== claim.revision
                     || !restoreProbeDue(lane, safeNow(now))) return;
@@ -4427,13 +4449,20 @@ export function createHandoffEngine({
     return finished;
   }
 
-  async function resume({ jobId } = {}) {
+  async function resume({ jobId } = {}, { reviewRecovery = null } = {}) {
     const staged = await mutateLanes(() => {
+      // This second argument is internal only; UI/MCP callers cannot supply a
+      // trusted source observation. A concurrent hold or source change wins.
+      if (reviewRecovery && (!sourceCurrent(reviewRecovery.generation)
+        || !lanes.includes(reviewRecovery.lane) || laneRevision(reviewRecovery.lane) !== reviewRecovery.revision
+        || reviewRecovery.lane.phase !== 'needs_user' || reviewRecovery.lane.reason !== 'review_stop')) {
+        return { ok: false, code: 'superseded' };
+      }
       if (jobId) {
         // Hold acts on a whole fanned-out bundle, so Resume must too: resuming
         // only the first lane left every held sibling held, and the resumed
         // seed's discovery read then retired itself against a held claim.
-        const family = applicationBundleFamily(jobId);
+        const family = reviewRecovery ? [] : applicationBundleFamily(jobId);
         if (family.length > 0) {
           const stamp = safeNow(now);
           const resumed = family.filter(isHeldPhase).map(lane => {
@@ -4447,7 +4476,7 @@ export function createHandoffEngine({
           if (resumed.length === 0) return { ok: true };
           return { generation: sourceGeneration, family: resumed, persist: true };
         }
-        const lane = lanes.find(item => item.jobId === jobId);
+        const lane = reviewRecovery?.lane || lanes.find(item => item.jobId === jobId);
         if (!lane) return { ok: false, code: 'not_found' };
         // Only a held lane has anything to resume. A stale or repeated click on a
         // lane that is already running must not restart its quiet clock and hide a
@@ -4498,7 +4527,7 @@ export function createHandoffEngine({
           }
           return { ok: false, code: 'persist_failed' };
         }
-        humanAction();
+        if (!reviewRecovery) humanAction();
         auditEvent('resume', { cause: 'lane' });
         log('resume', { cause: 'lane' });
         wake();
@@ -4647,10 +4676,7 @@ export function createHandoffEngine({
       for (const worker of epochWorkers()) {
         if (worker.activeTaskKind !== 'push' || !worker.activeTask || owners.has(worker.workerOrdinal)
           || worker.getInFlight != null || worker.submitInFlight > 0) continue;
-        worker.activeTask = false;
-        worker.activeTaskKind = null;
-        worker.activeTaskSince = null;
-        worker.idleSince = stamp;
+        markChatStopped(worker);
       }
     }
     const stallsNow = noteStalls(stamp);
@@ -4807,7 +4833,7 @@ export function createHandoffEngine({
     const poolPlan = poolGeneration === null
       ? { recommended: 0, queued: 0, materialized: 0, expandBy: 0, reason: 'empty', expansionCount: 0, lastExpansionAt: null, lastExpansionAdded: 0 }
       : (() => {
-        const planned = epoch?.poolRecommendation || workerPoolRecommendation(workerCapacity());
+        const planned = workerPoolRecommendation(workerCapacity());
         const recommended = Math.max(0, Math.min(workerCapacity(), Number.isInteger(planned?.recommended) ? planned.recommended : workerCount));
         // Counts are aggregate backlog telemetry and saturate only at the
         // exact-integer representation limit. They must not be confused with
@@ -4842,10 +4868,10 @@ export function createHandoffEngine({
           // invite a second, invalid copy attempt.
           const state = worker.restartPending === true
             ? (worker.starterExported === true ? 'ready' : 'available')
-            : worker.idleSince != null
-            ? 'idle'
             : workerIsQuiet(worker, stamp)
               ? 'quiet'
+            : worker.idleSince != null
+            ? 'idle'
               : worker.activeTask === true || (worker.getInFlight != null && !pollingAfterWait) || hasOutstandingApplication
               ? 'working'
               : worker.presented === true || worker.calls > 0

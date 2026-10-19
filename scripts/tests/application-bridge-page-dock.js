@@ -349,7 +349,10 @@ export default [
         assert(!dock.text().includes('PROMPT_aaaa'), 'does not ask to copy the stage prompt');
         assert(dock.text().includes('The app could not process the worker’s answer'), 'explains the app-side failure');
         assert(!dock.document.querySelector('[data-workers-only]'), 'does not offer worker starters for a host failure');
-        await dock.setStatus(withLanes(4, [{ ...lane(JOB_A, 'held', 'requirements-audit'), reason: 'restart' }]));
+        await dock.setStatus(withLanes(4, [{ ...lane(JOB_A, 'needs_user', 'requirements-adjudication'), reason: 'review_stop' }]));
+        assert(dock.page() && !dock.document.querySelector('textarea'), 'a readable recovered review stays on the bridge route while it is rechecked');
+        assert(!dock.text().includes('Copy this exact prompt'), 'recovery never silently asks for manual copy/paste');
+        await dock.setStatus(withLanes(5, [{ ...lane(JOB_A, 'held', 'requirements-audit'), reason: 'restart' }]));
         assert(dock.page() && !dock.document.querySelector('textarea'), 'restart recovery also stays on the automatic route');
         assert(dock.document.querySelector('[data-workers-only] button'), 'restart recovery offers the existing worker start action');
       });

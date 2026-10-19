@@ -1160,13 +1160,17 @@ export function hasPendingNonApiAiRequestsForSender(sender) {
 }
 
 export async function flushNonApiAiPersistence() {
-  await durableMutationTail;
-  if (durableDeferredWriteTimer) {
-    clearTimeout(durableDeferredWriteTimer);
-    durableDeferredWriteTimer = null;
+  // The normal serialization tail deliberately absorbs failures so typing can
+  // continue. Awaiting that tail alone cannot prove the last deferred draft
+  // reached disk. Checkpoint the current state again, inside the mutation
+  // queue, and propagate this write's original rejection to the quit barrier.
+  await queueDurableMutation(async () => {
+    if (durableDeferredWriteTimer) {
+      clearTimeout(durableDeferredWriteTimer);
+      durableDeferredWriteTimer = null;
+    }
     await writeDurableState();
-  }
-  await durableWriteTail;
+  });
 }
 
 // Test-only process-restart seam.  It deliberately keeps the on-disk state
@@ -3584,7 +3588,12 @@ export function registerNonApiAiHandlers({ clipboard = electronPkg.clipboard } =
 
   ipcMain.handle('update-non-api-ai-draft', async (event, args = {}) => {
     const record = pendingRequests.get(args?.requestId);
-    if (!record || event.sender !== record.sender || record.settling) return { saved: false };
+    if (!record) return { saved: false, code: 'REQUEST_SETTLED' };
+    if (event.sender !== record.sender) return { saved: false, code: 'REQUEST_OWNER_MISMATCH' };
+    // An acceptance can still fail its durable write. Preserve the retryable
+    // draft until that operation actually settles, rather than treating an
+    // in-progress write as proof the response is already safe on disk.
+    if (record.settling) return { saved: false, code: 'REQUEST_SETTLING' };
     if (record.handoffRoute === 'mcp') return { saved: false, code: 'MCP_ROUTE' };
     const draft = typeof args.response === 'string' ? args.response.slice(0, 8_000_000) : '';
     record.initialResponse = draft;

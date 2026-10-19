@@ -75,6 +75,10 @@ function hookSender(sender) {
 
 function claimExecution(canvasFilePath, intentId, sender, recoveryLease = null, intent = null) {
   if (!sender) return { ok: false, reason: 'missing-sender' };
+  // Authority/sidecar admission is asynchronous. The renderer can disappear
+  // while waiting, before hookSender has had a chance to observe destroyed.
+  // Never retain a recovery reader on behalf of that already-closed window.
+  if (sender.isDestroyed?.()) return { ok: false, reason: 'sender-destroyed' };
   const ownerKey = `${canvasFilePath}\u0000${intentId}`;
   if (activeExecutions.has(ownerKey)) return { ok: false, busy: true, reason: 'already-running' };
   const leaseToken = crypto.randomBytes(24).toString('hex');
@@ -725,7 +729,7 @@ export async function publishJobContinuationParentUpdate(canvasFilePath, args, {
     store.intents = store.intents.map(row => row.intentId === current.intentId ? updated : row);
     await atomicWrite(filePath, store);
     execution.intent = updated;
-    return publish(stagePublication);
+    return publish(stagePublication, record);
   });
   return admitted.admitted ? admitted.value : { saved: false, reason: admitted.reason || 'operation-superseded' };
 }

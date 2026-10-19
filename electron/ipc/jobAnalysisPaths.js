@@ -19,6 +19,9 @@ const JOB_ANALYSIS_LAST_SUCCESS_JSON = 'job-search-last-successful-scrape.json';
 const JOB_ANALYSIS_SUCCESSFUL_GENERATIONS = 3;
 const JOB_ANALYSIS_PROMPT = 'job-search-scoring-AI-prompt.txt';
 const MAX_REBIND_ARTIFACT_BYTES = MAX_JOB_ANALYSIS_ARTIFACT_BYTES;
+const ANALYSIS_ARTIFACT_SUFFIX_PATTERN = '(?:(?:[a-f0-9]{32}-)?(?:last-scrape\\.json|last-successful-scrape(?:-[23])?\\.json|scoring-AI-prompt\\.txt|operation-authority\\.json)|description-recovery-[a-f0-9]{24}\\.json)';
+const ANALYSIS_ARTIFACT_SUFFIX = new RegExp(`^${ANALYSIS_ARTIFACT_SUFFIX_PATTERN}$`);
+const ANALYSIS_WRITER_TEMP_SUFFIX = new RegExp(`^${ANALYSIS_ARTIFACT_SUFFIX_PATTERN}\\.[1-9][0-9]*\\.[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}\\.tmp$`);
 
 async function fsyncDirectory(directory) {
   const handle = await fs.promises.open(directory, 'r').catch(() => null);
@@ -266,7 +269,13 @@ export async function rebindJobAnalysisRecoveryOwners(oldCanvasFilePath, newCanv
     names = (await fs.promises.readdir(oldDir, { withFileTypes: true }))
       // Discover lookalike links/directories too, then reject them explicitly
       // instead of silently treating an ambiguous recovery namespace as empty.
-      .filter(entry => entry.name.startsWith(oldPrefix))
+      .filter(entry => entry.name.startsWith(oldPrefix)
+        // A process can crash before an atomic writer's finally removes its
+        // private temporary. It is uncommitted and has no recovery slot; keep
+        // it untouched without blocking migration of the committed bundle.
+        // Links, directories and all unrecognized lookalikes still reject.
+        && !(entry.isFile() && !entry.isSymbolicLink()
+          && ANALYSIS_WRITER_TEMP_SUFFIX.test(entry.name.slice(oldPrefix.length))))
       .map(entry => entry.name);
   } catch (error) {
     return error?.code === 'ENOENT' ? { success: true, migratedCount: 0 } : { success: false, reason: 'scan-failed' };
@@ -331,7 +340,7 @@ export async function rebindJobAnalysisRecoveryOwners(oldCanvasFilePath, newCanv
     }
     for (const name of names) {
       const suffix = name.slice(oldPrefix.length);
-      if (!/^(?:(?:[a-f0-9]{32}-)?(?:last-scrape\.json|last-successful-scrape(?:-[23])?\.json|scoring-AI-prompt\.txt|operation-authority\.json)|description-recovery-[a-f0-9]{24}\.json)$/.test(suffix)) {
+      if (!ANALYSIS_ARTIFACT_SUFFIX.test(suffix)) {
         throw new Error('unrecognized-artifact');
       }
       const source = path.join(oldDir, name);

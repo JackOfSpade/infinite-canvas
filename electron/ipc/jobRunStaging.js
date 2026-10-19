@@ -238,9 +238,21 @@ async function atomicWriteJson(filePath, obj) {
 }
 
 async function appendStagingDurably(filePath, text) {
-  const handle = await fs.promises.open(filePath, 'a', 0o600);
+  const handle = await fs.promises.open(filePath, 'a+', 0o600);
   try {
-    await handle.writeFile(text, 'utf8');
+    // Recovery ignores a torn final JSONL row, but appending directly to its
+    // unterminated bytes would also swallow the first row of this new page.
+    // The manifest would then advance past a job that no future resume could
+    // read. Preserve the old evidence and start this append on its own line.
+    // All page appends for this file already share the manifest mutex.
+    const { size } = await handle.stat();
+    let separator = '';
+    if (size > 0) {
+      const lastByte = Buffer.alloc(1);
+      await handle.read(lastByte, 0, 1, size - 1);
+      if (lastByte[0] !== 0x0a) separator = '\n';
+    }
+    await handle.writeFile(`${separator}${text}`, 'utf8');
     await handle.sync();
   } finally {
     await handle.close();

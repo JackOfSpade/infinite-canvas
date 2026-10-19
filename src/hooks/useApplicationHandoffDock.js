@@ -122,6 +122,9 @@ export function useApplicationHandoffDock({ navigation, getCurrentFile }) {
         const toFetch = onlyJobId
           ? candidates.filter((node) => node.data.localApplication.id === onlyJobId)
           : candidates;
+        const ownerKey = node => JSON.stringify([node.id, node.data.localApplication.id, resolveCanvasFilePath(node.data.localApplication)]);
+        const ownersAtRead = new Set(candidates.map(ownerKey));
+        const requestedCanvasByJobId = new Map(toFetch.map(node => [node.data.localApplication.id, resolveCanvasFilePath(node.data.localApplication)]));
 
         const previousItems = getApplicationHandoffs();
         const previousByJobId = new Map(previousItems.map((item) => [item.jobId, item]));
@@ -131,7 +134,7 @@ export function useApplicationHandoffDock({ navigation, getCurrentFile }) {
         // refills one slot while every later durable bundle remains queued.
         const fetched = await mapAutomaticHandoffs(toFetch, HANDOFF_CONCURRENCY, async (node) => {
           const local = node.data.localApplication;
-          const canvasFilePath = resolveCanvasFilePath(local);
+          const canvasFilePath = requestedCanvasByJobId.get(local.id);
           try {
             const result = await window.electronAPI.getLocalApplicationHandoff({ jobId: local.id, canvasFilePath });
             // A job whose own frozen state is broken takes no further paste,
@@ -213,12 +216,31 @@ export function useApplicationHandoffDock({ navigation, getCurrentFile }) {
         if (disposed) return;
         const fetchedByJobId = new Map(fetched);
 
+        // A read can wait behind a job mutation while a card is deleted,
+        // replaced, saved, or moved to another canvas. Publish only against
+        // current ownership; a captured candidate list would resurrect the
+        // old prompt until another discovery finishes.
+        let liveCandidates;
+        try {
+          liveCandidates = selectApplicationHandoffCandidates(ctxRef.current.navigation?.enumerateAllNodes?.() || [])
+            .filter(node => !discardedJobIds.has(node.data.localApplication.id));
+        } catch (error) {
+          EventLogger.log(`[ApplicationDock] live node enumeration failed: ${error?.message || error}`);
+          return;
+        }
+        if (liveCandidates.length !== candidates.length || liveCandidates.some(node => !ownersAtRead.has(ownerKey(node)))) {
+          queuedRefreshRef.current = { all: true, jobIds: new Set() };
+        }
+        candidates = liveCandidates;
+        const belongsToNode = (item, node) => item?.nodeId === node.id
+          && item.canvasFilePath === resolveCanvasFilePath(node.data.localApplication);
+
         const nextItems = [];
         for (const node of candidates) {
           const jobId = node.data.localApplication.id;
           if (fetchedByJobId.has(jobId)) {
             const item = fetchedByJobId.get(jobId);
-            if (item) nextItems.push(item);
+            if (belongsToNode(item, node)) nextItems.push(item);
             // else: this pass actually read the job and found it genuinely
             // settled to idle (not merely working or blocked), or hit an
             // unrecoverable first-ever read with no stale item to carry
@@ -227,7 +249,7 @@ export function useApplicationHandoffDock({ navigation, getCurrentFile }) {
             // Not part of this pass's fetch (a single-job refresh skipped
             // it, or the fan-out cap dropped it) — keep its last item as-is.
             const stale = previousByJobId.get(jobId);
-            if (stale) nextItems.push(stale);
+            if (belongsToNode(stale, node)) nextItems.push(stale);
           }
         }
 
@@ -241,7 +263,10 @@ export function useApplicationHandoffDock({ navigation, getCurrentFile }) {
         // never re-read here, so without this an unreadable flag would carry
         // it forward on every pass for the life of the canvas.
         const candidateJobIds = new Set(candidates.map((node) => node.data.localApplication.id));
-        publishApplicationHandoffs(retainUnreadableApplicationItems(nextItems, previousItems, candidateJobIds));
+        const currentPreviousItems = previousItems.filter(item => candidates.some(node => (
+          node.data.localApplication.id === item.jobId && belongsToNode(item, node)
+        )));
+        publishApplicationHandoffs(retainUnreadableApplicationItems(nextItems, currentPreviousItems, candidateJobIds));
       } finally {
         tickBusyRef.current = false;
         // Run whatever was asked for while this pass held the guard. Cleared

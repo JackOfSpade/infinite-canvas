@@ -684,7 +684,7 @@ export function attachProtectedCards(unionJobs, protectedCards) {
 
   const unmatchedProtected = cards
     .filter(card => !usedIds.has(card.id))
-    .map(jobFromProtectedCard);
+    .map(card => ({ ...jobFromProtectedCard(card), reuseCardId: card.id }));
 
   return { jobs: out, unmatchedProtected };
 }

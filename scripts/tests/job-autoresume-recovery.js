@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { EventEmitter } from 'node:events';
 import {
   beginJobContinuation,
   checkpointJobContinuationResult,
@@ -115,6 +116,94 @@ async function sealContinuationIdentity(canvasFilePath, identity, { careerSnapsh
 }
 
 export default [
+  {
+    name: 'job execution claims reject windows destroyed while Board or continuation admission waits',
+    run: async () => {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ic-job-destroyed-claim-'));
+      const canvas = path.join(dir, 'canvas.json');
+      const emitterSender = id => {
+        const owner = new EventEmitter();
+        owner.id = id;
+        let destroyed = false;
+        owner.isDestroyed = () => destroyed;
+        owner.destroy = () => { destroyed = true; owner.emit('destroyed'); };
+        return owner;
+      };
+      const holder = emitterSender(401);
+      const waiter = emitterSender(402);
+      const afterRebindWaiter = emitterSender(403);
+      const continuationWaiter = emitterSender(404);
+      const live = emitterSender(405);
+      let releaseAuthority;
+      let releaseRebind;
+      try {
+        fs.writeFileSync(canvas, '{}');
+        const args = { canvasFilePath: canvas, nodeId: 'board', boardRunId: 'run', autoResume: true };
+        const first = await claimJobBoardRunExecution({ ...args, autoResume: false }, { sender: holder });
+        const waiting = claimJobBoardRunExecution({ ...args, waitForRelease: true }, { sender: waiter });
+        await nextTurn();
+        waiter.destroy();
+        releaseJobBoardRunExecution({ ...args, claimToken: first.claimToken }, { sender: holder });
+        const refused = await waiting;
+        assert(!refused.ok && refused.reason === 'sender-destroyed',
+          'a destroyed contention waiter cannot install an orphaned Board claim');
+        const rebindGate = new Promise(resolve => { releaseRebind = resolve; });
+        const reboundCanvas = path.join(dir, 'after.json');
+        const rebind = withCanvasRecoveryRebind(canvas, reboundCanvas, async ({ installAlias }) => {
+          await rebindGate;
+          installAlias();
+          return { success: true };
+        });
+        const delayed = claimJobBoardRunExecution({ ...args, canvasFilePath: reboundCanvas, boardRunId: 'other-run' }, { sender: afterRebindWaiter });
+        await nextTurn();
+        afterRebindWaiter.destroy();
+        releaseRebind();
+        await rebind;
+        const delayedResult = await delayed;
+        assert(!delayedResult.ok && delayedResult.reason === 'sender-destroyed',
+          'a sender destroyed behind the Save As barrier releases its acquired recovery reader');
+        const admitted = await claimJobBoardRunExecution({ ...args, boardRunId: 'other-run' }, { sender: live });
+        assert(admitted.ok, 'refused late claims do not consume the automatic attempt or block a healthy renderer');
+        releaseJobBoardRunExecution({ ...args, boardRunId: 'other-run', claimToken: admitted.claimToken }, { sender: live });
+
+        const identity = await sealContinuationIdentity(reboundCanvas, {
+          nodeId: 'source-hub', parentRunId: 'source-run', profileFingerprint,
+          kind: 'late-source-refresh', operation: 'search-jobs-single-source', sourceId: 'usajobs',
+          searchWindow: { startTimestamp: 100, anchorTimestamp: 100, providerLookbackDays: 1 },
+          canonicalLocation: 'Toronto', generationFingerprint: 'generation',
+        });
+        const begun = await beginJobContinuation(reboundCanvas, { ...identity, recoveryMode: 'automatic', now: 101 });
+        const authorityGate = new Promise(resolve => { releaseAuthority = resolve; });
+        let entered;
+        const authorityEntered = new Promise(resolve => { entered = resolve; });
+        const heldAuthority = withCurrentJobAnalysisOperationAuthority({
+          canvasFilePath: reboundCanvas, hubId: identity.nodeId, ...identity.operationAuthority,
+        }, async () => { entered(); await authorityGate; return { ok: true }; });
+        await authorityEntered;
+        const claimArgs = { ...identity, intentId: begun.intent.intentId, autoResume: true };
+        const lateContinuation = claimJobContinuation(reboundCanvas, claimArgs, { sender: continuationWaiter });
+        await nextTurn();
+        continuationWaiter.destroy();
+        releaseAuthority();
+        await heldAuthority;
+        const continuationRefused = await lateContinuation;
+        assert(!continuationRefused.ok && continuationRefused.reason === 'sender-destroyed',
+          'a continuation closed during durable authority admission cannot acquire execution ownership');
+        const healthy = await claimJobContinuation(reboundCanvas, claimArgs, { sender: live });
+        assert(healthy.ok, 'refusing the destroyed continuation preserves its automatic retry for a live window');
+        releaseJobContinuationExecution(healthy.intent.intentId, healthy.leaseToken, live);
+        let drained = false;
+        await withCanvasRecoveryRebind(reboundCanvas, path.join(dir, 'final.json'), async () => { drained = true; });
+        assert(drained, 'every refused late claim releases its recovery reader so Save As can drain');
+        return { boardWaitsRejected: 2, continuationWaitRejected: true, recoveryReadersDrained: true };
+      } finally {
+        releaseAuthority?.();
+        releaseRebind?.();
+        for (const owner of [holder, waiter, afterRebindWaiter, continuationWaiter, live]) owner.destroy();
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  },
   {
     name: 'Board startup verification yield rearms only its exact process lease and preserves one-shot semantic recovery',
     async run() {

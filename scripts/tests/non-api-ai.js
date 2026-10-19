@@ -1,5 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { EventEmitter } from 'node:events';
+import { rejects } from 'node:assert/strict';
+import { flushNonApiAiPersistence } from '../../electron/ipc/nonApiAi.js';
 import { _resetNonApiAiHandoffLifecycle, abortNodeTasksAndWait, applyBugReportCode, assert, buildNonApiAiHandoffLifecycleMarkdown, callLLMRaw, callLLMText, callLLMVision, createHostStagedVisionCaller, checkPromptFits, __durableStepKeysForTests, __reloadDurableStateForTests, __nonApiAiProgressScopeSnapshotForTests, __pruneInactiveEphemeralProgressScopesForTests, __selectDurableStepForTests, __selectUniqueAcceptedLegacyStepForTests, canonicalizeGeneratedUntrustedBoundaryNonces, deriveHandoffCode, durableRunHasAnyTask, durableRunSettlementSummary, electronPkg, fs, generateMarkdown, getKnownTaskIds, getNonApiAiHandoffLifecycle, handleSafe, HANDOFF_CODE_ALPHABET, hardenStructuredTaskPrompt, ipcMain, listingIdsForRootBatch, materializeNonApiPrompt, NON_API_AI_TRANSPORT, NonApiAiCodeMismatchError, registerNonApiAiHandlers, requestNonApiAi, runBoundedJobTaxonomy, runRewindableGroundedHandoff, SAFE_NON_API_AI_LOG_ERROR_CODES, SAFE_VALIDATION_DIAGNOSTIC_REASONS, taskModelRoutingSnapshot, validateCompensationEvidenceSubmission, validateJobPreferenceListingSubmission, validateNonApiAiSubmission, validateRoleFamilyExperienceBandsSubmission, wrapUntrustedText } from '../test-dependencies.js';
 import { BRIDGE_ATTACHMENT_TRANSPORT_ENABLED, readBridgeableNonApiAiAttachments } from '../../electron/ipc/nonApiAi.js';
 import { pendingManualHandoffsForActiveTasks } from '../../electron/ipc/bugReport.js';
@@ -25,6 +27,64 @@ const MARKETPLACE_AND_WORKSPACE_TASKS = [
 ];
 
 export default [
+  {
+    name: 'non-API AI: quit retries an already-failed deferred draft checkpoint and propagates another failure',
+    run: async () => {
+      ipcMain.__clearInvokeHandlers();
+      registerNonApiAiHandlers();
+      const sent = [];
+      const sender = new EventEmitter();
+      sender.id = 927;
+      sender.isDestroyed = () => false;
+      sender.send = (channel, payload) => sent.push({ channel, payload });
+      const runId = `quit-draft-retry-${process.pid}-${Date.now()}`;
+      handleSafe('non-api-quit-draft-retry', async (_event, _args, signal) => ({
+        result: await requestNonApiAi({
+          prompt: 'SYNTHETIC QUIT DRAFT', task: 'test-manual-quit-draft', signal,
+          responseSchema: { type: 'object', required: ['answer'], properties: { answer: { type: 'string' } } },
+        }),
+      }));
+      const owner = ipcMain.__getInvokeHandler('non-api-quit-draft-retry')({ sender }, { nodeId: 'quit-draft-node', manualAiRunId: runId });
+      let request;
+      for (let attempt = 0; attempt < 200 && !request; attempt += 1) {
+        request = sent.find(item => item.channel === 'non-api-ai-request')?.payload;
+        if (!request) await new Promise(resolve => setTimeout(resolve, 5));
+      }
+      assert(request, 'the synthetic pending handoff is available');
+      const originalRename = fs.promises.rename;
+      let failWrites = true;
+      let failed;
+      const firstFailure = new Promise(resolve => { failed = resolve; });
+      fs.promises.rename = async (...args) => {
+        if (String(args[1]).endsWith('non-api-ai-handoffs.json') && failWrites) {
+          failed();
+          throw new Error('Synthetic draft disk failure');
+        }
+        return originalRename(...args);
+      };
+      try {
+        const update = ipcMain.__getInvokeHandler('update-non-api-ai-draft');
+        assert((await update({ sender }, { requestId: request.requestId, response: 'latest unfinished JSON' })).saved,
+          'typing is admitted before its deferred disk write');
+        await firstFailure;
+        await new Promise(resolve => setImmediate(resolve));
+        await rejects(flushNonApiAiPersistence(), /Synthetic draft disk failure/,
+          'quit must retry current memory state and expose a repeated disk failure');
+        failWrites = false;
+        await flushNonApiAiPersistence();
+        const disk = JSON.parse(await fs.promises.readFile(`${electronPkg.app.getPath('userData')}/non-api-ai-handoffs.json`, 'utf8'));
+        assert(Object.values(disk.runs[runId].steps).some(step => step.draft === 'latest unfinished JSON'),
+          'a successful retry verifies the latest draft on disk');
+      } finally {
+        fs.promises.rename = originalRename;
+        await ipcMain.__getInvokeHandler('cancel-non-api-ai-request')({ sender }, { requestId: request.requestId });
+        await owner;
+      }
+      assert((await ipcMain.__getInvokeHandler('update-non-api-ai-draft')({ sender }, {
+        requestId: request.requestId, response: 'obsolete draft',
+      })).code === 'REQUEST_SETTLED', 'only a truly settled request makes an obsolete draft safe to retire');
+    },
+  },
   {
     name: 'non-API AI: every career-profile compiler stage can be paused with its Job Search',
     run: () => {
@@ -197,7 +257,7 @@ export default [
         && dialogSource.includes('detail: { nodeId: cancelledNodeId, runId: cancelledRunId }')
         && jobSearchSource.includes("document.addEventListener('non-api-ai-node-cancelled', onManualAiNodeCancelled)")
         && jobSearchSource.includes('stopHandler();')
-        && jobSearchSource.includes('resetHandler(e, { preserveRecovery: true })'),
+        && jobSearchSource.includes('resetHandler(e, { preserveRecovery: true, ...options })'),
       'cancelling a node-owned manual AI request notifies its Job Search hub with exact run ownership before using the in-card saved-progress Stop path');
       assert(preloadSource.includes("revealNonApiAiAttachment: (requestId, filePath) => ipcRenderer.invoke('reveal-non-api-ai-attachment', { requestId, filePath })")
         && dialogSource.includes('activeRequest.attachments?.length > 0')
@@ -672,7 +732,8 @@ export default [
       'an explicit stale-recovery Resume remains single-action and exact-id-bound; it never exposes a competing discard path that could erase the saved marker');
       assert(mainSource.includes('async function flushNonApiAiPersistenceForLifecycle(win, actionType)')
         && mainSource.includes("if (!await flushNonApiAiPersistenceForLifecycle(win, 'close')) return;")
-        && mainSource.includes("return flushNonApiAiPersistenceForLifecycle(win, 'quit');")
+        && mainSource.includes('const quitAttempt = createQuitAutosaveAttempt({')
+        && mainSource.includes('flushPersistence: flushNonApiAiPersistence,')
         && mainSource.includes('Could Not Save AI Draft')
         && mainSource.includes('`${verb} Without Saving AI Draft`')
         && mainSource.includes('return choice === 1;')
@@ -683,10 +744,10 @@ export default [
       const closeCheck = mainSource.slice(mainSource.indexOf('async function checkUnsavedChanges'), mainSource.indexOf('// ── Window creation'));
       assert(closeCheck.indexOf('hasPendingNonApiAiRequestsForSender(expectedSender)')
           < closeCheck.indexOf('if (rendererState.hasUnsavedChanges)')
-        && preloadSource.includes('const pendingNonApiAiDraftWrites = new Set()')
-        && preloadSource.includes('await Promise.allSettled([...pendingNonApiAiDraftWrites])')
-        && persistenceSource.indexOf('await window.electronAPI?.flushNonApiAiPersistence?.()')
-          < persistenceSource.indexOf('sendQuitResponse(response, requestId);'),
+        && preloadSource.includes('const nonApiAiDraftBarrier = createDraftWriteBarrier({')
+        && preloadSource.includes('const flushNonApiAiPersistence = () => nonApiAiDraftBarrier.flush();')
+        && persistenceSource.includes('const prepareQuitPause = useEffectEvent(async () => {')
+        && /await Promise\.all\(\[\s*window\.electronAPI\?\.flushNonApiAiPersistence\?\.\(\),\s*flushApplicationDraftWrites\(\),?\s*\]\)/u.test(persistenceSource),
       'pending handoffs force a save independently of the dirty flag, and shutdown waits for every draft write before replying');
       assert(!dialogSource.includes("new CustomEvent('non-api-ai-node-settled'")
         && !jobSearchSource.includes("document.addEventListener('non-api-ai-node-settled'")

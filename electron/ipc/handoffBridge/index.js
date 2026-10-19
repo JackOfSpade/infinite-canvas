@@ -40,6 +40,9 @@ let registered = false;
 let registeredIpcMain = null;
 let startPromise = null;
 let runtime = null;
+let quitAdmissionHeld = false;
+let quitAdmissionHoldPromise = null;
+const deferredQuitLaunches = new Set();
 let controllerBridge = null;
 let uiRegistration = null;
 let lifecycle = 0;
@@ -1503,6 +1506,7 @@ function failedStartTelemetryEnabled(result, controller) {
 }
 
 function enableAttachedRuntime(current, args, lifecycleTicket = lifecycle) {
+  if (quitAdmissionHeld) return Promise.resolve({ success: false, code: 'QUIT_PAUSED', status: bootstrapSnapshot() });
   if (!current?.controller?.enable) return Promise.resolve({ success: false, code: 'UNAVAILABLE', status: bootstrapSnapshot() });
   const consentVersion = runtimeConsentVersions.get(current) ?? current.config?.consentVersion;
   if (consentVersion !== ENABLE_CONSENT_VERSION && !hasCurrentLongConsentCapability(args)) {
@@ -1543,7 +1547,14 @@ function enableAttachedRuntime(current, args, lifecycleTicket = lifecycle) {
   };
   let settled;
   const operation = Promise.resolve()
-    .then(() => current.controller.enable(args))
+    .then(() => {
+      if (quitAdmissionHeld) {
+        deferredQuitLaunches.add(() => runtime === current && lifecycleTicket === lifecycle
+          ? enableAttachedRuntime(current, args, lifecycleTicket) : undefined);
+        return { success: false, code: 'QUIT_PAUSED', status: bootstrapSnapshot() };
+      }
+      return current.controller.enable(args);
+    })
     .then(result => (runtime === current && lifecycleTicket === lifecycle
       ? result
       : { success: false, code: 'CANCELLED', status: bootstrapSnapshot() }))
@@ -1821,6 +1832,10 @@ export function registerHandoffBridgeHandlers({ ipcMain = electronPkg.ipcMain, d
 }
 
 export function startHandoffBridge({ reason = 'manual', deps = {} } = {}) {
+  if (quitAdmissionHeld) {
+    if (reason === 'auto-start') deferredQuitLaunches.add(() => startHandoffBridge({ reason, deps }));
+    return Promise.resolve({ success: false, code: 'QUIT_PAUSED', status: getHandoffBridgeStatus() });
+  }
   if (deps.activate === true) clearFailedStartDiagnostic();
   const existing = runtime;
   if (existing?.controller) {
@@ -1900,6 +1915,7 @@ export function startHandoffBridge({ reason = 'manual', deps = {} } = {}) {
       let result;
       try { result = await enableAttachedRuntime(candidate, startEnableArgs(reason, deps)); }
       catch { result = { success: false, code: 'tunnel_failed' }; }
+      if (result?.code === 'QUIT_PAUSED') deferredQuitLaunches.add(() => startHandoffBridge({ reason, deps }));
       if (lifecycleTicket !== lifecycle || runtime !== candidate) {
         if (runtime === candidate) detachRuntime(candidate, { advanceLifecycle: false });
         await disposeDetachedRuntime(candidate);
@@ -1920,18 +1936,22 @@ export function startHandoffBridge({ reason = 'manual', deps = {} } = {}) {
 }
 
 export function scheduleHandoffBridgeLaunch({ userData = '', setTimeoutImpl = setTimeout, stat = fs.promises.stat, readConfig: loadConfig = readConfig, reapOrphans = async () => undefined, start = startHandoffBridge, delayMs = 3_000 } = {}) {
-  return setTimeoutImpl(async () => {
+  const launch = async () => {
+    if (quitAdmissionHeld) { deferredQuitLaunches.add(launch); return; }
     const pidfile = path.join(userData, 'handoff-bridge', 'tunnel', 'tunnel.pid.json'); let exists = false;
     try { await stat(pidfile); exists = true; } catch { /* no pidfile means no process inspection */ }
+    if (quitAdmissionHeld) { deferredQuitLaunches.add(launch); return; }
     let loaded; try { loaded = syncReportRedactedHosts(loadConfig(userData)); } catch { return; }
     if (exists) try { await reapOrphans({ reason: 'launch', pidfile }); } catch { return; }
+    if (quitAdmissionHeld) { deferredQuitLaunches.add(launch); return; }
   if (loaded?.config?.autoStart && loaded.config.consentVersion === ENABLE_CONSENT_VERSION) {
     // Keep the loaded value both as the launch contract and in the default
     // starter's dependency bag. Main consumes the former; startHandoffBridge
     // consumes the latter, so neither path re-reads the config file.
     try { void Promise.resolve(start({ reason: 'auto-start', loadedConfig: loaded, deps: { loadedConfig: loaded, enabled: true, activate: true } })).catch(noOp); } catch { /* fire-and-forget */ }
   }
-  }, delayMs);
+  };
+  return setTimeoutImpl(launch, delayMs);
 }
 
 export async function stopHandoffBridge() {
@@ -1940,10 +1960,30 @@ export async function stopHandoffBridge() {
   return result;
 }
 export async function holdHandoffBridgeForQuit() {
-  if (runtime?.controller?.holdForQuit) return runtime.controller.holdForQuit();
-  return { success: true, status: getHandoffBridgeStatus() };
+  quitAdmissionHeld = true;
+  if (quitAdmissionHoldPromise) return quitAdmissionHoldPromise;
+  const hold = (async () => {
+    // An admitted startup/enable can still be attaching its runtime. Join it
+    // before selecting the controller whose admitted writes must be drained.
+    if (startPromise) await startPromise.catch(noOp);
+    const enabling = runtime && runtimeEnableOperations.get(runtime);
+    if (enabling) await enabling.catch(noOp);
+    if (runtime?.controller?.holdForQuit) return runtime.controller.holdForQuit();
+    return { success: true, status: getHandoffBridgeStatus() };
+  })();
+  quitAdmissionHoldPromise = hold;
+  try { return await hold; }
+  finally { if (quitAdmissionHoldPromise === hold) quitAdmissionHoldPromise = null; }
 }
 export async function resumeHandoffBridgeAfterQuitCancel() {
-  if (runtime?.controller?.resumeAfterQuitCancel) return runtime.controller.resumeAfterQuitCancel();
-  return { success: true, status: getHandoffBridgeStatus() };
+  if (quitAdmissionHoldPromise) await quitAdmissionHoldPromise;
+  const result = runtime?.controller?.resumeAfterQuitCancel
+    ? await runtime.controller.resumeAfterQuitCancel()
+    : { success: true, status: getHandoffBridgeStatus() };
+  if (result?.success !== true) return result;
+  quitAdmissionHeld = false;
+  const pending = [...deferredQuitLaunches];
+  deferredQuitLaunches.clear();
+  for (const launch of pending) void Promise.resolve().then(launch).catch(noOp);
+  return result;
 }

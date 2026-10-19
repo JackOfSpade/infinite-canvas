@@ -25,6 +25,8 @@ import { claimJobBoardRunExecution, releaseJobBoardRunExecution } from '../../el
 import { getJobAnalysisPaths, getJobDescriptionRecoveryCheckpointPath, rebindJobAnalysisRecoveryOwners } from '../../electron/ipc/jobAnalysisPaths.js';
 import { claimJobAnalysisOperationAuthority, withCurrentJobAnalysisOperationAuthority } from '../../electron/ipc/jobAnalysisOperationAuthorityStore.js';
 import crypto from 'node:crypto';
+import quitWorkflowPauseTests from './quitWorkflowPauseFixture.mjs';
+import { jobWorkflowNeedsQuitPause } from '../../src/utils/quitWorkflowPause.js';
 import { JOB_PREFERENCE_CRITERION_MAX_LENGTH, JOB_PREFERENCE_PLAN_SCHEMA, JOB_PREFERENCE_RESEARCH_BATCH_ASSESSMENT_SCHEMA, JOB_PREFERENCE_TITLE_MAX_LENGTH, JOB_ROLE_AUDIT_SCHEMA } from '../../electron/ipc/aiSchemas.js';
 import { parseJobPreferenceResearchSections } from '../../electron/ipc/jobPreferences.js';
 import { HANDOFF_CONCURRENCY, mapAutomaticHandoffs, runAutomaticHandoffWorkers } from '../../src/utils/handoffScheduler.js';
@@ -86,6 +88,53 @@ async function sealContinuationFixture(canvasFilePath, identity, { careerSnapsho
 }
 
 export default [
+  ...quitWorkflowPauseTests,
+  {
+    name: 'job run staging: resuming a torn final row preserves every newly checkpointed job',
+    run: async () => {
+      const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'ic-job-staging-torn-resume-'));
+      const canvasPath = path.join(root, 'workspace.json');
+      const nodeId = 'torn-resume-hub';
+      const runId = 'torn-resume-run';
+      try {
+        await startRun(canvasPath, { runId, startedAt: 1, nodeId, sourceIds: ['indeed'] });
+        await recordSourcePage(canvasPath, {
+          sourceId: 'indeed', query: 'example', queryIndex: 0, page: 1,
+          jobs: [{ title: 'Complete before crash' }], now: 2, nodeId, expectedRunId: runId,
+        });
+        const scope = jobRunPathScopeForCanvas(canvasPath, nodeId);
+        const stagingPath = path.join(scope.dir, `${scope.base}.jobs-staging.${scope.canvasHash}.${scope.ownerHash}.jsonl`);
+        await fs.promises.appendFile(stagingPath, '{"sourceId":"indeed","job":{"title":"torn');
+        assert((await readStagedJobs(canvasPath, nodeId)).length === 1,
+          'the initial restart safely ignores only the torn final row');
+        const saved = await recordSourcePage(canvasPath, {
+          sourceId: 'indeed', query: 'example', queryIndex: 0, page: 2,
+          jobs: [{ title: 'First after resume' }, { title: 'Second after resume' }],
+          now: 3, nodeId, expectedRunId: runId,
+        });
+        const state = await readRunState(canvasPath, 4, nodeId);
+        assert(saved === true && state.manifest.sources.indeed.queries['#0'].lastPage === 2
+          && state.stagedJobs.length === 3
+          && state.stagedJobs[1].job.title === 'First after resume'
+          && state.stagedJobs[2].job.title === 'Second after resume',
+        'a second restart recovers every new row before trusting the advanced page cursor');
+        // A complete row without its trailing newline is also legal recovery
+        // evidence; appending must preserve it as well as the following page.
+        await fs.promises.appendFile(stagingPath, JSON.stringify({ sourceId: 'indeed', query: 'example', page: 3, job: { title: 'Complete without newline' } }));
+        await recordSourcePage(canvasPath, {
+          sourceId: 'indeed', query: 'example', queryIndex: 0, page: 4,
+          jobs: [{ title: 'Following complete row' }], now: 5, nodeId, expectedRunId: runId,
+        });
+        const finalRows = await readStagedJobs(canvasPath, nodeId);
+        assert(finalRows.length === 5 && finalRows[3].job.title === 'Complete without newline'
+          && finalRows[4].job.title === 'Following complete row',
+        'inserting the separator preserves a valid unterminated row too');
+        return { recoveredRows: finalRows.length, cursor: 4 };
+      } finally {
+        await fs.promises.rm(root, { recursive: true, force: true });
+      }
+    },
+  },
   {
     name: 'mounted Board child Pause and save commits manual recovery while retaining its exact handoff and parent plan',
     run: async () => {
@@ -146,6 +195,41 @@ export default [
       assert(durableResult.success === true && stops === 2 && rollbacks === 0 && retired === 0,
         'the actual dock wrapper must pause a durable active Board child even without an in-memory executor');
       assert(context.boardRunControlRef.current === null, 'temporary pause ownership must be released after acknowledgement');
+      context.findJobSearchBoardActiveRecoveryOwner = () => null;
+      context.getNode = nodeId => ({ id: nodeId, data: live });
+      Object.assign(context, {
+        jobWorkflowNeedsQuitPause, settlePreFenceCanvasBatches: async () => {},
+        localQueueAdmissionRef: ref(null), scoringContinuationAdmissionRef: ref(null), usaJobsRefreshAdmissionRef: ref(null),
+      });
+      live = { ...live, locked: true, manualAiResume: { runId: 'handoff-run', acceptedStep: 'kept' } };
+      let quitCause;
+      let finishClaim;
+      context.analysisOperationClaimTailRef = ref(new Promise(resolve => { finishClaim = resolve; }));
+      context.window.electronAPI.pauseJobRunAndCancel = async args => {
+        quitCause = args.cause;
+        assert(args.operationAuthority?.operationId === 'newly-admitted-authority', 'quit must pause the receipt delivered by an already admitted claim');
+        return { ok: true, settled: true, paused: true, runId: 'provider-run' };
+      };
+      const quitting = reset(null, { lifecycleQuit: true, preserveRecovery: true, preserveAcceptedManualAi: true });
+      await Promise.resolve();
+      assert(quitCause === undefined, 'quit waits for the renderer claim tail before its backend pause');
+      live = { ...live, analysisOperation: { authority: { operationId: 'newly-admitted-authority' } } };
+      finishClaim();
+      const quitResult = await quitting;
+      assert(quitResult.success === true && quitCause === 'app-quit' && live.locked === true
+        && live.manualAiResume.runId === 'handoff-run' && live.manualAiResume.acceptedStep === 'kept'
+        && live.manualAiResume.pausedByUser === true && retired === 0 && rollbacks === 0,
+      'automatic quit pauses a locked standalone Search without retiring its accepted handoff or bypassing host authority');
+      context.analysisOperationClaimTailRef.current = new Promise(resolve => { finishClaim = resolve; });
+      let currentQuit = true;
+      quitCause = undefined;
+      const releasedQuit = reset(null, { lifecycleQuit: true, preserveAcceptedManualAi: true, isQuitPauseCurrent: () => currentQuit });
+      currentQuit = false;
+      live = { ...live, manualAiResume: { runId: 'successor-run', acceptedStep: 'successor' } };
+      finishClaim();
+      assert((await releasedQuit).success === false && quitCause === undefined
+        && live.manualAiResume.runId === 'successor-run' && !live.manualAiResume.pausedByUser,
+      'a released quit waiting for an old claim cannot pause the newly resumed Search');
       const owner = { orchestratorNodeId: 'board', boardRunId: 'board-run' };
       assert(!createDurableBoardPauseControl(owner, { boardRunId: 'other-run', activeSourceId: 'hub' }, 'hub')
         && !createDurableBoardPauseControl(owner, { boardRunId: 'board-run', selectedSearchModuleIds: ['hub'] }, 'hub')
@@ -181,9 +265,9 @@ export default [
       const search = fs.readFileSync(path.resolve('src/nodes/JobSearchNode.jsx'), 'utf8');
       const board = fs.readFileSync(path.resolve('src/nodes/JobBoardNode.jsx'), 'utf8');
       assert(search.includes('while (durableBoardOwner && !boardPauseControl)')
-        && search.includes('if (manualAiRunId && !boardPauseControl)')
-        && search.includes('manualAiResume: boardPauseControl && manualAiRunId')
-        && search.includes('pauseBoardOwnedSearch(control, () => stopHandler(null))')
+        && search.includes('if (manualAiRunId && !boardPauseControl && !preserveAcceptedManualAi)')
+        && search.includes('manualAiResume: (boardPauseControl || preserveAcceptedManualAi) && manualAiRunId')
+        && search.includes('pauseBoardOwnedSearch(control, () => stopHandler(null, options))')
         && (search.match(/const savedPause = await jobBoardSavedPauseOutcome/g) || []).length === 2
         && (search.match(/if \(control\?\.pauseCompletion\) return searchRunOutcome/g) || []).length === 3
         && board.includes('if (userPausedChild && !scanRunRef.current && !scanPreflightRef.current) {'),
@@ -754,7 +838,7 @@ export default [
         && !savedStop.includes('discardJobRun')
         && savedStop.includes("Pause & save acknowledged (cause=${cancellationReason || 'user-stopped'}); manual recovery saved and backend work settled")
         && savedStop.includes('Pause & save was not acknowledged; saved checkpoint left unchanged')
-        && stop.includes('pauseBoardOwnedSearch(control, () => stopHandler(null))')
+        && stop.includes('pauseBoardOwnedSearch(control, () => stopHandler(null, options))')
         && stop.includes('Pause & save requested from AI handoff (cause=user-stopped); awaiting durable manual recovery acknowledgement')
         && !stop.includes('handoffBridgePause')
         && stop.includes("document.addEventListener('job-search-pause-and-save'")

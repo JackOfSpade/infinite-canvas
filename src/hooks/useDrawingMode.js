@@ -17,13 +17,12 @@ export function useDrawingMode({
   takeSnapshot,
   activeColor = 'white',
   penSize = 3,
-  getIntersectingNodes,
   isAnimatingRef,
   cursorsRef,
   drawingLayerRef,
   isInteractionRef,
 }) {
-  const { screenToFlowPosition, getViewport, deleteElements } = useReactFlow();
+  const { screenToFlowPosition, getViewport } = useReactFlow();
   const isErasingRef = useRef(false);
   const currentStrokeRef = useRef(null);
 
@@ -35,18 +34,6 @@ export function useDrawingMode({
     const R     = eraserSize / zoom;  // convert screen px → flow units
 
     if (eraserType === 'object') {
-      // Delete entire nodes that overlap the eraser circle
-      if (getIntersectingNodes) {
-        const hit = getIntersectingNodes({
-          x: C.x - R, y: C.y - R, width: R * 2, height: R * 2,
-        });
-        if (hit?.length) {
-          const ids = hit.filter(n => !n.data?.locked).map(n => ({ id: n.id }));
-          if (ids.length) {
-            deleteElements({ nodes: ids });
-          }
-        }
-      }
       // Delete entire strokes that come within the eraser radius
       setDrawings(prev => prev.filter(stroke => {
         const pts = strokePoints(stroke);
@@ -69,8 +56,8 @@ export function useDrawingMode({
         return changed ? next : prev;
       });
     }
-  }, [screenToFlowPosition, getViewport, eraserSize, eraserType, getIntersectingNodes,
-      setDrawings, deleteElements, isAnimatingRef, isInteractionRef]);
+  }, [screenToFlowPosition, getViewport, eraserSize, eraserType,
+      setDrawings, isAnimatingRef, isInteractionRef]);
 
   const handlePointerDown = useCallback((e) => {
     if (e.button !== 0) return;

@@ -1,5 +1,7 @@
 import { createDurableBoardPauseControl, pauseBoardOwnedSearch, jobBoardSavedPauseOutcome } from '../utils/jobBoardSavedPause.js';
 import { waitForJobRendererCommit } from '../utils/jobRendererCommit';
+import { settlePreFenceCanvasBatches } from '../utils/quitCommitSettle';
+import { jobWorkflowNeedsQuitPause } from '../utils/quitWorkflowPause';
 import { hasLegacyPageScoring } from '../utils/jobScoringContract';
 import React, { useRef, useEffect, useCallback, useContext, useMemo, useState, useId, useSyncExternalStore } from 'react';
 import { useReactFlow, useStore } from '@xyflow/react';
@@ -5709,6 +5711,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
           throw new Error(snapshotReceipt?.error || 'The saved candidate snapshot was not confirmed.');
         }
       } catch (snapshotError) {
+        if (cancelled()) return searchRunOutcome('cancelled', { runId: searchResult.runId || null });
         // Keep the exact gathered rows in a retryable scoring checkpoint. A
         // generic pipeline error would fall back to a new scrape and could
         // lose the only copy of these listings; retry instead re-enters
@@ -5716,7 +5719,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         const message = `Could not save the gathered jobs for re-evaluation: ${snapshotError?.message || String(snapshotError)}`;
         let candidateSaveFailureAccepted = false;
         updateGlobal(currentId, (node) => {
-          if (!exactJobRunCareerSnapshotBindingMatches(node?.data, {
+          if (cancelled() || !exactJobRunCareerSnapshotBindingMatches(node?.data, {
             runId: searchResult.runId,
             careerSnapshotId: pinnedCareerSnapshotId,
           })) return null;
@@ -5970,6 +5973,9 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         canCommit: canCommitAnalysisOperation,
       });
     } catch (error) {
+      if (error?.code === 'APP_QUIT_PAUSED' || error?.message === 'App paused for quit') {
+        return searchRunOutcome('paused', { runId: jobRunIdRef.current, reason: 'awaiting-explicit-ai-continue' });
+      }
       // The app-level manual-AI dialog aborts the backend before its DOM cancel
       // notification necessarily reaches this node. If the IPC rejection wins
       // that race, perform the exact Board rollback here while the ownership
@@ -6435,6 +6441,12 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     const boardConnectedAtContinuationAdmission = !queueManagedExternally
       && isJobSearchConnectedToBoard(id, getNodes(), getEdges());
     const requestedData = getNode(id)?.data || data;
+    if (requestedData.locked) {
+      return searchRunOutcome('not-ready', {
+        runId: requestedData.jobRunId || null,
+        error: 'This Job Search module is locked.',
+      });
+    }
     if (requestedData.hubState === 'sources-ready' && !pausedCareerInputMatches(requestedData)) {
       return searchRunOutcome('superseded', {
         runId: requestedData.jobRunId || null,
@@ -6600,6 +6612,12 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
           });
         }
       const continuationData = getNode(id)?.data || null;
+      if (continuationData?.locked) {
+        return searchRunOutcome('not-ready', {
+          runId: requestedJobRunId,
+          error: 'This Job Search was locked while completion was queued. Unlock it and continue the saved results.',
+        });
+      }
       const admittedPausedCareerSnapshotId = normalizedJobCareerSnapshotId(
         continuationData?.pendingCareerSnapshotId,
       );
@@ -6864,6 +6882,14 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         });
       }
       const continuationData = getNode(currentId)?.data || null;
+      // Locking a waiting Search must retain its gathered work. Recheck at
+      // the lane turn before claiming authority or creating another handoff.
+      if (continuationData?.locked) {
+        return searchRunOutcome('not-ready', {
+          runId: requestedJobRunId,
+          error: 'This Job Search was locked while scoring was queued. Unlock it and continue the saved results.',
+        });
+      }
       const admittedPausedCareerSnapshotId = normalizedJobCareerSnapshotId(
         continuationData?.pendingCareerSnapshotId,
       );
@@ -7068,6 +7094,9 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         : outcome;
     } catch (error) {
       if (cancelled() || isNodeDeletedAbort(error)) return;
+      if (error?.code === 'APP_QUIT_PAUSED' || error?.message === 'App paused for quit') {
+        return searchRunOutcome('paused', { runId: activeJobRunId, reason: 'awaiting-explicit-ai-continue' });
+      }
       EventLogger.error('[JobSearch] Resume scoring failed:', error);
       updateGlobal(currentId, {
         hubState: 'sources-ready',
@@ -8032,10 +8061,11 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
           throw new Error(snapshotReceipt?.error || 'The saved candidate snapshot was not confirmed.');
         }
       } catch (snapshotError) {
+        if (cancelled()) return searchRunOutcome('cancelled', { runId: resumedRunId });
         const message = `Could not save the gathered jobs for re-evaluation: ${snapshotError?.message || String(snapshotError)}`;
         let resumedCandidateSaveFailureAccepted = false;
         updateGlobal(currentId, (node) => {
-          if (!exactJobRunCareerSnapshotBindingMatches(node?.data, {
+          if (cancelled() || !exactJobRunCareerSnapshotBindingMatches(node?.data, {
             runId: resumedRunId,
             careerSnapshotId: admittedResumeCareerSnapshotId,
           })) return null;
@@ -8165,6 +8195,9 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         canCommit: () => canCommitAnalysisOperation(resumeOperation),
       });
     } catch (error) {
+      if (error?.code === 'APP_QUIT_PAUSED' || error?.message === 'App paused for quit') {
+        return searchRunOutcome('paused', { runId: jobRunIdRef.current, reason: 'awaiting-explicit-ai-continue' });
+      }
       if (queueManagedByBoard && isJobBoardUserCancellation(error)) {
         const control = boardRunControlRef.current;
         if (control?.pauseCompletion) return searchRunOutcome('cancelled', { runId: jobRunIdRef.current || null });
@@ -9249,8 +9282,14 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
   // The in-card X is always a Stop. Only the separate Clear career data action
   // is allowed to erase a checkpoint, so future callers inherit the safe path
   // unless they explicitly opt into a lifecycle-only destructive operation.
-  const resetHandler = useCallback(async (e, { preserveRecovery = true } = {}) => {
+  const resetHandler = useCallback(async (e, { preserveRecovery = true, preserveAcceptedManualAi = false, lifecycleQuit = false, forceSavedRecovery = false, isQuitPauseCurrent = () => true } = {}) => {
     e?.stopPropagation();
+    if (lifecycleQuit && !forceSavedRecovery && !jobWorkflowNeedsQuitPause({ type: 'jobhub', data: getNode(id)?.data || data })
+      && !processingRunsRef.current.active && !localQueueAdmissionRef.current
+      && !scoringContinuationAdmissionRef.current && !usaJobsRefreshAdmissionRef.current
+      && !activeManualAiRunIdRef.current && !boardRunControlRef.current && !standaloneCancellationRef.current) {
+      return { success: true, settled: true, idle: true };
+    }
     // Capture this before claimStandaloneCancellation bumps the epoch and
     // cancels the renderer run.  That cancellation can synchronously let the
     // re-analysis handler reach finally and clear its ref while Pause & Save
@@ -9436,7 +9475,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         getEdges(),
       );
     }
-    if (getNode(id)?.data?.locked ?? data.locked) {
+    if (!lifecycleQuit && (getNode(id)?.data?.locked ?? data.locked)) {
       // A locked hub still renders this control, so the click reaches here and
       // then vanished without a trace. That made a real report ("I stopped it")
       // indistinguishable from one where the button was never pressed: nothing
@@ -9453,7 +9492,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       return;
     }
 
-    if (hasPendingManualAiRetirement(getNode(id)?.data || {})) {
+    if (!lifecycleQuit && hasPendingManualAiRetirement(getNode(id)?.data || {})) {
       EventLogger.log(`[JobSearch][${id}] Reset deferred: saved cancellation cleanup is still pending`);
       addToast({
         title: 'Finish Job Search Cleanup First',
@@ -9465,6 +9504,17 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     }
 
     if (!claimStandaloneCancellation()) return;
+    if (lifecycleQuit) {
+      // A host-admitted claim uses hubId and can still be delivering its
+      // receipt after node task drain. Let that renderer publication finish
+      // before capturing the exact authority that the pause must tombstone.
+      await analysisOperationClaimTailRef.current;
+      await settlePreFenceCanvasBatches();
+      if (!isQuitPauseCurrent()) {
+        releaseStandaloneCancellation();
+        return { success: false, error: 'This quit request was released.' };
+      }
+    }
     // This Reset/Stop is now admitted (not merely a refused Board/locked
     // control). Keep the local capability live until the host has atomically
     // paused and cancelled the exact staged run; an early renderer revoke
@@ -9472,7 +9522,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     const priorAuthority = getNode(id)?.data?.analysisOperation?.authority || null;
     const resetData = getNode(id)?.data || data;
     const manualMarker = getNode(id)?.data?.manualAiResume || null;
-    const manualAiRunId = activeManualAiRunIdRef.current
+    let manualAiRunId = activeManualAiRunIdRef.current
       || manualMarker?.runId
       || null;
 
@@ -9494,9 +9544,10 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
           // main-process transaction discovers and fences this node's current
           // manifest under its own mutex before cancellation.
           runId: jobRunIdRef.current || null,
-          cause: cancellationReason,
+          cause: lifecycleQuit ? 'app-quit' : cancellationReason,
           operationAuthority: priorAuthority,
         });
+        if (lifecycleQuit && !isQuitPauseCurrent()) return { success: false, error: 'This quit request was released.' };
         if (acknowledgement?.settled !== true) {
           const reason = acknowledgement?.operationAuthorityMismatch ? 'operation-authority-mismatch'
             : acknowledgement?.reason || 'stop-not-settled';
@@ -9507,10 +9558,11 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
               ? 'This Job Search changed runs before it could pause. Its current work was left untouched.'
               : 'The Job Search did not confirm that its saved work had stopped. Retry Pause & save.');
         }
+        if (preserveAcceptedManualAi) manualAiRunId ||= acknowledgement.manualAiRunIds?.[0] || null;
         analysisOperationLedgerRef.current.revoke();
         // Pause tombstones writes but keeps this exact host receipt as the
         // only admissible predecessor for an immediate Resume claim.
-        updateGlobal(id, (node) => ({
+        updateGlobal(id, (node) => lifecycleQuit && !isQuitPauseCurrent() ? null : ({
           analysisOperation: {
             ...(node?.data?.analysisOperation || {}),
             authority: priorAuthority,
@@ -9520,6 +9572,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         let stoppedOffer = canvasFilePath && window.electronAPI?.peekJobRun
           ? await window.electronAPI.peekJobRun({ canvasFilePath, nodeId: id })
           : null;
+        if (lifecycleQuit && !isQuitPauseCurrent()) return { success: false, error: 'This quit request was released.' };
         const exactStoppedRun = stoppedOffer?.found === true
           && stoppedOffer?.nodeId === id
           && typeof stoppedOffer?.runId === 'string'
@@ -9577,6 +9630,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         cancelCleanSourceCardDismiss();
         resetSourceProgress({ rejectUntilNextReset: true });
         updateGlobal(id, (node) => {
+          if (lifecycleQuit && !isQuitPauseCurrent()) return null;
           const live = node?.data || resetData;
           // A Stop can land after the run's original date window was frozen
           // but before search-jobs creates its staging manifest (parsing,
@@ -9637,10 +9691,10 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
               // The staging manifest is now the stronger, exact recovery
               // authority. Do not let an ancillary manual-AI cleanup failure
               // hide its Resume action behind a second stale-marker banner.
-              manualAiResume: boardPauseControl && manualAiRunId
-                ? { ...manualMarker, runId: manualAiRunId, pausedByUser: true, autoResumeEligible: false, updatedAt: Date.now() }
+              manualAiResume: (boardPauseControl || preserveAcceptedManualAi) && manualAiRunId
+                ? { ...(live.manualAiResume?.runId === manualAiRunId ? live.manualAiResume : manualMarker), runId: manualAiRunId, pausedByUser: true, autoResumeEligible: false, updatedAt: Date.now() }
                 : live.manualAiResume?.runId === manualAiRunId ? null : live.manualAiResume,
-              manualAiCleanupReceipts: removeManualAiCleanupReceipt(
+              manualAiCleanupReceipts: preserveAcceptedManualAi ? live.manualAiCleanupReceipts : removeManualAiCleanupReceipt(
                 live.manualAiCleanupReceipts,
                 manualAiRunId,
               ),
@@ -9667,7 +9721,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
           // The exact job-run ledger is already published above. Retiring its
           // older manual-AI handoff is housekeeping only, never a reason to
           // leave the card processing or remove the Resume affordance.
-          if (manualAiRunId && !boardPauseControl) {
+          if (manualAiRunId && !boardPauseControl && !preserveAcceptedManualAi) {
             void retireManualAiRunDurably(manualAiRunId).catch((error) => {
               EventLogger.error(`[JobSearch][${id}] Superseded manual-AI handoff cleanup failed:`, error);
             });
@@ -9687,7 +9741,8 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         // The handoff dock awaits this result before it tells the user that
         // stopping is saved.  Keep the visible in-card control on the same
         // path; it simply ignores the resolved result.
-        return { success: true };
+        if (lifecycleQuit) await settlePreFenceCanvasBatches();
+        return { success: true, settled: true };
       } catch (error) {
         EventLogger.log(`[JobSearch][${id}] Pause & save was not acknowledged; saved checkpoint left unchanged`);
         EventLogger.error(`[JobSearch][${id}] Could not verify saved-progress stop:`, error);
@@ -9867,11 +9922,11 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
   // The shared manual-AI cancellation event uses this same saved-stop path.
   // Keep it separate from the user-facing pause wrapper below: an external
   // cancellation has already been coordinated by the owner that raised it.
-  const stopHandler = useCallback((e) => {
-    return resetHandler(e, { preserveRecovery: true });
+  const stopHandler = useCallback((e, options = {}) => {
+    return resetHandler(e, { preserveRecovery: true, ...options });
   }, [resetHandler]);
 
-  const pauseAndSaveHandler = useCallback((e) => {
+  const pauseAndSaveHandler = useCallback((e, options = {}) => {
     // The bridge pause control is global: it turns away get *and* submit from
     // every worker, including unrelated Job Searches and application lanes.
     // This control is only for this exact Job Search. `resetHandler` performs
@@ -9889,7 +9944,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     );
     if (control?.pauseOnly && !boardRunControlRef.current) boardRunControlRef.current = control;
     EventLogger.log(`[JobSearch][${id}] Pause & save owner=${control?.pauseOnly ? 'durable-board' : control ? 'active-board' : owner ? 'board-reservation' : 'standalone'}`);
-    return pauseBoardOwnedSearch(control, () => stopHandler(null)).finally(() => {
+    return pauseBoardOwnedSearch(control, () => stopHandler(null, options)).finally(() => {
       if (control?.pauseOnly && boardRunControlRef.current === control) boardRunControlRef.current = null;
     });
   }, [getEdges, getNode, getNodes, id, stopHandler]);
@@ -11566,6 +11621,9 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     } catch (error) {
       const savedPause = await jobBoardSavedPauseOutcome(control, getNode(id)?.data?.jobRunId);
       if (savedPause) return savedPause;
+      if (error?.code === 'APP_QUIT_PAUSED' || error?.message === 'App paused for quit') {
+        return searchRunOutcome('paused', { runId: control.cancelledRunId || null, reason: 'awaiting-explicit-ai-continue' });
+      }
       // Rejections must obey the same ownership cleanup as returned failures.
       // In particular, a failed snapshot/ledger IPC can reject before the
       // child runner reaches its normal outcome block; leaving its marker
@@ -11597,8 +11655,9 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
   }, [cancelBoardRun]);
 
   useEffect(
-    () => jobSearchCoordinator.registerSearchModule(id, runForJobBoard, cancelBoardRun),
-    [cancelBoardRun, id, jobSearchCoordinator, runForJobBoard],
+    () => jobSearchCoordinator.registerSearchModule(id, runForJobBoard, cancelBoardRun,
+      options => pauseAndSaveHandler(null, options)),
+    [cancelBoardRun, id, jobSearchCoordinator, pauseAndSaveHandler, runForJobBoard],
   );
 
   // Re-score the currently displayed listings without invoking any search,
@@ -12229,6 +12288,9 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       return reanalysisCompletedOutcome();
     } catch (error) {
       if (cancelled()) return searchRunOutcome('cancelled');
+      if (error?.code === 'APP_QUIT_PAUSED' || error?.message === 'App paused for quit') {
+        return searchRunOutcome('paused', { runId: getNode(currentId)?.data?.jobRunId, reason: 'awaiting-explicit-ai-continue' });
+      }
       if (isNodeDeletedAbort(error)) {
         // React Flow now awaits acknowledged cleanup before committing a node
         // deletion. If a later durable step rejects that deletion, leave this
@@ -13236,6 +13298,9 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
           canCommit: () => !cancelled() && canCommitAnalysisOperation(savedScrapeOperation),
         });
       } catch (error) {
+        if (error?.code === 'APP_QUIT_PAUSED' || error?.message === 'App paused for quit') {
+          return searchRunOutcome('paused', { runId: snapshot.runId || null, reason: 'awaiting-explicit-ai-continue' });
+        }
         if (queueManagedByBoard && isJobBoardUserCancellation(error)) {
           const control = boardRunControlRef.current;
           if (control?.pauseCompletion) return searchRunOutcome('cancelled', { runId: snapshot.runId || null });

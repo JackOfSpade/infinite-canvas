@@ -2,6 +2,12 @@ import { deleteChildrenByHubId } from '../../src/nodes/_shared/hubChildCleanup.j
 import { beginJobCardDisplayRemoval, isJobCardDisplayRemoval } from '../../src/utils/jobCardRemovalIntent.js';
 import fs from 'node:fs';
 import assert from 'node:assert';
+import { runInNewContext } from 'node:vm';
+import { buildJobTreeNodes } from '../../src/nodes/jobsearch/buildJobTree.js';
+import { replaceBoardDisplayChildren } from '../../src/nodes/jobboard/replaceBoardDisplayChildren.js';
+import { combineCommitMismatchReason } from '../../src/nodes/jobboard/boardRecoveryNotice.js';
+import { attachProtectedCards, isProtectedJobCard } from '../../src/utils/jobLocationConsolidation.js';
+import { normalizeJobBoardRecoveryTimestamp } from '../../src/utils/jobBoardSearchSelection.js';
 
 import {
   boardHistoryAuthorityAvailable,
@@ -62,7 +68,162 @@ const bareLegacySource = () => ({
   },
 });
 
+// Execute the real post-provider Combine transaction with a delayed history IPC
+// and delayed React Flow deletion. The extraction keeps the regression on the
+// component's actual await/commit ordering, without live providers or React UI.
+async function startCombineCommitFixture({ unmatchedProtected = false } = {}) {
+  const source = readNodeSource();
+  const start = source.indexOf('      // Prepare, but do not consume, the durable seen-history capability');
+  const end = source.indexOf('\n    } catch (err) {', start);
+  assert(start >= 0 && end > start, 'the production Combine commit tail must be available');
+  let releaseHistory;
+  let enteredHistory;
+  const historyStarted = new Promise(resolve => { enteredHistory = resolve; });
+  const historyGate = new Promise(resolve => { releaseHistory = resolve; });
+  let releaseDeletion;
+  const deletionGate = new Promise(resolve => { releaseDeletion = resolve; });
+  const calls = { clear: [], appended: [], history: [], completed: [], toasts: [] };
+  const job = { ...scoredJob('Synthetic protected job', 80), source: 'example', reuseCardId: 'protected-card' };
+  const secondJob = { ...scoredJob('Synthetic current job', 70), source: 'example' };
+  const protectedCard = { id: 'protected-card', type: 'jobcard', position: { x: 200, y: 300 }, data: {
+    hubId: 'board', ...job, localApplication: { status: 'running', authorityId: 'application-1' }, additionalNotes: 'initial notes',
+  } };
+  const oldCard = { id: 'old-card', type: 'jobcard', data: { hubId: 'board', ...secondJob } };
+  const board = { id: 'board', type: 'jobboard', position: { x: 0, y: 0 }, data: { hubState: 'done', resultCount: 2 } };
+  let nodes = [board, protectedCard, oldCard, { id: 'old-group', type: 'jobgroup', data: { hubId: 'board' } }];
+  let edges = [{ id: 'old-edge', source: 'old-group', target: protectedCard.id }];
+  const module = {
+    id: 'search', runId: 'run-1', resultDisposition: 'scored', legacyPositiveResult: false,
+    fingerprint: 'source-fingerprint', careerSnapshotId: 'snapshot-1', operationAuthority: { operationId: 'operation-1' },
+  };
+  const liveInputs = { all: [module], completed: [module] };
+  const inputSignature = completed => completed.map(item => `${item.id}:${item.fingerprint}`).join('|');
+  const pendingDeletionIds = new Set();
+  const exactSourceRunsAtCombine = [combineSourceRunEntry(module)];
+  const updateGlobal = (nodeId, update) => {
+    nodes = nodes.map(node => {
+      if (node.id !== nodeId) return node;
+      const patch = typeof update === 'function' ? update(node) : update;
+      return patch ? { ...node, data: { ...node.data, ...patch } } : node;
+    });
+  };
+  const attached = attachProtectedCards(unmatchedProtected ? [secondJob] : [job, secondJob], [protectedCard]);
+  const union = attached.jobs.concat(attached.unmatchedProtected);
+  const env = {
+    id: 'board', canvasFilePath: '/tmp/synthetic-board.json', union, completedAtCombine: [{ ...module }],
+    protectedBoardCards: [protectedCard], sigAtCombine: inputSignature([module]), expectedSourceRuns: null,
+    exactSourceRunsAtCombine, sourceRunsAtCombine: exactSourceRunsAtCombine, dismissedJobKeysAtCombine: [],
+    manualAiRunId: 'board-manual-run', combineToken: Symbol('combine'), combineStartedAt: 1,
+    bucketTree: { roles: [{ name: 'Synthetic role', jobIndices: [0, 1] }] }, mergeStats: {}, perModule: [], locationStats: {},
+    getNode: nodeId => nodes.find(node => node.id === nodeId), getNodes: () => nodes, getEdges: () => edges,
+    setNodes: update => { nodes = typeof update === 'function' ? update(nodes) : update; }, updateGlobal,
+    cancelled: () => false, liveCombineInputs: () => liveInputs, boardInputSignature: inputSignature,
+    isJobWorkflowDeletionPending: nodeId => pendingDeletionIds.has(nodeId),
+    selectedRunsMatchExpected: () => true,
+    combineInputsMatchExpected: (modules, expected) => modules.length === expected.length
+      && expected.every(entry => jobSearchOutcomeReceiptMatches(modules.find(item => item.id === entry.sourceId), entry)),
+    combineCommitMismatchReason, describeReceiptMismatch, boardHistoryAuthorityAvailable, isProtectedJobCard,
+    normalizeJobBoardRecoveryTimestamp, buildJobTreeNodes, replaceBoardDisplayChildren,
+    keepCompletedSnapshotDuringActiveSearch: () => true, hideBoardChildren() {},
+    autoResumedManualAiRunRef: { current: 'board-manual-run' }, committedCombineRef: { current: null },
+    committedCombineManualAiRunIdsRef: { current: new Set() }, rememberBoundedRunId: (set, runId) => set.add(runId),
+    setFinalizingCommittedCombine() {}, recordCombineStage() {}, fitView() {},
+    completeManualAiRun: async (runId, options) => { calls.completed.push({ runId, options }); },
+    addToast: toast => calls.toasts.push(toast), EventLogger: { log() {}, error() {} },
+    document: { dispatchEvent() {} }, CustomEvent: class {}, requestAnimationFrame: callback => callback(),
+    addElementsGlobally: (_id, addedNodes, addedEdges) => {
+      calls.appended.push(addedNodes.map(node => node.id)); nodes = nodes.concat(addedNodes); edges = edges.concat(addedEdges);
+    },
+    clearBoardChildren: options => deleteChildrenByHubId({
+      getNodes: () => nodes, getEdges: () => edges, hubId: 'board', childTypes: ['jobcard', 'jobgroup'], displayReplacement: true,
+      ...options,
+      deleteElements: async request => {
+        calls.clear.push(request);
+        // React Flow captures matching ids before its onBeforeDelete await,
+        // then applies remove changes by id after that callback resolves.
+        const removedNodeIds = new Set(request.nodes.map(node => node.id));
+        const removedEdgeIds = new Set(request.edges.map(edge => edge.id));
+        await deletionGate;
+        nodes = nodes.filter(node => !removedNodeIds.has(node.id));
+        edges = edges.filter(edge => !removedEdgeIds.has(edge.id));
+        return { deletedNodes: [...removedNodeIds].map(id => ({ id })), deletedEdges: [] };
+      },
+    }),
+    window: { electronAPI: {
+      prepareBoardJobsHistory: async () => { enteredHistory(); return historyGate; },
+      appendJobsHistory: async args => { calls.history.push(args); return { success: true }; },
+    } },
+  };
+  const execution = runInNewContext(`(async () => { ${source.slice(start, end)} })()`, env);
+  await historyStarted;
+  return {
+    env, execution, calls, liveInputs, pendingDeletionIds, updateGlobal, getNodes: () => nodes, getEdges: () => edges,
+    releaseHistory: () => releaseHistory({ success: true, historyToken: 'synthetic-history-token' }),
+    releaseDeletion,
+  };
+}
+
 export default [
+  {
+    name: 'Board final display fence rechecks source identity, connections, locks, deletion and cancellation after history IPC',
+    async run() {
+      const cases = [
+        ['changed score fingerprint', fixture => { fixture.liveInputs.completed[0].fingerprint = 'changed'; }, 'superseded'],
+        ['changed source run', fixture => { fixture.liveInputs.completed[0].runId = 'run-2'; }, 'superseded'],
+        ['disconnected source', fixture => { fixture.liveInputs.completed = []; fixture.liveInputs.all = []; }, 'superseded'],
+        ['locked Board', fixture => fixture.updateGlobal('board', { locked: true }), 'not-ready'],
+        ['deletion pending', fixture => fixture.pendingDeletionIds.add('search'), 'cancelled'],
+        ['cancelled operation', fixture => { fixture.env.cancelled = () => true; }, 'cancelled'],
+        ['newly queued application', fixture => fixture.updateGlobal('old-card', { localApplication: { status: 'queued' } }), 'superseded'],
+        ['dismissed protected card', fixture => fixture.env.setNodes(nodes => nodes.filter(node => node.id !== 'protected-card')), 'superseded'],
+      ];
+      for (const [label, mutate, expected] of cases) {
+        const fixture = await startCombineCommitFixture();
+        assert.equal(fixture.calls.clear.length, 0, 'history preflight must finish before any visible mutation');
+        mutate(fixture);
+        fixture.releaseHistory();
+        const outcome = await fixture.execution;
+        assert.equal(outcome.status, expected, label);
+        assert.equal(fixture.calls.clear.length, 0, `${label} must leave the previous cascade intact`);
+        assert.equal(fixture.calls.appended.length, 0, `${label} cannot append obsolete cards`);
+        assert.equal(fixture.calls.history.length, 0, `${label} cannot record undisplayed results as seen`);
+        fixture.releaseDeletion();
+      }
+    },
+  },
+  {
+    name: 'Board delayed display deletion retains matched and unmatched application ids with their latest state',
+    async run() {
+      for (const unmatchedProtected of [false, true]) {
+        const fixture = await startCombineCommitFixture({ unmatchedProtected });
+        const latestApplication = { status: 'saved', authorityId: 'application-1', folderPath: '/tmp/synthetic-bundle' };
+        fixture.updateGlobal('protected-card', { localApplication: latestApplication, additionalNotes: 'new notes saved during preflight' });
+        fixture.releaseHistory();
+        assert.equal((await fixture.execution).status, 'completed');
+        assert.equal(fixture.calls.clear.length, 1);
+        const deletion = fixture.calls.clear[0];
+        assert(!deletion.nodes.some(node => node.id === 'protected-card'), 'the retained card must never enter the deletion lifecycle');
+        assert(deletion.nodes.some(node => node.id === 'old-card') && deletion.nodes.some(node => node.id === 'old-group'),
+          'old cards and groups still use the normal deletion lifecycle');
+        assert(deletion.edges.some(edge => edge.id === 'old-edge'), 'old hierarchy edges attached to retained cards must still retire');
+        assert(!fixture.calls.appended.flat().includes('protected-card'), 'the retained id cannot be appended a second time');
+        assert.strictEqual(fixture.getNodes().find(node => node.id === 'protected-card').data.localApplication, latestApplication,
+          'a bundle saved during preflight must stay linked before old deletion settles');
+        const queuedApplication = { ...latestApplication, status: 'saved', updatedAt: 2 };
+        fixture.updateGlobal('protected-card', { localApplication: queuedApplication });
+        fixture.releaseDeletion();
+        await new Promise(resolve => setImmediate(resolve));
+        const retained = fixture.getNodes().filter(node => node.id === 'protected-card');
+        assert.equal(retained.length, 1, 'late React Flow removal must leave exactly one retained card');
+        assert.strictEqual(retained[0].data.localApplication, queuedApplication, 'a bundle saved during preflight must stay linked');
+        assert.equal(retained[0].data.additionalNotes, 'new notes saved during preflight');
+        assert(!fixture.getNodes().some(node => node.id === 'old-card' || node.id === 'old-group'));
+        assert(!fixture.getEdges().some(edge => edge.id === 'old-edge'));
+        assert(fixture.getEdges().some(edge => edge.target === 'protected-card'), 'the new hierarchy must reference the retained card');
+        assert.equal(fixture.calls.history.length, 1, 'only the successfully displayed replacement records seen history');
+      }
+    },
+  },
   {
     name: 'history source deletion: only deleting a Job Search finalizes its provisional display receipts',
     async run() {

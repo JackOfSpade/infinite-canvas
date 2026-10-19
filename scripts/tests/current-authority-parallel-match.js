@@ -1,4 +1,5 @@
 import { assert, __setAuthorityLedgerStoreFaultHookForTests, fs, getLocalApplicationHandoff, localApplicationStatus, openAuthorityLedgerStore, path, submitLocalApplicationHandoff } from '../test-dependencies.js';
+import { requirementsAuditCapTerminal } from '../../electron/ipc/applicationRequirementsAuditPolicy.js';
 import { createApplicationSource } from '../../electron/ipc/handoffBridge/sources/application.js';
 import { queueLocalApplicationJob, __setLocalAiJobMutationLockObserverForTests, __setQueuedCurrentAuthorityProtocolForTests, PASTE_REQUIREMENTS_SCHEMA_RULE_IDS, pasteCorrectionPrompt, pasteRejectionCheckIds } from '../../electron/ipc/localAiApplication.js';
 import { _resetPasteHandoffDiagnostics, getPasteHandoffDiagnosticsSnapshot } from '../../electron/ipc/pasteHandoffDiagnostics.js';
@@ -72,8 +73,9 @@ async function completeRequirementsDiscovery({ fixture, queued, epoch = 0 }) {
     assert(requirementUnitIndex >= 0, `synthetic requirement ${index + 1} appears in the current immutable source window`);
     const item = { id: `${idPrefix}e-${index + 1}`, sourceId: 'job-listing', quote: fixture.requirements[index], requirement: `Synthetic capability ${String(index + 1).padStart(2, '0')}`, priority: 'high' };
     const requirement = { id: `${idPrefix}r-${index + 1}`, text: item.requirement, priority: 'high', evidenceIds: [item.id] };
-    const pageEvidence = [item];
-    const pageRequirements = [requirement];
+    const bound = source.bindingRows?.find(row => row.unitId === source.units[requirementUnitIndex].id);
+    const pageEvidence = bound?.disposition === 'not-a-requirement' ? [] : [item];
+    const pageRequirements = bound?.disposition === 'not-a-requirement' ? [] : [requirement];
     if (epoch > 0) {
       for (const binding of source.bindingRows || []) {
         if (binding.disposition !== 'requirement' || source.units.find(unit => unit.id === binding.unitId)?.text === item.quote) continue;
@@ -786,7 +788,7 @@ export default [
     }
   },
 }, {
-  name: 'current authority requirements adjudication: a repeated singleton audit dispute obeys the binding and advances',
+  name: 'current authority requirements adjudication: repeated audit disputes are repairable and signed bindings advance',
   run: async () => {
     const fixture = await makeCurrentAuthorityParallelMatchFixture();
     try {
@@ -813,14 +815,17 @@ export default [
       repeated.disposition = repeated.disposition === 'requirement' ? 'not-a-requirement' : 'requirement';
       let continued = await submitLocalApplicationHandoff({ jobId: queued.id, canvasFilePath: fixture.canvasFilePath,
         handoffCode: epochOne.handoff.handoffCode, response: epochOne.reply(epochOne.handoff, secondAudit) });
-      assert(continued.accepted && ['requirements-audit', 'write'].includes(continued.handoff?.stage) && !continued.terminal,
-        `a repeated single-unit disagreement is resolved by its prior signed binding (${JSON.stringify({ stage: continued.handoff?.stage, terminal: continued.terminal, errors: continued.validationErrors })})`);
-      const store = await openAuthorityLedgerStore(path.join(fixture.root, '.local-ai', 'jobs', queued.id, 'context'), { namespace: 'application-authority' });
-      const effectivePage = await store.getReceiptPage('requirements-audit-e1', 0);
-      assert(effectivePage.records[0].receipt.bindingOverride?.unitId === disputedId
-        && effectivePage.records[0].receipt.bindingOverride?.disposition === firstAudit.rows[0].disposition
-        && effectivePage.records[0].receipt.bindingOverride?.disagreementDigest,
-      'the effective audit receipt retains a signed override reference');
+      assert(!continued.accepted && continued.validationErrors.some(error => /binding disposition/.test(error)),
+        'a contradictory audit is repairable rather than an application terminal');
+      const malformed = await submitLocalApplicationHandoff({ jobId: queued.id, canvasFilePath: fixture.canvasFilePath,
+        handoffCode: epochOne.handoff.handoffCode, response: epochOne.reply(epochOne.handoff, { ...secondAudit, rows: [null] }) });
+      assert(!malformed.accepted && malformed.validationErrors.length > 0, 'malformed audit rows return repairable schema errors');
+      assert(contextOf(epochOne.handoff).bindingRows.some(row => row.unitId === disputedId),
+        'the audit prompt includes the signed independent decision');
+      repeated.disposition = firstAudit.rows[0].disposition;
+      continued = await submitLocalApplicationHandoff({ jobId: queued.id, canvasFilePath: fixture.canvasFilePath,
+        handoffCode: epochOne.handoff.handoffCode, response: epochOne.reply(epochOne.handoff, secondAudit) });
+      assert(continued.accepted && !continued.terminal, 'correcting the binding advances without a fresh generation');
       while (continued.handoff?.stage === 'requirements-audit') {
         const context = contextOf(continued.handoff);
         continued = await submitLocalApplicationHandoff({ jobId: queued.id, canvasFilePath: fixture.canvasFilePath,
@@ -833,6 +838,75 @@ export default [
     } finally {
       await fs.promises.rm(fixture.root, { recursive: true, force: true });
     }
+  },
+}, {
+  name: 'requirements audits converge past two epochs and recover a legacy capped job without changing source receipts',
+  run: async () => {
+    const fixture = await makeCurrentAuthorityParallelMatchFixture();
+    try {
+      const queued = await queueLocalApplicationJob({ transport: 'paste', canvasFilePath: fixture.canvasFilePath,
+        careerSnapshotId: fixture.snapshotId, job: fixture.job });
+      for (let epoch = 0; epoch < 3; epoch += 1) {
+        const discovery = await completeRequirementsDiscovery({ fixture, queued, epoch });
+        const context = contextOf(discovery.handoff);
+        const audit = semanticAuditFor(context, discovery.evidence, discovery.requirements);
+        const boundIds = new Set((context.bindingRows || []).map(row => row.unitId));
+        const novel = audit.rows.filter(row => !boundIds.has(row.unitId) && context.units.find(unit => unit.id === row.unitId)?.text.trim()).slice(0, 2);
+        assert(novel.length === 2, 'fixture has two new disputed source units');
+        for (const row of novel) row.disposition = row.disposition === 'requirement' ? 'not-a-requirement' : 'requirement';
+        if (epoch === 1) {
+          const repeated = audit.rows.filter(row => boundIds.has(row.unitId)).slice(0, 2);
+          const prior = repeated.map(row => row.disposition);
+          for (const row of repeated) row.disposition = row.disposition === 'requirement' ? 'not-a-requirement' : 'requirement';
+          const mixed = await submitLocalApplicationHandoff({ jobId: queued.id, canvasFilePath: fixture.canvasFilePath,
+            handoffCode: discovery.handoff.handoffCode, response: discovery.reply(discovery.handoff, audit) });
+          assert(!mixed.accepted && !mixed.terminal && mixed.validationErrors.filter(error => /binding disposition/.test(error)).length === 2,
+            'mixed novel and repeated multi-unit disputes preserve bindings through repair');
+          repeated.forEach((row, index) => { row.disposition = prior[index]; });
+        }
+        let opened = await submitLocalApplicationHandoff({ jobId: queued.id, canvasFilePath: fixture.canvasFilePath,
+          handoffCode: discovery.handoff.handoffCode, response: discovery.reply(discovery.handoff, audit) });
+        assert(opened.accepted && opened.handoff?.stage === 'requirements-adjudication' && !opened.terminal,
+          `novel multi-unit disagreements are adjudicated at epoch ${epoch}`);
+        if (epoch === 2) {
+          // Recreate the old host-authored terminal around the real signed
+          // disagreement. Recovery must preserve that store, not regenerate.
+          const file = path.join(queued.folder, 'manifest.json');
+          const manifest = JSON.parse(await fs.promises.readFile(file, 'utf8'));
+          const receipt = JSON.stringify(manifest.paste.authorityStore);
+          manifest.status = 'failed';
+          manifest.paste.stage = 'requirements-audit-disagreement';
+          manifest.paste.terminal = requirementsAuditCapTerminal(epoch, novel.map(row => row.unitId));
+          manifest.paste.handoffCode = null;
+          delete manifest.paste.authorityAdjudication;
+          await fs.promises.writeFile(file, JSON.stringify(manifest));
+          opened = await getLocalApplicationHandoff({ jobId: queued.id, canvasFilePath: fixture.canvasFilePath });
+          assert(opened.handoff?.stage === 'requirements-adjudication' && opened.localJob.status === 'queued',
+            'legacy capped application reopens its exact pending case');
+          const recovered = JSON.parse(await fs.promises.readFile(file, 'utf8'));
+          assert(JSON.stringify(recovered.paste.authorityStore) === receipt && !recovered.paste.terminal,
+            'recovery preserves the immutable source store and removes only the obsolete stop');
+        }
+        const adjudication = contextOf(opened.handoff);
+        const reset = await submitLocalApplicationHandoff({ jobId: queued.id, canvasFilePath: fixture.canvasFilePath,
+          handoffCode: opened.handoff.handoffCode, response: discovery.reply(opened.handoff, {
+            storeDigest: adjudication.storeDigest, caseDigest: adjudication.caseDigest,
+            rows: adjudication.cases.map(unit => ({ unitId: unit.unitId,
+              disposition: audit.rows.find(row => row.unitId === unit.unitId).disposition })),
+          }) });
+        assert(reset.accepted && reset.handoff?.stage === 'requirements', 'a new signed decision advances discovery');
+      }
+      const final = await completeRequirementsDiscovery({ fixture, queued, epoch: 3 });
+      let handoff = final.handoff;
+      while (handoff?.stage === 'requirements-audit') {
+        const accepted = await submitLocalApplicationHandoff({ jobId: queued.id, canvasFilePath: fixture.canvasFilePath,
+          handoffCode: handoff.handoffCode, response: final.reply(handoff,
+            semanticAuditFor(contextOf(handoff), final.evidence, final.requirements)) });
+        assert(accepted.accepted, 'all signed decisions survive receipt replay');
+        handoff = accepted.handoff;
+      }
+      assert(handoff?.stage === 'write', 'the recovered job converges to document writing');
+    } finally { await fs.promises.rm(fixture.root, { recursive: true, force: true }); }
   },
 }, {
   name: 'current authority compact schedule: an all-coverage listing fails closed before career matching',

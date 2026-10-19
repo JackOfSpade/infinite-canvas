@@ -1239,6 +1239,56 @@ const tests = [
     },
   },
   {
+    name: 'handoff bridge: a new push run wakes stopped pool workers without retrying the same held work',
+    run: async () => {
+      let available = [JOB_A];
+      let ready = false;
+      const push = {
+        refreshHubs: async () => true,
+        status: () => ({ available, discovered: [{ tasks: [{ task: 'job-location-consolidation-confirmation', pending: available.length }] }] }),
+        get: async () => ready
+          ? { status: 'served', handoffCode: 'NEW-RUN', task: 'job-location-consolidation-confirmation', prompt: 'Synthetic new run.', remaining: { ready: 0, working: 1, needsYou: 0 } }
+          : { status: 'needs_user', remaining: { ready: 0, working: 0, needsYou: 1 } },
+        submit: async () => ({ status: 'accepted' }),
+        closeEpoch: () => undefined,
+      };
+      const engine = createHandoffEngine({ sources: { application: source().api, push },
+        scope: { applications: false, scoring: true, marketplace: false }, holdMs: 0 });
+      try {
+        const pool = await engine.startWorkerPool({ linkId: LINK, requestedWorkers: 1 });
+        const first = engine.copyWorkerStarter({ linkId: LINK, generation: pool.generation, workerOrdinal: 1 });
+        assert((await engine.get({ session: first.sessionCode, linkId: LINK })).status === 'needs_user');
+        assert(engine.snapshot().chat.pool.workers[0]?.state === 'idle', 'the same held work must not cause automatic restart churn');
+        assert(engine.restartWorker({ linkId: LINK, generation: pool.generation, workerOrdinal: 1 }).status === 'not_quiet');
+        available = [JOB_B];
+        ready = true;
+        await engine.refreshPushHubs();
+        const worker = engine.snapshot().chat.pool.workers[0];
+        assert(worker?.state === 'quiet' && worker.quietReason === 'polling_stopped', 'a newly queued run must expose the existing safe automatic restart path');
+        assert(engine.snapshot().chat.pool.plan.materialized === 1, 'pool telemetry must reflect new discovery without requiring a worker call');
+        engine.pause();
+        assert(engine.restartWorker({ linkId: LINK, generation: pool.generation, workerOrdinal: 1 }).status === 'not_quiet', 'manual pause must keep the stopped worker idle');
+        await engine.resume();
+        let replacement;
+        let launches = 0;
+        const ui = registerHandoffBridgeUi({
+          ipc: { handle() {}, removeHandler() {}, on() {}, removeListener() {} },
+          controller: { snapshot: () => ({ ...engine.snapshot(), autoLaunchChats: true, serving: 'live' }),
+            subscribe: () => () => {}, restartWorker: args => (replacement = engine.restartWorker({ linkId: LINK, ...args })) },
+          chatLauncher: { owns: () => false, close: async () => true, launch: async () => { launches++; return { ok: true }; } },
+          getCanvasWindows: () => [],
+        });
+        try {
+          ui.publishStatus({ ...engine.snapshot(), autoLaunchChats: true, serving: 'live' });
+          await settle();
+          assert(replacement?.copied && launches === 1, 'new work must automatically launch one replacement through the real UI scheduler');
+          assert((await engine.get({ session: first.sessionCode, linkId: LINK })).status === 'session_ended', 'the old stopped credential is fenced');
+          assert((await engine.get({ session: replacement.sessionCode, linkId: LINK })).handoffCode === 'NEW-RUN', 'the replacement actually receives the new run');
+        } finally { ui.dispose(); }
+      } finally { await engine.close(); }
+    },
+  },
+  {
     name: 'handoff bridge: a worker that stops after waiting becomes a restartable polling-silence recovery, including an accepted successor wait',
     run: async () => {
       const clock = createFakeClock();
@@ -3733,6 +3783,51 @@ tests.push(
 const settle = async () => { for (let index = 0; index < 8; index += 1) await new Promise(resolve => setImmediate(resolve)); };
 
 tests.push(
+  {
+    name: 'handoff bridge: engine: recovered review stops return to automation while true stops and user holds remain held',
+    run: async () => {
+      for (const persistOk of [true, false]) {
+        const rec = recorders(); const clock = createFakeClock();
+        const JOB_C = '33333333-3333-4333-8333-333333333333';
+        const engine = createHandoffEngine({ source: source({ status: async ({ jobId }) => jobId === JOB_B
+          ? { kind: 'needs_user', reason: 'review_stop' } : { kind: 'awaiting', read: true } }).api,
+          now: clock.now, timers: clock, holdMs: 0, ...rec.port,
+          store: { saveLanes: async rows => { rec.saves.push(rows); return persistOk; } },
+          restoredLanes: [
+            { ord: 1, jobId: JOB_A, canvasFilePath: PATH_A, releasedAt: 1, phase: 'needs_user', reason: 'review_stop', heldFrom: 'host', counters: {} },
+            { ord: 2, jobId: JOB_B, canvasFilePath: PATH_A, releasedAt: 2, phase: 'needs_user', reason: 'review_stop', heldFrom: 'host', counters: {} },
+            { ord: 3, jobId: JOB_C, canvasFilePath: PATH_A, releasedAt: 3, phase: 'held', reason: 'user_hold', heldFrom: 'unread', counters: {} },
+          ],
+        });
+        await settle();
+        const row = id => engine.snapshot().queue.jobs.find(job => job.jobId === id);
+        assert(row(JOB_A).phase === (persistOk ? 'unread' : 'needs_user'), 'only a durably recovered job resumes');
+        assert(row(JOB_B).phase === 'needs_user' && row(JOB_B).reason === 'review_stop', 'a real independent-review stop is preserved');
+        assert(row(JOB_C).phase === 'held' && row(JOB_C).reason === 'user_hold', 'a deliberate user hold is preserved even when the source is answerable');
+        if (persistOk) {
+          const chat = await engine.newChat({ linkId: LINK });
+          const response = await engine.get({ session: chat.sessionCode, linkId: LINK });
+          assert(response.status === 'served' && response.handoffCode === 'HANDOFF-A', `a linked worker can claim the recovered application (${JSON.stringify(response)})`);
+        }
+      }
+    },
+  },
+  {
+    name: 'handoff bridge: engine: a late recovery probe cannot undo a new user hold',
+    run: async () => {
+      const pending = deferred(); const rec = recorders(); const clock = createFakeClock();
+      const engine = createHandoffEngine({ source: source({ status: async () => pending.promise }).api,
+        now: clock.now, timers: clock, holdMs: 0, ...rec.port,
+        restoredLanes: [{ ord: 1, jobId: JOB_A, canvasFilePath: PATH_A, releasedAt: 1,
+          phase: 'needs_user', reason: 'review_stop', heldFrom: 'host', counters: {} }],
+      });
+      await settle();
+      await engine.hold(JOB_A, 'user_hold');
+      pending.resolve({ kind: 'awaiting', read: true });
+      await settle();
+      assert(engine.snapshot().queue.jobs[0].reason === 'user_hold', 'the newer user decision wins over the recovery proof');
+    },
+  },
   {
     name: 'handoff bridge: engine: a lane restored for a bundle that is proven gone is dropped at restore, a transient probe error never drops one, and probing is bounded',
     run: async () => {

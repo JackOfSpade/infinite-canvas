@@ -36,3 +36,19 @@ export function isLiveCombineOwnedMarker(resumeRunId, activeCombineRunId) {
     && resumeRunId === activeCombineRunId
   );
 }
+
+// Preserve the exact replay marker before aborting its backend requests. The
+// host acknowledgement is the stop boundary; accepted registry answers remain
+// available when the same run is explicitly resumed.
+export async function pauseBoardCombine({ runId, getMarker, saveMarker, waitForCommit, fence, pauseBackend, settle }) {
+  const marker = getMarker();
+  if (!runId || marker?.runId !== runId || marker.retirementPending) throw new Error('The Job Board run changed before it could pause.');
+  saveMarker({ ...marker, pausedByUser: true, autoResumeEligible: false, updatedAt: Date.now() });
+  await waitForCommit();
+  if (getMarker()?.runId !== runId || getMarker()?.pausedByUser !== true) throw new Error('The Job Board checkpoint was not saved.');
+  fence();
+  const result = await pauseBackend();
+  if (result?.settled !== true) throw new Error('The Job Board did not confirm that its saved work stopped. Retry Pause & save.');
+  settle();
+  return { success: true };
+}

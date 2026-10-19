@@ -1318,8 +1318,34 @@ try {
       new MouseEvent('contextmenu', { bubbles: true, cancelable: true, button: 2 }),
     );
   });
-  await expectVisible(page, 'Erase by Object');
-  await clickPane(page, 800, 500);
+  await expectVisible(page, 'Erase whole stroke');
+  await page.getByText('Erase whole stroke', { exact: true }).click();
+  const protectedNodeCount = await nodeCount(page);
+  const protectedEdgeCount = await page.locator('.react-flow__edge').count();
+  const groupBox = await page.locator('.react-flow__node-group').first().boundingBox();
+  assert.ok(groupBox, 'eraser regression needs an overlapping module');
+  // Draw across a real module, then erase that stroke in each eraser mode.
+  for (const mode of ['Erase whole stroke', 'Erase part of stroke']) {
+    await clickToolbar(page, 'Pen Tool');
+    const x = groupBox.x + groupBox.width / 2;
+    const y = groupBox.y + groupBox.height / 2;
+    await page.mouse.move(x - 20, y);
+    await page.mouse.down();
+    await page.mouse.move(x + 20, y, { steps: 5 });
+    await page.mouse.up();
+    await page.getByText('Eraser', { exact: true }).evaluate(node => {
+      node.closest('.relative')?.querySelector('button')?.dispatchEvent(
+        new MouseEvent('contextmenu', { bubbles: true, cancelable: true, button: 2 }));
+    });
+    await page.getByText(mode, { exact: true }).click();
+    const before = await drawingPolylines.evaluateAll(nodes => nodes.map(n => n.getAttribute('points')).join('|'));
+    await page.mouse.click(x, y);
+    await page.waitForFunction(previous => [...document.querySelectorAll('svg.pointer-events-none polyline')]
+      .map(n => n.getAttribute('points')).join('|') !== previous, before);
+    assert.equal(await nodeCount(page), protectedNodeCount, `${mode} preserves modules`);
+    assert.equal(await page.locator('.react-flow__edge').count(), protectedEdgeCount, `${mode} preserves connections`);
+  }
+  await clickToolbar(page, 'Select / Marquee');
 
   // This deliberately uses Playwright's real pointer sequence instead of the
   // helper's programmatic .click(). React Flow observes pointer gestures in a

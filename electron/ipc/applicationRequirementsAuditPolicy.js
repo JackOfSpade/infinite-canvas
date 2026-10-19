@@ -1,4 +1,4 @@
-/** Bounded, host-enforced policy for independent requirements adjudication. */
+/** Host-enforced bindings and replay rules for legacy audit-stop receipts. */
 export const MAX_REQUIREMENTS_REEPOCHS = 2;
 
 export function requirementsAdjudicationBindings(receipts, units = null) {
@@ -21,7 +21,7 @@ export function requirementsAdjudicationBindings(receipts, units = null) {
 
 export function requirementsBindingErrors(coverage, bindingRows) {
   const binding = new Map((bindingRows || []).map(row => [row.unitId, row.disposition]));
-  return (coverage || []).flatMap(row => binding.has(row.unitId) && binding.get(row.unitId) !== row.disposition
+  return (coverage || []).flatMap(row => binding.has(row?.unitId) && binding.get(row?.unitId) !== row?.disposition
     ? [`Source unit ${row.unitId} must keep the prior independent adjudicator's binding disposition ${JSON.stringify(binding.get(row.unitId))}.`]
     : []);
 }

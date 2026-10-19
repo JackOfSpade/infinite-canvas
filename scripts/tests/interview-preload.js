@@ -3,12 +3,13 @@ import fs from 'node:fs';
 import path from 'node:path';
 import vm from 'node:vm';
 import { fileURLToPath } from 'node:url';
+import { createDraftWriteBarrier } from '../../electron/utils/draftWriteBarrier.js';
 
 const testPath = fileURLToPath(import.meta.url);
 const preloadPath = fileURLToPath(new URL('../../electron/preload.js', import.meta.url));
 
 /**
- * Evaluate the CommonJS preload with the smallest possible Electron seam.
+ * Evaluate the preload entry with its Electron and bundled draft-helper seams.
  * This intentionally does not import Electron or launch a renderer process:
  * the bridge and every invoked IPC request remain observable in this VM.
  */
@@ -42,9 +43,13 @@ function loadPreloadBridge() {
     },
     console: { error() {} },
     Set,
+    createDraftWriteBarrier,
   };
 
-  vm.runInNewContext(fs.readFileSync(preloadPath, 'utf8'), sandbox, { filename: preloadPath });
+  const source = fs.readFileSync(preloadPath, 'utf8').replace(
+    "import { createDraftWriteBarrier } from './utils/draftWriteBarrier.js';", '',
+  );
+  vm.runInNewContext(source, sandbox, { filename: preloadPath });
 
   assert.equal(exposures.length, 1, 'preload must expose one renderer bridge');
   assert.equal(exposures[0].name, 'electronAPI', 'preload must retain the broad renderer bridge name');

@@ -517,6 +517,7 @@ export function setDismissedApplicationBundles(next) {
 
 const draftFlushers = new Set();
 const pendingDraftWrites = new Set();
+const retryableDraftWrites = new Map();
 
 /**
  * Application draft writes are debounced in the renderer, so at any moment a
@@ -540,25 +541,64 @@ export function registerApplicationDraftFlusher(flush) {
   return () => { draftFlushers.delete(flush); };
 }
 
-export function trackApplicationDraftWrite(write) {
-  if (!write || typeof write.then !== 'function') return write;
-  pendingDraftWrites.add(write);
-  const forget = () => { pendingDraftWrites.delete(write); };
-  void write.then(forget, forget);
-  return write;
+export function trackApplicationDraftWrite(write, key = Symbol('application-draft')) {
+  if (typeof write !== 'function' && (!write || typeof write.then !== 'function')) return write;
+  const record = { retry: typeof write === 'function' ? write : null, status: 'pending', error: null };
+  retryableDraftWrites.set(key, record);
+  const pending = Promise.resolve().then(() => typeof write === 'function' ? write() : write).then(result => {
+    if (result === false || result?.success === false || result?.saved === false) {
+      throw new Error(result?.error || 'The application draft could not be saved.');
+    }
+    return result;
+  });
+  pendingDraftWrites.add(pending);
+  void pending.then(() => {
+    pendingDraftWrites.delete(pending);
+    if (retryableDraftWrites.get(key) === record) retryableDraftWrites.delete(key);
+  }, error => {
+    pendingDraftWrites.delete(pending);
+    record.status = 'failed';
+    record.error = error;
+  });
+  return pending;
+}
+
+// An accepted response or confirmed discard has stronger durable authority
+// than its recovery-only draft. Retire only that exact handoff's retry record.
+export function forgetApplicationDraftWrite(key) {
+  retryableDraftWrites.delete(key);
 }
 
 export async function flushApplicationDraftWrites() {
+  const errors = [];
+  const flusherResults = [];
   for (const flush of [...draftFlushers]) {
     // A flusher issues writes synchronously; one that throws must not strand
     // the drafts belonging to every other pending item.
-    try { flush(); } catch { /* keep draining the rest */ }
+    try {
+      flusherResults.push(Promise.resolve(flush()).then(result => {
+        if (result === false || result?.success === false || result?.saved === false) {
+          throw new Error(result?.error || 'The application draft could not be saved.');
+        }
+      }).catch(error => { errors.push(error); }));
+    } catch (error) { errors.push(error); }
   }
+  // Retain the latest failed payload for each handoff until a verified save.
+  // A later quit retries it once; a newly flushed debounce supersedes an old
+  // failed payload with the same key before this retry snapshot is taken.
+  for (const [key, record] of retryableDraftWrites) {
+    if (record.status === 'failed' && record.retry) trackApplicationDraftWrite(record.retry, key);
+  }
+  await Promise.all(flusherResults);
   // A flushed timer can itself register a new write, so drain until settled
   // rather than awaiting a single snapshot — the same loop preload runs.
   while (pendingDraftWrites.size > 0) {
     await Promise.allSettled([...pendingDraftWrites]);
   }
+  for (const record of retryableDraftWrites.values()) {
+    if (record.status === 'failed') errors.push(record.error || new Error('The application draft could not be saved.'));
+  }
+  if (errors.length > 0) throw new globalThis.AggregateError(errors, 'Could not save every application draft. Retry before quitting.');
 }
 
 // ---------------------------------------------------------------------------

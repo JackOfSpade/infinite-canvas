@@ -223,7 +223,13 @@ export async function loadJobsHistory(canvasFilePath, stats = null) {
   if (!filePath) return [];
   const pendingWrite = _historyTails.get(filePath);
   if (pendingWrite) await pendingWrite;
-  return loadJobsHistoryUnlocked(canvasFilePath, stats);
+  // A canvas can stay closed longer than the retention window, and a fresh
+  // run may have no provisional display receipts to append/prune first. Apply
+  // expiry at suppression read time too, or those old rows hide reposts until
+  // some unrelated successful history write finally removes them. Keep the
+  // raw reader for append so its physical pruning count remains accurate.
+  const rows = await loadJobsHistoryUnlocked(canvasFilePath, stats);
+  return rows.filter(row => isWithinAge(row.seen_date));
 }
 
 // Display is provisional. Keep its minimal identity rows separate from the

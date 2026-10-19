@@ -16,7 +16,7 @@ import { openExternalFailureMessage, openExternalUrl } from '../utils/openExtern
 import { normalizeJobListingExternalUrl, summarizeJobListingUrl } from '../utils/jobListingUrl';
 import { brokenLocalAiJobDriveState, LOCAL_AI_CARD_POLL_IDLE_STATUSES, LOCAL_AI_RESULT_SETTLE_MS, LOCAL_AI_STATUS_ERROR_STREAK_LIMIT, registerMountedJobCard, revealSavedLocalApplicationOutputOnce, unregisterMountedJobCard } from '../utils/localAiFallback';
 import { hubCardFilter, isUnscoredPlaceholderCard } from '../utils/jobCardFilters';
-import { canRegenerateLocalApplication, canSaveImportedLocalApplication, hasLinkedLocalApplicationOutput, queuedLocalApplicationSettlement, replacedLocalApplicationForCleanup } from '../utils/localAiApplicationLifecycle';
+import { canRegenerateLocalApplication, canSaveImportedLocalApplication, hasLinkedLocalApplicationOutput, queuedLocalApplicationSettlement, queuedLocalApplicationStartDecision, replacedLocalApplicationForCleanup } from '../utils/localAiApplicationLifecycle';
 import {
   APPLICATION_HANDOFF_LIMIT,
   applicationAwaitsPaste,
@@ -596,11 +596,14 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
       setLocalApplication((current) => current?.id === jobId ? { ...current, status: 'completed', message: 'Save this canvas, then reopen this card to import the completed result.' } : current);
       return;
     }
+    // Save As can change the active canvas while this handoff is running.
+    // Its status and terminal receipt stay bound to the canvas that queued it.
+    const jobCanvasFilePath = queuedCanvasFilePath || canvasFilePath;
     setLocalApplication((current) => current?.id === jobId ? { ...current, status: 'importing', message: 'Importing Local AI result…' } : current);
     try {
       const imported = await window.electronAPI.importLocalApplication({
         jobId,
-        canvasFilePath: queuedCanvasFilePath || canvasFilePath,
+        canvasFilePath: jobCanvasFilePath,
         expectedResultSha256,
       });
       if (!imported?.success || !imported.localApplication) {
@@ -715,12 +718,12 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
       // card dismissed while it was resolving must not forfeit the folder
       // reveal a still-open Finder window elsewhere might be waiting on.
       revealSavedLocalApplicationOutputOnce({
-        jobId, canvasFilePath, revealedRef: localAiOutputRevealedRef.current,
+        jobId, canvasFilePath: jobCanvasFilePath, revealedRef: localAiOutputRevealedRef.current,
         onError: (error) => EventLogger.log(`[LocalAI] could not open saved bundle folder job=${jobId}: ${error}`),
       });
       let savedReceipt = null;
       try {
-        const status = await window.electronAPI?.getLocalApplicationStatus?.({ jobId, canvasFilePath });
+        const status = await window.electronAPI?.getLocalApplicationStatus?.({ jobId, canvasFilePath: jobCanvasFilePath });
         if (status?.success && status.localJob?.status === 'saved') savedReceipt = status.localJob.receipt || null;
       } catch { /* The save succeeded; the next status probe can recover its receipt. */ }
       if (isMountedRef.current) {
@@ -749,6 +752,14 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
       }
     } catch (error) {
       if (!isMountedRef.current) return;
+      if (error?.code === 'APP_QUIT_PAUSED') {
+        // Quit may arrive between the admitted import and its export invoke.
+        // The durable result remains ready; do not poison its retry hash.
+        setLocalApplication((current) => current?.id === jobId ? {
+          ...current, status: 'completed', message: 'Application result retained for continuation.',
+        } : current);
+        return;
+      }
       // Read before every branch below, because each of them — including the
       // generic tail — parks this job at 'completed': a status the card
       // renders as "Local AI result ready", that keeps Generate disabled, and
@@ -795,7 +806,7 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
       if (expectedResultSha256) localSaveFailedHashesRef.current.set(jobId, expectedResultSha256);
       let adoptedStatus = null;
       try {
-        const statusResult = await window.electronAPI?.getLocalApplicationStatus?.({ jobId, canvasFilePath });
+        const statusResult = await window.electronAPI?.getLocalApplicationStatus?.({ jobId, canvasFilePath: jobCanvasFilePath });
         if (statusResult?.success && statusResult.localJob?.status) adoptedStatus = statusResult.localJob;
       } catch {
         // Best-effort probe only — the placeholder below still applies.
@@ -1104,7 +1115,8 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
         // while waiting is admitted so onStart can reject it and free the lane
         // instead of leaving a ghost at the head of the queue.
         canStart: () => {
-          if (!getLiveNode(idRef.current)) return true;
+          const card = getLiveNode(idRef.current);
+          if (!queuedLocalApplicationStartDecision(card, getLiveNode(card?.data?.hubId)).allowed) return true;
           const handoffCapNodes = (nav?.enumerateAllNodes?.() || []).filter((node) => node.id !== idRef.current);
           return countActiveApplicationHandoffs(handoffCapNodes, getDismissedApplicationBundles()) < APPLICATION_HANDOFF_LIMIT;
         },
@@ -1116,10 +1128,14 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
         },
         onStart: () => {
           // Hidden card views can unmount while their node remains valid. Only
-          // cancellation/deletion of the actual canvas node skips the work.
-          if (!getLiveNode(idRef.current)) {
+          // live ownership/lock changes skip the work. Recheck after admission:
+          // a card may change between canStart and this queue microtask.
+          const card = getLiveNode(idRef.current);
+          const decision = queuedLocalApplicationStartDecision(card, getLiveNode(card?.data?.hubId));
+          if (!decision.allowed) {
             cancelledBeforeStart = true;
-            throw new Error('Job card was removed before application generation started');
+            EventLogger.log(`[LocalAI] skipped queued generation node=${idRef.current}: ${decision.reason}`);
+            throw new Error(`Application generation skipped: ${decision.reason}`);
           }
           if (isMountedRef.current) setApplicationRun({ state: 'generating', position: null });
         },
@@ -1148,10 +1164,16 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
       // accept it only if the live card still owns the same terminal id/status.
       // That permits regeneration without allowing a late response to clobber
       // a genuinely newer in-flight handoff.
-      const expectedPriorLocalApplication = getLiveNode(idRef.current)?.data?.localApplication || null;
-      // A saved bundle can arrive while this click waits for its queue lease.
-      // Never replace it, even if this callback was created before the save.
-      if (hasLinkedLocalApplicationOutput(expectedPriorLocalApplication)) return;
+      const cardBeforeQueue = getLiveNode(idRef.current);
+      const startDecision = queuedLocalApplicationStartDecision(cardBeforeQueue, getLiveNode(cardBeforeQueue?.data?.hubId));
+      // onStart and this async continuation run in separate microtasks. Keep
+      // the same live ownership/lock fence immediately before the IPC too.
+      if (!startDecision.allowed) {
+        cancelledBeforeStart = true;
+        EventLogger.log(`[LocalAI] skipped queued generation node=${idRef.current}: ${startDecision.reason}`);
+        return;
+      }
+      const expectedPriorLocalApplication = cardBeforeQueue.data?.localApplication || null;
       const queued = await window.electronAPI.queueLocalApplication({
         nodeId: idRef.current,
         canvasFilePath,
@@ -1204,7 +1226,9 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
         matchScore: data.matchScore,
       });
       if (!queued?.success || !queued.localJob) {
-        throw new Error(queued?.error || 'Could not prepare the local application job.');
+        const error = new Error(queued?.error || 'Could not prepare the local application job.');
+        if (queued?.errorCode) error.code = queued.errorCode;
+        throw error;
       }
       // Hiding/collapsing unmounts this component but leaves its canvas node
       // intact. Persist the durable pointer directly into the live node before
@@ -1281,6 +1305,7 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
         });
       }
     } catch (e) {
+      if (e?.code === 'APP_QUIT_PAUSED' || e?.message === 'App paused for quit') return;
       // Explicit dismissal/cancellation is normal control flow, not an error
       // toast.
       if (cancelledBeforeStart) return;
@@ -1369,14 +1394,14 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
                 >
                   Unscored · review
                 </span>
-              ) : (
+              ) : cappedFrom !== null ? (
                 <span
                   className="px-1.5 py-0.5 rounded-full text-[9px] font-medium bg-amber-500/15 text-amber-300/90 border border-amber-500/30"
                   title={`The AI assigned ${cappedFrom}/100. The evidence-gap rule lowered it to ${score}/100 because grounded requirements were not documented, contradicted, or unclear in the supplied career data. Open "Why this score?" to see which rule applied and which requirements it counted.`}
                 >
                   Capped from {cappedFrom}
                 </span>
-              )}
+              ) : null}
             </div>
           )}
           {data.salary && (

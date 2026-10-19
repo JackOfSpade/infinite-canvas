@@ -1,6 +1,8 @@
 import { readFileSync } from 'node:fs';
+import { runInNewContext } from 'node:vm';
 import { assert } from './testHelpers.js';
 import { createModuleRunQueue } from '../../src/utils/moduleRunQueue.js';
+import { hasLinkedLocalApplicationOutput, queuedLocalApplicationStartDecision } from '../../src/utils/localAiApplicationLifecycle.js';
 import {
   APPLICATION_HANDOFF_LIMIT,
   countActiveApplicationHandoffs,
@@ -67,6 +69,125 @@ const buildTenOccupyingCards = () => Array.from(
 );
 
 export default [
+  {
+    name: 'application slot queue: live changes after onStart cannot cross the final Generate IPC boundary',
+    async run() {
+      const source = readFileSync(new URL('../../src/nodes/JobCardNode.jsx', import.meta.url), 'utf8');
+      const start = source.indexOf('const generateApplication = useCallback(');
+      const end = source.indexOf('\n\n  return (', start);
+      assert(start >= 0 && end > start, 'the actual Generate callback is available');
+      for (const change of ['unchanged', 'deleted', 'card-locked', 'board-locked', 'saved', 'pending']) {
+        const queue = createModuleRunQueue();
+        let card = jobCard('card', null, { hubId: 'board', careerSnapshotId: 'approved-snapshot' });
+        const board = { id: 'board', type: 'jobboard', data: {} };
+        const data = card.data;
+        let ipcCalls = 0;
+        let mutationAfterStart = false;
+        const callback = runInNewContext(`${source.slice(start, end)}\ngenerateApplication;`, {
+          useCallback: fn => fn,
+          window: { electronAPI: { queueLocalApplication: async () => { ipcCalls += 1; return { success: false }; } } },
+          applicationSubmissionRef: { current: false },
+          hasApplicationRun: false, localJobPending: false, effectiveLock: false,
+          id: 'card', idRef: { current: 'card' }, data, additionalNotes: '',
+          nav: { getCurrentFile: () => '/project/canvas.json', enumerateAllNodes: () => [card, board].filter(Boolean) },
+          getLiveNode: id => id === 'card' ? card : id === 'board' ? board : null,
+          setApplicationRun() {}, updateGlobal() {}, addToast() {},
+          isMountedRef: { current: true },
+          EventLogger: { log() {}, error() {} },
+          APPLICATION_HANDOFF_LIMIT, countActiveApplicationHandoffs,
+          getDismissedApplicationBundles: () => new Set(),
+          hasLinkedLocalApplicationOutput, queuedLocalApplicationStartDecision,
+          normalizeJobListingExternalUrl: job => job.url || 'https://example.test/job',
+          acquireModuleRun: options => queue.acquireModuleRun({
+            ...options,
+            onStart: info => {
+              options.onStart(info);
+              // Runs after the queue's onStart fence but before its acquire
+              // promise reaches Generate's awaiting continuation.
+              queueMicrotask(() => {
+                mutationAfterStart = true;
+                if (change === 'deleted') card = null;
+                if (change === 'card-locked') card.data.locked = true;
+                if (change === 'board-locked') board.data.locked = true;
+                if (change === 'saved') card.data.localApplication = pasteJob('saved-job', 'saved');
+                if (change === 'pending') card.data.localApplication = pasteJob('new-job');
+              });
+            },
+          }),
+        });
+        await callback();
+        assert(mutationAfterStart && ipcCalls === (change === 'unchanged' ? 1 : 0),
+          `${change}: only an unchanged live card may create a private handoff`);
+        assert(queue.getSnapshot().active === null, `${change}: the skipped Generate releases its lease`);
+      }
+    },
+  },
+  {
+    name: 'application slot queue: live locks, saved bundles, and new handoffs retire a waiting Generate without creating work',
+    async run() {
+      for (const change of ['deleted', 'card-locked', 'board-locked', 'saved', 'pending']) {
+        const timers = createFakeTimers();
+        const queue = createModuleRunQueue({ timers, admissionRecheckMs: 1000 });
+        let card = jobCard('waiting-card', null, { hubId: 'board' });
+        const board = { id: 'board', type: 'jobboard', data: {} };
+        const occupying = buildTenOccupyingCards();
+        let created = 0;
+        let rejectedReason = '';
+        const startDecision = () => queuedLocalApplicationStartDecision(card, board);
+        const pending = queue.acquireModuleRun({
+          lane: 'application', nodeId: 'waiting-card',
+          canStart: () => !startDecision().allowed
+            || countActiveApplicationHandoffs(occupying, new Set()) < APPLICATION_HANDOFF_LIMIT,
+          onStart: () => {
+            const decision = startDecision();
+            if (!decision.allowed) throw new Error(decision.reason);
+          },
+        }).then(lease => { created += 1; lease.release(); }, error => { rejectedReason = error.message; });
+        assert(queue.getSnapshot().queued[0]?.blocked, `${change}: Generate waits for a slot`);
+
+        if (change === 'deleted') card = null;
+        if (change === 'card-locked') card.data.locked = true;
+        if (change === 'board-locked') board.data.locked = true;
+        if (change === 'saved') card.data.localApplication = pasteJob('saved-job', 'saved');
+        if (change === 'pending') card.data.localApplication = pasteJob('new-job');
+        timers.advance(1000);
+        await pending;
+        await flushMicrotasks();
+
+        assert(created === 0 && rejectedReason, `${change}: obsolete Generate never creates a private handoff`);
+        assert(queue.getSnapshot().queued.length === 0 && queue.getSnapshot().active === null,
+          `${change}: obsolete Generate leaves the queue while the dock is still full`);
+        assert(timers.pendingCount() === 0, `${change}: no admission timer remains`);
+      }
+      assert(queuedLocalApplicationStartDecision(jobCard('retry', pasteJob('failed', 'failed'))).allowed,
+        'a failed application with no saved output remains regenerable');
+      assert(!queuedLocalApplicationStartDecision(jobCard('saved-link', {
+        ...pasteJob('saved-link', 'status-error'), savedDir: '/canvas/application',
+      })).allowed, 'a linked saved bundle remains protected during a transient status failure');
+    },
+  },
+  {
+    name: 'application slot queue: locking a card between admission and onStart prevents handoff creation',
+    async run() {
+      const queue = createModuleRunQueue();
+      const card = jobCard('race-card', null);
+      let created = false;
+      let rejection = null;
+      const pending = queue.acquireModuleRun({
+        lane: 'application', nodeId: card.id,
+        canStart: () => true,
+        onStart: () => {
+          const decision = queuedLocalApplicationStartDecision(card);
+          if (!decision.allowed) throw new Error(decision.reason);
+        },
+      }).then(lease => { created = true; lease.release(); }, error => { rejection = error; });
+      card.data.locked = true;
+      await pending;
+      await flushMicrotasks();
+      assert(!created && rejection?.message === 'card-locked', 'the final live check closes the admission microtask race');
+      assert(queue.getSnapshot().active === null, 'a skipped request releases its application lane');
+    },
+  },
   {
     name: 'module run queue snapshots preserve prototype-shaped lane names as own data',
     async run() {
@@ -493,6 +614,8 @@ export default [
       const card = readFileSync(new URL('../../src/nodes/JobCardNode.jsx', import.meta.url), 'utf8');
 
       assert(card.includes('canStart:'), 'JobCardNode passes a canStart predicate to the queue');
+      assert((card.match(/queuedLocalApplicationStartDecision\(card, getLiveNode\(card\?\.data\?\.hubId\)\)/g) || []).length === 2,
+        'admission and onStart both check the live card and owning board');
       assert(
         card.includes('countActiveApplicationHandoffs(handoffCapNodes, getDismissedApplicationBundles())'),
         'canStart reads the real dock capacity and dismissed bundles',

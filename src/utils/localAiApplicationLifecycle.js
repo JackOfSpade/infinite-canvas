@@ -29,6 +29,18 @@ export function hasLinkedLocalApplicationOutput(localApplication) {
     && (localApplication.status === 'saved' || !!localApplication.savedDir || !!localApplication.receipt?.outputDir);
 }
 
+// A Generate click can wait for dock capacity while its live card changes.
+// Re-evaluate the operational fences before creating a private handoff, and
+// admit obsolete queue entries so they can retire without waiting for a slot.
+export function queuedLocalApplicationStartDecision(node, owningBoard = null) {
+  if (node?.type !== 'jobcard') return { allowed: false, reason: 'card-missing' };
+  if (node.data?.locked || owningBoard?.data?.locked) return { allowed: false, reason: 'card-locked' };
+  const current = node.data?.localApplication;
+  if (hasLinkedLocalApplicationOutput(current)) return { allowed: false, reason: 'bundle-saved' };
+  if (current && !canRegenerateLocalApplication(current)) return { allowed: false, reason: 'handoff-pending' };
+  return { allowed: true };
+}
+
 /**
  * Regeneration is the only renderer action that may retire a prior Local AI
  * handoff. It may happen only after a newly queued replacement was accepted by

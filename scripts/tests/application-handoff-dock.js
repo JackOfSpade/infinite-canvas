@@ -1,4 +1,6 @@
 import { readFileSync } from 'node:fs';
+import { runInNewContext } from 'node:vm';
+import { rejects } from 'node:assert/strict';
 import { assert } from './testHelpers.js';
 import {
   APPLICATION_DOCK_BLOCKED_STATUSES,
@@ -59,6 +61,73 @@ const handoffRecord = (overrides = {}) => ({
 });
 
 const dockTests = [
+  {
+    name: 'application dock: an awaited discovery cannot republish a removed, replaced, or completed card handoff',
+    async run() {
+      const source = readFileSync(new URL('../../src/hooks/useApplicationHandoffDock.js', import.meta.url), 'utf8');
+      const start = source.indexOf('export function useApplicationHandoffDock(');
+      assert(start >= 0, 'the production discovery hook is available');
+      for (const change of ['removed', 'replaced', 'saved', 'owner-changed', 'node-changed', 'unchanged']) {
+        let nodes = [jobCard('card', pasteJob('old-job'))];
+        let release;
+        let entered;
+        const waiting = new Promise(resolve => { entered = resolve; });
+        const gate = new Promise(resolve => { release = resolve; });
+        let reads = 0;
+        const publications = [];
+        const refs = [];
+        const effects = [];
+        const hook = runInNewContext(`(${source.slice(start).replace('export function', 'function')})`, {
+          useRef: value => { const ref = { current: value }; refs.push(ref); return ref; },
+          useEffect: effect => effects.push(effect),
+          candidateIdSignature: candidates => candidates.map(node => node.data.localApplication.id).sort().join(','),
+          LOCAL_AI_POLL_INTERVAL_MS: 2500, APPLICATION_DISCOVERY_INTERVAL_MS: 20_000, HANDOFF_CONCURRENCY: 2,
+          selectApplicationHandoffCandidates,
+          getApplicationHandoffs: () => publications.at(-1) || [],
+          mapAutomaticHandoffs: (items, _limit, fn) => Promise.all(items.map(fn)),
+          jobIntegrityFailureMessage: () => '',
+          applicationDockRequest, applicationDockItemState, workingApplicationDockRequest, brokenApplicationDockRequest,
+          retainUnreadableApplicationItems,
+          publishApplicationHandoffs: items => publications.push(items),
+          subscribeApplicationHandoffRefresh: () => () => {},
+          EventLogger: { log() {} },
+          document: { addEventListener() {}, removeEventListener() {} },
+          window: { setInterval: () => 1, clearInterval() {}, electronAPI: {
+            getLocalApplicationHandoff: async ({ jobId }) => {
+              reads++;
+              if (reads === 1) { entered(); await gate; }
+              return { success: true, handoff: handoffRecord({ jobId }) };
+            },
+          } },
+        });
+        hook({ navigation: { enumerateAllNodes: () => nodes }, getCurrentFile: () => '/canvas/board.json' });
+        const cleanups = effects.map(effect => effect());
+        try {
+          await waiting;
+          if (change === 'removed') nodes = [];
+          if (change === 'replaced') nodes = [jobCard('card', pasteJob('new-job'))];
+          if (change === 'saved') nodes = [jobCard('card', pasteJob('old-job', 'saved'))];
+          if (change === 'owner-changed') nodes = [jobCard('card', { ...pasteJob('old-job'), canvasFilePath: '/canvas/other.json' })];
+          if (change === 'node-changed') nodes = [jobCard('new-card', pasteJob('old-job'))];
+          release();
+          for (let attempt = 0; refs[1].current && attempt < 30; attempt++) await new Promise(resolve => setImmediate(resolve));
+          assert(!refs[1].current, 'the production discovery and any queued refresh must finish');
+          const seen = publications.flat().map(item => item.jobId);
+          if (change === 'owner-changed') {
+            assert(publications.flat().length > 0 && publications.flat().every(item => item.canvasFilePath === '/canvas/other.json'),
+              'the same job id on another canvas cannot inherit the old owner response');
+          } else if (change === 'node-changed') {
+            assert(publications.flat().length > 0 && publications.flat().every(item => item.nodeId === 'new-card'),
+              'a replacement card cannot inherit a discard action targeting the old node');
+          } else {
+            assert(change === 'unchanged' ? seen.includes('old-job') : !seen.includes('old-job'),
+              `${change}: a stale read must never republish a handoff whose live card no longer needs it`);
+          }
+          if (change === 'replaced') assert(seen.includes('new-job'), 'a replacement is fetched immediately after the stale pass');
+        } finally { release(); cleanups.forEach(cleanup => cleanup?.()); }
+      }
+    },
+  },
   {
     name: 'application dock: only genuinely finished paste bundles give up their slot',
     run: () => {
@@ -399,13 +468,14 @@ const dockTests = [
       const unregisterBroken = registerApplicationDraftFlusher(() => { throw new Error('broken flusher'); });
 
       let settled = false;
-      const flushing = flushApplicationDraftWrites().then(() => { settled = true; });
+      let failure = null;
+      const flushing = flushApplicationDraftWrites().then(() => { settled = true; }, error => { failure = error; settled = true; });
       assert(flushed, 'the pending debounce must be fired, not merely awaited');
       await Promise.resolve();
       assert(!settled, 'the flush must not resolve before the write it just issued');
       resolveWrite();
       await flushing;
-      assert(settled, 'the flush must resolve once every issued write settles');
+      assert(settled && failure?.errors?.length === 1, 'a broken flusher fails quit only after every other issued write settles');
 
       unregister();
       unregisterBroken();
@@ -417,6 +487,66 @@ const dockTests = [
         persistence.includes('flushApplicationDraftWrites()'),
         'the quit handshake must drain application drafts alongside push drafts',
       );
+    },
+  },
+  {
+    name: 'application dock: failed draft checkpoints remain retryable and resolved save failures cannot pass quit',
+    run: async () => {
+      let attempts = 0;
+      let available = false;
+      const key = 'synthetic-quit-draft';
+      const write = () => {
+        attempts += 1;
+        if (attempts === 1) return Promise.reject(new Error('Draft disk unavailable'));
+        return Promise.resolve(available ? { success: true, saved: true } : { success: false, saved: false, error: 'Draft still unavailable' });
+      };
+      await rejects(trackApplicationDraftWrite(write, key), /unavailable/);
+      await rejects(flushApplicationDraftWrites(), /Could not save every application draft/);
+      assert(attempts === 2, 'a failed checkpoint is retried once per lifecycle flush');
+      available = true;
+      await flushApplicationDraftWrites();
+      assert(attempts === 3, 'the exact failed write remains available until a verified retry succeeds');
+      await flushApplicationDraftWrites();
+      assert(attempts === 3, 'a verified draft is released from the retry ledger');
+      await rejects(trackApplicationDraftWrite(() => Promise.resolve({ saved: false }), key));
+      await trackApplicationDraftWrite(() => Promise.resolve({ saved: true }), key);
+      await flushApplicationDraftWrites();
+    },
+  },
+  {
+    name: 'application dock: only authoritative stage settlement retires a failed older draft',
+    run: async () => {
+      const source = readFileSync(new URL('../../src/components/NonApiAiDialog.jsx', import.meta.url), 'utf8');
+      const start = source.indexOf('const applicationDraftKey =');
+      const end = source.indexOf('const stringifyValidationError =', start);
+      assert(start >= 0 && end > start, 'the actual draft persistence adapter is available');
+      for (const state of ['same-code', 'unreadable', 'new-code', 'completed', 'gone']) {
+        let available = false;
+        let attempts = 0;
+        const write = runInNewContext(`${source.slice(start, end)}\nwriteApplicationDraft;`, {
+          trackApplicationDraftWrite,
+          window: { electronAPI: {
+            updateLocalApplicationDraft: async () => { attempts++; return available ? { saved: true } : { success: false, saved: false }; },
+            getLocalApplicationHandoff: async () => {
+              if (state === 'unreadable') throw new Error('Handoff read unavailable');
+              return { success: true, completed: state === 'completed', gone: state === 'gone',
+                handoff: { handoffCode: state === 'new-code' ? 'new-code' : 'old-code' } };
+            },
+          } },
+        });
+        const pending = write({ jobId: `synthetic-${state}`, canvasFilePath: '/synthetic/canvas.json', handoffCode: 'old-code', draft: 'unfinished JSON' });
+        if (state === 'same-code' || state === 'unreadable') {
+          await rejects(pending);
+          await rejects(flushApplicationDraftWrites());
+          available = true;
+          await flushApplicationDraftWrites();
+          assert(attempts === 3, `${state}: the exact draft stays retryable until saved`);
+        } else {
+          assert((await pending).superseded === true, `${state}: host evidence supersedes recovery-only text`);
+          await flushApplicationDraftWrites();
+          assert(attempts === 1, `${state}: an obsolete draft cannot strand later quits`);
+        }
+      }
     },
   },
   {
@@ -478,7 +608,8 @@ const dockTests = [
       );
       // And the durable draft too, or reopening restores what was discarded.
       assert(
-        /updateLocalApplicationDraft\(\{[\s\S]{0,200}?draft: '',/.test(dock),
+        /writeApplicationDraft\(\{[\s\S]{0,200}?draft: '',/.test(dock)
+          && dock.includes('await window.electronAPI.updateLocalApplicationDraft(payload)'),
         'the persisted draft must be cleared as well',
       );
       // The refresh that follows must not put it back: the durable clear is
@@ -695,8 +826,8 @@ const dockTests = [
       );
       const discovery = readFileSync(new URL('../../src/hooks/useApplicationHandoffDock.js', import.meta.url), 'utf8');
       assert(
-        discovery.includes('retainUnreadableApplicationItems(nextItems, previousItems, candidateJobIds)'),
-        'discovery must pass the candidate scope it already computed',
+        discovery.includes('retainUnreadableApplicationItems(nextItems, currentPreviousItems, candidateJobIds)'),
+        'discovery must pass the live candidate scope and only prior items whose owner still matches',
       );
     },
   },

@@ -63,6 +63,8 @@ export function useCanvasPersistence({
   quitGateRef,
   freezeCanvasForQuit,
   releaseCanvasQuitFence,
+  pauseWorkflowsForQuit,
+  releaseQuitPause,
   clearHistory,
   isAnimatingRef,
   updateSetting,
@@ -210,7 +212,7 @@ export function useCanvasPersistence({
     }
   }, [addToast, flushStack, isAnimatingRef, updateSetting, isMountedRef, setSaveStatus]); // currentFile read via ref — omitted intentionally
 
-  const saveCanvas = useCallback(async () => {
+  const saveCanvas = useCallback(async ({ forceFresh = false } = {}) => {
     // Serialize every explicit/close-time save behind an in-flight manual or
     // autosave operation. In particular, quit invalidates the autosave's UI
     // generation, so that older write intentionally leaves the dirty flag set;
@@ -230,7 +232,7 @@ export function useCanvasPersistence({
       // generation, and mounted owner all still match. That is already the
       // authoritative clean result; the React-backed dirty ref may lag its
       // just-enqueued false update by one layout effect.
-      if (activeSucceeded) return true;
+      if (activeSucceeded && !forceFresh) return true;
     }
 
     const operation = performCanvasSave();
@@ -242,7 +244,10 @@ export function useCanvasPersistence({
     }
   }, [performCanvasSave, isMountedRef]);
 
-  const handleSaveRequest = useEffectEvent(async () => saveCanvas());
+  // Hidden workflow pauses change the navigation stack without incrementing
+  // the visible canvas revision. An earlier in-flight save cannot substitute
+  // for this lifecycle checkpoint, even when its own snapshot was successful.
+  const handleSaveRequest = useEffectEvent(async () => saveCanvas({ forceFresh: true }));
 
   const prepareQuitCommit = useEffectEvent(async () => {
     // Invalidating immediately makes any load already awaiting disk I/O a
@@ -253,6 +258,23 @@ export function useCanvasPersistence({
   });
   const releaseQuitCommit = useEffectEvent(() => {
     releaseCanvasQuitFence?.();
+    releaseQuitPause?.();
+  });
+  const prepareQuitPause = useEffectEvent(async () => {
+    loadRequestRef.current += 1;
+    // Save the last keystroke before workflow pause removes its pending AI
+    // request. A later draft invoke cannot update an already-settled request.
+    await Promise.all([
+      window.electronAPI?.flushNonApiAiPersistence?.(),
+      flushApplicationDraftWrites(),
+    ]);
+    const result = await pauseWorkflowsForQuit?.();
+    if (result?.success !== true) throw new Error(result?.failures?.[0]?.error || 'Active workflows could not be paused.');
+    await Promise.all([
+      window.electronAPI?.flushNonApiAiPersistence?.(),
+      flushApplicationDraftWrites(),
+    ]);
+    return { success: true, requiresCanvasSave: result?.requiresCanvasSave === true };
   });
 
   const flushDocumentSessions = useCallback(async ({ notify = false } = {}) => {
@@ -268,6 +290,7 @@ export function useCanvasPersistence({
   }, [addToast]);
 
   useEffect(() => {
+    let quitPauseEpoch = 0;
     // Electron invokes these as EventEmitter callbacks. Do not let a renderer
     // exception turn into a missing acknowledgement: quit fails closed after a
     // timeout, but a save request deliberately waits for this correlated reply.
@@ -289,27 +312,25 @@ export function useCanvasPersistence({
     // ── Quit Handshake ──────────────────────────────────────────────────────
     // Listens for the main process signaling a quit intent (e.g., Cmd+Q).
     const unlistenQuit = window.electronAPI?.onQuitRequest?.(async ({ requestId } = {}) => {
-      let response = { hasUnsavedChanges: true, documentSaveFailed: true };
+      let response = { hasUnsavedChanges: true, documentSaveFailed: true, draftSaveFailed: true };
       try {
         // A paste can be followed immediately by Cmd+Q. Wait for preload's
         // outstanding draft invokes and main's disk barrier before answering the
         // close handshake, otherwise the last edit can trail window destruction.
+        let draftSaveFailed = false;
         try {
-          // Both halves of the dock: preload's outstanding push-draft invokes
-          // and main's disk barrier, then the application bundles' debounced
-          // draft timers, which exist only in this renderer until they fire.
-          await Promise.allSettled([
+          await Promise.all([
             window.electronAPI?.flushNonApiAiPersistence?.(),
             flushApplicationDraftWrites(),
           ]);
         } catch {
-          // Main performs the same barrier before destruction; keep the standard
-          // close handshake available if this renderer-side optimization fails.
+          draftSaveFailed = true;
         }
         const documents = await textDocumentSessions.flushAndSettleAll();
         response = {
           hasUnsavedChanges: hasUnsavedChangesRef.current,
           documentSaveFailed: !documents.success,
+          draftSaveFailed,
         };
       } catch (error) {
         // A failed renderer-side flush is never evidence that the document or
@@ -318,6 +339,19 @@ export function useCanvasPersistence({
         console.error('Could not prepare quit response:', error);
       } finally {
         sendQuitResponse(response, requestId);
+      }
+    });
+
+    const unlistenQuitPause = window.electronAPI?.onQuitPauseRequest?.(async ({ requestId } = {}) => {
+      const epoch = ++quitPauseEpoch;
+      if (document.body) document.body.inert = true;
+      let result = { success: false };
+      try {
+        result = await prepareQuitPause();
+      } catch (error) {
+        console.error('Could not pause work before quit:', error);
+      } finally {
+        if (epoch === quitPauseEpoch) window.electronAPI?.sendQuitPauseAck?.(result, requestId);
       }
     });
 
@@ -340,6 +374,7 @@ export function useCanvasPersistence({
       }
     });
     const unlistenQuitCommitRelease = window.electronAPI?.onQuitCommitRelease?.(() => {
+      quitPauseEpoch += 1;
       releaseQuitCommit();
       if (document.body) document.body.inert = false;
     });
@@ -394,6 +429,8 @@ export function useCanvasPersistence({
 
     return () => {
       unlistenQuit?.();
+      unlistenQuitPause?.();
+      quitPauseEpoch += 1;
       unlistenQuitCommit?.();
       unlistenQuitCommitRelease?.();
       releaseQuitCommit();

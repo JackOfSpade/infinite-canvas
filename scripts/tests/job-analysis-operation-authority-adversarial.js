@@ -3,6 +3,11 @@ import fs from 'node:fs';
 import crypto from 'node:crypto';
 import os from 'node:os';
 import path from 'node:path';
+import { EventEmitter } from 'node:events';
+import { runInNewContext } from 'node:vm';
+import { appQuitPauseError, beginSenderQuitPause, handleSafe, isAppQuitPauseReason, nodeCancellationError, releaseSenderQuitPause } from '../../electron/ipc/ipcUtils.js';
+import { beginJobContinuation, claimJobContinuation, checkpointJobContinuationResult, listJobContinuations,
+  readJobContinuationResult, releaseJobContinuationExecution, validateJobContinuationAuthority } from '../../electron/ipc/jobContinuation.js';
 import { stageDisplayedJobsHistory, finalizeDisplayedJobsHistory, loadJobsHistory, dedupAgainstHistory } from '../../electron/ipc/jobsHistory.js';
 import {
   __loadJobAnalysisSnapshotForTests,
@@ -99,6 +104,277 @@ async function settlesWithin(promise, ms = 2_000) {
 }
 
 export default [
+  {
+    name: 'app quit pause: final staged page drains before authority tombstone and every saved listing remains recoverable',
+    async run() {
+      const directory = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'ic-job-quit-pause-page-'));
+      const canvas = path.join(directory, 'canvas.json');
+      const sender = new EventEmitter(); sender.id = 891; sender.isDestroyed = () => false;
+      const nodeId = 'quit-hub'; const runId = 'quit-run';
+      try {
+        ipcMain.__clearInvokeHandlers(); registerJobsHandlers();
+        await fs.promises.writeFile(canvas, '{}');
+        const claimed = await claimJobAnalysisOperationAuthority({ canvasFilePath: canvas, hubId: nodeId,
+          operationId: 'quit-page-operation', semanticBase: base('search', { runId }) });
+        await startRun(canvas, { runId, startedAt: Date.now(), nodeId, careerSnapshotId: pin,
+          profileFingerprint: 'b'.repeat(64), sourceIds: ['provider'], operationAuthority: claimed.receipt });
+        let finalPageSaved = false;
+        handleSafe('search-jobs', async (_event, _args, signal) => {
+          await new Promise(resolve => signal.addEventListener('abort', resolve, { once: true }));
+          assert(isAppQuitPauseReason(signal.reason), 'quit abort cannot use the destructive node-deleted sentinel');
+          finalPageSaved = await recordSourcePage(canvas, { sourceId: 'provider', query: 'synthetic', page: 0,
+            jobs: [{ title: 'Last completed page' }], now: Date.now(), expectedRunId: runId, nodeId,
+            expectedOperationAuthority: claimed.receipt });
+          return { jobs: [] };
+        });
+        const running = ipcMain.__getInvokeHandler('search-jobs')({ sender }, { nodeId });
+        beginSenderQuitPause(sender);
+        const pause = await ipcMain.__getInvokeHandler('pause-job-run-and-cancel')({ sender }, {
+          canvasFilePath: canvas, nodeId, runId, cause: 'app-quit', operationAuthority: claimed.receipt,
+        });
+        await running;
+        const state = await readRunState(canvas, Date.now(), { nodeId });
+        assert(pause.ok && pause.settled && pause.paused && finalPageSaved, 'quit must wait for the page checkpoint before tombstoning its writer');
+        assert(state.manifest.recoveryDisposition === 'manual' && state.stagedJobs[0]?.job?.title === 'Last completed page',
+          'the exact manually paused run must retain its final staged page');
+        assert(!await currentJobAnalysisOperationAuthority({ canvasFilePath: canvas, hubId: nodeId, ...claimed.receipt }),
+          'only after the durable drain may Pause close its exact write capability');
+      } finally { releaseSenderQuitPause(sender); await fs.promises.rm(directory, { recursive: true, force: true }); }
+    },
+  },
+  {
+    name: 'app quit pause: terminal continuation receipts still checkpoint and standalone intents are paused without deletion',
+    async run() {
+      const directory = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'ic-job-quit-pause-continuation-'));
+      const canvas = path.join(directory, 'canvas.json');
+      const sender = new EventEmitter(); sender.id = 892; sender.isDestroyed = () => false;
+      let begun; let lease;
+      try {
+        ipcMain.__clearInvokeHandlers(); registerJobsHandlers();
+        await fs.promises.writeFile(canvas, '{}');
+        const claimed = await claimJobAnalysisOperationAuthority({ canvasFilePath: canvas, hubId: 'hub', operationId: 'quit-continuation', semanticBase: base() });
+        await __saveJobAnalysisSnapshotForTests(snapshot({ canvasFilePath: canvas, authority: claimed.receipt }));
+        begun = await beginJobContinuation(canvas, { nodeId: 'hub', parentRunId: 'run-1', sourceId: 'usajobs',
+          kind: 'late-source-refresh', operation: 'search-jobs-single-source', profileFingerprint: 'b'.repeat(64),
+          careerSnapshotId: pin, operationAuthority: claimed.receipt, generationFingerprint: 'quit-generation',
+          canonicalLocation: 'Toronto', recoveryMode: 'automatic', now: Date.now() });
+        assert(begun.ok, 'the standalone source continuation must start from its sealed parent');
+        lease = await claimJobContinuation(canvas, { ...begun.intent, autoResume: false }, { sender });
+        assert(lease.ok, 'the exact source continuation must own an execution lease');
+        const source = await fs.promises.readFile(new URL('../../electron/ipc/jobs.js', import.meta.url), 'utf8');
+        const start = source.indexOf('function checkpointContinuationBeforeReply(operation) {');
+        const end = source.indexOf('\nasync function admitContinuationProviderWork', start);
+        const beforeReply = runInNewContext(`(${source.slice(start, end)})`, {
+          isAppQuitPauseReason, validateJobContinuationAuthority, checkpointJobContinuationResult,
+          continuationTerminalResult: (_op, result) => result.success === true && Array.isArray(result.jobs),
+        })('search-jobs-single-source');
+        const args = { canvasFilePath: canvas, nodeId: 'hub', jobRunId: 'run-1',
+          continuationIntentId: begun.intent.intentId, continuationLeaseToken: lease.leaseToken,
+          careerSnapshotId: pin, operationAuthority: claimed.receipt, parentArtifactFingerprint: begun.intent.parentArtifactFingerprint };
+        const destructive = new AbortController(); destructive.abort(nodeCancellationError('node-deleted'));
+        assert(await beforeReply({ event: { sender }, args, signal: destructive.signal, result: { success: true, jobs: [] } }) === undefined,
+          'ordinary destructive cancellation must keep its existing no-publication contract');
+        const quitting = new AbortController(); quitting.abort(appQuitPauseError());
+        const result = await beforeReply({ event: { sender }, args, signal: quitting.signal,
+          result: { success: true, jobs: [{ title: 'Completed before quit' }] } });
+        assert(result?.continuationCheckpoint?.saved, 'quit must not skip an otherwise-valid terminal continuation receipt');
+        const replay = await readJobContinuationResult(canvas, { ...begun.intent, leaseToken: lease.leaseToken }, { sender });
+        assert(replay.found && replay.result.jobs[0].title === 'Completed before quit', 'the accepted terminal result must replay from disk');
+        beginSenderQuitPause(sender);
+        const paused = await ipcMain.__getInvokeHandler('pause-job-run-and-cancel')({ sender }, {
+          canvasFilePath: canvas, nodeId: 'hub', runId: 'run-1', cause: 'app-quit', operationAuthority: claimed.receipt,
+        });
+        const intents = await listJobContinuations(canvas, 'hub');
+        assert(paused.ok && paused.settled && paused.absent && intents.length === 1
+          && intents[0].recoveryMode === 'manual' && intents[0].terminalResultAvailable,
+          'standalone quit Pause must preserve its intent and terminal result instead of clearing the only saved continuation');
+      } finally {
+        if (lease?.leaseToken) releaseJobContinuationExecution(begun.intent.intentId, lease.leaseToken, sender);
+        releaseSenderQuitPause(sender);
+        await fs.promises.rm(directory, { recursive: true, force: true });
+      }
+    },
+  },
+  {
+    name: 'operation authority: successful backup seals follow same-run retries and compacted missing or corrupt slots',
+    async run() {
+      const scenarios = ['same-run-retry', 'same-reanalysis-retry', 'description-update', 'missing-middle', 'corrupt-newest', 'altered-middle'];
+      for (const scenario of scenarios) {
+        const directory = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'ic-operation-exact-rotation-'));
+        const canvas = path.join(directory, 'canvas.json');
+        const hubId = 'hub';
+        try {
+          await fs.promises.writeFile(canvas, '{}');
+          let newest;
+          for (let index = 1; index <= 3; index += 1) {
+            const runId = scenario === 'same-reanalysis-retry' ? 'shared-source-run' : `run-${index}`;
+            const claimed = await claimJobAnalysisOperationAuthority({ canvasFilePath: canvas, hubId,
+              operationId: `seed-${index}`, semanticBase: base('search', { runId }) });
+            newest = snapshot({ canvasFilePath: canvas, hubId, runId, authority: claimed.receipt, title: `Seed ${index}` });
+            if (scenario === 'same-reanalysis-retry') newest.snapshotContext = {
+              recoveryMode: 'reanalyze-saved-jobs', analysisRevisionId: `revision-${index}`,
+            };
+            assert(!(await __saveJobAnalysisSnapshotForTests(newest)).retired, 'each seed must publish an exact successful backup');
+          }
+          const paths = getJobAnalysisPaths(canvas, null, hubId);
+          const olderBytes = await fs.promises.readFile(paths.lastSuccessJsonPaths[2], 'utf8');
+          if (scenario === 'missing-middle') await fs.promises.unlink(paths.lastSuccessJsonPaths[1]);
+          if (scenario === 'corrupt-newest') await fs.promises.writeFile(paths.lastSuccessJsonPaths[0], '{broken');
+          if (scenario === 'altered-middle') {
+            const altered = JSON.parse(await fs.promises.readFile(paths.lastSuccessJsonPaths[1], 'utf8'));
+            altered.jobs[0].title = 'Unsealed mutation';
+            await fs.promises.writeFile(paths.lastSuccessJsonPaths[1], JSON.stringify(altered));
+          }
+          const retry = ['same-run-retry', 'same-reanalysis-retry', 'description-update'].includes(scenario);
+          if (!retry) {
+            const claimed = await claimJobAnalysisOperationAuthority({ canvasFilePath: canvas, hubId,
+              operationId: 'next-run', semanticBase: base('search', { runId: 'run-4' }) });
+            newest = snapshot({ canvasFilePath: canvas, hubId, runId: 'run-4', authority: claimed.receipt, title: 'Next run' });
+          } else newest = { ...newest, jobs: [{ ...newest.jobs[0], title: 'Newest retry' }] };
+          if (scenario === 'description-update') {
+            assert((await __createDescriptionRecoveryCheckpointForTests(newest)).saved, 'description update needs its exact checkpoint');
+            const result = await __saveDescriptionRecoverySnapshotIfCurrentForTests(newest, { nodeId: hubId, jobRunId: newest.runId });
+            assert(result.saved && result.globalSaved, 'description recovery must publish both checkpoint and global backup');
+          } else assert(!(await __saveJobAnalysisSnapshotForTests(newest)).retired, 'the replacement must publish');
+
+          const expected = retry ? ['Newest retry', 'Seed 2', 'Seed 1']
+            : scenario === 'corrupt-newest' ? ['Next run', 'Seed 2', 'Seed 1'] : ['Next run', 'Seed 3', 'Seed 1'];
+          const retained = [];
+          for (const [index, filePath] of paths.lastSuccessJsonPaths.entries()) {
+            const serialized = await fs.promises.readFile(filePath, 'utf8');
+            const value = JSON.parse(serialized);
+            retained.push(value.jobs[0].title);
+            assert(await publishedJobAnalysisOperationAuthority({ canvasFilePath: canvas, hubId, slot: `success:${index + 1}`,
+              digest: sha256(serialized), ...value.operationAuthority }), `${scenario}: every retained slot must seal its actual bytes and original receipt`);
+          }
+          assert(retained.join('|') === expected.join('|'), `${scenario}: exact retained order ${JSON.stringify(retained)}`);
+          assert(await fs.promises.readFile(paths.lastSuccessJsonPaths[2], 'utf8') === olderBytes,
+            `${scenario}: moving/retaining old backups must preserve their sealed bytes exactly`);
+          await fs.promises.unlink(paths.jsonPath);
+          await fs.promises.unlink(paths.lastSuccessJsonPaths[0]);
+          const recovered = await __loadJobAnalysisSnapshotForTests(canvas, hubId);
+          assert(recovered.origin === 'last-success-2' && recovered.snapshot.jobs[0].title === expected[1],
+            `${scenario}: an unavailable latest snapshot must recover its actually retained predecessor`);
+        } finally { await fs.promises.rm(directory, { recursive: true, force: true }); }
+      }
+      return { scenarios: scenarios.length };
+    },
+  },
+  {
+    name: 'operation authority: retained rotation proposals cannot seal altered digests or forged predecessor receipts',
+    async run() {
+      const directory = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'ic-operation-retained-seal-'));
+      const canvas = path.join(directory, 'canvas.json');
+      try {
+        await fs.promises.writeFile(canvas, '{}');
+        const claimed = await claimJobAnalysisOperationAuthority({ canvasFilePath: canvas, hubId: 'hub', operationId: 'seed', semanticBase: base() });
+        await __saveJobAnalysisSnapshotForTests(snapshot({ canvasFilePath: canvas, authority: claimed.receipt }));
+        const paths = getJobAnalysisPaths(canvas, null, 'hub');
+        const original = await fs.promises.readFile(paths.operationAuthorityPath, 'utf8');
+        const sealedDigest = sha256(await fs.promises.readFile(paths.lastSuccessJsonPath));
+        for (const retained of [
+          { slot: 'success:2', digest: 'f'.repeat(64), receipt: claimed.receipt },
+          { slot: 'success:2', digest: sealedDigest, receipt: { ...claimed.receipt, operationId: 'forged-receipt' } },
+        ]) {
+          let rejected = false;
+          try {
+            await withCurrentJobAnalysisOperationAuthority({ canvasFilePath: canvas, hubId: 'hub', ...claimed.receipt },
+              (_record, stage) => stage({ publications: [{ slot: 'success:1', digest: sealedDigest }], retainedSuccessfulPublications: [retained] }));
+          } catch (error) { rejected = /not already sealed/.test(error.message); }
+          assert(rejected, 'an unsealed retained digest/receipt must be rejected before any publication map write');
+          assert(await fs.promises.readFile(paths.operationAuthorityPath, 'utf8') === original, 'rejection must preserve the existing stable authority byte-for-byte');
+        }
+      } finally { await fs.promises.rm(directory, { recursive: true, force: true }); }
+    },
+  },
+  {
+    name: 'seen history: a crash-pending current publication remains an exact Board display input',
+    async run() {
+      const directory = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'ic-history-pending-publication-'));
+      const canvas = path.join(directory, 'canvas.json');
+      const originalRename = fs.promises.rename;
+      try {
+        await fs.promises.writeFile(canvas, '{}');
+        const claimed = await claimJobAnalysisOperationAuthority({ canvasFilePath: canvas, hubId: 'hub', operationId: 'seed', semanticBase: base() });
+        const prior = snapshot({ canvasFilePath: canvas, authority: claimed.receipt });
+        prior.jobs[0].matchScore = 80;
+        await __saveJobAnalysisSnapshotForTests(prior);
+        const paths = getJobAnalysisPaths(canvas, null, 'hub');
+        let interrupted = false;
+        fs.promises.rename = async (from, to) => {
+          const result = await originalRename(from, to);
+          if (!interrupted && to === paths.jsonPath) { interrupted = true; throw new Error('simulated crash after current publication'); }
+          return result;
+        };
+        const next = { ...prior, jobs: [{ ...prior.jobs[0], title: 'Updated sealed job' }] };
+        try { await __saveJobAnalysisSnapshotForTests(next); } catch { /* durable current exists beside its pending publication map */ }
+        fs.promises.rename = originalRename;
+        assert(interrupted, 'the fixture must interrupt after the actual current artifact rename');
+        const prepared = await __boardHistoryAuthorityForTests.prepare({ sender: { id: 819 } }, {
+          canvasFilePath: canvas, jobs: next.jobs,
+          sources: [{ hubId: 'hub', runId: 'run-1', careerSnapshotId: pin, operationAuthority: claimed.receipt }],
+        });
+        assert(prepared.success, 'exact pending bytes must be admitted even when the prior stable slot has a different digest');
+      } finally {
+        fs.promises.rename = originalRename;
+        await fs.promises.rm(directory, { recursive: true, force: true });
+      }
+    },
+  },
+  {
+    name: 'operation authority: Save As preserves recognized abandoned writer temporaries and migrates only committed sealed artifacts',
+    async run() {
+      const directory = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'ic-analysis-rebind-temporaries-'));
+      const canvas = path.join(directory, 'original.json');
+      const destination = path.join(directory, 'adopted.json');
+      try {
+        await fs.promises.writeFile(canvas, '{}');
+        const claimed = await claimJobAnalysisOperationAuthority({ canvasFilePath: canvas, hubId: 'hub', operationId: 'seed', semanticBase: base() });
+        const original = snapshot({ canvasFilePath: canvas, authority: claimed.receipt });
+        await __saveJobAnalysisSnapshotForTests(original);
+        assert((await __createDescriptionRecoveryCheckpointForTests(original)).saved, 'a committed run checkpoint must also migrate');
+        const paths = getJobAnalysisPaths(canvas, null, 'hub');
+        const committedPaths = [paths.jsonPath, paths.lastSuccessJsonPath, paths.promptPath, paths.operationAuthorityPath,
+          getJobDescriptionRecoveryCheckpointPath(canvas, 'run-1', null)];
+        const temporaries = committedPaths.map(filePath => `${filePath}.${process.pid}.${crypto.randomUUID()}.tmp`);
+        for (const filePath of temporaries) await fs.promises.writeFile(filePath, '{abandoned partial atomic write');
+        const result = await rebindJobAnalysisRecoveryOwners(canvas, destination);
+        assert(result.success && result.migratedCount === committedPaths.length, 'only committed sidecars count toward the successful migration');
+        for (const filePath of temporaries) assert(await fs.promises.readFile(filePath, 'utf8') === '{abandoned partial atomic write',
+          'uncommitted writer temporaries must remain untouched at their original path');
+        for (const filePath of committedPaths) assert(!fs.existsSync(filePath), 'committed old-owner artifacts must retire after destination durability');
+        const loaded = await __loadJobAnalysisSnapshotForTests(destination, 'hub', 'run-1');
+        assert(loaded.snapshot.jobs[0].title === original.jobs[0].title && loaded.snapshot.canvasFilePath === destination,
+          'the destination must still load its exact sealed current snapshot');
+        assert((await __loadDescriptionRecoveryCheckpointForTests(destination, 'hub', 'run-1')).snapshot.runId === 'run-1',
+          'committed description recovery remains actionable after the rebind');
+      } finally { await fs.promises.rm(directory, { recursive: true, force: true }); }
+    },
+  },
+  {
+    name: 'operation authority: Save As rejects unknown and malformed writer temporary lookalikes',
+    async run() {
+      for (const kind of ['malformed-temp', 'unknown-artifact', 'temporary-symlink']) {
+        const directory = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'ic-analysis-rebind-temp-lookalike-'));
+        const canvas = path.join(directory, 'original.json');
+        const destination = path.join(directory, 'adopted.json');
+        try {
+          const paths = getJobAnalysisPaths(canvas, null, 'hub');
+          const lookalike = kind === 'malformed-temp' ? `${paths.jsonPath}.123.invalid-uuid.tmp`
+            : kind === 'unknown-artifact' ? `${paths.jsonPath}.unrecognized`
+              : `${paths.jsonPath}.${process.pid}.${crypto.randomUUID()}.tmp`;
+          if (kind === 'temporary-symlink') {
+            const target = path.join(directory, 'private-target.txt');
+            await fs.promises.writeFile(target, 'target remains untouched');
+            await fs.promises.symlink(target, lookalike);
+          } else await fs.promises.writeFile(lookalike, 'unknown artifact remains untouched');
+          const result = await rebindJobAnalysisRecoveryOwners(canvas, destination);
+          assert(!result.success && result.reason === 'migration-failed', `${kind}: only regular files with exact writer-temporary format may be ignored`);
+          assert(fs.existsSync(lookalike), `${kind}: rejection cannot delete the ambiguous input`);
+        } finally { await fs.promises.rm(directory, { recursive: true, force: true }); }
+      }
+    },
+  },
   {
     name: 'seen history: host stages only scored displayed rows and finalizes each source independently',
     async run() {

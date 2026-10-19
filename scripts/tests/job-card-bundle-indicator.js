@@ -1,5 +1,8 @@
 import fs from 'node:fs';
 import assert from 'node:assert';
+import { runInNewContext } from 'node:vm';
+import { canSaveImportedLocalApplication } from '../../src/utils/localAiApplicationLifecycle.js';
+import * as localAiFallback from '../../src/utils/localAiFallback.js';
 
 import {
   APPLICATION_BUNDLE_TONES,
@@ -13,7 +16,152 @@ function readNodeSource() {
   );
 }
 
+function fallbackManagerFixture(api) {
+  const source = fs.readFileSync(new URL('../../src/hooks/useLocalAiFallbackManager.js', import.meta.url), 'utf8');
+  const start = source.indexOf('export function useLocalAiFallbackManager(');
+  assert.ok(start >= 0);
+  let nodes = [];
+  const refs = [];
+  const effects = [];
+  let tick;
+  const navigation = {
+    enumerateAllNodes: () => nodes,
+    updateNodeDataGlobally() {},
+  };
+  const hook = runInNewContext(`(${source.slice(start).replace('export function', 'function')})`, {
+    ...localAiFallback,
+    LOCAL_AI_RETRY_NOTICE_INTERVAL_MS: 30_000,
+    isJobCardMounted: nodeId => nodes.some(node => node.id === nodeId),
+    selectFallbackLocalAiJobs: all => localAiFallback.selectFallbackLocalAiJobs(all, () => true),
+    useRef: value => { const ref = { current: value }; refs.push(ref); return ref; },
+    useEffect: effect => effects.push(effect),
+    window: { electronAPI: api, setInterval: callback => { tick = callback; return 1; }, clearInterval() {} },
+    EventLogger: { log() {} },
+    requestApplicationHandoffRefresh() {},
+    Date: { now: () => 10_000 },
+  });
+  hook({ navigation, getCurrentFile: () => '/project/canvas.json', addToast() {} });
+  // Settle the exact result before the automatic first tick, so an orphan
+  // would be eligible for import without relying on wall-clock timers.
+  refs[1].current.set('job', { resultSha256: 'a'.repeat(64), observedAt: 1 });
+  const cleanups = effects.map(effect => effect());
+  return {
+    attachCard: () => { nodes = [{ id: 'card', type: 'jobcard', data: { localApplication: { id: 'job', status: 'completed' } } }]; },
+    async finish() {
+      for (let attempt = 0; refs[7].current && attempt < 30; attempt++) await new Promise(resolve => setImmediate(resolve));
+      assert.equal(refs[7].current, false, 'the actual fallback tick must settle');
+      assert.equal(typeof tick, 'function');
+    },
+    stop: () => cleanups.forEach(cleanup => cleanup?.()),
+  };
+}
+
 export default [
+  {
+    name: 'fallback orphan recovery rechecks live card ownership after discovery and status waits',
+    async run() {
+      for (const boundary of ['discovery', 'status', 'unowned-control']) {
+        let release;
+        let entered;
+        const waiting = new Promise(resolve => { entered = resolve; });
+        const gate = new Promise(resolve => { release = resolve; });
+        let reads = 0;
+        let imports = 0;
+        const job = { id: 'job', status: 'completed', canvasFilePath: '/project/canvas.json', resultSha256: 'a'.repeat(64) };
+        const fixture = fallbackManagerFixture({
+          discoverLocalApplications: async () => {
+            if (boundary === 'discovery') { entered(); await gate; }
+            return { success: true, localJobs: [job] };
+          },
+          getLocalApplicationStatus: async () => {
+            reads++;
+            if (boundary !== 'discovery') { entered(); await gate; }
+            return { success: true, localJob: job };
+          },
+          importLocalApplication: async () => {
+            imports++;
+            return { success: true, localApplication: { status: 'render-retry-required', resultSha256: job.resultSha256 } };
+          },
+        });
+        try {
+          await waiting;
+          if (boundary !== 'unowned-control') fixture.attachCard();
+          release();
+          await fixture.finish();
+          assert.equal(reads, boundary === 'discovery' ? 0 : 1, 'discovery cannot read a newly card-owned job as an orphan');
+          assert.equal(imports, boundary === 'unowned-control' ? 1 : 0, 'only a still-unowned job may start orphan import');
+        } finally { release(); fixture.stop(); }
+      }
+    },
+  },
+  {
+    name: 'a Save As during application generation keeps receipt lookup, reveal, and save-failure recovery on the handoff owner',
+    async run() {
+      const source = readNodeSource();
+      const start = source.indexOf('const importCompletedLocalApplication = useCallback(');
+      const end = source.indexOf('\n  // Legacy coding-agent jobs', start);
+      assert.ok(start >= 0 && end > start, 'the mounted-card import callback is available');
+      // Execute the actual async callback with IPC/state boundaries supplied;
+      // PDF authoring and document content are outside this operational test.
+      const callbackSource = source.slice(start, end);
+      const originalCanvas = '/project/original.canvas';
+      const activeCanvas = '/project/saved-as.canvas';
+      for (const saveSucceeds of [true, false]) {
+        let localApplication = { id: 'job', status: 'completed', canvasFilePath: originalCanvas };
+        const calls = [];
+        const receipt = { outputDir: '/project/Applied Jobs/Acme/Role' };
+        const api = {
+          importLocalApplication: async request => {
+            calls.push(['import', request.canvasFilePath]);
+            return { success: true, localApplication: { workDir: '/project/.local-ai/work', missingArtifacts: [] } };
+          },
+          saveApplication: async request => {
+            calls.push(['save', request.canvasFilePath]);
+            return saveSucceeds ? { success: true, saved: true, dir: receipt.outputDir } : { success: false, error: 'Save unavailable' };
+          },
+          getLocalApplicationStatus: async request => {
+            calls.push(['status', request.canvasFilePath]);
+            return request.canvasFilePath === originalCanvas ? {
+              success: true,
+              localJob: saveSucceeds ? { id: 'job', status: 'saved', receipt }
+                : { id: 'job', status: 'render-retry-required', message: 'Retry the saved result' },
+            } : { success: false, error: 'No handoff belongs to this canvas' };
+          },
+        };
+        const callback = runInNewContext(`${callbackSource}\nimportCompletedLocalApplication;`, {
+          useCallback: fn => fn,
+          window: { electronAPI: api },
+          localApplication,
+          nav: { getCurrentFile: () => activeCanvas },
+          setLocalApplication: update => { localApplication = update(localApplication); },
+          isMountedRef: { current: true },
+          getLiveNode: () => ({ type: 'jobcard', data: { localApplication } }),
+          idRef: { current: 'card' },
+          data: { title: 'Role', location: 'Toronto' },
+          EventLogger: { log() {}, error() {} },
+          revealSavedLocalApplicationOutputOnce: request => calls.push(['reveal', request.canvasFilePath]),
+          localAiOutputRevealedRef: { current: new Set() },
+          brokenLocalAiJobDriveState: () => null,
+          localSaveFailedHashesRef: { current: new Map() },
+          addToast() {},
+          canSaveImportedLocalApplication,
+        });
+        await callback('job', 'a'.repeat(64));
+        assert.deepStrictEqual(calls.filter(([operation]) => operation !== 'save').map(([, canvas]) => canvas),
+          saveSucceeds ? [originalCanvas, originalCanvas, originalCanvas] : [originalCanvas, originalCanvas],
+          'every job/receipt operation retains the queued canvas after Save As');
+        assert.strictEqual(calls.find(([operation]) => operation === 'save')?.[1], activeCanvas,
+          'the existing save destination behavior remains unchanged');
+        assert.strictEqual(localApplication.status, saveSucceeds ? 'saved' : 'render-retry-required',
+          'the durable verdict is adopted immediately after a successful or failed save');
+        if (saveSucceeds) assert.strictEqual(localApplication.receipt, receipt, 'the saved card receives its terminal receipt');
+      }
+      const fallback = fs.readFileSync(new URL('../../src/hooks/useLocalAiFallbackManager.js', import.meta.url), 'utf8');
+      assert.ok(fallback.includes('const jobCanvasFilePath = local.canvasFilePath || saveCanvasFilePath;')
+        && fallback.includes('jobId, canvasFilePath: jobCanvasFilePath, revealedRef: revealedOutputRef.current'),
+      'the unmounted-card driver reveals through the same handoff owner');
+    },
+  },
   {
     name: 'applicationBundleIndicator returns null for non-saved and malformed inputs',
     run: async () => {

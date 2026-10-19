@@ -257,7 +257,7 @@ export default [
     },
   },
   {
-    name: 'requirements adjudication binds one ambiguous unit across three postings while multi-unit loops retain the cap',
+    name: 'requirements adjudication preserves bindings and verifies legacy capped terminals',
     run() {
       const postings = [
         { domain: 'freight', unit: 'u-freight', quote: 'Priorities may shift as freight volumes change.' },
@@ -302,10 +302,10 @@ export default [
       ]), /conflicting binding decisions/);
       const source = fs.readFileSync(new URL('../../electron/ipc/localAiApplication.js', import.meta.url), 'utf8');
       assert.ok(source.includes('requirementsBindingErrors(coverage, source.bindingRows)')
-        && source.includes('requirementsAuditCapTerminal(page.epoch, disagreement.differingUnitIds, bindingRows)')
-        && source.includes('authorityBoundSingletonAuditReceipt(page, disagreement, bindingRows)')
+        && source.includes('requirementsBindingErrors(Array.isArray(rows) ? rows : [], page.bindingRows)')
+        && source.includes('bindingRows: Number.isSafeInteger(epoch) ? await authorityPriorAdjudicationBindings(store, epoch, units) : []')
         && source.includes('bindingRows = await authorityPriorAdjudicationBindings(store, epoch.epoch, windowUnits)'),
-      'production discovery and audit paths must invoke both binding and cap checks');
+      'production discovery and audit must enforce the same signed bindings');
     },
   },
   {

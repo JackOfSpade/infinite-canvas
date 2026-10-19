@@ -41,12 +41,17 @@ const ADMISSION_RECHECK_MS = 1000;
 export function createModuleRunQueue({
   onChange = null,
   admissionRecheckMs = ADMISSION_RECHECK_MS,
-  timers = { setTimeout, clearTimeout },
+  timers = {
+    setTimeout: (...args) => globalThis.setTimeout(...args),
+    clearTimeout: (...args) => globalThis.clearTimeout(...args),
+  },
 } = {}) {
   // A lane is independently FIFO. Callers that share a resource (for example
   // the single job-search manual-AI handoff) use one common lane; unrelated
   // lanes retain independent scheduling.
   const lanes = new Map();
+  const admissionHolds = new Set();
+  const settlementObservers = new Set();
 
   const getLane = (laneName) => {
     const lane = normalizeLane(laneName);
@@ -81,11 +86,13 @@ export function createModuleRunQueue({
       queued,
       activeRuns,
       lanes: Object.fromEntries(laneSnapshots),
+      admissionsSuspended: admissionHolds.size > 0,
     };
   };
 
   const emitChange = () => {
     safeCall(onChange, snapshot());
+    [...settlementObservers].forEach(observer => observer());
   };
 
   // Admission is separate from lane capacity: an entry may carry canStart(), a
@@ -138,6 +145,15 @@ export function createModuleRunQueue({
     Promise.resolve()
       .then(() => {
         if (entry.cancelled) throw new Error(entry.cancelReason || 'Node deleted');
+        if (admissionHolds.size > 0) {
+          if (state.active === entry) state.active = null;
+          entry.wasQueued = true;
+          state.queued.unshift(entry);
+          safeCall(entry.onQueued, { ...describeEntry(entry, 1), position: 1 });
+          updateQueuedPositions(entry.lane);
+          emitChange();
+          return false;
+        }
         // `active` means this entry owns the lane, but it is not yet safe to
         // start external work until this turn has actually reached onStart.
         // Deletion/reset can happen between acquireModuleRun() returning and
@@ -149,8 +165,10 @@ export function createModuleRunQueue({
         if (typeof entry.onStart === 'function') {
           entry.onStart({ ...describeEntry(entry, 0), wasQueued: !!entry.wasQueued });
         }
+        return true;
       })
-      .then(() => {
+      .then((started) => {
+        if (started === false) return;
         entry.resolve({
           ...describeEntry(entry, 0),
           release: () => finishActive(entry),
@@ -163,6 +181,7 @@ export function createModuleRunQueue({
   };
 
   function drain(lane) {
+    if (admissionHolds.size > 0) return;
     const state = lanes.get(lane);
     if (!state || state.active) return;
     const head = state.queued[0];
@@ -224,7 +243,7 @@ export function createModuleRunQueue({
 
     // An idle lane still queues the entry when an earlier one is waiting on its
     // admission check, or when this entry's own check refuses it.
-    if (state.active || state.queued.length > 0 || !admits(entry)) {
+    if (admissionHolds.size > 0 || state.active || state.queued.length > 0 || !admits(entry)) {
       entry.wasQueued = true;
       if (entry.continuationPriority) {
         // A user-resolved paused source is the continuation of work that has
@@ -335,11 +354,47 @@ export function createModuleRunQueue({
     cancelQueuedRunsMatchingNode(nodeId, reason, { includeCancellationAliases: false })
   );
 
+  const suspendAdmissions = () => {
+    const hold = {};
+    admissionHolds.add(hold);
+    emitChange();
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      admissionHolds.delete(hold);
+      emitChange();
+      if (admissionHolds.size === 0) [...lanes.keys()].forEach(drain);
+    };
+  };
+
+  const waitForActiveRunsToSettle = ({ lanes: selectedLanes = null, timeoutMs = 30000 } = {}) => new Promise((resolve, reject) => {
+    const selected = Array.isArray(selectedLanes) ? new Set(selectedLanes.map(normalizeLane)) : null;
+    let timeout = null;
+    const cleanup = () => {
+      settlementObservers.delete(check);
+      if (timeout !== null) timers.clearTimeout(timeout);
+    };
+    const check = () => {
+      if ([...lanes].some(([lane, state]) => state.active && (!selected || selected.has(lane)))) return;
+      cleanup();
+      resolve({ settled: true });
+    };
+    settlementObservers.add(check);
+    timeout = timers.setTimeout(() => {
+      cleanup();
+      reject(new Error('Active module work did not finish saving before quit.'));
+    }, timeoutMs);
+    check();
+  });
+
   return {
     acquireModuleRun,
     runExclusive,
     cancelQueuedRunsForNode,
     cancelQueuedRunsOwnedByNode,
+    suspendAdmissions,
+    waitForActiveRunsToSettle,
     getSnapshot: snapshot,
   };
 }

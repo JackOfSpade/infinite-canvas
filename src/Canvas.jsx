@@ -72,6 +72,7 @@ import { useNestedCanvasDrag } from './hooks/useNestedCanvasDrag';
 import { useCanvasKeyboardShortcuts } from './hooks/useCanvasKeyboardShortcuts';
 import { useCanvasOSDeletion } from './hooks/useCanvasOSDeletion';
 import { useWorkspaceStartupRecovery } from './hooks/useWorkspaceStartupRecovery';
+import { useQuitWorkflowPause } from './hooks/useQuitWorkflowPause';
 import { useConfirmDialog } from './hooks/useConfirmDialog';
 import { ArrowUpLeft } from 'lucide-react';
 import { viewportForZoomAtScreenPoint } from './utils/layoutGeometry';
@@ -350,6 +351,9 @@ export function Canvas() {
 
   const customFitView = useCustomFitView(reactFlowWrapper, nodes, drawings, isNavigationAnimatingRef);
 
+  const workflowCurrentFileRef = useRef(null);
+  const getWorkflowCurrentFile = useCallback(() => workflowCurrentFileRef.current, []);
+  const { pauseWorkflowsForQuit, releaseQuitPause } = useQuitWorkflowPause({ navigation, getCurrentFile: getWorkflowCurrentFile });
   const {
     saveCanvas, loadCanvas, exportCanvasToPNG,
     hasUnsavedChanges, setHasUnsavedChanges, currentFile, setCurrentFile,
@@ -361,10 +365,13 @@ export function Canvas() {
     quitGateRef,
     freezeCanvasForQuit,
     releaseCanvasQuitFence,
+    pauseWorkflowsForQuit,
+    releaseQuitPause,
     clearHistory,
     isAnimatingRef: isNavigationAnimatingRef,
     updateSetting,
   });
+  React.useLayoutEffect(() => { workflowCurrentFileRef.current = currentFile; }, [currentFile]);
 
   useCanvasInitialization({
     nodes, edges, drawings, currentFile, setCurrentFile, hasUnsavedChanges, setHasUnsavedChanges,
@@ -661,7 +668,7 @@ export function Canvas() {
   const { handlePointerDown, handlePointerMove, handlePointerUp } = useDrawingMode({
     placementMode, setPlacementMode, activeTool, eraserType, eraserSize,
     setNodes, setDrawings, takeSnapshot, activeColor,
-    penSize, getIntersectingNodes, isAnimatingRef: isNavigationAnimatingRef,
+    penSize, isAnimatingRef: isNavigationAnimatingRef,
     cursorsRef, drawingLayerRef, isInteractionRef,
   });
 

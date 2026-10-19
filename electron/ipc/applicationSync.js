@@ -64,6 +64,9 @@ const workspaces = new Map();
 const editWatchers = new Map();
 const workspaceSyncQueues = new Map();
 let server = null;
+let serverStartupPromise = null;
+let serverShutdownPromise = null;
+let serverLifecycleGeneration = 0;
 let loadPromise = null;
 let persistenceQueue = Promise.resolve();
 let lastServerError = null;
@@ -1401,55 +1404,89 @@ export async function registerApplicationSyncWorkspace(workspaceDir, requestedTo
 }
 
 export async function startApplicationSyncServer() {
-  await loadWorkspaces();
-  if (server) return true;
-  server = http.createServer(async (request, response) => {
-    const origin = String(request.headers.origin || '');
-    const url = new URL(request.url || '/', `http://127.0.0.1:${APPLICATION_SYNC_PORT}`);
-    if (url.pathname !== APPLICATION_SYNC_PATH) return sendJson(response, 404, { success: false, error: 'Not found.' }, origin);
-    if (request.method === 'OPTIONS') return sendJson(response, 204, {}, origin);
-    if (request.method !== 'POST' || (origin && origin !== 'null' && origin !== 'file://')) return sendJson(response, 403, { success: false, error: 'Sync requests must come from a saved local application file.' }, origin);
-    try {
-      const payload = await readJson(request);
-      const result = payload?.action === 'remove-cover'
-        ? await removeCoverLetter(payload)
-        : payload?.action === 'status'
-        ? await (async () => { registeredWorkspaceForToken(payload); return improvementStatus(app.getPath('userData')); })()
-        : payload?.action === 'reconcile'
-        ? await reconcileWorkspacePdfs(payload)
-        : await syncWorkspace(payload);
-      sendJson(response, 200, { success: true, ...result }, origin);
-    } catch (error) {
-      logger.warn(`[ApplicationSync] Sync failed: ${error?.message || error}`);
-      sendJson(response, error?.statusCode || 500, { success: false, error: error?.message || 'Could not sync this application.' }, origin);
-    }
-  });
-  try {
-    await new Promise((resolve, reject) => {
-      server.once('error', reject);
-      server.listen(APPLICATION_SYNC_PORT, '127.0.0.1', () => {
-        server.removeListener('error', reject);
-        resolve();
-      });
+  if (serverShutdownPromise) await serverShutdownPromise;
+  if (serverStartupPromise) return serverStartupPromise;
+  if (server?.listening) return true;
+  const generation = serverLifecycleGeneration;
+  const startup = (async () => {
+    await loadWorkspaces();
+    // App shutdown can begin while the durable capability registry is loading.
+    // A startup requested before that boundary must not bind a new server later.
+    if (generation !== serverLifecycleGeneration) return false;
+    const current = http.createServer(async (request, response) => {
+      const origin = String(request.headers.origin || '');
+      const url = new URL(request.url || '/', `http://127.0.0.1:${APPLICATION_SYNC_PORT}`);
+      if (url.pathname !== APPLICATION_SYNC_PATH) return sendJson(response, 404, { success: false, error: 'Not found.' }, origin);
+      if (request.method === 'OPTIONS') return sendJson(response, 204, {}, origin);
+      if (request.method !== 'POST' || (origin && origin !== 'null' && origin !== 'file://')) return sendJson(response, 403, { success: false, error: 'Sync requests must come from a saved local application file.' }, origin);
+      try {
+        const payload = await readJson(request);
+        const result = payload?.action === 'remove-cover'
+          ? await removeCoverLetter(payload)
+          : payload?.action === 'status'
+          ? await (async () => { registeredWorkspaceForToken(payload); return improvementStatus(app.getPath('userData')); })()
+          : payload?.action === 'reconcile'
+          ? await reconcileWorkspacePdfs(payload)
+          : await syncWorkspace(payload);
+        sendJson(response, 200, { success: true, ...result }, origin);
+      } catch (error) {
+        logger.warn(`[ApplicationSync] Sync failed: ${error?.message || error}`);
+        sendJson(response, error?.statusCode || 500, { success: false, error: error?.message || 'Could not sync this application.' }, origin);
+      }
     });
-  } catch (error) {
-    server = null;
-    lastServerError = String(error?.message || error).replace(/[\r\n\t]+/g, ' ').slice(0, 500);
-    logger.warn(`[ApplicationSync] Could not start sync service on 127.0.0.1:${APPLICATION_SYNC_PORT}: ${lastServerError}`);
-    return false;
-  }
-  lastServerError = null;
-  for (const workspace of workspaces.values()) watchWorkspaceEdits(workspace);
-  logger.info(`[ApplicationSync] Listening on 127.0.0.1:${APPLICATION_SYNC_PORT}`);
-  return true;
+    server = current;
+    let bound = false;
+    current.on('error', (error) => {
+      // The one-shot bind rejection below handles startup errors. Keep a
+      // listener after binding too: a runtime accept failure must be reported,
+      // rather than becoming an uncaught EventEmitter error in the main app.
+      if (!bound || server !== current) return;
+      lastServerError = String(error?.message || error).replace(/[\r\n\t]+/g, ' ').slice(0, 500);
+      logger.warn(`[ApplicationSync] Sync service error: ${lastServerError}`);
+    });
+    try {
+      await new Promise((resolve, reject) => {
+        current.once('error', reject);
+        current.listen(APPLICATION_SYNC_PORT, '127.0.0.1', () => {
+          bound = true;
+          current.removeListener('error', reject);
+          resolve();
+        });
+      });
+    } catch (error) {
+      if (server === current) server = null;
+      lastServerError = String(error?.message || error).replace(/[\r\n\t]+/g, ' ').slice(0, 500);
+      logger.warn(`[ApplicationSync] Could not start sync service on 127.0.0.1:${APPLICATION_SYNC_PORT}: ${lastServerError}`);
+      return false;
+    }
+    if (generation !== serverLifecycleGeneration) return false;
+    lastServerError = null;
+    for (const workspace of workspaces.values()) watchWorkspaceEdits(workspace);
+    logger.info(`[ApplicationSync] Listening on 127.0.0.1:${APPLICATION_SYNC_PORT}`);
+    return true;
+  })();
+  serverStartupPromise = startup;
+  try { return await startup; }
+  finally { if (serverStartupPromise === startup) serverStartupPromise = null; }
 }
 
 export async function stopApplicationSyncServer() {
-  stopEditWatchers();
-  if (!server) return;
-  const current = server;
-  server = null;
-  await new Promise(resolve => current.close(resolve));
+  if (serverShutdownPromise) return serverShutdownPromise;
+  serverLifecycleGeneration += 1;
+  const startup = serverStartupPromise;
+  const shutdown = (async () => {
+    // Let an already-issued bind settle before closing that exact server.
+    // start() calls made during shutdown wait for this whole boundary too.
+    await startup?.catch(() => {});
+    stopEditWatchers();
+    if (!server) return;
+    const current = server;
+    server = null;
+    await new Promise(resolve => current.close(resolve));
+  })();
+  serverShutdownPromise = shutdown;
+  try { await shutdown; }
+  finally { if (serverShutdownPromise === shutdown) serverShutdownPromise = null; }
 }
 
 // Test seams: deterministic suites do not bind a port, but can verify that

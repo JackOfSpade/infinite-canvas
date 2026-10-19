@@ -266,7 +266,7 @@ export const CanvasToolbar = React.memo(function CanvasToolbar({
 
         {/* ── Eraser Tool ──────────────────────────────────────────── */}
         <div className="relative" onClick={e => e.stopPropagation()}>
-          <ToolbarTooltip label="Eraser" shortcut="right-click for options" hidden={showEraserMenu}>
+          <ToolbarTooltip label="Eraser" shortcut="drawings only · right-click for options" hidden={showEraserMenu}>
             <button
               onClick={handleEraserClick}
               onContextMenu={handleEraserContextMenu}
@@ -282,16 +282,16 @@ export const CanvasToolbar = React.memo(function CanvasToolbar({
               <div>
                 <div className="text-white/40 uppercase tracking-wider text-[10px] font-semibold mb-1.5">Mode</div>
                 <button
-                  onClick={() => { setEraserType('object'); setActiveTool('eraser'); }}
+                  onClick={() => { setEraserType('object'); setActiveTool('eraser'); setShowEraserMenu(false); }}
                   className={`w-full px-2 py-1.5 rounded text-left transition mb-0.5 ${eraserType === 'object' ? 'bg-red-500/30 text-white' : 'text-white/70 hover:bg-white/10'}`}
                 >
-                  Erase by Object
+                  Erase whole stroke
                 </button>
                 <button
-                  onClick={() => { setEraserType('pixel'); setActiveTool('eraser'); }}
+                  onClick={() => { setEraserType('pixel'); setActiveTool('eraser'); setShowEraserMenu(false); }}
                   className={`w-full px-2 py-1.5 rounded text-left transition ${eraserType === 'pixel' ? 'bg-red-500/30 text-white' : 'text-white/70 hover:bg-white/10'}`}
                 >
-                  Erase by Pixels
+                  Erase part of stroke
                 </button>
               </div>
 
