@@ -147,7 +147,6 @@ const profileValidation = validateCareerProfile(snapshot.profile, {
 });
 const reader = await verifySnapshot(snapshot);
 const snapshotSha256 = sha256(snapshotBytes);
-const reportPath = path.join(artifactDirectory, 'final-approval-report.json');
 const emitReport = process.argv.includes('--emit-report');
 const existingReport = emitReport ? null : readJson('final-approval-report.json');
 const reportedSnapshotSha256 = existingReport?.snapshotSha256;

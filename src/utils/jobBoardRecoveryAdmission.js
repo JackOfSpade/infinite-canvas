@@ -1,5 +1,15 @@
 import { normalizeLocationInput } from './jobLocation.js';
 
+// This host-issued receipt proves the source-resolution boundary was already
+// crossed. Reopening its provider ledger would lose later recovered details.
+export function hasCheckpointedPostCollectionAnalysis(offer) {
+  const base = offer?.operationAuthority?.semanticBase;
+  return offer?.found === true && offer.providerGathered === true
+    && !!offer.runId && base?.runId === offer.runId
+    && !!offer.careerSnapshotId && base.careerSnapshotId === offer.careerSnapshotId
+    && ['resolved-source-continuation', 'resume-saved-scrape'].includes(base.kind);
+}
+
 function normalizeResumeProfileFingerprint(value) {
   const fingerprint = typeof value === 'string' ? value.trim() : '';
   return /^[a-f0-9]{64}$/.test(fingerprint) ? fingerprint : '';

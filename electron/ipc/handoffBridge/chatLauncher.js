@@ -94,6 +94,30 @@ const FOCUS = `function run(argv) {
 const EDITOR = `(() => { const editor = document.querySelector('form [contenteditable="true"][role="textbox"]');
   return JSON.stringify({ready: !!editor, empty: (editor?.innerText || '').trim() === '', url: location.href,
     attachments: document.querySelectorAll('form button[aria-label^="Remove "]').length}); })()`;
+const READ_MODE = `(() => {
+  const controls = [...document.querySelectorAll('button[aria-pressed]')];
+  const chat = controls.filter(e => e.textContent.trim() === 'Chat');
+  const work = controls.filter(e => e.textContent.trim() === 'Work');
+  const editor = document.querySelector('form [contenteditable="true"][role="textbox"]');
+  const label = editor?.getAttribute('aria-label');
+  if (chat.length === 1 && work.length === 1) {
+    if (chat[0].getAttribute('aria-pressed') === 'true' && work[0].getAttribute('aria-pressed') === 'false'
+      && label === 'Ask ChatGPT') return 'chat';
+    if (work[0].getAttribute('aria-pressed') === 'true') return 'work';
+    return 'unknown';
+  }
+  // Existing conversations have no home switcher. Their composer still
+  // identifies the mode; never assume a /c/ URL means Chat rather than Work.
+  return chat.length === 0 && work.length === 0 && label === 'Ask ChatGPT' ? 'chat'
+    : label === 'Work with ChatGPT' ? 'work' : 'unknown';
+})()`;
+const SELECT_CHAT = `(() => {
+  const buttons = [...document.querySelectorAll('button[aria-pressed]')]
+    .filter(e => e.textContent.trim() === 'Chat');
+  if (buttons.length !== 1 || buttons[0].disabled) return 'unavailable';
+  if (buttons[0].getAttribute('aria-pressed') !== 'true') buttons[0].click();
+  return 'selected';
+})()`;
 const INIT_UPLOAD = id => `(() => { window.__icBridgeUploads ||= Object.create(null);
   window.__icBridgeUploads[${JSON.stringify(id)}] = []; return 'ready'; })()`;
 const APPEND_UPLOAD = (id, chunk) => `(() => { const b = window.__icBridgeUploads?.[${JSON.stringify(id)}];
@@ -298,6 +322,11 @@ export function createChatLauncher({ run = runUserChromeScript, delay = sleep, o
     }
   };
   const js = (tab, code) => safeRun(EXEC, [tab.windowId, tab.tabId, code]);
+  const readMode = async tab => {
+    const mode = await js(tab, READ_MODE);
+    tab.observed = { ...(tab.observed || {}), mode: ['chat', 'work'].includes(mode) ? mode : 'unknown' };
+    return mode;
+  };
   const upload = async (tab, attachments) => {
     const names = [];
     for (const attachment of attachments) {
@@ -425,12 +454,18 @@ export function createChatLauncher({ run = runUserChromeScript, delay = sleep, o
         if (!ready) return { ok: false, reason: 'editor_timeout' };
         if (ready.attachments !== 0) return { ok: false, reason: 'attachment_draft_present' };
         if (continueChat && ready.url.match(CHAT_ID)?.[1] !== tab.chatId) return { ok: false, reason: 'chat_changed' };
-        if (continueChat && ready.empty !== true) return { ok: false, reason: 'editor_not_empty' };
+        if (ready.empty !== true) return { ok: false, reason: 'editor_not_empty' };
         state(owner, 'checking');
+        if (!continueChat && !await poll(() => js(tab, SELECT_CHAT), value => value === 'selected', 10_000)) {
+          return { ok: false, reason: 'chat_mode_unavailable' };
+        }
+        if (!await poll(() => readMode(tab), value => value === 'chat', 10_000)) {
+          return { ok: false, reason: 'chat_mode_mismatch' };
+        }
         if (await js(tab, INSERT(message)) !== 'match') return { ok: false, reason: 'insert_mismatch' };
         const configured = await configureModelAndEffort(tab);
         if (!configured.ok) return configured;
-        const observed = configured.observed;
+        const observed = { ...configured.observed, mode: 'chat' };
         if (await js(tab, OPEN_PROFILE) !== 'opened') return { ok: false, reason: 'account_unknown' };
         const profileRead = await poll(() => js(tab, READ_PROFILE), value => value.includes('"signedIn":true'), 3000);
         if (!profileRead) return { ok: false, reason: 'account_unknown' };
@@ -443,6 +478,7 @@ export function createChatLauncher({ run = runUserChromeScript, delay = sleep, o
           tab.attachmentHandoffCode = attachmentHandoffCode.toUpperCase();
         }
         // Settings were selected and read back before the click.
+        if (await readMode(tab) !== 'chat') return { ok: false, reason: 'chat_mode_mismatch' };
         if (await js(tab, SEND) !== 'clicked') return { ok: false, reason: 'send_unavailable' };
         sendAttempted = true;
         tab.sendAttempted = true;

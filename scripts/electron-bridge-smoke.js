@@ -11,12 +11,6 @@ import os from 'node:os';
 import path from 'node:path';
 import { _electron as electron } from 'playwright';
 import {
-  APPLICATION_QUALITY_CHECKLIST_VERSION,
-  APPLICATION_QUALITY_CRITERIA,
-  LOCAL_AI_GENERATION_AUDIT_VERSION,
-  __queueLegacyLocalApplicationFixtureForTests,
-} from '../electron/ipc/localAiApplication.js';
-import {
   CAREER_SNAPSHOT_COMPILATION_CONTRACT,
   CAREER_SNAPSHOT_SCHEMA_VERSION,
   CAREER_SNAPSHOT_STATUS_APPROVED,
@@ -42,6 +36,7 @@ const BRIDGE_KEYS = [
   'handoffBridgeApproveBinary', 'handoffBridgeChooseCredentials', 'handoffBridgeRestartTunnel', 'handoffBridgeStopOrphan',
   'handoffBridgeGetTunnelLog', 'handoffBridgeOpenPairing', 'handoffBridgeCancelPairing', 'handoffBridgeNewChat',
   'handoffBridgeContinueChat', 'handoffBridgeStartWorkerPool', 'handoffBridgeCopyWorkerStarter', 'handoffBridgeRestartWorker',
+  'handoffBridgeOpenWorkerChat', 'handoffBridgeRetryWorkerLaunch', 'handoffBridgeGetLaunchAccount',
   'handoffBridgePause', 'handoffBridgeResume', 'handoffBridgeRevokeAll',
   'handoffBridgeForgetSetup', 'handoffBridgeRelease', 'handoffBridgeUnrelease', 'handoffBridgeReleasePush',
   'handoffBridgeUnreleasePush', 'handoffBridgeHoldJob', 'handoffBridgeAckAlarm', 'handoffBridgeGetActivity',
@@ -80,7 +75,6 @@ const SYNTHETIC_LETTER_SENTENCES = Object.freeze([
   'I would apply my experience delivering supported systems to reliable system delivery this role requires.',
 ]);
 const SYNTHETIC_LETTER = SYNTHETIC_LETTER_SENTENCES.join(' ');
-const SYNTHETIC_THESIS = 'Reliable system delivery is the supported capability this engineering role needs.';
 const SYNTHETIC_CAREER_DATA = [
   SYNTHETIC_IDENTITY.name, SYNTHETIC_IDENTITY.contact[0], '## Example Co', SYNTHETIC_IDENTITY.subtitleRole,
   SYNTHETIC_EVIDENCE, SYNTHETIC_LETTER,
@@ -242,99 +236,38 @@ async function linkOAuth(pairingCode) {
   return tokens.access_token;
 }
 
-function syntheticQualityCriteria() {
-  return APPLICATION_QUALITY_CRITERIA.map(({ id, requirement }) => ({ id, status: 'pass', evidence: requirement }));
-}
-
-function syntheticQualityChecklist() {
-  return APPLICATION_QUALITY_CRITERIA.map(({ id }) => ({ id, status: 'pass', detail: `Reviewed ${id} against the final documents.` }));
-}
-
-function syntheticGenerationAudit() {
-  return {
-    version: LOCAL_AI_GENERATION_AUDIT_VERSION,
-    jobPriorities: [{
-      requirement: 'Reliable system delivery', priority: 'highest', disposition: 'addressed-both',
-      justification: 'The selected systems evidence directly addresses the stated delivery requirement.',
-    }],
-    resumePlan: {
-      strategy: 'Lead with the strongest supported systems evidence for the role.',
-      selectionRationale: 'The retained role preserves direct factual support and concise relevance.',
-    },
-    coverLetterPlan: {
-      controllingThesis: SYNTHETIC_THESIS,
-      paragraphs: [{
-        paragraph: SYNTHETIC_LETTER,
-        argumentativeJob: 'Establish the controlling evidence-to-need connection.',
-        relationToThesis: 'Connect the source-supported proof to reliable system delivery.',
-        relationToPreviousParagraph: 'opening',
-        sentences: SYNTHETIC_LETTER_SENTENCES.map((sentence, index) => ({
-          sentence,
-          function: index === 0
-            ? 'States the general candidate capability.'
-            : (index === 1 ? 'Supplies the source-supported candidate proof.' : 'Connects the proof to the target responsibility.'),
-          relationToPreviousSentence: index === 0 ? 'opening' : 'Develops the preceding argument step.',
-        })),
-        argumentMapping: {
-          claim: SYNTHETIC_LETTER_SENTENCES[0], proof: SYNTHETIC_LETTER_SENTENCES[1], relevance: SYNTHETIC_LETTER_SENTENCES[2],
-          jobNeedQuote: 'reliable system delivery',
-        },
-      }],
-    },
-    finalDecisionSummary: 'The final documents use the strongest supported evidence without introducing a second cover-letter argument.',
-  };
-}
-
-function syntheticApplicationFields(stage) {
-  switch (stage) {
-    case 'evidence-plan':
-      return {
-        identity: SYNTHETIC_IDENTITY,
-        evidence: [
-          { id: 'resume-proof', sourceId: 'career-data', quote: SYNTHETIC_EVIDENCE, requirement: 'Reliable system delivery', priority: 'highest' },
-          { id: 'letter-proof', sourceId: 'career-data', quote: SYNTHETIC_LETTER, requirement: 'Reliable system delivery', priority: 'highest' },
-          { id: 'job-proof', sourceId: 'job-listing', quote: 'reliable system delivery', requirement: 'Reliable system delivery', priority: 'highest' },
-        ],
-        requirements: [{ id: 'need-1', text: 'Reliable system delivery', priority: 'highest', evidenceIds: ['resume-proof', 'job-proof'] }],
-      };
-    case 'resume':
-      return {
-        resume: {
-          schemaVersion: 'structured-resume.v1', identity: SYNTHETIC_IDENTITY,
-          roles: [{
-            id: 'role-1', title: 'Engineer', company: 'Example Co', dates: '', location: '',
-            bullets: [{ id: 'bullet-1', text: SYNTHETIC_EVIDENCE, evidenceIds: ['resume-proof'] }],
-          }],
-        },
-      };
-    case 'cover-letter':
-      return {
-        coverLetter: {
-          name: SYNTHETIC_IDENTITY.name, contact: SYNTHETIC_IDENTITY.contact,
-          paragraphs: [{ id: 'paragraph-1', text: SYNTHETIC_LETTER, evidenceIds: ['letter-proof', 'job-proof'] }],
-          roleThesis: SYNTHETIC_THESIS,
-          coverLetterArgument: {
-            primaryEvidence: {
-              evidence: SYNTHETIC_EVIDENCE, evidenceRole: 'Engineer at Example Co',
-              relationToThesis: 'The systems work establishes the delivery capability named in the thesis.',
-            },
-          },
-        },
-      };
-    case 'review':
-      return {
-        decision: 'pass', findings: [], checklist: syntheticQualityChecklist(),
-        qualityReview: {
-          checklistVersion: APPLICATION_QUALITY_CHECKLIST_VERSION,
-          criteria: syntheticQualityCriteria(),
-          resume: { decision: 'approved', rationale: 'The résumé preserves direct source-supported systems evidence with clear relevance.' },
-          coverLetter: { decision: 'approved', rationale: 'One controlling argument uses minimum-sufficient evidence for target system delivery.' },
-        },
-        generationAudit: syntheticGenerationAudit(),
-      };
-    default:
-      throw new Error(`Unexpected synthetic application handoff stage: ${String(stage)}`);
+function syntheticApplicationFields(stage, prompt) {
+  const marker = '\n\nAuthoritative context:\n';
+  const markerAt = prompt.lastIndexOf(marker);
+  assert.notEqual(markerAt, -1, 'current application stages must include authoritative source context');
+  const context = JSON.parse(prompt.slice(markerAt + marker.length));
+  const isRequirement = unit => unit.text.includes(SYNTHETIC_JOB.snippet);
+  if (stage === 'requirements') {
+    const source = context.requirementsProgress.sourceCoverage;
+    const evidence = source.units.filter(isRequirement).map((unit, index) => ({
+      id: `p1-smoke-evidence-${index}`, sourceId: 'job-listing', quote: unit.text,
+      requirement: 'Reliable system delivery', priority: 'high',
+    }));
+    const requirements = evidence.map((item, index) => ({
+      id: `p1-smoke-requirement-${index}`, text: item.requirement, priority: 'high', evidenceIds: [item.id],
+    }));
+    return {
+      storeDigest: context.authorityStore.digest, complete: true, identity: context.trustedIdentity,
+      evidence, requirements, nextUnitIndex: source.unitStart + source.units.length,
+      coverage: source.units.map(unit => {
+        const index = evidence.findIndex(item => item.quote === unit.text);
+        return { unitId: unit.id, disposition: index >= 0 ? 'requirement' : 'not-a-requirement',
+          requirementIds: index >= 0 ? [requirements[index].id] : [] };
+      }),
+    };
   }
+  if (stage === 'requirements-audit') {
+    return {
+      storeDigest: context.authorityStore.digest, auditDigest: context.auditDigest,
+      rows: context.units.map(unit => ({ unitId: unit.id, disposition: isRequirement(unit) ? 'requirement' : 'not-a-requirement' })),
+    };
+  }
+  throw new Error(`Unexpected synthetic application preflight stage: ${String(stage)}`);
 }
 
 function sharedFieldsFromPrompt(prompt) {
@@ -356,7 +289,7 @@ function syntheticResponseForServedHandoff(handoff) {
   const shared = sharedFieldsFromPrompt(handoff.prompt);
   assert.equal(shared.stage, handoff.stage, 'served stage must equal the stage in its authoritative prompt');
   assert.equal(shared.handoffCode, handoff.handoffCode, 'served code must equal the code in its authoritative prompt');
-  return JSON.stringify({ ...shared, ...syntheticApplicationFields(shared.stage) });
+  return JSON.stringify({ ...shared, ...syntheticApplicationFields(shared.stage, handoff.prompt) });
 }
 
 function mcpToolBody(response, label) {
@@ -385,24 +318,6 @@ async function queueSyntheticApplication(page, canvasFilePath, label) {
   assert.equal(queued.success, true, `${label}: synthetic application must queue through the frozen app IPC: ${JSON.stringify(queued)}`);
   assert.match(queued.localJob?.id || '', /^[0-9a-f-]{36}$/i, `${label}: queueLocalApplication must return its durable localJob id`);
   return queued;
-}
-
-// The bridge response fixture below intentionally covers the retained
-// evidence-plan/resume/cover-letter/review protocol. Keep that compatibility
-// coverage host-side: it must never be an alternate renderer or IPC creation
-// path for an unpinned application.
-async function seedLegacyBridgeFlowApplication(canvasFilePath, label) {
-  const localJob = await __queueLegacyLocalApplicationFixtureForTests({
-    canvasFilePath,
-    transport: 'paste',
-    job: SYNTHETIC_JOB,
-    careerData: SYNTHETIC_CAREER_DATA,
-    resumeProfile: {
-      workHistory: [{ id: 'role-1', title: 'Engineer', employer: 'Example Co', startDate: '', endDate: '' }],
-    },
-  });
-  assert.match(localJob?.id || '', /^[0-9a-f-]{36}$/i, `${label}: legacy bridge fixture must create a durable test job`);
-  return { localJob };
 }
 
 async function publishApplicationJobs(page, seq, jobs, label) {
@@ -898,8 +813,8 @@ try {
     canvasFilePath: canvasPath,
   });
   assert.equal(discardedStrictIpcJob.success, true,
-    `current-authority IPC fixture must be discarded through production IPC before legacy bridge-flow setup: ${JSON.stringify(discardedStrictIpcJob)}`);
-  const humanPasteJob = await seedLegacyBridgeFlowApplication(canvasPath, 'human-paste fixture');
+    `current-authority IPC fixture must be discarded through production IPC before current bridge-flow setup: ${JSON.stringify(discardedStrictIpcJob)}`);
+  const humanPasteJob = await queueSyntheticApplication(page, canvasPath, 'human-paste fixture');
   const published = await app.evaluate(({ BrowserWindow }, filePath) => {
     const window = BrowserWindow.getAllWindows()[0];
     window.__canvasFilePath = filePath;
@@ -914,11 +829,11 @@ try {
   const chat = await page.evaluate(() => window.electronAPI.handoffBridgeNewChat());
   assert.equal(chat.success, true, `New chat must mint a session after a link: ${JSON.stringify(chat)}`);
   const starter = await app.evaluate(() => globalThis.__icHandoffBridgeTest?.readStarterClipboard?.() || '');
-  const session = /\bwith session ([23456789ABCDEFGHJKLMNPQRSTUVWXYZ]{26})\./.exec(starter)?.[1];
+  let session = /\bwith session ([23456789ABCDEFGHJKLMNPQRSTUVWXYZ]{26})\./.exec(starter)?.[1];
   assert.ok(session, 'main-owned clipboard starter must contain the 26-character session code after "with session"');
   const humanHandoff = await mcpToolCall(accessToken, 3, 'get_handoff', { session }, 'human-paste initial get_handoff');
   assert.equal(humanHandoff.status, 'served', `active synthetic application must be served before a human paste: ${JSON.stringify(humanHandoff)}`);
-  assert.equal(humanHandoff.stage, 'evidence-plan', 'the human-paste fixture must begin at the application evidence stage');
+  assert.equal(humanHandoff.stage, 'requirements', 'the human-paste fixture must begin at current requirements discovery');
   const humanPaste = await page.evaluate(({ jobId, canvasFilePath, handoffCode, response }) => window.electronAPI.submitLocalApplicationHandoff({
     jobId, canvasFilePath, handoffCode, response,
   }), {
@@ -928,8 +843,8 @@ try {
     response: syntheticResponseForServedHandoff(humanHandoff),
   });
   assert.equal(humanPaste.accepted, true, `human local-application paste must advance the active bridge-served handoff: ${JSON.stringify(humanPaste)}`);
-  assert.equal(humanPaste.completed, false, 'the human evidence-plan paste must leave later application stages to run');
-  assert.equal(humanPaste.handoff?.stage, 'resume', 'human local-application paste must advance the durable app handoff to résumé');
+  assert.equal(humanPaste.completed, false, 'the human requirements paste must leave the independent audit to run');
+  assert.equal(humanPaste.handoff?.stage, 'requirements-audit', 'human local-application paste must advance to the independent audit');
   assert.notEqual(humanPaste.handoff?.handoffCode, humanHandoff.handoffCode, 'human local-application paste must rotate the app-owned handoff code');
 
   // This is the renderer publication the real dock publisher sends after the
@@ -957,14 +872,16 @@ try {
   }, 'a human local-application paste must auto-hold its active bridge lane with human_advance');
 
   // Keep the held human lane intact, then prove a second all-synthetic job
-  // drains every application stage through the real OAuth/MCP/main/app path.
-  const fullDrainJob = await seedLegacyBridgeFlowApplication(canvasPath, 'full-drain fixture');
+  // advances current requirements discovery and its independent audit through
+  // the real OAuth/MCP/main/app path. Document writing has its own acceptance
+  // suite; this transport smoke must not resurrect the retired v1 workflow.
+  const fullDrainJob = await queueSyntheticApplication(page, canvasPath, 'preflight-drain fixture');
   await publishApplicationJobs(page, SMOKE_PUBLISH_SEQUENCE_BASE + 3, [
     { jobId: humanPasteJob.localJob.id, canvasFilePath: canvasPath, dockState: 'awaiting', sig: 'synthetic-human-v2' },
     { jobId: fullDrainJob.localJob.id, canvasFilePath: canvasPath, dockState: 'awaiting', sig: 'synthetic-full-drain-v1' },
   ], 'full-drain fixture');
   await releaseApplicationJob(page, fullDrainJob.localJob.id, 'full-drain fixture');
-  const applicationStages = ['evidence-plan', 'resume', 'cover-letter', 'review'];
+  const applicationStages = ['requirements', 'requirements-audit'];
   let rpcId = 5;
   for (const [index, stage] of applicationStages.entries()) {
     const served = await mcpToolCall(accessToken, rpcId++, 'get_handoff', { session }, `full-drain ${stage} get_handoff`);
@@ -974,15 +891,23 @@ try {
       session, handoffCode: served.handoffCode, response: syntheticResponseForServedHandoff(served),
     }, `full-drain ${stage} submit_handoff`);
     assert.equal(accepted.status, 'accepted', `full-drain ${stage}: real MCP submit_handoff must accept the synthetic stage response: ${JSON.stringify(accepted)}`);
-    assert.equal(accepted.jobComplete, index === applicationStages.length - 1,
-      `full-drain ${stage}: completion must occur only after the final review stage`);
-    if (index < applicationStages.length - 1) {
-      assert.equal(accepted.next?.status, 'served', `full-drain ${stage}: accepted response must expose the app-owned next handoff`);
-      assert.equal(accepted.next?.stage, applicationStages[index + 1], `full-drain ${stage}: next handoff must advance exactly one stage`);
-    } else {
-      assert.equal(accepted.next, null, 'full-drain review: completed application must not expose another handoff');
-    }
+    assert.equal(accepted.jobComplete, false, `preflight ${stage}: document writing must remain incomplete`);
+    const expectedNextStage = applicationStages[index + 1] || 'write';
+    assert.equal(accepted.next?.status, 'session_full', `preflight ${stage}: independent successor requires a fresh chat`);
+    const freshChat = await page.evaluate(() => window.electronAPI.handoffBridgeNewChat());
+    assert.equal(freshChat.success, true, `preflight ${stage}: fresh chat must replace completed-stage context`);
+    const freshStarter = await app.evaluate(() => globalThis.__icHandoffBridgeTest?.readStarterClipboard?.() || '');
+    const priorSession = session;
+    session = /\bwith session ([23456789ABCDEFGHJKLMNPQRSTUVWXYZ]{26})\./.exec(freshStarter)?.[1];
+    assert.ok(session && session !== priorSession, `preflight ${stage}: replacement chat has a distinct capability`);
+    const successor = await mcpToolCall(accessToken, rpcId++, 'get_handoff', { session }, `preflight ${stage} fresh successor`);
+    assert.equal(successor.status, 'served', `preflight ${stage}: fresh chat receives the app-owned successor`);
+    assert.equal(successor.stage, expectedNextStage, `preflight ${stage}: successor advances exactly one current stage`);
   }
+  const discardedPreflightJob = await page.evaluate(args => window.electronAPI.discardLocalApplication(args), {
+    jobId: fullDrainJob.localJob.id, canvasFilePath: canvasPath,
+  });
+  assert.equal(discardedPreflightJob.success, true, 'the transport fixture must retire its unfinished document-writing job');
 
   const nextChat = await page.evaluate(() => window.electronAPI.handoffBridgeNewChat());
   assert.equal(nextChat.success, true, 'a second human New chat must retire the old session');

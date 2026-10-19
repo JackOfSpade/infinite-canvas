@@ -379,14 +379,17 @@ function recognizedCoarseLocationCountry(raw) {
   return !parsed.countryConflict && parsed.scope === 'country' ? String(parsed.country || '').trim() : '';
 }
 
-/** Infer only an explicit country-shaped suffix such as "Remote - Canada". */
-function recognizedRemoteLocationCountry(raw) {
+/** Retain a recognized country from a compact listing location, including a city. */
+function parseRemoteListingLocation(raw) {
   const remainder = String(raw || '').replace(/\bremote\b/ig, ' ')
     .replaceAll('(', ' ').replaceAll(')', ' ').replaceAll('[', ' ').replaceAll(']', ' ')
     .replace(/^[\s,;:|/\-–—]+|[\s,;:|/\-–—]+$/g, '').trim();
-  if (!remainder) return '';
-  const parsed = normalizeLocationInput(remainder);
-  return !parsed.countryConflict && parsed.scope === 'country' ? String(parsed.country || '').trim() : '';
+  return normalizeLocationInput(remainder);
+}
+
+function recognizedRemoteLocationCountry(raw) {
+  const parsed = parseRemoteListingLocation(raw);
+  return !parsed.countryConflict && ['country', 'city', 'state'].includes(parsed.scope) ? String(parsed.country || '').trim() : '';
 }
 
 function isNonGeographicCompensationLocation(raw) {
@@ -461,11 +464,17 @@ export function compensationResidencesForJob(job = {}, fallback = {}) {
  */
 function remoteResidenceKeyFor(context = {}, rawLocation = '') {
   const region = String(context.remoteRegion || '').trim().toLowerCase();
-  // Structured restrictions are authoritative. Only an absent/unknown
-  // structured restriction may be repaired from an explicit raw form such as
-  // "Remote - Canada"; bare "Remote" remains intentionally unresolved.
+  // Structured restrictions are authoritative. Otherwise the compact listing
+  // location can select a residence for an explicitly provisional salary
+  // estimate. This does not establish hiring eligibility. Bare Remote stays
+  // unresolved; never choose an arbitrary residence across countries.
   const structuredPermittedCountry = normalizeCountry(context.remoteCountry);
-  const permittedCountry = structuredPermittedCountry || recognizedRemoteLocationCountry(rawLocation);
+  const rawPlace = parseRemoteListingLocation(rawLocation);
+  // A city is only a provisional country hint when no region was established.
+  // In particular, a U.S. board city must not narrow an Americas/global role
+  // and invalidate the already selected Canadian "other" residence.
+  const allowCountryHint = !region || region === 'unknown' || rawPlace.scope === 'country';
+  const permittedCountry = structuredPermittedCountry || (allowCountryHint ? recognizedRemoteLocationCountry(rawLocation) : '');
   const key = region === 'usa' || region === 'us'
     ? 'usa'
     : region === 'canada' || region === 'ca'
@@ -479,7 +488,10 @@ function remoteResidenceKeyFor(context = {}, rawLocation = '') {
             : permittedCountry
               ? 'other'
               : '';
-  return { key, permittedCountry };
+  const provisional = !structuredPermittedCountry && (!region || region === 'unknown')
+    && Boolean(permittedCountry)
+    && parseRemoteListingLocation(rawLocation).scope !== 'country';
+  return { key, permittedCountry, provisional };
 }
 
 export function resolveCompensationLocation(job = {}, context = {}, remoteResidences = {}) {
@@ -505,7 +517,7 @@ export function resolveCompensationLocation(job = {}, context = {}, remoteReside
     if (/^(?:remote|hybrid|on[-\s]?site|onsite|anywhere|worldwide|global)$/i.test(location)) return null;
     return location ? canonicalizeCompensationLocation({ kind: 'job_location', display: location }) : null;
   }
-  const { key, permittedCountry } = remoteResidenceKeyFor(context, rawLocation);
+  const { key, permittedCountry, provisional } = remoteResidenceKeyFor(context, rawLocation);
   const value = key ? remoteResidences?.[key] : null;
   const country = normalizeCountry(value?.country || value?.countryCode);
   // A malformed saved residence must only make this optional comparison
@@ -516,6 +528,7 @@ export function resolveCompensationLocation(job = {}, context = {}, remoteReside
     && permittedCountry.localeCompare(country, undefined, { sensitivity: 'base' }) !== 0) return null;
   const bits = [value.city, value.subdivision, country].map(v => String(v || '').trim()).filter(Boolean);
   return canonicalizeCompensationLocation({
+    ...(provisional ? { basis: 'listing-country-residence-estimate' } : {}),
     kind: `remote_${key}_residence`, key, country, city: value.city, subdivision: value.subdivision,
     countryConflict: value?.countryConflict, display: bits.join(', '),
   });

@@ -148,14 +148,15 @@ export default [
       recordBridgeLaunchDiagnostic({ telemetry: false, at: 1000, workerOrdinal: 1, stage: 'failed', reason: 'model_menu_missing' });
       assert(!generateMarkdown({ ...base, filterCode: 'FULL' }).markdown.includes('Automatic worker launch outcomes'));
       for (let i = 0; i < 25; i++) recordBridgeLaunchDiagnostic({ telemetry: true, at: 2000 + i, workerOrdinal: 1,
-        stage: 'failed', reason: i === 24 ? 'approval_required' : 'model_menu_missing', attempt: i, url: secret });
+        stage: 'failed', reason: i === 24 ? 'approval_required' : 'model_menu_missing', attempt: i, mode: i === 24 ? 'work' : 'chat', url: secret });
       recordBridgeLaunchDiagnostic({ telemetry: true, at: 3000, workerOrdinal: 1, stage: 'failed', reason: secret });
       clearBridgeQueueDiagnostic(); // no live pool or lane remains after discard
-      for (const filterCode of ['FULL', 'BRIDGELAUNCH', 'BRIDGEWORKERS']) {
+      for (const filterCode of ['FULL', 'BRIDGELAUNCH', 'BRIDGECHATMODE', 'BRIDGEWORKERS']) {
         const markdown = generateMarkdown({ ...base, filterCode }).markdown;
         assert(markdown.includes('Automatic worker launch outcomes: 20 retained'));
         assert(markdown.includes('reason `approval_required`') && markdown.includes('reason `model_menu_missing`'));
         assert(markdown.includes('reason `none`') && !markdown.includes(secret));
+        assert(markdown.includes('mode `work`') && markdown.includes('mode `chat`') && markdown.includes('mode `unknown`'));
         assert(!markdown.includes('1970-01-01T00:00:02.000Z'), 'bounded ring evicts oldest outcomes');
       }
     } finally { clearBridgeLaunchDiagnostic(); }

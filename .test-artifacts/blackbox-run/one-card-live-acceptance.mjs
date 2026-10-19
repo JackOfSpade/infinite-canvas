@@ -424,7 +424,6 @@ export function archiveRunRestoreResidue({ canvas, jobId, evidenceRoot, baseline
     };
     visit(tree);
   };
-  const job = path.join(root, '.local-ai', 'jobs', jobId);
   for (const folder of ['rejected-handoffs', 'writer-shortlists']) {
     for (const relativeRoot of [path.join('.local-ai', 'jobs', jobId, folder), path.join('.local-ai', folder, jobId)]) {
       const directory = path.join(root, relativeRoot);

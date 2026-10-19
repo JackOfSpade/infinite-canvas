@@ -60,7 +60,7 @@ async function runHandlerWithGapReview({ reviewer, scorerGaps, rawScore = 86 }) 
       snapshotContext: { canvasFilePath: canvas, runId: 'run-1' },
     });
     const telemetry = getJobsTelemetry();
-    return { result, scorerCalls, reviewerCalls, telemetry: telemetry.scoring, postingClause };
+    return { result, scorerCalls, reviewerCalls, telemetry: telemetry.scoring, heartbeat: telemetry.scoringHeartbeat, postingClause };
   } finally {
     registerJobsHandlers();
     await fs.rm(directory, { recursive: true, force: true });
@@ -456,7 +456,7 @@ export default [
   {
     name: 'Gap review pipeline: the real score-jobs handler reviews a capped job once and publishes the recalibrated score',
     run: async () => {
-      const { result, scorerCalls, reviewerCalls, telemetry } = await runHandlerWithGapReview({
+      const { result, scorerCalls, reviewerCalls, telemetry, heartbeat } = await runHandlerWithGapReview({
         scorerGaps: twoRequiredGaps,
         reviewer: async (prompt, options) => {
           const ids = listedIdsIn(prompt);
@@ -481,13 +481,14 @@ export default [
       assert(telemetry.gapReview.candidates === 1 && telemetry.gapReview.batches === 1 && telemetry.gapReview.reviewedJobs === 1
         && telemetry.gapReview.reviewed === 1 && telemetry.gapReview.raisedAboveThreshold === 1 && telemetry.gapReview.failed === null
         && telemetry.gapReview.changes.priority === 1 && telemetry.gapReview.changes.confirmed === 1, `scoring telemetry gapReview was ${JSON.stringify(telemetry.gapReview)}`);
+      assert(heartbeat?.active === false && heartbeat.phase === 'completed' && heartbeat.scored === 1, 'gap review must finish before closing the live scoring heartbeat');
       assert(telemetry.calibration.cappedAcrossThreshold === 0 && telemetry.calibration.capped === 1, 'after the review the job is no longer capped across the bar but is still counted as capped');
     },
   },
   {
     name: 'Gap review pipeline: a failed review handoff leaves the calibrated score and records the failure',
     run: async () => {
-      const { result, reviewerCalls, telemetry } = await runHandlerWithGapReview({
+      const { result, reviewerCalls, telemetry, heartbeat } = await runHandlerWithGapReview({
         scorerGaps: twoRequiredGaps,
         reviewer: async () => { throw new Error('synthetic review transport failure'); },
       });
@@ -497,6 +498,7 @@ export default [
       assert(scored.matchScore === 69 && scored.rawScore === 86 && !scored.fitAssessment.gapReview, `the calibrated score must stand (got ${scored.matchScore}, gapReview ${JSON.stringify(scored.fitAssessment.gapReview)})`);
       assert(telemetry.gapReview.candidates === 1 && telemetry.gapReview.reviewedJobs === 0 && telemetry.gapReview.reviewed === 0
         && telemetry.gapReview.failed === 'synthetic review transport failure', `telemetry gapReview was ${JSON.stringify(telemetry.gapReview)}`);
+      assert(heartbeat?.active === false && heartbeat.phase === 'completed', 'a failed optional review must not leave the scorer live');
       assert(telemetry.calibration.cappedAcrossThreshold === 1, 'the unreviewed job still counts as capped across the bar');
     },
   },

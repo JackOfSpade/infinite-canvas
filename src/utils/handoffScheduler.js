@@ -160,6 +160,34 @@ export async function runAutomaticHandoffWorkers({ workerCount, claim, work, sig
   }
 }
 
+// Clear consumed slots immediately and compact only occasionally. Shifting a
+// long array for every claim otherwise repeatedly moves the remaining backlog.
+function createReadyLane(items = []) {
+  let entries = [...items];
+  let head = 0;
+  return {
+    get length() { return entries.length - head; },
+    push(item) { entries.push(item); },
+    shift() {
+      if (head === entries.length) return undefined;
+      const item = entries[head];
+      entries[head++] = undefined;
+      if (head === entries.length) {
+        entries = [];
+        head = 0;
+      } else if (head >= 1024 && head * 2 >= entries.length) {
+        entries = entries.slice(head);
+        head = 0;
+      }
+      return item;
+    },
+  };
+}
+
+function assertReadyDescriptor(item) {
+  if (item == null) throw new TypeError('Dependency-ready queue descriptors must not be null or undefined.');
+}
+
 /**
  * A dependency planner for automatic pipelines whose later descriptors become
  * runnable while earlier descriptors are still in flight. The queue owns no
@@ -170,13 +198,15 @@ export async function runAutomaticHandoffWorkers({ workerCount, claim, work, sig
  * the whole dependency graph has drained.
  */
 export function createDependencyReadyQueue(initial = []) {
-  const ready = Array.isArray(initial) ? [...initial] : [];
+  const initialItems = Array.isArray(initial) ? initial : [];
+  for (const item of initialItems) assertReadyDescriptor(item);
+  const ready = createReadyLane(initialItems);
   // A newly released dependent phase can be more useful than an unclaimed
   // independent descriptor (for example, it lets research assessment overlap
   // a slow raw tail). Keep that policy here rather than growing a second local
   // scheduler at each pipeline. FIFO is preserved within both priority and
   // ordinary lanes.
-  const priorityReady = [];
+  const priorityReady = createReadyLane();
   let pending = ready.length;
   const waiters = new Set();
 
@@ -210,6 +240,7 @@ export function createDependencyReadyQueue(initial = []) {
 
   return {
     add(item, { front = false } = {}) {
+      assertReadyDescriptor(item);
       (front ? priorityReady : ready).push(item);
       pending += 1;
       notify();

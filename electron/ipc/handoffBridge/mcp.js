@@ -1,3 +1,4 @@
+import { isBase64Text } from '../../utils/base64.js';
 import { CONSTANTS } from './constants.js';
 import { TOOLS_LIST } from './tools.js';
 
@@ -47,14 +48,22 @@ function toolResult(id, body) {
   let text;
   try { text = JSON.stringify(textBody); } catch { text = undefined; }
   if (typeof text !== 'string') text = JSON.stringify({ status: 'app_unavailable', note: 'The app result could not be sent.' });
-  const validImages = images.every(row => row?.mimeType === 'image/png' && typeof row.data === 'string'
-    && /^[A-Za-z0-9+/]+={0,2}$/u.test(row.data));
-  const content = [{ type: 'text', text }, ...images.map(row => ({ type: 'image', mimeType: 'image/png', data: row.data }))];
-  if (!validImages || Buffer.byteLength(JSON.stringify({ content }), 'utf8') > CONSTANTS.MAX_TOOL_RESULT_BYTES) {
-    text = JSON.stringify({ status: 'app_unavailable', note: 'The result was too large to send.' });
+  const validImages = images.every(row => row?.mimeType === 'image/png' && isBase64Text(row.data));
+  const content = [{ type: 'text', text }, ...(validImages ? images.map(row => ({ type: 'image', mimeType: 'image/png', data: row.data })) : [])];
+  const result = rpcResult(id, { content });
+  const textBytes = Buffer.byteLength(JSON.stringify(rpcResult(id, { content: content.slice(0, 1) })), 'utf8');
+  if (!validImages || textBytes > CONSTANTS.MAX_TOOL_TEXT_BYTES
+    || Buffer.byteLength(JSON.stringify(result), 'utf8') > CONSTANTS.MAX_TOOL_RESULT_BYTES) {
+    // This is deterministic for the current handoff, not an unavailable app.
+    // A recovery loop cannot fix it; never silently omit images or prompt text.
+    text = JSON.stringify({ status: 'needs_user',
+      kind: validImages ? 'tool_result_too_large' : 'invalid_page_images',
+      note: validImages
+        ? 'Stop this worker. The complete handoff exceeds the bridge result-size limit. The app must reduce the handoff payload before this worker can resume.'
+        : 'Stop this worker. The handoff contains invalid page images. The app must repair them before this worker can resume.' });
     return rpcResult(id, { content: [{ type: 'text', text }] });
   }
-  return rpcResult(id, { content });
+  return result;
 }
 
 /**

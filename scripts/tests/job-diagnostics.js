@@ -156,14 +156,16 @@ export default [
         };
         const full = generateMarkdown({ ...base, filterCode: 'FULL' }).markdown;
         const application = generateMarkdown({ ...base, filterCode: 'APPLICATION' }).markdown;
+        const validation = generateMarkdown({ ...base, filterCode: 'APPVALIDATION' }).markdown;
         const unrelated = generateMarkdown({ ...base, filterCode: 'JOBS' }).markdown;
-        for (const report of [full, application, unrelated]) {
+        for (const report of [full, application, validation, unrelated]) {
           for (const secret of ['PRIVATE_PASTED_RESPONSE', 'PRIVATE_JOB', 'PRIVATE_CODE']) {
             assert(!report.includes(secret), 'report filter output never exposes paste handoff private values');
           }
         }
         assert(full.includes('## Local Application Paste Handoff Lifecycle')
           && application.includes('## Local Application Paste Handoff Lifecycle')
+          && validation.includes('## Local Application Paste Handoff Lifecycle')
           && full.includes('syntax line 9, column 41')
           && !unrelated.includes('## Local Application Paste Handoff Lifecycle'),
         'FULL and APPLICATION expose a compact rejection receipt while unrelated report scopes omit it');
@@ -5821,6 +5823,35 @@ export default [
         recordApplicationTelemetry(prior);
       }
       return { phaseLabeled: true };
+    },
+  },
+{
+    name: 'Application diagnostics reconcile four requests and disclose only closed review-stop codes',
+    run: () => {
+      const states = [
+        { status: 'failed', terminalKind: 'requirements-audit-human-stop', terminalReason: 'prior-adjudication-conflict' },
+        { status: 'failed', terminalKind: 'write-verify-human-stop' },
+        { status: 'saved' },
+        { status: 'failed', terminalKind: 'PRIVATE_TERMINAL', terminalReason: 'PRIVATE_REASON' },
+      ];
+      const report = buildJobsPipelineSnapshot(new Set(), null, null, states.map((local, i) => ({
+        nodeId: `outcome-card-${i}`, localApplication: { id: `outcome-job-${i}`, ...local },
+      })));
+      assert(report.includes('4 card(s) with a generation request · 1 saved · 3 stopped/failed · 0 other/in progress'),
+        'the report reconciles each request instead of presenting the last success as the complete batch');
+      assert(report.includes('terminal `requirements-audit-human-stop`') && report.includes('reason `prior-adjudication-conflict`')
+        && report.includes('terminal `write-verify-human-stop`'), 'closed stop codes distinguish review stops from queue loss');
+      assert(!report.includes('PRIVATE_TERMINAL') && !report.includes('PRIVATE_REASON'), 'untrusted terminal text stays private');
+      const validation = generateMarkdown({
+        filterCode: 'APPVALIDATION', description: 'Stopped application fixture',
+        nodes: [{ id: 'stopped-card', type: 'jobcard', data: { localApplication: {
+          id: '123e4567-e89b-42d3-a456-426614174000', status: 'failed',
+          stage: 'write-verify-human-stop', terminalKind: 'write-verify-human-stop',
+        } } }], edges: [], drawings: [], frontEndState: {}, nodeInternals: [], nodeComponentStates: [],
+      }).markdown;
+      assert(validation.includes('## Local Application Paste Rejection Trace (durable)')
+        && validation.includes('stop stage `write-verify-human-stop`'),
+      'the narrow validation filter includes both durable rejection and current stop metadata');
     },
   },
 {
@@ -15415,6 +15446,18 @@ export default [
           && report.split('salary range bounds recorded; lower endpoint retained for deterministic placement.').length === 2
           && !report.includes('$195k–$230k/yr') && !report.includes('$195,000') && !report.includes('$230,000'),
         'salary diagnostics reconcile the new role-band counters without conflating lookup work with market cohorts, repeating identical audit-detail lines, or exporting salary values');
+        Object.assign(telemetry.compensation, { roleBandUnavailable: 1, roleBandUnavailableJobs: 2, marketCandidates: 1 });
+        const unavailableReport = buildJobsPipelineSnapshot(new Set(['role-band-salary-funnel']), null, null);
+        assert(unavailableReport.includes('2 without an auditable ladder + 1 passed to market cohorts')
+          && unavailableReport.includes('Honest unavailable role-band evidence: 1 researched role family/families returned no auditable ladder; 2 job(s) kept without a salary-market verdict.'),
+        'FULL salary diagnostics must distinguish a valid empty research answer from failed work without leaking role names or prose');
+        Object.assign(telemetry.compensation, { roleBandFallbackJobs: 2, marketCandidates: 3 });
+        const fallbackReport = buildJobsPipelineSnapshot(new Set(['role-band-salary-funnel']), null, null);
+        assert(fallbackReport.includes('4 candidate(s) = 1 not placeable in a role band + 0 interrupted during role-band preparation + 3 passed to market cohorts.')
+          && fallbackReport.includes('Listing-level market fallback: 2 of 3 market candidate(s)')
+          && fallbackReport.includes('2 job(s) eligible for listing-level market research'),
+        'fallback rows are a subset of market candidates, not additional exclusions from the funnel');
+
       } finally {
         Object.assign(telemetry, saved);
       }

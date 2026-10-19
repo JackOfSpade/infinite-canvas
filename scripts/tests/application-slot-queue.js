@@ -68,6 +68,22 @@ const buildTenOccupyingCards = () => Array.from(
 
 export default [
   {
+    name: 'module run queue snapshots preserve prototype-shaped lane names as own data',
+    async run() {
+      const queue = createModuleRunQueue();
+      const names = ['__proto__', 'constructor', 'toString'];
+      const leases = await Promise.all(names.map(lane => queue.acquireModuleRun({ lane, nodeId: lane })));
+      const snapshot = queue.getSnapshot();
+      assert(Object.getPrototypeOf(snapshot.lanes) === Object.prototype
+        && Object.keys(snapshot.lanes).length === names.length
+        && names.every(lane => Object.hasOwn(snapshot.lanes, lane)
+          && snapshot.lanes[lane].active.nodeId === lane),
+      'every lane must be observable without modifying the snapshot object prototype');
+      leases.forEach(lease => lease.release());
+      assert(Object.keys(queue.getSnapshot().lanes).length === 0, 'all independent lanes must release normally');
+    },
+  },
+  {
     name: 'application slot queue: a refused canStart on an idle lane queues at position 1, blocked, then starts',
     run: async () => {
       const timers = createFakeTimers();

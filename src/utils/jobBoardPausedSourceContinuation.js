@@ -78,6 +78,7 @@ export function terminalJobSearchOutcome(source) {
     source?.type !== 'jobhub'
     || sourceData.hubState !== 'done'
     || !!sourceData.errorMessage
+    || !!sourceData.terminalFinalizationRecovery
     || malformedRunProvenance
     || malformedDispositionProvenance
     || (!legacyPositiveResult && !runId)

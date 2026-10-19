@@ -11,11 +11,12 @@ import { LAUNCH_REASONS } from '../../../src/utils/handoffBridgeStatus.js';
 let launchDiagnostics = [];
 const launchReasons = new Set(LAUNCH_REASONS);
 export function clearBridgeLaunchDiagnostic() { launchDiagnostics = []; }
-export function recordBridgeLaunchDiagnostic({ telemetry = false, at, workerOrdinal, stage, reason, attempt } = {}) {
+export function recordBridgeLaunchDiagnostic({ telemetry = false, at, workerOrdinal, stage, reason, attempt, mode } = {}) {
   if (telemetry !== true || !['failed', 'retrying', 'presented'].includes(stage)
     || !Number.isSafeInteger(workerOrdinal) || workerOrdinal < 1 || workerOrdinal > MAX_HANDOFF_CONCURRENCY
     || !Number.isFinite(at) || at < 0 || at > 8_640_000_000_000_000) return;
   launchDiagnostics.push(Object.freeze({ at: Math.round(at), workerOrdinal, stage,
+    mode: ['chat', 'work'].includes(mode) ? mode : 'unknown',
     reason: launchReasons.has(reason) ? reason : null,
     attempt: Number.isSafeInteger(attempt) && attempt >= 0 ? Math.min(999, attempt) : 0 }));
   launchDiagnostics = launchDiagnostics.slice(-20);

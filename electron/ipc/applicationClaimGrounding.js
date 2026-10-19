@@ -1167,6 +1167,11 @@ export function credentialFindings(sentence, bodies) {
   const findings = [];
   for (const { group, re } of CREDENTIAL_GROUPS) {
     for (const match of text.matchAll(re)) {
+      // Commercial licensing terms describe a purchase arrangement, not a
+      // professional qualification. Do not demand a personal credential for
+      // evaluating a vendor's licensing costs or models.
+      if (group === 'licence' && /^licen[sc]ing$/iu.test(match[0])
+        && /^\s+(?:approaches|models|costs|fees|terms|agreements)\b/iu.test(text.slice(match.index + match[0].length))) continue;
       const unsupported = group === 'academic' ? Boolean(degreeStated(text, bodies)) : !credentialStated(group, text, match, bodies);
       if (unsupported) { findings.push({ code: 'credential', term: match[0] }); break; }
     }

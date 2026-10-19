@@ -1,4 +1,6 @@
 import { __getJobsTelemetryForReportForTests, __queryFanOutForTests, __resetJobsTelemetryForTests, __runWithIpcRequestContextForTests, activateRunForResume, assert, appendJobsHistory, blankJobPreferencePlan, buildExactTargetRoleQueryBundle, buildJobAnalysisSnapshot, buildJobRunCompletionReceipt, careerInputFingerprint, careerProfileFingerprint, clearRun, clearRunWithResult, completeRunWithReceipt, createModuleRunQueue, evaluateJobPreferences, fs, getJobsTelemetry, ipcMain, isJobRunAutomaticRecoveryEligible, jobRunPathScopeForCanvas, lastRunReceiptPathForCanvas, markProviderGathered, markSourceStatus, normalizeJobPreferencePlan, normalizeJobRunProfileFingerprint, os, path, pauseRunForManualResume, readLastRunReceipt, readRunState, readStagedJobs, recordLinkedinResolveAttempt, recordResolveMergeOutcome, recordSourcePage, sanitizeJobPreferencePlan, sanitizeJobPreferences, sanitizeLastRunReceipt, setStage, startRun, validateExactResumeRun, validateJobPreferenceListingSubmission, validateJobPreferencePlanSubmission, validateJobPreferenceResearchSubmission, writeLastRunReceipt } from '../test-dependencies.js';
+import { createDurableBoardPauseControl, pauseBoardOwnedSearch, jobBoardSavedPauseOutcome } from '../../src/utils/jobBoardSavedPause.js';
+import { runInNewContext } from 'node:vm';
 // The bug-report builders under test. test-dependencies.js already re-exports
 // all three; they are imported on their own line so the shared bundle import
 // above stays untouched while other sessions edit it.
@@ -16,7 +18,7 @@ import { JOB_SEARCH_MAX_PROVIDER_LOOKBACK_DAYS } from '../test-dependencies.js';
 import { validateResponseSchema } from '../test-dependencies.js';
 import { canAutomaticallyResolveJobSourceWarning, jobSourceWarningAction, jobSourceAuthPreflightScope } from '../test-dependencies.js';
 import { __canPerformJobSourceActionForTests, __createDescriptionRecoveryCheckpointForTests, __jobSourceActionAuthorizationForTests, __pruneSupersededDescriptionRecoveryCheckpointsForTests, authoritativeFreshJobSearchWindow, claimExactJobRunExecution, effectiveJobSearchWindow, filterAndDedupJobsByPostedSince, freshJobSearchWindow, jobSourceRecoveryDisposition, legacyJobSearchWindow, manualAiPreSearchRecoveryWindow, mergeJobSourceCollectionCap, mergeRoleScreenedJobs, registerJobsHandlers, shouldDiscardJobRunAfterAbort } from '../../electron/ipc/jobs.js';
-import { collectionCompletedAtForManifest, providerGatheredAtForManifest, rebindJobRunRecoveryOwners, sanitizeJobSearchWindow } from '../../electron/ipc/jobRunStaging.js';
+import { collectionCompletedAtForManifest, providerGatheredAtForManifest, rebindRunOperationAuthority, rebindJobRunRecoveryOwners, sanitizeJobSearchWindow } from '../../electron/ipc/jobRunStaging.js';
 import { beginJobContinuation, claimJobContinuation, completeJobContinuation, listJobContinuations, pauseJobContinuations, rebindJobContinuationOwners, releaseJobContinuationExecution } from '../../electron/ipc/jobContinuation.js';
 import { acquireCanvasRecoveryRead, __canvasRecoveryPathsForTests, withCanvasRecoveryOwner, withCanvasRecoveryRebind } from '../../electron/ipc/canvasRecoveryPaths.js';
 import { claimJobBoardRunExecution, releaseJobBoardRunExecution } from '../../electron/ipc/jobBoardRunLease.js';
@@ -84,6 +86,110 @@ async function sealContinuationFixture(canvasFilePath, identity, { careerSnapsho
 }
 
 export default [
+  {
+    name: 'mounted Board child Pause and save commits manual recovery while retaining its exact handoff and parent plan',
+    run: async () => {
+      const source = fs.readFileSync(path.resolve('src/nodes/JobSearchNode.jsx'), 'utf8');
+      const start = source.indexOf('const resetHandler = useCallback(') + 'const resetHandler = useCallback('.length;
+      const end = source.indexOf('}, [addToast, cancelActiveBoardChild', start) + 1;
+      const control = { orchestratorNodeId: 'board', boardRunId: 'board-run' };
+      const marker = { runId: 'handoff-run', orchestratorNodeId: 'board', boardRunId: 'board-run' };
+      let live = { jobRunId: 'provider-run', manualAiResume: marker, analysisOperation: { authority: { operationId: 'authority' } } };
+      let stops = 0;
+      let retired = 0;
+      let rollbacks = 0;
+      let offer;
+      const ref = current => ({ current });
+      const noop = () => {};
+      const context = {
+        id: 'hub', data: live, canvasFilePath: '/saved/canvas.json',
+        boardRunControlRef: ref(control), reanalysisRestoreRef: ref(null), standaloneCancellationRef: ref(null),
+        getNode: id => ({ id, data: live }), getNodes: () => [], getEdges: () => [],
+        findJobSearchBoardActiveRecoveryOwner: () => ({ orchestratorNodeId: 'board', boardRunId: 'board-run' }),
+        cancelActiveBoardChild: () => { rollbacks++; return true; },
+        jobSearchCoordinator: { cancelBoardModule: () => { rollbacks++; throw new Error('unexpected rollback'); } },
+        epoch: { bump: noop }, moduleRunQueue: { cancelQueuedRunsOwnedByNode: noop },
+        processingRunsRef: ref({ cancel: noop }), analysisOperationLedgerRef: ref({ revoke: noop }),
+        hasPendingManualAiRetirement: () => false, activeManualAiRunIdRef: ref('handoff-run'),
+        jobRunIdRef: ref('provider-run'), pendingJobsRef: ref([]), gatheredCountRef: ref(0),
+        scrapeWarningsRef: ref([]), terminalSourceWarningProjectionRef: ref(new Map()),
+        sourceWarningOverridesDuringSearchRef: ref(new Map()), hubStateRef: ref('evaluating-preferences'),
+        setActiveResumeCheckpoint: noop, cancelCleanSourceCardDismiss: noop, resetSourceProgress: noop,
+        cleanupAllJobChildren: noop, removeManualAiCleanupReceipt: () => [],
+        retireManualAiRunDurably: async () => { retired++; }, setResumeOffer: value => { offer = value; },
+        updateGlobal: (_id, patch) => { live = { ...live, ...(typeof patch === 'function' ? patch({ data: live }) : patch) }; },
+        addToast: noop, EventLogger: { log: noop, error: noop },
+        window: { electronAPI: {
+          pauseJobRunAndCancel: async args => { stops++; assert(args.runId === 'provider-run'); return { ok: true, settled: true, paused: true, runId: 'provider-run' }; },
+          peekJobRun: async () => ({ found: true, nodeId: 'hub', runId: 'provider-run', gatheredCount: 14 }),
+        } },
+      };
+      const reset = runInNewContext(`(${source.slice(start, end)})`, context);
+      const result = await pauseBoardOwnedSearch(control, () => reset(null));
+      assert(result.success === true && stops === 1, 'the actual mounted handler reaches the acknowledged backend stop');
+      assert(rollbacks === 0 && retired === 0, 'saved pause neither rolls back the Board nor retires accepted handoff steps');
+      assert(live.manualAiResume.runId === 'handoff-run' && live.manualAiResume.pausedByUser === true
+        && live.manualAiResume.autoResumeEligible === false && live.manualAiResume.boardRunId === 'board-run'
+        && live.analysisOperation.tombstoned === true && offer?.autoResumeEligible === false,
+      'the exact handoff and manual provider checkpoint survive for explicit Board Continue');
+      // Resolve/Skip can already be scoring while the Board has yielded its
+      // executor. Exercise the real dock wrapper with only persisted ownership.
+      context.boardRunControlRef.current = null;
+      context.getNode = nodeId => nodeId === 'board'
+        ? { id: nodeId, data: { boardScanResume: { boardRunId: 'board-run', activeSourceIds: ['hub'] } } }
+        : { id: nodeId, data: live };
+      Object.assign(context, { createDurableBoardPauseControl, pauseBoardOwnedSearch, stopHandler: () => reset(null) });
+      const wrapperStart = source.indexOf('const pauseAndSaveHandler = useCallback(') + 'const pauseAndSaveHandler = useCallback('.length;
+      const wrapperEnd = source.indexOf('}, [getEdges, getNode, getNodes, id, stopHandler]', wrapperStart) + 1;
+      const pauseFromDock = runInNewContext(`(${source.slice(wrapperStart, wrapperEnd)})`, context);
+      const durableResult = await pauseFromDock();
+      assert(durableResult.success === true && stops === 2 && rollbacks === 0 && retired === 0,
+        'the actual dock wrapper must pause a durable active Board child even without an in-memory executor');
+      assert(context.boardRunControlRef.current === null, 'temporary pause ownership must be released after acknowledgement');
+      const owner = { orchestratorNodeId: 'board', boardRunId: 'board-run' };
+      assert(!createDurableBoardPauseControl(owner, { boardRunId: 'other-run', activeSourceId: 'hub' }, 'hub')
+        && !createDurableBoardPauseControl(owner, { boardRunId: 'board-run', selectedSearchModuleIds: ['hub'] }, 'hub')
+        && !createDurableBoardPauseControl(owner, { boardRunId: 'board-run', activeSourceId: 'sibling' }, 'hub'),
+      'a queued reservation, sibling source or other Board run must not manufacture active pause authority');
+    },
+  },
+  {
+    name: 'Board-owned Pause and save awaits durable acknowledgement without entering rollback or losing the saved handoff',
+    run: async () => {
+      for (const success of [true, false]) {
+        const control = { cancelledRunId: 'saved-run' };
+        let acknowledge;
+        const pause = pauseBoardOwnedSearch(control, () => new Promise(resolve => { acknowledge = resolve; }));
+        assert(control.pauseCompletion && control.pauseInFlight, 'pause ownership is installed before cancellation can unwind the child');
+        let returned = false;
+        const boundary = jobBoardSavedPauseOutcome(control, 'saved-run').then(result => { returned = true; return result; });
+        await Promise.resolve();
+        assert(!returned, 'the Board does not classify epoch cancellation before the backend pause settles');
+        const repeated = await pauseBoardOwnedSearch(control, () => { throw new Error('duplicate stop'); });
+        assert(repeated.success === false, 'double clicks cannot create a competing stop');
+        acknowledge({ success, error: success ? null : 'checkpoint failed' });
+        assert((await pause).success === success);
+        const outcome = await boundary;
+        assert(outcome.status === (success ? 'paused' : 'recovery-inspection-failed')
+          && outcome.runId === 'saved-run' && outcome.reason === 'awaiting-explicit-ai-continue',
+        'success retains the Board plan for Continue; failure retains recovery for retry instead of destructive cancellation');
+        assert(control.pauseInFlight === false);
+      }
+      const thrownControl = {};
+      const failed = await pauseBoardOwnedSearch(thrownControl, async () => { throw new Error('IPC unavailable'); });
+      assert(failed.success === false && (await jobBoardSavedPauseOutcome(thrownControl)).status === 'recovery-inspection-failed');
+      const search = fs.readFileSync(path.resolve('src/nodes/JobSearchNode.jsx'), 'utf8');
+      const board = fs.readFileSync(path.resolve('src/nodes/JobBoardNode.jsx'), 'utf8');
+      assert(search.includes('while (durableBoardOwner && !boardPauseControl)')
+        && search.includes('if (manualAiRunId && !boardPauseControl)')
+        && search.includes('manualAiResume: boardPauseControl && manualAiRunId')
+        && search.includes('pauseBoardOwnedSearch(control, () => stopHandler(null))')
+        && (search.match(/const savedPause = await jobBoardSavedPauseOutcome/g) || []).length === 2
+        && (search.match(/if \(control\?\.pauseCompletion\) return searchRunOutcome/g) || []).length === 3
+        && board.includes('if (userPausedChild && !scanRunRef.current && !scanPreflightRef.current) {'),
+      'both child unwind paths bypass rollback, retain the exact manual handoff and refuse unattended Board restart after user pause');
+    },
+  },
   {
     name: 'job run staging: late terminal and recovery callbacks are fenced by exact run plus career snapshot',
     run: () => {
@@ -648,7 +754,7 @@ export default [
         && !savedStop.includes('discardJobRun')
         && savedStop.includes("Pause & save acknowledged (cause=${cancellationReason || 'user-stopped'}); manual recovery saved and backend work settled")
         && savedStop.includes('Pause & save was not acknowledged; saved checkpoint left unchanged')
-        && stop.includes('stopHandler(null);')
+        && stop.includes('pauseBoardOwnedSearch(control, () => stopHandler(null))')
         && stop.includes('Pause & save requested from AI handoff (cause=user-stopped); awaiting durable manual recovery acknowledgement')
         && !stop.includes('handoffBridgePause')
         && stop.includes("document.addEventListener('job-search-pause-and-save'")
@@ -6258,6 +6364,20 @@ export default [
         await __createDescriptionRecoveryCheckpointForTests({ ...snapshot(canvas, runId, startedAt + 1), careerSnapshotId, operationAuthority: authority });
         await __createDescriptionRecoveryCheckpointForTests({ ...snapshot(canvas, successorRun, startedAt + 2), careerSnapshotId, operationAuthority: authority });
         await __createDescriptionRecoveryCheckpointForTests(snapshot(canvas, foreignRun, startedAt - 30_000, foreignHubId));
+        // Reproduce source Resolve -> scoring: the old intent's authority and
+        // sealed parent no longer own the current publication when scoring ends.
+        const otherIdentity = await sealContinuationFixture(canvas, {
+          ...continuationIdentity, parentRunId: 'unrelated-run', generationFingerprint: 'unrelated-generation',
+        }, { careerSnapshotId, operationAuthority: authority });
+        assert((await beginJobContinuation(canvas, { ...otherIdentity, now: startedAt + 2 })).ok,
+          'unrelated same-hub continuation must survive terminal retirement');
+        const scoringAuthority = await claimStagingAuthority(canvas, hubId, runId, careerSnapshotId, {
+          kind: 'resume-saved-scrape', predecessor: authority,
+        });
+        assert((await rebindRunOperationAuthority(canvas, {
+          expectedRunId: runId, expectedNodeId: hubId, careerSnapshotId,
+          currentAuthority: scoringAuthority, predecessorAuthority: authority,
+        })).ok, 'scoring must own the exact staged run before completion');
         const currentPath = getJobDescriptionRecoveryCheckpointPath(canvas, runId, path.join(dir, 'unsaved-analysis'));
         const stalePath = getJobDescriptionRecoveryCheckpointPath(canvas, staleRun, path.join(dir, 'unsaved-analysis'));
         const successorPath = getJobDescriptionRecoveryCheckpointPath(canvas, successorRun, path.join(dir, 'unsaved-analysis'));
@@ -6274,7 +6394,7 @@ export default [
           terminalOutcome: 'populated',
           scoreReadyCount: 1,
           careerSnapshotId,
-          operationAuthority: authority,
+          operationAuthority: scoringAuthority,
         });
         const receipt = await readLastRunReceipt(canvas, hubId);
         const runState = await readRunState(canvas, Date.now(), { nodeId: hubId });
@@ -6284,10 +6404,23 @@ export default [
           && completed.supersededCheckpointCleanup?.removed === 1
           && receipt?.runId === runId && receipt.startedAt === startedAt
           && runState === null
-          && (await listJobContinuations(canvas, hubId)).length === 0
+          && (await listJobContinuations(canvas, hubId)).every(intent => intent.parentRunId === 'unrelated-run')
           && !fs.existsSync(currentPath) && !fs.existsSync(stalePath)
           && fs.existsSync(successorPath) && fs.existsSync(foreignPath),
         `registered complete-job-run consumes its exact manifest into a receipt, clears its own sidecars/current checkpoint, then reclaims only the older same-hub checkpoint: ${JSON.stringify({ completed, receipt, runState, paths: { current: fs.existsSync(currentPath), stale: fs.existsSync(stalePath), successor: fs.existsSync(successorPath), foreign: fs.existsSync(foreignPath) } })}`);
+
+        const replayed = await complete({ sender }, {
+          canvasFilePath: canvas, nodeId: hubId, runId, terminalStatus: 'completed',
+          terminalOutcome: 'populated', scoreReadyCount: 1, careerSnapshotId,
+          operationAuthority: scoringAuthority,
+        });
+        assert(replayed.ok === true && replayed.cleared === true,
+          'restart retry uses the exact terminal tombstone without reopening providers or scoring');
+        const staleCompletion = await complete({ sender }, {
+          canvasFilePath: canvas, nodeId: hubId, runId, careerSnapshotId, operationAuthority: authority,
+        });
+        assert(staleCompletion.ok === false && (await listJobContinuations(canvas, hubId)).length === 1,
+          'a superseded completion cannot retire another continuation');
 
         const failedStaleRun = 'completion-gc-failed-stale-run';
         await __createDescriptionRecoveryCheckpointForTests(snapshot(failedCanvas, failedStaleRun, startedAt - 30_000));

@@ -524,14 +524,14 @@ Dates: May 2019 — August 2019
       try {
         renderStructuredApplicationResume({ ...resume, skills: [{ ...resume.skills[0], items: ['Go'] }] }, context);
       } catch { rejectedShortSubstringSkill = true; }
-      const sparseProjects = [resume.projects[0]];
-      sparseProjects.length = 2;
+      const sparseProjects = [];
+      sparseProjects.length = 1;
       let sparseProjectMessage = '';
       try {
         renderStructuredApplicationResume({ ...resume, projects: sparseProjects }, context);
       } catch (error) { sparseProjectMessage = String(error?.message || error); }
       assert(html.includes('Analytics reporting') && html.includes('Personal Projects') && rejectedListingOnlyProject && rejectedShortSubstringSkill
-        && sparseProjectMessage.includes('projects[1] must be an object.'),
+        && sparseProjectMessage.includes('projects[0] must be an object.'),
       'project display copy retains its source provenance heading, while neutral editorial headings remain usable and listing-only, substring-only, or sparse project input is rejected at validation');
       return { projectRendered: true, rejectedListingOnlyProject, rejectedShortSubstringSkill, sparseProjectRejected: true };
     },
@@ -980,16 +980,21 @@ Dates: May 2019 — August 2019
       assert(['Kubernetes', 'Rust', 'Haskell', 'Erlang'].every(item => ungroundedItems.includes(`"${item}"`)),
         'one rejection names every ungrounded skill item across all skill groups');
 
+      // The résumé carries at most one Personal Projects entry, so a second
+      // project is refused outright and a lone ungrounded one is named.
       const ungroundedProjects = rejection({
+        ...batchResume,
+        projects: [{ id: 'alpha', name: 'Invented Alpha', evidenceIds: ['career-proof'] }],
+      });
+      const extraProjects = rejection({
         ...batchResume,
         projects: [
           { id: 'alpha', name: 'Invented Alpha', evidenceIds: ['career-proof'] },
           { id: 'beta', name: 'Invented Beta', evidenceIds: ['career-proof'] },
-          { id: 'gamma', name: 'Invented Gamma', evidenceIds: ['career-proof'] },
         ],
       });
-      assert(ungroundedProjects.includes('projects.alpha.name') && ungroundedProjects.includes('projects.beta.name') && ungroundedProjects.includes('projects.gamma.name'),
-        'one rejection names every ungrounded project field');
+      assert(ungroundedProjects.includes('projects.alpha.name') && extraProjects.includes('at most 1 projects'),
+        'one rejection names the ungrounded project field, and a second project is refused by the cap');
 
       const unknownBulletEvidence = rejection({
         ...batchResume,

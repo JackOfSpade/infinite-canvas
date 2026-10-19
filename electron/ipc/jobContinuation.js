@@ -18,6 +18,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { logger } from '../logger.js';
 import {
+  readLastRunReceipt,
   jobRunPathScopeForCanvas,
   normalizeJobRunProfileFingerprint,
   sanitizeJobSearchWindow,
@@ -307,6 +308,13 @@ function normalizeIntent(value, nodeId) {
     ? value.parentArtifactSlot
     : null;
   const parentArtifactPublicationReceipt = jobAnalysisOperationAuthorityReceipt(value.parentArtifactPublicationReceipt);
+  const rawParentUpdates = value.parentArtifactUpdates ?? [];
+  if (!Array.isArray(rawParentUpdates) || rawParentUpdates.length > 2
+    || !rawParentUpdates.every(update => typeof update?.digest === 'string' && /^[a-f0-9]{64}$/.test(update.digest)
+      && jobAnalysisOperationAuthorityReceipt(update.receipt))) return null;
+  const parentArtifactUpdates = rawParentUpdates.map(update => ({
+    digest: update.digest, receipt: jobAnalysisOperationAuthorityReceipt(update.receipt),
+  }));
   if (!identity || identity.nodeId !== nodeId || !intentId || !createdAt || !updatedAt || !recoveryMode
     || !parentArtifactSlot || !parentArtifactPublicationReceipt) return null;
   if (![searchWindowFingerprint, locationFingerprint, generationFingerprint].every(v => /^[a-f0-9]{64}$/.test(v || ''))) return null;
@@ -336,6 +344,7 @@ function normalizeIntent(value, nodeId) {
     updatedAt,
     parentArtifactSlot,
     parentArtifactPublicationReceipt,
+    ...(parentArtifactUpdates.length ? { parentArtifactUpdates } : {}),
     ...(terminalResult ? { terminalResult } : {}),
   };
 }
@@ -375,17 +384,19 @@ function sameContinuationWithoutAuthority(left, right) {
 async function validateStoredParentArtifact(canvasFilePath, record, intent) {
   const current = recordReceipt(record);
   const embedded = jobAnalysisOperationAuthorityReceipt(intent?.parentArtifactPublicationReceipt);
-  const publication = intent?.parentArtifactSlot && (record?.publications?.[intent.parentArtifactSlot]
-    || record?.pendingPublications?.[intent.parentArtifactSlot]);
-  if (!current || !embedded || !publication || publication.digest !== intent.parentArtifactFingerprint
-    || !sameAuthorityReceipt(publication.receipt, embedded)) return { ok: false, reason: 'parent-artifact-superseded' };
+  if (!current || !embedded) return { ok: false, reason: 'parent-artifact-superseded' };
   const paths = getJobAnalysisPaths(canvasFilePath, null, intent.nodeId);
   const filePath = intent.parentArtifactSlot === 'current'
     ? paths?.jsonPath
     : getJobDescriptionRecoveryCheckpointPath(canvasFilePath, intent.parentRunId, null);
   if (!filePath) return { ok: false, reason: 'parent-artifact-unavailable' };
   const bytes = await readBoundedNoFollowRegularFile(filePath);
-  if (!bytes || crypto.createHash('sha256').update(bytes).digest('hex') !== intent.parentArtifactFingerprint) {
+  const digest = bytes && crypto.createHash('sha256').update(bytes).digest('hex');
+  const permitted = [{ digest: intent.parentArtifactFingerprint, receipt: embedded }, ...(intent.parentArtifactUpdates || [])];
+  const publication = [record?.publications?.[intent.parentArtifactSlot], record?.pendingPublications?.[intent.parentArtifactSlot]]
+    .find(row => row?.digest === digest && permitted.some(update => update.digest === digest
+      && sameAuthorityReceipt(row.receipt, update.receipt)));
+  if (!bytes || !publication) {
     return { ok: false, reason: 'parent-artifact-superseded' };
   }
   try {
@@ -393,7 +404,7 @@ async function validateStoredParentArtifact(canvasFilePath, record, intent) {
     const snapshotReceipt = jobAnalysisOperationAuthorityReceipt(snapshot?.operationAuthority ?? snapshot?.snapshotContext?.operationAuthority);
     if (snapshot?.nodeId !== intent.nodeId || snapshot?.sourceHubId !== intent.nodeId
       || snapshot?.runId !== intent.parentRunId || snapshot?.careerSnapshotId !== intent.careerSnapshotId
-      || !sameAuthorityReceipt(snapshotReceipt, embedded)) return { ok: false, reason: 'parent-artifact-mismatch' };
+      || !sameAuthorityReceipt(snapshotReceipt, publication.receipt)) return { ok: false, reason: 'parent-artifact-mismatch' };
   } catch { return { ok: false, reason: 'parent-artifact-invalid' }; }
   return { ok: true };
 }
@@ -425,7 +436,7 @@ async function withExactContinuationAuthority(canvasFilePath, args, { sender = n
   const authority = desired.operationAuthority;
   return withCurrentJobAnalysisOperationAuthority({
     canvasFilePath, hubId: desired.nodeId, ...authority,
-  }, async record => {
+  }, async (record, stagePublication) => {
     const ownerCanvasFilePath = record.canvasFilePath;
     const filePath = continuationPath(ownerCanvasFilePath, desired.nodeId);
     if (!filePath) return { ok: false, reason: 'missing-ownership' };
@@ -464,7 +475,7 @@ async function withExactContinuationAuthority(canvasFilePath, args, { sender = n
       if (!parent.ok) return { ok: false, reason: parent.reason };
       const execution = requireLease ? exactExecution(intent.intentId, args.leaseToken, sender, ownerCanvasFilePath) : null;
       if (requireLease && !execution) return { ok: false, reason: 'execution-released' };
-      return callback({ filePath, ownerCanvasFilePath, store, intent, execution, rebound, record });
+      return callback({ filePath, ownerCanvasFilePath, store, intent, execution, rebound, record, stagePublication });
     });
   });
 }
@@ -674,6 +685,49 @@ export async function claimJobContinuation(canvasFilePath, args = {}, { sender =
   });
   if (!admitted.admitted) return { ok: false, operationSuperseded: true, reason: admitted.reason };
   return admitted.value;
+}
+
+// Host-only publication transaction. A source recovery legitimately rewrites
+// its own sealed parent. Commit the old/new byte digests before publishing so
+// either crash layout remains replayable, without accepting arbitrary same-run
+// rewrites or changing the immutable identity held by the renderer's lease.
+export async function publishJobContinuationParentUpdate(canvasFilePath, args, { sender = null } = {}, publish) {
+  const execution = exactExecution(args?.intentId, args?.leaseToken, sender, canvasFilePath);
+  const intent = execution?.intent;
+  const nextDigest = args?.nextParentArtifactFingerprint;
+  if (!intent || intent.kind !== 'source-recovery' || intent.nodeId !== args.nodeId
+    || intent.parentRunId !== args.parentRunId || intent.operation !== args.operation
+    || intent.careerSnapshotId !== args.careerSnapshotId
+    || intent.parentArtifactFingerprint !== args.parentArtifactFingerprint
+    || !sameAuthorityReceipt(intent.operationAuthority, args.operationAuthority)
+    || typeof nextDigest !== 'string' || !/^[a-f0-9]{64}$/.test(nextDigest)
+    || typeof publish !== 'function') return { saved: false, reason: 'missing-or-inactive-ownership' };
+  const admitted = await withExactContinuationAuthority(canvasFilePath, {
+    ...intent, leaseToken: args.leaseToken,
+  }, { sender, requireLease: true }, async ({ store, intent: current, filePath, record, stagePublication }) => {
+    const parentPath = current.parentArtifactSlot === 'current'
+      ? getJobAnalysisPaths(record.canvasFilePath, null, current.nodeId)?.jsonPath
+      : getJobDescriptionRecoveryCheckpointPath(record.canvasFilePath, current.parentRunId, null);
+    const bytes = parentPath && await readBoundedNoFollowRegularFile(parentPath);
+    if (!bytes) return { saved: false, reason: 'parent-artifact-unavailable' };
+    const priorDigest = crypto.createHash('sha256').update(bytes).digest('hex');
+    const priorPublication = [record.publications?.[current.parentArtifactSlot], record.pendingPublications?.[current.parentArtifactSlot]]
+      .find(row => row?.digest === priorDigest);
+    if (!priorPublication) return { saved: false, reason: 'parent-artifact-superseded' };
+    const updated = {
+      ...current,
+      parentArtifactUpdates: [
+        { digest: priorDigest, receipt: priorPublication.receipt },
+        { digest: nextDigest, receipt: recordReceipt(record) },
+      ],
+      updatedAt: Date.now(),
+    };
+    store.intents = store.intents.map(row => row.intentId === current.intentId ? updated : row);
+    await atomicWrite(filePath, store);
+    execution.intent = updated;
+    return publish(stagePublication);
+  });
+  return admitted.admitted ? admitted.value : { saved: false, reason: admitted.reason || 'operation-superseded' };
 }
 
 function isTerminalContinuationResult(operation, result) {
@@ -923,6 +977,48 @@ export async function clearJobContinuations(canvasFilePath, {
   return admitted.admitted ? admitted.value : { ok: false, removed: 0, operationSuperseded: true, reason: admitted.reason };
 }
 
+/** Host-only retirement after the exact terminal transaction cleared staging.
+ * Parent publications can have rotated during scoring, so they no longer prove
+ * obsolete source intents. The durable terminal receipt and its revoked write
+ * authority prove that this exact run is finished and cannot publish again.
+ */
+export async function retireTerminalJobContinuations(canvasFilePath, {
+  nodeId, runId, careerSnapshotId, operationAuthority,
+} = {}) {
+  const authority = jobAnalysisOperationAuthorityReceipt(operationAuthority);
+  if (!nodeId || !runId || !careerSnapshotId || !authority) return { ok: false, reason: 'missing-ownership' };
+  const admitted = await withCurrentJobAnalysisOperationAuthority({
+    canvasFilePath, hubId: nodeId, ...authority, allowRevoked: true,
+  }, async record => {
+    const receipt = await readLastRunReceipt(record.canvasFilePath, { nodeId });
+    if (record.status !== 'revoked' || receipt?.nodeId !== nodeId || receipt?.runId !== runId
+      || receipt?.careerSnapshotId !== careerSnapshotId || receipt?.cleanup?.cleared !== true
+      || !sameAuthorityReceipt(receipt.operationAuthority, authority)) {
+      return { ok: false, reason: 'terminal-receipt-mismatch' };
+    }
+    const filePath = continuationPath(record.canvasFilePath, nodeId);
+    return withLock(filePath, async () => {
+      const store = await readStore(filePath, nodeId);
+      const retained = store.intents.filter(intent => !(intent.parentRunId === runId
+        && intent.careerSnapshotId === careerSnapshotId
+        && intent.operationAuthority?.revision <= authority.revision));
+      const removed = store.intents.length - retained.length;
+      try {
+        if (removed && retained.length) await atomicWrite(filePath, { ...store, intents: retained });
+        else if (removed) {
+          await fs.promises.unlink(filePath);
+          await fsyncDirectory(path.dirname(filePath));
+        }
+        return { ok: true, removed };
+      } catch (error) {
+        logger.warn(`[JobContinuation] terminal retirement failed: ${error?.message || error}`);
+        return { ok: false, removed: 0, reason: 'write-failed' };
+      }
+    });
+  });
+  return admitted.admitted ? admitted.value : { ok: false, reason: admitted.reason };
+}
+
 /**
  * Re-key continuation sidecars after a canvas Save As/Finder rename. Intent
  * identities deliberately exclude the canvas spelling, so their run/node/input
@@ -988,7 +1084,8 @@ export async function rebindJobContinuationOwners(oldCanvasFilePath, newCanvasFi
         const snapshotReceipt = jobAnalysisOperationAuthorityReceipt(snapshot?.operationAuthority ?? snapshot?.snapshotContext?.operationAuthority);
         if (snapshot?.nodeId !== nodeId || snapshot?.sourceHubId !== nodeId
           || snapshot?.runId !== intent.parentRunId || snapshot?.careerSnapshotId !== intent.careerSnapshotId
-          || !sameAuthorityReceipt(snapshotReceipt, intent.parentArtifactPublicationReceipt)) {
+          || ![intent.parentArtifactPublicationReceipt, ...(intent.parentArtifactUpdates || []).map(update => update.receipt)]
+            .some(receipt => sameAuthorityReceipt(snapshotReceipt, receipt))) {
           throw new Error('parent-artifact-mismatch');
         }
         const identity = {
@@ -1011,6 +1108,8 @@ export async function rebindJobContinuationOwners(oldCanvasFilePath, newCanvasFi
           ...identity,
           intentId: intentIdFor(identity),
           parentArtifactFingerprint: digest,
+          parentArtifactPublicationReceipt: snapshotReceipt,
+          parentArtifactUpdates: [],
         });
       }
       if (new Set(reboundIntents.map(intent => intent.intentId)).size !== reboundIntents.length) {

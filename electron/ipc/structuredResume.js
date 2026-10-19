@@ -54,7 +54,7 @@ const MAX_TEXT = 8_000;
 const MAX_CONTACT = 12;
 const MAX_ROLES = 32;
 const MAX_BULLETS_PER_ROLE = 24;
-const MAX_PROJECTS = 24;
+const MAX_PROJECTS = 1; // one optional Personal Projects entry
 // Education and credentials are first-class, compact résumé sections. These
 // are structural safety bounds, not an instruction to silently discard a
 // candidate's history: authority selection decides relevance before a draft
@@ -2032,17 +2032,27 @@ function renderRole(role) {
   return `<article class="role" itemprop="hasOccupation" itemscope itemtype="https://schema.org/EmployeeRole"><div class="role-header meta-row"><p class="role-title-line"><span class="title">${escapeHtml(role.title)}</span>${company}</p>${dates}</div>${meta}<ul class="highlights">${bullets}</ul></article>`;
 }
 
-function sourceProjectHeadings(careerData, projects, authorityMode = false) {
+function sourceProjectHeadings(careerData, projects, authorityMode = false, projectRoleOf = null) {
   // The authority gives each project an exact typed identity; do not infer an
-  // employer/personal provenance heading by reparsing its display text. A
-  // plain Projects label preserves the project's visible name and supported
-  // facts without inventing a generic domain category such as “Systems”.
-  if (authorityMode) return projects.map(() => 'Projects');
+  // employer/personal provenance heading by reparsing its display text. The
+  // record's own role link decides it: an unlinked project is Personal
+  // Projects, and a linked one (or one whose link cannot be read) keeps the
+  // plain Projects label rather than being called personal work.
+  if (authorityMode) return projects.map(project => (projectIsUnlinked(project, projectRoleOf) ? 'Personal Projects' : 'Projects'));
   return projects.map(project => careerDataProjectProvenanceHeadingForName(careerData, project.name) || 'Selected Systems');
 }
 
-function renderProjects(projects, careerData, authorityMode = false) {
-  const headings = sourceProjectHeadings(careerData, projects, authorityMode);
+function projectIsUnlinked(project, projectRoleOf) {
+  if (typeof projectRoleOf !== 'function') return false;
+  const entityIds = [...new Set(project.evidenceIds
+    .map(evidenceId => AUTHORITY_PROJECT_EVIDENCE_ID_RE.exec(evidenceId)?.[1])
+    .filter(Boolean))];
+  if (entityIds.length !== 1) return false;
+  try { return !projectRoleOf(entityIds[0]); } catch { return false; }
+}
+
+function renderProjects(projects, careerData, authorityMode = false, projectRoleOf = null) {
+  const headings = sourceProjectHeadings(careerData, projects, authorityMode, projectRoleOf);
   const groups = new Map();
   projects.forEach((project, index) => {
     const heading = headings[index];
@@ -2088,7 +2098,7 @@ export function renderStructuredResume(raw, context = {}) {
     : (draft.identity.credential ? `<span class="credential">${escapeHtml(draft.identity.credential)}</span>` : '');
   const header = `<header class="resume-header"><h1 class="name" itemprop="name">${escapeHtml(draft.identity.name)}</h1>${subtitle ? `<p class="tagline">${subtitle}</p>` : ''}<p class="contact" role="group" aria-label="Contact">${draft.identity.contact.map(escapeHtml).join(separator())}</p></header>`;
   const experience = draft.roles.length ? `<section class="section" aria-labelledby="sec-experience">${sectionHead('Experience', 'sec-experience')}${draft.roles.map(renderRole).join('')}</section>` : '';
-  const projects = draft.projects.length ? renderProjects(draft.projects, context.careerData, context.authorityMode === true) : '';
+  const projects = draft.projects.length ? renderProjects(draft.projects, context.careerData, context.authorityMode === true, context.projectRoleOf) : '';
   const skills = draft.skills.length ? `<section class="section" aria-labelledby="sec-skills">${sectionHead('Skills', 'sec-skills')}<dl class="skills">${mergeSameLabelSkillGroups(draft.skills).map(row => `<dt>${escapeHtml(row.label)}</dt><dd>${row.items.map(escapeHtml).join(SKILL_ITEM_SEPARATOR)}</dd>`).join('')}</dl></section>` : '';
   const education = draft.education.length ? renderEducation(draft.education) : '';
   const credentials = draft.credentials.length ? renderCredentials(draft.credentials) : '';

@@ -118,7 +118,13 @@ export function makeServedBody({
     if (recovered) {
       // A recovered correctionPrompt already contains the complete prompt.
     } else if (servedBefore) {
-      body.correctionPrompt = frameCorrections(current.corrections, current.correctionPrompt).correctionPrompt;
+      // V2 supplies the complete stage prompt as its correction prompt. It
+      // already travels in body.prompt; repeating it alongside all judge PNGs
+      // can overflow the MCP result cap on every recovery read. Keep the full
+      // prompt and all fixes, with only the redundant copy replaced.
+      const supplied = current.correctionPrompt === current.prompt
+        ? correctionNote(current.stage, current.code) : current.correctionPrompt;
+      body.correctionPrompt = frameCorrections(current.corrections, supplied).correctionPrompt;
     } else {
       body.note = 'The listed fixes apply to a corrected answer to this prompt.';
     }

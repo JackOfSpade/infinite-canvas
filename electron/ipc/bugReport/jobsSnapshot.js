@@ -5671,10 +5671,21 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
   }
   if (visibleLocalApplications.length) {
     lines.push('\n### Local AI Job State (live card snapshot)');
+    const saved = visibleLocalApplications.filter(item => item.localApplication.status === 'saved').length;
+    const stopped = visibleLocalApplications.filter(item => ['failed', 'invalid', 'revision-exhausted'].includes(item.localApplication.status)).length;
+    lines.push(`- Application outcomes: ${visibleLocalApplications.length} card(s) with a generation request · ${saved} saved · ${stopped} stopped/failed · ${visibleLocalApplications.length - saved - stopped} other/in progress. These are current card outcomes, not a count of clicks or proof that every queued request finished.`);
     for (const item of visibleLocalApplications.slice(0, 20)) {
       const local = item.localApplication;
       const message = local.message ? ' · message recorded' : '';
-      lines.push(`- card ${reportCorrelationDigest(item.nodeId)} · job ${reportCorrelationDigest(local.id)} · status: **${local.status || 'unknown'}**${message}`);
+      // Closed protocol codes only: do not export private validation prose or
+      // accept arbitrary text from a renderer-provided terminal field.
+      const terminal = ['requirements-audit-human-stop', 'blind-review-human-stop', 'write-verify-human-stop', 'legacy-application-regenerate'].includes(local.terminalKind)
+        ? ` · terminal \`${local.terminalKind}\`` : '';
+      const reason = ['audit-re-epoch-cap', 'prior-adjudication-conflict'].includes(local.terminalReason)
+        ? ` · reason \`${local.terminalReason}\`` : '';
+      const stopStage = ['requirements-audit-disagreement', 'write-verify-human-stop'].includes(local.stage)
+        ? ` · stop stage \`${local.stage}\`` : '';
+      lines.push(`- card ${reportCorrelationDigest(item.nodeId)} · job ${reportCorrelationDigest(local.id)} · status: **${local.status || 'unknown'}**${stopStage}${terminal}${reason}${message}`);
     }
     if (visibleLocalApplications.length > 20) lines.push(`- _${visibleLocalApplications.length - 20} additional Local AI card state(s) omitted._`);
   }
@@ -8267,10 +8278,16 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
     if (hasRoleBandTelemetry) {
       lines.push(`- Market prerequisites: of the fit-qualified jobs, ${rec(c.skippedNoLocation)} had no resolvable location and ${rec(c.skippedNoCurrency)} no resolvable market currency; ${rec(c.preResearchCandidates)} passed to role-band preparation.`);
       lines.push(`- Fit-qualified partition: ${rec(c.eligible)} job(s) = ${rec(c.skippedNoLocation)} no location + ${rec(c.skippedNoCurrency)} no market currency + ${rec(c.skippedNoExperience)} no usable experience + ${rec(c.preResearchCandidates)} role-band candidate(s).`);
-      lines.push(`- Role-band gate (before market cohorts): ${rec(c.preResearchCandidates)} candidate(s) = ${rec(c.skippedNoExperienceBand)} not placeable in a role band + ${rec(c.roleBandInterruptedJobs)} interrupted during role-band preparation + ${rec(c.roleBandFailureJobs)} affected by failed role-band lookup(s) + ${rec(c.marketCandidates)} passed to market cohorts.`);
+      lines.push(`- Role-band gate (before market cohorts): ${rec(c.preResearchCandidates)} candidate(s) = ${rec(c.skippedNoExperienceBand)} not placeable in a role band + ${rec(c.roleBandInterruptedJobs)} interrupted during role-band preparation + ${c.roleBandFallbackJobs == null ? `${rec(c.roleBandFailureJobs)} affected by failed role-band lookup(s) + ${c.roleBandUnavailableJobs != null ? `${rec(c.roleBandUnavailableJobs)} without an auditable ladder + ` : ''}` : ''}${rec(c.marketCandidates)} passed to market cohorts.`);
       lines.push(roleBandLookups != null && roleBandLookupOutcomes != null && roleBandLookups === roleBandLookupOutcomes
         ? `- Role-band lookup work (separate from market cohorts): ${roleBandLookups} role-family lookup(s) = ${roleBandResearches} researched + ${roleBandCacheHits} cache hit(s)${roleBandFailures != null ? ` · ${roleBandFailures} of researched lookup(s) failed` : ''}.`
         : `- Role-band lookup work (separate from market cohorts): ${rec(c.roleBandLookups)} lookup(s) · ${rec(c.roleBandResearches)} researched · ${rec(c.roleBandCacheHits)} cache hit(s)${roleBandFailures != null ? ` · ${roleBandFailures} researched lookup(s) failed` : ''}.`);
+      if (c.roleBandUnavailable != null) {
+        lines.push(`- Honest unavailable role-band evidence: ${rec(c.roleBandUnavailable)} researched role family/families returned no auditable ladder; ${rec(c.roleBandUnavailableJobs)} job(s) ${c.roleBandFallbackJobs == null ? 'kept without a salary-market verdict' : 'eligible for listing-level market research' }.`);
+      }
+      if (c.roleBandFallbackJobs != null) {
+        lines.push(`- Listing-level market fallback: ${rec(c.roleBandFallbackJobs)} of ${rec(c.marketCandidates)} market candidate(s) proceeded using role/seniority without a published experience ladder; salary evidence is still required.`);
+      }
     } else {
       lines.push(`- Of the fit-qualified jobs, skipped before market research: ${rec(c.skippedNoLocation)} with no resolvable location, ${rec(c.skippedNoCurrency)} with no resolvable market currency; ${rec(c.preResearchCandidates)} passed to experience-band/cohort preparation`);
     }

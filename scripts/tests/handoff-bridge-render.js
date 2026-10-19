@@ -1576,8 +1576,10 @@ export default [
               && text(window).includes('Keeps accepted work and this unresolved handoff for Resume; it does not clear your response.'),
             'the worker-progress view exposes a clear saved-pause control and explicitly distinguishes it from destructive cancellation');
             await act(async () => { pause.click(); await Promise.resolve(); await Promise.resolve(); });
-            assert(text(window).includes('Saving this Job Search. Accepted work stays saved; Resume will appear when stopping finishes.'),
+            assert(text(window).includes('Job Search paused and saved. Use Resume or Continue when ready.'),
               'acknowledging the node-scoped saved stop gives immediate, non-destructive feedback');
+            assert(pause.parentElement.querySelector('[role="status"]')?.textContent.includes('Job Search paused and saved.'),
+              'the save acknowledgement must stay beside Pause, above the potentially long worker list');
           },
         });
 

@@ -1,12 +1,15 @@
-// Application protocol v2 limits. The transport caps are hard bridge limits.
+import { CONSTANTS } from './handoffBridge/constants.js';
+
+// Application protocol v2 limits. These are our bridge's operational caps.
 // ChatGPT's 16,384-token output cap is documented. The live synthetic bridge
 // checksum ramp delivered and answered 300,000 characters intact (measurement:
 // .test-artifacts/blackbox-run/live-one-card/redesign-evidence/panel-runs/
 // write-then-verify-v2-ruling2-raw/bridge-ramp/result.json). 250,000 keeps
 // 50,000 headroom.
 export const APPLICATION_V2_LIMITS = Object.freeze({
-  bridgeRequestBytes: 2 * 1024 * 1024,
-  bridgeToolResultBytes: 2 * 1024 * 1024,
+  bridgeRequestBytes: CONSTANTS.MCP_BODY_CAP_BYTES,
+  bridgeToolResultBytes: CONSTANTS.MAX_TOOL_RESULT_BYTES,
+  bridgeToolTextBytes: CONSTANTS.MAX_TOOL_TEXT_BYTES,
   chatReplyTokens: 16_384,
   chatPromptChars: 250_000,
 });
@@ -27,7 +30,7 @@ export function assertApplicationV2PromptLimit(prompt) {
   if (chars > APPLICATION_V2_LIMITS.chatPromptChars) throw new ApplicationV2LimitError('prompt characters', chars, APPLICATION_V2_LIMITS.chatPromptChars);
   const bytes = Buffer.byteLength(prompt, 'utf8');
   // Reserve 128 KiB for the MCP result frame and status metadata.
-  const transportBudget = APPLICATION_V2_LIMITS.bridgeToolResultBytes - 128 * 1024;
+  const transportBudget = APPLICATION_V2_LIMITS.bridgeToolTextBytes - 128 * 1024;
   if (bytes > transportBudget) throw new ApplicationV2LimitError('tool-result bytes', bytes, transportBudget);
   return { chars, bytes };
 }

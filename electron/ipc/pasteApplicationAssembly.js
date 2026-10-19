@@ -8,7 +8,7 @@
  * output locations, source-grounding quotes, or invented checklist evidence.
  */
 import { assertTrustedSourceRoles, isUnsafeControlCharacter, projectContactChannels, projectTrustedIdentity, renderStructuredResume } from './structuredResume.js';
-import { resolveAuthorityEvidence, resolveAuthorityRole } from './applicationCareerAuthority.js';
+import { authorityProjectRoleOf, resolveAuthorityEvidence, resolveAuthorityRole } from './applicationCareerAuthority.js';
 import { verifyCareerCleanText } from './careerCleanLayer.js';
 export { MAX_FROZEN_SOURCE_CHARS } from './applicationSourceLimits.js';
 import { MAX_FROZEN_SOURCE_CHARS } from './applicationSourceLimits.js';
@@ -728,6 +728,7 @@ export function assemblePasteApplicationResult({
       }) }
       : jobInput.careerSkillEvidence ?? null,
     authorityMode: Boolean(authority),
+    projectRoleOf: authorityProjectRoleOf(authority),
     ...(trustedIdentity != null ? { trustedIdentity } : {}),
   }));
   // The letter's envelope and its paragraph evidence citations: a defect in

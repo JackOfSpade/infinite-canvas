@@ -385,6 +385,31 @@ export async function clearJobAnalysisOperationAuthority({ canvasFilePath, hubId
   });
 }
 
+// A renderer can crash after claiming a continuation but before rebinding its
+// manifest. Offer only that exact, immediate successor; never bridge a Clear,
+// another career/run, or a skipped authority generation.
+export async function jobRunResumeOperationAuthority({ canvasFilePath, hubId, runId, careerSnapshotId, recordedAuthority } = {}) {
+  const recorded = receipt(recordedAuthority);
+  if (!recorded || !identifier(runId) || !careerSnapshotId) return null;
+  return withRecoveryScope(canvasFilePath, hubId, async scopeValue => {
+    if (!scopeValue) return null;
+    return withLock(scopeValue, async () => {
+      const state = await readState(scopeValue);
+      const current = state.invalid ? null : state.record;
+      if (!current || current.semanticBase?.kind === 'clear') return null;
+      if (sameReceipt(current, recorded)) return publicReceipt(current);
+      if (current.status !== 'active'
+        || !['resolved-source-continuation', 'crash-resume', 'resume-saved-scrape'].includes(current.semanticBase?.kind)
+        || current.semanticBase.runId !== runId
+        || current.semanticBase.careerSnapshotId !== careerSnapshotId
+        || recorded.semanticBase.careerSnapshotId !== careerSnapshotId
+        || (recorded.semanticBase.runId !== null && recorded.semanticBase.runId !== runId)
+        || !sameReceipt(current.predecessor, recorded)) return null;
+      return publicReceipt(current);
+    });
+  });
+}
+
 /** Legacy/missing receipts are never admitted. This is safe across restart. */
 export async function currentJobAnalysisOperationAuthority({ canvasFilePath, hubId, operationId, semanticBase: rawBase, revision } = {}) {
   const operation = identifier(operationId);

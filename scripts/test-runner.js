@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import base64 from './tests/base64.js';
 import marketplace_monitor from './tests/marketplace-monitor.js';
 import ai_models from './tests/ai-models.js';
 import fixtures_canvas from './tests/fixtures-canvas.js';
@@ -153,6 +154,7 @@ import oracle_leak_gate from './tests/oracle-leak-gate.js';
 // Keep the file name beside its group so omissions and stale registrations
 // fail before a green test run gives a false signal.
 const testGroups = [
+  ['base64.js', base64],
   ['marketplace-monitor.js', marketplace_monitor],
   ['ai-models.js', ai_models],
   ['fixtures-canvas.js', fixtures_canvas],

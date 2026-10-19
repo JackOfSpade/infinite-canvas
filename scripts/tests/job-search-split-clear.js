@@ -1,3 +1,4 @@
+import { jobBoardSavedPauseOutcome } from '../../src/utils/jobBoardSavedPause.js';
 import { waitForJobRendererCommit } from '../../src/utils/jobRendererCommit.js';
 import { dedupJobsAcrossSources } from '../../src/utils/jobIdentity.js';
 import { hasLegacyPageScoring, JOB_SCORING_CONTRACT } from '../../src/utils/jobScoringContract.js';
@@ -124,6 +125,12 @@ export default [
     const plan = { phase: 'searches', boardRunId: 'run', activeSourceIds: ['hub'], activeSourceManualAiRunIds: { hub: 'manual' } };
     const args = { plan, boardNodeId: 'board', node, connected: true };
     assert.equal(jobBoardHasSavedAiContinuation(args), true);
+    for (const task of ['job-scoring', 'job-preference-research', 'job-preference-research-batch-assessment', 'job-role-screen-batch']) {
+      const ordinary = { ...node, data: { jobRunId: 'saved-run', manualAiResume: { ...node.data.manualAiResume, recoveryMode: null, task, jobRunId: 'saved-run' } } };
+      assert.equal(jobBoardHasSavedAiContinuation({ ...args, node: ordinary }), true);
+      assert.equal(jobBoardHasSavedAiContinuation({ ...args, node: { ...ordinary, data: { ...ordinary.data, jobRunId: 'newer' } } }), false);
+    }
+    assert.equal(jobBoardHasSavedAiContinuation({ ...args, node: { ...node, data: { manualAiResume: { ...node.data.manualAiResume, recoveryMode: null, task: 'career-profile-compile' } } } }), false);
     assert.equal(jobBoardHasSavedAiContinuation({ ...args, connected: false }), false);
     assert.equal(jobBoardHasSavedAiContinuation({ ...args, boardNodeId: 'other' }), false);
     assert.equal(jobBoardHasSavedAiContinuation({ ...args, plan: { ...plan, boardRunId: 'other' } }), false);
@@ -327,7 +334,7 @@ export default [
             bindings.claimAnalysisOperation = instantiate(callback('claimAnalysisOperation'));
             bindings.finishScoringAndSpawn = instantiate(callback('finishScoringAndSpawn'));
             Object.assign(bindings, {
-              classifyJobBoardSourceAdmission,
+              classifyJobBoardSourceAdmission, jobBoardSavedPauseOutcome,
               findJobSearchBoardActiveRecoveryOwner: () => null,
               isExactPausedBoardScoringContinuation: () => false,
               isSavedScrapeManualAiResume: () => false,

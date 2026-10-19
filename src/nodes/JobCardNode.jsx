@@ -16,7 +16,7 @@ import { openExternalFailureMessage, openExternalUrl } from '../utils/openExtern
 import { normalizeJobListingExternalUrl, summarizeJobListingUrl } from '../utils/jobListingUrl';
 import { brokenLocalAiJobDriveState, LOCAL_AI_CARD_POLL_IDLE_STATUSES, LOCAL_AI_RESULT_SETTLE_MS, LOCAL_AI_STATUS_ERROR_STREAK_LIMIT, registerMountedJobCard, revealSavedLocalApplicationOutputOnce, unregisterMountedJobCard } from '../utils/localAiFallback';
 import { hubCardFilter, isUnscoredPlaceholderCard } from '../utils/jobCardFilters';
-import { canRegenerateLocalApplication, canSaveImportedLocalApplication, queuedLocalApplicationSettlement, replacedLocalApplicationForCleanup } from '../utils/localAiApplicationLifecycle';
+import { canRegenerateLocalApplication, canSaveImportedLocalApplication, hasLinkedLocalApplicationOutput, queuedLocalApplicationSettlement, replacedLocalApplicationForCleanup } from '../utils/localAiApplicationLifecycle';
 import {
   APPLICATION_HANDOFF_LIMIT,
   applicationAwaitsPaste,
@@ -448,6 +448,8 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
     : activeApplicationRun ? { state: 'generating', position: null } : applicationRun;
   const hasApplicationRun = displayedApplicationRun.state !== 'idle';
   const localJobPending = !!localApplication && !canRegenerateLocalApplication(localApplication);
+  const hasLinkedApplicationOutput = hasLinkedLocalApplicationOutput(localApplication)
+    || hasLinkedLocalApplicationOutput(data.localApplication);
   const bundleIndicator = applicationBundleIndicator(localApplication);
   const bundleTone = bundleIndicator ? APPLICATION_BUNDLE_TONES[bundleIndicator.tone] : null;
   // Whether the ChatGPT bridge holds this card's application (the dock's own
@@ -1043,6 +1045,7 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
   // the existing polling/import path validates and saves the final bundle.
   const generateApplication = useCallback(async () => {
     if (!window.electronAPI?.queueLocalApplication || applicationSubmissionRef.current || hasApplicationRun || localJobPending) return;
+    if (hasLinkedLocalApplicationOutput(getLiveNode(idRef.current)?.data?.localApplication)) return;
     // The reactive effective lock gives mounted cards immediate feedback; the
     // live read remains the race-safe fence if a Board locks after that render.
     if (effectiveLock || getLiveNode(data.hubId)?.data?.locked) return;
@@ -1146,9 +1149,13 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
       // That permits regeneration without allowing a late response to clobber
       // a genuinely newer in-flight handoff.
       const expectedPriorLocalApplication = getLiveNode(idRef.current)?.data?.localApplication || null;
+      // A saved bundle can arrive while this click waits for its queue lease.
+      // Never replace it, even if this callback was created before the save.
+      if (hasLinkedLocalApplicationOutput(expectedPriorLocalApplication)) return;
       const queued = await window.electronAPI.queueLocalApplication({
         nodeId: idRef.current,
         canvasFilePath,
+        priorLocalApplicationId: expectedPriorLocalApplication?.id || null,
         transport: 'paste',
         job: {
           title: data.title, company: data.company, snippet: data.snippet,
@@ -1657,6 +1664,11 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
                   ? 'Open the AI handoff, copy its self-contained prompt into your local AI chat, and paste back the requested JSON. Review prompts ask the AI to make edits in that same response; the app reviews again afterwards.'
                   : 'Open this canvas’s .local-ai job folder and run LOCAL_AI_PROMPT.md with a local coding agent. This card checks for its result automatically.')
                 : '')}</div>
+              {localApplication.status === 'failed' && canRegenerateLocalApplication(localApplication) && (
+                <div className="mt-1 text-amber-200/80">
+                  This request stopped before saving. Generate starts a new application for this job; other queued jobs run independently.
+                </div>
+              )}
               {localApplication.status === 'saved' && (Array.isArray(localApplication.receipt?.selectedModelEffort)
                 || (savedSelection?.jobId === localApplication.id && Array.isArray(savedSelection.rows))) && (
                 <div className="mt-1 text-white/55">
@@ -1752,7 +1764,7 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
 
       {/* Generate the application bundle. Submission remains a manual action on
           the employer's site; this disposable hierarchy tracks no application state. */}
-      <div className="px-3 py-2 border-t border-white/5 flex items-center gap-1.5" onPointerDown={(e) => e.stopPropagation()}>
+      {!hasLinkedApplicationOutput && <div className="px-3 py-2 border-t border-white/5 flex items-center gap-1.5" onPointerDown={(e) => e.stopPropagation()}>
         <button
           onClick={effectiveLock ? undefined : (e) => { e.stopPropagation(); generateApplication(); }}
           disabled={hasApplicationRun || localJobPending || effectiveLock}
@@ -1786,7 +1798,7 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
           </button>
         )}
 
-      </div>
+      </div>}
     </div>
   );
 });

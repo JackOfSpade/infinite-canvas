@@ -29,7 +29,7 @@ const previewFixtureRoot = await fs.mkdtemp(path.join(
   process.platform === 'darwin' ? '/private/tmp' : os.tmpdir(),
   'infinite-canvas-preview-e2e-',
 ));
-const workspacePath = path.join(userDataDir, 'roundtrip.json');
+const workspacePath = path.join(await fs.realpath(previewFixtureRoot), 'roundtrip.json');
 const env = { ...process.env };
 const modKey = process.platform === 'darwin' ? 'Meta' : 'Control';
 const BRIDGE_PRELOAD_KEYS = [
@@ -37,9 +37,11 @@ const BRIDGE_PRELOAD_KEYS = [
   'handoffBridgeApproveBinary', 'handoffBridgeChooseCredentials', 'handoffBridgeRestartTunnel', 'handoffBridgeStopOrphan',
   'handoffBridgeGetTunnelLog', 'handoffBridgeOpenPairing', 'handoffBridgeCancelPairing', 'handoffBridgeNewChat',
   'handoffBridgeContinueChat', 'handoffBridgeStartWorkerPool', 'handoffBridgeCopyWorkerStarter', 'handoffBridgeRestartWorker',
+  'handoffBridgeOpenWorkerChat', 'handoffBridgeRetryWorkerLaunch', 'handoffBridgeGetLaunchAccount',
   'handoffBridgePause', 'handoffBridgeResume', 'handoffBridgeRevokeAll',
   'handoffBridgeForgetSetup', 'handoffBridgeRelease', 'handoffBridgeUnrelease', 'handoffBridgeReleasePush',
   'handoffBridgeUnreleasePush', 'handoffBridgeHoldJob', 'handoffBridgeAckAlarm', 'handoffBridgeGetActivity',
+  'handoffBridgeTestSyntheticPreflight',
   'handoffBridgePublishJobs', 'onHandoffBridgeStatus', 'onHandoffBridgeJobChanged', 'onHandoffBridgeCanvasFileReady', 'onHandoffBridgeOpenPanel',
 ].sort();
 
@@ -463,9 +465,11 @@ try {
     status: await window.electronAPI.handoffBridgeGetStatus(),
     enable: await window.electronAPI.handoffBridgeSetEnabled({ enabled: true }),
     statusAfterEnable: await window.electronAPI.handoffBridgeGetStatus(),
+    syntheticUnavailable: await window.electronAPI.handoffBridgeTestSyntheticPreflight('progress').then(() => false, () => true),
   }));
   bridgeUserDataDir = await app.evaluate(({ app: electronApp }) => electronApp.getPath('userData'));
   assert.equal(bridgeOff.enable.success, false, 'ordinary E2E must refuse bridge enablement');
+  assert.equal(bridgeOff.syntheticUnavailable, true, 'ordinary E2E must not register the synthetic bridge test handler');
   assert.equal(bridgeOff.enable.code, 'UNAVAILABLE', 'ordinary E2E refusal must use the fixed unavailable IPC code');
   assert.equal(bridgeOff.status.status.serving, 'off', 'ordinary E2E bridge status must stay off');
   assert.equal(bridgeOff.statusAfterEnable.status.availability.reason, 'e2e', 'ordinary E2E status must expose its unavailable reason');

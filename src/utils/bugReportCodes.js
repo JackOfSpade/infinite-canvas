@@ -308,7 +308,7 @@ export const CODE_DEFINITIONS = {
 
   APPVALIDATION: {
     label: 'Application Validation',
-    description: 'Application response rejection checks, including fixed envelope-field mismatch codes, correction stages, durable rejection history and final save verification. Includes bridge launch outcomes. Included automatically in FULL; no prompts, answers or checksum values are exported.',
+    description: 'Application outcomes (saved versus stopped), closed review-stop codes, response rejection checks, fixed envelope-field mismatch codes, correction stages, durable rejection history and final save verification. Includes bridge launch outcomes. Included automatically in FULL; no prompts, answers or checksum values are exported.',
     logFilter: line => /LocalAI|HandoffBridge|validation|handoff|JobApplication|ApplicationSync/i.test(line),
     excludeSections: ['nodes', 'edges', 'drawings', 'nodeInternals', 'nodeComponentStates', 'imageState', 'mediaState'],
   },
@@ -396,6 +396,13 @@ export const CODE_DEFINITIONS = {
     label: 'Open Worker Chat',
     description: 'Closed outcomes for Open worker chat: revealed, reopened, missing tab, expired worker, or Chrome activation failure. No chat URLs, window IDs or conversation content. Included automatically in FULL.',
     logFilter: line => /\[HandoffBridge\]|worker|launch|approval|reconnect/i.test(line),
+    excludeSections: ['nodes', 'edges', 'drawings', 'nodeInternals', 'nodeComponentStates', 'imageState', 'mediaState'],
+  },
+
+  BRIDGECHATMODE: {
+    label: 'Worker Chat Mode',
+    description: 'Worker launch mode verification and refusal receipts. Included automatically in FULL; reports only Chat, Work, or unknown, never conversation text.',
+    logFilter: line => /HandoffBridge|worker|chat.mode|Pause.*save/i.test(line),
     excludeSections: ['nodes', 'edges', 'drawings', 'nodeInternals', 'nodeComponentStates', 'imageState', 'mediaState'],
   },
 

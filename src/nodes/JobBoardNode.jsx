@@ -160,6 +160,7 @@ async function releaseJobBoardProcessLease(canvasFilePath, nodeId, boardRunId, c
       nodeId,
       boardRunId,
       claimToken: claim.claimToken,
+      retryableDeferral: claim.retryableDeferral || null,
     });
   } catch {
     // Closing/reloading the renderer releases its sender-owned main lease.
@@ -3480,6 +3481,9 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
           `[JobBoard] saved recovery not admitted in this window id=${id}`
           + ` run=${resumePlan.boardRunId} reason=${processBoardClaim.error}`,
         );
+        setRecoveryError(processBoardClaim.error === 'automatic-attempted'
+          ? 'Saved search recovery is ready. Choose Continue saved AI handoff to resume from the saved checkpoint.'
+          : 'Saved search recovery could not start in this window. Retry recovery when ready.');
         return { status: processBoardClaim.busy ? 'busy' : 'failed', error: processBoardClaim.error };
       }
     }
@@ -3599,7 +3603,20 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
       : partitionJobBoardSourceAdmissions(selectedSourceNodes);
     const completedOutcomes = new Map(Object.entries(resumePlan?.completedSourceRuns || {}));
     const incompleteSearches = Array.isArray(resumePlan?.incompleteSearches)
-      ? resumePlan.incompleteSearches.map(entry => ({ ...entry }))
+      ? resumePlan.incompleteSearches.filter(entry => {
+        // An older runner released its child control before awaiting terminal
+        // publication and recorded cleanup failures as cancellation. Re-admit
+        // only the exact completed generation described by its saved marker.
+        const sourceData = sourceNodesById.get(entry?.sourceId)?.data;
+        const recovery = sourceData?.terminalFinalizationRecovery;
+        return !(entry?.status === 'cancelled'
+          && sourceData?.hubState === 'done'
+          && recovery?.kind === 'terminal-finalization'
+          && recovery.runId === sourceData.jobRunId
+          && recovery.careerSnapshotId === sourceData.careerSnapshotId
+          && recovery.resultDisposition === sourceData.resultDisposition
+          && recovery.fingerprint === moduleFingerprint(sourceData.scoredJobs));
+      }).map(entry => ({ ...entry }))
       : [];
     // A fresh Board action may include searches that have already completed.
     // Those generations are immutable display inputs, not work items: record
@@ -3851,8 +3868,8 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
         && Array.isArray(durableScanResume.awaitingSourceResolutions)
         && durableScanResume.awaitingSourceResolutions.length > 0
       ) {
-        const consumedSourceId = durableScanResume.awaitingSourceResolution?.sourceId
-          || durableScanResume.activeSourceId;
+        const consumedSourceId = durableScanResume.activeSourceId
+          || durableScanResume.awaitingSourceResolution?.sourceId;
         const promoted = promoteJobBoardPausedSourceResolution({
           awaitingSourceResolutions: durableScanResume.awaitingSourceResolutions,
           activeSourceId: durableScanResume.activeSourceId,
@@ -4151,6 +4168,11 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
             if (!committed) throw new Error(`${label} paused-source receipt was not committed.`);
             return;
           }
+          // Cleanup/inspection failures keep their exact active-child receipt.
+          // Final reconciliation below records the retry descriptor once all
+          // siblings settle; never retire this child's rollback as incomplete.
+          if (['recovery-inspection-failed', 'recovery-finalization-failed', 'recovery-cleanup-failed']
+            .includes(result?.status)) return;
           // A failed, invalid, or individually-cancelled child is terminal for
           // this Board run. Keep its exact attention row and retire its active
           // rollback so reload never starts a replacement provider run.
@@ -4253,10 +4275,14 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
             || result?.status === 'recovery-cleanup-failed') {
             persistScanResume({
               activeSourceId: sourceId,
-              activeSourceIds: [sourceId],
               activeSourceRollback: activeSourceRollbacks[sourceId],
-              activeSourceRollbacks: { [sourceId]: activeSourceRollbacks[sourceId] },
-              recoverableFailure: { sourceId, kind: 'inspection', status: result.status, runId: result.runId || null, error: result.error || null },
+              recoverableFailure: {
+                ...result,
+                sourceId,
+                kind: result.status === 'recovery-finalization-failed'
+                  ? 'terminal-finalization'
+                  : result.status === 'recovery-cleanup-failed' ? 'manual-ai-retirement' : 'inspection',
+              },
             });
             setRecoveryError(result.error || `${label} recovery could not be inspected.`);
             return;
@@ -4529,6 +4555,7 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
           || turnReadiness.statusLabel === 'Checking connections'
         ) {
           persistScanResume({ activeSourceId: sourceId });
+          if (processBoardClaim) processBoardClaim.retryableDeferral = 'platforms-verifying';
           // This scan already consumed its one-shot recovery key. Verification
           // is an external, retryable gate, so release it for the settled
           // session rather than stranding the durable plan after it finishes.
@@ -4553,7 +4580,8 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
             : null;
           if (hasActivePlatformVerification(verifyingPlatformsRef.current)) {
             persistScanResume({ activeSourceId: sourceId });
-            // See the post-peek verification yield above: the same exact plan
+            if (processBoardClaim) processBoardClaim.retryableDeferral = 'platforms-verifying';
+          // See the post-peek verification yield above: the same exact plan
             // must re-enter after the connection check settles.
             autoResumedBoardScanRef.current = null;
             setScanProgress({
@@ -4662,6 +4690,7 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
               currentLabel: label,
               label: `Waiting for ${label} connection checks…`,
             });
+            if (processBoardClaim) processBoardClaim.retryableDeferral = 'platforms-verifying';
             EventLogger.log(`[JobBoard] recovered scan waiting for platform verification id=${id} run=${boardRunId} source=${sourceId}`);
             return;
           }
@@ -4698,10 +4727,11 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
 
         activeSearchModuleIdRef.current = sourceId;
         activeSearchModuleIdsRef.current.add(sourceId);
-        const retainedRollback = durableScanResume.activeSourceId === sourceId
+        const retainedRollback = durableScanResume.activeSourceRollbacks?.[sourceId]
+          || (durableScanResume.activeSourceId === sourceId
           && durableScanResume.activeSourceRollback?.sourceId === sourceId
           ? durableScanResume.activeSourceRollback
-          : null;
+          : null);
         const activeSourceRollback = retainedRollback || captureJobSearchRollback(
           sourceId,
           turnSourceNode.data,
@@ -4720,13 +4750,16 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
         // reload-safe counterpart of JobSearch's in-memory rollback control.
         persistScanResume({
           activeSourceId: sourceId,
+          activeSourceIds: [...new Set([...(durableScanResume.activeSourceIds || []), sourceId])],
           activeSourceRollback,
+          activeSourceRollbacks: { ...(durableScanResume.activeSourceRollbacks || {}), [sourceId]: activeSourceRollback },
           // Do not consume the source-resolution proof until its exact child
           // reaches a terminal receipt. A reload during this call otherwise
           // cannot tell a sanitized empty/done scorer from an unrelated retry.
-          awaitingSourceResolution: pausedContinuation
-            ? durableScanResume.awaitingSourceResolution
-            : initialPausedDescriptor,
+          // A null here means "consume and promote" to persistScanResume.
+          // Admission must retain every existing paused sibling until that
+          // child actually settles, even when its renderer was sanitized.
+          ...(initialPausedDescriptor ? { awaitingSourceResolution: initialPausedDescriptor } : {}),
         });
         const childPlanCommitted = await waitForBoardPlanCommit({
           getNode,
@@ -4741,7 +4774,14 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
             )),
         });
         if (!childPlanCommitted) {
-          throw new Error(`${label} could not start because its rollback receipt was not committed.`);
+          const message = `${label} could not start because its rollback receipt was not committed. Its saved recovery was kept; retry Continue.`;
+          setRecoveryError(message);
+          const observed = getNode(id)?.data?.boardScanResume;
+          const reason = !observed ? 'plan-missing' : observed.boardRunId !== boardRunId ? 'run-changed'
+            : observed.activeSourceId !== sourceId ? 'active-child-changed'
+              : observed.activeSourceRollback?.sourceId !== sourceId ? 'rollback-mismatch' : 'awaiting-child-mismatch';
+          EventLogger.error(`[JobBoard] child admission not committed; recovery retained id=${id} run=${boardRunId} source=${sourceId} reason=${reason}`);
+          return;
         }
         if (cancelled()) return;
         try {
@@ -4800,6 +4840,7 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
           });
           if (cancelled()) return;
           if (result?.transientReason === 'platforms-verifying') {
+            if (processBoardClaim) processBoardClaim.retryableDeferral = 'platforms-verifying';
             // This is the final race fence: verification can begin after our
             // post-peek check but before the child reads its own live state.
             // The child tags that transient refusal, so keep this exact Board
@@ -5391,6 +5432,15 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
       connectedSig,
       verificationSignature,
     );
+    const userPausedChild = selectedSearchModuleIds.some(sourceId => {
+      const marker = getNode(sourceId)?.data?.manualAiResume;
+      return marker?.pausedByUser === true && marker.orchestratorNodeId === id
+        && marker.boardRunId === plan.boardRunId;
+    });
+    if (userPausedChild && !scanRunRef.current && !scanPreflightRef.current) {
+      setRecoveryError('This Job Search is paused with its saved work. Continue from the Job Board when ready.');
+      return;
+    }
     const searchRecoveryError = searchRecoveryErrorRef.current;
     // A Search error may retry only after a *consumable* external state change.
     // The error identity is intentionally separate from autoResumedBoardScanRef:
@@ -5488,7 +5538,10 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
     }
 
     const savedAiSources = [plan.activeSourceId, ...(plan.activeSourceIds || [])].filter(Boolean);
-    if (savedAiSources.some(sourceId => jobBoardHasSavedAiContinuation({
+    const terminalCleanupPending = selectedSearchModuleIds.some(sourceId => (
+      getNode(sourceId)?.data?.terminalFinalizationRecovery?.kind === 'terminal-finalization'
+    ));
+    if (!terminalCleanupPending && savedAiSources.some(sourceId => jobBoardHasSavedAiContinuation({
       plan, boardNodeId: id, node: getNode(sourceId),
       connected: getEdges().some(edge => (edge.source === id && edge.target === sourceId)
         || (edge.target === id && edge.source === sourceId)),
@@ -6374,7 +6427,7 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
           sourceCounts={data.finalSourceCounts || {}}
           showReviewCards={data.showReviewCards !== false}
           setShowReviewCards={setShowReviewCards}
-          onRecombine={null}
+          onRecombine={boardRunVisible ? null : () => handleCombine()}
           onClear={handleClear}
           combining={scanning || combining}
         />

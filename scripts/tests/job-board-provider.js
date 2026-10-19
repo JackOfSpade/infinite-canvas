@@ -1,5 +1,6 @@
 import { assert } from './testHelpers.js';
 import { readFileSync } from 'node:fs';
+import { runInNewContext } from 'node:vm';
 import { isJobBoardUserCancellation, isLegacyUnbucketedJobBoard, validateJobBoardTaxonomy } from '../../src/utils/jobBoardAiProvider.js';
 import { attachCompensationRemoteResidences, combineSignature, emptyReplacementIneligibilityReason, isLegacyCombineSignature, moduleCombineFingerprint, moduleFingerprint, normalizeJobMatchScore, parseCombineSignature, shouldKeepCompletedBoardSnapshotVisible, staleReason, unionScoredJobs } from '../../src/nodes/jobboard/mergeJobs.js';
 import { buildJobTreeNodes, compareJobsByFitAndPreference } from '../../src/nodes/jobsearch/buildJobTree.js';
@@ -12,7 +13,7 @@ import { sanitizeNodesForSave } from '../../src/utils/serializationUtils.js';
 import { applyManualAiRetirementReceiptsToNodes, collectDeletedBoardChildClaims, collectDeletedManualAiWorkflowNodes, retireDeletedManualAiRuns } from '../../src/utils/canvasInteractions.js';
 import { collectJobBoardsAffectedByDeletion, getActiveJobBoardSearchReferenceIds, getClearCanvasRetainedNodes, getJobWorkflowDeletionLifecycleRevision, isClearCanvasDeletionFenceIntact, isJobWorkflowDeletionPending, jobBoardHasCancellableRecovery, markJobWorkflowDeletionPending, settleJobWorkflowDeletion, subscribeJobWorkflowDeletionLifecycle } from '../../src/utils/nodeDeletionLifecycle.js';
 import { boundedCombinedSourceRuns } from '../../src/utils/jobBoardProvenance.js';
-import { exactInterruptedRecoveryAdmission, exactInterruptedRecoveryBackendFailure } from '../../src/utils/jobBoardRecoveryAdmission.js';
+import { exactInterruptedRecoveryAdmission, exactInterruptedRecoveryBackendFailure, hasCheckpointedPostCollectionAnalysis } from '../../src/utils/jobBoardRecoveryAdmission.js';
 import { cancelJobBoardChildrenSequentially, promoteJobBoardPausedSourceResolution, runJobBoardChildFanout } from '../../src/utils/jobBoardChildFanout.js';
 import { classifyJobBoardSourceAdmission, completedJobSearchOutcomeMatches, jobSearchOutcomeReceiptMatches, partitionJobBoardSourceAdmissions } from '../../src/utils/jobBoardSourceAdmission.js';
 import { jobCareerImportBoardAdmission, jobCareerImportConsumptionPatch, retryableUnstartedJobCareerImportCapability } from '../../src/utils/jobCareerImportCapability.js';
@@ -26,6 +27,289 @@ import careerCompilationQueueTests from './careerCompilationQueueFixture.mjs';
 
 export default [
   ...careerCompilationQueueTests,
+  {
+    name: 'completed Board leaves no stale Search cleanup marker after automatic receipt-only reconciliation',
+    async run() {
+      const source = readFileSync(new URL('../../src/nodes/JobSearchNode.jsx', import.meta.url), 'utf8');
+      const callback = name => {
+        const start = source.indexOf(`const ${name} = useCallback(`) + `const ${name} = useCallback(`.length;
+        const end = source.indexOf('\n  }, [', start) + '\n  }'.length;
+        return source.slice(start, end);
+      };
+      const ref = current => ({ current });
+      const pin = 'a'.repeat(64); const scores = [{ id: 'kept-job', matchScore: 80 }];
+      const descriptor = { kind: 'terminal-finalization', runId: 'kept-run', careerSnapshotId: pin,
+        terminalStatus: 'completed', terminalOutcome: 'populated', resultDisposition: 'scored',
+        scoreReadyCount: 1, fingerprint: moduleFingerprint(scores) };
+      const hub = { id: 'hub', type: 'jobhub', data: { hubState: 'done', jobRunId: 'kept-run', careerSnapshotId: pin,
+        scoredJobs: scores, resultDisposition: 'scored', terminalFinalizationRecovery: descriptor,
+        analysisOperation: { authority: { operationId: 'terminal-authority' } } } };
+      const board = { id: 'board', type: 'jobboard', data: { hubState: 'done', resultCount: 1 } };
+      const originalBoard = JSON.stringify(board);
+      const calls = [];
+      const env = { id: 'hub', data: hub.data, hubState: 'done', canvasFilePath: '/tmp/synthetic-canvas.json',
+        getNode: () => hub, getNodes: () => [hub, board], getEdges: () => [{ source: 'hub', target: 'board' }],
+        updateGlobal: (_id, update) => { const patch = typeof update === 'function' ? update(hub) : update; if (patch) Object.assign(hub.data, patch); },
+        normalizedJobCareerSnapshotId: value => value, careerSnapshotBindingMatches,
+        exactJobRunCareerSnapshotBindingMatches: (d, expected) => d.jobRunId === expected.runId && d.careerSnapshotId === expected.careerSnapshotId,
+        operationAuthorityFor: () => null, moduleFingerprint, waitForJobRendererCommit: async args => args.isCurrent() && args.isCommitted(),
+        waitForRendererCommitFrame: async () => { await Promise.resolve(); },
+        searchRunOutcome: (status, details) => ({ status, ...details }),
+        terminalResultDisposition: outcome => outcome === 'populated' ? 'scored' : outcome,
+        terminalFinalizationError: (_run, _path, result) => result?.ok && result?.cleared ? null : 'cleanup not finished',
+        setResumeOffer() {}, setActiveResumeCheckpoint() {}, EventLogger: { error() {}, log() {} },
+        localQueueAdmissionRef: ref(null), processingRunsRef: ref({ active: false }), autoTerminalFinalizationAttemptRef: ref(null),
+        epoch: { start: () => () => false }, moduleRunQueue: createModuleRunQueue(),
+        isJobWorkflowDeletionPending: () => false, hasPendingManualAiRetirement: () => false,
+        staleOrdinaryManualAiResumeBlocksAdmission: () => false, isLiveManualAiRecoveryBoardOwner: () => false,
+        findJobSearchBoardRecoveryOwner: () => null, findJobSearchBoardActiveRecoveryOwner: () => null,
+        normalizeManualAiCleanupReceipts: () => [], addToast() {}, isNodeDeletedAbort: () => false,
+        activeBoardRecoveryOwnerKey: null, cleanupRetirementPending: false,
+        window: { electronAPI: { completeJobRun: async args => { calls.push(args); return { ok: true, cleared: true }; } } },
+      };
+      const instantiate = text => runInNewContext(`(${text})`, env);
+      env.completeJobRun = instantiate(callback('completeJobRun'));
+      env.retryTerminalFinalization = instantiate(callback('retryTerminalFinalization'));
+      env.handleRetryFailed = instantiate(callback('handleRetryFailed'));
+      const effectStart = source.indexOf('  useEffect(() => {', source.indexOf('const autoTerminalFinalizationAttemptRef')) + '  useEffect(() => {'.length;
+      const effectEnd = source.indexOf('\n  }, [', effectStart);
+      const effect = instantiate(`() => { ${source.slice(effectStart, effectEnd)} }`);
+      // A dirty terminal must never be reused as completed input before cleanup.
+      assert(terminalJobSearchOutcome(hub) === null, 'pending terminal cleanup cannot certify a complete Board child');
+      effect(); effect();
+      for (let i = 0; i < 30 && (hub.data.terminalFinalizationRecovery || env.localQueueAdmissionRef.current); i++) await new Promise(resolve => setImmediate(resolve));
+      assert(calls.length === 1 && calls[0].runId === 'kept-run' && calls[0].operationAuthority.operationId === 'terminal-authority',
+        `only exact terminal cleanup may be called: ${JSON.stringify({ calls, data: hub.data })}`);
+      assert(!hub.data.terminalFinalizationRecovery && !hub.data.errorMessage && !hub.data.queuedModuleRun
+        && hub.data.scoredJobs === scores && JSON.stringify(board) === originalBoard,
+        'automatic housekeeping clears the stale lock while leaving the displayed scores and Board untouched');
+      assert(terminalJobSearchOutcome(hub)?.runId === 'kept-run', 'only reconciled output becomes reusable');
+      hub.data.terminalFinalizationRecovery = descriptor;
+      env.window.electronAPI.completeJobRun = async () => { throw new Error('one-shot cleanup retried unexpectedly'); };
+      effect();
+      assert(env.localQueueAdmissionRef.current === null, 'the same descriptor cannot auto-loop after a failed attempt');
+    },
+  },
+  {
+    name: 'restored two-source Board finishes terminal cleanup then preserves the sibling at explicit scoring Continue',
+    async run() {
+      const source = readFileSync(new URL('../../src/nodes/JobBoardNode.jsx', import.meta.url), 'utf8');
+      const start = source.indexOf('const handleSearchSelected = useCallback(') + 'const handleSearchSelected = useCallback('.length;
+      const end = source.indexOf('\n  }, [addToast, boardRecoverySig', start) + '\n  }'.length;
+      const ref = (current = null) => ({ current });
+      const canada = { id: 'ca', type: 'jobhub', data: { hubState: 'done', jobRunId: 'ca-run', careerSnapshotId: 'pin', resultDisposition: 'scored', scoredJobs: [{ id: 'retained' }], terminalFinalizationRecovery: { kind: 'terminal-finalization', runId: 'ca-run', careerSnapshotId: 'pin', resultDisposition: 'scored' } } };
+      canada.data.terminalFinalizationRecovery.fingerprint = moduleFingerprint(canada.data.scoredJobs);
+      const usa = { id: 'us', type: 'jobhub', data: { hubState: 'empty', jobRunId: 'us-run', manualAiResume: { runId: 'us-ai', task: 'job-preference-research', orchestratorNodeId: 'board', boardRunId: 'board-run' } } };
+      const rollback = sourceId => ({ version: 1, sourceId, previousData: {} });
+      const plan = { version: 1, phase: 'searches', boardRunId: 'board-run', startedAt: 123,
+        selectedSearchModuleIds: ['ca', 'us'], completedSourceRuns: {}, baselineSourceRuns: {}, freshImportCapabilities: {}, backgroundChildRequests: {},
+        incompleteSearches: [{ sourceId: 'ca', status: 'cancelled' }], activeSourceId: 'us', activeSourceIds: ['us'],
+        activeSourceRollback: rollback('us'), activeSourceRollbacks: { us: rollback('us') },
+        activeSourceManualAiRunIds: { us: 'us-ai' }, awaitingSourceResolution: { sourceId: 'us', jobRunId: 'us-run' }, awaitingSourceResolutions: [{ sourceId: 'us', jobRunId: 'us-run' }] };
+      const board = { id: 'board', type: 'jobboard', data: { boardScanResume: plan, selectedSearchModuleIds: ['ca', 'us'] } };
+      const nodes = new Map([['board', board], ['ca', canada], ['us', usa]]);
+      const edges = [{ source: 'ca', target: 'board' }, { source: 'us', target: 'board' }];
+      let error = null; const called = []; const logs = [];
+      const context = {
+        id: 'board', data: board.data, canvasFilePath: '/tmp/board-flow-test.json',
+        getNode: id => nodes.get(id), getNodes: () => [...nodes.values()], getEdges: () => edges,
+        updateGlobal: (id, update) => { const n = nodes.get(id); Object.assign(n.data, typeof update === 'function' ? update(n) : update); },
+        isJobWorkflowDeletionPending: () => false, hasPendingManualAiRetirement: () => false,
+        scanRunRef: ref(), combineRunRef: ref(), cancellationInFlightRef: ref(), scanPreflightRef: ref(),
+        autoResumedBoardScanRef: ref(), activeBoardRunIdRef: ref(), activeSearchModuleIdRef: ref(), activeSearchModuleIdsRef: ref(new Set()), activeSearchManualAiRunIdsRef: ref(new Map()), scanLaneLeaseOwnerRef: ref(),
+        foreignRecoveryWaitSigRef: ref(), verifyingPlatformsRef: ref(false), interruptedRecoveryProbes: {}, boardRecoverySig: 'stable',
+        inMemoryUntitledBoardRunIdsRef: ref(new Set()), inMemoryUntitledBoardRunIds: new Set(),
+        setRecoveryError: value => { error = value; }, setScanning() {}, setScanProgress() {}, addToast() {},
+        EventLogger: { log: message => logs.push(message), error: (...args) => { throw new Error(args.map(String).join(' ')); } },
+        ACTIVE_SEARCH_STATES: new Set(['searching', 'scoring', 'evaluating-preferences']),
+        epoch: { start: () => () => false }, moduleRunQueue: createModuleRunQueue(),
+        claimJobBoardProcessLease: async () => ({ claimToken: 'lease', operation: 'board-orchestration' }), releaseJobBoardProcessLease: async () => {},
+        isCurrentBoardScanResume: (live, expected) => live?.boardRunId === expected.boardRunId,
+        clearExactBoardScanResume: () => { throw new Error('must retain paused Board plan'); },
+        waitForBoardPlanCommit: async ({ getNode, nodeId, matches }) => matches(getNode(nodeId).data.boardScanResume),
+        getConnectedJobSearchIds, getSelectedConnectedJobSearchIds, orderJobSearchIds, normalizeJobBoardRecoveryTimestamp,
+        normalizeJobBoardAdmissionOrder, allocateJobBoardAdmissionOrder, moduleFingerprint, moduleCombineFingerprint,
+        classifyJobBoardSourceAdmission, partitionJobBoardSourceAdmissions, isMergeableTerminalJobSearchOutcome, terminalJobSearchOutcome,
+        exactPausedSourceContinuation, resolveExactPausedJobBoardTerminal, promoteJobBoardPausedSourceResolution,
+        findJobSearchBoardRecoveryOwner, findJobSearchBoardActiveRecoveryOwner,
+        moduleLabel: d => d === canada.data ? 'Canada' : 'US',
+        moduleSearchReadiness: () => ({ ready: true }), canInspectInterruptedRecovery: () => false,
+        interruptedRecoveryProbeSignature: () => 'same', hasActivePlatformVerification: () => false,
+        isSavedScrapeManualAiResume: marker => marker?.task === 'job-scoring',
+        captureJobSearchRollback: sourceId => rollback(sourceId), validateBackgroundBoardChildRequest: () => null,
+        isJobBoardUserCancellation, isExplicitlyUnscoredModule: () => false,
+        jobSearchCoordinator: { runSearchModule: async (id, args) => {
+          called.push({ id, args });
+          if (id === 'ca') { canada.data.terminalFinalizationRecovery = null; return { status: 'completed', runId: 'ca-run', resultDisposition: 'scored' }; }
+          return { status: 'paused', runId: 'us-run', reason: 'awaiting-explicit-ai-continue', error: 'Continue saved AI handoff' };
+        } },
+      };
+      const run = runInNewContext(`(${source.slice(start, end)})`, context);
+      await run({ resumeBoardScan: true, plan });
+      assert(called.map(c => c.id).join(',') === 'ca,us', `both exact child paths must run in order; got ${JSON.stringify({ called, error, logs })}`);
+      const saved = board.data.boardScanResume;
+      assert(saved.completedSourceRuns.ca?.runId === 'ca-run' && saved.activeSourceId === 'us'
+        && saved.awaitingSourceResolution.jobRunId === 'us-run' && saved.activeSourceManualAiRunIds.us === 'us-ai'
+        && saved.incompleteSearches.length === 0 && error === 'Continue saved AI handoff',
+        'Canada must be acknowledged while US keeps its original handoff and visible Continue; neither source may rescrape');
+    },
+  },
+  {
+    name: 'terminal failure publication retains its Board child control until the awaited receipt settles',
+    async run() {
+      const source = readFileSync(new URL('../../src/nodes/JobSearchNode.jsx', import.meta.url), 'utf8');
+      const waitStart = source.indexOf('async function waitForCommittedSearchOutcome(');
+      const waitEnd = source.indexOf('function boardRunRollbackPatch', waitStart);
+      const runner = source.indexOf('const runForJobBoard = useCallback');
+      const branchStart = source.indexOf("if (outcome?.status === 'recovery-finalization-failed')", runner);
+      const branchEnd = source.indexOf("      if (\n        outcome?.status === 'recovery-inspection-failed'", branchStart);
+      const outcome = { status: 'recovery-finalization-failed', runId: 'ca-run', resultDisposition: 'scored', error: 'retry cleanup' };
+      const descriptor = { kind: 'terminal-finalization', runId: 'ca-run', resultDisposition: 'scored', scoreReadyCount: 57, fingerprint: 'exact' };
+      const control = {};
+      const ref = { current: control };
+      let cancelledByUser = false;
+      const context = { outcome, control, boardRunControlRef: ref, id: 'ca',
+        cancelled: () => cancelledByUser || ref.current !== control,
+        getNode: () => ({ data: { hubState: 'done', jobRunId: 'ca-run', resultDisposition: 'scored', terminalFinalizationRecovery: descriptor } }),
+        waitForRendererCommitFrame: async () => { await Promise.resolve(); },
+        searchRunOutcome: (status, details) => ({ status, ...details }), moduleFingerprint: () => 'exact' };
+      const run = runInNewContext(`(async function(){ ${source.slice(waitStart, waitEnd)}
+        try { ${source.slice(branchStart, branchEnd)} }
+        finally { if (boardRunControlRef.current === control) boardRunControlRef.current = null; }
+      })`, context);
+      const result = await run();
+      assert(result.status === 'recovery-finalization-failed' && result.scoreReadyCount === 57 && ref.current === null,
+        'publication must settle before finally releases its cancellation control');
+      ref.current = control; cancelledByUser = true;
+      assert((await run()).status === 'cancelled', 'a real user cancellation must still fence publication');
+    },
+  },
+  {
+    name: 'fanout terminal cleanup failure retains all active siblings and exact retry metadata',
+    async run() {
+      const source = readFileSync(new URL('../../src/nodes/JobBoardNode.jsx', import.meta.url), 'utf8');
+      const start = source.indexOf('const recordFreshChildSettlement = async');
+      const end = source.indexOf('        const childResults =', start);
+      const ca = { id: 'ca', data: { jobRunId: 'ca-run', hubState: 'done', errorMessage: 'cleanup', terminalFinalizationRecovery: {} } };
+      const plan = { boardRunId: 'board-run', activeSourceIds: ['ca', 'us'] };
+      const result = { status: 'recovery-finalization-failed', runId: 'ca-run', terminalOutcome: 'populated', fingerprint: 'exact', scoreReadyCount: 57 };
+      let writes = 0;
+      const context = { cancelled: () => false, scanToken: 'scan', scanRunRef: { current: 'scan' },
+        id: 'board', boardRunId: 'board-run', durableScanResume: plan,
+        getNode: id => id === 'board' ? { data: { boardScanResume: plan } } : ca,
+        moduleLabel: () => 'Canada', terminalJobSearchOutcome: () => null,
+        fanoutCleanupFailureSourceIds: new Set(), persistScanResume: () => { writes++; },
+        setRecoveryError: () => {}, result };
+      await runInNewContext(`(async function(){ ${source.slice(start, end)} await recordFreshChildSettlement({ sourceId: 'ca', result }); })()`, context);
+      assert(writes === 0 && plan.activeSourceIds.length === 2, 'observer must not demote a retryable cleanup into terminal cancellation');
+      const branchStart = source.indexOf("          if (result?.status === 'recovery-inspection-failed'", end);
+      const branchEnd = source.indexOf('          const outcome = terminalJobSearchOutcome(source);', branchStart);
+      context.sourceId = 'ca'; context.activeSourceRollbacks = { ca: { sourceId: 'ca' } };
+      context.label = 'Canada'; context.persistScanResume = patch => { Object.assign(plan, patch); };
+      runInNewContext(`(function(){ ${source.slice(branchStart, branchEnd)} })()`, context);
+      assert(plan.activeSourceIds.includes('us') && plan.recoverableFailure.kind === 'terminal-finalization'
+        && plan.recoverableFailure.fingerprint === 'exact' && plan.recoverableFailure.scoreReadyCount === 57,
+        'final reconciliation keeps the sibling and all exact cleanup descriptor fields');
+    },
+  },
+  {
+    name: 'saved false cancellation is repairable only for the exact terminal cleanup generation',
+    run() {
+      const source = readFileSync(new URL('../../src/nodes/JobBoardNode.jsx', import.meta.url), 'utf8');
+      const start = source.indexOf('    const incompleteSearches = Array.isArray(resumePlan?.incompleteSearches)');
+      const end = source.indexOf('    // A fresh Board action', start);
+      const live = { hubState: 'done', jobRunId: 'ca-run', careerSnapshotId: 'pin', resultDisposition: 'scored', scoredJobs: [1],
+        terminalFinalizationRecovery: { kind: 'terminal-finalization', runId: 'ca-run', careerSnapshotId: 'pin', resultDisposition: 'scored', fingerprint: 'exact' } };
+      const context = { resumePlan: { incompleteSearches: [{ sourceId: 'ca', status: 'cancelled' }] },
+        sourceNodesById: new Map([['ca', { data: live }]]), moduleFingerprint: () => 'exact' };
+      const run = () => runInNewContext(`(function(){ ${source.slice(start, end)} return incompleteSearches; })()`, context);
+      assert(run().length === 0, 'the saved false cancellation must re-enter housekeeping using its 57 retained rows');
+      live.terminalFinalizationRecovery.runId = 'other';
+      assert(run().length === 1, 'a newer run must never borrow the old recovery descriptor');
+      live.terminalFinalizationRecovery.runId = 'ca-run'; live.terminalFinalizationRecovery.fingerprint = 'changed';
+      assert(run().length === 1, 'changed results must remain fenced');
+    },
+  },
+  {
+    name: 'restored Board child admission retains both paused descriptors and promotes only after settlement',
+    run() {
+      const source = readFileSync(new URL('../../src/nodes/JobBoardNode.jsx', import.meta.url), 'utf8');
+      const start = source.indexOf('const persistScanResume = (patch = {}) => {');
+      const end = source.indexOf('\n    persistScanResume();', start);
+      const admissionStart = source.indexOf('persistScanResume({\n          activeSourceId: sourceId,\n          activeSourceIds:');
+      const admissionEnd = source.indexOf('\n        });', admissionStart) + '\n        });'.length;
+      assert(start > 0 && end > start && admissionStart > 0, 'actual production persistence and serial admission must be exercised');
+      const first = { sourceId: 'canada', jobRunId: 'ca-run' };
+      const second = { sourceId: 'usa', jobRunId: 'us-run' };
+      const rollback = sourceId => ({ version: 1, sourceId, previousData: { jobRunId: `${sourceId}-prior` } });
+      let live;
+      const initial = { version: 1, boardRunId: 'board-run', phase: 'searches',
+        activeSourceId: 'canada', activeSourceIds: ['canada', 'usa'],
+        activeSourceRollback: rollback('canada'), activeSourceRollbacks: { canada: rollback('canada'), usa: rollback('usa') },
+        activeSourceManualAiRunIds: { canada: 'ca-ai', usa: 'us-ai' },
+        awaitingSourceResolution: first, awaitingSourceResolutions: [first, second] };
+      live = initial;
+      const context = {
+        initial, id: 'board', boardRunId: 'board-run', initialPausedDescriptor: null,
+        sourceId: 'canada', activeSourceRollback: initial.activeSourceRollback,
+        promoteJobBoardPausedSourceResolution,
+        getNode: () => ({ data: { boardScanResume: live } }),
+        updateGlobal: (_id, patch) => { live = patch.boardScanResume; },
+      };
+      const harness = runInNewContext(`(function(){ let durableScanResume = initial;
+        ${source.slice(start, end)}
+        return { admit(){ ${source.slice(admissionStart, admissionEnd)} }, persist: persistScanResume };
+      })()`, context);
+      harness.admit();
+      assert(live.activeSourceId === 'canada' && live.activeSourceRollback.sourceId === 'canada'
+        && live.awaitingSourceResolutions.length === 2 && live.activeSourceManualAiRunIds.usa === 'us-ai',
+      'admitting the restored first child must not consume it or replace its rollback with its sibling');
+      harness.persist({ awaitingSourceResolution: null });
+      assert(live.activeSourceId === 'usa' && live.awaitingSourceResolutions.length === 1,
+        'only explicit settlement consumes the first descriptor and promotes the second');
+      context.sourceId = 'usa'; context.activeSourceRollback = initial.activeSourceRollbacks.usa;
+      harness.admit();
+      assert(live.activeSourceId === 'usa' && live.activeSourceRollback.sourceId === 'usa'
+        && live.awaitingSourceResolution.jobRunId === 'us-run', 'the second child can be admitted with its exact retained rollback and run');
+      // Canada can still need terminal housekeeping while the only paused
+      // descriptor belongs to the US sibling. Finishing Canada consumes Canada.
+      live = { ...initial, activeSourceId: 'canada', awaitingSourceResolution: second, awaitingSourceResolutions: [second] };
+      const siblingContext = { ...context, initial: live, getNode: () => ({ data: { boardScanResume: live } }) };
+      const siblingHarness = runInNewContext(`(function(){ let durableScanResume = initial;
+        ${source.slice(start, end)} return { persist: persistScanResume }; })()`, siblingContext);
+      siblingHarness.persist({ activeSourceId: null, awaitingSourceResolution: null });
+      assert(live.activeSourceId === 'usa' && live.awaitingSourceResolution.jobRunId === 'us-run'
+        && live.activeSourceRollbacks.usa.sourceId === 'usa', 'finishing Canada cleanup must retain the US saved scoring handoff');
+      const failure = source.slice(source.indexOf('if (!childPlanCommitted)'), source.indexOf('if (cancelled()) return;', admissionEnd));
+      assert(failure.includes('setRecoveryError(message)') && !failure.includes('throw') && !failure.includes('clearExactBoardScanResume'),
+        'a failed renderer commit must keep the Board recovery available for Retry');
+    },
+  },
+  {
+    name: 'post-source recovery selects the exact saved analysis without reopening providers',
+    run() {
+      const offer = { found: true, providerGathered: true, runId: 'saved-run', careerSnapshotId: 'a'.repeat(64),
+        operationAuthority: { semanticBase: { kind: 'resolved-source-continuation', runId: 'saved-run', careerSnapshotId: 'a'.repeat(64) } } };
+      assert(hasCheckpointedPostCollectionAnalysis(offer), 'host-issued post-source authority must recover enriched saved rows');
+      for (const changed of [
+        { providerGathered: false }, { runId: 'another-run' }, { careerSnapshotId: 'b'.repeat(64) },
+        { operationAuthority: { semanticBase: { ...offer.operationAuthority.semanticBase, kind: 'search' } } },
+      ]) assert(!hasCheckpointedPostCollectionAnalysis({ ...offer, ...changed }), 'an unfinished provider phase or another generation must not borrow this proof');
+      const search = readFileSync(new URL('../../src/nodes/JobSearchNode.jsx', import.meta.url), 'utf8');
+      const route = search.slice(search.indexOf('if (hasCheckpointedPostCollectionAnalysis(offer))'), search.indexOf('const admissionToken = Symbol(`resume-job-search'));
+      let called = 0;
+      const context = { offer, providerPhaseOnly: true, id: 'hub', manualAiRunId: 'saved-ai', queueManagedByBoard: true,
+        parentCancelled: () => false, orchestratorNodeId: 'board', EventLogger: { log() {} },
+        searchRunOutcome: (status, details) => ({ status, ...details }), hasCheckpointedPostCollectionAnalysis,
+        resumeSavedScrapeRef: { current: args => { called++; return args; } } };
+      const run = () => runInNewContext(`(function(){${route}})()`, context);
+      assert(run().reason === 'awaiting-explicit-ai-continue' && called === 0, 'restart must wait for explicit Continue before AI analysis');
+      context.providerPhaseOnly = false;
+      const result = run();
+      assert(called === 1 && result.expectedRunId === 'saved-run' && result.predecessor === offer.operationAuthority
+        && result.manualAiRunId === 'saved-ai', 'Continue must reopen only this exact saved analysis and accepted AI run');
+    },
+  },
   {
     name: 'Career-derived retained state is bound to one exact approved snapshot',
     run() {
@@ -665,7 +949,7 @@ export default [
       'Board admission/UI must reuse completed inputs, classify sources-ready before fresh platform checks, fence the executor before generic rerun, and describe parallel-fanout ordering honestly');
       assert(board.includes('partitionJobBoardSourceAdmissions(selectedSourceNodes)')
         && board.includes('initialContinuationSourceIds.has(sourceId)')
-        && board.includes('awaitingSourceResolution: pausedContinuation')
+        && board.includes('...(initialPausedDescriptor ? { awaitingSourceResolution: initialPausedDescriptor } : {})')
         && board.includes('Waiting for ${label} to finish its existing paused search…')
         && search.includes("hubState === 'sources-ready'")
         && search.includes("return searchRunOutcome('paused'")
@@ -3608,11 +3892,11 @@ export default [
         && !search.slice(resumeActionableStart, resumeActionableEnd).includes('resumable !== false')
         && search.includes('const shouldShowSavedAnalysisPanel = !!savedAnalysisMeta && !showUnfinishedRunBanner;')
         && savedPanel.includes('{boardRecoveryOwnsActions && (')
-        && savedPanel.includes('Saved results remain available for reference on the connected Job Board.')
+        && savedPanel.includes('To resume these saved jobs, choose Resume & combine on the connected Job Board.')
         && savedPanel.includes('Saved results remain available while Job Board recovery finishes.')
         && !savedPanel.includes('Saved results are kept for reference.')
         && !savedPanel.includes('Start searches from the connected Job Board with Search selected & combine.')
-        && (savedPanel.match(/Saved results remain available/g) || []).length === 2
+        && (savedPanel.match(/Saved results remain available/g) || []).length === 1
         && savedPanel.includes('{!boardRecoveryOwnsActions && (')
         && savedPanel.includes('onClick={handleResumeSavedScrape}')
         && savedPanel.includes("'Re-score saved results'")
@@ -3680,7 +3964,7 @@ export default [
       const recovery = search.slice(compactEnd, panelEnd);
       assert(panelStart >= 0 && compactEnd > panelStart && panelEnd > compactEnd
         && search.includes('const compactSavedRunTools = hubState === \'done\' && savedAnalysisMatchesCurrentRun;')
-        && search.includes('const hasCompactSavedRunTool = !!savedAnalysisMeta?.promptPath || !!savedAnalysisWarning;')
+        && search.includes('const hasCompactSavedRunTool = (!boardRecoveryOwnsActions && !!savedAnalysisMeta?.promptPath) || !!savedAnalysisWarning;')
         && compact.includes('Saved run tools')
         && compact.includes('!!savedAnalysisWarning')
         && compact.includes('savedAnalysisMeta.promptPath')
@@ -4452,7 +4736,7 @@ export default [
         && durableOwnerAt > reset.indexOf("cancelActiveBoardChild('board-child-cancelled')")
         && durableParentCancelAt > durableOwnerAt
         && ownedQueueCancelAt < durableParentCancelAt
-        && reset.indexOf('while (durableBoardOwner)') > durableOwnerAt
+        && reset.indexOf('while (durableBoardOwner && !boardPauseControl)') > durableOwnerAt
         && reset.includes('const cancelledQueuedBoardOwners = new Set();')
         && reset.includes('await waitForRendererCommitFrame();')
         && reset.indexOf('durableBoardOwner = findJobSearchBoardActiveRecoveryOwner(', durableParentCancelAt) > durableParentCancelAt

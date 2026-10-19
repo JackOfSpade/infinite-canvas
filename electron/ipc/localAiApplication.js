@@ -32,7 +32,7 @@ import { applyPasteDocumentPatches, mergePasteReviewDelta, requiredPasteReviewDe
 import { recordPasteHandoffDiagnostic } from './pasteHandoffDiagnostics.js';
 import { approvedCareerEvidenceCatalog, CAREER_SNAPSHOT_SCHEMA_VERSION, careerSnapshotStorageRoot, isCareerSkillIndexEligible, projectApprovedCareerSnapshotForApplication, projectLegacyCareerProfile, readCareerSnapshot, readPinnedCareerSnapshot, vettedCareerSkillInventory } from './careerSnapshot.js';
 import { cleanCareerSkillNames, readCareerCleanLayer } from './careerCleanLayer.js';
-import { authorityEntityEvidenceQuotes, buildApplicationCareerAuthority, resolveAuthorityCertification, resolveAuthorityEducation, resolveAuthorityEvidence, resolveAuthorityProject, validateAuthorityCertificationEvidence, validateAuthorityEducationEvidence, validateAuthorityIdentityAndLocation, validateAuthorityProjectEvidence, validateAuthorityRoleEvidence, validateAuthoritySkillGroup } from './applicationCareerAuthority.js';
+import { authorityEntityEvidenceQuotes, authorityProjectRoleOf, buildApplicationCareerAuthority, resolveAuthorityCertification, resolveAuthorityEducation, resolveAuthorityEvidence, resolveAuthorityProject, validateAuthorityCertificationEvidence, validateAuthorityEducationEvidence, validateAuthorityIdentityAndLocation, validateAuthorityProjectEvidence, validateAuthorityRoleEvidence, validateAuthoritySkillGroup } from './applicationCareerAuthority.js';
 import { MAX_SOURCE_GROUNDING_QUOTE_CHARS as SOURCE_GROUNDING_QUOTE_CHARS } from './applicationSourceLimits.js';
 import { canonicalizeHostOwnedResumeFields } from './hostOwnedResumeFields.js';
 import { expectedExactlyClause } from './hostOwnedText.js';
@@ -805,6 +805,7 @@ function renderedPasteDocumentHash(type, document, state, input) {
       careerData: state.careerData,
       careerSkillEvidence: selectedAuthorityCareerSkillEvidence(input, state),
       authorityMode: Boolean(applicationCareerAuthority(input)),
+      projectRoleOf: authorityProjectRoleOf(applicationCareerAuthority(input)),
     });
     return pasteJsonHash(rendered);
   }
@@ -5335,6 +5336,7 @@ function pasteRenderedResumeMainHtml(resume, state, input) {
     careerData: state.careerData,
     careerSkillEvidence: selectedAuthorityCareerSkillEvidence(input, state),
     authorityMode: Boolean(authority),
+    projectRoleOf: authorityProjectRoleOf(authority),
   }));
 }
 
@@ -6135,7 +6137,8 @@ function pasteCoverLetterCompletionTwinErrors(response, state, input) {
     } catch (error) {
       // checkPunctuationStyle already inspected the letter's dashes; the
       // completion gate drops the duplicate for the same reason.
-      const alreadyReported = checks.some(check => check.id === 'punctuation-style' && !check.passed);
+      const alreadyReported = partitionCheckResults(checks).blocking
+        .some(check => check.id === 'punctuation-style' && !check.passed);
       errors.push(...validationFailureParts(error)
         .filter(message => !(alreadyReported && String(message).startsWith('Cover-letter copy'))));
     }
@@ -8664,8 +8667,10 @@ function requirementsAuditDisagreementStatus({ jobId, dir, canvas, manifest, pas
     revision: paste.revision || 0, logCount: paste.logCount || 0,
     stage: paste.stage || null, resultSha256: null,
     ...(['audit-re-epoch-cap', 'prior-adjudication-conflict'].includes(paste.terminal?.reason)
-      ? { terminalKind: 'requirements-audit-human-stop', disputedUnitIds: paste.terminal.disputedUnitIds || [] } : {}),
-    message: paste.terminal?.message || REQUIREMENTS_AUDIT_DISAGREEMENT_MESSAGE,
+      ? { terminalKind: 'requirements-audit-human-stop', terminalReason: paste.terminal.reason, disputedUnitIds: paste.terminal.disputedUnitIds || [] } : {}),
+    message: paste.terminal?.message
+      ? `${paste.terminal.message} Generate a new application on this job card to restart from the frozen sources.`
+      : REQUIREMENTS_AUDIT_DISAGREEMENT_MESSAGE,
   };
 }
 
@@ -13494,7 +13499,11 @@ export function validateLocalApplicationResult(raw, jobId, projectRoot, job, opt
     // checkPunctuationStyle already inspects the letter's dashes. Reporting the
     // same em dash from both gates told the writer there were two independent
     // defects and sent them hunting for a second one that did not exist.
-    const letterDashAlreadyReported = coverChecks.some(check => check.id === 'punctuation-style' && !check.passed);
+    // An advisory observation is not a rejection. Suppressing the builder's
+    // hard gate for an advisory lets invalid copy reach PDF rendering, where
+    // v2 mislabels it as page-fit, missing fonts, and a null page count.
+    const letterDashAlreadyReported = partitionCheckResults(coverChecks).blocking
+      .some(check => check.id === 'punctuation-style' && !check.passed);
     // dashPunctuationProblems() labels each problem with the copy it read, so
     // the document each one names is decided here rather than guessed later.
     failures.push(...dashFailures
@@ -15173,8 +15182,24 @@ export async function __queueLegacyLocalApplicationFixtureForTests(args = {}, si
 
 async function queueLocalApplicationJobWithAuthority(args = {}, signal = null, requestedCareerSnapshotId = '', snapshotInput = null) {
   throwIfAborted(signal);
-  const id = consumeQueuedJobId(args.__acceptanceHarnessReservationCapability);
   const canvas = await resolveCanvasProject(args.canvasFilePath);
+  if (args.priorLocalApplicationId != null) {
+    if (typeof args.priorLocalApplicationId !== 'string' || !JOB_ID_RE.test(args.priorLocalApplicationId)) {
+      throw new Error('Invalid prior Local AI job id.');
+    }
+    const receipt = await readLocalAiTerminalReceipt(canvas.canvasRoot, canvas.canonicalCanvasFilePath, args.priorLocalApplicationId);
+    if (receipt?.outputDir) {
+      let outputExists = true;
+      try { await resolveTrustedSavedApplicationOutputDirectory(canvas, receipt); }
+      catch (error) { if (error?.code !== 'ENOENT') throw error; outputExists = false; }
+      if (outputExists) {
+        const error = new Error('This job already has a linked application bundle. Delete its saved folder externally before generating another application.');
+        error.code = 'LOCAL_AI_OUTPUT_ALREADY_LINKED';
+        throw error;
+      }
+    }
+  }
+  const id = consumeQueuedJobId(args.__acceptanceHarnessReservationCapability);
   throwIfAborted(signal);
   const pasteTransport = args.transport === 'paste';
   // The shared routine is source-project scoped; the per-canvas job data is

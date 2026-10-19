@@ -7,6 +7,7 @@ import {
   BANNED_GENERIC_PHRASES,
   BANNED_GENERIC_PATTERNS,
   buildResumeDocument,
+  buildCoverLetterDocument,
   checkAdditiveSeam,
   checkAllNeedDisposition,
   checkAnchorRelevance,
@@ -2811,6 +2812,15 @@ export default [
         && legalSuffixJob.company === legalSuffixCompany,
       'a legal-entity suffix is omitted only from the salutation, while a spoken "Company" stays');
       const qualifiedEnvelope = authorCoverLetterEnvelope({ job: { company: 'Acme (Canada)' }, evidence });
+      for (const company of ['Orchard - Scheduling Tools', 'Harbor — Logistics', 'Elm – Research']) {
+        const job = { company };
+        const letter = { ...authorCoverLetterEnvelope({ job, evidence }), paragraphs: ['I built reporting tools.'] };
+        assert(letter.salutation === 'Dear Hiring Team,' && job.company === company,
+          'a host-owned salutation uses a neutral greeting without rewriting a punctuated employer name');
+        // Exercise the final document gate, not just the display helper: this
+        // envelope previously consumed all five candidates' correction rounds.
+        buildCoverLetterDocument({ letter });
+      }
       assert(qualifiedEnvelope.salutation === 'Dear Acme (Canada) Hiring Team,',
         'a descriptive parenthetical qualifier is not mistaken for an acronym in the salutation');
       const numericQualifierEnvelope = authorCoverLetterEnvelope({ job: { company: 'Acme (2024)' }, evidence });

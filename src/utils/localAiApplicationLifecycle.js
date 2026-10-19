@@ -18,7 +18,15 @@ const REPLACEABLE_LOCAL_APPLICATION_STATUSES = new Set([
 ]);
 
 export function canRegenerateLocalApplication(localApplication) {
-  return REPLACEABLE_LOCAL_APPLICATION_STATUSES.has(localApplication?.status);
+  return !hasLinkedLocalApplicationOutput(localApplication)
+    && REPLACEABLE_LOCAL_APPLICATION_STATUSES.has(localApplication?.status);
+}
+
+// Only the main process's missing-output verdict releases a saved link. Keep
+// it protected during a status error or while the mount-time probe is pending.
+export function hasLinkedLocalApplicationOutput(localApplication) {
+  return !!localApplication && localApplication.savedOutputMissing !== true
+    && (localApplication.status === 'saved' || !!localApplication.savedDir || !!localApplication.receipt?.outputDir);
 }
 
 /**

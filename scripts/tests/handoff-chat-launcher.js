@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { runInNewContext } from 'node:vm';
+import { JSDOM } from 'jsdom';
 import { createChatLauncher } from '../../electron/ipc/handoffBridge/chatLauncher.js';
 import { pickUserChromePid } from '../../electron/ipc/browser/appleEvents.js';
 import { buildWorkerStarterMessage } from '../../src/utils/handoffBridgeConfig.js';
@@ -25,6 +26,8 @@ function harness(options = {}) {
   let chromeRestarted = false;
   let nativeTabClosed = false;
   let urlReadError = options.urlReadError === true;
+  let mode = options.mode || 'work';
+  let modeReads = 0;
   const launcher = createChatLauncher({
     now: () => day * 86_400_000 + (tick += 500), delay: async () => {},
     onState: (...values) => { states.push(values); options.onState?.(...values); },
@@ -43,6 +46,15 @@ function harness(options = {}) {
         return activeUrl;
       }
       const code = args[2];
+      if (code.includes("const controls = [...document.querySelectorAll('button[aria-pressed]')];")) {
+        modeReads++;
+        return options.modeFlipsBeforeSend && modeReads > 1 ? 'work' : mode;
+      }
+      if (code.includes("const buttons = [...document.querySelectorAll('button[aria-pressed]')]")) {
+        if (options.modeUnavailable) return 'unavailable';
+        if (!options.modeStuck) mode = 'chat';
+        return 'selected';
+      }
       if (code === "'ready'") return 'ready';
       if (code.includes('return JSON.stringify({ready:')) return JSON.stringify({ ready: !options.noEditor, empty: true, attachments: options.staleAttachment ? 1 : 0, url: activeUrl });
       if (code.includes('window.__icBridgeUploads ||= ')) return 'ready';
@@ -72,7 +84,7 @@ function harness(options = {}) {
       throw new Error('unexpected fake command');
     },
   });
-  return { launcher, calls, states, navigate: url => { activeUrl = url; }, nextDay: () => { day += 1; }, enableAppleEvents: () => { appleEventsEnabled = true; }, restartChrome: () => { chromeRestarted = true; }, recoverChrome: () => { urlReadError = false; } };
+  return { launcher, calls, states, setMode: value => { mode = value; }, navigate: url => { activeUrl = url; }, nextDay: () => { day += 1; }, enableAppleEvents: () => { appleEventsEnabled = true; }, restartChrome: () => { chromeRestarted = true; }, recoverChrome: () => { urlReadError = false; } };
 }
 
 const starter = 'private-session-code-do-not-log';
@@ -87,6 +99,47 @@ const cases = [
 ];
 
 export default [
+  { name: 'chat launcher: explicitly selects and verifies Chat before typing and sending', async run() {
+    const { launcher, calls } = harness();
+    const result = await launcher.launch({ owner: 'mode', starter });
+    assert.equal(result.ok, true);
+    assert.equal(result.observed.mode, 'chat');
+    const codes = calls.map(call => call.args?.[2] || '');
+    const select = codes.findIndex(code => code.includes('const buttons ='));
+    const insert = codes.findIndex(code => code.includes("document.execCommand('insertText'"));
+    assert.ok(select >= 0 && select < insert);
+    const read = codes.find(code => code.includes('const controls ='));
+    const choose = codes[select];
+    const dom = new JSDOM('<button aria-pressed="false">Chat</button><button aria-pressed="true"><span>Work</span></button><form><div contenteditable="true" role="textbox" aria-label="Work with ChatGPT"></div></form>');
+    const document = dom.window.document;
+    assert.equal(runInNewContext(read, { document }), 'work');
+    document.querySelector('button').onclick = () => {
+      document.querySelectorAll('button')[0].setAttribute('aria-pressed', 'true');
+      document.querySelectorAll('button')[1].setAttribute('aria-pressed', 'false');
+      document.querySelector('[role="textbox"]').setAttribute('aria-label', 'Ask ChatGPT');
+    };
+    assert.equal(runInNewContext(choose, { document }), 'selected');
+    assert.equal(runInNewContext(read, { document }), 'chat');
+    document.querySelectorAll('button').forEach(button => button.remove());
+    assert.equal(runInNewContext(read, { document }), 'chat', 'existing Chat composer is recognized without a switcher');
+    document.querySelector('[role="textbox"]').setAttribute('aria-label', 'Work with ChatGPT');
+    assert.equal(runInNewContext(read, { document }), 'work');
+    dom.window.close();
+  } },
+  { name: 'chat launcher: unavailable, stuck, changed and existing Work modes never send', async run() {
+    for (const options of [{ modeUnavailable: true }, { modeStuck: true }, { modeFlipsBeforeSend: true }]) {
+      const { launcher, calls } = harness(options);
+      assert.equal((await launcher.launch({ owner: 'mode', starter })).ok, false);
+      assert.equal(calls.some(call => call.args?.[2]?.includes('button[aria-label="Send"]')), false);
+    }
+    const { launcher, calls, setMode } = harness();
+    assert.equal((await launcher.launch({ owner: 'existing-mode', starter })).ok, true);
+    setMode('work');
+    calls.length = 0;
+    const continued = await launcher.launch({ owner: 'existing-mode', starter, continueChat: true });
+    assert.equal(continued.reason, 'chat_mode_mismatch');
+    assert.equal(calls.some(call => call.args?.[2]?.includes("document.execCommand('insertText'")), false);
+  } },
   { name: 'chat launcher: opening an expanded model picker does not toggle it closed', async run() {
     const { launcher, calls } = harness();
     await launcher.launch({ owner: 'expanded-menu', starter });

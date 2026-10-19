@@ -17,7 +17,9 @@ export function writeVerifyLengthBudgets(profile, sourceRoles) {
   const roles = Math.min(3, (sourceRoles || []).length);
   const education = Math.min(1, (profile?.education || []).length);
   const availableSkills = (profile?.skills || []).length;
-  const projectCount = Math.min(3, (profile?.projects || []).length);
+  // The résumé prints at most one Personal Projects entry, drawn from
+  // projects with no role link; a role-linked project is that role's work.
+  const projectCount = Math.min(1, (profile?.projects || []).filter(project => !project?.roleId).length);
   return [
     writeVerifyLengthBudgetForStructure({ roles, education, skillsRows: Math.min(3, availableSkills), projects: 0 }),
     ...(projectCount ? [writeVerifyLengthBudgetForStructure({ roles, education, skillsRows: Math.min(1, availableSkills), projects: projectCount })] : []),

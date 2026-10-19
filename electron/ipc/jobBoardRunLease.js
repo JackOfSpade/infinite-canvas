@@ -107,6 +107,7 @@ export async function claimJobBoardRunExecution(args = {}, { sender = null } = {
     sender,
     boardRunId: owner.boardRunId,
     operation,
+    attemptKey,
     claimToken,
     released,
     resolveReleased,
@@ -139,6 +140,10 @@ export function releaseJobBoardRunExecution(args = {}, { sender = null } = {}) {
     || record.boardRunId !== owner.boardRunId
     || record.claimToken !== claimToken
   ) return false;
+  // A verified owner may yield before work for a temporary startup gate.
+  // Preserve one-shot behavior for settled/failed attempts; only these fixed
+  // deferrals can be automatically re-admitted after their external gate moves.
+  if (args.retryableDeferral === 'platforms-verifying') automaticAttempts.delete(record.attemptKey);
   return releaseRecord(owner.ownerKey, record);
 }
 

@@ -218,7 +218,11 @@ function salutationCompanyName(value = '') {
   const acronymCharacters = match ? match[2].replace(/[^A-Z0-9]/g, '') : '';
   const withoutAcronym = match && acronymCharacters.length >= 2 && /[A-Z]/.test(acronymCharacters) ? text(match[1]) : company;
   const withoutSuffix = withoutAcronym.replace(SALUTATION_LEGAL_SUFFIX_RE, '').trim();
-  return withoutSuffix || withoutAcronym;
+  const displayName = withoutSuffix || withoutAcronym;
+  // The host owns this field, so a writer cannot repair punctuation copied
+  // from a board's employer display name. Use the neutral salutation instead
+  // of altering the employer's name or spending every correction on it.
+  return /[—–]|\s-\s/u.test(displayName) ? '' : displayName;
 }
 
 // Cover letters identify their preparation period without implying a

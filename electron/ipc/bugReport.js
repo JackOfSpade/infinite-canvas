@@ -2168,7 +2168,7 @@ ${chatOpens.map(entry => `  - ${new Date(entry.at).toISOString()} · worker ${en
   const launches = getBridgeLaunchDiagnostic();
   const launchMarkdown = launches.length === 0 ? '' : `
 - Automatic worker launch outcomes: ${launches.length} retained (newest last; no chat content)
-${launches.map(entry => `  - ${new Date(entry.at).toISOString()} · worker ${entry.workerOrdinal} · stage \`${entry.stage}\` · reason \`${entry.reason || 'none'}\` · retry ${entry.attempt}`).join('\n')}`;
+${launches.map(entry => `  - ${new Date(entry.at).toISOString()} · worker ${entry.workerOrdinal} · stage \`${entry.stage}\` · reason \`${entry.reason || 'none'}\` · mode \`${entry.mode || 'unknown'}\` · retry ${entry.attempt}`).join('\n')}`;
   const bootstrapMarkdown = `
 - Bridge bootstrap: config \`${bootstrap.config}\` · consent \`${bootstrap.consent}\` · configured auto-start \`${bootstrap.autoStart}\` · enabled \`${bootstrap.enabled}\` · runtime \`${bootstrap.runtime}\` · tunnel \`${bootstrap.tunnel}\`
 - Setup readiness: hostname \`${bootstrap.setup.hostname}\` · binary \`${bootstrap.setup.binary}\` · credentials \`${bootstrap.setup.credentials}\` · public tunnel \`${bootstrap.setup.tunnelReachable}\`
@@ -2517,7 +2517,7 @@ export function generateMarkdown(payload, reportWindowId = null, options = {}) {
   catch { /* never break the report on diagnostic failure */ }
 
   let handoffBridgeDiagnosticsMarkdown = '';
-  if (isFullReport || reportCodes.has('BRIDGE') || reportCodes.has('BRIDGEWORKERS') || reportCodes.has('BRIDGELAUNCH') || reportCodes.has('BRIDGEFOCUS') || reportCodes.has('BRIDGESUBMIT')) try { handoffBridgeDiagnosticsMarkdown = buildHandoffBridgeDiagnosticsMarkdown(); }
+  if (isFullReport || reportCodes.has('BRIDGE') || reportCodes.has('BRIDGEWORKERS') || (reportCodes.has('BRIDGELAUNCH') || reportCodes.has('BRIDGECHATMODE')) || reportCodes.has('BRIDGEFOCUS') || reportCodes.has('BRIDGESUBMIT')) try { handoffBridgeDiagnosticsMarkdown = buildHandoffBridgeDiagnosticsMarkdown(); }
   catch { /* a diagnostic receipt must never block the report */ }
 
   // Same guard as every other section builder: a malformed row in the renderer
@@ -2687,11 +2687,11 @@ export function generateMarkdown(payload, reportWindowId = null, options = {}) {
   // already filtered by the code vocabulary; apply the equivalent predicate to
   // the otherwise-global main-process ring as well. FULL remains byte-for-byte
   // global even when combined with either code.
-  const mainProcessLogFilter = !isFullReport && (reportCodes.has('AIHANDOFF') || reportCodes.has('BRIDGE') || reportCodes.has('BRIDGEWORKERS') || reportCodes.has('BRIDGELAUNCH') || reportCodes.has('BRIDGEFOCUS') || reportCodes.has('BRIDGESUBMIT'))
+  const mainProcessLogFilter = !isFullReport && (reportCodes.has('AIHANDOFF') || reportCodes.has('BRIDGE') || reportCodes.has('BRIDGEWORKERS') || (reportCodes.has('BRIDGELAUNCH') || reportCodes.has('BRIDGECHATMODE')) || reportCodes.has('BRIDGEFOCUS') || reportCodes.has('BRIDGESUBMIT'))
     ? entry => {
       const message = String(entry?.message || '');
       return (reportCodes.has('AIHANDOFF') && AIHANDOFF_MAIN_PROCESS_LOG_PATTERN.test(message))
-        || ((reportCodes.has('BRIDGE') || reportCodes.has('BRIDGEWORKERS') || reportCodes.has('BRIDGELAUNCH') || reportCodes.has('BRIDGEFOCUS') || reportCodes.has('BRIDGESUBMIT')) && BRIDGE_MAIN_PROCESS_LOG_PATTERN.test(message));
+        || ((reportCodes.has('BRIDGE') || reportCodes.has('BRIDGEWORKERS') || (reportCodes.has('BRIDGELAUNCH') || reportCodes.has('BRIDGECHATMODE')) || reportCodes.has('BRIDGEFOCUS') || reportCodes.has('BRIDGESUBMIT')) && BRIDGE_MAIN_PROCESS_LOG_PATTERN.test(message));
     }
     : null;
   let mainProcessLogLines = [];
@@ -2817,7 +2817,7 @@ export function generateMarkdown(payload, reportWindowId = null, options = {}) {
   // section-availability one, so no new report code belongs here — only the
   // receipt itself needed more to say.
   let pasteHandoffMarkdown = '';
-  if (isFullReport || reportCodes.has('APPLICATION') || reportCodes.has('HANDOFF')) {
+  if (isFullReport || reportCodes.has('APPLICATION') || reportCodes.has('APPVALIDATION') || reportCodes.has('HANDOFF')) {
     try { pasteHandoffMarkdown = buildPasteHandoffDiagnosticsMarkdown(); }
     catch { /* never break the report on diagnostic failure */ }
   }
@@ -2832,7 +2832,7 @@ export function generateMarkdown(payload, reportWindowId = null, options = {}) {
   // buildPasteRejectionTraceMarkdown's own header for why no second job-
   // discovery path was built for this.
   let pasteRejectionTraceMarkdown = '';
-  if (isFullReport || reportCodes.has('APPLICATION') || reportCodes.has('HANDOFF')) {
+  if (isFullReport || reportCodes.has('APPLICATION') || reportCodes.has('APPVALIDATION') || reportCodes.has('HANDOFF')) {
     try { pasteRejectionTraceMarkdown = buildPasteRejectionTraceMarkdown(canvasFilePath, localApplications); }
     catch { /* never break the report on diagnostic failure */ }
   }

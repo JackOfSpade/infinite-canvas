@@ -455,7 +455,7 @@ export function BridgeProgress({
       });
       if (mountedRef.current) {
         setNotice(result?.success === true
-          ? 'Saving this Job Search. Accepted work stays saved; Resume will appear when stopping finishes.'
+          ? 'Job Search paused and saved. Use Resume or Continue when ready.'
           : (result?.error || 'This Job Search is no longer active. Its handoff was left unchanged.'));
       }
     } catch {
@@ -519,6 +519,7 @@ export function BridgeProgress({
             {pausingAndSaving ? 'Saving Job Search…' : 'Pause & save Job Search'}
           </button>
           <p className="text-[10px] text-amber-100/70">Keeps accepted work and this unresolved handoff for Resume; it does not clear your response.</p>
+          {notice && <p role="status" className="basis-full text-[11px] text-amber-200">{notice}</p>}
         </div>
       )}
 
@@ -602,7 +603,7 @@ export function BridgeProgress({
         </div>
       )}
 
-      {notice && <p role="status" className="mt-2 text-[11px] text-amber-200">{notice}</p>}
+      {notice && !(!workersOnly && canPauseAndSave && typeof onPauseAndSave === 'function') && <p role="status" className="mt-2 text-[11px] text-amber-200">{notice}</p>}
     </section>
   );
 }

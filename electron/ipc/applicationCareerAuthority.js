@@ -273,6 +273,13 @@ export function resolveAuthorityProject(authority, id) {
   return project;
 }
 
+// The approved record's project → role link, in the shape the résumé renderer
+// takes as projectRoleOf. Null without an authority.
+export function authorityProjectRoleOf(authority) {
+  if (!authority) return null;
+  return projectId => resolveAuthorityProject(authority, projectId).roleId || null;
+}
+
 export function resolveAuthoritySkill(authority, id) {
   const skill = stateOf(authority).skillsById.get(id);
   if (!skill) throw new Error(`Unknown authority skill ${JSON.stringify(id)}.`);

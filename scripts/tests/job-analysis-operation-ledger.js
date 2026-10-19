@@ -1,6 +1,11 @@
 import { createJobAnalysisOperationLedger, jobAnalysisOperationMatches } from '../../src/utils/jobAnalysisOperationLedger.js';
-import { __resolvePinnedScoringInputForTests } from '../../electron/ipc/jobs.js';
-import { startRun } from '../../electron/ipc/jobRunStaging.js';
+import { __resolvePinnedScoringInputForTests, __createDescriptionRecoveryCheckpointForTests, __saveJobAnalysisSnapshotForTests, registerJobsHandlers } from '../../electron/ipc/jobs.js';
+import { beginJobContinuation, listJobContinuations } from '../../electron/ipc/jobContinuation.js';
+import { getJobDescriptionRecoveryCheckpointPath } from '../../electron/ipc/jobAnalysisPaths.js';
+import { startRun, readRunState } from '../../electron/ipc/jobRunStaging.js';
+import electronPkg from 'electron';
+import { runInNewContext } from 'node:vm';
+import { handleSafe } from '../../electron/ipc/ipcUtils.js';
 import { rebindRunOperationAuthority } from '../../electron/ipc/jobRunStaging.js';
 import {
   claimJobAnalysisOperationAuthority,
@@ -22,6 +27,139 @@ const base = (kind, extra = {}) => ({
 });
 
 export default [
+  {
+    name: 'production Pause and save repairs its exact interrupted scoring receipt before cancelling backend work',
+    run: async () => {
+      const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'ic-production-saved-pause-'));
+      const canvas = path.join(directory, 'canvas.json');
+      const owner = { canvasFilePath: canvas, hubId: 'hub' };
+      const sender = { id: 98225, isDestroyed: () => false, on() {}, once() {}, removeListener() {}, send() {} };
+      let stopped = false;
+      let worker;
+      try {
+        fs.writeFileSync(canvas, '{}');
+        registerJobsHandlers();
+        const first = await claimJobAnalysisOperationAuthority({ ...owner, operationId: 'first', semanticBase: base('search') });
+        await startRun(canvas, { runId: 'run-1', startedAt: Date.now(), nodeId: 'hub', careerSnapshotId: pin, operationAuthority: first.receipt });
+        const parent = {
+          version: 2, canvasFilePath: canvas, sourceHubId: 'hub', nodeId: 'hub', runId: 'run-1',
+          createdAt: new Date().toISOString(), careerSnapshotId: pin, operationAuthority: first.receipt,
+          jobs: [{ title: 'Retained role', company: 'Example', url: 'https://example.test/job' }],
+          gatheredJobCount: 1, sourceGatheredCount: 1, selectedJobCount: 1, cachedPrefix: 'Retained evidence', previewBatches: [],
+        };
+        await __saveJobAnalysisSnapshotForTests(parent);
+        assert((await beginJobContinuation(canvas, {
+          nodeId: 'hub', parentRunId: 'run-1', kind: 'late-source-refresh',
+          operation: 'search-jobs-single-source', sourceId: 'usajobs', careerSnapshotId: pin,
+          profileFingerprint: 'c'.repeat(64), operationAuthority: first.receipt,
+          searchWindow: { startTimestamp: 1, endTimestamp: 2 }, canonicalLocation: 'Toronto',
+          generationFingerprint: 'source-receipt', recoveryMode: 'automatic', now: Date.now(),
+        })).ok, 'fixture must retain an older sealed source receipt');
+        const next = await claimJobAnalysisOperationAuthority({ ...owner, operationId: 'scoring', semanticBase: base('resolved-source-continuation'), predecessor: first.receipt });
+        handleSafe('saved-pause-test-worker', async (_event, _args, signal) => {
+          await new Promise(resolve => signal.addEventListener('abort', resolve, { once: true }));
+          const state = await readRunState(canvas, Date.now(), { nodeId: 'hub' });
+          assert(state.manifest.recoveryDisposition === 'manual', 'manual recovery must reach disk before the worker receives cancellation');
+          stopped = true;
+          return { success: true };
+        });
+        worker = electronPkg.ipcMain.__getInvokeHandler('saved-pause-test-worker')({ sender }, { nodeId: 'hub' });
+        const pause = electronPkg.ipcMain.__getInvokeHandler('pause-job-run-and-cancel');
+        const refused = await pause({ sender }, { canvasFilePath: canvas, nodeId: 'hub', runId: 'other-run', operationAuthority: next.receipt });
+        assert(refused.settled === false && !stopped, 'a different run must not cancel this worker');
+        const saved = await pause({ sender }, { canvasFilePath: canvas, nodeId: 'hub', runId: 'run-1', operationAuthority: next.receipt });
+        await worker;
+        const state = await readRunState(canvas, Date.now(), { nodeId: 'hub' });
+        assert(saved.ok && saved.paused && saved.settled && stopped
+          && state.manifest.inputs.operationAuthority.operationId === 'scoring'
+          && state.manifest.recoveryDisposition === 'manual', 'the actual IPC must repair S1→S2, persist manual recovery, and await worker settlement');
+        assert(!(await withCurrentJobAnalysisOperationAuthority({ ...owner, ...next.receipt }, () => 'late')).admitted,
+          'acknowledged pause must fence delayed writes from the stopped worker');
+        assert((await listJobContinuations(canvas, 'hub')).length === 1,
+          'obsolete sealed source receipts must be retained, while their revoked authority cannot block stopping current scoring');
+      } finally {
+        electronPkg.ipcMain.removeHandler('saved-pause-test-worker');
+        fs.rmSync(directory, { recursive: true, force: true });
+      }
+    },
+  },
+  {
+    name: 'production scoring continuation and restart Continue keep manifest authority current and repair one interrupted rebind',
+    run: async () => {
+      const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'ic-production-continue-'));
+      const canvas = path.join(directory, 'canvas.json');
+      const owner = { canvasFilePath: canvas, hubId: 'hub' };
+      const sender = { id: 98224, isDestroyed: () => false, on() {}, once() {}, removeListener() {}, send() {} };
+      try {
+        fs.writeFileSync(canvas, '{}');
+        registerJobsHandlers();
+        const claim = electronPkg.ipcMain.__getInvokeHandler('claim-job-analysis-operation');
+        const peek = electronPkg.ipcMain.__getInvokeHandler('peek-job-run');
+        const first = await claim({ sender }, { ...owner, operationId: 'first', semanticBase: base('search') });
+        await startRun(canvas, { runId: 'run-1', startedAt: Date.now(), nodeId: 'hub', careerSnapshotId: pin, operationAuthority: first.receipt });
+        const checkpoint = {
+          version: 2, canvasFilePath: canvas, sourceHubId: 'hub', nodeId: 'hub', runId: 'run-1',
+          createdAt: new Date().toISOString(), careerSnapshotId: pin,
+          gatheredJobCount: 1, sourceGatheredCount: 1, selectedJobCount: 1,
+          cachedPrefix: 'Retained evidence', previewBatches: [],
+          jobs: [{ title: 'Retained role', company: 'Example', url: 'https://example.test/job' }],
+          preferenceCandidatePool: [{ title: 'Retained role', company: 'Example', url: 'https://example.test/job' }],
+          operationAuthority: first.receipt,
+        };
+        assert((await __createDescriptionRecoveryCheckpointForTests(checkpoint)).saved, 'fixture must seal the same recovery checkpoint used by Solve');
+        const second = await claim({ sender }, { ...owner, operationId: 'second', semanticBase: base('resolved-source-continuation'), predecessor: first.receipt });
+        assert(second.admitted, 'the actual scoring continuation IPC must be admitted');
+        const staged = await readRunState(canvas, Date.now(), { nodeId: 'hub' });
+        assert(staged.manifest.inputs.operationAuthority.operationId === 'second', 'acknowledging scoring must also rebind its staged manifest before preference handoffs start');
+        const secondReplay = await claim({ sender }, { ...owner, operationId: 'second', semanticBase: base('resolved-source-continuation'), predecessor: first.receipt });
+        assert(secondReplay.admitted && secondReplay.idempotent, 'an acknowledgement retry must remain idempotent after the manifest has already moved');
+        const third = await claim({ sender }, { ...owner, operationId: 'third', semanticBase: base('crash-resume'), predecessor: (await peek({ sender }, { canvasFilePath: canvas, nodeId: 'hub' })).operationAuthority });
+        assert(third.admitted, 'restart Continue must use the current staged receipt');
+        // Model the older build/crash: host acknowledged S4, then never got as
+        // far as re-stamping the manifest. A new process has no renderer state.
+        const orphan = await claimJobAnalysisOperationAuthority({ ...owner, operationId: 'orphan', semanticBase: base('resolved-source-continuation'), predecessor: third.receipt });
+        const offered = await peek({ sender }, { canvasFilePath: canvas, nodeId: 'hub' });
+        assert(offered.operationAuthority.operationId === orphan.receipt.operationId, 'peek must discover only the immediate same-run interrupted successor');
+        assert((await readRunState(canvas, Date.now(), { nodeId: 'hub' })).manifest.inputs.operationAuthority.operationId === 'third', 'peek must remain read-only');
+        const repaired = await claim({ sender }, { ...owner, operationId: 'repaired', semanticBase: base('crash-resume'), predecessor: offered.operationAuthority });
+        assert(repaired.admitted && (await readRunState(canvas, Date.now(), { nodeId: 'hub' })).manifest.inputs.operationAuthority.operationId === 'repaired', 'Continue must finish S3→S4 adoption before admitting and adopting S5');
+        const recoveredCheckpoint = JSON.parse(fs.readFileSync(getJobDescriptionRecoveryCheckpointPath(canvas, 'run-1', null), 'utf8'));
+        assert(recoveredCheckpoint.operationAuthority.operationId === 'repaired'
+          && JSON.stringify(recoveredCheckpoint.jobs) === JSON.stringify(checkpoint.jobs)
+          && JSON.stringify(recoveredCheckpoint.preferenceCandidatePool) === JSON.stringify(checkpoint.preferenceCandidatePool), 'receipt repair must preserve all recovered job evidence and candidate rows');
+        const saved = await claim({ sender }, { ...owner, operationId: 'saved-analysis', semanticBase: base('resume-saved-scrape'), predecessor: repaired.receipt });
+        assert(saved.admitted && (await readRunState(canvas, Date.now(), { nodeId: 'hub' })).manifest.inputs.operationAuthority.operationId === 'saved-analysis',
+          'saved analysis must adopt its unfinished provider manifest so terminal finalization can complete the same run without scraping');
+        const wrong = await claimJobAnalysisOperationAuthority({ ...owner, operationId: 'wrong-run', semanticBase: base('resolved-source-continuation', { runId: 'other-run' }), predecessor: saved.receipt });
+        const wrongOffer = await peek({ sender }, { canvasFilePath: canvas, nodeId: 'hub' });
+        assert(wrong.admitted && wrongOffer.operationAuthority.operationId === saved.receipt.operationId, 'another run must never be offered as an adoptable continuation');
+        const refused = await claim({ sender }, { ...owner, operationId: 'refused', semanticBase: base('crash-resume'), predecessor: wrongOffer.operationAuthority });
+        assert(!refused.admitted, 'a stale offer must remain fenced instead of borrowing another run');
+        await clearJobAnalysisOperationAuthority(owner);
+        assert(!(await claim({ sender }, { ...owner, operationId: 'after-clear', semanticBase: base('crash-resume'), predecessor: repaired.receipt })).admitted, 'Clear must remain a hard recovery boundary');
+      } finally { fs.rmSync(directory, { recursive: true, force: true }); }
+    },
+  },
+  {
+    name: 'renderer recovery admission failure preserves saved work and Board ownership',
+    run: async () => {
+      const source = fs.readFileSync(new URL('../../src/nodes/JobSearchNode.jsx', import.meta.url), 'utf8');
+      for (const variable of ['resumeOperation', 'continuationOperation']) {
+        const block = source.match(new RegExp(`if \\(!${variable}\\) \\{([\\s\\S]*?)\\n      \\}`));
+        assert(block, `production ${variable} refusal block must exist`);
+        const writes = [];
+        const outcome = runInNewContext(`(function(){${block[1]}})()`, {
+          currentId: 'hub', activeJobRunId: 'run-1', offer: { runId: 'run-1' },
+          updateGlobal: (id, patch) => writes.push({ id, patch }),
+          searchRunOutcome: (status, details) => ({ status, ...details }),
+        });
+        assert(outcome.status === 'recovery-inspection-failed' && outcome.runId === 'run-1', 'Board must receive a retryable inspection failure, not a terminal/superseded attempt');
+        assert(writes.length === 1 && !Object.hasOwn(writes[0].patch, 'manualAiResume') && !Object.hasOwn(writes[0].patch, 'hubState'), 'a rejected claim must preserve the marker and visible saved state');
+      }
+      const board = source.slice(source.indexOf('const runForJobBoard = useCallback'), source.indexOf('// Re-score the currently displayed listings'));
+      assert(board.indexOf("outcome?.status === 'recovery-inspection-failed'") < board.indexOf("if (!outcome || outcome.status !== 'completed')"), 'Board executor must preserve an inspection failure before retiring a manual marker');
+    },
+  },
   {
     name: 'durable operation authority fences delayed writes yet preserves sealed S1 recovery across S2 cancel and reload',
     run: async () => {

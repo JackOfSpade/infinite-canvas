@@ -44,6 +44,7 @@
  * fields so its layout is always on-brand.
  */
 import fs from 'fs';
+import { isBase64Text } from '../utils/base64.js';
 import path from 'path';
 import crypto from 'node:crypto';
 import electronPkg from 'electron';
@@ -1250,7 +1251,7 @@ export function normaliseResumeDownloadBundle(raw = {}) {
     const pdfBase64 = String(value || '').replace(/\s/g, '');
     // Legacy saved workspaces may still contain embedded PDF bytes. Keep only
     // valid values while migrating them; new workspaces store PDFs as siblings.
-    return pdfBase64.startsWith('JVBERi0') && /^[A-Za-z0-9+/]*={0,2}$/.test(pdfBase64)
+    return pdfBase64.startsWith('JVBERi0') && isBase64Text(pdfBase64)
       && pdfBase64.length % 4 === 0 ? pdfBase64 : '';
   };
   // `pdfBase64` was the original single-PDF payload. Retain it solely as a

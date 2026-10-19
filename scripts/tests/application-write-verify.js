@@ -23,7 +23,7 @@ import { normalizeCurrentHandoff } from '../../electron/ipc/handoffBridge/lanes.
 import { __pasteUnitGroundingErrorsForTests } from '../../electron/ipc/localAiApplication.js';
 import { buildApplicationCareerAuthority } from '../../electron/ipc/applicationCareerAuthority.js';
 import { approvedCareerEvidenceCatalog, CAREER_SNAPSHOT_STATUS_APPROVED } from '../../electron/ipc/careerSnapshot.js';
-import { assessStrengthFamily } from '../../electron/ipc/applicationClaimGrounding.js';
+import { assessStrengthFamily, credentialFindings } from '../../electron/ipc/applicationClaimGrounding.js';
 import { MAX_REQUIREMENTS_REEPOCHS, requirementsAdjudicationBindings, requirementsBindingErrors, requirementsAuditCapTerminal, requirementsSingletonBinding } from '../../electron/ipc/applicationRequirementsAuditPolicy.js';
 import { applicationProtocolSetting } from '../../electron/ipc/applicationProtocolSetting.js';
 import { v2RejectionEvidencePaths } from '../../electron/ipc/applicationV2RejectionEvidence.js';
@@ -36,6 +36,14 @@ const domains = [
 const JOB_ID = '11111111-1111-4111-8111-111111111111';
 
 export default [
+  { name: 'commercial licensing does not claim a professional credential', run() {
+    for (const noun of ['approaches', 'models', 'costs', 'fees', 'terms', 'agreements']) {
+      assert.deepEqual(credentialFindings(`I evaluated vendors and their licensing ${noun}.`, ['I evaluated vendor costs and tradeoffs.']), []);
+      assert.ok(credentialFindings(`I evaluated licensing ${noun} and hold a nursing license.`, ['I evaluated vendor costs.']).length);
+    }
+    assert.ok(credentialFindings('I hold a professional license.', ['I evaluated vendor costs.']).length);
+    assert.ok(credentialFindings('I completed nursing licensing.', ['I evaluated vendor costs.']).length);
+  } },
   { name: 'v2 rejection diagnostics name each fixed envelope field without retaining its value', run() {
     const names = { protocol: 'protocol', jobId: 'job-id', stage: 'stage', handoffCode: 'code', baseHashes: 'base-hashes' };
     for (const [field, suffix] of Object.entries(names)) {
@@ -329,6 +337,11 @@ export default [
         assert.ok(errors(`I maintained ${work}. The Orbital Systems team appeals to me because it involves this work.`)
           .some(error => error.includes('names')), `${title}: invented fragment fails`);
         assert.deepEqual(errors(`I maintained ${work}. I would bring this work to ${company}.`), [], `${company}: target employer is licensed`);
+        const taggedErrors = text => __pasteUnitGroundingErrorsForTests({ ...args, targetCompany: `${company} - Operations Tools`, finalText: text });
+        assert.deepEqual(taggedErrors(`I maintained ${work}. I would bring this work to ${company}'s team.`), [],
+          'the exact employer prefix and possessive in a forward reference are licensed');
+        assert.ok(taggedErrors(`I maintained ${work} at ${company}.`).some(error => error.includes('names')),
+          'a display-name prefix does not license a past-employment claim');
         assert.ok(errors(`I worked as a ${title} on ${work}.`).some(error => error.includes('names')), `${title}: past title mutation fails`);
         assert.ok(errors(`I maintained ${work} at ${company}.`).some(error => error.includes('names')), `${company}: past employer mutation fails`);
         assert.ok(errors(`I maintained ${work}. The Orbital Systems Engineer role appeals to me because it involves this work.`)
@@ -505,7 +518,8 @@ export default [
       assert.equal(APPLICATION_V2_LIMITS.chatReplyTokens, 16_384);
       assert.equal(APPLICATION_V2_LIMITS.chatPromptChars, 250_000);
       assert.equal(APPLICATION_V2_LIMITS.bridgeRequestBytes, 2 * 1024 * 1024);
-      assert.equal(APPLICATION_V2_LIMITS.bridgeToolResultBytes, 2 * 1024 * 1024);
+      assert.equal(APPLICATION_V2_LIMITS.bridgeToolResultBytes, 8 * 1024 * 1024);
+      assert.equal(APPLICATION_V2_LIMITS.bridgeToolTextBytes, 2 * 1024 * 1024);
       assert.equal(assertApplicationV2PromptLimit('x'.repeat(250_000)).chars, 250_000);
       assert.throws(() => assertApplicationV2PromptLimit('x'.repeat(250_001)), ApplicationV2LimitError);
       assert.throws(() => assertApplicationV2ReplyLimit('x'.repeat(2 * 1024 * 1024)), ApplicationV2LimitError);
@@ -524,8 +538,10 @@ export default [
       assert.ok(roleHeavy.minCharacters >= roleHeavy.maxCharacters * 0.84 && roleHeavy.maxCharacters > 1095);
       assert.ok(projectHeavy.maxCharacters !== roleHeavy.maxCharacters);
       assert.ok(projectHeavy.maxBullets < roleHeavy.maxBullets);
-      const variants = writeVerifyLengthBudgets({ education: [{}], skills: [{}, {}, {}], projects: [{}, {}, {}] }, [{}, {}, {}]);
-      assert.deepEqual(variants, [roleHeavy, projectHeavy]);
+      // At most one Personal Projects entry, and only from unlinked projects.
+      const variants = writeVerifyLengthBudgets({ education: [{}], skills: [{}, {}, {}], projects: [{}, {}, { roleId: 'r1' }] }, [{}, {}, {}]);
+      assert.deepEqual(variants, [roleHeavy, writeVerifyLengthBudgetForStructure({ roles: 3, education: 1, skillsRows: 1, projects: 1 })]);
+      assert.deepEqual(writeVerifyLengthBudgets({ education: [{}], skills: [{}], projects: [{ roleId: 'r1' }] }, [{}]).length, 1);
       assert.throws(() => writeVerifyLengthBudgetForStructure({ roles: -1, education: 0, skillsRows: 0, projects: 0 }));
     },
   },

@@ -575,10 +575,10 @@ async function fixture(ctx, label, wantsEngine = false, engineOptions = {}) {
     confirmRestart: engineOptions.confirmRestart,
   }) : null;
   const mcp = createMcpHandler({
-    port: engine ? { get: value => engine.get(value), submit: value => engine.submit(value) } : {
+    port: engineOptions.mcpPort || (engine ? { get: value => engine.get(value), submit: value => engine.submit(value) } : {
       get: async () => ({ status: 'queue_empty', note: 'No synthetic handoff is waiting.' }),
       submit: async value => ({ status: 'accepted', echoedBytes: Buffer.byteLength(value.response, 'utf8') }),
-    },
+    }),
   });
   const handler = createRequestHandler({ hostname: HOST, oauth, mcp, sourcePolicy: 'off' });
   const listener = createListener({ socketPath: sock, handler });
@@ -844,6 +844,39 @@ async function sdkSocket(ctx, loaded) {
   }
 }
 
+async function sdkLargeToolResults(ctx, loaded) {
+  let body = { status: 'served', prompt: 'Synthetic judge transport fixture.\n'.repeat(6000),
+    pageImages: Array.from({ length: 12 }, (_, index) => ({
+      candidateId: `candidate-${Math.floor(index / 2) + 1}`, document: index % 2 ? 'cover-letter' : 'resume',
+      mimeType: 'image/png', data: Buffer.alloc(300 * 1024, index).toString('base64'),
+    })) };
+  const env = await fixture(ctx, 'sdk-big', false, { mcpPort: {
+    get: async () => body, submit: async () => body,
+  } });
+  try {
+    const token = await link(env, env.socket);
+    await withSdkClient(env, loaded, token, async client => {
+      for (const name of ['get_handoff', 'submit_handoff']) {
+        const result = await client.callTool({ name, arguments: { session: 'synthetic', handoffCode: 'synthetic', response: 'synthetic' } });
+        assert.equal(sdkToolBody(result, 'large ' + name).prompt, body.prompt, 'SDK changed the complete prompt');
+        assert.equal(result.content.length, 13, 'SDK lost a judge image');
+        assert.deepEqual(result.content.slice(1).map(row => row.data), body.pageImages.map(row => row.data), 'SDK changed image bytes');
+        assert.ok(Buffer.byteLength(JSON.stringify(result)) > 2 * 1024 * 1024, 'SDK fixture must exceed the old cap');
+      }
+      // Leave only 1 KiB for the envelope and verify near-cap delivery through
+      // OAuth, the HTTP handler, a real Unix socket and the SDK response parser.
+      body = { status: 'served', pageImages: [{ mimeType: 'image/png', data: 'a'.repeat(CONSTANTS.MAX_TOOL_RESULT_BYTES - 1024) }] };
+      const nearCap = await client.callTool({ name: 'get_handoff', arguments: { session: 'synthetic' } });
+      assert.equal(sdkToolBody(nearCap, 'near 8 MiB').status, 'served');
+      assert.equal(nearCap.content[1].data, body.pageImages[0].data, 'near-cap image bytes changed');
+      body.pageImages[0].data += 'a'.repeat(2048);
+      const overCap = await callSdkTool(client, 'get_handoff', { session: 'synthetic' }, 'over 8 MiB');
+      assert.equal(overCap.status, 'needs_user');
+      assert.equal(overCap.kind, 'tool_result_too_large');
+    });
+  } finally { await env.close(); }
+}
+
 function staticLabDiff() {
   const output = {};
   for (const name of ['oauth.js', 'server.js', 'design-tools.js']) {
@@ -995,6 +1028,7 @@ async function wire(ctx, options, loaded) {
   const socket = await transcript(ctx, 'wire-socket', 'socket');
   assert.deepEqual(socket.rows, inProcess.rows, 'driver-neutral table differs between in-process and Unix socket');
   await sdkSocket(ctx, loaded);
+  await sdkLargeToolResults(ctx, loaded);
   const env = await fixture(ctx, 'wire-raw');
   try {
     const normal = await rawSocket(env.sock, 'GET /.well-known/oauth-protected-resource/mcp HTTP/1.1\r\nHost: ' + HOST + '\r\nConnection: close\r\n\r\n');

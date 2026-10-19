@@ -1,0 +1,68 @@
+import assert from 'node:assert/strict';
+import fs from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+import { _electron as electron } from 'playwright';
+
+// Exercise only a disposable canvas/profile. No real generation or user files.
+const root = await fs.realpath(await fs.mkdtemp(path.join(process.platform === 'darwin' ? '/private/tmp' : os.tmpdir(), 'ic-bundle-link-')));
+const canvasFilePath = path.join(root, 'canvas.json');
+const outputDir = path.join(root, 'Applied Jobs', 'Synthetic');
+const jobId = '123e4567-e89b-42d3-a456-426614174777';
+const env = { ...process.env, INFINITE_CANVAS_E2E: '1', INFINITE_CANVAS_E2E_BACKGROUND: '1' };
+delete env.ELECTRON_RUN_AS_NODE;
+let application;
+try {
+  await fs.mkdir(outputDir, { recursive: true });
+  await fs.writeFile(path.join(outputDir, 'Resume.pdf'), 'synthetic placeholder');
+  const receipt = { version: 2, jobId, canvasFilePath, status: 'imported', resultSha256: 'a'.repeat(64),
+    importedAt: new Date().toISOString(), outputDir };
+  const receiptsRoot = path.join(root, '.local-ai', 'handoff-receipts');
+  await fs.mkdir(receiptsRoot, { recursive: true });
+  await fs.writeFile(path.join(receiptsRoot, `${jobId}.json`), JSON.stringify(receipt));
+  await fs.writeFile(canvasFilePath, JSON.stringify({ schemaVersion: 1, nodes: [{
+    id: 'saved-card', type: 'jobcard', position: { x: 0, y: 0 },
+    data: { title: 'Synthetic Engineer', company: 'Synthetic', matchScore: 80,
+      localApplication: { id: jobId, status: 'saved', mode: 'paste', canvasFilePath, savedDir: outputDir, receipt } },
+  }], edges: [], drawings: [] }));
+  application = await electron.launch({ args: ['.', `--user-data-dir=${path.join(root, 'profile')}`], env });
+  const page = await application.firstWindow();
+  await page.waitForLoadState('load');
+  await page.waitForFunction(() => typeof window.electronAPI?.loadWorkspace === 'function');
+  await page.locator('.react-flow').waitFor();
+  const loaded = await page.evaluate(filePath => window.electronAPI.loadWorkspace({ filePath }), canvasFilePath);
+  assert.equal(loaded.success, true, loaded.error || 'synthetic canvas must load');
+  const url = new URL(page.url());
+  url.searchParams.set('init', 'file');
+  url.searchParams.set('file', canvasFilePath);
+  await page.goto(url.href);
+  const skip = page.getByRole('button', { name: 'Skip', exact: true });
+  if (await skip.isVisible()) await skip.click();
+  const card = page.locator('.react-flow__node-jobcard');
+  await card.getByRole('button', { name: 'Open saved folder', exact: true }).waitFor();
+  assert.equal(await card.getByRole('button', { name: 'Generate', exact: true }).count(), 0,
+    'a linked saved folder must hide Generate entirely');
+  await page.evaluate(filePath => window.electronAPI.watchApplicationBundles({ canvasFilePath: filePath }), canvasFilePath);
+  await fs.unlink(path.join(outputDir, 'Resume.pdf'));
+  assert.equal(await card.getByRole('button', { name: 'Generate', exact: true }).count(), 0,
+    'editing or deleting a file inside a linked folder must not unlock generation');
+  await fs.rm(outputDir, { recursive: true });
+  await card.getByRole('button', { name: 'Generate', exact: true }).waitFor({ timeout: 20_000 });
+  assert.equal(await card.getByRole('button', { name: 'Open saved folder', exact: true }).count(), 0,
+    'external folder removal must clear the saved indicator');
+  const status = await page.evaluate(args => window.electronAPI.getLocalApplicationStatus(args), { jobId, canvasFilePath });
+  assert.equal(status.localJob.savedOutputMissing, true);
+  assert.equal(await fs.readFile(path.join(receiptsRoot, `${jobId}.json`), 'utf8'), JSON.stringify(receipt),
+    'a missing-output check must preserve the prior receipt');
+  console.log('PASS: linked bundle hides Generate; external folder deletion restores it without deleting the receipt.');
+} catch (error) {
+  const page = application?.windows()[0];
+  if (page) {
+    console.error((await page.locator('body').innerText()).slice(0, 5000));
+    await page.screenshot({ path: '/tmp/ic-bundle-link-smoke-error.png' });
+  }
+  throw error;
+} finally {
+  try { await application?.close(); }
+  finally { await fs.rm(root, { recursive: true, force: true }); }
+}

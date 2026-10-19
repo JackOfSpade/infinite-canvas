@@ -49,7 +49,8 @@ export const SOURCE_SCAN_ROWS = Object.freeze({
   'http.js': { allow: sibling('node:crypto', 'node:net', 'node:util') },
   'listener.js': { allow: ['node:http', 'node:net', 'node:fs', 'node:path', './constants.js'] },
   'tools.js': { allow: sibling('node:crypto', '../../../src/utils/handoffBridgeConfig.js') },
-  'mcp.js': { allow: sibling('node:crypto') },
+  // Pure base64 syntax validation adds no filesystem or network capability.
+  'mcp.js': { allow: sibling('node:crypto', '../../utils/base64.js') },
   'oauth.js': { allow: sibling('node:crypto') },
   'oauthPages.js': { allow: sibling('node:crypto') },
   'clientAuth.js': { allow: sibling('node:crypto') },

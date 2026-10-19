@@ -36,8 +36,12 @@ export function targetIdentityNameLicensed(sentence, finding, ctx, { reportsNoPa
     }
   }
   const company = String(ctx?.targetCompany || '').trim();
-  if (company && sentenceAddressesTarget(text, company)) {
-    const pattern = new RegExp(`(?<![\\p{L}\\p{N}])${phrase(company)}(?![\\p{L}\\p{N}])`, 'giu');
+  // Boards sometimes append a product description to the employer name.
+  // Its exact prefix is a target reference too, including its possessive;
+  // this licenses no claim that the candidate previously worked there.
+  const companyNames = [...new Set([company, company.split(/\s+[-–—|]\s+/u)[0]])].filter(name => name.length >= 3);
+  for (const name of companyNames) if (sentenceAddressesTarget(text, name)) {
+    const pattern = new RegExp(`(?<![\\p{L}\\p{N}])${phrase(name)}(?:['’]s)?(?![\\p{L}\\p{N}])`, 'giu');
     for (const match of text.matchAll(pattern)) if (noPastWork || forwardReference(match.index)) spans.push([match.index, match.index + match[0].length]);
   }
   if (!spans.length || !finding.term) return false;

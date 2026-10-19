@@ -62,14 +62,14 @@ export function createModuleRunQueue({
   const snapshot = () => {
     const activeRuns = [];
     const queued = [];
-    const laneSnapshots = {};
+    const laneSnapshots = [];
 
     lanes.forEach((state, lane) => {
       const active = describeEntry(state.active, 0);
       const waiting = state.queued.map((entry, index) => describeEntry(entry, index + 1));
       if (active) activeRuns.push(active);
       queued.push(...waiting);
-      laneSnapshots[lane] = { active, queued: waiting };
+      laneSnapshots.push([lane, { active, queued: waiting }]);
     });
 
     // `active` and `queued` remain available for existing consumers. Prefer the
@@ -80,7 +80,7 @@ export function createModuleRunQueue({
       active: describeEntry(globalActive, 0) || activeRuns[0] || null,
       queued,
       activeRuns,
-      lanes: laneSnapshots,
+      lanes: Object.fromEntries(laneSnapshots),
     };
   };
 

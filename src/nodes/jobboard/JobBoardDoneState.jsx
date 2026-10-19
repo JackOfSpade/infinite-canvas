@@ -132,7 +132,7 @@ export function JobBoardDoneState({
               }`}
               title={canReplaceWithEmpty
                 ? 'Replace the hidden previous results with the completed searches’ empty result'
-                : 'Re-pull all connected Job Search modules and rebuild the combined board'}
+                : 'Reuse saved scored searches, refresh salary research, and rebuild the board without scraping or scoring again'}
             >
               <RefreshCw size={9} className={combining ? 'animate-spin' : ''} />
               {combining ? 'Combining…' : (canReplaceWithEmpty ? 'Clear stale results' : 'Re-combine')}

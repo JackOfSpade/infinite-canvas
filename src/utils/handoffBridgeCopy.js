@@ -251,6 +251,7 @@ export const BRIDGE_UI_COPY = Object.freeze({
     if (launch?.stage === 'presented') return 'ChatGPT worker connected.';
     if (launch?.stage === 'retrying') return 'Chrome launch hit a temporary problem. Retrying in a fresh tab automatically…';
     if (launch?.reason === 'model_selection_failed' || launch?.reason === 'effort_unavailable') return 'Could not confirm the highest model/effort in ChatGPT. Check it and press Send.';
+    if (['chat_mode_unavailable', 'chat_mode_mismatch'].includes(launch?.reason)) return 'The worker was not sent because Chat mode could not be confirmed. Start a new Chat conversation, then retry this worker.';
     if (launch?.reason === 'model_menu_missing') return 'ChatGPT model controls were unavailable. Check the open tab before sending.';
     if (launch?.reason === 'editor_not_empty') return 'The existing chat has an unsent draft. Preserve it, then use Copy Continue.';
     if (launch?.reason === 'account_unknown') return 'Sign in to ChatGPT in Chrome, then press Send.';

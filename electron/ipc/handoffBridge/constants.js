@@ -65,7 +65,10 @@ export const CONSTANTS = Object.freeze({
   HINT_MIN_INTERVAL_MS: 500,
 
   MAX_RESPONSE_BYTES: 1_000_000,
-  MAX_TOOL_RESULT_BYTES: 2 * 1024 * 1024,
+  // Text keeps its existing bound. The larger complete-response budget also
+  // accommodates twelve 300 KiB judge PNGs after base64 encoding (~4.7 MiB).
+  MAX_TOOL_TEXT_BYTES: 2 * 1024 * 1024,
+  MAX_TOOL_RESULT_BYTES: 8 * 1024 * 1024,
   SESSION_ARG_MAX_CHARS: 128,
   HANDOFF_CODE_ARG_MAX_CHARS: 512,
   MIN_ATTEMPT_CHARS: 64,

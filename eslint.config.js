@@ -7,12 +7,15 @@ import { defineConfig, globalIgnores } from 'eslint/config'
 export default defineConfig([
   globalIgnores([
     'dist', 'dist-electron',
+    '.gemini',                           // private agent scratch state
+    '.test-artifacts/blackbox-run/*/',     // generated runs; root harness scripts stay linted
+    'tmp', 'temp', 'scratch',             // disposable local output, not maintained source
     'release',                            // electron-builder output (gitignored) — never lint built app copies
     'Job Application Design System/build/vendor',  // third-party (pdf-lib.min.js)
     'Job Application Design System/_ds_bundle.js', // generated dual-mode bundle (see its @ds-bundle header) — not app-consumed, never hand-edited
   ]),
   {
-    files: ['**/*.{js,jsx}'],
+    files: ['**/*.{js,jsx,mjs,cjs}'],
     extends: [
       js.configs.recommended,
       reactHooks.configs.flat.recommended,
@@ -51,7 +54,7 @@ export default defineConfig([
     },
   },
   {
-    files: ['electron/**/*.{js,mjs,cjs}', 'scripts/**/*.{js,mjs,cjs}', 'vite.config.js', 'eslint.config.js'],
+    files: ['**/*.{mjs,cjs}', 'electron/**/*.{js,mjs,cjs}', 'scripts/**/*.{js,mjs,cjs}', 'local_ai/**/*.mjs', 'vite.config.js', 'eslint.config.js'],
     languageOptions: {
       globals: {
         ...globals.node,

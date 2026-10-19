@@ -171,17 +171,23 @@ export default [
     assert.equal(receipts.restartCareerImportCompilationPatch(data, { generation: 'generation', runId: 'old-run' }), null, 'stale restart cannot touch replacement input');
   } },
   { name: 'Explicit Continue releases the cancellation latch for only the selected saved run', async run() {
-    const cancelled = new Set(['saved-run', 'other-run']); let request;
-    callback('handleContinueManualAiRecovery', {
+    const cancelled = new Set(['saved-run', 'other-run']); let request; let connected = false;
+    const continueSaved = callback('handleContinueManualAiRecovery', {
       getNode: () => ({ data: { manualAiResume: { runId: 'saved-run' } } }), id: 'hub', canvasFilePath: '/fixture/canvas.json',
       isJobWorkflowDeletionPending: () => false, hasPendingManualAiRetirement: () => false,
+      isCareerCompilationTask: () => false, isJobSearchConnectedToBoard: () => connected,
       findJobSearchBoardRecoveryOwner: () => null, getNodes: () => [], getEdges: () => [],
       manualAiStaleRecoveryActionRunIdRef: { current: null }, autoResumedManualAiRunRef: { current: null },
       manualAiAutoResumeAttemptRef: { current: null }, cancelledBoardManualAiRunIdsRef: { current: cancelled },
       setManualAiStaleRecoveryActionRunId() {}, setManualAiExplicitResumeRequest: value => { request = value; }, EventLogger: { log() {} },
-    })();
+    });
+    continueSaved();
     assert.equal(cancelled.has('saved-run'), false); assert.equal(cancelled.has('other-run'), true);
     assert.equal(request.runId, 'saved-run');
+    connected = true; request = null; cancelled.add('saved-run');
+    continueSaved();
+    assert.equal(request, null, 'a Board-connected Search cannot continue an AI run through its child handler');
+    assert.equal(cancelled.has('saved-run'), true, 'a refused child Continue must leave recovery unchanged');
   } },
   { name: 'Cancellation result does not become a durable compiler failure', async run() {
     const h = harness(); const hub = h.hub('cancel');

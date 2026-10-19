@@ -322,9 +322,7 @@ function assertPathStateMatches(actual, expected, label) {
   if (expected.type === 'file') assertByteRecordMatches(actual, expected, label);
   else assertTreeManifestMatches(actual.tree, expected.tree, label);
 }
-function backupPathState(backupRoot, relative, label) {
-  return pathState(safeChild(backupRoot, relative, label), `${label} backup`);
-}
+
 function manifestPathState(manifest, relative) {
   if (!manifest?.present) return { present: false };
   const normalized = path.normalize(relative);
@@ -477,7 +475,7 @@ function reserveOwnedPath({ destination, ownership, area, relative, root, before
   writeOwnership(destination, ownership);
   return ownership.paths[key];
 }
-function recordOwnedPath({ destination, ownership, area, relative, root, backupRoot, before, after, source = null }) {
+function recordOwnedPath({ destination, ownership, area, relative, root, before, after, source = null }) {
   const key = ownedKey(area, relative);
   const prior = ownership.paths[key];
   assertPathStateMatches(pathState(safeChild(root, relative, key), key), after, `${key} after mutation`);
@@ -1525,7 +1523,11 @@ const PASSIVE_RECEIPT_DIR = 'handoff-receipts';
 const PASSIVE_GENERATION_LOG = 'Generation Log.jsonl';
 const PASSIVE_JOB_ID = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i;
 function passiveText(value, max = 120) {
-  return typeof value === 'string' ? value.replace(/[\u0000-\u001f\u007f]/gu, ' ').slice(0, max) : null;
+  if (typeof value !== 'string') return null;
+  return [...value].map(character => {
+    const code = character.codePointAt(0);
+    return code <= 31 || code === 127 ? ' ' : character;
+  }).join('').slice(0, max);
 }
 function passiveCount(value) { return Number.isSafeInteger(value) && value >= 0 ? value : null; }
 async function passiveGenerationLogSummary(file) {
@@ -1674,7 +1676,7 @@ export function backupRun({ canvas, userData, destination, execute = false, allo
     // receipt-claimed isolated workspace entry.
     if (copyApplicationSyncBaseline && fs.existsSync(sync)) fs.copyFileSync(sync, path.join(destination, 'application-sync-workspaces.json'), fs.constants.COPYFILE_EXCL);
     const manifest = {
-      version: 3, createdAt: new Date().toISOString(), canvas, canvasRoot, userData,
+      version: 3, createdAt: new Date().toISOString(), canvasRoot, userData,
       canvas: { path: canvas, ...byteRecord(canvas) },
       localAi: treeManifest(localAi), appliedJobs: treeManifest(appliedJobs),
       careerSnapshotStore: treeManifest(careerSnapshotStore),
@@ -1839,7 +1841,6 @@ export async function inspectJob({ canvas, userData, destination, jobId, validat
   // touch it; sibling bundles remain deliberately outside the manifest.
   if (destination) {
     const ownership = readOwnership(destination);
-    const baseline = JSON.parse(fs.readFileSync(path.join(destination, 'baseline.json'), 'utf8'));
     // A controlled app may have advanced only this run's selected card pointer
     // since queueing. Re-attest that narrow structural delta before replacing
     // the canvas CAS state; all other canvas edits remain fail-closed.
@@ -2754,6 +2755,8 @@ async function selfTest() {
   const snapshotFile = path.join(root, 'approved.json'); fs.writeFileSync(snapshotFile, JSON.stringify(snapshot));
   const destination = path.join(root, 'run');
   let completed = false;
+  let cleanupFailure;
+  let result;
   try {
     // Reservation capability checks intentionally create real paste jobs so
     // they exercise the current-approved authority gate. Keep them outside
@@ -2798,13 +2801,13 @@ async function selfTest() {
         canvasFilePath: path.join(reservationRoot, 'not-a-canvas.json'), transport: 'paste', careerSnapshotId: snapshot.snapshotId,
         __acceptanceHarnessReservationCapability: postAuthorityReservation.capability,
       }));
-      const reservationAfterConsumedFailure = __reserveNextLocalApplicationJobIdForAcceptanceHarness(crypto.randomUUID());
+      assert.throws(() => __reserveNextLocalApplicationJobIdForAcceptanceHarness(crypto.randomUUID()), /already reserved/i);
       const finalReservationSmokeQueue = await queueLocalApplicationJob({
         canvasFilePath: reservationCanvas, transport: 'paste', careerSnapshotId: snapshot.snapshotId, job: reservationSmokeJob,
-        __acceptanceHarnessReservationCapability: reservationAfterConsumedFailure.capability,
+        __acceptanceHarnessReservationCapability: postAuthorityReservation.capability,
       });
-      assert.equal(finalReservationSmokeQueue.id, reservationAfterConsumedFailure.id,
-        'after the current-approved gate, a failed direct queue consumes its opaque reservation before canvas filesystem work');
+      assert.equal(finalReservationSmokeQueue.id, postAuthorityReservation.id,
+        'a failed canvas validation must preserve the opaque reservation for the next valid current-approved request');
       await discardLocalApplicationJob(finalReservationSmokeQueue.id, reservationCanvas);
       assert.equal(fs.existsSync(finalReservationSmokeQueue.folder), false, 'the final isolated reservation smoke queue must be discarded immediately');
     } finally {
@@ -3211,15 +3214,17 @@ async function selfTest() {
     await assert.rejects(() => restoreRun({ canvas, userData, destination: conflictDestination, execute: true, allowNonproduction: true }), /symbolic link|no longer matches its reserved job\/canvas identity/i);
     await applicationSyncRollbackSelfTest(root);
     completed = true;
-    return { ok: true, jobId: queued.localJob.id };
+    result = { ok: true, jobId: queued.localJob.id };
   } finally {
     try { fs.rmSync(root, { recursive: true, force: true, maxRetries: 3, retryDelay: 50 }); }
     catch (cleanupError) {
       // Preserve the earlier assertion/production failure rather than masking
       // it with a best-effort temporary-fixture cleanup error.
-      if (completed) throw cleanupError;
+      if (completed) cleanupFailure = cleanupError;
     }
   }
+  if (cleanupFailure) throw cleanupFailure;
+  return result;
 }
 
 async function main() {

@@ -249,6 +249,7 @@ export function registerHandoffBridgeUi({
         telemetry: currentStatus()?.config?.telemetryInBugReports === true,
         at: Number(now()), workerOrdinal: Number(owner.split(':')[2]),
         stage: progress.stage, reason: progress.reason, attempt,
+        mode: launcher.observation?.(owner)?.mode,
       });
       recordLaunch({
         outcome: progress.stage,

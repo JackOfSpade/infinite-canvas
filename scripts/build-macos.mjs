@@ -162,7 +162,7 @@ function acquireReclaimGuard(projectDir, {
   try {
     fs.writeFileSync(path.join(guardPath, 'owner.json'), `${JSON.stringify({ pid, token: guardToken, startedAt: new Date(now()).toISOString() })}\n`, { encoding: 'utf8', flag: 'wx' });
   } catch (error) {
-    try { quarantineLock(guardPath, guardToken); } catch {}
+    try { quarantineLock(guardPath, guardToken); } catch { /* Preserve the ownership-write failure. */ }
     throw commandFailure(`Could not record packaging reclaim-guard ownership at ${guardPath}.`, { error });
   }
   return {
@@ -225,7 +225,7 @@ export function acquirePackagingLock(projectDir = process.cwd(), {
       try {
         fs.writeFileSync(path.join(lockPath, 'owner.json'), `${JSON.stringify(owner)}\n`, { encoding: 'utf8', flag: 'wx' });
       } catch (error) {
-        try { quarantineLock(lockPath, token); } catch {}
+        try { quarantineLock(lockPath, token); } catch { /* Preserve the ownership-write failure. */ }
         throw commandFailure(`Could not record packaging lock ownership at ${lockPath}.`, { error });
       }
       let released = false;
@@ -466,7 +466,7 @@ export function electronBuilderInvocation(projectDir, {
   return { command: process.execPath, args: [builderCli] };
 }
 
-function packageApplication(projectDir, platform = process.platform) {
+function packageApplication(projectDir) {
   const { command, args } = electronBuilderInvocation(projectDir);
   runOrThrow(command, args, { cwd: projectDir });
 }
@@ -482,7 +482,7 @@ export function buildMacApplication(projectDir = process.cwd()) {
   compileApplication(projectDir);
   const releaseDir = path.join(projectDir, 'release');
   const before = snapshotMacApplications(releaseDir);
-  packageApplication(projectDir, 'darwin');
+  packageApplication(projectDir);
 
   const apps = findCurrentMacApplications(releaseDir, before);
   signMacApplications({ apps, identity });
@@ -496,7 +496,7 @@ export function buildApplication(projectDir = process.cwd(), platform = process.
   // offer the Darwin integrity guarantee or invoke codesign at all.
   if (!usesMacIntegrityGate(platform)) {
     compileApplication(projectDir);
-    packageApplication(projectDir, platform);
+    packageApplication(projectDir);
     return [];
   }
   return buildMacApplication(projectDir);

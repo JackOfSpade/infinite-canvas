@@ -28,6 +28,45 @@ async function settlesWithin(promise, milliseconds, message) {
 
 export default [
   {
+    name: 'dependency-ready queues reject reserved empty descriptors instead of stranding workers',
+    async run() {
+      for (const items of [[null], [undefined], new Array(1)]) {
+        nodeAssert.throws(() => createDependencyReadyQueue(items), TypeError);
+      }
+      const queue = createDependencyReadyQueue([0, false, '']);
+      nodeAssert.throws(() => queue.add(null), TypeError);
+      nodeAssert.throws(() => queue.add(undefined, { front: true }), TypeError);
+      for (const expected of [0, false, '']) {
+        nodeAssert.equal(await queue.claim(), expected);
+        queue.complete();
+      }
+      nodeAssert.equal(await queue.claim(), null);
+    },
+  },
+  {
+    name: 'dependency-ready queues preserve priority FIFO while repeatedly compacting a large rolling backlog',
+    async run() {
+      const queue = createDependencyReadyQueue(Array.from({ length: 6000 }, (_, i) => i));
+      for (let index = 0; index < 6000; index++) {
+        if (index % 37 === 0) {
+          queue.add(`first-${index}`, { front: true });
+          queue.add(`second-${index}`, { front: true });
+          nodeAssert.equal(await queue.claim(), `first-${index}`);
+          queue.complete();
+          nodeAssert.equal(await queue.claim(), `second-${index}`);
+          queue.complete();
+        }
+        nodeAssert.equal(await queue.claim(), index);
+        queue.complete();
+      }
+      nodeAssert.equal(await queue.claim(), null);
+      queue.add('after-drain');
+      nodeAssert.equal(await queue.claim(), 'after-drain');
+      queue.complete();
+      nodeAssert.equal(await queue.claim(), null);
+    },
+  },
+  {
     name: 'handoff scheduler module: automatic work refills immediately, preserves order, and respects its cap',
     run: async () => {
       const calls = [];

@@ -883,6 +883,7 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
       if (continuationIntent?.intentId) {
         const claimed = await window.electronAPI.claimJobContinuation?.({
           ...continuationIntent,
+          canvasFilePath: continuationIdentity.canvasFilePath,
           intentId: continuationIntent.intentId,
           autoResume: true,
           automaticOperation: continuationIntent.terminalResultAvailable ? 'replay' : 'execute',
@@ -927,8 +928,11 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
           throw new Error('This source recovery restart checkpoint could not be committed.');
         }
         continuationIntent = begun.intent;
+        // Public intents contain durable identity hashes, not the canvas path.
+        // Keep the claim scoped to the canvas that committed this checkpoint.
         const claimed = await window.electronAPI.claimJobContinuation?.({
           ...continuationIntent,
+          canvasFilePath: continuationIdentity.canvasFilePath,
           intentId: continuationIntent.intentId,
           allowManualResume: true,
         });

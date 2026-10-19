@@ -1,3 +1,4 @@
+import { runInNewContext } from 'node:vm';
 import { assert, canonicalizeGeneratedUntrustedBoundaryNonces, COMPENSATION_MIN_FIT_SCORE, compensationAssessmentCacheMatchesResearch, compensationCohortAssessmentFits, compensationCohortAssessmentMaxTokens, compensationResearchFingerprint, buildRoleFamilyBatchResearchPrompt, getRoleFamilyExperienceBandCache, packCompensationAssessmentBatches, packCompensationResearchBatches, parseCompensationResearchSections, planRoleFamilyAssessmentBatches, planRoleFamilyResearchBatches, roleFamilyAssessmentMaxTokens, saveRoleFamilyExperienceBandsBatch, tryGetStore, validateCompensationEvidenceBatchSubmission, validateRoleFamilyExperienceBandsBatchSubmission } from '../test-dependencies.js';
 import { readFileSync } from 'node:fs';
 import { compensationContextForSalary, researchCompensationAssessments } from '../../electron/ipc/jobs.js';
@@ -10,6 +11,7 @@ import {
   compensationMarketCurrency,
   resolveCompensationMarketCurrency,
   resolveCompensationLocation,
+  classifyCompensationLocationGap,
   compensationResidencesForJob,
   canonicalizeCompensationLocation,
   compensationCohortKey,
@@ -21,10 +23,54 @@ import {
   selectComparableEvidence,
   sourcesPresentInGroundedResearch,
 } from '../../electron/ipc/jobCompensation.js';
+import { ROLE_FAMILY_HANDOFF_BATCH_SIZE, COMPENSATION_COHORT_HANDOFF_BATCH_SIZE } from '../../electron/ipc/jobCompensationPlanning.js';
 import { normalizeRemoteResidences } from '../../src/utils/jobSearchLocations.js';
 import { JOB_COMPENSATION_EVIDENCE_BATCH_SCHEMA, ROLE_FAMILY_EXPERIENCE_BANDS_BATCH_SCHEMA, ROLE_FAMILY_EXPERIENCE_BANDS_SCHEMA } from '../../electron/ipc/aiSchemas.js';
 
 export default [{
+  name: 'Missing or failed role-band evidence still reaches grounded listing-level salary research without inventing a ladder',
+  run() {
+    const source = readFileSync(new URL('../../electron/ipc/jobs.js', import.meta.url), 'utf8');
+    const helperStart = source.indexOf('function unavailableExperienceBandsError(');
+    const helperEnd = source.indexOf('async function runFreshRoleFamilyPipeline', helperStart);
+    const unavailable = runInNewContext(`(function(){ ${source.slice(helperStart, helperEnd)} return unavailableExperienceBandsError; })()`);
+    const id = 'a'.repeat(24);
+    const empty = validateRoleFamilyExperienceBandsBatchSubmission({ ladders: [{ researchId: id, roleFamily: 'Synthetic engineering',
+      bands: [], sources: [], evidenceQuote: '', sourceDate: '', reusedFrom: '' }] },
+    [{ researchId: id, role: 'Synthetic engineering' }], new Map([[id, 'No auditable ladder was found.']]));
+    assert(empty.get(id).available === false, 'accepted empty evidence is a supported research outcome');
+    const candidate = (role, seniority) => ({ job: { title: role }, role, context: { seniority }, location: { display: 'Canada', value: 'Canada', level: 'country' }, offer: { currency: 'CAD' }, experience: { years: 5 } });
+    const noEvidenceJobs = [candidate('Synthetic engineering', 'senior'), candidate('Synthetic engineering', 'lead')];
+    const failedJobs = [candidate('Synthetic design', 'mid')];
+    const context = {
+      candidatesByRole: new Map([['engineering', noEvidenceJobs], ['design', failedJobs]]),
+      resolvedRoleBands: new Map([['synthetic engineering', { error: unavailable('Synthetic engineering') }], ['synthetic design', { error: new Error('injected transport failure') }]]),
+      signal: null, researchedAt: '2026-10-01', processed: 0,
+      roleBandLookups: 0, roleBandResearches: 0, roleBandCacheHits: 0, roleBandFailures: 0,
+      roleBandFailureJobs: 0, roleBandUnavailable: 0, roleBandUnavailableJobs: 0, roleBandInterruptedJobs: 0,
+      groups: new Map(), marketCandidates: 0, roleBandFallbackJobs: 0, compensationCohortKey,
+      roleBandFailureDetails: [], nodeId: 'synthetic-hub', logger: { warn() {} }, progress() {},
+      compensationFallback: (_job, reasonCode) => ({ reasonCode }),
+    };
+    const start = source.indexOf('for (const roleCandidates of candidatesByRole.values())');
+    const end = source.indexOf('  logger.info(', start);
+    runInNewContext(source.slice(start, end), context);
+    assert(context.roleBandUnavailable === 1 && context.roleBandUnavailableJobs === 2
+      && context.roleBandFailures === 1 && context.roleBandFailureJobs === 1 && context.processed === 0 && context.marketCandidates === 3 && context.roleBandFallbackJobs === 3,
+      'the production role-band partition must reconcile honest unavailability separately from transport failures');
+    assert(context.groups.size === 3 && [...context.groups.values()].every(group =>
+      group.experienceBand.basis === 'listing-role-level' && !('minYears' in group.experienceBand)
+      && group.experienceBandSources.length === 0 && group.jobs.every(item => !item.job.compensationAssessment)),
+      'each listing seniority reaches a separate market cohort without fabricated salary evidence or experience years');
+    const helper = source.slice(source.indexOf('function compensationResearchParametersForGroup('), source.indexOf('function buildLegacyCompensationResearchPrompt('));
+    const api = runInNewContext(`(function(){ ${helper} return { parameters: compensationResearchParametersForGroup, disclosure: compensationJustificationWithExperienceDisclosure }; })()`);
+    const group = [...context.groups.values()][0];
+    assert(api.parameters(group).experienceBandBasis.includes('No published years-to-level ladder')
+      && api.disclosure({ location: { basis: 'listing-country-residence-estimate' } }, group.experienceBand, 'Evidence pending.').includes('permitted hiring locations remain unconfirmed'),
+      'research and displayed justifications must disclose both level and remote-location assumptions');
+
+  },
+}, {
   name: 'Automatic handoff scheduler refills a compensation worker slot before a slow sibling settles',
   run: async () => {
     let releaseSlow;
@@ -348,8 +394,8 @@ export default [{
   name: 'Compensation batching uses bounded multi-batch task IDs while exact legacy prompts retain only their own one-item IDs',
   run: () => {
     const source = readFileSync(new URL('../../electron/ipc/jobs.js', import.meta.url), 'utf8');
-    assert(source.includes('ROLE_FAMILY_HANDOFF_BATCH_SIZE = 7')
-      && source.includes('COMPENSATION_COHORT_HANDOFF_BATCH_SIZE = 4')
+    assert(ROLE_FAMILY_HANDOFF_BATCH_SIZE === 7
+      && COMPENSATION_COHORT_HANDOFF_BATCH_SIZE === 4
       && source.includes("task: 'job-compensation-research-batch'")
       && source.includes("task: 'job-compensation-assessment-batch'"),
       'raw research remains bounded while its downstream assessment phase has separate deterministic batches');
@@ -378,7 +424,7 @@ export default [{
       && !source.includes('useLegacyIndividualCompensation'),
     'exact legacy and fresh raw prompts share the rolling automatic scheduler, while their dependent legacy/current extractions remain later phases');
     assert(source.includes('MAX_COMPENSATION_ROWS_PER_ASSESSMENT_COHORT')
-      && source.includes('compensationCohortAssessmentFits(nextCohorts, nextRows)')
+      && packCompensationAssessmentBatches(Array.from({ length: 7 }, (_, index) => ({ researchKey: String(index), group: { jobs: [{}] } }))).length === 2
       && source.includes('const rawFirstParts = []')
       && source.includes('const stableRawBatches = packCompensationResearchBatches(rawFirstParts)')
       && source.includes('const stableAssessmentBatches = packCompensationAssessmentBatches(freshAll)')
@@ -881,6 +927,31 @@ Model prose happens to mention https://prose.example.test/untrusted.`);
       { other: { city: 'London', subdivision: 'England', country: 'United Kingdom' } },
     )?.country === 'United Kingdom',
     'structured UK restrictions override contradictory raw location hints and normalize country aliases');
+    const establishedOtherRegion = resolveCompensationLocation(
+      { location: 'Denver, CO, United States' },
+      { workMode: 'remote', remoteRegion: 'other', remoteCountry: '' },
+      { other: { city: 'Toronto', subdivision: 'Ontario', country: 'Canada' } },
+    );
+    assert(establishedOtherRegion?.display === 'Toronto, Ontario, Canada' && !establishedOtherRegion.basis,
+      'an established broader remote region must not be narrowed by a board city in another country');
+    const provisionalRemote = resolveCompensationLocation(
+      { location: 'Tampa, FL, United States' },
+      { workMode: 'remote', remoteRegion: 'unknown', remoteCountry: '' },
+      { usa: { city: 'Denver', subdivision: 'Colorado', country: 'United States' } },
+    );
+    assert(classifyCompensationLocationGap(
+      { location: 'Tampa, FL, United States' },
+      { workMode: 'remote', remoteRegion: 'unknown' },
+      { usa: { city: 'Denver', subdivision: 'Colorado', country: 'United States' } },
+    ) === null, 'a usable provisional market must not require another employer-location lookup');
+    assert(provisionalRemote?.display === 'Denver, Colorado, United States'
+      && provisionalRemote.basis === 'listing-country-residence-estimate',
+      'a city listing can select a provisional same-country remote salary market with explicit provenance');
+    assert(resolveCompensationLocation(
+      { location: 'Tampa, FL, United States' },
+      { workMode: 'remote', remoteRegion: 'unknown' },
+      { canada: { city: 'Toronto', subdivision: 'Ontario', country: 'Canada' } },
+    ) === null, 'a missing same-country residence must not select a different-country estimate');
     const cohortCommon = { job: { title: 'Senior Designer' }, location: loc, offer: canadian, context: { seniority: 'senior' } };
     const roleBands = [
       { label: 'Entry (0–2 years)', minYears: 0, maxYears: 2 },

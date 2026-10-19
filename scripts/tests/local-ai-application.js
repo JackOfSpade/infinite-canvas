@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import nodeAssert from 'node:assert/strict';
 import electronPkg from 'electron';
 import { getRecentLogs } from '../../electron/logger.js';
 import { assert, assertCandidateDashPunctuation, assertSourceQuoteLinksFinalText, pasteAttributionScopeErrors, sanitizeQualityReview, buildCoverLetterDocument, buildLocalGenerationAuditArtifact, buildResumeDocument, careerDataRoleLocation, sanitizeDocumentMainHtml, checkAnchorRelevance, checkDirectWelcomeClosing, checkPriorEmployerOpening, checkResumeBulletLength, checkResumeRoleBulletBudget, evaluateResumeProseChecks, extractResumeEvidence, inspectApplicationExport, renderStructuredApplicationResume, resumeProjectProvenanceFailures, resumeRoleBlockSample, resumeRoleLocationFailures, RESUME_ROLE_BULLET_CEILING, ROLE_BULLET_EVIDENCE_EXCLUSIVITY_RULE, STRUCTURED_RESUME_SCHEMA_VERSION, validateStructuredApplicationResume, webFontFacesReadyExpression, canRegenerateLocalApplication, canSaveImportedLocalApplication, discardLocalApplicationJob, discoverLocalApplicationJobs, ensureDirectoryWithinRoot, fs, getApplicationTelemetry, getLocalApplicationHandoff, ipcMain, isPendingApplicationWorkspaceSaveInFlight, JSDOM, openAuthorityLedgerStore, os, path, PDFLib, LOCAL_AI_APPLICATION_VERSION, LOCAL_AI_CARD_POLL_IDLE_STATUSES, LOCAL_AI_FALLBACK_IDLE_STATUSES, LOCAL_AI_JOB_INTEGRITY_ERROR_CODE, brokenLocalAiJobDriveState, jobIntegrityFailureMessage, collectNodesDeep, deepUpdateNode, importLocalApplicationJob, isJobCardMounted, localApplicationStatus,   queueLocalApplicationJob, queuedLocalApplicationSettlement, readRegisteredApplicationArtifact, registerJobApplicationHandlers, registerLocalAiApplicationHandlers, registerMountedJobCard, registerPendingApplicationWorkspace, replacedLocalApplicationForCleanup, resolveLocalOutputBundleRoot, selectFallbackLocalAiJobs, selectOrphanedLocalAiJobs, submitLocalApplicationHandoff, unregisterMountedJobCard, validateLocalApplicationResult, withLocalAiJobPruneClaim, withUnregisteredApplicationWorkspacePruneClaim, __setAuthorityLedgerStoreFaultHookForTests } from '../test-dependencies.js';
@@ -11,6 +12,7 @@ import { inspectLocalAiHandoff, waitForLocalAiHandoff } from '../../local_ai/wai
 import { _resetPasteHandoffDiagnostics, buildPasteHandoffDiagnosticsMarkdown, getPasteHandoffDiagnosticsSnapshot, recordPasteHandoffDiagnostic } from '../../electron/ipc/pasteHandoffDiagnostics.js';
 import { approvedCareerEvidenceCatalog, CAREER_SNAPSHOT_COMPILATION_CONTRACT, CAREER_SNAPSHOT_SCHEMA_VERSION, CAREER_SNAPSHOT_STATUS_APPROVED, buildCareerSourceCorpus, canonicalCareerProfileDigest, careerSnapshotId, careerSnapshotIdForContract, careerSnapshotStorageRoot, emptyCareerReconciliationReceipt, partitionCareerSourcePages, verbatimCareerTranscriptionAuditReceipt, writeCareerSnapshotAtomically } from '../../electron/ipc/careerSnapshot.js';
 import { buildApplicationCareerAuthority } from '../../electron/ipc/applicationCareerAuthority.js';
+import { hasLinkedLocalApplicationOutput } from '../../src/utils/localAiApplicationLifecycle.js';
 
 async function createCanvasProject() {
   const root = await fs.promises.realpath(await fs.promises.mkdtemp(path.join(os.tmpdir(), 'local-ai-canvas-')));
@@ -1249,6 +1251,37 @@ export default [
     },
   },
   {
+    name: 'Local AI application queue: saved output blocks replacement until its folder is externally removed',
+    async run() {
+      const project = await createCanvasProject();
+      try {
+        const priorId = '123e4567-e89b-42d3-a456-426614174777';
+        const outputDir = path.join(project.root, 'Applied Jobs', 'Synthetic');
+        const receipts = path.join(project.root, '.local-ai', 'handoff-receipts');
+        await fs.promises.mkdir(outputDir, { recursive: true });
+        await fs.promises.mkdir(receipts, { recursive: true });
+        const receipt = { version: 2, jobId: priorId, canvasFilePath: project.canvasFilePath,
+          status: 'imported', resultSha256: 'a'.repeat(64), outputDir };
+        const raw = JSON.stringify(receipt);
+        const receiptPath = path.join(receipts, `${priorId}.json`);
+        await fs.promises.writeFile(receiptPath, raw);
+        const args = { canvasFilePath: project.canvasFilePath, priorLocalApplicationId: priorId,
+          careerData: 'Ada Lovelace built reliable engineering services at Acme.',
+          job: { title: 'Engineer', company: 'Acme', snippet: 'Build reliable services.' } };
+        // A renderer's stale/forged missing-output claim cannot bypass disk evidence.
+        await nodeAssert.rejects(() => queueLocalApplicationJob({ ...args, savedOutputMissing: true }),
+          error => error.code === 'LOCAL_AI_OUTPUT_ALREADY_LINKED');
+        assert(await fs.promises.readFile(receiptPath, 'utf8') === raw
+          && !fs.existsSync(path.join(project.root, '.local-ai', 'jobs')),
+          'a refused replacement must not create a job or alter the saved receipt');
+        await fs.promises.rm(outputDir, { recursive: true });
+        const queued = await queueLocalApplicationJob(args);
+        assert(queued.id !== priorId && fs.existsSync(queued.folder), 'external removal must permit a fresh handoff');
+        assert(await fs.promises.readFile(receiptPath, 'utf8') === raw, 'queueing does not delete the prior receipt');
+      } finally { await fs.promises.rm(project.root, { recursive: true, force: true }); }
+    },
+  },
+  {
     name: 'Local AI application lifecycle: display deletion preserves active jobs and regeneration cleans only its replaced terminal handoff',
     run: async () => {
       const project = await createCanvasProject();
@@ -1263,7 +1296,7 @@ export default [
         assert(queuedLocalApplicationSettlement(deletedCard, localJob).action === 'discard'
           && queuedLocalApplicationSettlement(replacementCard, localJob).action === 'discard',
         'a deleted card or a newer replacement handoff cannot be overwritten by a late queue response');
-        for (const status of ['saved', 'invalid', 'failed', 'revision-exhausted']) {
+        for (const status of ['invalid', 'failed', 'revision-exhausted']) {
           const prior = { id: `prior-${status}`, status };
           const terminalCard = { id: `card-${status}`, type: 'jobcard', data: { localApplication: prior } };
           assert(queuedLocalApplicationSettlement(terminalCard, localJob, prior).action === 'persist',
@@ -1274,8 +1307,19 @@ export default [
         assert(queuedLocalApplicationSettlement(pendingCard, localJob, pendingPrior).action === 'discard',
           'even an expected prior handoff cannot be replaced while it is still pending');
         const savedPrior = { id: 'prior-saved', status: 'saved', canvasFilePath: project.canvasFilePath };
-        assert(replacedLocalApplicationForCleanup(savedPrior, localJob, true) === savedPrior,
-          'an accepted regeneration selects the exact terminal handoff it replaced for cleanup');
+        assert(!canRegenerateLocalApplication(savedPrior)
+          && queuedLocalApplicationSettlement({ type: 'jobcard', data: { localApplication: savedPrior } }, localJob, savedPrior).action === 'discard'
+          && replacedLocalApplicationForCleanup(savedPrior, localJob, true) === null,
+          'a linked saved bundle cannot be replaced or selected for cleanup by a late generation request');
+        const missingPrior = { ...savedPrior, status: 'failed', savedOutputMissing: true };
+        assert(canRegenerateLocalApplication(missingPrior)
+          && queuedLocalApplicationSettlement({ type: 'jobcard', data: { localApplication: missingPrior } }, localJob, missingPrior).action === 'persist'
+          && replacedLocalApplicationForCleanup(missingPrior, localJob, true) === missingPrior,
+          'a verified externally deleted bundle permits generation and cleanup of its obsolete receipt');
+        assert(hasLinkedLocalApplicationOutput({ status: 'status-error', savedDir: '/synthetic/output' })
+          && hasLinkedLocalApplicationOutput({ status: 'failed', receipt: { outputDir: '/synthetic/output' } })
+          && !hasLinkedLocalApplicationOutput({ ...missingPrior, receipt: { outputDir: '/synthetic/output' } }),
+          'status errors retain the saved link until an authoritative missing-output verdict');
         assert(replacedLocalApplicationForCleanup(savedPrior, localJob, false) === null
           && replacedLocalApplicationForCleanup(pendingPrior, localJob, true) === null
           && replacedLocalApplicationForCleanup(localJob, localJob, true) === null,
@@ -6046,21 +6090,22 @@ export default [
         'the bounded record must keep whole defects rather than cutting one mid-sentence');
       const small = boundedRejectionError(Object.assign(new Error('ignored'), { failures: ['Only defect.'] }));
       assert(small === 'Only defect.', `a record that fits must be unchanged, got ${JSON.stringify(small)}`);
-      // One em dash is one defect: checkPunctuationStyle and the dash gate both
-      // read the letter, and reporting both sent the writer hunting for a
-      // second problem that did not exist.
-      let dashCount = '';
-      try {
-        validateLocalApplicationResult({
-          version: LOCAL_AI_APPLICATION_VERSION, jobId: id, status: 'completed', outputBundleRoot: 'Applied Jobs',
-          resumeMainHtml: validResumeMain,
-          coverLetter: { ...normalizedCoverLetter(), paragraphs: ['A letter \u2014 with one dash.'] },
-          coverLetterArgument: validCoverLetterArgument(), qualityReview: draftedQualityReview(),
-        }, id, root, {}, { careerData: null });
-      } catch (error) { dashCount = String(error?.message || error); }
-      assert(!/independent validation failures/.test(dashCount)
-        && !/Cover-letter copy contains an em dash/.test(dashCount),
-      `one em dash must be reported once, got ${JSON.stringify(dashCount.slice(0, 300))}`);
+      // Punctuation style is advisory, but the document builder still rejects
+      // these dash forms. Catch them before rendering, once per actual defect.
+      for (const copy of ['A letter \u2014 with one dash.', 'A letter \u2013 with one dash.', 'A letter - with one dash.']) {
+        let dashCount = '';
+        try {
+          validateLocalApplicationResult({
+            version: LOCAL_AI_APPLICATION_VERSION, jobId: id, status: 'completed', outputBundleRoot: 'Applied Jobs',
+            resumeMainHtml: validResumeMain,
+            coverLetter: { ...normalizedCoverLetter(), paragraphs: [copy] },
+            coverLetterArgument: validCoverLetterArgument(), qualityReview: draftedQualityReview(),
+          }, id, root, {}, { careerData: null });
+        } catch (error) { dashCount = String(error?.message || error); }
+        assert((dashCount.match(/Cover-letter copy contains/g) || []).length === 1
+          && !/punctuation-style:/.test(dashCount),
+        `the builder's dash gate must still reject when punctuation-style is advisory, got ${JSON.stringify(dashCount.slice(0, 300))}`);
+      }
       // A structural failure must not discard a prose defect already measured.
       let structural = '';
       try {
