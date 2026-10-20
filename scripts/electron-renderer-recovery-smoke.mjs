@@ -3,6 +3,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { _electron as electron } from 'playwright';
+import { closeDisposableElectron } from './close-disposable-electron.mjs';
 
 // A disposable hidden app tests an actual native renderer death. Never attach
 // to, crash, reload or write the person's running application/profile.
@@ -77,6 +78,6 @@ try {
   assert.equal(await application.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().length), 0);
   console.log('PASS: native renderer crash → one recovery dialog → same window restores the host-verified saved canvas; durable receipt verified.');
 } finally {
-  try { if (application) await application.close(); }
+  try { await closeDisposableElectron(application); }
   finally { await fs.rm(root, { recursive: true, force: true }); }
 }
