@@ -60,6 +60,29 @@ export default [
     },
   })),
   {
+    name: 'Quit retry is exposed only after sender admissions and bridge restoration settle',
+    async run() {
+      let finishResume;
+      const resumeGate = new Promise(resolve => { finishResume = resolve; });
+      const { attempt, events } = fixture({ resumeBridge: async () => {
+        events.push('resume-start');
+        await resumeGate;
+        events.push('resume-done');
+        return { success: true };
+      } });
+      await attempt.run();
+      const release = attempt.release();
+      try {
+        await Promise.resolve();
+        assert.ok(events.includes('ungate:first') && events.includes('ungate:second'));
+        assert.ok(!events.some(event => event.startsWith('release:')),
+          'an unfrozen renderer can immediately retry Quit; host release must finish first');
+      } finally { finishResume(); }
+      await release;
+      assert.deepEqual(events.slice(-3), ['resume-done', 'release:first', 'release:second']);
+    },
+  },
+  {
     name: 'Quit cancellation releases other windows and bridge even if one renderer release throws',
     async run() {
       const released = [];
