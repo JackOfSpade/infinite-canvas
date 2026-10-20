@@ -3,6 +3,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { _electron as electron } from 'playwright';
+import { closeDisposableElectron } from './close-disposable-electron.mjs';
 
 // Exercise only a disposable canvas/profile. No real generation or user files.
 const root = await fs.realpath(await fs.mkdtemp(path.join(process.platform === 'darwin' ? '/private/tmp' : os.tmpdir(), 'ic-bundle-link-')));
@@ -63,6 +64,6 @@ try {
   }
   throw error;
 } finally {
-  try { await application?.close(); }
+  try { await closeDisposableElectron(application); }
   finally { await fs.rm(root, { recursive: true, force: true }); }
 }

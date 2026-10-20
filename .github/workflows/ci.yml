@@ -1,12 +1,9 @@
 name: CI
 
-# Gates the auto-merge-to-main workflow (.github/workflows/auto-merge-to-main.yml),
-# which only merges a branch once its exact tip SHA has a successful run of the
-# workflow literally named "CI" (this one). Must trigger on every branch (no
-# `branches:` filter on push) so a run always exists for the auto-merge gate to find.
 on:
   push:
   pull_request:
+    branches: [main]
   workflow_dispatch:
 
 concurrency:
@@ -49,8 +46,64 @@ jobs:
       - name: Test
         run: npm test
 
-      # Compile smoke test: builds the Vite client + electron main/preload bundles.
-      # (Full electron-builder packaging is intentionally skipped — it needs
-      # platform codesigning/DMG tooling unrelated to code correctness.)
+      # Compile renderer and Electron main/preload bundles on Linux.
       - name: Build (compile smoke test)
         run: npm run build:compile
+
+  desktop:
+    name: macOS offline Electron and package smoke
+    runs-on: macos-latest
+    timeout-minutes: 30
+    env:
+      PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
+      PUPPETEER_SKIP_DOWNLOAD: "true"
+      CSC_IDENTITY_AUTO_DISCOVERY: "false"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run build:compile
+      # These existing harnesses create disposable userData and set E2E mode;
+      # they exercise renderer recovery/saved bundle links/quit retry without live AI or tunnels.
+      - run: node scripts/electron-renderer-recovery-smoke.mjs
+      - run: node scripts/electron-application-link-smoke.mjs
+      - run: node scripts/electron-quit-autosave-smoke.mjs
+      - name: Package and verify an ad-hoc CI app without a certificate
+        run: node scripts/ci-macos-package.mjs
+      - name: Retain package validation summary
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: macos-package-smoke
+          path: artifacts/macos-package.json
+          if-no-files-found: ignore
+          retention-days: 7
+
+  required:
+    name: CI required
+    if: ${{ always() }}
+    needs: ["test", "desktop", "merge-policy"]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require every prerequisite to succeed
+        env:
+          JOB_RESULTS: ${{ toJSON(needs) }}
+        run: |
+          python3 - <<'PY'
+          import json, os, sys
+          results = json.loads(os.environ["JOB_RESULTS"])
+          failed = [name for name, job in results.items() if job["result"] != "success"]
+          if failed:
+              sys.exit("Unsuccessful prerequisites: " + ", ".join(failed))
+          PY
+  merge-policy:
+    name: Validate merge policy
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - run: python3 -m unittest discover -s .github/tests -p 'test_merge_validated_pr.py'

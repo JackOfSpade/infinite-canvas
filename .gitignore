@@ -92,3 +92,5 @@ Thumbs.db
 .eslintcache
 .direnv/
 .envrc
+
+/artifacts/macos-package.json

@@ -3,6 +3,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { _electron as electron } from 'playwright';
+import { closeDisposableElectron } from './close-disposable-electron.mjs';
 
 // A hidden disposable process exercises the production quit handshake. It
 // never attaches to the running app or calls a provider/model.
@@ -95,12 +96,6 @@ try {
   application = null;
   console.log('PASS: production Quit pauses hidden workflows and automatically saves the canvas; failed save keeps the window usable and a retry preserves exact recovery data.');
 } finally {
-  try {
-    if (application) {
-      // Test cleanup only: bypass the production handshake if an assertion
-      // failed while the deliberately unwritable fixture was still open.
-      await application.evaluate(({ app }) => app.exit(0)).catch(() => {});
-      await application.close().catch(() => {});
-    }
-  } finally { await fs.rm(root, { recursive: true, force: true }); }
+  try { await closeDisposableElectron(application); }
+  finally { await fs.rm(root, { recursive: true, force: true }); }
 }

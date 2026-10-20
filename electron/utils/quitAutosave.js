@@ -46,9 +46,9 @@ export function createQuitAutosaveAttempt({
       // Always release every renderer that might have received a request,
       // including a timed-out request whose acknowledgement never arrived.
       const failures = [];
-      for (const win of attempted) {
-        try { releaseRenderer(win); } catch (error) { failures.push(error); }
-      }
+      // The renderer becomes interactive on release and can immediately retry
+      // Quit. Finish host admission/bridge restoration before advertising that
+      // readiness, otherwise the old in-flight attempt can swallow the retry.
       for (const win of gated) {
         try { releasePause(win); } catch (error) { failures.push(error); }
       }
@@ -56,6 +56,9 @@ export function createQuitAutosaveAttempt({
         const resumed = await resumeBridge();
         if (resumed?.success !== true) throw new Error('The application handoff bridge is still paused.');
       } catch (error) { failures.push(error); }
+      for (const win of attempted) {
+        try { releaseRenderer(win); } catch (error) { failures.push(error); }
+      }
       if (failures.length) throw new Error('Could not fully release the quit pause.', { cause: failures[0] });
     },
   };
