@@ -2888,7 +2888,7 @@ export function buildCoverLetterDocument({ letter = {}, variantAttrs = '', docId
     // (e.g. around a job title's en-dash), and a <br> there is a visible bad break.
     .map(p => `    <p>${escapeHtml(decodeTextEscapes(p))}</p>`)
     .join('\n');
-  const closing        = escapeHtml(decodeTextEscapes(letter.closing || 'Sincerely,'));
+  const closing        = escapeHtml(decodeTextEscapes(letter.closing || 'Best regards,'));
   const signatureTitle = escapeHtml(decodeTextEscapes(letter.signatureTitle || ''));
 
   // The Local AI envelope supplies these from the accepted résumé. Reuse its

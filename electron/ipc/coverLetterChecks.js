@@ -7613,7 +7613,7 @@ export function authorCoverLetterEnvelope({ job = {}, evidence = {}, today = '' 
     // second piece of letterhead.
     recipient: '',
     salutation: company ? `Dear ${company} Hiring Team,` : 'Dear Hiring Team,',
-    closing: 'Sincerely,',
+    closing: 'Best regards,',
     signatureTitle: '',
   };
 }

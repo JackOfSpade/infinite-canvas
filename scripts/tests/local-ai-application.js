@@ -2132,7 +2132,7 @@ export default [
         && /^[A-Z][a-z]+ \d{4}$/.test(canonicalEnvelope.coverLetter.date)
         && canonicalEnvelope.coverLetter.recipient === ''
         && canonicalEnvelope.coverLetter.salutation === 'Dear Acme Hiring Team,'
-        && canonicalEnvelope.coverLetter.closing === 'Sincerely,'
+        && canonicalEnvelope.coverLetter.closing === 'Best regards,'
         && canonicalEnvelope.coverLetter.signatureTitle === '',
       'Local AI derives the complete cover-letter envelope from the accepted résumé and selected job instead of trusting model-supplied fields');
       const renderedEnvelope = buildCoverLetterDocument({ letter: canonicalEnvelope.coverLetter });

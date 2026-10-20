@@ -2860,7 +2860,7 @@ export default [
       const numericQualifierEnvelope = authorCoverLetterEnvelope({ job: { company: 'Acme (2024)' }, evidence });
       assert(numericQualifierEnvelope.salutation === 'Dear Acme (2024) Hiring Team,',
         'a numeric parenthetical qualifier is not mistaken for an acronym in the salutation');
-      assert(envelope.signatureTitle === '' && envelope.closing === 'Sincerely,', 'code-authored closing omits an implied target title');
+      assert(envelope.signatureTitle === '' && envelope.closing === 'Best regards,', 'code-authored closing omits an implied target title');
       assert(envelope.date === 'August 2026', 'app-authored cover-letter dates use month and year only');
       assert(envelope.subtitleRole === 'Operations leader' && envelope.credential === 'B.S. Operations, Example University',
         'the authored envelope preserves the résumé header role and credential as structured letterhead fields');

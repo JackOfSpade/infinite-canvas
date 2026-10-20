@@ -13416,7 +13416,7 @@ export default [
       const bareDom = new JSDOM(bareFull);
       const bareMain = bareDom.window.document.querySelector('main.page');
       assert(bareMain?.querySelector('.salutation')?.textContent === 'Dear Hiring Team,'
-        && bareMain.querySelector('.valediction')?.textContent === 'Sincerely,', 'cover: missing salutation/closing fallback');
+        && bareMain.querySelector('.valediction')?.textContent === 'Best regards,', 'cover: missing salutation/closing fallback');
       assert(!bareMain.querySelector('.letter-recipient,.signature-title'), 'cover: recipient and optional signature-title blocks must be omitted');
       assert(bareMain.querySelector('p.signature'), 'cover: signature (name) always present');
       bareDom.window.close();
