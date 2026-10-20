@@ -674,8 +674,16 @@ export function createClaudeApplicationRunner({
         const key = freshContextKeyOf(handoff);
         const wasStarted = lane.started;
         if (needsFreshSession(lane, handoff, key)) {
+          const replacedId = lane.sessionId;
           lane.sessionId = crypto.randomUUID();
           lane.started = false;
+          // The replaced session is never resumed again: remove its transcript now,
+          // without waiting and without ever failing the run on it.
+          if (replacedId && replacedId !== lane.sessionId) {
+            removeTranscripts([replacedId]).catch(error => {
+              logger?.warn?.(`[ClaudeRunner] could not remove a replaced Claude session transcript: ${clip(error?.code || error?.message, 80)}`);
+            });
+          }
         }
         let succeeded = false;
         try {

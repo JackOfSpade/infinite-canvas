@@ -60,7 +60,9 @@ export default [
     name: 'write-verify brief frames the letter as a persuasive essay with a hedged thesis and one argued point per body paragraph',
     run() {
       assert.match(WRITE_VERIFY_BRIEF, /as the cover letter a persuasive essay to the hiring manager/u, 'the letter is written as an essay to a named reader');
-      assert.match(WRITE_VERIFY_BRIEF, /Open on a thesis, your hedged read of what the role most needs\./u, 'the thesis is the writer\u2019s hedged diagnosis');
+      assert.ok(WRITE_VERIFY_BRIEF.includes(' Open on a thesis, your read of what the role most needs, hedged once. '), 'the thesis is the writer\u2019s diagnosis, hedged once');
+      // Sabotage: the old wording doubled the hedge in live letters, so it must be gone.
+      assert.equal(WRITE_VERIFY_BRIEF.includes('your hedged read'), false, 'the old hedged-read wording is gone');
       assert.match(WRITE_VERIFY_BRIEF, /Each body paragraph argues one point for it, proves it with one piece of work and ties it to the job\./u, 'point, proof, comment per paragraph');
       // Sabotage: the replaced letter sentence must be gone, so the brief carries one letter instruction, not two.
       assert.equal(WRITE_VERIFY_BRIEF.includes('The letter adds what the quoted evidence states beyond the résumé.'), false);

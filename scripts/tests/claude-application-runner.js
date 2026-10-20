@@ -960,4 +960,96 @@ export default [
       assert.deepEqual(JSON.parse(fs.readFileSync(stateFile, 'utf8')), { failed: {}, sessions: {} });
     },
   },
+  {
+    name: 'claude runner sessions: a replaced lane session loses its transcript when the fresh session starts',
+    async run() {
+      const home = tempHome();
+      const projA = path.join(home, '.claude', 'projects', 'projA');
+      fs.mkdirSync(projA, { recursive: true });
+      fs.writeFileSync(path.join(projA, 'other.jsonl'), '{}\n');
+      const stateFile = tempStateFile();
+      const script = sequenceApi([
+        withFresh({ handoffCode: 'h1', stage: 'write', prompt: 'p1' }, true, 'cand-1'),
+        withFresh({ handoffCode: 'h2', stage: 'write', prompt: 'p2' }, true, 'cand-2'),
+        { handoffCode: 'h3', stage: 'write', prompt: 'p3' },
+      ]);
+      const calls = [];
+      const observed = [];
+      const file = id => path.join(projA, `${id}.jsonl`);
+      const logger = quietLogger();
+      const runner = createClaudeApplicationRunner({
+        api: script.api, stateFile, logger, homedir: home,
+        runStage: async ({ sessionId, resume }) => {
+          calls.push({ sessionId, resume });
+          if (calls.length === 2) {
+            // The replaced first session's transcript goes away while the second session runs.
+            await waitFor(() => !fs.existsSync(file(calls[0].sessionId)), 'replaced transcript removed');
+          }
+          if (!resume) fs.writeFileSync(file(sessionId), '{}\n');
+          observed.push({ first: fs.existsSync(file(calls[0].sessionId)), current: fs.existsSync(file(sessionId)) });
+          return { text: 'ok' };
+        },
+      });
+      runner.ensure({ jobId: 'job-replace', canvasFilePath: '/c.canvas' });
+      await waitFor(() => runner.status(['job-replace'])['job-replace']?.status === 'done', 'done');
+      await runner.shutdown();
+      assert.equal(calls.length, 3);
+      const [s1, s2] = [calls[0].sessionId, calls[1].sessionId];
+      assert.match(s1, UUID_RE);
+      assert.match(s2, UUID_RE);
+      assert.notEqual(s1, s2);
+      assert.deepEqual(calls, [
+        { sessionId: s1, resume: false },
+        { sessionId: s2, resume: false },
+        { sessionId: s2, resume: true },
+      ]);
+      // Before completion: the first file was there during its run, gone once the
+      // second session started; the second session's file survived until done.
+      assert.deepEqual(observed, [
+        { first: true, current: true },
+        { first: false, current: true },
+        { first: false, current: true },
+      ]);
+      assert.equal(fs.existsSync(file(s1)), false);
+      assert.equal(fs.existsSync(file(s2)), false);
+      assert.deepEqual(fs.readdirSync(projA), ['other.jsonl']);
+      assert.deepEqual(logger.warns, []);
+    },
+  },
+  {
+    name: 'claude runner sessions: a failing transcript removal for a replaced session is logged and never fails the run',
+    async run() {
+      const home = tempHome();
+      fs.mkdirSync(path.join(home, '.claude', 'projects', 'projA'), { recursive: true });
+      const realFs = fs.promises;
+      const fsImpl = {
+        mkdir: (...args) => realFs.mkdir(...args),
+        writeFile: (...args) => realFs.writeFile(...args),
+        rename: (...args) => realFs.rename(...args),
+        readFile: (...args) => realFs.readFile(...args),
+        readdir: (...args) => realFs.readdir(...args),
+        rm: async () => { const error = new Error('denied'); error.code = 'EACCES'; throw error; },
+      };
+      const script = sequenceApi([
+        withFresh({ handoffCode: 'h1', stage: 'write', prompt: 'SECRET-PROMPT-1' }, true, 'cand-1'),
+        withFresh({ handoffCode: 'h2', stage: 'write', prompt: 'SECRET-PROMPT-2' }, true, 'cand-2'),
+      ]);
+      const logger = quietLogger();
+      const calls = [];
+      const runner = createClaudeApplicationRunner({
+        api: script.api, stateFile: tempStateFile(), logger, homedir: home, fsImpl,
+        runStage: async ({ sessionId, resume }) => { calls.push({ sessionId, resume }); return { text: 'ok' }; },
+      });
+      runner.ensure({ jobId: 'job-rm-fail', canvasFilePath: '/c.canvas' });
+      await waitFor(() => runner.status(['job-rm-fail'])['job-rm-fail']?.status === 'done', 'done');
+      await runner.shutdown();
+      assert.equal(calls.length, 2);
+      assert.notEqual(calls[0].sessionId, calls[1].sessionId);
+      assert.deepEqual(logger.errors, []);
+      assert.equal(logger.warns.length > 0, true);
+      for (const warn of logger.warns) {
+        assert.equal(warn, '[ClaudeRunner] could not remove a Claude session transcript: EACCES');
+      }
+    },
+  },
 ];
