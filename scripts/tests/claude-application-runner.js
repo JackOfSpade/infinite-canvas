@@ -8,6 +8,7 @@ import {
   answeringModel,
   CLAUDE_MAX_RUNS_PER_JOB,
   CLAUDE_STAGE_PROFILES,
+  CLAUDE_STAGE_TIMEOUT_MS,
   claudeStageProfile,
   ClaudeRunnerError,
   buildClaudeInputMessage,
@@ -372,20 +373,26 @@ export default [
       const { calls, spawnImpl } = fakeSpawnFactory();
       const timers = [];
       const promise = runClaudeStage({
-        text: 't', binary: '/bin/claude', env: {}, cwd: '/tmp', spawnImpl, timeoutMs: 1234,
+        text: 't', binary: '/bin/claude', env: {}, cwd: '/tmp', spawnImpl, timeoutMs: 3 * 60_000,
         setTimeoutImpl: (fn, ms) => { timers.push({ fn, ms }); return timers.length; },
         clearTimeoutImpl: () => {},
       });
       assert.equal(timers.length, 1);
-      assert.equal(timers[0].ms, 1234);
+      assert.equal(timers[0].ms, 180_000);
       timers[0].fn();
       const error = await rejection(promise);
       assert.equal(error.code, 'CLAUDE_TIMEOUT');
-      assert.equal(error.message, 'Claude did not finish this stage within 20 minutes.');
+      assert.equal(error.message, 'Claude did not finish this stage within 3 minutes.');
       assert.deepEqual(calls[0].child.kills, ['SIGTERM']);
       assert.equal(timers[1].ms, 5000);
       timers[1].fn();
       assert.deepEqual(calls[0].child.kills, ['SIGTERM', 'SIGKILL']);
+    },
+  },
+  {
+    name: 'claude runner: the default stage timeout is 45 minutes',
+    run() {
+      assert.equal(CLAUDE_STAGE_TIMEOUT_MS, 45 * 60_000);
     },
   },
   {

@@ -207,7 +207,7 @@ export function buildApplicationCareerAuthority(snapshot) {
     counts: Object.freeze({ catalog: catalogById.size, roles: rolesById.size, projects: projectsById.size, skills: skillsById.size, education: educationById.size, certifications: certificationsById.size }),
   };
   const roleSegmentsById = new Map([...rolesById.values()].map(role => [role.id, roleWorkSegments(role, achievementsById, projectsById)]));
-  privateState.set(authority, { rolesById, projectsById, skillsById, achievementsById, educationById, certificationsById, catalogById, roleSegmentsById });
+  privateState.set(authority, { rolesById, projectsById, skillsById, achievementsById, educationById, certificationsById, otherEvidenceById, catalogById, roleSegmentsById });
   return Object.freeze(authority);
 }
 
@@ -330,10 +330,21 @@ export function validateAuthorityProjectEvidence(authority, projectId, evidenceI
 
 function validateAuthorityEntityEvidence(authority, entityId, evidenceIds, kind, resolve) {
   if (!Array.isArray(evidenceIds) || !evidenceIds.length) throw new Error(`${kind} evidence must be nonempty.`);
+  const state = stateOf(authority);
   const entity = resolve(authority, entityId);
+  const ownSegments = new Set(Array.isArray(entity?.evidenceSegmentIds) ? entity.evidenceSegmentIds : []);
   for (const id of evidenceIds) {
     const unit = resolveAuthorityEvidence(authority, id);
-    if (unit.kind !== kind || unit.entityId !== entityId) throw new Error(`Authority evidence ${JSON.stringify(id)} does not belong to ${kind} ${JSON.stringify(entityId)}.`);
+    if (unit.kind === kind && unit.entityId === entityId) continue;
+    // Supplementary evidence (for example a record's location the compiler
+    // filed separately) belongs to this record only when every source segment
+    // it was built from is one of the record's own segments.
+    if (unit.kind === 'other') {
+      const other = state.otherEvidenceById?.get(unit.entityId);
+      const segments = Array.isArray(other?.evidenceSegmentIds) ? other.evidenceSegmentIds : [];
+      if (segments.length && segments.every(segmentId => ownSegments.has(segmentId))) continue;
+    }
+    throw new Error(`Authority evidence ${JSON.stringify(id)} does not belong to ${kind} ${JSON.stringify(entityId)}.`);
   }
   return entity;
 }

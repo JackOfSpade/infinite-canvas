@@ -49,7 +49,9 @@ export function answeringModel(requested, models) {
 export function claudeStageProfile(stage) {
   return CLAUDE_STAGE_PROFILES[stage] || { model: CLAUDE_APPLICATION_MODEL, effort: CLAUDE_APPLICATION_EFFORT };
 }
-export const CLAUDE_STAGE_TIMEOUT_MS = 20 * 60_000;
+// Normal Opus write stages take 5-7 minutes; the cap leaves room for Claude
+// Code's own recovery after a cut-off API stream.
+export const CLAUDE_STAGE_TIMEOUT_MS = 45 * 60_000;
 export const CLAUDE_RUNNER_CONCURRENCY = 3;
 export const CLAUDE_MAX_RUNS_PER_JOB = 120;
 
@@ -61,7 +63,7 @@ const MESSAGES = Object.freeze({
   missing: 'Claude Code is not installed or not on PATH. Install it and sign in with your Claude subscription, then retry.',
   usage: 'Claude usage limit reached. Retry this application after your limit resets.',
   login: 'Claude Code is not signed in. Run claude in a terminal and sign in with your Claude subscription, then retry.',
-  timeout: 'Claude did not finish this stage within 20 minutes.',
+  timeout: minutes => `Claude did not finish this stage within ${minutes} minutes.`,
   cancelled: 'Claude run was cancelled.',
   tooMany: runs => `Stopped after ${runs} Claude runs without finishing this application.`,
 });
@@ -264,7 +266,7 @@ export function runClaudeStage({
     timer = setTimeoutImpl(() => {
       timer = null;
       killChild();
-      finish(new ClaudeRunnerError('CLAUDE_TIMEOUT', MESSAGES.timeout));
+      finish(new ClaudeRunnerError('CLAUDE_TIMEOUT', MESSAGES.timeout(Math.round(timeoutMs / 60000))));
     }, timeoutMs);
     timer?.unref?.();
 

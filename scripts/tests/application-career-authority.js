@@ -281,4 +281,54 @@ export default [{
       && rejectRawFallback({ ...authorityBase, credentials: [{ id: 'credential', name: 'Cert', issuer: 'Issuer', evidenceIds: ['quote-missing'] }] }, 'credentials.credential'),
     'current authority validation cannot resurrect project, skill, or credential support from raw career text when its approved evidence quote is absent');
   },
+}, {
+  name: 'Application career authority: other evidence built only from an education/certification record\'s own segments belongs to that record',
+  run() {
+    const base = snapshot();
+    base.profile.education = [
+      { id: 'e1', credential: 'BSc', institution: 'First University', evidenceSegmentIds: ['segment-0012', 'segment-0013'] },
+      { id: 'e2', credential: 'MSc', institution: 'Later University', evidenceSegmentIds: ['segment-0020'] },
+    ];
+    base.profile.certifications = [{ id: 'c1', name: 'Cert', issuer: 'Issuer', evidenceSegmentIds: ['segment-0030', 'segment-0031'] }];
+    base.profile.otherEvidence = [
+      { id: 'o-subset', kind: 'note', label: 'BSc, First University', text: 'Toronto', evidenceSegmentIds: ['segment-0012', 'segment-0013'] },
+      { id: 'o-partial', kind: 'note', label: 'Partial', text: 'Overlap', evidenceSegmentIds: ['segment-0012', 'segment-0099'] },
+      { id: 'o-empty', kind: 'note', label: 'Empty', text: 'Nothing', evidenceSegmentIds: [] },
+      { id: 'o-cert', kind: 'note', label: 'Cert detail', text: 'Renewed', evidenceSegmentIds: ['segment-0031'] },
+    ];
+    const authority = buildApplicationCareerAuthority(base);
+    const catalog = approvedCareerEvidenceCatalog(base);
+    const idsOf = prefix => catalog.filter(item => item.id.startsWith(prefix)).map(item => item.id);
+    const own = idsOf('host.career.education.e1.');
+    const subset = idsOf('host.career.other.o-subset.');
+    const partial = idsOf('host.career.other.o-partial.');
+    const empty = idsOf('host.career.other.o-empty.');
+    const certOwn = idsOf('host.career.certification.c1.');
+    const certOther = idsOf('host.career.other.o-cert.');
+    assert(own.length > 0 && subset.length > 0 && partial.length > 0 && empty.length > 0 && certOwn.length > 0 && certOther.length > 0,
+      'fixture catalog contains education, certification, and every other-evidence unit under test');
+    const messageOf = fn => { try { fn(); return null; } catch (error) { return String(error?.message || error); } };
+    const education = validateAuthorityEducationEvidence(authority, 'e1', [subset[0]]);
+    assert(education.id === 'e1', 'a subset other unit alone is accepted for its education record');
+    assert(validateAuthorityEducationEvidence(authority, 'e1', [...own, ...subset]).id === 'e1',
+      'a subset other unit is accepted together with the education record\'s own evidence');
+    assert(messageOf(() => validateAuthorityEducationEvidence(authority, 'e1', [...own, partial[0]]))
+      === `Authority evidence ${JSON.stringify(partial[0])} does not belong to education "e1".`,
+    'an other unit sharing only some segments is rejected with the existing ownership message');
+    assert(messageOf(() => validateAuthorityEducationEvidence(authority, 'e1', [empty[0]]))
+      === `Authority evidence ${JSON.stringify(empty[0])} does not belong to education "e1".`,
+    'an other unit with no evidence segments is rejected');
+    assert(messageOf(() => validateAuthorityEducationEvidence(authority, 'e2', [subset[0]]))
+      === `Authority evidence ${JSON.stringify(subset[0])} does not belong to education "e2".`,
+    'an other unit contained in education e1 is rejected for education e2 whose segments differ');
+    assert(validateAuthorityCertificationEvidence(authority, 'c1', [...certOwn, certOther[0]]).id === 'c1'
+      && validateAuthorityCertificationEvidence(authority, 'c1', [certOther[0]]).id === 'c1',
+    'the subset rule admits an other unit for a certification');
+    assert(messageOf(() => validateAuthorityCertificationEvidence(authority, 'c1', [subset[0]]))
+      === `Authority evidence ${JSON.stringify(subset[0])} does not belong to certification "c1".`,
+    'an other unit outside the certification\'s segments is rejected for it');
+    assert(messageOf(() => validateAuthorityEducationEvidence(authority, 'e1', [certOwn[0]]))
+      === `Authority evidence ${JSON.stringify(certOwn[0])} does not belong to education "e1".`,
+    'a non-other unit of another kind is still rejected');
+  },
 }];
