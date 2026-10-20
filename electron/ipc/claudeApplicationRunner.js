@@ -52,6 +52,9 @@ export function claudeStageProfile(stage) {
 // Normal Opus write stages take 5-7 minutes; the cap leaves room for Claude
 // Code's own recovery after a cut-off API stream.
 export const CLAUDE_STAGE_TIMEOUT_MS = 45 * 60_000;
+// Appended to every CLI invocation so Claude replies in the format the app's
+// validator accepts (no prose around a JSON answer).
+export const CLAUDE_HANDOFF_SYSTEM_PROMPT = 'You are answering a structured handoff from a desktop application. When the message asks for a JSON object, reply with only that JSON object, optionally inside one json code fence, with no text before or after it. When it asks for plain text, reply with only the requested text.';
 export const CLAUDE_RUNNER_CONCURRENCY = 3;
 export const CLAUDE_MAX_RUNS_PER_JOB = 120;
 
@@ -97,6 +100,7 @@ export function claudeCliArgs({
     ...sessionArgs,
     '--model', model,
     '--effort', effort,
+    '--append-system-prompt', CLAUDE_HANDOFF_SYSTEM_PROMPT,
     '--restricted',
     '--strict-mcp-config',
     '--tools', '',
@@ -393,12 +397,35 @@ function handoffCodeOf(handoff) {
   return handoff?.handoffCode ?? handoff?.code;
 }
 
+const MAX_CORRECTION_ITEMS = 30;
+const MAX_CORRECTION_CHARS = 1500;
+
+// Head 65 percent, an ellipsis, then the tail (like framing.js clipCorrectionItem).
+function clipCorrection(value, max = MAX_CORRECTION_CHARS) {
+  const text = String(value);
+  if (text.length <= max) return text;
+  const head = Math.floor(max * 0.65);
+  const tail = max - head - 1;
+  return `${text.slice(0, head)}…${text.slice(-tail)}`;
+}
+
+// A rejected handoff always reaches Claude with every correction item: the
+// app's correction prompt may be the original prompt verbatim, so any item it
+// does not already contain is appended as a numbered list.
 function chooseText(handoff) {
-  const corrections = Array.isArray(handoff?.corrections) ? handoff.corrections : [];
-  if (corrections.length > 0 && typeof handoff?.correctionPrompt === 'string' && handoff.correctionPrompt.trim()) {
-    return handoff.correctionPrompt;
-  }
-  return typeof handoff?.prompt === 'string' ? handoff.prompt : '';
+  const corrections = Array.isArray(handoff?.corrections)
+    ? handoff.corrections.filter(item => typeof item === 'string' && item.length > 0)
+    : [];
+  const prompt = typeof handoff?.prompt === 'string' ? handoff.prompt : '';
+  const correctionPrompt = handoff?.correctionPrompt;
+  const base = (corrections.length > 0 && typeof correctionPrompt === 'string' && correctionPrompt.trim() && correctionPrompt !== handoff?.prompt)
+    ? correctionPrompt
+    : prompt;
+  const missing = corrections.filter(item => !base.includes(item)).slice(0, MAX_CORRECTION_ITEMS);
+  if (!missing.length) return base;
+  const what = missing.length === 1 ? 'this item' : `these ${missing.length} items`;
+  return `${base}\n\nYour previous response to this handoff was rejected by the app. Fix ${what} and reply again with the complete corrected response:\n`
+    + missing.map((item, i) => `${i + 1}. ${clipCorrection(item)}`).join('\n');
 }
 
 function createProductionRunStage({ workspaceDir, fsImpl }) {

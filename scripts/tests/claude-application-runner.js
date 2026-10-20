@@ -6,6 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import {
   answeringModel,
+  CLAUDE_HANDOFF_SYSTEM_PROMPT,
   CLAUDE_MAX_RUNS_PER_JOB,
   CLAUDE_STAGE_PROFILES,
   CLAUDE_STAGE_TIMEOUT_MS,
@@ -20,6 +21,23 @@ import {
   resolveClaudeBinary,
   runClaudeStage,
 } from '../../electron/ipc/claudeApplicationRunner.js';
+
+const REJECTED_INTRO = n => `\n\nYour previous response to this handoff was rejected by the app. Fix ${n === 1 ? 'this item' : `these ${n} items`} and reply again with the complete corrected response:\n`;
+const FENCE_CORRECTION = 'Paste one valid JSON object (a single JSON code fence is also accepted).';
+
+async function textsSentFor(handoffs) {
+  const script = sequenceApi(handoffs);
+  const texts = [];
+  const runner = createClaudeApplicationRunner({
+    api: script.api, stateFile: tempStateFile(), logger: quietLogger(), homedir: '',
+    runStage: async ({ text }) => { texts.push(text); return { text: '{}' }; },
+  });
+  const jobId = `job-text-${Math.random().toString(36).slice(2)}`;
+  runner.ensure({ jobId, canvasFilePath: '/c.canvas' });
+  await waitFor(() => runner.status([jobId])[jobId]?.status === 'done', 'done');
+  await runner.shutdown();
+  return texts;
+}
 
 const USAGE_MESSAGE = 'Claude usage limit reached. Retry this application after your limit resets.';
 const LOGIN_MESSAGE = 'Claude Code is not signed in. Run claude in a terminal and sign in with your Claude subscription, then retry.';
@@ -162,7 +180,7 @@ export default [
     name: 'claude runner: CLI args are exactly the headless, tool-less latest-Sonnet invocation',
     run() {
       assert.deepEqual(claudeCliArgs(), [
-        '-p', '--model', 'sonnet', '--effort', 'high', '--restricted', '--strict-mcp-config',
+        '-p', '--model', 'sonnet', '--effort', 'high', '--append-system-prompt', CLAUDE_HANDOFF_SYSTEM_PROMPT, '--restricted', '--strict-mcp-config',
         '--tools', '', '--input-format', 'stream-json',
         '--output-format', 'stream-json', '--verbose',
       ]);
@@ -172,11 +190,78 @@ export default [
   {
     name: 'claude runner: CLI args start a session with --session-id or continue it with --resume right after -p',
     run() {
-      const tail = ['--model', 'opus', '--effort', 'xhigh', '--restricted', '--strict-mcp-config',
+      const tail = ['--model', 'opus', '--effort', 'xhigh', '--append-system-prompt', CLAUDE_HANDOFF_SYSTEM_PROMPT, '--restricted', '--strict-mcp-config',
         '--tools', '', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose'];
       assert.deepEqual(claudeCliArgs({ model: 'opus', effort: 'xhigh', sessionId: 'S', resume: false }), ['-p', '--session-id', 'S', ...tail]);
       assert.deepEqual(claudeCliArgs({ model: 'opus', effort: 'xhigh', sessionId: 'S', resume: true }), ['-p', '--resume', 'S', ...tail]);
       assert.deepEqual(claudeCliArgs({ model: 'opus', effort: 'xhigh', resume: true }), ['-p', ...tail]);
+    },
+  },
+  {
+    name: 'claude runner: every CLI invocation appends the handoff reply-format system prompt right after the effort pair',
+    run() {
+      assert.equal(CLAUDE_HANDOFF_SYSTEM_PROMPT, 'You are answering a structured handoff from a desktop application. When the message asks for a JSON object, reply with only that JSON object, optionally inside one json code fence, with no text before or after it. When it asks for plain text, reply with only the requested text.');
+      for (const options of [{}, { sessionId: 'S', resume: false }, { sessionId: 'S', resume: true }]) {
+        const args = claudeCliArgs({ model: 'sonnet', effort: 'medium', ...options });
+        const at = args.indexOf('--effort');
+        assert.deepEqual(args.slice(at, at + 5), ['--effort', 'medium', '--append-system-prompt', CLAUDE_HANDOFF_SYSTEM_PROMPT, '--restricted']);
+        assert.equal(args.filter(arg => arg === '--append-system-prompt').length, 1);
+      }
+    },
+  },
+  {
+    name: 'claude runner driver: a correction prompt equal to the prompt still carries the numbered correction',
+    async run() {
+      const texts = await textsSentFor([
+        { handoffCode: 'f1', stage: 'fact-check', prompt: 'FACT PROMPT' },
+        { handoffCode: 'f1-r', stage: 'fact-check', prompt: 'FACT PROMPT', corrections: [FENCE_CORRECTION], correctionPrompt: 'FACT PROMPT' },
+      ]);
+      assert.equal(texts.length, 2);
+      assert.equal(texts[0], 'FACT PROMPT');
+      assert.equal(texts[1].startsWith('FACT PROMPT\n\n'), true);
+      assert.equal(texts[1].endsWith(`\n1. ${FENCE_CORRECTION}`), true);
+      assert.equal(texts[1], `FACT PROMPT${REJECTED_INTRO(1)}1. ${FENCE_CORRECTION}`);
+    },
+  },
+  {
+    name: 'claude runner driver: a correction prompt that already contains every correction is sent unchanged',
+    async run() {
+      const correctionPrompt = 'Fix these 2 items.\n1. alpha is missing\n2. beta is too long';
+      const texts = await textsSentFor([
+        { handoffCode: 'c1', stage: 'draft', prompt: 'P', corrections: ['alpha is missing', 'beta is too long'], correctionPrompt },
+      ]);
+      assert.deepEqual(texts, [correctionPrompt]);
+    },
+  },
+  {
+    name: 'claude runner driver: only corrections missing from a distinct correction prompt are appended, renumbered',
+    async run() {
+      const texts = await textsSentFor([
+        { handoffCode: 'c1', stage: 'draft', prompt: 'P', corrections: ['alpha is missing', 'beta is too long'], correctionPrompt: 'Please fix: alpha is missing' },
+      ]);
+      assert.deepEqual(texts, [`Please fix: alpha is missing${REJECTED_INTRO(1)}1. beta is too long`]);
+    },
+  },
+  {
+    name: 'claude runner driver: two missing corrections are numbered and very long items are clipped head and tail',
+    async run() {
+      const long = `H${'a'.repeat(3000)}T`;
+      const texts = await textsSentFor([
+        { handoffCode: 'c1', stage: 'draft', prompt: 'P', corrections: ['', 'first', long, 7], correctionPrompt: 'P' },
+      ]);
+      const clipped = `${long.slice(0, 975)}…${long.slice(-524)}`;
+      assert.equal(clipped.length, 1500);
+      assert.deepEqual(texts, [`P${REJECTED_INTRO(2)}1. first\n2. ${clipped}`]);
+    },
+  },
+  {
+    name: 'claude runner driver: without corrections the prompt is sent unchanged',
+    async run() {
+      const texts = await textsSentFor([
+        { handoffCode: 'c1', stage: 'draft', prompt: 'Plain prompt', correctionPrompt: 'ignored' },
+        { handoffCode: 'c2', stage: 'draft', prompt: 'Second prompt', corrections: [], correctionPrompt: 'ignored too' },
+      ]);
+      assert.deepEqual(texts, ['Plain prompt', 'Second prompt']);
     },
   },
   {
@@ -433,7 +518,7 @@ export default [
       });
       runner.ensure({ jobId: 'job-reject', canvasFilePath: '/c.canvas' });
       await waitFor(() => runner.status(['job-reject'])['job-reject']?.status === 'done', 'done');
-      assert.deepEqual(texts, ['prompt one', 'fix draft']);
+      assert.deepEqual(texts, ['prompt one', `fix draft${REJECTED_INTRO(1)}1. too vague`]);
       assert.deepEqual(script.submits.map(s => [s.handoffCode, s.response]), [['code-1', 'a1'], ['code-1-r', 'a2']]);
     },
   },
@@ -690,7 +775,7 @@ export default [
       assert.match(calls[0].sessionId, UUID_RE);
       assert.deepEqual(calls, [
         { text: 'full schema prompt', sessionId: calls[0].sessionId, resume: false },
-        { text: 'Do not start over; fix it', sessionId: calls[0].sessionId, resume: true },
+        { text: `Do not start over; fix it${REJECTED_INTRO(1)}1. bad json`, sessionId: calls[0].sessionId, resume: true },
       ]);
     },
   },
