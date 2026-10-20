@@ -12,7 +12,7 @@ The private store contains `state.json` (up to 100 full pairs and about six mont
 
 ## New model
 
-Update the label in `config/application-model.json` and rebuild the packaged app so it carries the new label. Let the app archive the previous full pairs and reset the counter on its next read or write. Verify the archived file and zero counter. Keep summaries and the frozen regression set. Make no code changes for the model transition itself.
+Update the label in `config/application-model.json` and rebuild the packaged app so it carries the new label. Let the app archive the previous full pairs and reset the counter on its next read or write. Verify the archived file and zero counter. Keep summaries and the frozen regression set. Make no code changes for the model transition itself. For application bundles the model and effort are the runner's `CLAUDE_APPLICATION_MODEL` and `CLAUDE_APPLICATION_EFFORT` constants, so a model change edits those and the label together.
 
 ## Improvement session
 
@@ -20,7 +20,7 @@ Update the label in `config/application-model.json` and rebuild the packaged app
 2. Classify every edit as truth error, evidence choice, wording, structure, length, letter structure, or user judgment call. Exclude removed letters from letter analysis. Read each pair's `editNotes` first; a stated reason decides the category over an inference from the diff.
 3. Keep only patterns that recur across several bundles. A one-off edit is evidence to inspect, not a new rule.
 4. Propose at most about three changes. Prefer removing or replacing guidance over adding it, and keep the writer brief within a fixed size budget.
-5. Test each candidate offline. Replay on the logged jobs and measure closeness to the latest saved versions. Also run a blind play-the-hand panel, truth recall, and the frozen regression set. Compare panel results only within this session using the same renderer. Ship only proven wins.
+5. Test each candidate offline. Replay on the logged jobs and measure closeness to the latest saved versions. Also run a blind play-the-hand panel, truth recall, and the frozen regression set. Compare panel results only within this session using the same renderer. Ship only proven wins. The writer now runs locally through Claude Code, so a candidate brief can be replayed offline on logged postings with the runner's own CLI flags.
 6. Append a dated Session log entry below with what changed, why, and before and after numbers.
 7. Refresh the frozen set to about 20 representative pairs. Only the session changes this file. Reset the counter with `node scripts/application-improvement-state.mjs reset --data-root <absolute-userData-path>` after the entry and regression set are saved. The reset also clears the pre-generation gate, so generation resumes.
 
@@ -29,7 +29,7 @@ Update the label in `config/application-model.json` and rebuild the packaged app
 - Truth checks are never weakened. A user-reported false claim is fixed immediately, outside this batch process.
 - No candidate or posting facts enter tracked files, including tests and session notes.
 - The oracle gate stays at zero ngram findings.
-- Live ChatGPT workers use the latest model at Extra High, never Pro.
+- Application bundles are written by Claude Sonnet 5.5 at high effort through the local Claude Code runner (`electron/ipc/claudeApplicationRunner.js`). Every other AI task stays on the ChatGPT bridge. A Claude failure, including a usage limit, stops the bundle loudly for the user to retry. It never waits or falls back to ChatGPT.
 - Panel comparisons are valid only within one session with the same renderer.
 
 ## Session log

@@ -26,6 +26,10 @@ import application_authority_ledger_store from './tests/application-authority-le
 import current_authority_parallel_match from './tests/current-authority-parallel-match.js';
 import application_career_authority from './tests/application-career-authority.js';
 import application_write_verify from './tests/application-write-verify.js';
+import cover_letter_hedged_diagnosis from './tests/cover-letter-hedged-diagnosis.js';
+import claude_application_runner from './tests/claude-application-runner.js';
+import handoff_bridge_application_executor from './tests/handoff-bridge-application-executor.js';
+import application_claude_dock from './tests/application-claude-dock.js';
 import application_v2_writer_shortlist from './tests/application-v2-writer-shortlist.js';
 import paste_application_assembly from './tests/paste-application-assembly.js';
 import paste_application_flow from './tests/paste-application-flow.js';
@@ -188,6 +192,10 @@ const testGroups = [
   ['current-authority-parallel-match.js', current_authority_parallel_match],
   ['application-career-authority.js', application_career_authority],
   ['application-write-verify.js', application_write_verify],
+  ['cover-letter-hedged-diagnosis.js', cover_letter_hedged_diagnosis],
+  ['claude-application-runner.js', claude_application_runner],
+  ['handoff-bridge-application-executor.js', handoff_bridge_application_executor],
+  ['application-claude-dock.js', application_claude_dock],
   ['application-v2-writer-shortlist.js', application_v2_writer_shortlist],
   ['paste-application-assembly.js', paste_application_assembly],
   ['paste-application-flow.js', paste_application_flow],

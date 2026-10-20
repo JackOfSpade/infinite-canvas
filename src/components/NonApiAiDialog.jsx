@@ -26,6 +26,7 @@ import { applicationRequestId, applicationStageLabel, assignApplicationOrdinals,
 // answer that. See applicationHandoffDock.js's doc comment for the shared
 // dock contract this file adapts application handoffs into.
 import { jobIntegrityFailureMessage } from '../utils/localAiFallback';
+import { setClaudeApplicationRun } from '../utils/claudeApplicationRuns';
 
 const applicationDraftKey = payload => JSON.stringify([payload.canvasFilePath, payload.jobId, payload.handoffCode]);
 const writeApplicationDraft = payload => trackApplicationDraftWrite(
@@ -393,6 +394,10 @@ export function NonApiAiDialog() {
   // settle/replay effect below never has to reason about a second kind.
   const [applicationItems, setApplicationItems] = useState([]);
   const [discardingRequestIds, setDiscardingRequestIds] = useState(() => new Set());
+  // Application bundles whose "Retry with Claude" is in flight, plus the last
+  // retry error per request (the IPC resolves { success: false } on failure).
+  const [claudeRetryingRequestIds, setClaudeRetryingRequestIds] = useState(() => new Set());
+  const [claudeRetryErrors, setClaudeRetryErrors] = useState({});
   // A job-integrity failure takes no further paste; keyed by requestId so one
   // broken bundle does not affect any other item in the queue.
   const [brokenApplicationMessages, setBrokenApplicationMessages] = useState({});
@@ -582,6 +587,44 @@ export function NonApiAiDialog() {
   const applicationWorkingState = isApplicationRequest && activeRequest.working
     ? (activeRequest.workingState === 'blocked' ? 'blocked' : 'working')
     : null;
+  // The local Claude Code runner (main process) answering this bundle. Only
+  // 'running' and 'failed' change this panel; every other runner status
+  // ('bridge', 'needs-review', none) renders exactly as before. A bundle the
+  // ChatGPT bridge holds keeps its own branch.
+  const activeClaudeRun = isApplicationRequest && !isBridgeHeldApplication ? (activeRequest.claudeRun || null) : null;
+  const claudeRunState = activeClaudeRun?.status === 'running' || activeClaudeRun?.status === 'failed'
+    ? activeClaudeRun.status
+    : null;
+  const isRetryingClaude = !!activeRequestId && claudeRetryingRequestIds.has(activeRequestId);
+  const claudeRetryError = activeRequestId ? (claudeRetryErrors[activeRequestId] || '') : '';
+  const retryWithClaude = async () => {
+    const request = activeRequest;
+    const retry = window.electronAPI?.claudeApplicationRetry;
+    if (!request?.jobId || typeof retry !== 'function') return;
+    const requestId = request.requestId;
+    setClaudeRetryingRequestIds(previous => new Set(previous).add(requestId));
+    setClaudeRetryErrors(previous => ({ ...previous, [requestId]: '' }));
+    let failure = '';
+    try {
+      const result = await retry({ jobId: request.jobId, canvasFilePath: request.canvasFilePath });
+      if (result?.success === false) {
+        failure = result?.error || 'Claude could not be restarted for this application.';
+      } else {
+        setClaudeApplicationRun(request.jobId, result);
+      }
+    } catch (error) {
+      failure = error?.message || String(error);
+    }
+    if (failure) EventLogger.log(`[Manual AI] Claude retry failed job=${request.jobId}: ${failure}`);
+    else EventLogger.log(`[Manual AI] Claude retry started job=${request.jobId}`);
+    setClaudeRetryingRequestIds(previous => {
+      const next = new Set(previous);
+      next.delete(requestId);
+      return next;
+    });
+    if (failure) setClaudeRetryErrors(previous => ({ ...previous, [requestId]: failure }));
+    requestApplicationHandoffRefresh(request.jobId);
+  };
   // A current deterministic PDF comparison is blocked on an app fix, not an
   // action the card can repeat. Older feedback becomes retryable after the
   // comparator revision changes before it reaches this renderer.
@@ -2023,6 +2066,74 @@ export function NonApiAiDialog() {
                 </div>
                 <div className="truncate text-violet-100/75" title={activeRequest.subject || activeRequest.label || ''}>
                   {activeRequest.subject || activeRequest.label || 'This application'}
+                </div>
+              </div>
+            </div>
+          ) : claudeRunState === 'running' ? (
+            // The local Claude runner is answering this stage itself. Copying
+            // the prompt or pasting an answer would race it with a second,
+            // disagreeing response, so only the status and Discard render.
+            <div
+              role="status"
+              aria-live="polite"
+              className="flex items-start gap-3 rounded-lg border border-violet-400/25 bg-violet-500/10 px-3 py-3 text-xs leading-relaxed text-violet-100"
+            >
+              <LoaderCircle size={15} className="mt-0.5 shrink-0 animate-spin text-violet-200" aria-hidden="true" />
+              <div className="min-w-0 flex-1">
+                <div className="truncate font-semibold text-white">
+                  Claude Sonnet 5.5 is writing this
+                </div>
+                <div className="mt-1 truncate text-violet-100/75">
+                  {applicationStageLabel(activeClaudeRun.stage || activeRequest.stage)}
+                  {activeRequest.subject || activeRequest.label ? ` · ${activeRequest.subject || activeRequest.label}` : ''}
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={requestApplicationDiscardConfirm}
+                disabled={isDiscarding || !!cancelConfirmTarget}
+                className="shrink-0 rounded-md border border-red-400/30 px-3 py-2 text-sm font-medium text-red-200 transition-colors hover:bg-red-500/15 disabled:cursor-not-allowed disabled:opacity-50"
+                title="Delete this application bundle and its private job folder"
+              >
+                {isDiscarding ? 'Discarding…' : 'Discard bundle'}
+              </button>
+            </div>
+          ) : claudeRunState === 'failed' ? (
+            // The run stopped and will not restart on its own (ensure never
+            // re-runs a failed job). Retry is the one action; Discard stays.
+            <div
+              role="alert"
+              className="flex items-start gap-2 rounded-lg border border-red-400/40 bg-red-500/15 px-3 py-3 text-xs leading-relaxed text-red-100"
+            >
+              <AlertTriangle size={15} className="mt-0.5 shrink-0 text-red-300" aria-hidden="true" />
+              <div className="min-w-0 flex-1">
+                <div className="font-semibold text-red-50">
+                  Claude could not finish {applicationStageLabel(activeClaudeRun.stage || activeRequest.stage).toLowerCase()}
+                </div>
+                <div className="mt-1 whitespace-pre-wrap text-red-100/80">
+                  {activeClaudeRun.message || 'The local Claude run stopped before finishing this application.'}
+                </div>
+                {claudeRetryError && (
+                  <div className="mt-1.5 font-semibold text-amber-200">{claudeRetryError}</div>
+                )}
+                <div className="mt-3 flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => { void retryWithClaude(); }}
+                    disabled={isRetryingClaude || isDiscarding || !!cancelConfirmTarget}
+                    className="inline-flex items-center gap-1.5 rounded-md border border-white/15 bg-white/5 px-3 py-1.5 text-[11px] font-medium text-white/75 transition-colors hover:bg-white/10 hover:text-white disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    {isRetryingClaude && <LoaderCircle size={12} className="animate-spin" aria-hidden="true" />}
+                    {isRetryingClaude ? 'Retrying…' : 'Retry with Claude'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={requestApplicationDiscardConfirm}
+                    disabled={isDiscarding || !!cancelConfirmTarget}
+                    className="rounded-md border border-red-400/25 px-2.5 py-1.5 text-[11px] font-medium text-red-200/80 transition-colors hover:bg-red-500/15 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    {isDiscarding ? 'Discarding…' : 'Discard bundle'}
+                  </button>
                 </div>
               </div>
             </div>

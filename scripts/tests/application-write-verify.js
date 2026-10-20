@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {
-  WRITE_VERIFY_BRIEF, WRITE_VERIFY_BRIEF_MAX_CHARS,
+  WRITE_VERIFY_BRIEF, WRITE_VERIFY_BRIEF_MAX_CHARS, WRITE_VERIFY_JUDGE_RUBRIC,
   WRITE_VERIFY_PROTOCOL, WRITE_VERIFY_DEFAULT_CANDIDATES, WRITE_VERIFY_STAGES, WRITE_VERIFY_MAX_FIT_CORRECTIONS, acceptedWriteVerifyCandidates,
   WRITE_VERIFY_DROPPED_FINDINGS_HEADING, WRITE_VERIFY_DROPPED_FINDINGS_MAX, droppedCandidateFindings,
   WRITE_VERIFY_PRIOR_ROUND_FINDINGS_MAX, WRITE_VERIFY_PRIOR_ROUNDS_HEADING, priorRoundFindings,
@@ -28,7 +28,7 @@ import { buildApplicationCareerAuthority } from '../../electron/ipc/applicationC
 import { approvedCareerEvidenceCatalog, CAREER_SNAPSHOT_STATUS_APPROVED } from '../../electron/ipc/careerSnapshot.js';
 import { assessStrengthFamily, credentialFindings, CLAIM_GROUNDING_RULE } from '../../electron/ipc/applicationClaimGrounding.js';
 import {
-  MIN_SHARED_SOURCE_TERMS, SOURCE_FIGURE_GROUNDING_RULE, SOURCE_TERM_OVERLAP_RULE, writeVerifyGroundingContract,
+  LETTER_TERM_FORMS_RULE, MIN_SHARED_SOURCE_TERMS, SOURCE_FIGURE_GROUNDING_RULE, SOURCE_TERM_OVERLAP_RULE, writeVerifyGroundingContract,
 } from '../../electron/ipc/localAiApplication.js';
 import { MAX_REQUIREMENTS_REEPOCHS, requirementsAdjudicationBindings, requirementsBindingErrors, requirementsAuditCapTerminal, requirementsSingletonBinding } from '../../electron/ipc/applicationRequirementsAuditPolicy.js';
 import { applicationProtocolSetting } from '../../electron/ipc/applicationProtocolSetting.js';
@@ -57,6 +57,18 @@ export default [
     },
   },
   {
+    name: 'write-verify brief frames the letter as a persuasive essay with a hedged thesis and one argued point per body paragraph',
+    run() {
+      assert.match(WRITE_VERIFY_BRIEF, /as the cover letter a persuasive essay to the hiring manager/u, 'the letter is written as an essay to a named reader');
+      assert.match(WRITE_VERIFY_BRIEF, /Open on a thesis, your hedged read of what the role most needs\./u, 'the thesis is the writer\u2019s hedged diagnosis');
+      assert.match(WRITE_VERIFY_BRIEF, /Each body paragraph argues one point for it, proves it with one piece of work and ties it to the job\./u, 'point, proof, comment per paragraph');
+      // Sabotage: the replaced letter sentence must be gone, so the brief carries one letter instruction, not two.
+      assert.equal(WRITE_VERIFY_BRIEF.includes('The letter adds what the quoted evidence states beyond the résumé.'), false);
+      assert.match(WRITE_VERIFY_JUDGE_RUBRIC, /the letter argues rather than lists/u, 'the panel that picks the draft rewards the same structure');
+      assert.match(WRITE_VERIFY_JUDGE_RUBRIC, /two unrelated pieces of work side by side scores low/u);
+    },
+  },
+  {
     name: 'write-verify brief ends on the word-for-word grounding sentence inside its budget',
     run() {
       const sentence = 'Use a name, acronym, count, year or qualifier word (led, solely, reduced, daily) only where a quote the unit cites states it word for word.';
@@ -75,8 +87,8 @@ export default [
       assert.equal(contract.split(CLAIM_GROUNDING_RULE).length, 2, 'the claim rule prints once');
       assert.ok(contract.includes('sole ownership (single-handedly, solely, sole, independently, alone, on my own)'), 'sole-ownership forms');
       assert.ok(contract.includes('reduction outcome (reduce(d/s/ing), reduction(s)'), 'reduction forms');
-      assert.ok(contract.includes(`. ${SOURCE_FIGURE_GROUNDING_RULE}. Every sentence about the candidate's own work must share at least ${MIN_SHARED_SOURCE_TERMS} meaningful terms with the quotes its unit cites, where ${SOURCE_TERM_OVERLAP_RULE}.`), 'figure rule then the overlap floor');
-      assert.ok(contract.endsWith(`where ${SOURCE_TERM_OVERLAP_RULE}.`), 'ends on the overlap rule and a period');
+      assert.ok(contract.includes(`. ${SOURCE_FIGURE_GROUNDING_RULE}. Every sentence about the candidate's own work must share at least ${MIN_SHARED_SOURCE_TERMS} meaningful terms with the quotes its unit cites, where ${SOURCE_TERM_OVERLAP_RULE}, and ${LETTER_TERM_FORMS_RULE}.`), 'figure rule then the overlap floor');
+      assert.ok(contract.endsWith(`where ${SOURCE_TERM_OVERLAP_RULE}, and ${LETTER_TERM_FORMS_RULE}.`), 'ends on the overlap rule, the letter word-form clause and a period');
       assert.ok(contract.includes(`${MIN_SHARED_SOURCE_TERMS} meaningful terms`));
       assert.ok(contract.includes('word form'));
       const heading = 'GROUNDING CONTRACT (deterministic checks read every unit against the quotes it cites, literally): ';

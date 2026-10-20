@@ -1188,6 +1188,7 @@ export function composeHandoffBridge({ userData, config, tunnelState, setupState
     },
     sourcePolicy: null,
     rate: deps.rate,
+    applicationExecutor: deps.applicationExecutor === 'claude-code' ? 'claude-code' : 'chatgpt-bridge',
     recreateEngine: async () => {
       // `engine.close()` is terminal. Build a fresh memory-only epoch after a
       // hard Disable so the next explicit enable cannot reuse a closed engine.
@@ -1799,6 +1800,7 @@ export function registerHandoffBridgeHandlers({ ipcMain = electronPkg.ipcMain, d
       store: { writeConfig: writeBootstrapConfig }, getCanvasWindows,
       dialogs: bootstrapDialogs, clipboard: deps.clipboard || electronPkg.clipboard,
       chatLauncher: deps.chatLauncher || null,
+      applicationExecutor: deps.applicationExecutor === 'claude-code' ? 'claude-code' : 'chatgpt-bridge',
       notifyLaunchProblem: kind => runtime?.notifyLaunchProblem?.(kind),
       recordLaunch: fields => { try { runtime?.audit?.serve?.('launch', fields)?.catch?.(() => {}); } catch { /* best effort */ } },
       enableChromeLauncher: bootstrapContext?.isPackaged === true && process.env.INFINITE_CANVAS_HANDOFF_BRIDGE_TEST !== '1' && !deps.clipboard,

@@ -13,6 +13,20 @@ import {
   subscribeApplicationHandoffRefresh,
 } from '../utils/applicationHandoffDock';
 import { HANDOFF_CONCURRENCY, mapAutomaticHandoffs } from '../utils/handoffScheduler';
+import {
+  getClaudeApplicationRun,
+  normalizeClaudeRun,
+  setClaudeApplicationRun,
+  subscribeClaudeApplicationRuns,
+} from '../utils/claudeApplicationRuns';
+
+// The local Claude Code runner's IPC surface (claudeApplicationEnsure,
+// onClaudeApplicationChanged) is optional: an older main process or a test
+// harness simply lacks it, and the dock then behaves exactly as it did before
+// the runner existed. Every use below is gated on the method existing, so the
+// helpers here are only ever reached when it does.
+const sameClaudeRun = (a, b) => !!a && !!b
+  && a.status === b.status && a.stage === b.stage && a.code === b.code && a.message === b.message;
 
 // getLocalApplicationHandoff takes withLocalAiJobMutationLock on the job folder
 // it reads (electron/ipc/localAiApplication.js) — a real filesystem lock, not an
@@ -46,15 +60,20 @@ const candidateIdSignature = (candidates) => (
  * submits, validates, or mutates a job; see src/utils/applicationHandoffDock.js
  * for the shared item shape and the store this hook publishes into.
  *
+ * It also keeps the local Claude Code runner (main process) informed: every
+ * discovered bundle is "ensured" (idempotent; starts a run if none is going),
+ * and runner change events refresh that job's dock item promptly. Runner
+ * states live in src/utils/claudeApplicationRuns.js.
+ *
  * Modeled on useLocalAiFallbackManager: a ctxRef holds live props so the
  * mount-once effect below always reads current values, and a busy ref keeps
  * two discovery passes from overlapping.
  */
-export function useApplicationHandoffDock({ navigation, getCurrentFile }) {
-  const ctxRef = useRef({ navigation, getCurrentFile });
+export function useApplicationHandoffDock({ navigation, getCurrentFile, addToast = null }) {
+  const ctxRef = useRef({ navigation, getCurrentFile, addToast });
   useEffect(() => {
-    ctxRef.current = { navigation, getCurrentFile };
-  }, [navigation, getCurrentFile]);
+    ctxRef.current = { navigation, getCurrentFile, addToast };
+  }, [navigation, getCurrentFile, addToast]);
 
   const tickBusyRef = useRef(false);
   // The candidate id signature as of the last completed pass, so the cheap
@@ -75,6 +94,32 @@ export function useApplicationHandoffDock({ navigation, getCurrentFile }) {
     // window) and getCurrentFile() is the fallback for a job created before
     // that field existed.
     const resolveCanvasFilePath = (local) => local.canvasFilePath || ctxRef.current.getCurrentFile?.() || null;
+
+    // Local Claude runner (optional IPC), read lazily so a missing method
+    // leaves every path below exactly as it was.
+    const claudeEnsure = () => (
+      typeof window.electronAPI?.claudeApplicationEnsure === 'function'
+        ? window.electronAPI.claudeApplicationEnsure
+        : null
+    );
+    const claudeOnChanged = typeof window.electronAPI?.onClaudeApplicationChanged === 'function'
+      ? window.electronAPI.onClaudeApplicationChanged
+      : null;
+    const claudeAvailable = !!(claudeEnsure() || claudeOnChanged);
+    // Jobs whose current failure was already announced this session, so a
+    // failed run that every discovery pass re-reports raises one toast, not
+    // one every 20 seconds. Cleared once the job leaves 'failed' (a retry),
+    // so the next failure is announced again.
+    const announcedFailures = new Set();
+    // Store a runner state; true when it differs from what the dock last saw,
+    // i.e. this job's dock item needs re-reading.
+    const applyClaudeState = (jobId, state) => {
+      const next = normalizeClaudeRun(state);
+      if (!jobId || !next) return false;
+      const changed = !sameClaudeRun(getClaudeApplicationRun(jobId), next);
+      setClaudeApplicationRun(jobId, next);
+      return changed;
+    };
 
     const discover = async (onlyJobId = null) => {
       if (disposed) return;
@@ -125,6 +170,28 @@ export function useApplicationHandoffDock({ navigation, getCurrentFile }) {
         const ownerKey = node => JSON.stringify([node.id, node.data.localApplication.id, resolveCanvasFilePath(node.data.localApplication)]);
         const ownersAtRead = new Set(candidates.map(ownerKey));
         const requestedCanvasByJobId = new Map(toFetch.map(node => [node.data.localApplication.id, resolveCanvasFilePath(node.data.localApplication)]));
+
+        // Fire-and-forget: the runner's ensure is idempotent and cheap, and it
+        // never re-runs a failed job, so asking on every pass is safe. Its
+        // outcome is stored; a state that moved re-reads that one job.
+        const ensure = claudeEnsure();
+        if (ensure) {
+          for (const [jobId, canvasFilePath] of requestedCanvasByJobId) {
+            void (async () => {
+              try {
+                const result = await ensure({ jobId, canvasFilePath });
+                if (disposed) return;
+                if (result?.success === false) {
+                  EventLogger.log(`[ApplicationDock] Claude ensure failed job=${jobId}: ${result?.error || 'unknown error'}`);
+                  return;
+                }
+                if (applyClaudeState(jobId, result)) void discover(jobId);
+              } catch (error) {
+                EventLogger.log(`[ApplicationDock] Claude ensure threw job=${jobId}: ${error?.message || error}`);
+              }
+            })();
+          }
+        }
 
         const previousItems = getApplicationHandoffs();
         const previousByJobId = new Map(previousItems.map((item) => [item.jobId, item]));
@@ -325,6 +392,46 @@ export function useApplicationHandoffDock({ navigation, getCurrentFile }) {
     const idCheckInterval = window.setInterval(checkCandidateIds, LOCAL_AI_POLL_INTERVAL_MS);
     const safetyInterval = window.setInterval(() => { void discover(); }, APPLICATION_DISCOVERY_INTERVAL_MS);
     const unsubscribeRefresh = subscribeApplicationHandoffRefresh((jobId) => { void discover(jobId); });
+
+    // Failure announcements follow the runner store, not one call site, so a
+    // failure reported by ensure, a change event, or the dock's own Retry is
+    // toasted exactly once per failure.
+    const unsubscribeClaudeRuns = claudeAvailable
+      ? subscribeClaudeApplicationRuns((jobId, next) => {
+        if (disposed) return;
+        if (next?.status !== 'failed') {
+          announcedFailures.delete(jobId);
+          return;
+        }
+        if (announcedFailures.has(jobId)) return;
+        announcedFailures.add(jobId);
+        try {
+          ctxRef.current.addToast?.({
+            title: 'Claude could not finish an application',
+            description: next.message || 'The local Claude run stopped before finishing this application.',
+            type: 'error',
+          });
+        } catch (error) {
+          EventLogger.log(`[ApplicationDock] failure toast threw job=${jobId}: ${error?.message || error}`);
+        }
+      })
+      : () => {};
+    let unsubscribeClaudeChanged = () => {};
+    if (claudeOnChanged) {
+      try {
+        const unsubscribe = claudeOnChanged((event) => {
+          if (disposed) return;
+          const jobId = event?.jobId ? String(event.jobId) : '';
+          // Re-read the job only when its runner state actually moved, so a
+          // stage Claude just answered appears promptly (not after the 20 s
+          // safety poll) without an ensure/event echo loop.
+          if (applyClaudeState(jobId, event)) void discover(jobId);
+        });
+        if (typeof unsubscribe === 'function') unsubscribeClaudeChanged = unsubscribe;
+      } catch (error) {
+        EventLogger.log(`[ApplicationDock] Claude change subscription failed: ${error?.message || error}`);
+      }
+    }
     void discover();
 
     return () => {
@@ -332,6 +439,8 @@ export function useApplicationHandoffDock({ navigation, getCurrentFile }) {
       window.clearInterval(idCheckInterval);
       window.clearInterval(safetyInterval);
       unsubscribeRefresh();
+      unsubscribeClaudeRuns();
+      unsubscribeClaudeChanged();
       document.removeEventListener('application-handoff-discarded', handleDiscarded);
       // A stale queue must not outlive the canvas that discovered it — the
       // dock has no other signal that this canvas unmounted.

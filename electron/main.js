@@ -33,7 +33,9 @@ import { loadInterviewHelperCareerSnapshot, registerInterviewHelperHandlers } fr
 import { loadInterviewPreparationBundle, registerInterviewPreparationHandlers } from './ipc/interviewPreparation.js';
 import { createInterviewWindowController, isTrustedInterviewNavigation } from './interviewWindow.js';
 import { registerJobApplicationHandlers } from './ipc/jobApplication.js';
-import { registerLocalAiApplicationHandlers } from './ipc/localAiApplication.js';
+import { getLocalApplicationHandoff, registerLocalAiApplicationHandlers, submitLocalApplicationHandoff, subscribeLocalApplicationDiscards } from './ipc/localAiApplication.js';
+import { createClaudeApplicationRunner, registerClaudeApplicationRunnerHandlers } from './ipc/claudeApplicationRunner.js';
+import { getHandoffBridgeStatus } from './ipc/handoffBridge/index.js';
 import { registerApplicationGenerationGateHandlers } from './ipc/applicationGenerationGate.js';
 import { registerApplicationBundleWatchHandlers } from './ipc/applicationBundleWatch.js';
 import { startApplicationSyncServer, stopApplicationSyncServer } from './ipc/applicationSync.js';
@@ -47,7 +49,7 @@ import { pruneSavedBugReports } from './ipc/bugReport/reportFile.js';
 import { registerNetworkHandlers } from './ipc/network.js';
 import { registerSettingsHandlers } from './ipc/settings.js';
 import { flushNonApiAiPersistence, hasPendingNonApiAiRequestsForSender, registerNonApiAiHandlers } from './ipc/nonApiAi.js';
-import { __runWithIpcRequestContextForTests, beginSenderQuitPause, releaseSenderQuitPause, drainSenderNodeTasksForQuit } from './ipc/ipcUtils.js';
+import { __runWithIpcRequestContextForTests, beginSenderQuitPause, releaseSenderQuitPause, drainSenderNodeTasksForQuit, handleSafe } from './ipc/ipcUtils.js';
 import { buildCareerCleanLayer, produceCareerCleanLayer, readCareerCleanLayer } from './ipc/careerCleanLayer.js';
 import { approvedCareerEvidenceCatalog, careerSnapshotStorageRoot, readCareerSnapshot } from './ipc/careerSnapshot.js';
 import { callLLMText } from './ipc/llm.js';
@@ -407,6 +409,8 @@ const MARKETPLACE_PREVIEW_DEFAULT_DIMENSION = 1600;
 const MARKETPLACE_PREVIEW_QUALITY_STEPS = [82, 72, 60, 48, 36, 24];
 const MARKETPLACE_PREVIEW_CACHE_MAX_BYTES = 80 * 1024 * 1024;
 const marketplacePreviewCache = new Map();
+// Main-process Claude Code application runner (created after app ready).
+let claudeApplicationRunner;
 let marketplacePreviewCacheBytes = 0;
 
 function clampNumber(value, fallback, min, max) {
@@ -1687,6 +1691,36 @@ if (!gotTheLock) {
     });
     registerJobApplicationHandlers();
     registerLocalAiApplicationHandlers();
+    try {
+      const claudeRunnerRoot = path.join(app.getPath('userData'), 'claude-application-runner');
+      let claudeRunnerNotify = () => {};
+      claudeApplicationRunner = createClaudeApplicationRunner({
+        api: {
+          getHandoff: getLocalApplicationHandoff,
+          submitHandoff: submitLocalApplicationHandoff,
+          subscribeDiscards: subscribeLocalApplicationDiscards,
+        },
+        stateFile: path.join(claudeRunnerRoot, 'state.json'),
+        workspaceDir: path.join(claudeRunnerRoot, 'workspace'),
+        isBridgeLaned: jobId => {
+          try {
+            return (getHandoffBridgeStatus()?.queue?.jobs || []).some(lane => lane?.jobId === jobId && lane?.phase !== 'done' && lane?.phase !== 'gone');
+          } catch {
+            return false;
+          }
+        },
+        logger,
+        notify: state => claudeRunnerNotify(state),
+      });
+      claudeRunnerNotify = registerClaudeApplicationRunnerHandlers({
+        handleSafe,
+        runner: claudeApplicationRunner,
+        getAllWindows: () => BrowserWindow.getAllWindows(),
+      });
+      claudeApplicationRunner.load().catch(error => logger.warn(`[main] Claude application runner state failed to load: ${error?.message || error}`));
+    } catch (error) {
+      logger.error(`[main] Claude application runner failed to start: ${error?.message || error}`);
+    }
     registerApplicationGenerationGateHandlers();
     registerApplicationBundleWatchHandlers();
     startApplicationSyncServer().catch((err) => logger.warn(`[main] Application sync service failed to start: ${err?.message || err}`));
@@ -1755,6 +1789,9 @@ if (!gotTheLock) {
         // production bug-report ring without a second logger import.
         appLogger: logger,
         tunnelSetup,
+        // Application bundles are answered by the local Claude Code runner
+        // (claudeApplicationRunner.js); the bridge keeps every other task.
+        applicationExecutor: 'claude-code',
       } });
       if (bridgeRegistered) {
         logger.info(`[HandoffBridge] boot packaged=${bridgeBootContext.isPackaged ? 'yes' : 'no'} registered=yes`);
@@ -1853,6 +1890,14 @@ if (!gotTheLock) {
   });
 }
 
+async function shutdownClaudeApplicationRunner() {
+  try {
+    if (claudeApplicationRunner) await claudeApplicationRunner.shutdown();
+  } catch (error) {
+    try { logger.warn(`[main] Claude application runner shutdown failed: ${error?.message || error}`); } catch { /* never throw during quit */ }
+  }
+}
+
 app.on('before-quit', async (event) => {
   if (isBackgroundE2E && !(process.env.INFINITE_CANVAS_E2E_QUIT_HANDSHAKE === '1' && !app.isPackaged)) {
     // Do not run renderer handshakes, restore/minimize windows, or focus a
@@ -1873,6 +1918,7 @@ app.on('before-quit', async (event) => {
       stopHandoffBridge,
     });
     try {
+      await Promise.allSettled([shutdownClaudeApplicationRunner()]);
       await backgroundE2ECleanupInFlight;
     } finally {
       app.exit(0);
@@ -1947,6 +1993,7 @@ app.on('before-quit', async (event) => {
     try {
       const cleanup = async () => {
         const handoffBridgeStop = stopHandoffBridge();
+        const claudeRunnerStop = shutdownClaudeApplicationRunner();
         // Visible login/native-auth windows own the same persistent profile.
         // Close and await them first so the singleton cannot race their final
         // cookie checkpoint during quit.
@@ -1956,6 +2003,7 @@ app.on('before-quit', async (event) => {
           closeStealthBrowser(true),
           stopApplicationSyncServer(),
           handoffBridgeStop,
+          claudeRunnerStop,
         ]);
       };
 

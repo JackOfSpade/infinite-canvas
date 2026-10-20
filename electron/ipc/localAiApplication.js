@@ -36,7 +36,7 @@ import { authorityEntityEvidenceQuotes, authorityProjectRoleOf, buildApplication
 import { MAX_SOURCE_GROUNDING_QUOTE_CHARS as SOURCE_GROUNDING_QUOTE_CHARS } from './applicationSourceLimits.js';
 import { canonicalizeHostOwnedResumeFields } from './hostOwnedResumeFields.js';
 import { expectedExactlyClause } from './hostOwnedText.js';
-import { CLAIM_GROUNDING_RULE, SPELLED_NUMBER_PATTERN, assessBulkQuantity, assessComparativeMagnitude, assessScaleWord, assessStrengthFamily, claimGroundingFindings, claimedIntervals, clauseIndexesContaining, describeClaimFinding, evidenceBody, groundingClauses, quoteVerbHints, relatedQuoteIndexes, spelledNumberValue, statedBesideSameWords, statedIntervals } from './applicationClaimGrounding.js';
+import { CLAIM_GROUNDING_RULE, SPELLED_NUMBER_PATTERN, assessBulkQuantity, assessComparativeMagnitude, assessScaleWord, assessStrengthFamily, claimGroundingFindings, claimedIntervals, clauseIndexesContaining, describeClaimFinding, evidenceBody, groundingClauses, quoteVerbHints, relatedQuoteIndexes, relatednessStem, spelledNumberValue, statedBesideSameWords, statedIntervals } from './applicationClaimGrounding.js';
 import { supportsExpensePurpose } from './expenseOutcomeEquivalence.js';
 import { createAuthorityLedgerStore, openAuthorityLedgerStore } from './applicationAuthorityLedgerStore.js';
 import { APPLICATION_AUTHORITY_MATCH_PAGE_EVIDENCE, APPLICATION_AUTHORITY_WORKFLOW_VERSION, authorityDigest, createStoreAuthorityWorkflowRoot } from './applicationAuthorityWorkflow.js';
@@ -4138,7 +4138,7 @@ function pasteGroundingBriefRule(parts, items) {
   return `The career-data quotes a ${unit} is graded against are the ones its own evidenceIds name, and the rewrite is `
     + `measured against them rather than against the text it replaces: it must share at least ${MIN_SHARED_SOURCE_TERMS} `
     + `meaningful terms with those quotes${paragraph ? ', and so must every sentence of a paragraph that asserts something about the candidate’s own work, each measured on its own — so splitting one sentence into two leaves both halves to reach that floor separately' : ''} `
-    + `— ${SOURCE_TERM_OVERLAP_RULE}.`
+    + `— ${SOURCE_TERM_OVERLAP_RULE}${paragraph ? `, and ${LETTER_TERM_FORMS_RULE}` : ''}.`
     + (paragraph ? ' A claim is read against the quotes about the clause that makes it, so a paragraph that merges two proofs says each qualifier, figure, count, name and ownership word in the clause about the quote that states it.' : '')
     + (forms
       ? ` Any qualifier the new wording adds beyond those quotes must be stated by one of them in that quote’s own `
@@ -4156,7 +4156,7 @@ export function writeVerifyGroundingContract() {
     CLAIM_GROUNDING_RULE,
     `Qualifier words are matched by word form, never by meaning, in these families: ${sourceGroundingQualifierForms()}`,
     SOURCE_FIGURE_GROUNDING_RULE,
-    `Every sentence about the candidate's own work must share at least ${MIN_SHARED_SOURCE_TERMS} meaningful terms with the quotes its unit cites, where ${SOURCE_TERM_OVERLAP_RULE}`,
+    `Every sentence about the candidate's own work must share at least ${MIN_SHARED_SOURCE_TERMS} meaningful terms with the quotes its unit cites, where ${SOURCE_TERM_OVERLAP_RULE}, and ${LETTER_TERM_FORMS_RULE}`,
   ].join('. ') + '.';
 }
 
@@ -11675,6 +11675,24 @@ const SOURCE_GROUNDING_IDENTITY_STOPWORDS = new Set([
 // the bullet is actually measured against was never stated — the failure this
 // comment exists to prevent, one notch quieter than printing the whole rule.
 export const MIN_SHARED_SOURCE_TERMS = 2;
+// A letter paraphrases its evidence ("the platforms we migrated" for a quote
+// that "migrated ... to a third-party platform"), so a letter paragraph counts
+// the word forms relatednessStem joins (plural, -ed, -ing) as one term. Each
+// family counts once, so two forms of one word never make two terms. Résumé
+// bullets keep exact terms, as structuredResume.js's own gate does.
+export const LETTER_TERM_FORMS_RULE = 'in a letter paragraph, forms of one word (platform and platforms, migrate and migrated, plan and planning) count as one term';
+function letterSharedTerms(quoteTokens) {
+  const quoteStems = new Set([...quoteTokens].map(relatednessStem));
+  return tokens => {
+    const seen = new Set();
+    return tokens.filter(token => {
+      const stem = relatednessStem(token);
+      if (!quoteStems.has(stem) || seen.has(stem)) return false;
+      seen.add(stem);
+      return true;
+    });
+  };
+}
 export const SOURCE_TERM_OVERLAP_RULE = 'a term is a run of letters or digits, compared case-insensitively and counted once '
   + 'however often it repeats, a one-character term counting only when it is a digit, and these '
   + `${SOURCE_GROUNDING_STOPWORDS.size} words never count: ${[...SOURCE_GROUNDING_STOPWORDS].sort().join(', ')}`;
@@ -12062,7 +12080,7 @@ function isCandidateCareerSentence(sentence, identityTokens) {
   if (speaksOnlyOfApplicationIntent(sentence)) return false;
   const hasCareerAction = CAREER_ASSERTION_ACTION_RE.test(sentence) || CAREER_ASSERTION_REGULAR_PAST_RE.test(sentence);
   if (!hasCareerAction) return false;
-  const firstPerson = /\b(?:i|we|my|our)\b/iu.test(sentence);
+  const firstPerson = /\b(?:i|we|my|our)\b/iu.test(withoutStanceHedges(sentence));
   if (firstPerson) return true;
   const tokens = new Set(normalizedTokens(sentence));
   return identityTokens.some(token => tokens.has(token));
@@ -12193,9 +12211,28 @@ function withoutQuotedRomanOne(text, referenceTexts) {
   });
 }
 
+// A present-tense hedge that frames the writer's reading of the target ("As I
+// read it, your customers ...", "I suspect the hard part of this role is ...",
+// "My guess is that your team ...") states the candidate's interpretation, not
+// the candidate's work, so its first-person word does not make the rest of the
+// sentence a claim about the candidate. Only the hedge itself is removed: any
+// other first-person word stays and is read as before, so "I suspect I built
+// ..." or "As I read it, my pipeline ..." still speaks as the candidate.
+const STANCE_HEDGE_RE = new RegExp([
+  String.raw`\b(?:as|if)\s+I\s+(?:read|understand|see)\s+(?:it|this|that|(?:the|your|this)\s+(?:posting|role|position|job|listing|team))(?:\s+(?:right|correctly))?`,
+  String.raw`\bfrom\s+what\s+I\s+(?:read|understand|gather|can\s+tell|see)`,
+  String.raw`\bI\s+(?:suspect|imagine|gather|expect|think|believe|guess|sense)(?:\s+that)?(?![\p{L}\p{N}])`,
+  String.raw`\bI['’]d\s+(?:guess|imagine|bet)(?:\s+that)?(?![\p{L}\p{N}])`,
+  String.raw`\bmy\s+(?:guess|read|reading|sense|understanding|hunch|hypothesis)\s+(?:is|would\s+be)(?:\s+that)?(?![\p{L}\p{N}])`,
+].join('|'), 'giu');
+
+export function withoutStanceHedges(text) {
+  return String(text ?? '').replace(STANCE_HEDGE_RE, ' ');
+}
+
 /** Does the text speak as the candidate (see FIRST_PERSON_CLAUSE_RE), a Roman "I" the reference texts write excepted? */
 function speaksAsCandidate(text, referenceTexts = []) {
-  return FIRST_PERSON_CLAUSE_RE.test(withoutQuotedRomanOne(text, referenceTexts));
+  return FIRST_PERSON_CLAUSE_RE.test(withoutQuotedRomanOne(withoutStanceHedges(text), referenceTexts));
 }
 
 export function postingFreeClauses(sentence, targetCompany = '', verbHints = null, referenceTexts = []) {
@@ -12781,7 +12818,8 @@ export function assertSourceQuoteLinksFinalText(finalText, sourceQuotes, label, 
   };
   const finalTokens = meaningfulSourceTokens(finalText);
   const quoteTokens = new Set(meaningfulSourceTokens(sourceQuotes.join(' ')));
-  const shared = finalTokens.filter(token => quoteTokens.has(token));
+  const sharedTerms = label === 'coverLetterParagraphs' ? letterSharedTerms(quoteTokens) : tokens => tokens.filter(token => quoteTokens.has(token));
+  const shared = sharedTerms(finalTokens);
   const minimumShared = finalTokens.length === 1 ? 1 : MIN_SHARED_SOURCE_TERMS;
   const applicationIntentOnly = label === 'coverLetterParagraphs' && String(finalText).trim() !== ''
     && groundingSentences(finalText).every(sentence => speaksOnlyOfApplicationIntent(sentence) || speaksOnlyOfIntent(sentence));
@@ -12864,7 +12902,7 @@ export function assertSourceQuoteLinksFinalText(finalText, sourceQuotes, label, 
     }
     if (candidateCareerSentence) {
       const sentenceTokens = meaningfulSourceTokens(sentence);
-      const sentenceShared = sentenceTokens.filter(token => quoteTokens.has(token));
+      const sentenceShared = sharedTerms(sentenceTokens);
       const sentenceMinimum = sentenceTokens.length === 1 ? 1 : MIN_SHARED_SOURCE_TERMS;
       if (!sentenceTokens.length || sentenceShared.length < sentenceMinimum) {
         ungrounded.push({ position: sentenceIndex + 1, sentence });

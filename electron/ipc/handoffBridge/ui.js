@@ -197,7 +197,11 @@ export function registerHandoffBridgeUi({
   // Setup mutations capture binary/credential values into a composed runtime.
   // The composition owner injects this only when it can detach that graph.
   onSetupMutation = null,
+  // 'claude-code' hands APPLICATION jobs to a local runner: neither the
+  // manual nor the automatic path releases them to the bridge.
+  applicationExecutor = 'chatgpt-bridge',
 } = {}) {
+  const applicationsToClaudeCode = applicationExecutor === 'claude-code';
   const isValidHostname = value => {
     try { return validateHostname(value) === true; } catch { return false; }
   };
@@ -1425,6 +1429,9 @@ export function registerHandoffBridgeUi({
   }
   async function release(sender, window, payload) {
     if (!window || !plain(payload) || !Array.isArray(payload.items) || payload.items.length === 0 || payload.items.length > MAX_JOBS || new Set(payload.items.map(item => item?.jobId)).size !== payload.items.length || payload.items.some(item => !plain(item) || typeof item.jobId !== 'string' || Object.keys(item).some(key => key !== 'jobId'))) return fixed(window ? 'INVALID' : 'NO_WINDOW');
+    // A local Claude Code runner answers applications; never show the
+    // release sheet or reach the controller.
+    if (applicationsToClaudeCode) return fixed('DISABLED');
     const ids = payload.items.map(item => item.jobId);
     sweep();
     const context = captureReleaseContext(sender, window, ids);
@@ -1458,7 +1465,7 @@ export function registerHandoffBridgeUi({
   }
   function startAutoRelease(sender, window, entry) {
     const jobs = entry.jobs;
-    if (currentStatus()?.autoRelease !== true || !autoReleaseAvailable()) { autoReleaseHandled.delete(sender.id); return; }
+    if (applicationsToClaudeCode || currentStatus()?.autoRelease !== true || !autoReleaseAvailable()) { autoReleaseHandled.delete(sender.id); return; }
     void (async () => {
       let handled = autoReleaseHandled.get(sender.id);
       if (!handled) { handled = new Set(); autoReleaseHandled.set(sender.id, handled); }

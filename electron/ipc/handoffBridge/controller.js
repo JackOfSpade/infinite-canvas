@@ -230,6 +230,10 @@ export function createHandoffBridgeController(options = {}) {
   const refusalForStart = typeof options.refusalForStart === 'function' ? options.refusalForStart : null;
   const sourcePolicy = typeof options.sourcePolicy === 'function' ? options.sourcePolicy : null;
   const rate = typeof options.rate === 'function' ? options.rate : null;
+  // Who answers APPLICATION jobs. 'claude-code' means a local runner owns
+  // them, so the bridge never takes a new application release; any other
+  // value keeps the ChatGPT bridge behavior.
+  const applicationExecutor = options.applicationExecutor === 'claude-code' ? 'claude-code' : 'chatgpt-bridge';
   const selfProbe = options.selfProbe || listener.selfProbe || listener.probe;
   const publicProbe = options.publicProbe || tunnel.publicProbe;
   const subscribers = new Set();
@@ -532,6 +536,7 @@ export function createHandoffBridgeController(options = {}) {
   function snapshot(runTick = true) {
     if (runTick) applyDeadlines();
     const base = copy(STATUS_SNAPSHOT_EXAMPLE);
+    base.applicationExecutor = applicationExecutor;
     const stamp = safeNow(now);
     const engineStatus = snapshotOf(engine);
     const tunnelStatus = statusOf(tunnel);
@@ -1499,6 +1504,9 @@ export function createHandoffBridgeController(options = {}) {
     const generation = lifecycleGeneration;
     if (!servingGeneration(generation)) return { ok: false, code: 'NOT_READY' };
     if (!config.scope.applications) return { ok: false, code: 'disabled' };
+    // A local Claude Code runner owns application jobs: never release a new
+    // one to the bridge. Lanes released earlier keep running untouched.
+    if (applicationExecutor === 'claude-code') return { ok: false, code: 'disabled', reason: 'claude-code' };
     const jobs = Array.isArray(request?.jobs) ? request.jobs : [];
     if (jobs.length === 0 || jobs.length > 50 || jobs.some(item => !isObject(item)
       || typeof item.jobId !== 'string' || !UUID.test(item.jobId)

@@ -432,7 +432,7 @@ export function Canvas() {
   // global dock (NonApiAiDialog, mounted outside the canvas provider tree) —
   // see useApplicationHandoffDock for why this is a separate, read-only pass
   // from the Local AI fallback manager above.
-  useApplicationHandoffDock({ navigation, getCurrentFile });
+  useApplicationHandoffDock({ navigation, getCurrentFile, addToast });
 
   // ── Initial canvas population on mount ──────────────────────────────────
   // Each window is told what to show via the loaded URL's `init` query param,

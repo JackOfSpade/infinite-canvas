@@ -1,4 +1,5 @@
 import { HANDOFF_CONCURRENCY } from './handoffScheduler.js';
+import { getClaudeApplicationRun, normalizeClaudeRun } from './claudeApplicationRuns.js';
 
 /**
  * Application-bundle handoffs, expressed as items of the global AI handoff
@@ -95,8 +96,12 @@ export function applicationAwaitsPaste(status) {
  * Classify one status into the shape the dock renders. One function so no
  * caller re-derives "which of the three lists is this in" on its own.
  */
-export function applicationDockItemState(status) {
+export function applicationDockItemState(status, claudeRun = null) {
   if (APPLICATION_DOCK_WORKING_STATUSES.includes(status)) return 'working';
+  // A stage the local Claude runner is answering is not waiting on a person.
+  if (claudeRun?.status === 'running'
+    && !APPLICATION_DOCK_BLOCKED_STATUSES.includes(status)
+    && !APPLICATION_DOCK_IDLE_STATUSES.includes(status)) return 'working';
   if (APPLICATION_DOCK_BLOCKED_STATUSES.includes(status)) return 'blocked';
   if (APPLICATION_DOCK_IDLE_STATUSES.includes(status)) return 'idle';
   return 'waiting';
@@ -266,6 +271,7 @@ export function applicationDockRequest({ node, handoff, canvasFilePath = null })
       : null,
     label: company || title || 'Application',
     subject: [title, company].filter(Boolean).join(' · '),
+    claudeRun: normalizeClaudeRun(getClaudeApplicationRun(local.id)),
   };
 }
 

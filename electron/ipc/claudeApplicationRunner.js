@@ -1,0 +1,671 @@
+// Main-process Claude Code application runner.
+//
+// Application-bundle stages are answered by Sonnet 5.5 through the local
+// Claude Code CLI in headless mode. Every application v2 prompt is
+// self-contained, so each stage is a fresh, stateless CLI run. Failures are
+// final until the user retries: there is no automatic retry, no fallback and
+// no waiting. This module is pure Node (no 'electron' import); everything
+// environment-specific is injected so it can be tested with fakes.
+import childProcess from 'node:child_process';
+import fs from 'node:fs';
+import path from 'node:path';
+
+export const CLAUDE_APPLICATION_MODEL = 'claude-sonnet-5-5';
+export const CLAUDE_APPLICATION_EFFORT = 'high';
+export const CLAUDE_STAGE_TIMEOUT_MS = 20 * 60_000;
+export const CLAUDE_RUNNER_CONCURRENCY = 3;
+export const CLAUDE_MAX_RUNS_PER_JOB = 80;
+
+const OUTPUT_CAP_BYTES = 16 * 1024 * 1024;
+const KILL_GRACE_MS = 5000;
+const HUMAN_STOP_STAGE = 'write-verify-human-stop';
+
+const MESSAGES = Object.freeze({
+  missing: 'Claude Code is not installed or not on PATH. Install it and sign in with your Claude subscription, then retry.',
+  usage: 'Claude usage limit reached. Retry this application after your limit resets.',
+  login: 'Claude Code is not signed in. Run claude in a terminal and sign in with your Claude subscription, then retry.',
+  timeout: 'Claude did not finish this stage within 20 minutes.',
+  cancelled: 'Claude run was cancelled.',
+  tooMany: runs => `Stopped after ${runs} Claude runs without finishing this application.`,
+});
+
+export class ClaudeRunnerError extends Error {
+  constructor(code, message, detail) {
+    super(message);
+    this.name = 'ClaudeRunnerError';
+    this.code = code;
+    if (detail !== undefined) this.detail = detail;
+  }
+}
+
+function clip(value, max = 300) {
+  const text = String(value ?? '').replace(/\s+/g, ' ').trim();
+  return text.length > max ? text.slice(0, max) : text;
+}
+
+export function claudeCliArgs() {
+  return [
+    '-p',
+    '--model', CLAUDE_APPLICATION_MODEL,
+    '--effort', CLAUDE_APPLICATION_EFFORT,
+    '--restricted',
+    '--strict-mcp-config',
+    '--tools', '',
+    '--no-session-persistence',
+    '--input-format', 'stream-json',
+    '--output-format', 'stream-json',
+    '--verbose',
+  ];
+}
+
+function defaultIsExecutable(filePath) {
+  try {
+    const stat = fs.statSync(filePath);
+    if (!stat.isFile()) return false;
+    fs.accessSync(filePath, fs.constants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function resolveClaudeBinary({ env = process.env, homedir = '', isExecutable = defaultIsExecutable } = {}) {
+  const candidates = [];
+  for (const entry of String(env?.PATH || '').split(path.delimiter)) {
+    if (entry) candidates.push(path.join(entry, 'claude'));
+  }
+  if (homedir) candidates.push(path.join(homedir, '.local', 'bin', 'claude'));
+  candidates.push('/opt/homebrew/bin/claude', '/usr/local/bin/claude');
+  for (const candidate of candidates) {
+    let ok = false;
+    try { ok = isExecutable(candidate) === true; } catch { ok = false; }
+    if (ok) return candidate;
+  }
+  throw new ClaudeRunnerError('CLAUDE_CLI_MISSING', MESSAGES.missing);
+}
+
+export function claudeChildEnv(env = {}, binaryDir = '') {
+  const out = {};
+  for (const [key, value] of Object.entries(env || {})) {
+    if (key.startsWith('ANTHROPIC_') || key.startsWith('CLAUDE_CODE_USE_')) continue;
+    out[key] = value;
+  }
+  if (binaryDir) out.PATH = out.PATH ? `${binaryDir}${path.delimiter}${out.PATH}` : binaryDir;
+  return out;
+}
+
+export function buildClaudeInputMessage({ text, pageImages } = {}) {
+  const content = [{ type: 'text', text: String(text ?? '') }];
+  const images = Array.isArray(pageImages) ? pageImages : [];
+  images.forEach((image, i) => {
+    content.push({ type: 'text', text: `Page image ${i + 1}: candidate ${image?.candidateId}, ${image?.document}` });
+    content.push({
+      type: 'image',
+      source: { type: 'base64', media_type: image?.mimeType || 'image/png', data: image?.data },
+    });
+  });
+  return `${JSON.stringify({ type: 'user', message: { role: 'user', content } })}\n`;
+}
+
+export function parseClaudeStreamOutput(stdoutText) {
+  const lines = String(stdoutText ?? '').split(/\r?\n/);
+  for (let i = lines.length - 1; i >= 0; i -= 1) {
+    const line = lines[i].trim();
+    if (!line) continue;
+    let obj;
+    try { obj = JSON.parse(line); } catch { continue; }
+    if (!obj || typeof obj !== 'object' || obj.type !== 'result') continue;
+    return {
+      isError: obj.is_error === true || obj.subtype !== 'success',
+      subtype: obj.subtype,
+      result: typeof obj.result === 'string' ? obj.result : '',
+      apiErrorStatus: obj.api_error_status ?? null,
+      models: Object.keys(obj.modelUsage || {}),
+      sessionId: obj.session_id,
+      durationMs: obj.duration_ms,
+    };
+  }
+  return null;
+}
+
+const USAGE_RE = /usage limit|limit reached|hit your limit|rate.?limit|out of (extra )?usage/i;
+const LOGIN_RE = /not logged in|log ?in|\/login|authenticat|credential|invalid api key/i;
+
+export function classifyClaudeFailure({ parsed, stderr, exitCode } = {}) {
+  const resultText = typeof parsed?.result === 'string' ? parsed.result : '';
+  const stderrText = String(stderr ?? '');
+  const combined = `${resultText}\n${stderrText}`;
+  const clipped = clip(resultText.trim() ? resultText : stderrText);
+  const detail = { exitCode: exitCode ?? null, subtype: parsed?.subtype ?? null, apiErrorStatus: parsed?.apiErrorStatus ?? null };
+  if (parsed?.apiErrorStatus === 429 || USAGE_RE.test(combined)) {
+    return new ClaudeRunnerError('CLAUDE_USAGE_LIMIT', clipped ? `${MESSAGES.usage} (${clipped})` : MESSAGES.usage, detail);
+  }
+  if (LOGIN_RE.test(combined)) {
+    return new ClaudeRunnerError('CLAUDE_NOT_SIGNED_IN', MESSAGES.login, detail);
+  }
+  return new ClaudeRunnerError(
+    'CLAUDE_ERROR',
+    `Claude Code failed (exit ${exitCode ?? 'unknown'})${clipped ? `: ${clipped}` : ''}`,
+    detail,
+  );
+}
+
+export function runClaudeStage({
+  text,
+  pageImages,
+  signal,
+  binary,
+  env,
+  cwd,
+  spawnImpl = childProcess.spawn,
+  timeoutMs = CLAUDE_STAGE_TIMEOUT_MS,
+  setTimeoutImpl = globalThis.setTimeout,
+  clearTimeoutImpl = globalThis.clearTimeout,
+} = {}) {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(new ClaudeRunnerError('CLAUDE_CANCELLED', MESSAGES.cancelled));
+      return;
+    }
+    let child;
+    try {
+      child = spawnImpl(binary, claudeCliArgs(), { cwd, env, stdio: ['pipe', 'pipe', 'pipe'] });
+    } catch (error) {
+      reject(error?.code === 'ENOENT'
+        ? new ClaudeRunnerError('CLAUDE_CLI_MISSING', MESSAGES.missing)
+        : new ClaudeRunnerError('CLAUDE_ERROR', `Claude Code could not start: ${clip(error?.message || error)}`));
+      return;
+    }
+
+    let settled = false;
+    let timer = null;
+    let killTimer = null;
+    let killed = false;
+    const stdoutChunks = [];
+    const stderrChunks = [];
+    let stdoutBytes = 0;
+    let stderrBytes = 0;
+
+    const onAbort = () => {
+      killChild();
+      finish(new ClaudeRunnerError('CLAUDE_CANCELLED', MESSAGES.cancelled));
+    };
+
+    function killChild() {
+      if (killed) return;
+      killed = true;
+      try { child.kill('SIGTERM'); } catch { /* already gone */ }
+      killTimer = setTimeoutImpl(() => {
+        killTimer = null;
+        try { child.kill('SIGKILL'); } catch { /* already gone */ }
+      }, KILL_GRACE_MS);
+      killTimer?.unref?.();
+    }
+
+    function finish(error, value) {
+      if (settled) return;
+      settled = true;
+      if (timer !== null) { clearTimeoutImpl(timer); timer = null; }
+      signal?.removeEventListener?.('abort', onAbort);
+      if (error) reject(error); else resolve(value);
+    }
+
+    signal?.addEventListener?.('abort', onAbort, { once: true });
+    timer = setTimeoutImpl(() => {
+      timer = null;
+      killChild();
+      finish(new ClaudeRunnerError('CLAUDE_TIMEOUT', MESSAGES.timeout));
+    }, timeoutMs);
+    timer?.unref?.();
+
+    child.on('error', error => {
+      if (error?.code === 'ENOENT') finish(new ClaudeRunnerError('CLAUDE_CLI_MISSING', MESSAGES.missing));
+      else finish(new ClaudeRunnerError('CLAUDE_ERROR', `Claude Code could not run: ${clip(error?.message || error)}`));
+    });
+
+    child.stdout?.on('data', chunk => {
+      const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk));
+      stdoutBytes += buffer.length;
+      if (stdoutBytes > OUTPUT_CAP_BYTES) {
+        killChild();
+        finish(new ClaudeRunnerError('CLAUDE_ERROR', 'Claude Code produced more than 16 MB of output.'));
+        return;
+      }
+      stdoutChunks.push(buffer);
+    });
+    child.stderr?.on('data', chunk => {
+      const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk));
+      stderrBytes += buffer.length;
+      if (stderrBytes > OUTPUT_CAP_BYTES) {
+        killChild();
+        finish(new ClaudeRunnerError('CLAUDE_ERROR', 'Claude Code produced more than 16 MB of error output.'));
+        return;
+      }
+      stderrChunks.push(buffer);
+    });
+
+    child.on('close', (code, closeSignal) => {
+      if (killTimer !== null) { clearTimeoutImpl(killTimer); killTimer = null; }
+      if (settled) return;
+      const stdout = Buffer.concat(stdoutChunks).toString('utf8');
+      const stderr = Buffer.concat(stderrChunks).toString('utf8');
+      const exitCode = code ?? (closeSignal ? closeSignal : null);
+      const parsed = parseClaudeStreamOutput(stdout);
+      if (!parsed || parsed.isError || code !== 0) {
+        finish(classifyClaudeFailure({ parsed, stderr, exitCode }));
+        return;
+      }
+      if (!parsed.models.includes(CLAUDE_APPLICATION_MODEL)) {
+        finish(new ClaudeRunnerError(
+          'CLAUDE_WRONG_MODEL',
+          `Claude answered with ${parsed.models.join(', ')} instead of Sonnet 5.5.`,
+          { models: parsed.models },
+        ));
+        return;
+      }
+      if (!parsed.result.trim()) {
+        finish(new ClaudeRunnerError('CLAUDE_ERROR', 'Claude Code returned an empty answer.'));
+        return;
+      }
+      finish(null, { text: parsed.result, model: CLAUDE_APPLICATION_MODEL, durationMs: parsed.durationMs });
+    });
+
+    if (child.stdin) {
+      child.stdin.on?.('error', () => { /* a dead child reports through close */ });
+      try {
+        child.stdin.end(buildClaudeInputMessage({ text, pageImages }));
+      } catch (error) {
+        killChild();
+        finish(new ClaudeRunnerError('CLAUDE_ERROR', `Claude Code input could not be written: ${clip(error?.message || error)}`));
+      }
+    }
+  });
+}
+
+function createSemaphore(size) {
+  const limit = Math.max(1, Number.isFinite(size) ? Math.floor(size) : 1);
+  let active = 0;
+  const waiters = [];
+  function release() {
+    active -= 1;
+    while (waiters.length && active < limit) {
+      const waiter = waiters.shift();
+      active += 1;
+      waiter.grant();
+    }
+  }
+  function acquire(signal) {
+    if (signal?.aborted) return Promise.reject(new ClaudeRunnerError('CLAUDE_CANCELLED', MESSAGES.cancelled));
+    if (active < limit) {
+      active += 1;
+      return Promise.resolve(onceRelease());
+    }
+    return new Promise((resolve, reject) => {
+      const waiter = {
+        grant: () => { signal?.removeEventListener?.('abort', onAbort); resolve(onceRelease()); },
+      };
+      const onAbort = () => {
+        const index = waiters.indexOf(waiter);
+        if (index >= 0) waiters.splice(index, 1);
+        reject(new ClaudeRunnerError('CLAUDE_CANCELLED', MESSAGES.cancelled));
+      };
+      signal?.addEventListener?.('abort', onAbort, { once: true });
+      waiters.push(waiter);
+    });
+  }
+  function onceRelease() {
+    let done = false;
+    return () => { if (!done) { done = true; release(); } };
+  }
+  return { acquire };
+}
+
+function nonEmptyString(value) {
+  return typeof value === 'string' && value.length > 0;
+}
+
+function isEnoent(error) {
+  return error?.code === 'ENOENT' || /\bENOENT\b/.test(String(error?.message || ''));
+}
+
+function applicationError(error) {
+  return new ClaudeRunnerError(
+    'APPLICATION_ERROR',
+    clip(error?.message || String(error || 'Application step failed.')) || 'Application step failed.',
+    error?.code,
+  );
+}
+
+function handoffCodeOf(handoff) {
+  return handoff?.handoffCode ?? handoff?.code;
+}
+
+function chooseText(handoff) {
+  const corrections = Array.isArray(handoff?.corrections) ? handoff.corrections : [];
+  if (corrections.length > 0 && typeof handoff?.correctionPrompt === 'string' && handoff.correctionPrompt.trim()) {
+    return handoff.correctionPrompt;
+  }
+  return typeof handoff?.prompt === 'string' ? handoff.prompt : '';
+}
+
+function createProductionRunStage({ workspaceDir, fsImpl }) {
+  let bound = null;
+  return async ({ text, pageImages, signal }) => {
+    if (!bound) {
+      if (workspaceDir) await fsImpl.mkdir(workspaceDir, { recursive: true });
+      const os = await import('node:os');
+      const binary = resolveClaudeBinary({ env: process.env, homedir: os.homedir() });
+      bound = { binary, env: claudeChildEnv(process.env, path.dirname(binary)), cwd: workspaceDir || os.tmpdir() };
+    }
+    return runClaudeStage({ text, pageImages, signal, ...bound });
+  };
+}
+
+export function createClaudeApplicationRunner({
+  api = {},
+  runStage = null,
+  stateFile,
+  workspaceDir,
+  isBridgeLaned = () => false,
+  notify = () => {},
+  logger = console,
+  concurrency = CLAUDE_RUNNER_CONCURRENCY,
+  maxRunsPerJob = CLAUDE_MAX_RUNS_PER_JOB,
+  now = Date.now,
+  fsImpl = fs.promises,
+} = {}) {
+  const { getHandoff, submitHandoff, subscribeDiscards } = api;
+  const stageRunner = typeof runStage === 'function' ? runStage : createProductionRunStage({ workspaceDir, fsImpl });
+  const semaphore = createSemaphore(concurrency);
+  const states = new Map();
+  const drivers = new Map();
+  let persistChain = Promise.resolve();
+  let tempCounter = 0;
+  let shuttingDown = false;
+
+  function emit(payload) {
+    try { notify(payload); } catch { /* the UI cannot fail a run */ }
+  }
+
+  function setState(jobId, canvasFilePath, patch) {
+    const previous = states.get(jobId);
+    const state = {
+      jobId,
+      canvasFilePath,
+      status: patch.status,
+      stage: patch.stage !== undefined ? patch.stage : (previous?.stage ?? null),
+      ...(patch.code ? { code: patch.code } : {}),
+      ...(patch.message ? { message: patch.message } : {}),
+      updatedAt: now(),
+    };
+    states.set(jobId, state);
+    emit({ ...state });
+    return state;
+  }
+
+  function removeState(jobId, canvasFilePath) {
+    const previous = states.get(jobId);
+    states.delete(jobId);
+    emit({ jobId, canvasFilePath: previous?.canvasFilePath ?? canvasFilePath, status: 'done', stage: previous?.stage ?? null, updatedAt: now() });
+  }
+
+  function persist() {
+    const snapshot = {};
+    for (const [jobId, state] of states) if (state.status === 'failed') snapshot[jobId] = { ...state };
+    const body = `${JSON.stringify(snapshot, null, 2)}\n`;
+    const write = async () => {
+      if (!stateFile) return;
+      await fsImpl.mkdir(path.dirname(stateFile), { recursive: true });
+      tempCounter += 1;
+      const temp = `${stateFile}.${process.pid}.${tempCounter}.tmp`;
+      await fsImpl.writeFile(temp, body, 'utf8');
+      await fsImpl.rename(temp, stateFile);
+    };
+    persistChain = persistChain.then(write).catch(error => {
+      logger?.warn?.(`[ClaudeRunner] could not persist failed applications: ${clip(error?.code || error?.message || error, 80)}`);
+    });
+    return persistChain;
+  }
+
+  async function load() {
+    let raw;
+    try {
+      raw = await fsImpl.readFile(stateFile, 'utf8');
+    } catch (error) {
+      if (error?.code !== 'ENOENT') logger?.warn?.(`[ClaudeRunner] could not read failed applications: ${clip(error?.code || error?.message, 80)}`);
+      return;
+    }
+    let data;
+    try { data = JSON.parse(raw); } catch {
+      logger?.warn?.('[ClaudeRunner] ignoring malformed runner state file');
+      return;
+    }
+    if (!data || typeof data !== 'object' || Array.isArray(data)) {
+      logger?.warn?.('[ClaudeRunner] ignoring malformed runner state file');
+      return;
+    }
+    for (const [jobId, entry] of Object.entries(data)) {
+      if (!nonEmptyString(jobId) || entry?.status !== 'failed' || drivers.has(jobId)) continue;
+      states.set(jobId, {
+        jobId,
+        canvasFilePath: typeof entry.canvasFilePath === 'string' ? entry.canvasFilePath : '',
+        status: 'failed',
+        stage: entry.stage ?? null,
+        ...(entry.code ? { code: String(entry.code) } : {}),
+        ...(entry.message ? { message: String(entry.message) } : {}),
+        updatedAt: Number.isFinite(entry.updatedAt) ? entry.updatedAt : now(),
+      });
+    }
+  }
+
+  async function drive(entry) {
+    const { jobId, canvasFilePath, controller } = entry;
+    const signal = controller.signal;
+
+    const read = async (matchTaskId) => {
+      try {
+        return await getHandoff(matchTaskId ? { jobId, canvasFilePath, matchTaskId } : { jobId, canvasFilePath });
+      } catch (error) {
+        if (isEnoent(error)) return { gone: true, handoff: null };
+        throw applicationError(error);
+      }
+    };
+
+    const answer = async (handoff, matchTaskId) => {
+      if (entry.runs >= maxRunsPerJob) {
+        throw new ClaudeRunnerError('CLAUDE_TOO_MANY_RUNS', MESSAGES.tooMany(maxRunsPerJob));
+      }
+      entry.runs += 1;
+      entry.stage = handoff?.stage ?? null;
+      setState(jobId, canvasFilePath, { status: 'running', stage: entry.stage });
+      const text = chooseText(handoff);
+      const release = await semaphore.acquire(signal);
+      let result;
+      try {
+        if (signal.aborted) throw new ClaudeRunnerError('CLAUDE_CANCELLED', MESSAGES.cancelled);
+        try {
+          result = await stageRunner({ text, pageImages: Array.isArray(handoff?.pageImages) ? handoff.pageImages : [], signal });
+        } catch (error) {
+          if (error instanceof ClaudeRunnerError) throw error;
+          throw new ClaudeRunnerError('CLAUDE_ERROR', clip(error?.message || 'Claude run failed.') || 'Claude run failed.', error?.code);
+        }
+      } finally {
+        release();
+      }
+      if (signal.aborted) throw new ClaudeRunnerError('CLAUDE_CANCELLED', MESSAGES.cancelled);
+      try {
+        return await submitHandoff({
+          jobId,
+          canvasFilePath,
+          ...(matchTaskId ? { matchTaskId } : {}),
+          handoffCode: handoffCodeOf(handoff),
+          response: result?.text ?? '',
+        });
+      } catch (error) {
+        if (isEnoent(error)) return { gone: true };
+        throw applicationError(error);
+      }
+    };
+
+    const runTask = async (task) => {
+      try {
+        for (;;) {
+          if (signal.aborted) return;
+          const current = await read(task.id);
+          if (current?.gone === true || current?.completed === true) return;
+          if (!current?.handoff) throw new ClaudeRunnerError('APPLICATION_ERROR', 'The application returned no handoff for a parallel task.');
+          const submitted = await answer(current.handoff, task.id);
+          if (submitted?.gone === true) return;
+          if (submitted?.accepted === true && submitted.completed === true) return;
+        }
+      } catch (error) {
+        if (!entry.abortReason) {
+          entry.firstError = error;
+          entry.abortReason = 'failed';
+          controller.abort();
+        }
+        throw error;
+      }
+    };
+
+    for (;;) {
+      if (signal.aborted) return { stopped: true };
+      const current = await read();
+      if (current?.gone === true) return { gone: true };
+      if (current?.completed === true) return { done: true };
+      const handoff = current?.handoff;
+      if (!handoff) throw new ClaudeRunnerError('APPLICATION_ERROR', 'The application returned no handoff.');
+      entry.stage = handoff.stage ?? null;
+      if (handoff.stage === HUMAN_STOP_STAGE) return { needsReview: true };
+      const tasks = Array.isArray(handoff.parallelTasks) ? handoff.parallelTasks.filter(task => nonEmptyString(task?.id)) : [];
+      if (tasks.length) {
+        const results = await Promise.allSettled(tasks.map(runTask));
+        const rejected = results.find(item => item.status === 'rejected');
+        if (rejected) throw entry.firstError || rejected.reason;
+        continue;
+      }
+      const submitted = await answer(handoff, null);
+      if (submitted?.gone === true) return { gone: true };
+      if (submitted?.accepted === true && submitted.completed === true) return { done: true };
+    }
+  }
+
+  function startDriver(jobId, canvasFilePath) {
+    const entry = {
+      jobId,
+      canvasFilePath,
+      controller: new AbortController(),
+      runs: 0,
+      stage: null,
+      abortReason: null,
+      firstError: null,
+      promise: null,
+    };
+    drivers.set(jobId, entry);
+    setState(jobId, canvasFilePath, { status: 'running', stage: null });
+    entry.promise = (async () => {
+      try {
+        const outcome = await drive(entry);
+        if (entry.abortReason === 'discard' || entry.abortReason === 'shutdown') return;
+        if (outcome?.gone) removeState(jobId, canvasFilePath);
+        else if (outcome?.done) setState(jobId, canvasFilePath, { status: 'done', stage: entry.stage });
+        else if (outcome?.needsReview) setState(jobId, canvasFilePath, { status: 'needs-review', stage: entry.stage });
+      } catch (caught) {
+        if (entry.abortReason === 'discard' || entry.abortReason === 'shutdown') return;
+        const raw = entry.abortReason === 'failed' && entry.firstError ? entry.firstError : caught;
+        const error = raw instanceof ClaudeRunnerError ? raw : applicationError(raw);
+        setState(jobId, canvasFilePath, { status: 'failed', stage: entry.stage, code: error.code, message: error.message });
+        logger?.error?.(`[ClaudeRunner] job=${jobId.slice(0, 8)} stage=${entry.stage ?? 'none'} code=${error.code}`);
+        await persist();
+      } finally {
+        if (drivers.get(jobId) === entry) drivers.delete(jobId);
+      }
+    })();
+    return { status: 'running', stage: null };
+  }
+
+  function ensure({ jobId, canvasFilePath } = {}) {
+    if (!nonEmptyString(jobId) || !nonEmptyString(canvasFilePath)) return { status: 'invalid' };
+    const existing = states.get(jobId);
+    if (existing?.status === 'failed') return { ...existing };
+    if (drivers.has(jobId)) return existing ? { ...existing } : { status: 'running', stage: null };
+    if (shuttingDown) return { status: 'stopped' };
+    let laned = false;
+    try { laned = isBridgeLaned(jobId) === true; } catch { laned = false; }
+    if (laned) return { status: 'bridge' };
+    return startDriver(jobId, canvasFilePath);
+  }
+
+  async function retry({ jobId, canvasFilePath } = {}) {
+    if (!nonEmptyString(jobId) || !nonEmptyString(canvasFilePath)) return { status: 'invalid' };
+    if (states.get(jobId)?.status === 'failed') {
+      states.delete(jobId);
+      await persist();
+    }
+    return ensure({ jobId, canvasFilePath });
+  }
+
+  function status(jobIds) {
+    const out = {};
+    for (const jobId of Array.isArray(jobIds) ? jobIds : []) {
+      if (typeof jobId !== 'string') continue;
+      const state = states.get(jobId);
+      if (state) out[jobId] = { ...state };
+    }
+    return out;
+  }
+
+  function onDiscard(event) {
+    const jobId = typeof event === 'string' ? event : event?.jobId;
+    if (!nonEmptyString(jobId)) return;
+    const entry = drivers.get(jobId);
+    if (entry) {
+      entry.abortReason = 'discard';
+      entry.controller.abort();
+      removeState(jobId, entry.canvasFilePath);
+      return;
+    }
+    if (states.get(jobId)?.status === 'failed') {
+      removeState(jobId, event?.canvasFilePath);
+      persist();
+    }
+  }
+
+  let unsubscribe = null;
+  if (typeof subscribeDiscards === 'function') {
+    try { unsubscribe = subscribeDiscards(onDiscard) || null; } catch { unsubscribe = null; }
+  }
+
+  async function shutdown() {
+    shuttingDown = true;
+    const pending = [];
+    for (const entry of drivers.values()) {
+      if (!entry.abortReason) entry.abortReason = 'shutdown';
+      entry.controller.abort();
+      pending.push(entry.promise);
+    }
+    await Promise.allSettled(pending);
+    try { unsubscribe?.(); } catch { /* ignore */ }
+    await persistChain;
+  }
+
+  return Object.freeze({ ensure, retry, status, shutdown, load });
+}
+
+export function registerClaudeApplicationRunnerHandlers({ handleSafe, runner, getAllWindows }) {
+  handleSafe('claude-application:ensure', async (_event, args) => runner.ensure(args || {}));
+  handleSafe('claude-application:retry', async (_event, args) => runner.retry(args || {}));
+  handleSafe('claude-application:status', async (_event, args) => ({ states: runner.status(args?.jobIds) }));
+  return function notify(state) {
+    let windows = [];
+    try { windows = getAllWindows() || []; } catch { windows = []; }
+    for (const win of windows) {
+      try {
+        if (!win || win.isDestroyed?.()) continue;
+        const contents = win.webContents;
+        if (!contents || contents.isDestroyed?.()) continue;
+        contents.send('claude-application:changed', state);
+      } catch { /* a closing window cannot fail a run */ }
+    }
+  };
+}
