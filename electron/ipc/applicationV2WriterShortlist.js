@@ -1,6 +1,7 @@
 import path from 'node:path';
 
 const SHORTLIST_HEADING = /^\s{0,3}#{0,6}\s*EVIDENCE SHORTLIST \(WORKING NOTES\)\s*:?[ \t]*$/iu;
+const DECISION_LOG_HEADING = /^\s{0,3}#{0,6}\s*DECISION LOG \(WORKING NOTES\)\s*:?[ \t]*$/iu;
 const RESUME_HEADING = /^\s{0,3}#{0,6}\s*(?:RÉSUMÉ|RESUME)\s*:?[ \t]*$/iu;
 const LETTER_HEADING = /^\s{0,3}#{0,6}\s*(?:COVER LETTER|LETTER)\s*:?[ \t]*$/iu;
 const CATALOG_ID = /host\.career\.[a-z]+\.[a-z0-9-]+\.[0-9]+/gu;
@@ -55,7 +56,12 @@ export function splitWriteVerifyWriterResponse(response, allowedIds) {
   const allowedList = Array.isArray(allowedIds) ? allowedIds : [...(allowedIds || [])];
   const allowed = new Set(allowedList);
   const byEntity = shortIdIndex(allowedList);
-  const workingLines = lines.slice(heading + 1, resume).filter(line => line.trim());
+  // The decision log is the writer's own record of why it chose what it chose. It is
+  // archived for later diagnosis and never graded: a missing log is recorded, not rejected.
+  const decisionHeading = lines.findIndex((line, index) => index > heading && index < resume && DECISION_LOG_HEADING.test(line));
+  const shortlistEnd = decisionHeading > heading ? decisionHeading : resume;
+  const decisions = decisionHeading > heading ? lines.slice(decisionHeading + 1, resume).join('\n').trim() : '';
+  const workingLines = lines.slice(heading + 1, shortlistEnd).filter(line => line.trim());
   const items = workingLines.filter(line => {
     if (LIST_MARKER.test(line)) return true;
     if ([...line.matchAll(CATALOG_ID)].length) return true;
@@ -93,13 +99,13 @@ export function splitWriteVerifyWriterResponse(response, allowedIds) {
     throw new Error(`Writer must return nonempty résumé and cover letter sections with a COVER LETTER heading. ${FORM_SUFFIX}`);
   }
   const plainText = lines.slice(resume).join('\n').trim();
-  if (/EVIDENCE SHORTLIST\s*\(WORKING NOTES\)/iu.test(plainText)) {
+  if (/(?:EVIDENCE SHORTLIST|DECISION LOG)\s*\(WORKING NOTES\)/iu.test(plainText)) {
     throw new Error(`Working shortlist must stay before the résumé, outside application text. ${FORM_SUFFIX}`);
   }
   if (plainText.match(CATALOG_ID)) {
     throw new Error(`Résumé and letter text must not contain catalog evidence IDs; keep ${FULL_ID_FORM} IDs only in shortlist lines of the form ${LINE_FORM}.`);
   }
-  return { shortlist: workingLines.join('\n'), plainText, ids };
+  return { shortlist: workingLines.join('\n'), decisions, plainText, ids };
 }
 
 export function v2WriterShortlistEvidencePaths(jobDir, jobId, filename) {

@@ -7748,7 +7748,7 @@ async function submitWriteVerifyHandoff({ root, jobId, dir, manifest, input, fro
       const filename = `revision-${state.revision}-write-${pasteJsonHash(rawText)}.json`;
       const paths = v2WriterShortlistEvidencePaths(dir, jobId, filename);
       const evidence = { stage: 'write', revision: state.revision, candidateId: candidate.id,
-        responseSha256: pasteJsonHash(rawText), shortlist: split.shortlist };
+        responseSha256: pasteJsonHash(rawText), shortlist: split.shortlist, decisions: split.decisions, decisionLogPresent: Boolean(split.decisions) };
       await fs.promises.mkdir(path.dirname(paths.working), { recursive: true, mode: 0o700 });
       await fs.promises.mkdir(path.dirname(paths.retained), { recursive: true, mode: 0o700 });
       await atomicJson(paths.working, evidence);

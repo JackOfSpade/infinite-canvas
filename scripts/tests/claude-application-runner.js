@@ -977,7 +977,7 @@ export default [
       const observed = [];
       const file = id => path.join(projA, `${id}.jsonl`);
       const logger = quietLogger();
-      const runner = createClaudeApplicationRunner({
+      const runner = createClaudeApplicationRunner({ runLogPath: null,
         api: script.api, stateFile, logger, homedir: home,
         runStage: async ({ sessionId, resume }) => {
           calls.push({ sessionId, resume });
@@ -1036,7 +1036,7 @@ export default [
       ]);
       const logger = quietLogger();
       const calls = [];
-      const runner = createClaudeApplicationRunner({
+      const runner = createClaudeApplicationRunner({ runLogPath: null,
         api: script.api, stateFile: tempStateFile(), logger, homedir: home, fsImpl,
         runStage: async ({ sessionId, resume }) => { calls.push({ sessionId, resume }); return { text: 'ok' }; },
       });
@@ -1050,6 +1050,61 @@ export default [
       for (const warn of logger.warns) {
         assert.equal(warn, '[ClaudeRunner] could not remove a Claude session transcript: EACCES');
       }
+    },
+  },
+  {
+    name: 'claude runner run log: every run records stage, session, answer and the app verdict, rejections included',
+    async run() {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-runlog-'));
+      const logFile = path.join(dir, 'runs.jsonl');
+      const handoffs = [
+        { handoffCode: 'code-1', stage: 'requirements', prompt: 'prompt one' },
+        { handoffCode: 'code-1', stage: 'requirements', prompt: 'prompt one', corrections: ['Fix item A.'], correctionPrompt: 'prompt one' },
+      ];
+      let reads = 0;
+      const submits = [];
+      const api = {
+        getHandoff: async () => (reads < 2 ? { handoff: handoffs[reads++] } : { completed: true }),
+        submitHandoff: async (args) => { submits.push(args); return submits.length === 1 ? { accepted: false, validationErrors: ['Fix item A.'] } : { accepted: true, completed: true }; },
+      };
+      const runner = createClaudeApplicationRunner({
+        api, stateFile: path.join(dir, 'state.json'), logger: quietLogger(), homedir: dir,
+        runLogPath: (jobId, canvasFilePath) => { assert.equal(jobId, 'job-log'); assert.equal(canvasFilePath, '/c.canvas'); return logFile; },
+        runStage: async ({ text }) => ({ text: `answer to ${text.length}`, model: 'claude-sonnet-5-5', durationMs: 7 }),
+      });
+      runner.ensure({ jobId: 'job-log', canvasFilePath: '/c.canvas' });
+      await waitFor(() => runner.status(['job-log'])['job-log']?.status === 'done', 'done');
+      await runner.shutdown();
+      const rows = fs.readFileSync(logFile, 'utf8').trim().split('\n').map(line => JSON.parse(line));
+      assert.equal(rows.length, 2);
+      assert.deepEqual(rows.map(row => [row.stage, row.model, row.durationMs, row.resume]), [['requirements', 'claude-sonnet-5-5', 7, false], ['requirements', 'claude-sonnet-5-5', 7, true]]);
+      assert.equal(rows[0].sessionId, rows[1].sessionId);
+      assert.deepEqual(rows[0].submit, { accepted: false, completed: false, validationErrors: ['Fix item A.'] });
+      assert.deepEqual(rows[1].submit, { accepted: true, completed: true });
+      assert.equal(rows[0].answer, `answer to ${'prompt one'.length}`);
+      assert.equal(rows[0].promptChars, 'prompt one'.length);
+      assert.match(rows[0].promptSha256, /^[0-9a-f]{64}$/);
+      // The second prompt carried the rejection: its text differs from the first.
+      assert.notEqual(rows[1].promptSha256, rows[0].promptSha256);
+    },
+  },
+  {
+    name: 'claude runner run log: a failed Claude run is recorded with its error code',
+    async run() {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-runlog-'));
+      const logFile = path.join(dir, 'runs.jsonl');
+      const api = { getHandoff: async () => ({ handoff: { handoffCode: 'c', stage: 'write', prompt: 'p' } }), submitHandoff: async () => ({ accepted: true, completed: true }) };
+      const runner = createClaudeApplicationRunner({
+        api, stateFile: path.join(dir, 'state.json'), logger: quietLogger(), homedir: dir, runLogPath: () => logFile,
+        runStage: async () => { throw new ClaudeRunnerError('CLAUDE_USAGE_LIMIT', 'Claude usage limit reached.'); },
+      });
+      runner.ensure({ jobId: 'job-fail-log', canvasFilePath: '/c.canvas' });
+      await waitFor(() => runner.status(['job-fail-log'])['job-fail-log']?.status === 'failed', 'failed');
+      await runner.shutdown();
+      const rows = fs.readFileSync(logFile, 'utf8').trim().split('\n').map(line => JSON.parse(line));
+      assert.equal(rows.length, 1);
+      assert.deepEqual([rows[0].stage, rows[0].error], ['write', { code: 'CLAUDE_USAGE_LIMIT', message: 'Claude usage limit reached.' }]);
+      assert.equal('answer' in rows[0], false);
     },
   },
 ];

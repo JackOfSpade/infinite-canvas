@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {
-  WRITE_VERIFY_BRIEF, WRITE_VERIFY_BRIEF_MAX_CHARS, WRITE_VERIFY_JUDGE_RUBRIC,
+  WRITE_VERIFY_BRIEF, WRITE_VERIFY_BRIEF_MAX_CHARS, WRITE_VERIFY_JUDGE_RUBRIC, WRITE_VERIFY_SHORTLIST_STEP,
   WRITE_VERIFY_PROTOCOL, WRITE_VERIFY_DEFAULT_CANDIDATES, WRITE_VERIFY_STAGES, WRITE_VERIFY_MAX_FIT_CORRECTIONS, acceptedWriteVerifyCandidates,
   WRITE_VERIFY_DROPPED_FINDINGS_HEADING, WRITE_VERIFY_DROPPED_FINDINGS_MAX, droppedCandidateFindings,
   WRITE_VERIFY_PRIOR_ROUND_FINDINGS_MAX, WRITE_VERIFY_PRIOR_ROUNDS_HEADING, priorRoundFindings,
@@ -64,6 +64,12 @@ export default [
       assert.match(WRITE_VERIFY_BRIEF, /as the cover letter a persuasive essay to the hiring manager/u, 'the letter is written as an essay to a named reader');
       assert.ok(WRITE_VERIFY_BRIEF.includes(" Open on a thesis, your read of the role's main need, hedged once, and that you meet it. "), 'the thesis is the writer\u2019s diagnosis, hedged once, and the claim of meeting it');
       assert.ok(WRITE_VERIFY_BRIEF.includes(' Start each body paragraph with its full point in one or two sentences'), 'each body paragraph leads with its full point');
+      assert.ok(WRITE_VERIFY_BRIEF.includes('what you did and where this job needs it, then prove it.'), 'the point states both the work and where this job needs it');
+      assert.equal(WRITE_VERIFY_BRIEF.includes('a claim about your work this job needs'), false, 'the implicit-link wording is gone');
+      assert.match(WRITE_VERIFY_JUDGE_RUBRIC, /The point must name both the candidate's work and the specific part of this job it serves/u);
+      assert.match(WRITE_VERIFY_JUDGE_RUBRIC, /a final sentence that only restates the relevance/u);
+      assert.match(WRITE_VERIFY_SHORTLIST_STEP, /a line reading exactly DECISION LOG \(WORKING NOTES\) and under it record every decision you make and why/u);
+      assert.ok(WRITE_VERIFY_SHORTLIST_STEP.indexOf('DECISION LOG (WORKING NOTES)') > WRITE_VERIFY_SHORTLIST_STEP.indexOf('EVIDENCE SHORTLIST (WORKING NOTES)'), 'the decision log follows the shortlist');
       assert.ok(WRITE_VERIFY_BRIEF.includes(' End on your argument, not stock courtesy. '), 'the close is the argument, not courtesy');
       // Sabotage: the replaced letter sentences must be gone, so the brief carries one letter instruction set, not two.
       assert.equal(WRITE_VERIFY_BRIEF.includes('your hedged read'), false, 'the old hedged-read wording is gone');

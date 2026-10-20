@@ -481,6 +481,10 @@ export function createClaudeApplicationRunner({
   now = Date.now,
   fsImpl = fs.promises,
   homedir = os.homedir(),
+  // Where each Claude run is recorded (prompt hash, full answer, the app's verdict) for later
+  // diagnosis. Defaults to <canvas folder>/.local-ai/claude-runs/<jobId>.jsonl, beside the job's
+  // other private files; null turns the log off.
+  runLogPath = (jobId, canvasFilePath) => path.join(path.dirname(canvasFilePath), '.local-ai', 'claude-runs', `${jobId}.jsonl`),
 } = {}) {
   const { getHandoff, submitHandoff, subscribeDiscards } = api;
   const stageRunner = typeof runStage === 'function' ? runStage : createProductionRunStage({ workspaceDir, fsImpl });
@@ -496,6 +500,22 @@ export function createClaudeApplicationRunner({
     let lane = lanes.get(laneKey);
     if (!lane) { lane = { sessionId: null, started: false, contextKey: null, stage: null }; lanes.set(laneKey, lane); }
     return lane;
+  }
+
+  let runLogChain = Promise.resolve();
+  function logRun(jobId, canvasFilePath, record) {
+    if (typeof runLogPath !== 'function') return runLogChain;
+    let file;
+    try { file = runLogPath(jobId, canvasFilePath); } catch { return runLogChain; }
+    if (!file) return runLogChain;
+    const line = `${JSON.stringify(record)}\n`;
+    runLogChain = runLogChain.then(async () => {
+      await fsImpl.mkdir(path.dirname(file), { recursive: true, mode: 0o700 });
+      await fsImpl.appendFile(file, line, { encoding: 'utf8', mode: 0o600 });
+    }).catch(error => {
+      logger?.warn?.(`[ClaudeRunner] could not write the Claude run log: ${clip(error?.code || error?.message, 80)}`);
+    });
+    return runLogChain;
   }
 
   async function removeTranscripts(sessionIds) {
@@ -668,6 +688,7 @@ export function createClaudeApplicationRunner({
       const text = chooseText(handoff);
       const release = await semaphore.acquire(signal);
       let result;
+      let record = null;
       try {
         if (signal.aborted) throw new ClaudeRunnerError('CLAUDE_CANCELLED', MESSAGES.cancelled);
         const lane = laneFor(jobId, matchTaskId || 'main');
@@ -686,6 +707,12 @@ export function createClaudeApplicationRunner({
           }
         }
         let succeeded = false;
+        record = {
+          at: new Date(now()).toISOString(), jobId, stage: entry.stage, ...(matchTaskId ? { matchTaskId } : {}),
+          sessionId: lane.sessionId, resume: lane.started,
+          promptSha256: crypto.createHash('sha256').update(text).digest('hex'), promptChars: text.length,
+          pageImages: Array.isArray(handoff?.pageImages) ? handoff.pageImages.length : 0,
+        };
         try {
           result = await stageRunner({
             text,
@@ -696,9 +723,13 @@ export function createClaudeApplicationRunner({
             resume: lane.started,
           });
           succeeded = true;
+          Object.assign(record, { model: result?.model ?? null, durationMs: result?.durationMs ?? null, answer: result?.text ?? '' });
         } catch (error) {
-          if (error instanceof ClaudeRunnerError) throw error;
-          throw new ClaudeRunnerError('CLAUDE_ERROR', clip(error?.message || 'Claude run failed.') || 'Claude run failed.', error?.code);
+          const failure = error instanceof ClaudeRunnerError
+            ? error
+            : new ClaudeRunnerError('CLAUDE_ERROR', clip(error?.message || 'Claude run failed.') || 'Claude run failed.', error?.code);
+          logRun(jobId, canvasFilePath, { ...record, error: { code: failure.code, message: failure.message } });
+          throw failure;
         } finally {
           lane.contextKey = key;
           lane.stage = handoff?.stage ?? null;
@@ -712,14 +743,21 @@ export function createClaudeApplicationRunner({
       }
       if (signal.aborted) throw new ClaudeRunnerError('CLAUDE_CANCELLED', MESSAGES.cancelled);
       try {
-        return await submitHandoff({
+        const submitted = await submitHandoff({
           jobId,
           canvasFilePath,
           ...(matchTaskId ? { matchTaskId } : {}),
           handoffCode: handoffCodeOf(handoff),
           response: result?.text ?? '',
         });
+        logRun(jobId, canvasFilePath, { ...record, submit: {
+          accepted: submitted?.accepted === true, completed: submitted?.completed === true,
+          ...(Array.isArray(submitted?.validationErrors) && submitted.validationErrors.length ? { validationErrors: submitted.validationErrors } : {}),
+          ...(submitted?.gone === true ? { gone: true } : {}),
+        } });
+        return submitted;
       } catch (error) {
+        logRun(jobId, canvasFilePath, { ...record, submit: { error: clip(error?.message || error, 300) } });
         if (isEnoent(error)) return { gone: true };
         throw applicationError(error);
       }
@@ -876,6 +914,7 @@ export function createClaudeApplicationRunner({
     await Promise.allSettled(pending);
     try { unsubscribe?.(); } catch { /* ignore */ }
     await persistChain;
+    await runLogChain;
   }
 
   return Object.freeze({ ensure, retry, status, shutdown, load });

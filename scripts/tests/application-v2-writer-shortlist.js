@@ -222,4 +222,21 @@ export default [
         /Résumé and letter text must not contain catalog evidence IDs;/u);
     },
   },
+  {
+    name: 'v2 writer shortlist: the decision log is split out, archived as notes, and never reaches the application text',
+    run() {
+      const working = SIX.map(id => `- ${id} - strongest fit for the posting`);
+      const notes = ['Thesis: the depot role needs steady rotations, chosen because the posting leads with it.', `P1 serves rotation planning, using ${ID.freight1} over ${ID.clinic1} because it is closer.`, 'Left out the library work: unrelated to dispatch.'];
+      const text = ['EVIDENCE SHORTLIST (WORKING NOTES)', ...working, 'DECISION LOG (WORKING NOTES)', ...notes, 'RÉSUMÉ', RESUME_BODY, 'COVER LETTER', LETTER_BODY].join('\n');
+      const parsed = splitWriteVerifyWriterResponse(text, ALLOWED);
+      assert.equal(parsed.decisions, notes.join('\n'));
+      assert.deepEqual(parsed.ids, SIX, 'the shortlist still holds exactly its six items');
+      assert.equal(parsed.shortlist, working.join('\n'), 'decision notes are not shortlist items');
+      assert.equal(parsed.plainText, PLAIN);
+      // A missing decision log is recorded as empty, never a rejection.
+      assert.equal(parse(working).decisions, '');
+      // The log may not appear inside the application text.
+      assert.throws(() => splitWriteVerifyWriterResponse(['EVIDENCE SHORTLIST (WORKING NOTES)', ...working, 'RÉSUMÉ', RESUME_BODY, 'DECISION LOG (WORKING NOTES)', 'note', 'COVER LETTER', LETTER_BODY].join('\n'), ALLOWED), /must stay before the résumé/u);
+    },
+  },
 ];
