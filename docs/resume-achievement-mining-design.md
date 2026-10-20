@@ -9,7 +9,7 @@ found five design defects (receipt matching, arithmetic edge cases, the missing 
 the cover-letter gap, and the mining race) — all folded in below.
 
 UPDATE — this design has since been **built** (achievement ledger, model resolver, HTML generation,
-receipts). The applied-jobs store described below was later retired in favor of the simpler
+receipts). The applied-jobs store described below was later replaced by the simpler
 search → hierarchy → bundle → manual submission → delete hierarchy workflow. Two other things
 below drifted from this original plan during
 implementation and are corrected in place rather than left to mislead a future reader: §3.1's

@@ -49,7 +49,7 @@ import { applicationProtocolSetting } from './applicationProtocolSetting.js';
 import { targetIdentityNameLicensed, validateSharedApplicationContent } from './applicationTruthGates.js';
 import { v2RejectionEvidencePaths } from './applicationV2RejectionEvidence.js';
 import { archiveV2Content } from './applicationV2EvidenceArchive.js';
-import { splitWriteVerifyWriterResponse, v2WriterShortlistEvidencePaths } from './applicationV2WriterShortlist.js';
+import { archiveV2WriterNotes, splitWriteVerifyWriterResponse } from './applicationV2WriterShortlist.js';
 import { tryGetStore } from './settings.js';
 import { assertApplicationV2PromptLimit, assertApplicationV2ReplyLimit } from './applicationV2Limits.js';
 import { writeVerifyLengthBudgets } from './applicationV2LengthBudget.js';
@@ -7745,14 +7745,8 @@ async function submitWriteVerifyHandoff({ root, jobId, dir, manifest, input, fro
     try { split = splitWriteVerifyWriterResponse(rawText, allowedIds); }
     catch (error) { errors.push(error.message); }
     if (split) {
-      const filename = `revision-${state.revision}-write-${pasteJsonHash(rawText)}.json`;
-      const paths = v2WriterShortlistEvidencePaths(dir, jobId, filename);
-      const evidence = { stage: 'write', revision: state.revision, candidateId: candidate.id,
-        responseSha256: pasteJsonHash(rawText), shortlist: split.shortlist, decisions: split.decisions, decisionLogPresent: Boolean(split.decisions) };
-      await fs.promises.mkdir(path.dirname(paths.working), { recursive: true, mode: 0o700 });
-      await fs.promises.mkdir(path.dirname(paths.retained), { recursive: true, mode: 0o700 });
-      await atomicJson(paths.working, evidence);
-      await atomicJson(paths.retained, evidence);
+      await archiveV2WriterNotes({ jobDir: dir, jobId, revision: state.revision, candidateId: candidate.id,
+        responseSha256: pasteJsonHash(rawText), split });
       candidate.plainText = split.plainText; candidate.status = 'written'; work.ordinal = state.writeVerify.ordinal;
     }
   }

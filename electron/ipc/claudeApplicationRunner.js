@@ -14,6 +14,8 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { buildEditorialPlanPrompt, editorialPlanAllowedIds, editorialPlanBinding, parseEditorialPlanResponse, writerPromptWithEditorialPlan } from './applicationEditorialPlan.js';
+import { loadEditorialPlan, saveEditorialPlan } from './applicationEditorialPlanArchive.js';
 
 // Claude Code's aliases for the newest model in each line, so a new Sonnet or
 // Opus release is used without a code change. The answer is checked by family.
@@ -25,6 +27,7 @@ export const CLAUDE_APPLICATION_EFFORT = 'high';
 // Opus where the stage decides the writing (write) or picks it (pick);
 // Sonnet for the rule-following repair, trim, fact and conversion stages.
 export const CLAUDE_STAGE_PROFILES = Object.freeze({
+  'editorial-plan': Object.freeze({ model: CLAUDE_OPUS_MODEL, effort: 'xhigh' }),
   write: Object.freeze({ model: CLAUDE_OPUS_MODEL, effort: 'xhigh' }),
   pick: Object.freeze({ model: CLAUDE_OPUS_MODEL, effort: 'high' }),
   convert: Object.freeze({ model: CLAUDE_SONNET_MODEL, effort: 'medium' }),
@@ -72,11 +75,14 @@ const MESSAGES = Object.freeze({
 });
 
 export class ClaudeRunnerError extends Error {
-  constructor(code, message, detail) {
+  constructor(code, message, detail, result) {
     super(message);
     this.name = 'ClaudeRunnerError';
     this.code = code;
     if (detail !== undefined) this.detail = detail;
+    // Only the terminal result's plain text belongs here, never the stream's
+    // assistant/thinking blocks, signatures, or transcript.
+    if (typeof result === 'string') this.result = result;
   }
 }
 
@@ -182,23 +188,48 @@ export function parseClaudeStreamOutput(stdoutText) {
 
 const USAGE_RE = /usage limit|limit reached|hit your limit|rate.?limit|out of (extra )?usage/i;
 const LOGIN_RE = /not logged in|log ?in|\/login|authenticat|credential|invalid api key/i;
+// These are provider error sentences, not a keyword detector. A normal answer
+// or an incidental mention of safeguards cannot establish a blocked request.
+const SAFEGUARD_ERROR_RE = /^(?:API Error:\s*)?(?:(?:Opus|Sonnet|Haiku)\s+\d+(?:\.\d+)*['’]s safeguards flagged this message\b|Your (?:request|message) (?:was|has been) blocked by (?:our |the )?safeguards\b)/iu;
+
+function plainSafeguardStderr(stderr) {
+  const text = stderr.trim();
+  if (!SAFEGUARD_ERROR_RE.test(text)) return '';
+  // Only a recognized plain provider error may be retained from stderr. Do
+  // not bring along any following JSON stream record or reasoning block.
+  const lines = text.split(/\r?\n/u);
+  const streamAt = lines.findIndex(line => /^\s*(?:\[|\{|<\/?(?:thinking|analysis|redacted_thinking)\b)/iu.test(line));
+  return (streamAt < 0 ? lines : lines.slice(0, streamAt)).join('\n').trim();
+}
 
 export function classifyClaudeFailure({ parsed, stderr, exitCode } = {}) {
   const resultText = typeof parsed?.result === 'string' ? parsed.result : '';
   const stderrText = String(stderr ?? '');
   const combined = `${resultText}\n${stderrText}`;
   const clipped = clip(resultText.trim() ? resultText : stderrText);
-  const detail = { exitCode: exitCode ?? null, subtype: parsed?.subtype ?? null, apiErrorStatus: parsed?.apiErrorStatus ?? null };
+  const detail = { exitCode: exitCode ?? null, subtype: parsed?.subtype ?? null, apiErrorStatus: parsed?.apiErrorStatus ?? null,
+    models: parsed?.models ?? [], durationMs: parsed?.durationMs ?? null };
   if (parsed?.apiErrorStatus === 429 || USAGE_RE.test(combined)) {
-    return new ClaudeRunnerError('CLAUDE_USAGE_LIMIT', clipped ? `${MESSAGES.usage} (${clipped})` : MESSAGES.usage, detail);
+    return new ClaudeRunnerError('CLAUDE_USAGE_LIMIT', clipped ? `${MESSAGES.usage} (${clipped})` : MESSAGES.usage, detail, resultText);
   }
   if (LOGIN_RE.test(combined)) {
-    return new ClaudeRunnerError('CLAUDE_NOT_SIGNED_IN', MESSAGES.login, detail);
+    return new ClaudeRunnerError('CLAUDE_NOT_SIGNED_IN', MESSAGES.login, detail, resultText);
+  }
+  const providerText = resultText.trim() || plainSafeguardStderr(stderrText);
+  if (SAFEGUARD_ERROR_RE.test(providerText)) {
+    const category = providerText.match(/\bDetails:\s*`\[([a-z][a-z_]{0,79})\]`/u)?.[1];
+    const requestId = providerText.match(/\bRequest ID:\s*(req_[A-Za-z0-9]{8,120})\b/u)?.[1];
+    const messageId = providerText.match(/\bMessage ID:\s*(msg_[A-Za-z0-9]{8,120})\b/u)?.[1];
+    return new ClaudeRunnerError('CLAUDE_SAFEGUARD_BLOCKED',
+      'Claude blocked this request with its safeguards. The private run log contains the provider message. Review the request before retrying.',
+      { ...detail, ...(category ? { refusalCategory: category } : {}), ...(requestId ? { requestId } : {}), ...(messageId ? { messageId } : {}) },
+      resultText.trim() ? resultText : providerText);
   }
   return new ClaudeRunnerError(
     'CLAUDE_ERROR',
     `Claude Code failed (exit ${exitCode ?? 'unknown'})${clipped ? `: ${clipped}` : ''}`,
     detail,
+    resultText,
   );
 }
 
@@ -316,12 +347,14 @@ export function runClaudeStage({
         finish(new ClaudeRunnerError(
           'CLAUDE_WRONG_MODEL',
           `Claude answered with ${parsed.models.join(', ')} instead of ${MODEL_FAMILIES[model]?.label || model}.`,
-          { models: parsed.models },
+          { models: parsed.models, subtype: parsed.subtype, apiErrorStatus: parsed.apiErrorStatus, exitCode, durationMs: parsed.durationMs },
+          parsed.result,
         ));
         return;
       }
       if (!parsed.result.trim()) {
-        finish(new ClaudeRunnerError('CLAUDE_ERROR', 'Claude Code returned an empty answer.'));
+        finish(new ClaudeRunnerError('CLAUDE_ERROR', 'Claude Code returned an empty answer.',
+          { models: parsed.models, subtype: parsed.subtype, apiErrorStatus: parsed.apiErrorStatus, exitCode, durationMs: parsed.durationMs }, parsed.result));
         return;
       }
       finish(null, { text: parsed.result, model: answered, durationMs: parsed.durationMs });
@@ -430,13 +463,14 @@ function chooseText(handoff) {
 
 function createProductionRunStage({ workspaceDir, fsImpl }) {
   let bound = null;
-  return async ({ text, pageImages, signal, stage, sessionId, resume }) => {
+  return async ({ text, pageImages, signal, stage, sessionId, resume, onThinkingSummary }) => {
     if (!bound) {
       if (workspaceDir) await fsImpl.mkdir(workspaceDir, { recursive: true });
       const binary = resolveClaudeBinary({ env: process.env, homedir: os.homedir() });
       bound = { binary, env: claudeChildEnv(process.env, path.dirname(binary)), cwd: workspaceDir || os.tmpdir() };
     }
-    return runClaudeStage({ text, pageImages, signal, sessionId, resume, ...bound, ...claudeStageProfile(stage) });
+    const { runClaudeSdkStage } = await import('./claudeApplicationSdkStage.js');
+    return runClaudeSdkStage({ text, pageImages, signal, sessionId, resume, onThinkingSummary, ...bound, ...claudeStageProfile(stage) });
   };
 }
 
@@ -465,7 +499,42 @@ function sanitizeLane(value) {
     started: value.started === true,
     contextKey: typeof value.contextKey === 'string' ? value.contextKey : null,
     stage: typeof value.stage === 'string' ? value.stage : null,
+    ...(value.editorialPlanned === true ? { editorialPlanned: true } : {}),
   };
+}
+
+// Errors may contain transport objects or a raw stream. Project only the
+// small result metadata needed to diagnose a failed invocation.
+function auditFailure(error) {
+  const failure = { code: clip(error?.code || 'CLAUDE_ERROR', 80), message: clip(error?.message || 'Claude run failed.', 400) };
+  const detail = error?.detail;
+  if (detail && typeof detail === 'object' && !Array.isArray(detail)) {
+    const metadata = {};
+    if (Number.isInteger(detail.exitCode) || (typeof detail.exitCode === 'string' && /^SIG[A-Z0-9]+$/u.test(detail.exitCode))) metadata.exitCode = detail.exitCode;
+    if (typeof detail.subtype === 'string') metadata.subtype = clip(detail.subtype, 100);
+    if (Number.isInteger(detail.apiErrorStatus) && detail.apiErrorStatus >= 100 && detail.apiErrorStatus <= 599) metadata.apiErrorStatus = detail.apiErrorStatus;
+    if (Array.isArray(detail.models)) metadata.models = detail.models.filter(model => typeof model === 'string').slice(0, 20).map(model => clip(model, 200));
+    if (Number.isFinite(detail.durationMs) && detail.durationMs >= 0) metadata.durationMs = detail.durationMs;
+    if (typeof detail.refusalCategory === 'string' && /^[a-z][a-z_]{0,79}$/u.test(detail.refusalCategory)) metadata.refusalCategory = detail.refusalCategory;
+    if (typeof detail.requestId === 'string' && /^req_[A-Za-z0-9]{8,120}$/u.test(detail.requestId)) metadata.requestId = detail.requestId;
+    if (typeof detail.messageId === 'string' && /^msg_[A-Za-z0-9]{8,120}$/u.test(detail.messageId)) metadata.messageId = detail.messageId;
+    if (typeof detail.reason === 'string') metadata.reason = clip(detail.reason, 300);
+    if (Array.isArray(detail.errors)) metadata.errors = detail.errors.filter(value => typeof value === 'string').slice(0, 20).map(value => clip(value, 2000));
+    if (typeof detail.refusalEvent === 'string') metadata.refusalEvent = clip(detail.refusalEvent, 100);
+    if (typeof detail.stopReason === 'string') metadata.stopReason = clip(detail.stopReason, 100);
+    for (const key of ['assistantStopReasons', 'assistantErrors']) {
+      if (Array.isArray(detail[key])) metadata[key] = detail[key].filter(value => typeof value === 'string').slice(0, 20).map(value => clip(value, 100));
+    }
+    if (Object.keys(metadata).length) failure.detail = metadata;
+  }
+  return failure;
+}
+
+function defaultRunLogPath(jobId, canvasFilePath) {
+  if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,239}$/u.test(String(jobId || '')) || !path.isAbsolute(String(canvasFilePath || ''))) {
+    throw Object.assign(new Error('Invalid private audit path.'), { code: 'LOG_PATH_INVALID' });
+  }
+  return path.join(path.dirname(canvasFilePath), '.local-ai', 'claude-runs', `${jobId}.jsonl`);
 }
 
 export function createClaudeApplicationRunner({
@@ -481,10 +550,11 @@ export function createClaudeApplicationRunner({
   now = Date.now,
   fsImpl = fs.promises,
   homedir = os.homedir(),
-  // Where each Claude run is recorded (prompt hash, full answer, the app's verdict) for later
+  // Where each Claude run is recorded as correlated append-only events for later
   // diagnosis. Defaults to <canvas folder>/.local-ai/claude-runs/<jobId>.jsonl, beside the job's
   // other private files; null turns the log off.
-  runLogPath = (jobId, canvasFilePath) => path.join(path.dirname(canvasFilePath), '.local-ai', 'claude-runs', `${jobId}.jsonl`),
+  runLogPath = defaultRunLogPath,
+  capturePrompts = true,
 } = {}) {
   const { getHandoff, submitHandoff, subscribeDiscards } = api;
   const stageRunner = typeof runStage === 'function' ? runStage : createProductionRunStage({ workspaceDir, fsImpl });
@@ -504,18 +574,51 @@ export function createClaudeApplicationRunner({
 
   let runLogChain = Promise.resolve();
   function logRun(jobId, canvasFilePath, record) {
-    if (typeof runLogPath !== 'function') return runLogChain;
+    if (typeof runLogPath !== 'function') return Promise.resolve();
+    const logError = error => {
+      logger?.warn?.(`[ClaudeRunner] could not write the Claude run log: ${clip(error?.code || 'LOG_WRITE_FAILED', 80)}`);
+      return new ClaudeRunnerError('CLAUDE_LOG_ERROR', 'The private Claude audit log could not be written. Check the log folder permissions and available disk space, then retry.');
+    };
     let file;
-    try { file = runLogPath(jobId, canvasFilePath); } catch { return runLogChain; }
-    if (!file) return runLogChain;
-    const line = `${JSON.stringify(record)}\n`;
-    runLogChain = runLogChain.then(async () => {
-      await fsImpl.mkdir(path.dirname(file), { recursive: true, mode: 0o700 });
-      await fsImpl.appendFile(file, line, { encoding: 'utf8', mode: 0o600 });
-    }).catch(error => {
-      logger?.warn?.(`[ClaudeRunner] could not write the Claude run log: ${clip(error?.code || error?.message, 80)}`);
+    try { file = runLogPath(jobId, canvasFilePath); } catch (error) { return Promise.reject(logError(error)); }
+    if (!nonEmptyString(file)) return Promise.reject(logError({ code: 'LOG_PATH_INVALID' }));
+    const line = `${JSON.stringify({ ...record, at: new Date(now()).toISOString() })}\n`;
+    const write = runLogChain.then(async () => {
+      let logDir = path.dirname(file);
+      if (runLogPath === defaultRunLogPath) {
+        const canvasRoot = await fsImpl.realpath(path.dirname(canvasFilePath));
+        logDir = path.join(canvasRoot, '.local-ai', 'claude-runs');
+        // Validate each app-owned directory before creating anything inside
+        // it. A .local-ai symlink must not redirect even directory creation.
+        for (const dir of [path.dirname(logDir), logDir]) {
+          try { await fsImpl.mkdir(dir, { mode: 0o700 }); } catch (error) { if (error?.code !== 'EEXIST') throw error; }
+          const stat = await fsImpl.lstat(dir);
+          if (!stat.isDirectory() || stat.isSymbolicLink() || await fsImpl.realpath(dir) !== dir) {
+            throw Object.assign(new Error('Audit directory left the canvas.'), { code: 'LOG_PATH_UNTRUSTED' });
+          }
+        }
+        await fsImpl.chmod(logDir, 0o700);
+      } else {
+        await fsImpl.mkdir(logDir, { recursive: true, mode: 0o700 });
+      }
+      const dirStat = await fsImpl.lstat(logDir);
+      if (!dirStat.isDirectory() || dirStat.isSymbolicLink()) throw Object.assign(new Error('Invalid audit directory.'), { code: 'LOG_PATH_UNTRUSTED' });
+      const realDir = await fsImpl.realpath(logDir);
+      const logFile = path.join(realDir, path.basename(file));
+      let fileStat;
+      try { fileStat = await fsImpl.lstat(logFile); } catch (error) { if (error?.code !== 'ENOENT') throw error; }
+      if (fileStat && (!fileStat.isFile() || fileStat.isSymbolicLink())) throw Object.assign(new Error('Invalid audit file.'), { code: 'LOG_PATH_UNTRUSTED' });
+      const handle = await fsImpl.open(logFile, fs.constants.O_WRONLY | fs.constants.O_APPEND | fs.constants.O_CREAT | fs.constants.O_NOFOLLOW, 0o600);
+      try {
+        if (!(await handle.stat()).isFile()) throw Object.assign(new Error('Invalid audit file.'), { code: 'LOG_PATH_UNTRUSTED' });
+        await handle.chmod(0o600);
+        await fsImpl.appendFile(handle, line, { encoding: 'utf8' });
+      } finally { await handle.close(); }
     });
-    return runLogChain;
+    // A failed append must reach its caller, without poisoning later jobs or
+    // leaving a rejected background promise for shutdown to discover.
+    runLogChain = write.catch(() => {});
+    return write.catch(error => { throw logError(error); });
   }
 
   async function removeTranscripts(sessionIds) {
@@ -593,7 +696,8 @@ export function createClaudeApplicationRunner({
       const out = {};
       for (const [laneKey, lane] of lanes) {
         if (!lane.sessionId) continue;
-        out[laneKey] = { sessionId: lane.sessionId, started: lane.started === true, contextKey: lane.contextKey ?? null, stage: lane.stage ?? null };
+        out[laneKey] = { sessionId: lane.sessionId, started: lane.started === true, contextKey: lane.contextKey ?? null, stage: lane.stage ?? null,
+          ...(lane.editorialPlanned === true ? { editorialPlanned: true } : {}) };
       }
       if (Object.keys(out).length) sessionSnapshot[jobId] = out;
     }
@@ -678,89 +782,192 @@ export function createClaudeApplicationRunner({
       }
     };
 
-    const answer = async (handoff, matchTaskId) => {
+    // One durable record per provider invocation, including the separate planning
+    // call. Summaries are provider-authored readable output, never raw events.
+    const invokeLoggedStage = async ({ stage, text, pageImages = [], sessionId, resume = false, handoff, matchTaskId, editorialPlan }) => {
       if (entry.runs >= maxRunsPerJob) {
         throw new ClaudeRunnerError('CLAUDE_TOO_MANY_RUNS', MESSAGES.tooMany(maxRunsPerJob));
       }
       entry.runs += 1;
-      entry.stage = handoff?.stage ?? null;
-      setState(jobId, canvasFilePath, { status: 'running', stage: entry.stage });
-      const text = chooseText(handoff);
       const release = await semaphore.acquire(signal);
-      let result;
-      let record = null;
+      const profile = claudeStageProfile(stage);
+      const record = {
+        version: 2, runId: crypto.randomUUID(), jobId, stage, ...(matchTaskId ? { matchTaskId } : {}),
+        sessionId, resume,
+        requestedModel: profile.model, requestedEffort: profile.effort,
+        handoffSha256: crypto.createHash('sha256').update(String(handoffCodeOf(handoff) ?? '')).digest('hex'),
+        promptSha256: crypto.createHash('sha256').update(text).digest('hex'), promptChars: text.length,
+        pageImages: pageImages.length,
+        ...(editorialPlan ? { editorialPlan } : {}),
+      };
+      let summaryCount = 0;
+      let summaryChars = 0;
+      let summaryChain = Promise.resolve();
+      let acceptingSummaries = true;
+      const coverage = status => ({ thinkingDisplay: 'summarized', thinkingSummaryCount: summaryCount,
+        thinkingSummaryChars: summaryChars, thinkingSummaryPresent: summaryCount > 0, summaryStatus: status });
       try {
         if (signal.aborted) throw new ClaudeRunnerError('CLAUDE_CANCELLED', MESSAGES.cancelled);
-        const lane = laneFor(jobId, matchTaskId || 'main');
-        const key = freshContextKeyOf(handoff);
-        const wasStarted = lane.started;
-        if (needsFreshSession(lane, handoff, key)) {
-          const replacedId = lane.sessionId;
-          lane.sessionId = crypto.randomUUID();
-          lane.started = false;
-          // The replaced session is never resumed again: remove its transcript now,
-          // without waiting and without ever failing the run on it.
-          if (replacedId && replacedId !== lane.sessionId) {
-            removeTranscripts([replacedId]).catch(error => {
-              logger?.warn?.(`[ClaudeRunner] could not remove a replaced Claude session transcript: ${clip(error?.code || error?.message, 80)}`);
-            });
-          }
-        }
-        let succeeded = false;
-        record = {
-          at: new Date(now()).toISOString(), jobId, stage: entry.stage, ...(matchTaskId ? { matchTaskId } : {}),
-          sessionId: lane.sessionId, resume: lane.started,
-          promptSha256: crypto.createHash('sha256').update(text).digest('hex'), promptChars: text.length,
-          pageImages: Array.isArray(handoff?.pageImages) ? handoff.pageImages.length : 0,
-        };
+        // A logged start also makes an interrupted/incomplete invocation
+        // visible. No provider call is made if this cannot be recorded.
+        await logRun(jobId, canvasFilePath, { ...record, event: 'started', ...(capturePrompts ? { prompt: text } : {}) });
         try {
-          result = await stageRunner({
-            text,
-            pageImages: Array.isArray(handoff?.pageImages) ? handoff.pageImages : [],
-            signal,
-            stage: entry.stage,
-            sessionId: lane.sessionId,
-            resume: lane.started,
+          const result = await stageRunner({
+            text, pageImages, signal, stage, sessionId, resume, model: profile.model, effort: profile.effort,
+            onThinkingSummary: summary => {
+              if (!acceptingSummaries) return Promise.reject(new ClaudeRunnerError('CLAUDE_LOG_ERROR', 'Claude returned a diagnostic summary after its run had ended.'));
+              const write = summaryChain.then(async () => {
+                if (typeof summary?.text !== 'string' || !summary.text.trim() || summary.thinkingDisplay !== 'summarized'
+                  || typeof summary.model !== 'string' || !answeringModel(profile.model, [summary.model])) {
+                  throw new ClaudeRunnerError('CLAUDE_LOG_ERROR', 'Claude returned an invalid diagnostic summary. The application was stopped before submission.');
+                }
+                // Project only this public content. Never serialize the callback
+                // argument itself: it may contain signatures or redacted blocks.
+                const safe = { text: summary.text, model: summary.model, index: summaryCount + 1, thinkingDisplay: 'summarized' };
+                await logRun(jobId, canvasFilePath, { ...record, event: 'thinking-summary', summary: safe, provisional: true });
+                summaryCount += 1;
+                summaryChars += summary.text.length;
+              });
+              summaryChain = write;
+              write.catch(() => {});
+              return write;
+            },
           });
-          succeeded = true;
-          Object.assign(record, { model: result?.model ?? null, durationMs: result?.durationMs ?? null, answer: result?.text ?? '' });
+          acceptingSummaries = false;
+          await summaryChain;
+          // Keep returned text before submission, cancellation or transcript cleanup.
+          await logRun(jobId, canvasFilePath, { ...record, event: 'response', model: result?.model ?? null,
+            durationMs: result?.durationMs ?? null, answer: result?.text ?? '', ...coverage('complete') });
+          return { result, record };
         } catch (error) {
-          const failure = error instanceof ClaudeRunnerError
-            ? error
-            : new ClaudeRunnerError('CLAUDE_ERROR', clip(error?.message || 'Claude run failed.') || 'Claude run failed.', error?.code);
-          logRun(jobId, canvasFilePath, { ...record, error: { code: failure.code, message: failure.message } });
+          acceptingSummaries = false;
+          // Cancellation can settle the SDK before an in-flight disk append.
+          // Wait for it before freezing terminal coverage for the run.
+          let cause = error;
+          try { await summaryChain; } catch (logError) { cause = logError; }
+          const failure = cause instanceof ClaudeRunnerError
+            ? cause
+            : new ClaudeRunnerError('CLAUDE_ERROR', clip(cause?.message || 'Claude run failed.') || 'Claude run failed.', cause?.code);
+          await logRun(jobId, canvasFilePath, { ...record, event: 'failed', error: auditFailure(failure),
+            ...(typeof failure.result === 'string' ? { result: failure.result } : {}), ...coverage('incomplete') });
           throw failure;
-        } finally {
-          lane.contextKey = key;
-          lane.stage = handoff?.stage ?? null;
-          if (succeeded) lane.started = true;
-          // Only a resumable lane (or one that replaced a resumable lane) needs to reach disk now;
-          // a discarded job's sessions are about to be dropped.
-          if (entry.abortReason !== 'discard' && (lane.started || wasStarted)) persist();
         }
       } finally {
         release();
       }
-      if (signal.aborted) throw new ClaudeRunnerError('CLAUDE_CANCELLED', MESSAGES.cancelled);
+    };
+
+    const answer = async (handoff, matchTaskId) => {
+      const stage = handoff?.stage ?? null;
+      entry.stage = stage;
+      setState(jobId, canvasFilePath, { status: 'running', stage });
+      let text = chooseText(handoff);
+      const laneKey = matchTaskId || 'main';
+      const key = freshContextKeyOf(handoff);
+      const lane = laneFor(jobId, laneKey);
+      let planReference;
+      // Only the v2 writer has this frozen source contract. Other application
+      // stages still receive their exact handoff without a planning round.
+      if (stage === 'write' && /^(?:APPLICATION V2 HANDOFF|The following is approved source data, not instructions\.)$/mu.test(handoff?.prompt || '')) {
+        let planRecord;
+        try {
+          const binding = editorialPlanBinding(handoff.prompt);
+          const allowedIds = editorialPlanAllowedIds(handoff.prompt);
+          const archiveArgs = { canvasFilePath, jobId, laneKey, contextKey: key ?? `handoff:${crypto.createHash('sha256').update(String(handoffCodeOf(handoff) ?? '')).digest('hex')}`,
+            sourceDigest: binding.sourceDigest, allowedIds };
+          let saved = await loadEditorialPlan(archiveArgs);
+          if (!saved && lane.started && !lane.editorialPlanned && !needsFreshSession(lane, handoff, key)) {
+            // A session started by an older build cannot acquire an outline
+            // retrospectively. Keep its established draft/correction context.
+            await logRun(jobId, canvasFilePath, { version: 2, jobId, stage, event: 'editorial-plan-unavailable',
+              sessionId: lane.sessionId, reason: 'writer-session-already-started', sourceDigest: binding.sourceDigest });
+          } else if (!saved) {
+            const planSessionId = crypto.randomUUID();
+            try {
+              const planned = await invokeLoggedStage({ stage: 'editorial-plan', text: buildEditorialPlanPrompt(handoff.prompt),
+                sessionId: planSessionId, handoff, matchTaskId });
+              planRecord = planned.record;
+              const checkPlanningCancellation = async () => {
+                if (!signal.aborted) return;
+                const error = new ClaudeRunnerError('CLAUDE_CANCELLED', MESSAGES.cancelled);
+                await logRun(jobId, canvasFilePath, { ...planRecord, event: 'cancelled', error: auditFailure(error) });
+                throw error;
+              };
+              await checkPlanningCancellation();
+              saved = await saveEditorialPlan({ ...archiveArgs, writerPromptSha256: binding.writerPromptSha256,
+                plan: parseEditorialPlanResponse(planned.result?.text, allowedIds), planRunId: planned.record.runId,
+                planSessionId, model: planned.result?.model, createdAt: new Date(now()).toISOString() });
+              await checkPlanningCancellation();
+            } finally {
+              // This standalone session is never resumed, including failures.
+              await removeTranscripts([planSessionId]);
+            }
+          }
+          if (saved) {
+            lane.editorialPlanned = true;
+            planReference = { reference: saved.reference, planSha256: saved.planSha256, planRunId: saved.planRunId,
+              sourceDigest: saved.sourceDigest, contextKey: saved.contextKey };
+            const attached = writerPromptWithEditorialPlan(handoff.prompt, saved.plan);
+            // Resumed corrections may be terse. Preserve their corrections and
+            // append the same saved proposal without replaying all source data.
+            text += attached.slice(handoff.prompt.length);
+          }
+        } catch (error) {
+          if (error instanceof ClaudeRunnerError) throw error;
+          const failure = new ClaudeRunnerError('CLAUDE_EDITORIAL_PLAN_ERROR', 'The private editorial outline could not be validated or saved. Review the diagnostic archive before retrying.', { reason: clip(error?.message, 300) });
+          await logRun(jobId, canvasFilePath, { version: 2, jobId, stage: 'editorial-plan', ...planRecord,
+            event: 'editorial-plan-error', error: auditFailure(failure) });
+          throw failure;
+        }
+      }
+      const wasStarted = lane.started;
+      if (needsFreshSession(lane, handoff, key)) {
+        const replacedId = lane.sessionId;
+        lane.sessionId = crypto.randomUUID();
+        lane.started = false;
+        if (replacedId && replacedId !== lane.sessionId) {
+          removeTranscripts([replacedId]).catch(error => {
+            logger?.warn?.(`[ClaudeRunner] could not remove a replaced Claude session transcript: ${clip(error?.code || error?.message, 80)}`);
+          });
+        }
+      }
+      let result;
+      let record;
       try {
-        const submitted = await submitHandoff({
+        ({ result, record } = await invokeLoggedStage({ stage, text, handoff, matchTaskId,
+          pageImages: Array.isArray(handoff?.pageImages) ? handoff.pageImages : [],
+          sessionId: lane.sessionId, resume: lane.started, editorialPlan: planReference }));
+        lane.started = true;
+      } finally {
+        lane.contextKey = key;
+        lane.stage = stage;
+        if (entry.abortReason !== 'discard' && (lane.started || wasStarted)) persist();
+      }
+      if (signal.aborted) {
+        const error = new ClaudeRunnerError('CLAUDE_CANCELLED', MESSAGES.cancelled);
+        await logRun(jobId, canvasFilePath, { ...record, event: 'cancelled', error: auditFailure(error) });
+        throw error;
+      }
+      let submitted;
+      try {
+        submitted = await submitHandoff({
           jobId,
           canvasFilePath,
           ...(matchTaskId ? { matchTaskId } : {}),
           handoffCode: handoffCodeOf(handoff),
           response: result?.text ?? '',
         });
-        logRun(jobId, canvasFilePath, { ...record, submit: {
-          accepted: submitted?.accepted === true, completed: submitted?.completed === true,
-          ...(Array.isArray(submitted?.validationErrors) && submitted.validationErrors.length ? { validationErrors: submitted.validationErrors } : {}),
-          ...(submitted?.gone === true ? { gone: true } : {}),
-        } });
-        return submitted;
       } catch (error) {
-        logRun(jobId, canvasFilePath, { ...record, submit: { error: clip(error?.message || error, 300) } });
+        await logRun(jobId, canvasFilePath, { ...record, event: 'submission-error', error: auditFailure(applicationError(error)) });
         if (isEnoent(error)) return { gone: true };
         throw applicationError(error);
       }
+      await logRun(jobId, canvasFilePath, { ...record, event: 'submission', submit: {
+        accepted: submitted?.accepted === true, completed: submitted?.completed === true,
+        ...(Array.isArray(submitted?.validationErrors) && submitted.validationErrors.length ? { validationErrors: submitted.validationErrors } : {}),
+        ...(submitted?.gone === true ? { gone: true } : {}),
+      } });
+      return submitted;
     };
 
     const runTask = async (task) => {

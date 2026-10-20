@@ -16,7 +16,7 @@ import {
   claudeChildEnv,
   claudeCliArgs,
   classifyClaudeFailure,
-  createClaudeApplicationRunner,
+  createClaudeApplicationRunner as createRunner,
   parseClaudeStreamOutput,
   resolveClaudeBinary,
   runClaudeStage,
@@ -24,6 +24,16 @@ import {
 
 const REJECTED_INTRO = n => `\n\nYour previous response to this handoff was rejected by the app. Fix ${n === 1 ? 'this item' : `these ${n} items`} and reply again with the complete corrected response:\n`;
 const FENCE_CORRECTION = 'Paste one valid JSON object (a single JSON code fence is also accepted).';
+
+// Most driver fixtures use a fake canvas at /c.canvas. Audit tests below opt
+// into an actual private temporary log rather than writing beside that path.
+function createClaudeApplicationRunner(options = {}) {
+  return createRunner({ runLogPath: null, capturePrompts: false, ...options });
+}
+
+function readRunLog(file) {
+  return fs.readFileSync(file, 'utf8').trim().split('\n').filter(Boolean).map(line => JSON.parse(line));
+}
 
 async function textsSentFor(handoffs) {
   const script = sequenceApi(handoffs);
@@ -390,6 +400,7 @@ export default [
     name: 'claude runner: Opus writes (xhigh) and judges (high); Sonnet converts (medium) and repairs and fact-checks (high)',
     run() {
       assert.deepEqual(JSON.parse(JSON.stringify(CLAUDE_STAGE_PROFILES)), {
+        'editorial-plan': { model: 'opus', effort: 'xhigh' },
         write: { model: 'opus', effort: 'xhigh' },
         pick: { model: 'opus', effort: 'high' },
         convert: { model: 'sonnet', effort: 'medium' },
@@ -450,6 +461,27 @@ export default [
       const generic = classifyClaudeFailure({ parsed: null, stderr: 'segfault', exitCode: 2 });
       assert.equal(generic.code, 'CLAUDE_ERROR');
       assert.equal(generic.message, 'Claude Code failed (exit 2): segfault');
+    },
+  },
+  {
+    name: 'claude runner: only explicit provider error phrasing is classified as a safeguard block',
+    async run() {
+      const result = "API Error: Opus 5.5's safeguards flagged this message (https://www.anthropic.com/legal/aup). This sometimes happens with safe, normal conversations.\nDetails: `[reasoning_extraction]`\nRequest ID: req_011CgE69C2EX1378K7bDBwD2\nMessage ID: msg_011CgE69CGrrrez7psX9N3ji";
+      const error = await rejection((await stageWith({ stdout: resultLine({ result, models: ['claude-opus-5-5'] }), code: 1 }, claudeStageProfile('write'))).promise);
+      assert.equal(error.code, 'CLAUDE_SAFEGUARD_BLOCKED');
+      assert.equal(error.result, result);
+      assert.equal(error.detail.exitCode, 1);
+      assert.equal(error.detail.subtype, 'success', 'nonzero CLI exit still establishes transport failure');
+      assert.equal(error.detail.refusalCategory, 'reasoning_extraction');
+      assert.equal(error.detail.requestId, 'req_011CgE69C2EX1378K7bDBwD2');
+      assert.equal(error.detail.messageId, 'msg_011CgE69CGrrrez7psX9N3ji');
+      const blocked = classifyClaudeFailure({ parsed: { result: 'Your request was blocked by our safeguards.' }, exitCode: 1 });
+      assert.equal(blocked.code, 'CLAUDE_SAFEGUARD_BLOCKED');
+      for (const mention of ['Please explain the safeguards in this system.', 'The user quoted “safeguards flagged this message” in a bug report.', 'A discussion of a blocked request and safeguards is not a provider rejection.']) {
+        assert.equal(classifyClaudeFailure({ parsed: { result: mention }, exitCode: 1 }).code, 'CLAUDE_ERROR');
+      }
+      const normal = await stageWith({ stdout: resultLine({ result: 'Your request was blocked by our safeguards.' }) });
+      assert.equal((await normal.promise).text, 'Your request was blocked by our safeguards.', 'a successful answer is not reclassified by its subject');
     },
   },
   {
@@ -1053,7 +1085,7 @@ export default [
     },
   },
   {
-    name: 'claude runner run log: every run records stage, session, answer and the app verdict, rejections included',
+    name: 'claude runner run log: correlated start, response and verdict events are durable before submit and completion',
     async run() {
       const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-runlog-'));
       const logFile = path.join(dir, 'runs.jsonl');
@@ -1065,7 +1097,14 @@ export default [
       const submits = [];
       const api = {
         getHandoff: async () => (reads < 2 ? { handoff: handoffs[reads++] } : { completed: true }),
-        submitHandoff: async (args) => { submits.push(args); return submits.length === 1 ? { accepted: false, validationErrors: ['Fix item A.'] } : { accepted: true, completed: true }; },
+        submitHandoff: async (args) => {
+          // The returned answer is on disk before any application mutation.
+          const latest = readRunLog(logFile).at(-1);
+          assert.equal(latest.event, 'response');
+          assert.equal(latest.answer, args.response);
+          submits.push(args);
+          return submits.length === 1 ? { accepted: false, validationErrors: ['Fix item A.'] } : { accepted: true, completed: true };
+        },
       };
       const runner = createClaudeApplicationRunner({
         api, stateFile: path.join(dir, 'state.json'), logger: quietLogger(), homedir: dir,
@@ -1074,18 +1113,32 @@ export default [
       });
       runner.ensure({ jobId: 'job-log', canvasFilePath: '/c.canvas' });
       await waitFor(() => runner.status(['job-log'])['job-log']?.status === 'done', 'done');
+      assert.equal(readRunLog(logFile).at(-1).event, 'submission', 'completion waits for the final app verdict append');
       await runner.shutdown();
-      const rows = fs.readFileSync(logFile, 'utf8').trim().split('\n').map(line => JSON.parse(line));
-      assert.equal(rows.length, 2);
-      assert.deepEqual(rows.map(row => [row.stage, row.model, row.durationMs, row.resume]), [['requirements', 'claude-sonnet-5-5', 7, false], ['requirements', 'claude-sonnet-5-5', 7, true]]);
-      assert.equal(rows[0].sessionId, rows[1].sessionId);
-      assert.deepEqual(rows[0].submit, { accepted: false, completed: false, validationErrors: ['Fix item A.'] });
-      assert.deepEqual(rows[1].submit, { accepted: true, completed: true });
-      assert.equal(rows[0].answer, `answer to ${'prompt one'.length}`);
-      assert.equal(rows[0].promptChars, 'prompt one'.length);
-      assert.match(rows[0].promptSha256, /^[0-9a-f]{64}$/);
+      const rows = readRunLog(logFile);
+      assert.deepEqual(rows.map(row => row.event), ['started', 'response', 'submission', 'started', 'response', 'submission']);
+      const [first, second] = [rows.slice(0, 3), rows.slice(3)];
+      for (const group of [first, second]) {
+        assert.match(group[0].runId, UUID_RE);
+        assert.equal(new Set(group.map(row => row.runId)).size, 1);
+        assert.equal(new Set(group.map(row => row.handoffSha256)).size, 1);
+        for (const row of group) {
+          assert.deepEqual([row.version, row.stage, row.requestedModel, row.requestedEffort], [2, 'requirements', 'sonnet', 'high']);
+          assert.match(row.handoffSha256, /^[0-9a-f]{64}$/);
+          assert.match(row.promptSha256, /^[0-9a-f]{64}$/);
+          assert.equal(Number.isFinite(Date.parse(row.at)), true);
+        }
+      }
+      assert.notEqual(first[0].runId, second[0].runId);
+      assert.deepEqual([first[1].model, first[1].durationMs, first[1].resume], ['claude-sonnet-5-5', 7, false]);
+      assert.deepEqual([second[1].model, second[1].durationMs, second[1].resume], ['claude-sonnet-5-5', 7, true]);
+      assert.equal(first[0].sessionId, second[0].sessionId);
+      assert.deepEqual(first[2].submit, { accepted: false, completed: false, validationErrors: ['Fix item A.'] });
+      assert.deepEqual(second[2].submit, { accepted: true, completed: true });
+      assert.equal(first[1].answer, `answer to ${'prompt one'.length}`);
+      assert.equal(first[0].promptChars, 'prompt one'.length);
       // The second prompt carried the rejection: its text differs from the first.
-      assert.notEqual(rows[1].promptSha256, rows[0].promptSha256);
+      assert.notEqual(second[0].promptSha256, first[0].promptSha256);
     },
   },
   {
@@ -1101,10 +1154,241 @@ export default [
       runner.ensure({ jobId: 'job-fail-log', canvasFilePath: '/c.canvas' });
       await waitFor(() => runner.status(['job-fail-log'])['job-fail-log']?.status === 'failed', 'failed');
       await runner.shutdown();
-      const rows = fs.readFileSync(logFile, 'utf8').trim().split('\n').map(line => JSON.parse(line));
-      assert.equal(rows.length, 1);
-      assert.deepEqual([rows[0].stage, rows[0].error], ['write', { code: 'CLAUDE_USAGE_LIMIT', message: 'Claude usage limit reached.' }]);
-      assert.equal('answer' in rows[0], false);
+      const rows = readRunLog(logFile);
+      assert.deepEqual(rows.map(row => row.event), ['started', 'failed']);
+      assert.equal(rows[0].runId, rows[1].runId);
+      assert.deepEqual([rows[1].stage, rows[1].error], ['write', { code: 'CLAUDE_USAGE_LIMIT', message: 'Claude usage limit reached.' }]);
+      assert.deepEqual([rows[0].requestedModel, rows[0].requestedEffort], ['opus', 'xhigh']);
+      assert.equal('answer' in rows[1], false);
+    },
+  },
+  {
+    name: 'claude runner run log: terminal provider errors retain complete plain results and only whitelisted metadata',
+    async run() {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-runlog-'));
+      const logFile = path.join(dir, 'runs.jsonl');
+      const result = `Provider request failed. ${'More explicit error context. '.repeat(40)}END OF RESULT`;
+      const stream = [
+        JSON.stringify({ type: 'assistant', message: { content: [{ type: 'thinking', thinking: 'PRIVATE_THINKING', signature: 'PRIVATE_SIGNATURE' }] } }),
+        resultLine({ result, isError: true, subtype: 'error_during_execution', apiErrorStatus: 403 }),
+      ].join('\n');
+      const failure = await rejection((await stageWith({ stdout: stream, code: 1 })).promise);
+      assert.equal(failure.result, result);
+      // Future transport metadata must never pass through by object spread.
+      Object.assign(failure.detail, { rawStream: stream, thinking: 'PRIVATE_THINKING', signature: 'PRIVATE_SIGNATURE', secret: 'PRIVATE_SECRET' });
+      let submits = 0;
+      const runner = createClaudeApplicationRunner({
+        api: {
+          getHandoff: async () => ({ handoff: { handoffCode: 'c', stage: 'convert', prompt: 'PRIVATE_PROMPT' } }),
+          submitHandoff: async () => { submits += 1; return { accepted: true, completed: true }; },
+        },
+        stateFile: path.join(dir, 'state.json'), logger: quietLogger(), homedir: dir, runLogPath: () => logFile,
+        runStage: async () => { throw failure; },
+      });
+      runner.ensure({ jobId: 'job-provider-error', canvasFilePath: '/c.canvas' });
+      await waitFor(() => runner.status(['job-provider-error'])['job-provider-error']?.status === 'failed', 'failed');
+      await runner.shutdown();
+      const rows = readRunLog(logFile);
+      assert.deepEqual(rows.map(row => row.event), ['started', 'failed']);
+      assert.equal(rows[1].result, result);
+      assert.deepEqual(rows[1].error.detail, { exitCode: 1, subtype: 'error_during_execution', apiErrorStatus: 403, models: ['claude-sonnet-5-5'], durationMs: 42 });
+      assert.equal(submits, 0);
+      assert.doesNotMatch(fs.readFileSync(logFile, 'utf8'), /PRIVATE_(?:THINKING|SIGNATURE|SECRET|PROMPT)|rawStream/u);
+    },
+  },
+  {
+    name: 'claude runner run log: a safeguard error emitted only on stderr retains its plain message without stream records',
+    async run() {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-runlog-'));
+      const logFile = path.join(dir, 'runs.jsonl');
+      const providerMessage = "API Error: Opus 5.5's safeguards flagged this message.\n\nDetails: `[reasoning_extraction]`\nRequest ID: req_011CgE69C2EX1378K7bDBwD2\nMessage ID: msg_011CgE69CGrrrez7psX9N3ji";
+      const privateStream = JSON.stringify({ type: 'assistant', message: { content: [{ type: 'thinking', thinking: 'PRIVATE_THINKING', signature: 'PRIVATE_SIGNATURE' }] } });
+      const failure = await rejection((await stageWith({ stdout: privateStream, stderr: `${providerMessage}\n${privateStream}\n`, code: 1 }, claudeStageProfile('write'))).promise);
+      assert.equal(failure.code, 'CLAUDE_SAFEGUARD_BLOCKED');
+      assert.equal(failure.result, providerMessage);
+      const script = scriptedApi([{ handoffCode: 'c', stage: 'write', prompt: 'PRIVATE_PROMPT' }]);
+      const runner = createClaudeApplicationRunner({
+        api: script.api, stateFile: path.join(dir, 'state.json'), logger: quietLogger(), homedir: dir, runLogPath: () => logFile,
+        runStage: async () => { throw failure; },
+      });
+      runner.ensure({ jobId: 'job-stderr-safeguard', canvasFilePath: '/c.canvas' });
+      await waitFor(() => runner.status(['job-stderr-safeguard'])['job-stderr-safeguard']?.status === 'failed', 'failed');
+      await runner.shutdown();
+      const rows = readRunLog(logFile);
+      assert.deepEqual(rows.map(row => row.event), ['started', 'failed']);
+      assert.equal(rows[1].result, providerMessage);
+      assert.equal(rows[1].error.detail.refusalCategory, 'reasoning_extraction');
+      assert.equal(rows[1].error.detail.requestId, 'req_011CgE69C2EX1378K7bDBwD2');
+      assert.equal(rows[1].error.detail.messageId, 'msg_011CgE69CGrrrez7psX9N3ji');
+      assert.equal(script.submits.length, 0);
+      assert.doesNotMatch(fs.readFileSync(logFile, 'utf8'), /PRIVATE_(?:THINKING|SIGNATURE|PROMPT)|"type":"assistant"/u);
+    },
+  },
+  {
+    name: 'claude runner run log: cancellation after a model response retains the answer and terminal outcome',
+    async run() {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-runlog-'));
+      const logFile = path.join(dir, 'runs.jsonl');
+      const script = scriptedApi([{ handoffCode: 'c', stage: 'write', prompt: 'p' }]);
+      const runner = createClaudeApplicationRunner({
+        api: script.api, stateFile: path.join(dir, 'state.json'), logger: quietLogger(), homedir: dir, runLogPath: () => logFile,
+        runStage: async () => { script.discard('job-cancel-response'); return { text: 'Complete returned answer', model: 'claude-opus-5-5' }; },
+      });
+      runner.ensure({ jobId: 'job-cancel-response', canvasFilePath: '/c.canvas' });
+      await waitFor(() => fs.existsSync(logFile) && readRunLog(logFile).some(row => row.event === 'cancelled'), 'cancelled log');
+      await runner.shutdown();
+      const rows = readRunLog(logFile);
+      assert.deepEqual(rows.map(row => row.event), ['started', 'response', 'cancelled']);
+      assert.equal(new Set(rows.map(row => row.runId)).size, 1);
+      assert.equal(rows[1].answer, 'Complete returned answer');
+      assert.equal(rows[2].error.code, 'CLAUDE_CANCELLED');
+      assert.equal(script.submits.length, 0);
+    },
+  },
+  {
+    name: 'claude runner run log: a failed start or response append stops the job without submitting',
+    async run() {
+      for (const failedEvent of ['started', 'response']) {
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-runlog-'));
+        const logFile = path.join(dir, 'runs.jsonl');
+        const script = scriptedApi([{ handoffCode: 'c', stage: 'write', prompt: 'p' }]);
+        let modelRuns = 0;
+        const logger = quietLogger();
+        const runner = createClaudeApplicationRunner({
+          api: script.api, stateFile: path.join(dir, 'state.json'), logger, homedir: dir, runLogPath: () => logFile,
+          fsImpl: {
+            ...fs.promises,
+            appendFile: async (file, line, options) => {
+              if (JSON.parse(line).event === failedEvent) throw Object.assign(new Error('Contains private path details'), { code: 'ENOSPC' });
+              await fs.promises.appendFile(file, line, options);
+            },
+          },
+          runStage: async () => { modelRuns += 1; return { text: 'Unrecorded answer' }; },
+        });
+        const jobId = `job-log-fails-${failedEvent}`;
+        runner.ensure({ jobId, canvasFilePath: '/c.canvas' });
+        await waitFor(() => runner.status([jobId])[jobId]?.status === 'failed', 'failed');
+        assert.equal(runner.status([jobId])[jobId].code, 'CLAUDE_LOG_ERROR');
+        assert.equal(script.submits.length, 0);
+        assert.equal(modelRuns, failedEvent === 'started' ? 0 : 1);
+        assert.deepEqual(logger.warns, ['[ClaudeRunner] could not write the Claude run log: ENOSPC']);
+        assert.doesNotMatch(runner.status([jobId])[jobId].message, /private path details/u);
+        await runner.shutdown();
+      }
+    },
+  },
+  {
+    name: 'claude runner run log: an unwritable app verdict cannot report successful completion',
+    async run() {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-runlog-'));
+      const logFile = path.join(dir, 'runs.jsonl');
+      const script = scriptedApi([{ handoffCode: 'c', stage: 'convert', prompt: 'p' }]);
+      const runner = createClaudeApplicationRunner({
+        api: script.api, stateFile: path.join(dir, 'state.json'), logger: quietLogger(), homedir: dir, runLogPath: () => logFile,
+        fsImpl: { ...fs.promises, appendFile: async (file, line, options) => {
+          if (JSON.parse(line).event === 'submission') throw Object.assign(new Error('disk full'), { code: 'ENOSPC' });
+          return fs.promises.appendFile(file, line, options);
+        } },
+        runStage: async () => ({ text: 'Returned answer' }),
+      });
+      runner.ensure({ jobId: 'job-verdict-log-fails', canvasFilePath: '/c.canvas' });
+      await waitFor(() => runner.status(['job-verdict-log-fails'])['job-verdict-log-fails']?.status === 'failed', 'failed');
+      await runner.shutdown();
+      assert.equal(runner.status(['job-verdict-log-fails'])['job-verdict-log-fails'].code, 'CLAUDE_LOG_ERROR');
+      assert.equal(script.submits.length, 1);
+      assert.deepEqual(readRunLog(logFile).map(row => row.event), ['started', 'response']);
+    },
+  },
+  {
+    name: 'claude runner run log: default private paths reject symlink redirects and nonregular files before invoking Claude',
+    async run() {
+      for (const kind of ['root-link', 'directory-link', 'file-link', 'nonregular-file']) {
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-private-log-'));
+        const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-private-outside-'));
+        const untouched = path.join(outside, 'untouched.jsonl');
+        fs.writeFileSync(untouched, 'Unmodified private data');
+        const localRoot = path.join(dir, '.local-ai');
+        const logDir = path.join(localRoot, 'claude-runs');
+        const jobId = `job-private-${kind}`;
+        if (kind === 'root-link') fs.symlinkSync(outside, localRoot, 'dir');
+        else {
+          fs.mkdirSync(localRoot);
+          if (kind === 'directory-link') fs.symlinkSync(outside, logDir, 'dir');
+          else {
+            fs.mkdirSync(logDir);
+            const logFile = path.join(logDir, `${jobId}.jsonl`);
+            if (kind === 'file-link') fs.symlinkSync(untouched, logFile);
+            else fs.mkdirSync(logFile);
+          }
+        }
+        let modelRuns = 0;
+        const script = scriptedApi([{ handoffCode: 'c', stage: 'write', prompt: 'p' }]);
+        const runner = createRunner({
+          api: script.api, stateFile: path.join(dir, 'state.json'), logger: quietLogger(), homedir: dir,
+          runStage: async () => { modelRuns += 1; return { text: 'answer' }; },
+        });
+        runner.ensure({ jobId, canvasFilePath: path.join(dir, 'test.canvas') });
+        await waitFor(() => runner.status([jobId])[jobId]?.status === 'failed', 'failed');
+        await runner.shutdown();
+        assert.equal(runner.status([jobId])[jobId].code, 'CLAUDE_LOG_ERROR', kind);
+        assert.equal(modelRuns, 0, kind);
+        assert.equal(script.submits.length, 0, kind);
+        assert.equal(fs.readFileSync(untouched, 'utf8'), 'Unmodified private data', kind);
+        assert.deepEqual(fs.readdirSync(outside), ['untouched.jsonl'], 'even directory creation stays inside the canvas');
+      }
+    },
+  },
+  {
+    name: 'claude runner run log: existing default log files become private and preserve prior events',
+    async run() {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-private-log-'));
+      const logDir = path.join(dir, '.local-ai', 'claude-runs');
+      fs.mkdirSync(logDir, { recursive: true, mode: 0o755 });
+      const logFile = path.join(logDir, 'job-private-success.jsonl');
+      fs.writeFileSync(logFile, `${JSON.stringify({ event: 'old-event' })}\n`, { mode: 0o644 });
+      const script = scriptedApi([{ handoffCode: 'c', stage: 'write', prompt: 'p' }]);
+      const runner = createRunner({
+        api: script.api, stateFile: path.join(dir, 'state.json'), logger: quietLogger(), homedir: dir,
+        runStage: async () => ({ text: 'answer' }),
+      });
+      runner.ensure({ jobId: 'job-private-success', canvasFilePath: path.join(dir, 'test.canvas') });
+      await waitFor(() => runner.status(['job-private-success'])['job-private-success']?.status === 'done', 'done');
+      await runner.shutdown();
+      assert.deepEqual(readRunLog(logFile).map(row => row.event), ['old-event', 'started', 'response', 'submission']);
+      assert.equal(fs.statSync(logFile).mode & 0o777, 0o600);
+      assert.equal(fs.statSync(logDir).mode & 0o777, 0o700);
+    },
+  },
+  {
+    name: 'claude runner run log: parallel queued stages retain their own model profile and audit identity',
+    async run() {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-runlog-'));
+      const logFile = path.join(dir, 'runs.jsonl');
+      const done = new Set();
+      const api = {
+        getHandoff: async ({ matchTaskId }) => {
+          if (!matchTaskId) return done.size === 2 ? { completed: true } : { handoff: { stage: 'match-wave', parallelTasks: [{ id: 'writer' }, { id: 'converter' }] } };
+          return done.has(matchTaskId) ? { completed: true } : { handoff: { handoffCode: matchTaskId, prompt: matchTaskId, stage: matchTaskId === 'writer' ? 'write' : 'convert' } };
+        },
+        submitHandoff: async ({ matchTaskId }) => { done.add(matchTaskId); return { accepted: true, completed: true }; },
+      };
+      const profiles = [];
+      const runner = createClaudeApplicationRunner({
+        api, concurrency: 1, stateFile: path.join(dir, 'state.json'), logger: quietLogger(), homedir: dir, runLogPath: () => logFile,
+        runStage: async ({ stage, model, effort }) => { profiles.push([stage, model, effort]); return { text: 'answer' }; },
+      });
+      runner.ensure({ jobId: 'job-parallel-log', canvasFilePath: '/c.canvas' });
+      await waitFor(() => runner.status(['job-parallel-log'])['job-parallel-log']?.status === 'done', 'done');
+      await runner.shutdown();
+      assert.deepEqual(profiles, [['write', 'opus', 'xhigh'], ['convert', 'sonnet', 'medium']]);
+      const rows = readRunLog(logFile);
+      for (const [matchTaskId, stage, model, effort] of [['writer', 'write', 'opus', 'xhigh'], ['converter', 'convert', 'sonnet', 'medium']]) {
+        const group = rows.filter(row => row.matchTaskId === matchTaskId);
+        assert.deepEqual(group.map(row => row.event), ['started', 'response', 'submission']);
+        assert.equal(new Set(group.map(row => row.runId)).size, 1);
+        for (const row of group) assert.deepEqual([row.stage, row.requestedModel, row.requestedEffort], [stage, model, effort]);
+      }
+      assert.equal(new Set(rows.map(row => row.runId)).size, 2);
     },
   },
 ];

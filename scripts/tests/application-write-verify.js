@@ -68,8 +68,9 @@ export default [
       assert.equal(WRITE_VERIFY_BRIEF.includes('a claim about your work this job needs'), false, 'the implicit-link wording is gone');
       assert.match(WRITE_VERIFY_JUDGE_RUBRIC, /The point must name both the candidate's work and the specific part of this job it serves/u);
       assert.match(WRITE_VERIFY_JUDGE_RUBRIC, /a final sentence that only restates the relevance/u);
-      assert.match(WRITE_VERIFY_SHORTLIST_STEP, /a line reading exactly DECISION LOG \(WORKING NOTES\) and under it record every decision you make and why/u);
-      assert.ok(WRITE_VERIFY_SHORTLIST_STEP.indexOf('DECISION LOG (WORKING NOTES)') > WRITE_VERIFY_SHORTLIST_STEP.indexOf('EVIDENCE SHORTLIST (WORKING NOTES)'), 'the decision log follows the shortlist');
+      assert.match(WRITE_VERIFY_SHORTLIST_STEP, /a line reading exactly EDITORIAL SUMMARY, give a short explanation of the finished application/u);
+      assert.ok(WRITE_VERIFY_SHORTLIST_STEP.indexOf('EDITORIAL SUMMARY') > WRITE_VERIFY_SHORTLIST_STEP.indexOf('EVIDENCE SHORTLIST'), 'the explanation follows the evidence appendix');
+      assert.match(WRITE_VERIFY_SHORTLIST_STEP, /After the complete letter, add two editorial appendices/u);
       assert.ok(WRITE_VERIFY_BRIEF.includes(' End on your argument, not stock courtesy. '), 'the close is the argument, not courtesy');
       // Sabotage: the replaced letter sentences must be gone, so the brief carries one letter instruction set, not two.
       assert.equal(WRITE_VERIFY_BRIEF.includes('your hedged read'), false, 'the old hedged-read wording is gone');
@@ -382,15 +383,15 @@ export default [
     },
   },
   {
-    name: 'v2 writer shortlist is a working step retained outside conversion across three synthetic careers',
+    name: 'v2 writer appendices stay outside conversion and historical replies remain readable across three synthetic careers',
     run() {
       for (const [domain, action] of domains) {
         const ids = Array.from({ length: 6 }, (_, index) => `host.career.achievement.${domain}-${index + 1}.1`);
         const state = initialWriteVerifyState(1);
         const envelope = { protocol: 'paste-application.v1', jobId: JOB_ID, stage: 'write' };
         const writePrompt = writeVerifyPrompt({ stage: 'write', state, sourcePrompt: `${domain} posting and full grouped catalog`, envelope });
-        assert.ok(writePrompt.includes('Before the résumé, list the 6–10 strongest true evidence items'), domain);
-        assert.ok(writePrompt.includes('EVIDENCE SHORTLIST (WORKING NOTES)'), domain);
+        assert.ok(writePrompt.includes('After the complete letter, add two editorial appendices'), domain);
+        assert.ok(writePrompt.includes('EDITORIAL SUMMARY'), domain);
         const response = `EVIDENCE SHORTLIST (WORKING NOTES)\n\n${ids.map((id, index) => `${index + 1}. ${id} — ${action} reason ${index + 1}.`).join('\n')}\n\nRÉSUMÉ\n${action} work.\n\nCOVER LETTER\nI would bring ${action} experience.`;
         const separated = splitWriteVerifyWriterResponse(response, ids);
         assert.equal(separated.shortlist.split('\n').length, 6, domain);

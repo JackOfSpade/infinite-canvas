@@ -28,6 +28,10 @@ import application_career_authority from './tests/application-career-authority.j
 import application_write_verify from './tests/application-write-verify.js';
 import cover_letter_hedged_diagnosis from './tests/cover-letter-hedged-diagnosis.js';
 import claude_application_runner from './tests/claude-application-runner.js';
+import claude_application_sdk_stage from './tests/claude-application-sdk-stage.js';
+import application_editorial_plan from './tests/application-editorial-plan.js';
+import application_editorial_plan_archive from './tests/application-editorial-plan-archive.js';
+import claude_application_diagnostics from './tests/claude-application-diagnostics.js';
 import handoff_bridge_application_executor from './tests/handoff-bridge-application-executor.js';
 import application_claude_dock from './tests/application-claude-dock.js';
 import application_v2_writer_shortlist from './tests/application-v2-writer-shortlist.js';
@@ -194,6 +198,10 @@ const testGroups = [
   ['application-write-verify.js', application_write_verify],
   ['cover-letter-hedged-diagnosis.js', cover_letter_hedged_diagnosis],
   ['claude-application-runner.js', claude_application_runner],
+  ['claude-application-sdk-stage.js', claude_application_sdk_stage],
+  ['application-editorial-plan.js', application_editorial_plan],
+  ['application-editorial-plan-archive.js', application_editorial_plan_archive],
+  ['claude-application-diagnostics.js', claude_application_diagnostics],
   ['handoff-bridge-application-executor.js', handoff_bridge_application_executor],
   ['application-claude-dock.js', application_claude_dock],
   ['application-v2-writer-shortlist.js', application_v2_writer_shortlist],

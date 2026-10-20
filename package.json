@@ -30,13 +30,13 @@
   "build": {
     "appId": "com.antigravity.infinitecanvas",
     "mac": {
-    "target": "dir",
-    "identity": "AI Chalkboard Local Code Signing",
-    "forceCodeSigning": true,
-    "timestamp": "none",
-    "extendInfo": {
-      "NSAppleEventsUsageDescription": "Open and check ChatGPT worker chats in Google Chrome."
-    }
+      "target": "dir",
+      "identity": "AI Chalkboard Local Code Signing",
+      "forceCodeSigning": true,
+      "timestamp": "none",
+      "extendInfo": {
+        "NSAppleEventsUsageDescription": "Open and check ChatGPT worker chats in Google Chrome."
+      }
     },
     "directories": {
       "buildResources": "build",
@@ -44,7 +44,8 @@
     },
     "files": [
       "dist",
-      "dist-electron"
+      "dist-electron",
+      "!node_modules/@anthropic-ai/claude-agent-sdk-*/**/*"
     ],
     "extraResources": [
       {
@@ -73,6 +74,7 @@
     ]
   },
   "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "0.3.305",
     "chromium-bidi": "^14.0.0",
     "electron-store": "^11.0.2",
     "html-to-text": "^10.0.1",

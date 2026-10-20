@@ -90,6 +90,9 @@ export default defineConfig({
                 'puppeteer-core',
                 'puppeteer-extra',
                 'puppeteer-extra-plugin-stealth',
+                // The SDK loads runtime files relative to its own package and
+                // launches the user's installed Claude Code executable.
+                '@anthropic-ai/claude-agent-sdk',
                 // jsdom uses __dirname-relative readFileSync for browser/default-stylesheet.css;
                 // bundling it corrupts that path to dist-electron/ instead of node_modules/jsdom/.
                 'jsdom',

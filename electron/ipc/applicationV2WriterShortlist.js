@@ -1,7 +1,10 @@
 import path from 'node:path';
+import { atomicWriteJson, ensureDirectoryWithinRoot } from '../utils/pathSafety.js';
 
 const SHORTLIST_HEADING = /^\s{0,3}#{0,6}\s*EVIDENCE SHORTLIST \(WORKING NOTES\)\s*:?[ \t]*$/iu;
 const DECISION_LOG_HEADING = /^\s{0,3}#{0,6}\s*DECISION LOG \(WORKING NOTES\)\s*:?[ \t]*$/iu;
+const EVIDENCE_APPENDIX_HEADING = /^\s{0,3}#{0,6}\s*EVIDENCE SHORTLIST\s*:?[ \t]*$/iu;
+const EDITORIAL_SUMMARY_HEADING = /^\s{0,3}#{0,6}\s*EDITORIAL SUMMARY\s*:?[ \t]*$/iu;
 const RESUME_HEADING = /^\s{0,3}#{0,6}\s*(?:RÉSUMÉ|RESUME)\s*:?[ \t]*$/iu;
 const LETTER_HEADING = /^\s{0,3}#{0,6}\s*(?:COVER LETTER|LETTER)\s*:?[ \t]*$/iu;
 const CATALOG_ID = /host\.career\.[a-z]+\.[a-z0-9-]+\.[0-9]+/gu;
@@ -48,6 +51,25 @@ export function splitWriteVerifyWriterResponse(response, allowedIds) {
     throw new Error('Writer must return a plain-text résumé and cover letter with no JSON.');
   }
   const lines = response.split(/\r?\n/u);
+  // Current writers explain the completed application in trailing appendices.
+  // Normalize into the historical parser so old in-flight replies still work.
+  const first = lines.findIndex(line => line.trim());
+  if (RESUME_HEADING.test(lines[first] || '')) {
+    const letter = lines.findIndex((line, index) => index > first && LETTER_HEADING.test(line));
+    const evidence = lines.findIndex(line => EVIDENCE_APPENDIX_HEADING.test(line));
+    const summary = lines.findIndex(line => EDITORIAL_SUMMARY_HEADING.test(line));
+    if (letter <= first || evidence <= letter || (summary >= 0 && summary <= evidence)
+      || lines.filter(line => EVIDENCE_APPENDIX_HEADING.test(line)).length !== 1
+      || lines.filter(line => EDITORIAL_SUMMARY_HEADING.test(line)).length > 1) {
+      throw new Error('Writer must return RÉSUMÉ, COVER LETTER, EVIDENCE SHORTLIST, then EDITORIAL SUMMARY as separate sections.');
+    }
+    const split = splitWriteVerifyWriterResponse(['EVIDENCE SHORTLIST (WORKING NOTES)',
+      ...lines.slice(evidence + 1, summary >= 0 ? summary : lines.length),
+      ...lines.slice(first, evidence)].join('\n'), allowedIds);
+    // The explanation is data. Its own résumé/letter subheadings must never
+    // participate in finding the delivered document boundaries.
+    return { ...split, decisions: summary >= 0 ? lines.slice(summary + 1).join('\n').trim() : '' };
+  }
   const heading = lines.findIndex(line => SHORTLIST_HEADING.test(line));
   const resume = lines.findIndex((line, index) => index > heading && RESUME_HEADING.test(line));
   if (heading < 0 || lines.slice(0, heading).some(line => line.trim()) || resume <= heading + 1) {
@@ -99,7 +121,8 @@ export function splitWriteVerifyWriterResponse(response, allowedIds) {
     throw new Error(`Writer must return nonempty résumé and cover letter sections with a COVER LETTER heading. ${FORM_SUFFIX}`);
   }
   const plainText = lines.slice(resume).join('\n').trim();
-  if (/(?:EVIDENCE SHORTLIST|DECISION LOG)\s*\(WORKING NOTES\)/iu.test(plainText)) {
+  if (/(?:EVIDENCE SHORTLIST|DECISION LOG)\s*\(WORKING NOTES\)/iu.test(plainText)
+    || plainText.split('\n').some(line => EVIDENCE_APPENDIX_HEADING.test(line) || EDITORIAL_SUMMARY_HEADING.test(line))) {
     throw new Error(`Working shortlist must stay before the résumé, outside application text. ${FORM_SUFFIX}`);
   }
   if (plainText.match(CATALOG_ID)) {
@@ -118,4 +141,20 @@ export function v2WriterShortlistEvidencePaths(jobDir, jobId, filename) {
     working: path.join(jobDir, 'writer-shortlists', filename),
     retained: path.join(path.dirname(path.dirname(jobDir)), 'writer-shortlists', jobId, filename),
   };
+}
+
+/** Keep the editorial summary after saving removes the working job directory. */
+export async function archiveV2WriterNotes({ jobDir, jobId, revision, candidateId, responseSha256, split }) {
+  if (!Number.isSafeInteger(revision) || revision < 0 || !/^candidate-[1-9][0-9]*$/u.test(candidateId)
+    || !/^[a-f0-9]{64}$/u.test(responseSha256) || typeof split?.shortlist !== 'string'
+    || typeof split?.decisions !== 'string') throw new Error('Invalid v2 writer notes record.');
+  const paths = v2WriterShortlistEvidencePaths(jobDir, jobId, `revision-${revision}-write-${responseSha256}.json`);
+  const canvasRoot = path.dirname(path.dirname(path.dirname(jobDir)));
+  const evidence = { stage: 'write', revision, candidateId, responseSha256, shortlist: split.shortlist,
+    decisions: split.decisions, decisionLogPresent: Boolean(split.decisions), decisionLogKind: 'editorial-summary' };
+  for (const file of [paths.working, paths.retained]) {
+    await ensureDirectoryWithinRoot(canvasRoot, path.dirname(file), { mode: 0o700, label: 'Writer notes archive' });
+    await atomicWriteJson(file, evidence, { mode: 0o600, pretty: true, ensureDir: false });
+  }
+  return paths;
 }

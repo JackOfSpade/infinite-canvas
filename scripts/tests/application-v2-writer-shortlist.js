@@ -1,5 +1,8 @@
 import assert from 'node:assert/strict';
-import { splitWriteVerifyWriterResponse } from '../../electron/ipc/applicationV2WriterShortlist.js';
+import fs from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+import { archiveV2WriterNotes, splitWriteVerifyWriterResponse } from '../../electron/ipc/applicationV2WriterShortlist.js';
 
 // Synthetic catalog built from three synthetic domains: freight, clinic, library.
 const ID = {
@@ -237,6 +240,71 @@ export default [
       assert.equal(parse(working).decisions, '');
       // The log may not appear inside the application text.
       assert.throws(() => splitWriteVerifyWriterResponse(['EVIDENCE SHORTLIST (WORKING NOTES)', ...working, 'RÉSUMÉ', RESUME_BODY, 'DECISION LOG (WORKING NOTES)', 'note', 'COVER LETTER', LETTER_BODY].join('\n'), ALLOWED), /must stay before the résumé/u);
+    },
+  },
+  {
+    name: 'v2 writer appendices: completed documents lead and editorial explanation is excluded from conversion',
+    run() {
+      const explanation = 'The dispatch example supports the scheduling need. The clinic example was omitted because it adds less relevant evidence.';
+      const response = [PLAIN, 'EVIDENCE SHORTLIST', ...fullLines(SIX), 'EDITORIAL SUMMARY', explanation].join('\n');
+      const split = splitWriteVerifyWriterResponse(response, ALLOWED);
+      assert.equal(split.plainText, PLAIN);
+      assert.equal(split.decisions, explanation);
+      assert.deepEqual(split.ids, SIX);
+      assert.equal(split.shortlist, fullLines(SIX).join('\n'));
+      const headedExplanation = `${explanation}\nRÉSUMÉ\nThe order follows relevant evidence.\nCOVER LETTER\nThe paragraphs develop the thesis.`;
+      const headed = splitWriteVerifyWriterResponse(response.replace(explanation, headedExplanation), ALLOWED);
+      assert.equal(headed.plainText, PLAIN);
+      assert.equal(headed.decisions, headedExplanation);
+      const absent = splitWriteVerifyWriterResponse([PLAIN, 'EVIDENCE SHORTLIST', ...fullLines(SIX)].join('\n'), ALLOWED);
+      assert.equal(absent.decisions, '');
+      assert.equal(absent.plainText, PLAIN);
+      assert.throws(() => splitWriteVerifyWriterResponse(response.replace('COVER LETTER', 'EDITORIAL SUMMARY'), ALLOWED), /separate sections/u);
+      assert.throws(() => splitWriteVerifyWriterResponse(`${response}\nEDITORIAL SUMMARY\nRepeated appendix`, ALLOWED), /separate sections/u);
+      assert.throws(() => splitWriteVerifyWriterResponse(response.replace(RESUME_BODY, ID.freight1), ALLOWED), /must not contain catalog evidence IDs/u);
+      assert.throws(() => splitWriteVerifyWriterResponse(response.replace(`${LETTER_BODY}\n`, ''), ALLOWED), /nonempty résumé and cover letter/u);
+    },
+  },
+  {
+    name: 'v2 writer notes: production archive retains editorial summaries after working job removal and records missing summaries',
+    async run() {
+      const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'writer-notes-')));
+      const jobId = '11111111-1111-4111-8111-111111111111';
+      const jobDir = path.join(root, '.local-ai', 'jobs', jobId);
+      try {
+        const notes = 'Thesis: reliable dispatch. Selected depot evidence over clinic evidence for its direct operational relevance.';
+        const text = [PLAIN, 'EVIDENCE SHORTLIST', ...fullLines(SIX), 'EDITORIAL SUMMARY', notes].join('\n');
+        const split = splitWriteVerifyWriterResponse(text, ALLOWED);
+        const paths = await archiveV2WriterNotes({ jobDir, jobId, revision: 2, candidateId: 'candidate-1', responseSha256: 'a'.repeat(64), split });
+        const working = JSON.parse(await fs.readFile(paths.working, 'utf8'));
+        assert.deepEqual(JSON.parse(await fs.readFile(paths.retained, 'utf8')), working);
+        assert.equal(working.decisions, notes);
+        assert.equal(working.decisionLogPresent, true);
+        assert.equal(working.decisionLogKind, 'editorial-summary');
+        assert.equal(split.plainText, PLAIN);
+        assert.equal((await fs.stat(paths.retained)).mode & 0o777, 0o600);
+        await fs.rm(jobDir, { recursive: true, force: true });
+        assert.equal(JSON.parse(await fs.readFile(paths.retained, 'utf8')).decisions, notes);
+        const absent = await archiveV2WriterNotes({ jobDir, jobId, revision: 3, candidateId: 'candidate-2', responseSha256: 'b'.repeat(64), split: parse(fullLines(SIX)) });
+        const missing = JSON.parse(await fs.readFile(absent.retained, 'utf8'));
+        assert.equal(missing.decisionLogPresent, false);
+        assert.equal(missing.decisions, '');
+      } finally { await fs.rm(root, { recursive: true, force: true }); }
+    },
+  },
+  {
+    name: 'v2 writer notes: a substituted archive directory cannot redirect candidate notes',
+    async run() {
+      const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'writer-notes-link-')));
+      const outside = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'writer-notes-outside-')));
+      const jobId = '11111111-1111-4111-8111-111111111111';
+      try {
+        await fs.mkdir(path.join(root, '.local-ai'), { mode: 0o700 });
+        await fs.symlink(outside, path.join(root, '.local-ai', 'writer-shortlists'), 'dir');
+        await assert.rejects(archiveV2WriterNotes({ jobDir: path.join(root, '.local-ai', 'jobs', jobId), jobId,
+          revision: 1, candidateId: 'candidate-1', responseSha256: 'a'.repeat(64), split: parse(fullLines(SIX)) }), /symbolic link|regular directory/u);
+        assert.deepEqual(await fs.readdir(outside), []);
+      } finally { await fs.rm(root, { recursive: true, force: true }); await fs.rm(outside, { recursive: true, force: true }); }
     },
   },
 ];
