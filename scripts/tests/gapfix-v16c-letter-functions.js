@@ -140,13 +140,15 @@ function planOf(paragraphs) {
   };
 }
 
-// Every check the host runs on a final letter: the editorial battery and the audit's argument links.
+// Every check the host runs on a final letter: the editorial battery as production runs it (checks
+// whose disposition is 'off' are not run) and the audit's argument links.
 function battery(domain, paragraphs) {
   const texts = paragraphs.map(paragraph => paragraph.sentences.join(' '));
   return [
     ...evaluateCoverLetterChecks({
       plan: {}, paragraphs: texts, evidence: { roles: [{ company: domain.employer }], projects: [], bullets: [] }, jobText: domain.posting, researchText: '', companyName: domain.company,
       paragraphCitations: domain.citations ? paragraphs.map(() => domain.quotes) : null,
+      activeOnly: true,
     }),
     checkParagraphArgumentLinks({ plan: planOf(paragraphs), paragraphs: texts, jobText: domain.posting }),
   ];
@@ -171,7 +173,6 @@ const PHRASE_OF = Object.freeze({
   'claim-and-relevance': 'a claim phrase and a sentence relating its proof to the job need',
   proof: 'a proof sentence in every proof-bearing paragraph',
   opening: 'an opening that leads with the target work',
-  closing: 'the closing’s asset, action and target parts',
   proportion: 'proportion limits',
 });
 
@@ -188,7 +189,7 @@ export default [
     },
   },
   {
-    name: 'Host functions, deletion: every check that newly fails when one sentence of a letter is deleted is named by the exported map, and the checks reached include the opening, the role context, the argument links, the proportion limits and the closing (4 domains, A/B/C)',
+    name: 'Host functions, deletion: every check that newly fails when one sentence of a letter is deleted is named by the exported map, and the checks reached include the opening, the role context, the argument links and the proportion limits, and never the closing, whose check is off (4 domains, A/B/C)',
     run() {
       const reached = new Set();
       for (const domain of DOMAINS) {
@@ -202,14 +203,17 @@ export default [
       // B: the test is not vacuous in the other direction either: some deletions lose no function at all (a trailing sentence of a three-sentence paragraph, the closing).
       const allRows = DOMAINS.flatMap(domain => deletions(domain));
       assert(allRows.some(row => row.newly.length === 0) && allRows.some(row => row.newly.length > 0), 'B: some deletions are free and some are not');
-      for (const id of ['opening-artifact-context', 'prior-employer-opening', 'paragraph-argument-links', 'letter-proportion', 'direct-welcome-closing']) {
+      for (const id of ['opening-artifact-context', 'prior-employer-opening', 'paragraph-argument-links', 'letter-proportion']) {
         assert(reached.has(id), `C: the experiment reaches ${id} (reached ${[...reached].join(', ')})`);
         assert(Object.hasOwn(HOST_REQUIRED_LETTER_FUNCTION_CHECKS, id), `C: and the map names it`);
       }
-      // The closing's source: with no cited quote, deleting the only sentence that says the candidate made the noun rejects the closing.
+      // The closing is the writer's choice: its check is off, so no production deletion reports it and the map does not name it.
+      // The seed bank letter has no cited quote, so deleting the sentence that licenses its closing noun is the deletion that used to reject the closing.
       const seed = DOMAINS.find(domain => domain.key === 'seed bank curation');
       const rows = deletions(seed);
-      assert(rows.some(row => row.newly.includes('direct-welcome-closing')), `C: deleting the sentence that licenses the closing's noun rejects the closing (${rows.map(row => `${row.at}: ${row.newly.join('+') || 'none'}`).join('; ')})`);
+      assert(rows.length > 0 && !rows.some(row => row.newly.includes('direct-welcome-closing')), `C: no deletion of the seed bank letter reports direct-welcome-closing (${rows.map(row => `${row.at}: ${row.newly.join('+') || 'none'}`).join('; ')})`);
+      assert(!reached.has('direct-welcome-closing'), `C: no production deletion in any domain reports direct-welcome-closing (reached ${[...reached].join(', ')})`);
+      assert(!Object.hasOwn(HOST_REQUIRED_LETTER_FUNCTION_CHECKS, 'direct-welcome-closing'), 'C: and the map no longer names the closing check');
     },
   },
   {
@@ -218,7 +222,8 @@ export default [
       const rows = DOMAINS.flatMap(domain => deletions(domain));
       assert(unnamed(rows, HOST_REQUIRED_LETTER_FUNCTION_CHECKS).length === 0, 'A: the real map covers every deleted-sentence failure');
       const reached = [...new Set(rows.flatMap(row => row.newly))].sort();
-      assert(reached.length >= 5, `the experiment reaches at least five distinct checks (${reached.join(', ')})`);
+      // The closing check is off, so the experiment reaches exactly the four checks production runs that lose a function.
+      assert(reached.join() === 'letter-proportion,opening-artifact-context,paragraph-argument-links,prior-employer-opening', `the experiment reaches exactly four distinct checks (${reached.join(', ')})`);
       for (const id of reached) {
         const mutated = Object.fromEntries(Object.entries(HOST_REQUIRED_LETTER_FUNCTION_CHECKS).filter(([key]) => key !== id));
         const gaps = unnamed(rows, mutated);
@@ -241,9 +246,18 @@ export default [
       assert([...used].sort().join() === Object.keys(PHRASE_OF).sort().join(), `the map points at exactly the functions this test knows (${[...used].join(', ')})`);
       for (const name of used) assert(HOST_REQUIRED_LETTER_FUNCTIONS.includes(PHRASE_OF[name]), `the list says the ${name} function: ${PHRASE_OF[name]}`);
       for (const [id, names] of Object.entries(HOST_REQUIRED_LETTER_FUNCTION_CHECKS)) assert(Array.isArray(names) && names.length >= 1 && Object.isFrozen(names), `${id} names at least one function, immutably`);
-      // C: the written doc prints the same list (apostrophes and line breaks aside) and no longer says "all of these".
+      // The closing is the writer's choice: no function names it, and neither the list nor the rule prescribes its parts.
+      assert(!used.has('closing') && !/\bclosing\b/iu.test(HOST_REQUIRED_LETTER_FUNCTIONS), `the list names no closing function: ${HOST_REQUIRED_LETTER_FUNCTIONS}`);
+      assert(!raised.includes('the closing’s asset, action and target parts'), 'and the rule no longer prints the closing’s parts');
+      // The list stays one grammatical series, "A, B, C, and D".
+      assert(/^a claim phrase and a sentence relating its proof to the job need in [^,]+, a proof sentence/u.test(HOST_REQUIRED_LETTER_FUNCTIONS)
+        && HOST_REQUIRED_LETTER_FUNCTIONS.endsWith(', a proof sentence in every proof-bearing paragraph, an opening that leads with the target work, with the candidate’s role stated wherever a prior employer or named project is first named, and paragraphs long enough to stay within the letter’s proportion limits'),
+        `the list is the four functions in one series: ${HOST_REQUIRED_LETTER_FUNCTIONS}`);
+      // C: the written doc prints exactly the constant's list (apostrophes and line breaks aside), with no closing parts,
+      // and no longer says "all of these".
       const doc = flat(fs.readFileSync(path.resolve('local_ai/PASTE_BACK_APPLICATION.md'), 'utf8'));
-      assert(doc.includes(`Among the functions the app requires of a cover-letter paragraph are these: ${flat(HOST_REQUIRED_LETTER_FUNCTIONS)}`), 'PASTE_BACK_APPLICATION.md prints the list');
+      assert(!doc.includes('closing\'s asset, action and target parts'), 'the doc no longer prints the closing\'s asset, action and target parts');
+      assert(doc.includes(`Among the functions the app requires of a cover-letter paragraph are these: ${flat(HOST_REQUIRED_LETTER_FUNCTIONS)}.`), 'PASTE_BACK_APPLICATION.md prints the list');
       assert(!doc.includes('those functions are all of these'), 'and no longer calls it complete');
       // The mutation: a list without the opening function fails the doc comparison.
       const withoutOpening = flat(HOST_REQUIRED_LETTER_FUNCTIONS).replace(', an opening that leads with the target work, with the candidate\'s role stated wherever a prior employer or named project is first named', '');

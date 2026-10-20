@@ -5413,8 +5413,9 @@ export function closingContributionParts() {
 }
 
 // The functions the host requires of the sentences of a cover letter, each in one phrase, and the
-// checks that can reject a letter for losing one. The phrases are built from the budgets and the
-// closing's own halves so they can never name a function the gates do not read; the map from check
+// checks that can reject a letter for losing one. No closing function is listed: how a letter closes
+// is the writer's choice. The phrases are built from the budgets so they can never name a function
+// the gates do not read; the map from check
 // id to function is what a test holds against the checks themselves: delete each sentence of a
 // letter in turn, and every check that newly fails must be a key here, so a function the gates
 // enforce cannot go unnamed. Generic by construction: no field of work, no wording, nothing a
@@ -5427,7 +5428,6 @@ const HOST_LETTER_FUNCTION_PHRASES = Object.freeze({
   // The opening is read by three checks: the first sentence may not lead with a prior employer's or a
   // named project's evidence, and the sentence that first names either must carry the candidate's part in it.
   opening: 'an opening that leads with the target work, with the candidate’s role stated wherever a prior employer or named project is first named',
-  closing: `the closing’s ${ALL_CONTRIBUTION_HALVES.slice(0, -1).join(', ')} and ${ALL_CONTRIBUTION_HALVES.at(-1)} parts`,
   // Deleting a sentence shortens its paragraph, and the proportion limits count paragraphs, sentences and words.
   proportion: 'paragraphs long enough to stay within the letter’s proportion limits',
 });
@@ -5436,10 +5436,9 @@ export const HOST_REQUIRED_LETTER_FUNCTION_CHECKS = Object.freeze({
   'opening-artifact-context': Object.freeze(['opening']),
   'prior-employer-opening': Object.freeze(['opening']),
   'named-artifact-introduction': Object.freeze(['opening']),
-  'direct-welcome-closing': Object.freeze(['closing']),
   'letter-proportion': Object.freeze(['proportion']),
 });
-export const HOST_REQUIRED_LETTER_FUNCTIONS = ['claim-and-relevance', 'proof', 'opening', 'closing', 'proportion']
+export const HOST_REQUIRED_LETTER_FUNCTIONS = ['claim-and-relevance', 'proof', 'opening', 'proportion']
   .map(name => HOST_LETTER_FUNCTION_PHRASES[name])
   .reduce((joined, phrase, index, all) => (index === 0 ? phrase : `${joined}, ${index === all.length - 1 ? 'and ' : ''}${phrase}`), '');
 
@@ -7372,7 +7371,7 @@ const CHECK_DISPOSITION_ROWS = Object.freeze([
   ['plain-register', 'off', 'TASTE', 'a few fixed phrases from past letters.'],
   ['introductory-workplace-comma', 'off', 'TASTE', 'comma placement.'],
   ['visual-reference-precision', 'off', 'TASTE', 'fitted to one project description.'],
-  ['direct-welcome-closing', 'advisory', 'TASTE', 'the most frequent rejection and never a truth question; coverage is lexical accident (one invitation noun passes and a synonym fails) and the certified form is itself boilerplate.'],
+  ['direct-welcome-closing', 'off', 'TASTE', 'it certified one closing shape, a direct invitation, and that shape became the stock closing of every letter; how a letter closes is the writer’s choice.'],
   ['opening-demonstrative', 'off', 'TASTE', 'cohesion judgment for a reviewer.'],
   ['opening-employer-shorthand', 'off', 'TASTE', 'wording.'],
   ['adjacent-employer-repetition', 'off', 'TASTE', 'wording that pulled opposite to prior-employer-opening.'],

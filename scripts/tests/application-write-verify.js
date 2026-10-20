@@ -57,17 +57,25 @@ export default [
     },
   },
   {
-    name: 'write-verify brief frames the letter as a persuasive essay with a hedged thesis and one argued point per body paragraph',
+    name: 'write-verify brief frames the letter as a persuasive essay with a hedged thesis, point-first body paragraphs and an argued close',
     run() {
+      assert.equal(WRITE_VERIFY_BRIEF_MAX_CHARS, 650, 'the brief budget is fixed at 650 characters');
+      assert.ok(WRITE_VERIFY_BRIEF.length <= WRITE_VERIFY_BRIEF_MAX_CHARS, `the brief is ${WRITE_VERIFY_BRIEF.length} characters`);
       assert.match(WRITE_VERIFY_BRIEF, /as the cover letter a persuasive essay to the hiring manager/u, 'the letter is written as an essay to a named reader');
-      assert.ok(WRITE_VERIFY_BRIEF.includes(' Open on a thesis, your read of what the role most needs, hedged once. '), 'the thesis is the writer\u2019s diagnosis, hedged once');
-      // Sabotage: the old wording doubled the hedge in live letters, so it must be gone.
+      assert.ok(WRITE_VERIFY_BRIEF.includes(" Open on a thesis, your read of the role's main need, hedged once, and that you meet it. "), 'the thesis is the writer\u2019s diagnosis, hedged once, and the claim of meeting it');
+      assert.ok(WRITE_VERIFY_BRIEF.includes(' Start each body paragraph with its full point in one or two sentences'), 'each body paragraph leads with its full point');
+      assert.ok(WRITE_VERIFY_BRIEF.includes(' End on your argument, not stock courtesy. '), 'the close is the argument, not courtesy');
+      // Sabotage: the replaced letter sentences must be gone, so the brief carries one letter instruction set, not two.
       assert.equal(WRITE_VERIFY_BRIEF.includes('your hedged read'), false, 'the old hedged-read wording is gone');
-      assert.match(WRITE_VERIFY_BRIEF, /Each body paragraph argues one point for it, proves it with one piece of work and ties it to the job\./u, 'point, proof, comment per paragraph');
-      // Sabotage: the replaced letter sentence must be gone, so the brief carries one letter instruction, not two.
+      assert.equal(WRITE_VERIFY_BRIEF.includes('your read of what the role most needs, hedged once'), false, 'the old thesis wording is gone');
+      assert.equal(WRITE_VERIFY_BRIEF.includes('Each body paragraph argues one point for it'), false, 'the old paragraph wording is gone');
+      assert.equal(WRITE_VERIFY_BRIEF.includes('Lead with the strongest true evidence.'), false, 'the evidence-first sentence is gone');
       assert.equal(WRITE_VERIFY_BRIEF.includes('The letter adds what the quoted evidence states beyond the résumé.'), false);
       assert.match(WRITE_VERIFY_JUDGE_RUBRIC, /the letter argues rather than lists/u, 'the panel that picks the draft rewards the same structure');
-      assert.match(WRITE_VERIFY_JUDGE_RUBRIC, /two unrelated pieces of work side by side scores low/u);
+      assert.ok(WRITE_VERIFY_JUDGE_RUBRIC.includes('states its full point in its first one or two sentences'), 'the panel rewards point-first paragraphs');
+      assert.ok(WRITE_VERIFY_JUDGE_RUBRIC.includes('opens on evidence or only on what the role needs'), 'the panel marks evidence-first paragraphs down');
+      assert.ok(WRITE_VERIFY_JUDGE_RUBRIC.includes('a closing of stock courtesy'), 'the panel marks a courtesy close down');
+      assert.match(WRITE_VERIFY_JUDGE_RUBRIC, /two unrelated pieces of work side by side, scores low/u);
     },
   },
   {
