@@ -5,7 +5,9 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {
-  CLAUDE_APPLICATION_MODEL,
+  answeringModel,
+  CLAUDE_STAGE_PROFILES,
+  claudeStageProfile,
   ClaudeRunnerError,
   buildClaudeInputMessage,
   claudeChildEnv,
@@ -20,7 +22,7 @@ import {
 const USAGE_MESSAGE = 'Claude usage limit reached. Retry this application after your limit resets.';
 const LOGIN_MESSAGE = 'Claude Code is not signed in. Run claude in a terminal and sign in with your Claude subscription, then retry.';
 
-function resultLine({ result = 'final answer', isError = false, subtype = 'success', models = [CLAUDE_APPLICATION_MODEL], apiErrorStatus } = {}) {
+function resultLine({ result = 'final answer', isError = false, subtype = 'success', models = ['claude-sonnet-5-5'], apiErrorStatus } = {}) {
   const modelUsage = Object.fromEntries(models.map(model => [model, { inputTokens: 1 }]));
   return JSON.stringify({
     type: 'result', subtype, is_error: isError, result, session_id: 's1', duration_ms: 42, modelUsage,
@@ -51,9 +53,9 @@ function finishChild(child, { stdout = '', stderr = '', code = 0 } = {}) {
   setImmediate(() => child.emit('close', code, null));
 }
 
-async function stageWith(output) {
+async function stageWith(output, profile = {}) {
   const { calls, spawnImpl } = fakeSpawnFactory();
-  const promise = runClaudeStage({ text: 'secret prompt', pageImages: [], binary: '/bin/claude', env: { PATH: '/bin' }, cwd: '/tmp/ws', spawnImpl });
+  const promise = runClaudeStage({ text: 'secret prompt', pageImages: [], binary: '/bin/claude', env: { PATH: '/bin' }, cwd: '/tmp/ws', spawnImpl, ...profile });
   await new Promise(resolve => setImmediate(resolve));
   finishChild(calls[0].child, output);
   return { promise, calls };
@@ -123,10 +125,10 @@ function scriptedApi(stages, { rejectFirst = false } = {}) {
 
 export default [
   {
-    name: 'claude runner: CLI args are exactly the headless, tool-less Sonnet 5.5 invocation',
+    name: 'claude runner: CLI args are exactly the headless, tool-less latest-Sonnet invocation',
     run() {
       assert.deepEqual(claudeCliArgs(), [
-        '-p', '--model', 'claude-sonnet-5-5', '--effort', 'high', '--restricted', '--strict-mcp-config',
+        '-p', '--model', 'sonnet', '--effort', 'high', '--restricted', '--strict-mcp-config',
         '--tools', '', '--no-session-persistence', '--input-format', 'stream-json',
         '--output-format', 'stream-json', '--verbose',
       ]);
@@ -222,7 +224,49 @@ export default [
       const error = await rejection(promise);
       assert.equal(error instanceof ClaudeRunnerError, true);
       assert.equal(error.code, 'CLAUDE_WRONG_MODEL');
-      assert.equal(error.message, 'Claude answered with claude-opus-4-1 instead of Sonnet 5.5.');
+      assert.equal(error.message, 'Claude answered with claude-opus-4-1 instead of Sonnet.');
+    },
+  },
+  {
+    name: 'claude runner: Opus writes (xhigh) and judges (high); Sonnet converts (medium) and repairs and fact-checks (high)',
+    run() {
+      assert.deepEqual(JSON.parse(JSON.stringify(CLAUDE_STAGE_PROFILES)), {
+        write: { model: 'opus', effort: 'xhigh' },
+        pick: { model: 'opus', effort: 'high' },
+        convert: { model: 'sonnet', effort: 'medium' },
+        'verify-correction': { model: 'sonnet', effort: 'high' },
+        'fit-correction': { model: 'sonnet', effort: 'high' },
+        'fact-check': { model: 'sonnet', effort: 'high' },
+        'fact-correction': { model: 'sonnet', effort: 'high' },
+        'fact-recheck': { model: 'sonnet', effort: 'high' },
+      });
+      // A stage the table does not name runs on the Sonnet high default.
+      assert.deepEqual(claudeStageProfile('requirements-audit'), { model: 'sonnet', effort: 'high' });
+      assert.deepEqual(claudeCliArgs(claudeStageProfile('write')).slice(0, 5), ['-p', '--model', 'opus', '--effort', 'xhigh']);
+    },
+  },
+  {
+    name: 'claude runner: an Opus stage spawns Opus and rejects a Sonnet answer as CLAUDE_WRONG_MODEL',
+    async run() {
+      const opus = claudeStageProfile('pick');
+      const ok = await stageWith({ stdout: `${resultLine({ models: ['claude-opus-5-5'] })}\n` }, opus);
+      assert.deepEqual(await ok.promise, { text: 'final answer', model: 'claude-opus-5-5', durationMs: 42 });
+      assert.deepEqual(ok.calls[0].args, claudeCliArgs(opus));
+      const wrong = await stageWith({ stdout: `${resultLine({ models: ['claude-sonnet-5-5'] })}\n` }, opus);
+      const error = await rejection(wrong.promise);
+      assert.equal(error.code, 'CLAUDE_WRONG_MODEL');
+      assert.equal(error.message, 'Claude answered with claude-sonnet-5-5 instead of Opus.');
+    },
+  },
+  {
+    name: 'claude runner: the latest-model aliases accept any release of their own line and nothing else',
+    run() {
+      assert.equal(answeringModel('sonnet', ['claude-sonnet-5-5']), 'claude-sonnet-5-5');
+      assert.equal(answeringModel('sonnet', ['claude-haiku-5-5', 'claude-sonnet-6-0']), 'claude-sonnet-6-0');
+      assert.equal(answeringModel('opus', ['claude-opus-7-1']), 'claude-opus-7-1');
+      assert.equal(answeringModel('opus', ['claude-sonnet-5-5']), null);
+      assert.equal(answeringModel('sonnet', ['claude-opus-5-5', 'claude-haiku-5-5']), null);
+      assert.equal(answeringModel('sonnet', []), null);
     },
   },
   {
@@ -279,14 +323,17 @@ export default [
         { handoffCode: 'code-2', stage: 'verify', prompt: 'prompt two' },
       ]);
       const texts = [];
+      const stages = [];
       const notes = [];
       const runner = createClaudeApplicationRunner({
         api: script.api, stateFile: tempStateFile(), logger: quietLogger(), notify: n => notes.push(n),
-        runStage: async ({ text }) => { texts.push(text); return { text: `answer to ${text}` }; },
+        runStage: async ({ text, stage }) => { texts.push(text); stages.push(stage); return { text: `answer to ${text}` }; },
       });
       assert.deepEqual(runner.ensure({ jobId: 'job-happy', canvasFilePath: '/c.canvas' }), { status: 'running', stage: null });
       await waitFor(() => runner.status(['job-happy'])['job-happy']?.status === 'done', 'done');
       assert.deepEqual(texts, ['prompt one', 'prompt two']);
+      // The runner tells runStage which stage it answers, so the stage picks its model.
+      assert.deepEqual(stages, ['draft', 'verify']);
       assert.deepEqual(script.submits, [
         { jobId: 'job-happy', canvasFilePath: '/c.canvas', handoffCode: 'code-1', response: 'answer to prompt one' },
         { jobId: 'job-happy', canvasFilePath: '/c.canvas', handoffCode: 'code-2', response: 'answer to prompt two' },

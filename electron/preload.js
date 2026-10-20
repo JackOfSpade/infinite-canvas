@@ -383,7 +383,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // its existing bounded application snapshot.
   onHandoffBridgeCanvasFileReady: createListener('handoff-bridge:canvas-file-ready'),
   onHandoffBridgeOpenPanel: createListener('handoff-bridge:open-panel'),
-  // Main-process Claude Code application runner (Sonnet 5.5 via the local CLI).
+  // Main-process Claude Code application runner (latest Opus and Sonnet via the local CLI).
   claudeApplicationEnsure: (args) => ipcRenderer.invoke('claude-application:ensure', args),
   claudeApplicationRetry: (args) => ipcRenderer.invoke('claude-application:retry', args),
   claudeApplicationStatus: (args) => ipcRenderer.invoke('claude-application:status', args),

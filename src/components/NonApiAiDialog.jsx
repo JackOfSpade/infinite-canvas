@@ -2081,7 +2081,7 @@ export function NonApiAiDialog() {
               <LoaderCircle size={15} className="mt-0.5 shrink-0 animate-spin text-violet-200" aria-hidden="true" />
               <div className="min-w-0 flex-1">
                 <div className="truncate font-semibold text-white">
-                  Claude Sonnet 5.5 is writing this
+                  Claude is working on this
                 </div>
                 <div className="mt-1 truncate text-violet-100/75">
                   {applicationStageLabel(activeClaudeRun.stage || activeRequest.stage)}

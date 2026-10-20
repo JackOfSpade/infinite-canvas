@@ -1,7 +1,8 @@
 // Main-process Claude Code application runner.
 //
-// Application-bundle stages are answered by Sonnet 5.5 through the local
-// Claude Code CLI in headless mode. Every application v2 prompt is
+// Application-bundle stages are answered through the local Claude Code CLI in
+// headless mode: the latest Opus writes and judges, the latest Sonnet
+// converts, repairs and fact-checks (CLAUDE_STAGE_PROFILES). Every application v2 prompt is
 // self-contained, so each stage is a fresh, stateless CLI run. Failures are
 // final until the user retries: there is no automatic retry, no fallback and
 // no waiting. This module is pure Node (no 'electron' import); everything
@@ -10,8 +11,40 @@ import childProcess from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 
-export const CLAUDE_APPLICATION_MODEL = 'claude-sonnet-5-5';
+// Claude Code's aliases for the newest model in each line, so a new Sonnet or
+// Opus release is used without a code change. The answer is checked by family.
+export const CLAUDE_SONNET_MODEL = 'sonnet';
+export const CLAUDE_OPUS_MODEL = 'opus';
+// The default profile, for any stage the table below does not name.
+export const CLAUDE_APPLICATION_MODEL = CLAUDE_SONNET_MODEL;
 export const CLAUDE_APPLICATION_EFFORT = 'high';
+// Opus where the stage decides the writing (write) or picks it (pick);
+// Sonnet for the rule-following repair, trim, fact and conversion stages.
+export const CLAUDE_STAGE_PROFILES = Object.freeze({
+  write: Object.freeze({ model: CLAUDE_OPUS_MODEL, effort: 'xhigh' }),
+  pick: Object.freeze({ model: CLAUDE_OPUS_MODEL, effort: 'high' }),
+  convert: Object.freeze({ model: CLAUDE_SONNET_MODEL, effort: 'medium' }),
+  'verify-correction': Object.freeze({ model: CLAUDE_SONNET_MODEL, effort: 'high' }),
+  'fit-correction': Object.freeze({ model: CLAUDE_SONNET_MODEL, effort: 'high' }),
+  'fact-check': Object.freeze({ model: CLAUDE_SONNET_MODEL, effort: 'high' }),
+  'fact-correction': Object.freeze({ model: CLAUDE_SONNET_MODEL, effort: 'high' }),
+  'fact-recheck': Object.freeze({ model: CLAUDE_SONNET_MODEL, effort: 'high' }),
+});
+const MODEL_FAMILIES = Object.freeze({
+  [CLAUDE_SONNET_MODEL]: Object.freeze({ label: 'Sonnet', id: /^claude-sonnet-/ }),
+  [CLAUDE_OPUS_MODEL]: Object.freeze({ label: 'Opus', id: /^claude-opus-/ }),
+});
+
+/** The model id in a run's modelUsage that belongs to the requested family, or null. */
+export function answeringModel(requested, models) {
+  const family = MODEL_FAMILIES[requested];
+  const list = Array.isArray(models) ? models : [];
+  return list.find(id => (family ? family.id.test(id) : id === requested)) || null;
+}
+
+export function claudeStageProfile(stage) {
+  return CLAUDE_STAGE_PROFILES[stage] || { model: CLAUDE_APPLICATION_MODEL, effort: CLAUDE_APPLICATION_EFFORT };
+}
 export const CLAUDE_STAGE_TIMEOUT_MS = 20 * 60_000;
 export const CLAUDE_RUNNER_CONCURRENCY = 3;
 export const CLAUDE_MAX_RUNS_PER_JOB = 80;
@@ -43,11 +76,11 @@ function clip(value, max = 300) {
   return text.length > max ? text.slice(0, max) : text;
 }
 
-export function claudeCliArgs() {
+export function claudeCliArgs({ model = CLAUDE_APPLICATION_MODEL, effort = CLAUDE_APPLICATION_EFFORT } = {}) {
   return [
     '-p',
-    '--model', CLAUDE_APPLICATION_MODEL,
-    '--effort', CLAUDE_APPLICATION_EFFORT,
+    '--model', model,
+    '--effort', effort,
     '--restricted',
     '--strict-mcp-config',
     '--tools', '',
@@ -157,6 +190,8 @@ export function runClaudeStage({
   binary,
   env,
   cwd,
+  model = CLAUDE_APPLICATION_MODEL,
+  effort = CLAUDE_APPLICATION_EFFORT,
   spawnImpl = childProcess.spawn,
   timeoutMs = CLAUDE_STAGE_TIMEOUT_MS,
   setTimeoutImpl = globalThis.setTimeout,
@@ -169,7 +204,7 @@ export function runClaudeStage({
     }
     let child;
     try {
-      child = spawnImpl(binary, claudeCliArgs(), { cwd, env, stdio: ['pipe', 'pipe', 'pipe'] });
+      child = spawnImpl(binary, claudeCliArgs({ model, effort }), { cwd, env, stdio: ['pipe', 'pipe', 'pipe'] });
     } catch (error) {
       reject(error?.code === 'ENOENT'
         ? new ClaudeRunnerError('CLAUDE_CLI_MISSING', MESSAGES.missing)
@@ -255,10 +290,11 @@ export function runClaudeStage({
         finish(classifyClaudeFailure({ parsed, stderr, exitCode }));
         return;
       }
-      if (!parsed.models.includes(CLAUDE_APPLICATION_MODEL)) {
+      const answered = answeringModel(model, parsed.models);
+      if (!answered) {
         finish(new ClaudeRunnerError(
           'CLAUDE_WRONG_MODEL',
-          `Claude answered with ${parsed.models.join(', ')} instead of Sonnet 5.5.`,
+          `Claude answered with ${parsed.models.join(', ')} instead of ${MODEL_FAMILIES[model]?.label || model}.`,
           { models: parsed.models },
         ));
         return;
@@ -267,7 +303,7 @@ export function runClaudeStage({
         finish(new ClaudeRunnerError('CLAUDE_ERROR', 'Claude Code returned an empty answer.'));
         return;
       }
-      finish(null, { text: parsed.result, model: CLAUDE_APPLICATION_MODEL, durationMs: parsed.durationMs });
+      finish(null, { text: parsed.result, model: answered, durationMs: parsed.durationMs });
     });
 
     if (child.stdin) {
@@ -350,14 +386,14 @@ function chooseText(handoff) {
 
 function createProductionRunStage({ workspaceDir, fsImpl }) {
   let bound = null;
-  return async ({ text, pageImages, signal }) => {
+  return async ({ text, pageImages, signal, stage }) => {
     if (!bound) {
       if (workspaceDir) await fsImpl.mkdir(workspaceDir, { recursive: true });
       const os = await import('node:os');
       const binary = resolveClaudeBinary({ env: process.env, homedir: os.homedir() });
       bound = { binary, env: claudeChildEnv(process.env, path.dirname(binary)), cwd: workspaceDir || os.tmpdir() };
     }
-    return runClaudeStage({ text, pageImages, signal, ...bound });
+    return runClaudeStage({ text, pageImages, signal, ...bound, ...claudeStageProfile(stage) });
   };
 }
 
@@ -484,7 +520,7 @@ export function createClaudeApplicationRunner({
       try {
         if (signal.aborted) throw new ClaudeRunnerError('CLAUDE_CANCELLED', MESSAGES.cancelled);
         try {
-          result = await stageRunner({ text, pageImages: Array.isArray(handoff?.pageImages) ? handoff.pageImages : [], signal });
+          result = await stageRunner({ text, pageImages: Array.isArray(handoff?.pageImages) ? handoff.pageImages : [], signal, stage: entry.stage });
         } catch (error) {
           if (error instanceof ClaudeRunnerError) throw error;
           throw new ClaudeRunnerError('CLAUDE_ERROR', clip(error?.message || 'Claude run failed.') || 'Claude run failed.', error?.code);
