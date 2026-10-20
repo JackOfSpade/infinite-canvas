@@ -185,6 +185,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   discoverLocalApplications: (args) => ipcRenderer.invoke('discover-local-applications', args),
   openLocalApplicationFolder: (args) => ipcRenderer.invoke('open-local-application-folder', args),
   openLocalApplicationOutput: (args) => ipcRenderer.invoke('open-local-application-output', args),
+  deleteLocalApplicationOutput: (args) => ipcRenderer.invoke('delete-local-application-output', args),
   importLocalApplication: (args) => ipcRenderer.invoke('import-local-application', args),
   saveApplication: (args) => ipcRenderer.invoke('save-application', args),
   discardApplication: (args) => ipcRenderer.invoke('discard-application', args),

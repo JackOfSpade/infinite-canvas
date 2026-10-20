@@ -42,7 +42,7 @@ import { createAuthorityLedgerStore, openAuthorityLedgerStore } from './applicat
 import { APPLICATION_AUTHORITY_MATCH_PAGE_EVIDENCE, APPLICATION_AUTHORITY_WORKFLOW_VERSION, authorityDigest, createStoreAuthorityWorkflowRoot } from './applicationAuthorityWorkflow.js';
 import { applicationBlindReviewValidatorStamp, isApplicationBlindReviewValidatorStamp } from './applicationRetiredBlindReviewStamp.js';
 import { BLIND_REPAIR_RAISED_CYCLES_RULE, BLIND_REPAIR_TRUNCATION_RULE } from './applicationRepairConvergence.js';
-import { COVER_LETTER_WRITER_GUIDANCE, LETTER_REWRITE_BRIEF_RULE, RESUME_SUPPORT_VERB_RULE, RESUME_WRITER_GUIDANCE, UNSUPPORTED_NEEDS_PRIORITIES, UNSUPPORTED_NEEDS_RULE } from './applicationWriterGuidance.js';
+import { RESUME_SUPPORT_VERB_RULE } from './applicationWriterGuidance.js';
 import { describeRoleStrengthFinding, roleStrengthFindings } from './applicationRoleStrength.js';
 import { WRITE_VERIFY_PROTOCOL, WRITE_VERIFY_STAGES, WRITE_VERIFY_MAX_CORRECTIONS, WRITE_VERIFY_MAX_FIT_CORRECTIONS, acceptedWriteVerifyCandidates, factCorrectionTransition, fullApprovedHand, initialWriteVerifyState, isWriteVerifyJob, validateWriteVerifyRanking, writeVerifyCandidateCount, writeVerifyNextAfterCandidate, writeVerifyPrompt, writeVerifySourcePrompt, writeVerifyStageKey, writeVerifyFactFindingErrors, writeVerifyChangedFindingErrors } from './applicationWriteVerify.js';
 import { applicationProtocolSetting } from './applicationProtocolSetting.js';
@@ -3689,7 +3689,7 @@ function inferredPasteValidationErrorId(message) {
   if (/experience span|span of years|unsupported-experience-span/iu.test(value)) return 'unsupported-experience-span';
   if (/source.?grounding|source quote|career-data quote|cited evidence|career-data evidence|attribution scope/iu.test(value)) return 'unit-source-grounding';
   if (/trustedIdentity|host-owned|approved (?:role|project|identity|credential)|source role.*(?:title|company|dates|location)/iu.test(value)) return 'host-owned-field-equality';
-  if (/dash punctuation|em dash|en dash|spaced hyphen/iu.test(value)) return 'candidate-dash-punctuation';
+  if (/dash punctuation|em dash|en dash|spaced hyphen|semicolon|colon used as sentence punctuation/iu.test(value)) return 'candidate-dash-punctuation';
   if (/argumentMapping|jobNeedQuote|argument span/iu.test(value)) return 'paragraph-argument-links';
   if (/structured r[ée]sum[ée]|resume (?:roles|bullets|projects|skills)|r[ée]sum[ée] (?:role|bullet|project|skill)/iu.test(value)) return 'structured-resume';
   return 'schema-invalid';
@@ -9482,7 +9482,7 @@ export const APPLICATION_QUALITY_CRITERIA = Object.freeze([
   { id: 'cover-continuity', document: 'coverLetter', requirement: 'Every paragraph has one argumentative job and advances the same argument with clear transitions and no delayed relevance. State the target frame once; later paragraphs add evidence, mechanism, judgment, constraint, or result instead of recycling the same team, domain, and system nouns. Within a paragraph, a shift between distinct systems or responsibilities names its shared responsibility, constraint, or outcome before the new proof; shared role or job context alone is not a bridge. After a skill, system, or example is introduced, use natural implicit reference or the shortest clear noun rather than repeat its full phrase when its antecedent is unambiguous; when it is not, retain the shortest clear noun or name. The sentence that states relevance may use that continuity for the candidate asset, provided the target responsibility remains explicit. Only ' + OWING_PROOF_PARAGRAPHS + ' states why its proof matters to the target, in the writer’s own natural wording and never in a stock sentence such as “I would apply this experience in this role”; every later proof paragraph ends on what the work did instead of on another bridge. When an umbrella sentence names multiple branches, it states the frame once and the following concrete actions demonstrate those branches without mirrored handled/addressed category labels or audit-like narration. When the thesis names multiple decision branches, each evidence paragraph identifies the branch it develops instead of replacing it with a new abstraction. Each non-final paragraph ends by concluding its point or explicitly carrying the next subject forward; read that sentence beside the next opening and remove optional details that neither complete the current proof nor prepare the next decision. Bridge sentences add a decision, mechanism, constraint, or result rather than restating a category.' },
   { id: 'cover-reference-clarity', document: 'coverLetter', requirement: 'Employers, actors, systems, comparisons, causal links, and temporal references are unambiguous; completed work introduced as opening proof is situated in its supported prior role or employer; the opening names the role by its title and the employer by name once, after which target scope is stated as this role or the work itself and the selected position is referenced proximally, while listing-only employer context is attributed only when provenance is necessary, with its source document—not the target position—as the reporting subject.' },
   { id: 'cover-register', document: 'coverLetter', requirement: 'Prose is specific, confident, and natural, without generic, bureaucratic, additive, advertisement-facing, or conditional/deferential closing language. Past evidence is stated directly; conditional language is reserved for genuinely prospective contribution and does not become repetitive “I would/I could/I can” scaffolding. A final invitation uses direct present tense, does not repeat the opening’s interest rationale, synthesizes established evidence, introduces no new frame, never asks the employer to choose between initiatives, and connects the candidate’s contribution to target work by tying one concrete item the letter has already shown to the role.' },
-  { id: 'cover-sentence-craft', document: 'coverLetter', requirement: 'Sentences are concise, grammatical, parallel, and punctuated for immediate parsing. Each paragraph develops one proof in the sentences it needs rather than a prescribed count, usually two to four; separate claims and action steps get their own sentence when that is easier to parse, only the paragraph that owes the sentence about the target gives it a sentence of its own, and an artifact introduction may be followed by a clear causal sentence for its trigger or action. The prose chooses the load-bearing features instead of enumerating every supported one, gives no single detail a one-sentence paragraph of its own, and inserts no standalone abstract warrant merely to label difficulty. Sentences pass a literal first-read and word-boundary parse, use concrete actors, artifacts, and actions where needed, make a breadth modifier such as “full-stack” modify the candidate’s work, implementation, or responsibility rather than the artifact, preserve the source-supported scope of contribution or ownership, name the systems or data moved in migration copy instead of relying on slash shorthand, end a span between prose endpoints with “to” rather than “through” and name a process by its steps rather than by a stewardship verb spanning its endpoints, give every named technology a role-accurate governing verb without grouping distinct roles under one operation, and contain no semicolon or dash clause splices.' },
+  { id: 'cover-sentence-craft', document: 'coverLetter', requirement: 'Sentences are concise, grammatical, parallel, and punctuated for immediate parsing. Each paragraph develops one proof in the sentences it needs rather than a prescribed count, usually two to four; separate claims and action steps get their own sentence when that is easier to parse, only the paragraph that owes the sentence about the target gives it a sentence of its own, and an artifact introduction may be followed by a clear causal sentence for its trigger or action. The prose chooses the load-bearing features instead of enumerating every supported one, gives no single detail a one-sentence paragraph of its own, and inserts no standalone abstract warrant merely to label difficulty. Sentences pass a literal first-read and word-boundary parse, use concrete actors, artifacts, and actions where needed, make a breadth modifier such as “full-stack” modify the candidate’s work, implementation, or responsibility rather than the artifact, preserve the source-supported scope of contribution or ownership, name the systems or data moved in migration copy instead of relying on slash shorthand, end a span between prose endpoints with “to” rather than “through” and name a process by its steps rather than by a stewardship verb spanning its endpoints, give every named technology a role-accurate governing verb without grouping distinct roles under one operation, and contain no semicolon, colon or dash clause splices.' },
   { id: 'cover-figure-discipline', document: 'coverLetter', requirement: `Every figure is necessary and appears in the selected résumé evidence, and the letter carries at most ${MAX_LETTER_FIGURES} of them, counting a repeated figure again each time it appears.` },
   // Renamed from a spelling that named legal work status. The criterion states
   // only what checkLogisticsExclusion enforces — the availability, location,
@@ -13491,7 +13491,7 @@ export function validateLocalApplicationResult(raw, jobId, projectRoot, job, opt
   let dashPunctuationCheck = {
     id: 'candidate-dash-punctuation',
     passed: true,
-    detail: 'Résumé and cover-letter candidate copy contains no forbidden dash punctuation.',
+    detail: 'Résumé and cover-letter candidate copy contains no forbidden punctuation (dashes, semicolons, colons).',
   };
   try {
     assertCandidateDashPunctuation({
@@ -17056,6 +17056,31 @@ export function registerLocalAiApplicationHandlers() {
     const { dir } = await assertRealSavedApplicationOutputDirectory(jobId, canvasFilePath);
     const error = await shell.openPath(dir);
     return { opened: !error, error: error || null };
+  });
+  // Deleting the saved bundle is how a person regenerates. This does from the
+  // card what used to need Finder, through the same trust boundary as the
+  // reveal: the directory comes from the durable receipt, never from the
+  // renderer, and is revalidated immediately before removal. Unlike a folder
+  // that vanishes by other means (which the status probe reports as a
+  // missing-output failure so the person learns of it), a deliberate delete
+  // is the end of that generation: its terminal receipt is retired too, so
+  // nothing later reads the job as saved or as lost, and the card simply
+  // returns to its pre-generation state. A folder already gone is reported as
+  // such rather than as a deletion; its receipt is retired all the same.
+  handleSafe('delete-local-application-output', async (_event, { jobId, canvasFilePath } = {}) => {
+    const normalizedJobId = String(jobId || '');
+    if (!JOB_ID_RE.test(normalizedJobId)) throw new Error('Invalid Local AI job id.');
+    let dir = null;
+    let canvas;
+    try {
+      ({ dir, ...canvas } = await assertRealSavedApplicationOutputDirectory(normalizedJobId, canvasFilePath));
+    } catch (error) {
+      if (error?.code !== 'ENOENT') throw error;
+      canvas = await resolveCanvasProject(canvasFilePath);
+    }
+    if (dir) await fs.promises.rm(dir, { recursive: true, force: true });
+    const receiptRemoved = await discardLocalAiTerminalReceipt(canvas.canvasRoot, canvas.canonicalCanvasFilePath, normalizedJobId);
+    return { deleted: dir !== null, missing: dir === null, receiptRemoved: receiptRemoved === true };
   });
   handleSafe('import-local-application', async (event, { jobId, canvasFilePath, expectedResultSha256 } = {}, signal) => ({ localApplication: await importLocalApplicationJob({ jobId, canvasFilePath, expectedResultSha256, senderId: event.sender.id, signal }) }));
 }

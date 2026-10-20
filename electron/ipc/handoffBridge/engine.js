@@ -1484,6 +1484,7 @@ export function createHandoffEngine({
     if (target && epochWorkers(epoch).includes(target)) {
       target.idleSince ??= safeNow(now);
       target.stoppedPushClaims = new Set(currentAvailablePushClaims());
+      target.stoppedApplicationLanes = new Set(lanes.map(lane => lane.ord));
       target.activeTask = false;
       target.activeTaskKind = null;
       target.activeTaskSince = null;
@@ -1570,10 +1571,16 @@ export function createHandoffEngine({
     if (worker?.submitInFlight > 0) return null;
     if (worker?.freshContextRequired === true) return 'fresh_context_required';
     // A stop instruction is final for that chat, but not for a later run.
-    // Only newly available, unclaimed push work may wake a stopped worker;
+    // Only newly available, unclaimed work may wake a stopped worker;
     // retained holds and the same unserviceable queue cannot cause a loop.
-    if (worker?.idleSince != null && worker.getInFlight == null && !worker.activeTask
-      && currentAvailablePushClaims().some(claim => !worker.stoppedPushClaims?.has(claim))) return 'polling_stopped';
+    if (!paused && worker?.idleSince != null && worker.getInFlight == null && !worker.activeTask) {
+      const newApplication = scope.applications && lanes.some(lane =>
+        !worker.stoppedApplicationLanes?.has(lane.ord)
+        && ['unread', 'awaiting'].includes(lane.phase)
+        && !lane.awaitingAnswer && !lane.inFlight.read && !lane.inFlight.status && !lane.inFlight.submit
+        && canAssign(lane, worker));
+      if (newApplication || currentAvailablePushClaims().some(claim => !worker.stoppedPushClaims?.has(claim))) return 'polling_stopped';
+    }
     if (workerAnswerSilent(worker, stamp)) return 'answer_silent';
     if (paused || !worker || worker.getInFlight != null || !Number.isFinite(worker.waitingSince)) return null;
     const anchors = [worker.waitingSince, worker.quietFrom].filter(Number.isFinite);

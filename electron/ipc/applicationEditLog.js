@@ -197,15 +197,21 @@ export async function logGeneratedBundle({ root, workspaceDir, html, posting, ap
     const at = new Date().toISOString();
     const snapshot = documentSnapshot(html);
     if (!snapshot.resume) throw new Error('Cannot log a bundle without its résumé panel.');
-    // A regeneration overwrites the folder's bundle, so the earlier pair was never sent.
+    const build = appBuild();
+    // A regeneration overwrites the folder's bundle, so the earlier pair was never
+    // sent. Whether it was REJECTED is a different question: a regeneration under
+    // a different build is a re-run of the posting under new code, and says
+    // nothing about the earlier text. The reason is kept so a session can tell
+    // the two apart (the 2026-10-19 session read five rebuild re-runs as rejections).
     for (const prior of state.pairs) {
       if (prior.workspaceId !== workspaceId || prior.supersededAt) continue;
       prior.supersededAt = at;
-      state.summaries.push({ id: prior.id, at, document: 'bundle', op: 'regenerated', section: '', kind: '' });
+      prior.supersededReason = prior.build == null ? 'unknown-build' : prior.build !== build ? 'rebuild' : 'same-build';
+      state.summaries.push({ id: prior.id, at, document: 'bundle', op: 'regenerated', section: '', kind: '', reason: prior.supersededReason });
     }
     const pair = {
       id, workspaceId, posting: String(posting || ''), generated: snapshot, saved: snapshot,
-      generatedAt: at, savedAt: at, appVersion: String(appVersion || ''), build: appBuild(), modelLabel: state.modelLabel,
+      generatedAt: at, savedAt: at, appVersion: String(appVersion || ''), build, modelLabel: state.modelLabel,
       letterRemoved: false,
     };
     state.pairs.push(pair);
@@ -239,11 +245,52 @@ export async function logSavedBundle({ root, workspaceDir, html, letterRemoved =
   });
 }
 
+// The full session waits for a batch (SESSION_DUE_COUNT bundles) because a
+// habit needs that much evidence to tell from noise. A SYSTEMATIC defect does
+// not: it shows as the same section edited bundle after bundle, and the user
+// fixes it by hand until a session notices. So a second, earlier signal reads
+// recurrence rather than volume: one section of one document edited in
+// RECURRING_MIN_BUNDLES of the last RECURRING_WINDOW accepted bundles logged
+// since the last session. It suggests a session; it never starts one.
+export const SESSION_DUE_COUNT = 50;
+export const RECURRING_WINDOW = 8;
+export const RECURRING_MIN_BUNDLES = 4;
+const EDIT_OPS = new Set(['added', 'removed', 'rewritten', 'moved']);
+
+/**
+ * Sections edited in at least `min` of the last `window` accepted bundles
+ * since the last session, most recurrent first: [{ document, section,
+ * bundles, of }]. Superseded pairs never count (a rebuild re-run or a rejected
+ * generation was not sent), and neither does a pair reviewed by a past session.
+ */
+export function recurringEditSections(state, { window = RECURRING_WINDOW, min = RECURRING_MIN_BUNDLES } = {}) {
+  const since = Number.isFinite(Date.parse(state?.lastSessionAt)) ? Date.parse(state.lastSessionAt) : -Infinity;
+  const recent = (state?.pairs || [])
+    .filter(pair => !pair.supersededAt && Date.parse(pair.generatedAt) >= since)
+    .sort((left, right) => String(left.generatedAt).localeCompare(String(right.generatedAt)))
+    .slice(-window);
+  if (recent.length < min) return [];
+  const ids = new Set(recent.map(pair => pair.id));
+  const bundlesByKey = new Map();
+  for (const row of state?.summaries || []) {
+    if (!ids.has(row.id) || !EDIT_OPS.has(row.op)) continue;
+    const key = JSON.stringify([row.document, row.section || '']);
+    if (!bundlesByKey.has(key)) bundlesByKey.set(key, new Set());
+    bundlesByKey.get(key).add(row.id);
+  }
+  return [...bundlesByKey]
+    .filter(([, bundles]) => bundles.size >= min)
+    .map(([key, bundles]) => { const [document, section] = JSON.parse(key); return { document, section, bundles: bundles.size, of: recent.length }; })
+    .sort((left, right) => right.bundles - left.bundles || left.document.localeCompare(right.document) || left.section.localeCompare(right.section));
+}
+
 export async function improvementStatus(root) {
   return serialize(async () => {
     const state = await alignModel(root, await read(root));
     await write(root, state);
-    return { count: state.countSinceSession || 0, due: (state.countSinceSession || 0) >= 50, modelLabel: state.modelLabel };
+    const count = state.countSinceSession || 0;
+    const recurring = recurringEditSections(state);
+    return { count, due: count >= SESSION_DUE_COUNT, earlyDue: recurring.length > 0, recurring, modelLabel: state.modelLabel };
   });
 }
 

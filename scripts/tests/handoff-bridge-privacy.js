@@ -10,7 +10,7 @@ import { assert } from './testHelpers.js';
 import { generateMarkdown } from '../test-dependencies.js';
 import { SENTINEL_PREFIX, assertNoSentinel, sentinel } from './fixtures/handoff-bridge/sentinels.js';
 import { IPC_CHANNELS, IPC_EVENTS } from '../../electron/ipc/handoffBridge/contracts.js';
-import { createHandoffBridgeDialogs } from '../../electron/ipc/handoffBridge/uiDialogs.js';
+import { SILENT_CONFIRMATION_KINDS, createHandoffBridgeDialogs } from '../../electron/ipc/handoffBridge/uiDialogs.js';
 import { registerHandoffBridgeUi } from '../../electron/ipc/handoffBridge/ui.js';
 import { createRequestHandler } from '../../electron/ipc/handoffBridge/http.js';
 import { composeHandoffBridge, getHandoffBridgeBootstrapDiagnostic, resolveTestMode, tunnelLogLinesForUi } from '../../electron/ipc/handoffBridge/index.js';
@@ -607,22 +607,24 @@ export default [
     }
   },
 }, {
-  name: 'handoff bridge: privacy: native confirmation text is disk-derived and strips hostile renderer/client values',
+  name: 'handoff bridge: privacy: silent confirmation kinds open no native sheet and answer ok, so renderer/client values have nowhere to go',
   async run() {
     const specs = []; const sender = { id: 1, __isCanvasRenderer: true }; const window = { webContents: sender, __canvasFilePath: '/tmp/Ada.canvas', isDestroyed: () => false };
     const dialogs = createHandoffBridgeDialogs({ getCanvasWindows: () => [window], dialog: { showMessageBox: async (_parent, spec) => { specs.push(spec); return { response: 1 }; } } });
     const hostile = sentinel('renderer-label');
-    // Title/company are deliberately allowed only after the application
-    // adapter derives them from disk. Use safe adapter output here; hostile
-    // fields model the renderer/client payload that the adapter ignores.
-    const answer = await dialogs.ask(sender, 'release', { hostname: 'bridge.example.com', canvasFilePath: '/tmp/Ada.canvas', items: [{ title: 'Ada\u202e Lovelace', company: `Example ${'x'.repeat(100)}` }], client_name: hostile, label: hostile, rendererTitle: hostile });
-    assert(answer.ok && specs.length === 1, 'native release confirmation must be main-owned');
-    const serialized = JSON.stringify(specs[0]);
-    assert(!serialized.includes(hostile) && !serialized.includes('\u202e') && !serialized.includes('client_name'), 'renderer/client sentinels must not reach a native sheet');
-    assert(serialized.includes('Ada Lovelace') && !serialized.includes('x'.repeat(61)), 'disk-derived title/company are bidi-stripped and clipped before display');
+    assert(JSON.stringify(SILENT_CONFIRMATION_KINDS) === JSON.stringify(['enable', 'release', 'releasePush', 'restart', 'scoring', 'marketplace', 'autoStart', 'autoRelease']),
+      'the silent list is exactly the set of cheap-to-undo confirmations chosen on 2026-10-19');
+    for (const kind of SILENT_CONFIRMATION_KINDS) {
+      const answer = await dialogs.ask(sender, kind, { hostname: 'bridge.example.com', canvasFilePath: '/tmp/Ada.canvas', long: true, items: [{ title: `Ada\u202e ${hostile}`, company: hostile }], client_name: hostile, label: hostile });
+      assert(answer.ok === true && answer.code === null && answer.silent === true, `${kind} answers ok without a sheet`);
+      // No parent window and a busy adapter are irrelevant to a silent kind: nothing is shown.
+      const orphan = await dialogs.ask({ id: 999 }, kind, {});
+      assert(orphan.ok === true && orphan.silent === true, `${kind} needs no canvas parent because it shows nothing`);
+    }
+    assert(specs.length === 0, 'no silent kind reaches showMessageBox');
   },
 }, {
-  name: 'handoff bridge: privacy: real publish-release-application-confirm pipeline never puts hostile renderer or listing fields in a native sheet',
+  name: 'handoff bridge: privacy: real publish-release-application-confirm pipeline releases without a native sheet and still never exposes renderer or listing fields',
   async run() {
     const jobId = '550e8400-e29b-41d4-a716-446655440000'; const canvasFilePath = '/tmp/Marisol.canvas';
     const rendererLabel = sentinel('renderer-label-pipeline'); const listing = sentinel('listing-pipeline'); const clientName = sentinel('client-name-pipeline');
@@ -644,8 +646,7 @@ export default [
       const result = await ipc.handlers.get(IPC_CHANNELS.RELEASE)({ sender }, { items: [{ jobId }] });
       const serialized = JSON.stringify(specs);
       assert(result.success && JSON.stringify(releases) === JSON.stringify([{ jobs: [{ jobId, canvasFilePath }] }]), 'the real IPC path releases only canonical job and canvas identifiers after the disk adapter describes it');
-      for (const value of [rendererLabel, listing, clientName]) assert(!serialized.includes(value), 'renderer, listing, and remote-client fields never reach the native confirmation spec');
-      assert(serialized.includes('Marisol Quenby') && serialized.includes('Example'), 'the sheet retains only the safe, adapter-derived title and company positive controls');
+      assert(specs.length === 0 && serialized === '[]', 'a release opens no native sheet, so no renderer, listing or remote-client field can reach one');
     } finally { ui.dispose(); }
   },
 }, {
@@ -885,7 +886,7 @@ export default [
     const sender = { id: 1, __isCanvasRenderer: true }; const window = { webContents: sender, isDestroyed: () => false };
     let release; let parent = null;
     const dialogs = createHandoffBridgeDialogs({ getCanvasWindows: () => [window], dialog: { showMessageBox: (value, spec) => { parent = value; void spec; return new Promise(resolve => { release = resolve; }); } } });
-    const first = dialogs.ask(sender, 'enable', { hostname: 'bridge.example.com', idlePauseMinutes: 0, long: true });
+    const first = dialogs.ask(sender, 'forget', {});
     const busy = await dialogs.ask(sender, 'linkBreak', { hostname: 'bridge.example.com' });
     assert(busy.code === 'BUSY' && parent === window, 'one native sheet at a time and always attached to canvas parent');
     release({ response: 0 }); await first;
@@ -942,90 +943,41 @@ export default [
     assert(!serialized.includes(hostile) && serialized.includes('unavailable'), 'hostile binary details cannot cross into native dialog text');
   },
 }, {
-  name: 'handoff bridge: privacy: the restart sheet names the configured plugin only when the main-owned name is valid, else the neutral fallback',
-  async run() {
-    const sender = { id: 1, __isCanvasRenderer: true }; const window = { webContents: sender, isDestroyed: () => false };
-    const hostile = sentinel('plugin-name');
-    const detailFor = async pluginName => {
-      const specs = [];
-      await createHandoffBridgeDialogs({ getCanvasWindows: () => [window], dialog: { showMessageBox: async (_parent, spec) => { specs.push(spec); return { response: 1 }; } } })
-        .ask(sender, 'restart', { releasedCount: 1, items: [], pluginName });
-      return specs[0].detail;
-    };
-    assert((await detailFor('my_plugin')).includes('Next: paste it into a new ChatGPT chat with my_plugin selected.'), 'a valid configured name is shown');
-    for (const bad of [undefined, null, '', 5, `bad name ${hostile}`, `${hostile}\n`]) {
-      const detail = await detailFor(bad);
-      assert(detail.includes('with the Infinite Canvas plugin selected.') && !detail.includes(hostile), `an invalid or missing name falls back and is never echoed: ${JSON.stringify(bad)}`);
-    }
-  },
-}, {
   name: 'handoff bridge: privacy: every remaining native confirmation is parented and renderer/client sentinels never reach it',
   async run() {
     const sender = { id: 1, __isCanvasRenderer: true }; const window = { webContents: sender, isDestroyed: () => false };
     const hostile = sentinel('all-dialog-kinds'); const specs = [];
     const make = () => createHandoffBridgeDialogs({ getCanvasWindows: () => [window], dialog: { showMessageBox: async (parent, spec) => { assert(parent === window, 'every native sheet must receive the canvas parent'); specs.push(spec); return { response: 1 }; } } });
     const values = [
-      ['enable', { hostname: 'bridge.example.com', idlePauseMinutes: 60, long: true, client_name: hostile }],
       ['disable', { client_name: hostile }],
       ['linkBreak', { hostname: 'bridge.example.com', redirect: hostile }],
-      ['restart', { releasedCount: 1, items: [{ title: 'Disk title', company: 'Disk company' }], client_name: hostile }],
       ['resume', { reason: 'anomaly', count: 5, minutes: 10, at: 1, client_name: hostile }],
-      ['release', { hostname: 'bridge.example.com', canvasFilePath: '/tmp/Disk.canvas', items: [{ title: 'Disk title', company: 'Disk company' }], label: hostile }],
-      ['releasePush', { client_name: hostile }], ['scoring', { client_name: hostile }], ['autoStart', { client_name: hostile }], ['autoRelease', { client_name: hostile }],
       ['sourcePolicy', { client_name: hostile }], ['networkCheck', { client_name: hostile }], ['limits', { client_name: hostile }], ['forget', { client_name: hostile }],
       ['binaryApproval', { sourcePath: hostile, version: hostile, sha256: hostile, signature: hostile }],
     ];
     for (const [kind, details] of values) await make().ask(sender, kind, details);
+    assert(specs.length === values.length, 'every kept kind opens exactly one parented sheet');
     for (const [kind, details] of [
       ['hostname', { hostname: 'bridge.example.com' }],
       ['pairing', {}],
       ['revoke', {}],
-      ['enable', { long: false }],
     ]) assert((await make().ask(sender, kind, details)).code === 'INVALID', `${kind} must not restore a routine native confirmation`);
+    for (const kind of SILENT_CONFIRMATION_KINDS) {
+      const answer = await make().ask(sender, kind, { hostname: 'bridge.example.com', long: true, client_name: hostile });
+      assert(answer.ok === true && answer.silent === true && specs.length === values.length, `${kind} answers ok and opens no sheet`);
+    }
     const serialized = JSON.stringify(specs);
     assert(!serialized.includes(hostile) && !serialized.includes('client_name') && !serialized.includes('redirect'), 'native dialog text cannot serialize renderer, remote-client, or redirect values');
-    assert(specs.filter(spec => spec.message === 'Allow ChatGPT to fetch released handoffs?').length === 1, 'only the long critical enable consent may reach a native sheet');
-    const longEnable = specs.find(spec => spec.title === 'Turn on ChatGPT bridge' && spec.detail.includes('bridge.example.com'));
-    for (const disclosure of [
-      'Only ChatGPT chats you start', 'Job and marketplace listings, pricing comparisons, career data, research prompts and results, and drafts', 'Cloudflare and ChatGPT can read this data',
-      'ChatGPT stores the chat', 'Pause or Revoke anytime', 'Quitting ends chats',
-      'After restart, confirm released jobs', 'After 1 hour idle, serving pauses until Resume; tunnel and link stay up',
-    ]) assert(longEnable?.detail.includes(disclosure), `long enable consent retains: ${disclosure}`);
-    assert(!longEnable?.detail.includes('Delete the chat when done.') && !longEnable?.detail.includes('Copy/paste still works.'), 'long enable consent excludes noncritical follow-up advice');
-    assert(longEnable.detail.trim().split(/\s+/).length <= 70, 'long enable consent must stay under the native-sheet readability budget');
     const buttonsFor = title => specs.find(spec => spec.title === title)?.buttons;
     for (const [title, label] of [
-      ['Turn off ChatGPT bridge', 'Turn off'], ['Change bridge address', 'Change address'], ['Copy a starter for a new ChatGPT chat', 'Copy starter'],
-      ['Resume bridge serving', 'Resume'], ['Release work to ChatGPT', 'Release'], ['Release selected text work', 'Release'], ['Forget bridge setup', 'Forget setup'],
+      ['Turn off ChatGPT bridge', 'Turn off'], ['Change bridge address', 'Change address'],
+      ['Resume bridge serving', 'Resume'], ['Forget bridge setup', 'Forget setup'],
+      ['Reduce source checks', 'Reduce checks'], ['Turn off pairing network check', 'Turn off check'], ['Increase bridge limits', 'Increase limit'],
     ]) assert(JSON.stringify(buttonsFor(title)) === JSON.stringify(['Cancel', label]), `${title} uses its specific affirmative label with Cancel as the safe default`);
-    const releaseSpec = specs.find(spec => spec.title === 'Release work to ChatGPT');
-    for (const disclosure of ['1 released job:', 'Disk title — Disk company', 'Canvas: Disk.canvas', 'Destination: bridge.example.com', 'career data, job listings, and drafts through Cloudflare']) assert(releaseSpec?.detail.includes(disclosure), `release consent retains: ${disclosure}`);
-    const restartSpec = specs.find(spec => spec.title === 'Copy a starter for a new ChatGPT chat');
-    for (const disclosure of ['1 released job will be available to the new chat', 'Disk title — Disk company', 'Chats from before the restart have ended', 'Next: paste it into a new ChatGPT chat with the Infinite Canvas plugin selected.']) assert(restartSpec?.detail.includes(disclosure), `restart consent retains: ${disclosure}`);
     const linkBreakSpec = specs.find(spec => spec.title === 'Change bridge address');
     assert(linkBreakSpec?.detail.includes('bridge.example.com') && linkBreakSpec.detail.includes('breaks the current ChatGPT link'), 'linked address consent must name the new host and reconnection consequence');
     const forgetSpec = specs.find(spec => spec.title === 'Forget bridge setup');
     assert(forgetSpec?.detail.includes('revokes ChatGPT access') && forgetSpec.detail.includes('Cloudflare tunnel') && forgetSpec.detail.includes('ChatGPT plugin') && forgetSpec.detail.includes('history are not deleted'), 'forget consent must state its local, access and external-data scope');
-  },
-}, {
-  name: 'handoff bridge: privacy: long consent describes the exact configured idle-pause duration',
-  async run() {
-    const sender = { id: 1, __isCanvasRenderer: true }; const window = { webContents: sender, isDestroyed: () => false };
-    const cases = [
-      [0, null],
-      [30, 'After 30 minutes idle'],
-      [90, 'After 1 hour 30 minutes idle'],
-      [1440, 'After 1 day idle'],
-      [1500, 'After 1 day 1 hour idle'],
-      [2881, 'After 2 days 1 minute idle'],
-    ];
-    for (const [idlePauseMinutes, expected] of cases) {
-      let spec;
-      const dialogs = createHandoffBridgeDialogs({ getCanvasWindows: () => [window], dialog: { showMessageBox: async (_parent, value) => { spec = value; return { response: 0 }; } } });
-      await dialogs.ask(sender, 'enable', { hostname: 'bridge.example.com', idlePauseMinutes, long: true });
-      if (expected) assert(spec.detail.includes(expected), `idle pause ${idlePauseMinutes} must be stated exactly`);
-      else assert(!spec.detail.includes(' idle, serving pauses'), 'disabled idle pause must not claim that a timer is active');
-    }
   },
 }, {
   name: 'handoff bridge: privacy: pairing and binary sheets use the fixed restricted controls and copy',

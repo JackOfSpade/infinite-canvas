@@ -2266,6 +2266,32 @@ export default [
         try { assertCandidateDashPunctuation({ resumeMainHtml: `<main><p>${copy}</p></main>` }); } catch { rejected = true; }
         assert(rejected, `prose that merely follows a date-like left side cannot pass as a range: ${copy}`);
       }
+      const resumeMarkMessage = (copy) => {
+        try {
+          assertCandidateDashPunctuation({ resumeMainHtml: `<main><p>${copy}</p></main>` });
+          return null;
+        } catch (error) {
+          return error.message;
+        }
+      };
+      assert(resumeMarkMessage('Rebuilt the orchard irrigation schedule; cut water use by a third.')
+        === 'Résumé copy contains a semicolon. Split the clause into separate sentences.',
+      'a semicolon in résumé copy is rejected by name on the résumé surface');
+      assert(resumeMarkMessage('Rebuilt the orchard irrigation schedule and cut water use by a third.') === null,
+        'the same résumé bullet without the semicolon passes the punctuation gate');
+      assert(resumeMarkMessage('Key result: cut ambulance dispatch delays by a quarter.')
+        === 'Résumé copy contains a colon used as sentence punctuation. Write the sentence out instead.',
+      'a prose colon in résumé copy is rejected by name on the résumé surface');
+      assert(resumeMarkMessage('Opened the pastry line at 10:30 each weekday.') === null,
+        'a colon between two digits (a time) is not sentence punctuation');
+      assert(resumeMarkMessage('Published the library catalogue at https://example.test for every branch.') === null,
+        'a URL scheme colon is not sentence punctuation');
+      assert(resumeMarkMessage('Encoded entities stay safe, such as R&amp;D budgets.') === null,
+        'an HTML character reference is not read as a semicolon');
+      const emDashMessage = resumeMarkMessage('Retrained the ferry crew — halving boarding time.');
+      assert(emDashMessage === 'Résumé copy contains an em dash. Use a comma, a conjunction, parentheses, or separate sentences instead.'
+        && !/colon|semicolon/u.test(emDashMessage),
+      `the em-dash repair advice never recommends another banned mark: ${emDashMessage}`);
       const sourceExactRoleDateRanges = [
         'Spring 2020 – Fall 2021',
         'Juillet 2023 – Avril 2026',
@@ -5935,6 +5961,93 @@ export default [
     },
   },
   {
+    name: 'Local AI saved-bundle delete: removes only the receipt-resolved output directory and retires its receipt, reports an already-missing one, and leaves no saved or lost verdict behind',
+    run: async () => {
+      const project = await createCanvasProject();
+      try {
+        const queued = await queueLocalApplicationJob({
+          job: { title: 'Surveyor', company: 'Ridgeline', snippet: 'Accurate field records are required for this role.' }, careerData: TRUSTED_QUEUE_CAREER_DATA,
+          canvasFilePath: project.canvasFilePath,
+        });
+        const outputDir = path.join(project.root, 'Applied Jobs', 'Ridgeline', 'Unknown Location', 'Surveyor');
+        await fs.promises.mkdir(outputDir, { recursive: true });
+        await fs.promises.writeFile(path.join(outputDir, 'Resume.pdf'), 'pdf bytes', 'utf8');
+        const sibling = path.join(project.root, 'Applied Jobs', 'Ridgeline', 'Unknown Location', 'Sibling');
+        await fs.promises.mkdir(sibling, { recursive: true });
+        const receiptsRoot = path.join(project.root, '.local-ai', 'handoff-receipts');
+        await fs.promises.mkdir(receiptsRoot, { recursive: true });
+        const receiptPath = path.join(receiptsRoot, `${queued.id}.json`);
+        const receipt = {
+          version: 2, jobId: queued.id, canvasFilePath: project.canvasFilePath, status: 'imported',
+          resultSha256: 'b'.repeat(64), importedAt: new Date().toISOString(), outputDir,
+          resume: { pageCount: 1, targetPageCount: 1, attempts: [{ density: 'default', pageCount: 1 }] },
+          coverLetter: { pageCount: 1, targetPageCount: 1 }, message: 'Both documents met their measured targets.',
+        };
+        await fs.promises.writeFile(receiptPath, `${JSON.stringify(receipt)}\n`, 'utf8');
+        registerLocalAiApplicationHandlers();
+        const deleteOutput = ipcMain.__getInvokeHandler('delete-local-application-output');
+        const status = ipcMain.__getInvokeHandler('get-local-application-status');
+        const sender = { id: 9203, isDestroyed: () => false, once: () => {}, on: () => {}, removeListener: () => {} };
+
+        // A forged receipt pointing outside the canvas folder is refused before anything is removed.
+        const forged = { ...receipt, outputDir: path.join(os.tmpdir(), 'not-the-canvas-folder') };
+        await fs.promises.writeFile(receiptPath, `${JSON.stringify(forged)}\n`, 'utf8');
+        const escaped = await deleteOutput({ sender }, { jobId: queued.id, canvasFilePath: project.canvasFilePath });
+        assert(escaped?.success === false && /escaped the canvas folder/i.test(escaped.error || ''),
+          `a receipt naming a directory outside the canvas folder is refused rather than deleted, got ${JSON.stringify(escaped)}`);
+        assert(fs.existsSync(receiptPath) && fs.existsSync(outputDir), 'a refused request removes neither the folder nor the receipt');
+        await fs.promises.writeFile(receiptPath, `${JSON.stringify(receipt)}\n`, 'utf8');
+        // The private job folder is deleted on a real save; remove it so every
+        // status read below reaches the durable receipt's terminal branch.
+        await fs.promises.rm(queued.folder, { recursive: true, force: true });
+        const beforeDelete = await status({ sender }, { jobId: queued.id, canvasFilePath: project.canvasFilePath });
+        assert(beforeDelete?.success === true && beforeDelete.localJob?.status === 'saved', `fixture: the job reads as saved before the delete, got ${JSON.stringify(beforeDelete).slice(0, 200)}`);
+
+        const deleted = await deleteOutput({ sender }, { jobId: queued.id, canvasFilePath: project.canvasFilePath, dir: sibling, path: sibling });
+        assert(deleted?.success === true && deleted.deleted === true && deleted.missing === false && deleted.receiptRemoved === true,
+          `the receipt-resolved folder is deleted and its receipt retired, got ${JSON.stringify(deleted)}`);
+        assert(!fs.existsSync(outputDir) && !fs.existsSync(receiptPath), 'the saved bundle folder and its terminal receipt are gone');
+        assert(fs.existsSync(sibling), 'a caller-supplied path never substitutes for the receipt-resolved directory');
+
+        // A deliberate delete is not a loss: with the receipt retired, the
+        // status probe can no longer report the job as saved, nor as the
+        // missing-output failure reserved for a folder that vanished by other means.
+        const probed = await status({ sender }, { jobId: queued.id, canvasFilePath: project.canvasFilePath });
+        assert(probed?.localJob?.status !== 'saved' && probed?.localJob?.savedOutputMissing !== true,
+          `after a deliberate delete nothing reads as saved or as a lost bundle, got ${JSON.stringify(probed).slice(0, 300)}`);
+
+        // With the receipt retired there is nothing left to delete: a repeat
+        // request is refused like any job with no recorded save (the card no
+        // longer shows the button by then), never reported as a deletion.
+        const again = await deleteOutput({ sender }, { jobId: queued.id, canvasFilePath: project.canvasFilePath });
+        assert(again?.success === false && /no saved application bundle is recorded/i.test(again.error || ''),
+          `a repeat request after the receipt is retired is refused, got ${JSON.stringify(again)}`);
+
+        // A folder removed by other means keeps its receipt, so the probe reports the loss.
+        const lostDir = path.join(project.root, 'Applied Jobs', 'Ridgeline', 'Unknown Location', 'Lost');
+        await fs.promises.mkdir(lostDir, { recursive: true });
+        await fs.promises.writeFile(receiptPath, `${JSON.stringify({ ...receipt, outputDir: lostDir })}\n`, 'utf8');
+        await fs.promises.rm(lostDir, { recursive: true, force: true });
+        const lost = await status({ sender }, { jobId: queued.id, canvasFilePath: project.canvasFilePath });
+        assert(lost?.success === true && lost.localJob?.savedOutputMissing === true && lost.localJob?.status === 'failed',
+          `a folder that vanished without the delete action still reads as a missing-output failure, got ${JSON.stringify(lost).slice(0, 300)}`);
+        assert(canRegenerateLocalApplication(lost.localJob), 'the card can generate again once the folder is gone');
+        // And the delete action on that already-lost folder retires the stale receipt so the warning clears.
+        const cleared = await deleteOutput({ sender }, { jobId: queued.id, canvasFilePath: project.canvasFilePath });
+        assert(cleared?.success === true && cleared.missing === true && cleared.receiptRemoved === true && !fs.existsSync(receiptPath),
+          `deleting an already-lost folder retires its receipt, got ${JSON.stringify(cleared)}`);
+
+        const neverSavedJobId = '223e4567-e89b-42d3-a456-426614174002';
+        const noReceipt = await deleteOutput({ sender }, { jobId: neverSavedJobId, canvasFilePath: project.canvasFilePath });
+        assert(noReceipt?.success === false && /no saved application bundle is recorded/i.test(noReceipt.error || ''),
+          `a job with no recorded save is refused, got ${JSON.stringify(noReceipt)}`);
+        return { deleted: true, siblingKept: true, missingReported: true, regenerable: true };
+      } finally {
+        await fs.promises.rm(project.root, { recursive: true, force: true });
+      }
+    },
+  },
+  {
     name: 'Local AI render: screen-only page guides cannot fail the print font-readiness gate',
     async run() {
       // Reproduces the exact failure that stranded a real job. renderPdf swaps
@@ -6052,7 +6165,7 @@ export default [
         });
       } catch (error) { singleDash = String(error?.message || error); singleFailures = error?.failures; }
       assert(singleFailures === undefined
-        && singleDash === 'Résumé copy contains an em dash. Use a comma, conjunction, colon, semicolon, parentheses, or separate sentences instead.',
+        && singleDash === 'Résumé copy contains an em dash. Use a comma, a conjunction, parentheses, or separate sentences instead.',
       `a lone dash defect must keep its original message byte-for-byte, got ${JSON.stringify(singleDash)}`);
       const localSource = fs.readFileSync(new URL('../../electron/ipc/localAiApplication.js', import.meta.url), 'utf8');
       assert(localSource.includes('function joinValidationFailures')

@@ -883,9 +883,12 @@ export function registerHandoffBridgeUi({
         // originating canvas while it runs must not turn a closed window into
         // an authority to start the bridge without a sheet.
         if (!stillOwnsWindow(sender, window)) return fixed('NO_WINDOW');
-        // A first/material enable has the one long consent sheet. A repeat
-        // enable is still deliberate (the renderer toggle) but leaves the
-        // launch restart hold in place until the first New chat/Continue.
+        // A first/material enable mints, verifies and records its consent
+        // receipt through the main-owned consent port; the adapter no longer
+        // opens a sheet for it (SILENT_CONFIRMATION_KINDS in uiDialogs.js),
+        // so the `confirm` call below answers at once. A repeat enable is
+        // still deliberate (the renderer toggle) but leaves the launch
+        // restart hold in place until the first New chat/Continue.
         if (long) {
           if (!stillOwnsWindow(sender, window)) return fixed('NO_WINDOW');
           const answer = await confirm(sender, 'enable', enableDetails);
@@ -950,6 +953,9 @@ export function registerHandoffBridgeUi({
         && weakensSourcePolicy(status?.prefs?.sourcePolicy, patch.prefs.sourcePolicy);
       const weakensNetwork = patch.prefs?.pairingNetworkCheck === false && status?.prefs?.pairingNetworkCheck !== false;
       const raisesLimits = expandsLimits(status?.limits, patch);
+      // Raising scope, auto-start and auto-release answer silently in the
+      // adapter (SILENT_CONFIRMATION_KINDS); the weakening and limit kinds
+      // still open a sheet. The loop keeps one shape for both.
       const confirmations = [];
       if (raisesScoring) confirmations.push('scoring');
       if (raisesMarketplace) confirmations.push('marketplace');
@@ -1182,8 +1188,8 @@ export function registerHandoffBridgeUi({
     [IPC_CHANNELS.RELEASE_PUSH]: invoke(async ({ sender, window }, payload) => {
       if (!window) return fixed('NO_WINDOW');
       if (!Array.isArray(payload?.hubs) || payload.hubs.length === 0 || payload.hubs.length > 50 || new Set(payload.hubs).size !== payload.hubs.length || !payload.hubs.every(key => typeof key === 'string' && HUB_KEY.test(key))) return fixed('INVALID');
-      // Hub identifiers are renderer-originated routing values, never dialog
-      // text. The consent is fixed and intentionally names no listing data.
+      // Hub identifiers are renderer-originated routing values and never
+      // reach a sheet; releasePush answers silently in the adapter.
       { const answer = await confirm(sender, 'releasePush'); if (!stillOwnsWindow(sender, window)) return fixed('NO_WINDOW'); if (!answer.ok) return fixed(fixedCode(answer.code, 'DECLINED')); }
       return fromResult(await safeCall(push, 'release', payload.hubs));
     }),
@@ -1434,10 +1440,10 @@ export function registerHandoffBridgeUi({
     const afterConfirm = releaseContextCode(context);
     if (afterConfirm) return fixed(afterConfirm);
     if (!releaseAvailable()) return fixed('NOT_READY');
-    // The native sheet may have remained open long enough for the app-owned
-    // job description to change. Re-read it before release, and require the
-    // same main-owned confirmation facts the person saw; a renderer keepalive
-    // with an identical projection is allowed, a changed job is not.
+    // The confirm step answers silently now, but the description is still
+    // re-read before release and must match what was just described: a
+    // renderer keepalive with an identical projection is allowed, a changed
+    // job is not.
     const refreshedDescription = await safeCall(application, 'describeForConfirm', context.path, context.ids);
     const afterRefresh = releaseContextCode(context);
     if (afterRefresh) return fixed(afterRefresh);

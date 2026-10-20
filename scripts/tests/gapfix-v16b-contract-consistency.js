@@ -34,7 +34,6 @@
 // production names any of them.
 import { assert } from './testHelpers.js';
 import * as checks from '../../electron/ipc/coverLetterChecks.js';
-import * as guidance from '../../electron/ipc/applicationWriterGuidance.js';
 import { APPLICATION_QUALITY_CRITERIA} from '../../electron/ipc/localAiApplication.js';
 
 
@@ -151,19 +150,6 @@ export default [
       const realRule = checks.EXPLICIT_RELEVANCE_BUDGET_RULE;
       const olderRule = realRule.replace('a later proof-bearing paragraph owes only its proof span and its jobNeedQuote, may leave the relevance out, and is held to the same shape for a relevance span it records', 'every later proof-bearing paragraph keeps its relevance');
       assert(olderRule !== realRule && findUniversalSpanOwnership(olderRule).length === 1 && findUniversalSpanOwnership(realRule).length === 0, 'the shipped budget sentence passes and its older wording is flagged');
-    },
-  },
-      {
-    name: 'Stage 1 quality guidance is short, positive and never describes a deterministic style rejection',
-    run() {
-      const brief = guidance.COVER_LETTER_WRITER_GUIDANCE;
-      for (const phrase of ['strongest true evidence', 'role and company once', 'reasons, decisions, constraints and outcomes',
-        'plain, natural English', 'closing specific', 'adjacent experience honestly', 'Never claim more than a cited quote states']) {
-        assert(brief.includes(phrase), `writer quality brief includes ${phrase}`);
-      }
-      assert(!/rejected|exactly one sentence|closed verb|three parts|span budget|at most \d/iu.test(brief),
-        'the quality brief teaches no demoted rejection grammar');
-      for (const career of ['orchard routing', 'museum conservation', 'coastal surveys']) assert(!brief.includes(career), 'the brief stays career-independent');
     },
   },
   {

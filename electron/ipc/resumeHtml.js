@@ -411,8 +411,19 @@ function candidateText(value) {
     .replace(/&(?:mdash|#8212|#x2014);/gi, '—')
     .replace(/&(?:ndash|#8211|#x2013);/gi, '–')
     .replace(/&nbsp;/gi, ' ')
+    // Decode the remaining character references so an entity's own ';' (as
+    // in the &amp; that JSDOM serializes) is never read as a semicolon.
+    .replace(/&#x([0-9a-f]+);/gi, (_, hex) => safeCodePoint(parseInt(hex, 16)))
+    .replace(/&#(\d+);/g, (_, dec) => safeCodePoint(parseInt(dec, 10)))
+    .replace(/&(?:lt|gt|quot|apos);/gi, (entity) => ({ '&lt;': '<', '&gt;': '>', '&quot;': '"', '&apos;': "'" })[entity.toLowerCase()])
+    .replace(/&(?!amp;)[a-z][a-z0-9]*;/gi, 'x')
+    .replace(/&amp;/gi, '&')
     .replace(/\s+/g, ' ')
     .trim();
+}
+
+function safeCodePoint(codePoint) {
+  try { return String.fromCodePoint(codePoint); } catch { return ' '; }
 }
 
 function candidateResumeText(value, trustedRenderedRoleDates) {
@@ -446,10 +457,34 @@ function candidateResumeText(value, trustedRenderedRoleDates) {
 // others, and the Local AI path turns every throw into a full authoring round —
 // so a document with an em dash in the résumé and one in the letter used to
 // cost two rounds to learn about two defects already visible in one file.
+/**
+ * House style: a colon is never sentence punctuation in candidate copy. A
+ * colon followed by a space, or ending the text, is sentence punctuation; one
+ * glued to the next character is notation (10:30, 3:1, https://, javascript:x)
+ * and survives. coverLetterChecks.js keeps an identical copy because it must
+ * stay free of this module's DOM dependency.
+ */
+export function hasProseColon(text) {
+  const value = String(text ?? '');
+  for (let index = value.indexOf(':'); index !== -1; index = value.indexOf(':', index + 1)) {
+    // Sentence punctuation is followed by a space or ends the text. A colon
+    // glued to what follows is a token of some notation (10:30, 3:1, https://,
+    // a scheme such as javascript:x, key:value), never a clause break.
+    if (index + 1 >= value.length || /\s/u.test(value[index + 1])) return true;
+  }
+  return false;
+}
+
 function dashPunctuationProblems(text, surface) {
   const problems = [];
   if (text.includes('—')) {
-    problems.push(`${surface} contains an em dash. Use a comma, conjunction, colon, semicolon, parentheses, or separate sentences instead.`);
+    problems.push(`${surface} contains an em dash. Use a comma, a conjunction, parentheses, or separate sentences instead.`);
+  }
+  if (text.includes(';')) {
+    problems.push(`${surface} contains a semicolon. Split the clause into separate sentences.`);
+  }
+  if (hasProseColon(text)) {
+    problems.push(`${surface} contains a colon used as sentence punctuation. Write the sentence out instead.`);
   }
   if (/\s-\s/.test(text)) {
     problems.push(`${surface} contains a spaced hyphen acting as sentence punctuation.`);
@@ -463,7 +498,12 @@ function dashPunctuationProblems(text, surface) {
   return problems;
 }
 
-/** Enforce the design system's candidate-copy dash gate before document build. */
+/**
+ * Enforce the design system's candidate-copy punctuation gate before document
+ * build. Despite the historical name, it covers dashes (em dash, spaced hyphen,
+ * en dash outside a range), semicolons, and colons used as sentence
+ * punctuation in both the résumé and the cover letter.
+ */
 export function assertCandidateDashPunctuation({ resumeMainHtml = '', coverLetter = null, trustedRenderedRoleDates = null } = {}) {
   const problems = [];
   const resume = candidateResumeText(resumeMainHtml, trustedRenderedRoleDates);
@@ -2330,6 +2370,12 @@ ${editableRuntimeSanitizerSource()}
     }).then(function (response) { return response.json(); }).then(function (body) {
       if (improvementDue && body.success && body.due) {
         improvementDue.textContent = 'Improvement session due: ' + body.count + ' new samples since last session. Run it from Claude Code or Codex.';
+        improvementDue.hidden = false;
+      } else if (improvementDue && body.success && body.earlyDue && body.recurring && body.recurring[0]) {
+        var recurring = body.recurring[0];
+        improvementDue.textContent = 'Improvement session suggested early: the ' + (recurring.section || 'whole') + ' section of the '
+          + (recurring.document === 'letter' ? 'cover letter' : 'résumé') + ' was edited in ' + recurring.bundles + ' of the last ' + recurring.of
+          + ' bundles. Run it from Claude Code or Codex.';
         improvementDue.hidden = false;
       }
     }).catch(function () {});

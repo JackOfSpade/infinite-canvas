@@ -1495,6 +1495,40 @@ export default [
       assert(parity.filter(item => item.gateRejected).length === 7
         && parity.every(item => item.gateRejected === item.spliceFlagged),
       'every dash form the document gate rejects must become a revisable observation, and no form it blesses may be sent back for revision');
+      const colonStyle = checkPunctuationStyle([
+        'The greenhouse ran on one rule: water before noon.',
+        'I opened the bakery at 10:30 and mixed dough at a 3:1 ratio.',
+        'The ferry timetable now lives at https://example.test for every deckhand.',
+      ]);
+      assert(!colonStyle.passed
+        && colonStyle.detail.includes('paragraph 1 uses a colon as sentence punctuation; write the sentence out instead')
+        && !colonStyle.detail.includes('paragraph 2 uses a colon')
+        && !colonStyle.detail.includes('paragraph 3 uses a colon'),
+      `a prose colon is revision work while a time, a ratio, and a URL scheme are not: ${colonStyle.detail}`);
+      const markCorpus = [
+        { copy: 'The greenhouse ran on one rule: water before noon.', rejected: true, marker: 'uses a colon as sentence punctuation', gateMessage: 'Cover-letter copy contains a colon used as sentence punctuation. Write the sentence out instead.' },
+        { copy: 'I calibrated the kiln each morning; the glaze never cracked.', rejected: true, marker: 'uses a semicolon', gateMessage: 'Cover-letter copy contains a semicolon. Split the clause into separate sentences.' },
+        { copy: 'I opened the bakery at 10:30 every weekday.', rejected: false },
+        { copy: 'The ferry timetable now lives at https://example.test for every deckhand.', rejected: false },
+      ];
+      for (const { copy, rejected, marker, gateMessage } of markCorpus) {
+        let gateError = null;
+        try {
+          assertCandidateDashPunctuation({ coverLetter: { paragraphs: [copy] } });
+        } catch (error) {
+          gateError = error;
+        }
+        const advisory = checkPunctuationStyle([copy]);
+        if (rejected) {
+          assert(gateError && gateError.message === gateMessage,
+            `the document gate rejects this mark by name on the letter surface: ${copy} -> ${gateError?.message}`);
+          assert(!advisory.passed && advisory.detail.includes(`paragraph 1 ${marker}`),
+            `the advisory check flags what the gate rejects: ${copy} -> ${advisory.detail}`);
+        } else {
+          assert(!gateError, `the document gate blesses mechanical colons: ${copy} -> ${gateError?.message}`);
+          assert(advisory.passed, `the advisory check never sends a blessed colon back for revision: ${copy} -> ${advisory.detail}`);
+        }
+      }
       const register = checkPlainRegister([
         'I am in possession of a valid driver licence for the depot fleet.',
         'I possess a valid first aid certificate for the site.',
@@ -4166,7 +4200,7 @@ export default [
       // five-word frame differs in the fifth slot ("... and" against "... for").
       const embeddedAiLetter = [
         'Duskfield is growing its cold-chain network across regional depots, and safety, audit trails, and uptime stay central to that growth. I combine depot route planning with forecasting work. As a Software Engineer at Brackenfield Freight Company, I built an internal dispatch board that spans the screens and services, packaged so it could be deployed at a new depot within a day. I would apply that capability to dispatch features that watch temperature across the network.',
-        'Linked structures are where my changeover experience sits: surveying, photographing, and checking them in sequence. At Brackenfield Freight Company, I turned a stack of paper inspection sheets into one shared register, with sampling and cutover steps that kept it current. That changeover experience would support production sensor integrations, including alert routing and error handling.',
+        'Linked structures are where my changeover experience sits, in surveying, photographing, and checking them in sequence. At Brackenfield Freight Company, I turned a stack of paper inspection sheets into one shared register, with sampling and cutover steps that kept it current. That changeover experience would support production sensor integrations, including alert routing and error handling.',
         "My release practice combines manual review with scripted checking, and I have written route validators, checklist templates, and handoff routing for it. That judgment would support the team's shared habits around release safety, quality, and cost. I welcome a conversation about how my checking practice could support Duskfield's shared engineering patterns.",
       ];
       assert(checkRepeatedSentenceShape(embeddedAiLetter).passed,

@@ -1748,6 +1748,39 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
               Open saved folder
             </button>
           )}
+          {localApplication.status === 'saved' && localApplication.savedDir && window.electronAPI?.deleteLocalApplicationOutput && (
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                // No confirmation on purpose: an accidental delete costs one
+                // regeneration, which is cheap, and the dialog cost a click on
+                // every intended one.
+                const canvasFilePath = localApplication.canvasFilePath
+                  || (nav?.getCurrentFile ? nav.getCurrentFile() : nav?.currentFile ?? null);
+                // Main resolves the folder from its own durable receipt, as the
+                // reveal does, and retires the receipt with it. A deliberate
+                // delete is not a loss to warn about: the card drops its
+                // pointer and returns to its pre-generation state, Generate
+                // included. Only a failed request falls back to the saved
+                // probe, which then reports whatever is actually on disk.
+                const jobId = localApplication.id;
+                window.electronAPI.deleteLocalApplicationOutput({ jobId, canvasFilePath })
+                  .then((result) => {
+                    if (!result?.success) throw new Error(result?.error || 'not deleted');
+                    localSavedProbeRef.current.delete(jobId);
+                    setLocalApplication(current => (current?.id === jobId ? null : current));
+                  })
+                  .catch(() => {
+                    localSavedProbeRef.current.delete(jobId);
+                    setSavedFolderRecheck(count => count + 1);
+                  });
+              }}
+              className="mt-2 ml-1.5 rounded-md border border-rose-400/20 bg-rose-400/10 px-2 py-1 text-[10px] font-medium text-rose-200 transition-colors hover:bg-rose-400/15"
+              title="Delete the saved application bundle folder so this job can be generated again."
+            >
+              Delete saved folder
+            </button>
+          )}
           {localApplication.status === 'saved' && !localApplication.intermediateCleaned
             && Array.isArray(localApplication.missingArtifacts) && localApplication.missingArtifacts.length > 0 && (
             <button

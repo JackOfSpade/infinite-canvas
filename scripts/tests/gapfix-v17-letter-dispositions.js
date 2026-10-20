@@ -88,7 +88,7 @@ export default [
     },
   },
   {
-    name: 'Paste rejection receipts attribute schema, grounding, equality, span, dash and duration errors without retaining career text',
+    name: 'Paste rejection receipts attribute schema, grounding, equality, span, punctuation and duration errors without retaining career text',
     run() {
       for (const career of careers) {
         const source = career.work;
@@ -97,6 +97,8 @@ export default [
           [`Resume role company does not equal context.trustedIdentity for ${source}.`, 'host-owned-field-equality'],
           [`argumentMapping.jobNeedQuote is not a span of the posting for ${source}.`, 'paragraph-argument-links'],
           [`Candidate copy has an em dash beside ${source}.`, 'candidate-dash-punctuation'],
+          [`Résumé copy contains a semicolon beside ${source}.`, 'candidate-dash-punctuation'],
+          [`Cover-letter copy contains a colon used as sentence punctuation beside ${source}.`, 'candidate-dash-punctuation'],
           [`Resume bullet claims an unsupported experience span for ${source}.`, 'unsupported-experience-span'],
           [`Resume roles contain a malformed bullet for ${source}.`, 'structured-resume'],
           [`Unrecognised envelope field for ${source}.`, 'schema-invalid'],
@@ -105,7 +107,7 @@ export default [
           const receipt = pasteRejectionCheckIds([message]);
           assert(receipt.uncodedErrors === 0 && receipt.checkIds.includes(expected), `${source}: ${expected} is attributed`);
           assert(!JSON.stringify(receipt).includes(source), `${source}: the receipt contains no career prose`);
-          const changed = pasteRejectionCheckIds([message.replace(/experience span|em dash|jobNeedQuote|career-data quote|trustedIdentity|Resume roles/iu, 'ordinary field')]);
+          const changed = pasteRejectionCheckIds([message.replace(/experience span|em dash|semicolon|colon used as sentence punctuation|jobNeedQuote|career-data quote|trustedIdentity|Resume roles/iu, 'ordinary field')]);
           if (expected === 'unsupported-experience-span' || expected === 'candidate-dash-punctuation') {
             assert(!changed.checkIds.includes(expected), `${source}: changing the triggering words changes the attribution`);
           }

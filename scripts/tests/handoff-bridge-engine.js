@@ -1289,6 +1289,59 @@ const tests = [
     },
   },
   {
+    name: 'handoff bridge: a new application wakes a pool stopped by retained review lanes',
+    run: async () => {
+      const clock = createFakeClock();
+      const engine = createHandoffEngine({ source: source({
+        read: async ({ jobId }) => jobId === JOB_A ? { kind: 'host' }
+          : { kind: 'open', handoff: handoff({ jobId, code: 'HANDOFF-B' }) },
+        status: async ({ jobId }) => jobId === JOB_A
+          ? { kind: 'needs_user', reason: 'review_stop' } : { kind: 'awaiting', read: true },
+      }).api, now: clock.now, timers: clock, holdMs: 0 });
+      try {
+        await engine.release({ jobs: [{ jobId: JOB_A, canvasFilePath: PATH_A }] });
+        const pool = await engine.startWorkerPool({ linkId: LINK, requestedWorkers: 1 });
+        const first = engine.copyWorkerStarter({ linkId: LINK, generation: pool.generation, workerOrdinal: 1 });
+        let stopped;
+        for (let i = 0; i < 3; i++) {
+          stopped = await engine.get({ session: first.sessionCode, linkId: LINK });
+          if (stopped.status === 'paused') break;
+          clock.advance(CONSTANTS.HOST_POLL_MS);
+        }
+        assert(stopped.status === 'paused', JSON.stringify({ stopped, pool }));
+        assert(engine.snapshot().chat.pool.workers[0]?.state === 'idle');
+        await engine.release({ linkId: LINK, jobs: [{ jobId: JOB_A, canvasFilePath: PATH_A }] });
+        assert(engine.restartWorker({ linkId: LINK, generation: pool.generation, workerOrdinal: 1 }).status === 'not_quiet',
+          'releasing the same review stop must not churn chats');
+        await engine.release({ linkId: LINK, jobs: [{ jobId: JOB_B, canvasFilePath: PATH_A }] });
+        const worker = engine.snapshot().chat.pool.workers[0];
+        assert(worker.state === 'quiet' && worker.quietReason === 'polling_stopped',
+          'a new unread application must make the stopped worker restartable');
+        engine.pause();
+        assert(engine.restartWorker({ linkId: LINK, generation: pool.generation, workerOrdinal: 1 }).status === 'not_quiet',
+          'manual pause must still prevent recovery');
+        await engine.resume();
+        let replacement;
+        let launches = 0;
+        const ui = registerHandoffBridgeUi({
+          ipc: { handle() {}, removeHandler() {}, on() {}, removeListener() {} },
+          controller: { snapshot: () => ({ ...engine.snapshot(), autoLaunchChats: true, serving: 'live' }),
+            subscribe: () => () => {}, restartWorker: args => (replacement = engine.restartWorker({ linkId: LINK, ...args })) },
+          chatLauncher: { owns: () => false, close: async () => true, launch: async () => { launches++; return { ok: true }; } },
+          getCanvasWindows: () => [],
+        });
+        try {
+          ui.publishStatus({ ...engine.snapshot(), autoLaunchChats: true, serving: 'live' });
+          await settle();
+          assert(replacement?.copied && launches === 1, 'new application must launch a replacement automatically');
+          assert((await engine.get({ session: first.sessionCode, linkId: LINK })).status === 'session_ended');
+          assert((await engine.get({ session: replacement.sessionCode, linkId: LINK })).handoffCode === 'HANDOFF-B',
+            'replacement must claim the new application despite the retained review stop');
+        } finally { ui.dispose(); }
+      } finally { await engine.close(); }
+    },
+  },
+  {
     name: 'handoff bridge: a worker that stops after waiting becomes a restartable polling-silence recovery, including an accepted successor wait',
     run: async () => {
       const clock = createFakeClock();

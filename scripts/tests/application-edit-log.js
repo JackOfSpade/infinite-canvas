@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { documentSnapshot, editSummaries, improvementStatus, logGeneratedBundle, logSavedBundle, resetImprovementCounter } from '../../electron/ipc/applicationEditLog.js';
+import { RECURRING_MIN_BUNDLES, RECURRING_WINDOW, documentSnapshot, editSummaries, improvementStatus, logGeneratedBundle, logSavedBundle, recurringEditSections, resetImprovementCounter } from '../../electron/ipc/applicationEditLog.js';
 import { __removeCoverLetterForTests, __withoutCoverLetterForTests, inspectApplicationSyncRevision, mergeSelectedApplicationPanel, registerApplicationSyncWorkspace } from '../../electron/ipc/applicationSync.js';
 import electronPkg from 'electron';
 import { PDFDocument } from 'pdf-lib';
@@ -37,6 +37,52 @@ export default [{
     assert(!JSON.stringify(rows).match(/Lantern|Elm|alpha/), 'no document text in summaries');
     const markup = editSummaries({ resume: page('<p>same</p>') }, { resume: page('<p class="x">same</p>') }, 'x', 'now');
     assert.deepEqual(markup.map(row => row.op), ['markup']);
+  },
+}, {
+  name: 'application edits: the same section edited in four of the last eight accepted bundles is an early session signal, and nothing less is',
+  run: async () => {
+    assert.equal(RECURRING_WINDOW, 8); assert.equal(RECURRING_MIN_BUNDLES, 4);
+    for (const career of ['glassblowing', 'harbour piloting', 'orchard surveying']) {
+      const root = await fs.mkdtemp(path.join(os.tmpdir(), 'application-recurring-'));
+      try {
+        const resume = (section, text) => `<h2>${section}</h2><p>${text}</p><h2>Other</h2><p>${career} steady line</p>`;
+        const generate = async (name, section, edited) => {
+          const workspaceDir = path.join(root, name);
+          await logGeneratedBundle({ root, workspaceDir, html: html(resume(section, `${career} draft ${name}`), `<p>${career} letter</p>`), posting: `Synthetic ${career} posting`, appVersion: 'test' });
+          if (edited) await logSavedBundle({ root, workspaceDir, html: html(resume(section, `${career} draft ${name} trimmed`), `<p>${career} letter</p>`) });
+        };
+        // Three edits in one section across eight bundles: evidence to inspect, not a signal.
+        for (let i = 0; i < 8; i++) await generate(`b${i}`, 'Skills', i < 3);
+        let status = await improvementStatus(root);
+        assert.equal(status.earlyDue, false, `${career}: three of eight is below the floor`);
+        assert.deepEqual(status.recurring, []);
+        assert.equal(status.due, false);
+        // A fourth edit in the same section inside the window flips it.
+        await logSavedBundle({ root, workspaceDir: path.join(root, 'b7'), html: html(resume('Skills', `${career} draft b7 trimmed`), `<p>${career} letter</p>`) });
+        status = await improvementStatus(root);
+        assert.equal(status.earlyDue, true, `${career}: four of eight is the signal`);
+        assert.deepEqual(status.recurring, [{ document: 'resume', section: 'Skills', bundles: 4, of: 8 }]);
+        // Four edits spread over two sections are two habits of two, not one of four.
+        const spread = JSON.parse(await fs.readFile(path.join(root, 'application-improvement/state.json'), 'utf8'));
+        const rows = spread.summaries.filter(row => row.document === 'resume' && row.section === 'Skills');
+        for (const row of rows.slice(0, 2)) row.section = 'Experience';
+        assert.deepEqual(recurringEditSections(spread), [], `${career}: the floor is per section`);
+        // A superseded pair never counts, and the window slides: eight newer unedited bundles push the edits out.
+        for (let i = 8; i < 16; i++) await generate(`b${i}`, 'Skills', false);
+        status = await improvementStatus(root);
+        assert.equal(status.earlyDue, false, `${career}: the window is the last eight accepted bundles`);
+        const state = JSON.parse(await fs.readFile(path.join(root, 'application-improvement/state.json'), 'utf8'));
+        // workspaceId is a digest, so mark by generation order: the eight newest pairs.
+        const newest = [...state.pairs].sort((a, b) => a.generatedAt.localeCompare(b.generatedAt)).slice(-8);
+        for (const pair of newest) pair.supersededAt = pair.generatedAt;
+        assert.deepEqual(recurringEditSections(state), [{ document: 'resume', section: 'Skills', bundles: 4, of: 8 }], `${career}: superseded pairs drop out of the window`);
+        // A session reviewed what came before it.
+        await fs.writeFile(path.join(root, 'application-improvement/state.json'), JSON.stringify(state));
+        await resetImprovementCounter(root);
+        status = await improvementStatus(root);
+        assert.equal(status.earlyDue, false, `${career}: edits before the last session were already reviewed`);
+      } finally { await fs.rm(root, { recursive: true, force: true }); }
+    }
   },
 }, {
   name: 'application edits: three synthetic careers, overwrite, removal, retention and counter reset',
@@ -91,8 +137,24 @@ export default [{
       const repeats = state.pairs.filter(pair => pair.posting === 'Synthetic repeat');
       assert(repeats[0].supersededAt, 'the overwritten generation is marked superseded, not sent unchanged');
       assert.equal(repeats[1].supersededAt, undefined);
-      assert(state.summaries.some(row => row.id === repeats[0].id && row.op === 'regenerated'), 'regeneration outlives full-pair retention');
+      assert(state.summaries.some(row => row.id === repeats[0].id && row.op === 'regenerated' && row.reason === 'same-build'), 'regeneration outlives full-pair retention and names its reason');
+      assert.equal(repeats[0].supersededReason, 'same-build', 'a regeneration under the same build is a rejected generation');
       assert.equal(repeats[1].build, 'unbundled source');
+      // A regeneration after a rebuild re-runs the posting under new code and says nothing about the earlier text.
+      repeats[1].build = 'older-build';
+      await fs.writeFile(path.join(root, 'application-improvement/state.json'), JSON.stringify(state));
+      await logGeneratedBundle({ root, workspaceDir: path.join(root, 'repeat'), html: html('<p>third</p>', '<p>letter</p>'), posting: 'Synthetic repeat', appVersion: 'test' });
+      state = JSON.parse(await fs.readFile(path.join(root, 'application-improvement/state.json'), 'utf8'));
+      const rebuilt = state.pairs.find(pair => pair.id === repeats[1].id);
+      assert.equal(rebuilt.supersededReason, 'rebuild');
+      assert(state.summaries.some(row => row.id === repeats[1].id && row.op === 'regenerated' && row.reason === 'rebuild'), 'a rebuild re-run is tagged so a session never reads it as a rejection');
+      const legacy = { ...rebuilt, id: 'legacy-pair', workspaceId: rebuilt.workspaceId, supersededAt: undefined, supersededReason: undefined };
+      delete legacy.build; delete legacy.supersededAt; delete legacy.supersededReason;
+      state.pairs.push(legacy);
+      await fs.writeFile(path.join(root, 'application-improvement/state.json'), JSON.stringify(state));
+      await logGeneratedBundle({ root, workspaceDir: path.join(root, 'repeat'), html: html('<p>fourth</p>', '<p>letter</p>'), posting: 'Synthetic repeat', appVersion: 'test' });
+      state = JSON.parse(await fs.readFile(path.join(root, 'application-improvement/state.json'), 'utf8'));
+      assert.equal(state.pairs.find(pair => pair.id === 'legacy-pair').supersededReason, 'unknown-build', 'a pair logged before build stamps cannot claim either reason');
       const modelFile = path.join(root, 'model.json');
       await fs.writeFile(modelFile, '{"label":"synthetic-next-model"}');
       const priorModelFile = process.env.IC_APPLICATION_MODEL_FILE;

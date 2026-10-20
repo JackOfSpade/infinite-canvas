@@ -1,37 +1,11 @@
 import electronPkg from 'electron';
 
-const MAX_CONFIRM_TEXT = 60;
-// The configured ChatGPT plugin name, as the controller passes it from config.
-// Same shape rule as isValidPluginName in src/utils/handoffBridgeConfig.js (this
-// module may import only siblings and electron), and the same fallback wording
-// as bridgePluginRef in the renderer copy.
-const PLUGIN_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9 _-]{0,39}$/;
-const pluginRef = value => (typeof value === 'string' && PLUGIN_NAME_PATTERN.test(value) ? value : 'the Infinite Canvas plugin');
 const fallbackHostname = value => typeof value === 'string'
   && value.length <= 253 && value === value.toLowerCase() && !value.endsWith('.')
   && /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?){2,}$/.test(value);
-const UNSAFE_TEXT = new RegExp(String.raw`[\u0000-\u001f\u007f-\u009f\u061c\u200b-\u200f\u202a-\u202e\u2060\u2066-\u2069\ufeff]`, 'g');
 const UNSAFE_TEXT_TEST = new RegExp(String.raw`[\u0000-\u001f\u007f-\u009f\u061c\u200b-\u200f\u202a-\u202e\u2060\u2066-\u2069\ufeff]`);
-const cleanText = value => String(value ?? '')
-  .replace(UNSAFE_TEXT, '')
-  .replace(/\s+/g, ' ')
-  .trim()
-  .slice(0, MAX_CONFIRM_TEXT);
-const canvasName = value => cleanText(String(value || '').split('/').filter(Boolean).pop() || 'this canvas');
 const safeCount = value => Number.isSafeInteger(value) && value >= 0 && value <= 50 ? value : 0;
 const safeMinutes = value => Number.isFinite(value) && value >= 0 ? Math.min(24 * 60, Math.floor(value)) : 0;
-const formatDurationMinutes = value => {
-  if (!Number.isSafeInteger(value) || value <= 0) return '';
-  const days = Math.floor(value / (24 * 60));
-  const afterDays = value % (24 * 60);
-  const hours = Math.floor(afterDays / 60);
-  const minutes = afterDays % 60;
-  const parts = [];
-  if (days) parts.push(`${days} day${days === 1 ? '' : 's'}`);
-  if (hours) parts.push(`${hours} hour${hours === 1 ? '' : 's'}`);
-  if (minutes) parts.push(`${minutes} minute${minutes === 1 ? '' : 's'}`);
-  return parts.join(' ');
-};
 const formatPairingCode = value => `${value.slice(0, 5)}-${value.slice(5)}`;
 const safePath = value => typeof value === 'string' && value.startsWith('/') && value.length <= 4096 && /^[\x20-\x7e]+$/.test(value) && !UNSAFE_TEXT_TEST.test(value) ? value : null;
 const safeSignature = value => ['ad-hoc signed', 'Developer ID signed', 'other signed', 'unsigned'].includes(value) ? value : 'unavailable';
@@ -41,6 +15,22 @@ const expiryClock = value => {
 };
 
 function accepted(answer) { return answer === true || answer?.response === 1 || answer?.accepted === true || answer?.ok === true; }
+
+// Confirmation kinds that no longer open a sheet. Jack asked for this on
+// 2026-10-19: each of these confirmed an action that is cheap to undo
+// (unrelease a job, turn the bridge off, flip the setting back), and the sheet
+// cost a click on every intended use. The caller's flow is unchanged: the
+// enable path still mints, verifies and records its consent receipt, release
+// still re-reads the job description before serving it, and the restart hold
+// is still acknowledged; only the click is gone. The sheets that remain guard
+// decisions that are not cheap to undo or that weaken a protection: turning
+// the bridge off with work outstanding, forgetting the setup, changing the
+// public address, approving a cloudflared binary, resuming after an anomaly
+// pause, reducing the source or pairing network checks, raising a limit, and
+// the pairing code itself.
+export const SILENT_CONFIRMATION_KINDS = Object.freeze([
+  'enable', 'release', 'releasePush', 'restart', 'scoring', 'marketplace', 'autoStart', 'autoRelease',
+]);
 
 /**
  * Native sheets are deliberately a tiny port.  Renderer values never become
@@ -61,22 +51,15 @@ export function createHandoffBridgeDialogs({
     try { return validateHostname(value) === true; } catch { return false; }
   };
   async function ask(sender, kind, details = {}) {
+    if (SILENT_CONFIRMATION_KINDS.includes(kind)) return { ok: true, code: null, silent: true };
     const parentWindow = parentFor(sender);
     if (!parentWindow) return { ok: false, code: 'NO_WINDOW' };
     if (busy) return { ok: false, code: 'BUSY' };
     const templates = {
-      enable: { title: 'Turn on ChatGPT bridge', message: 'Allow ChatGPT to fetch released handoffs?', detail: '' },
       disable: { title: 'Turn off ChatGPT bridge', message: 'Stop serving released work to ChatGPT?', detail: 'This ends active bridge chats. You can turn the bridge on again later.' },
       linkBreak: { title: 'Change bridge address', message: 'Use this address and reconnect ChatGPT?', detail: '' },
-      restart: { title: 'Copy a starter for a new ChatGPT chat', message: 'Make these released jobs available to it?', detail: '' },
       resume: { title: 'Resume bridge serving', message: 'Let ChatGPT receive released work again?', detail: 'Released work can be served again.' },
-      release: { title: 'Release work to ChatGPT', message: 'Share the selected jobs with ChatGPT?', detail: '' },
-      releasePush: { title: 'Release selected text work', message: 'Let ChatGPT handle the selected work?', detail: 'ChatGPT can receive reviewed scoring, research, resume, and marketplace text handoffs from these hubs.' },
       forget: { title: 'Forget bridge setup', message: 'Turn off the bridge and remove its setup?', detail: 'This clears this app’s bridge setup and revokes ChatGPT access. The Cloudflare tunnel, ChatGPT plugin, and existing ChatGPT history are not deleted.' },
-      scoring: { title: 'Add job-search text handoffs', message: 'Let ChatGPT handle job-search text work too?', detail: 'This includes scoring, search-query and taxonomy planning, role and preference evaluation, compensation research, and resume parsing. One run can contain dozens or hundreds of prompts with job listings and career data.' },
-      marketplace: { title: 'Add marketplace pricing handoffs', message: 'Let ChatGPT handle marketplace pricing work too?', detail: 'This can send listing details and the pricing comparisons used to price them.' },
-      autoStart: { title: 'Start bridge with the app', message: 'Turn on the bridge when this app opens?', detail: 'Reviewed scoring, research, resume, and marketplace text hubs may be selected automatically. Application handoffs follow the separate automatic-release setting.' },
-      autoRelease: { title: 'Automatically release new handoffs', message: 'Release new application handoffs automatically?', detail: 'Only jobs created by this app after this launch are released automatically.' },
       sourcePolicy: { title: 'Reduce source checks', message: 'Reduce source-network checks?', detail: 'This weakens protection against use from another network.' },
       limits: { title: 'Increase bridge limits', message: 'Increase or turn off a bridge limit?', detail: 'This can leave work available to ChatGPT longer.' },
       binaryApproval: { title: 'Approve cloudflared copy', message: 'Approve this cloudflared copy?', detail: '' },
@@ -87,53 +70,10 @@ export function createHandoffBridgeDialogs({
     let title = base.title;
     let message = base.message;
     let detail = base.detail;
-    if (kind === 'enable') {
-      // Repeat enables never open a native sheet. Reject the obsolete short
-      // form so no caller can accidentally restore that routine popup.
-      if (details.long === false) return { ok: false, code: 'INVALID' };
-      const hostname = isValidHostname(details.hostname) ? details.hostname : null;
-      const idlePauseLabel = formatDurationMinutes(details.idlePauseMinutes);
-      const rows = Array.isArray(details.items) ? details.items.slice(0, 10) : [];
-      const names = rows.map(item => [cleanText(item?.title), cleanText(item?.company)].filter(Boolean).join(' — ')).filter(Boolean);
-      if (!hostname) return { ok: false, code: 'INVALID' };
-      else {
-        detail = [
-          [
-            'Only ChatGPT chats you start can fetch released handoffs and return answers.',
-            `Job and marketplace listings, pricing comparisons, career data, research prompts and results, and drafts pass through Cloudflare at ${hostname} to ChatGPT. Cloudflare and ChatGPT can read this data; ChatGPT stores the chat.`,
-            `Pause or Revoke anytime. Quitting ends chats. After restart, confirm released jobs.${idlePauseLabel ? ` After ${idlePauseLabel} idle, serving pauses until Resume; tunnel and link stay up.` : ''}`,
-          ].join('\n\n'),
-          names.length ? `Released jobs (${names.length}):\n${names.join('\n')}` : '',
-        ].filter(Boolean).join('\n\n');
-      }
-    }
     if (kind === 'linkBreak') {
       const hostname = isValidHostname(details.hostname) ? details.hostname : null;
       if (!hostname) return { ok: false, code: 'INVALID' };
       detail = `Changing to ${hostname} breaks the current ChatGPT link. Reconnect it afterward.`;
-    }
-    if (kind === 'release') {
-      const rows = Array.isArray(details.items) ? details.items : [];
-      const names = rows.slice(0, 10).map(item => [cleanText(item.title), cleanText(item.company)].filter(Boolean).join(' — ')).filter(Boolean);
-      const destination = isValidHostname(details.hostname) ? details.hostname : null;
-      detail = [
-        `${safeCount(rows.length)} released ${safeCount(rows.length) === 1 ? 'job' : 'jobs'}:`,
-        names.join('\n'),
-        `Canvas: ${canvasName(details.canvasFilePath)}`,
-        destination ? `Destination: ${destination}` : '',
-        'ChatGPT receives your career data, job listings, and drafts through Cloudflare.',
-      ].filter(Boolean).join('\n');
-    }
-    if (kind === 'restart') {
-      const count = safeCount(details.releasedCount || details.items?.length);
-      const names = (Array.isArray(details.items) ? details.items : []).slice(0, 10)
-        .map(item => [cleanText(item?.title), cleanText(item?.company)].filter(Boolean).join(' — ')).filter(Boolean);
-      detail = [
-        count ? `${count} released ${count === 1 ? 'job' : 'jobs'} will be available to the new chat.` : '',
-        names.join('\n'),
-        'Chats from before the restart have ended.',
-        `Next: paste it into a new ChatGPT chat with ${pluginRef(details.pluginName)} selected.`,
-      ].filter(Boolean).join('\n');
     }
     if (kind === 'resume' && details.reason === 'anomaly') {
       const count = safeCount(details.count);
@@ -158,9 +98,8 @@ export function createHandoffBridgeDialogs({
     busy = true;
     try {
       const affirmative = {
-        enable: 'Turn on', disable: 'Turn off', linkBreak: 'Change address', restart: 'Copy starter', resume: 'Resume',
-        release: 'Release', releasePush: 'Release', forget: 'Forget setup', binaryApproval: 'Approve', scoring: 'Add scoring', marketplace: 'Add marketplace',
-        autoStart: 'Turn on at launch', autoRelease: 'Release automatically', sourcePolicy: 'Reduce checks', limits: 'Increase limit', networkCheck: 'Turn off check',
+        disable: 'Turn off', linkBreak: 'Change address', resume: 'Resume', forget: 'Forget setup', binaryApproval: 'Approve',
+        sourcePolicy: 'Reduce checks', limits: 'Increase limit', networkCheck: 'Turn off check',
       };
       const result = await dialog?.showMessageBox?.(parentWindow, {
         type: 'question', buttons: ['Cancel', affirmative[kind] || 'Continue'], defaultId: 0, cancelId: 0,

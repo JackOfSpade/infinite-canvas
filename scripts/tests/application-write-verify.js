@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {
+  WRITE_VERIFY_BRIEF, WRITE_VERIFY_BRIEF_MAX_CHARS,
   WRITE_VERIFY_PROTOCOL, WRITE_VERIFY_DEFAULT_CANDIDATES, WRITE_VERIFY_STAGES, WRITE_VERIFY_MAX_FIT_CORRECTIONS, acceptedWriteVerifyCandidates,
   factCorrectionTransition, fullApprovedHand, initialWriteVerifyState, isWriteVerifyJob,
   validateWriteVerifyRanking, writeVerifyCandidateCount,
@@ -36,6 +37,20 @@ const domains = [
 const JOB_ID = '11111111-1111-4111-8111-111111111111';
 
 export default [
+  {
+    name: 'write-verify brief: one punctuation rule for both documents, printed once, inside a fixed size budget',
+    run() {
+      assert.ok(WRITE_VERIFY_BRIEF.length <= WRITE_VERIFY_BRIEF_MAX_CHARS, `the brief is ${WRITE_VERIFY_BRIEF.length} characters against a budget of ${WRITE_VERIFY_BRIEF_MAX_CHARS}`);
+      // The rule names the marks the candidate-copy gate refuses and the one it allows, so the writer learns it before writing, not from a rejection.
+      for (const mark of ['em dash', 'colon', 'semicolon', 'hyphen']) assert.ok(WRITE_VERIFY_BRIEF.includes(mark), `the brief names the ${mark}`);
+      assert.ok(/either document/u.test(WRITE_VERIFY_BRIEF), 'the rule covers the résumé and the letter alike');
+      for (const domain of ['tidal-survey', 'bakehouse', 'observatory']) {
+        const prompt = writeVerifySourcePrompt({ posting: `${domain} posting`, requirements: [], listingEvidence: [], identity: {},
+          sourceRoles: [], profile: { roles: [], achievements: [], projects: [], skills: [] }, catalog: [] });
+        assert.equal(prompt.split(`BRIEF: ${WRITE_VERIFY_BRIEF}`).length, 2, `${domain}: the brief prints exactly once`);
+      }
+    },
+  },
   { name: 'commercial licensing does not claim a professional credential', run() {
     for (const noun of ['approaches', 'models', 'costs', 'fees', 'terms', 'agreements']) {
       assert.deepEqual(credentialFindings(`I evaluated vendors and their licensing ${noun}.`, ['I evaluated vendor costs and tradeoffs.']), []);

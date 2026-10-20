@@ -1403,8 +1403,8 @@ export function checkParagraphArgumentLinks({
     if (scope) observe(PROVENANCE, scope);
   });
   // A posting requirement answered twice. jobNeedQuote is graded as a verbatim span of the posting and,
-  // for a paragraph that owes no relevance span, as nothing more, so the only thing keeping two
-  // paragraphs from claiming one requirement is the writer guidance (LETTER_JOB_NEED_BINDING_RULE).
+  // for a paragraph that owes no relevance span, as nothing more, so nothing but the writer's own
+  // care keeps two paragraphs from claiming one requirement.
   // This reads the degenerate case alone: two or more proof-bearing paragraphs bound to the SAME span.
   // It asks nothing of how a quote and a paragraph share words, so a proof that shares none with any
   // sentence of the posting stays writable; it is reported here, at the review, because the drafting
@@ -4520,10 +4520,29 @@ function hasDashSplice(raw) {
 }
 
 /**
- * House register: short declarative sentences, no semicolons, no dashes as
- * clause splices. Both marks read as generated prose to this user, and the
- * semicolon in particular became the model's escape hatch once the colon
- * unload was banned by name.
+ * Mirror of resumeHtml.js hasProseColon(), duplicated so this module stays
+ * free of that module's DOM dependency. A colon followed by a space, or ending
+ * the text, is sentence punctuation; one glued to the next character (10:30,
+ * 3:1, https://, javascript:x) is notation.
+ */
+function hasProseColon(raw) {
+  const value = String(raw ?? '');
+  for (let index = value.indexOf(':'); index !== -1; index = value.indexOf(':', index + 1)) {
+    // Sentence punctuation is followed by a space or ends the text. A colon
+    // glued to what follows is a token of some notation (10:30, 3:1, https://,
+    // a scheme such as javascript:x, key:value), never a clause break.
+    if (index + 1 >= value.length || /\s/u.test(value[index + 1])) return true;
+  }
+  return false;
+}
+
+/**
+ * House register: short declarative sentences, no semicolons, no colons as
+ * sentence punctuation, and no dashes as clause splices. These marks read as
+ * generated prose to this user, and the semicolon in particular became the
+ * model's escape hatch once the colon unload was banned by name. Each
+ * observation mirrors a rejection in the document hard gate
+ * (assertCandidateDashPunctuation), with the same digit/URL colon exemption.
  *
  * This is the one check that must read the RAW paragraph string: text()
  * normalizes every dash glyph to '-', which would erase exactly the
@@ -4542,9 +4561,12 @@ export function checkPunctuationStyle(paragraphs = []) {
     if (hasDashSplice(raw)) {
       observations.push(`paragraph ${index + 1} uses a dash as a clause splice; restructure into separate sentences or a comma`);
     }
+    if (hasProseColon(raw)) {
+      observations.push(`paragraph ${index + 1} uses a colon as sentence punctuation; write the sentence out instead`);
+    }
   }
   return observationResult('punctuation-style', observations, MAX_PUNCTUATION_OBSERVATIONS,
-    `${list.length} paragraph(s) avoid semicolons and dash splices`);
+    `${list.length} paragraph(s) avoid semicolons, prose colons, and dash splices`);
 }
 
 // Passport-desk register in a letter that is otherwise first-person prose.
