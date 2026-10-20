@@ -1,6 +1,13 @@
 /** Host-enforced bindings and replay rules for legacy audit-stop receipts. */
 export const MAX_REQUIREMENTS_REEPOCHS = 2;
 
+// Re-epochs are bounded: once this many fresh epochs have been opened, a
+// further audit-sided adjudication overrides only the audit verdict for the
+// disputed page instead of re-extracting the listing again.
+export function requirementsAuditCapReached(epoch) {
+  return Number.isSafeInteger(epoch) && epoch >= MAX_REQUIREMENTS_REEPOCHS;
+}
+
 export function requirementsAdjudicationBindings(receipts, units = null) {
   const allowed = units == null ? null : new Set(units.map(unit => unit.id));
   const decisions = new Map();

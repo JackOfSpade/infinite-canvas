@@ -191,6 +191,8 @@ const CLONED_JOB_BOARD_RUN_KEYS = new Set([
   'manualAiResume',
   'boardCancellation',
   'manualAiCleanupReceipts',
+  // A clone must not inherit the original Board's handoff or its application career pin.
+  'jobBoardCareerOverride',
 ]);
 
 function sanitizeJobHubClone(data) {

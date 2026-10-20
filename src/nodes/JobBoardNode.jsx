@@ -25,6 +25,22 @@ import { attachProtectedCards, consolidateJobLocations, isProtectedJobCard } fro
 import { SAVED_HANDOFF_READY_MESSAGE, isLiveCombineOwnedMarker, combineCommitMismatchReason } from './jobboard/boardRecoveryNotice';
 import { JobBoardDoneState } from './jobboard/JobBoardDoneState';
 import { JobBoardSearchSelection } from './jobboard/JobBoardSearchSelection';
+import { JobBoardCareerOverridePanel } from './jobboard/JobBoardCareerOverridePanel';
+import { CareerCanvasFileImportDialog } from '../components/CareerCanvasFileImportDialog';
+import { canvasCareerImportCandidates, reconcileCareerCanvasFileSelections, selectedCareerCanvasFiles, toggleCareerCanvasFileSelection } from '../utils/careerCanvasFileImport';
+import { filesToDropPayloads } from '../utils/fileDropUtils';
+import { CAREER_TEXT_ONLY_MESSAGE, isCareerTextFileName } from '../utils/careerTextFiles';
+import {
+  approveJobBoardCareerOverride,
+  beginJobBoardCareerOverride,
+  clearJobBoardCareerOverride,
+  discardJobBoardCareerOverridePending,
+  failJobBoardCareerOverride,
+  jobBoardCareerOverrideView,
+  markJobBoardCareerOverrideRunsRetired,
+  queueJobBoardCareerOverrideRetire,
+  resumeJobBoardCareerOverride,
+} from '../utils/jobBoardCareerOverride';
 import { replaceBoardDisplayChildren } from './jobboard/replaceBoardDisplayChildren';
 import { isJobBoardUserCancellation, isLegacyUnbucketedJobBoard, validateJobBoardTaxonomy } from '../utils/jobBoardAiProvider';
 import { boundedCombinedSourceRuns, normalizeBoardResultCount } from '../utils/jobBoardProvenance';
@@ -760,6 +776,14 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
 
   const hubState = data.hubState || 'empty';
   const [combining, setCombining] = useState(false);
+  // Board career override: live run id of this renderer's compile, if any.
+  const careerOverrideRunRef = useRef(null);
+  const careerOverrideMountRetiredRef = useRef(false);
+  const [careerOverrideLocalRunId, setCareerOverrideLocalRunId] = useState(null);
+  const [careerOverrideBusy, setCareerOverrideBusy] = useState(false);
+  const [careerCanvasOpen, setCareerCanvasOpen] = useState(false);
+  const [careerCanvasSelections, setCareerCanvasSelections] = useState([]);
+  const [careerCanvasError, setCareerCanvasError] = useState(null);
   // Once the replacement cascade and Board metadata are committed, Cancel can
   // no longer truthfully promise to keep the previous Board. Durable manual-AI
   // retirement may still take a few frames, so keep that short finalization
@@ -6492,6 +6516,223 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
   const cleanupOnlyRecovery = normalizeManualAiCleanupReceipts(data.manualAiCleanupReceipts).length > 0
     && !durableRecoveryActive;
   const cancellationCleanupActive = hasPendingManualAiRetirement(data);
+  // --- Board career override (career data for applications) ---------------
+  // Independent of Board runs: it never writes combine/scan markers and uses
+  // its own `job-board-career:` run ids. Cards only read the approved id.
+  const retireCareerOverrideRuns = useCallback(async () => {
+    const live = getNode(id)?.data;
+    const record = live?.jobBoardCareerOverride;
+    const runIds = Array.isArray(record?.retirePending) ? [...record.retirePending] : [];
+    if (runIds.length === 0 || !window.electronAPI?.completeNonApiAiRun) return;
+    const retired = [];
+    for (const runId of runIds) {
+      try {
+        const result = await window.electronAPI.completeNonApiAiRun(runId);
+        if (result?.cleared === true || result?.absent === true) retired.push(runId);
+      } catch {
+        // Stays queued; retried on the next mount or compile.
+      }
+    }
+    if (retired.length === 0) return;
+    updateGlobal(id, node => ({
+      jobBoardCareerOverride: markJobBoardCareerOverrideRunsRetired(node?.data, retired),
+    }));
+  }, [getNode, id, updateGlobal]);
+
+  useEffect(() => {
+    // Once per mount: later retries happen before each compile/discard/clear.
+    if (careerOverrideMountRetiredRef.current) return;
+    careerOverrideMountRetiredRef.current = true;
+    void retireCareerOverrideRuns();
+  }, [retireCareerOverrideRuns]);
+
+  const compileCareerOverride = useCallback(async ({ filePaths = [], fileNames = [], resume = false } = {}) => {
+    if (data.locked || !window.electronAPI?.parseCareerData) return;
+    if (careerOverrideRunRef.current || careerOverrideBusy) return;
+    if (!resume) {
+      const refused = filePaths.length === 0
+        || filePaths.some(path => typeof path !== 'string'
+          || /\.app[\\/]*$/iu.test(path)
+          || !isCareerTextFileName(path));
+      if (refused) {
+        addToast({ title: 'Only .txt or .md files', description: CAREER_TEXT_ONLY_MESSAGE, type: 'error' });
+        return;
+      }
+    }
+    await retireCareerOverrideRuns();
+    const live = getNode(id)?.data;
+    let record = null;
+    let manualAiRunId = null;
+    if (resume) {
+      const resumed = resumeJobBoardCareerOverride(live);
+      if (resumed) {
+        record = resumed.record;
+        manualAiRunId = resumed.manualAiRunId;
+        filePaths = resumed.filePaths;
+        fileNames = resumed.fileNames;
+      }
+    } else {
+      record = beginJobBoardCareerOverride(live, { nodeId: id, filePaths, fileNames });
+      manualAiRunId = record?.pending?.manualAiRunId || null;
+    }
+    if (!record || !manualAiRunId) {
+      addToast({ title: 'Career data is busy', description: 'Finish or discard the current career compilation first.', type: 'info' });
+      return;
+    }
+    updateGlobal(id, { jobBoardCareerOverride: record });
+    careerOverrideRunRef.current = manualAiRunId;
+    setCareerOverrideLocalRunId(manualAiRunId);
+    setCareerOverrideBusy(true);
+    EventLogger.log(`[JobBoard][${id}] Career override compile ${resume ? 'resumed' : 'started'}: ${fileNames.length} file(s)`);
+    try {
+      const reply = await window.electronAPI.parseCareerData({ filePaths, nodeId: id, manualAiRunId });
+      if (!reply?.success) {
+        throw new Error(reply?.error || 'Career compilation did not return an approved snapshot.');
+      }
+      // Only the exact live run approves; a superseded completion is stale.
+      const approvedNow = !!approveJobBoardCareerOverride(getNode(id)?.data, {
+        careerSnapshotId: reply.careerSnapshotId,
+        profileFingerprint: reply.fingerprint,
+        manualAiRunId,
+      });
+      updateGlobal(id, node => {
+        const next = approveJobBoardCareerOverride(node?.data, {
+          careerSnapshotId: reply.careerSnapshotId,
+          profileFingerprint: reply.fingerprint,
+          manualAiRunId,
+        });
+        return next ? { jobBoardCareerOverride: next } : null;
+      });
+      if (approvedNow) {
+        addToast({ title: 'Career data ready for applications', description: fileNames.join(', '), type: 'success' });
+      } else {
+        EventLogger.log(`[JobBoard][${id}] Career override result superseded; not approved`);
+      }
+      let retiredRun = false;
+      try {
+        const result = await window.electronAPI.completeNonApiAiRun?.(manualAiRunId);
+        retiredRun = result?.cleared === true || result?.absent === true;
+      } catch {
+        retiredRun = false;
+      }
+      if (!retiredRun) {
+        updateGlobal(id, node => ({
+          jobBoardCareerOverride: queueJobBoardCareerOverrideRetire(node?.data, manualAiRunId),
+        }));
+      }
+    } catch (error) {
+      const message = error?.message || String(error || 'Failed to compile career files');
+      if (message !== 'Node deleted') {
+        updateGlobal(id, node => {
+          const next = failJobBoardCareerOverride(node?.data, { manualAiRunId, error: message });
+          return next ? { jobBoardCareerOverride: next } : null;
+        });
+        addToast({ title: 'Career data failed', description: message, type: 'error' });
+        EventLogger.error(`[JobBoard][${id}] Career override compile failed: ${message}`);
+      }
+    } finally {
+      if (careerOverrideRunRef.current === manualAiRunId) {
+        careerOverrideRunRef.current = null;
+        setCareerOverrideLocalRunId(current => (current === manualAiRunId ? null : current));
+      }
+      setCareerOverrideBusy(false);
+    }
+  }, [addToast, careerOverrideBusy, data.locked, getNode, id, retireCareerOverrideRuns, updateGlobal]);
+
+  const handleCareerOverrideDrop = useCallback((event) => {
+    const files = filesToDropPayloads(event?.dataTransfer?.files);
+    void compileCareerOverride({
+      filePaths: files.map(file => file.path),
+      fileNames: files.map(file => file.name || file.path.split(/[\\/]/u).pop()),
+    });
+  }, [compileCareerOverride]);
+
+  const handleCareerOverridePick = useCallback((event) => {
+    const input = event?.target;
+    const files = filesToDropPayloads(input?.files);
+    if (input) input.value = '';
+    if (files.length === 0) return;
+    void compileCareerOverride({
+      filePaths: files.map(file => file.path),
+      fileNames: files.map(file => file.name || file.path.split(/[\\/]/u).pop()),
+    });
+  }, [compileCareerOverride]);
+
+  const handleCareerOverrideOpenCanvasFiles = useCallback((event) => {
+    event?.stopPropagation?.();
+    setCareerCanvasSelections([]);
+    setCareerCanvasError(null);
+    setCareerCanvasOpen(true);
+  }, []);
+
+  const handleCareerOverrideToggleCanvasFile = useCallback((file) => {
+    if (!file?.nodeId || !file?.filePath) return;
+    setCareerCanvasSelections(current => toggleCareerCanvasFileSelection(current, file));
+  }, []);
+
+  const handleCareerOverrideImportCanvasFiles = useCallback(() => {
+    // Resolve from the live canvas level at confirmation time.
+    const liveFiles = canvasCareerImportCandidates(getNodes());
+    const selected = selectedCareerCanvasFiles(liveFiles, careerCanvasSelections);
+    if (selected.length === 0) {
+      setCareerCanvasError('Select one or more .txt or .md file cards from this canvas.');
+      return;
+    }
+    const filePaths = selected.map(file => file.filePath);
+    if (filePaths.some(path => /\.app[\\/]*$/iu.test(path) || !isCareerTextFileName(path))) {
+      setCareerCanvasError(CAREER_TEXT_ONLY_MESSAGE);
+      return;
+    }
+    setCareerCanvasOpen(false);
+    setCareerCanvasError(null);
+    void compileCareerOverride({
+      filePaths,
+      fileNames: filePaths.map(path => path.split(/[\\/]/u).pop() || path),
+    });
+  }, [careerCanvasSelections, compileCareerOverride, getNodes]);
+
+  const handleCareerOverrideResume = useCallback(() => {
+    void compileCareerOverride({ resume: true });
+  }, [compileCareerOverride]);
+
+  const handleCareerOverrideDiscard = useCallback(() => {
+    if (data.locked || careerOverrideRunRef.current) return;
+    updateGlobal(id, node => ({ jobBoardCareerOverride: discardJobBoardCareerOverridePending(node?.data) }));
+    void retireCareerOverrideRuns();
+  }, [data.locked, id, retireCareerOverrideRuns, updateGlobal]);
+
+  const handleCareerOverrideClear = useCallback(() => {
+    if (data.locked || careerOverrideRunRef.current) return;
+    updateGlobal(id, node => {
+      const data = node?.data;
+      const view = jobBoardCareerOverrideView(data, { localRunId: careerOverrideRunRef.current, locked: !!data?.locked });
+      if (view.state === 'compiling') return null;
+      // clear refuses while pending is 'compiling'; an interrupted compile is
+      // discarded first so Clear really clears.
+      const base = view.state === 'interrupted'
+        ? { ...data, jobBoardCareerOverride: discardJobBoardCareerOverridePending(data) }
+        : data;
+      return { jobBoardCareerOverride: clearJobBoardCareerOverride(base) };
+    });
+    void retireCareerOverrideRuns();
+    addToast({ title: 'Career data for applications cleared', description: 'Job cards go back to the career data of their Job Search.', type: 'info' });
+  }, [addToast, data.locked, id, retireCareerOverrideRuns, updateGlobal]);
+
+  const careerOverrideView = jobBoardCareerOverrideView(data, { localRunId: careerOverrideLocalRunId, locked: !!data.locked });
+  const careerCanvasFiles = careerCanvasOpen ? canvasCareerImportCandidates(getNodes()) : [];
+  const careerCanvasFileKey = careerCanvasFiles.map(file => `${file.nodeId}\u0000${file.filePath}`).join('\u0001');
+
+  // Keep the chooser open across harmless canvas updates, but never leave a
+  // checked selection that no longer names a compatible file on this level.
+  useEffect(() => {
+    if (!careerCanvasOpen) return;
+    const liveFiles = canvasCareerImportCandidates(getNodes());
+    setCareerCanvasSelections(current => {
+      const next = reconcileCareerCanvasFileSelections(current, liveFiles);
+      return next.length === current.length ? current : next;
+    });
+  }, [careerCanvasOpen, careerCanvasFileKey, getNodes]);
+
   const boardRunVisible = scanning || combining || durableRecoveryActive || cancellationCleanupActive;
   const awaitingSourceId = data.boardScanResume?.awaitingSourceResolution?.sourceId || null;
   const awaitingSourceLabel = awaitingSourceId
@@ -6558,6 +6799,19 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
         )}
       </div>
 
+      <div className="px-3 pb-3">
+        <JobBoardCareerOverridePanel
+          view={careerOverrideView}
+          busy={careerOverrideBusy}
+          onDropFiles={handleCareerOverrideDrop}
+          onPickFiles={handleCareerOverridePick}
+          onOpenCanvasFiles={handleCareerOverrideOpenCanvasFiles}
+          onResume={handleCareerOverrideResume}
+          onDiscard={handleCareerOverrideDiscard}
+          onClear={handleCareerOverrideClear}
+        />
+      </div>
+
       {hubState === 'done' && (
         <JobBoardDoneState
           resultCount={data.resultCount}
@@ -6583,6 +6837,21 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
         />
       )}
       </HubContainer>
+
+      {careerCanvasOpen && (
+        <CareerCanvasFileImportDialog
+          files={careerCanvasFiles}
+          selectedSelections={careerCanvasSelections}
+          onToggle={handleCareerOverrideToggleCanvasFile}
+          onClose={() => setCareerCanvasOpen(false)}
+          onImport={handleCareerOverrideImportCanvasFiles}
+          importDisabled={careerCanvasSelections.length === 0 || !careerOverrideView.canImport || careerOverrideBusy}
+          title="Career data for applications"
+          description="Select .txt or .md career files on this canvas. They are compiled for this board's application bundles only."
+          importLabel="Compile for applications"
+          errorMessage={careerCanvasError}
+        />
+      )}
 
       {emptyReplacementPrompt && (
         <ConfirmDialog

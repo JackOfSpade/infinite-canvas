@@ -14,6 +14,7 @@ import platform_utils from './tests/platform-utils.js';
 import skill_opportunities from './tests/skill-opportunities.js';
 import resume_download_bundle from './tests/resume-download-bundle.js';
 import application_edit_log from './tests/application-edit-log.js';
+import application_generation_gate from './tests/application-generation-gate.js';
 import application_multi_posting from './tests/application-multi-posting.js';
 import cover_letter_harness from './tests/cover-letter-harness.js';
 import job_collection_limits from './tests/job-collection-limits.js';
@@ -25,6 +26,7 @@ import application_authority_ledger_store from './tests/application-authority-le
 import current_authority_parallel_match from './tests/current-authority-parallel-match.js';
 import application_career_authority from './tests/application-career-authority.js';
 import application_write_verify from './tests/application-write-verify.js';
+import application_v2_writer_shortlist from './tests/application-v2-writer-shortlist.js';
 import paste_application_assembly from './tests/paste-application-assembly.js';
 import paste_application_flow from './tests/paste-application-flow.js';
 import paste_application_fit_save from './tests/paste-application-fit-save.js';
@@ -58,6 +60,8 @@ import job_run_staging from './tests/job-run-staging.js';
 import job_autoresume_recovery from './tests/job-autoresume-recovery.js';
 import job_board_recovery_notice from './tests/job-board-recovery-notice.js';
 import job_board_action_visibility from './tests/job-board-action-visibility.js';
+import job_board_career_override from './tests/job-board-career-override.js';
+import job_board_career_override_ui from './tests/job-board-career-override-ui.js';
 import job_search_split_clear from './tests/job-search-split-clear.js';
 import job_card_review_bucket from './tests/job-card-review-bucket.js';
 import job_gap_review from './tests/job-gap-review.js';
@@ -172,6 +176,7 @@ const testGroups = [
   ['skill-opportunities.js', skill_opportunities],
   ['resume-download-bundle.js', resume_download_bundle],
   ['application-edit-log.js', application_edit_log],
+  ['application-generation-gate.js', application_generation_gate],
   ['application-multi-posting.js', application_multi_posting],
   ['cover-letter-harness.js', cover_letter_harness],
   ['job-collection-limits.js', job_collection_limits],
@@ -183,6 +188,7 @@ const testGroups = [
   ['current-authority-parallel-match.js', current_authority_parallel_match],
   ['application-career-authority.js', application_career_authority],
   ['application-write-verify.js', application_write_verify],
+  ['application-v2-writer-shortlist.js', application_v2_writer_shortlist],
   ['paste-application-assembly.js', paste_application_assembly],
   ['paste-application-flow.js', paste_application_flow],
   ['paste-application-fit-save.js', paste_application_fit_save],
@@ -216,6 +222,8 @@ const testGroups = [
   ['job-autoresume-recovery.js', job_autoresume_recovery],
   ['job-board-recovery-notice.js', job_board_recovery_notice],
   ['job-board-action-visibility.js', job_board_action_visibility],
+  ['job-board-career-override.js', job_board_career_override],
+  ['job-board-career-override-ui.js', job_board_career_override_ui],
   ['job-search-split-clear.js', job_search_split_clear],
   ['job-card-review-bucket.js', job_card_review_bucket],
   ['job-gap-review.js', job_gap_review],

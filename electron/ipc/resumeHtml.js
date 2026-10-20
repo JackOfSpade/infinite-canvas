@@ -944,6 +944,7 @@ const INJECTED_CHROME_CSS = `
 .ic-panel-title { margin: 0; color: inherit; font-size: 12px; letter-spacing: .08em; text-transform: uppercase; }
 .ic-panel-note, .ic-review-status { color: #cfc2b0; font-size: 11px; }
 .ic-review-status { display: block; margin: 0 0 10px; }
+.ic-notes-input { display: block; width: 100%; box-sizing: border-box; min-height: 96px; margin: 0 0 8px; padding: 8px; resize: vertical; border: 1px solid rgba(255,255,255,.14); border-radius: 8px; background: rgba(0,0,0,.25); color: inherit; font: 12px/1.45 -apple-system, "Helvetica Neue", Arial, sans-serif; }
 .ic-insight-card { padding: 12px; margin: 8px 0; border: 1px solid rgba(247, 241, 230, .2); background: #302921; }
 .ic-insight-card[data-ic-decision="verified"] { border-color: #8eb49b; }
 .ic-insight-card[data-ic-decision="not_mine"] { opacity: .62; }
@@ -1756,6 +1757,7 @@ function buildSkillWorkspace({ skillInsights, skillHistogram, jobContext, jobUrl
     <span id="ic-restore-note" class="ic-restore-note" hidden>Restored your edits from this browser.</span>
     <span class="ic-hint">Sync re-renders the PDF with the same engine that produced the originals — use it instead of your browser’s print dialog.</span>
   </div>
+  <section class="ic-panel ic-notes-panel" aria-labelledby="ic-notes-title"><div class="ic-panel-head"><h2 class="ic-panel-title" id="ic-notes-title">Why I changed things</h2><span id="ic-notes-status" class="ic-panel-note" role="status"></span></div><textarea id="ic-edit-notes" class="ic-notes-input" rows="5" maxlength="4000" placeholder="One block of text. Say why you cut, kept or reworded things so the next improvement session does not have to guess." aria-describedby="ic-notes-hint"></textarea><p id="ic-notes-hint" class="ic-panel-note">Saved with this bundle's private edit record. Never printed, never sent to a worker.</p></section>
   <div class="ic-banner ic-font-warning" id="ic-font-warning" role="status" hidden>Web fonts didn’t load. Check your internet connection or content blocker, then reopen this application before syncing. Sync refuses to replace a PDF with fallback typography.</div>
   <section class="ic-panel" aria-labelledby="ic-check-title">
     <div class="ic-panel-head"><h2 class="ic-panel-title" id="ic-check-title">Needs your check</h2><span id="ic-review-progress" class="ic-panel-note"></span></div>
@@ -1864,6 +1866,44 @@ ${editableRuntimeSanitizerSource()}
   var restoreNote = document.getElementById('ic-restore-note');
   var fontWarning = document.getElementById('ic-font-warning');
   var saveTimer = null;
+  var notesInput = document.getElementById('ic-edit-notes');
+  var notesStatus = document.getElementById('ic-notes-status');
+  var NOTES_KEY = 'ic-edit-notes:' + DOC_ID;
+  var notesTimer = null;
+  if (notesInput) {
+    var storedNotes = '';
+    try { storedNotes = localStorage.getItem(NOTES_KEY) || ''; } catch (e) {}
+    notesInput.value = storedNotes;
+    notesInput.addEventListener('input', function () {
+      if (notesTimer) clearTimeout(notesTimer);
+      notesTimer = setTimeout(function () {
+        notesTimer = null;
+        var text = notesInput.value;
+        try { localStorage.setItem(NOTES_KEY, text); } catch (e) {}
+        var notesSync = BUNDLE_DATA && BUNDLE_DATA.sync;
+        if (!(HAS_APPLICATION_BUNDLE && typeof window.fetch === 'function' && notesSync && notesSync.endpoint && notesSync.token)) {
+          if (notesStatus) notesStatus.textContent = 'Saved in this browser';
+          return;
+        }
+        if (notesStatus) notesStatus.textContent = 'Saving\u2026';
+        var notesFailed = function () {
+          if (notesStatus && notesInput.value === text) notesStatus.textContent = 'Saved in this browser only \u00b7 Infinite Canvas unreachable';
+        };
+        try {
+          window.fetch(notesSync.endpoint, {
+            method: 'POST', mode: 'cors', credentials: 'omit',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ token: notesSync.token, action: 'notes', editNotes: text })
+          }).then(function (response) {
+            return response.json().catch(function () { return {}; }).then(function (body) {
+              if (response.ok === false || !body || body.success === false) throw new Error('notes');
+              if (notesStatus && notesInput.value === text) notesStatus.textContent = 'Saved';
+            });
+          }).catch(notesFailed);
+        } catch (e) { notesFailed(); }
+      }, 800);
+    });
+  }
   var skillStorageKey = 'ic-skill-review:' + DOC_ID;
   var skillCards = Array.prototype.slice.call(document.querySelectorAll('[data-ic-insight][data-ic-kind="verify"]'));
   var skillDecisions = {};
@@ -2368,6 +2408,10 @@ ${editableRuntimeSanitizerSource()}
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ token: BUNDLE_DATA.sync.token, action: 'status' })
     }).then(function (response) { return response.json(); }).then(function (body) {
+      if (notesInput && body && body.success && typeof body.editNotes === 'string' && body.editNotes && !notesInput.value) {
+        notesInput.value = body.editNotes;
+        try { localStorage.setItem(NOTES_KEY, body.editNotes); } catch (e) {}
+      }
       if (improvementDue && body.success && body.due) {
         improvementDue.textContent = 'Improvement session due: ' + body.count + ' new samples since last session. Run it from Claude Code or Codex.';
         improvementDue.hidden = false;
@@ -2431,7 +2475,7 @@ ${editableRuntimeSanitizerSource()}
       fetch(sync.endpoint, {
         method: 'POST', mode: 'cors', credentials: 'omit',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ token: sync.token, document: documentToSync, html: currentHtml })
+        body: JSON.stringify({ token: sync.token, document: documentToSync, html: currentHtml, editNotes: notesInput ? notesInput.value : '' })
       }).then(function (response) {
         return response.json().catch(function () { return {}; }).then(function (body) {
           if (!response.ok || !body.success) throw new Error(body.error || 'Infinite Canvas could not sync this application.');

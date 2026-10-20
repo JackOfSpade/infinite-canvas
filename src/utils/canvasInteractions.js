@@ -1,4 +1,5 @@
 import { normalizeJobAnalysisClearRunId } from './jobAnalysisRecovery.js';
+import { jobBoardCareerOverrideRunIds } from './jobBoardCareerOverride.js';
 
 // ── Global Canvas Interaction State ──────────────────────────────────────────
 // These state objects are abstracted completely out of the React lifecycle to
@@ -246,6 +247,9 @@ function durableManualAiRunIdsForWorkflowNode(node) {
     ...(Array.isArray(data.manualAiCleanupReceipts)
       ? data.manualAiCleanupReceipts.map(receipt => receipt?.runId)
       : []),
+    // Only a Board owns a career override; its compile/retry runs must be
+    // retired with the Board.
+    ...(node.type === 'jobboard' ? jobBoardCareerOverrideRunIds(data) : []),
   ].filter(runId => typeof runId === 'string' && runId.trim()))];
 }
 

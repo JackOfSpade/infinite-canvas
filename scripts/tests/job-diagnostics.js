@@ -635,6 +635,168 @@ export default [
     },
   },
   {
+    // The incident this line exists for: a job cycling through requirements
+    // re-epochs needed the private store on disk to diagnose. The report now
+    // carries the manifest's counts (never its digests or heads).
+    name: 'the durable paste rejection trace renders a manifest workflow line with re-epoch counts and an observation at 9 epochs',
+    run: () => {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ic-paste-workflow-9-'));
+      const canvas = path.join(dir, 'canvas.canvas');
+      const jobId = '6a6a6a6a-6a6a-46a6-86a6-6a6a6a6a6a6a';
+      const jobDir = path.join(dir, '.local-ai', 'jobs', jobId);
+      fs.mkdirSync(jobDir, { recursive: true });
+      fs.writeFileSync(path.join(jobDir, 'Paste Rejections.json'), JSON.stringify([{
+        at: '2026-10-20T10:00:00.000Z', stage: 'requirements-audit', reason: 'VALIDATION_FAILED', revision: 117, checkIds: ['redundancy'] }]));
+      const stream = count => ({ count, head: 'PRIVATE_HEAD_MUST_NOT_RENDER', digest: 'PRIVATE_DIGEST_MUST_NOT_RENDER' });
+      fs.writeFileSync(path.join(jobDir, 'manifest.json'), JSON.stringify({
+        status: 'queued',
+        paste: {
+          stage: 'requirements', revision: 118, logCount: 118,
+          authorityStore: {
+            version: 3, revision: 118,
+            streams: {
+              requirements: stream(5), 'requirements-e8': stream(6), 'requirements-e9': stream(4),
+              'requirements-audit': stream(3), 'requirements-audit-e8': stream(2),
+              'requirements-adjudications': stream(9), 'requirements-epochs': stream(9),
+              'requirements-audit-disagreements': stream(12),
+            },
+          },
+        },
+        prompt: 'PRIVATE_PROMPT_MUST_NOT_RENDER',
+      }));
+      try {
+        const markdown = buildPasteRejectionTraceMarkdown(canvas, [{ nodeId: 'n', localApplication: { id: jobId, canvasFilePath: canvas, status: 'queued' } }]);
+        const expected = '  - workflow: stage `requirements` · revision 118 · requirements re-epochs 9 · independent disagreements 12 · active epoch pages: discovery 4 · audit 0 · ⚠️ 9 audit-sided re-epochs recorded\n';
+        assert(markdown.includes(expected), `the 9-epoch workflow line must render exactly, got: ${markdown}`);
+        const headerAt = markdown.indexOf('1 rejection(s) retained');
+        const workflowAt = markdown.indexOf(expected);
+        const rowAt = markdown.indexOf('stage `requirements-audit` · VALIDATION_FAILED · revision 117');
+        assert(headerAt >= 0 && rowAt >= 0 && headerAt < workflowAt && workflowAt < rowAt,
+          `the workflow line sits under the job header and before the rejection rows, got: ${markdown}`);
+        assert(markdown.includes('Each job\'s "workflow" line comes from the counts in that job\'s own manifest'),
+          `the section header note must explain the workflow line source, got: ${markdown}`);
+        for (const leak of ['PRIVATE_HEAD_MUST_NOT_RENDER', 'PRIVATE_DIGEST_MUST_NOT_RENDER', 'PRIVATE_PROMPT_MUST_NOT_RENDER', 'manifest.json', dir]) {
+          assert(!markdown.includes(leak), `${leak} must never render, got: ${markdown}`);
+        }
+        return { epochs: 9 };
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  },
+  {
+    name: 'a single requirements re-epoch renders no observation suffix, and a non-enum stage renders as unknown',
+    run: () => {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ic-paste-workflow-1-'));
+      const canvas = path.join(dir, 'canvas.canvas');
+      const jobId = '6b6b6b6b-6b6b-46b6-86b6-6b6b6b6b6b6b';
+      const oddJobId = '6c6c6c6c-6c6c-46c6-86c6-6c6c6c6c6c6c';
+      const jobDir = path.join(dir, '.local-ai', 'jobs', jobId);
+      const oddDir = path.join(dir, '.local-ai', 'jobs', oddJobId);
+      fs.mkdirSync(jobDir, { recursive: true });
+      fs.mkdirSync(oddDir, { recursive: true });
+      fs.writeFileSync(path.join(jobDir, 'Paste Rejections.json'), JSON.stringify([{
+        at: '2026-10-20T10:00:00.000Z', stage: 'requirements', reason: 'VALIDATION_FAILED', revision: 7, checkIds: ['redundancy'] }]));
+      fs.writeFileSync(path.join(jobDir, 'manifest.json'), JSON.stringify({ status: 'queued', paste: { stage: 'requirements-audit', revision: 8,
+        authorityStore: { version: 3, streams: {
+          'requirements-epochs': { count: 1 }, 'requirements-adjudications': { count: 1 },
+          'requirements-audit-disagreements': { count: 2 }, 'requirements-e1': { count: 3 }, 'requirements-audit-e1': { count: 1 } } } } }));
+      fs.writeFileSync(path.join(oddDir, 'manifest.json'), JSON.stringify({ status: 'queued', paste: { stage: 'PRIVATE Stage Text', revision: 2 } }));
+      try {
+        const markdown = buildPasteRejectionTraceMarkdown(canvas, [
+          { nodeId: 'n', localApplication: { id: jobId, canvasFilePath: canvas, status: 'queued' } },
+          { nodeId: 'o', localApplication: { id: oddJobId, canvasFilePath: canvas, status: 'queued' } },
+        ]);
+        assert(markdown.includes('  - workflow: stage `requirements-audit` · revision 8 · requirements re-epochs 1 · independent disagreements 2 · active epoch pages: discovery 3 · audit 1\n'),
+          `the 1-epoch workflow line must render exactly with no suffix, got: ${markdown}`);
+        assert(!markdown.includes('audit-sided re-epochs recorded'), `one re-epoch is not an observation-worthy repeat, got: ${markdown}`);
+        assert(markdown.includes('  - workflow: stage `unknown` · revision 2 · job predates the v3 requirements store (no stream counts)\n')
+          && !markdown.includes('PRIVATE Stage Text'),
+        `a non-enum stage renders as unknown and a store-less manifest is labelled as predating v3, got: ${markdown}`);
+        return { epochs: 1 };
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  },
+  {
+    name: 'an absent manifest beside a live sidecar renders explicit absent wording, distinct from unreadable and from a saved job',
+    run: () => {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ic-paste-workflow-absent-'));
+      const canvas = path.join(dir, 'canvas.canvas');
+      const liveJobId = '6d6d6d6d-6d6d-46d6-86d6-6d6d6d6d6d6d';
+      const savedJobId = '6e6e6e6e-6e6e-46e6-86e6-6e6e6e6e6e6e';
+      const liveDir = path.join(dir, '.local-ai', 'jobs', liveJobId);
+      fs.mkdirSync(liveDir, { recursive: true });
+      fs.writeFileSync(path.join(liveDir, 'Paste Rejections.json'), JSON.stringify([{
+        at: '2026-10-20T10:00:00.000Z', stage: 'resume', reason: 'VALIDATION_FAILED', revision: 3, checkIds: ['redundancy'] }]));
+      const receiptDir = path.join(dir, '.local-ai', 'handoff-receipts');
+      fs.mkdirSync(receiptDir, { recursive: true });
+      fs.writeFileSync(path.join(receiptDir, `${savedJobId}.json`), JSON.stringify({
+        version: 2, jobId: savedJobId, status: 'imported', canvasFilePath: canvas, pasteRejectionTrace: { version: 1, rows: [] } }));
+      try {
+        const live = buildPasteRejectionTraceMarkdown(canvas, [{ nodeId: 'l', localApplication: { id: liveJobId, canvasFilePath: canvas, status: 'queued' } }]);
+        assert(live.includes('  - workflow: manifest absent (no manifest on disk for this job)\n')
+          && !live.includes('manifest unreadable')
+          && !live.includes('job folder removed after a successful save'),
+        `a live job without a manifest renders the absent wording only, got: ${live}`);
+        const saved = buildPasteRejectionTraceMarkdown(canvas, [{ nodeId: 's', localApplication: { id: savedJobId, canvasFilePath: canvas, status: 'saved' } }]);
+        assert(saved.includes('no rejected round recorded (terminal-save receipt).\n  - workflow: manifest absent (job folder removed after a successful save)\n')
+          && !saved.includes('manifest unreadable'),
+        `a saved job's removed folder renders the terminal-receipt absent wording, got: ${saved}`);
+        return { absentHandled: true };
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  },
+  {
+    name: 'an oversized or symlinked manifest renders as unreadable without leaking its contents',
+    run: () => {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ic-paste-workflow-unreadable-'));
+      const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'ic-paste-workflow-outside-'));
+      const canvas = path.join(dir, 'canvas.canvas');
+      const bigJobId = '6f6f6f6f-6f6f-46f6-86f6-6f6f6f6f6f6f';
+      const linkJobId = '70707070-7070-4707-8707-707070707070';
+      const bigDir = path.join(dir, '.local-ai', 'jobs', bigJobId);
+      const linkDir = path.join(dir, '.local-ai', 'jobs', linkJobId);
+      fs.mkdirSync(bigDir, { recursive: true });
+      fs.mkdirSync(linkDir, { recursive: true });
+      const row = JSON.stringify([{ at: '2026-10-20T10:00:00.000Z', stage: 'resume', reason: 'VALIDATION_FAILED', revision: 3, checkIds: ['redundancy'] }]);
+      fs.writeFileSync(path.join(bigDir, 'Paste Rejections.json'), row);
+      fs.writeFileSync(path.join(linkDir, 'Paste Rejections.json'), row);
+      // Valid JSON just over the 512_000-byte cap: only the size check can reject it.
+      fs.writeFileSync(path.join(bigDir, 'manifest.json'), JSON.stringify({
+        paste: { stage: 'requirements', revision: 5, authorityStore: { streams: { 'requirements-epochs': { count: 4 } } } },
+        pad: 'x'.repeat(520_000) }));
+      const outsideManifest = path.join(outside, 'manifest.json');
+      fs.writeFileSync(outsideManifest, JSON.stringify({ paste: { stage: 'review', revision: 77, authorityStore: { streams: {} } } }));
+      let symlinked = true;
+      try {
+        try {
+          fs.symlinkSync(outsideManifest, path.join(linkDir, 'manifest.json'), 'file');
+        } catch (error) {
+          if (!['EPERM', 'EACCES', 'ENOTSUP', 'EOPNOTSUPP'].includes(error?.code)) throw error;
+          symlinked = false;
+        }
+        const big = buildPasteRejectionTraceMarkdown(canvas, [{ nodeId: 'b', localApplication: { id: bigJobId, canvasFilePath: canvas, status: 'queued' } }]);
+        assert(big.includes('1 rejection(s) retained') && big.includes('  - workflow: manifest unreadable\n')
+          && !big.includes('requirements re-epochs 4') && !big.includes('manifest absent'),
+        `an over-cap manifest must render unreadable, got: ${big}`);
+        if (symlinked) {
+          const linked = buildPasteRejectionTraceMarkdown(canvas, [{ nodeId: 'k', localApplication: { id: linkJobId, canvasFilePath: canvas, status: 'queued' } }]);
+          assert(linked.includes('  - workflow: manifest unreadable\n')
+            && !linked.includes('revision 77') && !linked.includes('stage `review`'),
+          `a symlinked manifest must render unreadable, got: ${linked}`);
+        }
+        return { oversized: true, symlinked };
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+        fs.rmSync(outside, { recursive: true, force: true });
+      }
+    },
+  },
+  {
     name: 'job diagnostics never joins ambiguous terminal receipts to another hub snapshot',
     run: () => {
       const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ic-receipt-snapshot-join-'));

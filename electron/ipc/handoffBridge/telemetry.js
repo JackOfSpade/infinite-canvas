@@ -402,7 +402,7 @@ const QUEUE_PUSH_TASKS = new Set([
   'career-profile-audit-attribution', 'career-profile-audit-metrics', 'career-profile-audit-skills',
   'career-profile-audit-conflicts', 'career-profile-repair',
   'job-compensation-research', 'job-compensation-research-batch',
-  'job-preference-research', 'job-preference-research-batch', 'job-query-generation', 'job-scoring', 'job-gap-review',
+  'job-preference-research', 'job-preference-research-batch', 'job-query-generation', 'job-scoring', 'job-gap-review', 'application-edit-recurrence',
   'job-taxonomy-plan', 'job-taxonomy-classify', 'job-taxonomy-classify-batch',
   'job-compensation-assessment', 'job-compensation-assessment-batch',
   'job-preference-interpretation', 'job-preference-evaluation',

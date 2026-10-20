@@ -59,6 +59,7 @@ const KNOWN_TASKS = new Set([
   'job-query-generation',
   'job-scoring',
   'job-gap-review',
+  'application-edit-recurrence',
   'job-taxonomy-plan',
   'job-taxonomy-classify',
   'job-taxonomy-classify-batch',
@@ -181,6 +182,9 @@ const TASK_MAX_TOKENS = {
   // passes it as a hint; the job count alone is only a floor.
   'job-gap-review':            ({ itemCount = 1, reviewRowCount = 0 } = {}) =>
     Math.min(MANUAL_AI_USABLE_OUTPUT_TOKENS, 1024 + Math.max(1, itemCount) * 256 + Math.max(0, reviewRowCount) * 160),
+  // A handful of short pattern rows; the edited-bundle count is the only driver.
+  'application-edit-recurrence': ({ itemCount = 3 } = {}) =>
+    Math.min(MANUAL_AI_USABLE_OUTPUT_TOKENS, 1024 + Math.max(1, itemCount) * 96),
   'job-scoring':               ({ itemCount = 10, scoringRequirementCount = 0 } = {}) =>
     jobScoringMaxTokens(Math.max(itemCount, scoringRequirementCount)),
   // Taxonomy planning is fed only bounded aggregate statistics and returns a

@@ -44,7 +44,7 @@ import { applicationBlindReviewValidatorStamp, isApplicationBlindReviewValidator
 import { BLIND_REPAIR_RAISED_CYCLES_RULE, BLIND_REPAIR_TRUNCATION_RULE } from './applicationRepairConvergence.js';
 import { RESUME_SUPPORT_VERB_RULE } from './applicationWriterGuidance.js';
 import { describeRoleStrengthFinding, roleStrengthFindings } from './applicationRoleStrength.js';
-import { WRITE_VERIFY_PROTOCOL, WRITE_VERIFY_STAGES, WRITE_VERIFY_MAX_CORRECTIONS, WRITE_VERIFY_MAX_FIT_CORRECTIONS, acceptedWriteVerifyCandidates, factCorrectionTransition, fullApprovedHand, initialWriteVerifyState, isWriteVerifyJob, validateWriteVerifyRanking, writeVerifyCandidateCount, writeVerifyNextAfterCandidate, writeVerifyPrompt, writeVerifySourcePrompt, writeVerifyStageKey, writeVerifyFactFindingErrors, writeVerifyChangedFindingErrors } from './applicationWriteVerify.js';
+import { WRITE_VERIFY_PROTOCOL, WRITE_VERIFY_STAGES, WRITE_VERIFY_MAX_CORRECTIONS, WRITE_VERIFY_MAX_FIT_CORRECTIONS, acceptedWriteVerifyCandidates, droppedCandidateFindings, factCorrectionTransition, fullApprovedHand, initialWriteVerifyState, isWriteVerifyJob, validateWriteVerifyRanking, writeVerifyCandidateCount, writeVerifyNextAfterCandidate, writeVerifyPrompt, writeVerifySourcePrompt, writeVerifyStageKey, writeVerifyFactFindingErrors, writeVerifyChangedFindingErrors } from './applicationWriteVerify.js';
 import { applicationProtocolSetting } from './applicationProtocolSetting.js';
 import { targetIdentityNameLicensed, validateSharedApplicationContent } from './applicationTruthGates.js';
 import { v2RejectionEvidencePaths } from './applicationV2RejectionEvidence.js';
@@ -54,7 +54,7 @@ import { tryGetStore } from './settings.js';
 import { assertApplicationV2PromptLimit, assertApplicationV2ReplyLimit } from './applicationV2Limits.js';
 import { writeVerifyLengthBudgets } from './applicationV2LengthBudget.js';
 import { applicationV2PagePng } from './applicationV2PageImages.js';
-import { requirementsAdjudicationBindings, requirementsBindingErrors, requirementsAuditCapTerminal, requirementsSingletonBinding } from './applicationRequirementsAuditPolicy.js';
+import { MAX_REQUIREMENTS_REEPOCHS, requirementsAdjudicationBindings, requirementsAuditCapReached, requirementsBindingErrors, requirementsAuditCapTerminal, requirementsSingletonBinding } from './applicationRequirementsAuditPolicy.js';
 
 const { shell, app } = electronPkg;
 // `matches` is deliberately kept in canonical requirement×catalog order so
@@ -1659,6 +1659,160 @@ function authorityEffectiveSemanticAuditReceipt(page, disagreement, adjudication
   };
 }
 
+// Bounded re-epochs: after MAX_REQUIREMENTS_REEPOCHS fresh epochs, an
+// audit-sided adjudication no longer opens another full re-extraction.  The
+// accepted trade-off is explicit: the requirements items in the stream remain
+// the discovery's; only this page's audit verdict is overridden by the signed
+// adjudicator rows, so after two re-epochs a residual dispute no longer costs
+// a full listing re-extraction and the workflow always terminates.  The
+// receipt carries only unit ids, enums, digests and epoch numbers.
+function authorityCapOverrideSemanticAuditReceipt(page, disagreement, adjudication, epoch) {
+  const base = authorityEffectiveSemanticAuditReceipt(page, disagreement, adjudication);
+  const decided = new Map((Array.isArray(adjudication?.rows) ? adjudication.rows : []).map(row => [row?.unitId, row?.disposition]));
+  const unitIds = [];
+  const rows = base.rows.map(row => {
+    if (!decided.has(row.unitId) || decided.get(row.unitId) === row.disposition) return row;
+    unitIds.push(row.unitId);
+    return { ...row, disposition: decided.get(row.unitId) };
+  });
+  return { ...base, rows, capOverride: { epoch, maxReEpochs: MAX_REQUIREMENTS_REEPOCHS, unitIds } };
+}
+
+// A read-only overlay that presents not-yet-appended receipt pages as if they
+// were already in the store.  A paste transition may hold exactly one journal
+// transaction, so carried pages must be planned against the transition's
+// pending pages and appended together with them.
+function authorityPendingStoreView(store, entries) {
+  const pendingFor = stream => entries.filter(entry => entry.stream === stream);
+  const realCount = stream => store.receipt().streams[stream]?.count || 0;
+  const view = {
+    receipt() {
+      const receipt = store.receipt(); const streams = { ...receipt.streams };
+      for (const entry of entries) streams[entry.stream] = { ...(streams[entry.stream] || {}), count: (streams[entry.stream]?.count || 0) + 1 };
+      return { ...receipt, streams };
+    },
+    listingSlice: index => store.listingSlice(index),
+    async getReceiptPage(stream, number) {
+      const real = realCount(stream);
+      if (number < real) return store.getReceiptPage(stream, number);
+      const pending = pendingFor(stream)[number - real];
+      if (!pending) throw new Error('The pending authority receipt page does not exist.');
+      return { stream, number, records: pending.records };
+    },
+    async *iterateReceiptPages(stream) {
+      const total = realCount(stream) + pendingFor(stream).length;
+      for (let number = 0; number < total; number += 1) yield await view.getReceiptPage(stream, number);
+    },
+  };
+  return view;
+}
+
+function authorityCarriedSourceAgrees(sourcePage, page) {
+  const effective = sourcePage?.records?.at(-1);
+  const receipt = effective?.receipt;
+  return effective?.kind === 'listing-semantic-audit' && receipt?.version === AUTHORITY_LISTING_COVERAGE_VERSION
+    && receipt.pageIndex === page.index && receipt.auditDigest === page.auditDigest && !receipt.capOverride
+    && canonicalFrozenValue(receipt.rows) === canonicalFrozenValue(authoritySemanticAuditRows(page.dispositions));
+}
+
+// Convergent re-audits: an audit page whose auditDigest (page position, frozen
+// units and discovery dispositions) and rows equal an agreeing effective
+// receipt at the same index in an earlier epoch has already been audited, so
+// re-auditing it only re-rolls fresh disputes.  Returns the carried entries
+// to append in the caller's single held transaction, the first page that
+// still needs a live audit (or null), and metadata-only log rows.
+async function authorityCarryForwardAgreedAudits(store, input, active, pendingEntries = []) {
+  const entries = []; const log = [];
+  if (!isRequirementsAdjudicationProtocol(input) || !Number.isSafeInteger(active?.epoch) || active.epoch < 1) return { entries, log };
+  const pending = [...pendingEntries];
+  const view = authorityPendingStoreView(store, pending);
+  let index = view.receipt().streams[active.auditStream]?.count || 0;
+  for (;;) {
+    const page = await authorityListingSemanticAuditPage(view, index, { requirementsStream: active.requirementsStream, auditStream: active.auditStream });
+    if (!page) return { entries, log };
+    let source = null;
+    for (let earlier = 0; earlier < active.epoch && !source; earlier += 1) {
+      const streams = authorityEpochStreams(earlier);
+      if ((store.receipt().streams[streams.auditStream]?.count || 0) <= index) continue;
+      const sourcePage = await store.getReceiptPage(streams.auditStream, index);
+      if (authorityCarriedSourceAgrees(sourcePage, page)) source = { epoch: earlier, auditStream: streams.auditStream, pageIndex: index };
+    }
+    if (!source) return { entries, log };
+    const entry = { stream: active.auditStream, records: [{ id: `requirements-audit:${index}:${page.auditDigest}:carried`, kind: 'listing-semantic-audit',
+      receipt: { version: AUTHORITY_LISTING_COVERAGE_VERSION, auditDigest: page.auditDigest, pageIndex: page.index, pageDigest: page.digest,
+        rows: authoritySemanticAuditRows(page.dispositions), carriedFrom: source } }] };
+    entries.push(entry); pending.push(entry);
+    log.push({ epoch: active.epoch, pageIndex: index, fromEpoch: source.epoch, final: page.index + 1 === page.pageCount });
+    index += 1;
+  }
+}
+
+// One "next audit page or write" step shared by discovery completion, an
+// accepted audit page, and both non-epoch adjudication outcomes.  The caller
+// passes its own pending pages; carried pages are appended in the same held
+// transaction.  When the final audit page is appended here the zero-
+// requirement check runs first, exactly like a live final audit page.
+async function authorityAdvanceAuditOrWrite({ store, input, next, active, pendingEntries, finalPageInPending = false }) {
+  const carry = await authorityCarryForwardAgreedAudits(store, input, active, pendingEntries);
+  const finalCarried = carry.log.some(row => row.final);
+  // The requirements stream is unchanged by audit/adjudication transitions,
+  // so the check can precede the append; on discovery completion the final
+  // requirements page is pending and the check runs after the held append
+  // (a throw leaves an unpublished journal that reopen rolls back).
+  const requirementsPending = pendingEntries.some(entry => entry.stream === active.requirementsStream);
+  if ((finalCarried || finalPageInPending) && !requirementsPending) await currentAuthorityWorkflow(store, input);
+  const entries = [...pendingEntries, ...carry.entries];
+  if (entries.length === 1) await store.appendReceiptPage(entries[0].stream, entries[0].records, { holdJournal: true });
+  else if (entries.length) await store.appendReceiptPages(entries, { holdJournal: true });
+  if ((finalCarried || finalPageInPending) && requirementsPending) await currentAuthorityWorkflow(store, input);
+  const remaining = await authorityListingSemanticAuditPage(store, null, { requirementsStream: active.requirementsStream, auditStream: active.auditStream });
+  if (remaining) next.stage = 'requirements-audit';
+  else if (isWriteVerifyJob(input)) {
+    next.evidencePlan = (await writeVerifyFrozenContext(input, { authorityStore: store })).evidencePlan;
+    next.trustedIdentity = authorityTrustedIdentity(applicationCareerAuthority(input));
+    next.stage = 'write';
+  } else throw new Error('This application was made by an older version, so regenerate it.');
+  return carry.log.map(({ epoch, pageIndex, fromEpoch }) => ({ epoch, pageIndex, fromEpoch }));
+}
+
+// Discovery prefix carry for a re-epoch.  Invariant: every carried page lies
+// wholly before the disputed audit window, so it contains no unit of this
+// adjudication, and it was validated against the bindings in force when it
+// was extracted (the new adjudication binds only disputed units), so no
+// binding can be violated by keeping it.  Records keep their original ids;
+// only the epoch-scoped index keys are rebuilt for the new stream exactly as
+// discovery acceptance builds them.  The responder's next handoff resumes at
+// the disputed window with the new epoch's id prefix.
+async function authorityDiscoveryPrefixPages(store, fromStream, toStream, disputedAuditPage) {
+  const entries = [];
+  const count = authorityStoreReceipt(store).streams[fromStream]?.count || 0;
+  let cursor = { listingPageIndex: 0, unitStart: 0 };
+  for (let number = 0; number < count; number += 1) {
+    const receiptPage = await store.getReceiptPage(fromStream, number);
+    const coverage = receiptPage.records?.find(record => record?.kind === 'listing-coverage')?.receipt;
+    if (!coverage || !Number.isSafeInteger(coverage.unitEnd)) throw new Error('The superseded authority requirements receipt is missing its listing source-coverage audit.');
+    const window = { listingPageIndex: cursor.listingPageIndex, unitStart: cursor.unitStart, unitEnd: coverage.unitEnd };
+    const reached = window.listingPageIndex > disputedAuditPage.listingPageIndex
+      || (window.listingPageIndex === disputedAuditPage.listingPageIndex
+        && window.unitStart < disputedAuditPage.unitEnd && window.unitEnd > disputedAuditPage.unitStart);
+    if (reached) break;
+    entries.push({ stream: toStream, records: receiptPage.records.map(record => {
+      if (record?.kind === 'listing-evidence') return { ...record, indexKeys: [authorityScopedRequirementIndexKey(toStream, 'e', record.item?.id)] };
+      if (record?.kind === 'requirement') {
+        const text = String(record.item?.text || '').trim().replace(/\s+/gu, ' ').toLocaleLowerCase();
+        return { ...record, indexKeys: [authorityScopedRequirementIndexKey(toStream, 'r', record.item?.id), authorityScopedRequirementIndexKey(toStream, 'text', text)] };
+      }
+      return record;
+    }) });
+    const listingPage = await store.listingSlice(cursor.listingPageIndex);
+    const unitCount = authorityListingCoverageUnits(listingPage.text).length;
+    cursor = coverage.unitEnd >= unitCount
+      ? { listingPageIndex: cursor.listingPageIndex + 1, unitStart: 0 }
+      : { listingPageIndex: cursor.listingPageIndex, unitStart: coverage.unitEnd };
+  }
+  return entries;
+}
+
 function authorityBoundSingletonAuditReceipt(page, disagreement, bindingRows) {
   const binding = requirementsSingletonBinding(disagreement.differingUnitIds, bindingRows, page.dispositions);
   if (!binding) throw new Error('A single-unit audit override has no matching prior adjudication.');
@@ -1895,7 +2049,24 @@ async function assertAuthorityListingSemanticAuditReceipts(store, { requirements
       && direct?.version === AUTHORITY_LISTING_COVERAGE_VERSION && direct.pageIndex === index
       && direct.auditDigest === expected.auditDigest && direct.pageDigest === expected.digest
       && canonicalFrozenValue(direct.rows) === canonicalFrozenValue(authoritySemanticAuditRows(expected.dispositions));
-    if (normal && !direct.adjudication && !direct.bindingOverride) continue;
+    if (page.records?.length === 1 && page.records[0]?.kind === 'listing-semantic-audit' && direct?.carriedFrom !== undefined) {
+      // A carried receipt is only as good as the prior-epoch audit it names:
+      // reload that page and require it to be an agreeing effective audit of
+      // the identical audit window, so an edited pointer cannot launder an
+      // unaudited page into the active epoch.
+      const from = direct.carriedFrom;
+      let agrees = false;
+      if (normal && !direct.adjudication && !direct.bindingOverride && !direct.capOverride
+        && Number.isSafeInteger(from?.epoch) && from.epoch >= 0 && from.epoch < epoch
+        && from.auditStream === authorityEpochStreams(from.epoch).auditStream && from.pageIndex === index
+        && (receipt.streams[from.auditStream]?.count || 0) > index) {
+        const sourcePage = await store.getReceiptPage(from.auditStream, from.pageIndex);
+        agrees = authorityCarriedSourceAgrees(sourcePage, expected);
+      }
+      if (!agrees) throw new Error('The carried semantic listing-audit receipt does not bind an agreeing prior-epoch audit.');
+      continue;
+    }
+    if (normal && !direct.adjudication && !direct.bindingOverride && !direct.capOverride) continue;
     if (page.records?.length === 1 && page.records[0]?.kind === 'listing-semantic-audit' && direct?.bindingOverride) {
       const disagreement = await authorityFindDisagreementReceipt(store, direct.bindingOverride.disagreementDigest, { epoch, requirementsStream, auditStream });
       const bindingRows = await authorityPriorAdjudicationBindings(store, epoch, expected.units);
@@ -1917,6 +2088,15 @@ async function assertAuthorityListingSemanticAuditReceipts(store, { requirements
     }
     const disagreement = await authorityFindDisagreementReceipt(store, adjudication?.disagreementDigest, { epoch, requirementsStream, auditStream });
     const verdict = authorityVerifyAdjudicationReceipt({ page: expected, disagreement, adjudication, epoch });
+    if (effective?.capOverride !== undefined) {
+      // Only an audit-sided verdict at the re-epoch cap may override the
+      // audit verdict; the receipt must be exactly the host-derived one.
+      if (verdict.allDiscovery || !requirementsAuditCapReached(epoch) || effective.capOverride?.epoch !== epoch
+        || canonicalFrozenValue(effective) !== canonicalFrozenValue(authorityCapOverrideSemanticAuditReceipt(expected, disagreement, adjudication, epoch))) {
+        throw new Error('The cap-override semantic listing-audit receipt does not bind its adjudication at the re-epoch cap.');
+      }
+      continue;
+    }
     const expectedEffective = authorityEffectiveSemanticAuditReceipt(expected, disagreement, adjudication);
     if (!verdict.allDiscovery || canonicalFrozenValue(effective) !== canonicalFrozenValue(expectedEffective)) {
       throw new Error('The effective semantic listing-audit receipt does not bind its adjudication provenance.');
@@ -3967,6 +4147,19 @@ function pasteGroundingBriefRule(parts, items) {
     + ` ${SOURCE_FIGURE_GROUNDING_RULE}. Also: ${CLAIM_GROUNDING_RULE}.`;
 }
 
+// The literal claim-grounding gate stated up front for the application v2
+// write-then-verify source prompt, composed at call time from the same
+// constants the gates print, so the writer learns the rules before a
+// rejection and the wording can never drift from the checks.
+export function writeVerifyGroundingContract() {
+  return [
+    CLAIM_GROUNDING_RULE,
+    `Qualifier words are matched by word form, never by meaning, in these families: ${sourceGroundingQualifierForms()}`,
+    SOURCE_FIGURE_GROUNDING_RULE,
+    `Every sentence about the candidate's own work must share at least ${MIN_SHARED_SOURCE_TERMS} meaningful terms with the quotes its unit cites, where ${SOURCE_TERM_OVERLAP_RULE}`,
+  ].join('. ') + '.';
+}
+
 // Ordered by what omitting each one cost when a literal repair was measured
 // against it, because MAX_CORRECTION_BRIEF_CHARS drops whole entries from the
 // end. The argument-mapping entry leads: a paragraph left with no qualifying
@@ -4788,6 +4981,7 @@ async function writeVerifyFrozenContext(input, state) {
   const sourcePrompt = writeVerifySourcePrompt({
     posting, requirements, listingEvidence, identity: hydrated.snapshot.profile.identity,
     sourceRoles: hydrated.sourceRoles, profile: hydrated.snapshot.profile, catalog, lengthBudget,
+    groundingContract: writeVerifyGroundingContract(),
   });
   return { posting, requirements, listingEvidence, catalog, hand, sourcePrompt,
     evidencePlan: { evidence: [...hydrated.catalog, ...listingEvidence], requirements } };
@@ -4797,8 +4991,11 @@ async function writeVerifyHandoffRecord({ jobId, input, state, corrections = [] 
   const context = await writeVerifyFrozenContext(input, state);
   const envelope = { protocol: PASTE_APPLICATION_PROTOCOL_VERSION, jobId, stage: state.stage,
     handoffCode: state.handoffCode, baseHashes: state.baseHashes };
+  // A fresh write learns from every candidate dropped before it: their final
+  // deterministic findings ride along as observations (applicationWriteVerify
+  // droppedCandidateFindings). Corrections stay the current candidate's own.
   const prompt = writeVerifyPrompt({ stage: state.stage, state: state.writeVerify, ...context,
-    envelope, corrections });
+    envelope, corrections, droppedFindings: state.stage === 'write' ? droppedCandidateFindings(state.writeVerify) : [] });
   assertApplicationV2PromptLimit(prompt);
   const record = { ...envelope, prompt, draft: '' };
   if (state.stage === 'pick') {
@@ -7622,6 +7819,8 @@ async function submitWriteVerifyHandoff({ root, jobId, dir, manifest, input, fro
       } else { work.factFindings = parsed.findings; work.factCorrectionRound = 0; }
     }
   }
+  // An accepted stage never hands a correction list to the next handoff.
+  if (!errors.length) work.lastCorrections = [];
   if (errors.length && ['convert', 'verify-correction', 'fit-correction'].includes(outgoingStage)) {
     const separateFit = work.fitPolicy === 'separate-four-rounds' && fitRejected;
     candidate.rejections.push({ round: separateFit ? candidate.fitCorrections || 0 : candidate.corrections,
@@ -8042,6 +8241,10 @@ export async function submitLocalApplicationHandoff({ jobId, canvasFilePath, han
     let authorityRuntimeDispositionPlan = null;
     let authorityRuntimeDispositionPage = null;
     let authorityRuntimeReduction = null;
+    // Metadata-only rows (epoch/page numbers, unit ids, digests) for the
+    // generation log; carried and overridden audits never repeat unit text.
+    let authorityCarriedAuditLog = [];
+    let authorityCapOverrideLog = null;
     // The app decides which contact values reach a document, not the
     // responder. Projecting at the freeze means every later stage repeats an
     // already-correct row and no handoff round is ever spent on this.
@@ -8052,7 +8255,7 @@ export async function submitLocalApplicationHandoff({ jobId, canvasFilePath, han
         const page = state.authorityListingPage;
         if (!page?.requirementsStream) throw new Error('Current authority requirements state is missing its active immutable epoch stream.');
         const scoped = isRequirementsAdjudicationProtocol(input);
-        await store.appendReceiptPage(page.requirementsStream, [
+        const discoveryRecords = [
           ...(usesAuthorityListingCoverage(input) ? [{ id: `coverage:${parsed.__authorityListingCoverageReceipt?.listingPageIndex}:${parsed.__authorityListingCoverageReceipt?.unitStart}`, kind: 'listing-coverage', receipt: parsed.__authorityListingCoverageReceipt }] : []),
           ...parsed.evidence.map(item => ({ id: `e:${item.id}`, kind: 'listing-evidence',
             ...(scoped ? { indexKeys: [authorityScopedRequirementIndexKey(page.requirementsStream, 'e', item.id)] } : {}), item })),
@@ -8062,11 +8265,18 @@ export async function submitLocalApplicationHandoff({ jobId, canvasFilePath, han
               ? [authorityScopedRequirementIndexKey(page.requirementsStream, 'r', item.id), authorityScopedRequirementIndexKey(page.requirementsStream, 'text', text)]
               : [`requirement-text:${text}`], item };
           }),
-        ], { holdJournal: true });
+        ];
+        if (parsed.complete) {
+          const active = await authorityRequirementsEpoch(store, input);
+          authorityCarriedAuditLog = await authorityAdvanceAuditOrWrite({ store, input, next, active,
+            pendingEntries: [{ stream: page.requirementsStream, records: discoveryRecords }] });
+        } else {
+          await store.appendReceiptPage(page.requirementsStream, discoveryRecords, { holdJournal: true });
+          next.stage = 'requirements';
+        }
         authorityStoreToWrite = store;
         next.authorityStore = authorityStoreReceipt(store);
         next.trustedIdentity = authorityTrustedIdentity(applicationCareerAuthority(input));
-        next.stage = parsed.complete ? 'requirements-audit' : 'requirements';
       } else if (authorityProtocolFor(input) === AUTHORITY_PROTOCOL_LEGACY) {
       const ledger = state.authorityLedger;
       const nextLedger = {
@@ -8124,50 +8334,48 @@ export async function submitLocalApplicationHandoff({ jobId, canvasFilePath, han
         // Verify before adding the final held audit page: a listing with no
         // extracted requirements is a deterministic terminal input error,
         // never a zero-work match plan or a partially-published transition.
-        if (page.index + 1 === page.pageCount) await currentAuthorityWorkflow(store, input);
-        await store.appendReceiptPage(page.auditStream, [{ id: `requirements-audit:${page.index}:${audit.auditDigest}`, kind: 'listing-semantic-audit', receipt: audit }], { holdJournal: true });
+        // A v2 terminal never advances into candidate matching. V3 instead
+        // routes disagreements through the isolated adjudicator above.
+        const active = await authorityRequirementsEpoch(store, input);
+        authorityCarriedAuditLog = await authorityAdvanceAuditOrWrite({ store, input, next, active,
+          pendingEntries: [{ stream: page.auditStream, records: [{ id: `requirements-audit:${page.index}:${audit.auditDigest}`, kind: 'listing-semantic-audit', receipt: audit }] }],
+          finalPageInPending: page.index + 1 === page.pageCount });
       }
       authorityStoreToWrite = store; next.authorityStore = authorityStoreReceipt(store);
-      if (disagreement) {
-        // A v2 terminal never advances into candidate matching. V3 instead
-        // routes through the isolated third-context adjudicator above.
-      } else if (page.index + 1 < page.pageCount) next.stage = 'requirements-audit';
-      else {
-        if (isWriteVerifyJob(input)) {
-          next.evidencePlan = (await writeVerifyFrozenContext(input, { authorityStore: store })).evidencePlan;
-          next.trustedIdentity = authorityTrustedIdentity(applicationCareerAuthority(input));
-          next.stage = 'write';
-        }
-        else throw new Error('This application was made by an older version, so regenerate it.');
-      }
     } else if (state.stage === 'requirements-adjudication' && isRequirementsAdjudicationProtocol(input)) {
       const store = state.authorityStore; const page = state.authorityListingAuditPage;
       const caseRecord = state.authorityAdjudicationCase; const adjudication = parsed.__authorityAdjudicationReceipt;
       if (!store || !page || !caseRecord || !adjudication) throw new Error('Current authority requirements adjudication state is missing its exact immutable case.');
       const disagreement = caseRecord.disagreement;
       const verdict = authorityVerifyAdjudicationReceipt({ page, disagreement, adjudication, epoch: caseRecord.epoch });
-      if (verdict.allDiscovery) {
-        const effective = authorityEffectiveSemanticAuditReceipt(page, disagreement, adjudication);
-        if (page.index + 1 === page.pageCount) await currentAuthorityWorkflow(store, input);
-        await store.appendReceiptPage(caseRecord.auditStream, [
-          { id: `requirements-adjudication:${caseRecord.epoch}:${adjudication.digest}`, kind: 'requirements-adjudication', receipt: adjudication },
-          { id: `requirements-audit:${page.index}:${effective.auditDigest}:effective`, kind: 'listing-semantic-audit', receipt: effective },
-        ], { holdJournal: true });
+      const capOverride = !verdict.allDiscovery && requirementsAuditCapReached(caseRecord.epoch);
+      if (verdict.allDiscovery || capOverride) {
+        // At the re-epoch cap an audit-sided verdict overrides only this
+        // page's audit receipt (see authorityCapOverrideSemanticAuditReceipt).
+        const effective = capOverride
+          ? authorityCapOverrideSemanticAuditReceipt(page, disagreement, adjudication, caseRecord.epoch)
+          : authorityEffectiveSemanticAuditReceipt(page, disagreement, adjudication);
         delete next.authorityAdjudication;
-        if (page.index + 1 < page.pageCount) next.stage = 'requirements-audit';
-        else {
-          if (isWriteVerifyJob(input)) {
-            next.evidencePlan = (await writeVerifyFrozenContext(input, { authorityStore: store })).evidencePlan;
-            next.trustedIdentity = authorityTrustedIdentity(applicationCareerAuthority(input));
-            next.stage = 'write';
-          }
-          else throw new Error('This application was made by an older version, so regenerate it.');
+        authorityCarriedAuditLog = await authorityAdvanceAuditOrWrite({ store, input, next,
+          active: { epoch: caseRecord.epoch, requirementsStream: caseRecord.requirementsStream, auditStream: caseRecord.auditStream },
+          pendingEntries: [{ stream: caseRecord.auditStream, records: [
+            { id: `requirements-adjudication:${caseRecord.epoch}:${adjudication.digest}`, kind: 'requirements-adjudication', receipt: adjudication },
+            { id: `requirements-audit:${page.index}:${effective.auditDigest}:effective`, kind: 'listing-semantic-audit', receipt: effective },
+          ] }],
+          finalPageInPending: page.index + 1 === page.pageCount });
+        if (capOverride) {
+          authorityCapOverrideLog = { epoch: caseRecord.epoch, pageIndex: page.index, maxReEpochs: MAX_REQUIREMENTS_REEPOCHS,
+            unitIds: [...effective.capOverride.unitIds], disputedUnitCount: caseRecord.disputedUnitIds.length,
+            overriddenUnitCount: effective.capOverride.unitIds.length, adjudicationDigest: adjudication.digest };
         }
       } else {
         const pointer = authorityEpochPointerReceipt({ epoch: caseRecord.epoch + 1, adjudication });
+        const nextStreams = authorityEpochStreams(caseRecord.epoch + 1);
+        const seeded = await authorityDiscoveryPrefixPages(store, caseRecord.requirementsStream, nextStreams.requirementsStream, page);
         await store.appendReceiptPages([
           { stream: REQUIREMENTS_ADJUDICATIONS_STREAM, records: [{ id: `requirements-adjudication:${caseRecord.epoch}:${adjudication.digest}`, kind: 'requirements-adjudication', receipt: adjudication }] },
           { stream: REQUIREMENTS_EPOCHS_STREAM, records: [{ id: `requirements-epoch:${pointer.epoch}:${pointer.digest}`, kind: 'requirements-epoch', receipt: pointer }] },
+          ...seeded,
         ], { holdJournal: true });
         delete next.authorityAdjudication;
         next.stage = 'requirements';
@@ -8488,6 +8696,23 @@ export async function submitLocalApplicationHandoff({ jobId, canvasFilePath, han
           : { type: isRequirementsAdjudicationProtocol(input) ? 'authority-requirements-accepted-v3' : 'authority-requirements-accepted-v2', jobId, sequence: next.logCount, revision: next.revision, stage: state.stage, nextStage: next.stage, storeReceipt: next.authorityStore })
       : { type: 'paste-accepted', jobId, sequence: next.logCount, revision: next.revision, stage: state.stage, decision: parsed.decision || null, responseSha256: pasteJsonHash(parsed), nextStage: next.stage, findings: Array.isArray(parsed.findings) ? parsed.findings.length : 0,
         response: parsed }, hostCanonicalizations, hostCanonicalizationOriginalSha256), advisoryChecks });
+    // Each carried audit page and a cap override get their own lifecycle row
+    // after the transition row, advancing logCount so sequence numbers stay
+    // monotonic.  These rows carry only numbers, enums, unit ids and digests.
+    if (authorityStoreToWrite) {
+      for (const row of authorityCarriedAuditLog || []) {
+        next.logCount += 1;
+        await appendPasteGenerationLog(dir, { type: 'authority-requirements-audit-carried', jobId, sequence: next.logCount, revision: next.revision, stage: state.stage,
+          epoch: row.epoch, pageIndex: row.pageIndex, fromEpoch: row.fromEpoch });
+      }
+      if (authorityCapOverrideLog) {
+        next.logCount += 1;
+        const row = authorityCapOverrideLog;
+        await appendPasteGenerationLog(dir, { type: 'authority-requirements-audit-cap-override', jobId, sequence: next.logCount, revision: next.revision, stage: state.stage,
+          epoch: row.epoch, pageIndex: row.pageIndex, maxReEpochs: row.maxReEpochs, unitIds: [...row.unitIds], disputedUnitCount: row.disputedUnitCount,
+          overriddenUnitCount: row.overriddenUnitCount, adjudicationDigest: row.adjudicationDigest });
+      }
+    }
     if (authorityLedgerToWrite || authorityStoreToWrite) await authorityLedgerPersistenceStep('ledger:log-event');
     const updatedManifest = { ...manifest, status: pasteTerminalStop(next, input) ? 'failed' : (next.stage === 'completed' ? 'paste-completed' : 'queued'), paste: next };
     await atomicJson(path.join(dir, 'manifest.json'), updatedManifest);

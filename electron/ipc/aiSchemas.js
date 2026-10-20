@@ -1572,6 +1572,29 @@ export const JOB_SCORING_SCHEMA = {
 // priority with the posting's own softer wording, supply overlooked verbatim
 // candidate evidence, or mark one row a duplicate of another. The host
 // re-grounds every quote and recomputes the score deterministically.
+// Pre-generation gate: recurring kinds of hand edit across application bundles.
+export const APPLICATION_EDIT_RECURRENCE_SCHEMA = {
+  type: 'object',
+  required: ['version', 'patterns'],
+  properties: {
+    version: { type: 'integer', enum: [1], description: 'Always 1.' },
+    patterns: {
+      type: 'array',
+      maxItems: 12,
+      description: 'Every kind of change that recurs in at least 2 listed bundles. Empty when nothing recurs.',
+      items: {
+        type: 'object',
+        required: ['summary', 'kind', 'bundles'],
+        properties: {
+          summary: { type: 'string', minLength: 1, maxLength: 200, description: 'One sentence describing the recurring change, without candidate or employer names.' },
+          kind: { type: 'string', enum: ['truth', 'evidence', 'wording', 'structure', 'length', 'letter', 'other'], description: 'truth = factual correction; evidence = choice of achievements or proof; wording = phrasing or tone; structure = order or sections; length = trimming or expanding; letter = cover letter structure; other = anything else.' },
+          bundles: { type: 'array', minItems: 2, maxItems: 100, items: { type: 'integer', minimum: 1 }, description: 'The listed bundle numbers where this change appears.' },
+        },
+      },
+    },
+  },
+};
+
 export const JOB_GAP_REVIEW_SCHEMA = {
   type: 'object',
   required: ['reviews'],

@@ -1,4 +1,5 @@
 import { TRANSIENT_PROCESSING_HUB_STATES } from './persistenceTransientState.js';
+import { hasActiveJobBoardCareerOverrideRun } from './jobBoardCareerOverride.js';
 
 // External-lifecycle data must not participate in undo. It is stripped from
 // fingerprints and merged from the live nodes on restore so Undo cannot revive
@@ -20,6 +21,7 @@ const JOB_BOARD_RUN_FIELDS = [
   'manualAiResume',
   'manualAiCleanupReceipts',
   'queuedModuleRun',
+  'jobBoardCareerOverride',
 ];
 
 const JOB_SEARCH_RUN_FIELDS = [
@@ -258,6 +260,7 @@ export function hasActiveExternalRunState(nodes, { recursive = true } = {}) {
       || data.manualAiResume
       || (Array.isArray(data.manualAiCleanupReceipts) && data.manualAiCleanupReceipts.length > 0)
       || data.queuedModuleRun
+      || hasActiveJobBoardCareerOverrideRun(data)
     )) return true;
     if (node?.type === 'jobhub' && hasExternallyOwnedJobSearchState(data)) return true;
     if (node?.type === 'sellhub' && hasExternallyOwnedSellHubState(data)) return true;

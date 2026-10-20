@@ -5668,7 +5668,11 @@ export default [
       const generationStart = source.indexOf('const generateApplication = useCallback');
       const generationEnd = source.indexOf('\n  return (', generationStart);
       const generationScope = source.slice(generationStart, generationEnd);
-      assert(generationScope.includes('const careerSnapshotId = typeof data.careerSnapshotId')
+      // The pin may come from the owning Board's approved career override or
+      // from the card itself; both are immutable approved snapshot ids resolved
+      // by one helper, never mutable hub authority.
+      assert(generationScope.includes('resolveApplicationCareerSnapshotId({ cardData: { careerSnapshotId: data.careerSnapshotId }')
+        && generationScope.includes("const careerSnapshotId = (resolvedCareer.careerSnapshotId || '')")
         && generationScope.includes('careerSnapshotId,')
         && !generationScope.includes('originHubId')
         && !/\bcareerData\s*:/.test(generationScope)

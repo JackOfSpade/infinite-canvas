@@ -23,7 +23,7 @@ import {
 import { reconcileApplicationHtmlFromPdf } from './applicationPdfReconcile.js';
 import { replaceApplicationBundleAtomically } from './applicationFileTransaction.js';
 import { logger } from '../logger.js';
-import { improvementStatus, logSavedBundle } from './applicationEditLog.js';
+import { bundleEditNotes, improvementStatus, logBundleEditNotes, logSavedBundle } from './applicationEditLog.js';
 
 const { app } = electronPkg;
 
@@ -1176,6 +1176,30 @@ async function removeCoverLetter(payload) {
 }
 export const __removeCoverLetterForTests = removeCoverLetter;
 
+const MAX_EDIT_NOTES_BYTES = 64 * 1024;
+
+async function recordWorkspaceEditNotes(payload) {
+  const { workspace } = registeredWorkspaceForToken(payload);
+  const editNotes = typeof payload?.editNotes === 'string' ? payload.editNotes : '';
+  if (Buffer.byteLength(editNotes, 'utf8') > MAX_EDIT_NOTES_BYTES) {
+    throw Object.assign(new Error('The edit notes are too long.'), { statusCode: 400 });
+  }
+  const result = await logBundleEditNotes({ root: app.getPath('userData'), workspaceDir: workspace.workspaceDir, editNotes });
+  return { editNotes: result?.editNotes ?? '' };
+}
+export const __recordWorkspaceEditNotesForTests = recordWorkspaceEditNotes;
+
+async function workspaceStatus(payload) {
+  const { workspace } = registeredWorkspaceForToken(payload);
+  const root = app.getPath('userData');
+  const status = await improvementStatus(root);
+  let editNotes = '';
+  try { editNotes = (await bundleEditNotes({ root, workspaceDir: workspace.workspaceDir })).editNotes; }
+  catch (error) { logger.warn(`[ApplicationSync] Could not read edit notes: ${error?.message || error}`); }
+  return { ...status, editNotes };
+}
+export const __workspaceStatusForTests = workspaceStatus;
+
 async function syncWorkspace(payload) {
   const { token, workspace } = registeredWorkspaceForToken(payload);
   const documentKind = payload?.document === 'cover' ? 'cover' : payload?.document === 'resume' ? 'resume' : '';
@@ -1328,7 +1352,12 @@ async function syncWorkspace(payload) {
       updateSyncAttempt(attemptId, {
         status: 'completed', phase: 'completed', finishedAt: Date.now(), manifest,
       });
-      try { await logSavedBundle({ root: app.getPath('userData'), workspaceDir: workspace.workspaceDir, html: mergedHtml }); }
+      try {
+        await logSavedBundle({
+          root: app.getPath('userData'), workspaceDir: workspace.workspaceDir, html: mergedHtml,
+          editNotes: typeof payload?.editNotes === 'string' ? payload.editNotes : undefined,
+        });
+      }
       catch (error) { logger.warn(`[ApplicationSync] Could not record synced application edit: ${error?.message || error}`); }
       logger.info(`[ApplicationSync] Synced ${documentKind} and verified destination revision in ${workspace.workspaceDir}`);
       return {
@@ -1424,7 +1453,9 @@ export async function startApplicationSyncServer() {
         const result = payload?.action === 'remove-cover'
           ? await removeCoverLetter(payload)
           : payload?.action === 'status'
-          ? await (async () => { registeredWorkspaceForToken(payload); return improvementStatus(app.getPath('userData')); })()
+          ? await workspaceStatus(payload)
+          : payload?.action === 'notes'
+          ? await recordWorkspaceEditNotes(payload)
           : payload?.action === 'reconcile'
           ? await reconcileWorkspacePdfs(payload)
           : await syncWorkspace(payload);

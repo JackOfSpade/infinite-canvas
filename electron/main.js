@@ -34,6 +34,7 @@ import { loadInterviewPreparationBundle, registerInterviewPreparationHandlers } 
 import { createInterviewWindowController, isTrustedInterviewNavigation } from './interviewWindow.js';
 import { registerJobApplicationHandlers } from './ipc/jobApplication.js';
 import { registerLocalAiApplicationHandlers } from './ipc/localAiApplication.js';
+import { registerApplicationGenerationGateHandlers } from './ipc/applicationGenerationGate.js';
 import { registerApplicationBundleWatchHandlers } from './ipc/applicationBundleWatch.js';
 import { startApplicationSyncServer, stopApplicationSyncServer } from './ipc/applicationSync.js';
 import { assertDesignSystemIntact } from './ipc/resumeHtml.js';
@@ -1686,6 +1687,7 @@ if (!gotTheLock) {
     });
     registerJobApplicationHandlers();
     registerLocalAiApplicationHandlers();
+    registerApplicationGenerationGateHandlers();
     registerApplicationBundleWatchHandlers();
     startApplicationSyncServer().catch((err) => logger.warn(`[main] Application sync service failed to start: ${err?.message || err}`));
     registerMarketplaceHandlers();

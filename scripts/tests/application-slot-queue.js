@@ -85,7 +85,12 @@ export default [
         let mutationAfterStart = false;
         const callback = runInNewContext(`${source.slice(start, end)}\ngenerateApplication;`, {
           useCallback: fn => fn,
-          window: { electronAPI: { queueLocalApplication: async () => { ipcCalls += 1; return { success: false }; } } },
+          window: { electronAPI: {
+            queueLocalApplication: async () => { ipcCalls += 1; return { success: false }; },
+            checkApplicationGenerationGate: async () => ({ success: true, blocked: false }),
+            completeNonApiAiRun: async () => {},
+          } },
+          generateId: () => 'gate-run',
           applicationSubmissionRef: { current: false },
           hasApplicationRun: false, localJobPending: false, effectiveLock: false,
           id: 'card', idRef: { current: 'card' }, data, additionalNotes: '',
@@ -119,6 +124,69 @@ export default [
         assert(mutationAfterStart && ipcCalls === (change === 'unchanged' ? 1 : 0),
           `${change}: only an unchanged live card may create a private handoff`);
         assert(queue.getSnapshot().active === null, `${change}: the skipped Generate releases its lease`);
+      }
+    },
+  },
+  {
+    name: 'application slot queue: a blocked edit-recurrence gate refuses Generate before any handoff and releases the lease',
+    async run() {
+      const source = readFileSync(new URL('../../src/nodes/JobCardNode.jsx', import.meta.url), 'utf8');
+      const start = source.indexOf('const generateApplication = useCallback(');
+      const end = source.indexOf('\n\n  return (', start);
+      assert(start >= 0 && end > start, 'the actual Generate callback is available');
+      for (const gateResult of [
+        { success: true, blocked: true, patterns: [{ summary: 'Shortens the opening summary', count: 3 }] },
+        { success: false, error: 'handoff failed' },
+        { success: true, blocked: false, patterns: [] },
+      ]) {
+        const queue = createModuleRunQueue();
+        const card = jobCard('card', null, { hubId: 'board', careerSnapshotId: 'approved-snapshot' });
+        const board = { id: 'board', type: 'jobboard', data: {} };
+        let queueCalls = 0;
+        const gateCalls = [];
+        const completed = [];
+        const toasts = [];
+        const runStates = [];
+        const callback = runInNewContext(`${source.slice(start, end)}\ngenerateApplication;`, {
+          useCallback: fn => fn,
+          window: { electronAPI: {
+            queueLocalApplication: async () => { queueCalls += 1; return { success: false }; },
+            checkApplicationGenerationGate: async args => { gateCalls.push(args); return gateResult; },
+            completeNonApiAiRun: async runId => { completed.push(runId); },
+          } },
+          generateId: () => 'gate-run',
+          applicationSubmissionRef: { current: false },
+          hasApplicationRun: false, localJobPending: false, effectiveLock: false,
+          id: 'card', idRef: { current: 'card' }, data: card.data, additionalNotes: '',
+          nav: { getCurrentFile: () => '/project/canvas.json', enumerateAllNodes: () => [card, board] },
+          getLiveNode: id => id === 'card' ? card : id === 'board' ? board : null,
+          setApplicationRun: run => runStates.push(run.state), updateGlobal() {}, addToast: toast => toasts.push(toast),
+          isMountedRef: { current: true },
+          EventLogger: { log() {}, error() {} },
+          APPLICATION_HANDOFF_LIMIT, countActiveApplicationHandoffs,
+          getDismissedApplicationBundles: () => new Set(),
+          hasLinkedLocalApplicationOutput, queuedLocalApplicationStartDecision,
+          normalizeJobListingExternalUrl: job => job.url || 'https://example.test/job',
+          acquireModuleRun: options => queue.acquireModuleRun(options),
+        });
+        await callback();
+        const label = gateResult.success ? `blocked=${gateResult.blocked}` : 'failed check';
+        assert(gateCalls.length === 1 && gateCalls[0].nodeId === 'card' && gateCalls[0].manualAiRunId === 'application-gate:card:gate-run',
+          `${label}: the gate runs once with the card's durable run id`);
+        assert(completed.length === 1 && completed[0] === 'application-gate:card:gate-run', `${label}: the gate run is retired`);
+        assert(queue.getSnapshot().active === null, `${label}: the lease is released`);
+        assert(runStates.at(-1) === 'idle', `${label}: the card returns to idle`);
+        if (gateResult.success && !gateResult.blocked) {
+          assert(queueCalls === 1, 'an unblocked gate lets Generate queue the handoff');
+        } else if (gateResult.success) {
+          assert(queueCalls === 0, 'a blocked gate never queues the handoff');
+          assert(toasts.length === 1 && toasts[0].title === 'Improvement session required'
+            && toasts[0].description.includes('Shortens the opening summary'), 'the refusal names the recurring pattern');
+        } else {
+          assert(queueCalls === 0, 'a failed check refuses generation (fail closed)');
+          assert(toasts.length === 1 && toasts[0].title === 'Generation Error' && toasts[0].description === 'handoff failed',
+            'the failed check surfaces its error');
+        }
       }
     },
   },

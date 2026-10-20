@@ -12,6 +12,7 @@ import { inspectLocalAiHandoff, waitForLocalAiHandoff } from '../../local_ai/wai
 import { _resetPasteHandoffDiagnostics, buildPasteHandoffDiagnosticsMarkdown, getPasteHandoffDiagnosticsSnapshot, recordPasteHandoffDiagnostic } from '../../electron/ipc/pasteHandoffDiagnostics.js';
 import { approvedCareerEvidenceCatalog, CAREER_SNAPSHOT_COMPILATION_CONTRACT, CAREER_SNAPSHOT_SCHEMA_VERSION, CAREER_SNAPSHOT_STATUS_APPROVED, buildCareerSourceCorpus, canonicalCareerProfileDigest, careerSnapshotId, careerSnapshotIdForContract, careerSnapshotStorageRoot, emptyCareerReconciliationReceipt, partitionCareerSourcePages, verbatimCareerTranscriptionAuditReceipt, writeCareerSnapshotAtomically } from '../../electron/ipc/careerSnapshot.js';
 import { buildApplicationCareerAuthority } from '../../electron/ipc/applicationCareerAuthority.js';
+import { WRITE_VERIFY_DROPPED_FINDINGS_HEADING, WRITE_VERIFY_MAX_CORRECTIONS } from '../../electron/ipc/applicationWriteVerify.js';
 import { hasLinkedLocalApplicationOutput } from '../../src/utils/localAiApplicationLifecycle.js';
 
 async function createCanvasProject() {
@@ -584,12 +585,40 @@ export default [
         }
         assert(converged.accepted && converged.handoff?.stage === 'write' && !converged.terminal,
           'a discovery-sided adjudication emits the effective audit receipt and continues to v2 writing');
+        // A fresh write learns from dropped candidates: drive candidate-1 past
+        // its correction budget with writer replies that fail the deterministic
+        // shortlist split, then read candidate-2's first write prompt.
+        assert(!converged.handoff.prompt.includes(WRITE_VERIFY_DROPPED_FINDINGS_HEADING),
+          'an undropped flow carries no dropped-draft observations');
+        const logTypesBefore = new Set((await fs.promises.readFile(path.join(queued.folder, 'Generation Log.jsonl'), 'utf8')).trim().split('\n').map(line => JSON.parse(line).type));
+        let writeRound = converged;
+        for (let round = 0; round <= WRITE_VERIFY_MAX_CORRECTIONS; round += 1) {
+          writeRound = await submitLocalApplicationHandoff({ jobId: queued.id, canvasFilePath: project.canvasFilePath, handoffCode: writeRound.handoff.handoffCode,
+            response: 'RÉSUMÉ\nA draft without the working shortlist.\n\nCOVER LETTER\nA letter without the working shortlist.' });
+          assert(!writeRound.accepted && writeRound.handoff?.stage === 'write' && writeRound.validationErrors?.length,
+            `write round ${round} is rejected and re-prompts a write (${JSON.stringify(writeRound.validationErrors || [])})`);
+          if (round < WRITE_VERIFY_MAX_CORRECTIONS) assert(!writeRound.handoff.prompt.includes(WRITE_VERIFY_DROPPED_FINDINGS_HEADING),
+            `correction round ${round} of the live candidate carries no dropped-draft observations`);
+        }
+        const droppedManifest = JSON.parse(await fs.promises.readFile(path.join(queued.folder, 'manifest.json'), 'utf8'));
+        const [droppedCandidate, nextCandidate] = droppedManifest.paste.writeVerify.candidates;
+        assert(droppedCandidate.status === 'dropped' && Array.isArray(droppedCandidate.dropReason) && droppedCandidate.dropReason.length
+          && nextCandidate.status === 'unwritten' && droppedManifest.paste.writeVerify.ordinal === 1,
+        'the exhausted candidate drops with its final findings retained and the next candidate takes the write slot');
+        const nextWrite = writeRound.handoff.prompt;
+        const sectionAt = nextWrite.indexOf(WRITE_VERIFY_DROPPED_FINDINGS_HEADING);
+        assert(sectionAt > 0 && sectionAt < nextWrite.indexOf('OUTPUT FORMAT FOR THIS ARM')
+          && droppedCandidate.dropReason.every(text => nextWrite.includes(`\n- ${text.trim()}`)),
+        'the next candidate\'s first write prompt carries every finding that dropped the previous one');
+        const logTypesAfter = new Set((await fs.promises.readFile(path.join(queued.folder, 'Generation Log.jsonl'), 'utf8')).trim().split('\n').map(line => JSON.parse(line).type));
+        assert([...logTypesAfter].every(type => logTypesBefore.has(type) || type === 'write-verify-stage'),
+          `the dropped-finding carry adds no generation-log event type (${[...logTypesAfter].join(', ')})`);
         const persistedManifest = await fs.promises.readFile(path.join(queued.folder, 'manifest.json'), 'utf8');
         const persistedLog = await fs.promises.readFile(path.join(queued.folder, 'Generation Log.jsonl'), 'utf8');
         assert(!persistedManifest.includes(sourceSentinel) && !persistedLog.includes(sourceSentinel)
           && !persistedManifest.includes(adjudicationKey) && !persistedLog.includes(adjudicationKey),
         'the adjudication case source and fresh key remain runtime-only across manifest and generation-log persistence');
-        return { requirements: 13, omittedClauseBlocked: true, adjudicated: true, continued: true };
+        return { requirements: 13, omittedClauseBlocked: true, adjudicated: true, continued: true, droppedCarried: droppedCandidate.dropReason.length };
       } finally { await fs.promises.rm(project.root, { recursive: true, force: true }); }
     },
   },

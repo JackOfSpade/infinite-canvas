@@ -116,19 +116,10 @@ function outOfOrder(values) {
 }
 
 /**
- * One row per changed block: what the user did (added, removed, rewritten,
- * moved, markup) and where, without any document text. Classifying the edit
- * (truth, evidence, wording...) is left to the improvement session.
+ * Shared block pairing for editSummaries and editDiffs, so the private
+ * summaries and the gate's diffs always describe the same edits.
  */
-export function editSummaries(generated, saved, id, at) {
-  const rows = [];
-  for (const document of ['resume', 'letter']) {
-    const beforeHtml = generated?.[document] || '';
-    const afterHtml = saved?.[document] || '';
-    if (beforeHtml === afterHtml) continue;
-    const before = contentBlocks(beforeHtml);
-    const after = contentBlocks(afterHtml);
-    const row = (block, extra) => rows.push({ id, at, document, section: block.section, kind: block.kind, ...extra });
+function pairBlocks(before, after) {
     const pairs = [];
     const freeAfter = new Set(after.keys());
     const freeBefore = [];
@@ -158,6 +149,24 @@ export function editSummaries(generated, saved, id, at) {
     }
     pairs.sort((x, y) => x.i - y.i);
     const moved = outOfOrder(pairs.map(pair => pair.j));
+    return { pairs, moved, freeBefore, rewrittenBefore, freeAfter };
+}
+
+/**
+ * One row per changed block: what the user did (added, removed, rewritten,
+ * moved, markup) and where, without any document text. Classifying the edit
+ * (truth, evidence, wording...) is left to the improvement session.
+ */
+export function editSummaries(generated, saved, id, at) {
+  const rows = [];
+  for (const document of ['resume', 'letter']) {
+    const beforeHtml = generated?.[document] || '';
+    const afterHtml = saved?.[document] || '';
+    if (beforeHtml === afterHtml) continue;
+    const before = contentBlocks(beforeHtml);
+    const after = contentBlocks(afterHtml);
+    const row = (block, extra) => rows.push({ id, at, document, section: block.section, kind: block.kind, ...extra });
+    const { pairs, moved, freeBefore, rewrittenBefore, freeAfter } = pairBlocks(before, after);
     for (const [k, pair] of pairs.entries()) {
       const block = before[pair.i];
       const next = after[pair.j];
@@ -171,6 +180,110 @@ export function editSummaries(generated, saved, id, at) {
     if (!rows.some(item => item.document === document)) rows.push({ id, at, document, op: 'markup', section: '', kind: '' });
   }
   return rows;
+}
+
+const DIFF_TEXT_MAX = 500;
+const cap = value => String(value || '').slice(0, DIFF_TEXT_MAX);
+
+/**
+ * The text of each added, removed or rewritten block, for the pre-generation
+ * gate's handoff only (never stored). Moved-only blocks are not edits of content.
+ */
+export function editDiffs(generated, saved) {
+  const rows = [];
+  for (const document of ['resume', 'letter']) {
+    const beforeHtml = generated?.[document] || '';
+    const afterHtml = saved?.[document] || '';
+    if (beforeHtml === afterHtml) continue;
+    const before = contentBlocks(beforeHtml);
+    const after = contentBlocks(afterHtml);
+    const { pairs, freeBefore, rewrittenBefore, freeAfter } = pairBlocks(before, after);
+    for (const pair of pairs) {
+      if (!pair.rewritten) continue;
+      const block = before[pair.i];
+      rows.push({ document, section: block.section, kind: block.kind, op: 'rewritten', before: cap(block.text), after: cap(after[pair.j].text) });
+    }
+    for (const i of freeBefore) {
+      if (!rewrittenBefore.has(i)) rows.push({ document, section: before[i].section, kind: before[i].kind, op: 'removed', before: cap(before[i].text), after: '' });
+    }
+    for (const j of freeAfter) rows.push({ document, section: after[j].section, kind: after[j].kind, op: 'added', before: '', after: cap(after[j].text) });
+  }
+  return rows;
+}
+
+function sinceSession(state) {
+  return Number.isFinite(Date.parse(state?.lastSessionAt)) ? Date.parse(state.lastSessionAt) : -Infinity;
+}
+
+/** Non-superseded pairs since the last session with at least one content edit, oldest first. */
+export function editedPairsSinceSession(state) {
+  const since = sinceSession(state);
+  return (state?.pairs || [])
+    .filter(pair => !pair.supersededAt && Date.parse(pair.generatedAt) >= since)
+    .sort((left, right) => String(left.generatedAt).localeCompare(String(right.generatedAt)))
+    .map(pair => ({ pair, diffs: editDiffs(pair.generated, pair.saved) }))
+    .filter(entry => entry.diffs.length > 0);
+}
+
+export const GATE_PROMPT_VERSION = 1;
+export const GATE_MIN_EDITED_BUNDLES = 3;
+export const GATE_RECURRENCE_MIN = 3;
+
+/** Changes exactly when the gate's handoff input could change. */
+export function generationGateInputDigest(state, editedPairs) {
+  return digest(JSON.stringify([
+    GATE_PROMPT_VERSION,
+    state?.lastSessionAt || '',
+    (editedPairs || []).map(({ pair }) => [pair.id, pair.savedAt, pair.editNotesAt || '']),
+  ]));
+}
+
+const GATE_KINDS = new Set(['truth', 'evidence', 'wording', 'structure', 'length', 'letter', 'other']);
+
+function normalizeGate(record) {
+  if (!record || typeof record !== 'object' || record.version !== 1 || typeof record.inputDigest !== 'string') return null;
+  const patterns = (Array.isArray(record.patterns) ? record.patterns : [])
+    .map(item => ({
+      summary: String(item?.summary || '').trim().slice(0, 200),
+      kind: GATE_KINDS.has(item?.kind) ? item.kind : 'other',
+      bundles: [...new Set((Array.isArray(item?.bundles) ? item.bundles : []).filter(id => typeof id === 'string' && id))],
+    }))
+    .filter(item => item.summary && item.bundles.length > 0);
+  return {
+    version: 1,
+    inputDigest: record.inputDigest,
+    checkedAt: typeof record.checkedAt === 'string' ? record.checkedAt : null,
+    lastSessionAt: typeof record.lastSessionAt === 'string' ? record.lastSessionAt : null,
+    blocked: record.blocked === true,
+    patterns,
+    editedBundleCount: Number.isInteger(record.editedBundleCount) ? record.editedBundleCount : 0,
+  };
+}
+
+/** The pre-generation gate's last result, or null. */
+export async function readGenerationGate(root) {
+  return serialize(async () => normalizeGate((await read(root)).generationGate));
+}
+
+/** Store (or, with null, clear) the gate record; the rest of the state is kept. */
+export async function writeGenerationGate(root, record) {
+  return serialize(async () => {
+    const state = await alignModel(root, await read(root));
+    const normalized = normalizeGate(record);
+    if (normalized) state.generationGate = normalized;
+    else delete state.generationGate;
+    await write(root, state);
+    return normalized;
+  });
+}
+
+/** Read the state and its edited pairs in one consistent snapshot. */
+export async function generationGateInputs(root) {
+  return serialize(async () => {
+    const state = await alignModel(root, await read(root));
+    const editedPairs = editedPairsSinceSession(state);
+    return { state, editedPairs, gate: normalizeGate(state.generationGate) };
+  });
 }
 
 async function alignModel(root, state) {
@@ -221,7 +334,62 @@ export async function logGeneratedBundle({ root, workspaceDir, html, posting, ap
   });
 }
 
-export async function logSavedBundle({ root, workspaceDir, html, letterRemoved = false }) {
+/**
+ * The user's own stated reasons for their hand edits, typed in the workspace
+ * sidebar. Kept on the pair only (never in summary rows), capped and stripped
+ * of control characters other than newlines.
+ */
+export const EDIT_NOTES_MAX_CHARS = 4000;
+
+export function normalizeEditNotes(value) {
+  if (typeof value !== 'string') return '';
+  return value
+    .replace(/\r\n?/g, '\n')
+    // A tab is a word separator the user typed, not noise; keep the gap.
+    .replace(/\t/g, ' ')
+    // eslint-disable-next-line no-control-regex
+    .replace(/[\u0000-\u0008\u000B-\u001F\u007F-\u009F]/g, '')
+    .trim()
+    .slice(0, EDIT_NOTES_MAX_CHARS)
+    .trim();
+}
+
+function applyEditNotes(pair, editNotes) {
+  const text = normalizeEditNotes(editNotes);
+  if (text) {
+    pair.editNotes = text;
+    pair.editNotesAt = new Date().toISOString();
+  } else {
+    delete pair.editNotes;
+    delete pair.editNotesAt;
+  }
+  return text;
+}
+
+export async function logBundleEditNotes({ root, workspaceDir, editNotes }) {
+  return serialize(async () => {
+    const state = await alignModel(root, await read(root));
+    const pair = state.pairs.findLast(item => item.workspaceId === idFor(workspaceDir));
+    if (!pair) return null;
+    const text = applyEditNotes(pair, editNotes);
+    await write(root, state);
+    return { editNotes: text };
+  });
+}
+
+export async function bundleEditNotes({ root, workspaceDir }) {
+  return serialize(async () => {
+    const state = await read(root);
+    const pair = (state.pairs || []).findLast(item => item.workspaceId === idFor(workspaceDir));
+    if (!pair || state.modelLabel !== modelLabel()) return { editNotes: '', editNotesAt: null };
+    return {
+      editNotes: typeof pair.editNotes === 'string' ? pair.editNotes : '',
+      editNotesAt: typeof pair.editNotesAt === 'string' ? pair.editNotesAt : null,
+    };
+  });
+}
+
+export async function logSavedBundle({ root, workspaceDir, html, letterRemoved = false, editNotes }) {
   return serialize(async () => {
     const state = await alignModel(root, await read(root));
     const pair = state.pairs.findLast(item => item.workspaceId === idFor(workspaceDir));
@@ -230,6 +398,7 @@ export async function logSavedBundle({ root, workspaceDir, html, letterRemoved =
     const at = new Date().toISOString();
     pair.saved = documentSnapshot(html);
     pair.savedAt = at;
+    if (typeof editNotes === 'string') applyEditNotes(pair, editNotes);
     if (letterRemoved || pair.saved.letterRemoved) {
       pair.generated.letter = null;
       pair.saved.letter = null;
@@ -290,7 +459,11 @@ export async function improvementStatus(root) {
     await write(root, state);
     const count = state.countSinceSession || 0;
     const recurring = recurringEditSections(state);
-    return { count, due: count >= SESSION_DUE_COUNT, earlyDue: recurring.length > 0, recurring, modelLabel: state.modelLabel };
+    const gate = normalizeGate(state.generationGate);
+    const generationGate = gate
+      ? { blocked: gate.blocked, checkedAt: gate.checkedAt, patterns: gate.patterns.map(item => ({ summary: item.summary, count: item.bundles.length })) }
+      : null;
+    return { count, due: count >= SESSION_DUE_COUNT, earlyDue: recurring.length > 0, recurring, modelLabel: state.modelLabel, generationGate };
   });
 }
 
@@ -299,6 +472,8 @@ export async function resetImprovementCounter(root) {
     const state = await alignModel(root, await read(root));
     state.countSinceSession = 0;
     state.lastSessionAt = new Date().toISOString();
+    // The session reviewed the recurring edits, so the refusal it answered ends here.
+    delete state.generationGate;
     await write(root, state);
   });
 }

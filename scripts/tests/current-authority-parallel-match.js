@@ -44,12 +44,30 @@ function semanticAuditFor(context, evidence, requirements) {
   };
 }
 
-async function completeRequirementsDiscovery({ fixture, queued, epoch = 0 }) {
+// Drives discovery for the remaining source windows of the active epoch.  A
+// re-epoch carries the discovery pages wholly before the disputed audit
+// window, so in epochs > 0 the first handoff may resume past unit zero; the
+// carried pages' evidence and requirements come from `prior` (the previous
+// epoch's result) so later audits classify the whole listing.
+async function completeRequirementsDiscovery({ fixture, queued, epoch = 0, prior = null }) {
   const reply = (handoff, fields) => JSON.stringify({ protocol: 1, jobId: queued.id, stage: handoff.stage, handoffCode: handoff.handoffCode, baseHashes: handoff.baseHashes, ...fields });
   const evidence = [];
   const requirements = [];
+  const byIndex = new Map();
   let handoff = (await getLocalApplicationHandoff({ jobId: queued.id, canvasFilePath: fixture.canvasFilePath })).handoff;
   const idPrefix = epoch === 0 ? 'p1-' : `e${epoch}-p1-`;
+  const resumeUnit = contextOf(handoff).requirementsProgress.sourceCoverage.unitStart;
+  const firstRemaining = fixture.requirementUnitIndexes
+    ? fixture.requirementUnitIndexes.findIndex(unitIndex => unitIndex >= resumeUnit)
+    : 0;
+  assert(resumeUnit === 0 || (epoch > 0 && fixture.requirementUnitIndexes && firstRemaining > 0),
+    `only a re-epoch over a long listing resumes past unit zero (resume=${resumeUnit}, epoch=${epoch})`);
+  for (let index = 0; index < firstRemaining; index += 1) {
+    const carried = prior?.byIndex?.get(index);
+    assert(!!carried, `carried discovery page ${index + 1} has a prior-epoch record to reuse`);
+    byIndex.set(index, carried);
+    evidence.push(...carried.evidence); requirements.push(...carried.requirements);
+  }
   const submitCoverageOnlyPage = async (label, complete = false) => {
     const context = contextOf(handoff);
     const source = context.requirementsProgress.sourceCoverage;
@@ -63,8 +81,8 @@ async function completeRequirementsDiscovery({ fixture, queued, epoch = 0 }) {
     assert(accepted.accepted, `${label} coverage-only requirement page is accepted (${JSON.stringify(accepted.validationErrors || [])})`);
     handoff = accepted.handoff;
   };
-  if (fixture.coverageOnlyPrefix) await submitCoverageOnlyPage('prefix');
-  for (let index = 0; index < fixture.requirements.length; index += 1) {
+  if (fixture.coverageOnlyPrefix && resumeUnit === 0) await submitCoverageOnlyPage('prefix');
+  for (let index = firstRemaining; index < fixture.requirements.length; index += 1) {
     const context = contextOf(handoff);
     assert(context.requirementsProgress.epoch === epoch,
       `requirements discovery reopens the expected immutable epoch (${context.requirementsProgress.epoch})`);
@@ -88,6 +106,7 @@ async function completeRequirementsDiscovery({ fixture, queued, epoch = 0 }) {
       }
     }
     evidence.push(...pageEvidence); requirements.push(...pageRequirements);
+    byIndex.set(index, { evidence: [...pageEvidence], requirements: [...pageRequirements] });
     const hasCoverageOnlyAfter = fixture.coverageOnlyAfterEveryRequirement || fixture.coverageOnlyAfterRequirementIndex === index;
     const accepted = await submitLocalApplicationHandoff({
       jobId: queued.id, canvasFilePath: fixture.canvasFilePath, handoffCode: handoff.handoffCode,
@@ -117,7 +136,86 @@ async function completeRequirementsDiscovery({ fixture, queued, epoch = 0 }) {
     assert(accepted.accepted, `coverage-only requirement page is accepted (${JSON.stringify(accepted.validationErrors || [])})`);
     handoff = accepted.handoff;
   }
-  return { handoff, evidence, requirements, reply };
+  return { handoff, evidence, requirements, reply, byIndex, resumeUnit, firstRemaining };
+}
+
+// Flips one audit row so the independent audit disagrees with discovery.
+function flipRow(audit, unitId) {
+  const row = audit.rows.find(candidate => candidate.unitId === unitId);
+  assert(!!row, `the audit window contains disputed unit ${unitId}`);
+  row.disposition = row.disposition === 'requirement' ? 'not-a-requirement' : 'requirement';
+  return row;
+}
+
+// Submits an audit-sided adjudication for an open adjudication handoff.
+async function adjudicateWithAudit({ fixture, queued, opened, audit, reply }) {
+  const context = contextOf(opened.handoff);
+  return submitLocalApplicationHandoff({ jobId: queued.id, canvasFilePath: fixture.canvasFilePath,
+    handoffCode: opened.handoff.handoffCode, response: reply(opened.handoff, {
+      storeDigest: context.storeDigest, caseDigest: context.caseDigest,
+      rows: context.cases.map(unit => ({ unitId: unit.unitId, disposition: audit.rows.find(row => row.unitId === unit.unitId).disposition })),
+    }) });
+}
+
+// Long-listing helpers: the unit id at a listing index comes from whichever
+// served window contains that index's synthetic text.
+function unitIdForText(context, text) {
+  const units = context.units || context.requirementsProgress?.sourceCoverage?.units || [];
+  return units.find(unit => unit.text === text)?.id;
+}
+
+// Agrees with every served audit window until the one holding `unitIndex`,
+// disputes that unit, and sides the adjudicator with the audit.
+async function disputeLiveAuditWindow({ fixture, queued, discovery, unitIndex }) {
+  let handoff = discovery.handoff;
+  while (handoff?.stage === 'requirements-audit') {
+    const context = contextOf(handoff);
+    const audit = semanticAuditFor(context, discovery.evidence, discovery.requirements);
+    const disputedId = unitIdForText(context, fixture.unitTexts[unitIndex]);
+    if (disputedId) {
+      flipRow(audit, disputedId);
+      const opened = await submitLocalApplicationHandoff({ jobId: queued.id, canvasFilePath: fixture.canvasFilePath,
+        handoffCode: handoff.handoffCode, response: discovery.reply(handoff, audit) });
+      assert(opened.accepted && opened.handoff?.stage === 'requirements-adjudication',
+        `the dispute on unit ${unitIndex} opens adjudication (${JSON.stringify(opened.validationErrors || [])})`);
+      return adjudicateWithAudit({ fixture, queued, opened, audit, reply: discovery.reply });
+    }
+    const accepted = await submitLocalApplicationHandoff({ jobId: queued.id, canvasFilePath: fixture.canvasFilePath,
+      handoffCode: handoff.handoffCode, response: discovery.reply(handoff, audit) });
+    assert(accepted.accepted, `an agreeing audit window is accepted (${JSON.stringify(accepted.validationErrors || [])})`);
+    handoff = accepted.handoff;
+  }
+  throw new Error(`no served audit window contained unit ${unitIndex}`);
+}
+
+// Epoch zero over the long listing: agree with window [0,64), dispute unit 80
+// in window [64,128), and side with the audit to open epoch one.
+async function longListingToEpochOne({ fixture, queued }) {
+  const first = (await getLocalApplicationHandoff({ jobId: queued.id, canvasFilePath: fixture.canvasFilePath })).handoff;
+  const firstSource = contextOf(first).requirementsProgress.sourceCoverage;
+  const header = fixture.headerUnitCount;
+  assert(firstSource.unitCount === fixture.unitTexts.length + 2 && firstSource.units[header]?.text === fixture.unitTexts[header]
+    && firstSource.units[header - 1]?.text !== fixture.unitTexts[header],
+  `the long listing is one listing page of 150 units whose synthetic sentences start after the header (${firstSource.unitCount}, ${JSON.stringify(firstSource.units.slice(0, header + 1).map(unit => unit.text.length))})`);
+  const epochZero = await completeRequirementsDiscovery({ fixture, queued });
+  assert(epochZero.handoff?.stage === 'requirements-audit' && contextOf(epochZero.handoff).units[header].text === fixture.unitTexts[header],
+    'epoch-zero audit starts at window [0,64)');
+  const reset = await disputeLiveAuditWindow({ fixture, queued, discovery: epochZero, unitIndex: 80 });
+  assert(reset.accepted && reset.handoff?.stage === 'requirements', 'the audit-sided verdict on unit 80 opens epoch one');
+  return { epochZero, reset };
+}
+
+async function readGenerationLog(queued) {
+  const text = await fs.promises.readFile(path.join(queued.folder, 'Generation Log.jsonl'), 'utf8');
+  return text.split('\n').filter(Boolean).map(line => JSON.parse(line));
+}
+
+async function assertReplays({ fixture, queued, stage, label }) {
+  const reopened = await getLocalApplicationHandoff({ jobId: queued.id, canvasFilePath: fixture.canvasFilePath });
+  const status = await localApplicationStatus(queued.id, fixture.canvasFilePath);
+  assert(reopened.handoff?.stage === stage && reopened.localJob.status === 'queued' && status.status === 'queued' && status.stage === stage,
+    `${label}: reopen and status replay the immutable store (stage=${reopened.handoff?.stage}, status=${status.status}/${status.stage})`);
+  return reopened;
 }
 
 function authorityRootPageReferences(root) {
@@ -894,18 +992,207 @@ export default [
             rows: adjudication.cases.map(unit => ({ unitId: unit.unitId,
               disposition: audit.rows.find(row => row.unitId === unit.unitId).disposition })),
           }) });
-        assert(reset.accepted && reset.handoff?.stage === 'requirements', 'a new signed decision advances discovery');
+        if (epoch < 2) {
+          assert(reset.accepted && reset.handoff?.stage === 'requirements', `a new signed decision at epoch ${epoch} opens a fresh discovery epoch`);
+          continue;
+        }
+        // At the re-epoch cap the audit-sided verdict overrides this page's
+        // audit instead of opening epoch 3.
+        assert(reset.accepted && !reset.terminal && ['requirements-audit', 'write'].includes(reset.handoff?.stage),
+          `the capped audit-sided decision proceeds without a new epoch (${reset.handoff?.stage})`);
+        let handoff = reset.handoff;
+        while (handoff?.stage === 'requirements-audit') {
+          const accepted = await submitLocalApplicationHandoff({ jobId: queued.id, canvasFilePath: fixture.canvasFilePath,
+            handoffCode: handoff.handoffCode, response: discovery.reply(handoff,
+              semanticAuditFor(contextOf(handoff), discovery.evidence, discovery.requirements)) });
+          assert(accepted.accepted, 'all signed decisions survive receipt replay');
+          handoff = accepted.handoff;
+        }
+        assert(handoff?.stage === 'write', 'the recovered job converges to document writing');
+        const store = await openAuthorityLedgerStore(path.join(queued.folder, 'context'), { namespace: 'application-authority' });
+        const streams = store.receipt().streams;
+        const overridePage = await store.getReceiptPage('requirements-audit-e2', 0);
+        assert(streams['requirements-epochs'].count === 2 && streams['requirements-adjudications'].count === 2
+          && !streams['requirements-e3'] && !streams['requirements-audit-e3']
+          && overridePage.records.length === 2 && overridePage.records[0].kind === 'requirements-adjudication'
+          && overridePage.records[1].receipt.capOverride?.epoch === 2 && overridePage.records[1].receipt.capOverride?.maxReEpochs === 2
+          && [...overridePage.records[1].receipt.capOverride.unitIds].sort().join(',') === novel.map(row => row.unitId).sort().join(','),
+        'the cap override records the adjudication and an overriding effective audit in the epoch-2 audit stream, never epoch 3');
+        await assertReplays({ fixture, queued, stage: 'write', label: 'legacy capped job after override' });
       }
-      const final = await completeRequirementsDiscovery({ fixture, queued, epoch: 3 });
-      let handoff = final.handoff;
+    } finally { await fs.promises.rm(fixture.root, { recursive: true, force: true }); }
+  },
+}, {
+  name: 'requirements re-epoch carries discovery pages before the disputed window and carries agreed audits without serving them',
+  run: async () => {
+    const fixture = await makeCurrentAuthorityParallelMatchFixture({ longListing: true });
+    try {
+      const queued = await queueLocalApplicationJob({ transport: 'paste', canvasFilePath: fixture.canvasFilePath,
+        careerSnapshotId: fixture.snapshotId, job: fixture.job });
+      const { epochZero, reset } = await longListingToEpochOne({ fixture, queued });
+      const resetSource = contextOf(reset.handoff).requirementsProgress.sourceCoverage;
+      assert(contextOf(reset.handoff).requirementsProgress.epoch === 1 && resetSource.unitStart === 41
+        && resetSource.units[0].text === fixture.unitTexts[41],
+      'the new epoch resumes discovery at the first page overlapping the disputed window (unit 41), not at unit zero');
+      const contextDir = path.join(queued.folder, 'context');
+      let store = await openAuthorityLedgerStore(contextDir, { namespace: 'application-authority' });
+      assert(store.receipt().streams['requirements-e1']?.count === 2 && store.receipt().streams.requirements.count === 6,
+        'exactly the two discovery pages wholly before audit window [64,128) are carried into requirements-e1');
+      for (let number = 0; number < 2; number += 1) {
+        const original = await store.getReceiptPage('requirements', number);
+        const carried = await store.getReceiptPage('requirements-e1', number);
+        assert(carried.records.map(record => record.id).join('|') === original.records.map(record => record.id).join('|')
+          && carried.records.map(record => record.kind).join('|') === original.records.map(record => record.kind).join('|'),
+        `carried discovery page ${number} keeps its original record ids`);
+        const originalRequirement = original.records.find(record => record.kind === 'requirement');
+        const carriedRequirement = carried.records.find(record => record.kind === 'requirement');
+        assert(carriedRequirement && JSON.stringify(carriedRequirement.item) === JSON.stringify(originalRequirement.item)
+          && carriedRequirement.indexKeys.length === originalRequirement.indexKeys.length
+          && carriedRequirement.indexKeys.every((key, index) => key !== originalRequirement.indexKeys[index]),
+        `carried discovery page ${number} copies items verbatim but re-scopes every index key to requirements-e1`);
+      }
+      await assertReplays({ fixture, queued, stage: 'requirements', label: 'after the discovery prefix carry' });
+
+      const epochOne = await completeRequirementsDiscovery({ fixture, queued, epoch: 1, prior: epochZero });
+      assert(epochOne.resumeUnit === 41 && epochOne.firstRemaining === 2,
+        'epoch one re-extracts only the overlapping and later windows');
+      store = await openAuthorityLedgerStore(contextDir, { namespace: 'application-authority' });
+      assert(store.receipt().streams['requirements-e1'].count === 6,
+        'two carried plus four re-extracted discovery pages complete requirements-e1');
+      const firstAudit = contextOf(epochOne.handoff);
+      assert(epochOne.handoff.stage === 'requirements-audit' && firstAudit.units[0].text === fixture.unitTexts[64],
+        'no requirements-audit handoff is served for the carried window; the live audit resumes at the disputed page');
+      const carriedAudit = await store.getReceiptPage('requirements-audit-e1', 0);
+      const carriedFrom = carriedAudit.records[0]?.receipt?.carriedFrom;
+      assert(store.receipt().streams['requirements-audit-e1'].count === 1
+        && carriedAudit.records.length === 1 && carriedAudit.records[0].kind === 'listing-semantic-audit'
+        && carriedFrom?.epoch === 0 && carriedFrom?.auditStream === 'requirements-audit' && carriedFrom?.pageIndex === 0
+        && Object.keys(carriedFrom).length === 3,
+      `the epoch-one audit page before the disputed window is a carriedFrom receipt pointing at the agreeing epoch-zero page (${store.receipt().streams['requirements-audit-e1'].count}, ${carriedAudit.records.length}, ${JSON.stringify(carriedFrom)})`);
+      const log = await readGenerationLog(queued);
+      const carriedEvents = log.filter(event => event.type === 'authority-requirements-audit-carried');
+      assert(carriedEvents.length === 1 && carriedEvents[0].epoch === 1 && carriedEvents[0].pageIndex === 0 && carriedEvents[0].fromEpoch === 0
+        && Object.keys(carriedEvents[0]).sort().join(',') === 'at,epoch,fromEpoch,jobId,pageIndex,revision,sequence,stage,type',
+      'the carried audit is logged as one metadata-only lifecycle event');
+      const sequences = log.filter(event => Number.isSafeInteger(event.sequence)).map(event => event.sequence);
+      assert(sequences.length > 1 && sequences.every((value, index) => index === 0 || value > sequences[index - 1]),
+        'generation-log sequence numbers stay strictly monotonic across carried events');
+      await assertReplays({ fixture, queued, stage: 'requirements-audit', label: 'after audit carry-forward' });
+
+      let handoff = epochOne.handoff;
       while (handoff?.stage === 'requirements-audit') {
         const accepted = await submitLocalApplicationHandoff({ jobId: queued.id, canvasFilePath: fixture.canvasFilePath,
-          handoffCode: handoff.handoffCode, response: final.reply(handoff,
-            semanticAuditFor(contextOf(handoff), final.evidence, final.requirements)) });
-        assert(accepted.accepted, 'all signed decisions survive receipt replay');
+          handoffCode: handoff.handoffCode, response: epochOne.reply(handoff, semanticAuditFor(contextOf(handoff), epochOne.evidence, epochOne.requirements)) });
+        assert(accepted.accepted, `epoch-one audit page is accepted (${JSON.stringify(accepted.validationErrors || [])})`);
         handoff = accepted.handoff;
       }
-      assert(handoff?.stage === 'write', 'the recovered job converges to document writing');
+      assert(handoff?.stage === 'write', 'the carried epoch converges to writing');
+      await assertReplays({ fixture, queued, stage: 'write', label: 'after the carried epoch reaches write' });
+    } finally { await fs.promises.rm(fixture.root, { recursive: true, force: true }); }
+  },
+}, {
+  name: 'requirements re-epoch cap: a third audit-sided adjudication overrides the page audit and reaches write',
+  run: async () => {
+    const fixture = await makeCurrentAuthorityParallelMatchFixture({ longListing: true });
+    try {
+      const queued = await queueLocalApplicationJob({ transport: 'paste', canvasFilePath: fixture.canvasFilePath,
+        careerSnapshotId: fixture.snapshotId, job: fixture.job });
+      const { epochZero } = await longListingToEpochOne({ fixture, queued });
+      const epochOne = await completeRequirementsDiscovery({ fixture, queued, epoch: 1, prior: epochZero });
+      const secondReset = await disputeLiveAuditWindow({ fixture, queued, discovery: epochOne, unitIndex: 90 });
+      assert(secondReset.accepted && secondReset.handoff?.stage === 'requirements'
+        && contextOf(secondReset.handoff).requirementsProgress.epoch === 2,
+      'a second audit-sided verdict opens epoch two');
+      await assertReplays({ fixture, queued, stage: 'requirements', label: 'after the second re-epoch' });
+      const epochTwo = await completeRequirementsDiscovery({ fixture, queued, epoch: 2, prior: epochOne });
+      assert(epochTwo.resumeUnit === 41 && contextOf(epochTwo.handoff).units[0].text === fixture.unitTexts[64],
+        'epoch two also carries the discovery prefix and the agreed first audit window');
+      const contextDir = path.join(queued.folder, 'context');
+      let store = await openAuthorityLedgerStore(contextDir, { namespace: 'application-authority' });
+      const carriedTwice = await store.getReceiptPage('requirements-audit-e2', 0);
+      assert(carriedTwice.records.length === 1 && carriedTwice.records[0].receipt.carriedFrom?.epoch < 2
+        && carriedTwice.records[0].receipt.carriedFrom?.pageIndex === 0,
+      'the epoch-two first audit page is carried from an earlier agreeing epoch');
+
+      const audit = semanticAuditFor(contextOf(epochTwo.handoff), epochTwo.evidence, epochTwo.requirements);
+      const disputedId = unitIdForText(contextOf(epochTwo.handoff), fixture.unitTexts[95]);
+      flipRow(audit, disputedId);
+      const opened = await submitLocalApplicationHandoff({ jobId: queued.id, canvasFilePath: fixture.canvasFilePath,
+        handoffCode: epochTwo.handoff.handoffCode, response: epochTwo.reply(epochTwo.handoff, audit) });
+      assert(opened.accepted && opened.handoff?.stage === 'requirements-adjudication', 'the third dispute is adjudicated');
+      const overridden = await adjudicateWithAudit({ fixture, queued, opened, audit, reply: epochTwo.reply });
+      assert(overridden.accepted && !overridden.terminal && overridden.handoff?.stage === 'requirements-audit'
+        && contextOf(overridden.handoff).units[0].text === fixture.unitTexts[128],
+      'at the cap the audit-sided verdict advances to the next audit window instead of a new epoch');
+      store = await openAuthorityLedgerStore(contextDir, { namespace: 'application-authority' });
+      const overridePage = await store.getReceiptPage('requirements-audit-e2', 1);
+      const effective = overridePage.records[1]?.receipt;
+      assert(store.receipt().streams['requirements-epochs'].count === 2
+        && store.receipt().streams['requirements-adjudications'].count === 2
+        && !store.receipt().streams['requirements-e3']
+        && overridePage.records.length === 2 && overridePage.records[0].kind === 'requirements-adjudication'
+        && JSON.stringify(effective.capOverride) === JSON.stringify({ epoch: 2, maxReEpochs: 2, unitIds: [disputedId] })
+        && effective.rows.find(row => row.unitId === disputedId)?.disposition === 'requirement',
+      'the override page holds the adjudication and an effective audit taking the adjudicator disposition, with no third epoch');
+      const log = await readGenerationLog(queued);
+      const capEvents = log.filter(event => event.type === 'authority-requirements-audit-cap-override');
+      assert(capEvents.length === 1 && capEvents[0].epoch === 2 && capEvents[0].pageIndex === 1 && capEvents[0].maxReEpochs === 2
+        && JSON.stringify(capEvents[0].unitIds) === JSON.stringify([disputedId])
+        && capEvents[0].disputedUnitCount === 1 && capEvents[0].overriddenUnitCount === 1
+        && /^[a-f0-9]{64}$/u.test(capEvents[0].adjudicationDigest)
+        && !JSON.stringify(log).includes(fixture.unitTexts[95]),
+      'the cap override is logged as metadata only, never the disputed unit text');
+      await assertReplays({ fixture, queued, stage: 'requirements-audit', label: 'after the cap override' });
+
+      let handoff = overridden.handoff;
+      while (handoff?.stage === 'requirements-audit') {
+        const accepted = await submitLocalApplicationHandoff({ jobId: queued.id, canvasFilePath: fixture.canvasFilePath,
+          handoffCode: handoff.handoffCode, response: epochTwo.reply(handoff, semanticAuditFor(contextOf(handoff), epochTwo.evidence, epochTwo.requirements)) });
+        assert(accepted.accepted, `post-override audit page is accepted (${JSON.stringify(accepted.validationErrors || [])})`);
+        handoff = accepted.handoff;
+      }
+      assert(handoff?.stage === 'write', 'the capped job reaches writing');
+      await assertReplays({ fixture, queued, stage: 'write', label: 'after the capped job reaches write' });
+    } finally { await fs.promises.rm(fixture.root, { recursive: true, force: true }); }
+  },
+}, {
+  name: 'requirements audit carry: a carriedFrom pointer edited on disk is rejected on reopen',
+  run: async () => {
+    const fixture = await makeCurrentAuthorityParallelMatchFixture({ longListing: true });
+    try {
+      const queued = await queueLocalApplicationJob({ transport: 'paste', canvasFilePath: fixture.canvasFilePath,
+        careerSnapshotId: fixture.snapshotId, job: fixture.job });
+      const { epochZero } = await longListingToEpochOne({ fixture, queued });
+      await completeRequirementsDiscovery({ fixture, queued, epoch: 1, prior: epochZero });
+      const contextDir = path.join(queued.folder, 'context');
+      const probe = await openAuthorityLedgerStore(contextDir, { namespace: 'application-authority' });
+      const carried = await probe.getReceiptPage('requirements-audit-e1', 0);
+      assert(carried.records[0]?.receipt?.carriedFrom?.pageIndex === 0, 'the untampered carried receipt binds epoch-zero page 0');
+
+      // Content-addressed page files cannot be edited without failing the
+      // store's inclusion proof first, so present the edited pointer through
+      // the store read path to reach the semantic carriedFrom check itself.
+      const prototype = Object.getPrototypeOf(probe);
+      const original = prototype.getReceiptPage;
+      let servedTampered = 0;
+      prototype.getReceiptPage = async function tamperedGetReceiptPage(stream, number, ...rest) {
+        const page = await original.call(this, stream, number, ...rest);
+        if (stream !== 'requirements-audit-e1' || number !== 0 || !page?.records?.[0]?.receipt?.carriedFrom) return page;
+        servedTampered += 1;
+        const edited = JSON.parse(JSON.stringify(page));
+        // Epoch-zero page 1 is the disputed window and never agrees with 0.
+        edited.records[0].receipt.carriedFrom.pageIndex = 1;
+        return edited;
+      };
+      let status = null; let statusError = null; let reopened = null; let reopenError = null;
+      try {
+        try { status = await localApplicationStatus(queued.id, fixture.canvasFilePath); } catch (error) { statusError = error; }
+        try { reopened = await getLocalApplicationHandoff({ jobId: queued.id, canvasFilePath: fixture.canvasFilePath }); } catch (error) { reopenError = error; }
+      } finally { prototype.getReceiptPage = original; }
+      assert(servedTampered > 0, 'reopen replays the carried audit receipt through the store');
+      assert((statusError || status?.status === 'failed') && (reopenError?.code === 'LOCAL_AI_JOB_INTEGRITY' || reopened?.localJob?.status === 'failed')
+        && reopened?.handoff?.stage !== 'requirements-audit',
+      `a carriedFrom pointer naming a non-agreeing page fails closed on reopen (${status?.status}, ${statusError?.message}, ${reopenError?.code}, ${reopened?.handoff?.stage})`);
     } finally { await fs.promises.rm(fixture.root, { recursive: true, force: true }); }
   },
 }, {

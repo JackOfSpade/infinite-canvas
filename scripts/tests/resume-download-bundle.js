@@ -203,6 +203,89 @@ export default [
     },
   },
   {
+    name: 'application workspace: "Why I changed things" notes live in the sidebar, autosave locally and post to the bridge',
+    run: async () => {
+      const docId = 'edit-notes-test';
+      const token = 'e'.repeat(64);
+      const doc = embedApplicationSyncConfig(buildResumeDocument({
+        docId,
+        resumeMainHtml: '<main class="page"><p>Synthetic résumé</p></main>',
+        coverLetter: { name: 'Synthetic Applicant', paragraphs: ['Synthetic letter.'] },
+        downloadBundle: { company: 'Example', candidateName: 'Synthetic Applicant', jobMarkdown: '# Synthetic role' },
+      }), { endpoint: 'http://127.0.0.1:43192/application-sync', token });
+      // Lines indented inside one @media print block, up to the sidebar rule.
+      const printBlock = /@media print \{(?:\n {2}[^\n]*)*?\n {2}\.ic-workspace-sidebar \{ display: none !important; \}\n/.test(doc);
+      assert(printBlock, 'the print block must still hide the whole sidebar (and with it the notes box)');
+
+      const typed = 'Cut the second project because it repeats the first.';
+      const calls = [];
+      const dom = new JSDOM(doc, {
+        runScripts: 'dangerously', url: 'https://edit-notes.local/Application.html',
+        beforeParse(window) {
+          window.fetch = async (_url, options) => {
+            calls.push(JSON.parse(options.body));
+            return { ok: true, json: async () => ({ success: true }) };
+          };
+        },
+      });
+      try {
+        const { document } = dom.window;
+        const textarea = document.getElementById('ic-edit-notes');
+        assert(textarea && textarea.tagName === 'TEXTAREA', 'the notes textarea must render');
+        assert(textarea.closest('.ic-workspace-sidebar'), 'the notes textarea must sit inside the workspace sidebar');
+        assert(!textarea.closest('main') && !document.querySelector('main #ic-edit-notes'), 'the notes must never be inside a printed document main');
+        assert(textarea.value === '', 'a fresh page starts with no notes');
+        await new Promise(resolve => dom.window.setTimeout(resolve, 0));
+        textarea.value = typed;
+        textarea.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
+        await new Promise(resolve => dom.window.setTimeout(resolve, 300));
+        assert(!calls.some(call => call.action === 'notes'), 'notes must not post before the debounce elapses');
+        await new Promise(resolve => dom.window.setTimeout(resolve, 700));
+        const notesCalls = calls.filter(call => call.action === 'notes');
+        assert(notesCalls.length === 1, `typing must post exactly one notes request, got ${notesCalls.length}`);
+        assert(notesCalls[0].token === token && notesCalls[0].editNotes === typed, 'the notes request must carry the capability and typed text');
+        assert(dom.window.localStorage.getItem(`ic-edit-notes:${docId}`) === typed, 'the notes must be mirrored to localStorage under the doc id');
+        assert(document.getElementById('ic-notes-status').textContent === 'Saved', 'a confirmed save must say Saved');
+        const mains = Array.from(document.querySelectorAll('main'));
+        assert(mains.length > 0 && mains.every(main => !main.textContent.includes(typed)), 'the notes text must never enter a document main');
+        const bundleData = document.getElementById('ic-application-bundle-data').textContent;
+        assert(!bundleData.includes(typed), 'the notes text must never enter BUNDLE_DATA');
+      } finally { dom.window.close(); }
+
+      const restored = new JSDOM(doc, {
+        runScripts: 'dangerously', url: 'https://edit-notes-restore.local/Application.html',
+        beforeParse(window) {
+          window.localStorage.setItem(`ic-edit-notes:${docId}`, 'Kept the summary short on purpose.');
+          window.fetch = () => new Promise(() => {});
+        },
+      });
+      try {
+        assert(restored.window.document.getElementById('ic-edit-notes').value === 'Kept the summary short on purpose.',
+          'a page opened with stored notes must show them in the textarea');
+      } finally { restored.window.close(); }
+
+      const fromServer = new JSDOM(doc, {
+        runScripts: 'dangerously', url: 'https://edit-notes-server.local/Application.html',
+        beforeParse(window) {
+          window.fetch = async (_url, options) => ({
+            ok: true,
+            json: async () => JSON.parse(options.body).action === 'status'
+              ? { success: true, due: false, editNotes: 'Reworded the headline to match the posting.' }
+              : { success: true },
+          });
+        },
+      });
+      try {
+        await new Promise(resolve => fromServer.window.setTimeout(resolve, 10));
+        assert(fromServer.window.document.getElementById('ic-edit-notes').value === 'Reworded the headline to match the posting.',
+          'the status response must restore notes when localStorage is empty');
+        assert(fromServer.window.localStorage.getItem(`ic-edit-notes:${docId}`) === 'Reworded the headline to match the posting.',
+          'restored notes are mirrored back into localStorage');
+      } finally { fromServer.window.close(); }
+      return { debounced: true };
+    },
+  },
+  {
     name: 'application workspace: remove cover letter requires confirmation and screen notice stays out of print',
     run: async () => {
       const doc = embedApplicationSyncConfig(buildResumeDocument({

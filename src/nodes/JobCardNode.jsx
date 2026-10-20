@@ -4,6 +4,7 @@ import { CanvasNavigationContext } from '../contexts/CanvasNavigationContext';
 import { ExternalLink, X, Sparkles, ChevronDown } from 'lucide-react';
 import { useToast } from '../components/ToastProvider';
 import { EventLogger } from '../utils/EventLogger';
+import { generateId } from '../utils/idGenerator';
 import { formatPostedForDisplay } from '../utils/jobPostedDate';
 import { languageLabel } from '../utils/jobLanguageLabels';
 import { NodeHandles } from './_shared/NodeHandles';
@@ -29,6 +30,7 @@ import {
 import { useBridgeHeldKey } from '../hooks/useBridgeHeldKey';
 import { bridgeHeldCardLine } from '../utils/bridgeHeldApplication';
 import { applicationBundleIndicator, APPLICATION_BUNDLE_TONES } from '../utils/jobCardBundleIndicator';
+import { resolveApplicationCareerSnapshotId } from '../utils/jobBoardCareerOverride';
 
 // Accent color encodes the hiring-fit band: a compact evidence-based assessment
 // of full-process fit, not a guaranteed hiring outcome.
@@ -1060,7 +1062,17 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
     // The reactive effective lock gives mounted cards immediate feedback; the
     // live read remains the race-safe fence if a Board locks after that render.
     if (effectiveLock || getLiveNode(data.hubId)?.data?.locked) return;
-    const careerSnapshotId = typeof data.careerSnapshotId === 'string' ? data.careerSnapshotId.trim() : '';
+    // A Board-level career override wins over the card pin so new career data
+    // reaches applications without re-scraping or re-scoring the Board.
+    const owningBoard = getLiveNode(data.hubId);
+    // (The typeof fence keeps this callback evaluable by source-sliced
+    // harnesses that run it without module imports; there it uses the pin.)
+    const resolvedCareer = typeof resolveApplicationCareerSnapshotId === 'function'
+      ? resolveApplicationCareerSnapshotId({ cardData: { careerSnapshotId: data.careerSnapshotId }, boardData: owningBoard?.type === 'jobboard' ? owningBoard.data : null })
+      : { careerSnapshotId: typeof data.careerSnapshotId === 'string' ? data.careerSnapshotId.trim() || null : null, source: 'card' };
+    // The resolver trims and validates both sources; the card's own pin is
+    // only the fallback when the Board has no approved override.
+    const careerSnapshotId = (resolvedCareer.careerSnapshotId || '');
     // Fast, non-queued validation prevents a legacy or stale card from taking
     // a queue turn. The main-process boundary repeats this check before any
     // job id or filesystem side effect.
@@ -1159,6 +1171,27 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
         return;
       }
 
+      // Pre-generation gate: refuse a new bundle while the user's hand edits
+      // repeat the same change in 3+ bundles since the last improvement session.
+      // A failed check refuses generation deliberately: the same transport runs
+      // generation, and the gate must not be bypassable by a transport failure.
+      const gateRunId = 'application-gate:' + idRef.current + ':' + generateId();
+      const gate = await window.electronAPI.checkApplicationGenerationGate({ nodeId: idRef.current, manualAiRunId: gateRunId });
+      window.electronAPI.completeNonApiAiRun?.(gateRunId)?.catch?.(() => {});
+      if (!gate?.success) throw new Error(gate?.error || 'The edit-history check did not complete.');
+      if (gate.blocked) {
+        const summaries = (gate.patterns || []).map(p => p.summary).filter(Boolean).slice(0, 3).join(' · ');
+        EventLogger.log('[JobCard] generation blocked by recurring edits id=' + idRef.current + ' patterns=' + (gate.patterns || []).length);
+        if (isMountedRef.current) {
+          addToast({
+            title: 'Improvement session required',
+            description: 'Your recent edits repeat the same change in 3 or more bundles: ' + summaries + '. Run the application improvement session from Claude Code or Codex, then generate again.',
+            type: 'error',
+          });
+        }
+        return;
+      }
+
       // A terminal handoff remains on the card as the audit/repair pointer.
       // Snapshot the exact one this click intends to replace; settlement will
       // accept it only if the live card still owns the same terminal id/status.
@@ -1174,6 +1207,7 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
         return;
       }
       const expectedPriorLocalApplication = cardBeforeQueue.data?.localApplication || null;
+      EventLogger.log(`[JobCard] application career source id=${id} source=${resolvedCareer.source}`);
       const queued = await window.electronAPI.queueLocalApplication({
         nodeId: idRef.current,
         canvasFilePath,

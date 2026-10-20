@@ -2,8 +2,8 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { RECURRING_MIN_BUNDLES, RECURRING_WINDOW, documentSnapshot, editSummaries, improvementStatus, logGeneratedBundle, logSavedBundle, recurringEditSections, resetImprovementCounter } from '../../electron/ipc/applicationEditLog.js';
-import { __removeCoverLetterForTests, __withoutCoverLetterForTests, inspectApplicationSyncRevision, mergeSelectedApplicationPanel, registerApplicationSyncWorkspace } from '../../electron/ipc/applicationSync.js';
+import { EDIT_NOTES_MAX_CHARS, RECURRING_MIN_BUNDLES, RECURRING_WINDOW, bundleEditNotes, documentSnapshot, editSummaries, improvementStatus, logBundleEditNotes, logGeneratedBundle, logSavedBundle, normalizeEditNotes, recurringEditSections, resetImprovementCounter } from '../../electron/ipc/applicationEditLog.js';
+import { __recordWorkspaceEditNotesForTests, __removeCoverLetterForTests, __withoutCoverLetterForTests, inspectApplicationSyncRevision, mergeSelectedApplicationPanel, registerApplicationSyncWorkspace } from '../../electron/ipc/applicationSync.js';
 import electronPkg from 'electron';
 import { PDFDocument } from 'pdf-lib';
 
@@ -201,6 +201,87 @@ export default [{
       assert.equal(pair.letterRemoved, 'not needed');
       assert.equal(pair.generated.letter, null);
       assert.equal(pair.saved.letter, null);
+    } finally { await fs.rm(root, { recursive: true, force: true }); }
+  },
+}, {
+  name: 'application edits: normalizeEditNotes trims, caps, normalises newlines and strips control characters',
+  run: () => {
+    assert.equal(EDIT_NOTES_MAX_CHARS, 4000);
+    assert.equal(normalizeEditNotes('  kept it short  \n'), 'kept it short');
+    assert.equal(normalizeEditNotes('line one\r\nline two\rline three'), 'line one\nline two\nline three');
+    assert.equal(normalizeEditNotes('a\u0000b\u0007c\u001Bd\u007Fe\tf'), 'abcde f', 'control characters vanish but a tab keeps the words apart');
+    assert.equal(normalizeEditNotes('x'.repeat(EDIT_NOTES_MAX_CHARS + 50)).length, EDIT_NOTES_MAX_CHARS);
+    for (const value of [undefined, null, 42, { text: 'x' }, ['x']]) assert.equal(normalizeEditNotes(value), '');
+  },
+}, {
+  name: 'application edits: bundle edit notes ride on the latest pair only, never in summaries',
+  run: async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'application-notes-'));
+    const workspaceDir = path.join(root, 'Workspace');
+    const stateOf = async () => JSON.parse(await fs.readFile(path.join(root, 'application-improvement/state.json'), 'utf8'));
+    const notes = 'Dropped the Kite project because it repeats the platform bullet.';
+    try {
+      assert.equal(await logBundleEditNotes({ root, workspaceDir, editNotes: notes }), null, 'a workspace with no pair returns null');
+      assert.deepEqual(await bundleEditNotes({ root, workspaceDir }), { editNotes: '', editNotesAt: null });
+
+      await logGeneratedBundle({ root, workspaceDir, html: html('<p>alpha one</p>', '<p>letter one</p>'), posting: 'Notes posting', appVersion: 'test' });
+      await logSavedBundle({ root, workspaceDir, html: html('<p>alpha one revised</p>', '<p>letter one</p>') });
+      const before = await stateOf();
+      const beforePair = before.pairs.at(-1);
+      assert.equal(beforePair.editNotes, undefined, 'a fresh pair has no notes');
+
+      assert.deepEqual(await logBundleEditNotes({ root, workspaceDir, editNotes: `  ${notes}\r\n` }), { editNotes: notes });
+      const after = await stateOf();
+      const afterPair = after.pairs.at(-1);
+      assert.equal(afterPair.editNotes, notes);
+      assert(!Number.isNaN(Date.parse(afterPair.editNotesAt)), 'editNotesAt is an ISO timestamp');
+      assert.equal(afterPair.savedAt, beforePair.savedAt, 'notes do not touch savedAt');
+      assert.deepEqual(afterPair.saved, beforePair.saved, 'notes do not touch the saved snapshot');
+      assert.deepEqual(after.summaries, before.summaries, 'notes do not touch summary rows');
+      assert.equal(after.countSinceSession, before.countSinceSession, 'notes do not touch the counter');
+      assert(!JSON.stringify(after.summaries).includes('Kite'), 'notes never enter summaries');
+      assert.deepEqual(await bundleEditNotes({ root, workspaceDir }), { editNotes: notes, editNotesAt: afterPair.editNotesAt });
+
+      assert.deepEqual(await logBundleEditNotes({ root, workspaceDir, editNotes: '  \n ' }), { editNotes: '' });
+      const cleared = (await stateOf()).pairs.at(-1);
+      assert(!('editNotes' in cleared) && !('editNotesAt' in cleared), 'empty notes clear both fields');
+
+      await logSavedBundle({ root, workspaceDir, html: html('<p>alpha two</p>', '<p>letter one</p>'), editNotes: 'Second reason.' });
+      assert.equal((await stateOf()).pairs.at(-1).editNotes, 'Second reason.', 'Sync carries the current notes');
+      await logSavedBundle({ root, workspaceDir, html: html('<p>alpha three</p>', '<p>letter one</p>') });
+      const kept = await stateOf();
+      assert.equal(kept.pairs.at(-1).editNotes, 'Second reason.', 'a save without notes keeps the existing notes');
+      assert(!JSON.stringify(kept.summaries).includes('Second reason'), 'notes never enter summaries after Sync');
+
+      await logGeneratedBundle({ root, workspaceDir, html: html('<p>regenerated</p>', '<p>letter two</p>'), posting: 'Notes posting', appVersion: 'test' });
+      const regenerated = await stateOf();
+      const workspacePairs = regenerated.pairs.filter(pair => pair.posting === 'Notes posting');
+      assert.equal(workspacePairs.length, 2);
+      assert.equal(workspacePairs[0].editNotes, 'Second reason.', 'the superseded pair keeps its notes');
+      assert.equal(workspacePairs[1].editNotes, undefined, 'a regeneration starts without notes');
+      assert.deepEqual(await bundleEditNotes({ root, workspaceDir }), { editNotes: '', editNotesAt: null });
+    } finally { await fs.rm(root, { recursive: true, force: true }); }
+  },
+}, {
+  name: 'application edits: sync server notes action is token-scoped and size-limited',
+  run: async () => {
+    const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'application-notes-sync-')));
+    const appRoot = electronPkg.app.getPath('userData');
+    const token = 'f'.repeat(64);
+    const source = html('<p>resume notes</p>', '<p>letter notes</p>');
+    try {
+      await fs.writeFile(path.join(root, 'Application.html'), source);
+      await logGeneratedBundle({ root: appRoot, workspaceDir: root, html: source, posting: 'Synthetic notes posting', appVersion: 'test' });
+      await registerApplicationSyncWorkspace(root, token);
+      assert.deepEqual(await __recordWorkspaceEditNotesForTests({ token, editNotes: ' Kept the letter brief.\r\n' }), { editNotes: 'Kept the letter brief.' });
+      const state = JSON.parse(await fs.readFile(path.join(appRoot, 'application-improvement/state.json'), 'utf8'));
+      const pair = state.pairs.findLast(item => item.posting === 'Synthetic notes posting');
+      assert.equal(pair.editNotes, 'Kept the letter brief.');
+      assert(!JSON.stringify(state.summaries).includes('Kept the letter brief'), 'notes never enter summaries');
+      await assert.rejects(__recordWorkspaceEditNotesForTests({ token: '1'.repeat(64), editNotes: 'x' }), { statusCode: 403 });
+      await assert.rejects(__recordWorkspaceEditNotesForTests({ token, editNotes: 'x'.repeat(64 * 1024 + 1) }), { statusCode: 400 });
+      const unchanged = JSON.parse(await fs.readFile(path.join(appRoot, 'application-improvement/state.json'), 'utf8'));
+      assert.equal(unchanged.pairs.findLast(item => item.posting === 'Synthetic notes posting').editNotes, 'Kept the letter brief.', 'a refused request leaves the notes alone');
     } finally { await fs.rm(root, { recursive: true, force: true }); }
   },
 }];

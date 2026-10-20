@@ -277,6 +277,84 @@ function readSavedReceiptTrace(canvasRoot, ownerCanvasFilePath, jobId) {
   return { state: 'ok', rows: trace.rows.map(boundedRow).filter(Boolean), source: 'terminal-receipt' };
 }
 
+// The job manifest written beside the sidecar (localAiApplication.js keeps
+// paste state there). Restated rather than imported for the same reason as
+// JOB_ID_RE above.
+const JOB_MANIFEST_FILE = 'manifest.json';
+// Stage values are a closed protocol enum, but the manifest is still a file a
+// shared canvas could carry hand-edited: only an enum-SHAPED value renders,
+// anything else collapses to 'unknown' so no free text reaches the report.
+const WORKFLOW_STAGE_RE = /^[a-z-]{1,40}$/;
+const MAX_WORKFLOW_COUNT = 1_000_000;
+
+function streamCount(streams, name) {
+  const stream = Object.prototype.hasOwnProperty.call(streams, name) ? streams[name] : null;
+  if (!stream || typeof stream !== 'object') return 0;
+  return boundedInt(stream.count, MAX_WORKFLOW_COUNT) ?? 0;
+}
+
+// Reads the v3 requirements-workflow progress from the job's manifest through
+// the SAME owned-path checks and size cap as readJobTrace — the manifest sits
+// in the same private job folder, so it gets the same privacy boundary. Only
+// counts and the stage enum leave this function: never stream heads, digests,
+// or any other manifest text.
+function readJobWorkflow(canvasRoot, jobsRoot, manifestPath) {
+  const trusted = ownedTraceFileState(canvasRoot, jobsRoot, manifestPath);
+  if (trusted.state !== 'ok') return { state: trusted.state };
+  let manifest;
+  try {
+    manifest = JSON.parse(fs.readFileSync(trusted.path, 'utf8'));
+  } catch {
+    return { state: 'unreadable' };
+  }
+  if (!manifest || typeof manifest !== 'object' || Array.isArray(manifest)) return { state: 'unreadable' };
+  const paste = manifest.paste && typeof manifest.paste === 'object' && !Array.isArray(manifest.paste) ? manifest.paste : {};
+  const stage = typeof paste.stage === 'string' && WORKFLOW_STAGE_RE.test(paste.stage) ? paste.stage : 'unknown';
+  const revision = boundedInt(paste.revision, MAX_WORKFLOW_COUNT);
+  const store = paste.authorityStore && typeof paste.authorityStore === 'object' ? paste.authorityStore : null;
+  const streams = store && store.streams && typeof store.streams === 'object' && !Array.isArray(store.streams) ? store.streams : null;
+  if (!streams) {
+    // A job created before the v3 authority store has no stream counts. That
+    // is a fact about the job, not a read failure, so it stays 'ok'.
+    return {
+      state: 'ok', predatesStore: true, stage, revision,
+      epoch: null, adjudications: null, disagreements: null, activeRequirementsPages: null, activeAuditPages: null,
+    };
+  }
+  // The active epoch is the number of recorded re-epochs; epoch 0 writes the
+  // unsuffixed streams, epoch N writes the `-eN` streams.
+  const epoch = streamCount(streams, 'requirements-epochs');
+  const suffix = epoch > 0 ? `-e${epoch}` : '';
+  return {
+    state: 'ok', predatesStore: false, stage, revision, epoch,
+    adjudications: streamCount(streams, 'requirements-adjudications'),
+    disagreements: streamCount(streams, 'requirements-audit-disagreements'),
+    activeRequirementsPages: streamCount(streams, `requirements${suffix}`),
+    activeAuditPages: streamCount(streams, `requirements-audit${suffix}`),
+  };
+}
+
+// One line per scanned job, always — absent and unreadable manifests get
+// distinct explicit wording so a missing line can never read as "no loop".
+function formatWorkflowLine(workflow, traceSource) {
+  if (!workflow || workflow.state === 'unreadable') return '  - workflow: manifest unreadable';
+  if (workflow.state === 'unresolved') return '  - workflow: manifest not read (job folder could not be resolved)';
+  if (workflow.state === 'absent') {
+    return traceSource === 'terminal-receipt'
+      ? '  - workflow: manifest absent (job folder removed after a successful save)'
+      : '  - workflow: manifest absent (no manifest on disk for this job)';
+  }
+  const revision = Number.isInteger(workflow.revision) ? `revision ${workflow.revision}` : 'revision unknown';
+  if (workflow.predatesStore) {
+    return `  - workflow: stage \`${workflow.stage}\` · ${revision} · job predates the v3 requirements store (no stream counts)`;
+  }
+  // An observation, not a conclusion: repeated audit-sided re-epochs are
+  // what a requirements loop looks like, but the reader decides.
+  const recorded = Number.isInteger(workflow.adjudications) && workflow.adjudications > 0 ? workflow.adjudications : workflow.epoch;
+  const warning = workflow.epoch >= 2 ? ` · ⚠️ ${recorded} audit-sided re-epochs recorded` : '';
+  return `  - workflow: stage \`${workflow.stage}\` · ${revision} · requirements re-epochs ${workflow.epoch} · independent disagreements ${workflow.disagreements} · active epoch pages: discovery ${workflow.activeRequirementsPages} · audit ${workflow.activeAuditPages}${warning}`;
+}
+
 function formatRow(row) {
   const checks = row.checkIds.length
     ? ` · failed checks ${row.checkIds.map(id => `${id}${row.checkFingerprints[id] ? ` (${row.checkFingerprints[id]})` : ''}`).join(', ')}`
@@ -355,15 +433,18 @@ export function buildPasteRejectionTraceMarkdown(canvasFilePath, localApplicatio
       : canvasFilePath;
     if (typeof ownerCanvasFilePath !== 'string' || !ownerCanvasFilePath || !path.isAbsolute(ownerCanvasFilePath)) {
       lines.push(`- ${jobLabel(item)}: not retained (no saved canvas path to resolve this job's folder).`);
+      lines.push(formatWorkflowLine({ state: 'unresolved' }));
       continue;
     }
     const canvasRoot = path.dirname(path.resolve(ownerCanvasFilePath));
     const jobsRoot = path.join(canvasRoot, '.local-ai', 'jobs');
     const traceFilePath = path.join(jobsRoot, jobId, PASTE_REJECTION_TRACE_FILE);
+    const manifestPath = path.join(jobsRoot, jobId, JOB_MANIFEST_FILE);
     // Defense in depth alongside JOB_ID_RE above: even a validated id must
     // still resolve inside the exact folder this canvas owns.
-    if (!isWithinDirectory(jobsRoot, traceFilePath)) {
+    if (!isWithinDirectory(jobsRoot, traceFilePath) || !isWithinDirectory(jobsRoot, manifestPath)) {
       lines.push(`- ${jobLabel(item)}: not retained (job path escaped its canvas folder).`);
+      lines.push(formatWorkflowLine({ state: 'unresolved' }));
       continue;
     }
     let trace;
@@ -376,12 +457,23 @@ export function buildPasteRejectionTraceMarkdown(canvasFilePath, localApplicatio
     // context. Its receipt is an exact job+canvas-bound fallback, not a
     // broader scan or a trust of the card's requested output path.
     if (trace.state === 'absent') trace = readSavedReceiptTrace(canvasRoot, ownerCanvasFilePath, jobId);
+    // Read independently of the trace: a job cycling through requirements
+    // re-epochs may never have had a paste rejected at all.
+    let workflow;
+    try {
+      workflow = readJobWorkflow(canvasRoot, jobsRoot, manifestPath);
+    } catch {
+      workflow = { state: 'unreadable' };
+    }
+    const workflowLine = formatWorkflowLine(workflow, trace.source);
     if (trace.state === 'absent') {
       lines.push(`- ${jobLabel(item)}: not retained (no rejection trace on disk — either no paste round for this job was ever rejected, or the job folder is gone).`);
+      lines.push(workflowLine);
       continue;
     }
     if (trace.state === 'unreadable') {
       lines.push(`- ${jobLabel(item)}: not retained (rejection trace file could not be read as a trusted, well-formed record).`);
+      lines.push(workflowLine);
       continue;
     }
     // A trusted, well-formed record with no rows is a fact, not a read
@@ -389,6 +481,7 @@ export function buildPasteRejectionTraceMarkdown(canvasFilePath, localApplicatio
     // said "unreadable" on 2026-10-15 for a job that was simply never traced.
     if (trace.rows.length === 0) {
       lines.push(`- ${jobLabel(item)}: no rejected round recorded${trace.source === 'terminal-receipt' ? ' (terminal-save receipt)' : ''}.`);
+      lines.push(workflowLine);
       continue;
     }
     const rows = trace.rows;
@@ -397,6 +490,7 @@ export function buildPasteRejectionTraceMarkdown(canvasFilePath, localApplicatio
       ? `longest same-cause run: ${run.length} consecutive rejection(s) — stage \`${run.row.stage}\`, check${run.row.checkIds.length > 1 ? 's' : ''} ${run.row.checkIds.map(id => `${id}${run.row.checkFingerprints[id] ? ` (${run.row.checkFingerprints[id]})` : ''}`).join(', ')}`
       : 'no repeated cause — every retained rejection differs in stage, check id, or branch';
     lines.push(`- ${jobLabel(item)} · ${rows.length} rejection(s) retained${trace.source === 'terminal-receipt' ? ' · preserved with successful save' : ''} · ${runLabel}`);
+    lines.push(workflowLine);
     const newestFirst = [...rows].sort((a, b) => b.atMs - a.atMs).slice(0, MAX_ROWS_PER_JOB);
     for (const row of newestFirst) lines.push(formatRow(row));
     if (rows.length > newestFirst.length) {
@@ -406,7 +500,7 @@ export function buildPasteRejectionTraceMarkdown(canvasFilePath, localApplicatio
 
   return `
 ## Local Application Paste Rejection Trace (durable)
-> Reads each current job card's own \`Paste Rejections.json\` sidecar (localAiApplication.js's PASTE_REJECTION_TRACE_FILE), with a metadata-only terminal-save receipt fallback after successful cleanup removes the private job folder. It exists to answer one question a restart mid-loop otherwise erases: is a paste handoff stuck repeating the SAME cause? "Longest same-cause run" is recomputed from these rows directly rather than trusted from any single row's own stored counter, because that counter is kept in a process-local map a restart resets.
+> Reads each current job card's own \`Paste Rejections.json\` sidecar (localAiApplication.js's PASTE_REJECTION_TRACE_FILE), with a metadata-only terminal-save receipt fallback after successful cleanup removes the private job folder. It exists to answer one question a restart mid-loop otherwise erases: is a paste handoff stuck repeating the SAME cause? "Longest same-cause run" is recomputed from these rows directly rather than trusted from any single row's own stored counter, because that counter is kept in a process-local map a restart resets. Each job's "workflow" line comes from the counts in that job's own manifest (stage enum, revision, requirements re-epochs, independent disagreements, active-epoch page counts), read under the same trust checks as the sidecar.
 > Metadata only: at/stage/reason/revision/errorCount/checkIds/checkFingerprints/rejectionStreak. Never the letter text, prompts, pasted responses, handoff codes, or validation detail text — the same privacy rule pasteHandoffDiagnostics.js states for the process-local section above.
 - Scanned ${jobs.length} of ${candidates.length} current job card(s) carrying a Local AI id (cap ${MAX_JOBS_SCANNED})${scanNote} · rows shown newest-first, capped at ${MAX_ROWS_PER_JOB} per job.
 ${lines.join('\n')}

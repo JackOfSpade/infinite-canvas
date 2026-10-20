@@ -5,6 +5,8 @@ import path from 'node:path';
 import {
   WRITE_VERIFY_BRIEF, WRITE_VERIFY_BRIEF_MAX_CHARS,
   WRITE_VERIFY_PROTOCOL, WRITE_VERIFY_DEFAULT_CANDIDATES, WRITE_VERIFY_STAGES, WRITE_VERIFY_MAX_FIT_CORRECTIONS, acceptedWriteVerifyCandidates,
+  WRITE_VERIFY_DROPPED_FINDINGS_HEADING, WRITE_VERIFY_DROPPED_FINDINGS_MAX, droppedCandidateFindings,
+  WRITE_VERIFY_PRIOR_ROUND_FINDINGS_MAX, WRITE_VERIFY_PRIOR_ROUNDS_HEADING, priorRoundFindings,
   factCorrectionTransition, fullApprovedHand, initialWriteVerifyState, isWriteVerifyJob,
   validateWriteVerifyRanking, writeVerifyCandidateCount,
   writeVerifyChangedFindingErrors, writeVerifyFactFindingErrors,
@@ -24,7 +26,10 @@ import { normalizeCurrentHandoff } from '../../electron/ipc/handoffBridge/lanes.
 import { __pasteUnitGroundingErrorsForTests } from '../../electron/ipc/localAiApplication.js';
 import { buildApplicationCareerAuthority } from '../../electron/ipc/applicationCareerAuthority.js';
 import { approvedCareerEvidenceCatalog, CAREER_SNAPSHOT_STATUS_APPROVED } from '../../electron/ipc/careerSnapshot.js';
-import { assessStrengthFamily, credentialFindings } from '../../electron/ipc/applicationClaimGrounding.js';
+import { assessStrengthFamily, credentialFindings, CLAIM_GROUNDING_RULE } from '../../electron/ipc/applicationClaimGrounding.js';
+import {
+  MIN_SHARED_SOURCE_TERMS, SOURCE_FIGURE_GROUNDING_RULE, SOURCE_TERM_OVERLAP_RULE, writeVerifyGroundingContract,
+} from '../../electron/ipc/localAiApplication.js';
 import { MAX_REQUIREMENTS_REEPOCHS, requirementsAdjudicationBindings, requirementsBindingErrors, requirementsAuditCapTerminal, requirementsSingletonBinding } from '../../electron/ipc/applicationRequirementsAuditPolicy.js';
 import { applicationProtocolSetting } from '../../electron/ipc/applicationProtocolSetting.js';
 import { v2RejectionEvidencePaths } from '../../electron/ipc/applicationV2RejectionEvidence.js';
@@ -48,6 +53,179 @@ export default [
         const prompt = writeVerifySourcePrompt({ posting: `${domain} posting`, requirements: [], listingEvidence: [], identity: {},
           sourceRoles: [], profile: { roles: [], achievements: [], projects: [], skills: [] }, catalog: [] });
         assert.equal(prompt.split(`BRIEF: ${WRITE_VERIFY_BRIEF}`).length, 2, `${domain}: the brief prints exactly once`);
+      }
+    },
+  },
+  {
+    name: 'write-verify brief ends on the word-for-word grounding sentence inside its budget',
+    run() {
+      const sentence = 'Use a name, acronym, count, year or qualifier word (led, solely, reduced, daily) only where a quote the unit cites states it word for word.';
+      assert.ok(WRITE_VERIFY_BRIEF.length <= WRITE_VERIFY_BRIEF_MAX_CHARS, `the brief is ${WRITE_VERIFY_BRIEF.length} characters`);
+      assert.ok(WRITE_VERIFY_BRIEF.endsWith(` ${sentence}`), 'the new sentence is the last one');
+      assert.equal(WRITE_VERIFY_BRIEF.split('word for word').length, 2, 'stated once');
+      // Sabotage: the replaced sentence must be gone.
+      assert.equal(WRITE_VERIFY_BRIEF.includes('Never claim more than a cited quote states.'), false);
+    },
+  },
+  {
+    name: 'v2 grounding contract is composed from the gate constants and printed once right after the brief only when supplied',
+    run() {
+      const contract = writeVerifyGroundingContract();
+      assert.ok(contract.startsWith(`${CLAIM_GROUNDING_RULE}. Qualifier words are matched by word form, never by meaning, in these families: `), 'claim rule first, then the word-form families');
+      assert.equal(contract.split(CLAIM_GROUNDING_RULE).length, 2, 'the claim rule prints once');
+      assert.ok(contract.includes('sole ownership (single-handedly, solely, sole, independently, alone, on my own)'), 'sole-ownership forms');
+      assert.ok(contract.includes('reduction outcome (reduce(d/s/ing), reduction(s)'), 'reduction forms');
+      assert.ok(contract.includes(`. ${SOURCE_FIGURE_GROUNDING_RULE}. Every sentence about the candidate's own work must share at least ${MIN_SHARED_SOURCE_TERMS} meaningful terms with the quotes its unit cites, where ${SOURCE_TERM_OVERLAP_RULE}.`), 'figure rule then the overlap floor');
+      assert.ok(contract.endsWith(`where ${SOURCE_TERM_OVERLAP_RULE}.`), 'ends on the overlap rule and a period');
+      assert.ok(contract.includes(`${MIN_SHARED_SOURCE_TERMS} meaningful terms`));
+      assert.ok(contract.includes('word form'));
+      const heading = 'GROUNDING CONTRACT (deterministic checks read every unit against the quotes it cites, literally): ';
+      for (const [domain] of domains) {
+        const base = { posting: `${domain} posting`, requirements: [], listingEvidence: [], identity: {},
+          sourceRoles: [], profile: { roles: [], achievements: [], projects: [], skills: [] }, catalog: [] };
+        const briefLine = `BRIEF: ${WRITE_VERIFY_BRIEF}`;
+        const withContract = writeVerifySourcePrompt({ ...base, groundingContract: contract });
+        const without = writeVerifySourcePrompt(base);
+        assert.equal(withContract.split(heading).length, 2, `${domain}: the section prints exactly once`);
+        const briefAt = withContract.indexOf(briefLine);
+        assert.ok(briefAt >= 0, domain);
+        assert.equal(withContract.indexOf(`${briefLine}\n\n${heading}${contract}\n\n`), briefAt, `${domain}: the section follows the brief line directly`);
+        assert.equal(without.includes('GROUNDING CONTRACT'), false, `${domain}: omitted contract prints nothing`);
+        assert.equal(writeVerifySourcePrompt({ ...base, groundingContract: '' }), without, `${domain}: an empty contract prints nothing`);
+        assert.equal(withContract.replace(`${heading}${contract}\n\n`, ''), without, `${domain}: the section is the only difference`);
+      }
+      const hostSource = fs.readFileSync(new URL('../../electron/ipc/localAiApplication.js', import.meta.url), 'utf8');
+      assert.match(hostSource, /lengthBudget,\s*groundingContract: writeVerifyGroundingContract\(\),\s*\}\);/u, 'the frozen context supplies the contract');
+    },
+  },
+  {
+    name: 'v2 accepted submissions clear the stale correction list before rejection bookkeeping',
+    run() {
+      const hostSource = fs.readFileSync(new URL('../../electron/ipc/localAiApplication.js', import.meta.url), 'utf8');
+      assert.match(hostSource, /\n {2}if \(!errors\.length\) work\.lastCorrections = \[\];\n {2}if \(errors\.length && \['convert', 'verify-correction', 'fit-correction'\]\.includes\(outgoingStage\)\) \{/u);
+      assert.equal(hostSource.split('if (!errors.length) work.lastCorrections = [];').length, 2, 'cleared in exactly one place');
+      // Rejection paths still carry their own corrections.
+      assert.equal(hostSource.split('candidate.corrections += 1; candidate.status = \'correcting\'; work.lastCorrections = errors;').length, 2);
+    },
+  },
+  {
+    name: 'v2 prior-round findings keep only earlier content rounds, deduplicated, bounded and excluding the current corrections',
+    run() {
+      for (const [domain, action] of domains) {
+        const t = n => `unit-source-grounding: ${domain} ${action} finding ${n}`;
+        const rows = [
+          { round: 0, checkIds: ['schema-invalid'], errors: [`${domain} plain-text format`] },
+          { round: 0, kind: 'content', checkIds: [], errors: [t(1), '  ', t(2)] },
+          { round: 0, kind: 'fit', checkIds: ['measured-one-page-fit'], errors: [`${domain} render one line shorter`] },
+          { round: 1, kind: 'content', checkIds: [], errors: [` ${t(1)} `, t(3), t(4)] },
+        ];
+        assert.deepEqual(priorRoundFindings(rows, [t(4)]), [t(2), t(1), t(3)], domain);
+        assert.deepEqual(priorRoundFindings(rows, [t(4)], 2), [t(1), t(3)], `${domain}: newest win the bound, oldest first`);
+        assert.deepEqual(priorRoundFindings(rows, [t(4)], 0), [], domain);
+        assert.deepEqual(priorRoundFindings(rows, []), [t(2), t(1), t(3), t(4)], domain);
+        assert.deepEqual(priorRoundFindings([], [t(1)]), [], domain);
+        assert.deepEqual(priorRoundFindings(undefined, undefined), [], domain);
+        const many = [{ kind: 'content', errors: Array.from({ length: WRITE_VERIFY_PRIOR_ROUND_FINDINGS_MAX + 3 }, (_, index) => t(`m${index}`)) }];
+        const bounded = priorRoundFindings(many, []);
+        assert.equal(bounded.length, WRITE_VERIFY_PRIOR_ROUND_FINDINGS_MAX, domain);
+        assert.deepEqual(bounded, many[0].errors.slice(3), domain);
+        assert.throws(() => priorRoundFindings(rows, [], -1), /non-negative integer/u, domain);
+        assert.throws(() => priorRoundFindings(rows, [], 1.5), /non-negative integer/u, domain);
+      }
+      assert.equal(WRITE_VERIFY_PRIOR_ROUND_FINDINGS_MAX, 12);
+      assert.equal(WRITE_VERIFY_PRIOR_ROUNDS_HEADING, 'EARLIER ROUNDS OF THIS SAME DRAFT (ALREADY REPORTED; KEEP THEM SATISFIED)');
+    },
+  },
+  {
+    name: 'v2 verify and fit correction prompts carry the earlier content rounds of the same draft',
+    run() {
+      const intro = 'Earlier rounds of this same draft were returned for the findings below; the unit each names was then repaired and the rewrite tripped the current rejection text. Keep every one of these satisfied together with the current rejection text; change nothing that already passes.';
+      for (const [domain, action] of domains) {
+        const t = n => `unit-source-grounding: Résumé bullet "b${n}": ${domain} ${action} detail ${n}`;
+        const sourcePrompt = `${domain} posting and full grouped catalog`;
+        for (const stage of ['verify-correction', 'fit-correction']) {
+          const envelope = { protocol: 'paste-application.v1', jobId: JOB_ID, stage };
+          const state = initialWriteVerifyState(1);
+          const candidate = state.candidates[0];
+          candidate.structured = { resume: { roles: [{ id: `role-${domain}`, bullets: [] }] }, coverLetter: { paragraphs: [] } };
+          const current = [t('now'), `other-check: ${domain} second current finding`];
+          const docs = `CURRENT STRUCTURED DOCUMENTS:\n${JSON.stringify(candidate.structured)}`;
+          const legacy = `${docs}\n\nCorrect the complete documents and return only the production JSON shapes. The rejection text follows verbatim:\n${current.join('\n')}\n\nOUTPUT FORMAT:\n`;
+          const fresh = writeVerifyPrompt({ stage, state, sourcePrompt, envelope, corrections: current });
+          assert.ok(fresh.includes(legacy), `${domain} ${stage}: no earlier rounds keeps the prompt as before`);
+          assert.equal(fresh.includes(WRITE_VERIFY_PRIOR_ROUNDS_HEADING), false, `${domain} ${stage}`);
+          // Fit and write-stage rows are not grounding observations.
+          candidate.rejections.push({ round: 0, checkIds: ['schema-invalid'], errors: [`${domain} plain text format`] });
+          candidate.rejections.push({ round: 0, kind: 'fit', checkIds: ['measured-one-page-fit'], errors: [`${domain} shorten by one line`] });
+          assert.equal(writeVerifyPrompt({ stage, state, sourcePrompt, envelope, corrections: current }), fresh, `${domain} ${stage}: non-content rows change nothing`);
+          candidate.rejections.push({ round: 0, kind: 'content', checkIds: [], errors: [t(1), t(2)] });
+          candidate.rejections.push({ round: 1, kind: 'content', checkIds: [], errors: [t(3), current[0]] });
+          const prompt = writeVerifyPrompt({ stage, state, sourcePrompt, envelope, corrections: current });
+          assert.equal(prompt.split(WRITE_VERIFY_PRIOR_ROUNDS_HEADING).length, 2, `${domain} ${stage}: heading once`);
+          const docsAt = prompt.indexOf(docs);
+          const headingAt = prompt.indexOf(WRITE_VERIFY_PRIOR_ROUNDS_HEADING);
+          const correctAt = prompt.indexOf('Correct the complete documents');
+          assert.ok(docsAt >= 0 && docsAt < headingAt && headingAt < correctAt, `${domain} ${stage}: between documents and correction instruction`);
+          const section = prompt.slice(headingAt, correctAt);
+          assert.equal(section, `${WRITE_VERIFY_PRIOR_ROUNDS_HEADING}:\n${intro}\n- ${t(1)}\n- ${t(2)}\n- ${t(3)}\n\n`, `${domain} ${stage}: exact section`);
+          for (const text of [t(1), t(2), t(3)]) assert.ok(prompt.includes(`\n- ${text}`), `${domain} ${stage}`);
+          for (const text of current) assert.equal(section.includes(text), false, `${domain} ${stage}: current corrections stay out of the section`);
+          assert.equal(prompt.split(current[0]).length, 2, `${domain} ${stage}: the current correction prints once`);
+          assert.ok(prompt.includes(`${docs}\n\n${section}Correct the complete documents and return only the production JSON shapes. The rejection text follows verbatim:\n${current.join('\n')}\n\nOUTPUT FORMAT:\n`), `${domain} ${stage}`);
+          // Sabotage: removing the section restores the earlier prompt byte for byte.
+          assert.equal(prompt.replace(`${section}`, ''), fresh, `${domain} ${stage}`);
+        }
+      }
+    },
+  },
+  {
+    name: 'v2 fact-correction prompt prints every finding, the verbatim rejection only when present, and earlier fact rounds',
+    run() {
+      const findingsHeading = 'FACT-CHECK FINDINGS TO CORRECT (every flagged span must change; a span returned unchanged is rejected):';
+      for (const [domain, action] of domains) {
+        const sourcePrompt = `${domain} posting and full grouped catalog`;
+        const envelope = { protocol: 'paste-application.v1', jobId: JOB_ID, stage: 'fact-correction' };
+        const state = initialWriteVerifyState(2);
+        const claim = `led the ${domain} ${action} team`;
+        const winner = state.candidates[1];
+        winner.status = 'accepted';
+        winner.structured = { resume: { roles: [{ id: `role-${domain}`, bullets: [{ id: 'b1', text: `I ${claim}.`, evidenceIds: [] }] }] }, coverLetter: { paragraphs: [] } };
+        state.candidates[0].rejections.push({ round: 0, kind: 'content', checkIds: [], errors: [`${domain} other candidate finding`] });
+        state.ranking = ['candidate-2', 'candidate-1']; state.factIndex = 0;
+        state.factFindings = [
+          { id: 'b1', checkId: 'unsupported-scope', claim, quote: `I worked on ${domain} ${action}.`, reason: 'The quote states no leadership.' },
+          { id: 'p1', checkId: 'unsupported-metric', claim: `cut ${action} time by half`, quote: '', reason: 'No cited quote states a reduction.' },
+        ];
+        const docs = `CURRENT STRUCTURED DOCUMENTS:\n${JSON.stringify(winner.structured)}`;
+        const findings = `${findingsHeading}\n- b1: the span ${JSON.stringify(claim)} is not supported. The quote states no leadership. Cited quote: ${JSON.stringify(`I worked on ${domain} ${action}.`)}\n- p1: the span ${JSON.stringify(`cut ${action} time by half`)} is not supported. No cited quote states a reduction.`;
+        const first = writeVerifyPrompt({ stage: 'fact-correction', state, sourcePrompt, envelope });
+        assert.ok(first.includes(`${docs}\n\n${findings}\n\nCorrect the complete documents and return only the production JSON shapes.\n\nOUTPUT FORMAT:\n`), `${domain}: first round shows every finding and no rejection sentence`);
+        assert.equal(first.includes('The rejection text follows verbatim'), false, domain);
+        assert.equal(first.includes(WRITE_VERIFY_PRIOR_ROUNDS_HEADING), false, domain);
+        assert.equal(first.includes('other candidate finding'), false, `${domain}: another candidate's rounds never ride along`);
+        // Second round: the writer returned the span unchanged.
+        const unchanged = writeVerifyChangedFindingErrors(state.factFindings, winner.structured);
+        assert.ok(unchanged.length >= 1 && unchanged.every(error => error.startsWith('fact-check-unchanged:')), domain);
+        winner.factCorrectionRejections = [{ round: 1, checkIds: ['fact-check-unchanged'], errors: unchanged }];
+        const second = writeVerifyPrompt({ stage: 'fact-correction', state, sourcePrompt, envelope, corrections: unchanged });
+        assert.ok(second.includes(`${docs}\n\n${findings}\n\nCorrect the complete documents and return only the production JSON shapes. The rejection text follows verbatim:\n${unchanged.join('\n')}\n\nOUTPUT FORMAT:\n`), `${domain}: second round prints the unchanged text verbatim`);
+        assert.equal(second.includes(WRITE_VERIFY_PRIOR_ROUNDS_HEADING), false, `${domain}: the current round is not repeated as an earlier one`);
+        // Third round: a different gate rejected; the unchanged round is now earlier.
+        const grounding = `unit-source-grounding: Résumé bullet "b1": ${domain} names a title the quotes do not state`;
+        winner.factCorrectionRejections.push({ round: 2, checkIds: ['unit-source-grounding'], errors: [grounding] });
+        const third = writeVerifyPrompt({ stage: 'fact-correction', state, sourcePrompt, envelope, corrections: [grounding] });
+        const findingsAt = third.indexOf(findingsHeading);
+        const headingAt = third.indexOf(WRITE_VERIFY_PRIOR_ROUNDS_HEADING);
+        const correctAt = third.indexOf('Correct the complete documents');
+        assert.ok(third.indexOf(docs) < findingsAt && findingsAt < headingAt && headingAt < correctAt, `${domain}: findings, then earlier rounds, then the instruction`);
+        const section = third.slice(headingAt, correctAt);
+        for (const text of unchanged) assert.ok(section.includes(`\n- ${text}`), domain);
+        assert.equal(section.includes(grounding), false, `${domain}: the current correction stays out of the section`);
+        assert.equal(third.split(WRITE_VERIFY_PRIOR_ROUNDS_HEADING).length, 2, domain);
+        for (const missing of [[], undefined, null]) {
+          state.factFindings = missing;
+          assert.throws(() => writeVerifyPrompt({ stage: 'fact-correction', state, sourcePrompt, envelope }), /^Error: Fact correction requires the fact-check findings\.$/u, domain);
+        }
       }
     },
   },
@@ -125,6 +303,53 @@ export default [
           assert.equal(fs.existsSync(sabotaged), false);
           assert.equal(fs.readdirSync(outside).length, 0);
         } finally { fs.rmSync(root, { recursive: true, force: true }); }
+      }
+    },
+  },
+  {
+    name: 'v2 fresh write carries the deduplicated, bounded findings of every dropped candidate and an undropped flow carries none',
+    run() {
+      for (const [domain, action] of domains) {
+        const finding = (unit, detail) => `unit-source-grounding: Résumé bullet ${JSON.stringify(unit)}: ${domain} ${detail}`;
+        const state = initialWriteVerifyState(4);
+        const envelope = { protocol: 'paste-application.v1', jobId: JOB_ID, stage: 'write' };
+        const sourcePrompt = `${domain} posting and full grouped catalog`;
+        // Nothing dropped yet: a corrected-but-live candidate contributes nothing.
+        state.candidates[0].status = 'correcting'; state.candidates[0].corrections = 2;
+        state.candidates[0].rejections.push({ round: 1, checkIds: ['unit-source-grounding'], errors: [finding('b1', `${action} scope the quotes do not state`)] });
+        assert.deepEqual(droppedCandidateFindings(state), [], `${domain}: correction rounds never feed the dropped list`);
+        const untouched = writeVerifyPrompt({ stage: 'write', state, sourcePrompt, envelope, droppedFindings: droppedCandidateFindings(state) });
+        assert.ok(!untouched.includes(WRITE_VERIFY_DROPPED_FINDINGS_HEADING), `${domain}: an undropped flow prints no dropped-draft section`);
+        assert.equal(untouched, writeVerifyPrompt({ stage: 'write', state, sourcePrompt, envelope }), `${domain}: the default is the same prompt as before`);
+        // Two drops repeat one finding and add a prefix-less one; the same text under a different check id stays distinct.
+        const shared = finding('b1', `${action} scope the quotes do not state`);
+        state.candidates[0].status = 'dropped'; state.candidates[0].dropReason = [shared, `cover letter ${domain} paragraph repeats the ${action} bullet`, '  '];
+        state.candidates[1].status = 'dropped'; state.candidates[1].dropReason = [finding('b2', `${action} population the quotes do not name`), shared, `other-check: ${domain} ${action} scope the quotes do not state`];
+        state.ordinal = 2;
+        const rows = droppedCandidateFindings(state);
+        assert.deepEqual(rows.map(row => [row.candidateId, row.checkId]),
+          [['candidate-1', null], ['candidate-2', 'unit-source-grounding'], ['candidate-2', 'unit-source-grounding'], ['candidate-2', 'other-check']],
+          `${domain}: dedup keeps the newest occurrence of a (check id, text) pair, oldest first, blanks dropped`);
+        assert.equal(rows.filter(row => row.text === shared).length, 1, `${domain}: a finding two candidates shared prints once`);
+        const prompt = writeVerifyPrompt({ stage: 'write', state, sourcePrompt, envelope, droppedFindings: rows });
+        const sectionAt = prompt.indexOf(WRITE_VERIFY_DROPPED_FINDINGS_HEADING);
+        assert.ok(sectionAt > prompt.indexOf(sourcePrompt) && sectionAt < prompt.indexOf('OUTPUT FORMAT FOR THIS ARM'), `${domain}: observations sit between the source data and the output format`);
+        for (const row of rows) assert.ok(prompt.includes(`\n- ${row.text}`), `${domain}: every dropped finding prints verbatim`);
+        assert.equal(prompt.split(shared).length, 2, `${domain}: the shared finding prints exactly once`);
+        assert.ok(/none is text to reuse or a claim to make/u.test(prompt), `${domain}: the section is framed as observations, not replacement wording`);
+        for (const stage of ['convert']) {
+          state.candidates[2].plainText = `${domain} draft`;
+          assert.ok(!writeVerifyPrompt({ stage, state, sourcePrompt, envelope, droppedFindings: rows }).includes(WRITE_VERIFY_DROPPED_FINDINGS_HEADING), `${domain}: only the write stage carries the section`);
+        }
+        // Bound: many distinct findings keep only the newest WRITE_VERIFY_DROPPED_FINDINGS_MAX.
+        state.candidates[2].status = 'dropped';
+        state.candidates[2].dropReason = Array.from({ length: WRITE_VERIFY_DROPPED_FINDINGS_MAX + 3 }, (_, index) => finding(`c${index}`, `${action} detail ${index} beyond the quotes`));
+        const bounded = droppedCandidateFindings(state);
+        assert.equal(bounded.length, WRITE_VERIFY_DROPPED_FINDINGS_MAX, `${domain}: the list is bounded`);
+        assert.ok(bounded.every(row => row.candidateId === 'candidate-3'), `${domain}: the newest findings win the bound`);
+        assert.equal(bounded.at(-1).text, state.candidates[2].dropReason.at(-1), `${domain}: order stays oldest first within the bound`);
+        assert.equal(droppedCandidateFindings(state, 2).length, 2, `${domain}: the bound is a parameter`);
+        assert.throws(() => droppedCandidateFindings(state, -1), /non-negative integer/u, domain);
       }
     },
   },
