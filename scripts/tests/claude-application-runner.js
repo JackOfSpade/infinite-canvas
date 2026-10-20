@@ -6,6 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import {
   answeringModel,
+  CLAUDE_MAX_RUNS_PER_JOB,
   CLAUDE_STAGE_PROFILES,
   claudeStageProfile,
   ClaudeRunnerError,
@@ -90,6 +91,38 @@ function quietLogger() {
   return { errors, warns, error: message => errors.push(message), warn: message => warns.push(message), info() {}, log() {} };
 }
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+function tempHome() {
+  return fs.mkdtempSync(path.join(os.tmpdir(), 'claude-runner-home-'));
+}
+
+// Like the app: the new-chat fields are non-enumerable properties of the handoff.
+function withFresh(handoff, required, key) {
+  Object.defineProperty(handoff, 'freshContextRequired', { value: required, enumerable: false });
+  if (key !== undefined) Object.defineProperty(handoff, 'freshContextKey', { value: key, enumerable: false });
+  return handoff;
+}
+
+// Each submit advances to the next handoff (returned as the same object, so its
+// non-enumerable fields survive); the last submit completes the job.
+function sequenceApi(handoffs) {
+  let index = 0;
+  return {
+    handoffs,
+    api: {
+      async getHandoff() {
+        return index >= handoffs.length ? { completed: true, handoff: null } : { handoff: handoffs[index] };
+      },
+      async submitHandoff() {
+        index += 1;
+        return { accepted: true, completed: index >= handoffs.length };
+      },
+      subscribeDiscards: () => () => {},
+    },
+  };
+}
+
 // A scripted single-job application: a list of main handoffs advanced on accepted submits.
 function scriptedApi(stages, { rejectFirst = false } = {}) {
   let index = 0;
@@ -129,9 +162,49 @@ export default [
     run() {
       assert.deepEqual(claudeCliArgs(), [
         '-p', '--model', 'sonnet', '--effort', 'high', '--restricted', '--strict-mcp-config',
-        '--tools', '', '--no-session-persistence', '--input-format', 'stream-json',
+        '--tools', '', '--input-format', 'stream-json',
         '--output-format', 'stream-json', '--verbose',
       ]);
+      assert.equal(claudeCliArgs().includes('--no-session-persistence'), false);
+    },
+  },
+  {
+    name: 'claude runner: CLI args start a session with --session-id or continue it with --resume right after -p',
+    run() {
+      const tail = ['--model', 'opus', '--effort', 'xhigh', '--restricted', '--strict-mcp-config',
+        '--tools', '', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose'];
+      assert.deepEqual(claudeCliArgs({ model: 'opus', effort: 'xhigh', sessionId: 'S', resume: false }), ['-p', '--session-id', 'S', ...tail]);
+      assert.deepEqual(claudeCliArgs({ model: 'opus', effort: 'xhigh', sessionId: 'S', resume: true }), ['-p', '--resume', 'S', ...tail]);
+      assert.deepEqual(claudeCliArgs({ model: 'opus', effort: 'xhigh', resume: true }), ['-p', ...tail]);
+    },
+  },
+  {
+    name: 'claude runner: a resumed stage spawns the CLI with --resume and the session id',
+    async run() {
+      const { promise, calls } = await stageWith({ stdout: `${resultLine({ models: ['claude-sonnet-5-5', 'claude-opus-5-5'] })}\n` }, { sessionId: 'abc', resume: true });
+      assert.deepEqual(await promise, { text: 'final answer', model: 'claude-sonnet-5-5', durationMs: 42 });
+      assert.deepEqual(calls[0].args.slice(0, 3), ['-p', '--resume', 'abc']);
+    },
+  },
+  {
+    name: 'claude runner: the default run guard is 120 runs per job',
+    async run() {
+      assert.equal(CLAUDE_MAX_RUNS_PER_JOB, 120);
+      let runs = 0;
+      const api = {
+        async getHandoff() { return { handoff: { handoffCode: 'c', stage: 'draft', prompt: 'p', corrections: ['x'], correctionPrompt: 'again' } }; },
+        async submitHandoff() { return { accepted: false, validationErrors: ['x'], handoff: {} }; },
+        subscribeDiscards: () => () => {},
+      };
+      const runner = createClaudeApplicationRunner({
+        api, stateFile: tempStateFile(), logger: quietLogger(), homedir: '',
+        runStage: async () => { runs += 1; return { text: 'nope' }; },
+      });
+      runner.ensure({ jobId: 'job-guard', canvasFilePath: '/c.canvas' });
+      await waitFor(() => runner.status(['job-guard'])['job-guard']?.status === 'failed', 'failed', 10000);
+      assert.equal(runs, 120);
+      assert.equal(runner.status(['job-guard'])['job-guard'].message, 'Stopped after 120 Claude runs without finishing this application.');
+      await runner.shutdown();
     },
   },
   {
@@ -394,9 +467,10 @@ export default [
       assert.equal(state.stage, 'draft');
       assert.equal(state.message, USAGE_MESSAGE);
       const persisted = JSON.parse(fs.readFileSync(stateFile, 'utf8'));
-      assert.deepEqual(Object.keys(persisted), ['job-usage-1']);
-      assert.equal(persisted['job-usage-1'].code, 'CLAUDE_USAGE_LIMIT');
-      assert.equal(persisted['job-usage-1'].status, 'failed');
+      assert.deepEqual(Object.keys(persisted), ['failed', 'sessions']);
+      assert.deepEqual(Object.keys(persisted.failed), ['job-usage-1']);
+      assert.equal(persisted.failed['job-usage-1'].code, 'CLAUDE_USAGE_LIMIT');
+      assert.equal(persisted.failed['job-usage-1'].status, 'failed');
       assert.deepEqual(logger.errors, ['[ClaudeRunner] job=job-usag stage=draft code=CLAUDE_USAGE_LIMIT']);
 
       const again = runner.ensure({ jobId: 'job-usage-1', canvasFilePath: '/c.canvas' });
@@ -419,7 +493,7 @@ export default [
       assert.equal(runs, 2);
       assert.deepEqual(script.submits.map(s => s.response), ['fine']);
       await runner.shutdown();
-      assert.deepEqual(JSON.parse(fs.readFileSync(stateFile, 'utf8')), {});
+      assert.deepEqual(JSON.parse(fs.readFileSync(stateFile, 'utf8')), { failed: {}, sessions: {} });
     },
   },
   {
@@ -588,6 +662,210 @@ export default [
       assert.equal(state.code, 'APPLICATION_ERROR');
       assert.equal(state.message, 'Job integrity fault');
       await runner.shutdown();
+    },
+  },
+  {
+    name: 'claude runner sessions: a correction round resumes the same Claude session',
+    async run() {
+      const script = sequenceApi([
+        { handoffCode: 'r1', stage: 'requirements', prompt: 'full schema prompt' },
+        { handoffCode: 'r1-fix', stage: 'requirements', prompt: 'full schema prompt', corrections: ['bad json'], correctionPrompt: 'Do not start over; fix it' },
+      ]);
+      const calls = [];
+      const runner = createClaudeApplicationRunner({
+        api: script.api, stateFile: tempStateFile(), logger: quietLogger(), homedir: tempHome(),
+        runStage: async ({ text, sessionId, resume }) => { calls.push({ text, sessionId, resume }); return { text: '{}' }; },
+      });
+      runner.ensure({ jobId: 'job-correct', canvasFilePath: '/c.canvas' });
+      await waitFor(() => runner.status(['job-correct'])['job-correct']?.status === 'done', 'done');
+      await runner.shutdown();
+      assert.equal(calls.length, 2);
+      assert.match(calls[0].sessionId, UUID_RE);
+      assert.deepEqual(calls, [
+        { text: 'full schema prompt', sessionId: calls[0].sessionId, resume: false },
+        { text: 'Do not start over; fix it', sessionId: calls[0].sessionId, resume: true },
+      ]);
+    },
+  },
+  {
+    name: 'claude runner sessions: the bridge new-chat rule decides fresh sessions by key, then by stage',
+    async run() {
+      const script = sequenceApi([
+        withFresh({ handoffCode: 'h1', stage: 'a', prompt: 'p1' }, true, 'k1'),
+        withFresh({ handoffCode: 'h2', stage: 'a', prompt: 'p2' }, true, 'k2'),
+        withFresh({ handoffCode: 'h3', stage: 'b', prompt: 'p3' }, true, 'k2'),
+        withFresh({ handoffCode: 'h4', stage: 'c', prompt: 'p4' }, true),
+        withFresh({ handoffCode: 'h5', stage: 'c', prompt: 'p5' }, true),
+        { handoffCode: 'h6', stage: 'd', prompt: 'p6' },
+      ]);
+      // The app's fields are non-enumerable: a spread does not carry them.
+      assert.equal({ ...script.handoffs[0] }.freshContextRequired, undefined);
+      assert.equal(script.handoffs[0].freshContextRequired, true);
+      const calls = [];
+      const runner = createClaudeApplicationRunner({
+        api: script.api, stateFile: tempStateFile(), logger: quietLogger(), homedir: tempHome(),
+        runStage: async ({ sessionId, resume }) => { calls.push({ sessionId, resume }); return { text: 'ok' }; },
+      });
+      runner.ensure({ jobId: 'job-fresh', canvasFilePath: '/c.canvas' });
+      await waitFor(() => runner.status(['job-fresh'])['job-fresh']?.status === 'done', 'done');
+      await runner.shutdown();
+      assert.equal(calls.length, 6);
+      const [s1, s2, s3] = [calls[0].sessionId, calls[1].sessionId, calls[3].sessionId];
+      assert.equal(new Set([s1, s2, s3]).size, 3);
+      for (const id of [s1, s2, s3]) assert.match(id, UUID_RE);
+      assert.deepEqual(calls, [
+        { sessionId: s1, resume: false },
+        { sessionId: s2, resume: false }, // new key
+        { sessionId: s2, resume: true }, // same key keeps the chat although the stage changed
+        { sessionId: s3, resume: false }, // no key, changed stage
+        { sessionId: s3, resume: true }, // no key, same stage
+        { sessionId: s3, resume: true }, // no fresh requirement
+      ]);
+    },
+  },
+  {
+    name: 'claude runner sessions: a first run that fails is never resumed; retry starts a new session',
+    async run() {
+      const script = sequenceApi([{ handoffCode: 'h1', stage: 'draft', prompt: 'p1' }]);
+      const calls = [];
+      let failNext = true;
+      const runner = createClaudeApplicationRunner({
+        api: script.api, stateFile: tempStateFile(), logger: quietLogger(), homedir: tempHome(),
+        runStage: async ({ sessionId, resume }) => {
+          calls.push({ sessionId, resume });
+          if (failNext) { failNext = false; throw new ClaudeRunnerError('CLAUDE_USAGE_LIMIT', USAGE_MESSAGE); }
+          return { text: 'ok' };
+        },
+      });
+      runner.ensure({ jobId: 'job-first-fail', canvasFilePath: '/c.canvas' });
+      await waitFor(() => runner.status(['job-first-fail'])['job-first-fail']?.status === 'failed', 'failed');
+      await runner.retry({ jobId: 'job-first-fail', canvasFilePath: '/c.canvas' });
+      await waitFor(() => runner.status(['job-first-fail'])['job-first-fail']?.status === 'done', 'done');
+      await runner.shutdown();
+      assert.equal(calls.length, 2);
+      assert.match(calls[0].sessionId, UUID_RE);
+      assert.match(calls[1].sessionId, UUID_RE);
+      assert.notEqual(calls[1].sessionId, calls[0].sessionId);
+      assert.deepEqual(calls.map(c => c.resume), [false, false]);
+    },
+  },
+  {
+    name: 'claude runner sessions: retry after a failure in a started chat resumes it, also across a reload',
+    async run() {
+      const stateFile = tempStateFile();
+      const home = tempHome();
+      const correctionScript = () => sequenceApi([
+        { handoffCode: 'r1', stage: 'requirements', prompt: 'p' },
+        { handoffCode: 'r1-fix', stage: 'requirements', prompt: 'p', corrections: ['x'], correctionPrompt: 'fix' },
+      ]);
+      const scripts = { 'job-same': correctionScript(), 'job-reload': correctionScript() };
+      const api = {
+        getHandoff: args => scripts[args.jobId].api.getHandoff(args),
+        submitHandoff: args => scripts[args.jobId].api.submitHandoff(args),
+        subscribeDiscards: () => () => {},
+      };
+      const calls = { 'job-same': [], 'job-reload': [] };
+      const makeRunner = (jobId, failSecond) => createClaudeApplicationRunner({
+        api, stateFile, logger: quietLogger(), homedir: home,
+        runStage: async ({ sessionId, resume, text }) => {
+          calls[jobId].push({ sessionId, resume, text });
+          if (failSecond && calls[jobId].length === 2) throw new ClaudeRunnerError('CLAUDE_USAGE_LIMIT', USAGE_MESSAGE);
+          return { text: 'ok' };
+        },
+      });
+
+      const same = makeRunner('job-same', true);
+      same.ensure({ jobId: 'job-same', canvasFilePath: '/c.canvas' });
+      await waitFor(() => same.status(['job-same'])['job-same']?.status === 'failed', 'same failed');
+      await same.retry({ jobId: 'job-same', canvasFilePath: '/c.canvas' });
+      await waitFor(() => same.status(['job-same'])['job-same']?.status === 'done', 'same done');
+      await same.shutdown();
+      const sameId = calls['job-same'][0].sessionId;
+      assert.match(sameId, UUID_RE);
+      assert.deepEqual(calls['job-same'], [
+        { sessionId: sameId, resume: false, text: 'p' },
+        { sessionId: sameId, resume: true, text: 'fix' },
+        { sessionId: sameId, resume: true, text: 'fix' },
+      ]);
+
+      const first = makeRunner('job-reload', true);
+      first.ensure({ jobId: 'job-reload', canvasFilePath: '/c.canvas' });
+      await waitFor(() => first.status(['job-reload'])['job-reload']?.status === 'failed', 'reload failed');
+      await first.shutdown();
+      const reloadId = calls['job-reload'][0].sessionId;
+      assert.match(reloadId, UUID_RE);
+      const persisted = JSON.parse(fs.readFileSync(stateFile, 'utf8'));
+      assert.deepEqual(persisted.sessions, {
+        'job-reload': { main: { sessionId: reloadId, started: true, contextKey: null, stage: 'requirements' } },
+      });
+      assert.equal(persisted.failed['job-reload'].code, 'CLAUDE_USAGE_LIMIT');
+
+      const second = makeRunner('job-reload', false);
+      await second.load();
+      assert.equal(second.status(['job-reload'])['job-reload'].status, 'failed');
+      await second.retry({ jobId: 'job-reload', canvasFilePath: '/c.canvas' });
+      await waitFor(() => second.status(['job-reload'])['job-reload']?.status === 'done', 'reload done');
+      await second.shutdown();
+      assert.deepEqual(calls['job-reload'], [
+        { sessionId: reloadId, resume: false, text: 'p' },
+        { sessionId: reloadId, resume: true, text: 'fix' },
+        { sessionId: reloadId, resume: true, text: 'fix' },
+      ]);
+      assert.deepEqual(JSON.parse(fs.readFileSync(stateFile, 'utf8')), { failed: {}, sessions: {} });
+    },
+  },
+  {
+    name: 'claude runner sessions: an old-format state file still loads; a malformed one loads empty with a warning',
+    async run() {
+      const stateFile = tempStateFile();
+      fs.mkdirSync(path.dirname(stateFile), { recursive: true });
+      const old = { jobId: 'job-old', canvasFilePath: '/c.canvas', status: 'failed', stage: 'draft', code: 'CLAUDE_USAGE_LIMIT', message: USAGE_MESSAGE, updatedAt: 5 };
+      fs.writeFileSync(stateFile, JSON.stringify({ 'job-old': old }));
+      const runner = createClaudeApplicationRunner({ api: sequenceApi([]).api, stateFile, logger: quietLogger(), homedir: tempHome(), runStage: async () => { throw new Error('must not run'); } });
+      await runner.load();
+      assert.deepEqual(runner.status(['job-old']), { 'job-old': old });
+      assert.equal(runner.ensure({ jobId: 'job-old', canvasFilePath: '/c.canvas' }).status, 'failed');
+
+      const badFile = tempStateFile();
+      fs.mkdirSync(path.dirname(badFile), { recursive: true });
+      fs.writeFileSync(badFile, JSON.stringify({ failed: [], sessions: {} }));
+      const logger = quietLogger();
+      const bad = createClaudeApplicationRunner({ api: sequenceApi([]).api, stateFile: badFile, logger, homedir: tempHome(), runStage: async () => ({ text: 'x' }) });
+      await bad.load();
+      assert.deepEqual(logger.warns, ['[ClaudeRunner] ignoring malformed runner state file']);
+    },
+  },
+  {
+    name: 'claude runner sessions: a done job removes only its own transcripts and its persisted sessions',
+    async run() {
+      const home = tempHome();
+      const projA = path.join(home, '.claude', 'projects', 'projA');
+      const projB = path.join(home, '.claude', 'projects', 'projB');
+      fs.mkdirSync(projA, { recursive: true });
+      fs.mkdirSync(projB, { recursive: true });
+      fs.writeFileSync(path.join(projA, 'other.jsonl'), '{}\n');
+      const stateFile = tempStateFile();
+      const script = sequenceApi([{ handoffCode: 'h1', stage: 'draft', prompt: 'p1' }]);
+      const seen = [];
+      const runner = createClaudeApplicationRunner({
+        api: script.api, stateFile, logger: quietLogger(), homedir: home,
+        runStage: async ({ sessionId }) => {
+          seen.push(sessionId);
+          fs.writeFileSync(path.join(projA, `${sessionId}.jsonl`), '{}\n');
+          fs.mkdirSync(path.join(projB, sessionId, 'subagents'), { recursive: true });
+          return { text: 'ok' };
+        },
+      });
+      runner.ensure({ jobId: 'job-clean', canvasFilePath: '/c.canvas' });
+      await waitFor(() => runner.status(['job-clean'])['job-clean']?.status === 'done', 'done');
+      await runner.shutdown();
+      assert.equal(seen.length, 1);
+      assert.match(seen[0], UUID_RE);
+      assert.equal(fs.existsSync(path.join(projA, `${seen[0]}.jsonl`)), false);
+      assert.equal(fs.existsSync(path.join(projB, seen[0])), false);
+      assert.deepEqual(fs.readdirSync(projA), ['other.jsonl']);
+      assert.equal(fs.readFileSync(path.join(projA, 'other.jsonl'), 'utf8'), '{}\n');
+      assert.deepEqual(JSON.parse(fs.readFileSync(stateFile, 'utf8')), { failed: {}, sessions: {} });
     },
   },
 ];

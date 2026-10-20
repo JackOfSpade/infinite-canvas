@@ -2,13 +2,17 @@
 //
 // Application-bundle stages are answered through the local Claude Code CLI in
 // headless mode: the latest Opus writes and judges, the latest Sonnet
-// converts, repairs and fact-checks (CLAUDE_STAGE_PROFILES). Every application v2 prompt is
-// self-contained, so each stage is a fresh, stateless CLI run. Failures are
-// final until the user retries: there is no automatic retry, no fallback and
-// no waiting. This module is pure Node (no 'electron' import); everything
-// environment-specific is injected so it can be tested with fakes.
+// converts, repairs and fact-checks (CLAUDE_STAGE_PROFILES). Each handoff lane
+// (the main lane of a job, or one parallel task) keeps one persisted Claude Code
+// session per chat: correction rounds resume it, and the bridge's new-chat rule
+// (freshContextRequired / freshContextKey) decides when a fresh session starts.
+// Failures are final until the user retries: there is no automatic retry, no
+// fallback and no waiting. This module is pure Node (no 'electron' import);
+// everything environment-specific is injected so it can be tested with fakes.
 import childProcess from 'node:child_process';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 
 // Claude Code's aliases for the newest model in each line, so a new Sonnet or
@@ -47,7 +51,7 @@ export function claudeStageProfile(stage) {
 }
 export const CLAUDE_STAGE_TIMEOUT_MS = 20 * 60_000;
 export const CLAUDE_RUNNER_CONCURRENCY = 3;
-export const CLAUDE_MAX_RUNS_PER_JOB = 80;
+export const CLAUDE_MAX_RUNS_PER_JOB = 120;
 
 const OUTPUT_CAP_BYTES = 16 * 1024 * 1024;
 const KILL_GRACE_MS = 5000;
@@ -76,15 +80,24 @@ function clip(value, max = 300) {
   return text.length > max ? text.slice(0, max) : text;
 }
 
-export function claudeCliArgs({ model = CLAUDE_APPLICATION_MODEL, effort = CLAUDE_APPLICATION_EFFORT } = {}) {
+export function claudeCliArgs({
+  model = CLAUDE_APPLICATION_MODEL,
+  effort = CLAUDE_APPLICATION_EFFORT,
+  sessionId,
+  resume = false,
+} = {}) {
+  let sessionArgs = [];
+  if (typeof sessionId === 'string' && sessionId.length > 0) {
+    sessionArgs = resume === true ? ['--resume', sessionId] : ['--session-id', sessionId];
+  }
   return [
     '-p',
+    ...sessionArgs,
     '--model', model,
     '--effort', effort,
     '--restricted',
     '--strict-mcp-config',
     '--tools', '',
-    '--no-session-persistence',
     '--input-format', 'stream-json',
     '--output-format', 'stream-json',
     '--verbose',
@@ -192,6 +205,8 @@ export function runClaudeStage({
   cwd,
   model = CLAUDE_APPLICATION_MODEL,
   effort = CLAUDE_APPLICATION_EFFORT,
+  sessionId,
+  resume = false,
   spawnImpl = childProcess.spawn,
   timeoutMs = CLAUDE_STAGE_TIMEOUT_MS,
   setTimeoutImpl = globalThis.setTimeout,
@@ -204,7 +219,7 @@ export function runClaudeStage({
     }
     let child;
     try {
-      child = spawnImpl(binary, claudeCliArgs({ model, effort }), { cwd, env, stdio: ['pipe', 'pipe', 'pipe'] });
+      child = spawnImpl(binary, claudeCliArgs({ model, effort, sessionId, resume }), { cwd, env, stdio: ['pipe', 'pipe', 'pipe'] });
     } catch (error) {
       reject(error?.code === 'ENOENT'
         ? new ClaudeRunnerError('CLAUDE_CLI_MISSING', MESSAGES.missing)
@@ -386,14 +401,41 @@ function chooseText(handoff) {
 
 function createProductionRunStage({ workspaceDir, fsImpl }) {
   let bound = null;
-  return async ({ text, pageImages, signal, stage }) => {
+  return async ({ text, pageImages, signal, stage, sessionId, resume }) => {
     if (!bound) {
       if (workspaceDir) await fsImpl.mkdir(workspaceDir, { recursive: true });
-      const os = await import('node:os');
       const binary = resolveClaudeBinary({ env: process.env, homedir: os.homedir() });
       bound = { binary, env: claudeChildEnv(process.env, path.dirname(binary)), cwd: workspaceDir || os.tmpdir() };
     }
-    return runClaudeStage({ text, pageImages, signal, ...bound, ...claudeStageProfile(stage) });
+    return runClaudeStage({ text, pageImages, signal, sessionId, resume, ...bound, ...claudeStageProfile(stage) });
+  };
+}
+
+const FRESH_CONTEXT_KEY_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+const SESSION_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+// freshContextRequired / freshContextKey are non-enumerable on the app's
+// handoff object, so they are read directly, never through a spread or JSON.
+function freshContextKeyOf(handoff) {
+  const key = handoff?.freshContextKey;
+  return typeof key === 'string' && FRESH_CONTEXT_KEY_RE.test(key) ? key : null;
+}
+
+/** Mirrors the bridge engine's requiresFreshContextBoundary rule for one lane. */
+function needsFreshSession(lane, handoff, key) {
+  if (!lane.started) return true;
+  if (handoff?.freshContextRequired !== true) return false;
+  if (key !== null) return key !== lane.contextKey;
+  return typeof lane.stage === 'string' && handoff?.stage !== lane.stage;
+}
+
+function sanitizeLane(value) {
+  if (!value || typeof value !== 'object' || !SESSION_ID_RE.test(String(value.sessionId || ''))) return null;
+  return {
+    sessionId: value.sessionId,
+    started: value.started === true,
+    contextKey: typeof value.contextKey === 'string' ? value.contextKey : null,
+    stage: typeof value.stage === 'string' ? value.stage : null,
   };
 }
 
@@ -409,12 +451,61 @@ export function createClaudeApplicationRunner({
   maxRunsPerJob = CLAUDE_MAX_RUNS_PER_JOB,
   now = Date.now,
   fsImpl = fs.promises,
+  homedir = os.homedir(),
 } = {}) {
   const { getHandoff, submitHandoff, subscribeDiscards } = api;
   const stageRunner = typeof runStage === 'function' ? runStage : createProductionRunStage({ workspaceDir, fsImpl });
   const semaphore = createSemaphore(concurrency);
   const states = new Map();
   const drivers = new Map();
+  // jobId -> Map(laneKey -> { sessionId, started, contextKey, stage }); laneKey is 'main' or a matchTaskId.
+  const sessions = new Map();
+
+  function laneFor(jobId, laneKey) {
+    let lanes = sessions.get(jobId);
+    if (!lanes) { lanes = new Map(); sessions.set(jobId, lanes); }
+    let lane = lanes.get(laneKey);
+    if (!lane) { lane = { sessionId: null, started: false, contextKey: null, stage: null }; lanes.set(laneKey, lane); }
+    return lane;
+  }
+
+  async function removeTranscripts(sessionIds) {
+    const ids = sessionIds.filter(id => SESSION_ID_RE.test(String(id || '')));
+    if (!ids.length || !homedir) return;
+    const root = path.join(homedir, '.claude', 'projects');
+    let dirs;
+    try {
+      dirs = await fsImpl.readdir(root, { withFileTypes: true });
+    } catch (error) {
+      if (error?.code !== 'ENOENT') logger?.warn?.(`[ClaudeRunner] could not list Claude projects: ${clip(error?.code || error?.message, 80)}`);
+      return;
+    }
+    for (const dirent of dirs) {
+      if (!dirent?.isDirectory?.()) continue;
+      const dir = path.join(root, dirent.name);
+      for (const id of ids) {
+        try {
+          await fsImpl.rm(path.join(dir, `${id}.jsonl`), { force: true });
+          await fsImpl.rm(path.join(dir, id), { force: true, recursive: true });
+        } catch (error) {
+          logger?.warn?.(`[ClaudeRunner] could not remove a Claude session transcript: ${clip(error?.code || error?.message, 80)}`);
+        }
+      }
+    }
+  }
+
+  async function dropSessions(jobId) {
+    const lanes = sessions.get(jobId);
+    if (!lanes) return;
+    sessions.delete(jobId);
+    const ids = [...lanes.values()].map(lane => lane.sessionId).filter(Boolean);
+    persist();
+    try {
+      await removeTranscripts(ids);
+    } catch (error) {
+      logger?.warn?.(`[ClaudeRunner] could not remove Claude session transcripts: ${clip(error?.code || error?.message, 80)}`);
+    }
+  }
   let persistChain = Promise.resolve();
   let tempCounter = 0;
   let shuttingDown = false;
@@ -446,9 +537,18 @@ export function createClaudeApplicationRunner({
   }
 
   function persist() {
-    const snapshot = {};
-    for (const [jobId, state] of states) if (state.status === 'failed') snapshot[jobId] = { ...state };
-    const body = `${JSON.stringify(snapshot, null, 2)}\n`;
+    const failed = {};
+    for (const [jobId, state] of states) if (state.status === 'failed') failed[jobId] = { ...state };
+    const sessionSnapshot = {};
+    for (const [jobId, lanes] of sessions) {
+      const out = {};
+      for (const [laneKey, lane] of lanes) {
+        if (!lane.sessionId) continue;
+        out[laneKey] = { sessionId: lane.sessionId, started: lane.started === true, contextKey: lane.contextKey ?? null, stage: lane.stage ?? null };
+      }
+      if (Object.keys(out).length) sessionSnapshot[jobId] = out;
+    }
+    const body = `${JSON.stringify({ failed, sessions: sessionSnapshot }, null, 2)}\n`;
     const write = async () => {
       if (!stateFile) return;
       await fsImpl.mkdir(path.dirname(stateFile), { recursive: true });
@@ -480,7 +580,29 @@ export function createClaudeApplicationRunner({
       logger?.warn?.('[ClaudeRunner] ignoring malformed runner state file');
       return;
     }
-    for (const [jobId, entry] of Object.entries(data)) {
+    const isPlainObject = value => !!value && typeof value === 'object' && !Array.isArray(value);
+    const newFormat = ('failed' in data || 'sessions' in data)
+      && data.failed?.status !== 'failed' && data.sessions?.status !== 'failed';
+    let failedMap = data;
+    if (newFormat) {
+      const failedOk = data.failed === undefined || isPlainObject(data.failed);
+      const sessionsOk = data.sessions === undefined || isPlainObject(data.sessions);
+      if (!failedOk || !sessionsOk) {
+        logger?.warn?.('[ClaudeRunner] ignoring malformed runner state file');
+        return;
+      }
+      failedMap = data.failed || {};
+      for (const [jobId, lanes] of Object.entries(data.sessions || {})) {
+        if (!nonEmptyString(jobId) || !isPlainObject(lanes) || drivers.has(jobId)) continue;
+        const restored = new Map();
+        for (const [laneKey, lane] of Object.entries(lanes)) {
+          const clean = nonEmptyString(laneKey) ? sanitizeLane(lane) : null;
+          if (clean) restored.set(laneKey, clean);
+        }
+        if (restored.size) sessions.set(jobId, restored);
+      }
+    }
+    for (const [jobId, entry] of Object.entries(failedMap)) {
       if (!nonEmptyString(jobId) || entry?.status !== 'failed' || drivers.has(jobId)) continue;
       states.set(jobId, {
         jobId,
@@ -519,11 +641,34 @@ export function createClaudeApplicationRunner({
       let result;
       try {
         if (signal.aborted) throw new ClaudeRunnerError('CLAUDE_CANCELLED', MESSAGES.cancelled);
+        const lane = laneFor(jobId, matchTaskId || 'main');
+        const key = freshContextKeyOf(handoff);
+        const wasStarted = lane.started;
+        if (needsFreshSession(lane, handoff, key)) {
+          lane.sessionId = crypto.randomUUID();
+          lane.started = false;
+        }
+        let succeeded = false;
         try {
-          result = await stageRunner({ text, pageImages: Array.isArray(handoff?.pageImages) ? handoff.pageImages : [], signal, stage: entry.stage });
+          result = await stageRunner({
+            text,
+            pageImages: Array.isArray(handoff?.pageImages) ? handoff.pageImages : [],
+            signal,
+            stage: entry.stage,
+            sessionId: lane.sessionId,
+            resume: lane.started,
+          });
+          succeeded = true;
         } catch (error) {
           if (error instanceof ClaudeRunnerError) throw error;
           throw new ClaudeRunnerError('CLAUDE_ERROR', clip(error?.message || 'Claude run failed.') || 'Claude run failed.', error?.code);
+        } finally {
+          lane.contextKey = key;
+          lane.stage = handoff?.stage ?? null;
+          if (succeeded) lane.started = true;
+          // Only a resumable lane (or one that replaced a resumable lane) needs to reach disk now;
+          // a discarded job's sessions are about to be dropped.
+          if (entry.abortReason !== 'discard' && (lane.started || wasStarted)) persist();
         }
       } finally {
         release();
@@ -602,12 +747,20 @@ export function createClaudeApplicationRunner({
     entry.promise = (async () => {
       try {
         const outcome = await drive(entry);
-        if (entry.abortReason === 'discard' || entry.abortReason === 'shutdown') return;
-        if (outcome?.gone) removeState(jobId, canvasFilePath);
-        else if (outcome?.done) setState(jobId, canvasFilePath, { status: 'done', stage: entry.stage });
-        else if (outcome?.needsReview) setState(jobId, canvasFilePath, { status: 'needs-review', stage: entry.stage });
+        if (entry.abortReason === 'discard') { await dropSessions(jobId); return; }
+        if (entry.abortReason === 'shutdown') return;
+        if (outcome?.gone) {
+          removeState(jobId, canvasFilePath);
+          await dropSessions(jobId);
+        } else if (outcome?.done) {
+          setState(jobId, canvasFilePath, { status: 'done', stage: entry.stage });
+          await dropSessions(jobId);
+        } else if (outcome?.needsReview) {
+          setState(jobId, canvasFilePath, { status: 'needs-review', stage: entry.stage });
+        }
       } catch (caught) {
-        if (entry.abortReason === 'discard' || entry.abortReason === 'shutdown') return;
+        if (entry.abortReason === 'discard') { await dropSessions(jobId); return; }
+        if (entry.abortReason === 'shutdown') return;
         const raw = entry.abortReason === 'failed' && entry.firstError ? entry.firstError : caught;
         const error = raw instanceof ClaudeRunnerError ? raw : applicationError(raw);
         setState(jobId, canvasFilePath, { status: 'failed', stage: entry.stage, code: error.code, message: error.message });
@@ -664,6 +817,9 @@ export function createClaudeApplicationRunner({
     if (states.get(jobId)?.status === 'failed') {
       removeState(jobId, event?.canvasFilePath);
       persist();
+    }
+    if (sessions.has(jobId)) {
+      dropSessions(jobId).catch(() => { /* logged inside; never fails a job */ });
     }
   }
 
