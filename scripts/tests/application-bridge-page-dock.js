@@ -211,6 +211,30 @@ export default [
       assert(JSON.stringify(dock.calls.openWorker) === JSON.stringify([{ generation: 41, workerOrdinal: 1 }]));
     });
   } },
+  { name: 'handoff popup offers Open worker chat for a healthy worker whose Chrome tab the app owns', async run() {
+    await withDock(async dock => {
+      await dock.render();
+      const healthy = (seq, extraWorker) => withLanes(seq, [lane(JOB_A, 'awaiting')], {
+        uiRevision: seq,
+        chat: { state: 'working', ordinal: 1, pool: { active: true, generation: 61, workerCount: 1,
+          workers: [{ ordinal: 1, state: 'working', completed: 1, firstCallAt: NOW,
+            launch: { stage: 'presented', reason: null }, ...extraWorker }] } },
+      });
+      const open = () => [...dock.document.querySelectorAll('button')].filter(b => b.textContent === 'Open worker chat');
+      await dock.setStatus(healthy(2, {}));
+      await dock.publish([dock.item({ jobId: JOB_A, title: 'Engineer', company: 'Acme' })]);
+      assert(open().length === 0, 'a healthy worker without an owned tab shows no Open button');
+      await dock.setStatus(healthy(3, { canOpenChat: true }));
+      assert(open().length === 1 && !open()[0].disabled, `a healthy worker with an owned tab shows one enabled Open worker chat button (found ${open().length})`);
+      await dock.act(async () => { open()[0].click(); await Promise.resolve(); });
+      assert(JSON.stringify(dock.calls.openWorker) === JSON.stringify([{ generation: 61, workerOrdinal: 1 }]),
+        `Open sends the exact worker identity (got ${JSON.stringify(dock.calls.openWorker)})`);
+      assert(dock.text().includes('Opened this worker’s ChatGPT chat in Chrome.'), 'a healthy worker gets the short Chrome notice');
+      assert(!dock.text().includes('Complete any approval or reconnect request there.'), 'a healthy worker does not get the approval notice');
+      await dock.setStatus(healthy(4, {}));
+      assert(open().length === 0, 'the same worker without canOpenChat hides the Open button again');
+    });
+  } },
 
   {
     name: 'career progress appears inside the real handoff popup and its pause action names the exact run',

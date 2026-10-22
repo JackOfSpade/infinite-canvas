@@ -5,7 +5,7 @@ import { createChatLauncher } from '../../electron/ipc/handoffBridge/chatLaunche
 import { pickUserChromePid } from '../../electron/ipc/browser/appleEvents.js';
 import { buildWorkerStarterMessage } from '../../src/utils/handoffBridgeConfig.js';
 import { registerHandoffBridgeUi } from '../../electron/ipc/handoffBridge/ui.js';
-import { IPC_CHANNELS } from '../../electron/ipc/handoffBridge/contracts.js';
+import { IPC_CHANNELS, IPC_EVENTS } from '../../electron/ipc/handoffBridge/contracts.js';
 import { applyHandoffBridgeStatus, getHandoffBridgeStatus, __resetHandoffBridgeStoreForTests } from '../../src/utils/handoffBridgeStore.js';
 import { IPC_ERROR_COPY } from '../../src/utils/handoffBridgeCopy.js';
 import { clearBridgeChatOpenDiagnostic, getBridgeChatOpenDiagnostic, clearBridgeLaunchDiagnostic, getBridgeLaunchDiagnostic } from '../../electron/ipc/handoffBridge/telemetry.js';
@@ -269,6 +269,35 @@ export default [
       await retry;
       for (let turn = 0; turn < 10; turn++) await new Promise(resolve => setImmediate(resolve));
       assert.equal(launches, 1); assert.equal(closes, 0);
+    } finally { ui.dispose(); }
+  } },
+  { name: 'chat launcher: published status marks exactly the workers whose Chrome tab the app owns as openable', async run() {
+    const handlers = new Map(); const published = [];
+    const sender = { id: 816, __isCanvasRenderer: true, send: (channel, payload) => { if (channel === IPC_EVENTS.STATUS) published.push(payload); } };
+    const window = { webContents: sender, isDestroyed: () => false };
+    const snapshot = { serving: 'live', autoLaunchChats: false, config: {}, chat: { pool: { active: true, generation: 66, workerCount: 2, workers: [
+      { ordinal: 1, state: 'working', firstCallAt: Date.now(), completed: 3 },
+      { ordinal: 2, state: 'waiting', firstCallAt: Date.now(), completed: 1 },
+    ] } } };
+    const owned = [];
+    const ui = registerHandoffBridgeUi({
+      ipc: { handle: (key, value) => handlers.set(key, value), removeHandler() {}, on() {}, removeListener() {} },
+      controller: { snapshot: () => snapshot, subscribe: () => () => {} },
+      chatLauncher: { owns: owner => { owned.push(owner); return owner === 'worker:66:1'; }, close: async () => true,
+        launch: async () => { throw new Error('a healthy pool must not launch'); } },
+      timers: { setTimeout() { return { unref() {} }; }, clearTimeout() {} }, getCanvasWindows: () => [window],
+    });
+    try {
+      ui.publishStatus(snapshot);
+      for (let turn = 0; turn < 5; turn++) await new Promise(resolve => setImmediate(resolve));
+      assert(published.length >= 1, 'the status reaches the canvas renderer');
+      const workers = published.at(-1).chat.pool.workers;
+      assert.equal(workers.length, 2);
+      assert.equal(workers[0].ordinal, 1); assert.equal(workers[0].canOpenChat, true);
+      assert.equal(workers[1].ordinal, 2); assert.equal(workers[1].canOpenChat, false);
+      assert.equal(workers[0].launch, null, 'worker 1 has no launch progress yet is still openable');
+      assert.equal(workers[1].launch, null);
+      assert(owned.includes('worker:66:1') && owned.includes('worker:66:2'), 'ownership is asked per exact worker owner');
     } finally { ui.dispose(); }
   } },
   { name: 'chat launcher: Open preserves the original tab when Send landed but confirmation failed', async run() {

@@ -165,6 +165,21 @@ export default [
     ])
       && !JSON.stringify(hostile).includes('PRIVATE-WORKER-SESSION-CODE'),
     'worker progress stays a closed, bounded roster and never transports a starter capability');
+
+    const openable = normalizeBridgeStatus(rawStatus(1, {
+      chat: { pool: { active: true, generation: 45, workerCount: 4, workers: [
+        { ordinal: 1, state: 'working', completed: 1, canOpenChat: true, launch: { stage: 'presented', reason: null } },
+        { ordinal: 2, state: 'waiting', completed: 0, canOpenChat: false },
+        { ordinal: 3, state: 'idle', completed: 0, canOpenChat: 'yes' },
+        { ordinal: 4, state: 'ready', completed: 0, canOpenChat: 1 },
+      ] } },
+    }));
+    assert(JSON.stringify(openable.chat.pool.workers) === JSON.stringify([
+      { ordinal: 1, state: 'working', completed: 1, lastCallAt: null, quietReason: null, canOpenChat: true, launch: { stage: 'presented', reason: null } },
+      { ordinal: 2, state: 'waiting', completed: 0, lastCallAt: null, quietReason: null },
+      { ordinal: 3, state: 'idle', completed: 0, lastCallAt: null, quietReason: null },
+      { ordinal: 4, state: 'ready', completed: 0, lastCallAt: null, quietReason: null },
+    ]), 'only a strictly true canOpenChat survives normalization; false, strings and numbers are dropped');
   } },
   { name: 'handoff bridge: ui: answer-silent worker status retains only its ordinal, safe silence reason, and call time', run: () => {
     const normalized = normalizeBridgeStatus(rawStatus(1, {

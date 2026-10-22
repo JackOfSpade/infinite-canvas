@@ -183,6 +183,7 @@ export function normalizeBridgeStatus(raw) {
               quietReason: state === 'quiet'
                 ? nullableOneOf(worker.quietReason, POOL_WORKER_QUIET_REASONS)
                 : null,
+              ...(worker.canOpenChat === true ? { canOpenChat: true } : {}),
               ...(isObject(worker.launch) && nullableOneOf(worker.launch.stage, LAUNCH_STAGES)
                 ? { launch: { stage: worker.launch.stage, reason: nullableOneOf(worker.launch.reason, LAUNCH_REASONS),
                   ...(typeof worker.launch.canReveal === 'boolean' ? { canReveal: worker.launch.canReveal } : {}) } } : {}),

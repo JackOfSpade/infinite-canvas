@@ -298,7 +298,8 @@ export function registerHandoffBridgeUi({
     const pool = snapshot?.chat?.pool;
     if (!pool?.active || !Array.isArray(pool.workers)) return snapshot;
     return { ...snapshot, chat: { ...snapshot.chat, pool: { ...pool, workers: pool.workers.map(worker => ({
-      ...worker, launch: launchProgress.has(workerOwner(pool.generation, worker.ordinal))
+      ...worker, canOpenChat: launcher.owns(workerOwner(pool.generation, worker.ordinal)) === true,
+      launch: launchProgress.has(workerOwner(pool.generation, worker.ordinal))
         ? { ...launchProgress.get(workerOwner(pool.generation, worker.ordinal)),
           canReveal: launcher.owns(workerOwner(pool.generation, worker.ordinal)) === true }
         : null,

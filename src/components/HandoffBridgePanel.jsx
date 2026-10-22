@@ -88,7 +88,7 @@ function workerPoolFromStatus(status) {
       const quietReason = state === 'quiet' && typeof worker?.quietReason === 'string' && QUIET_REASONS.has(worker.quietReason)
         ? worker.quietReason
         : null;
-      return [{ ordinal, state, completed, lastCallAt, quietReason, launch: worker?.launch || null }];
+      return [{ ordinal, state, completed, lastCallAt, quietReason, ...(worker?.canOpenChat === true ? { canOpenChat: true } : {}), launch: worker?.launch || null }];
     }).sort((left, right) => left.ordinal - right.ordinal) : [];
     const plan = pool?.plan && typeof pool.plan === 'object'
       ? {
@@ -146,6 +146,7 @@ function workerPoolProgress(pool, reportedPool, copiedWorkers, copiedWorkerStatu
       completed: reported?.completed || 0,
       lastCallAt: Number.isFinite(reported?.lastCallAt) && reported.lastCallAt >= 0 ? reported.lastCallAt : null,
       quietReason: state === 'quiet' && QUIET_REASONS.has(reported?.quietReason) ? reported.quietReason : null,
+      ...(reported?.canOpenChat === true ? { canOpenChat: true } : {}),
       launch: reported?.launch || null,
     };
   });
@@ -506,10 +507,12 @@ export function HandoffBridgePanel() {
       generation: activeWorkerPool.generation, workerOrdinal,
     });
     if (mountedRef.current) {
+      const openedWorker = (activeWorkerProgress?.workers || []).find(worker => worker?.ordinal === workerOrdinal);
+      const needsUserAction = ['approval_required', 'reconnect_required'].includes(openedWorker?.launch?.reason);
       setCopyingWorker(null);
-      setNotice(result?.success ? (openExisting && result?.started !== true ? 'Opened this worker’s ChatGPT chat. Complete any approval or reconnect request there.' : 'Opening a fresh ChatGPT worker chat…') : ipcErrorMessage(result?.code || 'INTERNAL'));
+      setNotice(result?.success ? (openExisting && result?.started !== true ? (needsUserAction ? 'Opened this worker’s ChatGPT chat. Complete any approval or reconnect request there.' : 'Opened this worker’s ChatGPT chat in Chrome.') : 'Opening a fresh ChatGPT worker chat…') : ipcErrorMessage(result?.code || 'INTERNAL'));
     }
-  }, [activeCopyingWorker, activeWorkerPool]);
+  }, [activeCopyingWorker, activeWorkerPool, activeWorkerProgress]);
 
   const runHealthAction = useCallback(id => {
     if (id === 'setup') {
@@ -683,7 +686,7 @@ export function HandoffBridgePanel() {
                               {BRIDGE_UI_COPY.workerState(worker.state, worker.quietReason, worker.launch)}
                             </span>
                             {worker.launch && <span className="basis-full text-sky-100/80">{BRIDGE_UI_COPY.workerLaunch(worker.launch, launchAccountName(activeWorkerPool.generation, worker.ordinal))}</span>}
-                            {worker.launch?.canReveal !== false && (worker.launch?.stage === 'failed' || ['approval_required', 'delivery_timeout', 'conversation_unavailable', 'chat_stopped'].includes(worker.launch?.reason) || worker.state === 'quiet') && (
+                            {(worker.canOpenChat === true || (worker.launch?.canReveal !== false && (worker.launch?.stage === 'failed' || ['approval_required', 'delivery_timeout', 'conversation_unavailable', 'chat_stopped'].includes(worker.launch?.reason) || worker.state === 'quiet'))) && (
                               <button type="button" className="rounded border border-amber-300/50 px-2 py-1 text-amber-100"
                                 disabled={activeCopyingWorker !== null} onClick={() => void retryWorkerLaunch(worker.ordinal, true)}>{worker.launch?.reason === 'approval_required' ? 'Open ChatGPT for approval' : 'Open worker chat'}</button>
                             )}
