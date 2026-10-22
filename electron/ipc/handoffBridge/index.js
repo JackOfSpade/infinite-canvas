@@ -34,7 +34,7 @@ import { createHandoffBridgeDialogs } from './uiDialogs.js';
 import { registerHandoffBridgeUi } from './ui.js';
 import { createHandoffBridgeTray } from './tray.js';
 import { createHandoffBridgePower } from './power.js';
-import { clearApplicationSubmitFailures, recordApplicationSubmitFailure, clearBridgeChatOpenDiagnostic, clearBridgeLaunchDiagnostic, clearBridgeChatCopyDiagnostic, clearBridgeQueueDiagnostic, clearClientAuthDiagnostic, clearFailedStartDiagnostic, clearMcpRateLimitDiagnostic, clearOAuthRejectionDiagnostic, clearSourceRejectionDiagnostic, getFailedStartDiagnosticLines, recordClientAuthDiagnostic, recordFailedStartDiagnostic, recordMcpRateLimitDiagnostic, recordOAuthRejectionDiagnostic, recordSourceRejectionDiagnostic, retireBridgeQueueDiagnosticProvider, setBridgeQueueDiagnosticProvider } from './telemetry.js';
+import { clearApplicationSubmitFailures, recordApplicationSubmitFailure, clearBridgeChatOpenDiagnostic, clearBridgeLaunchDiagnostic, clearBridgeChatCopyDiagnostic, clearBridgeQueueDiagnostic, clearBridgeMetadataDiagnostic, clearClientAuthDiagnostic, clearFailedStartDiagnostic, clearMcpRateLimitDiagnostic, clearOAuthRejectionDiagnostic, clearSourceRejectionDiagnostic, getFailedStartDiagnosticLines, recordBridgeMetadataDiagnostic, recordClientAuthDiagnostic, recordFailedStartDiagnostic, recordMcpRateLimitDiagnostic, recordOAuthRejectionDiagnostic, recordSourceRejectionDiagnostic, retireBridgeQueueDiagnosticProvider, setBridgeQueueDiagnosticProvider } from './telemetry.js';
 
 let registered = false;
 let registeredIpcMain = null;
@@ -938,7 +938,14 @@ export function composeHandoffBridge({ userData, config, tunnelState, setupState
     // signed, so dropping it here would silently strand the decision.
     recordClientAuth: entry => {
       if (!bridgeDiagnosticsEnabled()) return;
-      recordClientAuthDiagnostic({ telemetry: true, outcome: entry?.outcome, grant: entry?.grant, at: now() });
+      recordClientAuthDiagnostic({ telemetry: true, outcome: entry?.outcome, grant: entry?.grant, accepted: entry?.accepted, at: now() });
+    },
+    // Whether ChatGPT's published metadata could be fetched and whether a
+    // saved copy covered an outage. Closed enums only; telemetry.js rejects
+    // anything else, and no URL or document content crosses this port.
+    recordMetadataFetch: entry => {
+      if (!bridgeDiagnosticsEnabled()) return;
+      recordBridgeMetadataDiagnostic({ telemetry: true, kind: entry?.kind, outcome: entry?.outcome, fallback: entry?.fallback, at: now() });
     },
     onPairingClosed: reason => pairing?.onOAuthPairingClosed?.(reason),
     onConsentRequested: value => {
@@ -1599,7 +1606,7 @@ async function forgetActiveRuntime(current, status) {
   // memory after Forget would let a later FULL report disclose an old attempt
   // despite the user explicitly clearing this bridge's settings.
   clearFailedStartDiagnostic();
-  clearOAuthRejectionDiagnostic(); clearSourceRejectionDiagnostic(); clearClientAuthDiagnostic(); clearMcpRateLimitDiagnostic(); clearBridgeChatCopyDiagnostic(); clearBridgeQueueDiagnostic();
+  clearOAuthRejectionDiagnostic(); clearSourceRejectionDiagnostic(); clearClientAuthDiagnostic(); clearBridgeMetadataDiagnostic(); clearMcpRateLimitDiagnostic(); clearBridgeChatCopyDiagnostic(); clearBridgeQueueDiagnostic();
   setReportRedactedHosts([]);
   try {
     if (!current) {
@@ -1638,7 +1645,7 @@ async function forgetActiveRuntime(current, status) {
 
 async function invalidateRuntimeForMutation({ clearOAuthDiagnostics = false } = {}) {
   clearFailedStartDiagnostic();
-  if (clearOAuthDiagnostics) { clearOAuthRejectionDiagnostic(); clearSourceRejectionDiagnostic(); clearClientAuthDiagnostic(); clearMcpRateLimitDiagnostic(); clearBridgeChatCopyDiagnostic(); clearBridgeQueueDiagnostic(); }
+  if (clearOAuthDiagnostics) { clearOAuthRejectionDiagnostic(); clearSourceRejectionDiagnostic(); clearClientAuthDiagnostic(); clearBridgeMetadataDiagnostic(); clearMcpRateLimitDiagnostic(); clearBridgeChatCopyDiagnostic(); clearBridgeQueueDiagnostic(); }
   bootstrapCleared = false;
   const disposed = await disposeCurrentRuntime();
   const status = bootstrapSnapshot();
@@ -1711,7 +1718,7 @@ export function registerHandoffBridgeHandlers({ ipcMain = electronPkg.ipcMain, d
     // carry even its closed fields into another profile/context that has not
     // opted in to diagnostics.
     clearFailedStartDiagnostic();
-    clearOAuthRejectionDiagnostic(); clearSourceRejectionDiagnostic(); clearClientAuthDiagnostic(); clearMcpRateLimitDiagnostic(); clearBridgeChatCopyDiagnostic(); clearBridgeQueueDiagnostic();
+    clearOAuthRejectionDiagnostic(); clearSourceRejectionDiagnostic(); clearClientAuthDiagnostic(); clearBridgeMetadataDiagnostic(); clearMcpRateLimitDiagnostic(); clearBridgeChatCopyDiagnostic(); clearBridgeQueueDiagnostic();
     setReportRedactedHosts([]);
   }
   controllerBridge ||= createControllerBridge();
@@ -1765,7 +1772,7 @@ export function registerHandoffBridgeHandlers({ ipcMain = electronPkg.ipcMain, d
       if (Object.hasOwn(safePatch, 'telemetryInBugReports') && safePatch.telemetryInBugReports !== true) {
         clearApplicationSubmitFailures(); clearBridgeLaunchDiagnostic(); clearBridgeChatOpenDiagnostic();
         clearFailedStartDiagnostic();
-        clearOAuthRejectionDiagnostic(); clearSourceRejectionDiagnostic(); clearClientAuthDiagnostic(); clearMcpRateLimitDiagnostic(); clearBridgeChatCopyDiagnostic(); clearBridgeQueueDiagnostic();
+        clearOAuthRejectionDiagnostic(); clearSourceRejectionDiagnostic(); clearClientAuthDiagnostic(); clearBridgeMetadataDiagnostic(); clearMcpRateLimitDiagnostic(); clearBridgeChatCopyDiagnostic(); clearBridgeQueueDiagnostic();
       }
       if (result.config) syncReportRedactedHosts({ config: result.config, state: 'ok' });
       else if (Object.hasOwn(safePatch, 'hostname')) syncReportRedactedHosts({ config: { hostname: safePatch.hostname }, state: 'ok' });
@@ -1863,7 +1870,7 @@ export function startHandoffBridge({ reason = 'manual', deps = {} } = {}) {
     // controlled in-process test or host switch).  Keep the receipt scoped to
     // its originating root just like hostname report redaction.
     clearFailedStartDiagnostic();
-    clearOAuthRejectionDiagnostic(); clearSourceRejectionDiagnostic(); clearClientAuthDiagnostic(); clearMcpRateLimitDiagnostic(); clearBridgeChatCopyDiagnostic(); clearBridgeQueueDiagnostic();
+    clearOAuthRejectionDiagnostic(); clearSourceRejectionDiagnostic(); clearClientAuthDiagnostic(); clearBridgeMetadataDiagnostic(); clearMcpRateLimitDiagnostic(); clearBridgeChatCopyDiagnostic(); clearBridgeQueueDiagnostic();
     setReportRedactedHosts([]);
   }
   const composedDeps = mergeDefinedDeps(inherited, deps);

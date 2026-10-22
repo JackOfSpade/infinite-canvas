@@ -24,7 +24,7 @@ import {
   redactReportUrlsInText,
   setReportRedactedHosts,
 } from '../../electron/ipc/bugReport/helpers.js';
-import { clearApplicationSubmitFailures, recordApplicationSubmitFailure, clearBridgeChatOpenDiagnostic, recordBridgeChatOpenDiagnostic, clearBridgeLaunchDiagnostic, recordBridgeLaunchDiagnostic, clearBridgeChatCopyDiagnostic, clearBridgeQueueDiagnostic, getBridgeQueueDiagnostic, reduceBridgeQueue, retireBridgeQueueDiagnosticProvider, setBridgeQueueDiagnosticProvider, clearClientAuthDiagnostic, clearFailedStartDiagnostic, clearMcpRateLimitDiagnostic, clearOAuthRejectionDiagnostic, clearSourceRejectionDiagnostic, getFailedStartDiagnosticLines, recordBridgeChatCopyDiagnostic, recordBridgeChatCopyResult, recordClientAuthDiagnostic, recordFailedStartDiagnostic, recordMcpRateLimitDiagnostic, recordOAuthRejectionDiagnostic, recordSourceRejectionDiagnostic } from '../../electron/ipc/handoffBridge/telemetry.js';
+import { clearApplicationSubmitFailures, recordApplicationSubmitFailure, clearBridgeChatOpenDiagnostic, recordBridgeChatOpenDiagnostic, clearBridgeLaunchDiagnostic, recordBridgeLaunchDiagnostic, clearBridgeChatCopyDiagnostic, clearBridgeQueueDiagnostic, getBridgeQueueDiagnostic, reduceBridgeQueue, retireBridgeQueueDiagnosticProvider, setBridgeQueueDiagnosticProvider, clearBridgeMetadataDiagnostic, getBridgeMetadataDiagnostic, recordBridgeMetadataDiagnostic, clearClientAuthDiagnostic, clearFailedStartDiagnostic, clearMcpRateLimitDiagnostic, clearOAuthRejectionDiagnostic, clearSourceRejectionDiagnostic, getFailedStartDiagnosticLines, recordBridgeChatCopyDiagnostic, recordBridgeChatCopyResult, recordClientAuthDiagnostic, recordFailedStartDiagnostic, recordMcpRateLimitDiagnostic, recordOAuthRejectionDiagnostic, recordSourceRejectionDiagnostic } from '../../electron/ipc/handoffBridge/telemetry.js';
 
 const fixtureDirectory = fileURLToPath(new URL('./fixtures/handoff-bridge/', import.meta.url));
 const repoRoot = fileURLToPath(new URL('../../', import.meta.url));
@@ -513,14 +513,81 @@ export default [
 
       clearClientAuthDiagnostic();
       recordClientAuthDiagnostic({ telemetry: true, outcome: 'none', at: 6_000 });
-      assert(generateMarkdown({ ...base, filterCode: 'FULL' }).markdown.includes('method `none`'),
+      const unsigned = generateMarkdown({ ...base, filterCode: 'FULL' }).markdown;
+      assert(unsigned.includes('method `none`'),
         'an unsigned token exchange must be reported as none, not inferred as assertion');
+      assert(unsigned.includes('the connector did not sign, so pinning private_key_jwt would break the link')
+        && unsigned.includes('accepted `unknown`'),
+      'an unsigned exchange keeps its verdict and reports an unstated acceptance as unknown');
+
+      // A signed assertion that merely failed verification must never read
+      // as "did not sign".
+      clearClientAuthDiagnostic();
+      recordClientAuthDiagnostic({ telemetry: true, outcome: 'assertion_unknown_kid', grant: 'refresh_token', accepted: false, at: 6_100 });
+      const unknownKid = generateMarkdown({ ...base, filterCode: 'FULL' }).markdown;
+      assert(unknownKid.includes('the connector signed, but the signature could not be verified (`assertion_unknown_kid`), so the exchange was rejected')
+        && !unknownKid.includes('did not sign')
+        && unknownKid.includes('accepted `no`'),
+      'an unknown kid is a signed-but-unverified exchange, rejected');
+
+      clearClientAuthDiagnostic();
+      recordClientAuthDiagnostic({ telemetry: true, outcome: 'assertion_jwks_unavailable', grant: 'refresh_token', accepted: true, at: 6_200 });
+      const outageAccepted = generateMarkdown({ ...base, filterCode: 'FULL' }).markdown;
+      assert(outageAccepted.includes("the connector signed, but ChatGPT's signing keys could not be fetched and none were saved; the exchange was accepted under the key-outage policy")
+        && outageAccepted.includes('outcome `assertion_jwks_unavailable`')
+        && outageAccepted.includes('accepted `yes`')
+        && !outageAccepted.includes('did not sign'),
+      'a key outage accepted under the policy says so');
+
+      clearClientAuthDiagnostic();
+      recordClientAuthDiagnostic({ telemetry: true, outcome: 'assertion_jwks_unavailable', grant: 'refresh_token', accepted: false, at: 6_300 });
+      const outageRejected = generateMarkdown({ ...base, filterCode: 'FULL' }).markdown;
+      assert(outageRejected.includes('none were saved; the exchange was rejected.')
+        && !outageRejected.includes('key-outage policy')
+        && outageRejected.includes('accepted `no`'),
+      'a rejected key-outage exchange says rejected');
 
       clearClientAuthDiagnostic();
       recordClientAuthDiagnostic({ telemetry: false, outcome: 'assertion_ok' });
       assert(!generateMarkdown({ ...base, filterCode: 'FULL' }).markdown.includes('Client authentication observed'),
         'the diagnostics opt-out cannot retain a client-authentication observation');
     } finally { clearClientAuthDiagnostic(); }
+  },
+}, {
+  // A 404 on ChatGPT's published metadata must be visible in a report, and
+  // whether a saved copy covered it; nothing else about the fetch is kept.
+  name: 'handoff bridge: privacy: FULL reports ChatGPT metadata fetch receipts with closed values only',
+  run: () => {
+    const base = {
+      description: 'Metadata fetch observation.', nodes: [], edges: [], drawings: [], frontEndState: {}, nodeInternals: [], nodeComponentStates: [], eventLogs: [],
+    };
+    try {
+      clearBridgeMetadataDiagnostic();
+      assert(!generateMarkdown({ ...base, filterCode: 'FULL' }).markdown.includes('ChatGPT metadata fetches'),
+        'no metadata line renders without a receipt');
+      assert(recordBridgeMetadataDiagnostic({ telemetry: false, kind: 'client', outcome: 'ok', at: 1_000 }) === null
+        && getBridgeMetadataDiagnostic().client === null,
+      'the diagnostics opt-out records no metadata receipt');
+      assert(recordBridgeMetadataDiagnostic({ telemetry: true, kind: 'https://chatgpt.com/oauth/client.json', outcome: 'ok', at: 1_000 }) === null
+        && recordBridgeMetadataDiagnostic({ telemetry: true, kind: 'jwks', outcome: 'PRIVATE_KID', at: 1_000 }) === null,
+      'an unknown kind or outcome is refused');
+      recordBridgeMetadataDiagnostic({ telemetry: true, kind: 'client', outcome: 'unavailable', fallback: 'saved', at: 1_000 });
+      const clientOnly = generateMarkdown({ ...base, filterCode: 'FULL' }).markdown;
+      assert(clientOnly.includes(`- ChatGPT metadata fetches: client document \`unavailable\` (saved copy \`saved\`) at ${new Date(1_000).toISOString()} · signing keys \`not recorded\``),
+        'a client receipt renders with a not-recorded key receipt');
+      recordBridgeMetadataDiagnostic({ telemetry: true, kind: 'jwks', outcome: 'unavailable', fallback: 'PRIVATE_URL', at: 2_000 });
+      const both = generateMarkdown({ ...base, filterCode: 'FULL' }).markdown;
+      assert(both.includes(`signing keys \`unavailable\` (saved keys \`none\`) at ${new Date(2_000).toISOString()}`)
+        && !both.includes('PRIVATE_URL'),
+      'an unknown fallback closes to none and is never echoed');
+      assert(Object.isFrozen(getBridgeMetadataDiagnostic().jwks) && getBridgeMetadataDiagnostic().jwks.outcome === 'unavailable',
+        'the latest receipt per kind is frozen');
+      assert(!generateMarkdown({ ...base, filterCode: 'JOBS' }).markdown.includes('ChatGPT metadata fetches'),
+        'unrelated report filters omit the metadata line');
+      clearBridgeMetadataDiagnostic();
+      assert(!generateMarkdown({ ...base, filterCode: 'FULL' }).markdown.includes('ChatGPT metadata fetches'),
+        'clearing removes the metadata line');
+    } finally { clearBridgeMetadataDiagnostic(); }
   },
 }, {
   name: 'handoff bridge: privacy: FULL issue-reporter draft diagnostics retain only closed state and bounded length',

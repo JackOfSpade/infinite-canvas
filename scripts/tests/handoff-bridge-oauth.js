@@ -101,6 +101,7 @@ function boot(options = {}) {
     fetchJwks: options.fetchJwks || (async () => null),
     emitSecurityEvent: (event, fields) => { events.push({ event, fields }); options.emitSecurityEvent?.(event, fields); },
     recordClientAuth: entry => { auth.push(entry); options.recordClientAuth?.(entry); },
+    recordMetadataFetch: options.recordMetadataFetch,
     onConsentRequested: entry => { consent.push(entry); options.onConsentRequested?.(entry); },
     onDisconnected: entry => { disconnected.push(entry); options.onDisconnected?.(entry); },
     onPairingClosed: reason => { pairingClosed.push(reason); options.onPairingClosed?.(reason); },
@@ -1517,7 +1518,7 @@ const assertionTests = [
   },
   {
     name: 'handoff bridge: oauth: assertion outcomes are a closed privacy-safe enumeration',
-    run: () => assert.deepEqual(ASSERTION_OUTCOMES, ['none', 'assertion_ok', 'assertion_bad_signature', 'assertion_bad_claims', 'assertion_replay', 'assertion_unknown_kid', 'other']),
+    run: () => assert.deepEqual(ASSERTION_OUTCOMES, ['none', 'assertion_ok', 'assertion_bad_signature', 'assertion_bad_claims', 'assertion_replay', 'assertion_unknown_kid', 'other', 'assertion_jwks_unavailable']),
   },
   {
     name: 'handoff bridge: oauth: assertion subject inspection only accepts matching iss and sub',
@@ -1720,7 +1721,7 @@ const assertionTests = [
     name: 'handoff bridge: oauth: a failed JWKS fetch fails closed',
     run: async () => {
       const item = verifier({ fetchJwks: async () => { throw new Error('offline'); } });
-      assert.equal((await verify(item.instance, assertion())).outcome, 'assertion_unknown_kid');
+      assert.equal((await verify(item.instance, assertion())).outcome, 'assertion_jwks_unavailable');
     },
   },
   {
@@ -1732,7 +1733,8 @@ const assertionTests = [
       assert.equal(env.auth.at(-1).outcome, 'none');
       // `grant` is a closed enum naming which grant was authenticated; the
       // refresh case is what licenses requiring an assertion.
-      assert.deepEqual(Object.keys(env.auth.at(-1)).sort(), ['assertionSize', 'audience', 'grant', 'jtiPresent', 'outcome']);
+      assert.deepEqual(Object.keys(env.auth.at(-1)).sort(), ['accepted', 'assertionSize', 'audience', 'grant', 'jtiPresent', 'outcome']);
+      assert.equal(env.auth.at(-1).accepted, true);
       assert.ok(['authorization_code', 'refresh_token', 'other'].includes(env.auth.at(-1).grant), 'the recorded grant must stay a closed enum');
     },
   },
@@ -1831,8 +1833,188 @@ const assertionTests = [
   },
 ];
 
+const unavailableError = () => Object.assign(new Error('client metadata unavailable'), { code: 'CIMD_UNAVAILABLE' });
+const offline = async () => { throw new Error('offline'); };
+const OUTAGE_TEXT = 'could not be loaded from chatgpt.com right now, so this request cannot be checked. Try Connect again in a few minutes.';
+const savedJwk = (kid = PUBLIC_JWK.kid) => ({ kty: PUBLIC_JWK.kty, use: 'sig', alg: 'RS256', kid, n: PUBLIC_JWK.n, e: PUBLIC_JWK.e, key_ops: ['verify'] });
+const signed = (now, extra = {}) => ({ client_assertion: assertion({ clock: now, ...extra }), client_assertion_type: JWT_BEARER });
+function outageVerifier({ fetchJwks = offline, saved = null } = {}) {
+  const fetched = [];
+  const instance = createClientAssertionVerifier({
+    fetchJwks, now: clockAt(), issuer: ISSUER, tokenEndpoint: `${ISSUER}/oauth/token`, clientId: CLIENT_ID,
+    lastGoodKeys: () => saved, onKeysFetched: keys => fetched.push(keys),
+  });
+  return { instance, fetched };
+}
+
+const metadataOutageTests = [
+  {
+    name: 'handoff bridge: oauth: outage: the CIMD fetcher distinguishes an unavailable document from an invalid one',
+    run: async () => {
+      const unavailable = createCimdFetcher({ clientIds: [CLIENT_ID], fetchJson: async () => null });
+      await assert.rejects(() => unavailable(CLIENT_ID), error => error.code === 'CIMD_UNAVAILABLE');
+      const invalid = createCimdFetcher({ clientIds: [CLIENT_ID], fetchJson: async () => ({ ...REAL_METADATA, client_id: 'https://example.com/client' }) });
+      assert.equal(await invalid(CLIENT_ID), null);
+      const valid = createCimdFetcher({ clientIds: [CLIENT_ID], fetchJson: async () => REAL_METADATA });
+      assert.equal((await valid(CLIENT_ID)).id, CLIENT_ID);
+    },
+  },
+  {
+    name: 'handoff bridge: oauth: outage: an unavailable CIMD falls back to the persisted validated client',
+    run: async () => {
+      const first = boot();
+      await grant(first);
+      assert.equal(first.store.state().clients.length, 1);
+      const receipts = [];
+      const env = boot({ store: first.store, now: first.now, fetchClientMetadata: async () => { throw unavailableError(); }, recordMetadataFetch: entry => receipts.push(entry) });
+      const started = await consentStart(env);
+      assert.equal(started.page.status, 200, started.page.text);
+      assert.ok(started.txn, 'the consent page carries a transaction');
+      assert.deepEqual(receipts, [{ kind: 'client', outcome: 'unavailable', fallback: 'saved' }]);
+      // An invalid document, or a non-outage failure, never falls back.
+      const invalid = await consentStart(boot({ store: first.store, now: first.now, fetchClientMetadata: async () => null }));
+      assert.equal(invalid.page.status, 400);
+      assert.ok(invalid.page.text.includes('The authorization request is not recognised.'));
+      const other = await consentStart(boot({ store: first.store, now: first.now, fetchClientMetadata: async () => { throw new Error('boom'); } }));
+      assert.ok(other.page.text.includes('The authorization request is not recognised.'));
+    },
+  },
+  {
+    name: 'handoff bridge: oauth: outage: no persisted client answers 503 with the outage text, invalid stays not recognised',
+    run: async () => {
+      const receipts = [];
+      const env = boot({ fetchClientMetadata: async () => { throw unavailableError(); }, recordMetadataFetch: entry => receipts.push(entry) });
+      const started = await consentStart(env);
+      assert.equal(started.page.status, 503);
+      assert.ok(started.page.text.includes(OUTAGE_TEXT), started.page.text);
+      assert.ok(!started.page.text.includes('not recognised'));
+      assert.equal(started.txn, null);
+      assert.deepEqual(receipts, [{ kind: 'client', outcome: 'unavailable', fallback: 'none' }]);
+      const invalid = await consentStart(boot({ metadata: null }));
+      assert.equal(invalid.page.status, 400);
+      assert.ok(invalid.page.text.includes('The authorization request is not recognised.'));
+      assert.ok(!invalid.page.text.includes(OUTAGE_TEXT));
+    },
+  },
+  {
+    name: 'handoff bridge: oauth: outage: the verifier uses last-good keys strictly and reports unavailable only with none',
+    run: async () => {
+      const saved = outageVerifier({ saved: [savedJwk()] });
+      assert.equal((await verify(saved.instance, assertion())).outcome, 'assertion_ok');
+      assert.equal((await verify(saved.instance, assertion({ header: { kid: 'rotated-key' } }))).outcome, 'assertion_unknown_kid');
+      assert.equal((await verify(saved.instance, assertion({ key: weakRsa.privateKey }))).outcome, 'assertion_bad_signature');
+      assert.equal(saved.fetched.length, 0);
+      const none = outageVerifier({ fetchJwks: async () => null });
+      assert.equal((await verify(none.instance, assertion())).outcome, 'assertion_jwks_unavailable');
+      assert.equal((await verify(none.instance, 'a.b')).outcome, 'assertion_bad_claims');
+      const live = outageVerifier({ fetchJwks: async () => ({ keys: [PUBLIC_JWK] }) });
+      assert.equal((await verify(live.instance, assertion())).outcome, 'assertion_ok');
+      assert.equal(live.fetched.length, 1);
+      assert.equal(live.fetched[0][0].kid, PUBLIC_JWK.kid);
+      assert.ok(Object.isFrozen(live.fetched[0]));
+    },
+  },
+  {
+    name: 'handoff bridge: oauth: outage: require-assertion accepts a signed refresh only when no keys were ever obtained',
+    run: async () => {
+      const now = clockAt();
+      const receipts = [];
+      const env = boot({ now, tokenAuthMode: 'require-assertion', fetchJwks: offline, recordMetadataFetch: entry => receipts.push(entry) });
+      const issued = await obtainCode(env);
+      const exchanged = await exchangeCode(env, issued, signed(now));
+      assert.equal(exchanged.status, 200, exchanged.text);
+      const refreshed = await refresh(env, exchanged.json.refresh_token, signed(now));
+      assert.equal(refreshed.status, 200, refreshed.text);
+      assert.ok(refreshed.json.refresh_token && refreshed.json.refresh_token !== exchanged.json.refresh_token);
+      assert.equal(env.auth.at(-1).outcome, 'assertion_jwks_unavailable');
+      assert.equal(env.auth.at(-1).accepted, true);
+      assert.deepEqual(receipts.at(-1), { kind: 'jwks', outcome: 'unavailable', fallback: 'none' });
+      const unsigned = await refresh(env, refreshed.json.refresh_token);
+      assert.equal(unsigned.json.error, 'invalid_client');
+      assert.equal(env.auth.at(-1).accepted, false);
+
+      const store = memoryStore({ v: 1, issuer: ISSUER, clients: [], codes: [], families: [], refresh: [], access: [], jwks: { keys: [savedJwk()], fetchedAt: now() } });
+      const savedEnv = boot({ now, store, tokenAuthMode: 'require-assertion', fetchJwks: offline, recordMetadataFetch: entry => receipts.push(entry) });
+      const savedIssued = await obtainCode(savedEnv);
+      const savedExchange = await exchangeCode(savedEnv, savedIssued, signed(now));
+      assert.equal(savedExchange.status, 200, savedExchange.text);
+      assert.equal(savedEnv.auth.at(-1).outcome, 'assertion_ok');
+      assert.deepEqual(receipts.at(-1), { kind: 'jwks', outcome: 'unavailable', fallback: 'saved' });
+      const rotated = await refresh(savedEnv, savedExchange.json.refresh_token, signed(now, { header: { kid: 'rotated-key' } }));
+      assert.equal(rotated.json.error, 'invalid_client');
+      assert.equal(savedEnv.auth.at(-1).outcome, 'assertion_unknown_kid');
+      assert.equal(savedEnv.auth.at(-1).accepted, false);
+    },
+  },
+  {
+    name: 'handoff bridge: oauth: outage: last-good JWKS persists, survives a restart, and is rewritten only when it changes',
+    run: async () => {
+      const now = clockAt();
+      let fetches = 0;
+      let liveKeys = [{ ...PUBLIC_JWK, secret: 'drop-me' }];
+      const env = boot({ now, fetchJwks: async () => { fetches += 1; return { keys: liveKeys }; } });
+      const linked = await grant(env);
+      assert.equal(env.store.state().jwks ?? null, null, 'no keys are saved before any live fetch');
+      const first = await refresh(env, linked.token.refresh_token, signed(now));
+      assert.equal(first.status, 200, first.text);
+      const durable = env.store.state().jwks;
+      assert.equal(durable.keys.length, 1);
+      assert.equal(durable.keys[0].kid, PUBLIC_JWK.kid);
+      assert.equal(durable.keys[0].n, PUBLIC_JWK.n);
+      assert.ok(!Object.hasOwn(durable.keys[0], 'secret'), 'only known public-key fields are persisted');
+      assert.ok(Number.isFinite(durable.fetchedAt));
+
+      // ACCESS_TTL_MS equals JWKS_CACHE_MS and the access token was issued by
+      // the same refresh that fetched the keys, so the first cache boundary
+      // also expires the access token and its sweep commits. Cross that
+      // boundary unmeasured, then measure a later crossing where nothing else
+      // expires.
+      assert.equal(fetches, 1);
+      now.advance(CONSTANTS.JWKS_CACHE_MS + 1000);
+      const sweep = await revoke(env, 'not-a-real-token', signed(now));
+      assert.equal(sweep.status, 200, sweep.text);
+      assert.equal(fetches, 2, 'the first hourly refetch happened');
+      now.advance(CONSTANTS.JWKS_CACHE_MS - 2000);
+      await revoke(env, 'not-a-real-token', signed(now));
+      assert.equal(fetches, 2, 'no refetch before the cache boundary');
+      const before = env.store.commits();
+      now.advance(2000);
+      const same = await revoke(env, 'not-a-real-token', signed(now));
+      assert.equal(same.status, 200, same.text);
+      assert.equal(fetches, 3, 'the hourly refetch happened');
+      assert.equal(env.store.commits(), before, 'an identical key set does not rewrite the file');
+      now.advance(CONSTANTS.JWKS_CACHE_MS - 1000);
+      await revoke(env, 'not-a-real-token', signed(now));
+      const beforeChange = env.store.commits();
+      liveKeys = [PUBLIC_JWK, { ...PUBLIC_JWK, kid: 'chatgpt-key-2' }];
+      now.advance(2000);
+      await revoke(env, 'not-a-real-token', signed(now));
+      assert.equal(fetches, 4);
+      assert.equal(env.store.commits(), beforeChange + 1, 'a changed key set is committed once');
+      assert.deepEqual(env.store.state().jwks.keys.map(key => key.kid), [PUBLIC_JWK.kid, 'chatgpt-key-2']);
+
+      const rebooted = boot({ now, store: env.store, tokenAuthMode: 'require-assertion', fetchJwks: offline });
+      const afterRestart = await refresh(rebooted, first.json.refresh_token, signed(now));
+      assert.equal(afterRestart.status, 200, afterRestart.text);
+      assert.equal(rebooted.auth.at(-1).outcome, 'assertion_ok');
+
+      const corrupted = { ...rebooted.store.state(), jwks: { keys: [{ kty: 'oct', kid: 'x', n: 'a', e: 'b' }], fetchedAt: 1 } };
+      const ignored = boot({ now, store: memoryStore(corrupted), tokenAuthMode: 'require-assertion', fetchJwks: offline });
+      assert.equal(ignored.oauth.stats().activeFamilies, 1, 'the rest of the state still loads');
+      const fallback = await refresh(ignored, afterRestart.json.refresh_token, signed(now));
+      assert.equal(ignored.auth.at(-1).outcome, 'assertion_jwks_unavailable', 'malformed saved keys are treated as none');
+      assert.equal(fallback.status, 200, fallback.text);
+
+      const legacy = rebooted.store.state();
+      delete legacy.jwks;
+      const old = boot({ now, store: memoryStore(legacy), fetchJwks: offline });
+      assert.equal(old.oauth.stats().activeFamilies, 1, 'an old state file without jwks loads unchanged');
+    },
+  },
+];
+
 assert.equal(LAB_STEP_NAMES.length, 100);
 assert.equal(phaseOneTests.length, 23);
 assert.equal(assertionTests.length, 43);
 
-export default [...portedLabTests, ...phaseOneTests, ...assertionTests];
+export default [...portedLabTests, ...phaseOneTests, ...assertionTests, ...metadataOutageTests];

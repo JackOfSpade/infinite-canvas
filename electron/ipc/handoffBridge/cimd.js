@@ -196,6 +196,13 @@ export function createCimdFetcher(options = {}) {
   return async clientId => {
     if (!clientIds.includes(clientId)) return null;
     const document = await fetchJson(clientId);
+    // "Could not fetch" and "fetched but invalid" need different handling:
+    // only an outage may fall back to a previously validated copy.
+    if (document === null || document === undefined) {
+      const error = new Error('client metadata unavailable');
+      error.code = 'CIMD_UNAVAILABLE';
+      throw error;
+    }
     return validateClientMetadata(document, clientId);
   };
 }

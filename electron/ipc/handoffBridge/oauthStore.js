@@ -43,6 +43,7 @@ export function createOAuthStore({ filePath, fsImpl = fs, pathImpl = path, rando
         families: Array.isArray(state?.families) ? state.families : [],
         refresh: Array.isArray(state?.refresh) ? state.refresh : [],
         access: Array.isArray(state?.access) ? state.access : [],
+        jwks: isObject(state?.jwks) ? state.jwks : null,
       };
       const data = JSON.stringify(persisted);
       if (Buffer.byteLength(data, 'utf8') > MAX_STATE_BYTES) return false;

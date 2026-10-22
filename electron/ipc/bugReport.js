@@ -49,7 +49,7 @@ import {
 import { getHubDropLockReason, hubHasAcceptedInitialDrop } from '../../src/utils/hubDropEligibility.js';
 import { completionTimestampIso } from '../../src/utils/completionTimestamp.js';
 import { isBackgroundE2E } from '../utils/backgroundE2e.js';
-import { getApplicationSubmitFailures, getBridgeChatOpenDiagnostic, getBridgeLaunchDiagnostic, getBridgeChatCopyDiagnostic, getBridgeQueueDiagnostic, getClientAuthDiagnostic, getFailedStartDiagnostic, getMcpRateLimitDiagnostic, getOAuthRejectionDiagnostic, getSourceRejectionDiagnostic } from './handoffBridge/telemetry.js';
+import { getApplicationSubmitFailures, getBridgeChatOpenDiagnostic, getBridgeLaunchDiagnostic, getBridgeChatCopyDiagnostic, getBridgeQueueDiagnostic, getBridgeMetadataDiagnostic, getClientAuthDiagnostic, getFailedStartDiagnostic, getMcpRateLimitDiagnostic, getOAuthRejectionDiagnostic, getSourceRejectionDiagnostic } from './handoffBridge/telemetry.js';
 import { getHandoffBridgeBootstrapDiagnostic } from './handoffBridge/index.js';
 import { validateIssueReportDescription } from '../../src/utils/issueReportDescription.js';
 
@@ -2149,6 +2149,7 @@ function buildHandoffBridgeDiagnosticsMarkdown() {
   const oauthRejection = getOAuthRejectionDiagnostic();
   const sourceRejection = getSourceRejectionDiagnostic();
   const clientAuth = getClientAuthDiagnostic();
+  const metadataFetches = getBridgeMetadataDiagnostic();
   const mcpRateLimit = getMcpRateLimitDiagnostic();
   const failedStart = diagnostic?.telemetry === true;
   const rejectedOrigin = oauthRejection?.telemetry === true;
@@ -2373,14 +2374,33 @@ ${launches.map(entry => `  - ${new Date(entry.at).toISOString()} · worker ${ent
     // The refresh grant is the decisive one: client authentication runs for it
     // too, so pinning on a code-exchange observation alone would kill the link
     // at the first refresh.
+    // Any assertion_* outcome other than ok means the connector DID sign; only
+    // verification failed. Saying "did not sign" there misdirects the fix.
+    const outcome = typeof clientAuth.outcome === 'string' ? clientAuth.outcome : 'unknown';
+    const signedButUnverified = outcome.startsWith('assertion_') && outcome !== 'assertion_ok';
     const verdict = clientAuth.refreshSigned === true
       ? 'a signed refresh has been seen, so AS_AUTH_METHODS can be pinned to private_key_jwt'
       : clientAuth.method === 'assertion'
         ? 'only the authorization_code exchange has been seen signed — NOT yet enough to pin, because client authentication also runs for refresh_token'
-        : 'the connector did not sign, so pinning private_key_jwt would break the link';
+        : outcome === 'assertion_jwks_unavailable'
+          ? `the connector signed, but ChatGPT's signing keys could not be fetched and none were saved; the exchange was ${clientAuth.accepted === true ? 'accepted under the key-outage policy' : 'rejected'}`
+          : signedButUnverified
+            ? `the connector signed, but the signature could not be verified (\`${outcome}\`), so the exchange was rejected`
+            : 'the connector did not sign, so pinning private_key_jwt would break the link';
+    const accepted = clientAuth.accepted === true ? 'yes' : clientAuth.accepted === false ? 'no' : 'unknown';
     clientAuthMarkdown = `
-- Client authentication observed: ${count} token exchange(s) · last grant \`${clientAuth.grant || 'unknown'}\` · method \`${clientAuth.method || 'unknown'}\` · outcome \`${clientAuth.outcome || 'unknown'}\` · signed refresh seen \`${clientAuth.refreshSigned === true ? 'yes' : 'no'}\` · recorded ${at}
+- Client authentication observed: ${count} token exchange(s) · last grant \`${clientAuth.grant || 'unknown'}\` · method \`${clientAuth.method || 'unknown'}\` · outcome \`${clientAuth.outcome || 'unknown'}\` · signed refresh seen \`${clientAuth.refreshSigned === true ? 'yes' : 'no'}\` · accepted \`${accepted}\` · recorded ${at}
   - ${verdict}.`;
+  }
+  // Closed enums and timestamps only; no URL, kid, key or document content.
+  const metadataPart = (receipt, label, savedLabel) => {
+    if (!receipt) return `${label} \`not recorded\``;
+    const when = Number.isFinite(receipt.at) ? new Date(receipt.at).toISOString() : 'not recorded';
+    return `${label} \`${receipt.outcome || 'unknown'}\` (${savedLabel} \`${receipt.fallback || 'unknown'}\`) at ${when}`;
+  };
+  if (metadataFetches?.client || metadataFetches?.jwks) {
+    clientAuthMarkdown += `
+- ChatGPT metadata fetches: ${metadataPart(metadataFetches.client, 'client document', 'saved copy')} · ${metadataPart(metadataFetches.jwks, 'signing keys', 'saved keys')}`;
   }
   let mcpRateLimitMarkdown = '';
   if (observedMcpRateLimit) {

@@ -4,7 +4,7 @@ import { CONSTANTS } from './constants.js';
 export const JWT_BEARER = 'urn:ietf:params:oauth:client-assertion-type:jwt-bearer';
 export const ASSERTION_OUTCOMES = Object.freeze([
   'none', 'assertion_ok', 'assertion_bad_signature', 'assertion_bad_claims',
-  'assertion_replay', 'assertion_unknown_kid', 'other',
+  'assertion_replay', 'assertion_unknown_kid', 'other', 'assertion_jwks_unavailable',
 ]);
 
 const isObject = value => value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -69,6 +69,8 @@ export function createClientAssertionVerifier({
   tokenEndpoint,
   clientId,
   constants = CONSTANTS,
+  lastGoodKeys = () => null,
+  onKeysFetched = () => undefined,
 } = {}) {
   if (typeof fetchJwks !== 'function') throw new TypeError('fetchJwks must be a function');
   if (typeof issuer !== 'string' || typeof tokenEndpoint !== 'string' || typeof clientId !== 'string') throw new TypeError('issuer, tokenEndpoint and clientId are required');
@@ -76,6 +78,9 @@ export function createClientAssertionVerifier({
   let cachedKeys = null;
   let keysExpireAt = 0;
   let lastUnknownKidFetchAt = Number.NEGATIVE_INFINITY;
+  // True only when neither a live fetch nor a saved last-good set produced
+  // keys: an unknown kid then means "could not look it up", not "wrong key".
+  let keysUnavailable = false;
   const jtis = new Map();
 
   const pruneJtis = current => {
@@ -83,16 +88,27 @@ export function createClientAssertionVerifier({
     while (jtis.size > constants.JWT_JTI_CACHE_ENTRIES) jtis.delete(jtis.keys().next().value);
   };
   const loadKeys = async current => {
+    let live = null;
     try {
       const response = await fetchJwks();
       const keys = Array.isArray(response) ? response : response?.keys;
-      if (!Array.isArray(keys)) throw new TypeError('JWKS response must contain keys');
-      cachedKeys = Object.freeze(keys.filter(isObject).slice());
+      if (Array.isArray(keys)) live = Object.freeze(keys.filter(isObject).slice());
+    } catch { live = null; }
+    if (live) {
+      cachedKeys = live;
       keysExpireAt = current + constants.JWKS_CACHE_MS;
-    } catch {
-      cachedKeys = Object.freeze([]);
-      keysExpireAt = current + constants.JWKS_UNKNOWN_KID_REFETCH_MS;
+      keysUnavailable = false;
+      try { onKeysFetched(live); } catch { /* persistence is best effort */ }
+      return cachedKeys;
     }
+    // A failed live fetch falls back to the persisted last-good set, still
+    // verified strictly, and is retried soon so a recovery is picked up.
+    let saved = null;
+    try { saved = lastGoodKeys(); } catch { saved = null; }
+    const savedKeys = Array.isArray(saved) ? saved.filter(isObject) : [];
+    cachedKeys = Object.freeze(savedKeys.slice());
+    keysExpireAt = current + constants.JWKS_UNKNOWN_KID_REFETCH_MS;
+    keysUnavailable = savedKeys.length === 0;
     return cachedKeys;
   };
 
@@ -131,7 +147,8 @@ export function createClientAssertionVerifier({
     }
     if (!jwk) {
       if (loadedNow) lastUnknownKidFetchAt = current;
-      return result('assertion_unknown_kid', { assertionSize, jtiPresent, audience });
+      const outcome = keysUnavailable && keys.length === 0 ? 'assertion_jwks_unavailable' : 'assertion_unknown_kid';
+      return result(outcome, { assertionSize, jtiPresent, audience });
     }
     const key = rsaKeyFromJwk(jwk, constants.JWT_RSA_MIN_BITS);
     const signature = canonicalPart(parts[2]);
@@ -162,7 +179,7 @@ export function createClientAssertionVerifier({
 
   return Object.freeze({
     verify,
-    clear: () => { cachedKeys = null; keysExpireAt = 0; lastUnknownKidFetchAt = Number.NEGATIVE_INFINITY; jtis.clear(); },
+    clear: () => { cachedKeys = null; keysExpireAt = 0; keysUnavailable = false; lastUnknownKidFetchAt = Number.NEGATIVE_INFINITY; jtis.clear(); },
     stats: () => ({ cachedKeys: cachedKeys?.length || 0, jtis: jtis.size, keysExpireAt }),
   });
 }

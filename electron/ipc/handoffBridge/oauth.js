@@ -176,7 +176,25 @@ function openPair(predecessor, sealed) {
 }
 
 function emptyPersistedState() {
-  return { v: 1, clients: [], codes: [], families: [], refresh: [], access: [] };
+  return { v: 1, clients: [], codes: [], families: [], refresh: [], access: [], jwks: null };
+}
+
+const JWK_STRING_FIELDS = ['kty', 'use', 'alg', 'kid', 'n', 'e'];
+const MAX_SAVED_JWKS = 16;
+// Persist only the public-key fields verification needs, so a durable copy
+// can never carry arbitrary published content.
+function copyJwk(key) {
+  const copy = {};
+  for (const field of JWK_STRING_FIELDS) if (typeof key?.[field] === 'string') copy[field] = key[field];
+  if (Array.isArray(key?.key_ops) && key.key_ops.every(op => typeof op === 'string')) copy.key_ops = key.key_ops.slice(0, 8);
+  return copy;
+}
+function savedJwksFrom(value) {
+  if (!isObject(value) || !Array.isArray(value.keys) || value.keys.length < 1 || value.keys.length > MAX_SAVED_JWKS
+    || !Number.isFinite(value.fetchedAt)) return null;
+  if (value.keys.some(key => !isObject(key) || key.kty !== 'RSA' || typeof key.kid !== 'string'
+    || typeof key.n !== 'string' || typeof key.e !== 'string')) return null;
+  return { keys: Object.freeze(value.keys.map(key => Object.freeze(copyJwk(key)))), fetchedAt: value.fetchedAt };
 }
 
 function authorizationQuery(req) {
@@ -215,6 +233,7 @@ export function createOAuthServer({
   randomBytes = crypto.randomBytes,
   emitSecurityEvent = () => undefined,
   recordClientAuth = () => undefined,
+  recordMetadataFetch = () => undefined,
   onAuthorizeWithoutWindow = () => undefined,
   onConsentRequested = () => undefined,
   onLinked = () => undefined,
@@ -233,7 +252,32 @@ export function createOAuthServer({
   const resource = `${base}${CONSTANTS.MCP_PATH}`;
   const tokenEndpoint = `${base}${TOKEN_PATH}`;
   const pinnedClientId = CONSTANTS.CIMD_CLIENT_IDS[0];
-  const verifier = createClientAssertionVerifier({ fetchJwks, now, issuer: base, tokenEndpoint, clientId: pinnedClientId });
+  // The last successfully fetched signing keys, persisted so an outage of the
+  // published JWKS (or a restart during one) does not break signed refreshes.
+  let lastGoodJwks = null;
+  const verifier = createClientAssertionVerifier({
+    fetchJwks, now, issuer: base, tokenEndpoint, clientId: pinnedClientId,
+    lastGoodKeys: () => {
+      const keys = lastGoodJwks?.keys || null;
+      safeCall(recordMetadataFetch, { kind: 'jwks', outcome: 'unavailable', fallback: keys?.length ? 'saved' : 'none' });
+      return keys;
+    },
+    onKeysFetched: keys => {
+      safeCall(recordMetadataFetch, { kind: 'jwks', outcome: 'ok', fallback: 'not-needed' });
+      // Only RSA keys are usable for RS256; saving anything else would make
+      // the durable set fail validation on the next load.
+      const copied = (Array.isArray(keys) ? keys : [])
+        .filter(key => isObject(key) && key.kty === 'RSA' && typeof key.kid === 'string'
+          && typeof key.n === 'string' && typeof key.e === 'string')
+        .slice(0, MAX_SAVED_JWKS).map(copyJwk);
+      const candidate = savedJwksFrom({ keys: copied, fetchedAt: now() });
+      if (!candidate) return;
+      // An hourly refetch of an identical set must not rewrite the file.
+      if (lastGoodJwks && JSON.stringify(lastGoodJwks.keys) === JSON.stringify(candidate.keys)) return;
+      lastGoodJwks = candidate;
+      commit();
+    },
+  });
   const clients = new Map();
   const transactions = new Map();
   const codes = new Map();
@@ -288,6 +332,9 @@ export function createOAuthServer({
         metadataHash: item.metadataHash,
       });
     }
+    // An absent or malformed saved key set is simply "none saved"; it must
+    // never make the rest of the durable state unreadable.
+    lastGoodJwks = savedJwksFrom(state.jwks);
     for (const item of Array.isArray(state.families) ? state.families : []) {
       if (!isObject(item) || typeof item.id !== 'string' || item.clientId !== pinnedClientId || typeof item.clientKind !== 'string'
         || !finiteTime(item.createdAt) || !finiteTime(item.lastRefreshedAt) || !finiteTime(item.idleExpiresAt) || !finiteTime(item.absoluteExpiresAt)) continue;
@@ -413,6 +460,9 @@ export function createOAuthServer({
         expiresAt: record.expiresAt,
         revoked: record.revoked,
       })),
+      jwks: lastGoodJwks
+        ? { keys: lastGoodJwks.keys.map(key => ({ ...key, ...(key.key_ops ? { key_ops: key.key_ops.slice() } : {}) })), fetchedAt: lastGoodJwks.fetchedAt }
+        : null,
     };
   }
 
@@ -610,17 +660,38 @@ export function createOAuthServer({
     return compactDurableState(current) || changed;
   }
 
-  async function clientFor(clientId, { forceFetch = false } = {}) {
-    if (clientId !== pinnedClientId) return null;
-    if (!forceFetch && clients.has(clientId)) return clients.get(clientId);
+  // Resolves the pinned client and says whether the published metadata was
+  // unavailable. Only an outage (never an invalid document) may fall back to
+  // the validated copy already held for exactly this pinned id.
+  async function resolveClient(clientId, { forceFetch = false } = {}) {
+    if (clientId !== pinnedClientId) return { client: null, unavailable: false };
+    if (!forceFetch && clients.has(clientId)) return { client: clients.get(clientId), unavailable: false };
+    let client;
     try {
-      const client = await fetchClientMetadata(clientId);
-      if (!isObject(client) || client.id !== clientId || client.clientKind !== 'cimd' || !Array.isArray(client.redirectUris)
-        || !client.redirectUris.some(uri => uri === REDIRECT_URI) || !Array.isArray(client.authMethods)) return null;
+      client = await fetchClientMetadata(clientId);
+    } catch (error) {
+      if (error?.code === 'CIMD_UNAVAILABLE') {
+        const saved = clients.get(clientId) || null;
+        safeCall(recordMetadataFetch, { kind: 'client', outcome: 'unavailable', fallback: saved ? 'saved' : 'none' });
+        return { client: saved, unavailable: true };
+      }
+      return { client: null, unavailable: false };
+    }
+    if (!isObject(client) || client.id !== clientId || client.clientKind !== 'cimd' || !Array.isArray(client.redirectUris)
+      || !client.redirectUris.some(uri => uri === REDIRECT_URI) || !Array.isArray(client.authMethods)) {
+      safeCall(recordMetadataFetch, { kind: 'client', outcome: 'invalid', fallback: 'none' });
+      return { client: null, unavailable: false };
+    }
+    try {
       const persisted = copyClient(client);
       clients.set(client.id, persisted);
-      return persisted;
-    } catch { return null; }
+      safeCall(recordMetadataFetch, { kind: 'client', outcome: 'ok', fallback: 'not-needed' });
+      return { client: persisted, unavailable: false };
+    } catch { return { client: null, unavailable: false }; }
+  }
+
+  async function clientFor(clientId, options) {
+    return (await resolveClient(clientId, options)).client;
   }
 
   const gateAllows = req => {
@@ -675,11 +746,16 @@ export function createOAuthServer({
     if (!query.client_id || !query.redirect_uri || parsed.dups.has('client_id') || parsed.dups.has('redirect_uri')) {
       throw new PageError('The request is missing a client or a redirect address.');
     }
-    const client = await clientFor(query.client_id, { forceFetch: true });
+    const { client, unavailable } = await resolveClient(query.client_id, { forceFetch: true });
     // Client metadata is the only awaited step before a consent transaction.
     // A native cancel/expiry while it is in flight must not resurrect the
     // pairing or enqueue a notice once that request eventually returns.
     if (!activePairing() || !gateAllows(req)) throw new PageError('This pairing window is closed.', 403);
+    // An outage is not a rejection: say so, rather than calling ChatGPT's
+    // own request unrecognised. The pinned id and redirect checks still apply.
+    if (unavailable && !client) {
+      throw new PageError("ChatGPT's app details could not be loaded from chatgpt.com right now, so this request cannot be checked. Try Connect again in a few minutes.", 503);
+    }
     if (!client || query.redirect_uri !== REDIRECT_URI || !client.redirectUris.includes(query.redirect_uri)) {
       throw new PageError('The authorization request is not recognised.');
     }
@@ -872,16 +948,24 @@ export function createOAuthServer({
     // kills the link at the first refresh.
     const authenticatedGrant = params.grant_type === 'authorization_code' || params.grant_type === 'refresh_token'
       ? params.grant_type : 'other';
+    const noneAllowed = outcome.outcome === 'none' && tokenAuthMode === 'observe-both' && client.authMethods.includes('none');
+    const assertionAllowed = outcome.ok && client.authMethods.includes('private_key_jwt');
+    // Key-outage policy: the signing keys have never been obtainable on this
+    // Mac, so a signed request is no weaker than the public-client (`none`)
+    // path ChatGPT's own metadata advertises. Refresh rotation/reuse detection
+    // and PKCE still apply. Saved keys never reach this branch: a kid missing
+    // from them is assertion_unknown_kid and is rejected.
+    const keyOutageAllowed = outcome.outcome === 'assertion_jwks_unavailable' && client.authMethods.includes('none');
+    const accepted = noneAllowed || assertionAllowed || keyOutageAllowed;
     safeCall(recordClientAuth, {
       outcome: outcome.outcome,
       grant: authenticatedGrant,
       assertionSize: outcome.assertionSize,
       jtiPresent: outcome.jtiPresent,
       audience: outcome.audience,
+      accepted,
     });
-    const noneAllowed = outcome.outcome === 'none' && tokenAuthMode === 'observe-both' && client.authMethods.includes('none');
-    const assertionAllowed = outcome.ok && client.authMethods.includes('private_key_jwt');
-    if (!noneAllowed && !assertionAllowed) {
+    if (!accepted) {
       counters.clientAuthFailures += 1;
       throw new OAuthError('invalid_client', 'Client authentication failed', 401);
     }

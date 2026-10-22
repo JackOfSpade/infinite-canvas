@@ -95,7 +95,7 @@ const LINK_PRESENCE = new Set(['none', 'one', 'many', 'unreadable']);
 // Exactly the token-endpoint outcome vocabulary from clientAuth.js. This is
 // the MG1 measurement: which client authentication ChatGPT actually used.
 const CLIENT_AUTH_OUTCOMES = new Set(['none', 'assertion_ok', 'assertion_bad_signature',
-  'assertion_bad_claims', 'assertion_replay', 'assertion_unknown_kid', 'other']);
+  'assertion_bad_claims', 'assertion_replay', 'assertion_unknown_kid', 'other', 'assertion_jwks_unavailable']);
 // Which grant was authenticated. Requiring an assertion is only justified once
 // `refresh_token` has been seen signed; the code exchange alone is not enough.
 const CLIENT_AUTH_GRANTS = new Set(['authorization_code', 'refresh_token', 'other']);
@@ -215,7 +215,7 @@ export function getSourceRejectionDiagnostic() { return latestSourceRejection; }
 // header, claim, or credential.
 export function clearClientAuthDiagnostic() { latestClientAuth = null; }
 
-export function recordClientAuthDiagnostic({ telemetry = false, outcome, grant, at = Date.now() } = {}) {
+export function recordClientAuthDiagnostic({ telemetry = false, outcome, grant, accepted, at = Date.now() } = {}) {
   if (telemetry !== true) return null;
   const stamp = finite(at) ?? Date.now();
   const resolved = enumOr(outcome, CLIENT_AUTH_OUTCOMES);
@@ -232,11 +232,40 @@ export function recordClientAuthDiagnostic({ telemetry = false, outcome, grant, 
     refreshSigned: priorRefresh || (resolvedGrant === 'refresh_token' && resolved === 'assertion_ok'),
     // The single fact the pin decision needs, stated without inference.
     method: resolved === 'none' ? 'none' : resolved === 'assertion_ok' ? 'assertion' : 'unknown',
+    // Whether the token endpoint let this exchange through; null when the
+    // caller did not say (older call sites).
+    accepted: typeof accepted === 'boolean' ? accepted : null,
   });
   return latestClientAuth;
 }
 
 export function getClientAuthDiagnostic() { return latestClientAuth; }
+
+// Whether ChatGPT's published client document and signing keys could be
+// fetched, and whether a saved copy covered an outage. Closed enums and a
+// timestamp only: never a URL, kid, key material, or document content.
+const METADATA_KINDS = new Set(['client', 'jwks']);
+const METADATA_OUTCOMES = new Set(['ok', 'unavailable', 'invalid']);
+const METADATA_FALLBACKS = new Set(['saved', 'none', 'not-needed']);
+let latestMetadata = { client: null, jwks: null };
+
+export function clearBridgeMetadataDiagnostic() { latestMetadata = { client: null, jwks: null }; }
+
+export function recordBridgeMetadataDiagnostic({ telemetry = false, kind, outcome, fallback, at = Date.now() } = {}) {
+  if (telemetry !== true || !METADATA_KINDS.has(kind) || !METADATA_OUTCOMES.has(outcome)) return null;
+  const receipt = Object.freeze({
+    kind,
+    outcome,
+    fallback: enumOr(fallback, METADATA_FALLBACKS, outcome === 'ok' ? 'not-needed' : 'none'),
+    at: finite(at) ?? Date.now(),
+  });
+  latestMetadata = { ...latestMetadata, [kind]: receipt };
+  return receipt;
+}
+
+export function getBridgeMetadataDiagnostic() {
+  return Object.freeze({ client: latestMetadata.client, jwks: latestMetadata.jwks });
+}
 
 export function clearMcpRateLimitDiagnostic() { latestMcpRateLimit = null; }
 

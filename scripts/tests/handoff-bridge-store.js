@@ -1,7 +1,9 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { isDeepStrictEqual } from 'node:util';
 import { assert } from './testHelpers.js';
+import { createOAuthStore, OAUTH_STORE_VERSION } from '../../electron/ipc/handoffBridge/oauthStore.js';
 import { CONSTANTS } from '../../electron/ipc/handoffBridge/constants.js';
 import { configPathFor, emptyConfig, forgetConfig, readConfig, writeConfig } from '../../electron/ipc/handoffBridge/store.js';
 
@@ -489,6 +491,48 @@ export default [
       const saved = await save(userData, { limits: { ...loaded.config.limits, jobsPerChat: 1, epochHardBytes: 1_000 } });
       assert(saved.ok && !Object.hasOwn(persisted(userData).limits, 'jobsPerChat') && !Object.hasOwn(persisted(userData).limits, 'epochHardBytes'),
         'an older renderer may submit its full limits object, but the next write removes every retired lifetime cap');
+    }),
+  },
+  {
+    name: 'handoff bridge: oauth store: jwks object persists, non-object jwks persists null, legacy file without jwks reads unchanged',
+    run: () => withStore(async userData => {
+      const filePath = path.join(userData, 'handoff-bridge', 'oauth.json');
+      const store = createOAuthStore({ filePath });
+      const jwks = {
+        keys: [{ kty: 'RSA', use: 'sig', alg: 'RS256', kid: 'kid-1', n: 'nmodulus', e: 'AQAB', key_ops: ['verify'] }],
+        fetchedAt: 1_700_000_000_000,
+      };
+      const base = { issuer: 'https://bridge.example.com', clients: [{ id: 'c1' }], codes: [], families: [], refresh: [], access: [] };
+      assert(store.commit({ ...base, jwks }) === true, 'commit with a jwks object must succeed');
+      const onDisk = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+      assert(isDeepStrictEqual(onDisk.jwks, jwks), 'the jwks object must be written to disk verbatim');
+      const loaded = store.read();
+      assert(isDeepStrictEqual(loaded.jwks, jwks), 'read() must return the persisted jwks deep-equal to the committed one');
+      assert(loaded.issuer === base.issuer && isDeepStrictEqual(loaded.clients, base.clients),
+        'persisting jwks must not disturb the other fields');
+
+      for (const bad of [[{ kty: 'RSA', kid: 'x', n: 'n', e: 'AQAB' }], 'not-an-object']) {
+        assert(store.commit({ ...base, jwks: jwks }) === true, 'reset commit must succeed');
+        assert(store.commit({ ...base, jwks: bad }) === true, `commit with ${Array.isArray(bad) ? 'array' : typeof bad} jwks must succeed`);
+        const raw = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+        assert(Object.hasOwn(raw, 'jwks') && raw.jwks === null,
+          `a ${Array.isArray(bad) ? 'array' : typeof bad} jwks must persist as null`);
+        assert(store.read().jwks === null, 'read() must return null jwks after a non-object commit');
+      }
+
+      const legacy = {
+        v: OAUTH_STORE_VERSION,
+        issuer: 'https://legacy.example.com',
+        clients: [{ id: 'legacy-client' }],
+        codes: [{ code: 'c' }],
+        families: [{ id: 'f' }],
+        refresh: [{ id: 'r' }],
+        access: [{ id: 'a' }],
+      };
+      fs.writeFileSync(filePath, JSON.stringify(legacy));
+      const legacyLoaded = store.read();
+      assert(isDeepStrictEqual(legacyLoaded, legacy), 'a legacy file without jwks must read back exactly unchanged');
+      assert(!Object.hasOwn(legacyLoaded, 'jwks'), 'read() must not inject a jwks field into a legacy file');
     }),
   },
 ];
