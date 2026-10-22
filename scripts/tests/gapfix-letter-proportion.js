@@ -294,7 +294,9 @@ function battery(letter, paragraphs, citations = null) {
     ...evaluateCoverLetterChecks({
       plan, paragraphs, evidence, jobText: letter.jobText, researchText: '', companyName: letter.company, referenceDate: '2026-10-09',
       paragraphCitations: citations,
-    }),
+    // paragraph-openers is an advisory record of opening-word variety that never rejects a letter, and these
+    // fixtures predate that house rule, so the battery here is every rejecting or advisory check except it.
+    }).filter(check => check.id !== 'paragraph-openers'),
   ];
 }
 const failedIds = checks => checks.filter(check => !check.passed).map(check => check.id);

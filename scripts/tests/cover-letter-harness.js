@@ -97,7 +97,7 @@ import {
 // relevance-span rule whose CHOICE of carriers settles the one apparent
 // contradiction in this pair of checks.
 import {
-  ARGUMENT_RELEVANCE_SPAN_RULE, checkDanglingDemonstrative, checkRepeatedTransferCarrier, COVER_LETTER_SALIENT_ECHO_PHRASES,
+  ARGUMENT_RELEVANCE_SPAN_RULE, checkDanglingDemonstrative, checkParagraphOpeners, checkRepeatedTransferCarrier, COVER_LETTER_SALIENT_ECHO_PHRASES,
   DANGLING_DEMONSTRATIVE_RULE, MIN_REPEAT_CONTENT_WORDS, REPEATED_PHRASE_RULE, REPEATED_TRANSFER_CARRIER_RULE,
 } from '../../electron/ipc/coverLetterChecks.js';
 
@@ -1428,6 +1428,58 @@ export default [
     },
   },
   {
+    name: 'cover letter harness: consecutive paragraphs opening on the same word are recorded with their numbers and word',
+    run: () => {
+      const allI = checkParagraphOpeners([
+        'I rebuilt the dock intake path.',
+        'I traced every lost slip to one handoff.',
+        'I wrote the runbook the yard office uses.',
+        'I would bring that habit to the role.',
+      ]);
+      assert(!allI.passed && allI.id === 'paragraph-openers'
+        && allI.detail.startsWith('paragraphs 1, 2, 3 and 4 open with the same word (“I”)')
+        && allI.detail.split('open with the same word').length === 2,
+      `four paragraphs opening on “I” give exactly one observation naming all four: ${allI.detail}`);
+      const varied = checkParagraphOpeners([
+        'I rebuilt the dock intake path.',
+        'At the yard office, every slip now has an owner.',
+        'The runbook is still in use.',
+      ]);
+      assert(varied.passed && varied.id === 'paragraph-openers' && varied.detail === '3 paragraph(s) open on different words',
+        `paragraphs opening on different words pass: ${varied.detail}`);
+      const quotedCase = checkParagraphOpeners(['“I built the scheduler,” the lead said.', 'i built the reporting service too.']);
+      assert(!quotedCase.passed && quotedCase.detail.startsWith('paragraphs 1 and 2 open with the same word (“I”)'),
+        `matching skips leading quotes and ignores case: ${quotedCase.detail}`);
+      const prefix = checkParagraphOpeners(['I built the scheduler.', 'Ivy built the reporting service.']);
+      assert(prefix.passed, `a word that merely starts with the same letters is a different word: ${prefix.detail}`);
+      const twoRuns = checkParagraphOpeners([
+        'I rebuilt the intake path.',
+        'I traced the lost slips.',
+        'At the depot, the queue cleared.',
+        'At the office, billing caught up.',
+        'The runbook stayed in use.',
+      ]);
+      assert(!twoRuns.passed
+        && twoRuns.detail.includes('paragraphs 1 and 2 open with the same word (“I”)')
+        && twoRuns.detail.includes('paragraphs 3 and 4 open with the same word (“At”)')
+        && twoRuns.detail.split('open with the same word').length === 3
+        && !twoRuns.detail.includes('(“The”)'),
+      `two separate runs give two observations, each naming its own paragraphs: ${twoRuns.detail}`);
+      let hostile;
+      let threw = false;
+      try {
+        hostile = checkParagraphOpeners(['', null, undefined, 42, { toString: () => 'in house' }]);
+      } catch {
+        threw = true;
+      }
+      assert(!threw && hostile && typeof hostile.passed === 'boolean' && typeof hostile.detail === 'string',
+        'a malformed paragraph array yields a result and never throws');
+      const notArray = [null, undefined, 42, { paragraphs: [] }].map(value => checkParagraphOpeners(value));
+      assert(notArray.every(check => check.passed && check.detail === '0 paragraph(s) open on different words'),
+        'non-array input is read as an empty letter');
+    },
+  },
+  {
     name: 'cover letter harness: runaway sentences, semicolons, dash splices, and bureaucratic register carry plain repairs',
     run: () => {
       const long = checkSentenceLength(['The scheduling rewrite began when the paper receiving log kept losing signed delivery slips, so I mapped every handoff between the dock, the yard office, and the billing desk in order to find the point where a slip could vanish without anyone noticing it had gone missing at all.']);
@@ -1500,13 +1552,10 @@ export default [
         'I opened the bakery at 10:30 and mixed dough at a 3:1 ratio.',
         'The ferry timetable now lives at https://example.test for every deckhand.',
       ]);
-      assert(!colonStyle.passed
-        && colonStyle.detail.includes('paragraph 1 uses a colon as sentence punctuation; write the sentence out instead')
-        && !colonStyle.detail.includes('paragraph 2 uses a colon')
-        && !colonStyle.detail.includes('paragraph 3 uses a colon'),
-      `a prose colon is revision work while a time, a ratio, and a URL scheme are not: ${colonStyle.detail}`);
+      assert(colonStyle.passed && !/\bcolons?\b/u.test(colonStyle.detail),
+        `colons are allowed again (user decision, 2026-10-20): a prose colon, a time, a ratio and a URL scheme all pass: ${colonStyle.detail}`);
       const markCorpus = [
-        { copy: 'The greenhouse ran on one rule: water before noon.', rejected: true, marker: 'uses a colon as sentence punctuation', gateMessage: 'Cover-letter copy contains a colon used as sentence punctuation. Write the sentence out instead.' },
+        { copy: 'The greenhouse ran on one rule: water before noon.', rejected: false },
         { copy: 'I calibrated the kiln each morning; the glaze never cracked.', rejected: true, marker: 'uses a semicolon', gateMessage: 'Cover-letter copy contains a semicolon. Split the clause into separate sentences.' },
         { copy: 'I opened the bakery at 10:30 every weekday.', rejected: false },
         { copy: 'The ferry timetable now lives at https://example.test for every deckhand.', rejected: false },
@@ -1887,9 +1936,12 @@ export default [
       'each failure quotes the specific defective construction the one revision attempt has to repair');
       assert(checks.every(check => typeof check.id === 'string' && typeof check.passed === 'boolean' && typeof check.detail === 'string'),
         'the register checks keep the result(id, passed, detail) contract the audit line and revision prompt consume');
+      const openers = checks.filter(check => check.id === 'paragraph-openers');
+      assert(openers.length === 1 && typeof openers[0].passed === 'boolean',
+        `the paragraph-openers check is dispatched exactly once with a boolean verdict: ${openers.length}`);
       const hostile = [checkCompoundHyphenation, checkAnchorRelevance, checkAdditiveSeam, checkPostingReference,
         checkClaimedEquivalence, checkSentenceLength, checkPunctuationStyle, checkPlainRegister,
-        checkOpeningDemonstrative]
+        checkOpeningDemonstrative, checkParagraphOpeners]
         .map(check => check(['', null, undefined, 42, { toString: () => 'in house' }], null, undefined));
       assert(hostile.every(check => check && typeof check.passed === 'boolean' && typeof check.detail === 'string'),
         'a malformed or partially persisted paragraph array must yield a check result, never a thrown application-generation failure');
@@ -1917,8 +1969,11 @@ export default [
         evidence: {},
         researchText: '',
       });
-      assert(workStatusChecks.every(check => check.passed),
-        `stating work authorization in letter prose is no longer a defect: ${workStatusChecks.filter(check => !check.passed).map(check => `${check.id}: ${check.detail}`).join(' | ')}`);
+      // paragraph-openers is advisory and reads opening-word variety, not
+      // subject matter: these four status lines all open on “I” by design.
+      const workStatusVerdicts = workStatusChecks.filter(check => check.id !== 'paragraph-openers');
+      assert(workStatusVerdicts.length === workStatusChecks.length - 1 && workStatusVerdicts.every(check => check.passed),
+        `stating work authorization in letter prose is no longer a defect: ${workStatusVerdicts.filter(check => !check.passed).map(check => `${check.id}: ${check.detail}`).join(' | ')}`);
       const planStatusGate = checkPlanGate({ ...groundedPlan, logistics: '' }, evidence, needs,
         'The role must manage incident escalation.', '', 'Candidates must be authorized to work in Canada.');
       assert(!planStatusGate.checks.some(check => /legal|status|citizen|authoriz/iu.test(check.id)),
@@ -2872,9 +2927,9 @@ export default [
       const fallback = authorCoverLetterEnvelope({ job: {}, evidence: { identity: {} } });
       assert(fallback.recipient === '' && fallback.salutation === 'Dear Hiring Team,' && fallback.signatureTitle === '', 'missing company/title keeps a usable envelope without a recipient block');
       const proseChecks = evaluateCoverLetterChecks({ plan: { mappings: [{}], companyHook: { detail: '' } }, paragraphs: ['The role needs clear prioritization.', 'My triage experience demonstrates that mechanism.'], evidence, researchText: '' });
-      assert(Array.isArray(proseChecks) && proseChecks.length === 52, 'prose helper returns every non-page deterministic check');
+      assert(Array.isArray(proseChecks) && proseChecks.length === 53, 'prose helper returns every non-page deterministic check');
       assert(proseChecks.slice(9).map(check => check.id).join(',')
-        === 'compound-hyphenation,parallel-structure,prior-employer-opening,named-artifact-introduction,opening-artifact-context,vague-domain-work-label,reference-clarity,modifier-attachment,migration-object-clarity,opening-posting-restatement,opening-job-summary-scaffolding,anchor-relevance,target-claim-scope,target-company-binding,detached-relevance-claim,prospective-contribution-tense,additive-seam,responsibility-transition,tool-calls-garden-path,low-information-tool-build,containerization-technology-roles,posting-reference,claimed-equivalence,dangling-paragraph-transition,sentence-length,punctuation-style,plain-register,introductory-workplace-comma,visual-reference-precision,direct-welcome-closing,opening-demonstrative,opening-employer-shorthand,adjacent-employer-repetition,entailed-premise,repeated-sentence-shape,repeated-phrase,candidate-agency,letter-proportion,repeated-transfer-carrier,dangling-demonstrative,ended-role-current-employment,transfer-carrier-budget,transfer-benefit-support',
+        === 'compound-hyphenation,parallel-structure,prior-employer-opening,named-artifact-introduction,opening-artifact-context,vague-domain-work-label,reference-clarity,modifier-attachment,migration-object-clarity,opening-posting-restatement,opening-job-summary-scaffolding,anchor-relevance,target-claim-scope,target-company-binding,detached-relevance-claim,prospective-contribution-tense,additive-seam,responsibility-transition,tool-calls-garden-path,low-information-tool-build,containerization-technology-roles,posting-reference,claimed-equivalence,dangling-paragraph-transition,sentence-length,punctuation-style,paragraph-openers,plain-register,introductory-workplace-comma,visual-reference-precision,direct-welcome-closing,opening-demonstrative,opening-employer-shorthand,adjacent-employer-repetition,entailed-premise,repeated-sentence-shape,repeated-phrase,candidate-agency,letter-proportion,repeated-transfer-carrier,dangling-demonstrative,ended-role-current-employment,transfer-carrier-budget,transfer-benefit-support',
       'the register and style checks are appended after the established eight, and all of them read paragraphs only');
       const emptyHookWithResearch = evaluateCoverLetterChecks({
         plan: { mappings: [{ evidence: 'Triaged incomplete emergency reports under time pressure.' }], companyHook: { detail: '' } },
@@ -4260,7 +4315,7 @@ export default [
       ];
       assert(repaired[1] !== embeddedAiLetter[1] && repaired[2] !== embeddedAiLetter[2] && battery(repaired).every(check => check.passed),
         `the minimal repair clears the whole battery (failed=${battery(repaired).filter(check => !check.passed).map(check => `${check.id}: ${check.detail}`).join(' | ')})`);
-      assert(battery(repaired).length === 52, 'the repaired letter is graded by every check, not by a shortened battery');
+      assert(battery(repaired).length === 53, 'the repaired letter is graded by every check, not by a shortened battery');
       // Swapping only the verb or only the noun of the shipped sentence is not a rotation.
       const verbOnly = [embeddedAiLetter[0], embeddedAiLetter[1], embeddedAiLetter[2].replace('That judgment would support', 'That practice would help')];
       assert(!checkRepeatedTransferCarrier(verbOnly).passed

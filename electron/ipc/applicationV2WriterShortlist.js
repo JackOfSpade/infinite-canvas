@@ -1,12 +1,21 @@
 import path from 'node:path';
 import { atomicWriteJson, ensureDirectoryWithinRoot } from '../utils/pathSafety.js';
 
-const SHORTLIST_HEADING = /^\s{0,3}#{0,6}\s*EVIDENCE SHORTLIST \(WORKING NOTES\)\s*:?[ \t]*$/iu;
-const DECISION_LOG_HEADING = /^\s{0,3}#{0,6}\s*DECISION LOG \(WORKING NOTES\)\s*:?[ \t]*$/iu;
-const EVIDENCE_APPENDIX_HEADING = /^\s{0,3}#{0,6}\s*EVIDENCE SHORTLIST\s*:?[ \t]*$/iu;
-const EDITORIAL_SUMMARY_HEADING = /^\s{0,3}#{0,6}\s*EDITORIAL SUMMARY\s*:?[ \t]*$/iu;
-const RESUME_HEADING = /^\s{0,3}#{0,6}\s*(?:RÉSUMÉ|RESUME)\s*:?[ \t]*$/iu;
-const LETTER_HEADING = /^\s{0,3}#{0,6}\s*(?:COVER LETTER|LETTER)\s*:?[ \t]*$/iu;
+// A heading may be wrapped symmetrically in markdown emphasis (**, *, __ or _),
+// with the optional trailing colon inside the wrapper. One-sided emphasis is not a heading.
+function headingPattern(words) {
+  const body = `(?:${words})\\s*:?`;
+  const end = '[ \\t]*\u0024';
+  return new RegExp(`^\\s{0,3}#{0,6}\\s*(?:(\\*\\*|\\*|__|_)${body}\\1|${body})${end}`, 'iu');
+}
+
+const SHORTLIST_HEADING = headingPattern('EVIDENCE SHORTLIST \\(WORKING NOTES\\)');
+const DECISION_LOG_HEADING = headingPattern('DECISION LOG \\(WORKING NOTES\\)');
+const EVIDENCE_APPENDIX_HEADING = headingPattern('EVIDENCE SHORTLIST');
+const EDITORIAL_SUMMARY_HEADING = headingPattern('EDITORIAL SUMMARY');
+const RESUME_HEADING = headingPattern('RÉSUMÉ|RESUME');
+const LETTER_HEADING = headingPattern('COVER LETTER|LETTER');
+const PREFACE_MESSAGE = 'Writer must start with a standalone RÉSUMÉ heading on the first line, with no preface or name line before it. Deliver RÉSUMÉ, COVER LETTER, then the EVIDENCE SHORTLIST and EDITORIAL SUMMARY appendices as separate sections.';
 const CATALOG_ID = /host\.career\.[a-z]+\.[a-z0-9-]+\.[0-9]+/gu;
 const LIST_MARKER = /^\s*(?:[-*+\u2022\u00b7\u2013\u2014]|\d+[.)]|\(\d+\))\s+/u;
 const SHORT_TOKEN = /^\[?([a-z0-9][a-z0-9-]*)\]?(?=$|[\s:)\]\u2013\u2014,;.])/iu;
@@ -53,8 +62,12 @@ export function splitWriteVerifyWriterResponse(response, allowedIds) {
   const lines = response.split(/\r?\n/u);
   // Current writers explain the completed application in trailing appendices.
   // Normalize into the historical parser so old in-flight replies still work.
+  // Only a reply that actually carries a legacy working-notes heading is legacy.
   const first = lines.findIndex(line => line.trim());
-  if (RESUME_HEADING.test(lines[first] || '')) {
+  const legacy = lines.some(line => SHORTLIST_HEADING.test(line) || DECISION_LOG_HEADING.test(line));
+  const startsWithResume = RESUME_HEADING.test(lines[first] || '');
+  if (!legacy || startsWithResume) {
+    if (!startsWithResume) throw new Error(PREFACE_MESSAGE);
     const letter = lines.findIndex((line, index) => index > first && LETTER_HEADING.test(line));
     const evidence = lines.findIndex(line => EVIDENCE_APPENDIX_HEADING.test(line));
     const summary = lines.findIndex(line => EDITORIAL_SUMMARY_HEADING.test(line));
@@ -120,7 +133,12 @@ export function splitWriteVerifyWriterResponse(response, allowedIds) {
     || !lines.slice(letter + 1).some(line => line.trim())) {
     throw new Error(`Writer must return nonempty résumé and cover letter sections with a COVER LETTER heading. ${FORM_SUFFIX}`);
   }
-  const plainText = lines.slice(resume).join('\n').trim();
+  // Canonical document headings: decorated or colon-suffixed headings never reach the converter.
+  const plainText = lines.slice(resume).map((line, offset) => {
+    if (offset === 0) return 'RÉSUMÉ';
+    if (resume + offset === letter) return 'COVER LETTER';
+    return line;
+  }).join('\n').trim();
   if (/(?:EVIDENCE SHORTLIST|DECISION LOG)\s*\(WORKING NOTES\)/iu.test(plainText)
     || plainText.split('\n').some(line => EVIDENCE_APPENDIX_HEADING.test(line) || EDITORIAL_SUMMARY_HEADING.test(line))) {
     throw new Error(`Working shortlist must stay before the résumé, outside application text. ${FORM_SUFFIX}`);

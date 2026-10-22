@@ -44,6 +44,17 @@ function fullLines(ids) {
   return ids.map((id, index) => `${id} - reason ${index + 1}`);
 }
 
+// A well-formed current-format reply: documents first, then the two appendices.
+const CURRENT = [PLAIN, 'EVIDENCE SHORTLIST', ...fullLines(SIX), 'EDITORIAL SUMMARY', 'Synthetic explanation.'].join('\n');
+
+function assertPrefaceRejection(text) {
+  assert.throws(() => splitWriteVerifyWriterResponse(text, ALLOWED), (error) => {
+    assert.match(error.message, /start with a standalone RÉSUMÉ heading/u);
+    assert.doesNotMatch(error.message, /WORKING NOTES/u);
+    return true;
+  });
+}
+
 export default [
   {
     name: 'writer shortlist: unmarked lines each starting with a full ID parse',
@@ -263,6 +274,67 @@ export default [
       assert.throws(() => splitWriteVerifyWriterResponse(`${response}\nEDITORIAL SUMMARY\nRepeated appendix`, ALLOWED), /separate sections/u);
       assert.throws(() => splitWriteVerifyWriterResponse(response.replace(RESUME_BODY, ID.freight1), ALLOWED), /must not contain catalog evidence IDs/u);
       assert.throws(() => splitWriteVerifyWriterResponse(response.replace(`${LETTER_BODY}\n`, ''), ALLOWED), /nonempty résumé and cover letter/u);
+    },
+  },
+  {
+    name: 'v2 writer format (a): a preface sentence before RÉSUMÉ gets the RÉSUMÉ-first correction, never the legacy one',
+    run() {
+      // Sanity: the unprefixed reply parses, so the failure comes from the preface only.
+      assert.equal(splitWriteVerifyWriterResponse(CURRENT, ALLOWED).plainText, PLAIN);
+      assertPrefaceRejection(`Here is the application.\n${CURRENT}`);
+    },
+  },
+  {
+    name: 'v2 writer format (b): a name line before RÉSUMÉ gets the RÉSUMÉ-first correction',
+    run() {
+      assertPrefaceRejection(`Dana Example\n${CURRENT}`);
+    },
+  },
+  {
+    name: 'v2 writer format (c): plain prose with no headings gets the RÉSUMÉ-first correction, not the legacy one',
+    run() {
+      assertPrefaceRejection('This is plain prose with no headings.\nIt continues on a second line.');
+    },
+  },
+  {
+    name: 'v2 writer format (g): one-sided emphasis on the first line is not a RÉSUMÉ heading',
+    run() {
+      assertPrefaceRejection(CURRENT.replace(/^RÉSUMÉ/u, '**RÉSUMÉ'));
+      assertPrefaceRejection(CURRENT.replace(/^RÉSUMÉ/u, 'RÉSUMÉ**'));
+      assertPrefaceRejection(CURRENT.replace(/^RÉSUMÉ/u, '**RÉSUMÉ__'));
+    },
+  },
+  {
+    name: 'v2 writer format: a legacy reply with a preface still receives the legacy correction',
+    run() {
+      assert.throws(() => splitWriteVerifyWriterResponse(`Here is the application.\n${reply(fullLines(SIX))}`, ALLOWED), (error) => {
+        assert.match(error.message, /^Writer must begin with EVIDENCE SHORTLIST \(WORKING NOTES\), then a RÉSUMÉ heading\. /u);
+        assert.doesNotMatch(error.message, /standalone RÉSUMÉ heading/u);
+        return true;
+      });
+    },
+  },
+  {
+    name: 'v2 writer format (e): bold headings parse with canonical plainText headings',
+    run() {
+      const explanation = 'Synthetic explanation of the chosen evidence.';
+      const bold = ['**RÉSUMÉ**', RESUME_BODY, '**COVER LETTER**', LETTER_BODY, '**EVIDENCE SHORTLIST**',
+        ...fullLines(SIX), '**EDITORIAL SUMMARY**', explanation].join('\n');
+      const split = splitWriteVerifyWriterResponse(bold, ALLOWED);
+      assert.equal(split.plainText, PLAIN);
+      assert.deepEqual(split.ids, SIX);
+      assert.equal(split.decisions, explanation);
+    },
+  },
+  {
+    name: 'v2 writer format (f): colon-suffixed and other wrapped headings parse with canonical plainText headings',
+    run() {
+      const colon = ['# RESUME:', RESUME_BODY, 'COVER LETTER:', LETTER_BODY, 'EVIDENCE SHORTLIST', ...fullLines(SIX)].join('\n');
+      assert.equal(splitWriteVerifyWriterResponse(colon, ALLOWED).plainText, PLAIN);
+      const wrapped = ['__RÉSUMÉ:__', RESUME_BODY, '*COVER LETTER*', LETTER_BODY, '_EVIDENCE SHORTLIST_', ...fullLines(SIX)].join('\n');
+      assert.equal(splitWriteVerifyWriterResponse(wrapped, ALLOWED).plainText, PLAIN);
+      const mismatched = ['**RÉSUMÉ__', RESUME_BODY, 'COVER LETTER', LETTER_BODY, 'EVIDENCE SHORTLIST', ...fullLines(SIX)].join('\n');
+      assert.throws(() => splitWriteVerifyWriterResponse(mismatched, ALLOWED), /start with a standalone RÉSUMÉ heading/u);
     },
   },
   {

@@ -2308,9 +2308,8 @@ export default [
       'a semicolon in résumé copy is rejected by name on the résumé surface');
       assert(resumeMarkMessage('Rebuilt the orchard irrigation schedule and cut water use by a third.') === null,
         'the same résumé bullet without the semicolon passes the punctuation gate');
-      assert(resumeMarkMessage('Key result: cut ambulance dispatch delays by a quarter.')
-        === 'Résumé copy contains a colon used as sentence punctuation. Write the sentence out instead.',
-      'a prose colon in résumé copy is rejected by name on the résumé surface');
+      assert(resumeMarkMessage('Key result: cut ambulance dispatch delays by a quarter.') === null,
+        'a prose colon in résumé copy is allowed again (user decision, 2026-10-20)');
       assert(resumeMarkMessage('Opened the pastry line at 10:30 each weekday.') === null,
         'a colon between two digits (a time) is not sentence punctuation');
       assert(resumeMarkMessage('Published the library catalogue at https://example.test for every branch.') === null,

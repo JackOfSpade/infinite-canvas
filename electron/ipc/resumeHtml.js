@@ -457,23 +457,8 @@ function candidateResumeText(value, trustedRenderedRoleDates) {
 // others, and the Local AI path turns every throw into a full authoring round —
 // so a document with an em dash in the résumé and one in the letter used to
 // cost two rounds to learn about two defects already visible in one file.
-/**
- * House style: a colon is never sentence punctuation in candidate copy. A
- * colon followed by a space, or ending the text, is sentence punctuation; one
- * glued to the next character is notation (10:30, 3:1, https://, javascript:x)
- * and survives. coverLetterChecks.js keeps an identical copy because it must
- * stay free of this module's DOM dependency.
- */
-export function hasProseColon(text) {
-  const value = String(text ?? '');
-  for (let index = value.indexOf(':'); index !== -1; index = value.indexOf(':', index + 1)) {
-    // Sentence punctuation is followed by a space or ends the text. A colon
-    // glued to what follows is a token of some notation (10:30, 3:1, https://,
-    // a scheme such as javascript:x, key:value), never a clause break.
-    if (index + 1 >= value.length || /\s/u.test(value[index + 1])) return true;
-  }
-  return false;
-}
+// Colons are ordinary punctuation again (user decision, 2026-10-20). Only em
+// dashes, semicolons, spaced hyphens and en dashes outside a range are rejected.
 
 function dashPunctuationProblems(text, surface) {
   const problems = [];
@@ -482,9 +467,6 @@ function dashPunctuationProblems(text, surface) {
   }
   if (text.includes(';')) {
     problems.push(`${surface} contains a semicolon. Split the clause into separate sentences.`);
-  }
-  if (hasProseColon(text)) {
-    problems.push(`${surface} contains a colon used as sentence punctuation. Write the sentence out instead.`);
   }
   if (/\s-\s/.test(text)) {
     problems.push(`${surface} contains a spaced hyphen acting as sentence punctuation.`);
@@ -501,8 +483,8 @@ function dashPunctuationProblems(text, surface) {
 /**
  * Enforce the design system's candidate-copy punctuation gate before document
  * build. Despite the historical name, it covers dashes (em dash, spaced hyphen,
- * en dash outside a range), semicolons, and colons used as sentence
- * punctuation in both the résumé and the cover letter.
+ * en dash outside a range) and semicolons in both the résumé and the cover
+ * letter. Colons are allowed again (user decision, 2026-10-20).
  */
 export function assertCandidateDashPunctuation({ resumeMainHtml = '', coverLetter = null, trustedRenderedRoleDates = null } = {}) {
   const problems = [];

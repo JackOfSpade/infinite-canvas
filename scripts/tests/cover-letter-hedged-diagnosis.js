@@ -31,6 +31,12 @@ export default [
         'My guess is that your customers outgrow tools they cannot adapt.',
         'If I read the posting right, Lanecraft customers arrive with years of history in Trackwell.',
         'From what I gather, your team wants engineers who own a change through rollout.',
+        'From my understanding, Lanecraft wants engineers who own a change through rollout.',
+        'In my reading of the posting, your dispatchers lose time moving loads out of Trackwell.',
+        'From my read of the role, your team wants engineers who own a change through rollout.',
+        'The way I read it, Lanecraft customers arrive with years of history in Trackwell.',
+        'As far as I understand the role, your team ships a change through rollout.',
+        'My reading of the role is that your team wants engineers who own a change through rollout.',
       ]) {
         for (const order of ['before', 'after']) assert.equal(verdict(sentence, order), 'pass', `${order}: ${sentence}`);
       }
@@ -48,6 +54,10 @@ export default [
         // "driver" is its only quote term ("switch" would be a second, meeting the floor).
         ['I believe I also ran the driver interviews for the rollout.', /unrelated to its bound career-data quotes/u],
         ['My guess is that my routing board cut missed pickups by 30%.', /unsupported figure “30%”/u],
+        ['From my understanding, my Trackwell integrations would carry over directly.', /names “Trackwell”/u],
+        ['The way I read it, I built the only Trackwell importer the depots had.', /names \u201cTrackwell\u201d, which none of its bound career-data quotes states/u],
+        ['In my reading of the posting, I built the only Trackwell importer the depots had.', /names \u201cTrackwell\u201d, which none of its bound career-data quotes states/u],
+        ['My reading of the role is that my Trackwell integrations would carry over directly.', /names “Trackwell”/u],
       ]) {
         assert.match(verdict(sentence), expected, sentence);
       }
@@ -59,6 +69,10 @@ export default [
       assert.equal(withoutStanceHedges('As I read it, your team ships weekly.').includes('I'), false);
       assert.match(withoutStanceHedges('I suspect I built it.'), /\bI built\b/u);
       assert.match(withoutStanceHedges('My guess is that my board helped.'), /\bmy board\b/u);
+      assert.doesNotMatch(withoutStanceHedges('From my understanding, your team ships weekly.'), /(?<![\p{L}\p{N}])(?:I|we|me|us|my|mine|our|ours)(?![\p{L}\p{N}])/iu);
+      assert.match(withoutStanceHedges('From my understanding, I built it.'), /\bI built\b/u);
+      assert.doesNotMatch(withoutStanceHedges('The way I read it, your team ships weekly.'), /\bI\b/u);
+      assert.match(withoutStanceHedges('My reading of the role is that my board helped.'), /^\s*my board helped\.$/u);
       // A past-tense report is not a hedge: "I read the manuals" stays first person.
       assert.match(withoutStanceHedges('I read the manuals before the switch.'), /^I read/u);
     },

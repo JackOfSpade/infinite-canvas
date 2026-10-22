@@ -25,6 +25,7 @@ const MAX_SENTENCE_LENGTH_OBSERVATIONS = 5;
 const MAX_PUNCTUATION_OBSERVATIONS = 8;
 const MAX_PLAIN_REGISTER_OBSERVATIONS = 4;
 const MAX_OPENING_DEMONSTRATIVE_OBSERVATIONS = 4;
+const MAX_PARAGRAPH_OPENER_OBSERVATIONS = 4;
 const MAX_PARALLEL_STRUCTURE_OBSERVATIONS = 8;
 const MAX_EXPERIENCE_FRAMING_OBSERVATIONS = 4;
 const MAX_REFERENCE_CLARITY_OBSERVATIONS = 8;
@@ -4520,29 +4521,10 @@ function hasDashSplice(raw) {
 }
 
 /**
- * Mirror of resumeHtml.js hasProseColon(), duplicated so this module stays
- * free of that module's DOM dependency. A colon followed by a space, or ending
- * the text, is sentence punctuation; one glued to the next character (10:30,
- * 3:1, https://, javascript:x) is notation.
- */
-function hasProseColon(raw) {
-  const value = String(raw ?? '');
-  for (let index = value.indexOf(':'); index !== -1; index = value.indexOf(':', index + 1)) {
-    // Sentence punctuation is followed by a space or ends the text. A colon
-    // glued to what follows is a token of some notation (10:30, 3:1, https://,
-    // a scheme such as javascript:x, key:value), never a clause break.
-    if (index + 1 >= value.length || /\s/u.test(value[index + 1])) return true;
-  }
-  return false;
-}
-
-/**
- * House register: short declarative sentences, no semicolons, no colons as
- * sentence punctuation, and no dashes as clause splices. These marks read as
- * generated prose to this user, and the semicolon in particular became the
- * model's escape hatch once the colon unload was banned by name. Each
- * observation mirrors a rejection in the document hard gate
- * (assertCandidateDashPunctuation), with the same digit/URL colon exemption.
+ * House register: short declarative sentences, no semicolons and no dashes as
+ * clause splices. These marks read as generated prose to this user. Colons are
+ * allowed again (user decision, 2026-10-20). Each observation mirrors a
+ * rejection in the document hard gate (assertCandidateDashPunctuation).
  *
  * This is the one check that must read the RAW paragraph string: text()
  * normalizes every dash glyph to '-', which would erase exactly the
@@ -4561,12 +4543,9 @@ export function checkPunctuationStyle(paragraphs = []) {
     if (hasDashSplice(raw)) {
       observations.push(`paragraph ${index + 1} uses a dash as a clause splice; restructure into separate sentences or a comma`);
     }
-    if (hasProseColon(raw)) {
-      observations.push(`paragraph ${index + 1} uses a colon as sentence punctuation; write the sentence out instead`);
-    }
   }
   return observationResult('punctuation-style', observations, MAX_PUNCTUATION_OBSERVATIONS,
-    `${list.length} paragraph(s) avoid semicolons, prose colons, and dash splices`);
+    `${list.length} paragraph(s) avoid semicolons and dash splices`);
 }
 
 // Passport-desk register in a letter that is otherwise first-person prose.
@@ -5887,6 +5866,44 @@ export function checkOpeningDemonstrative(paragraphs = []) {
   }
   return observationResult('opening-demonstrative', observations, MAX_OPENING_DEMONSTRATIVE_OBSERVATIONS,
     `${list.length} paragraph(s) anchor their opening references in the preceding paragraph`);
+}
+
+/** Opening word as written: the first run of letters/apostrophes, or '' when none. */
+function paragraphOpeningWord(value) {
+  const match = /[\p{L}][\p{L}'’]*/u.exec(text(value));
+  return match ? match[0] : '';
+}
+
+function listParagraphNumbers(numbers) {
+  if (numbers.length <= 1) return numbers.join('');
+  return `${numbers.slice(0, -1).join(', ')} and ${numbers[numbers.length - 1]}`;
+}
+
+/**
+ * Records consecutive paragraphs that open on the same word (case-insensitive).
+ * Advisory only: names paragraph numbers and the writer's own word, never a
+ * replacement string.
+ */
+export function checkParagraphOpeners(paragraphs = []) {
+  const list = Array.isArray(paragraphs) ? paragraphs : [];
+  const openers = list.map(paragraph => paragraphOpeningWord(paragraph));
+  const observations = [];
+  let start = 0;
+  while (start < openers.length) {
+    const key = openers[start].toLowerCase();
+    let end = start + 1;
+    if (key) {
+      while (end < openers.length && openers[end].toLowerCase() === key) end++;
+    }
+    if (key && end - start >= 2) {
+      const numbers = [];
+      for (let index = start; index < end; index++) numbers.push(index + 1);
+      observations.push(`paragraphs ${listParagraphNumbers(numbers)} open with the same word (“${boundedDetailValue(openers[start])}”); start at least one of them on a different word, such as the work or its setting`);
+    }
+    start = end;
+  }
+  return observationResult('paragraph-openers', observations, MAX_PARAGRAPH_OPENER_OBSERVATIONS,
+    `${list.length} paragraph(s) open on different words`);
 }
 
 // At a paragraph boundary, “The department” after a named employer
@@ -7368,6 +7385,7 @@ const CHECK_DISPOSITION_ROWS = Object.freeze([
   ['dangling-paragraph-transition', 'off', 'TASTE', 'one regex shape.'],
   ['sentence-length', 'advisory', 'TASTE', 'a readability preference.'],
   ['punctuation-style', 'advisory', 'TASTE', 'house style the host can normalise mechanically instead of rejecting.'],
+  ['paragraph-openers', 'advisory', 'TASTE', 'opening-word variety that the brief asks for; the host records it and never rejects on it.'],
   ['plain-register', 'off', 'TASTE', 'a few fixed phrases from past letters.'],
   ['introductory-workplace-comma', 'off', 'TASTE', 'comma placement.'],
   ['visual-reference-precision', 'off', 'TASTE', 'fitted to one project description.'],
@@ -7558,6 +7576,7 @@ export function evaluateCoverLetterChecks({ plan = {}, paragraphs = [], evidence
     ['dangling-paragraph-transition', () => checkDanglingParagraphTransition(paragraphs)],
     ['sentence-length', () => checkSentenceLength(paragraphs)],
     ['punctuation-style', () => checkPunctuationStyle(paragraphs)],
+    ['paragraph-openers', () => checkParagraphOpeners(paragraphs)],
     ['plain-register', () => checkPlainRegister(paragraphs)],
     ['introductory-workplace-comma', () => checkIntroductoryWorkplaceComma(paragraphs, priorEmployers)],
     ['visual-reference-precision', () => checkVisualReferencePrecision(paragraphs)],

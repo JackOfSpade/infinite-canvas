@@ -47,7 +47,8 @@ export default [
     run() {
       assert.ok(WRITE_VERIFY_BRIEF.length <= WRITE_VERIFY_BRIEF_MAX_CHARS, `the brief is ${WRITE_VERIFY_BRIEF.length} characters against a budget of ${WRITE_VERIFY_BRIEF_MAX_CHARS}`);
       // The rule names the marks the candidate-copy gate refuses and the one it allows, so the writer learns it before writing, not from a rejection.
-      for (const mark of ['em dash', 'colon', 'semicolon', 'hyphen']) assert.ok(WRITE_VERIFY_BRIEF.includes(mark), `the brief names the ${mark}`);
+      for (const mark of ['em dash', 'semicolon', 'hyphen']) assert.ok(WRITE_VERIFY_BRIEF.includes(mark), `the brief names the ${mark}`);
+      assert.ok(!/\bcolons?\b/u.test(WRITE_VERIFY_BRIEF), 'the brief no longer bans colons (user decision, 2026-10-20)');
       assert.ok(/either document/u.test(WRITE_VERIFY_BRIEF), 'the rule covers the résumé and the letter alike');
       for (const domain of ['tidal-survey', 'bakehouse', 'observatory']) {
         const prompt = writeVerifySourcePrompt({ posting: `${domain} posting`, requirements: [], listingEvidence: [], identity: {},
@@ -59,12 +60,18 @@ export default [
   {
     name: 'write-verify brief frames the letter as a persuasive essay with a hedged thesis, point-first body paragraphs and an argued close',
     run() {
-      assert.equal(WRITE_VERIFY_BRIEF_MAX_CHARS, 650, 'the brief budget is fixed at 650 characters');
+      assert.equal(WRITE_VERIFY_BRIEF_MAX_CHARS, 970, 'the brief budget is fixed at 970 characters (raised on 2026-10-21 for the explicit-link, link-pattern and need-it-meets wording)');
       assert.ok(WRITE_VERIFY_BRIEF.length <= WRITE_VERIFY_BRIEF_MAX_CHARS, `the brief is ${WRITE_VERIFY_BRIEF.length} characters`);
       assert.match(WRITE_VERIFY_BRIEF, /as the cover letter a persuasive essay to the hiring manager/u, 'the letter is written as an essay to a named reader');
-      assert.ok(WRITE_VERIFY_BRIEF.includes(" Open on a thesis, your read of the role's main need, hedged once, and that you meet it. "), 'the thesis is the writer\u2019s diagnosis, hedged once, and the claim of meeting it');
+      assert.ok(WRITE_VERIFY_BRIEF.includes(" Open on a thesis: the role's main need as you read the posting, framed once as your reading, not a probability, then that you meet it, stated as fact. "), 'the thesis is the writer\u2019s reading, framed once and not as a probability, then the claim of meeting it as fact');
       assert.ok(WRITE_VERIFY_BRIEF.includes(' Start each body paragraph with its full point in one or two sentences'), 'each body paragraph leads with its full point');
-      assert.ok(WRITE_VERIFY_BRIEF.includes('what you did and where this job needs it, then prove it.'), 'the point states both the work and where this job needs it');
+      assert.ok(WRITE_VERIFY_BRIEF.includes('Start each body paragraph with its full point in one or two sentences, the kind of work you did and, stated outright for a reader who has not memorized the posting, which of this job\'s needs it meets, then prove it with specific examples, the first set in its time and place. Do not open consecutive paragraphs with the same word or link two paragraphs to the job with the same sentence pattern.'), 'the point states the kind of work and, outright, which of this job\u2019s needs it meets, proved with specific examples, then the paragraph-opener rule');
+      assert.equal(WRITE_VERIFY_BRIEF.split("which of this job's needs it meets").length, 2, 'the need-it-meets phrase appears exactly once');
+      assert.ok(WRITE_VERIFY_BRIEF.includes('Do not open consecutive paragraphs with the same word or link two paragraphs to the job with the same sentence pattern.'), 'the brief forbids consecutive paragraphs opening with the same word');
+      assert.equal(WRITE_VERIFY_BRIEF.includes('where this job needs it'), false, 'the old where-this-job-needs-it wording is gone (user decision, 2026-10-20)');
+      assert.equal(WRITE_VERIFY_BRIEF.length, 968, 'the brief is exactly 968 characters after the 2026-10-21 need-it-meets change');
+      assert.equal(WRITE_VERIFY_BRIEF.includes('the need it serves'), false, 'the need-it-serves wording was replaced so the point says the work meets the need (user decision, 2026-10-21)');
+      assert.equal(WRITE_VERIFY_BRIEF.includes('in plain words'), false, 'the plain-words wording was replaced by the explicit-link wording (user decision, 2026-10-21)');
       assert.equal(WRITE_VERIFY_BRIEF.includes('a claim about your work this job needs'), false, 'the implicit-link wording is gone');
       assert.match(WRITE_VERIFY_JUDGE_RUBRIC, /The point must name both the candidate's work and the specific part of this job it serves/u);
       assert.match(WRITE_VERIFY_JUDGE_RUBRIC, /a final sentence that only restates the relevance/u);
@@ -75,6 +82,8 @@ export default [
       // Sabotage: the replaced letter sentences must be gone, so the brief carries one letter instruction set, not two.
       assert.equal(WRITE_VERIFY_BRIEF.includes('your hedged read'), false, 'the old hedged-read wording is gone');
       assert.equal(WRITE_VERIFY_BRIEF.includes('your read of what the role most needs, hedged once'), false, 'the old thesis wording is gone');
+      assert.equal(WRITE_VERIFY_BRIEF.includes('hedged once'), false, 'the hedged-once thesis rule is gone (user decision, 2026-10-20)');
+      assert.equal(WRITE_VERIFY_BRIEF.includes('most likely'), false, 'the brief asks for no probability phrase');
       assert.equal(WRITE_VERIFY_BRIEF.includes('Each body paragraph argues one point for it'), false, 'the old paragraph wording is gone');
       assert.equal(WRITE_VERIFY_BRIEF.includes('Lead with the strongest true evidence.'), false, 'the evidence-first sentence is gone');
       assert.equal(WRITE_VERIFY_BRIEF.includes('The letter adds what the quoted evidence states beyond the résumé.'), false);
@@ -82,6 +91,12 @@ export default [
       assert.ok(WRITE_VERIFY_JUDGE_RUBRIC.includes('states its full point in its first one or two sentences'), 'the panel rewards point-first paragraphs');
       assert.ok(WRITE_VERIFY_JUDGE_RUBRIC.includes('opens on evidence or only on what the role needs'), 'the panel marks evidence-first paragraphs down');
       assert.ok(WRITE_VERIFY_JUDGE_RUBRIC.includes('a closing of stock courtesy'), 'the panel marks a courtesy close down');
+      assert.ok(WRITE_VERIFY_JUDGE_RUBRIC.includes('framed once as that reading rather than as a probability'), 'the panel rewards a thesis framed as a reading, not a probability');
+      assert.ok(WRITE_VERIFY_JUDGE_RUBRIC.includes('same connective or sentence pattern linking the candidate\'s work to the job in two or more paragraphs'), 'the panel marks a repeated connective down');
+      assert.ok(WRITE_VERIFY_JUDGE_RUBRIC.includes('past or present perfect'), 'the panel checks the tense of past work');
+      assert.ok(WRITE_VERIFY_JUDGE_RUBRIC.includes('only echoes the posting\'s words without saying which need they answer'), 'the panel marks an echo-only link down');
+      assert.ok(WRITE_VERIFY_JUDGE_RUBRIC.includes('names the need with a label instead of plain words'), 'the panel marks a labelled rather than plainly stated need down');
+      assert.ok(WRITE_VERIFY_JUDGE_RUBRIC.includes('consecutive paragraphs opening with the same word'), 'the panel marks repeated paragraph openers down');
       assert.match(WRITE_VERIFY_JUDGE_RUBRIC, /two unrelated pieces of work side by side, scores low/u);
     },
   },
@@ -405,7 +420,9 @@ export default [
         assert.ok(!convertPrompt.includes('EVIDENCE SHORTLIST') && !convertPrompt.includes(`${action} reason`), domain);
         assert.throws(() => splitWriteVerifyWriterResponse(response.replace(ids[0], 'host.career.achievement.invented.1'), ids), /approved catalog ID/, domain);
         assert.throws(() => splitWriteVerifyWriterResponse(response.replace(ids[1], ids[0]), ids), /must be distinct/, domain);
-        assert.throws(() => splitWriteVerifyWriterResponse(response.replace('EVIDENCE SHORTLIST (WORKING NOTES)', 'WORKING NOTES'), ids), /must begin with EVIDENCE SHORTLIST/, domain);
+        // A reply with no recognizable legacy working-notes heading is held to the live
+        // contract (documents first), never steered back to the retired layout.
+        assert.throws(() => splitWriteVerifyWriterResponse(response.replace('EVIDENCE SHORTLIST (WORKING NOTES)', 'WORKING NOTES'), ids), /start with a standalone RÉSUMÉ heading/u, domain);
         assert.throws(() => splitWriteVerifyWriterResponse(`${response}\n${ids[0]}`, ids), /must not contain catalog evidence IDs/, domain);
         assert.throws(() => splitWriteVerifyWriterResponse(`${response}\nEVIDENCE SHORTLIST (WORKING NOTES)`, ids), /must stay before the résumé/, domain);
         assert.throws(() => splitWriteVerifyWriterResponse(response.replace('COVER LETTER\n', 'This résumé mentions a cover letter.\n'), ids), /nonempty résumé and cover letter sections/, domain);

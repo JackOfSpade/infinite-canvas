@@ -3716,6 +3716,7 @@ export const PASTE_CHECK_PROSE_UNITS = Object.freeze({
   // qualifying span at all, and only rewriting that paragraph repairs it — so
   // the rules a rewrite is measured by are the ones this item may need.
   'paragraph-argument-links': 'prose-unit',
+  'paragraph-openers': 'prose-unit',
   'plain-register': 'prose-unit',
   'posting-reference': 'prose-unit',
   'prior-employer-opening': 'prose-unit',
@@ -12212,12 +12213,19 @@ function withoutQuotedRomanOne(text, referenceTexts) {
 // sentence a claim about the candidate. Only the hedge itself is removed: any
 // other first-person word stays and is read as before, so "I suspect I built
 // ..." or "As I read it, my pipeline ..." still speaks as the candidate.
+// The writer brief asks for one untemplated reading of the posting, so the
+// vocabulary also covers "From/In my understanding|reading|read (of the role)",
+// "The way I read it" / "As far as I understand the role" and "My reading of
+// the role is that": a narrow list would make this gate a hidden template.
 const STANCE_HEDGE_RE = new RegExp([
   String.raw`\b(?:as|if)\s+I\s+(?:read|understand|see)\s+(?:it|this|that|(?:the|your|this)\s+(?:posting|role|position|job|listing|team))(?:\s+(?:right|correctly))?`,
   String.raw`\bfrom\s+what\s+I\s+(?:read|understand|gather|can\s+tell|see)`,
   String.raw`\bI\s+(?:suspect|imagine|gather|expect|think|believe|guess|sense)(?:\s+that)?(?![\p{L}\p{N}])`,
   String.raw`\bI['’]d\s+(?:guess|imagine|bet)(?:\s+that)?(?![\p{L}\p{N}])`,
   String.raw`\bmy\s+(?:guess|read|reading|sense|understanding|hunch|hypothesis)\s+(?:is|would\s+be)(?:\s+that)?(?![\p{L}\p{N}])`,
+  String.raw`\b(?:from|in)\s+my\s+(?:understanding|reading|read)(?:\s+of\s+(?:the|your|this)\s+(?:posting|role|position|job|listing|team))?(?![\p{L}\p{N}])`,
+  String.raw`\b(?:the\s+way|as\s+far\s+as)\s+I\s+(?:read|understand|see)\s+(?:it|this|that|(?:the|your|this)\s+(?:posting|role|position|job|listing|team))(?![\p{L}\p{N}])`,
+  String.raw`\bmy\s+(?:read|reading|understanding)\s+of\s+(?:the|your|this)\s+(?:posting|role|position|job|listing|team)\s+(?:is|would\s+be)(?:\s+that)?(?![\p{L}\p{N}])`,
 ].join('|'), 'giu');
 
 export function withoutStanceHedges(text) {
