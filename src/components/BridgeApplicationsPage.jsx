@@ -105,7 +105,7 @@ export function BridgeApplicationsPage({
                   ) : null}
                   {row.view.headline}
                 </div>
-                {row.showDetail && <div className="mt-1 text-white/70">{row.view.detail}</div>}
+                {row.showDetail && row.view.detail && <div className="mt-1 text-white/70">{row.view.detail}</div>}
               </div>
 
               {(lines.elapsed || lines.heard) && (

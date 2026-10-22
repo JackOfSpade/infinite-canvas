@@ -2065,9 +2065,6 @@ export function NonApiAiDialog() {
                 <div className="truncate font-semibold text-white" title={workingHeadline}>
                   {workingHeadline}
                 </div>
-                <div className="truncate text-violet-100/75" title={activeRequest.subject || activeRequest.label || ''}>
-                  {activeRequest.subject || activeRequest.label || 'This application'}
-                </div>
               </div>
             </div>
           ) : claudeRunState === 'running' ? (
@@ -2078,32 +2075,18 @@ export function NonApiAiDialog() {
             // sits OUTSIDE the status div: its timer ticks every second and
             // must not re-announce through that live region.
             <>
-            <div
-              role="status"
-              aria-live="polite"
-              className="flex items-start gap-3 rounded-lg border border-violet-400/25 bg-violet-500/10 px-3 py-3 text-xs leading-relaxed text-violet-100"
-            >
-              <LoaderCircle size={15} className="mt-0.5 shrink-0 animate-spin text-violet-200" aria-hidden="true" />
-              <div className="min-w-0 flex-1">
-                <div className="truncate font-semibold text-white">
-                  Claude is working on this
-                </div>
-                <div className="mt-1 truncate text-violet-100/75">
-                  {applicationStageLabel(activeClaudeRun.stage || activeRequest.stage)}
-                  {activeRequest.subject || activeRequest.label ? ` · ${activeRequest.subject || activeRequest.label}` : ''}
-                </div>
-              </div>
+            <ClaudeProgress run={activeClaudeRun} item={activeRequest} />
+            <div className="flex flex-wrap items-center justify-end gap-2">
               <button
                 type="button"
                 onClick={requestApplicationDiscardConfirm}
                 disabled={isDiscarding || !!cancelConfirmTarget}
-                className="shrink-0 rounded-md border border-red-400/30 px-3 py-2 text-sm font-medium text-red-200 transition-colors hover:bg-red-500/15 disabled:cursor-not-allowed disabled:opacity-50"
+                className="rounded-md border border-red-400/25 px-2.5 py-1.5 text-[11px] font-medium text-red-200/80 transition-colors hover:bg-red-500/15 disabled:cursor-not-allowed disabled:opacity-50"
                 title="Delete this application bundle and its private job folder"
               >
                 {isDiscarding ? 'Discarding…' : 'Discard bundle'}
               </button>
             </div>
-            <ClaudeProgress run={activeClaudeRun} item={activeRequest} />
             </>
           ) : claudeRunState === 'failed' ? (
             // The run stopped and will not restart on its own (ensure never
@@ -2155,27 +2138,20 @@ export function NonApiAiDialog() {
             // status div below: its timers tick every second and must not
             // re-announce through that live region.
             <>
-            <div
-              role="status"
-              aria-live="polite"
-              className="flex items-start gap-3 rounded-lg border border-violet-400/25 bg-violet-500/10 px-3 py-3 text-xs leading-relaxed text-violet-100"
-            >
-              <div className="min-w-0 flex-1">
-                <div className="truncate font-semibold text-white">
-                  Handed to ChatGPT
-                </div>
-                <div className="mt-1 text-violet-100/75">
-                  {isBridgeHeldApplication
-                    ? 'This application is being handled through the ChatGPT bridge.'
-                    : 'This handoff is being handled through the ChatGPT bridge.'}
-                </div>
-              </div>
+            <BridgeProgress
+              status={bridgeStatus}
+              item={activeRequest}
+              isPush={!isApplicationRequest}
+              canPauseAndSave={canPauseAndSaveJobSearch && !activeCareerProgress}
+              onPauseAndSave={requestJobSearchPauseAndSave}
+            />
+            <div className="flex flex-wrap items-center justify-end gap-2">
               {isBridgeHeldApplication ? (
                 <button
                   type="button"
                   onClick={requestApplicationDiscardConfirm}
                   disabled={isDiscarding || !!cancelConfirmTarget}
-                  className="shrink-0 rounded-md border border-red-400/30 px-3 py-2 text-sm font-medium text-red-200 transition-colors hover:bg-red-500/15 disabled:cursor-not-allowed disabled:opacity-50"
+                  className="rounded-md border border-red-400/25 px-2.5 py-1.5 text-[11px] font-medium text-red-200/80 transition-colors hover:bg-red-500/15 disabled:cursor-not-allowed disabled:opacity-50"
                   title="Delete this application bundle and its private job folder"
                 >
                   {isDiscarding ? 'Discarding…' : 'Discard bundle'}
@@ -2185,20 +2161,13 @@ export function NonApiAiDialog() {
                   type="button"
                   onClick={requestCancelConfirm}
                   disabled={isCancelling || !!cancelConfirmTarget}
-                  className="shrink-0 rounded-md border border-red-400/30 px-3 py-2 text-sm font-medium text-red-200 transition-colors hover:bg-red-500/15 disabled:cursor-not-allowed disabled:opacity-50"
+                  className="rounded-md border border-red-400/25 px-2.5 py-1.5 text-[11px] font-medium text-red-200/80 transition-colors hover:bg-red-500/15 disabled:cursor-not-allowed disabled:opacity-50"
                   title="Cancel the job operation waiting for this AI response"
                 >
                   {isCancelling ? 'Cancelling…' : 'Cancel task'}
                 </button>
               )}
             </div>
-            <BridgeProgress
-              status={bridgeStatus}
-              item={activeRequest}
-              isPush={!isApplicationRequest}
-              canPauseAndSave={canPauseAndSaveJobSearch && !activeCareerProgress}
-              onPauseAndSave={requestJobSearchPauseAndSave}
-            />
             </>
           ) : (
             <>
@@ -2320,7 +2289,7 @@ export function NonApiAiDialog() {
               <p className="text-sm leading-relaxed text-white/70">
                 {isCorrection
                   ? 'The previous answer did not validate. Copy this correction prompt into the same AI chat, then replace the response below with the complete regenerated answer.'
-                  : 'Copy this exact prompt into your AI chat, then paste its complete response below. This task stays open until the response validates or the running job is cancelled.'}
+                  : 'Copy this prompt into your AI chat, then paste its complete response below.'}
               </p>
 
               {activeRequest.attachments?.length > 0 && (
@@ -2494,8 +2463,8 @@ export function NonApiAiDialog() {
               <div className="shrink-0 flex flex-wrap items-center justify-between gap-3 pt-1">
                 <span className="min-w-48 flex-1 text-xs text-white/40" aria-live="polite">
                   {isApplicationRequest
-                    ? (isAccepted ? 'Response accepted — continuing task…' : isDiscarding ? 'Discarding this application bundle…' : 'Responses are saved privately with this application, and each accepted revision is appended to its generation log. Discard bundle deletes this application and its private job folder; the job card keeps its listing, and Generate can start a fresh one.')
-                    : (isAccepted ? 'Response accepted — continuing task…' : isSteppingBack ? 'Returning to the previous AI step…' : isCancelling ? 'Cancelling the owning job operation…' : 'Cancel task stops the owning job operation. Every response you already pasted for this run is discarded. You can retry as many times as needed.')}
+                    ? (isAccepted ? 'Response accepted — continuing task…' : isDiscarding ? 'Discarding this application bundle…' : 'Responses are saved privately with this application, and each accepted revision is appended to its generation log.')
+                    : (isAccepted ? 'Response accepted — continuing task…' : isSteppingBack ? 'Returning to the previous AI step…' : isCancelling ? 'Cancelling the owning job operation…' : '')}
                 </span>
                 <div className="flex flex-wrap items-center justify-end gap-2">
                   {activeRequest.canStepBack && (

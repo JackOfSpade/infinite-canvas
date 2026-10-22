@@ -47,7 +47,7 @@ export function ClaudeProgress({ run, item }) {
           {toneLabel ? <span className="mr-1.5 text-[10px] font-semibold uppercase tracking-wide opacity-75">{toneLabel}</span> : null}
           {view.headline}
         </div>
-        <div className="mt-1 text-white/70">{view.detail}</div>
+        {view.detail && <div className="mt-1 text-white/70">{view.detail}</div>}
       </div>
 
       {(lines.elapsed || lines.heard) && (

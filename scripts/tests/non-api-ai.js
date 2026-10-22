@@ -274,7 +274,7 @@ export default [
       const selectorEnd = dialogSource.indexOf('</nav>', selectorStart);
       const selectorSource = dialogSource.slice(selectorStart, selectorEnd);
       assert(dialogSource.includes('window.electronAPI.cancelNonApiAiRequest(requestId)')
-        && dialogSource.includes('Cancel task stops the owning job operation.')
+        && !dialogSource.includes('Cancel task stops the owning job operation.')
         && dialogSource.includes("request.itemCount === 1 ? 'item' : 'items'")
         && dialogSource.includes('const count = Number.isFinite(request.itemCount)')
         && dialogSource.includes('const selectorLabel = applicationOrdinal')
@@ -392,7 +392,7 @@ export default [
         // re-read on every save — and `truncate` on both rows is what stops a
         // long job title from wrapping into a third.
         && dialogSource.includes('<div className="truncate font-semibold text-white" title={workingHeadline}>')
-        && dialogSource.includes('<div className="truncate text-violet-100/75"')
+        && !dialogSource.includes('<div className="truncate text-violet-100/75" title={activeRequest.subject')
         && !dialogSource.includes('Nothing to paste while this runs.')
         && !dialogSource.includes('The documents are already written'),
       'an application bundle the app is still finishing keeps its panel, in a two-line state that asks for nothing');

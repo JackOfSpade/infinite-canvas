@@ -255,11 +255,11 @@ function deriveInner({ job: rawJob, chat: rawChat, item: rawItem, bridge: rawBri
     const streak = escalation.active === true && Number.isFinite(escalation.streak) && escalation.streak >= 2
       ? Math.floor(escalation.streak) : 0;
     return build({ kind: 'fixing', steps }, {
-      headline, detail: `${streak ? `${detail} ${BRIDGE_PROGRESS_COPY.sameCheckStreak(streak)}` : detail}${fullNote}`, tone: 'working', since: servedSince, lastHeard,
+      headline, detail: `${streak ? `${detail} ${BRIDGE_PROGRESS_COPY.sameCheckStreak(streak)}` : detail}${fullNote}`.trim(), tone: 'working', since: servedSince, lastHeard,
     });
   }
   const [headline, detail] = label ? BRIDGE_PROGRESS_COPY.writing(label) : BRIDGE_PROGRESS_COPY.writingUnknownStage;
-  return build({ kind: 'writing', steps }, { headline, detail: `${detail}${fullNote}`, tone: 'working', since: servedSince, lastHeard });
+  return build({ kind: 'writing', steps }, { headline, detail: `${detail}${fullNote}`.trim(), tone: 'working', since: servedSince, lastHeard });
 }
 
 /**
@@ -332,7 +332,7 @@ export function deriveBridgePushProgress({ chat: rawChat, bridge: rawBridge, own
   if (awaitingClaim === true) {
     return build({ kind: 'push-awaiting-poll', steps }, {
       headline: 'Waiting for ChatGPT to ask for this handoff',
-      detail: 'A ChatGPT chat is active, but it has not claimed this exact handoff. It will be delivered only when the chat calls its next handoff tool.',
+      detail: 'A ChatGPT chat is active. It gets this handoff on its next handoff call.',
       // `reached` proves the capability was presented but no work call was
       // admitted. Continuing is safe there; a working chat may own another
       // request, so it stays deliberately passive.
@@ -348,7 +348,7 @@ export function deriveBridgePushProgress({ chat: rawChat, bridge: rawBridge, own
     });
   }
   return build({ kind: 'push-working', steps }, {
-    headline: 'ChatGPT is working on this handoff', detail: 'This exact request was delivered to the active ChatGPT chat.', tone: 'working', lastHeard,
+    headline: 'ChatGPT is working on this handoff', detail: '', tone: 'working', lastHeard,
   });
 }
 

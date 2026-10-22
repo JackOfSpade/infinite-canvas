@@ -41,7 +41,7 @@ export default [
       assert(view.kind === 'claude-writing', `kind ${view.kind}`);
       assert(view.tone === 'working', `tone ${view.tone}`);
       assert(view.headline === `Claude is working on: ${applicationStageLabel('resume')}`, `headline ${view.headline}`);
-      assert(typeof view.detail === 'string' && view.detail.startsWith(`${applicationStageLabel('resume')} was handed to Claude`), `detail ${view.detail}`);
+      assert(typeof view.detail === 'string' && view.detail === 'Running on this computer.', `detail ${view.detail}`);
       assert(view.lastHeard === null && view.action === null && view.actionLabel === null, 'no last-heard or action');
       assert(view.since === 5000, `since ${view.since}`);
     },

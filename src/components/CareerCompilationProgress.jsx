@@ -54,12 +54,14 @@ export function CareerCompilationProgress({ progress, onPauseAndSave }) {
         label: ['Read files', 'Compile', 'Audit', 'Save', 'Summary'][step],
         state: step < index ? 'done' : step === index ? 'current' : 'upcoming',
       }))} />
-      <p className="mt-1.5 tabular-nums">Step {index + 1} of {PHASES.length}{hasCounts ? ` · ${completed}/${progress.total} ${phase === 'compiling' ? 'pages compiled' : 'checks returned'}` : ''}{elapsed !== null ? ` · ${Math.floor(elapsed / 60)}m ${elapsed % 60}s elapsed` : ''}</p>
+      {(hasCounts || elapsed !== null) && <p className="mt-1.5 tabular-nums">{[
+        hasCounts && `${completed}/${progress.total} ${phase === 'compiling' ? 'pages compiled' : 'checks returned'}`,
+        elapsed !== null && `${Math.floor(elapsed / 60)}m ${elapsed % 60}s elapsed`,
+      ].filter(Boolean).join(' · ')}</p>}
       {hasCounts && <div role="progressbar" aria-label={phase === 'compiling' ? 'Career pages compiled' : 'Career audit checks returned'} aria-valuemin={0} aria-valuenow={completed} aria-valuemax={progress.total} className="h-1 w-full overflow-hidden rounded bg-white/10">
         <div className="h-full bg-violet-400 transition-[width]" style={{ width: `${completed / progress.total * 100}%` }} />
       </div>}
       {notice && <p role="status" className="text-amber-100">{notice}</p>}
-      <p className="mt-1 text-violet-100/50">Each step updates as its AI responses return.</p>
     </section>
   );
 }

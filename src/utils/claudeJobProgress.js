@@ -16,11 +16,11 @@ const object = value => (isObject(value) ? value : {});
 const time = value => (Number.isFinite(value) && value >= 0 ? value : null);
 
 export const CLAUDE_PROGRESS_COPY = Object.freeze({
-  writing: label => [`Claude is working on: ${label}`, `${label} was handed to Claude, which is writing it on this computer. Its answer has not arrived yet.`],
-  writingUnknownStage: Object.freeze(['Claude is working on this', 'This job was handed to Claude, which is writing it on this computer. Its answer has not arrived yet.']),
+  writing: label => [`Claude is working on: ${label}`, 'Running on this computer.'],
+  writingUnknownStage: Object.freeze(['Claude is working on this', 'Running on this computer.']),
   fixing: (count, label) => [
     `Claude is fixing ${count} ${count === 1 ? 'issue' : 'issues'}`,
-    `The app found ${count === 1 ? 'an issue' : `${count} issues`} in the last ${label ? label.toLowerCase() : 'answer'} and Claude has the list. The corrected answer has not arrived yet.`,
+    `Found in its last ${label ? label.toLowerCase() : 'answer'}.`,
   ],
   lastHeard: ago => `Last heard from Claude ${ago}`,
   notHeardYet: 'Nothing heard from Claude yet in this step',

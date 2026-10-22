@@ -123,7 +123,7 @@ export const BRIDGE_PROGRESS_COPY = Object.freeze({
   region: 'ChatGPT progress',
   stepper: 'Application steps',
   stepState: Object.freeze({ done: 'done', current: 'current step', upcoming: 'not started yet' }),
-  toneLabel: Object.freeze({ neutral: '', working: 'In progress', attention: 'Needs attention', problem: 'Problem' }),
+  toneLabel: Object.freeze({ neutral: '', working: '', attention: 'Needs attention', problem: 'Problem' }),
   generic: Object.freeze(['Checking on this job', 'The bridge has not reported this job\'s progress yet.']),
   gone: Object.freeze(['Discarded', 'The bridge is no longer holding this job.']),
   done: Object.freeze(['Saved', 'Every step of this application is finished.']),
@@ -134,15 +134,16 @@ export const BRIDGE_PROGRESS_COPY = Object.freeze({
   needsYouFallback: 'Open the job card to see what it needs.',
   kept: 'The bridge is not giving this job to ChatGPT. Choose Resume serving in the bridge panel to hand it back.',
   noChat: pluginName => Object.freeze(['No worker chats yet', `Prepare the worker plan, then copy each starter into a separate ChatGPT chat with ${bridgePluginRef(pluginName)} selected.`]),
-  queued: label => ['Queued for ChatGPT', `${label ? `The ${label.toLowerCase()} step is ready.` : 'This job is ready.'} ChatGPT gets it when it asks for its next handoff.`],
+  // The step list above the line already names the step.
+  queued: () => ['Queued for ChatGPT', 'ChatGPT gets it with its next handoff request.'],
   queuedChatFull: () => ['Queued while a worker is retired', 'A replacement worker will claim this bundle when it is ready.'],
-  writing: label => [`ChatGPT is working on: ${label}`, `${label} was handed to ChatGPT. Its answer has not arrived yet.`],
-  writingUnknownStage: Object.freeze(['ChatGPT is working on this', 'This job was handed to ChatGPT. Its answer has not arrived yet.']),
+  writing: label => [`ChatGPT is working on: ${label}`, ''],
+  writingUnknownStage: Object.freeze(['ChatGPT is working on this', '']),
   responseOverdue: Object.freeze([
     'No recent response from this worker',
-    'This worker has not made a bridge call for at least 5 min while this handoff awaits its response. It may still be writing or may have stopped. Copying a replacement starter resumes this exact handoff.',
+    'It may still be writing. If it has stopped, copying a replacement starter resumes this exact handoff.',
   ]),
-  fixing: (count, label) => [`ChatGPT is fixing ${count} ${count === 1 ? 'issue' : 'issues'}`, `The app found ${count === 1 ? 'an issue' : `${count} issues`} in the last ${label ? label.toLowerCase() : 'answer'} and ChatGPT has the list. The corrected answer has not arrived yet.`],
+  fixing: (count, label) => [`ChatGPT is fixing ${count} ${count === 1 ? 'issue' : 'issues'}`, `Found in its last ${label ? label.toLowerCase() : 'answer'}.`],
   sameCheckStreak: count => `The same check has now failed ${count} times in a row.`,
   lastHeard: ago => `Last heard from ChatGPT ${ago}`,
   elapsed: duration => `Elapsed: ${duration}`,
@@ -213,8 +214,9 @@ export const BRIDGE_UI_COPY = Object.freeze({
   startWorkerPool: 'Prepare worker plan',
   preparingWorkerPool: 'Preparing worker chats…',
   workerPoolReady: 'Worker plan ready.',
+  // A forecast equal to what is already released adds nothing to read.
   workerPoolPlan: (count, queued, materialized = queued) => queued
-    ? `${count} ${count === 1 ? 'worker chat' : 'worker chats'} · ${materialized} released now · ${queued} forecast`
+    ? `${count} ${count === 1 ? 'worker chat' : 'worker chats'} · ${materialized} released now${materialized === queued ? '' : ` · ${queued} forecast`}`
     : `${count} ${count === 1 ? 'worker chat' : 'worker chats'}`,
   workerPoolDirections: count => count === 1
     ? 'Copy the starter into a new pinned ChatGPT chat.'
@@ -249,7 +251,7 @@ export const BRIDGE_UI_COPY = Object.freeze({
     if (launch?.stage === 'opening') return 'Opening a new ChatGPT chat…';
     if (launch?.stage === 'checking') return 'Checking ChatGPT model, effort, and sign-in…';
     if (launch?.stage === 'sent') return 'Sent in ChatGPT; waiting for the bridge call…';
-    if (launch?.stage === 'presented') return 'ChatGPT worker connected.';
+    if (launch?.stage === 'presented') return null;
     if (launch?.stage === 'retrying') return 'Chrome launch hit a temporary problem. Retrying in a fresh tab automatically…';
     if (launch?.reason === 'model_selection_failed' || launch?.reason === 'effort_unavailable') return 'Could not confirm the highest model/effort in ChatGPT. Check it and press Send.';
     if (['chat_mode_unavailable', 'chat_mode_mismatch'].includes(launch?.reason)) return 'The worker was not sent because Chat mode could not be confirmed. Start a new Chat conversation, then retry this worker.';
@@ -281,7 +283,7 @@ export const BRIDGE_UI_COPY = Object.freeze({
   },
   workerDone: count => `${count} ${count === 1 ? 'handoff completed' : 'handoffs completed'}`,
   workerQuiet: quietReason => quietReason === 'answer_silent'
-    ? 'This worker has not made a bridge call for at least 5 min while it owns a handoff response. It may still be writing. The app keeps this chat running. Check it before choosing a replacement; if it has stopped, copy a replacement starter to resume the exact handoff.'
+    ? 'No bridge call for at least 5 min while it owns a response. It may still be writing; check the chat before copying a replacement starter.'
     : quietReason === 'fresh_context_required'
       ? 'This completed stage requires a fresh ChatGPT chat before the next stage can be served. Copy a replacement starter and send it in a new ChatGPT chat.'
       : 'This chat was told to poll again but has made no bridge call for at least 5 min. If this waiting chat is gone, copy a replacement starter and send it in a new ChatGPT chat.',

@@ -281,7 +281,7 @@ export default [
               await Promise.resolve(); await Promise.resolve();
             });
             assert(![...window.document.querySelectorAll('button')].some(button => button.textContent.includes('Add ') && button.textContent.includes('workers to reach 10'))
-              && window.document.body.textContent.includes('5 worker chats · 5 released now · 5 forecast'),
+              && window.document.body.textContent.includes('5 worker chats · 5 released now'),
             'the panel never offers manual capacity inflation');
             await bundle.module.act(async () => {
               bundle.module.applyHandoffBridgeStatus(status(4, { chat: { state: 'working', pool: { active: true, generation: 41, workerCount: 5, plan: { recommended: 8, queued: 8, materialized: 8, expandBy: 3, reason: 'maximum_parallelism' } } } }));
@@ -1503,7 +1503,7 @@ export default [
             assert(!button(window, 'Copy worker 1 starter') && !button(window, 'Copy worker 2 starter') && restart && !restart.disabled
               && quietText.includes('Worker 2')
               && quietText.includes('Response overdue')
-              && quietText.includes('This worker has not made a bridge call')
+              && quietText.includes('No bridge call for at least 5 min')
               && !quietText.includes('ChatGPT is working on this handoff')
               && !quietText.includes('PRIVATE-QUIET-WORKER-SESSION'),
             'an answer-silent worker gives an ambiguity-safe replacement path based only on its own stale bridge call, not another worker polling');
@@ -1550,7 +1550,7 @@ export default [
           item: { jobId: JOB, stage: 'evidence-plan' },
           async check({ window }) {
             assert(!button(window, 'Add 4 workers to reach 10')
-              && text(window).includes('6 worker chats · 6 released now · 6 forecast'),
+              && text(window).includes('6 worker chats · 6 released now'),
             'the Job Search progress surface shows its automatically sized plan instead of offering manual capacity inflation');
           },
         });
@@ -1599,7 +1599,7 @@ export default [
           status: view({}, {}),
           async check({ window, timers, act }) {
             const region = live(window);
-            assert(region && region.getAttribute('aria-live') === 'polite' && region.textContent.includes('ChatGPT is working on: Résumé') && region.textContent.includes('In progress'), 'the headline and its tone word sit in the polite live region');
+            assert(region && region.getAttribute('aria-live') === 'polite' && region.textContent.includes('ChatGPT is working on: Résumé') && !region.textContent.includes('In progress'), 'the headline sits in the polite live region without a tone word repeating it');
             assert([...window.document.querySelectorAll('[role="status"], [aria-live]')].every(item => !item.textContent.includes('Last heard') && !item.textContent.includes('Elapsed:')), 'the ticking timer lines must stay outside every live region');
             const states = [...window.document.querySelectorAll('ol[aria-label="Application steps"] li')].map(item => item.textContent);
             assert(states[0].includes('done') && states[1].includes('current step') && states[2].includes('not started yet'), `step states must be text, not colour alone: ${states.join(' | ')}`);
@@ -1972,7 +1972,7 @@ export default [
           ['unselected/no published push lane', queued({ push: { available: [], claimed: [] } }), 'No worker chats yet'],
           ['disabled and unlinked', unavailable(), 'ChatGPT handoff is not ready'],
           ['paused', queued({ paused: true }), 'Paused'],
-          ['exactly claimed', queued({ chat: { state: 'working' }, push: { claimed: [claim] } }), 'Handed to ChatGPT'],
+          ['exactly claimed', queued({ chat: { state: 'working', ordinal: 1 }, push: { claimed: [claim] } }), 'ChatGPT is working on this handoff'],
         ]) {
           await withDom(async window => withConsoleCollector(async entries => {
             const priorCustomEvent = Object.getOwnPropertyDescriptor(globalThis, 'CustomEvent');

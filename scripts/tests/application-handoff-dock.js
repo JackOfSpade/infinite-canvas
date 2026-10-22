@@ -1634,8 +1634,8 @@ const dockTests = [
       // Held: a calm status line. Application bundles retain their one dock
       // control (Discard); ordinary push work has no equivalent discard.
       // Neither kind may expose a second answer path while ChatGPT owns it.
-      assert(heldBlock.includes('Handed to ChatGPT') && !heldBlock.includes('Working in ChatGPT'),
-        'a bridge-held item must show the "Handed to ChatGPT" state, a headline true before any chat has started');
+      assert(heldBlock.includes('<BridgeProgress') && !heldBlock.includes('Handed to ChatGPT') && !heldBlock.includes('Working in ChatGPT'),
+        'a bridge-held item lets BridgeProgress say what ChatGPT is doing, with no second status line repeating it');
       assert(dock.includes('{activeRequest?.handoffCode && !isBridgeHeldRequest && !isMcpRoutedRequest && ('),
         'the header handoff-code chip belongs to the copy/paste flow and must be hidden for either exact held request kind');
       assert(heldBlock.includes('{isBridgeHeldApplication ? (')
@@ -1653,9 +1653,8 @@ const dockTests = [
         && heldBlock.includes('canPauseAndSave={canPauseAndSaveJobSearch && !activeCareerProgress}')
         && heldBlock.includes('onPauseAndSave={requestJobSearchPauseAndSave}')
         && dock.includes("import { BridgeProgress } from './BridgeProgress';")
-        && heldBlock.indexOf('<BridgeProgress') > heldBlock.lastIndexOf('</div>') - 200
-        && heldBlock.indexOf('<BridgeProgress') > heldBlock.indexOf('Discard bundle'),
-      'a bridge-held application item must render BridgeProgress after (outside) the status block');
+        && heldBlock.indexOf('<BridgeProgress') < heldBlock.indexOf('Discard bundle'),
+      'a bridge-held application item renders BridgeProgress first, then its one action row');
       assert(
         !heldBlock.includes('Paste AI response')
         && !heldBlock.includes('id="non-api-ai-response"')
@@ -1822,7 +1821,7 @@ const bridgeJobProgressTests = [
       const view = progress({ chat: progressChat({ state: 'full' }) });
       assert(view.kind === 'writing' && view.headline === 'ChatGPT is working on: Résumé', `a served job in a full chat can still be answered: ${view.kind} ${view.headline}`);
       assert(view.action === null && view.actionLabel === null, 'the person must not be told to abandon a chat that is mid-answer');
-      assert(view.detail.includes(BRIDGE_PROGRESS_COPY.chatFullNote) && view.detail.includes('has not arrived yet'), `the detail carries the limit note: ${view.detail}`);
+      assert(view.detail === BRIDGE_PROGRESS_COPY.chatFullNote, `the detail carries the limit note: ${view.detail}`);
       assert(!view.detail.includes('work limit'), 'the full-chat headline copy must not leak into a served job');
       const fixing = progress({ chat: progressChat({ state: 'full' }), item: { stage: 'resume', corrections: ['a'] } });
       assert(fixing.kind === 'fixing' && fixing.detail.includes(BRIDGE_PROGRESS_COPY.chatFullNote) && fixing.action === null, 'a correction round in a full chat gets the same note');
@@ -1834,12 +1833,12 @@ const bridgeJobProgressTests = [
     run: () => {
       const queued = progress({ job: progressJob({ servedToChat: null }) });
       assert(queued.kind === 'queued' && queued.tone === 'working' && queued.headline === 'Queued for ChatGPT' && queued.since === null, 'not yet served -> queued, no invented timer');
-      assert(queued.detail.includes('résumé step'), 'queued names the step');
+      assert(queued.steps.some(step => step.key === 'resume' && step.state === 'current') && !queued.detail.includes('résumé'), 'the step list names the step, so the line does not repeat it');
       const concurrent = progress({ job: progressJob({ servedToChat: null }), chat: progressChat({ jobsAssigned: 2, jobsCap: 2 }) });
-      assert(concurrent.headline === 'Queued for ChatGPT' && concurrent.detail.includes('résumé step'), 'assignment telemetry never invents a retired per-chat bundle limit');
+      assert(concurrent.headline === 'Queued for ChatGPT' && concurrent.detail === queued.detail, 'assignment telemetry never invents a retired per-chat bundle limit');
       const writing = progress();
       assert(writing.kind === 'writing' && writing.tone === 'working' && writing.headline === 'ChatGPT is working on: Résumé', writing.headline);
-      assert(writing.detail.includes('has not arrived yet') && writing.lastHeard === PROGRESS_NOW - 20000, 'served -> waiting for the answer with the last call');
+      assert(writing.detail === '' && writing.lastHeard === PROGRESS_NOW - 20000, 'served -> waiting for the answer with the last call');
       assert(writing.since === PROGRESS_NOW - 120000, 'the hand-over time is this job\'s own servedAt');
       // Per-job proof: none of the chat-level guesses matter any more.
       assert(progress({ chat: progressChat({ jobsAssigned: 2 }) }).since === PROGRESS_NOW - 120000, 'with several jobs in the chat the job\'s own servedAt is still exact');
@@ -1849,7 +1848,7 @@ const bridgeJobProgressTests = [
       const between = progress({ job: answeredJob({ stage: 'cover-letter' }) });
       assert(between.kind === 'queued' && between.headline === 'Queued for ChatGPT' && between.since === null && !/working on/.test(between.headline),
         `an accepted answer with the next stage not yet served must not read as "ChatGPT is working": ${between.kind} ${between.headline}`);
-      assert(between.detail.includes('cover letter step'), 'and names the step that is ready');
+      assert(between.steps.some(step => step.key === 'cover-letter' && step.state === 'current'), 'and marks the step that is ready');
       assert(progress({ job: answeredJob(), chat: progressChat({ jobsAssigned: 2, jobsCap: 2 }) }).headline === 'Queued for ChatGPT', 'a job that already holds a slot is never told it waits for a later chat');
       assert(progress({ job: progressJob({ awaitingAnswer: false, servedAt: null }), item: { stage: 'resume', corrections: ['a'] } }).kind === 'queued', 'corrections are only "being fixed" while the answer is actually awaited');
     },
@@ -1908,7 +1907,7 @@ const bridgeJobProgressTests = [
       assert(view.kind === 'fixing' && view.headline === 'ChatGPT is fixing 3 issues' && view.tone === 'working', view.headline);
       assert(view.detail.includes('last résumé') && !/round/i.test(view.detail), 'no round number is invented: the job revision does not advance on a rejection');
       const one = progress({ item: { stage: 'resume', corrections: ['a'] } });
-      assert(one.headline === 'ChatGPT is fixing 1 issue' && one.detail.includes('an issue'), 'singular wording');
+      assert(one.headline === 'ChatGPT is fixing 1 issue' && one.detail === 'Found in its last résumé.', 'the count lives in the headline only');
       const escalated = progress({ item: { stage: 'resume', corrections: ['a'], rejectionEscalation: { active: true, streak: 3, checkIds: ['x'] } } });
       assert(escalated.detail.includes('The same check has now failed 3 times in a row.'), 'an active escalation states its streak');
       assert(!progress({ item: { stage: 'resume', corrections: ['a'], rejectionEscalation: { active: false, streak: 3 } } }).detail.includes('in a row'), 'an inactive escalation is not reported');
