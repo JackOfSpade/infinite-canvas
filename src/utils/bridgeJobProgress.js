@@ -49,12 +49,12 @@ const object = value => (isObject(value) ? value : {});
 const time = value => (Number.isFinite(value) && value >= 0 ? value : null);
 const upperFirst = text => `${text.charAt(0).toUpperCase()}${text.slice(1)}`;
 
-function progressStage(value) {
+export function progressStage(value) {
   if (PROGRESS_STAGES.includes(value)) return value;
   return REVIEW_PROGRESS_STAGES.has(value) ? 'review' : null;
 }
 
-function stepsFor(stage, allDone) {
+export function stepsFor(stage, allDone) {
   const current = PROGRESS_STAGES.indexOf(stage);
   return PROGRESS_STAGES.map((key, index) => ({
     key,

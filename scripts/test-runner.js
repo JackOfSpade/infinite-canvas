@@ -34,6 +34,7 @@ import application_editorial_plan_archive from './tests/application-editorial-pl
 import claude_application_diagnostics from './tests/claude-application-diagnostics.js';
 import handoff_bridge_application_executor from './tests/handoff-bridge-application-executor.js';
 import application_claude_dock from './tests/application-claude-dock.js';
+import claude_job_progress from './tests/claude-job-progress.js';
 import application_v2_writer_shortlist from './tests/application-v2-writer-shortlist.js';
 import paste_application_assembly from './tests/paste-application-assembly.js';
 import paste_application_flow from './tests/paste-application-flow.js';
@@ -204,6 +205,7 @@ const testGroups = [
   ['claude-application-diagnostics.js', claude_application_diagnostics],
   ['handoff-bridge-application-executor.js', handoff_bridge_application_executor],
   ['application-claude-dock.js', application_claude_dock],
+  ['claude-job-progress.js', claude_job_progress],
   ['application-v2-writer-shortlist.js', application_v2_writer_shortlist],
   ['paste-application-assembly.js', paste_application_assembly],
   ['paste-application-flow.js', paste_application_flow],

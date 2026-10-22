@@ -11,6 +11,7 @@ import { useHandoffBridgeStatus } from '../hooks/useHandoffBridgeStatus';
 import { CareerCompilationProgress } from './CareerCompilationProgress';
 import { careerCompilationProgressForRequest, recordCareerCompilationProgress } from '../utils/careerCompilationProgress';
 import { BridgeProgress } from './BridgeProgress';
+import { ClaudeProgress } from './ClaudeProgress';
 import { BridgeApplicationsPage } from './BridgeApplicationsPage';
 // The bridge-held rule is shared with the job card so the two cannot disagree.
 import { isBridgeHeldJob } from '../utils/bridgeHeldApplication';
@@ -2073,6 +2074,10 @@ export function NonApiAiDialog() {
             // The local Claude runner is answering this stage itself. Copying
             // the prompt or pasting an answer would race it with a second,
             // disagreeing response, so only the status and Discard render.
+            // ClaudeProgress (the same four-step section the bridge shows)
+            // sits OUTSIDE the status div: its timer ticks every second and
+            // must not re-announce through that live region.
+            <>
             <div
               role="status"
               aria-live="polite"
@@ -2098,6 +2103,8 @@ export function NonApiAiDialog() {
                 {isDiscarding ? 'Discarding…' : 'Discard bundle'}
               </button>
             </div>
+            <ClaudeProgress run={activeClaudeRun} item={activeRequest} />
+            </>
           ) : claudeRunState === 'failed' ? (
             // The run stopped and will not restart on its own (ensure never
             // re-runs a failed job). Retry is the one action; Discard stays.
