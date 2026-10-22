@@ -4,6 +4,7 @@ import {
   canSellHubAcceptDisplayPhotoDrop,
   getHubDropRejectLabel,
 } from './hubDropEligibility.js';
+import { jobBoardCareerDropVerdict } from './jobBoardCareerOverride.js';
 
 export function filePayloadFromDraggedNodes(nodes) {
   return (nodes || [])
@@ -31,7 +32,10 @@ export function fileSupportedByHub(hubType, file) {
   // Job Search's final admission filter.
   const names = [file?.filename, file?.filePath].filter(value => typeof value === 'string');
   // Career data is plain text only: the real path must be .txt or .md.
-  if (hubType === 'jobhub') return !names.some(isAppBundlePathOrName) && isCareerTextFileName(file?.filePath);
+  // A Job Board's career override uses the identical career-text rule.
+  if (hubType === 'jobhub' || hubType === 'jobboard') {
+    return !names.some(isAppBundlePathOrName) && isCareerTextFileName(file?.filePath);
+  }
   if (hubType === 'sellhub') return isProductImageFile(file);
   return false;
 }
@@ -54,6 +58,14 @@ export function buildHubHoverState(targetHub, dragSet) {
   }
 
   const acceptedFiles = filePayload.filter(file => fileSupportedByHub(targetHub.type, file));
+  // A Job Board takes canvas career files as its career override: the whole
+  // selection must be text, then the Board's own override lifecycle decides.
+  if (targetHub.type === 'jobboard') {
+    if (acceptedFiles.length !== filePayload.length) {
+      return { kind: 'reject', label: 'Text files only (.txt, .md)' };
+    }
+    return jobBoardCareerDropVerdict(targetHub.data);
+  }
   // Job Search refuses a whole drop that holds any non-text file, so the cue
   // must not promise "Use as resume" for a mixed selection.
   if (targetHub.type === 'jobhub' && acceptedFiles.length !== filePayload.length) {

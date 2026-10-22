@@ -477,16 +477,9 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
   const hiringFitAudit = useMemo(() => compactHiringFitAudit(data.fitAssessment), [data.fitAssessment]);
 
   const score = data.matchScore || 0;
-  // Review badges. An unscored placeholder carries a fixed sentinel number,
-  // not an assessment, so its chip reads "—" and takes the neutral colour. A
-  // capped card keeps its calibrated number but says what the model assigned
-  // before the evidence-gap rule lowered it, so a 69 that began as an 86 is
-  // never mistaken for a confident 69.
+  // An unscored placeholder carries a fixed sentinel number, not an assessment,
+  // so its chip reads "—" and takes the neutral colour.
   const unscoredPlaceholder = isUnscoredPlaceholderCard(data);
-  const cappedFrom = !unscoredPlaceholder && Number.isFinite(Number(data.rawScore)) && Number(data.rawScore) > score
-    ? Number(data.rawScore)
-    : null;
-  const gapReviewed = hiringFitAudit?.gapReview || null;
   const accentColor = unscoredPlaceholder ? '#6b7280' : scoreColor(score);
   const compensationBorderColor = COMPENSATION_BORDER_COLORS[compensationAssessment.status] || COMPENSATION_NEUTRAL_BORDER;
   const hasExpandedDisclosure = showScoreAudit || showCompensationDetails;
@@ -1409,33 +1402,14 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
         <div className="flex-1 min-w-0 pr-6 relative">
           <div className="text-white/90 text-sm font-semibold leading-tight truncate">{data.title || 'Untitled'}</div>
           <div className="text-white/50 text-xs mt-0.5 truncate">{data.company}{subtitleLocation ? ` · ${subtitleLocation}` : ''}</div>
-          {(unscoredPlaceholder || cappedFrom !== null || gapReviewed) && (
+          {unscoredPlaceholder && (
             <div className="mt-1 flex flex-wrap gap-1">
-              {gapReviewed && !unscoredPlaceholder && (
-                <span
-                  className={`px-1.5 py-0.5 rounded-full text-[9px] font-medium border ${gapReviewed.after > gapReviewed.before ? 'bg-emerald-500/15 text-emerald-300/90 border-emerald-500/30' : 'bg-white/10 text-white/60 border-white/15'}`}
-                  title={gapReviewed.after > gapReviewed.before
-                    ? `A second, independent review of the gap rows that capped this score corrected ${gapReviewed.corrected} row${gapReviewed.corrected === 1 ? '' : 's'} (re-grounded against the posting and the career evidence) and recalibrated the score from ${gapReviewed.before} to ${gapReviewed.after}. Open "Why this score?" for the rows.`
-                    : `A second, independent review of the gap rows that capped this score confirmed them; the score stays at ${gapReviewed.after}.`}
-                >
-                  {gapReviewed.after > gapReviewed.before ? `Reviewed ${gapReviewed.before} → ${gapReviewed.after}` : 'Reviewed · gaps confirmed'}
-                </span>
-              )}
-              {unscoredPlaceholder ? (
-                <span
-                  className="px-1.5 py-0.5 rounded-full text-[9px] font-medium bg-white/10 text-white/70 border border-white/15"
-                  title="The AI never returned a usable score for this job, so it has no hiring-fit assessment. It stays visible below the Board's minimum as a review card; re-score the search to assess it."
-                >
-                  Unscored · review
-                </span>
-              ) : cappedFrom !== null ? (
-                <span
-                  className="px-1.5 py-0.5 rounded-full text-[9px] font-medium bg-amber-500/15 text-amber-300/90 border border-amber-500/30"
-                  title={`The AI assigned ${cappedFrom}/100. The evidence-gap rule lowered it to ${score}/100 because grounded requirements were not documented, contradicted, or unclear in the supplied career data. Open "Why this score?" to see which rule applied and which requirements it counted.`}
-                >
-                  Capped from {cappedFrom}
-                </span>
-              ) : null}
+              <span
+                className="px-1.5 py-0.5 rounded-full text-[9px] font-medium bg-white/10 text-white/70 border border-white/15"
+                title="The AI never returned a usable score for this job, so it has no hiring-fit assessment. It stays visible below the Board's minimum as a review card; re-score the search to assess it."
+              >
+                Unscored · review
+              </span>
             </div>
           )}
           {data.salary && (

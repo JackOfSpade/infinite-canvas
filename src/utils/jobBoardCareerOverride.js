@@ -311,6 +311,21 @@ export function resolveApplicationCareerSnapshotId({ cardData, boardData } = {})
   return { careerSnapshotId: null, source: null };
 }
 
+// Verdict for a canvas document node dragged onto a Board: may its career
+// files become the Board's career data for applications right now? Mirrors
+// the panel's own import gates. The drag lane has no local run id, so a live
+// compile and an interrupted one look the same here; one label covers both.
+export function jobBoardCareerDropVerdict(boardData) {
+  const locked = !!boardData?.locked;
+  if (locked) return { kind: 'reject', label: 'Locked' };
+  const { state } = jobBoardCareerOverrideView(boardData, { locked });
+  if (state === 'compiling' || state === 'interrupted') {
+    return { kind: 'reject', label: 'Finish current career data first' };
+  }
+  if (state === 'failed') return { kind: 'reject', label: 'Retry or discard first' };
+  return { kind: 'accept', label: 'Use for applications' };
+}
+
 export function jobBoardCareerOverrideView(boardData, { localRunId = null, locked = false } = {}) {
   const current = recordOf(boardData);
   const pending = current?.pending || null;

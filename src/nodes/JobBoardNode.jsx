@@ -6691,6 +6691,22 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
     });
   }, [careerCanvasSelections, compileCareerOverride, getNodes]);
 
+  // A canvas document node dragged onto this Board (resolved and gated in
+  // useDragCorrections) sets its career data, like the canvas-file picker.
+  useEffect(() => {
+    const handler = (e) => {
+      if (e.detail?.hubId !== id || e.detail?.hubType !== 'jobboard') return;
+      const files = (e.detail?.files || []).filter(file => typeof file?.filePath === 'string' && file.filePath);
+      if (files.length === 0) return;
+      void compileCareerOverride({
+        filePaths: files.map(file => file.filePath),
+        fileNames: files.map(file => file.filename || file.filePath.split(/[\\/]/u).pop() || file.filePath),
+      });
+    };
+    document.addEventListener('canvas-file-nodes-dropped-on-hub', handler);
+    return () => document.removeEventListener('canvas-file-nodes-dropped-on-hub', handler);
+  }, [compileCareerOverride, id]);
+
   const handleCareerOverrideResume = useCallback(() => {
     void compileCareerOverride({ resume: true });
   }, [compileCareerOverride]);
@@ -6741,7 +6757,8 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
 
   return (
     <>
-      <HubContainer hubState={hubState} theme="blue" width={260} minHeight={hubState === 'empty' ? 150 : 100} dropsBlocked>
+      {/* No OS-lane drops on the Board body (the career panel's own drop zone takes those), but a canvas-node career-file accept verdict must be allowed to paint. */}
+      <HubContainer hubState={hubState} theme="blue" width={260} minHeight={hubState === 'empty' ? 150 : 100} dragHover={data.dragHover || null} dropsBlocked={data.dragHover?.kind !== 'accept'}>
       {/* Header */}
       <div className="flex items-center gap-2 px-3 pt-3 pb-2">
         <div className="w-7 h-7 rounded-lg bg-indigo-500/15 flex items-center justify-center shrink-0">

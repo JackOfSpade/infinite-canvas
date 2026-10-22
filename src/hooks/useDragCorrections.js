@@ -25,6 +25,19 @@ function findHubDropTarget(dragSet, getIntersectingNodes) {
     );
     if (targetHub) return targetHub;
   }
+  // A Job Board is a career-file target only — it is resolved solely for a
+  // drag that carries document file payloads, after jobhub/sellhub, so a
+  // non-file drag over a Board (and sub-canvas absorption precedence) stays
+  // exactly as before. A locked Board is still found so its "Locked" reject
+  // cue can paint instead of the drag silently showing nothing.
+  if (filePayloadFromDraggedNodes(dragSet).length > 0) {
+    for (const dragged of dragSet) {
+      const targetBoard = getIntersectingNodes(dragged).find(n =>
+        n.type === 'jobboard' && n.id !== dragged.id
+      );
+      if (targetBoard) return targetBoard;
+    }
+  }
   return null;
 }
 
@@ -340,6 +353,32 @@ export function useDragCorrections({ setNodes, setEdges, getNodes, getEdges, get
       const dragSet = (draggedNodes && draggedNodes.length > 0) ? draggedNodes : [node];
       const targetHub = HUB_DROP_TARGET_TYPES.has(node.type) ? null : findHubDropTarget(dragSet, getIntersectingNodes);
       const filePayload = filePayloadFromDraggedNodes(dragSet);
+
+      // A Job Board takes career files as its career override. It has its own
+      // verdict (jobBoardCareerDropVerdict via buildHubHoverState) and is never
+      // routed through the jobhub/sellhub lifecycle rules below.
+      if (targetHub && targetHub.type === 'jobboard' && filePayload.length > 0) {
+        const draggedIds = dragSet.map(n => n.id);
+        const verdict = buildHubHoverState(targetHub, dragSet);
+        if (!verdict || verdict.kind !== 'accept') {
+          restoreDragStartPositions(draggedIds);
+          EventLogger.log(`Rejected ${filePayload.length} document node(s) for jobboard (${verdict?.label || 'Not accepting drops'}); restored drag position`);
+          return;
+        }
+        const acceptedFiles = filePayload.filter(file => fileSupportedByHub('jobboard', file));
+        const dropMode = 'career-override';
+        document.dispatchEvent(new CustomEvent('canvas-file-nodes-dropped-on-hub', {
+          detail: {
+            hubId: targetHub.id,
+            hubType: targetHub.type,
+            files: acceptedFiles,
+            mode: dropMode,
+          },
+        }));
+        restoreDragStartPositions(draggedIds);
+        EventLogger.log(`Dropped ${acceptedFiles.length}/${filePayload.length} document node(s) onto ${targetHub.type} ${targetHub.id} mode=${dropMode}`);
+        return;
+      }
 
       if (targetHub && filePayload.length > 0) {
         const draggedIds = dragSet.map(n => n.id);

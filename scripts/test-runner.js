@@ -60,6 +60,7 @@ import job_analysis_operation_ledger from './tests/job-analysis-operation-ledger
 import job_analysis_operation_authority_adversarial from './tests/job-analysis-operation-authority-adversarial.js';
 import job_continuation_authority_contract from './tests/job-continuation-authority-contract.js';
 import career_canvas_file_import from './tests/career-canvas-file-import.js';
+import job_board_canvas_career_drop from './tests/job-board-canvas-career-drop.js';
 import career_text_files from './tests/career-text-files.js';
 import career_profile_compilation from './tests/career-profile-compilation.js';
 import career_clean_layer from './tests/career-clean-layer.js';
@@ -231,6 +232,7 @@ const testGroups = [
   ['job-analysis-operation-authority-adversarial.js', job_analysis_operation_authority_adversarial],
   ['job-continuation-authority-contract.js', job_continuation_authority_contract],
   ['career-canvas-file-import.js', career_canvas_file_import],
+  ['job-board-canvas-career-drop.js', job_board_canvas_career_drop],
   ['career-text-files.js', career_text_files],
   ['career-profile-compilation.js', career_profile_compilation],
   ['career-clean-layer.js', career_clean_layer],

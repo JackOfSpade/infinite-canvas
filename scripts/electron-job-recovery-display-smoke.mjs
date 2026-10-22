@@ -62,10 +62,6 @@ try {
   assert.match(await usa.innerText(), /Continue saved AI handoff or Retry recovery/);
   assert.equal(await usa.getByRole('button', { name: 'Continue', exact: true }).count(), 0);
   assert.equal(await usa.getByRole('button', { name: 'Open prompt', exact: true }).count(), 0);
-  const reviewedCard = page.locator('.react-flow__node[data-id="reviewed-card"]');
-  await reviewedCard.getByText('Reviewed 69 → 71', { exact: true }).waitFor();
-  assert.equal(await reviewedCard.getByText(/Capped from/).count(), 0, 'a corrected uncapped score has no empty cap badge');
-  await page.locator('.react-flow__node[data-id="capped-card"]').getByText('Capped from 83', { exact: true }).waitFor();
   assert.deepEqual(errors, []);
   // Reproduce the report's second shape: a completed Board already consumed
   // this exact result, while its Search still carries an obsolete cleanup lock.
