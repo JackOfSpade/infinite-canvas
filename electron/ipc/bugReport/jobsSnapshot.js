@@ -4986,8 +4986,14 @@ export function buildNonApiAiHandoffLifecycleMarkdown(currentNodeIds, reportWind
       const responseChars = boardDiagnosticNumber(failure?.responseChars, { max: 10_000_000 });
       const size = Number.isInteger(responseChars) ? ` · ${responseChars} chars` : '';
       const hash = typeof failure?.responseHash === 'string' && /^[a-f0-9]{8}$/i.test(failure.responseHash) ? ` · receipt tag \`${failure.responseHash}\`` : '';
+      // Bridged answers only: equal tags are the same failing rule, and the
+      // count is how many answers to this handoff have failed it so far.
+      const causeRepeats = boardDiagnosticNumber(failure?.causeRepeats, { max: 1_000_000 });
+      const cause = typeof failure?.causeTag === 'string' && /^[a-f0-9]{8}$/.test(failure.causeTag)
+        ? ` · cause \`${failure.causeTag}\`${Number.isInteger(causeRepeats) ? ` ×${causeRepeats}` : ''}`
+        : '';
       const clock = Number.isFinite(at) && at > 0 ? `${new Date(at).toISOString()} ` : '';
-      return [`${clock}${code} · ${stage}:${reason}${counts.length ? ` (${counts.join(', ')})` : ''}${size}${hash}`];
+      return [`${clock}${code} · ${stage}:${reason}${counts.length ? ` (${counts.join(', ')})` : ''}${size}${hash}${cause}`];
     });
     const omission = omittedFailures > 0
       ? ` · ${omittedFailures} earlier rejection detail(s) not retained (newest ${failures.length} shown)`
@@ -5085,6 +5091,10 @@ export function buildNonApiAiHandoffLifecycleMarkdown(currentNodeIds, reportWind
     if (otherRejections > 0) retries.push(`${otherRejections} paste rejection(s)`);
     if (boardDiagnosticValue(item, 'reissues')) retries.push(`${boardDiagnosticValue(item, 'reissues')} reissued`);
     if (boardDiagnosticValue(item, 'replays')) retries.push(`${boardDiagnosticValue(item, 'replays')} replayed after dialog remount`);
+    if (boardDiagnosticValue(item, 'escalated') === 'rejection_cap') {
+      const after = boardDiagnosticNumber(boardDiagnosticValue(item, 'escalatedAfterRejections'));
+      retries.push(`**returned to the person** (\`rejection_cap\`: one cause kept failing in ChatGPT's answers${after != null ? `, after ${after} rejection(s)` : ''})`);
+    }
     const accepted = acceptedAt && issuedAt
       ? ` · accepted after ${handoffElapsed(acceptedAt - issuedAt)}`
       : '';

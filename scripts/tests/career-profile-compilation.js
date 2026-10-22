@@ -480,6 +480,11 @@ export default [
             assert(duplicateCoverageRejection?.validationDiagnostic?.reason === 'CAREER_PAGE_COVERAGE_SEGMENT'
               && !duplicateCoverageRejection.message.includes('invented-model-entity'),
             'duplicate segment coverage must be rejected as a cardinality defect after every stale model inverse id is cleared, not misclassified as reciprocal coverage');
+            assert(Array.isArray(domainRejection.correctionDetails) && domainRejection.correctionDetails.length >= 1
+              && domainRejection.correctionDetails.length <= 12
+              && domainRejection.correctionDetails.every(line => typeof line === 'string' && domainRejection.message.includes(line))
+              && !duplicateCoverageRejection.correctionDetails.some(line => line.includes('invented-model-entity')),
+            'a page rejection carries its exact failing rules for the answering chat, and nothing its own message does not say');
             options.responseValidator(good);
             return good;
           }

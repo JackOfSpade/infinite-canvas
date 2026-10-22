@@ -868,6 +868,9 @@ export function createPushSource({ seam = {}, activeNodeTasks = snapshotActiveNo
         }
         return result('rejected', { handoffCode: served.handoffCode, attempt: Number.isInteger(verdict.attempt) ? verdict.attempt : rejections + 1, validationCode, correction: typeof verdict.correction === 'string' ? verdict.correction : '', isCorrection: verdict.isCorrection === true, caution: CAUTION });
       }
+      // The registry already moved this handoff to the person's dock, so its
+      // registry exclusion (not `held`) is what counts it as needing them.
+      case 'rejection_cap': removeServed(value, served.requestId); return result('needs_user', { reason: 'rejection_cap' });
       case 'cooldown': removeServed(value, served.requestId); return result('waiting', { retryAfterSeconds: retryAfterSeconds(verdict), remaining: currentRemaining(value) });
       case 'busy': return result('retry', { reason: 'busy' });
       case 'commit_failed': { const failures = (value.commitFailures.get(served.requestId) || 0) + 1; value.commitFailures.set(served.requestId, failures); if (failures >= 2) { removeServed(value, served.requestId); value.held.set(served.requestId, 'commit_failed'); return result('needs_user', { reason: 'commit_failed' }); } return result('retry', { reason: 'save_failed' }); }

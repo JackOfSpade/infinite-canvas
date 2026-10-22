@@ -20,6 +20,7 @@ import { assertResponseMatchesSchema, canonicalizeResponseSchemaEnums } from './
 import { abortNodeTasksAndWait, cancellationError, getCurrentIpcRequestContext, releaseAcknowledgedManualAiRunIds } from './ipcUtils.js';
 import { logger } from '../logger.js';
 import { isBackgroundE2E } from '../utils/backgroundE2e.js';
+import { clipCorrectionItem, REJECTED_CAUTION } from './handoffBridge/framing.js';
 
 const { app, ipcMain, shell } = electronPkg;
 
@@ -65,6 +66,17 @@ const DURABLE_HANDOFF_FILE = 'non-api-ai-handoffs.json';
 // not erase the cooling period.
 const DURABLE_REISSUE_BACKOFF_BASE_MS = 750;
 const DURABLE_REISSUE_BACKOFF_MAX_MS = 30_000;
+// Correction rounds stay uncapped while the answers keep changing what fails.
+// A bridged answer that fails the SAME validator rule again is not learning
+// it: on 2026-10-22 a career repair was rejected 69 times in ~100 minutes for
+// one cause. When any one rule has failed in this many answers to the same
+// handoff, it goes back to the person's dock instead of the chat.
+const BRIDGE_SAME_CAUSE_REJECTION_LIMIT = 5;
+// Validator-vouched correction lines (see cleanCorrectionDetails).
+const CORRECTION_DETAIL_LIMIT = 12;
+const CORRECTION_DETAIL_MAX_CHARS = 600;
+// Persisted per durable step; plenty for one handoff's distinct rules.
+const BRIDGE_REJECTION_CAUSE_LIMIT = 64;
 let durableStatePromise = null;
 let durableMutationTail = Promise.resolve();
 let durableWriteTail = Promise.resolve();
@@ -1252,6 +1264,9 @@ function createHandoffLifecycle({ requestId, handoffCode, runId, sender, nodeId,
     // prompt, pasted response, validation message, path, property name, or
     // property value here: this array is exported in bug reports.
     failures: [],
+    // 'rejection_cap' once a repeated bridged cause returned it to the person.
+    escalated: null,
+    escalatedAfterRejections: null,
     acceptedAt: null,
     settledAt: null,
     outcome: 'pending',
@@ -1323,9 +1338,17 @@ function updateHandoffLifecycle(record, update) {
       responseHash: typeof update.responseHash === 'string' && /^[a-f0-9]{8}$/i.test(update.responseHash)
         ? update.responseHash.toLowerCase()
         : null,
+      // Bridged answers only: a process-keyed tag of the most repeated failing
+      // rule and how many answers to this handoff have now failed it.
+      causeTag: typeof update.causeTag === 'string' && /^[a-f0-9]{8}$/.test(update.causeTag) ? update.causeTag : null,
+      causeRepeats: Number.isSafeInteger(update.causeRepeats) && update.causeRepeats > 0 ? update.causeRepeats : null,
     };
     lifecycle.failures.push(failure);
     if (lifecycle.failures.length > HANDOFF_FAILURES_PER_LIFECYCLE_LIMIT) lifecycle.failures.shift();
+  }
+  else if (update?.escalated === 'rejection_cap') {
+    lifecycle.escalated = 'rejection_cap';
+    lifecycle.escalatedAfterRejections = lifecycle.rejected;
   }
   else if (update === 'accepted') {
     lifecycle.acceptedAt = now;
@@ -2157,11 +2180,21 @@ function promptForRetry(record, validationError) {
       ? 'The previous answer was valid JSON but did not match the required schema.'
       : 'The previous answer failed the application\'s response checks.';
   const safeGuidance = safeCorrectionGuidance(record.validationDiagnostic, record.validationCode);
+  // A category alone is goal-shaped: it cannot say which rule failed, and a
+  // worker that cannot see the failing rule repeats it indefinitely.
+  const details = Array.isArray(record.validationCorrectionDetails) ? record.validationCorrectionDetails : [];
+  const detailLines = details.length
+    ? [
+        `Fix ${details.length === 1 ? 'this problem' : `each of these ${details.length} problems`} found in the previous answer. ${REJECTED_CAUTION}`,
+        ...details.map((line, index) => `${index + 1}. ${line}`),
+      ]
+    : [];
   const correction = record.responseSchema
     ? [
         '--- CORRECTION REQUIRED ---',
         reason,
         ...(safeGuidance ? [safeGuidance] : []),
+        ...detailLines,
         'Regenerate the entire answer from the original inputs. Do not return a patch, only the corrected field, or an explanation of the mistake.',
         'Return exactly one complete `json` code block. Serialize the result once, then run a strict JSON.parse-equivalent check on the exact block before sending it.',
         'Pay special attention to commas and closing braces, and JSON-escape every quote, backslash, or line break that occurs inside a string value.',
@@ -2170,6 +2203,7 @@ function promptForRetry(record, validationError) {
         '--- CORRECTION REQUIRED ---',
         reason,
         ...(safeGuidance ? [safeGuidance] : []),
+        ...detailLines,
         'Regenerate and return the complete answer again. Do not return only a patch or an explanation of the mistake.',
       ].join('\n');
   return { prompt: `${basePrompt}\n\n${correction}`, isCorrection: true };
@@ -2265,6 +2299,73 @@ function durableBridgeReissuePacing(record, validationCode = null, validationDia
 function nextRetryDelayMs(rejectionCount) {
   const exponent = Math.min(16, Math.max(0, cleanRetryRejectionCount(rejectionCount) - 1));
   return Math.min(DURABLE_REISSUE_BACKOFF_MAX_MS, DURABLE_REISSUE_BACKOFF_BASE_MS * (2 ** exponent));
+}
+
+// Default-deny: an ordinary thrown message never reaches a prompt. A validator
+// opts in with `error.correctionDetails` only when each line describes the
+// answer it just checked using material the answering chat already holds (its
+// own ids, labels and indices, the prompt's segment ids). Paths are still
+// scrubbed and long quoted spans clipped, as application-lane corrections are.
+function cleanCorrectionDetails(error) {
+  if (!Array.isArray(error?.correctionDetails)) return [];
+  return error.correctionDetails
+    .filter(line => typeof line === 'string' && line.trim())
+    .slice(0, CORRECTION_DETAIL_LIMIT)
+    .map(line => clipCorrectionItem(line.replace(/\p{Cc}+/gu, ' ').trim(), CORRECTION_DETAIL_MAX_CHARS));
+}
+
+// Two rejections share a cause when the same rule failed, whatever entity,
+// index, quoted value or segment it named: fixing one entity and breaking
+// another the same way is still repeating the mistake. Without vouched lines
+// the safe classification is the only rule there is.
+function rejectionCauseKeys(validationCode, validationDiagnostic, details) {
+  const base = `${validationCode || 'VALIDATION_FAILED'}:${validationDiagnostic?.reason || 'VALIDATION_FAILED'}`;
+  const shapes = details.length
+    ? details.map(line => `${base}:${line
+      .replace(/"(?:[^"\\]|\\.)*"/gu, '""')
+      .replace(/\[[^\]]*\]/gu, '[]')
+      .replace(/\b[a-z][a-z0-9]*(?:-[a-z0-9]+)+\b/gu, '<id>')
+      .replace(/\d+/gu, '#')
+      .replace(/<id>(?:[\s,]+<id>)+/gu, '<id>')}`)
+    : [base];
+  return [...new Set(shapes)].map(shape => crypto.createHash('sha256').update(shape).digest('hex').slice(0, 16));
+}
+
+function cleanBridgeRejectionCauses(value) {
+  const causes = new Map();
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return causes;
+  for (const [key, count] of Object.entries(value)) {
+    if (causes.size >= BRIDGE_REJECTION_CAUSE_LIMIT) break;
+    if (/^[a-f0-9]{16}$/u.test(key) && Number.isSafeInteger(count) && count > 0) causes.set(key, count);
+  }
+  return causes;
+}
+
+// Counts each rule once per answer (most recently seen last, oldest evicted)
+// and returns the most repeated of this answer's rules.
+function recordBridgeRejectionCauses(record, keys) {
+  const causes = record.bridgeRejectionCauses instanceof Map ? record.bridgeRejectionCauses : new Map();
+  for (const key of keys) {
+    const count = (causes.get(key) || 0) + 1;
+    causes.delete(key);
+    causes.set(key, count);
+  }
+  while (causes.size > BRIDGE_REJECTION_CAUSE_LIMIT) causes.delete(causes.keys().next().value);
+  record.bridgeRejectionCauses = causes;
+  return keys.reduce((top, key) => (causes.get(key) > top.count ? { key, count: causes.get(key) } : top), { key: keys[0], count: 0 });
+}
+
+// Process-keyed like the response receipt tag, so a report can show that two
+// rejections repeated one cause without becoming an offline lookup table.
+function rejectionCauseTag(key) {
+  return crypto.createHmac('sha256', RESPONSE_RECEIPT_HMAC_KEY).update(String(key)).digest('hex').slice(0, 8);
+}
+
+function bridgeRejectionDurablePatch(record) {
+  return {
+    bridgeRejectionCauses: record.bridgeRejectionCauses?.size ? Object.fromEntries(record.bridgeRejectionCauses) : null,
+    bridgeEscalation: record.bridgeEscalation || null,
+  };
 }
 
 function clearReissueTimer(record) {
@@ -2733,10 +2834,15 @@ export async function requestNonApiAi({
     validationError: null,
     validationCode: null,
     validationDiagnostic: null,
+    validationCorrectionDetails: [],
     // These are restored only from the durable step and are later discarded
     // for local/manual routes. They carry no prompt or answer content.
     retryRejectionCount: cleanRetryRejectionCount(effectiveSavedStep?.retryRejectionCount),
     retryNotBefore: cleanRetryNotBefore(effectiveSavedStep?.retryNotBefore),
+    // Rule-shape digests and the escalation they caused survive a relaunch, so
+    // restarting the app cannot hand a non-converging handoff back to ChatGPT.
+    bridgeRejectionCauses: cleanBridgeRejectionCauses(effectiveSavedStep?.bridgeRejectionCauses),
+    bridgeEscalation: effectiveSavedStep?.bridgeEscalation === 'rejection_cap' ? 'rejection_cap' : null,
     retryTimer: null,
     signal,
     materializedPrompt,
@@ -2760,9 +2866,11 @@ export async function requestNonApiAi({
   // Immutable before the first renderer delivery/replay.  The dock must never
   // consult a live bridge status packet to choose its workflow: an unavailable
   // bridge is a setup state for reviewed text, not a reason to offer a second
-  // manual answer path.
+  // manual answer path. A handoff already returned to the person for repeating
+  // one rejected cause stays theirs.
   record.handoffRoute = isMcpEligibleNonApiAiRecord(record)
     && !(typeof record.initialResponse === 'string' && record.initialResponse.trim())
+    && !record.bridgeEscalation
     ? 'mcp'
     : 'manual';
   if (record.handoffRoute !== 'mcp' || !record.runId || !record.stepKey) {
@@ -2966,10 +3074,11 @@ async function acceptNonApiAiResponse(record, args, { transport = 'local' } = {}
     claimAcceptedResponseFingerprint(record, args.response);
     record.validationError = null;
     record.validationCode = null;
+    record.validationCorrectionDetails = [];
     record.settling = true;
     phase = 'commit';
     await updateDurableStep(record, { status: 'accepted', response: args.response, draft: '',
-      retryRejectionCount: 0, retryNotBefore: null,
+      retryRejectionCount: 0, retryNotBefore: null, bridgeRejectionCauses: null, bridgeEscalation: null,
     });
     phase = 'committed';
     // The durable write yields. Cancellation or Back may settle this record
@@ -3020,25 +3129,57 @@ async function acceptNonApiAiResponse(record, args, { transport = 'local' } = {}
     const validationCode = nonApiAiLogErrorCode(error);
     const validationDiagnostic = defaultSafeValidationDiagnostic(error, validationCode);
     const responseReceipt = safeResponseReceipt(args.response);
+    // The bridge exposes a durable-save failure as `commit_failed`, not as its
+    // submit-rejected outcome. Route-specific rejection accounting must follow
+    // that wire contract while the general receipt still records the failed
+    // local acceptance attempt.
+    const bridgeRejection = phase === 'validate' && transport === 'bridge';
     record.validationError = message;
     record.validationCode = validationCode;
     record.validationDiagnostic = validationDiagnostic;
+    record.validationCorrectionDetails = phase === 'validate' ? cleanCorrectionDetails(error) : [];
+    // Only answers ChatGPT sends through the bridge count toward returning a
+    // handoff to the person; a person's own paste is never capped.
+    const cause = bridgeRejection && record.handoffRoute === 'mcp'
+      ? recordBridgeRejectionCauses(record, rejectionCauseKeys(validationCode, validationDiagnostic, record.validationCorrectionDetails))
+      : null;
     updateHandoffLifecycle(record, {
       rejected: true,
-      // The bridge exposes a durable-save failure as `commit_failed`, not as
-      // its submit-rejected outcome. Route-specific rejection accounting must
-      // follow that wire contract while the general receipt still records the
-      // failed local acceptance attempt.
-      transport: phase === 'validate' && transport === 'bridge' ? 'bridge' : 'local',
+      transport: bridgeRejection ? 'bridge' : 'local',
       code: validationCode,
       validationDiagnostic,
       ...responseReceipt,
+      ...(cause ? { causeTag: rejectionCauseTag(cause.key), causeRepeats: cause.count } : {}),
     });
     logger.warn(`[Non-API AI] Rejected response for task '${record.task || 'unknown'}' (code=${nonApiAiLogErrorCode(error)}).`);
+    if (cause && cause.count >= BRIDGE_SAME_CAUSE_REJECTION_LIMIT) {
+      // The person's dock is the existing manual route (an attachment that
+      // cannot travel falls back the same way). It shows the precise message
+      // and keeps Cancel; the bridge tells the chat this needs the person.
+      clearReissueTimer(record);
+      record.handoffRoute = 'manual';
+      record.bridgeEscalation = 'rejection_cap';
+      record.retryRejectionCount = 0;
+      record.retryNotBefore = null;
+      updateHandoffLifecycle(record, { escalated: 'rejection_cap' });
+      logger.warn(`[Non-API AI] Returned task '${record.task || 'unknown'}' to the person: one rejected cause recurred in ${cause.count} bridged answers (code=${validationCode}).`);
+      try {
+        await updateDurableStep(record, {
+          status: 'pending', draft: record.initialResponse || '', response: null,
+          retryRejectionCount: 0, retryNotBefore: null, ...bridgeRejectionDurablePatch(record),
+        });
+      } catch (writeError) {
+        // This process still holds the escalation; only a relaunch would miss it.
+        logger.warn(`[Non-API AI] Could not persist the bridge escalation for '${record.task || 'unknown'}': ${writeError?.message || writeError}`);
+      }
+      if (pendingRequests.get(record.requestId) === record && !record.signal?.aborted) sendRequest(record, 'reissue');
+      return { accepted: false, validationErrors: [message], reason: 'rejection_cap' };
+    }
     // A response-validator failure is a quality correction, not a transport
     // failure. Keep the same request available with no correction-pass budget;
     // a person can cancel it, and phase keeps commit failures distinguishable
     // from ordinary validation failures for callers that enforce save safety.
+    // Only a rule that keeps failing returns the handoff to the person (above).
     // Durable bridge work additionally cools between failed answers. This is
     // intentionally unbounded: each new failed attempt is allowed, but cannot
     // create a zero-delay self-reissue loop or bypass the persisted deadline.
@@ -3050,6 +3191,7 @@ async function acceptNonApiAiResponse(record, args, { transport = 'local' } = {}
         await updateDurableStep(record, {
           status: 'pending', draft: record.initialResponse || '', response: null,
           retryRejectionCount: record.retryRejectionCount, retryNotBefore: record.retryNotBefore,
+          ...bridgeRejectionDurablePatch(record),
         });
       } catch (writeError) {
         // Do not drop a valid correction simply because its pacing checkpoint
@@ -3059,6 +3201,10 @@ async function acceptNonApiAiResponse(record, args, { transport = 'local' } = {}
       }
       if (pendingRequests.get(record.requestId) === record && !record.signal?.aborted) schedulePacedReissue(record, 'reissue');
       return { accepted: false, validationErrors: [message], reason: 'validation', retryAfterMs };
+    }
+    if (cause) {
+      void updateDurableStep(record, bridgeRejectionDurablePatch(record))
+        .catch(writeError => logger.warn(`[Non-API AI] Could not persist bridge rejection causes for '${record.task || 'unknown'}': ${writeError?.message || writeError}`));
     }
     sendRequest(record, 'reissue');
     return { accepted: false, validationErrors: [message], reason: phase === 'validate' ? 'validation' : 'commit_failed' };
@@ -3468,6 +3614,11 @@ export async function submitNonApiAiResponseForBridge({ requestId, handoffCode, 
         retryAfterMs: result.retryAfterMs || 0,
       });
     }
+    // Returned to the person's dock: this chat must stop answering it.
+    case 'rejection_cap': return bridgeOutcome('rejection_cap', {
+      validationCode: SAFE_NON_API_AI_LOG_ERROR_CODES.has(record.validationCode) ? record.validationCode : null,
+      validationDiagnostic: cloneSafeValidationDiagnostic(record.validationDiagnostic),
+    });
     case 'commit_failed': return bridgeOutcome('commit_failed');
     default: return bridgeOutcome('not_pending');
   }

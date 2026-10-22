@@ -1443,7 +1443,7 @@ export default [
         assert(validateTampered(profile, corpus, () => {}).valid, `${c.key}: faithful profile is valid before any ledger edit`);
         const cases = [
           ['a non-skill label that still binds a skill id', [`${flagged(mentionId)}.technologyReferences[0] must not bind skillId for a non-skill disposition.`], p => { ledgerOf(p, mentionId).technologyReferences[0].skillId = practiceRowId; }, mentionId],
-          ['a ledger label the source never states', [`${flagged(mentionId)}.technologyReferences[1].technology is not literally grounded in its cited source segment(s).`, `${flagged(mentionId)} technology ${JSON.stringify(c.nearMiss.sibling)} is not grounded.`], p => {
+          ['a ledger label the source never states', [`${flagged(mentionId)}.technologyReferences[1].technology is not literally grounded in its cited source segment(s). Copy the label exactly, as whole words, from a cited segment (name a demonstrated action by the source's own contiguous wording, never a paraphrase), or drop the label and its technologyReferences record.`, `${flagged(mentionId)} technology ${JSON.stringify(c.nearMiss.sibling)} is not grounded.`], p => {
             const entity = ledgerOf(p, mentionId);
             entity.technologies.push(c.nearMiss.sibling);
             entity.technologyReferences.push({ technology: c.nearMiss.sibling, disposition: 'non-skill', nonSkillReason: 'not stated', relationship: 'independent', relationshipGroup: '', relationshipEvidence: c.mentions[0].text, evidenceSegmentIds: [...entity.evidenceSegmentIds] });
@@ -1467,7 +1467,7 @@ export default [
         assert(validateTampered(projectProfile, projectCorpus, () => {}).valid, `${c.key}: faithful project profile is valid`);
         const projectCases = [
           ['a non-skill project label that still binds a skill id', [`${projectLabel}.technologyReferences[0] must not bind skillId for a non-skill disposition.`], p => { p.projects[0].technologyReferences[0].skillId = practiceRowId; }],
-          ['a project ledger label the source never states', [`${projectLabel}.technologyReferences[1].technology is not literally grounded in its cited source segment(s).`, `${projectLabel} technology ${JSON.stringify(c.nearMiss.sibling)} is not grounded.`], p => {
+          ['a project ledger label the source never states', [`${projectLabel}.technologyReferences[1].technology is not literally grounded in its cited source segment(s). Copy the label exactly, as whole words, from a cited segment (name a demonstrated action by the source's own contiguous wording, never a paraphrase), or drop the label and its technologyReferences record.`, `${projectLabel} technology ${JSON.stringify(c.nearMiss.sibling)} is not grounded.`], p => {
             const entity = p.projects[0];
             entity.technologies.push(c.nearMiss.sibling);
             entity.technologyReferences.push({ technology: c.nearMiss.sibling, disposition: 'non-skill', nonSkillReason: 'not stated', relationship: 'independent', relationshipGroup: '', relationshipEvidence: c.projectMention.text, evidenceSegmentIds: [...entity.evidenceSegmentIds] });

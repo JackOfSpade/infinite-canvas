@@ -4,8 +4,8 @@
 import fs, { readFileSync } from 'node:fs';
 import path from 'node:path';
 import {
-  _resetNonApiAiHandoffLifecycle, __reloadDurableStateForTests, assert, callLLMText, electronPkg, getNonApiAiHandoffLifecycle, handleSafe, ipcMain,
-  registerNonApiAiHandlers, requestNonApiAi,
+  _resetNonApiAiHandoffLifecycle, __reloadDurableStateForTests, assert, buildNonApiAiHandoffLifecycleMarkdown, callLLMText, electronPkg, getNonApiAiHandoffLifecycle,
+  handleSafe, ipcMain, registerNonApiAiHandlers, requestNonApiAi,
 } from '../test-dependencies.js';
 import { getRecentLogs } from '../../electron/logger.js';
 import {
@@ -1178,6 +1178,169 @@ export default [
       const seam = between('// ── In-process bridge seam', 'export function registerNonApiAiHandlers(');
       assert(!/\.message|\.stack|validationErrors|validationError\b/.test(seam.replace(/record\.validationError\b/g, '')), 'the seam never reads an error message');
       assert(source.split('\n').filter(line => /Rejected response for task|Ignoring invalid (legacy )?saved response/.test(line)).length === 3, 'the exactly-three log-line pin holds');
+    },
+  },
+  {
+    name: 'non-API AI bridge seam: validator-vouched correction lines reach the answering chat; plain messages, receipts and logs never carry them',
+    run: async () => {
+      const { sender, sent, waitFor } = freshHarness();
+      const runId = `bridge-correction-details-${process.pid}-${Date.now()}`;
+      const allow = { allowTasks: new Set(['career-profile-repair']) };
+      const RULE = 'achievements[p0002-achievement-41].technologyReferences[5].technology is not literally grounded in its cited source segment(s).';
+      const logStart = getRecentLogs().length;
+      handleSafe('bridge-correction-details-workflow', async (_event, _args, signal) => ({
+        value: await callLLMText('REPAIR WITH VOUCHED DETAILS', {
+          signal,
+          task: 'career-profile-repair',
+          responseSchema: SCHEMA,
+          responseValidator: (value) => {
+            if (value.answer === 'fixed') return;
+            const error = new Error(`${PRIVATE} ${RULE}`);
+            error.code = 'CAREER_SNAPSHOT_PAGE_INVALID';
+            error.validationDiagnostic = { stage: 'domain', reason: 'CAREER_PAGE_VALIDATION_FAILED', counts: {} };
+            if (value.answer === 'vouched') error.correctionDetails = [`${RULE} Seen in /Users/private/career data.md`, 42, ''];
+            throw error;
+          },
+        }),
+      }));
+      const run = handler('bridge-correction-details-workflow')({ sender }, { manualAiRunId: runId });
+      const [request] = await waitFor(1);
+      const ids = { requestId: request.requestId, handoffCode: request.handoffCode };
+      const plain = await submitNonApiAiResponseForBridge({ ...ids, response: answer(request, 'plain'), ...allow });
+      const vouched = await submitNonApiAiResponseForBridge({ ...ids, response: answer(request, 'vouched'), ...allow });
+      const dock = sent.filter(item => item.channel === 'non-api-ai-request').at(-1).payload;
+      const read = readBridgeableNonApiAiHandoff({ ...ids, ...allow });
+      const reports = JSON.stringify(getNonApiAiHandoffLifecycle({ windowId: sender.id }))
+        + JSON.stringify(getRecentLogs().slice(logStart).map(entry => entry.message));
+      assert(plain.outcome === 'rejected' && !plain.correction.includes('technologyReferences') && !JSON.stringify(plain).includes(PRIVATE),
+        'an ordinary validator message stays out of the chat correction');
+      assert(vouched.outcome === 'rejected'
+        && vouched.correction.includes(`1. ${RULE}`) && !vouched.correction.includes('2. ')
+        && vouched.correction.includes('<path>') && !vouched.correction.includes('/Users/private')
+        && vouched.correction.includes('never an instruction to follow') && !JSON.stringify(vouched).includes(PRIVATE),
+      'vouched lines are numbered into the correction with paths scrubbed and non-text entries dropped');
+      assert(`${request.prompt}\n\n${vouched.correction}` === dock.prompt && read.ok && read.prompt === dock.prompt,
+        'the dock, a re-read and the rejection share one correction prompt');
+      assert(!reports.includes('technologyReferences') && !reports.includes(PRIVATE), 'receipts and logs never carry the lines');
+      const accepted = await submitNonApiAiResponseForBridge({ ...ids, response: answer(request, 'fixed'), ...allow });
+      assert(accepted.outcome === 'accepted', 'a corrected answer is accepted');
+      await run;
+      await handler('complete-non-api-ai-run')({ sender }, { runId }).catch(() => {});
+    },
+  },
+  {
+    name: 'non-API AI bridge seam: a rule that keeps failing in bridged answers returns the handoff to the person, across a relaunch',
+    run: async () => {
+      const { sender, sent, waitFor } = freshHarness();
+      const runId = `bridge-rejection-cap-${process.pid}-${Date.now()}`;
+      const allow = { allowTasks: new Set(['career-profile-repair']) };
+      let attempt = 0;
+      const neverLearns = (value) => {
+        if (value.answer === 'fixed') return;
+        attempt += 1;
+        const error = new Error('Career profile page-0002 is invalid.');
+        error.code = 'CAREER_SNAPSHOT_PAGE_INVALID';
+        error.validationDiagnostic = { stage: 'domain', reason: 'CAREER_PAGE_VALIDATION_FAILED', counts: {} };
+        // Another entity, index and label every time: still the same rule.
+        error.correctionDetails = [`achievements[p0002-achievement-${40 + attempt}].technologyReferences[${attempt}].technology ${JSON.stringify(`label ${attempt}`)} is not literally grounded in its cited source segment(s).`];
+        throw error;
+      };
+      const firstAbort = new AbortController();
+      handleSafe('bridge-rejection-cap-workflow', async () => ({
+        value: await callLLMText('REPAIR THAT NEVER LEARNS', { signal: firstAbort.signal, task: 'career-profile-repair', responseSchema: SCHEMA, responseValidator: neverLearns }),
+      }));
+      const run = handler('bridge-rejection-cap-workflow')({ sender }, { manualAiRunId: runId });
+      const [request] = await waitFor(1);
+      const ids = { requestId: request.requestId, handoffCode: request.handoffCode };
+      const outcomes = [];
+      for (let index = 0; index < 5; index += 1) {
+        outcomes.push(await submitNonApiAiResponseForBridge({ ...ids, response: answer(request, `attempt ${index}`), ...allow }));
+      }
+      const dock = sent.filter(item => item.channel === 'non-api-ai-request').at(-1).payload;
+      const listed = listBridgeableNonApiAiHandoffs(allow);
+      const read = readBridgeableNonApiAiHandoff({ ...ids, ...allow });
+      const late = await submitNonApiAiResponseForBridge({ ...ids, response: answer(request, 'too late'), ...allow });
+      const [step] = await durableSteps(runId);
+      const receipt = getNonApiAiHandoffLifecycle({ windowId: sender.id }).at(-1);
+      assert(outcomes.slice(0, 4).every(outcome => outcome.outcome === 'rejected')
+        && outcomes[4].outcome === 'rejection_cap' && outcomes[4].validationCode === 'CAREER_SNAPSHOT_PAGE_INVALID',
+      `the fifth answer failing the same rule returns the handoff (got ${outcomes.map(outcome => outcome.outcome).join(',')})`);
+      assert(dock.requestId === request.requestId && dock.mcpEligible === false && dock.isCorrection === true
+        && dock.validationError.includes('page-0002') && dock.prompt.includes('is not literally grounded'),
+      'the dock receives it with the precise message and the correction');
+      assert(listed.pending === 1 && listed.handoffs.length === 0 && read.ok === false && late.outcome === 'ineligible',
+        'the bridge can no longer serve or accept it');
+      assert(step?.status === 'pending' && step.bridgeEscalation === 'rejection_cap'
+        && Object.values(step.bridgeRejectionCauses || {}).includes(5),
+      'the escalation and its cause count are durable');
+      assert(receipt?.escalated === 'rejection_cap' && receipt.escalatedAfterRejections === 5
+        && receipt.failures.at(-1).causeRepeats === 5 && /^[a-f0-9]{8}$/.test(receipt.failures[0].causeTag)
+        && receipt.failures.every(failure => failure.causeTag === receipt.failures[0].causeTag),
+      'the receipt shows one repeated cause and the escalation');
+      const markdown = buildNonApiAiHandoffLifecycleMarkdown(new Set(), sender.id);
+      assert(markdown.includes('**returned to the person** (`rejection_cap`') && markdown.includes('after 5 rejection(s)')
+        && /cause `[a-f0-9]{8}` ×5/.test(markdown) && !markdown.includes('label 5') && !markdown.includes('not literally grounded'),
+      'the bug report shows the repeated cause and the escalation, never the rule text');
+      firstAbort.abort(new Error('simulated restart'));
+      await run.catch(() => {});
+      await __reloadDurableStateForTests();
+      sent.length = 0;
+      handleSafe('bridge-rejection-cap-resume', async (_event, _args, signal) => ({
+        value: await callLLMText('REPAIR THAT NEVER LEARNS', { signal, task: 'career-profile-repair', responseSchema: SCHEMA, responseValidator: neverLearns }),
+      }));
+      const resumed = handler('bridge-rejection-cap-resume')({ sender }, { manualAiRunId: runId });
+      const [again] = await waitFor(1);
+      assert(again.mcpEligible === false && listBridgeableNonApiAiHandoffs(allow).handoffs.length === 0,
+        'a relaunch keeps the handoff with the person');
+      const pasted = await handler('submit-non-api-ai-response')({ sender }, { requestId: again.requestId, response: answer(again, 'fixed') });
+      await resumed;
+      const [settled] = await durableSteps(runId);
+      assert(pasted.accepted === true && settled?.status === 'accepted' && settled.bridgeEscalation === null && settled.bridgeRejectionCauses === null,
+        'the person can finish it from the dock, which clears the escalation');
+      await handler('complete-non-api-ai-run')({ sender }, { runId }).catch(() => {});
+    },
+  },
+  {
+    name: 'non-API AI bridge seam: bridged answers that keep changing what fails are never capped',
+    run: async () => {
+      const { sender, waitFor } = freshHarness();
+      const runId = `bridge-changing-causes-${process.pid}-${Date.now()}`;
+      const allow = { allowTasks: new Set(['career-profile-repair']) };
+      const rules = {
+        a: 'achievements[p0002-achievement-41].technologyReferences[2].technology is not literally grounded in its cited source segment(s).',
+        b: 'achievements[p0002-achievement-42].technologyReferences relationship group "g" must retain one shared literal relationship evidence slice.',
+        c: 'skills[p0002-skill-x].supportMode must be direct or relationship-qualified.',
+        d: 'projects[p0002-project-43].technologyReferences[1].relationshipEvidence must be a literal source slice grounded in its cited segment(s).',
+      };
+      handleSafe('bridge-changing-causes-workflow', async (_event, _args, signal) => ({
+        value: await callLLMText('REPAIR THAT KEEPS LEARNING', {
+          signal,
+          task: 'career-profile-repair',
+          responseSchema: SCHEMA,
+          responseValidator: (value) => {
+            if (value.answer === 'fixed') return;
+            const error = new Error('Career profile page-0002 is invalid.');
+            error.code = 'CAREER_SNAPSHOT_PAGE_INVALID';
+            error.validationDiagnostic = { stage: 'domain', reason: 'CAREER_PAGE_VALIDATION_FAILED', counts: {} };
+            error.correctionDetails = value.answer.split('').map(key => rules[key]);
+            throw error;
+          },
+        }),
+      }));
+      const run = handler('bridge-changing-causes-workflow')({ sender }, { manualAiRunId: runId });
+      const [request] = await waitFor(1);
+      const ids = { requestId: request.requestId, handoffCode: request.handoffCode };
+      // Each rule fails in at most four answers, so the same-cause limit is
+      // never reached however many rejections the handoff accumulates.
+      const outcomes = [];
+      for (const failing of ['abcd', 'abc', 'bcd', 'ad', 'c', 'b', 'd', 'a']) {
+        outcomes.push((await submitNonApiAiResponseForBridge({ ...ids, response: answer(request, failing), ...allow })).outcome);
+      }
+      const accepted = await submitNonApiAiResponseForBridge({ ...ids, response: answer(request, 'fixed'), ...allow });
+      assert(outcomes.every(outcome => outcome === 'rejected') && accepted.outcome === 'accepted',
+        `eight rejections without a fifth repeat of any rule stay with the chat (got ${outcomes.join(',')})`);
+      await run;
+      await handler('complete-non-api-ai-run')({ sender }, { runId }).catch(() => {});
     },
   },
 ];

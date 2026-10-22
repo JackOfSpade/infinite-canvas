@@ -749,8 +749,9 @@ function hardError(message, code) {
 
 // Domain validation happens inside the same durable Non-API handoff that
 // parsed the JSON.  Keep its correction receipt deliberately data-free: the
-// original source and candidate response are private, while this fixed
-// category is enough to tell the worker exactly which invariant to repair.
+// original source and candidate response are private.  The category selects
+// fixed guidance; the failing rules themselves reach only the answering chat
+// through throwPageValidationError's correctionDetails.
 function careerPageValidationDiagnostic(errors) {
   const text = Array.isArray(errors) ? errors.join('\n') : String(errors || '');
   if (/replacement leaves the assembled canonical career profile unchanged/u.test(text)) {
@@ -1176,7 +1177,7 @@ function validateTechnologyReferences(errors, entity, segments, label, {
       if (segment) evidence.push(segment);
     }
     if (typeof reference.technology === 'string' && reference.technology.trim() && !scalarInEvidence(reference.technology, evidence, { wholeTerm: true })) {
-      errors.push(`${referenceLabel}.technology is not literally grounded in its cited source segment(s).`);
+      errors.push(`${referenceLabel}.technology is not literally grounded in its cited source segment(s). Copy the label exactly, as whole words, from a cited segment (name a demonstrated action by the source's own contiguous wording, never a paraphrase), or drop the label and its technologyReferences record.`);
     }
     if (typeof reference.relationshipEvidence !== 'string' || !reference.relationshipEvidence.trim()
       || !literalSourceSliceInEvidence(reference.relationshipEvidence, evidenceIds, segments)) {
@@ -1229,7 +1230,7 @@ function validateTechnologyReferences(errors, entity, segments, label, {
     const evidence = new Set(members.map(member => normalizeLiteralSourceSlice(member.reference.relationshipEvidence)));
     if (relationships.size !== 1) errors.push(`${label}.technologyReferences relationship group ${JSON.stringify(group)} mixes incompatible relationship classes.`);
     if (relationships.has('alternative') && members.length < 2) errors.push(`${label}.technologyReferences alternative group ${JSON.stringify(group)} needs at least two labels.`);
-    if (members.length > 1 && evidence.size !== 1) errors.push(`${label}.technologyReferences relationship group ${JSON.stringify(group)} must retain one shared literal relationship evidence slice.`);
+    if (members.length > 1 && evidence.size !== 1) errors.push(`${label}.technologyReferences relationship group ${JSON.stringify(group)} must retain one shared literal relationship evidence slice. Give every member the identical relationshipEvidence; to cite a narrower slice for one conditional, optional, or ambiguous label, move that label into its own relationshipGroup (alternatives keep one shared slice).`);
     const sharedEvidence = members[0]?.reference?.relationshipEvidence || '';
     for (const member of members) if (!scalarInEvidence(member.reference.technology, [{ text: sharedEvidence }], { wholeTerm: true })) {
       errors.push(`${member.referenceLabel}.relationshipEvidence does not literally include its grouped technology label.`);
@@ -3161,6 +3162,13 @@ function arrayOrEmpty(value) {
 function throwPageValidationError(page, errors) {
   const error = hardError(`Career profile ${page.id} is invalid: ${errors.slice(0, 12).join(' | ')}`, 'CAREER_SNAPSHOT_PAGE_INVALID');
   error.validationDiagnostic = careerPageValidationDiagnostic(errors);
+  // The category alone cannot say which rule failed: a bridged repair was
+  // rejected 69 times under the catch-all reason with no way to learn the
+  // cause. These lines name only ids, indices, labels and segment ids from
+  // the shard just checked and its own page, which the answering chat already
+  // holds. nonApiAi adds them to that request's correction only; receipts,
+  // logs and reports keep the data-free diagnostic above.
+  error.correctionDetails = errors.slice(0, 12);
   throw error;
 }
 
