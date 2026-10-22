@@ -683,7 +683,7 @@ export function HandoffBridgePanel() {
                               {BRIDGE_UI_COPY.workerState(worker.state, worker.quietReason, worker.launch)}
                             </span>
                             {worker.launch && <span className="basis-full text-sky-100/80">{BRIDGE_UI_COPY.workerLaunch(worker.launch, launchAccountName(activeWorkerPool.generation, worker.ordinal))}</span>}
-                            {worker.launch?.canReveal !== false && (worker.launch?.stage === 'failed' || ['approval_required', 'delivery_timeout', 'conversation_unavailable'].includes(worker.launch?.reason) || worker.state === 'quiet') && (
+                            {worker.launch?.canReveal !== false && (worker.launch?.stage === 'failed' || ['approval_required', 'delivery_timeout', 'conversation_unavailable', 'chat_stopped'].includes(worker.launch?.reason) || worker.state === 'quiet') && (
                               <button type="button" className="rounded border border-amber-300/50 px-2 py-1 text-amber-100"
                                 disabled={activeCopyingWorker !== null} onClick={() => void retryWorkerLaunch(worker.ordinal, true)}>{worker.launch?.reason === 'approval_required' ? 'Open ChatGPT for approval' : 'Open worker chat'}</button>
                             )}

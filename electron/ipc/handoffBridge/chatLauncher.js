@@ -301,8 +301,31 @@ const DIAGNOSE = pluginName => `(() => {
   else if ((lower.includes(plugin) || lower.includes('plugin'))
     && /not connected|not available|cannot find|can't find|don.t have access|not installed|unknown tool|don.t have that tool/i.test(content)) reason = 'plugin_missing';
   else if (/can.t help with this request|violates (?:our )?usage policies|blocked for safety/i.test(content)) reason = 'safety_block';
-  return JSON.stringify({reason, assistantPresent: !!agent});
+  return JSON.stringify({reason, assistantPresent: !!agent, responding});
 })()`;
+// Closes every other tab showing exactly the retiring chat (argv[1] is its
+// id). Tabs of other chats are never touched. Returns only a count.
+const CLOSE_CHAT = `function run(argv) {
+  const chrome = Application(Number(argv[0]));
+  const id = String(argv[1]);
+  const prefix = 'https://chatgpt.com/c/' + id;
+  const matches = url => {
+    if (!url.startsWith(prefix)) return false;
+    const rest = url.slice(prefix.length);
+    return rest === '' || rest === '/' || /^\\/?[?#]/.test(rest);
+  };
+  let closed = 0;
+  for (const w of chrome.windows()) {
+    const tabs = w.tabs();
+    for (let index = tabs.length - 1; index >= 0; index -= 1) {
+      let url = '';
+      try { url = String(tabs[index].url()); } catch (error) { continue; }
+      if (!matches(url)) continue;
+      try { tabs[index].close(); closed += 1; } catch (error) { /* tab already gone */ }
+    }
+  }
+  return String(closed);
+}`;
 
 export function createChatLauncher({ run = runUserChromeScript, delay = sleep, onState = () => {}, now = Date.now } = {}) {
   let windowId = null;
@@ -311,6 +334,8 @@ export function createChatLauncher({ run = runUserChromeScript, delay = sleep, o
   const tabs = new Map();
   const chatIds = new Map();
   const usedIds = new Set();
+  const pendingCloses = [];
+  const MAX_PENDING_CLOSES = 32;
   const state = (owner, stage, reason = null) => { try { onState(owner, stage, reason); } catch { /* status is optional */ } };
   const safeRun = async (script, args) => {
     // Opening a tab can take a while when Chrome is busy or just restarted.
@@ -430,6 +455,16 @@ export function createChatLauncher({ run = runUserChromeScript, delay = sleep, o
       const remaining = 2500 - (now() - lastStart);
       if (remaining > 0) await delay(remaining);
       lastStart = now();
+      await retryPendingCloses();
+      if (!continueChat) {
+        // A fresh chat replaces this owner's previous tab; never orphan it.
+        const prior = tabs.get(owner);
+        chatIds.delete(owner);
+        if (prior) {
+          tabs.delete(owner);
+          await closeTab(prior);
+        }
+      }
       state(owner, 'opening');
       let tab = continueChat ? tabs.get(owner) : null;
       let sendAttempted = false;
@@ -504,13 +539,47 @@ export function createChatLauncher({ run = runUserChromeScript, delay = sleep, o
     if (!outcome.ok) state(owner, 'failed', outcome.reason);
     return outcome;
   };
+  // A close can fail while Chrome is busy. Remember the tab (bounded) and try
+  // again on the next launch/close so a retired chat is not left open.
+  const closeTab = async tab => {
+    try { await safeRun(CLOSE, [tab.windowId, tab.tabId]); return true; } catch {
+      pendingCloses.push({ windowId: tab.windowId, tabId: tab.tabId, chatId: tab.chatId || null });
+      while (pendingCloses.length > MAX_PENDING_CLOSES) pendingCloses.shift();
+      return false;
+    }
+  };
+  const retryPendingCloses = async () => {
+    if (pendingCloses.length === 0) return;
+    const entries = pendingCloses.splice(0, pendingCloses.length);
+    for (const entry of entries) {
+      // A tab that is recorded again (e.g. reopened) is live, never retired.
+      if ([...tabs.values()].some(tab => tab.windowId === entry.windowId && tab.tabId === entry.tabId)) continue;
+      try { await safeRun(CLOSE, [entry.windowId, entry.tabId]); } catch (error) {
+        // Only a busy Chrome is worth retrying; otherwise the tab is gone.
+        if (error?.code === 'chrome_timeout' && pendingCloses.length < MAX_PENDING_CLOSES) pendingCloses.push(entry);
+      }
+    }
+  };
   const close = async owner => {
-    chatIds.delete(owner);
+    await retryPendingCloses();
     const tab = tabs.get(owner);
-    if (!tab) return false;
-    tabs.delete(owner);
-    if (![...tabs.values()].some(item => item.windowId === tab.windowId)) windowId = null;
-    try { await safeRun(CLOSE, [tab.windowId, tab.tabId]); return true; } catch { return false; }
+    const recordedId = chatIds.get(owner) || tab?.chatId || null;
+    chatIds.delete(owner);
+    if (!tab && !recordedId) return false;
+    let closed = false;
+    if (tab) {
+      tabs.delete(owner);
+      if (![...tabs.values()].some(item => item.windowId === tab.windowId)) windowId = null;
+      closed = await closeTab(tab);
+    }
+    // Duplicate tabs of exactly this retiring chat (e.g. reopened by Open),
+    // never while another owner still records the same chat id.
+    if (recordedId && /^[a-zA-Z0-9-]{8,}$/.test(recordedId)
+      && ![...chatIds.values()].includes(recordedId)
+      && ![...tabs.values()].some(item => item.chatId === recordedId)) {
+      try { await safeRun(CLOSE_CHAT, [recordedId]); } catch { /* best effort */ }
+    }
+    return tab ? closed : false;
   };
   const rekey = (before, after) => {
     if ((!tabs.has(before) && !chatIds.has(before)) || tabs.has(after) || chatIds.has(after)) return false;
@@ -520,6 +589,7 @@ export function createChatLauncher({ run = runUserChromeScript, delay = sleep, o
   };
   const closeAll = async () => {
     await sequence;
+    await retryPendingCloses();
     return Promise.all([...new Set([...tabs.keys(), ...chatIds.keys()])].map(close));
   };
   const reveal = async owner => {
@@ -567,8 +637,8 @@ export function createChatLauncher({ run = runUserChromeScript, delay = sleep, o
       if (!tab.chatId || url.match(CHAT_ID)?.[1] !== tab.chatId) return { reason: 'chat_changed', assistantPresent: false };
       const value = JSON.parse(await js(tab, DIAGNOSE(pluginName)));
       return { reason: ['none', 'approval_required', 'delivery_timeout', 'conversation_unavailable', 'reconnect_required', 'usage_limit', 'plugin_missing', 'safety_block'].includes(value?.reason)
-        ? value.reason : 'none', assistantPresent: value?.assistantPresent === true };
-    } catch { return { reason: 'chrome_unavailable', assistantPresent: false }; }
+        ? value.reason : 'none', assistantPresent: value?.assistantPresent === true, responding: value?.responding === true };
+    } catch { return { reason: 'chrome_unavailable', assistantPresent: false, responding: false }; }
   };
   const javascriptReady = async owner => {
     const tab = tabs.get(owner);
@@ -578,5 +648,5 @@ export function createChatLauncher({ run = runUserChromeScript, delay = sleep, o
   return Object.freeze({ launch, close, closeAll, rekey, owns: owner => tabs.has(owner) || chatIds.has(owner),
     focus, reveal, diagnose, javascriptReady, accountName: owner => tabs.get(owner)?.accountName || '',
     observation: owner => tabs.get(owner)?.observed || null,
-    scripts: Object.freeze({ OPEN, EXEC, URL, CLOSE, FOCUS }) });
+    scripts: Object.freeze({ OPEN, EXEC, URL, CLOSE, CLOSE_CHAT, FOCUS }) });
 }

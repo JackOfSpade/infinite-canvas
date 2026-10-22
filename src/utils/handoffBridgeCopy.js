@@ -243,8 +243,9 @@ export const BRIDGE_UI_COPY = Object.freeze({
   })[state] || 'Worker active',
   workerLaunch: (launch, accountName = '') => {
     if (launch?.reason === 'approval_required') return 'Approval needed in ChatGPT. Open this worker’s chat and review the Infinite Canvas tool approval prompt. This chat is being kept open.';
-    if (launch?.reason === 'delivery_timeout') return 'ChatGPT’s response delivery timed out. The bridge will reopen this worker and resume its unfinished handoff after the quiet window.';
-    if (launch?.reason === 'conversation_unavailable') return 'ChatGPT could not load this worker’s conversation. The bridge will reopen it and resume its unfinished handoff after the quiet window.';
+    if (launch?.reason === 'delivery_timeout') return 'ChatGPT’s response delivery timed out. The bridge will reopen this worker and resume its unfinished work automatically.';
+    if (launch?.reason === 'conversation_unavailable') return 'ChatGPT could not load this worker’s conversation. The bridge will reopen this worker and resume its unfinished work automatically.';
+    if (launch?.reason === 'chat_stopped') return 'ChatGPT stopped working in this worker’s chat without reporting an error. The bridge will reopen this worker and resume its unfinished work automatically.';
     if (launch?.stage === 'opening') return 'Opening a new ChatGPT chat…';
     if (launch?.stage === 'checking') return 'Checking ChatGPT model, effort, and sign-in…';
     if (launch?.stage === 'sent') return 'Sent in ChatGPT; waiting for the bridge call…';

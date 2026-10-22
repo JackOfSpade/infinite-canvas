@@ -88,6 +88,10 @@ export const CONSTANTS = Object.freeze({
   TOMBSTONES_PER_ENGINE: 64,
   PUSH_TOMBSTONE_RING: 500,
   STALL_NOTICE_MS: 5 * 60_000,
+  // A chat the UI saw stop (delivery alert, or no active turn) may be
+  // replaced once it has made no bridge call for this long and owns no
+  // unanswered handoff.
+  OBSERVED_FAILURE_SILENCE_MS: 60_000,
   // Ended chats remembered by digest (in memory, and persisted as retired-chats.json
   // so a chat from before a restart still reads as ended). Matches MAX_RETIRED_CHATS
   // in laneStore.js.

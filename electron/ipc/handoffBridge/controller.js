@@ -1921,7 +1921,7 @@ export function createHandoffBridgeController(options = {}) {
     }
     try {
       const result = await call(activeEngine, 'restartWorker', { linkId: currentLinkId(), generation: poolGeneration,
-        workerOrdinal, failedLaunch: args?.failedLaunch === true });
+        workerOrdinal, failedLaunch: args?.failedLaunch === true, observedFailure: args?.observedFailure === true });
       if (!currentRuntime(generation, activeEngine)) return { copied: false, status: 'session_ended' };
       if (result?.copied === true) {
         humanAction();

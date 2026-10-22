@@ -321,6 +321,99 @@ const tests = [
     },
   },
   {
+    name: 'handoff bridge: an observed chat failure restarts only a silent waiting worker that owns no answer',
+    run: async () => {
+      const makeWaiting = async () => {
+        const clock = createFakeClock();
+        const control = { gate: null, result: 'waiting' };
+        const push = {
+          refreshHubs: async () => true,
+          status: () => ({ discovered: [{ tasks: [{ task: 'job-preference-evaluation', pending: 1 }] }], working: 1 }),
+          get: async () => {
+            if (control.gate) await control.gate.promise;
+            return control.result === 'waiting'
+              ? { status: 'waiting', remaining: { ready: 0, working: 1, needsYou: 0 } }
+              : { status: 'needs_user', remaining: { ready: 0, working: 0, needsYou: 1 } };
+          },
+          submit: async () => ({ status: 'unknown_handoff' }),
+          closeEpoch: () => undefined,
+        };
+        const engine = createHandoffEngine({ sources: { application: source().api, push },
+          scope: { applications: false, scoring: true, marketplace: false }, now: clock.now, timers: clock, holdMs: 0 });
+        const pool = await engine.startWorkerPool({ linkId: LINK, requestedWorkers: 1 });
+        const starter = engine.copyWorkerStarter({ linkId: LINK, generation: pool.generation, workerOrdinal: 1 });
+        const restart = (extra = {}) => engine.restartWorker({ linkId: LINK, generation: pool.generation, workerOrdinal: 1, ...extra });
+        const worker = () => engine.snapshot().chat.pool.workers[0];
+        return { engine, clock, control, starter, restart, worker };
+      };
+
+      // A waiting worker: refused under a minute, and never without the flag.
+      {
+        const { engine, clock, starter, restart, worker } = await makeWaiting();
+        assert((await engine.get({ session: starter.sessionCode, linkId: LINK })).status === 'waiting' && worker()?.state === 'waiting',
+          'the worker is polling between handoffs');
+        clock.advance(CONSTANTS.OBSERVED_FAILURE_SILENCE_MS - 1);
+        assert(restart({ observedFailure: true }).status === 'not_quiet', 'a worker that called under a minute ago is not replaced');
+        clock.advance(1);
+        assert(restart().status === 'not_quiet', 'without an observed failure a waiting worker is still not quiet');
+        assert(restart({ failedLaunch: true }).status === 'not_quiet', 'a connected chat is not an unpresented launch failure');
+        const replacement = restart({ observedFailure: true });
+        assert(replacement.copied === true && typeof replacement.sessionCode === 'string' && replacement.sessionCode.length === 26
+          && replacement.sessionCode !== starter.sessionCode, 'a minute of silence plus an observed failure rotates the key');
+        assert(worker()?.state === 'ready' && worker()?.restarts === 1, 'the worker awaits its replacement chat');
+        assert((await engine.get({ session: starter.sessionCode, linkId: LINK })).status === 'session_ended',
+          'the stopped chat is retired on its next call');
+        assert((await engine.get({ session: replacement.sessionCode, linkId: LINK })).status === 'waiting', 'the replacement key works');
+        await engine.close();
+      }
+      // A paused bridge keeps its chats.
+      {
+        const { engine, clock, starter, restart } = await makeWaiting();
+        await engine.get({ session: starter.sessionCode, linkId: LINK });
+        clock.advance(CONSTANTS.OBSERVED_FAILURE_SILENCE_MS + 1);
+        engine.pause();
+        assert(restart({ observedFailure: true }).status === 'not_quiet', 'a paused bridge never replaces a chat');
+        await engine.close();
+      }
+      // A get in flight is live, however long ago it started.
+      {
+        const { engine, clock, control, starter, restart } = await makeWaiting();
+        await engine.get({ session: starter.sessionCode, linkId: LINK });
+        control.gate = deferred();
+        const pending = engine.get({ session: starter.sessionCode, linkId: LINK });
+        await settle();
+        clock.advance(CONSTANTS.OBSERVED_FAILURE_SILENCE_MS + 1);
+        assert(restart({ observedFailure: true }).status === 'not_quiet', 'a chat with a get in flight is never replaced');
+        control.gate.resolve();
+        await pending;
+        await engine.close();
+      }
+      // An idle (stopped) worker is not replaced by an observed failure.
+      {
+        const { engine, clock, control, starter, restart, worker } = await makeWaiting();
+        control.result = 'needs_user';
+        assert((await engine.get({ session: starter.sessionCode, linkId: LINK })).status === 'needs_user' && worker()?.state === 'idle',
+          'the worker was told to stop');
+        clock.advance(CONSTANTS.OBSERVED_FAILURE_SILENCE_MS + 1);
+        assert(restart({ observedFailure: true }).status === 'not_quiet', 'an idle worker is never replaced');
+        await engine.close();
+      }
+      // A worker that owns an unanswered handoff keeps the five-minute rule.
+      {
+        const clock = createFakeClock();
+        const engine = createHandoffEngine({ source: source().api, now: clock.now, timers: clock, holdMs: 0 });
+        await engine.release({ jobs: [{ jobId: JOB_A, canvasFilePath: PATH_A }] });
+        const pool = await engine.startWorkerPool({ linkId: LINK, requestedWorkers: 1 });
+        const starter = engine.copyWorkerStarter({ linkId: LINK, generation: pool.generation, workerOrdinal: 1 });
+        assert((await engine.get({ session: starter.sessionCode, linkId: LINK })).status === 'served', 'the worker owns a handoff');
+        clock.advance(CONSTANTS.OBSERVED_FAILURE_SILENCE_MS + 1);
+        assert(engine.restartWorker({ linkId: LINK, generation: pool.generation, workerOrdinal: 1, observedFailure: true }).status === 'not_quiet',
+          'an answer-owning chat is not replaced by an observed failure before it is quiet');
+        await engine.close();
+      }
+    },
+  },
+  {
     name: 'handoff bridge: keyed fresh-context boundaries separate equal-stage tracks but preserve same-key corrections',
     run: async () => {
       let submissions = 0;

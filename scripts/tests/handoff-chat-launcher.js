@@ -17,6 +17,7 @@ function harness(options = {}) {
   let tick = 0;
   let day = 0;
   let chatOrdinal = 0;
+  let closeFailures = options.closeFailures ?? 0;
   let modelReads = 0;
   let selectedModel = options.model || 'GPT-6';
   let appleEventsEnabled = options.appleEventsOff !== true;
@@ -35,7 +36,11 @@ function harness(options = {}) {
       calls.push({ script, args });
       if (!appleEventsEnabled && script === launcher.scripts.EXEC) throw new Error('JavaScript through AppleScript is turned off');
       if (script === launcher.scripts.OPEN) { chatOrdinal += 1; activeUrl = args[1]; chromeRestarted = false; nativeTabClosed = false; return `100:${199 + chatOrdinal}`; }
-      if (script === launcher.scripts.CLOSE) { nativeTabClosed = options.closeInvalidatesTab === true; return ''; }
+      if (script === launcher.scripts.CLOSE_CHAT) return String(options.duplicateTabs ?? 0);
+      if (script === launcher.scripts.CLOSE) {
+        if (closeFailures > 0) { closeFailures -= 1; throw Object.assign(new Error('Chrome is busy'), { killed: true }); }
+        nativeTabClosed = options.closeInvalidatesTab === true; return '';
+      }
       if (nativeTabClosed) throw new Error('owned tab was closed');
       if (script === launcher.scripts.FOCUS) return 'focused';
       if (script === launcher.scripts.URL) {
@@ -86,6 +91,53 @@ function harness(options = {}) {
   });
   return { launcher, calls, states, setMode: value => { mode = value; }, navigate: url => { activeUrl = url; }, nextDay: () => { day += 1; }, enableAppleEvents: () => { appleEventsEnabled = true; }, restartChrome: () => { chromeRestarted = true; }, recoverChrome: () => { urlReadError = false; } };
 }
+
+const flush = async (turns = 40) => { for (let turn = 0; turn < turns; turn++) await new Promise(resolve => setImmediate(resolve)); };
+
+// A dock with one connected pool worker whose owned tab is diagnosed by a
+// controllable fake. `tick(ms)` advances the clock and fires the 15s
+// observation timer (or republishes status when none is armed).
+function observedWorkerUi({ worker, clock, diagnosis, controller = {} }) {
+  const calls = [];
+  const diagnoses = [];
+  const handlers = new Map();
+  let observationTimer = null;
+  const snapshot = { autoLaunchChats: true, serving: 'live', config: { pluginName: 'Infinite Canvas' },
+    chat: { pool: { active: true, generation: 31, workerCount: 1, workers: [worker] } } };
+  const ui = registerHandoffBridgeUi({
+    ipc: { handle: (key, value) => handlers.set(key, value), removeHandler() {}, on() {}, removeListener() {} },
+    now: () => clock.now,
+    timers: { setTimeout(fn, ms) { if (ms === 15_000) observationTimer = fn; return { unref() {} }; }, clearTimeout() {} },
+    controller: { snapshot: () => snapshot, subscribe: () => () => {},
+      restartWorker: async args => {
+        calls.push(['restart', { ...args }]);
+        worker.firstCallAt = null; worker.lastCallAt = null; worker.state = 'ready'; worker.quietReason = null; worker.restarts++;
+        return { copied: true, sessionCode: '3'.repeat(26), workerCount: 1 };
+      }, ...controller },
+    chatLauncher: { owns: owner => owner === 'worker:31:1',
+      diagnose: async owner => { diagnoses.push(owner); return diagnosis(); },
+      close: async owner => { calls.push(['close', owner]); return true; },
+      launch: async () => {
+        calls.push(['launch']);
+        worker.firstCallAt = clock.now; worker.lastCallAt = clock.now; worker.state = 'waiting';
+        return { ok: true };
+      } },
+    getCanvasWindows: () => [],
+  });
+  const launch = async () => (await handlers.get(IPC_CHANNELS.GET_STATUS)({ sender: { __isCanvasRenderer: true } }))
+    .status.chat.pool.workers[0].launch || null;
+  return { ui, calls, diagnoses, snapshot, launch, armed: () => typeof observationTimer === 'function',
+    publish: async () => { ui.publishStatus(snapshot); await flush(); },
+    tick: async ms => {
+      clock.now += ms;
+      const fire = observationTimer;
+      observationTimer = null;
+      if (fire) fire(); else ui.publishStatus(snapshot);
+      await flush();
+    } };
+}
+const stopped = { reason: 'none', assistantPresent: true, responding: false };
+const responding = { reason: 'none', assistantPresent: true, responding: true };
 
 const starter = 'private-session-code-do-not-log';
 const cases = [
@@ -546,6 +598,11 @@ export default [
     assert.equal(page({ error: 'Message delivery timed out. Please try again.\nRetry' }).reason, 'delivery_timeout');
     assert.equal(page({ conversation: true }).reason, 'conversation_unavailable');
     assert.equal(page({ error: 'Message delivery timed out. Please try again.', stop: true }).reason, 'none');
+    assert.deepEqual(page({ error: 'Message delivery timed out. Please try again.', stop: true }).responding, true);
+    assert.deepEqual(page({ stop: true }), { reason: 'none', assistantPresent: true, responding: true });
+    assert.deepEqual(page({}), { reason: 'none', assistantPresent: true, responding: false }, 'a turn without a Stop control is not responding');
+    assert.equal(page({ error: 'Message delivery timed out. Please try again.\nRetry' }).responding, false);
+    assert.equal(page({ conversation: true }).responding, false);
     assert.equal(page({ error: 'Message delivery timed out. Please try again.', hidden: true }).reason, 'none');
     assert.equal(page({ prose: 'Message delivery timed out. Please try again.' }).reason, 'none');
     assert.equal(page({ error: 'An unrelated alert' }).reason, 'none');
@@ -641,6 +698,183 @@ export default [
     assert.equal((await status()).status.chat.pool.workers[0].launch.reason, null, 'cancellation clears a stale approval alert');
     ui.dispose();
     assert.equal(diagnosisTimerCleared, true, 'disposing the dock stops observation');
+  } },
+  { name: 'chat launcher: a fresh relaunch closes the owner’s previously recorded tab before opening', async run() {
+    const h = harness();
+    assert.equal((await h.launcher.launch({ owner: 'worker:1:1', starter })).ok, true);
+    const before = h.calls.length;
+    assert.equal((await h.launcher.launch({ owner: 'worker:1:1', starter })).ok, true);
+    const later = h.calls.slice(before);
+    const closes = later.map((call, index) => ({ call, index })).filter(({ call }) => call.script === h.launcher.scripts.CLOSE);
+    assert.deepEqual(closes.map(({ call }) => call.args.map(String)), [['100', '200']]);
+    const open = later.findIndex(call => call.script === h.launcher.scripts.OPEN);
+    assert.ok(open > closes[0].index, 'the old tab is closed before the new one opens');
+  } },
+  { name: 'chat launcher: close also closes duplicate tabs of exactly the retiring chat', async run() {
+    const h = harness();
+    await h.launcher.launch({ owner: 'worker:1:1', starter });
+    await h.launcher.launch({ owner: 'worker:1:2', starter });
+    const before = h.calls.length;
+    assert.equal(await h.launcher.close('worker:1:1'), true);
+    const later = h.calls.slice(before);
+    assert.deepEqual(later.filter(call => call.script === h.launcher.scripts.CLOSE).map(call => call.args.map(String)), [['100', '200']]);
+    assert.deepEqual(later.filter(call => call.script === h.launcher.scripts.CLOSE_CHAT).map(call => call.args), [['unique-chat-123']],
+      'only the retiring chat id is scanned for; the other worker’s chat is not');
+    assert.equal(h.launcher.owns('worker:1:2'), true);
+
+    // The JXA scan closes exact matches (with optional slash/query/hash) only.
+    const windows = [['https://chatgpt.com/c/unique-chat-123', 'https://chatgpt.com/c/unique-chat-124', 'https://chatgpt.com/c/unique-chat-123/'],
+      ['https://chatgpt.com/c/unique-chat-1234', 'https://chatgpt.com/c/unique-chat-123?model=x', 'https://chatgpt.com/c/unique-chat-123#end',
+        'https://example.com/c/unique-chat-123', 'https://chatgpt.com/']];
+    const chrome = { windows: () => windows.map(urls => ({ tabs: () => urls.map(url => ({ url: () => url,
+      close: () => urls.splice(urls.indexOf(url), 1) })) })) };
+    let pid = null;
+    const count = runInNewContext(`${h.launcher.scripts.CLOSE_CHAT}\nrun(['42', 'unique-chat-123'])`, { Application: value => { pid = value; return chrome; } });
+    assert.equal(pid, 42);
+    assert.equal(count, '4');
+    assert.deepEqual(windows, [['https://chatgpt.com/c/unique-chat-124'],
+      ['https://chatgpt.com/c/unique-chat-1234', 'https://example.com/c/unique-chat-123', 'https://chatgpt.com/']]);
+  } },
+  { name: 'chat launcher: a close that fails while Chrome is busy is retried on the next launcher call', async run() {
+    const h = harness({ closeFailures: 1 });
+    await h.launcher.launch({ owner: 'worker:1:1', starter });
+    assert.equal(await h.launcher.close('worker:1:1'), false);
+    assert.equal(h.launcher.owns('worker:1:1'), false);
+    const before = h.calls.length;
+    assert.equal((await h.launcher.launch({ owner: 'worker:1:2', starter })).ok, true);
+    const later = h.calls.slice(before);
+    const retry = later.findIndex(call => call.script === h.launcher.scripts.CLOSE);
+    assert.deepEqual(later[retry].args.map(String), ['100', '200']);
+    assert.ok(retry < later.findIndex(call => call.script === h.launcher.scripts.OPEN), 'the retry runs at the start of the launch');
+    assert.equal(later.filter(call => call.script === h.launcher.scripts.CLOSE).length, 1);
+    const settled = h.calls.length;
+    await h.launcher.close('worker:9:9');
+    assert.equal(h.calls.slice(settled).filter(call => call.script === h.launcher.scripts.CLOSE).length, 0, 'a closed tab is not retried again');
+  } },
+  { name: 'chat launcher: a waiting worker with a visible delivery failure and a minute of silence is replaced', async run() {
+    const clock = { now: Date.now() };
+    const worker = { ordinal: 1, state: 'waiting', firstCallAt: clock.now - 600_000, lastCallAt: clock.now - 61_000, restarts: 0 };
+    const h = observedWorkerUi({ worker, clock, diagnosis: () => ({ reason: 'delivery_timeout', assistantPresent: true, responding: false }) });
+    try {
+      await h.publish();
+      assert.deepEqual(h.diagnoses, ['worker:31:1']);
+      assert.deepEqual(h.calls, [['restart', { generation: 31, workerOrdinal: 1, observedFailure: true }], ['close', 'worker:31:1'], ['launch']]);
+    } finally { h.ui.dispose(); }
+  } },
+  { name: 'chat launcher: a waiting worker that polled recently is not diagnosed', async run() {
+    const clock = { now: Date.now() };
+    const worker = { ordinal: 1, state: 'waiting', firstCallAt: clock.now - 600_000, lastCallAt: clock.now - 39_000, restarts: 0 };
+    const h = observedWorkerUi({ worker, clock, diagnosis: () => ({ reason: 'delivery_timeout', assistantPresent: true, responding: false }) });
+    try {
+      await h.publish();
+      assert.deepEqual(h.diagnoses, []);
+      assert.equal(h.armed(), true, 'observation stays armed so the worker is looked at once it is overdue');
+      await h.tick(500);
+      assert.deepEqual(h.diagnoses, []);
+      await h.tick(1_000);
+      assert.deepEqual(h.diagnoses, ['worker:31:1'], 'a poll 40s overdue is looked at without a status change');
+    } finally { h.ui.dispose(); }
+  } },
+  { name: 'chat launcher: a waiting worker silent under a minute is not yet replaced', async run() {
+    const clock = { now: Date.now() };
+    const worker = { ordinal: 1, state: 'waiting', firstCallAt: clock.now - 600_000, lastCallAt: clock.now - 45_000, restarts: 0 };
+    const h = observedWorkerUi({ worker, clock, diagnosis: () => ({ reason: 'delivery_timeout', assistantPresent: true, responding: false }) });
+    try {
+      await h.publish();
+      assert.deepEqual(h.diagnoses, ['worker:31:1']);
+      assert.deepEqual(h.calls, []);
+      assert.equal((await h.launch())?.reason, 'delivery_timeout');
+      await h.tick(16_000);
+      assert.deepEqual(h.calls, [['restart', { generation: 31, workerOrdinal: 1, observedFailure: true }], ['close', 'worker:31:1'], ['launch']]);
+    } finally { h.ui.dispose(); }
+  } },
+  { name: 'chat launcher: two consecutive looks without a Stop control classify the chat as stopped', async run() {
+    const clock = { now: Date.now() };
+    const worker = { ordinal: 1, state: 'working', firstCallAt: clock.now - 600_000, lastCallAt: clock.now - 400_000, restarts: 0 };
+    let next = stopped;
+    const h = observedWorkerUi({ worker, clock, diagnosis: () => next });
+    try {
+      await h.publish();
+      assert.equal((await h.launch())?.reason ?? null, null, 'one look can fall between two polls');
+      next = responding; await h.tick(15_000);
+      assert.equal((await h.launch())?.reason ?? null, null);
+      next = stopped; await h.tick(15_000);
+      assert.equal((await h.launch())?.reason ?? null, null, 'a responding look resets the streak');
+      await h.tick(15_000);
+      assert.deepEqual(await h.launch(), { ...(await h.launch()), stage: 'failed', reason: 'chat_stopped' });
+      await h.tick(15_000);
+      assert.equal((await h.launch()).reason, 'chat_stopped');
+      next = responding; await h.tick(15_000);
+      assert.equal((await h.launch()).reason, null);
+      assert.equal((await h.launch()).stage, 'presented');
+      assert.equal(h.diagnoses.length, 6);
+      assert.deepEqual(h.calls, [], 'a working worker that owns an answer is never replaced by these rules');
+    } finally { h.ui.dispose(); }
+  } },
+  { name: 'chat launcher: a not-responding look never clears a delivery failure', async run() {
+    const clock = { now: Date.now() };
+    const worker = { ordinal: 1, state: 'working', firstCallAt: clock.now - 600_000, lastCallAt: clock.now - 400_000, restarts: 0 };
+    let next = { reason: 'delivery_timeout', assistantPresent: true, responding: false };
+    const h = observedWorkerUi({ worker, clock, diagnosis: () => next });
+    try {
+      await h.publish();
+      assert.equal((await h.launch()).reason, 'delivery_timeout');
+      next = stopped; await h.tick(15_000);
+      assert.equal((await h.launch()).reason, 'delivery_timeout');
+      next = responding; await h.tick(15_000);
+      assert.equal((await h.launch()).reason, null);
+      assert.deepEqual(h.calls, []);
+    } finally { h.ui.dispose(); }
+  } },
+  { name: 'chat launcher: a silent answer-owning chat that stopped is replaced, a responding one never', async run() {
+    {
+      const clock = { now: Date.now() };
+      const worker = { ordinal: 1, state: 'quiet', quietReason: 'answer_silent', firstCallAt: clock.now - 900_000, lastCallAt: clock.now - 400_000, restarts: 0 };
+      const h = observedWorkerUi({ worker, clock, diagnosis: () => stopped });
+      try {
+        await h.publish();
+        assert.deepEqual(h.calls, []);
+        await h.tick(15_000);
+        assert.deepEqual(h.calls, [['restart', { generation: 31, workerOrdinal: 1 }], ['close', 'worker:31:1'], ['launch']]);
+      } finally { h.ui.dispose(); }
+    }
+    for (const [state, quietReason] of [['working', null], ['quiet', 'answer_silent'], ['waiting', null]]) {
+      const clock = { now: Date.now() };
+      const worker = { ordinal: 1, state, quietReason, firstCallAt: clock.now - 900_000, lastCallAt: clock.now - 400_000, restarts: 0 };
+      const h = observedWorkerUi({ worker, clock, diagnosis: () => responding });
+      try {
+        await h.publish();
+        for (let look = 0; look < 4; look++) await h.tick(15_000);
+        assert.equal(h.diagnoses.length, 5, `${state} worker is observed`);
+        assert.deepEqual(h.calls, [], `${state} worker with a visible Stop control is never replaced`);
+      } finally { h.ui.dispose(); }
+    }
+  } },
+  { name: 'chat launcher: idle workers are never diagnosed', async run() {
+    const clock = { now: Date.now() };
+    const worker = { ordinal: 1, state: 'idle', firstCallAt: clock.now - 900_000, lastCallAt: clock.now - 400_000, restarts: 0 };
+    const h = observedWorkerUi({ worker, clock, diagnosis: () => ({ reason: 'delivery_timeout', assistantPresent: true, responding: false }) });
+    try {
+      await h.publish();
+      await h.tick(15_000);
+      await h.tick(15_000);
+      assert.deepEqual(h.diagnoses, []);
+      assert.equal(h.calls.some(([kind]) => kind === 'restart' || kind === 'launch'), false);
+    } finally { h.ui.dispose(); }
+  } },
+  { name: 'chat launcher: a restart whose attachment preparation fails has already closed the old tab', async run() {
+    const clock = { now: Date.now() };
+    const worker = { ordinal: 1, state: 'waiting', firstCallAt: clock.now - 600_000, lastCallAt: clock.now - 61_000, restarts: 0 };
+    const abandoned = [];
+    const h = observedWorkerUi({ worker, clock, diagnosis: () => ({ reason: 'delivery_timeout', assistantPresent: true, responding: false }),
+      controller: { prepareWorkerAttachment: async () => ({ status: 'failed', reason: 'read_error' }),
+        abandonWorkerStarter: async args => { abandoned.push(args.workerOrdinal); } } });
+    try {
+      await h.publish();
+      assert.deepEqual(h.calls, [['restart', { generation: 31, workerOrdinal: 1, observedFailure: true }], ['close', 'worker:31:1']]);
+      assert.deepEqual(abandoned, [1]);
+      assert.equal((await h.launch())?.reason, 'attachment_prepare_read_error');
+    } finally { h.ui.dispose(); }
   } },
   { name: 'chat launcher: restored attachment or failed upload never sends', async run() {
     for (const options of [{ staleAttachment: true }, { uploadFailed: true }]) {

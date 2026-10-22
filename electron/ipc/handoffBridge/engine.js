@@ -4016,15 +4016,24 @@ export function createHandoffEngine({
   // aggregate completion count, and lane/push ownership so a fresh chat can
   // safely re-get the exact outstanding handoff.  The prior key stays in the
   // ended-key ledger and can never authenticate again.
-  function restartWorker({ linkId, generation, workerOrdinal, failedLaunch = false } = {}) {
+  function restartWorker({ linkId, generation, workerOrdinal, failedLaunch = false, observedFailure = false } = {}) {
     if (!epoch?.poolStarted || !Number.isInteger(generation) || generation !== epoch.poolGeneration) return { copied: false, status: 'session_ended' };
     if (typeof linkId !== 'string' || !linkId || !Number.isInteger(workerOrdinal) || workerOrdinal < 1 || workerOrdinal > MAX_WORKER_POOL_SIZE) return { copied: false, status: 'session_ended' };
     const worker = workerForId(epoch, workerId(workerOrdinal));
     if (worker?.retiring === true) return { copied: false, status: 'session_ended' };
     const unpresentedFailure = failedLaunch === true && worker?.starterExported === true
       && worker.presented !== true && worker.firstCallAt == null;
-    if (!worker || (!workerIsQuiet(worker) && !unpresentedFailure)) return { copied: false, status: 'not_quiet' };
+    // The UI saw this chat stop in its tab (a delivery alert, or no active
+    // turn). Accept that only for a connected chat that has been silent for a
+    // minute and owns no unanswered work: an answer-owning chat still needs
+    // the engine's own quiet window.
     const stamp = safeNow(now);
+    const observedStop = observedFailure === true && !!worker && !paused
+      && Number.isFinite(worker.firstCallAt) && worker.getInFlight == null && !(worker.submitInFlight > 0)
+      && worker.idleSince == null && worker.activeTask !== true
+      && !lanes.some(lane => laneAwaitingAnswer(lane, worker))
+      && Number.isFinite(worker.lastCallAt) && stamp - worker.lastCallAt >= CONSTANTS.OBSERVED_FAILURE_SILENCE_MS;
+    if (!worker || (!workerIsQuiet(worker) && !unpresentedFailure && !observedStop)) return { copied: false, status: 'not_quiet' };
     // The live ledger already contains this digest, but stamp it again before
     // dropping the only credential that could authenticate it.
     ledgerAdd(worker.endedDigest, stamp);
