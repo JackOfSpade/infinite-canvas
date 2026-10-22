@@ -39,10 +39,11 @@ export default [
       const run = normalizeClaudeRun({
         status: 'running', stage: 'cover-letter', code: 'C1', message: 'busy', updatedAt: 123, extra: true,
       });
-      assert(JSON.stringify(run) === JSON.stringify({ status: 'running', stage: 'cover-letter', code: 'C1', message: 'busy' }),
-        `unexpected normalized run: ${JSON.stringify(run)}`);
+      assert(JSON.stringify(run) === JSON.stringify({
+        status: 'running', stage: 'cover-letter', code: 'C1', message: 'busy', updatedAt: 123, lastActivityAt: null,
+      }), `unexpected normalized run: ${JSON.stringify(run)}`);
       const bare = normalizeClaudeRun({ status: 'failed' });
-      assert(JSON.stringify(bare) === JSON.stringify({ status: 'failed', stage: '', code: '', message: '' }),
+      assert(JSON.stringify(bare) === JSON.stringify({ status: 'failed', stage: '', code: '', message: '', updatedAt: null, lastActivityAt: null }),
         `missing optional fields become empty strings: ${JSON.stringify(bare)}`);
       for (const status of ['running', 'failed', 'done', 'needs-review', 'bridge', 'invalid']) {
         assert(normalizeClaudeRun({ status })?.status === status, `${status} is a known status`);
@@ -75,6 +76,19 @@ export default [
     },
   },
   {
+    name: 'claude dock: normalizeClaudeRun keeps finite updatedAt/lastActivityAt and nulls bad values',
+    run() {
+      const run = normalizeClaudeRun({ status: 'running', updatedAt: 0, lastActivityAt: 98765 });
+      assert(run.updatedAt === 0, `updatedAt ${run.updatedAt}`);
+      assert(run.lastActivityAt === 98765, `lastActivityAt ${run.lastActivityAt}`);
+      for (const bad of [NaN, -1, Infinity, '123', null, undefined, {}]) {
+        const out = normalizeClaudeRun({ status: 'running', updatedAt: bad, lastActivityAt: bad });
+        assert(out.updatedAt === null, `updatedAt ${String(bad)} -> ${out.updatedAt}`);
+        assert(out.lastActivityAt === null, `lastActivityAt ${String(bad)} -> ${out.lastActivityAt}`);
+      }
+    },
+  },
+  {
     name: 'claude dock: applicationDockRequest carries the stored runner state, or null when absent',
     run() {
       __resetClaudeApplicationRunsForTests();
@@ -89,7 +103,9 @@ export default [
         assert(running.claudeRun?.status === 'running', `expected running, got ${JSON.stringify(running.claudeRun)}`);
         assert(running.claudeRun.stage === 'resume', 'stage carried through');
         assert(running.claudeRun.message.length === 400, 'the stored message is clipped');
-        assert(!('updatedAt' in running.claudeRun), 'only normalized fields reach the dock item');
+        assert(JSON.stringify(Object.keys(running.claudeRun)) === JSON.stringify(['status', 'stage', 'code', 'message', 'updatedAt', 'lastActivityAt']),
+          `only normalized fields reach the dock item: ${JSON.stringify(Object.keys(running.claudeRun))}`);
+        assert(running.claudeRun.updatedAt === 1 && running.claudeRun.lastActivityAt === null, 'timestamps are normalized');
         // The pre-existing fields are untouched by the new key.
         assert(running.jobId === 'job-1' && running.prompt === 'Write the résumé.' && running.kind === 'application',
           'existing request fields are unchanged');

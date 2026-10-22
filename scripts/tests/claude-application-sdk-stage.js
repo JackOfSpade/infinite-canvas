@@ -481,4 +481,37 @@ export default [
       assert.equal('result' in error, false);
     },
   },
+  {
+    name: 'claude SDK: requests partial messages and reports activity once per yielded message',
+    async run() {
+      const streamEvent = { type: 'stream_event', event: { type: 'content_block_delta', delta: { type: 'text_delta', text: 'IGNORED' } } };
+      const fake = fakeQuery([streamEvent, streamEvent, assistant(), streamEvent, result()]);
+      let activity = 0;
+      const value = await stage(fake.queryImpl, { onActivity: () => { activity += 1; } });
+      assert.equal(fake.calls[0].options.includePartialMessages, true);
+      assert.equal(activity, 5);
+      assert.deepEqual(value, { text: 'answer', model: SONNET, durationMs: 42, summaryCount: 0, summaryChars: 0, thinkingDisplay: 'summarized' });
+    },
+  },
+  {
+    name: 'claude SDK: a throwing onActivity does not change the stage result',
+    async run() {
+      const streamEvent = { type: 'stream_event', event: { type: 'message_start' } };
+      const fake = fakeQuery([streamEvent, assistant(), result()]);
+      let calls = 0;
+      const value = await stage(fake.queryImpl, { onActivity: () => { calls += 1; throw new Error('ui gone'); } });
+      assert.equal(calls, 3);
+      assert.deepEqual(value, { text: 'answer', model: SONNET, durationMs: 42, summaryCount: 0, summaryChars: 0, thinkingDisplay: 'summarized' });
+    },
+  },
+  {
+    name: 'claude SDK: large stream_event text neither changes the answer nor counts toward the cap',
+    async run() {
+      const big = 'y'.repeat(9 * 1024 * 1024);
+      const streamEvent = { type: 'stream_event', event: { type: 'content_block_delta', delta: { type: 'text_delta', text: big } } };
+      const fake = fakeQuery([streamEvent, streamEvent, assistant(), result()]);
+      const value = await stage(fake.queryImpl);
+      assert.equal(value.text, 'answer');
+    },
+  },
 ];

@@ -44,6 +44,7 @@ export async function runClaudeSdkStage({
   queryImpl = null,
   timeoutMs = CLAUDE_STAGE_TIMEOUT_MS,
   onThinkingSummary = async () => {},
+  onActivity = () => {},
   setTimeoutImpl = globalThis.setTimeout,
   clearTimeoutImpl = globalThis.clearTimeout,
 } = {}) {
@@ -129,6 +130,9 @@ export async function runClaudeSdkStage({
         settingSources: [],
         persistSession: true,
         maxTurns: 1,
+        // Partial stream events are a liveness signal only; they fall through
+        // every branch below and are never counted or logged.
+        includePartialMessages: true,
         systemPrompt: { type: 'preset', preset: 'claude_code', append: CLAUDE_HANDOFF_SYSTEM_PROMPT },
         extraArgs: { restricted: null },
         ...(sessionId ? (resume ? { resume: sessionId } : { sessionId }) : {}),
@@ -143,6 +147,8 @@ export async function runClaudeSdkStage({
       if (item.done) break;
       const message = item.value;
       if (!message || typeof message !== 'object') continue;
+      // Never awaited: activity reporting must not fail or slow a stage.
+      try { if (typeof onActivity === 'function') onActivity(); } catch { /* liveness only */ }
 
       if (message.type === 'assistant' && !message.parent_tool_use_id && !message.agent_id) {
         // SDK modelUsage also includes auxiliary calls. Only main assistant

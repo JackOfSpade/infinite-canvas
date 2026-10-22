@@ -1,5 +1,5 @@
 import { assert } from './testHelpers.js';
-import { deriveClaudeJobProgress } from '../../src/utils/claudeJobProgress.js';
+import { CLAUDE_PROGRESS_COPY, claudeProgressTimeLines, deriveClaudeJobProgress } from '../../src/utils/claudeJobProgress.js';
 import { deriveBridgeJobProgress } from '../../src/utils/bridgeJobProgress.js';
 import { applicationStageLabel } from '../../src/utils/applicationHandoffDock.js';
 
@@ -119,6 +119,54 @@ export default [
         sameSteps(view.steps, all, `malformed ${json(input)}`);
         assert(view.headline === 'Claude is working on this', `headline ${view.headline}`);
         assert(view.tone === 'working', `tone ${view.tone}`);
+      }
+    },
+  },
+  {
+    name: 'claude progress: lastHeard comes from run.lastActivityAt and rejects bad values',
+    run() {
+      const heard = deriveClaudeJobProgress({ run: { ...running('resume', 1000), lastActivityAt: 4321 } });
+      assert(heard.lastHeard === 4321, `lastHeard ${heard.lastHeard}`);
+      const fixing = deriveClaudeJobProgress({ run: { ...running('resume', 1000), lastActivityAt: 0 }, item: { corrections: ['x'] } });
+      assert(fixing.kind === 'claude-fixing' && fixing.lastHeard === 0, `fixing lastHeard ${fixing.lastHeard}`);
+      for (const bad of [-5, NaN, Infinity, '4321', null, undefined]) {
+        const value = deriveClaudeJobProgress({ run: { ...running('resume', 1000), lastActivityAt: bad } }).lastHeard;
+        assert(value === null, `${String(bad)} should give null lastHeard, got ${value}`);
+      }
+    },
+  },
+  {
+    name: 'claude progress: time lines show Elapsed and Last heard from Claude together while writing',
+    run() {
+      const view = deriveClaudeJobProgress({ run: { ...running('resume', 100000), lastActivityAt: 148000 } });
+      const lines = claudeProgressTimeLines(view, 160000);
+      assert(lines.elapsed === 'Elapsed: 1 min', `elapsed ${lines.elapsed}`);
+      assert(lines.heard === 'Last heard from Claude 12s ago', `heard ${lines.heard}`);
+      assert(CLAUDE_PROGRESS_COPY.lastHeard('x') === 'Last heard from Claude x', 'copy');
+    },
+  },
+  {
+    name: 'claude progress: heard is "just now" under 2 s and clamps future activity',
+    run() {
+      const view = deriveClaudeJobProgress({ run: { ...running('resume', 1000), lastActivityAt: 10000 } });
+      assert(claudeProgressTimeLines(view, 11999).heard === 'Last heard from Claude just now', 'under 2 s');
+      assert(claudeProgressTimeLines(view, 12000).heard === 'Last heard from Claude 2s ago', 'at 2 s');
+      assert(claudeProgressTimeLines(view, 5000).heard === 'Last heard from Claude just now', 'future activity clamps to 0');
+      assert(claudeProgressTimeLines(view, 11999).elapsed === 'Elapsed: 10s', 'elapsed alongside');
+    },
+  },
+  {
+    name: 'claude progress: notHeardYet with only since; nothing when both are unknown',
+    run() {
+      const onlySince = claudeProgressTimeLines(deriveClaudeJobProgress({ run: running('resume', 1000) }), 31000);
+      assert(onlySince.elapsed === 'Elapsed: 30s', `elapsed ${onlySince.elapsed}`);
+      assert(onlySince.heard === 'Nothing heard from Claude yet in this step', `heard ${onlySince.heard}`);
+      assert(onlySince.heard === CLAUDE_PROGRESS_COPY.notHeardYet, 'uses the copy constant');
+      const none = claudeProgressTimeLines(deriveClaudeJobProgress({ run: running('resume', null) }), 31000);
+      assert(none.elapsed === null && none.heard === null, `both null, got ${json(none)}`);
+      for (const bad of [undefined, null, 42, 'x']) {
+        const out = claudeProgressTimeLines(bad, 1000);
+        assert(out.elapsed === null && out.heard === null, `malformed view ${json(bad)}`);
       }
     },
   },

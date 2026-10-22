@@ -60,6 +60,8 @@ export const CLAUDE_STAGE_TIMEOUT_MS = 45 * 60_000;
 export const CLAUDE_HANDOFF_SYSTEM_PROMPT = 'You are answering a structured handoff from a desktop application. When the message asks for a JSON object, reply with only that JSON object, optionally inside one json code fence, with no text before or after it. When it asks for plain text, reply with only the requested text.';
 export const CLAUDE_RUNNER_CONCURRENCY = 3;
 export const CLAUDE_MAX_RUNS_PER_JOB = 120;
+// Activity-only state updates (stream liveness) reach the UI at most this often per job.
+export const CLAUDE_ACTIVITY_EMIT_INTERVAL_MS = 5000;
 
 const OUTPUT_CAP_BYTES = 16 * 1024 * 1024;
 const KILL_GRACE_MS = 5000;
@@ -463,14 +465,14 @@ function chooseText(handoff) {
 
 function createProductionRunStage({ workspaceDir, fsImpl }) {
   let bound = null;
-  return async ({ text, pageImages, signal, stage, sessionId, resume, onThinkingSummary }) => {
+  return async ({ text, pageImages, signal, stage, sessionId, resume, onThinkingSummary, onActivity }) => {
     if (!bound) {
       if (workspaceDir) await fsImpl.mkdir(workspaceDir, { recursive: true });
       const binary = resolveClaudeBinary({ env: process.env, homedir: os.homedir() });
       bound = { binary, env: claudeChildEnv(process.env, path.dirname(binary)), cwd: workspaceDir || os.tmpdir() };
     }
     const { runClaudeSdkStage } = await import('./claudeApplicationSdkStage.js');
-    return runClaudeSdkStage({ text, pageImages, signal, sessionId, resume, onThinkingSummary, ...bound, ...claudeStageProfile(stage) });
+    return runClaudeSdkStage({ text, pageImages, signal, sessionId, resume, onThinkingSummary, onActivity, ...bound, ...claudeStageProfile(stage) });
   };
 }
 
@@ -560,6 +562,8 @@ export function createClaudeApplicationRunner({
   const stageRunner = typeof runStage === 'function' ? runStage : createProductionRunStage({ workspaceDir, fsImpl });
   const semaphore = createSemaphore(concurrency);
   const states = new Map();
+  // jobId -> time of the last activity-only emit (never part of a state).
+  const activityEmits = new Map();
   const drivers = new Map();
   // jobId -> Map(laneKey -> { sessionId, started, contextKey, stage }); laneKey is 'main' or a matchTaskId.
   const sessions = new Map();
@@ -678,13 +682,28 @@ export function createClaudeApplicationRunner({
       updatedAt: now(),
     };
     states.set(jobId, state);
+    activityEmits.delete(jobId);
     emit({ ...state });
     return state;
+  }
+
+  // Liveness from the provider stream. updatedAt stays the stage start (it
+  // drives the Elapsed clock); only lastActivityAt moves, emitted throttled.
+  function touchActivity(jobId) {
+    const state = states.get(jobId);
+    if (!state || state.status !== 'running') return;
+    const at = now();
+    state.lastActivityAt = at;
+    const last = activityEmits.get(jobId);
+    if (last !== undefined && at - last < CLAUDE_ACTIVITY_EMIT_INTERVAL_MS) return;
+    activityEmits.set(jobId, at);
+    emit({ ...state });
   }
 
   function removeState(jobId, canvasFilePath) {
     const previous = states.get(jobId);
     states.delete(jobId);
+    activityEmits.delete(jobId);
     emit({ jobId, canvasFilePath: previous?.canvasFilePath ?? canvasFilePath, status: 'done', stage: previous?.stage ?? null, updatedAt: now() });
   }
 
@@ -814,6 +833,7 @@ export function createClaudeApplicationRunner({
         try {
           const result = await stageRunner({
             text, pageImages, signal, stage, sessionId, resume, model: profile.model, effort: profile.effort,
+            onActivity: () => touchActivity(jobId),
             onThinkingSummary: summary => {
               if (!acceptingSummaries) return Promise.reject(new ClaudeRunnerError('CLAUDE_LOG_ERROR', 'Claude returned a diagnostic summary after its run had ended.'));
               const write = summaryChain.then(async () => {

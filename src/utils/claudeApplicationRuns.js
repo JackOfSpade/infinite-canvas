@@ -13,6 +13,7 @@ export const CLAUDE_RUN_STATUSES = Object.freeze([
 const MESSAGE_LIMIT = 400;
 
 const optionalString = (value) => (typeof value === 'string' && value ? value : '');
+const optionalTime = (value) => (typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : null);
 
 /**
  * Pure: the subset of a runner state the dock renders, or null for anything
@@ -27,6 +28,8 @@ export function normalizeClaudeRun(state) {
     stage: optionalString(state.stage),
     code: optionalString(state.code),
     message: optionalString(state.message).slice(0, MESSAGE_LIMIT),
+    updatedAt: optionalTime(state.updatedAt),
+    lastActivityAt: optionalTime(state.lastActivityAt),
   };
 }
 

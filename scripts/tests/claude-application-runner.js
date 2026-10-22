@@ -6,6 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import {
   answeringModel,
+  CLAUDE_ACTIVITY_EMIT_INTERVAL_MS,
   CLAUDE_HANDOFF_SYSTEM_PROMPT,
   CLAUDE_MAX_RUNS_PER_JOB,
   CLAUDE_STAGE_PROFILES,
@@ -1389,6 +1390,82 @@ export default [
         for (const row of group) assert.deepEqual([row.stage, row.requestedModel, row.requestedEffort], [stage, model, effort]);
       }
       assert.equal(new Set(rows.map(row => row.runId)).size, 2);
+    },
+  },
+  {
+    name: 'claude runner activity: onActivity emits lastActivityAt throttled per job, keeping updatedAt as the stage start',
+    async run() {
+      assert.equal(CLAUDE_ACTIVITY_EMIT_INTERVAL_MS, 5000);
+      const script = scriptedApi([{ handoffCode: 'code-1', stage: 'draft', prompt: 'prompt one' }]);
+      let clock = 1000;
+      const notes = [];
+      let savedActivity = null;
+      let stageStart = null;
+      const runner = createClaudeApplicationRunner({
+        api: script.api, stateFile: tempStateFile(), logger: quietLogger(), homedir: '',
+        now: () => clock,
+        notify: n => notes.push({ ...n }),
+        runStage: async ({ onActivity }) => {
+          savedActivity = onActivity;
+          stageStart = notes.filter(n => n.status === 'running' && n.stage === 'draft').at(-1).updatedAt;
+          clock = 3000; onActivity();
+          clock = 4000; onActivity();
+          clock = 7999; onActivity();
+          clock = 8000; onActivity();
+          return { text: 'answer' };
+        },
+      });
+      runner.ensure({ jobId: 'job-activity', canvasFilePath: '/c.canvas' });
+      await waitFor(() => runner.status(['job-activity'])['job-activity']?.status === 'done', 'done');
+      assert.equal(stageStart, 1000);
+      const activity = notes.filter(n => 'lastActivityAt' in n);
+      assert.deepEqual(activity.map(n => [n.status, n.stage, n.updatedAt, n.lastActivityAt]), [
+        ['running', 'draft', 1000, 3000],
+        ['running', 'draft', 1000, 8000],
+      ]);
+      const before = notes.length;
+      clock = 20000;
+      savedActivity();
+      assert.equal(notes.length, before, 'activity after the job left running emits nothing');
+      await runner.shutdown();
+    },
+  },
+  {
+    name: 'claude runner activity: a new stage drops lastActivityAt and the persisted failure has none',
+    async run() {
+      const stateFile = tempStateFile();
+      const script = scriptedApi([{ handoffCode: 'code-1', stage: 'draft', prompt: 'prompt one' }]);
+      let clock = 500;
+      const notes = [];
+      let savedActivity = null;
+      const runner = createClaudeApplicationRunner({
+        api: script.api, stateFile, logger: quietLogger(), homedir: '',
+        now: () => clock,
+        notify: n => notes.push({ ...n }),
+        runStage: async ({ onActivity }) => {
+          savedActivity = onActivity;
+          clock = 900; onActivity();
+          throw new ClaudeRunnerError('CLAUDE_USAGE_LIMIT', USAGE_MESSAGE);
+        },
+      });
+      runner.ensure({ jobId: 'job-activity-fail', canvasFilePath: '/c.canvas' });
+      await waitFor(() => runner.status(['job-activity-fail'])['job-activity-fail']?.status === 'failed', 'failed');
+      assert.deepEqual(notes.filter(n => 'lastActivityAt' in n).map(n => [n.status, n.lastActivityAt]), [['running', 900]]);
+      const failedNote = notes.at(-1);
+      assert.equal(failedNote.status, 'failed');
+      assert.equal('lastActivityAt' in failedNote, false);
+      assert.equal('lastActivityAt' in runner.status(['job-activity-fail'])['job-activity-fail'], false);
+      const before = notes.length;
+      savedActivity();
+      assert.equal(notes.length, before, 'a failed job ignores activity');
+      await waitFor(() => {
+        try { return JSON.parse(fs.readFileSync(stateFile, 'utf8')).failed?.['job-activity-fail']?.status === 'failed'; } catch { return false; }
+      }, 'persisted failure');
+      await runner.shutdown();
+      const persisted = JSON.parse(fs.readFileSync(stateFile, 'utf8')).failed['job-activity-fail'];
+      assert.equal('lastActivityAt' in persisted, false);
+      assert.equal(persisted.code, 'CLAUDE_USAGE_LIMIT');
+      assert.equal(persisted.updatedAt, 900);
     },
   },
 ];
