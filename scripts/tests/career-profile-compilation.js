@@ -23,6 +23,7 @@ import {
   CAREER_SNAPSHOT_SEGMENT_POLICY,
   CAREER_PROFILE_COMPILE_SCHEMA,
   CAREER_PROFILE_PAGE_SCHEMA,
+  __ownedDeterministicFindingsForTests,
   __setCareerSnapshotReadHookForTests,
   careerDataFromCareerSnapshot,
   careerAttachmentRegionPartPageId,
@@ -244,6 +245,23 @@ function crossPageShard(corpus, pageIndex, { changedRole = false } = {}) {
 }
 
 export default [
+  {
+    name: 'career snapshot: a deterministic finding goes to the page that owns its cited segment, not to the page whose id a merged skill kept',
+    run: () => {
+      const pages = [
+        { index: 0, segmentIds: ['segment-0001', 'segment-0002'] },
+        { index: 1, segmentIds: ['segment-0003', 'segment-0004'] },
+      ];
+      const owners = detail => __ownedDeterministicFindingsForTests([detail], 0, pages).map(finding => finding.pageIndex);
+      // Page two's evidence was reconciled into page one's skill id; only page two can reread segment-0004.
+      const merged = owners('skills[p0001-skill-react].directEvidenceSegmentIds segment-0004 shares relationship-qualified evidence but has no whole-term skill occurrence outside every literal relationshipEvidence slice.');
+      assert(merged.length === 1 && merged[0] === 1, `a merged skill's foreign-page evidence finding is owned by the evidence page only (got ${merged})`);
+      const entityOnly = owners('roles[p0001-role-acme].skillIds links skill p0002-skill-react whose roleIds omit p0001-role-acme.');
+      assert(entityOnly.length === 2 && entityOnly.includes(0) && entityOnly.includes(1), 'with no cited segment, every named entity page still owns the finding');
+      const duplicate = owners('skills[p0002-skill-react].name duplicates the Unicode/case-insensitive skill name used by skills[p0001-skill-react].');
+      assert(duplicate.length === 1 && duplicate[0] === 1, 'a duplicate-name finding stays with the redundant row');
+    },
+  },
   {
     name: 'career snapshot: segmentation is bounded, stable, and losslessly reconstructs the supplied corpus',
     run: () => {
@@ -1870,9 +1888,8 @@ export default [
     name: 'career snapshot: an unreconcilable same-name skill is repaired by the one page whose row is redundant, never by the page whose row is correct',
     run: async () => {
       // Each case differs in exactly one governing fact between two pages naming the same skill. The row to change is the
-      // later one for a wording/eligibility difference, and the relationship-qualified one wherever it sits.
+      // relationship-qualified one wherever it sits. (A category wording difference is not governing: it merges.)
       const cases = [
-        { name: 'category wording', pages: [{ category: 'language' }, { category: 'scripting' }], redundantPage: 1 },
         { name: 'direct, then qualified', pages: [{}, { mode: 'relationship-qualified' }], redundantPage: 1 },
         { name: 'qualified, then direct', pages: [{ mode: 'relationship-qualified' }, {}], redundantPage: 0 },
       ];

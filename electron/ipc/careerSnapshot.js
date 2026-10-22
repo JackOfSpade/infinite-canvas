@@ -3414,9 +3414,16 @@ function canonicalMetric(value) {
 // direct record must never be merged with a relationship-qualified one and
 // thereby make a choice/condition look like standalone experience.
 //
-// Records that are NOT reconcilable (a different free-text category wording, a
-// direct use on one page and a qualified use on another) stay as two same-name
-// rows and surface as a duplicate-name finding. That finding is owned by the
+// The free-text category and the capabilityKind are organizing labels, not
+// eligibility: pages pick them independently (a Skills-section heading vs. a
+// later project's own wording), so they never block a merge and the earlier
+// page's values are kept. Deleting the
+// later page's row instead left that page's role/segments unlinked, and its own
+// audit re-demanded the skill every round until the compile stopped.
+//
+// Records that are NOT reconcilable (a direct use on one page and a qualified
+// use on another) stay as two same-name rows and surface as a duplicate-name
+// finding. That finding is owned by the
 // one page whose row is the redundant one (see duplicateSkillNameOwnerLabel and
 // ownedDeterministicFindings), so a faithful repair of that page converges
 // instead of demanding a spurious edit from the page whose row is correct.
@@ -3432,7 +3439,9 @@ function sameSkillSupportSemantics(left, right) {
   // a mixed old/new pair silently reconcile.
   if (!leftCurrent && !rightCurrent) return true;
   if (!leftCurrent || !rightCurrent) return false;
-  return left.capabilityKind === right.capabilityKind && left.supportMode === right.supportMode;
+  // capabilityKind, like category, is a classification label each page picks
+  // independently; the earlier page's value is kept on merge.
+  return left.supportMode === right.supportMode;
 }
 
 function mergePagePatch(target, patch, kind) {
@@ -3562,8 +3571,7 @@ function mergeCareerProfilePageResult(pageProfiles) {
   });
   reconcileCompatibleEntities(profile, 'skills', reconciliation.skillMerges, {
     key: skill => canonicalEntityField(skill.name),
-    matches: (left, right) => left.category === right.category
-      && left.indexEligible === right.indexEligible
+    matches: (left, right) => left.indexEligible === right.indexEligible
       && sameSkillSupportSemantics(left, right),
     merge: (left, right) => {
       left.evidenceSegmentIds = stableUnique([...left.evidenceSegmentIds, ...right.evidenceSegmentIds]);
@@ -3718,9 +3726,16 @@ function ownedDeterministicFindings(errors, round, pages) {
         const index = pageForSegment(segmentId);
         if (index != null) targets.add(index);
       }
-      for (const entityId of String(detail).match(/p[0-9]{4,}-[a-z0-9-]+/gu) || []) {
-        const index = pageNumberFromEntityId(entityId);
-        if (index != null && pages[index]) targets.add(index);
+      // A cited segment names the source text being misread, and only its own
+      // page can reinterpret it. An entity id alone is not ownership: a skill
+      // reconciled across pages keeps the earlier page's id while carrying a
+      // later page's evidence, and sending that page the finding would demand
+      // a spurious edit of a row it cannot fix.
+      if (!targets.size) {
+        for (const entityId of String(detail).match(/p[0-9]{4,}-[a-z0-9-]+/gu) || []) {
+          const index = pageNumberFromEntityId(entityId);
+          if (index != null && pages[index]) targets.add(index);
+        }
       }
     }
     // A schema-wide invariant may not name an entity/segment. Repeat one
@@ -3737,6 +3752,8 @@ function ownedDeterministicFindings(errors, round, pages) {
   }
   return findings;
 }
+
+export const __ownedDeterministicFindingsForTests = ownedDeterministicFindings;
 
 function ownedDeterministicFindingsForPage(errors, round, page, pages) {
   return ownedDeterministicFindings(errors, round, pages)
@@ -4549,7 +4566,7 @@ function validateReconciliationReceipt(value, profile) {
     // semantics match. This receipt prevents a later host change from
     // silently erasing a direct-vs-qualified distinction.
     ['skillMerges', 'skills', (from, target) => canonicalEntityField(from.name) === canonicalEntityField(target.name)
-      && from.category === target.category && from.indexEligible === target.indexEligible
+      && from.indexEligible === target.indexEligible
       && sameSkillSupportSemantics(from, target)
       && arrayOrEmpty(from.roleIds).every(id => target.roleIds.includes(id))
       && arrayOrEmpty(from.directEvidenceSegmentIds).every(id => arrayOrEmpty(target.directEvidenceSegmentIds).includes(id))

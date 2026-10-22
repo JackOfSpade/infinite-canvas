@@ -1147,7 +1147,7 @@ export default [
     },
   },
   {
-    name: 'adaptability skills: a skill spelled in another case on a later source page merges into one canonical skill; an incompatible duplicate is refused rather than doubled',
+    name: 'adaptability skills: a skill spelled in another case or labeled differently on a later source page merges into one canonical skill; an ineligible duplicate is refused rather than doubled',
     run: async () => {
       for (const c of CANDIDATES) {
         const practice = c.practice.uses[0];
@@ -1200,12 +1200,23 @@ export default [
         assert(inventoryNames(view).vetted.size === 1, `${c.key}: exactly one ATS keyword results`);
         expectAdmission(view, practice.name, true, `${c.key} merged`);
 
-        // Incompatible same-name rows are never silently doubled into two keywords. Each variant
-        // differs from the compatible control above in exactly one eligibility-governing field.
+        // Category and capability kind are labels each page picks on its own: a later page
+        // wording them differently still merges, keeping the earlier page's labels.
         const otherKind = practice.kind === 'capability' ? 'method' : 'capability';
-        const incompatible = [
+        for (const [kind, shard] of [
           ['category', pageTwoShard(practice.name.toLowerCase(), `${practice.category} (alternate classification)`)],
           ['capability kind', pageTwoShard(practice.name.toLowerCase(), practice.category, { capabilityKind: otherKind })],
+        ]) {
+          const relabeled = await compilePaged(shard);
+          const rows = relabeled.profile.skills.filter(skill => canon(skill.name) === canon(practice.name));
+          assert(rows.length === 1 && rows[0].category === practice.category && rows[0].capabilityKind === practice.kind
+            && relabeled.snapshot.reconciliation.skillMerges.length === 1,
+          `${c.key}: a later page's different ${kind} merges into the earlier page's skill and keeps its labels`);
+        }
+
+        // Incompatible same-name rows are never silently doubled into two keywords. The variant
+        // differs from the compatible control above in one eligibility-governing field.
+        const incompatible = [
           ['index eligibility', pageTwoShard(practice.name.toLowerCase(), practice.category, { indexEligible: false })],
         ];
         for (const [kind, shard] of incompatible) {
