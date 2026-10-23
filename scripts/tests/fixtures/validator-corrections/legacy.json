@@ -1,0 +1,184 @@
+{
+  "scoring strict": {
+    "message": "Invalid job-scoring response: rows at index 0, 1, 2 must contain grounded requirement evidence supported by the supplied candidate and job text; resolve each requirement once, and give distinct requirements different shortest verbatim jobEvidence spans instead of reusing a compound sentence.",
+    "code": "VALIDATION_FAILED",
+    "diagnostic": null
+  },
+  "scoring structural": {
+    "message": "Invalid job-scoring response: duplicate indexes: 0; invalid indexes: 9.",
+    "code": "VALIDATION_FAILED",
+    "diagnostic": null
+  },
+  "inventory": {
+    "message": "Every scoring requirement must cite its exact listing evidence and priority.",
+    "code": null,
+    "diagnostic": null
+  },
+  "page evidence": {
+    "message": "Evidence assessment has an unknown, duplicate, or invalid requirement id/status.",
+    "code": null,
+    "diagnostic": null
+  },
+  "synthesis": {
+    "message": "A requirement with documented support cannot become a global documentation gap.",
+    "code": null,
+    "diagnostic": null
+  },
+  "gap review": {
+    "message": "Invalid job-gap-review response: job 0, row wrong: this id is not among the listed gap row ids for this job",
+    "code": "VALIDATION_FAILED",
+    "diagnostic": null
+  },
+  "preference plan": {
+    "message": "Each Job Preference criterion must appear exactly once; do not duplicate it across soft and strict preferences.",
+    "code": null,
+    "diagnostic": null
+  },
+  "listing v2 true": {
+    "message": "Job Preference evaluation must return the exact listingId for each local listing index exactly once.",
+    "code": null,
+    "diagnostic": null
+  },
+  "listing v2 false": {
+    "message": "Job Preference evaluation must return the exact listingId for each local listing index exactly once.",
+    "code": null,
+    "diagnostic": null
+  },
+  "listing legacy true": {
+    "message": "Job Preference evaluation returned an unknown, duplicate, or invalid preference outcome.",
+    "code": null,
+    "diagnostic": null
+  },
+  "listing legacy false": {
+    "message": "Job Preference evaluation returned an unknown, duplicate, or invalid preference outcome.",
+    "code": null,
+    "diagnostic": null
+  },
+  "research single": {
+    "message": "Confirmed or conflicting Job Preference research requires a verbatim grounded evidence quote.",
+    "code": "JOB_PREFERENCE_RESEARCH_RESPONSE_INVALID",
+    "diagnostic": {
+      "stage": "research-assessment",
+      "reason": "ASSESSMENT_QUOTE_NOT_GROUNDED"
+    }
+  },
+  "research batch": {
+    "message": "Confirmed or conflicting batched Job Preference research requires a verbatim quote from its own research section.",
+    "code": "JOB_PREFERENCE_RESEARCH_RESPONSE_INVALID",
+    "diagnostic": {
+      "stage": "research-assessment",
+      "reason": "ASSESSMENT_QUOTE_NOT_GROUNDED"
+    }
+  },
+  "consolidation": {
+    "message": "Invalid location-consolidation confirmation: response named an unknown pair.",
+    "code": null,
+    "diagnostic": null
+  },
+  "lookup rows": {
+    "message": "Job location lookup section aaaaaaaaaaaaaaaaaaaaaaaa needs a \"RESULT: FOUND\" or \"RESULT: NOT FOUND\" line.",
+    "code": "JOB_LOCATION_LOOKUP_RESPONSE_INVALID",
+    "diagnostic": null
+  },
+  "compensation single": {
+    "message": "Invalid comparable compensation range for assessment index 0: comparable=true requires a positive annual range in USD and a direct auditable source URL present in the supplied grounded research.",
+    "code": "JOB_COMPENSATION_RESPONSE_INVALID",
+    "diagnostic": {
+      "stage": "compensation-assessment",
+      "reason": "COMPENSATION_RANGE_INVALID"
+    }
+  },
+  "compensation batch": {
+    "message": "Invalid comparable compensation range for assessment index 0: comparable=true requires a positive annual range in USD and a direct auditable source URL present in the supplied grounded research.",
+    "code": "JOB_COMPENSATION_RESPONSE_INVALID",
+    "diagnostic": {
+      "stage": "compensation-assessment",
+      "reason": "COMPENSATION_RANGE_INVALID"
+    }
+  },
+  "ladder single": {
+    "message": "Invalid experience-band response for ZQX-SENTINEL-ROLE: provide a contiguous, auditable ladder with direct source URLs from the supplied grounded research, or return both bands and sources empty when no auditable ladder exists.",
+    "code": "JOB_COMPENSATION_RESPONSE_INVALID",
+    "diagnostic": {
+      "stage": "compensation-assessment",
+      "reason": "COMPENSATION_ROLE_FAMILY_EVIDENCE_NOT_GROUNDED"
+    }
+  },
+  "ladder batch": {
+    "message": "Invalid experience-band response for Synthetic role: provide a contiguous, auditable ladder with direct source URLs from the supplied grounded research, or return both bands and sources empty when no auditable ladder exists.",
+    "code": "JOB_COMPENSATION_RESPONSE_INVALID",
+    "diagnostic": {
+      "stage": "compensation-assessment",
+      "reason": "COMPENSATION_ROLE_FAMILY_EVIDENCE_NOT_GROUNDED"
+    }
+  },
+  "interview": {
+    "message": "invalid research provenance: companyFacts[0].fact must be text copied exactly from RAW RESEARCH",
+    "code": null,
+    "diagnostic": null
+  },
+  "price": {
+    "message": "Price synthesis batch returned comp provenance from another item or an unknown source.",
+    "code": null,
+    "diagnostic": null
+  },
+  "hub": {
+    "message": "Marketplace hub batch returned an unknown, duplicate, or malformed platform scan identity.",
+    "code": null,
+    "diagnostic": null
+  },
+  "grounded text": {
+    "message": "Grounded research must be non-empty text.",
+    "code": "VALIDATION_FAILED",
+    "diagnostic": null
+  },
+  "interview text": {
+    "message": "Interview research could not be validated.",
+    "code": null,
+    "diagnostic": null
+  },
+  "compensation sections": {
+    "message": "Compensation research must contain only exact section blocks.",
+    "code": null,
+    "diagnostic": null
+  },
+  "preference sections": {
+    "message": "Batched Job Preference research returned an unknown research section.",
+    "code": "JOB_PREFERENCE_RESEARCH_RESPONSE_INVALID",
+    "diagnostic": {
+      "stage": "research-sections",
+      "reason": "UNKNOWN_SECTION",
+      "expectedCount": 2,
+      "receivedCount": 1,
+      "unknownCount": 1
+    }
+  },
+  "lookup sections": {
+    "message": "Job location lookup must contain only exact section blocks.",
+    "code": "JOB_LOCATION_LOOKUP_RESPONSE_INVALID",
+    "diagnostic": null
+  },
+  "taxonomy plan": {
+    "message": "Invalid taxonomy plan: roleFamilies contains duplicate labels.",
+    "code": null,
+    "diagnostic": null
+  },
+  "taxonomy chunk": {
+    "message": "Invalid taxonomy chunk 1/1: received 3 entries; exactly 25 required (22 missing, 1 non-integer, 2 out-of-range, 0 extra).",
+    "code": null,
+    "diagnostic": null
+  },
+  "compensation coverage": {
+    "message": "Invalid compensation evidence response: received 0/1 rows; missing indexes: 0.",
+    "code": "JOB_COMPENSATION_RESPONSE_INVALID",
+    "diagnostic": {
+      "stage": "compensation-assessment",
+      "reason": "COMPENSATION_ASSESSMENT_COVERAGE_INVALID",
+      "expectedCount": 1,
+      "receivedCount": 0,
+      "missingCount": 1,
+      "duplicateCount": 0,
+      "unknownCount": 0
+    }
+  }
+}

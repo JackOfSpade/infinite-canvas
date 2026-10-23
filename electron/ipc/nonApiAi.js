@@ -3325,6 +3325,8 @@ export function returnBridgeHandoffToPerson({ requestId, reason } = {}) {
   return true;
 }
 
+export const __rejectionCauseKeysForTests = (code, diagnostic, details) => rejectionCauses(code, diagnostic, details).map(cause => cause.key);
+
 // ── In-process bridge seam ───────────────────────────────────────────────────
 // A narrow, stateless view of `pendingRequests` for the ChatGPT MCP bridge
 // (electron/ipc/handoffBridge/sources/push.js). The bridge never sees a record:

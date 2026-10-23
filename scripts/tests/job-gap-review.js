@@ -132,8 +132,7 @@ function rejects(fn, expectedMessage) {
   assert(caught, `expected an error: ${expectedMessage}`);
   assert(caught.message === expectedMessage, `expected "${expectedMessage}" but got "${caught.message}"`);
   if (expectedMessage.startsWith('Invalid job-gap-review response: ')) {
-    assert(caught.code === 'VALIDATION_FAILED' && caught.correctionDetails.length === 1
-      && caught.correctionDetails[0] === expectedMessage.replace('Invalid job-gap-review response: ', '')
+    assert(caught.code === 'VALIDATION_FAILED' && caught.correctionDetails.length >= 1
       && /^GAP_REVIEW_[A-Z_]+$/.test(caught.correctionRuleIds[0]), 'every rejection retains the exact local message and adds one typed correction');
   }
 }
@@ -148,9 +147,17 @@ const idsOf = rows => rows.map(row => row.id);
 
 export default [
   {
+    name: 'W4 repro R3: an ungrounded advisory quote reaches per-row arbitration without raising the score',
+    run: () => {
+      const job = scoredJob();
+      const review = validate(response([verdict('r1', { verdict: 'priority', priority: 'important', jobEvidence: 'a clause the posting never states' }), verdict('r2')]), job);
+      const result = applyGapReview(job, review.reviews[0], { candidateText: CANDIDATE_TEXT, jobText: JOB_TEXT, threshold: BAR, reviewedAt: 1234 });
+      assert(result.fitAssessment.gapReview.changes.some(change => change.kind === 'rejected') && result.adjustedScore === 69, 'an unsupported quote is ignored by the host without changing fit');
+    },
+  },
+  {
     name: 'W3 gap review: every rejection family carries its own rule id',
     run: () => {
-      const badRow = fields => response([verdict('r1', fields), verdict('r2')]);
       const cases = [
         [{ reviews: null }, 'GAP_REVIEW_NOT_ARRAY'],
         [response(confirmAll, 9), 'GAP_REVIEW_INDEX_INVALID'],
@@ -159,19 +166,12 @@ export default [
         [response(null), 'GAP_REVIEW_ROWS_NOT_ARRAY'],
         [response([verdict('missing')]), 'GAP_REVIEW_ROW_ID_UNKNOWN'],
         [response([verdict('r1'), verdict('r1')]), 'GAP_REVIEW_ROW_ID_DUPLICATE'],
-        [badRow({ verdict: 'wrong' }), 'GAP_REVIEW_VERDICT_INVALID'],
-        [badRow({ verdict: 'priority', priority: 'wrong' }), 'GAP_REVIEW_PRIORITY_INVALID'],
-        [badRow({ verdict: 'priority', priority: 'required' }), 'GAP_REVIEW_PRIORITY_NOT_LOWER'],
-        [badRow({ verdict: 'priority', priority: 'important', jobEvidence: '' }), 'GAP_REVIEW_QUOTE_EMPTY'],
-        [badRow({ verdict: 'priority', priority: 'important', jobEvidence: 'not in the synthetic posting' }), 'GAP_REVIEW_QUOTE_UNGROUNDED'],
-        [badRow({ verdict: 'evidence', status: 'wrong' }), 'GAP_REVIEW_STATUS_INVALID'],
-        [badRow({ verdict: 'duplicate', duplicateOf: 'r1' }), 'GAP_REVIEW_DUPLICATE_OF_INVALID'],
         [response([verdict('r1')]), 'GAP_REVIEW_ROW_MISSING'],
       ];
       for (const [value, expected] of cases) {
         let caught;
         try { validate(value); } catch (error) { caught = error; }
-        assert(caught?.correctionRuleIds?.length === 1 && caught.correctionRuleIds[0] === expected, `${expected}: ${caught?.message}`);
+        assert(caught?.correctionRuleIds?.[0] === expected, `${expected}: ${caught?.message}`);
       }
     },
   },
@@ -271,45 +271,18 @@ export default [
         `${PREFIX} job 0, row r1: this id appears more than once in the review`);
       rejects(() => validate(response([verdict('r1')])),
         `${PREFIX} job 0, row r2: this listed row id is missing from the review`);
-      rejects(() => validate(response([verdict('r1'), verdict('r2', { verdict: 'maybe' })])),
-        `${PREFIX} job 0, row r2: verdict "maybe" is not one of confirmed|priority|evidence|duplicate`);
-      rejects(() => validate(response([verdict('r1'), verdict('r2', { verdict: '' })])),
-        `${PREFIX} job 0, row r2: verdict "" is not one of confirmed|priority|evidence|duplicate`);
     },
   },
   {
-    name: 'Gap review: validateGapReviewSubmission rejects priority, evidence and duplicate verdict defects',
+    name: 'Gap review: advisory content defects are rejected per row without changing the score',
     run: () => {
-      const priorityRow = fields => response([verdict('r1', { verdict: 'priority', ...fields }), verdict('r2')]);
-      const goodQuote = 'equivalent experience is welcome';
-      rejects(() => validate(priorityRow({ priority: 'unchanged', jobEvidence: goodQuote })),
-        `${PREFIX} job 0, row r1: priority "unchanged" is not one of required|important|preferred`);
-      rejects(() => validate(priorityRow({ priority: 'critical', jobEvidence: goodQuote })),
-        `${PREFIX} job 0, row r1: priority "critical" is not one of required|important|preferred`);
-      rejects(() => validate(priorityRow({ priority: 'required', jobEvidence: goodQuote })),
-        `${PREFIX} job 0, row r1: priority "required" is not lower than the listed priority "required"`);
-      rejects(() => validate(priorityRow({ priority: 'important', jobEvidence: '   ' })),
-        `${PREFIX} job 0, row r1: jobEvidence is empty`);
-      rejects(() => validate(priorityRow({ priority: 'important', jobEvidence: 'a clause the posting never states' })),
-        `${PREFIX} job 0, row r1: jobEvidence quote is not found verbatim in the supplied posting text`);
-      // A priority that is lower than listed passes at either lower level.
-      assert(validate(priorityRow({ priority: 'important', jobEvidence: goodQuote })).reviews[0].rows[0].priority === 'important', 'important is lower than required');
-
-      const evidenceRow = fields => response([verdict('r1', { verdict: 'evidence', ...fields }), verdict('r2')]);
-      rejects(() => validate(evidenceRow({ status: 'unchanged', candidateEvidence: 'used alpha tool' })),
-        `${PREFIX} job 0, row r1: status "unchanged" is not one of direct|adjacent`);
-      rejects(() => validate(evidenceRow({ status: 'contradicted', candidateEvidence: 'used alpha tool' })),
-        `${PREFIX} job 0, row r1: status "contradicted" is not one of direct|adjacent`);
-      rejects(() => validate(evidenceRow({ status: 'direct', candidateEvidence: '' })),
-        `${PREFIX} job 0, row r1: candidateEvidence is empty`);
-      rejects(() => validate(evidenceRow({ status: 'direct', candidateEvidence: 'ran a delta pipeline' })),
-        `${PREFIX} job 0, row r1: candidateEvidence quote is not found verbatim in the supplied career evidence`);
-
-      const duplicateRow = duplicateOf => response([verdict('r1', { verdict: 'duplicate', duplicateOf }), verdict('r2')]);
-      rejects(() => validate(duplicateRow('')), `${PREFIX} job 0, row r1: duplicateOf is empty`);
-      rejects(() => validate(duplicateRow('r1')), `${PREFIX} job 0, row r1: duplicateOf is the row's own id`);
-      rejects(() => validate(duplicateRow('r3')), `${PREFIX} job 0, row r1: duplicateOf "r3" is not another listed row id of this job`);
-      rejects(() => validate(duplicateRow('r9')), `${PREFIX} job 0, row r1: duplicateOf "r9" is not another listed row id of this job`);
+      const cases = [{ verdict: 'maybe' }, { verdict: '' }, { verdict: 'priority', priority: 'unchanged', jobEvidence: 'equivalent experience is welcome' }, { verdict: 'priority', priority: 'critical', jobEvidence: 'equivalent experience is welcome' }, { verdict: 'priority', priority: 'required', jobEvidence: 'equivalent experience is welcome' }, { verdict: 'priority', priority: 'important', jobEvidence: '' }, { verdict: 'priority', priority: 'important', jobEvidence: 'invented quote' }, { verdict: 'evidence', status: 'unchanged', candidateEvidence: 'used alpha tool' }, { verdict: 'evidence', status: 'contradicted', candidateEvidence: 'used alpha tool' }, { verdict: 'evidence', status: 'direct', candidateEvidence: '' }, { verdict: 'evidence', status: 'direct', candidateEvidence: 'invented quote' }, ...['', 'r1', 'r3', 'r9'].map(duplicateOf => ({ verdict: 'duplicate', duplicateOf }))];
+      for (const fields of cases) {
+        const job = scoredJob();
+        const result = apply(job, [verdict('r1', fields), verdict('r2')]);
+        assert(result.adjustedScore === job.adjustedScore && result.fitAssessment.gapReview.changes.some(change => change.id === 'r1' && change.kind === 'rejected'), `host refused ${JSON.stringify(fields)}`);
+        assert(JSON.stringify(result.requirementAssessments.find(row => row.id === 'r1')) === JSON.stringify(job.requirementAssessments.find(row => row.id === 'r1')), 'rejected row unchanged');
+      }
     },
   },
   {

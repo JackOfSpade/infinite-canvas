@@ -91,7 +91,7 @@ export default [
       for (const [scores, expected, message] of [
         [[row, row], 'SCORING_INDEX_DUPLICATE', 'Invalid job-scoring response: duplicate indexes: 0.'],
         [[{ ...row, index: 2 }], 'SCORING_INDEX_INVALID', 'Invalid job-scoring response: invalid indexes: 2.'],
-        [[row], 'SCORING_REQUIREMENT_EVIDENCE_UNGROUNDED', null],
+        [[row], 'SCORING_NO_REQUIREMENT_ROWS', null],
         [[{ ...row, materialGaps: [{ requirement: 'US work authorization', priority: 'required', status: 'not_documented', jobEvidence: 'authorized to work in the US', candidateEvidence: '' }] }], 'SCORING_LOGISTICS_PENALTY', 'Invalid job-scoring rows at index 0: work authorization, citizenship/sponsorship, and location/onsite/relocation constraints are informational logistics, not material professional gaps, and must contribute zero penalty to matchScore.'],
       ]) {
         let caught;

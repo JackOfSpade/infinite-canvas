@@ -14,6 +14,31 @@ async function runHubScan({ urlSpecs, llmText, signal, platformId = 'test-platfo
 }
 
 export default [
+  ...['omitted', 'shortened'].map(kind => ({
+    name: `W4 repro R4: hub batch repairs ${kind} source URLs within each platform section`,
+    run: async () => {
+      const pending = [];
+      for (const [index, count] of [1, 1, 2].entries()) {
+        const platformId = `synthetic-${index}`;
+        const prepared = await prepareHubPages({ platformId, urlSpecs: Array.from({ length: count }, (_, i) => ({
+          url: `https://example.test/${platformId}/${i}`, urlLabel: 'hub',
+          fetcher: async () => ({ ok: true, status: 200, html: `<main>${'Synthetic seller dashboard content. '.repeat(20)}</main>` }),
+        })) });
+        pending.push({ platformId, prepared });
+      }
+      const entries = packPreparedHubScans(pending).flat();
+      const results = await scanPreparedHubPageBatch({ scans: entries, llmText: async (_prompt, options) => {
+        const value = { platforms: entries.map(entry => ({ scanId: entry.scanId, summary: '', attention: [{ urgency: 'low', category: 'other', headline: 'Synthetic item', evidence: 'Synthetic', ...(kind === 'shortened' ? { sourceUrl: 'https://short.example.test/x' } : {}) }] })) };
+        options.responseValidator(value); return value;
+      } });
+      for (const entry of entries) {
+        const result = results.get(entry.scanId);
+        assert(result.status === 'ok', 'an optional or shortened URL does not reject the batch');
+        const expected = entry.prepared.llmInputs.length === 1 ? entry.prepared.llmInputs[0].spec.url : undefined;
+        assert(result.attention[0].sourceUrl === expected, 'repair binds only a sole URL in the matching section; ambiguous links are dropped');
+      }
+    },
+  })),
 {
     name: 'resolveAttentionSourceUrls: binds each item to a real hub page, never a wrong one',
     run: () => {

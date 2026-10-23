@@ -1,3 +1,6 @@
+import { validationFailure } from './validationFailure.js';
+import { collector, templatesFor } from './validationLines.js';
+export const SCORING_EVIDENCE_CORRECTION_TEMPLATES = templatesFor('inventory.', 'evidence.', 'synthesis.');
 import crypto from 'node:crypto';
 import { JOB_SCORING_SCHEMA } from './aiSchemas.js';
 import { nonScoringJobConstraintKind } from './jobFitAssessment.js';
@@ -58,34 +61,34 @@ export const SCORING_SYNTHESIS_SCHEMA = {
   },
 };
 
-export function normalizeScoringInventory(value, jobText) {
-  if (!Array.isArray(value?.requirements) || !value.requirements.length) throw new Error('Scoring requires a nonempty listing requirement inventory.');
+function normalizeScoringInventoryCore(value, jobText) {
+  if (!Array.isArray(value?.requirements) || !value.requirements.length) throw validationFailure({ message: 'Scoring requires a nonempty listing requirement inventory.', code: null });
   const usedQuotes = new Set();
   return Object.freeze(value.requirements.map(row => {
     if (!text(row?.requirementText) || !['required', 'important', 'preferred', 'contextual'].includes(row?.priority)
-      || !quoteIn(jobText, row?.jobEvidence)) throw new Error('Every scoring requirement must cite its exact listing evidence and priority.');
+      || !quoteIn(jobText, row?.jobEvidence)) throw validationFailure({ message: 'Every scoring requirement must cite its exact listing evidence and priority.', code: null });
     const quote = text(row.jobEvidence);
     // Two distinct obligations must use their distinct source clauses. Reusing
     // one quote for aliases would multiply the same gap in deterministic caps.
-    if (usedQuotes.has(quote)) throw new Error('Duplicate scoring requirement evidence: use one requirement per distinct listing clause.');
+    if (usedQuotes.has(quote)) throw validationFailure({ message: 'Duplicate scoring requirement evidence: use one requirement per distinct listing clause.', code: null });
     usedQuotes.add(quote);
-    if (nonScoringJobConstraintKind(row)) throw new Error('Work authorization and location logistics cannot enter the professional scoring inventory.');
+    if (nonScoringJobConstraintKind(row)) throw validationFailure({ message: 'Work authorization and location logistics cannot enter the professional scoring inventory.', code: null });
     const requirement = { requirementText: text(row.requirementText), priority: row.priority, jobEvidence: quote };
     return Object.freeze({ id: `requirement-${digest(requirement).slice(0, 24)}`, ...requirement });
   }));
 }
 
-export function validateScoringPageEvidence(value, inventory, page) {
+function validateScoringPageEvidenceCore(value, inventory, page) {
   const rows = value?.assessments;
-  if (!Array.isArray(rows) || rows.length !== inventory.length) throw new Error('Return one evidence assessment for every immutable requirement id.');
+  if (!Array.isArray(rows) || rows.length !== inventory.length) throw validationFailure({ message: 'Return one evidence assessment for every immutable requirement id.', code: null });
   const byId = new Map(inventory.map(row => [row.id, row]));
   const seen = new Set();
   for (const row of rows) {
-    if (!byId.has(row?.requirementId) || seen.has(row.requirementId) || !statuses.includes(row?.status)) throw new Error('Evidence assessment has an unknown, duplicate, or invalid requirement id/status.');
+    if (!byId.has(row?.requirementId) || seen.has(row.requirementId) || !statuses.includes(row?.status)) throw validationFailure({ message: 'Evidence assessment has an unknown, duplicate, or invalid requirement id/status.', code: null });
     seen.add(row.requirementId);
-    if (groundedStatuses.has(row.status) && !quoteIn(page.text, row.candidateEvidence)) throw new Error('Direct, adjacent and contradicted evidence must quote this exact approved page.');
-    if (text(row.candidateEvidence) && !quoteIn(page.text, row.candidateEvidence)) throw new Error('Candidate evidence is not present on this approved page.');
-    if (row.status === 'not_documented' && text(row.candidateEvidence)) throw new Error('A page-local absence cannot carry positive candidate evidence.');
+    if (groundedStatuses.has(row.status) && !quoteIn(page.text, row.candidateEvidence)) throw validationFailure({ message: 'Direct, adjacent and contradicted evidence must quote this exact approved page.', code: null });
+    if (text(row.candidateEvidence) && !quoteIn(page.text, row.candidateEvidence)) throw validationFailure({ message: 'Candidate evidence is not present on this approved page.', code: null });
+    if (row.status === 'not_documented' && text(row.candidateEvidence)) throw validationFailure({ message: 'A page-local absence cannot carry positive candidate evidence.', code: null });
   }
   return inventory.map(requirement => {
     const row = rows.find(item => item.requirementId === requirement.id);
@@ -115,26 +118,26 @@ export function reduceScoringEvidence(inventory, pages, pageResults) {
   });
 }
 
-export function composeScoringSynthesis(value, inventory, ledger) {
+function composeScoringSynthesisCore(value, inventory, ledger) {
   if (!Number.isInteger(value?.matchScore) || value.matchScore < 0 || value.matchScore > 100
-    || !['high', 'medium', 'low'].includes(value?.confidence)) throw new Error('Final scoring requires a bounded score and explicit confidence.');
+    || !['high', 'medium', 'low'].includes(value?.confidence)) throw validationFailure({ message: 'Final scoring requires a bounded score and explicit confidence.', code: null });
   const rows = value?.assessments;
-  if (!Array.isArray(rows) || rows.length !== inventory.length) throw new Error('Final scoring must assess every immutable requirement exactly once.');
+  if (!Array.isArray(rows) || rows.length !== inventory.length) throw validationFailure({ message: 'Final scoring must assess every immutable requirement exactly once.', code: null });
   const byId = new Map(ledger.map(row => [row.id, row]));
   const seen = new Set();
   const assessments = inventory.map(requirement => {
     const matches = rows.filter(row => row?.requirementId === requirement.id);
-    if (matches.length !== 1 || seen.has(requirement.id)) throw new Error('Final scoring requirement coverage is missing or duplicated.');
+    if (matches.length !== 1 || seen.has(requirement.id)) throw validationFailure({ message: 'Final scoring requirement coverage is missing or duplicated.', code: null });
     seen.add(requirement.id);
     const row = matches[0];
     const observations = byId.get(requirement.id)?.observations;
-    if (!Array.isArray(observations) || !statuses.includes(row.status)) throw new Error('Final scoring requirement evidence is unavailable.');
+    if (!Array.isArray(observations) || !statuses.includes(row.status)) throw validationFailure({ message: 'Final scoring requirement evidence is unavailable.', code: null });
     const hasSupport = observations.some(item => supportedStatuses.has(item.status));
-    if (row.status === 'not_documented' && hasSupport) throw new Error('A requirement with documented support cannot become a global documentation gap.');
+    if (row.status === 'not_documented' && hasSupport) throw validationFailure({ message: 'A requirement with documented support cannot become a global documentation gap.', code: null });
     const quote = text(row.candidateEvidence);
-    if (row.status === 'not_documented' && quote) throw new Error('A global documentation gap cannot carry positive evidence.');
-    if (groundedStatuses.has(row.status) && (!quote || !observations.some(item => text(item.candidateEvidence).includes(quote)))) throw new Error('Final scoring must cite evidence retrieved for this requirement.');
-    if (quote && !observations.some(item => text(item.candidateEvidence).includes(quote))) throw new Error('Final scoring invented candidate evidence.');
+    if (row.status === 'not_documented' && quote) throw validationFailure({ message: 'A global documentation gap cannot carry positive evidence.', code: null });
+    if (groundedStatuses.has(row.status) && (!quote || !observations.some(item => text(item.candidateEvidence).includes(quote)))) throw validationFailure({ message: 'Final scoring must cite evidence retrieved for this requirement.', code: null });
+    if (quote && !observations.some(item => text(item.candidateEvidence).includes(quote))) throw validationFailure({ message: 'Final scoring invented candidate evidence.', code: null });
     return { id: requirement.id, requirementText: requirement.requirementText, priority: requirement.priority, jobEvidence: requirement.jobEvidence, status: row.status, candidateEvidence: quote, explanation: text(row.explanation) };
   });
   return {
@@ -179,4 +182,71 @@ export async function scorePinnedJobEvidence({ job, jobText, pages, candidateRol
   });
   await assertCurrent();
   return composeScoringSynthesis(final, inventory, ledger);
+}
+
+export function normalizeScoringInventory(value, jobText) {
+  try { return normalizeScoringInventoryCore(value, jobText); } catch (error) {
+    const issues = collector();
+    const rows = value?.requirements;
+    if (!Array.isArray(rows) || !rows.length) issues.add('inventory.empty', '');
+    const used = new Set();
+    for (const [i, row] of (Array.isArray(rows) ? rows : []).entries()) {
+      if (!text(row?.requirementText) || !['required', 'important', 'preferred', 'contextual'].includes(row?.priority)) { issues.add('inventory.row-fields', i); continue; }
+      if (!quoteIn(jobText, row?.jobEvidence)) { issues.add('inventory.quote-not-verbatim', i); continue; }
+      const quote = text(row.jobEvidence);
+      if (used.has(quote)) { issues.add('inventory.quote-duplicate', i); continue; }
+      used.add(quote);
+      if (nonScoringJobConstraintKind(row)) issues.add('inventory.logistics', i);
+    }
+    issues.fail({ templates: SCORING_EVIDENCE_CORRECTION_TEMPLATES, vars: {}, error });
+    throw error;
+  }
+}
+
+export function validateScoringPageEvidence(value, inventory, page) {
+  try { return validateScoringPageEvidenceCore(value, inventory, page); } catch (error) {
+    const issues = collector();
+    const rows = Array.isArray(value?.assessments) ? value.assessments : [];
+    if (!Array.isArray(value?.assessments) || rows.length !== inventory.length) issues.add('evidence.count', '', { raw: rows.length });
+    const ids = new Set(inventory.map(row => row.id)), seen = new Set();
+    for (const row of rows) {
+      const id = row?.requirementId;
+      if (!ids.has(id)) { issues.add('evidence.id-unknown', '', { value: id }); continue; }
+      if (seen.has(id)) { issues.add('evidence.id-duplicate', id); continue; }
+      seen.add(id);
+      if (!statuses.includes(row.status)) { issues.add('evidence.status-invalid', id); continue; }
+      if (groundedStatuses.has(row.status) && !quoteIn(page.text, row.candidateEvidence)) { issues.add('evidence.quote-required', id); continue; }
+      if (text(row.candidateEvidence) && !quoteIn(page.text, row.candidateEvidence)) { issues.add('evidence.quote-not-on-page', id); continue; }
+      if (row.status === 'not_documented' && text(row.candidateEvidence)) issues.add('evidence.absence-with-quote', id);
+    }
+    for (const id of ids) if (!seen.has(id)) issues.add('evidence.id-missing', id);
+    issues.fail({ templates: SCORING_EVIDENCE_CORRECTION_TEMPLATES, vars: { total: inventory.length }, error });
+    throw error;
+  }
+}
+
+export function composeScoringSynthesis(value, inventory, ledger) {
+  try { return composeScoringSynthesisCore(value, inventory, ledger); } catch (error) {
+    const issues = collector();
+    if (!Number.isInteger(value?.matchScore) || value.matchScore < 0 || value.matchScore > 100 || !['high', 'medium', 'low'].includes(value?.confidence)) issues.add('synthesis.score', '');
+    const rows = Array.isArray(value?.assessments) ? value.assessments : [];
+    if (!Array.isArray(value?.assessments) || rows.length !== inventory.length) issues.add('synthesis.count', '', { raw: rows.length });
+    const ids = new Set(inventory.map(row => row.id)), seen = new Set(), byId = new Map(ledger.map(row => [row.id, row]));
+    for (const row of rows) {
+      const id = row?.requirementId;
+      if (!ids.has(id)) { issues.add('synthesis.id-unknown', '', { value: id }); continue; }
+      if (seen.has(id)) { issues.add('synthesis.id-duplicate', id); continue; }
+      seen.add(id);
+      if (!statuses.includes(row.status)) { issues.add('synthesis.status-invalid', id); continue; }
+      const observations = byId.get(id)?.observations;
+      if (!Array.isArray(observations)) continue; // host ledger fault
+      if (row.status === 'not_documented' && observations.some(item => supportedStatuses.has(item.status))) issues.add('synthesis.absence-contradicts-support', id);
+      const quote = text(row.candidateEvidence);
+      if (row.status === 'not_documented' && quote) issues.add('synthesis.absence-with-quote', id);
+      if ((quote || groundedStatuses.has(row.status)) && (!quote || !observations.some(item => text(item.candidateEvidence).includes(quote)))) issues.add('synthesis.quote-not-retrieved', id);
+    }
+    for (const id of ids) if (!seen.has(id)) issues.add('synthesis.id-missing', id);
+    issues.fail({ templates: SCORING_EVIDENCE_CORRECTION_TEMPLATES, vars: { total: inventory.length }, error });
+    throw error;
+  }
 }

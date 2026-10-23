@@ -1,3 +1,6 @@
+export const BUNDLE_FACTOR_SUFFIX = "--- FACTOR CHECK ---\nEvery factor needs a percent above 0 (omit a factor rather than listing 0) and a non-empty reason. A premium factor reason must not use discount wording, and a discount factor reason must not use premium wording. One invalid factor makes the application discard the whole answer and show the plain sum, so omit any factor you cannot state precisely.";
+import { collector, templatesFor } from './validationLines.js';
+export const PRICE_SYNTHESIS_CORRECTION_TEMPLATES = templatesFor('price.');
 /**
  * Marketplace IPC handlers — photo analysis, multi-source FMV research, listing prep.
  *
@@ -550,33 +553,35 @@ export function packBatchPriceSynthesisItems(items) {
 }
 
 export function validateBatchPriceSynthesisSubmission(value, expectedItems) {
+  const issues = collector();
   const rows = Array.isArray(value?.items) ? value.items : [];
-  const expectedIds = new Set(expectedItems.map(item => item.itemId));
-  if (rows.length !== expectedItems.length || expectedIds.size !== expectedItems.length) {
-    throw new Error('Price synthesis batch must return exactly one result for every requested item.');
-  }
+  const expected = new Map(expectedItems.map(item => [item.itemId, item]));
+  if (rows.length !== expectedItems.length || expected.size !== expectedItems.length) issues.add('price.rows', '', { raw: rows.length, message: 'Price synthesis batch must return exactly one result for every requested item.' });
   const seen = new Set();
+  const identityMessage = 'Price synthesis batch returned an unknown, duplicate, or malformed item identity.';
+  const provenanceMessage = 'Price synthesis batch returned comp provenance from another item or an unknown source.';
+  const countMessage = 'Price synthesis batch result claims more comps than were supplied to its item section.';
   for (const row of rows) {
-    if (!expectedIds.has(row?.itemId) || seen.has(row.itemId) || !row?.pricing || !Array.isArray(row.compSourceUrls) || !Array.isArray(row.compSources)) {
-      throw new Error('Price synthesis batch returned an unknown, duplicate, or malformed item identity.');
-    }
-    const item = expectedItems.find(candidate => candidate.itemId === row.itemId);
-    const allowedUrls = batchCompUrls(item);
-    const reportedUrls = row.compSourceUrls.map(url => String(url || '').trim());
-    const allowedSources = batchCompSources(item);
-    const reportedSources = row.compSources.map(source => String(source || '').trim());
-    if (new Set(reportedUrls).size !== reportedUrls.length || reportedUrls.some(url => !allowedUrls.has(url))
-      || new Set(reportedSources).size !== reportedSources.length || reportedSources.some(source => !allowedSources.has(source))) {
-      throw new Error('Price synthesis batch returned comp provenance from another item or an unknown source.');
-    }
-    const summary = row.pricing.market_summary || {};
-    const breakdown = row.pricing.comp_breakdown || {};
-    if (Number(summary.sold_count) > item.soldComps.length || Number(summary.active_count) > item.activeComps.length
-      || Number(breakdown.anchor_count) + Number(breakdown.adjusted_count) + Number(breakdown.bound_count) > item.soldComps.length + item.activeComps.length) {
-      throw new Error('Price synthesis batch result claims more comps than were supplied to its item section.');
-    }
+    if (!expected.has(row?.itemId)) { issues.add('price.item-unknown', row?.itemId, { value: row?.itemId, message: identityMessage }); continue; }
+    if (seen.has(row.itemId)) { issues.add('price.item-duplicate', row.itemId, { message: identityMessage }); continue; }
     seen.add(row.itemId);
+    if (!row.pricing || !Array.isArray(row.compSourceUrls) || !Array.isArray(row.compSources)) { issues.add('price.item-malformed', row.itemId, { message: identityMessage }); continue; }
+    const item = expected.get(row.itemId);
+    for (const [field, allowed, rule] of [['compSourceUrls', batchCompUrls(item), 'price.url-foreign'], ['compSources', batchCompSources(item), 'price.source-foreign']]) {
+      const used = new Set();
+      for (const [index, raw] of row[field].entries()) {
+        const value = String(raw || '').trim();
+        if (used.has(value) || !allowed.has(value)) issues.add(rule, `${row.itemId}:${field}.${index}`, { value, message: provenanceMessage });
+        used.add(value);
+      }
+    }
+    const summary = row.pricing.market_summary || {}, breakdown = row.pricing.comp_breakdown || {};
+    if (Number(summary.sold_count) > item.soldComps.length) issues.add('price.sold-count', row.itemId, { raw: item.soldComps.length, message: countMessage });
+    if (Number(summary.active_count) > item.activeComps.length) issues.add('price.active-count', row.itemId, { raw: item.activeComps.length, message: countMessage });
+    if (Number(breakdown.anchor_count) + Number(breakdown.adjusted_count) + Number(breakdown.bound_count) > item.soldComps.length + item.activeComps.length) issues.add('price.breakdown-sum', row.itemId, { raw: item.soldComps.length + item.activeComps.length, message: countMessage });
   }
+  for (const id of expected.keys()) if (!seen.has(id)) issues.add('price.item-missing', id, { message: 'Price synthesis batch must return exactly one result for every requested item.' });
+  issues.fail({ templates: PRICE_SYNTHESIS_CORRECTION_TEMPLATES, vars: { total: expectedItems.length } });
   return value;
 }
 
@@ -2715,6 +2720,7 @@ Return ONLY a single JSON object with EXACTLY this shape. No prose outside the J
 }`, {
       signal,
       task: 'bundle-price-synthesis',
+      displayOnlyPromptSuffix: BUNDLE_FACTOR_SUFFIX,
       hints: { itemCount: priced.length },
       responseSchema: BUNDLE_PRICE_SCHEMA,
       meta: bundleMeta,

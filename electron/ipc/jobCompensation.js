@@ -726,17 +726,7 @@ export function estimateCompensationExperienceYearsFromDescription(job = {}, con
  * a nearest band and silently pricing the wrong seniority market.
  */
 export function isValidCompensationExperienceBandLadder(bands) {
-  if (!Array.isArray(bands) || !bands.length) return false;
-  let nextMinimum = 0;
-  for (const band of bands) {
-    const label = String(band?.label || '').trim();
-    const minYears = Number(band?.minYears);
-    const maxYears = Number(band?.maxYears);
-    if (!label || !Number.isInteger(minYears) || !Number.isInteger(maxYears)
-      || minYears < 0 || maxYears < minYears || minYears !== nextMinimum) return false;
-    nextMinimum = maxYears + 1;
-  }
-  return nextMinimum === 100;
+  return diagnoseCompensationExperienceBandLadder(bands).length === 0;
 }
 
 /** Pick the researched inclusive ladder band for one resolved headline ask. */
@@ -869,4 +859,21 @@ function sanitizeLinks(links) {
       note: String(source.note || '').trim().slice(0, 500),
     };
   }).filter(Boolean).slice(0, 5);
+}
+
+export function diagnoseCompensationExperienceBandLadder(bands) {
+  const findings = [];
+  const add = (ruleId, entity, extra = {}) => findings.push({ ruleId, entity, extra });
+  if (!Array.isArray(bands) || !bands.length) { add('ladder.bands-empty', ''); return findings; }
+  let next = 0;
+  for (const [i, band] of bands.entries()) {
+    const min = Number(band?.minYears), max = Number(band?.maxYears);
+    if (!String(band?.label || '').trim()) add('ladder.label', i);
+    if (!Number.isInteger(min) || !Number.isInteger(max) || min < 0 || max < min) add('ladder.years-integer', i);
+    if (i === 0 && min !== 0) add('ladder.start', i, { raw: min });
+    else if (i > 0 && min !== next) add('ladder.contiguous', i);
+    next = max + 1;
+  }
+  if (next !== 100) add('ladder.end', bands.length - 1, { raw: Number(bands.at(-1)?.maxYears) });
+  return findings;
 }

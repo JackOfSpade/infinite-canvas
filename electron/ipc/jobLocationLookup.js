@@ -1,3 +1,6 @@
+import { validationFailure } from './validationFailure.js';
+import { collector, diagnoseMarkedSections, templatesFor } from './validationLines.js';
+export const LOCATION_LOOKUP_CORRECTION_TEMPLATES = templatesFor('lookup.');
 /**
  * Career-site location lookup for the competitive-pay check.
  *
@@ -291,12 +294,12 @@ ${entries.map(entry => `BEGIN REQUEST ${entry.id}\n${wrapUntrustedText('job-post
 // ---------------------------------------------------------------------------
 
 function structuralError(message) {
-  const error = new Error(message);
+  const error = validationFailure({ message: message, code: null });
   error.code = 'JOB_LOCATION_LOOKUP_RESPONSE_INVALID';
   return error;
 }
 
-export function parseJobLocationLookupSections(raw, expectedIds) {
+function parseJobLocationLookupSectionsCore(raw, expectedIds) {
   const ids = Array.isArray(expectedIds) ? expectedIds.map(String) : [];
   const expected = new Set(ids);
   if (!ids.length || expected.size !== ids.length) throw structuralError('Invalid job location lookup identity set.');
@@ -403,7 +406,7 @@ function parseRow(id, section) {
   };
 }
 
-export function parseJobLocationLookupBatch(raw, requests) {
+function parseJobLocationLookupBatchLegacy(raw, requests) {
   const ids = (Array.isArray(requests) ? requests : []).map(request => request.id);
   const sections = parseJobLocationLookupSections(raw, ids);
   return new Map(ids.map(id => [id, parseRow(id, sections.get(id))]));
@@ -606,4 +609,31 @@ export async function runJobLocationLookup({ requests, jobsById, callRaw, signal
     else { result.failed = true; result.error = String(err?.message || err).slice(0, 300); }
   }
   return result;
+}
+
+export function parseJobLocationLookupSections(raw, expectedIds) {
+  try { return parseJobLocationLookupSectionsCore(raw, expectedIds); } catch (error) {
+    const problems = diagnoseMarkedSections(raw, { expectedIds, label: 'JOB LOCATION LOOKUP', trimLines: true });
+    if (!problems.length) throw error;
+    throw validationFailure({ error, code: error.code ?? null, validationDiagnostic: error.validationDiagnostic, details: problems.map(p => p.line), ruleIds: problems.map(p => p.correctionRuleId) });
+  }
+}
+
+export function parseJobLocationLookupBatch(raw, requests) {
+  try { return parseJobLocationLookupBatchLegacy(raw, requests); } catch (error) {
+    const issues = collector();
+    const ids = (Array.isArray(requests) ? requests : []).map(row => row.id);
+    let sections;
+    try { sections = parseJobLocationLookupSections(raw, ids); } catch { throw error; }
+    for (const id of ids) {
+      try { parseRow(id, sections.get(id)); } catch (rowError) {
+        if (rowError.message.includes('is missing:')) {
+          const list = rowError.message.split('is missing: ')[1].split('.')[0].split(', ');
+          issues.add('lookup.found-fields', id, { list });
+        } else issues.add('lookup.result-line', id);
+      }
+    }
+    issues.fail({ templates: LOCATION_LOOKUP_CORRECTION_TEMPLATES, vars: {}, error });
+    throw error;
+  }
 }

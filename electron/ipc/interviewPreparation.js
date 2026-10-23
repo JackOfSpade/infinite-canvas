@@ -1,3 +1,8 @@
+import { validationFailure } from './validationFailure.js';
+export const INTERVIEW_EXACT_COPY_SUFFIX = "--- EXACT COPY CHECK ---\nIf an item cannot satisfy these exact-copy rules, omit that item: empty companyFacts, recentContext and applicationPositioning arrays are valid, and warnings should state what could not be sourced. sourceDate is date text of at most 80 characters and never a URL; sourceUrl must be an http(s) URL.";
+import { collector, templatesFor } from './validationLines.js';
+export const TEXT_CORRECTION_TEMPLATES = templatesFor('text.');
+export const INTERVIEW_CORRECTION_TEMPLATES = templatesFor('interview.');
 /**
  * Read-only application-bundle intake and interview-brief assembly.
  *
@@ -758,7 +763,7 @@ function exactQuote(value) {
   // this exact returned string must be findable in the captured source.
   return typeof value === 'string' && value.length > 0 && value.length <= MAX_BRIEF_TEXT ? value : '';
 }
-function evidenceList(value, raw, label = 'evidence') {
+function evidenceList(value, raw, label = 'evidence', issues = null) {
   if (!Array.isArray(value)) return [];
   const out = [];
   for (const [index, item] of value.slice(0, MAX_BRIEF_ITEMS).entries()) {
@@ -771,23 +776,23 @@ function evidenceList(value, raw, label = 'evidence') {
     // and never a URL, whose query would bypass sourceUrl canonicalization.
     const sourceDate = providedDate === 'unknown' ? 'unknown' : (providedDate.trim() && providedDate.length <= 80 && !hasControl(providedDate) && !/:\/\//u.test(providedDate) && raw.includes(providedDate) ? providedDate : '');
     // Name the failing item and field only; never echo the worker's content.
-    if (!fact || !raw.includes(rawFact)) throw new Error(`invalid research provenance: ${at}.fact must be text copied exactly from RAW RESEARCH`);
-    if (!evidenceQuote || !raw.includes(evidenceQuote)) throw new Error(`invalid research provenance: ${at}.evidenceQuote must be text copied exactly from RAW RESEARCH`);
-    if (typeof providedUrl !== 'string' || !sourceUrl || !raw.includes(providedUrl)) throw new Error(`invalid research provenance: ${at}.sourceUrl must be an http(s) URL copied exactly from RAW RESEARCH`);
-    if (!sourceDate) throw new Error(`invalid research provenance: ${at}.sourceDate must be exactly "unknown" or short date text copied exactly from RAW RESEARCH, never a URL`);
+    if (!fact || !raw.includes(rawFact)) { const message = `invalid research provenance: ${at}.fact must be text copied exactly from RAW RESEARCH`; if (!issues) throw validationFailure({ message: message, code: null }); issues.add('interview.fact', at.replace(/\[(\d+)\]/g, '.$1'), { message }); continue; }
+    if (!evidenceQuote || !raw.includes(evidenceQuote)) { const message = `invalid research provenance: ${at}.evidenceQuote must be text copied exactly from RAW RESEARCH`; if (!issues) throw validationFailure({ message: message, code: null }); issues.add('interview.quote', at.replace(/\[(\d+)\]/g, '.$1'), { message }); continue; }
+    if (typeof providedUrl !== 'string' || !sourceUrl || !raw.includes(providedUrl)) { const message = `invalid research provenance: ${at}.sourceUrl must be an http(s) URL copied exactly from RAW RESEARCH`; if (!issues) throw validationFailure({ message: message, code: null }); issues.add('interview.url', at.replace(/\[(\d+)\]/g, '.$1'), { message }); continue; }
+    if (!sourceDate) { const message = `invalid research provenance: ${at}.sourceDate must be exactly "unknown" or short date text copied exactly from RAW RESEARCH, never a URL`; if (!issues) throw validationFailure({ message: message, code: null }); issues.add('interview.date', at.replace(/\[(\d+)\]/g, '.$1'), { message }); continue; }
     out.push({ fact: boundedScrubbedText(fact), sourceId: sha256(sourceUrl).slice(0, 16), sourceUrl, sourceDate });
   }
   return out;
 }
-function quoteList(value, source) {
+function quoteList(value, source, issues = null) {
   if (!Array.isArray(value)) return [];
   const out = [];
   for (const [index, item] of value.slice(0, MAX_BRIEF_ITEMS).entries()) {
     const point = safeString(item?.point); const evidenceQuote = exactQuote(item?.evidenceQuote); const documentKind = item?.documentKind === 'coverLetter' ? 'coverLetter' : item?.documentKind === 'resume' ? 'resume' : '';
     const at = `applicationPositioning[${index}]`;
-    if (!documentKind) throw new Error(`invalid source quote: ${at}.documentKind must be "resume" or "coverLetter"`);
-    if (!point || !source?.[documentKind]?.includes(point)) throw new Error(`invalid source quote: ${at}.point must be text copied exactly from the ${documentKind} APPLICATION POSITIONING`);
-    if (!evidenceQuote || !source?.[documentKind]?.includes(evidenceQuote)) throw new Error(`invalid source quote: ${at}.evidenceQuote must be text copied exactly from the ${documentKind} APPLICATION POSITIONING`);
+    if (!documentKind) { const message = `invalid source quote: ${at}.documentKind must be "resume" or "coverLetter"`; if (!issues) throw validationFailure({ message: message, code: null }); issues.add('interview.positioning-kind', at.replace(/\[(\d+)\]/g, '.$1'), { message }); continue; }
+    if (!point || !source?.[documentKind]?.includes(point)) { const message = `invalid source quote: ${at}.point must be text copied exactly from the ${documentKind} APPLICATION POSITIONING`; if (!issues) throw validationFailure({ message: message, code: null }); issues.add('interview.positioning-point', at.replace(/\[(\d+)\]/g, '.$1'), { message }); continue; }
+    if (!evidenceQuote || !source?.[documentKind]?.includes(evidenceQuote)) { const message = `invalid source quote: ${at}.evidenceQuote must be text copied exactly from the ${documentKind} APPLICATION POSITIONING`; if (!issues) throw validationFailure({ message: message, code: null }); issues.add('interview.positioning-quote', at.replace(/\[(\d+)\]/g, '.$1'), { message }); continue; }
     out.push({ documentKind, point: boundedScrubbedText(point) });
   }
   return out;
@@ -814,7 +819,7 @@ function groundedRoleField(value, sources) {
   return sources.some(source => typeof source === 'string' && literal.test(source)) ? safe : '';
 }
 export function validateInterviewBriefAssessment(value, { rawResearch, bundle, snapshotId, canonicalJobUrl, bundleArtifactId, createdAt = new Date().toISOString() } = {}) {
-  if (!plainObject(value)) throw new Error('invalid interview brief');
+  if (!plainObject(value)) { const issues = collector(); issues.add('interview.not-object', ''); issues.fail({ templates: INTERVIEW_CORRECTION_TEMPLATES, message: 'invalid interview brief' }); }
   const safeCreatedAt = safeString(createdAt, 80);
   if (!safeCreatedAt) throw new Error('invalid interview brief');
   const role = {
@@ -825,11 +830,13 @@ export function validateInterviewBriefAssessment(value, { rawResearch, bundle, s
     location: boundedScrubbedText(safeString(bundle.job?.location, 300) || groundedRoleField(value.role?.location, [bundle.listingText, rawResearch]), 300) || 'Unknown',
     summary: boundedScrubbedText(safeString(value.role?.summary)),
   };
+  const issues = collector();
   const semantic = {
     version: 1, inputs: { careerSnapshotId: snapshotId, jobUrlSha256: sha256(canonicalJobUrl), applicationArtifactId: bundleArtifactId, applicationArtifactDigest: sha256(stable(bundle.digests)) }, role,
-    roleThemes: stringList(value.roleThemes), companyFacts: evidenceList(value.companyFacts, rawResearch, 'companyFacts'), recentContext: evidenceList(value.recentContext, rawResearch, 'recentContext'),
-    likelyQuestions: stringList(value.likelyQuestions), questionsToAsk: stringList(value.questionsToAsk), applicationPositioning: quoteList(value.applicationPositioning, bundle.applicationPositioning), warnings: stringList(value.warnings),
+    roleThemes: stringList(value.roleThemes), companyFacts: evidenceList(value.companyFacts, rawResearch, 'companyFacts', issues), recentContext: evidenceList(value.recentContext, rawResearch, 'recentContext', issues),
+    likelyQuestions: stringList(value.likelyQuestions), questionsToAsk: stringList(value.questionsToAsk), applicationPositioning: quoteList(value.applicationPositioning, bundle.applicationPositioning, issues), warnings: stringList(value.warnings),
   };
+  issues.fail({ templates: INTERVIEW_CORRECTION_TEMPLATES });
   const briefId = sha256(stable(semantic));
   // One first-cited-wins definition for the producer and the publish gate, so
   // a source cited twice with different dates still seals.
@@ -837,8 +844,8 @@ export function validateInterviewBriefAssessment(value, { rawResearch, bundle, s
   return { ...semantic, briefId, createdAt: safeCreatedAt, sources };
 }
 
-function validateGroundedResearchText(value) {
-  if (typeof value !== 'string' || value.trim().length === 0 || value.length > 80_000) throw new Error('Interview research could not be validated.');
+function validateGroundedResearchTextCore(value) {
+  if (typeof value !== 'string' || value.trim().length === 0 || value.length > 80_000) throw validationFailure({ message: 'Interview research could not be validated.', code: null });
   return value;
 }
 
@@ -858,7 +865,7 @@ export async function buildInterviewBrief({ nodeId, snapshotId, canonicalJobUrl,
     if (!isPublishedInterviewBrief(assessed)) throw new Error('invalid interview brief');
     return assessed;
   };
-  const response = await callText(assessmentPrompt({ rawResearch, bundle, canonicalJobUrl }), { signal, task: 'interview-brief-assessment', responseSchema: INTERVIEW_BRIEF_SCHEMA, responseValidator: publishableAssessment, hints: { itemCount: 1 } });
+  const response = await callText(assessmentPrompt({ rawResearch, bundle, canonicalJobUrl }), { signal, task: 'interview-brief-assessment', displayOnlyPromptSuffix: INTERVIEW_EXACT_COPY_SUFFIX, responseSchema: INTERVIEW_BRIEF_SCHEMA, responseValidator: publishableAssessment, hints: { itemCount: 1 } });
   throwIfAborted(signal);
   return { brief: validateInterviewBriefAssessment(response, { rawResearch, bundle, snapshotId, canonicalJobUrl, bundleArtifactId }) };
 }
@@ -905,4 +912,13 @@ export function registerInterviewPreparationHandlers({ appInstance = app, regist
     }
     catch (error) { if (signal?.aborted) throw error; throw new Error('The interview brief could not be prepared safely.'); }
   }, { validateArgs: validateInterviewBriefRequestArgs });
+}
+
+export function validateGroundedResearchText(value) {
+  try { return validateGroundedResearchTextCore(value); } catch (error) {
+    const issues = collector();
+    issues.add(typeof value !== 'string' || !value.trim() ? 'text.empty' : 'text.too-long', '', { raw: typeof value === 'string' ? value.length : 0 });
+    issues.fail({ templates: TEXT_CORRECTION_TEMPLATES, vars: { max: 80_000 }, error });
+    throw error;
+  }
 }

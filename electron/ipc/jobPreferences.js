@@ -1,3 +1,9 @@
+export const PREFERENCE_PLAN_UNIQUENESS_SUFFIX = "--- UNIQUENESS CHECK ---\nNo two preferences, soft and strict combined, may have the same criterion text, ignoring case; every preference id must be unique across softPreferences and strictRequirements.";
+import { validationFailure } from './validationFailure.js';
+import { collector, diagnoseMarkedSections, templatesFor } from './validationLines.js';
+export const PREFERENCE_LISTING_CORRECTION_TEMPLATES = templatesFor('listing.');
+export const PREFERENCE_RESEARCH_CORRECTION_TEMPLATES = templatesFor('research.');
+export const PREFERENCE_PLAN_CORRECTION_TEMPLATES = templatesFor('plan.');
 import crypto from 'node:crypto';
 import { JOB_PREFERENCE_CRITERION_MAX_LENGTH, JOB_PREFERENCE_TITLE_MAX_LENGTH, JOB_PREFERENCE_PLAN_SCHEMA, JOB_PREFERENCE_LISTING_EVALUATION_SCHEMA, JOB_PREFERENCE_LISTING_EVALUATION_V1_SCHEMA, JOB_PREFERENCE_RESEARCH_ASSESSMENT_SCHEMA, JOB_PREFERENCE_RESEARCH_BATCH_ASSESSMENT_SCHEMA, JOB_ROLE_AUDIT_SCHEMA, JOB_ROLE_SCREEN_SCHEMA } from './aiSchemas.js';
 import { wrapUntrustedText } from './promptSafety.js';
@@ -370,9 +376,9 @@ function hasValidRawPlanShape(value) {
  * see screenJobRolesByTitle's own doc comment for why that screen is a
  * separate title-only call rather than part of the listing evaluation.
  */
-export function validateJobPreferencePlanSubmission(value) {
+function validateJobPreferencePlanSubmissionCore(value) {
   if (!hasValidRawPlanShape(value)) {
-    throw new Error('Job Preference plan has an invalid or incomplete structure.');
+    throw validationFailure({ message: 'Job Preference plan has an invalid or incomplete structure.', code: null });
   }
   const plan = normalizeJobPreferencePlan(value);
   const criteria = new Set();
@@ -388,7 +394,7 @@ export function validateJobPreferencePlanSubmission(value) {
   const missing = [...plan.direction.roleDirections, ...plan.direction.avoidDirections]
     .filter(direction => !roleCriteria.has(directionalKey(direction)));
   if (missing.length > 0) {
-    throw new Error('Every role direction or avoidance must exactly match a category="role" soft or strict preference criterion so it can be evaluated after history filtering.');
+    throw validationFailure({ message: 'Every role direction or avoidance must exactly match a category="role" soft or strict preference criterion so it can be evaluated after history filtering.', code: null });
   }
   return plan;
 }
@@ -456,7 +462,7 @@ export async function interpretJobPreferences({ jobPreferences, profile, careerD
     + '(c) If a title-like phrase carries a parenthetical CONDITION (e.g. "Frontend Engineer (when the role includes some backend work)"), strip the parenthetical out of the title itself — emit only "Frontend Engineer" in `titles` — and instead capture the condition as its own softPreferences or strictRequirements criterion; these titles are sent verbatim as job-board search queries, and condition wording does not belong in a search query. '
     + '(d) Never state or aim for a specific number of titles; emit exactly as many as the brief genuinely requires to cover its intent, no more and no fewer — the schema\'s cap is only a defense against a malformed response, not a target to reach.\n'
     + 'USER JOB PREFERENCES (trusted): ' + raw + '\nCAREER PROFILE (untrusted reference): ' + wrapUntrustedText('career-profile', JSON.stringify(profile || {})) + '\nCAREER DATA (untrusted reference): ' + wrapUntrustedText('career-data', String(careerData || '').slice(0, 30000)) + '\nReturn only the requested JSON plan.';
-  const result = await callText(prompt, { signal, task: 'job-preference-interpretation', responseSchema: JOB_PREFERENCE_PLAN_SCHEMA, responseValidator: value => validateJobPreferencePlanSubmission(value), meta });
+  const result = await callText(prompt, { signal, task: 'job-preference-interpretation', displayOnlyPromptSuffix: PREFERENCE_PLAN_UNIQUENESS_SUFFIX, responseSchema: JOB_PREFERENCE_PLAN_SCHEMA, responseValidator: value => validateJobPreferencePlanSubmission(value), meta });
   throwIfAborted(signal);
   const preferencePlan = validateJobPreferencePlanSubmission(result);
   return { jobPreferences: raw, preferencePlan, jobPreferencesInterpretation: preferencePlan, aiSkipped: false };
@@ -972,7 +978,7 @@ function listingAssessmentByIndex(raw, jobs, plan) {
     });
   });
 }
-function validateJobPreferenceListingRows(value, jobs, plan, { requireComplete = true, listingIds = null } = {}) {
+function validateJobPreferenceListingRowsCore(value, jobs, plan, { requireComplete = true, listingIds = null } = {}) {
   const expectedItems = allPlanItems(normalizeJobPreferencePlan(plan));
   const expectedIds = new Set(expectedItems.map(item => item.id));
   const rows = Array.isArray(value?.assessments) ? value.assessments : [];
@@ -981,30 +987,30 @@ function validateJobPreferenceListingRows(value, jobs, plan, { requireComplete =
   // normalizeMatch defaults an absent preference to `unverified` and a strict
   // unverified sets the job's status to `filtered` — i.e. an accepted-but-short
   // response silently DELETES jobs. That axis stays unconditional below.
-  if (requireComplete && rows.length !== jobs.length) throw new Error(`Job Preference evaluation must return exactly ${jobs.length} listing rows.`);
+  if (requireComplete && rows.length !== jobs.length) throw validationFailure({ message: `Job Preference evaluation must return exactly ${jobs.length} listing rows.`, code: null });
   const seenIndexes = new Set();
   const seenListingIds = new Set();
   for (const row of rows) {
     if (!Number.isInteger(row?.index) || row.index < 0 || row.index >= jobs.length || seenIndexes.has(row.index)) {
-      throw new Error('Job Preference evaluation must return every listing index exactly once.');
+      throw validationFailure({ message: 'Job Preference evaluation must return every listing index exactly once.', code: null });
     }
     seenIndexes.add(row.index);
     if (listingIds) {
       const expectedListingId = listingIds[row.index];
       if (typeof row?.listingId !== 'string' || row.listingId !== expectedListingId || seenListingIds.has(row.listingId)) {
-        throw new Error('Job Preference evaluation must return the exact listingId for each local listing index exactly once.');
+        throw validationFailure({ message: 'Job Preference evaluation must return the exact listingId for each local listing index exactly once.', code: null });
       }
       seenListingIds.add(row.listingId);
     }
     const matches = Array.isArray(row.matches) ? row.matches : [];
-    if (matches.length !== expectedIds.size) throw new Error('Job Preference evaluation must return every preference exactly once for each listing.');
+    if (matches.length !== expectedIds.size) throw validationFailure({ message: 'Job Preference evaluation must return every preference exactly once for each listing.', code: null });
     const seenIds = new Set();
     for (const match of matches) {
       if (!expectedIds.has(match?.preferenceId) || seenIds.has(match.preferenceId) || !OUTCOMES.has(match.outcome)) {
-        throw new Error('Job Preference evaluation returned an unknown, duplicate, or invalid preference outcome.');
+        throw validationFailure({ message: 'Job Preference evaluation returned an unknown, duplicate, or invalid preference outcome.', code: null });
       }
       if (['confirmed', 'conflicts'].includes(match.outcome) && !cleanText(match.evidenceQuote, 280)) {
-        throw new Error('Confirmed or conflicting listing preference outcomes require a verbatim listing evidenceQuote.');
+        throw validationFailure({ message: 'Confirmed or conflicting listing preference outcomes require a verbatim listing evidenceQuote.', code: null });
       }
       seenIds.add(match.preferenceId);
     }
@@ -1027,7 +1033,7 @@ export function validateLegacyJobPreferenceListingSubmission(value, jobs, plan, 
 // silently treating a copied/pasted response for another preference as
 // "unverified" would make a strict requirement filter a job for the wrong
 // reason, and leaves a manual handoff with no useful correction message.
-export function validateJobPreferenceResearchSubmission(value, { preferenceId, groundedResearch } = {}) {
+function validateJobPreferenceResearchSubmissionLegacy(value, { preferenceId, groundedResearch } = {}) {
   const assessments = Array.isArray(value?.assessments) ? value.assessments : [];
   if (assessments.length !== 1) {
     throw preferenceResearchResponseError(
@@ -1068,7 +1074,7 @@ export function validateJobPreferenceResearchSubmission(value, { preferenceId, g
   return value;
 }
 function preferenceResearchResponseError(message, validationDiagnostic = null) {
-  const error = new Error(message);
+  const error = validationFailure({ message: message, code: null });
   error.code = PREFERENCE_RESEARCH_RESPONSE_INVALID;
   if (validationDiagnostic) error.validationDiagnostic = validationDiagnostic;
   return error;
@@ -1326,7 +1332,7 @@ function markerLineRecords(text) {
  * The marker grammar intentionally has no optional label text: accepting a
  * close-looking section would let one employer's evidence bleed into another.
  */
-export function parseJobPreferenceResearchSections(rawResearch, expectedResearchIds) {
+function parseJobPreferenceResearchSectionsCore(rawResearch, expectedResearchIds) {
   const raw = String(rawResearch || '').replace(/\r\n?/g, '\n').trim();
   const expected = Array.isArray(expectedResearchIds) ? expectedResearchIds : [];
   const expectedSet = new Set(expected);
@@ -1421,7 +1427,7 @@ export function parseJobPreferenceResearchSections(rawResearch, expectedResearch
 }
 
 /** Validate exact row coverage and per-section provenance for a batch. */
-export function validateJobPreferenceResearchBatchSubmission(value, { requests, groundedResearchById } = {}) {
+function validateJobPreferenceResearchBatchSubmissionLegacy(value, { requests, groundedResearchById } = {}) {
   const expected = Array.isArray(requests) ? requests : [];
   const sections = groundedResearchById instanceof Map ? groundedResearchById : new Map();
   const assessments = Array.isArray(value?.assessments) ? value.assessments : [];
@@ -2311,4 +2317,103 @@ export async function evaluateJobPreferences({ jobs, jobPreferences, preferenceP
   }));
   const assessed = attachAssessments(pool, rows);
   return evaluationEnvelope({ aiSkipped: false, preferencePlan: plan, jobPreferencesInterpretation: plan, preferenceFingerprint, ...assessed }, assessed.candidatePool);
+}
+
+export function validateJobPreferencePlanSubmission(value) {
+  try { return validateJobPreferencePlanSubmissionCore(value); } catch (error) {
+    const issues = collector();
+    const lists = ['softPreferences', 'strictRequirements'];
+    if (!hasValidRawPlanShape(value)) {
+      const seen = new Set();
+      for (const field of lists) for (const [i, item] of (Array.isArray(value?.[field]) ? value[field] : []).entries()) {
+        if (seen.has(item?.id)) issues.add('plan.id-duplicate', `${field}.${i}`);
+        seen.add(item?.id);
+      }
+      if (!issues.size) issues.add('plan.shape', '');
+    } else {
+      const plan = normalizeJobPreferencePlan(value), seen = new Set();
+      for (const field of lists) for (const [i, item] of plan[field].entries()) {
+        const key = directionalKey(item.criterion);
+        if (seen.has(key)) issues.add('plan.criterion-duplicate', `${field}.${i}`, { value: item.criterion });
+        seen.add(key);
+      }
+      const roles = new Set([...plan.softPreferences, ...plan.strictRequirements].filter(item => item.category === 'role').map(item => directionalKey(item.criterion)));
+      for (const field of ['roleDirections', 'avoidDirections']) for (const [i, value] of plan.direction[field].entries()) if (!roles.has(directionalKey(value))) issues.add('plan.direction-unmatched', `direction.${field}.${i}`, { value });
+    }
+    issues.fail({ templates: PREFERENCE_PLAN_CORRECTION_TEMPLATES, vars: {}, error });
+    throw error;
+  }
+}
+
+function validateJobPreferenceListingRows(value, jobs, plan, options = {}) {
+  try { return validateJobPreferenceListingRowsCore(value, jobs, plan, options); } catch (error) {
+    const issues = collector(), { requireComplete = true, listingIds = null } = options;
+    const ids = new Set(allPlanItems(normalizeJobPreferencePlan(plan)).map(item => item.id));
+    const rows = Array.isArray(value?.assessments) ? value.assessments : [], indexes = new Set(), listingSeen = new Set();
+    if (requireComplete && rows.length !== jobs.length) issues.add('listing.row-count', '', { raw: rows.length });
+    for (const [position, row] of rows.entries()) {
+      if (!Number.isInteger(row?.index) || row.index < 0 || row.index >= jobs.length || indexes.has(row.index)) { issues.add('listing.index-invalid', position); continue; }
+      indexes.add(row.index);
+      if (listingIds && (typeof row.listingId !== 'string' || row.listingId !== listingIds[row.index] || listingSeen.has(row.listingId))) issues.add('listing.listing-id', row.index, { value: row.listingId });
+      listingSeen.add(row.listingId);
+      const matches = Array.isArray(row.matches) ? row.matches : [], seen = new Set();
+      if (matches.length !== ids.size) issues.add('listing.matches-count', row.index, { raw: matches.length });
+      for (const [i, match] of matches.entries()) {
+        const entity = `${row.index}:matches.${i}`;
+        if (!ids.has(match?.preferenceId) || seen.has(match.preferenceId)) { issues.add('listing.preference-unknown-or-duplicate', row.index, { value: match?.preferenceId }); continue; }
+        seen.add(match.preferenceId);
+        if (!OUTCOMES.has(match.outcome)) { issues.add('listing.outcome-invalid', entity); continue; }
+        if (['confirmed', 'conflicts'].includes(match.outcome) && !cleanText(match.evidenceQuote, 280)) issues.add('listing.quote-missing', entity);
+      }
+      const missing = [...ids].filter(id => !seen.has(id));
+      if (missing.length) issues.add('listing.preference-missing', row.index, { list: missing });
+    }
+    issues.fail({ templates: PREFERENCE_LISTING_CORRECTION_TEMPLATES, vars: { total: jobs.length, max: jobs.length - 1, expected: ids.size }, error });
+    throw error;
+  }
+}
+
+export function validateJobPreferenceResearchSubmission(value, options = {}) {
+  try { return validateJobPreferenceResearchSubmissionLegacy(value, options); } catch (error) {
+    const issues = collector();
+    const reason = error.validationDiagnostic?.reason;
+    const rule = reason === 'ASSESSMENT_COVERAGE_INVALID' ? 'research.coverage' : reason === 'ASSESSMENT_IDENTITY_INVALID' ? 'research.identity' : reason === 'ASSESSMENT_QUOTE_NOT_GROUNDED' ? 'research.quote' : 'research.url';
+    issues.add(rule, '', { raw: Array.isArray(value?.assessments) ? value.assessments.length : 0, value: value?.assessments?.[0]?.preferenceId });
+    issues.fail({ templates: PREFERENCE_RESEARCH_CORRECTION_TEMPLATES, vars: {}, error });
+    throw error;
+  }
+}
+
+export function validateJobPreferenceResearchBatchSubmission(value, { requests, groundedResearchById } = {}) {
+  try { return validateJobPreferenceResearchBatchSubmissionLegacy(value, { requests, groundedResearchById }); } catch (error) {
+    const issues = collector();
+    const expected = Array.isArray(requests) ? requests : [], sections = groundedResearchById instanceof Map ? groundedResearchById : new Map();
+    const byId = new Map(expected.map(row => [row.researchId, row]));
+    if (expected.length < 1 || expected.length > RESEARCH_ASSESSMENT_BATCH_SIZE || byId.size !== expected.length || sections.size !== expected.length) throw error;
+    const rows = Array.isArray(value?.assessments) ? value.assessments : [], seen = new Set();
+    if (rows.length !== expected.length) issues.add('research.batch-coverage', '', { raw: rows.length, list: expected.filter(r => !rows.some(row => row?.researchId === r.researchId)).map(r => r.researchId) });
+    for (const row of rows) {
+      const request = byId.get(row?.researchId), id = row?.researchId;
+      if (!request) { issues.add('research.batch-id-unknown', id, { value: id }); continue; }
+      if (seen.has(id)) { issues.add('research.batch-id-duplicate', id); continue; }
+      seen.add(id);
+      if (row.preferenceId !== request.match.preferenceId) issues.add('research.batch-preference-mismatch', id);
+      if (!OUTCOMES.has(row.outcome)) { issues.add('research.batch-outcome', id); continue; }
+      if (!['confirmed', 'conflicts'].includes(row.outcome)) continue;
+      const raw = sections.get(id);
+      if (!isGroundedEvidenceQuote(cleanText(row.evidenceQuote, 280), raw)) issues.add('research.batch-quote', id);
+      if (!sourcesPresentInGroundedResearch(Array.isArray(row.sourceUrls) ? row.sourceUrls.slice(0, 5).map(url => ({ url })) : [], raw).length) issues.add('research.batch-url', id);
+    }
+    if (seen.size !== byId.size && rows.length === expected.length) issues.add('research.batch-coverage', '', { raw: seen.size, list: [...byId.keys()].filter(id => !seen.has(id)) });
+    issues.fail({ templates: PREFERENCE_RESEARCH_CORRECTION_TEMPLATES, vars: { total: Array.isArray(requests) ? requests.length : 0 }, error });
+    throw error;
+  }
+}
+
+export function parseJobPreferenceResearchSections(rawResearch, expectedResearchIds) {
+  try { return parseJobPreferenceResearchSectionsCore(rawResearch, expectedResearchIds); } catch (error) {
+    const problems = diagnoseMarkedSections(rawResearch, { expectedIds: expectedResearchIds, label: 'RESEARCH', idPattern: '[a-f0-9]{24}', caseInsensitive: false, outsideTextAllowed: true, ordered: true, decoratedLookalikes: true });
+    if (!problems.length) throw error;
+    throw validationFailure({ error, code: error.code ?? null, validationDiagnostic: error.validationDiagnostic, details: problems.map(p => p.line), ruleIds: problems.map(p => p.correctionRuleId) });
+  }
 }

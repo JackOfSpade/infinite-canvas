@@ -1,3 +1,5 @@
+import { collector, templatesFor } from './validationLines.js';
+export const HUB_SCAN_CORRECTION_TEMPLATES = templatesFor('hub.');
 /**
  * Listing status check engine.
  *
@@ -813,30 +815,28 @@ export function mergePreparedHubScanSections(sections) {
   return { status, message, summary, attention, sources, readState };
 }
 
-function validateHubScanBatchSubmission(value, expectedEntries) {
+export function validateHubScanBatchSubmission(value, expectedEntries) {
+  const issues = collector();
   const rows = Array.isArray(value?.platforms) ? value.platforms : [];
-  const expected = new Set(expectedEntries.map(entry => entry.scanId));
-  if (rows.length !== expectedEntries.length || expected.size !== expectedEntries.length) {
-    throw new Error('Marketplace hub batch must return exactly one platform result for every requested scan.');
-  }
+  const expected = new Map(expectedEntries.map(entry => [entry.scanId, entry]));
+  if (rows.length !== expectedEntries.length || expected.size !== expectedEntries.length) issues.add('hub.rows', '', { raw: rows.length, message: 'Marketplace hub batch must return exactly one platform result for every requested scan.' });
   const seen = new Set();
+  const identityMessage = 'Marketplace hub batch returned an unknown, duplicate, or malformed platform scan identity.';
+  const urlsFor = entry => (entry?.prepared?.llmInputs || []).map(input => input?.spec?.url).filter(Boolean);
   for (const row of rows) {
-    if (!expected.has(row?.scanId) || seen.has(row.scanId) || !Array.isArray(row.attention)) {
-      throw new Error('Marketplace hub batch returned an unknown, duplicate, or malformed platform scan identity.');
-    }
-    const allowedUrls = new Set((expectedEntries.find(entry => entry.scanId === row.scanId)?.prepared?.llmInputs || [])
-      .map(input => input?.spec?.url)
-      .filter(Boolean));
-    for (const item of row.attention) {
-      // Unlike the legacy one-platform path, a batch must fail closed rather
-      // than repair a wrong URL: otherwise evidence from one platform could be
-      // rebound to another platform's sole page.
-      if (typeof item?.sourceUrl !== 'string' || !allowedUrls.has(item.sourceUrl)) {
-        throw new Error('Marketplace hub batch attention item references a URL outside its platform scan.');
-      }
-    }
+    if (!expected.has(row?.scanId)) { issues.add('hub.scan-unknown', row?.scanId, { value: row?.scanId, message: identityMessage }); continue; }
+    if (seen.has(row.scanId)) { issues.add('hub.scan-duplicate', row.scanId, { message: identityMessage }); continue; }
     seen.add(row.scanId);
+    if (!Array.isArray(row.attention)) { issues.add('hub.attention-malformed', row.scanId, { message: identityMessage }); continue; }
+    const ownUrls = new Set(urlsFor(expected.get(row.scanId)));
+    for (const [index, item] of row.attention.entries()) {
+      // Batches reject exact URLs owned by another section. Missing or shortened
+      // URLs use the same sole-page host repair as singleton scans.
+      if (!ownUrls.has(item?.sourceUrl) && expectedEntries.some(entry => entry.scanId !== row.scanId && urlsFor(entry).includes(item?.sourceUrl))) issues.add('hub.url-foreign-section', `${row.scanId}:${index}`, { message: 'Marketplace hub batch attention item references a URL outside its platform scan.' });
+    }
   }
+  for (const id of expected.keys()) if (!seen.has(id)) issues.add('hub.scan-missing', id, { message: 'Marketplace hub batch must return exactly one platform result for every requested scan.' });
+  issues.fail({ templates: HUB_SCAN_CORRECTION_TEMPLATES, vars: { total: expectedEntries.length } });
   return value;
 }
 

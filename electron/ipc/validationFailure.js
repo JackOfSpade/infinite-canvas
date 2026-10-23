@@ -63,13 +63,14 @@ export function selectCorrectionDetails(entries, limit = VALIDATION_DETAIL_LIMIT
   return { lines: all.map((entry) => entry.line), ruleIds: all.map((entry) => entry.ruleId) };
 }
 
-function applyFailureFields(error, { code, stage, reason, counts, selected }) {
-  error.code = code;
+function applyFailureFields(error, { code, stage, reason, counts, selected, validationDiagnostic }) {
+  if (code != null) error.code = code;
   if (selected.lines.length) {
     error.correctionDetails = selected.lines;
     error.correctionRuleIds = selected.ruleIds;
   }
-  if (reason) {
+  if (validationDiagnostic != null) error.validationDiagnostic = validationDiagnostic;
+  else if (reason) {
     error.validationDiagnostic = { stage, reason, counts: counts || {} };
   }
   return error;
@@ -80,6 +81,7 @@ function applyFailureFields(error, { code, stage, reason, counts, selected }) {
  * `throw validationFailure({ ... })`.
  */
 export function validationFailure({
+  error: existingError,
   message,
   details = [],
   ruleIds = [],
@@ -87,12 +89,14 @@ export function validationFailure({
   stage = 'domain',
   reason = null,
   counts = null,
+  validationDiagnostic = null,
 } = {}) {
   const lineList = Array.isArray(details) ? details : [];
   const idList = Array.isArray(ruleIds) ? ruleIds : [];
   const selected = selectCorrectionDetails(lineList.map((line, index) => ({ line, ruleId: idList[index] })));
-  const error = new Error(message ?? selected.lines.join(' | '));
-  return applyFailureFields(error, { code, stage, reason, counts, selected });
+  const error = existingError instanceof Error ? existingError : new Error(message ?? selected.lines.join(' | '));
+  if (message != null) error.message = message;
+  return applyFailureFields(error, { code, stage, reason, counts, selected, validationDiagnostic });
 }
 
 /**

@@ -1,3 +1,5 @@
+import { collector, templatesFor } from './validationLines.js';
+export const LOCATION_CONSOLIDATION_CORRECTION_TEMPLATES = templatesFor('locconf.');
 import { JOB_LOCATION_CONSOLIDATION_CONFIRMATION_SCHEMA } from './aiSchemas.js';
 import { wrapUntrustedText } from './promptSafety.js';
 import { HANDOFF_CONCURRENCY, mapAutomaticHandoffs } from '../../src/utils/handoffScheduler.js';
@@ -51,20 +53,20 @@ ${wrapUntrustedText('job-location-consolidation-pairs', JSON.stringify(rows))}`;
 }
 
 function validateConfirmation(value, expectedPairs) {
-  const rows = Array.isArray(value?.confirmations) ? value.confirmations : null;
-  if (!rows || rows.length !== expectedPairs.length) {
-    throw new Error(`Invalid location-consolidation confirmation: received ${rows?.length ?? 0}/${expectedPairs.length} pair verdicts.`);
-  }
+  const issues = collector();
+  const rows = Array.isArray(value?.confirmations) ? value.confirmations : [];
+  if (!Array.isArray(value?.confirmations) || rows.length !== expectedPairs.length) issues.add('locconf.rows', '', { raw: rows.length, message: `Invalid location-consolidation confirmation: received ${rows.length}/${expectedPairs.length} pair verdicts.` });
   const expectedIds = new Set(expectedPairs.map(pair => pair.id));
   const seen = new Set();
   for (const row of rows) {
     const pairId = typeof row?.pairId === 'string' ? row.pairId : '';
-    if (!expectedIds.has(pairId)) throw new Error('Invalid location-consolidation confirmation: response named an unknown pair.');
-    if (seen.has(pairId)) throw new Error('Invalid location-consolidation confirmation: response repeated a pair.');
-    if (typeof row?.sameJob !== 'boolean') throw new Error(`Invalid location-consolidation confirmation for ${pairId}: sameJob must be boolean.`);
+    if (!expectedIds.has(pairId)) { issues.add('locconf.pair-unknown', pairId, { value: pairId, message: 'Invalid location-consolidation confirmation: response named an unknown pair.' }); continue; }
+    if (seen.has(pairId)) { issues.add('locconf.pair-duplicate', pairId, { message: 'Invalid location-consolidation confirmation: response repeated a pair.' }); continue; }
+    if (typeof row?.sameJob !== 'boolean') issues.add('locconf.same-job-type', pairId, { message: `Invalid location-consolidation confirmation for ${pairId}: sameJob must be boolean.` });
     seen.add(pairId);
   }
-  if (seen.size !== expectedIds.size) throw new Error('Invalid location-consolidation confirmation: response omitted a pair.');
+  for (const id of expectedIds) if (!seen.has(id)) issues.add('locconf.pair-missing', id, { message: 'Invalid location-consolidation confirmation: response omitted a pair.' });
+  issues.fail({ templates: LOCATION_CONSOLIDATION_CORRECTION_TEMPLATES, vars: { total: expectedPairs.length } });
 }
 
 /**

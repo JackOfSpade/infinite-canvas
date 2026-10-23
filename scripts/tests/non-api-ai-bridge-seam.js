@@ -7,6 +7,7 @@ import {
   _resetNonApiAiHandoffLifecycle, __reloadDurableStateForTests, assert, buildNonApiAiHandoffLifecycleMarkdown, callLLMText, electronPkg, getNonApiAiHandoffLifecycle,
   handleSafe, ipcMain, registerNonApiAiHandlers, requestNonApiAi, validateJobScoringSubmission,
   returnBridgeHandoffToPerson, __promptForRetryForTests, __defaultSafeValidationDiagnosticForTests,
+  JOB_GAP_REVIEW_SCHEMA, validateGapReviewSubmission,
 } from '../test-dependencies.js';
 import { getRecentLogs } from '../../electron/logger.js';
 import {
@@ -535,6 +536,45 @@ function ruleError(lines, ids) {
 }
 
 export default [
+  {
+    name: 'W4 repro R1: distinct gap-review rules count separately and the fifth repeat hands back',
+    run: async () => {
+      const { sender, sent, waitFor } = freshHarness();
+      const logsBefore = new Set(getRecentLogs());
+      const runId = `w4-gap-causes-${sender.id}-${Date.now()}`;
+      const allow = { allowTasks: new Set(['job-gap-review']) };
+      const batch = [{ index: 0, jobText: 'Alpha duty one.', rows: ['r1', 'r2'].map(id => ({
+        id, requirement: 'a', priority: 'required', status: 'not_documented', jobEvidence: [], candidateEvidence: [],
+      })) }];
+      handleSafe('w4-gap-causes', async (_event, _args, signal) => ({
+        value: await callLLMText('GAP REVIEW CAUSES', { signal, task: 'job-gap-review', responseSchema: JOB_GAP_REVIEW_SCHEMA,
+          responseValidator: value => validateGapReviewSubmission(value, batch) }),
+      }));
+      const run = handler('w4-gap-causes')({ sender }, { manualAiRunId: runId });
+      const [request] = await waitFor(1);
+      const row = (id, attempt) => ({ id, verdict: 'confirmed', priority: 'unchanged', status: 'unchanged', jobEvidence: '', candidateEvidence: '', duplicateOf: '', explanation: `Synthetic attempt ${attempt}` });
+      const submit = (ids, attempt) => submitNonApiAiResponseForBridge({ requestId: request.requestId, handoffCode: request.handoffCode,
+        response: JSON.stringify({ handoffCode: request.handoffCode, reviews: [{ index: 0, rows: ids.map(id => row(id, attempt)) }] }), ...allow });
+      try {
+        for (let index = 0; index < 4; index++) {
+          const result = await submit(['r1'], index);
+          assert(result.outcome === 'rejected' && /1\. .*r2.*missing/iu.test(result.correction), 'the missing-row rule has a numbered correction and remains bridged');
+        }
+        for (let index = 0; index < 4; index++) {
+          const result = await submit(['r1', 'r2', `zz-${index + 1}`], index + 4);
+          assert(result.outcome === 'rejected' && /1\. .*zz-.*not among/iu.test(result.correction), 'the unlisted-row rule has a separate numbered correction and does not cap at five total');
+        }
+        assert((await submit(['r1'], 8)).outcome === 'rejection_cap', 'the ninth answer is the fifth repeat of the missing-row rule');
+        assert(listBridgeableNonApiAiHandoffs(allow).handoffs.length === 0, 'the bridge no longer owns the handoff');
+        assert(sent.filter(item => item.channel === 'non-api-ai-request').at(-1).payload.prompt.includes('missing'), 'the dock carries the rule text');
+        const diagnostics = JSON.stringify({ lifecycle: getNonApiAiHandoffLifecycle({ windowId: sender.id }), logs: getRecentLogs().filter(entry => !logsBefore.has(entry)) });
+        assert(!diagnostics.includes('listed gap rows') && !diagnostics.includes('not among the listed gap row ids') && !diagnostics.includes('correctionDetails'), 'W4 teaching text stays out of logs and lifecycle receipts');
+      } finally {
+        await cancelAll(sender, [request]); await run;
+        await handler('complete-non-api-ai-run')({ sender }, { runId }).catch(() => {});
+      }
+    },
+  },
   {
     name: 'W3 transport: an unkeyed detail counts independently beside changing keyed rules',
     run: () => withRuleHandoff(value => {

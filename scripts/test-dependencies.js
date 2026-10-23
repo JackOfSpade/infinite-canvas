@@ -168,6 +168,17 @@ export { assertResponseMatchesSchema, assertResponseSchemaVocabularySupported, a
 export { selectCorrectionDetails, validationFailure, validationFailureCollector, VALIDATION_DETAIL_LIMIT, VALIDATION_RULE_ID_RE, VALIDATION_SUMMARY_RULE_ID } from '../electron/ipc/validationFailure.js';
 export { applyProfileEditsWithRules, checkFindingAgainstLedgerWithRules, checkFindingAgainstLedgerWithForwardedDetails } from '../electron/ipc/careerProfileEdits.js';
 export { __careerPageValidationDiagnosticForTests } from '../electron/ipc/careerSnapshot.js';
+export { JOB_GAP_REVIEW_SCHEMA, validateGapReviewSubmission } from '../electron/ipc/jobGapReview.js';
+export * as w4Jobs from '../electron/ipc/jobs.js';
+export * as w4Scoring from '../electron/ipc/jobScoringEvidence.js';
+export * as w4Preferences from '../electron/ipc/jobPreferences.js';
+export * as w4Taxonomy from '../electron/ipc/jobTaxonomy.js';
+export * as w4Location from '../electron/ipc/jobLocationLookup.js';
+export * as w4Consolidation from '../electron/ipc/jobLocationConsolidation.js';
+export * as w4Interview from '../electron/ipc/interviewPreparation.js';
+export * as w4Marketplace from '../electron/ipc/marketplace.js';
+export * as w4Hub from '../electron/ipc/listingStatusCheck.js';
+export * as w4Text from '../electron/ipc/groundedResearchValidation.js';
 export { withSharedProfileLock, getSharedProfileLockSnapshot } from '../electron/ipc/sharedProfileLock.js';
 export { withStatusCheckLock, getStatusCheckQueueDepth } from '../electron/ipc/statusCheckLock.js';
 export { withMarketplaceBrowserLock, getMarketplaceBrowserQueueDepth } from '../electron/ipc/marketplaceBrowserLock.js';
@@ -351,3 +362,9 @@ export { __holdWriteVerifyRenderForTests, __readWriteVerifyRenderHoldForTests } 
 export { classifyRenderFaults, renderDocumentsWithHostRetry, fitRejectionMessage, hostOwnedPunctuationFaults, hostOwnedPunctuationMessage, fitMeasurement, sameFitMeasurement } from '../electron/ipc/applicationV2HostFaults.js';
 export { __setLocalAiRenderPdfForTests } from '../electron/ipc/localAiApplication.js';
 export { recordPasteHandoffDiagnostic, getPasteHandoffDiagnosticsSnapshot, buildPasteHandoffDiagnosticsMarkdown, _resetPasteHandoffDiagnostics } from '../electron/ipc/pasteHandoffDiagnostics.js';
+
+export * as w4Lines from '../electron/ipc/validationLines.js';
+export { __rejectionCauseKeysForTests } from '../electron/ipc/nonApiAi.js';
+export { diagnoseCompensationExperienceBandLadder } from '../electron/ipc/jobCompensation.js';
+
+export { isValidCompensationExperienceBandLadder } from '../electron/ipc/jobCompensation.js';
