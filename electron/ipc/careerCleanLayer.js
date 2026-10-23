@@ -1,6 +1,7 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
+import { HANDOFF_CONCURRENCY, mapAutomaticHandoffs } from '../../src/utils/handoffScheduler.js';
 
 export const CAREER_CLEAN_LAYER_VERSION = 1;
 export const CAREER_CLEAN_RESPONSE_SCHEMA = Object.freeze({
@@ -193,13 +194,18 @@ export async function readCareerCleanLayer(root, snapshotId, catalog) {
 /** The same handoff and verifier serve cache hits and freshly compiled snapshots. */
 export async function produceCareerCleanLayer({ snapshotId, catalog, root, callText, signal }) {
   if (await readCareerCleanLayer(root, snapshotId, catalog)) return { reused: true };
-  const responses = [];
-  for (const page of careerCleanLayerPages(catalog)) {
-    responses.push(await callText(careerCleanLayerPrompt(page), {
-      signal, task: 'career-profile-clean', responseSchema: CAREER_CLEAN_RESPONSE_SCHEMA,
+  // Pages are independent (each answers only its own ids), so they share one
+  // bounded roster instead of waiting on each other: six pages took 3 min
+  // one at a time on 2026-10-23 while nine bridge workers sat idle.
+  const responses = await mapAutomaticHandoffs(
+    careerCleanLayerPages(catalog),
+    HANDOFF_CONCURRENCY,
+    (page, _index, { signal: pageSignal }) => callText(careerCleanLayerPrompt(page), {
+      signal: pageSignal, task: 'career-profile-clean', responseSchema: CAREER_CLEAN_RESPONSE_SCHEMA,
       hints: { itemCount: page.length },
-    }));
-  }
+    }),
+    { signal },
+  );
   const layer = buildCareerCleanLayer(snapshotId, catalog, responses);
   await writeCareerCleanLayer(root, layer);
   const published = await readCareerCleanLayer(root, snapshotId, catalog);

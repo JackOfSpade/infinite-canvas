@@ -162,6 +162,27 @@ export function selectOrphanedLocalAiJobs(discoveredJobs, knownJobIds) {
   });
 }
 
+// A 'failed' folder with no card is the one orphan nothing can ever act on:
+// the dock and the review-stop recovery both start from a card, and a deleted
+// card's result is never saved. Left alone it sat for the 30-day retention as a
+// released bridge lane counted as "needs you", which also answered every
+// worker's empty-queue poll with "paused" (2026-10-23: three review-stopped
+// first attempts whose cards were deleted before the same jobs were generated
+// again). The manager discards it once it has stayed card-less this long, so a
+// canvas still loading its nodes, or an undo right after the delete, keeps it.
+export const LOCAL_AI_FAILED_ORPHAN_RETIRE_MS = 2 * 60_000;
+
+/**
+ * Pure retire decision for one discovered orphan. `firstSeenAt` is when this
+ * job was first seen card-less and failed in an unbroken run of ticks (null
+ * for the first sighting). Returns 'track' (start the clock), 'wait' or
+ * 'retire'.
+ */
+export function failedOrphanRetireDecision(firstSeenAt, now, retireMs = LOCAL_AI_FAILED_ORPHAN_RETIRE_MS) {
+  if (!Number.isFinite(firstSeenAt)) return 'track';
+  return now - firstSeenAt >= retireMs ? 'retire' : 'wait';
+}
+
 // ── Saved-bundle Finder/Explorer reveal ─────────────────────────────────────
 // Both drivers can be the one that turns a job terminal 'saved': the mounted
 // card when it runs its own import+save, or this manager when the card was

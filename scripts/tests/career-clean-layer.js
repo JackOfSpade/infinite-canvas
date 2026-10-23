@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
-  buildCareerCleanLayer, cleanCareerSkillNames, readCareerCleanLayer,
+  buildCareerCleanLayer, careerCleanLayerPages, cleanCareerSkillNames, readCareerCleanLayer,
   produceCareerCleanLayer, verifyCareerCleanText, writeCareerCleanLayer,
 } from '../../electron/ipc/careerCleanLayer.js';
 import { fullApprovedHand, writeVerifySourcePrompt } from '../../electron/ipc/applicationWriteVerify.js';
@@ -65,6 +65,22 @@ export default [{
       assert.equal(produced.reused, false);
       assert.equal(handoffs, 1);
       assert.ok(await readCareerCleanLayer(freshRoot, snapshotId, catalog));
+      // Independent pages are issued together, not one after another.
+      const longCatalog = Array.from({ length: 6 }, (_, page) => careers.map(({ id, quote }) => ({
+        id: `${id}.p${page}`, quote: `${quote} ${'x'.repeat(6_000)}`, sourceId: 'career-data' }))).flat();
+      const pageCount = careerCleanLayerPages(longCatalog).length;
+      assert.ok(pageCount > 1, 'fixture spans several pages');
+      let inFlight = 0; let peak = 0;
+      const parallel = await produceCareerCleanLayer({ snapshotId, catalog: longCatalog, root: path.join(root, 'parallel'),
+        callText: async (prompt) => {
+          inFlight += 1; peak = Math.max(peak, inFlight);
+          await new Promise(resolve => setTimeout(resolve, 10));
+          inFlight -= 1;
+          return { items: longCatalog.filter(row => prompt.includes(row.id)).map(row => ({ id: row.id, clean: row.quote })) };
+        } });
+      assert.equal(parallel.reused, false);
+      assert.equal(peak, pageCount, 'every page is in flight at once');
+      assert.deepEqual(parallel.layer.rejections, []);
     } finally { fs.rmSync(root, { recursive: true, force: true }); }
   },
 }, {
@@ -102,7 +118,11 @@ export default [{
 }, {
   name: 'Sabotage: bypassing ordered-word comparison makes the reorder mutation pass and fails this proof',
   async run() {
-    const source = fs.readFileSync(fileURLToPath(new URL('../../electron/ipc/careerCleanLayer.js', import.meta.url)), 'utf8');
+    // A data: module cannot resolve the layer's relative scheduler import.
+    const schedulerImport = "'../../src/utils/handoffScheduler.js'";
+    const rawSource = fs.readFileSync(fileURLToPath(new URL('../../electron/ipc/careerCleanLayer.js', import.meta.url)), 'utf8');
+    assert.ok(rawSource.includes(schedulerImport), 'scheduler import exists');
+    const source = rawSource.replace(schedulerImport, `'${new URL('../../src/utils/handoffScheduler.js', import.meta.url).href}'`);
     const target = 'return orthographicGrouping(original, proposed, originalWords, cleanWords);';
     assert.ok(source.includes(target), 'guard branch exists');
     const sabotaged = await import(`data:text/javascript;base64,${Buffer.from(source.replace(target, 'return true;')).toString('base64')}`);

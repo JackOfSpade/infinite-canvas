@@ -88,7 +88,7 @@ import { __queueLegacyLocalApplicationFixtureForTests } from '../electron/ipc/lo
 // that fixture-only path out of IPC while production callers exercise the
 // strict current-snapshot queue export directly.
 export const queueLocalApplicationJob = __queueLegacyLocalApplicationFixtureForTests;
-export { LOCAL_AI_FALLBACK_IDLE_STATUSES, LOCAL_AI_CARD_POLL_IDLE_STATUSES, LOCAL_AI_JOB_INTEGRITY_ERROR_CODE, brokenLocalAiJobDriveState, jobIntegrityFailureMessage, registerMountedJobCard, unregisterMountedJobCard, isJobCardMounted, selectFallbackLocalAiJobs, selectOrphanedLocalAiJobs } from '../src/utils/localAiFallback.js';
+export { LOCAL_AI_FALLBACK_IDLE_STATUSES, LOCAL_AI_CARD_POLL_IDLE_STATUSES, LOCAL_AI_JOB_INTEGRITY_ERROR_CODE, brokenLocalAiJobDriveState, jobIntegrityFailureMessage, registerMountedJobCard, unregisterMountedJobCard, isJobCardMounted, selectFallbackLocalAiJobs, selectOrphanedLocalAiJobs, failedOrphanRetireDecision, LOCAL_AI_FAILED_ORPHAN_RETIRE_MS } from '../src/utils/localAiFallback.js';
 export { canRegenerateLocalApplication, canSaveImportedLocalApplication, queuedLocalApplicationSettlement, replacedLocalApplicationForCleanup } from '../src/utils/localAiApplicationLifecycle.js';
 export { collectNodesDeep } from '../src/utils/navigationUtils.js';
 export { backgroundJobResumeRequest, collectNestedStartupRecoveryGraph, createWorkspaceStartupRecoveryCoordinator, hasNestedStartupRecoveryCandidate, isNestedStartupRecoveryCandidate, terminalMarketplaceReplayDisposition } from '../src/utils/workspaceStartupRecovery.js';

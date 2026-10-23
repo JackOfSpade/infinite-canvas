@@ -5,6 +5,8 @@ import {
   LOCAL_AI_POLL_INTERVAL_MS,
   LOCAL_AI_RESULT_SETTLE_MS,
   brokenLocalAiJobDriveState,
+  failedOrphanRetireDecision,
+  LOCAL_AI_FAILED_ORPHAN_RETIRE_MS,
   LOCAL_AI_STATUS_ERROR_STREAK_LIMIT,
   isJobCardMounted,
   revealSavedLocalApplicationOutputOnce,
@@ -74,6 +76,10 @@ export function useLocalAiFallbackManager({ navigation, getCurrentFile, addToast
   const tickBusyRef = useRef(false);
   // One measured import at a time across all jobs — each renders PDFs.
   const importBusyRef = useRef(false);
+  // jobId → when this orphan was first seen card-less and 'failed' in an
+  // unbroken run of ticks (see LOCAL_AI_FAILED_ORPHAN_RETIRE_MS). Any tick
+  // where a card owns the job again clears it.
+  const failedOrphanSinceRef = useRef(new Map());
 
   useEffect(() => {
     let disposed = false;
@@ -400,6 +406,24 @@ export function useLocalAiFallbackManager({ navigation, getCurrentFile, addToast
       }
     };
 
+    // Discard a failed folder no card has owned for the whole retire window.
+    // The discard is the app's own bundle-removal chokepoint, so it also frees
+    // the bundle's handoff bridge lane.
+    const retireFailedOrphan = async (jobId, canvasFilePath, generation) => {
+      const decision = failedOrphanRetireDecision(failedOrphanSinceRef.current.get(jobId), Date.now());
+      if (decision === 'track') failedOrphanSinceRef.current.set(jobId, Date.now());
+      if (decision !== 'retire' || !window.electronAPI?.discardLocalApplication) return;
+      failedOrphanSinceRef.current.delete(jobId);
+      if (disposed || !isCurrentQuitGeneration(generation) || hasLiveJobCardOwner(jobId)) return;
+      try {
+        const result = await window.electronAPI.discardLocalApplication({ jobId, canvasFilePath });
+        if (result?.success === false) throw new Error(result.error || 'discard refused');
+        EventLogger.log(`[LocalAI] fallback discarded failed orphan job=${jobId}: no card has owned it for ${Math.round(LOCAL_AI_FAILED_ORPHAN_RETIRE_MS / 1000)}s`);
+      } catch (error) {
+        EventLogger.log(`[LocalAI] fallback could not discard failed orphan job=${jobId}: ${error?.message || error}`);
+      }
+    };
+
     const driveJob = async (node, orphanJob = null, generation = currentQuitGeneration()) => {
       const { getCurrentFile: currentFile } = ctxRef.current;
       const local = node.data.localApplication;
@@ -445,6 +469,13 @@ export function useLocalAiFallbackManager({ navigation, getCurrentFile, addToast
         if (!statusResult?.success || !statusResult.localJob) throw new Error(statusResult?.error || 'Could not check Local AI job status.');
         statusErrorStreakRef.current.delete(jobId);
         const next = statusResult.localJob;
+        if (isOrphan) {
+          if (next.status === 'failed') {
+            await retireFailedOrphan(jobId, canvasFilePath, generation);
+            return;
+          }
+          failedOrphanSinceRef.current.delete(jobId);
+        }
         if (next.status === 'importing') {
           // Manifest reports a fresh 'imported': a prior import's bundle save
           // is in its time-bounded window. Hold in a waiting state — writing
@@ -622,6 +653,12 @@ export function useLocalAiFallbackManager({ navigation, getCurrentFile, addToast
           .map((node) => node?.data?.localApplication?.id)
           .filter(Boolean));
         const orphaned = selectOrphanedLocalAiJobs(discovery.localJobs, knownJobIds);
+        // A failed-orphan clock only runs while the job stays card-less on
+        // consecutive ticks; an undo or a canvas that finished loading resets it.
+        const orphanedIds = new Set(orphaned.map(job => job.id));
+        for (const jobId of failedOrphanSinceRef.current.keys()) {
+          if (!orphanedIds.has(jobId)) failedOrphanSinceRef.current.delete(jobId);
+        }
         // Same head-of-line hazard applies to orphaned folders discovered for
         // this canvas: nothing about one card-less job's import should hold up
         // another's poll.
