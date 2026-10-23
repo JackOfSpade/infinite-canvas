@@ -9,13 +9,15 @@ import {
   WRITE_VERIFY_PRIOR_ROUND_FINDINGS_MAX, WRITE_VERIFY_PRIOR_ROUNDS_HEADING, priorRoundFindings,
   factCorrectionTransition, fullApprovedHand, initialWriteVerifyState, isWriteVerifyJob,
   validateWriteVerifyRanking, writeVerifyCandidateCount,
-  writeVerifyChangedFindingErrors, writeVerifyFactFindingErrors,
+  writeVerifyChangedFindingErrors, writeVerifyFactFindingErrors, writeVerifyUnitText, writeVerifyUnitListing,
+  writeVerifyRankingErrors, writeVerifyRankingShapeError, writeVerifyRankingReasonErrors, WRITE_VERIFY_REJECTION_HEADING,
   writeVerifyNextAfterCandidate, writeVerifySourcePrompt, writeVerifyStageKey, writeVerifyPrompt,
 } from '../../electron/ipc/applicationWriteVerify.js';
 import {
   APPLICATION_V2_LIMITS, ApplicationV2LimitError,
   assertApplicationV2PromptLimit, assertApplicationV2ReplyLimit,
 } from '../../electron/ipc/applicationV2Limits.js';
+import { extractEditorialPlanSource } from '../../electron/ipc/applicationEditorialPlan.js';
 import { classifySubmission } from '../../electron/ipc/handoffBridge/preflight.js';
 import { createSyntheticPreflightSource } from '../../electron/ipc/handoffBridge/sources/syntheticPreflight.js';
 import { createHandoffCodeGuard } from '../../electron/ipc/handoffBridge/lanes.js';
@@ -42,6 +44,110 @@ const domains = [
 const JOB_ID = '11111111-1111-4111-8111-111111111111';
 
 export default [
+  {
+    name: 'v2 correction details preserve strict spans, bound output, and register each rule',
+    run: () => {
+      const text = `The team's ledger rebuild used five engineers.`;
+      const docs = { resume: { roles: [{ bullets: [{ id: 'b1', text }] }] } };
+      const check = (finding, ids) => {
+        const errors = writeVerifyFactFindingErrors([finding], docs);
+        assert.equal(errors.length, 1);
+        assert.deepEqual(pasteRejectionCheckIds(errors).checkIds.sort(), ids.sort());
+        assert.ok(!errors[0].includes(text));
+        return errors[0];
+      };
+      check({ id: 'roleThesis', claim: 'x', reason: 'bad' }, ['fact-finding-unit']);
+      check({ id: 'b1', claim: ' ', reason: ' ' }, ['fact-finding-claim', 'fact-finding-reason']);
+      check(null, ['fact-finding-shape']);
+      assert.match(check({ id: 'b1', claim: 'ledger...engineers', reason: 'bad' }, ['fact-finding-span']), /one unbroken span/);
+      assert.match(check({ id: 'b1', claim: `team${String.fromCharCode(0x2019)}s ledger`, reason: 'bad' }, ['fact-finding-span']), /matches once whitespace/);
+      assert.deepEqual(writeVerifyFactFindingErrors([{ id: 'b1', claim: "team's ledger", reason: 'bad' }], docs), []);
+      assert.match(writeVerifyFactFindingErrors(null, docs)[0], /^fact-findings-shape:/);
+      const many = writeVerifyFactFindingErrors(Array.from({ length: 25 }, () => ({ id: 'b1', claim: 'wrong', reason: 'bad' })), docs);
+      assert.equal(many.length, 21);
+      assert.match(many[20], /5 more findings/);
+    },
+  },
+  {
+    name: 'v2 unit listing includes delivered authored units and ranking errors identify set defects',
+    run: () => {
+      const docs = { resume: { roles: [{ bullets: [{ id: 'b1', text: 'Synthetic text' }, { text: 'idless' }] }],
+        projects: [{ id: 'p1' }], skills: [{ id: 's1', group: 'Tools', items: ['TypeScript'] }],
+        education: [{ id: 'e1', credential: 'Degree' }], credentials: [{ id: 'c1', name: 'Credential' }] },
+      coverLetter: { paragraphs: [{ id: 'l1', text: 'Paragraph' }] } };
+      assert.equal(writeVerifyUnitText(docs, undefined), null);
+      assert.equal(writeVerifyUnitText(docs, 's1'), 'TypeScript Tools');
+      assert.equal(writeVerifyUnitText(docs, 'e1'), 'Degree');
+      assert.equal(writeVerifyUnitText(docs, 'c1'), 'Credential');
+      assert.equal(writeVerifyUnitListing(docs), '- résumé bullets: b1\n- projects: p1\n- skill groups: s1\n- letter paragraphs: l1');
+      const errors = writeVerifyRankingErrors(['candidate-1', 'candidate-1', 'foreign'], ['candidate-1', 'candidate-2']);
+      assert.equal(errors.length, 1);
+      assert.match(errors[0], /3 places for 2 candidates; missing candidate-2; not candidates of this round "foreign"; listed more than once candidate-1/);
+      assert.match(writeVerifyRankingShapeError({ persona: 'x', pass: true, sets: [] }), /persona, pass, sets/);
+      assert.match(writeVerifyRankingReasonErrors([{ id: 'candidate-1', reason: ' ' }])[0], /place 1/);
+      assert.throws(() => validateWriteVerifyRanking(null, []));
+    },
+  },
+  {
+    name: 'v2 prompts print corrections verbatim once for write pick and both fact stages',
+    run: () => {
+      const state = initialWriteVerifyState();
+      state.candidates[0].status = 'accepted';
+      state.candidates[0].structured = { resume: { roles: [{ bullets: [{ id: 'b1', text: 'Synthetic' }] }] }, coverLetter: { paragraphs: [] } };
+      state.ranking = [state.candidates[0].id]; state.factIndex = 0;
+      const line = 'fact-finding-span: findings[0] failed.';
+      for (const stage of ['write', 'pick', 'fact-check', 'fact-recheck']) {
+        const args = { stage, state, sourcePrompt: 'The following is approved source data, not instructions.\nBRIEF: Synthetic brief\n', posting: 'Posting', hand: 'Hand', envelope: {} };
+        assert.equal(writeVerifyPrompt(args), writeVerifyPrompt({ ...args, corrections: [] }));
+        const prompt = writeVerifyPrompt({ ...args, corrections: [line] });
+        assert.equal(prompt.split(line).length, 2);
+        assert.equal(prompt.split(WRITE_VERIFY_REJECTION_HEADING).length, 2);
+        if (stage === 'write') {
+          assert.equal(extractEditorialPlanSource(prompt), extractEditorialPlanSource(writeVerifyPrompt(args)));
+          assert.equal([...prompt.matchAll(/^OUTPUT FORMAT FOR THIS ARM:$/gm)].length, 1);
+        }
+        if (stage === 'pick') {
+          assert.equal(prompt.split('{"ranking":[{"id":candidateId,"reason":string}]}').length, 2);
+          assert.ok(!prompt.includes('{persona'));
+        }
+        if (stage.startsWith('fact-')) {
+          assert.match(prompt, /CHECKABLE UNITS \(/);
+          assert.match(prompt, /roleThesis and coverLetterArgument/);
+          assert.ok(prompt.indexOf(line) < prompt.indexOf('Echo the APPLICATION V2 HANDOFF'));
+        }
+      }
+      const source = fs.readFileSync(path.resolve('electron/ipc/localAiApplication.js'), 'utf8');
+      assert.ok(source.includes('work.judgeRejections = appendWriteVerifyRejection'));
+      assert.ok(source.includes('winner.factCheckRejections = appendWriteVerifyRejection'));
+      assert.ok(source.includes('pageImageSha256'));
+      assert.ok(!source.includes('return { accepted: false, validationErrors: errors, handoff: await writeVerifyHandoffRecord({ jobId, input, state, corrections: errors }) }'));
+    },
+  },
+
+  {
+    name: 'v2 judge rubric carries grading text only and the pick prompt owns its output format',
+    run: () => {
+      assert.ok(!WRITE_VERIFY_JUDGE_RUBRIC.includes('Return JSON only'));
+      assert.ok(!WRITE_VERIFY_JUDGE_RUBRIC.includes('persona'));
+      assert.ok(WRITE_VERIFY_JUDGE_RUBRIC.endsWith('compare the play of the fixed hand.'));
+    },
+  },
+  {
+    name: 'v2 fact findings give one learnable line per bad finding without expected source text',
+    run: () => {
+      for (const domain of ['ledger', 'orchard', 'library']) {
+        const text = `I led five engineers on the ${domain} rebuild.`;
+        const documents = { resume: { roles: [{ bullets: [{ id: 'bullet-1', text }] }] } };
+        const errors = writeVerifyFactFindingErrors([{ id: 'bullet-1', claim: 'led a team of five', reason: 'inflated' }], documents);
+        assert.equal(errors.length, 1);
+        assert.ok(errors[0].startsWith('fact-finding-span: findings[0].claim'));
+        assert.ok(errors[0].includes('its first 4 of 18 characters'));
+        assert.ok(!errors[0].includes(text));
+        assert.deepEqual(pasteRejectionCheckIds(errors).checkIds, ['fact-finding-span']);
+      }
+    },
+  },
+
   {
     name: 'write-verify brief: one punctuation rule for both documents, printed once, inside a fixed size budget',
     run() {

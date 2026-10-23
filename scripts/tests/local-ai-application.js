@@ -623,6 +623,86 @@ export default [
     },
   },
 
+
+  {
+    name: 'v2 rejected fact-check and fact-recheck replies persist their correction and the re-read handoff prints it',
+    run: async () => {
+      for (const stage of ['fact-check', 'fact-recheck']) {
+        const project = await createCanvasProject();
+        try {
+          const queued = await queueDiscardFixture(project);
+          const args = { jobId: queued.id, canvasFilePath: project.canvasFilePath };
+          const reply = (handoff, fields) => JSON.stringify({ protocol: 1, jobId: queued.id, stage: handoff.stage,
+            handoffCode: handoff.handoffCode, baseHashes: handoff.baseHashes, ...fields });
+          const contextOf = handoff => JSON.parse(handoff.prompt.slice(handoff.prompt.lastIndexOf('\n\nAuthoritative context:\n') + '\n\nAuthoritative context:\n'.length));
+          let handoff = (await getLocalApplicationHandoff(args)).handoff;
+          let context = contextOf(handoff);
+          const evidence = [{ id: 'p1-e1', quote: context.requirementsProgress.sourceCoverage.units.find(unit => unit.text.includes('reliable system delivery')).text, requirement: 'Reliable system delivery', priority: 'high' }];
+          const requirements = [{ id: 'p1-r1', text: 'Reliable system delivery', priority: 'high', evidenceIds: ['p1-e1'] }];
+          const accepted = await submitLocalApplicationHandoff({ ...args, handoffCode: handoff.handoffCode,
+            response: reply(handoff, { storeDigest: context.authorityStore.digest, complete: true, identity: context.trustedIdentity,
+              evidence, requirements, ...listingCoverageFields(context, evidence, requirements) }) });
+          nodeAssert.equal(accepted.accepted, true, JSON.stringify(accepted.validationErrors));
+          handoff = accepted.handoff;
+          while (handoff.stage === 'requirements-audit') {
+            context = contextOf(handoff);
+            const audited = await submitLocalApplicationHandoff({ ...args, handoffCode: handoff.handoffCode,
+              response: reply(handoff, listingSemanticAuditFields(context, evidence, requirements)) });
+            nodeAssert.equal(audited.accepted, true, JSON.stringify(audited.validationErrors));
+            handoff = audited.handoff;
+          }
+          nodeAssert.equal(handoff.stage, 'write');
+          const manifestPath = path.join(queued.folder, 'manifest.json');
+          const manifest = JSON.parse(await fs.promises.readFile(manifestPath, 'utf8'));
+          const work = manifest.paste.writeVerify;
+          manifest.paste.stage = stage;
+          work.candidates[0].status = 'accepted';
+          work.candidates[0].structured = { resume: { roles: [{ id: 'role-acme', bullets: [{ id: 'bullet-1', text: 'I led five engineers on the ledger rebuild.', evidenceIds: [] }] }], projects: [], skills: [], education: [], credentials: [] },
+            coverLetter: { paragraphs: [{ id: 'para-1', text: 'Synthetic paragraph.', evidenceIds: [] }] } };
+          work.ranking = [work.candidates[0].id]; work.factIndex = 0;
+          work.factFindings = [{ id: 'bullet-1', claim: stage === 'fact-recheck' ? 'led five engineers' : 'x', reason: 'x' }];
+          if (stage === 'fact-recheck') work.factCorrectionRound = 1;
+          await fs.promises.writeFile(manifestPath, JSON.stringify(manifest));
+          const first = (await getLocalApplicationHandoff(args)).handoff;
+          const archiveDir = path.join(project.root, '.local-ai', 'evidence-archive', queued.id);
+          const archiveBefore = await fs.promises.readdir(archiveDir);
+          const rejected = await submitLocalApplicationHandoff({ ...args, handoffCode: first.handoffCode,
+            response: reply(first, { findings: [{ id: 'bullet-1', claim: 'led a team of five', reason: 'inflated' }] }) });
+          nodeAssert.equal(rejected.accepted, false);
+          const reread = (await getLocalApplicationHandoff(args)).handoff;
+          nodeAssert.deepEqual(reread.corrections, rejected.validationErrors);
+          nodeAssert.deepEqual(rejected.handoff.corrections, rejected.validationErrors);
+          nodeAssert.equal(reread.prompt, rejected.handoff.prompt);
+          nodeAssert.equal((await fs.promises.readdir(archiveDir)).length, archiveBefore.length + 2);
+          const trace = JSON.parse(await fs.promises.readFile(path.join(queued.folder, 'Paste Rejections.json'), 'utf8'));
+          nodeAssert.equal(trace.length, 1);
+          nodeAssert.ok(reread.prompt.includes(rejected.validationErrors[0]));
+          nodeAssert.notEqual(reread.prompt, first.prompt);
+          nodeAssert.equal(reread.stage, stage);
+          nodeAssert.notEqual(reread.handoffCode, first.handoffCode);
+          nodeAssert.equal(reread.freshContextKey, first.freshContextKey);
+          const saved = JSON.parse(await fs.promises.readFile(manifestPath, 'utf8'));
+          nodeAssert.equal(saved.paste.revision, manifest.paste.revision + 1);
+          nodeAssert.deepEqual(saved.paste.writeVerify.factFindings, work.factFindings);
+          nodeAssert.deepEqual(saved.paste.writeVerify.ranking, work.ranking);
+          nodeAssert.equal(saved.paste.writeVerify.factIndex, 0);
+          nodeAssert.deepEqual(saved.paste.writeVerify.lastCorrections, rejected.validationErrors);
+          nodeAssert.equal(saved.paste.writeVerify.candidates[0].factCheckRejections[0].stage, stage);
+          nodeAssert.ok(saved.paste.writeVerify.candidates[0].factCheckRejections[0].checkIds.includes('fact-finding-span'));
+          if (stage === 'fact-check') {
+            const corrected = await submitLocalApplicationHandoff({ ...args, handoffCode: reread.handoffCode,
+              response: reply(reread, { findings: [{ id: 'bullet-1', claim: 'led five engineers', reason: 'inflated' }] }) });
+            nodeAssert.equal(corrected.accepted, true);
+            nodeAssert.equal(corrected.handoff.stage, 'fact-correction');
+            nodeAssert.ok(!corrected.handoff.prompt.includes('YOUR PREVIOUS REPLY TO THIS HANDOFF WAS REJECTED BY THE APP'));
+          }
+        } finally {
+          await fs.promises.rm(project.root, { recursive: true, force: true });
+        }
+      }
+    },
+  },
+
   {
     name: 'Current authority final artifact rules reject only linked or shared role-project duplicates and retain selected skills',
     run: () => {

@@ -36,7 +36,7 @@ Score six dimensions, integer points, total 100:
 
 Truth and hygiene are separate hard gates. Flag a confirmed unsupported hard claim only with the exact claim, cited source text or absence, and explanation. Do not flag a plausible stylistic choice as a hard claim. Do not infer employer facts from the posting. A clear confirmed hard-claim flag makes that set fail truth regardless of its score. Hygiene fails only for a real format, safety, encoding, or page-fit problem.
 
-For each set, read both plain-text files and BOTH page PNGs. Read the career file and posting. Make no changes to the documents. The sets are anonymized; never guess or discuss their origin. Score each set independently on the same rubric, then compare the play of the fixed hand. Return JSON only, with {persona, pass, sets:[{code,scores:{evidenceSelection,writing,specificity,addedInformation,structure,honestFraming},total,truthGate:'pass'|'fail',hygieneGate:'pass'|'fail',hardFactFlags:[...],majorDefects:[...],summary}]}.`;
+For each set, read both plain-text files and BOTH page PNGs. Read the career file and posting. Make no changes to the documents. The sets are anonymized; never guess or discuss their origin. Score each set independently on the same rubric, then compare the play of the fixed hand.`;
 export const WRITE_VERIFY_STAGES = Object.freeze([
   'write', 'convert', 'verify-correction', 'fit-correction', 'pick', 'fact-check', 'fact-correction', 'fact-recheck', 'write-verify-human-stop',
 ]);
@@ -161,34 +161,101 @@ export function writeVerifyNextAfterCandidate(state) {
   return 'pick';
 }
 
+const clip = (value, max) => {
+  const text = String(value);
+  return text.length <= max ? text : `${text.slice(0, max - 1)}${String.fromCharCode(0x2026)}`;
+};
+const shownId = id => typeof id === 'string' ? JSON.stringify(clip(id, 40)) : `(${id === undefined ? 'missing' : typeof id})`;
+const shortList = values => values.slice(0, 10).join(', ') + (values.length > 10 ? ` and ${values.length - 10} more` : '');
+export function writeVerifyRankingShapeError(parsed) {
+  const keys = Object.keys(parsed || {}).filter(key => !['protocol', 'jobId', 'stage', 'handoffCode', 'baseHashes'].includes(key));
+  return `judge-ranking-shape: The reply needs a "ranking" array of {"id","reason"} objects, best first; its top-level fields are ${keys.slice(0, 10).map(key => clip(key, 40)).join(', ') || 'none'}.`;
+}
+export function writeVerifyRankingErrors(ranking, acceptedIds) {
+  if (!Array.isArray(ranking)) return [writeVerifyRankingShapeError(undefined)];
+  const missing = acceptedIds.filter(id => !ranking.includes(id));
+  const extra = [...new Set(ranking.filter(id => !acceptedIds.includes(id)))];
+  const duplicates = [...new Set(ranking.filter((id, index) => ranking.indexOf(id) !== index))];
+  if (!missing.length && !extra.length && !duplicates.length && ranking.length === acceptedIds.length) return [];
+  return [`judge-ranking-set: The ranking lists ${ranking.length} places for ${acceptedIds.length} candidates${missing.length ? `; missing ${shortList(missing)}` : ''}${extra.length ? `; not candidates of this round ${shortList(extra.map(shownId))}` : ''}${duplicates.length ? `; listed more than once ${shortList(duplicates.map(id => acceptedIds.includes(id) ? id : shownId(id)))}` : ''}.`];
+}
+export function writeVerifyRankingReasonErrors(ranked) {
+  return ranked.flatMap((row, index) => typeof row?.reason === 'string' && row.reason.trim() ? []
+    : [`judge-ranking-reason: place ${index + 1} (${shownId(row?.id)}) has no reason.`]).slice(0, 10);
+}
 export function validateWriteVerifyRanking(ranking, acceptedIds) {
-  if (!Array.isArray(ranking) || ranking.length !== acceptedIds.length || new Set(ranking).size !== ranking.length
-    || ranking.some(id => !acceptedIds.includes(id))) throw new Error('Judge ranking must include every accepted candidate exactly once and no dropped candidate.');
+  const errors = writeVerifyRankingErrors(ranking, acceptedIds);
+  if (errors.length) throw new Error(errors.join(' | '));
 }
 
+const WRITE_VERIFY_UNIT_KINDS = Object.freeze([
+  ['résumé bullets', docs => (docs?.resume?.roles || []).flatMap(role => role?.bullets || []), true],
+  ['projects', docs => docs?.resume?.projects || [], true],
+  ['skill groups', docs => docs?.resume?.skills || [], true],
+  ['education', docs => docs?.resume?.education || [], false],
+  ['credentials', docs => docs?.resume?.credentials || [], false],
+  ['letter paragraphs', docs => docs?.coverLetter?.paragraphs || [], true],
+]);
 export function writeVerifyUnitText(documents, id) {
-  const resume = documents?.resume || {};
-  const units = [
-    ...(resume.roles || []).flatMap(role => role.bullets || []),
-    ...(resume.projects || []), ...(resume.skills || []),
-    ...(resume.education || []), ...(resume.credentials || []),
-    ...(documents?.coverLetter?.paragraphs || []),
-  ];
-  const unit = units.find(row => row?.id === id);
-  return unit ? [unit.text, unit.description, unit.items?.join(' '), unit.credential, unit.name].filter(Boolean).join(' ') : null;
+  if (typeof id !== 'string' || !id) return null;
+  for (const [, pick] of WRITE_VERIFY_UNIT_KINDS) {
+    const unit = pick(documents).find(row => row?.id === id);
+    if (unit) return [unit.text, unit.description, unit.items?.join(' '), unit.credential, unit.name, unit.group].filter(Boolean).join(' ');
+  }
+  return null;
+}
+export function writeVerifyUnitListing(documents) {
+  return WRITE_VERIFY_UNIT_KINDS.filter(([, , listed]) => listed).map(([label, pick]) => {
+    const ids = pick(documents).map(row => row?.id).filter(id => typeof id === 'string' && id);
+    return ids.length ? `- ${label}: ${ids.join(', ')}` : null;
+  }).filter(Boolean).join('\n');
 }
 
+const FACT_FINDING_MAX_LINES = 20;
+const foldFinding = value => value.normalize('NFKC').replace(/[\u2018\u2019]/g, "'").replace(/[\u201c\u201d]/g, '"').replace(/[\u2010-\u2015]/g, '-').replace(/\s+/g, ' ');
 export function writeVerifyFactFindingErrors(findings, documents) {
-  if (!Array.isArray(findings)) return ['Fact-check response needs a findings array.'];
+  if (!Array.isArray(findings)) return [`fact-findings-shape: The reply needs a "findings" array (an empty array when every claim is supported); it has ${findings === undefined ? 'no "findings" field' : `a ${findings === null ? 'null' : typeof findings}`}.`];
   const errors = [];
-  for (const finding of findings) {
-    const unit = writeVerifyUnitText(documents, finding?.id);
-    if (!unit || typeof finding?.claim !== 'string' || !finding.claim.trim() || !unit.includes(finding.claim)
-      || typeof finding?.reason !== 'string' || !finding.reason.trim()) {
-      errors.push('Fact-check finding must name a document unit and an exact claim span with a reason.');
+  for (const [i, finding] of findings.entries()) {
+    if (!finding || typeof finding !== 'object' || Array.isArray(finding)) {
+      errors.push(`fact-finding-shape: findings[${i}] is ${finding === null ? 'null' : Array.isArray(finding) ? 'an array' : `a ${typeof finding}`}, not an object with id, claim and reason.`);
+      continue;
     }
+    const { id, claim, reason } = finding;
+    const unit = writeVerifyUnitText(documents, id);
+    const segments = [];
+    if (unit === null) segments.push(`fact-finding-unit: findings[${i}].id ${typeof id === 'string' ? JSON.stringify(clip(id, 60)) : `(${id === undefined ? 'missing' : typeof id})`} is not a unit id of the documents (use only the ids under CHECKABLE UNITS).`);
+    if (typeof claim !== 'string' || !claim.trim()) segments.push(`fact-finding-claim: findings[${i}].claim is missing or empty.`);
+    else if (unit !== null && !unit.includes(claim)) {
+      let k = 0;
+      let upper = claim.length;
+      while (k + 1 < upper) {
+        const middle = Math.floor((k + upper) / 2);
+        if (unit.includes(claim.slice(0, middle))) k = middle;
+        else upper = middle;
+      }
+      const cause = /\u2026|\.\.\./u.test(claim)
+        ? ` A claim is one unbroken span; it cannot contain "${String.fromCharCode(0x2026)}" or "...".`
+        : foldFinding(unit).includes(foldFinding(claim))
+          ? " It matches once whitespace, quote marks and dashes are ignored; copy the span character for character, with the unit's own spacing and marks."
+          : ' Copy the span character for character from that unit in the DOCUMENTS block; do not paraphrase.';
+      segments.push(`fact-finding-span: findings[${i}].claim ${JSON.stringify(clip(claim, 80))} is not a verbatim span of unit ${id}: its first ${k} of ${claim.length} characters appear in the unit and character ${k + 1} does not.${cause}`);
+    }
+    if (typeof reason !== 'string' || !reason.trim()) segments.push(`fact-finding-reason: findings[${i}].reason is missing or empty.`);
+    if (segments.length) errors.push(segments.join(' | '));
   }
-  return errors;
+  return errors.length > FACT_FINDING_MAX_LINES ? [...errors.slice(0, FACT_FINDING_MAX_LINES), `fact-finding-shape: ${errors.length - FACT_FINDING_MAX_LINES} more findings also failed these checks; correct the lines above first.`] : errors;
+}
+
+export const WRITE_VERIFY_REJECTION_ROWS_MAX = 8;
+export function appendWriteVerifyRejection(rows, row) {
+  return [...(Array.isArray(rows) ? rows : []), row].slice(-WRITE_VERIFY_REJECTION_ROWS_MAX);
+}
+export const WRITE_VERIFY_REJECTION_HEADING = 'YOUR PREVIOUS REPLY TO THIS HANDOFF WAS REJECTED BY THE APP';
+function rejectionSection(corrections) {
+  const lines = (Array.isArray(corrections) ? corrections : []).filter(item => typeof item === 'string' && item.length > 0);
+  if (!lines.length) return '';
+  return `\n${WRITE_VERIFY_REJECTION_HEADING}:\nThe app's checks returned the lines below, verbatim. Reply again with the complete corrected answer in the same format as before; change only what the lines name.\n${lines.join('\n')}\n`;
 }
 
 export function writeVerifyChangedFindingErrors(findings, documents) {
@@ -301,7 +368,7 @@ const PRODUCTION_SHAPES = 'Return a single JSON object with production shapes: {
 export function writeVerifyPrompt({ stage, state, sourcePrompt, posting, hand, envelope, corrections = [], droppedFindings = [] }) {
   const candidate = state.candidates[state.ordinal];
   const prefix = `APPLICATION V2 HANDOFF\n${JSON.stringify(envelope)}\nReply within ${APPLICATION_V2_LIMITS.chatReplyTokens} output tokens.\n`;
-  if (stage === 'write') return `${prefix}${WRITE_VERIFY_SHORTLIST_STEP}\n\n${sourcePrompt}${droppedFindingsSection(droppedFindings)}\n\nOUTPUT FORMAT FOR THIS ARM:\nWrite the résumé and cover letter as plain text. No JSON. Only the EVIDENCE SHORTLIST appendix may contain catalog IDs; the résumé and letter contain no evidence IDs or citation markers. Finish the letter before either appendix. Start the application with a standalone RÉSUMÉ heading, include a skills block, and start the letter with a standalone COVER LETTER heading. A PERSONAL PROJECTS section is optional: include at most one project from Standalone projects, and only when it clearly strengthens this application; otherwise leave the section out. Put content in both sections. Keep the wording you want published; a separate converter will only make changes required by the production structure.\n`;
+  if (stage === 'write') return `${prefix}${WRITE_VERIFY_SHORTLIST_STEP}\n\n${sourcePrompt}${droppedFindingsSection(droppedFindings)}\n\nOUTPUT FORMAT FOR THIS ARM:\nWrite the résumé and cover letter as plain text. No JSON. Only the EVIDENCE SHORTLIST appendix may contain catalog IDs; the résumé and letter contain no evidence IDs or citation markers. Finish the letter before either appendix. Start the application with a standalone RÉSUMÉ heading, include a skills block, and start the letter with a standalone COVER LETTER heading. A PERSONAL PROJECTS section is optional: include at most one project from Standalone projects, and only when it clearly strengthens this application; otherwise leave the section out. Put content in both sections. Keep the wording you want published; a separate converter will only make changes required by the production structure.\n${rejectionSection(corrections)}`;
   if (stage === 'convert') return `${prefix}${sourcePrompt}\n\nPLAIN-TEXT WRITER RESULT TO CONVERT:\n${candidate.plainText}\n\nCONVERSION TASK:\nConvert that exact writer result to production shapes and attach IDs from the full approved catalog above. Change wording only where the production shape requires it. Do not add claims or alter the selection.\n\nOUTPUT FORMAT:\n${PRODUCTION_SHAPES}\nEcho the APPLICATION V2 HANDOFF fields at the top level of the returned JSON.\n`;
   if (stage === 'verify-correction' || stage === 'fit-correction' || stage === 'fact-correction') {
     const target = stage === 'fact-correction'
@@ -316,11 +383,11 @@ export function writeVerifyPrompt({ stage, state, sourcePrompt, posting, hand, e
   }
   if (stage === 'pick') {
     const ids = state.elimination?.activeIds || acceptedWriteVerifyCandidates(state).map(row => row.id);
-    return `${prefix}${WRITE_VERIFY_JUDGE_RUBRIC}\n\nFor this application handoff, return a best-to-worst ranking with a reason for each place, JSON {ranking:[{id,reason}]}. Every listed id must appear exactly once. The two PNGs per candidate (résumé and letter page images) accompany this handoff as image blocks.\nPOSTING:\n${posting}\nFULL APPROVED HAND:\n${hand}\nCANDIDATES:\n${ids.map(id => { const row = state.candidates.find(item => item.id === id); return `${id}:\nWRITER TEXT:\n${row?.plainText}\nCONVERTED TEXT AND CITATIONS:\n${JSON.stringify(row?.structured)}\nPAGE IMAGES: ${id} résumé, then ${id} letter.`; }).join('\n\n')}\nEcho the APPLICATION V2 HANDOFF fields at the top level.\n`;
+    return `${prefix}${WRITE_VERIFY_JUDGE_RUBRIC}\n\nFor this application handoff, return a best-to-worst ranking with a reason for each place. Return JSON only, in exactly this shape plus the echoed handoff fields: {"ranking":[{"id":candidateId,"reason":string}]}. Every listed id must appear exactly once. The two PNGs per candidate (résumé and letter page images) accompany this handoff as image blocks.\nPOSTING:\n${posting}\nFULL APPROVED HAND:\n${hand}\nCANDIDATES:\n${ids.map(id => { const row = state.candidates.find(item => item.id === id); return `${id}:\nWRITER TEXT:\n${row?.plainText}\nCONVERTED TEXT AND CITATIONS:\n${JSON.stringify(row?.structured)}\nPAGE IMAGES: ${id} résumé, then ${id} letter.`; }).join('\n\n')}${rejectionSection(corrections) || '\n'}Echo the APPLICATION V2 HANDOFF fields at the top level.\n`;
   }
   if (stage === 'fact-check' || stage === 'fact-recheck') {
     const winner = state.candidates.find(row => row.id === state.ranking[state.factIndex]);
-    return `${prefix}Compare every claim in the following résumé and letter with its cited quotes. List only actual inflation of ownership, scope, metrics, dates or tools. Each finding id must name the document unit id; claim must be an exact verbatim span of that unit. Return JSON {findings:[{id,checkId,claim,quote,reason}]} with an empty findings array when every claim is supported.\nCITED QUOTES:\n${hand}\nDOCUMENTS:\n${JSON.stringify(winner?.structured)}\nEcho the APPLICATION V2 HANDOFF fields at the top level.\n`;
+    return `${prefix}Compare every claim in the following résumé and letter with its cited quotes. List only actual inflation of ownership, scope, metrics, dates or tools. Each finding id must name the document unit id; claim must be an exact verbatim span of that unit. Return JSON {findings:[{id,checkId,claim,quote,reason}]} with an empty findings array when every claim is supported. Flag only text inside the units listed under CHECKABLE UNITS, and a finding id must be exactly one of those ids. Role headers, the résumé identity, education and credential records, the letterhead, salutation and closing, and the roleThesis and coverLetterArgument fields are fixed by the host or are not part of the delivered text, so never flag them.\nCITED QUOTES:\n${hand}\nDOCUMENTS:\n${JSON.stringify(winner?.structured)}\nCHECKABLE UNITS (a finding id must be exactly one of these ids; its claim must be a span of that unit's own text):\n${writeVerifyUnitListing(winner?.structured)}${rejectionSection(corrections) || '\n'}Echo the APPLICATION V2 HANDOFF fields at the top level.\n`;
   }
   throw new Error(`No application v2 prompt for ${stage}.`);
 }

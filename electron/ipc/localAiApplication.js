@@ -44,7 +44,7 @@ import { applicationBlindReviewValidatorStamp, isApplicationBlindReviewValidator
 import { BLIND_REPAIR_RAISED_CYCLES_RULE, BLIND_REPAIR_TRUNCATION_RULE } from './applicationRepairConvergence.js';
 import { RESUME_SUPPORT_VERB_RULE } from './applicationWriterGuidance.js';
 import { describeRoleStrengthFinding, roleStrengthFindings } from './applicationRoleStrength.js';
-import { WRITE_VERIFY_PROTOCOL, WRITE_VERIFY_STAGES, WRITE_VERIFY_MAX_CORRECTIONS, WRITE_VERIFY_MAX_FIT_CORRECTIONS, acceptedWriteVerifyCandidates, droppedCandidateFindings, factCorrectionTransition, fullApprovedHand, initialWriteVerifyState, isWriteVerifyJob, validateWriteVerifyRanking, writeVerifyCandidateCount, writeVerifyNextAfterCandidate, writeVerifyPrompt, writeVerifySourcePrompt, writeVerifyStageKey, writeVerifyFactFindingErrors, writeVerifyChangedFindingErrors } from './applicationWriteVerify.js';
+import { WRITE_VERIFY_PROTOCOL, WRITE_VERIFY_STAGES, WRITE_VERIFY_MAX_CORRECTIONS, WRITE_VERIFY_MAX_FIT_CORRECTIONS, acceptedWriteVerifyCandidates, droppedCandidateFindings, factCorrectionTransition, fullApprovedHand, initialWriteVerifyState, isWriteVerifyJob, appendWriteVerifyRejection, writeVerifyRankingErrors, writeVerifyRankingShapeError, writeVerifyRankingReasonErrors, writeVerifyCandidateCount, writeVerifyNextAfterCandidate, writeVerifyPrompt, writeVerifySourcePrompt, writeVerifyStageKey, writeVerifyFactFindingErrors, writeVerifyChangedFindingErrors } from './applicationWriteVerify.js';
 import { applicationProtocolSetting } from './applicationProtocolSetting.js';
 import { targetIdentityNameLicensed, validateSharedApplicationContent } from './applicationTruthGates.js';
 import { v2RejectionEvidencePaths } from './applicationV2RejectionEvidence.js';
@@ -54,6 +54,10 @@ import { tryGetStore } from './settings.js';
 import { assertApplicationV2PromptLimit, assertApplicationV2ReplyLimit } from './applicationV2Limits.js';
 import { writeVerifyLengthBudgets } from './applicationV2LengthBudget.js';
 import { applicationV2PagePng } from './applicationV2PageImages.js';
+let applicationV2PagePngImpl = applicationV2PagePng;
+export function __setApplicationV2PagePngForTests(impl) {
+  applicationV2PagePngImpl = typeof impl === 'function' ? impl : applicationV2PagePng;
+}
 import { MAX_REQUIREMENTS_REEPOCHS, requirementsAdjudicationBindings, requirementsAuditCapReached, requirementsBindingErrors, requirementsAuditCapTerminal, requirementsSingletonBinding } from './applicationRequirementsAuditPolicy.js';
 
 const { shell, app } = electronPkg;
@@ -3842,6 +3846,7 @@ const PASTE_CHECK_ID_PREFIX_RE = /^([a-z][a-z0-9-]*):\s/u;
 // reach Paste Rejections.json as an unidentified row. The fallback is a schema
 // error, never an advisory, and cannot turn a rejection into an acceptance.
 const PASTE_VALIDATION_ERROR_ID_SET = new Set([
+  'fact-findings-shape', 'fact-finding-shape', 'fact-finding-unit', 'fact-finding-claim', 'fact-finding-span', 'fact-finding-reason', 'judge-ranking-shape', 'judge-ranking-set', 'judge-ranking-reason', 'fact-check-unchanged',
   'unsupported-experience-span', 'unit-source-grounding',
   'host-owned-field-equality', 'candidate-dash-punctuation',
   'structured-resume', 'paragraph-argument-links', 'measured-one-page-fit', 'schema-invalid',
@@ -3849,6 +3854,17 @@ const PASTE_VALIDATION_ERROR_ID_SET = new Set([
   'handoff-echo-code', 'handoff-echo-base-hashes',
 ]);
 const PASTE_VALIDATION_ERROR_PROSE_UNITS = Object.freeze({
+  'fact-findings-shape': 'field',
+  'fact-finding-shape': 'field',
+  'fact-finding-unit': 'field',
+  'fact-finding-claim': 'field',
+  'fact-finding-span': 'field',
+  'fact-finding-reason': 'field',
+  'judge-ranking-shape': 'field',
+  'judge-ranking-set': 'field',
+  'judge-ranking-reason': 'field',
+  'fact-check-unchanged': 'field',
+
   'unsupported-experience-span': 'prose-unit',
   'unit-source-grounding': 'prose-unit',
   'candidate-dash-punctuation': 'prose-unit',
@@ -5016,8 +5032,8 @@ async function writeVerifyHandoffRecord({ jobId, input, state, corrections = [] 
       const letterFit = await renderLocalCoverLetter({ letter, variantAttrs: resumeFit.variantAttrs, docId: crypto.randomUUID() });
       if (resumeFit.pageCount !== 1 || letterFit.pageCount !== 1 || !resumeFit.bytes || !letterFit.bytes
         || resumeFit.layoutIssues?.length || letterFit.layoutIssues?.length) throw new Error('Application v2 judge requires both verified one-page renders for every accepted candidate.');
-      record.pageImages.push({ candidateId: id, document: 'resume', mimeType: 'image/png', data: await applicationV2PagePng(resumeFit.bytes) });
-      record.pageImages.push({ candidateId: id, document: 'cover-letter', mimeType: 'image/png', data: await applicationV2PagePng(letterFit.bytes) });
+      record.pageImages.push({ candidateId: id, document: 'resume', mimeType: 'image/png', data: await applicationV2PagePngImpl(resumeFit.bytes) });
+      record.pageImages.push({ candidateId: id, document: 'cover-letter', mimeType: 'image/png', data: await applicationV2PagePngImpl(letterFit.bytes) });
     }
   }
   if (corrections.length) {
@@ -5030,7 +5046,9 @@ async function writeVerifyHandoffRecord({ jobId, input, state, corrections = [] 
     stage: state.stage, revision: state.revision, kind: 'prompt',
     candidateId: state.stage === 'pick' ? null : ['fact-check', 'fact-correction', 'fact-recheck'].includes(state.stage)
       ? state.writeVerify.ranking[state.writeVerify.factIndex] : state.writeVerify.candidates[state.writeVerify.ordinal]?.id || null,
-    content: { prompt, ...(record.pageImages ? { pageImages: record.pageImages } : {}) } });
+    content: { prompt, ...(record.pageImages ? (corrections.length
+      ? { pageImageSha256: record.pageImages.map(image => crypto.createHash('sha256').update(image.data).digest('hex')) }
+      : { pageImages: record.pageImages }) : {}) } });
   return record;
 }
 
@@ -7776,10 +7794,12 @@ async function submitWriteVerifyHandoff({ root, jobId, dir, manifest, input, fro
   if (!errors.length && outgoingStage === 'pick') {
     const acceptedIds = acceptedWriteVerifyCandidates(work).map(row => row.id);
     const ranked = Array.isArray(parsed?.ranking) ? parsed.ranking : [];
-    try {
-      validateWriteVerifyRanking(ranked.map(row => row?.id), work.elimination?.activeIds || acceptedIds);
-      if (ranked.some(row => typeof row?.reason !== 'string' || !row.reason.trim())) throw new Error('Judge ranking needs a reason for every place.');
-    } catch (error) { errors.push(error.message); }
+    const acceptedSet = work.elimination?.activeIds || acceptedIds;
+    if (!Array.isArray(parsed?.ranking)) errors.push(writeVerifyRankingShapeError(parsed));
+    else {
+      errors.push(...writeVerifyRankingErrors(ranked.map(row => row?.id), acceptedSet));
+      errors.push(...writeVerifyRankingReasonErrors(ranked));
+    }
     if (!errors.length) {
       work.judgeRecords.push({ round: work.elimination?.round || 0, ranking: ranked });
       if (work.elimination?.final) {
@@ -7848,6 +7868,15 @@ async function submitWriteVerifyHandoff({ root, jobId, dir, manifest, input, fro
     if (candidate.corrections < WRITE_VERIFY_MAX_CORRECTIONS) {
       candidate.corrections += 1; work.lastCorrections = errors;
     } else { candidate.status = 'dropped'; candidate.dropReason = errors; work.lastCorrections = []; }
+  } else if (errors.length && outgoingStage === 'pick') {
+    work.judgeRejections = appendWriteVerifyRejection(work.judgeRejections,
+      { round: work.elimination?.round || 0, checkIds: pasteRejectionCheckIds(errors).checkIds, errors });
+    work.lastCorrections = errors;
+  } else if (errors.length && ['fact-check', 'fact-recheck'].includes(outgoingStage)) {
+    const winner = work.candidates.find(row => row.id === work.ranking[work.factIndex]);
+    winner.factCheckRejections = appendWriteVerifyRejection(winner.factCheckRejections,
+      { stage: outgoingStage, checkIds: pasteRejectionCheckIds(errors).checkIds, errors });
+    work.lastCorrections = errors;
   }
   if (errors.length) {
     // Private job evidence: exact rejected output and production wording for
@@ -7867,11 +7896,9 @@ async function submitWriteVerifyHandoff({ root, jobId, dir, manifest, input, fro
   }
   await recordWriteVerifyRoundDiagnostics({ root, dir, jobId, state, rawText, errors,
     checkIdsOverride: fitRejected ? ['measured-one-page-fit'] : null });
-  if (errors.length && !['write', 'convert', 'verify-correction', 'fit-correction', 'fact-correction'].includes(outgoingStage)) {
-    return { accepted: false, validationErrors: errors, handoff: await writeVerifyHandoffRecord({ jobId, input, state, corrections: errors }) };
-  }
   let nextStage = outgoingStage;
-  if (outgoingStage === 'write') nextStage = errors.length
+  if (errors.length && ['pick', 'fact-check', 'fact-recheck'].includes(outgoingStage)) { /* same-stage rejection: stay */ }
+  else if (outgoingStage === 'write') nextStage = errors.length
     ? (candidate.status === 'dropped' ? writeVerifyNextAfterCandidate(work) : 'write') : 'convert';
   else if (['convert', 'verify-correction', 'fit-correction'].includes(outgoingStage)) nextStage = errors.length && candidate.status === 'correcting'
     ? 'verify-correction' : errors.length && candidate.status === 'fit-correcting' ? 'fit-correction' : writeVerifyNextAfterCandidate(work);
