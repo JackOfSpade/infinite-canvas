@@ -17257,6 +17257,10 @@ async function importLocalApplicationJobAttempt({ jobId, canvasFilePath, senderI
     coverLetterPdfPageCount: coverPdf ? coverLetterFit.pageCount : null,
     generationAuditJobId: jobId,
     generationAuditRequired: !isWriteVerifyJob(input) && expectedAuditVersion != null,
+    // Preserve this job's already-verified frozen source, including retained
+    // snapshot jobs, rather than consulting the module's current career data.
+    careerSnapshotId: input.careerAuthority?.snapshotId || input.careerSnapshotId || null,
+    careerSourceFrozenAt: input.createdAt || null,
     attemptId: `local-${jobId}`, applicationRoot: outputRoot.resolved,
     // Keep a partial bundle's source job so the card can repair its missing
     // PDFs. Fully complete bundles use the default cleanup path.

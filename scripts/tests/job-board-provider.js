@@ -6265,7 +6265,7 @@ export default [
       const pipeline = search.slice(pipelineStart, pipelineEnd);
 
       assert(compileStart >= 0 && compileEnd > compileStart
-        && compile.includes('window.electronAPI.parseCareerData({ filePaths, nodeId: id, manualAiRunId, forceRecompile: compileOptions.forceRecompile === true })')
+        && compile.includes("window.electronAPI.parseCareerData({ filePaths, nodeId: id, manualAiRunId, forceRecompile: compileOptions.forceRecompile === true, importModule: 'job-search' })")
         && compile.includes('careerSnapshotId: typeof parseResult.careerSnapshotId')
         && compile.includes("hubState: 'empty'")
         && compile.includes("status: 'compiled'"),

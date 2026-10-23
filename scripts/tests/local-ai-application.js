@@ -4945,6 +4945,69 @@ export default [
     },
   },
   {
+    name: 'Application edit evidence: save and discard preserve the host career pin and freeze time and ignore renderer provenance',
+    run: async () => {
+      const project = await createCanvasProject();
+      const rendererPin = 'c'.repeat(64);
+      const rendererFrozenAt = '2099-10-23T00:00:00.000Z';
+      const sourceHtml = `<!doctype html><html data-print="ink-only"><body><section data-ic-document-panel="resume"><main class="page"><p>Resume</p></main></section><section data-ic-document-panel="cover"><main class="page"><p>Cover</p></main></section><script id="ic-application-bundle-data" type="application/json">{"careerSnapshotId":"${rendererPin}","careerSourceFrozenAt":"${rendererFrozenAt}"}</script></body></html>`;
+      const cases = [
+        { action: 'save', careerSnapshotId: 'a'.repeat(64), careerSourceFrozenAt: '2026-10-05T14:15:16.000Z' },
+        { action: 'discard', careerSnapshotId: 'b'.repeat(64), careerSourceFrozenAt: '2026-10-06T14:15:16.000Z' },
+        { action: 'save', careerSnapshotId: null, careerSourceFrozenAt: null },
+        { action: 'discard', careerSnapshotId: null, careerSourceFrozenAt: 'invalid frozen date' },
+      ];
+      try {
+        registerJobApplicationHandlers();
+        for (const [index, fixture] of cases.entries()) {
+          const workDir = path.join(project.root, `career-evidence-${index}`);
+          const resumeHtmlPath = path.join(workDir, 'Application.html');
+          const jobListingPath = path.join(workDir, 'Original Job Listing.md');
+          const jobListing = `# Synthetic evidence posting ${index}\n`;
+          const senderId = 9190 + index;
+          const sender = { id: senderId, isDestroyed: () => false, once: () => {}, on: () => {}, removeListener: () => {} };
+          await fs.promises.mkdir(workDir, { recursive: true });
+          await Promise.all([
+            fs.promises.writeFile(resumeHtmlPath, sourceHtml, 'utf8'),
+            fs.promises.writeFile(jobListingPath, jobListing, 'utf8'),
+          ]);
+          registerPendingApplicationWorkspace({
+            workDir, senderId, company: 'Synthetic evidence', resumeHtmlPath, jobListingPath,
+            careerSnapshotId: fixture.careerSnapshotId,
+            careerSourceFrozenAt: fixture.careerSourceFrozenAt,
+            artifactData: { resumeHtml: sourceHtml, jobListing },
+          });
+          const handler = ipcMain.__getInvokeHandler(`${fixture.action}-application`);
+          const result = await handler({ sender }, {
+            workDir, resumeHtmlPath, resumePdfPath: null, coverLetterPdfPath: null,
+            jobListingPath, generationAuditPath: null, jobTitle: `Evidence role ${index}`, location: 'Synthetic city',
+            canvasFilePath: project.canvasFilePath, suppressReveal: true,
+            careerSnapshotId: rendererPin,
+            careerSourceFrozenAt: rendererFrozenAt,
+          });
+          assert(result?.success === true && (fixture.action === 'save' ? result.saved : result.discarded),
+            `${fixture.action}: the registered workspace is consumed successfully, got ${JSON.stringify(result)}`);
+          const evidenceWorkspace = fixture.action === 'save' ? result.dir : workDir;
+          const statePath = path.join(electronPkg.app.getPath('userData'), 'application-improvement', 'state.json');
+          const state = JSON.parse(await fs.promises.readFile(statePath, 'utf8'));
+          const pair = state.pairs.findLast(item => item.workspaceId === sha256(path.resolve(evidenceWorkspace)));
+          nodeAssert.equal(pair?.careerSnapshotId, fixture.careerSnapshotId,
+            `${fixture.action}: evidence must retain the host source pin, or explicit null for a legacy bundle`);
+          assert(pair.careerSnapshotId !== rendererPin,
+            `${fixture.action}: editable bundle metadata and IPC fields cannot assign career provenance`);
+          nodeAssert.equal(pair.careerSourceFrozenAt,
+            fixture.careerSourceFrozenAt === 'invalid frozen date' ? null : fixture.careerSourceFrozenAt,
+            `${fixture.action}: the host source-selection time survives; missing or malformed times stay unknown`);
+          assert(pair.careerSourceFrozenAt !== rendererFrozenAt,
+            `${fixture.action}: editable bundle metadata and IPC fields cannot assign source-selection time`);
+        }
+        return { saveAndDiscard: true, legacySourceRemainsUnknown: true };
+      } finally {
+        await fs.promises.rm(project.root, { recursive: true, force: true });
+      }
+    },
+  },
+  {
     name: 'Application cleanup: a duplicate discard reports cleanup-in-flight instead of false completion',
     run: async () => {
       const project = await createCanvasProject();

@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { JSDOM } from 'jsdom';
+import { careerImportReview, careerImportStatus } from './careerImportLog.js';
 
 const MAX_PAIRS = 100;
 const SUMMARY_AGE_MS = 183 * 24 * 60 * 60 * 1000;
@@ -302,7 +303,7 @@ function prune(state) {
   return state;
 }
 
-export async function logGeneratedBundle({ root, workspaceDir, html, posting, appVersion }) {
+export async function logGeneratedBundle({ root, workspaceDir, html, posting, appVersion, careerSnapshotId = null, careerSourceFrozenAt = null }) {
   return serialize(async () => {
     const state = await alignModel(root, await read(root));
     const workspaceId = idFor(workspaceDir);
@@ -325,6 +326,9 @@ export async function logGeneratedBundle({ root, workspaceDir, html, posting, ap
     const pair = {
       id, workspaceId, posting: String(posting || ''), generated: snapshot, saved: snapshot,
       generatedAt: at, savedAt: at, appVersion: String(appVersion || ''), build, modelLabel: state.modelLabel,
+      careerSnapshotId: typeof careerSnapshotId === 'string' && /^[a-f0-9]{64}$/.test(careerSnapshotId) ? careerSnapshotId : null,
+      careerSourceFrozenAt: typeof careerSourceFrozenAt === 'string' && Number.isFinite(Date.parse(careerSourceFrozenAt))
+        && Date.parse(careerSourceFrozenAt) <= Date.parse(at) ? new Date(careerSourceFrozenAt).toISOString() : null,
       letterRemoved: false,
     };
     state.pairs.push(pair);
@@ -463,8 +467,16 @@ export async function improvementStatus(root) {
     const generationGate = gate
       ? { blocked: gate.blocked, checkedAt: gate.checkedAt, patterns: gate.patterns.map(item => ({ summary: item.summary, count: item.bundles.length })) }
       : null;
-    return { count, due: count >= SESSION_DUE_COUNT, earlyDue: recurring.length > 0, recurring, modelLabel: state.modelLabel, generationGate };
+    const careerDataHistory = await careerImportStatus(root);
+    return { count, due: count >= SESSION_DUE_COUNT, earlyDue: recurring.length > 0, recurring, modelLabel: state.modelLabel, generationGate, careerDataHistory };
   });
+}
+
+/** Full private source evidence is available only through the local session CLI. */
+export async function applicationCareerHistory({ root, pairId }) {
+  const pair = await serialize(async () => (await read(root)).pairs?.find(item => item.id === pairId));
+  if (!pair) throw new Error('Application improvement pair not found in the retained evidence.');
+  return { pairId: pair.id, ...await careerImportReview({ root, careerSnapshotId: pair.careerSnapshotId, careerSourceFrozenAt: pair.careerSourceFrozenAt, generatedAt: pair.generatedAt, savedAt: pair.savedAt }) };
 }
 
 export async function resetImprovementCounter(root) {

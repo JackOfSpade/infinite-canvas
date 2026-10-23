@@ -6620,7 +6620,7 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
     setCareerOverrideBusy(true);
     EventLogger.log(`[JobBoard][${id}] Career override compile ${resume ? 'resumed' : 'started'}: ${fileNames.length} file(s)`);
     try {
-      const reply = await window.electronAPI.parseCareerData({ filePaths, nodeId: id, manualAiRunId });
+      const reply = await window.electronAPI.parseCareerData({ filePaths, nodeId: id, manualAiRunId, importModule: 'job-board' });
       if (!reply?.success) {
         throw new Error(reply?.error || 'Career compilation did not return an approved snapshot.');
       }

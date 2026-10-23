@@ -49,8 +49,8 @@ export default [
     run: () => {
       const region = compileRegion(board());
       assert(
-        region.includes('window.electronAPI.parseCareerData({ filePaths, nodeId: id, manualAiRunId })'),
-        'compile must call parseCareerData with filePaths, nodeId and manualAiRunId',
+        region.includes("window.electronAPI.parseCareerData({ filePaths, nodeId: id, manualAiRunId, importModule: 'job-board' })"),
+        'compile must call parseCareerData with filePaths, nodeId, manualAiRunId and the board import label',
       );
       assert(
         /approveJobBoardCareerOverride\([^)]*\{[\s\S]*?manualAiRunId,[\s\S]*?\}\)/.test(region),

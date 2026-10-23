@@ -6262,7 +6262,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         ) {
           return searchRunOutcome('superseded', { error: 'Career input changed while compilation was starting.' });
         }
-        const parseResult = await window.electronAPI.parseCareerData({ filePaths, nodeId: id, manualAiRunId, forceRecompile: compileOptions.forceRecompile === true });
+        const parseResult = await window.electronAPI.parseCareerData({ filePaths, nodeId: id, manualAiRunId, forceRecompile: compileOptions.forceRecompile === true, importModule: 'job-search' });
         if (locallyCancelled()) return searchRunOutcome('cancelled');
         if (!parseResult?.success) throw new Error(parseResult?.error || 'Failed to parse career files');
         const profile = parseResult.profile;

@@ -1,5 +1,9 @@
 import { __analysisPathsForCurrentRequestForTests, __createDescriptionRecoveryCheckpointForTests, __discardJobAnalysisSnapshotForTests, __discardOwnedJobRunForTests, __formatJobAnalysisPromptForTests, __getJobAnalysisRetirementStateForTests, __loadDescriptionRecoveryCheckpointForTests, __loadJobAnalysisSnapshotForTests, __removeDescriptionRecoveryCheckpointForTests, __runWithIpcRequestContextForTests, __saveDescriptionRecoverySnapshotIfCurrentForTests, __saveJobAnalysisSnapshotForTests, assessDescriptionRecoverySnapshotOwnership, assert, canRecoverGatheredRunDirectly, claimJobAnalysisOperationAuthority, collectDeletedJobAnalysisDiscards, collectDeletedJobRunDiscards, createDescriptionRecoveryMutex, filterJobsByDescriptionEvidence, fs, getJobAnalysisPaths, ipcMain, isLiveDescriptionRecoveryRun, isSafeJobAnalysisCleanupNoop, listDescriptionRecoveryCheckpointsSync, markSourceStatus, path, PDFDocument, readRunState, recordSourcePage, setStage, startRun } from '../test-dependencies.js';
+import electronPkg from 'electron';
 import { writeApprovedCareerSnapshotFixture } from './careerSnapshotFixture.mjs';
+import { approvedCareerEvidenceCatalog, careerSnapshotPath, careerSnapshotStorageRoot, readCareerSnapshot } from '../../electron/ipc/careerSnapshot.js';
+import { buildCareerCleanLayer, writeCareerCleanLayer } from '../../electron/ipc/careerCleanLayer.js';
+import { careerImportLogFile, careerImportReview, readCareerImportHistory } from '../../electron/ipc/careerImportLog.js';
 import { normalizeJobsMarkup, repairJobsMojibake } from '../../src/utils/textEncoding.js';
 import { careerFilesCleanupNeedsWarning, isJobAnalysisSnapshotAfterClear, nextJobAnalysisClearWatermark, normalizeJobAnalysisClearRunId, normalizeJobAnalysisClearWatermark } from '../../src/utils/jobAnalysisRecovery.js';
 import { getJobDescriptionRecoveryCheckpointPath } from '../../electron/ipc/jobAnalysisPaths.js';
@@ -12,6 +16,98 @@ import { formatJobAnalysisRecoveryLifecycleMarkdown, readJobAnalysisRecoveryLife
 import { CODE_DEFINITIONS } from '../../src/utils/bugReportCodes.js';
 
 export default [
+  {
+    name: 'career cached imports log each module scope, deduplicate retries, and fail visibly when history is corrupt',
+    run: async () => {
+      const directory = fs.realpathSync(fs.mkdtempSync(path.join('/tmp', 'ic-career-import-handler-')));
+      // The Electron stub lives under macOS /var/folders, a system-sensitive
+      // staging root. Use an ordinary canonical temp root for the real IPC.
+      const originalGetPath = electronPkg.app.getPath;
+      const userData = path.join(directory, 'user-data');
+      electronPkg.app.getPath = name => name === 'userData' ? userData : originalGetPath(name);
+      const historyFile = careerImportLogFile(userData);
+      let priorHistory = null;
+      let snapshotFile = null;
+      let cleanLayerFile = null;
+      try {
+        try { priorHistory = await fs.promises.readFile(historyFile); }
+        catch (error) { if (error.code !== 'ENOENT') throw error; }
+        await fs.promises.unlink(historyFile).catch(error => { if (error.code !== 'ENOENT') throw error; });
+        const sourceName = `Career ${path.basename(directory)}.md`;
+        const career = await writeApprovedCareerSnapshotFixture({ sourceName });
+        const sourceFile = path.join(directory, sourceName);
+        await fs.promises.writeFile(sourceFile, career.careerData, 'utf8');
+        const snapshotRoot = careerSnapshotStorageRoot(userData);
+        const approved = await readCareerSnapshot(snapshotRoot, career.snapshotId);
+        assert(approved?.snapshotId === career.snapshotId, 'the cached-import fixture is a real readable approved snapshot');
+        snapshotFile = careerSnapshotPath(snapshotRoot, career.snapshotId);
+        const snapshotBytes = await fs.promises.readFile(snapshotFile);
+        const catalog = approvedCareerEvidenceCatalog(approved);
+        cleanLayerFile = await writeCareerCleanLayer(snapshotRoot, buildCareerCleanLayer(career.snapshotId, catalog, [{
+          items: catalog.map(item => ({ id: item.id, clean: item.quote })),
+        }]));
+        const progress = [];
+        const sender = {
+          id: 98_223, __canvasPath: path.join(directory, 'workspace.canvas'),
+          isDestroyed: () => false, once: () => {}, on: () => {}, removeListener: () => {},
+          send: (channel, data) => { if (channel === 'career-compile-progress') progress.push(data); },
+        };
+        registerJobsHandlers();
+        const parseCareerData = ipcMain.__getInvokeHandler('parse-career-data');
+        const searchArgs = {
+          filePaths: [sourceFile], nodeId: 'career-search-import', importModule: 'job-search', manualAiRunId: 'career-import-handler-search',
+        };
+        const search = await parseCareerData({ sender }, searchArgs);
+        assert(search?.success === true && search.careerSnapshotId === career.snapshotId,
+          `the Job Search cache import must succeed, got ${JSON.stringify(search)}`);
+        const firstHistory = await readCareerImportHistory(userData);
+        assert(firstHistory.imports.length === 1 && firstHistory.imports[0].module === 'job-search'
+          && firstHistory.imports[0].cacheHit && firstHistory.imports[0].change === 'baseline'
+          && firstHistory.imports[0].snapshotId === career.snapshotId,
+        'the successful cached Job Search import must durably log its exact snapshot and scope');
+        const boardArgs = { ...searchArgs, nodeId: 'career-board-import', importModule: 'job-board', manualAiRunId: 'career-import-handler-board' };
+        const board = await parseCareerData({ sender }, boardArgs);
+        const retriedBoard = await parseCareerData({ sender }, boardArgs);
+        const history = await readCareerImportHistory(userData);
+        assert(board?.success === true && retriedBoard?.success === true
+          && board.careerSnapshotId === career.snapshotId && retriedBoard.careerSnapshotId === career.snapshotId
+          && history.imports.length === 2 && history.snapshots.length === 1
+          && history.imports[1].module === 'job-board' && history.imports[1].cacheHit
+          && history.imports[1].change === 'baseline' && history.imports[1].scopeId !== history.imports[0].scopeId
+          && progress.filter(item => item.phase === 'cleaning' && item.cached).length === 3
+          && !progress.some(item => item.phase === 'saving'),
+        `the same snapshot in Job Board must log a distinct scope once, while a completed-run retry remains idempotent, got ${JSON.stringify(history)}`);
+
+        const generatedAt = new Date(Date.now() + 60_000).toISOString();
+        const review = await careerImportReview({ root: userData, careerSnapshotId: career.snapshotId,
+          careerSourceFrozenAt: generatedAt, generatedAt, savedAt: generatedAt });
+        assert(review.baseline?.snapshotId === career.snapshotId
+          && review.baseline.sources.length === 1 && review.baseline.sources[0].name === sourceName
+          && review.baseline.sources[0].text === career.careerData
+          && review.baseline.sources[0].contentHash === approved.sources[0].contentHash
+          && review.laterImports.length === 0 && review.warnings.length === 1,
+        `the session review's real storage loader must recover the exact imported source without a missing-baseline warning, got ${JSON.stringify(review)}`);
+
+        const corruptHistory = '{ retained corrupt career import history';
+        await fs.promises.writeFile(historyFile, corruptHistory, 'utf8');
+        const failed = await parseCareerData({ sender }, { ...boardArgs, manualAiRunId: 'career-import-handler-history-failure' });
+        const preserved = await readCareerSnapshot(snapshotRoot, career.snapshotId);
+        assert(failed?.success === false && /private change history could not be saved.*Retry the import/u.test(failed.error)
+          && await fs.promises.readFile(historyFile, 'utf8') === corruptHistory
+          && preserved?.snapshotId === career.snapshotId
+          && (await fs.promises.readFile(snapshotFile)).equals(snapshotBytes),
+        `an unusable history must visibly reject the processed import while preserving both existing evidence and the approved snapshot, got ${JSON.stringify(failed)}`);
+        return { cachedScopes: 2, retryIdempotent: true, realBaselineLoaded: true, historyFailureVisible: true };
+      } finally {
+        electronPkg.app.getPath = originalGetPath;
+        if (priorHistory !== null) await fs.promises.writeFile(historyFile, priorHistory, { mode: 0o600 });
+        else await fs.promises.unlink(historyFile).catch(error => { if (error.code !== 'ENOENT') throw error; });
+        if (snapshotFile) await fs.promises.unlink(snapshotFile).catch(error => { if (error.code !== 'ENOENT') throw error; });
+        if (cleanLayerFile) await fs.promises.unlink(cleanLayerFile).catch(error => { if (error.code !== 'ENOENT') throw error; });
+        fs.rmSync(directory, { recursive: true, force: true });
+      }
+    },
+  },
   {
     name: 'career snapshot publication refuses a source file rewritten after its input fingerprint was captured',
     run: async () => {

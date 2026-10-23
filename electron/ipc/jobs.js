@@ -34,6 +34,7 @@ import {
   writeCareerSnapshotAtomically,
 } from './careerSnapshot.js';
 import { produceCareerCleanLayer } from './careerCleanLayer.js';
+import { logCareerDataImport } from './careerImportLog.js';
 import { buildScoredJob } from './jobBatchReconcile.js';
 import { nonScoringJobConstraintKind, summarizeFitCalibration, validateAndNormalizeFitAssessment } from './jobFitAssessment.js';
 import {
@@ -10855,11 +10856,22 @@ function registerJobsHandlersWithDependencies(dependencies = {}) {
   // snapshot. Querying/scraping cannot begin until the snapshot is atomically
   // published. Legacy `profile` and `careerData` projections remain for the
   // established downstream interfaces, but are derived from that snapshot.
-  handleSafe('parse-career-data', async (event, { filePaths, nodeId, forceRecompile = false }, signal) => {
+  handleSafe('parse-career-data', async (event, { filePaths, nodeId, forceRecompile = false, importModule }, signal) => {
     const paths = Array.isArray(filePaths) ? filePaths.filter(Boolean) : [];
     if (paths.length === 0) throw new Error('No files provided to parse.');
     logger.info(`[Jobs][${nodeId}] Parsing ${paths.length} career file(s)`);
     const manualAiRunId = getCurrentIpcRequestContext()?.manualAiRunId || null;
+    const importContext = {
+      root: app.getPath('userData'), nodeId, module: importModule, manualAiRunId,
+      canvasScope: event.sender.__canvasPath || unsavedAnalysisScopeForCurrentRequest(null),
+    };
+    const recordProcessedImport = async (snapshot, cacheHit = false) => {
+      if (signal?.aborted) throw nodeCancellationError();
+      try { await logCareerDataImport({ ...importContext, snapshot, cacheHit }); }
+      catch (error) {
+        throw new Error(`Career sources were processed, but their private change history could not be saved. Retry the import. ${error.message}`, { cause: error });
+      }
+    };
     const startedAt = Date.now();
     let progressTelemetry = null;
     const reportProgress = (progress) => {
@@ -10914,6 +10926,8 @@ function registerJobsHandlersWithDependencies(dependencies = {}) {
       const profile = legacyProfileFromApprovedSnapshot(indexedSnapshot);
       const careerData = careerDataFromCareerSnapshot(indexedSnapshot);
       const outputFingerprint = careerProfileFingerprint(profile, careerData);
+      await assertCareerInputDescriptorsStillMatch(paths, fileDescriptors);
+      await recordProcessedImport(indexedSnapshot, true);
       logger.info(`[Jobs][${nodeId}] Approved career snapshot hit for input ${cacheInputFingerprint.slice(0, 12)}`);
       return {
         careerSnapshotId: indexedSnapshot.snapshotId,
@@ -11009,6 +11023,8 @@ function registerJobsHandlersWithDependencies(dependencies = {}) {
     cacheTelemetry.ts = Date.now();
     cacheTelemetry.outcome = 'published';
     cacheTelemetry.snapshot = approved.snapshotId.slice(0, 12);
+
+    await recordProcessedImport(approved);
 
     logger.info(`[Jobs][${nodeId}] Approved career snapshot published (${paths.length} file(s), ${approvedCareerData.length} chars): ${profile.titles?.join(', ')}`);
     return { careerSnapshotId: compiled.snapshotId, profile, careerData: approvedCareerData, fingerprint: outputFingerprint };

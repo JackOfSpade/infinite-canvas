@@ -355,7 +355,7 @@ export function registerPendingApplicationWorkspace({
   resumePdfPath = null, coverLetterPdfPath = null, jobListingPath,
   resumePdfPageCount = null, coverLetterPdfPageCount = null,
   generationAuditPath = null, generationAuditJobId = null, generationAuditRequired = null,
-  generationLogPath = null,
+  generationLogPath = null, careerSnapshotId = null, careerSourceFrozenAt = null,
   attemptId = null, cleanupOnDiscard = true, applicationRoot = null,
   artifactData = {}, cleanupOnSaveFailure = true, onBeforeSave = null, onBeforeDiscard = null,
   onSuccessfulSave = null, onBeforeSuccessfulCleanup = null, onAfterSuccessfulCleanup = null, onSaveFailure = null,
@@ -403,6 +403,11 @@ export function registerPendingApplicationWorkspace({
     throw new Error('Cannot register application artifacts without trusted source fingerprints.');
   }
   const expectedGenerationAuditJobId = String(generationAuditJobId || '').trim();
+  const careerSourceFrozenTime = typeof careerSourceFrozenAt === 'string' ? Date.parse(careerSourceFrozenAt) : NaN;
+  // Queue timestamps use canonical ISO format. Malformed optional provenance
+  // stays unknown instead of inventing a source-selection time.
+  const normalizedCareerSourceFrozenAt = Number.isFinite(careerSourceFrozenTime)
+    && new Date(careerSourceFrozenTime).toISOString() === careerSourceFrozenAt ? careerSourceFrozenAt : null;
   if (optional[2]) {
     if (!expectedGenerationAuditJobId || expectedGenerationAuditJobId.length > 80) {
       throw new Error('Cannot register Generation Audit.json without its app-owned job id.');
@@ -447,6 +452,11 @@ export function registerPendingApplicationWorkspace({
     generationLogPath: optional[3],
     generationAuditJobId: optional[2] ? expectedGenerationAuditJobId : null,
     generationAuditRequired: optional[2] ? generationAuditRequired : null,
+    // The host importer supplies the exact frozen source pin. Keep it on the
+    // capability so save/discard never infer provenance from editable HTML or
+    // from whichever career source happened to be imported most recently.
+    careerSnapshotId: typeof careerSnapshotId === 'string' && careerSnapshotId ? careerSnapshotId : null,
+    careerSourceFrozenAt: normalizedCareerSourceFrozenAt,
     jobListingPath: required[1], cleanupOnDiscard: cleanupOnDiscard !== false,
     cleanupOnSaveFailure: cleanupOnSaveFailure !== false,
     onBeforeSave: typeof onBeforeSave === 'function' ? onBeforeSave : null,
@@ -2474,7 +2484,11 @@ export function registerJobApplicationHandlers() {
         readRegisteredApplicationArtifact(resolvedWorkDir, pending.resumeHtmlPath, { ...options, expectedSha256: pending.artifactSha256?.resumeHtml }),
         readRegisteredApplicationArtifact(resolvedWorkDir, pending.jobListingPath, { ...options, expectedSha256: pending.artifactSha256?.jobListing }),
       ]);
-      await logGeneratedBundle({ root: app.getPath('userData'), workspaceDir: resolvedWorkDir, html, posting, appVersion: app.getVersion() });
+      await logGeneratedBundle({
+        root: app.getPath('userData'), workspaceDir: resolvedWorkDir, html, posting,
+        appVersion: app.getVersion(), careerSnapshotId: pending.careerSnapshotId,
+        careerSourceFrozenAt: pending.careerSourceFrozenAt,
+      });
       await logSavedBundle({ root: app.getPath('userData'), workspaceDir: resolvedWorkDir, html });
     } catch (error) {
       logger.warn(`[JobApplication] Could not capture discarded application edit evidence: ${error?.message || error}`);
@@ -2812,6 +2826,8 @@ export function registerJobApplicationHandlers() {
         await logGeneratedBundle({
           root: app.getPath('userData'), workspaceDir: dir, html: generatedHtml,
           posting: jobListingData?.toString('utf8') || '', appVersion: app.getVersion(),
+          careerSnapshotId: pending.careerSnapshotId,
+          careerSourceFrozenAt: pending.careerSourceFrozenAt,
         });
       } catch (error) {
         logger.warn(`[JobApplication] Could not record generated application edit evidence: ${error?.message || error}`);
