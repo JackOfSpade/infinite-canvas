@@ -64,6 +64,7 @@ import job_board_canvas_career_drop from './tests/job-board-canvas-career-drop.j
 import career_text_files from './tests/career-text-files.js';
 import career_profile_compilation from './tests/career-profile-compilation.js';
 import career_clean_layer from './tests/career-clean-layer.js';
+import career_profile_edits from './tests/career-profile-edits.js';
 import non_api_ai from './tests/non-api-ai.js';
 import job_workflow_documentation from './tests/job-workflow-documentation.js';
 import job_run_staging from './tests/job-run-staging.js';
@@ -236,6 +237,7 @@ const testGroups = [
   ['career-text-files.js', career_text_files],
   ['career-profile-compilation.js', career_profile_compilation],
   ['career-clean-layer.js', career_clean_layer],
+  ['career-profile-edits.js', career_profile_edits],
   ['non-api-ai.js', non_api_ai],
   ['job-workflow-documentation.js', job_workflow_documentation],
   ['job-run-staging.js', job_run_staging],

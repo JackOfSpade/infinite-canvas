@@ -55,6 +55,27 @@ import { recordJobAnalysisRecoveryLifecycle } from '../../electron/ipc/jobAnalys
 import { jobRunPathScopeForCanvas, lastRunReceiptPathForCanvas } from '../../electron/ipc/jobRunStaging.js';
 import { __runWithIpcRequestContextForTests } from '../../electron/ipc/ipcUtils.js';
 import { __recordJobSourceDispatchForTests, __resetJobsTelemetryForTests } from '../../electron/ipc/jobs.js';
+import { appendCareerConvergenceRound, sanitizeCareerConvergenceRound } from '../../electron/ipc/jobs.js';
+import { renderCareerConvergenceLines } from '../../electron/ipc/bugReport/jobsSnapshot.js';
+
+const CONVERGENCE_FIXTURE_ROUND_1 = Object.freeze({
+  round: 1,
+  findings: { blocker: 2, warning: 4 },
+  byCategory: { skills: { blocker: 2, warning: 1 }, grounding: { blocker: 0, warning: 3 }, metrics: { blocker: 0, warning: 0 } },
+  editsApplied: 5, decisionsTotal: 6, challengesAccepted: 1, adjudications: 2, findingsRejected: 1, editRepairs: 0, deterministicErrors: 0,
+});
+const CONVERGENCE_FIXTURE_ROUND_2 = Object.freeze({
+  round: 2,
+  findings: { blocker: 0, warning: 1 },
+  byCategory: { conflict: { blocker: 0, warning: 1 }, coverage: { blocker: 0, warning: 0 } },
+  editsApplied: 1, decisionsTotal: 9, challengesAccepted: 0, adjudications: 0, findingsRejected: 0, editRepairs: 1, deterministicErrors: 0,
+});
+const CONVERGENCE_FIXTURE_EXPECTED = Object.freeze([
+  '- Audit convergence (2 round(s) retained):',
+  '  - round 1 · findings 2 blocker / 4 warning · edits applied 5 · decisions 6 · challenges 1 · adjudications 2 · rejected 1 · edit repairs 0 · deterministic errors 0 · by category: grounding 0b/3w, skills 2b/1w',
+  '  - round 2 · findings 0 blocker / 1 warning · edits applied 1 · decisions 9 · challenges 0 · adjudications 0 · rejected 0 · edit repairs 1 · deterministic errors 0 · by category: conflict 0b/1w',
+  '  - Trend: findings went from 6 (round 1) to 1 (round 2); decisions recorded: 9.',
+]);
 import { boundedCombinedSourceRuns, normalizeBoardResultCount } from '../../src/utils/jobBoardProvenance.js';
 import { collectCompactJobBoardTopology } from '../../src/utils/jobBoardReportTopology.js';
 import os from 'node:os';
@@ -14063,13 +14084,145 @@ export default [
         }
         const ids = new Set(['compile-a', 'compile-b', 'foreign-compile']);
         const report = inContext(sender, null, () => buildJobsPipelineSnapshot(ids, sender.id, null));
-        assert((report.match(/Career compilation hub:/g) || []).length === 2
+        assert((report.match(/Career compilation owner:/g) || []).length === 2
           && report.includes('stage: compiling · 0/6') && report.includes('stage: auditing · 3/6')
           && !report.includes('stage: repairing') && !report.includes('compile-a') && !report.includes('compile-b'),
           'each local hub keeps its own redacted stage and counts without joining funnels or borrowing foreign compilation');
         const wrong = inContext(sender, null, () => buildJobsPipelineSnapshot(ids, other.id, null));
-        assert(!wrong.includes('Career compilation hub:'), 'mismatched report window must fail closed');
+        assert(!wrong.includes('Career compilation owner:'), 'mismatched report window must fail closed');
       } finally { __resetJobsTelemetryForTests(); }
+    },
+  },
+  {
+    name: 'career compilation owned by a Job Board renders under Career compilation owner with retained convergence',
+    run() {
+      __resetJobsTelemetryForTests();
+      const sender = { id: 793 };
+      const inContext = (nodeId, callback) => __runWithIpcRequestContextForTests({ sender, nodeId, channel: nodeId ? 'parse-career-data' : 'bug-report' }, callback);
+      try {
+        inContext('board-owner-node', () => Object.assign(getJobsTelemetry(), {
+          nodeId: 'board-owner-node', windowId: sender.id,
+          careerSnapshotCache: {
+            nodeId: 'board-owner-node', outcome: 'miss', fileCount: 2, fingerprint: 'b0a4d0000001', ts: Date.now(),
+            progress: { phase: 'auditing', completed: 1, total: 4, round: 2, updatedAt: Date.now() },
+            convergenceRounds: [CONVERGENCE_FIXTURE_ROUND_1, CONVERGENCE_FIXTURE_ROUND_2],
+          },
+        }));
+        const allNodes = new Set(['typed-hub-node', 'board-owner-node']);
+        const typedHubs = new Set(['typed-hub-node']);
+        const report = inContext(null, () => buildJobsPipelineSnapshot(allNodes, sender.id, null, [], false, typedHubs));
+        const lines = report.split('\n');
+        assert((report.match(/Career compilation owner:/g) || []).length === 1
+          && !report.includes('Career compilation hub:')
+          && !report.includes('board-owner-node')
+          && lines.some(l => l.startsWith('- miss — compilation was started · 2 file(s) · fingerprint `b0a4d0000001`'))
+          && lines.some(l => /^- Career compilation owner: `[^`]+`$/.test(l)),
+        'a Board-owned compile (not a typed Job Search hub) is reported under a redacted Career compilation owner line');
+        const start = lines.indexOf('- Audit convergence (2 round(s) retained):');
+        assert(start > 0
+          && lines[start + 1] === CONVERGENCE_FIXTURE_EXPECTED[1]
+          && lines[start + 2] === CONVERGENCE_FIXTURE_EXPECTED[2]
+          && lines[start + 3] === CONVERGENCE_FIXTURE_EXPECTED[3],
+        'the Board owner section carries the retained convergence rounds and trend line');
+        // Outside the full node set, the Board's compile stays out of the report.
+        const narrowed = inContext(null, () => buildJobsPipelineSnapshot(typedHubs, sender.id, null, [], false, typedHubs));
+        assert(!narrowed.includes('Career compilation owner:'), 'a compile whose owner is not on the current canvas is not reported');
+      } finally { __resetJobsTelemetryForTests(); }
+    },
+  },
+  {
+    name: 'sanitizeCareerConvergenceRound keeps exact contract values and drops invalid counts, unknown keys, and categories',
+    run() {
+      const valid = sanitizeCareerConvergenceRound({
+        round: 3,
+        findings: { blocker: 1, warning: 2 },
+        byCategory: { coverage: { blocker: 1, warning: 0 }, conflict: { blocker: 0, warning: 2 } },
+        editsApplied: 4, decisionsTotal: 7, challengesAccepted: 1, adjudications: 2, findingsRejected: 3, editRepairs: 1, deterministicErrors: 0,
+      });
+      assert(JSON.stringify(valid) === JSON.stringify({
+        round: 3,
+        findings: { blocker: 1, warning: 2 },
+        byCategory: { coverage: { blocker: 1, warning: 0 }, conflict: { blocker: 0, warning: 2 } },
+        editsApplied: 4, decisionsTotal: 7, challengesAccepted: 1, adjudications: 2, findingsRejected: 3, editRepairs: 1, deterministicErrors: 0,
+      }), 'a valid round is retained exactly');
+      const dirty = sanitizeCareerConvergenceRound({
+        round: 2,
+        findings: { blocker: 0, warning: 5, extra: 9 },
+        byCategory: {
+          skills: { blocker: 2, warning: 1, note: 'x' },
+          grounding: { blocker: -1, warning: 3 },
+          metrics: { blocker: 1.5, warning: 0 },
+          invented: { blocker: 1, warning: 1 },
+        },
+        editsApplied: -1, decisionsTotal: 2.5, challengesAccepted: Number.NaN, adjudications: '3', findingsRejected: 1,
+        editRepairs: Infinity, deterministicErrors: 0, secretNote: 'leak',
+      });
+      assert(JSON.stringify(dirty) === JSON.stringify({
+        round: 2,
+        findings: { blocker: 0, warning: 5 },
+        byCategory: { skills: { blocker: 2, warning: 1 } },
+        findingsRejected: 1, deterministicErrors: 0,
+      }), 'negative/float/NaN/string counts, unknown keys and unknown categories are dropped');
+      assert(sanitizeCareerConvergenceRound({ findings: { blocker: 0, warning: 0 } }) === null, 'missing round → null');
+      assert(sanitizeCareerConvergenceRound({ round: 0, findings: { blocker: 0, warning: 0 } }) === null, 'round 0 → null');
+      assert(sanitizeCareerConvergenceRound({ round: 1, findings: { blocker: '1', warning: 0 } }) === null, 'invalid findings → null');
+      assert(sanitizeCareerConvergenceRound({ round: 1 }) === null, 'missing findings → null');
+      assert(sanitizeCareerConvergenceRound(null) === null && sanitizeCareerConvergenceRound('round 1') === null, 'non-objects → null');
+    },
+  },
+  {
+    name: 'appendCareerConvergenceRound retains the newest 64 rounds, counts evictions, and replaces same-round entries',
+    run() {
+      const telemetry = {};
+      for (let round = 1; round <= 70; round += 1) {
+        assert(appendCareerConvergenceRound(telemetry, { round, findings: { blocker: 0, warning: round } }) === true, `round ${round} retained`);
+      }
+      assert(telemetry.convergenceRounds.length === 64
+        && telemetry.convergenceRoundsEvicted === 6
+        && telemetry.convergenceRounds[0].round === 7
+        && telemetry.convergenceRounds[63].round === 70,
+      '70 rounds → newest 64 retained, 6 evicted');
+      appendCareerConvergenceRound(telemetry, { round: 70, findings: { blocker: 1, warning: 0 } });
+      assert(telemetry.convergenceRounds.length === 64
+        && telemetry.convergenceRoundsEvicted === 6
+        && telemetry.convergenceRounds.filter(entry => entry.round === 70).length === 1
+        && telemetry.convergenceRounds[63].findings.blocker === 1
+        && telemetry.convergenceRounds[63].findings.warning === 0,
+      'same-round replacement does not duplicate or evict');
+      assert(appendCareerConvergenceRound(telemetry, { round: -2, findings: { blocker: 0, warning: 0 } }) === false
+        && telemetry.convergenceRounds.length === 64, 'an invalid round is not retained');
+      const fresh = {};
+      appendCareerConvergenceRound(fresh, { round: 1, findings: { blocker: 0, warning: 0 } });
+      assert(fresh.convergenceRounds.length === 1 && fresh.convergenceRoundsEvicted === undefined, 'array is created lazily without an eviction count');
+    },
+  },
+  {
+    name: 'career convergence rendering matches exactly, orders categories, and omits zero categories',
+    run() {
+      const lines = renderCareerConvergenceLines([CONVERGENCE_FIXTURE_ROUND_2, CONVERGENCE_FIXTURE_ROUND_1]);
+      assert(JSON.stringify(lines) === JSON.stringify(CONVERGENCE_FIXTURE_EXPECTED), `two-round fixture renders exactly: ${JSON.stringify(lines)}`);
+      const withEvicted = renderCareerConvergenceLines([CONVERGENCE_FIXTURE_ROUND_1, CONVERGENCE_FIXTURE_ROUND_2], 3);
+      assert(withEvicted[0] === '- Audit convergence (2 round(s) retained, 3 earlier round(s) evicted):', 'eviction count appears in the header');
+      assert(renderCareerConvergenceLines([]).length === 0 && renderCareerConvergenceLines(undefined).length === 0, 'no rounds → no lines');
+    },
+  },
+  {
+    name: 'hostile career convergence entries render no foreign text',
+    run() {
+      const hostile = {
+        round: 1,
+        findings: { blocker: 1, warning: 0, label: 'HOSTILE_FINDINGS' },
+        byCategory: { skills: { blocker: 1, warning: 0, why: 'HOSTILE_CAT' }, 'HOSTILE_KEY': { blocker: 9, warning: 9 }, grounding: 'HOSTILE_STRING' },
+        decisionsTotal: 'HOSTILE_DECISIONS', editsApplied: 2, note: 'HOSTILE_NOTE', toString: 'HOSTILE_TOSTRING',
+      };
+      const notARound = { round: 'HOSTILE_ROUND', findings: { blocker: 0, warning: 0 } };
+      const lines = renderCareerConvergenceLines([hostile, notARound, 'HOSTILE_ENTRY'], 'HOSTILE_EVICTED');
+      const text = lines.join('\n');
+      assert(!text.includes('HOSTILE') && JSON.stringify(lines) === JSON.stringify([
+        '- Audit convergence (1 round(s) retained):',
+        '  - round 1 · findings 1 blocker / 0 warning · edits applied 2 · decisions 0 · challenges 0 · adjudications 0 · rejected 0 · edit repairs 0 · deterministic errors 0 · by category: skills 1b/0w',
+        '  - Trend: findings went from 1 (round 1) to 1 (round 1); decisions recorded: 0.',
+      ]), `hostile entry renders only validated values: ${JSON.stringify(lines)}`);
     },
   },
   {

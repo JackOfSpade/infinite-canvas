@@ -5619,6 +5619,67 @@ function reportAttributableHubTelemetry(currentNodeIds, reportWindowId = null) {
     .sort((a, b) => String(a[0]).localeCompare(String(b[0])));
 }
 
+export const CAREER_CONVERGENCE_CATEGORIES = Object.freeze(['coverage', 'grounding', 'attribution', 'metrics', 'skills', 'conflict']);
+const CAREER_CONVERGENCE_COUNTERS = Object.freeze(['editsApplied', 'decisionsTotal', 'challengesAccepted', 'adjudications', 'findingsRejected', 'editRepairs', 'deterministicErrors']);
+export const CAREER_CONVERGENCE_ROUND_CAP = 64;
+
+const isCareerCount = value => Number.isSafeInteger(value) && value >= 0;
+
+function sanitizeCareerFindingPair(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  if (!isCareerCount(value.blocker) || !isCareerCount(value.warning)) return null;
+  return { blocker: value.blocker, warning: value.warning };
+}
+
+/**
+ * Pure: returns a fresh object holding only the per-round convergence contract
+ * keys, or null when the round or findings are invalid. Invalid counters and
+ * unknown keys/categories are dropped, never coerced.
+ */
+export function sanitizeCareerConvergenceRound(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  if (!Number.isSafeInteger(value.round) || value.round < 1) return null;
+  const findings = sanitizeCareerFindingPair(value.findings);
+  if (!findings) return null;
+  const out = { round: value.round, findings };
+  const byCategory = {};
+  const rawCategories = value.byCategory && typeof value.byCategory === 'object' && !Array.isArray(value.byCategory) ? value.byCategory : null;
+  if (rawCategories) {
+    for (const category of CAREER_CONVERGENCE_CATEGORIES) {
+      if (!Object.prototype.hasOwnProperty.call(rawCategories, category)) continue;
+      const pair = sanitizeCareerFindingPair(rawCategories[category]);
+      if (pair) byCategory[category] = pair;
+    }
+  }
+  out.byCategory = byCategory;
+  for (const key of CAREER_CONVERGENCE_COUNTERS) {
+    if (isCareerCount(value[key])) out[key] = value[key];
+  }
+  return out;
+}
+
+/**
+ * Appends one sanitized convergence round to a telemetry record, replacing an
+ * existing entry for the same round, keeping the newest CAREER_CONVERGENCE_ROUND_CAP
+ * and counting evictions. Returns true when an entry was retained.
+ */
+export function appendCareerConvergenceRound(telemetry, value) {
+  if (!telemetry || typeof telemetry !== 'object') return false;
+  const entry = sanitizeCareerConvergenceRound(value);
+  if (!entry) return false;
+  if (!Array.isArray(telemetry.convergenceRounds)) telemetry.convergenceRounds = [];
+  const rounds = telemetry.convergenceRounds;
+  const existing = rounds.findIndex(item => item?.round === entry.round);
+  if (existing >= 0) rounds.splice(existing, 1);
+  rounds.push(entry);
+  if (rounds.length > CAREER_CONVERGENCE_ROUND_CAP) {
+    const evicted = rounds.length - CAREER_CONVERGENCE_ROUND_CAP;
+    rounds.splice(0, evicted);
+    telemetry.convergenceRoundsEvicted = (isCareerCount(telemetry.convergenceRoundsEvicted) ? telemetry.convergenceRoundsEvicted : 0) + evicted;
+  }
+  return true;
+}
+
 /**
  * How many current-canvas hubs hold attributable telemetry in this window.
  *
@@ -10822,7 +10883,13 @@ function registerJobsHandlersWithDependencies(dependencies = {}) {
     const startedAt = Date.now();
     let progressTelemetry = null;
     const reportProgress = (progress) => {
-      if (progressTelemetry) progressTelemetry.progress = { ...progress, startedAt, updatedAt: Date.now() };
+      if (progressTelemetry) {
+        // Per-round convergence is retained separately (sanitized, bounded);
+        // keep the raw contract object out of the last-stage record.
+        const { convergence, ...stage } = progress || {};
+        progressTelemetry.progress = { ...stage, startedAt, updatedAt: Date.now() };
+        if (convergence) appendCareerConvergenceRound(progressTelemetry, convergence);
+      }
       if (!signal?.aborted && !event.sender.isDestroyed()) {
         event.sender.send('career-compile-progress', { nodeId, manualAiRunId, startedAt, ...progress });
       }

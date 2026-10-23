@@ -4,7 +4,7 @@ const { app } = electronPkg;
 import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
-import { getCurrentRequestJobAnalysisPaths, getJobsCareerCompilationForReport, getJobsResumeAttributionForReport, getJobsSourceRunHistoryForReport, getJobsTelemetryForReport, getJobsTelemetryHubCountForReport, JOB_DESCRIPTION_EVIDENCE_MIN_CHARS, listDescriptionRecoveryCheckpointsSync } from '../jobs.js';
+import { CAREER_CONVERGENCE_CATEGORIES, sanitizeCareerConvergenceRound, getCurrentRequestJobAnalysisPaths, getJobsCareerCompilationForReport, getJobsResumeAttributionForReport, getJobsSourceRunHistoryForReport, getJobsTelemetryForReport, getJobsTelemetryHubCountForReport, JOB_DESCRIPTION_EVIDENCE_MIN_CHARS, listDescriptionRecoveryCheckpointsSync } from '../jobs.js';
 import { getNonApiAiHandoffLifecycleSnapshot, SAFE_NON_API_AI_LOG_ERROR_CODES, SAFE_VALIDATION_DIAGNOSTIC_REASONS } from '../nonApiAi.js';
 import { formatTypeAreaUtilization, getApplicationTelemetry } from '../jobApplication.js';
 import { getApplicationSyncTelemetry } from '../applicationSync.js';
@@ -5508,6 +5508,32 @@ function resumeAttemptTrailLine(sourceId, attempts, indent = '  ') {
   return `${indent}- \`${sourceId}\` (${countLabel}): ${rendered}`;
 }
 
+/**
+ * Render retained per-round audit convergence. Every entry is re-validated
+ * through the producer's sanitizer so no raw value reaches the report; the
+ * trend line states observations only.
+ */
+export function renderCareerConvergenceLines(rounds, evicted) {
+  if (!Array.isArray(rounds) || rounds.length === 0) return [];
+  const entries = rounds.map(sanitizeCareerConvergenceRound).filter(Boolean)
+    .sort((a, b) => a.round - b.round);
+  if (entries.length === 0) return [];
+  const evictedCount = Number.isSafeInteger(evicted) && evicted > 0 ? evicted : 0;
+  const out = [`- Audit convergence (${entries.length} round(s) retained${evictedCount ? `, ${evictedCount} earlier round(s) evicted` : ''}):`];
+  const n = value => (Number.isSafeInteger(value) && value >= 0 ? value : 0);
+  for (const entry of entries) {
+    const categories = CAREER_CONVERGENCE_CATEGORIES
+      .filter(category => entry.byCategory[category] && (entry.byCategory[category].blocker > 0 || entry.byCategory[category].warning > 0))
+      .map(category => `${category} ${entry.byCategory[category].blocker}b/${entry.byCategory[category].warning}w`);
+    out.push(`  - round ${entry.round} · findings ${entry.findings.blocker} blocker / ${entry.findings.warning} warning · edits applied ${n(entry.editsApplied)} · decisions ${n(entry.decisionsTotal)} · challenges ${n(entry.challengesAccepted)} · adjudications ${n(entry.adjudications)} · rejected ${n(entry.findingsRejected)} · edit repairs ${n(entry.editRepairs)} · deterministic errors ${n(entry.deterministicErrors)}${categories.length ? ` · by category: ${categories.join(', ')}` : ''}`);
+  }
+  const first = entries[0];
+  const last = entries[entries.length - 1];
+  const total = entry => entry.findings.blocker + entry.findings.warning;
+  out.push(`  - Trend: findings went from ${total(first)} (round ${first.round}) to ${total(last)} (round ${last.round}); decisions recorded: ${n(last.decisionsTotal)}.`);
+  return out;
+}
+
 export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvasFilePath, localApplications = [], omitJobAudit = false, currentJobHubIds = currentNodeIds) {
   let t;
   // Older direct callers/tests do not have the renderer's typed hub index.
@@ -5516,7 +5542,11 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
   const telemetryOwners = arguments.length >= 6 ? currentJobHubIds : currentNodeIds;
   try { t = getJobsTelemetryForReport(telemetryOwners, reportWindowId); } catch { return ''; }
   let careerCompilationOwners = [];
-  try { careerCompilationOwners = getJobsCareerCompilationForReport(telemetryOwners, reportWindowId); } catch { /* optional stage diagnostics */ }
+  // A Job Board's career override compiles under the Board's node id, so
+  // career-compilation owners come from the full current node set (Boards
+  // included), not only typed Job Search hubs. Every other section keeps
+  // using telemetryOwners.
+  try { careerCompilationOwners = getJobsCareerCompilationForReport(currentNodeIds, reportWindowId); } catch { /* optional stage diagnostics */ }
   let sourceRunHistoryOwners = [];
   try { sourceRunHistoryOwners = getJobsSourceRunHistoryForReport(telemetryOwners, reportWindowId); } catch { /* optional bounded diagnostics */ }
   // `t` is null both when nothing ran and when several hubs each ran their own
@@ -5661,7 +5691,7 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
         published: 'miss → published — the approved career snapshot was atomically stored',
       };
       lines.push('\n### Approved Career Snapshot Cache');
-      if (nodeId) lines.push(`- Career compilation hub: \`${reportCorrelationDigest(nodeId)}\``);
+      if (nodeId) lines.push(`- Career compilation owner: \`${reportCorrelationDigest(nodeId)}\``);
       lines.push(`- ${outcomes[cache.outcome] || cache.outcome || 'unknown'} · ${cache.fileCount || 0} file(s) · fingerprint \`${cache.fingerprint || 'unknown'}\`${ago(cache.ts)}`);
       const progress = cache.progress;
       if (['reading', 'compiling', 'auditing', 'repairing', 'saving', 'cleaning'].includes(progress?.phase)) {
@@ -5677,6 +5707,7 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
       if (Number.isFinite(cache.transcriptionAudited)) {
         lines.push(`- Attachment transcription audit: ${cache.transcriptionAudited || 0} independently checked · ${cache.transcriptionRevised || 0} complete replacement${cache.transcriptionRevised === 1 ? '' : 's'}`);
       }
+      lines.push(...renderCareerConvergenceLines(cache.convergenceRounds, cache.convergenceRoundsEvicted));
     }
   }
   if (visibleLocalApplications.length) {

@@ -59,6 +59,7 @@ import {
 import { buildApplicationCareerAuthority, validateAuthorityRoleEvidence, validateAuthoritySkillGroup } from '../../electron/ipc/applicationCareerAuthority.js';
 import { postingNamedAttestedSkillTerms, requiredCareerAttestedSkillTerms, validateStructuredApplicationResume } from '../../electron/ipc/structuredResume.js';
 import { __snapshotCareerSkillEvidenceForTests, assertSourceQuoteLinksFinalText } from '../../electron/ipc/localAiApplication.js';
+import nodeAssert from 'node:assert/strict';
 
 // ---------------------------------------------------------------------------
 // Synthetic candidates. Six unrelated kinds of work are covered on purpose:
@@ -747,7 +748,176 @@ async function expectCompileFailure(run) {
 // Tests
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Edit-protocol regressions: an ungrounded skill row is removed by an applied
+// field-level audit edit, and a removed row is settled so a later unchallenged
+// re-add is rejected by the audit responseValidator.
+// ---------------------------------------------------------------------------
+
+const SKILL_EDIT_LANES = new Map([
+  ['career-profile-audit-completeness', 'coverage'],
+  ['career-profile-audit-grounding', 'grounding'],
+  ['career-profile-audit-attribution', 'attribution'],
+  ['career-profile-audit-metrics', 'metrics'],
+  ['career-profile-audit-skills', 'skills'],
+  ['career-profile-audit-conflicts', 'conflict'],
+]);
+
+const PROMOTED_LINES = Object.freeze([
+  'Grace Hopper',
+  'Logistics Analyst at Northwind in Denver',
+  'March 2019 to Present',
+  'Built Excel forecasts used by 12 planners.',
+  'Sat next to the Kubernetes platform team.',
+  'Compared Tableau licence quotes for the finance office.',
+  'grace@example.test',
+]);
+
+// Fake compiling model that promotes one mere mention (by segment) to a
+// direct, indexable skill next to the genuinely demonstrated Excel row.
+function promotedMentionShard(corpus, promoted) {
+  const ids = corpus.segments.map(segment => segment.id);
+  const excelSegment = ids[3];
+  const mentionSegment = ids[promoted.segmentIndex];
+  const skillIds = ['skill-excel', promoted.id];
+  const entityIds = ['identity', 'role-northwind', 'achievement-forecasts', ...skillIds];
+  const skill = (id, name, segmentId, capabilityKind) => ({
+    id, name, category: 'software', capabilityKind, supportMode: 'direct', directEvidenceSegmentIds: [segmentId],
+    indexEligible: true, roleIds: ['role-northwind'], evidenceSegmentIds: [segmentId],
+  });
+  return {
+    identity: { name: 'Grace Hopper', contacts: ['grace@example.test'], evidenceSegmentIds: ids },
+    roles: [{
+      id: 'role-northwind', title: 'Logistics Analyst', employer: 'Northwind', startDate: 'March 2019', endDate: 'Present', location: 'Denver',
+      achievementIds: ['achievement-forecasts'], skillIds, evidenceSegmentIds: ids,
+    }],
+    achievements: [{
+      id: 'achievement-forecasts', roleId: 'role-northwind', claim: PROMOTED_LINES[3], technologies: ['Excel'],
+      technologyReferences: [{ technology: 'Excel', disposition: 'skill', relationship: 'independent', relationshipGroup: '', relationshipEvidence: 'Built Excel forecasts', evidenceSegmentIds: [excelSegment] }],
+      metrics: [{ label: 'planners', value: '12', unit: 'planners', evidenceSegmentIds: [excelSegment] }], evidenceSegmentIds: ids,
+    }],
+    projects: [],
+    skills: [skill('skill-excel', 'Excel', excelSegment, 'tool'), skill(promoted.id, promoted.name, mentionSegment, 'platform')],
+    education: [], certifications: [], otherEvidence: [], rolePatches: [], projectPatches: [],
+    continuationState: { roles: { mode: 'replace', ids: ['role-northwind'] }, projects: { mode: 'inherit', ids: [] } },
+    segmentCoverage: ids.map(segmentId => ({ segmentId, disposition: 'achievement', entityIds })),
+  };
+}
+
+async function runPromotedMentionCompile({ promoted, audit }) {
+  const lines = PROMOTED_LINES;
+  const text = lines.map(line => `${line}\n`).join('');
+  const files = [{ name: 'Promoted Career.md', contentHash: crypto.createHash('sha256').update(text).digest('hex'), text, transcriptionAudit: verbatimCareerTranscriptionAuditReceipt() }];
+  const corpus = buildCareerSourceCorpus(files);
+  const log = { calls: [], rejected: [] };
+  const rounds = new Map();
+  const result = await compileAuditedCareerSnapshot({
+    sourceFiles: files,
+    callText: async (prompt, options) => {
+      const phase = options.hints?.phase || '';
+      log.calls.push({ task: options.task, phase });
+      if (options.task === 'career-profile-compile') return promotedMentionShard(corpus, promoted);
+      if (!SKILL_EDIT_LANES.has(options.task)) throw new Error(`Unexpected task ${options.task}/${phase}`);
+      const lane = SKILL_EDIT_LANES.get(options.task);
+      const round = rounds.get(lane) || 0;
+      rounds.set(lane, round + 1);
+      for (const candidate of audit({ lane, round, corpus })) {
+        try {
+          options.responseValidator(candidate);
+          return candidate;
+        } catch (error) {
+          log.rejected.push({ task: options.task, message: error.message });
+        }
+      }
+      throw new Error(`No ${options.task} candidate was accepted: ${log.rejected.map(item => item.message).join(' || ')}`);
+    },
+  });
+  return { result, corpus, log };
+}
+
+function removePromotedFinding(promoted, segmentId, id = 'not-a-skill') {
+  return {
+    id, severity: 'blocker', category: 'skills', segmentIds: [segmentId], entityIds: [`p0001-${promoted.id}`],
+    detail: `${promoted.name} is only mentioned near the work; the source never shows the candidate using it.`,
+    sourceQuote: promoted.quote, challenge: { decisionId: '', evidenceSegmentIds: [] },
+    edits: [
+      { op: 'remove', group: 'skills', entityId: `p0001-${promoted.id}`, field: '', valueJson: '' },
+      { op: 'set', group: 'roles', entityId: 'p0001-role-northwind', field: 'skillIds', valueJson: JSON.stringify(['p0001-skill-excel']) },
+    ],
+  };
+}
+
+function promotedOutcome(result, log, promoted) {
+  const removal = result.snapshot.auditHistory.at(-1).decisionLog.targets.find(target => target.targetKey === `skills\u0000p0001-${promoted.id}\u0000*`);
+  return {
+    status: result.snapshot.status,
+    valid: validateCurrentCareerSnapshot(result.snapshot).valid,
+    skills: result.profile.skills.map(skill => [skill.id, skill.name]),
+    roleSkillIds: result.profile.roles[0].skillIds,
+    removal: [removal.current.origin, removal.current.category],
+    repairs: log.calls.filter(call => call.task === 'career-profile-repair').length,
+  };
+}
+
+const KUBERNETES = Object.freeze({ id: 'skill-kubernetes', name: 'Kubernetes', segmentIndex: 4, quote: 'Sat next to the Kubernetes platform team.' });
+const TABLEAU = Object.freeze({ id: 'skill-tableau', name: 'Tableau', segmentIndex: 5, quote: 'Compared Tableau licence quotes' });
+
+const restoredSkillEditTests = [
+  {
+    name: 'adaptability skills edits: an ungrounded skill row is removed by an applied skills-lane edit and never reaches the approved snapshot',
+    run: async () => {
+      const { result, log } = await runPromotedMentionCompile({
+        promoted: KUBERNETES,
+        audit: ({ lane, round, corpus }) => (lane === 'skills' && round === 0
+          ? [{ findings: [removePromotedFinding(KUBERNETES, corpus.segments[4].id)] }]
+          : [{ findings: [] }]),
+      });
+      nodeAssert.deepStrictEqual(promotedOutcome(result, log, KUBERNETES), {
+        status: 'approved', valid: true, skills: [['p0001-skill-excel', 'Excel']], roleSkillIds: ['p0001-skill-excel'],
+        removal: ['audit', 'skills'], repairs: 0,
+      });
+      nodeAssert.strictEqual(log.rejected.length, 0);
+      return { skills: 1 };
+    },
+  },
+  {
+    name: 'adaptability skills edits: a mention promoted to a skill stays removed — a later unchallenged re-add is rejected every round',
+    run: async () => {
+      const { result, log } = await runPromotedMentionCompile({
+        promoted: TABLEAU,
+        audit: ({ lane, round, corpus }) => {
+          const segmentId = corpus.segments[5].id;
+          if (lane !== 'skills') return [{ findings: [] }];
+          if (round === 0) return [{ findings: [removePromotedFinding(TABLEAU, segmentId)] }];
+          const reAdded = {
+            id: 'p0001-skill-tableau', name: 'Tableau', category: 'software', capabilityKind: 'tool', supportMode: 'direct',
+            directEvidenceSegmentIds: [segmentId], indexEligible: true, roleIds: ['p0001-role-northwind'], evidenceSegmentIds: [segmentId],
+          };
+          return [
+            { findings: [{
+              id: 're-add', severity: 'blocker', category: 'skills', segmentIds: [segmentId], entityIds: ['p0001-skill-tableau'],
+              detail: 'Tableau appears in the source.', sourceQuote: 'Tableau', challenge: { decisionId: '', evidenceSegmentIds: [] },
+              edits: [{ op: 'add', group: 'skills', entityId: 'p0001-skill-tableau', field: '', valueJson: JSON.stringify(reAdded) }],
+            }] },
+            { findings: [] },
+          ];
+        },
+      });
+      const skillsCalls = log.calls.filter(call => call.task === 'career-profile-audit-skills').length;
+      nodeAssert.deepStrictEqual(promotedOutcome(result, log, TABLEAU), {
+        status: 'approved', valid: true, skills: [['p0001-skill-excel', 'Excel']], roleSkillIds: ['p0001-skill-excel'],
+        removal: ['audit', 'skills'], repairs: 0,
+      });
+      nodeAssert.ok(skillsCalls >= 2);
+      nodeAssert.strictEqual(log.rejected.length, skillsCalls - 1);
+      nodeAssert.ok(log.rejected.every(item => item.task === 'career-profile-audit-skills' && item.message.includes('skills finding re-add')), log.rejected.map(item => item.message).join(' || '));
+      return { skillsCalls, rejected: log.rejected.length };
+    },
+  },
+];
+
 export default [
+  ...restoredSkillEditTests,
   {
     name: 'adaptability skills: synthetic fixture matrix is domain-diverse and every baseline compiles to an approved snapshot whose skill inventory is exactly the source-evidenced set',
     run: async () => {
@@ -801,61 +971,6 @@ export default [
             `${c.key}: near-miss ${kind} claim ${JSON.stringify(claim)} must be rejected (${errorsOf(result).slice(0, 200)})`);
           assert(result.errors.every(error => error.includes(`skills[skill-forged-${kind}]`)), `${c.key}: near-miss ${kind}: the forged row is the only defect (${errorsOf(result).slice(0, 300)})`);
         }
-      }
-    },
-  },
-  {
-    name: 'adaptability skills: the compile loop never approves an ungrounded skill; a responder that repairs it is approved without the skill',
-    run: async () => {
-      for (const c of CANDIDATES) {
-        const bullets = bulletsFor(c, 'A');
-        const forgeShard = shard => {
-          const seg = shard.achievements.map(item => item.evidenceSegmentIds[0]);
-          shard.skills.push({
-            id: 'skill-forged', name: c.addedName, category: 'claimed', capabilityKind: 'capability', supportMode: 'direct',
-            directEvidenceSegmentIds: seg, indexEligible: true, roleIds: [ROLE_ID], evidenceSegmentIds: seg,
-          });
-          shard.roles[0].skillIds.push('skill-forged');
-          return shard;
-        };
-        const groundingFinding = 'skills[p0001-skill-forged].name is not grounded in its cited source segment(s).';
-        const files = sourceFilesFor(c, bullets);
-        const corpus = buildCareerSourceCorpus(files);
-        const faithful = pageShard(buildProfile(c, bullets, corpus));
-        const run = async repairShard => {
-          const repairPrompts = [];
-          const outcome = await compileAuditedCareerSnapshot({
-            sourceFiles: files, now: FIXED_NOW,
-            callText: async (prompt, options) => {
-              if (options.task === 'career-profile-compile') return forgeShard(structuredClone(faithful));
-              if (options.task === 'career-profile-repair') { repairPrompts.push(prompt); return repairShard(); }
-              return { findings: [] };
-            },
-          }).then(result => ({ result }), error => ({ error }));
-          return { ...outcome, repairPrompts };
-        };
-
-        // 1) A responder that insists on the forged skill is refused outright, and the
-        //    reason handed to its repair round is the literal-grounding finding about that row.
-        const insisting = await run(() => forgeShard(structuredClone(faithful)));
-        assert(insisting.error && /^CAREER_SNAPSHOT_[A-Z_]+$/u.test(String(insisting.error.code)) && !insisting.result,
-          `${c.key}: insisting on an ungrounded skill must end in a typed hard refusal, never an approved snapshot (${insisting.error?.code})`);
-        assert(insisting.repairPrompts.length >= 1 && insisting.repairPrompts[0].includes(groundingFinding),
-          `${c.key}: the repair round was told that the forged skill is ungrounded`);
-
-        // 2) A responder that drops it on the targeted repair round is approved.
-        const repaired = await run(() => structuredClone(faithful));
-        assert(!repaired.error, `${c.key}: a responder that drops the forged skill is approved (${repaired.error?.message})`);
-        const { result } = repaired;
-        assert(repaired.repairPrompts.length >= 1 && repaired.repairPrompts[0].includes(groundingFinding), `${c.key}: deterministic failure of the grounding rule triggered the repair round`);
-        // Production folds the failed round into a tamper-evident prefix and approves only a clean final round.
-        const history = result.snapshot.auditHistory;
-        assert(history[0].kind === 'folded' && history[0].roundCount >= 1 && history.at(-1).deterministicFailureCount === 0 && history.at(-1).unresolvedCount === 0,
-          `${c.key}: the failed first round is folded into the retained audit history and the approved round is clean`);
-        assert(!result.profile.skills.some(skill => skill.id.endsWith('skill-forged')), `${c.key}: the forged row is gone from the approved profile`);
-        const view = productionView(result.snapshot, neutralListing());
-        assertViewMatchesOracle(c, bullets, view, 'after repair');
-        expectAdmission(view, c.addedName, false, `${c.key} forged skill after repair`);
       }
     },
   },
@@ -1270,66 +1385,6 @@ export default [
             assert(!attempt2.accepted && attempt2.message.includes(`item "${claim}"`), `${c.key} vs ${other.key}'s posting: ${claim} is named by the posting but is not this candidate's skill (${attempt2.message.slice(0, 160)})`);
           }
         }
-      }
-    },
-  },
-  {
-    name: 'adaptability skills: a skills-lane audit finding blocks approval of a mention promoted to a skill, and the repaired snapshot excludes it',
-    run: async () => {
-      for (const c of CANDIDATES) {
-        const bullets = bulletsFor(c, 'A');
-        const mention = c.mentions[0];
-        const label = mention.uses[0].label;
-        const files = sourceFilesFor(c, bullets);
-        const corpus = buildCareerSourceCorpus(files);
-        const faithfulFull = buildProfile(c, bullets, corpus);
-        const faithful = pageShard(faithfulFull);
-        const mentionSegment = faithful.achievements.find(item => item.claim === mention.text).evidenceSegmentIds[0];
-        // Forge the promotion on the complete (host-bound) profile, then page-shard it the way a responder would answer.
-        const promotedFull = structuredClone(faithfulFull);
-        promotedFull.skills.push({
-          id: 'skill-promoted', name: label, category: 'tool', capabilityKind: 'tool', supportMode: 'direct',
-          directEvidenceSegmentIds: [mentionSegment], indexEligible: true, roleIds: [ROLE_ID], evidenceSegmentIds: [mentionSegment],
-        });
-        promotedFull.roles[0].skillIds.push('skill-promoted');
-        // The coverage entityIds are the reciprocal inverse of evidence; keep the complete profile consistent with the new row.
-        promotedFull.segmentCoverage.find(entry => entry.segmentId === mentionSegment).entityIds.push('skill-promoted');
-        // Keep the forged profile internally CONSISTENT: the technology ledger agrees with the promoted row (the
-        // mention's own reference is now an independent skill disposition bound to skill-promoted). Deterministic
-        // validation rejects a skill whose only evidence is a line the ledger calls non-skill, so a ledger that still
-        // said non-skill would fail BEFORE any audit ran (the compiler runs no AI audit while deterministic validation
-        // fails). With the ledger agreeing there is no deterministic contradiction left: whether an organization-owned
-        // system is really the candidate's capability is a semantic judgement only the independent skills-lane audit can make.
-        const promotedReference = promotedFull.achievements.find(item => item.claim === mention.text).technologyReferences
-          .find(reference => canon(reference.technology) === canon(label));
-        promotedReference.disposition = 'skill';
-        delete promotedReference.nonSkillReason;
-        promotedReference.skillId = 'skill-promoted';
-        // Sanity: the consistent forgery passes deterministic validation, so only the audit lane can object.
-        const sanity = validateCareerProfile(promotedFull, corpus);
-        assert(sanity.valid, `${c.key}: the forged promotion must be invisible to deterministic validation (${errorsOf(sanity).slice(0, 300)})`);
-        const promoted = pageShard(promotedFull);
-        const lane = { flagged: 0, repairs: 0, repairPrompt: '' };
-        const detail = 'The label is an organization-owned system or evaluation the candidate did not operate.';
-        const result = await compileAuditedCareerSnapshot({
-          sourceFiles: files, now: FIXED_NOW,
-          callText: async (prompt, options) => {
-            if (options.task === 'career-profile-compile') return promoted;
-            if (options.task === 'career-profile-repair') { lane.repairs += 1; lane.repairPrompt = prompt; return faithful; }
-            if (options.task === 'career-profile-audit-skills' && new RegExp(`"name":"${label}"`, 'u').test(prompt)) {
-              lane.flagged += 1;
-              return { findings: [{ id: 'mention-promoted', severity: 'blocker', category: 'skills', segmentIds: [mentionSegment], entityIds: ['p0001-skill-promoted'], detail }] };
-            }
-            return { findings: [] };
-          },
-        });
-        assert(lane.flagged >= 1 && lane.repairs >= 1, `${c.key}: the skills lane flagged and the repair round ran`);
-        // The audit finding itself (not an unrelated defect) is what the repair round was asked to resolve.
-        assert(lane.repairPrompt.includes(detail), `${c.key}: the repair round received the skills-lane finding`);
-        assert(result.snapshot.auditHistory[0].kind === 'folded' && result.snapshot.auditHistory.at(-1).unresolvedCount === 0, `${c.key}: the unresolved round is retained and the approved round is clean`);
-        const repairedView = productionView(result.snapshot, neutralListing());
-        assertViewMatchesOracle(c, bullets, repairedView, 'repaired');
-        expectAdmission(repairedView, label, false, `${c.key} audited-out mention`);
       }
     },
   },

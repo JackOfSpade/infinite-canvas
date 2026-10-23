@@ -69,6 +69,7 @@ import {
 } from '../../electron/ipc/applicationCareerAuthority.js';
 import { validateStructuredApplicationResume } from '../../electron/ipc/structuredResume.js';
 import { __snapshotCareerSkillEvidenceForTests } from '../../electron/ipc/localAiApplication.js';
+import nodeAssert from 'node:assert/strict';
 
 // ---------------------------------------------------------------------------
 // Synthetic candidates. Nothing here is real, and nothing in production may
@@ -654,7 +655,310 @@ const qualifiedKindTests = QUALIFIED_KINDS.map(kind => ({
   },
 }));
 
+// ---------------------------------------------------------------------------
+// Edit-protocol regressions. Audits return field-level edits; the host applies
+// them and settles every applied target in the compilation decision ledger.
+// An accepted correction may change again only through a challenge naming its
+// decision/group and citing a segment not yet considered.
+// ---------------------------------------------------------------------------
+
+function relationshipEditLanes() {
+  return new Map([
+    ['career-profile-audit-completeness', 'coverage'],
+    ['career-profile-audit-grounding', 'grounding'],
+    ['career-profile-audit-attribution', 'attribution'],
+    ['career-profile-audit-metrics', 'metrics'],
+    ['career-profile-audit-skills', 'skills'],
+    ['career-profile-audit-conflicts', 'conflict'],
+  ]);
+}
+
+// Shared fake callText: every candidate answer goes through the real
+// responseValidator, in order, as the durable handoff re-prompts a worker.
+async function runRelationshipEditCompile({ lines, compile, audit = () => [{ findings: [] }], repair = () => [], adjudicate = () => [], pageMaxSegments }) {
+  const files = [{ name: 'Relationship Career.md', contentHash: 'e'.repeat(64), text: lines.map(line => `${line}\n`).join(''), transcriptionAudit: verbatimCareerTranscriptionAuditReceipt() }];
+  const corpus = buildCareerSourceCorpus(files);
+  const lanes = relationshipEditLanes();
+  const log = { calls: [], rejected: [] };
+  const rounds = new Map();
+  const result = await compileAuditedCareerSnapshot({
+    sourceFiles: files,
+    ...(pageMaxSegments ? { pageMaxSegments, pageMaxSourceChars: 1 } : {}),
+    callText: async (_prompt, options) => {
+      const phase = options.hints?.phase || '';
+      const pageIndex = options.hints?.pageIndex ?? 0;
+      log.calls.push({ task: options.task, phase, pageIndex });
+      if (options.task === 'career-profile-compile') return compile(corpus, pageIndex);
+      let candidates;
+      if (lanes.has(options.task)) {
+        const lane = lanes.get(options.task);
+        const key = `${lane}/${pageIndex}`;
+        const round = rounds.get(key) || 0;
+        rounds.set(key, round + 1);
+        const match = _prompt.match(/<UNTRUSTED_CAREER_PAGE_AUDIT_INPUT>\n([\s\S]*)\n<\/UNTRUSTED_CAREER_PAGE_AUDIT_INPUT>/u);
+        candidates = audit({ lane, round, pageIndex, corpus, payload: match ? JSON.parse(match[1]) : null });
+      } else if (options.task === 'career-profile-repair' && phase === 'adjudication') candidates = adjudicate({ corpus });
+      else if (options.task === 'career-profile-repair' && phase === 'edit-repair') candidates = repair({ corpus, pageIndex });
+      else throw new Error(`Unexpected task ${options.task}/${phase}`);
+      for (const candidate of candidates) {
+        try {
+          options.responseValidator(candidate);
+          return candidate;
+        } catch (error) {
+          log.rejected.push({ task: options.task, phase, pageIndex, message: error.message });
+        }
+      }
+      throw new Error(`No ${options.task}/${phase} candidate was accepted: ${log.rejected.map(item => item.message).join(' || ')}`);
+    },
+  });
+  return { result, corpus, log };
+}
+
+function relationshipShard({ identity, roles = [], achievements = [], skills = [], segmentCoverage, continuationState }) {
+  return {
+    identity, roles, achievements, projects: [], skills, education: [], certifications: [], otherEvidence: [],
+    rolePatches: [], projectPatches: [],
+    continuationState: continuationState || {
+      roles: { mode: roles.length ? 'replace' : 'inherit', ids: roles.map(role => role.id) },
+      projects: { mode: 'inherit', ids: [] },
+    },
+    segmentCoverage,
+  };
+}
+
+function techReference(technology, segmentId, { relationship = 'independent', relationshipGroup = '', relationshipEvidence = technology, nonSkillReason = '' } = {}) {
+  return {
+    technology, disposition: nonSkillReason ? 'non-skill' : 'skill', ...(nonSkillReason ? { nonSkillReason } : {}),
+    relationship, relationshipGroup, relationshipEvidence, evidenceSegmentIds: [segmentId],
+  };
+}
+
+function relationshipSkill(id, name, segmentId, { qualified = false, capabilityKind = 'technology', roleId = 'role-riverbank' } = {}) {
+  return {
+    id, name, category: 'database', capabilityKind, supportMode: qualified ? 'relationship-qualified' : 'direct',
+    directEvidenceSegmentIds: qualified ? [] : [segmentId], indexEligible: !qualified, roleIds: [roleId], evidenceSegmentIds: [segmentId],
+  };
+}
+
+const CORRECTION_LINES = Object.freeze([
+  'Maya Chen',
+  'Data Analyst at Riverbank in Austin',
+  'June 2021 to Present',
+  'Built SQL reports in PostgreSQL or MySQL for 30 managers.',
+  'Loaded the Bloomberg feed into the staging environment.',
+  'maya@example.test',
+]);
+
+// The flattened compile: an either/or database choice read as two direct
+// skills, and a data-feed label promoted to a skill.
+function flattenedCorrectionShard(corpus) {
+  const ids = corpus.segments.map(segment => segment.id);
+  const [reportsSegment, feedSegment] = [ids[3], ids[4]];
+  const skillIds = ['skill-sql', 'skill-postgresql', 'skill-mysql', 'skill-bloomberg-feed'];
+  const entityIds = ['identity', 'role-riverbank', 'achievement-reports', 'achievement-feed', ...skillIds];
+  return relationshipShard({
+    identity: { name: 'Maya Chen', contacts: ['maya@example.test'], evidenceSegmentIds: ids },
+    roles: [{
+      id: 'role-riverbank', title: 'Data Analyst', employer: 'Riverbank', startDate: 'June 2021', endDate: 'Present', location: 'Austin',
+      achievementIds: ['achievement-reports', 'achievement-feed'], skillIds, evidenceSegmentIds: ids,
+    }],
+    achievements: [
+      {
+        id: 'achievement-reports', roleId: 'role-riverbank', claim: CORRECTION_LINES[3], technologies: ['SQL', 'PostgreSQL', 'MySQL'],
+        technologyReferences: ['SQL', 'PostgreSQL', 'MySQL'].map(name => techReference(name, reportsSegment)),
+        metrics: [{ label: 'managers', value: '30', unit: 'managers', evidenceSegmentIds: [reportsSegment] }], evidenceSegmentIds: ids,
+      },
+      {
+        id: 'achievement-feed', roleId: 'role-riverbank', claim: CORRECTION_LINES[4], technologies: ['Bloomberg feed'],
+        technologyReferences: [techReference('Bloomberg feed', feedSegment)], metrics: [], evidenceSegmentIds: ids,
+      },
+    ],
+    skills: [
+      relationshipSkill('skill-sql', 'SQL', reportsSegment, { capabilityKind: 'language' }),
+      relationshipSkill('skill-postgresql', 'PostgreSQL', reportsSegment),
+      relationshipSkill('skill-mysql', 'MySQL', reportsSegment),
+      relationshipSkill('skill-bloomberg-feed', 'Bloomberg feed', feedSegment),
+    ],
+    segmentCoverage: ids.map(segmentId => ({ segmentId, disposition: 'achievement', entityIds })),
+  });
+}
+
+function setEdit(group, entityId, field, value) {
+  return { op: 'set', group, entityId, field, valueJson: JSON.stringify(value) };
+}
+
+function correctionFinding({ id, segmentIds, sourceQuote, edits, entityIds, challenge = { decisionId: '', evidenceSegmentIds: [] } }) {
+  return {
+    id, severity: 'blocker', category: 'skills', segmentIds, entityIds,
+    detail: 'The source relationship decides whether this label is a candidate skill.', edits, sourceQuote, challenge,
+  };
+}
+
+function alternativeReferences(segmentId) {
+  return [
+    techReference('SQL', segmentId),
+    techReference('PostgreSQL', segmentId, { relationship: 'alternative', relationshipGroup: 'database-choice', relationshipEvidence: 'PostgreSQL or MySQL' }),
+    techReference('MySQL', segmentId, { relationship: 'alternative', relationshipGroup: 'database-choice', relationshipEvidence: 'PostgreSQL or MySQL' }),
+  ];
+}
+
+function alternativeCorrectionEdits(segmentId) {
+  return [
+    setEdit('achievements', 'p0001-achievement-reports', 'technologyReferences', alternativeReferences(segmentId)),
+    ...['p0001-skill-postgresql', 'p0001-skill-mysql'].flatMap(skillId => [
+      setEdit('skills', skillId, 'supportMode', 'relationship-qualified'),
+      setEdit('skills', skillId, 'directEvidenceSegmentIds', []),
+      setEdit('skills', skillId, 'indexEligible', false),
+    ]),
+  ];
+}
+
+function flattenPostgresEdits(segmentId) {
+  return [
+    setEdit('achievements', 'p0001-achievement-reports', 'technologyReferences', ['SQL', 'PostgreSQL', 'MySQL'].map(name => techReference(name, segmentId))),
+    setEdit('skills', 'p0001-skill-postgresql', 'supportMode', 'direct'),
+    setEdit('skills', 'p0001-skill-postgresql', 'directEvidenceSegmentIds', [segmentId]),
+    setEdit('skills', 'p0001-skill-postgresql', 'indexEligible', true),
+  ];
+}
+
+function feedDemotionEdits(segmentId) {
+  return [
+    setEdit('achievements', 'p0001-achievement-feed', 'technologyReferences', [techReference('Bloomberg feed', segmentId, { nonSkillReason: 'A data feed handled by the work, not a candidate capability.' })]),
+    { op: 'remove', group: 'skills', entityId: 'p0001-skill-bloomberg-feed', field: '', valueJson: '' },
+    setEdit('roles', 'p0001-role-riverbank', 'skillIds', ['p0001-skill-sql', 'p0001-skill-postgresql', 'p0001-skill-mysql']),
+  ];
+}
+
+function crossPageShard(corpus, pageIndex) {
+  const segmentId = corpus.segments[pageIndex].id;
+  const roleId = 'p0002-role-riverbank';
+  if (pageIndex === 0) {
+    return relationshipShard({ identity: { name: 'Maya Chen', contacts: [], evidenceSegmentIds: [segmentId] }, segmentCoverage: [{ segmentId, disposition: 'identity', entityIds: ['identity'] }] });
+  }
+  const identity = { name: '', contacts: [], evidenceSegmentIds: [segmentId] };
+  if (pageIndex === 1) {
+    return relationshipShard({
+      identity,
+      roles: [{ id: 'role-riverbank', title: 'Data Analyst', employer: 'Riverbank', startDate: 'June 2021', endDate: 'Present', location: 'Austin', achievementIds: [], skillIds: [], evidenceSegmentIds: [segmentId] }],
+      segmentCoverage: [{ segmentId, disposition: 'role-header', entityIds: ['identity', 'role-riverbank'] }],
+    });
+  }
+  const inherit = { roles: { mode: 'inherit', ids: [] }, projects: { mode: 'inherit', ids: [] } };
+  if (pageIndex === 2) {
+    return relationshipShard({
+      identity, continuationState: inherit,
+      achievements: [{
+        id: 'achievement-reports', roleId, claim: 'Built SQL reports in PostgreSQL for 30 managers.', technologies: ['PostgreSQL'],
+        technologyReferences: [techReference('PostgreSQL', segmentId)],
+        metrics: [{ label: 'managers', value: '30', unit: 'managers', evidenceSegmentIds: [segmentId] }], evidenceSegmentIds: [segmentId],
+      }],
+      skills: [relationshipSkill('skill-postgresql', 'PostgreSQL', segmentId, { roleId })],
+      segmentCoverage: [{ segmentId, disposition: 'achievement', entityIds: ['identity', 'achievement-reports', 'skill-postgresql'] }],
+    });
+  }
+  return relationshipShard({
+    identity, continuationState: inherit,
+    achievements: [{
+      id: 'achievement-dashboards', roleId, claim: 'Prototyped dashboards in PostgreSQL or MySQL for finance.', technologies: ['PostgreSQL', 'MySQL'],
+      technologyReferences: ['PostgreSQL', 'MySQL'].map(name => techReference(name, segmentId, { relationship: 'alternative', relationshipGroup: 'dashboard-database', relationshipEvidence: 'PostgreSQL or MySQL' })),
+      metrics: [], evidenceSegmentIds: [segmentId],
+    }],
+    // The direct PostgreSQL row lives on page 3; this page only carries the
+    // qualified MySQL row and the qualified PostgreSQL ledger record.
+    skills: [relationshipSkill('skill-mysql', 'MySQL', segmentId, { qualified: true, roleId })],
+    segmentCoverage: [{ segmentId, disposition: 'achievement', entityIds: ['identity', 'achievement-dashboards', 'skill-mysql'] }],
+  });
+}
+
+function restoredRelationshipEditTests() {
+  return [
+    {
+      name: 'adaptability relationships edits: an accepted non-candidate removal, alternative correction, and data-feed demotion cannot be resurrected or flattened without a new-evidence challenge',
+      run: async () => {
+        const { result, log, corpus } = await runRelationshipEditCompile({
+          lines: CORRECTION_LINES,
+          compile: source => flattenedCorrectionShard(source),
+          audit: ({ lane, round, payload, corpus: source }) => {
+            const [reports, feed] = [source.segments[3].id, source.segments[4].id];
+            if (lane !== 'skills') return [{ findings: [] }];
+            if (round === 0) {
+              return [{ findings: [
+                correctionFinding({ id: 'database-choice', segmentIds: [reports], sourceQuote: 'PostgreSQL or MySQL', entityIds: ['p0001-skill-postgresql', 'p0001-skill-mysql'], edits: alternativeCorrectionEdits(reports) }),
+                correctionFinding({ id: 'feed-not-skill', segmentIds: [feed], sourceQuote: 'Loaded the Bloomberg feed', entityIds: ['p0001-skill-bloomberg-feed'], edits: feedDemotionEdits(feed) }),
+              ] }];
+            }
+            const postgresGroup = payload.settledDecisions.find(decision => decision.targetKey === 'skills\u0000p0001-skill-postgresql\u0000supportMode').groupId;
+            return [
+              { findings: [correctionFinding({
+                id: 'resurrect-feed', segmentIds: [feed], sourceQuote: 'Bloomberg feed', entityIds: ['p0001-skill-bloomberg-feed'],
+                edits: [{ op: 'add', group: 'skills', entityId: 'p0001-skill-bloomberg-feed', field: '', valueJson: JSON.stringify(relationshipSkill('p0001-skill-bloomberg-feed', 'Bloomberg feed', feed, { roleId: 'p0001-role-riverbank' })) }],
+              })] },
+              { findings: [correctionFinding({ id: 'flatten-database', segmentIds: [reports], sourceQuote: 'PostgreSQL', entityIds: ['p0001-skill-postgresql'], edits: flattenPostgresEdits(reports) })] },
+              { findings: [correctionFinding({ id: 'flatten-database-stale', segmentIds: [reports], sourceQuote: 'PostgreSQL', entityIds: ['p0001-skill-postgresql'], challenge: { decisionId: postgresGroup, evidenceSegmentIds: [reports] }, edits: flattenPostgresEdits(reports) })] },
+              { findings: [] },
+            ];
+          },
+        });
+        const reports = corpus.segments[3].id;
+        const skillsCalls = log.calls.filter(call => call.task === 'career-profile-audit-skills').length;
+        const rejected = log.rejected.filter(item => item.task === 'career-profile-audit-skills').map(item => item.message);
+        nodeAssert.strictEqual(result.snapshot.status, 'approved');
+        nodeAssert.ok(validateCurrentCareerSnapshot(result.snapshot).valid);
+        nodeAssert.ok(skillsCalls >= 2);
+        nodeAssert.strictEqual(rejected.length, 3 * (skillsCalls - 1));
+        nodeAssert.ok(rejected.every((message, index) => message.includes(`skills finding ${['resurrect-feed', 'flatten-database', 'flatten-database-stale'][index % 3]}`)), rejected.join(' || '));
+        nodeAssert.ok(rejected.filter((_, index) => index % 3 === 2).every(message => message.includes('cites no new evidence')), rejected.join(' || '));
+        nodeAssert.strictEqual(log.calls.filter(call => call.task === 'career-profile-repair').length, 0);
+        const skills = result.profile.skills.map(skill => [skill.name, skill.supportMode, skill.indexEligible, skill.directEvidenceSegmentIds]);
+        nodeAssert.deepStrictEqual(skills, [
+          ['SQL', 'direct', true, [reports]],
+          ['PostgreSQL', 'relationship-qualified', false, []],
+          ['MySQL', 'relationship-qualified', false, []],
+        ]);
+        const [reportsAchievement, feedAchievement] = result.profile.achievements;
+        nodeAssert.deepStrictEqual(reportsAchievement.technologyReferences.map(item => [item.technology, item.relationship, item.relationshipGroup]),
+          [['SQL', 'independent', ''], ['PostgreSQL', 'alternative', 'database-choice'], ['MySQL', 'alternative', 'database-choice']]);
+        nodeAssert.deepStrictEqual(feedAchievement.technologyReferences.map(item => [item.technology, item.disposition, Object.hasOwn(item, 'skillId')]), [['Bloomberg feed', 'non-skill', false]]);
+        const removal = result.snapshot.auditHistory.at(-1).decisionLog.targets.find(target => target.targetKey === 'skills\u0000p0001-skill-bloomberg-feed\u0000*');
+        nodeAssert.deepStrictEqual([removal.current.origin, removal.supersededDecisionIds.length], ['audit', 0]);
+        return { skillsCalls, rejected: rejected.length };
+      },
+    },
+    {
+      name: 'adaptability relationships edits: a technology direct on one page and alternative on another converges with no spurious edit and zero repair calls',
+      run: async () => {
+        const { result, log } = await runRelationshipEditCompile({
+          lines: [
+            'Maya Chen',
+            'Data Analyst at Riverbank in Austin from June 2021 to Present',
+            'Built SQL reports in PostgreSQL for 30 managers.',
+            'Prototyped dashboards in PostgreSQL or MySQL for finance.',
+          ],
+          pageMaxSegments: 1,
+          compile: (source, pageIndex) => crossPageShard(source, pageIndex),
+        });
+        nodeAssert.strictEqual(result.snapshot.status, 'approved');
+        nodeAssert.ok(validateCurrentCareerSnapshot(result.snapshot).valid);
+        nodeAssert.deepStrictEqual(log.calls.filter(call => call.task === 'career-profile-repair').map(call => call.phase), []);
+        nodeAssert.strictEqual(log.rejected.length, 0);
+        nodeAssert.strictEqual(log.calls.filter(call => relationshipEditLanes().has(call.task)).length, 4 * 6);
+        nodeAssert.deepStrictEqual(result.profile.skills.map(skill => [skill.id, skill.name, skill.supportMode, skill.indexEligible]), [
+          ['p0003-skill-postgresql', 'PostgreSQL', 'direct', true],
+          ['p0004-skill-mysql', 'MySQL', 'relationship-qualified', false],
+        ]);
+        const dashboards = result.profile.achievements.find(item => item.id === 'p0004-achievement-dashboards');
+        nodeAssert.deepStrictEqual(dashboards.technologyReferences.map(item => [item.technology, item.relationship, item.skillId]),
+          [['PostgreSQL', 'alternative', 'p0003-skill-postgresql'], ['MySQL', 'alternative', 'p0004-skill-mysql']]);
+        nodeAssert.deepStrictEqual(result.snapshot.auditHistory.at(-1).decisionLog?.targets || [], []);
+        return { repairs: 0 };
+      },
+    },
+  ];
+}
+
 export default [
+  ...restoredRelationshipEditTests(),
   ...nonCandidateKindTests,
   ...qualifiedKindTests,
   {
@@ -1314,52 +1618,6 @@ export default [
     },
   },
   {
-    name: 'adaptability/relationships: a repair batch cannot silently resurrect a non-candidate skill that an earlier batch removed',
-    async run() {
-      for (const profile of PROFILES) {
-        const run = await repairScenario(profile, REPAIR_SCENARIOS.evaluatedMisread);
-        assertRepairRegression(run.regressions.rePromote, [/reintroduces an earlier removed capability skill/u, /regresses an earlier corrected technology ledger record/u], `${profile.key}/evaluated`);
-        assertSnapshotApproved(run.result, `${profile.key}/evaluated`);
-        const d = readDownstream(run.result);
-        assertRefused(d, profile.label, `${profile.key}/evaluated after repair`);
-        assertAccepted(d, profile.other, `${profile.key}/evaluated after repair`);
-        assert(ledgerOf(d.profile, profile.label)[0].reference.disposition === 'non-skill', `${profile.key}: the corrected ledger must remain non-skill`);
-      }
-    },
-  },
-  {
-    name: 'adaptability/relationships: a repair batch cannot silently flatten or erase an alternative that an earlier batch corrected',
-    async run() {
-      for (const profile of PROFILES) {
-        const run = await repairScenario(profile, REPAIR_SCENARIOS.flattenedAlternative);
-        assertRepairRegression(run.regressions.reflatten, [/regresses an earlier corrected capability skill/u, /regresses an earlier corrected technology ledger record/u], `${profile.key}/flattened`);
-        assertRepairRegression(run.regressions.erase, [/deletes an earlier corrected capability skill/u, /deletes an earlier corrected technology ledger record/u], `${profile.key}/erased`);
-        assertSnapshotApproved(run.result, `${profile.key}/flattened`);
-        const d = readDownstream(run.result);
-        for (const label of [profile.label, profile.other]) {
-          assertRefused(d, label, `${profile.key}/flattened after repair`);
-          assert(ledgerOf(d.profile, label)[0].reference.relationship === 'alternative', `${profile.key}: the corrected relationship for "${label}" must stay an alternative`);
-        }
-        assertAccepted(d, profile.extra, `${profile.key}/flattened after repair`);
-      }
-    },
-  },
-  {
-    name: 'adaptability/relationships: a repair batch cannot silently re-promote an environment or data-feed label that an earlier batch removed from the skills',
-    async run() {
-      for (const profile of PROFILES) {
-        const run = await repairScenario(profile, REPAIR_SCENARIOS.phantomEnvironment);
-        assertRepairRegression(run.regressions.restore, [/reintroduces an earlier removed capability skill/u, /reintroduces an earlier removed technology ledger record for/u], `${profile.key}/phantom`);
-        assertSnapshotApproved(run.result, `${profile.key}/phantom`);
-        const d = readDownstream(run.result);
-        assertRefused(d, profile.site, `${profile.key}/phantom after repair`);
-        assert(!ledgerOf(d.profile, profile.site).length && !d.profile.skills.some(skill => skill.name === profile.site), `${profile.key}: the removed label must not return in the ledger or the skills`);
-        assertRefused(d, profile.label, `${profile.key}/phantom after repair`);
-        assertAccepted(d, profile.extra, `${profile.key}/phantom after repair`);
-      }
-    },
-  },
-  {
     name: 'adaptability/relationships [fixed defect]: validateCareerProfile: a direct skill whose only direct evidence is a non-skill ledger sentence is accepted',
     async run() {
       for (const profile of PROFILES) {
@@ -1407,23 +1665,6 @@ export default [
       let accepted = true;
       try { validateStructuredApplicationResume(resume, { ...context, careerSkillEvidence: null }); } catch { accepted = false; }
       assert(!accepted, 'authority mode must fail closed on a missing approved skill inventory instead of treating a cited non-skill label as an ATS skill');
-    },
-  },
-  {
-    name: 'adaptability/relationships [fixed defect]: compileAuditedCareerSnapshot: one technology that is direct on one page and relationship-qualified on another cannot converge without a spurious edit',
-    async run() {
-      const profile = PROFILES[4];
-      for (const order of ['direct-first', 'qualified-first']) {
-        const direct = SENTENCES.operated.make(profile.label, profile.purpose);
-        const qualified = SENTENCES.whenAvailable.make(profile.label);
-        const [first, later] = order === 'direct-first' ? [direct, qualified] : [qualified, direct];
-        const qualifiedPage = order === 'direct-first' ? 1 : 0;
-        const compiled = await compile(twoRoleText(profile, first, later), {
-          pageMaxSegments: 5,
-          repair: faithfulDuplicateRepair(qualifiedPage),
-        });
-        assertAccepted(readDownstream(compiled), profile.label, `${profile.key}/${order}`);
-      }
     },
   },
   {
@@ -1530,56 +1771,6 @@ function flattenChoice(shard, profile) {
     Object.assign(skill, { supportMode: 'direct', indexEligible: true, directEvidenceSegmentIds: [...skill.evidenceSegmentIds] });
   }
   return shard;
-}
-
-function assertRepairRegression(error, patterns, context) {
-  assert(error?.code === 'CAREER_SNAPSHOT_PAGE_INVALID' && error.validationDiagnostic?.reason === 'CAREER_PAGE_REPAIR_REGRESSION' && patterns.every(pattern => pattern.test(error.message)),
-    `${context}: a later batch that undoes the earlier correction must be rejected as a repair regression matching ${patterns.join(' & ')} (${error?.code} ${error?.validationDiagnostic?.reason} ${error?.message})`);
-}
-
-async function repairScenario(profile, scenario) {
-  const files = sourceFiles(scenario.text(profile));
-  const corpus = buildCareerSourceCorpus(files);
-  const [page] = partitionCareerSourcePages(corpus);
-  const segment = prefix => corpus.segments.find(item => item.text.startsWith(prefix)).id;
-  const correct = () => standInShard(page.segments);
-  const context = { profile, correct, segment };
-  const build = { correct, misread: () => scenario.misread(context) };
-  const findings = scenario.findings(context).map((finding, index) => ({
-    id: `finding-${index + 1}`, severity: 'warning', category: 'skills', ...finding, detail: `${finding.detail} ${FINDING_FILLER}`.slice(0, 1_200),
-  }));
-  const careless = scenario.careless({ profile, build, fixOther: scenario.fixOther });
-  // Finding batches are sized by the prompt budget; search for the budget that
-  // splits these two findings rather than hard-coding a production number.
-  for (let maxPromptChars = 9_000; maxPromptChars <= 16_000; maxPromptChars += 250) {
-    let auditPass = 0;
-    let repairCalls = 0;
-    const regressions = {};
-    try {
-      const result = await compileAuditedCareerSnapshot({
-        sourceFiles: files, maxPromptChars,
-        callText: async (_prompt, options) => {
-          if (options.task === 'career-profile-compile') return build.misread();
-          if (options.task === 'career-profile-audit-skills') return auditPass++ === 0 ? { findings } : { findings: [] };
-          if (options.task?.startsWith('career-profile-audit-')) return { findings: [] };
-          if (options.task === 'career-profile-repair') {
-            if (repairCalls++ === 0) return correct();
-            // Careless second batches: each is judged by the real handoff validator.
-            for (const [name, candidate] of Object.entries(careless)) {
-              try { options.responseValidator(candidate()); regressions[name] = null; } catch (error) { regressions[name] = error; }
-            }
-            return scenario.fixOther(correct(), profile);
-          }
-          throw new Error(`Unexpected task ${options.task}`);
-        },
-      });
-      if (repairCalls === 2) return { result: { ...result, corpus }, repairCalls, regressions, maxPromptChars };
-      if (repairCalls < 2) break;
-    } catch (error) {
-      if (error?.code !== 'CAREER_SNAPSHOT_PROMPT_TOO_LARGE') throw error;
-    }
-  }
-  throw new Error(`${profile.key}: no prompt budget split the two findings into two repair batches`);
 }
 
 // ---------------------------------------------------------------------------

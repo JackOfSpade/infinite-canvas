@@ -778,6 +778,65 @@ export const CAREER_PROFILE_AUDIT_SCHEMA = {
   },
 };
 
+// A checkable field-level edit to one page shard.  Arbitrary JSON values
+// travel as JSON text in `valueJson` so the schema stays closed and flat; the
+// host parses and validates the decoded value against the page schema.
+const CAREER_PROFILE_SEGMENT_ID = CAREER_SNAPSHOT_EVIDENCE_IDS.items;
+export const CAREER_PROFILE_EDIT_SCHEMA = {
+  type: 'object', additionalProperties: false,
+  required: ['op', 'group', 'entityId', 'field', 'valueJson'],
+  properties: {
+    op: { type: 'string', enum: ['set', 'add', 'remove', 'set-coverage'] },
+    group: { type: 'string', enum: ['identity', 'roles', 'achievements', 'projects', 'skills', 'education', 'certifications', 'otherEvidence', 'segmentCoverage', 'rolePatches', 'projectPatches'] },
+    entityId: { type: 'string', maxLength: 120, description: "Entity id; 'identity' for identity, the segment id for segmentCoverage, the targetId for patches." },
+    field: { type: 'string', maxLength: 64, description: "Field name for set; '' for add/remove." },
+    valueJson: { type: 'string', maxLength: 16000, description: "JSON text: new field value for set, full entity for add, disposition string for set-coverage, '' for remove." },
+  },
+};
+
+const CAREER_PROFILE_AUDIT_FINDING_SCHEMA = CAREER_PROFILE_AUDIT_SCHEMA.properties.findings.items;
+export const CAREER_PROFILE_EDIT_AUDIT_SCHEMA = {
+  type: 'object', additionalProperties: false, required: ['findings'],
+  properties: {
+    findings: { type: 'array', maxItems: 200, items: {
+      type: 'object', additionalProperties: false,
+      required: [...CAREER_PROFILE_AUDIT_FINDING_SCHEMA.required, 'edits', 'sourceQuote', 'challenge'],
+      properties: {
+        ...CAREER_PROFILE_AUDIT_FINDING_SCHEMA.properties,
+        edits: { type: 'array', minItems: 1, maxItems: 16, items: CAREER_PROFILE_EDIT_SCHEMA },
+        sourceQuote: { type: 'string', minLength: 1, maxLength: 600, description: 'Verbatim text from the cited segments that justifies the edits.' },
+        challenge: {
+          type: 'object', additionalProperties: false, required: ['decisionId', 'evidenceSegmentIds'],
+          properties: {
+            decisionId: { type: 'string', maxLength: 80, description: "'' when the finding does not challenge a recorded decision." },
+            evidenceSegmentIds: { type: 'array', maxItems: 32, items: CAREER_PROFILE_SEGMENT_ID },
+          },
+        },
+      },
+    } },
+  },
+};
+
+export const CAREER_PROFILE_EDIT_REPAIR_SCHEMA = {
+  type: 'object', additionalProperties: false, required: ['edits', 'notes'],
+  properties: {
+    edits: { type: 'array', maxItems: 64, items: CAREER_PROFILE_EDIT_SCHEMA },
+    notes: { type: 'string', maxLength: 2000 },
+  },
+};
+
+export const CAREER_PROFILE_ADJUDICATION_SCHEMA = {
+  type: 'object', additionalProperties: false,
+  required: ['ruling', 'valueJson', 'rationale', 'sourceQuote', 'evidenceSegmentIds'],
+  properties: {
+    ruling: { type: 'string', enum: ['keep', 'change'] },
+    valueJson: { type: 'string', maxLength: 16000, description: "JSON text of the ruled value; '' for keep." },
+    rationale: { type: 'string', minLength: 1, maxLength: 2000 },
+    sourceQuote: { type: 'string', minLength: 1, maxLength: 600 },
+    evidenceSegmentIds: { type: 'array', minItems: 1, maxItems: 32, items: CAREER_PROFILE_SEGMENT_ID },
+  },
+};
+
 // ── Job-query generation: profile → search query bundles ──────────────────
 // No target role: the model explores — titleQueries/suggestedRoleQueries/
 // skillsOnlyQueries are populated and targetRoleQueries is empty.

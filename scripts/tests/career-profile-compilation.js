@@ -2,12 +2,12 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import nodeAssert from 'node:assert';
 import { assert } from './testHelpers.js';
 import { MAX_SOURCE_GROUNDING_QUOTE_CHARS } from '../../electron/ipc/applicationSourceLimits.js';
 import { careerDataProjectProvenanceHeadingForName, resumeRoleLocationFailures } from '../../electron/ipc/jobApplication.js';
 import {
   buildCareerProfileCompilePrompt,
-  buildCareerProfilePageRepairPrompt,
   approvedCareerEvidenceCatalog,
   buildCareerProfileAuditPrompt,
   buildCareerProfilePageCompilePrompt,
@@ -244,7 +244,856 @@ function crossPageShard(corpus, pageIndex, { changedRole = false } = {}) {
   };
 }
 
+// ── Field-level edit protocol harness ──────────────────────────────────────
+// One page (sourceFiles) compiled from validProfile. Each fake responder
+// returns a list of candidate answers; the harness tries them in order through
+// the real responseValidator, exactly as the durable handoff re-prompts the
+// same worker after a rejected answer.
+const EDIT_LANES = [
+  ['coverage', 'career-profile-audit-completeness'],
+  ['grounding', 'career-profile-audit-grounding'],
+  ['attribution', 'career-profile-audit-attribution'],
+  ['metrics', 'career-profile-audit-metrics'],
+  ['skills', 'career-profile-audit-skills'],
+  ['conflict', 'career-profile-audit-conflicts'],
+];
+const EDIT_LANE_BY_TASK = new Map(EDIT_LANES.map(([lane, task]) => [task, lane]));
+const EDIT_SKILL = 'p0001-skill-python';
+const NO_CHALLENGE = Object.freeze({ decisionId: '', evidenceSegmentIds: [] });
+
+function categoryEdit(value, entityId = EDIT_SKILL) {
+  return { op: 'set', group: 'skills', entityId, field: 'category', valueJson: JSON.stringify(value) };
+}
+
+function editFinding({ id = 'skill-category', category = 'skills', segmentIds, edits, sourceQuote = 'Built Python service', challenge = NO_CHALLENGE, entityIds = [EDIT_SKILL] }) {
+  return { id, severity: 'warning', category, segmentIds, entityIds, detail: 'The skill category must follow the source.', edits, sourceQuote, challenge: structuredClone(challenge) };
+}
+
+function auditPayload(prompt) {
+  const match = prompt.match(/<UNTRUSTED_CAREER_PAGE_AUDIT_INPUT>\n([\s\S]*)\n<\/UNTRUSTED_CAREER_PAGE_AUDIT_INPUT>/u);
+  // Host-merged patch-scope prompts use a different envelope.
+  return match ? JSON.parse(match[1]) : null;
+}
+
+function adjudicationPayload(prompt) {
+  const match = prompt.match(/<UNTRUSTED_CAREER_ADJUDICATION_INPUT>\n([\s\S]*)\n<\/UNTRUSTED_CAREER_ADJUDICATION_INPUT>/u);
+  return JSON.parse(match[1]);
+}
+
+function fieldEdit(field, value, entityId = EDIT_SKILL) {
+  return { op: 'set', group: 'skills', entityId, field, valueJson: JSON.stringify(value) };
+}
+
+// Shared fake callText harness. `round` counts calls per lane AND per
+// page/scope, so on a single page it is the compile round; multi-page tests
+// pass `files` + `pageMaxSegments` and read `pageIndex`/`scopeKind`.
+async function runEditProtocol({
+  audit = () => [{ findings: [] }], repair = () => [], adjudicate = () => [], compile = null,
+  files = sourceFiles(), pageMaxSegments = undefined,
+} = {}) {
+  const corpus = buildCareerSourceCorpus(files);
+  const log = { calls: [], rejected: [], progress: [] };
+  const roundsByLane = new Map();
+  const result = await compileAuditedCareerSnapshot({
+    sourceFiles: files,
+    ...(pageMaxSegments === undefined ? {} : { pageMaxSegments, pageMaxSourceChars: 1 }),
+    onProgress: event => log.progress.push(event),
+    callText: async (prompt, options) => {
+      const phase = options.hints?.phase || '';
+      const pageIndex = options.hints?.pageIndex ?? 0;
+      log.calls.push({ task: options.task, phase, prompt, options, pageIndex });
+      if (options.task === 'career-profile-compile') return compile ? compile(corpus, pageIndex, prompt, options) : pageTransport(validProfile(corpus));
+      let candidates;
+      if (EDIT_LANE_BY_TASK.has(options.task)) {
+        const lane = EDIT_LANE_BY_TASK.get(options.task);
+        const scopeKind = options.hints?.auditScopeKind || '';
+        const scopeIndex = options.hints?.auditScopeIndex ?? 0;
+        const key = `${lane}\u0000${pageIndex}\u0000${scopeKind}\u0000${scopeIndex}`;
+        const round = roundsByLane.get(key) || 0;
+        roundsByLane.set(key, round + 1);
+        candidates = audit({ lane, round, payload: auditPayload(prompt), prompt, corpus, pageIndex, scopeKind, scopeIndex, options });
+      } else if (options.task === 'career-profile-repair' && phase === 'adjudication') candidates = adjudicate({ prompt, corpus, pageIndex });
+      else if (options.task === 'career-profile-repair' && phase === 'edit-repair') candidates = repair({ prompt, corpus, pageIndex });
+      else throw new Error(`Unexpected task ${options.task}/${phase}`);
+      for (const candidate of candidates) {
+        try {
+          options.responseValidator(candidate);
+          return candidate;
+        } catch (error) {
+          log.rejected.push({ task: options.task, phase, pageIndex, message: error.message });
+        }
+      }
+      throw new Error(`No ${options.task}/${phase} candidate was accepted: ${log.rejected.map(item => item.message).join(' || ')}`);
+    },
+  });
+  return { result, corpus, log };
+}
+
+const convergencePayloads = log => log.progress.filter(event => Object.hasOwn(event, 'convergence')).map(event => event.convergence);
+const finalSkill = result => result.profile.skills.find(skill => skill.name === 'Python');
+const finalDecisionLog = result => result.snapshot.auditHistory[result.snapshot.auditHistory.length - 1].decisionLog;
+
+const editProtocolTests = [
+  {
+    name: 'career snapshot edits: one audit sample per page/scope/lane per round, clean edits apply without any repair call, and convergence progress is exact',
+    run: async () => {
+      const { result, corpus, log } = await runEditProtocol({
+        audit: ({ lane, round, corpus: source }) => (lane === 'skills' && round === 0
+          ? [{ findings: [editFinding({ segmentIds: [source.segments[3].id], edits: [categoryEdit('programming language')] })] }]
+          : [{ findings: [] }]),
+      });
+      const auditCalls = log.calls.filter(call => EDIT_LANE_BY_TASK.has(call.task));
+      const repairCalls = log.calls.filter(call => call.task === 'career-profile-repair');
+      const convergence = convergencePayloads(log);
+      const expected = {
+        round: 1,
+        findings: { blocker: 0, warning: 1 },
+        byCategory: { skills: { blocker: 0, warning: 1 } },
+        editsApplied: 1,
+        decisionsTotal: 1,
+        challengesAccepted: 0,
+        adjudications: 0,
+        findingsRejected: 0,
+        editRepairs: 0,
+        deterministicErrors: 0,
+      };
+      assert(auditCalls.length === 12 && repairCalls.length === 0
+        && auditCalls.every(call => call.options.responseSchema.properties.findings.items.required.includes('edits'))
+        && finalSkill(result).category === 'programming language'
+        && convergence.length === 1 && canonicalJson(convergence[0]) === canonicalJson(expected)
+        && validateCurrentCareerSnapshot(result.snapshot).valid && corpus.segments.length === 5,
+      `two rounds must run exactly 6 lanes x 1 page x 1 scope audits each, apply the finding edit with zero repair calls, and emit one exact convergence payload (audits=${auditCalls.length}, repairs=${repairCalls.length}, convergence=${canonicalJson(convergence)})`);
+      return { auditCalls: auditCalls.length, convergence: convergence[0] };
+    },
+  },
+  {
+    name: 'career snapshot edits: responseValidator rejects no-op, unknown-entity, unverifiable-quote and out-of-page challenge findings, then accepts the corrected answer',
+    run: async () => {
+      const { result, log } = await runEditProtocol({
+        audit: ({ lane, round, corpus: source }) => {
+          if (lane !== 'skills' || round !== 0) return [{ findings: [] }];
+          const segmentIds = [source.segments[3].id];
+          return [
+            { findings: [editFinding({ id: 'noop-edit', segmentIds, edits: [categoryEdit('language')] })] },
+            { findings: [editFinding({ id: 'unknown-entity', segmentIds, edits: [categoryEdit('programming language', 'p0001-skill-missing')] })] },
+            { findings: [editFinding({ id: 'bad-quote', segmentIds, sourceQuote: 'Invented a quantum compiler', edits: [categoryEdit('programming language')] })] },
+            { findings: [editFinding({ id: 'outside-evidence', segmentIds, challenge: { decisionId: '', evidenceSegmentIds: ['segment-9999'] }, edits: [categoryEdit('programming language')] })] },
+            { findings: [editFinding({ id: 'corrected', segmentIds, edits: [categoryEdit('programming language')] })] },
+          ];
+        },
+      });
+      const ids = ['noop-edit', 'unknown-entity', 'bad-quote', 'outside-evidence'];
+      assert(log.rejected.length === 4
+        && ids.every((id, index) => log.rejected[index].message.includes(`skills finding ${id}`))
+        && log.rejected[2].message.includes('sourceQuote is not a verbatim quote')
+        && log.rejected[3].message.includes('challenge evidence segment-9999 is not a segment of page-0001')
+        && finalSkill(result).category === 'programming language'
+        && convergencePayloads(log)[0].findingsRejected === 4,
+      `each invalid finding must be rejected in order with its own id and the corrected answer applied (${log.rejected.map(item => item.message).join(' || ')})`);
+      return { rejected: log.rejected.length };
+    },
+  },
+  {
+    name: 'career snapshot edits: the decision log settles a target, rejects unchallenged or re-interpreting challenges, and adjudicates a new-evidence challenge once',
+    run: async () => {
+      let settledId = '';
+      const { result, log } = await runEditProtocol({
+        audit: ({ lane, round, payload, corpus: source }) => {
+          if (lane !== 'skills') return [{ findings: [] }];
+          const service = source.segments[3].id;
+          const title = source.segments[1].id;
+          if (round === 0) return [{ findings: [editFinding({ segmentIds: [service], edits: [categoryEdit('programming language')] })] }];
+          if (round === 1) {
+            settledId = payload.settledDecisions.find(decision => decision.targetKey.endsWith('\u0000category')).id;
+            return [
+              { findings: [editFinding({ id: 'unchallenged', segmentIds: [service], edits: [categoryEdit('language')] })] },
+              { findings: [editFinding({ id: 'considered-only', segmentIds: [service], challenge: { decisionId: settledId, evidenceSegmentIds: [service] }, edits: [categoryEdit('language')] })] },
+              { findings: [editFinding({ id: 'new-evidence', segmentIds: [service], challenge: { decisionId: settledId, evidenceSegmentIds: [title] }, edits: [categoryEdit('language')] })] },
+            ];
+          }
+          if (round === 2) {
+            return [
+              { findings: [editFinding({ id: 'repeat-challenge', segmentIds: [service], challenge: { decisionId: settledId, evidenceSegmentIds: [title] }, edits: [categoryEdit('language')] })] },
+              { findings: [] },
+            ];
+          }
+          return [{ findings: [] }];
+        },
+        adjudicate: ({ corpus: source }) => [{ ruling: 'keep', valueJson: '', rationale: 'The source supports the settled category.', sourceQuote: 'Built Python service', evidenceSegmentIds: [source.segments[3].id] }],
+      });
+      const adjudications = log.calls.filter(call => call.phase === 'adjudication');
+      const auditRejections = log.rejected.filter(item => item.task === 'career-profile-audit-skills').map(item => item.message);
+      const decision = finalDecisionLog(result).targets.find(target => target.targetKey.endsWith('\u0000category'));
+      assert(adjudications.length === 1 && adjudications[0].task === 'career-profile-repair'
+        && adjudications[0].options.hints.phase === 'adjudication'
+        && auditRejections.length === 3
+        && auditRejections[0].includes('skills finding unchallenged')
+        && auditRejections[1].includes('skills finding considered-only')
+        && auditRejections[2].includes('skills finding repeat-challenge')
+        && finalSkill(result).category === 'programming language'
+        && decision.current.origin === 'adjudication' && decision.current.valueJson === '"programming language"'
+        && decision.supersededDecisionIds.includes(settledId)
+        && validateCurrentCareerSnapshot(result.snapshot).valid,
+      `a settled target needs a new-evidence challenge, which gets exactly one adjudication; keep retains the value and the same challenge cannot reopen (${auditRejections.join(' || ')})`);
+      return { adjudications: adjudications.length, rejected: auditRejections.length };
+    },
+  },
+  {
+    name: 'career snapshot edits: two lanes proposing different values for one target get exactly one adjudication whose change ruling is applied',
+    run: async () => {
+      const { result, log } = await runEditProtocol({
+        audit: ({ lane, round, corpus: source }) => {
+          if (round !== 0 || !['skills', 'metrics'].includes(lane)) return [{ findings: [] }];
+          const value = lane === 'skills' ? 'programming language' : 'scripting language';
+          return [{ findings: [editFinding({ id: `${lane}-category`, category: lane, segmentIds: [source.segments[3].id], edits: [categoryEdit(value)] })] }];
+        },
+        adjudicate: ({ prompt, corpus: source }) => {
+          assert(prompt.includes('scripting language') && prompt.includes('programming language'), 'the adjudication input must carry both competing proposals');
+          return [
+            { ruling: 'change', valueJson: '"systems language"', rationale: 'Not proposed.', sourceQuote: 'Built Python service', evidenceSegmentIds: [source.segments[3].id] },
+            { ruling: 'change', valueJson: JSON.stringify([categoryEdit('scripting language')]), rationale: 'The metrics reading fits.', sourceQuote: 'Built Python service', evidenceSegmentIds: [source.segments[3].id] },
+          ];
+        },
+      });
+      const adjudications = log.calls.filter(call => call.phase === 'adjudication');
+      const decision = finalDecisionLog(result).targets.find(target => target.targetKey.endsWith('\u0000category'));
+      const convergence = convergencePayloads(log)[0];
+      assert(adjudications.length === 1 && log.rejected.length === 1 && log.rejected[0].phase === 'adjudication'
+        && finalSkill(result).category === 'scripting language'
+        && decision.current.origin === 'adjudication' && decision.current.valueJson === '"scripting language"'
+        && convergence.adjudications === 1 && convergence.editsApplied === 1
+        && canonicalJson(convergence.byCategory) === canonicalJson({ metrics: { blocker: 0, warning: 1 }, skills: { blocker: 0, warning: 1 } }),
+      `a same-round conflict must be adjudicated once, an unproposed ruling rejected, and the ruled value applied with adjudication origin (${canonicalJson(convergence)})`);
+      return { adjudications: adjudications.length };
+    },
+  },
+  {
+    name: 'career snapshot edits: a cross-category audit observation is host-canonicalized to the invoked lane before acceptance',
+    run: async () => {
+      const { result, log } = await runEditProtocol({
+        audit: ({ lane, round, corpus: source }) => (lane === 'skills' && round === 0
+          ? [{ findings: [editFinding({ id: 'cross-lane', category: 'grounding', segmentIds: [source.segments[3].id], edits: [categoryEdit('programming language')] })] }]
+          : [{ findings: [] }]),
+      });
+      const convergence = convergencePayloads(log)[0];
+      const decision = finalDecisionLog(result).targets.find(target => target.targetKey === `skills\u0000${EDIT_SKILL}\u0000category`);
+      nodeAssert.deepStrictEqual(convergence.byCategory, { skills: { blocker: 0, warning: 1 } });
+      nodeAssert.deepStrictEqual([convergence.editsApplied, convergence.findingsRejected, convergence.adjudications], [1, 0, 0]);
+      nodeAssert.deepStrictEqual([decision.current.origin, decision.current.valueJson], ['audit', '"programming language"']);
+      nodeAssert.strictEqual(finalSkill(result).category, 'programming language');
+      return { byCategory: convergence.byCategory };
+    },
+  },
+  {
+    name: 'career snapshot edits: a losing finding loses every edit, including uncontested siblings, and the winner applies whole',
+    run: async () => {
+      const { result, log } = await runEditProtocol({
+        audit: ({ lane, round, corpus: source }) => {
+          if (round !== 0 || !['skills', 'metrics'].includes(lane)) return [{ findings: [] }];
+          const segmentIds = [source.segments[3].id];
+          const edits = lane === 'skills'
+            ? [categoryEdit('programming language'), fieldEdit('indexEligible', false)]
+            : [categoryEdit('scripting language')];
+          return [{ findings: [editFinding({ id: `${lane}-coordinated`, category: lane, segmentIds, edits })] }];
+        },
+        adjudicate: ({ corpus: source }) => [
+          { ruling: 'change', valueJson: JSON.stringify([categoryEdit('scripting language'), fieldEdit('indexEligible', false)]), rationale: 'A mixed array is no proposal.', sourceQuote: 'Built Python service', evidenceSegmentIds: [source.segments[3].id] },
+          { ruling: 'change', valueJson: JSON.stringify([categoryEdit('scripting language')]), rationale: 'The metrics reading fits.', sourceQuote: 'Built Python service', evidenceSegmentIds: [source.segments[3].id] },
+        ],
+      });
+      const adjudications = log.calls.filter(call => call.phase === 'adjudication');
+      const input = adjudicationPayload(adjudications[0].prompt);
+      const targets = finalDecisionLog(result).targets;
+      const category = targets.find(target => target.targetKey === `skills\u0000${EDIT_SKILL}\u0000category`);
+      const eligible = targets.find(target => target.targetKey === `skills\u0000${EDIT_SKILL}\u0000indexEligible`);
+      const convergence = convergencePayloads(log)[0];
+      nodeAssert.strictEqual(adjudications.length, 1);
+      nodeAssert.deepStrictEqual(input.proposals.map(proposal => [proposal.findingId, proposal.lane, proposal.edits]).sort(), [
+        ['metrics-coordinated', 'metrics', [categoryEdit('scripting language')]],
+        ['skills-coordinated', 'skills', [categoryEdit('programming language'), fieldEdit('indexEligible', false)]],
+      ]);
+      nodeAssert.deepStrictEqual(input.targets.map(target => [target.field, target.currentValueJson]), [['category', '"language"'], ['indexEligible', 'true']]);
+      nodeAssert.deepStrictEqual(log.rejected.map(item => item.phase), ['adjudication']);
+      nodeAssert.strictEqual(finalSkill(result).category, 'scripting language');
+      nodeAssert.strictEqual(finalSkill(result).indexEligible, true);
+      nodeAssert.deepStrictEqual([category.current.origin, category.current.valueJson, eligible.current.origin, eligible.current.valueJson],
+        ['adjudication', '"scripting language"', 'adjudication', 'true']);
+      nodeAssert.strictEqual(category.current.groupId, eligible.current.groupId);
+      nodeAssert.deepStrictEqual([convergence.adjudications, convergence.editsApplied], [1, 1]);
+      return { adjudications: adjudications.length };
+    },
+  },
+  {
+    name: 'career snapshot edits: a coordinated fix settles under one groupId, a stale reversal is rejected, and a groupId challenge with new evidence is adjudicated once for the whole cluster',
+    run: async () => {
+      let settled = [];
+      const { result, log } = await runEditProtocol({
+        audit: ({ lane, round, payload, corpus: source }) => {
+          const service = source.segments[3].id;
+          if (round === 0 && lane === 'skills') {
+            return [{ findings: [editFinding({ id: 'qualify', segmentIds: [service], edits: [categoryEdit('scripting language'), fieldEdit('capabilityKind', 'technology')] })] }];
+          }
+          if (round !== 1 || !['skills', 'metrics'].includes(lane)) return [{ findings: [] }];
+          settled = payload.settledDecisions.filter(decision => decision.targetKey.startsWith(`skills\u0000${EDIT_SKILL}\u0000`));
+          const groupId = settled[0].groupId;
+          if (lane === 'metrics') {
+            return [{ findings: [editFinding({ id: 'other-reading', category: 'metrics', segmentIds: [service], challenge: { decisionId: groupId, evidenceSegmentIds: [source.segments[2].id] }, edits: [categoryEdit('systems language'), fieldEdit('capabilityKind', 'tool'), fieldEdit('indexEligible', false)] })] }];
+          }
+          const reverse = [categoryEdit('language'), fieldEdit('capabilityKind', 'language')];
+          return [
+            { findings: [editFinding({ id: 'reverse-unchallenged', segmentIds: [service], edits: reverse })] },
+            { findings: [editFinding({ id: 'reverse-stale', segmentIds: [service], challenge: { decisionId: groupId, evidenceSegmentIds: [service] }, edits: reverse })] },
+            { findings: [editFinding({ id: 'reverse', segmentIds: [service], challenge: { decisionId: groupId, evidenceSegmentIds: [source.segments[1].id] }, edits: reverse })] },
+          ];
+        },
+        adjudicate: ({ corpus: source }) => [{
+          ruling: 'change', valueJson: JSON.stringify([categoryEdit('language'), fieldEdit('capabilityKind', 'language')]),
+          rationale: 'The source states a language used directly.', sourceQuote: 'Built Python service', evidenceSegmentIds: [source.segments[3].id],
+        }],
+      });
+      const adjudications = log.calls.filter(call => call.phase === 'adjudication');
+      const auditRejections = log.rejected.filter(item => item.phase !== 'adjudication').map(item => item.message);
+      const targets = finalDecisionLog(result).targets.filter(target => target.targetKey.startsWith(`skills\u0000${EDIT_SKILL}\u0000`));
+      nodeAssert.deepStrictEqual(settled.map(decision => decision.targetKey.split('\u0000')[2]), ['capabilityKind', 'category']);
+      assert(/^group-[0-9a-f]{16}$/u.test(settled[0].groupId) && settled[0].groupId === settled[1].groupId
+        && settled.every(decision => decision.id !== decision.groupId && decision.origin === 'audit'),
+      `one finding's decisions must share one host groupId (${canonicalJson(settled)})`);
+      nodeAssert.strictEqual(auditRejections.length, 2);
+      assert(auditRejections[0].includes('skills finding reverse-unchallenged') && auditRejections[0].includes(`or ${settled[0].groupId}`)
+        && auditRejections[1].includes('skills finding reverse-stale') && auditRejections[1].includes('cites no new evidence'),
+      `stale reversals must be rejected (${auditRejections.join(' || ')})`);
+      nodeAssert.strictEqual(adjudications.length, 1);
+      const input = adjudicationPayload(adjudications[0].prompt);
+      nodeAssert.deepStrictEqual(input.proposals.map(proposal => proposal.findingId).sort(), ['other-reading', 'reverse']);
+      nodeAssert.deepStrictEqual(input.targets.map(target => target.field), ['capabilityKind', 'category', 'indexEligible']);
+      nodeAssert.deepStrictEqual(input.currentDecisions.map(decision => decision.groupId), [settled[0].groupId, settled[0].groupId]);
+      const skill = finalSkill(result);
+      nodeAssert.deepStrictEqual([skill.category, skill.capabilityKind, skill.indexEligible], ['language', 'language', true]);
+      nodeAssert.deepStrictEqual(targets.map(target => [target.targetKey.split('\u0000')[2], target.current.origin, target.current.valueJson]), [
+        ['capabilityKind', 'adjudication', '"language"'],
+        ['category', 'adjudication', '"language"'],
+        ['indexEligible', 'adjudication', 'true'],
+      ]);
+      const rulingGroup = targets[0].current.groupId;
+      assert(rulingGroup !== settled[0].groupId && targets.every(target => target.current.groupId === rulingGroup)
+        && settled.every(decision => targets.some(target => target.supersededDecisionIds.includes(decision.id))),
+      'one ruling settles every cluster target under one new groupId and supersedes the coordinated decisions');
+      const challenged = convergencePayloads(log)[1];
+      nodeAssert.deepStrictEqual([challenged.adjudications, challenged.challengesAccepted, challenged.editsApplied], [1, 2, 2]);
+      assert(result.snapshot.status === 'approved' && validateCurrentCareerSnapshot(result.snapshot).valid, 'the coordinated reversal converges to an approved snapshot');
+      return { adjudications: adjudications.length };
+    },
+  },
+  {
+    name: 'career snapshot edits: an adversarial flip-flop auditor that never cites new evidence cannot stop approval within four rounds',
+    run: async () => {
+      const { result, log } = await runEditProtocol({
+        audit: ({ lane, round, payload, corpus: source }) => {
+          if (lane !== 'skills') return [{ findings: [] }];
+          const service = source.segments[3].id;
+          const value = round % 2 === 0 ? 'programming language' : 'language';
+          const settled = (payload.settledDecisions || []).find(decision => decision.targetKey.endsWith('\u0000category'));
+          return [
+            { findings: [editFinding({ id: 'flip', segmentIds: [service], edits: [categoryEdit(value)] })] },
+            ...(settled ? [{ findings: [editFinding({ id: 'flip-challenge', segmentIds: [service], challenge: { decisionId: settled.id, evidenceSegmentIds: [service] }, edits: [categoryEdit(value)] })] }] : []),
+            { findings: [] },
+          ];
+        },
+      });
+      const rounds = result.snapshot.auditHistory.reduce((total, round) => total + (round.kind === 'folded' ? round.roundCount : 1), 0);
+      assert(result.snapshot.status === 'approved' && rounds <= 4 && rounds === 2
+        && finalSkill(result).category === 'programming language'
+        && log.rejected.filter(item => item.task === 'career-profile-audit-skills').length === 2
+        && log.calls.every(call => call.task !== 'career-profile-repair'),
+      `the decision log must reject every re-litigation and approve by construction (rounds=${rounds})`);
+      return { rounds };
+    },
+  },
+  {
+    name: 'career snapshot edits: a deterministic error goes to a minimal edit-repair that cannot touch an unrelated settled target',
+    run: async () => {
+      let claimEdit = null;
+      const { result, log } = await runEditProtocol({
+        audit: ({ lane, round, corpus: source }) => {
+          const service = source.segments[3].id;
+          if (lane === 'skills' && round === 0) return [{ findings: [editFinding({ segmentIds: [service], edits: [categoryEdit('programming language')] })] }];
+          if (lane === 'coverage' && round === 1) {
+            claimEdit = value => ({ op: 'set', group: 'achievements', entityId: 'p0001-achievement-service', field: 'claim', valueJson: JSON.stringify(value) });
+            return [{ findings: [editFinding({ id: 'claim-wording', category: 'coverage', segmentIds: [service], entityIds: [], edits: [claimEdit('Invented outcome')] })] }];
+          }
+          return [{ findings: [] }];
+        },
+        repair: ({ prompt }) => {
+          assert(prompt.includes('Return the minimal field-level edits') && !prompt.includes('Return one complete'), 'edit-repair must ask for edits, not a full shard');
+          return [
+            { edits: [categoryEdit('tool'), claimEdit('Built Python service used by 50 users.')], notes: 'also retune the category' },
+            { edits: [claimEdit('Built Python service used by 50 users.')], notes: 'restore the literal source claim' },
+          ];
+        },
+      });
+      const repairs = log.calls.filter(call => call.phase === 'edit-repair');
+      const repairRejections = log.rejected.filter(item => item.phase === 'edit-repair').map(item => item.message);
+      const convergence = convergencePayloads(log);
+      assert(repairs.length === 1 && repairs[0].task === 'career-profile-repair'
+        && repairRejections.length === 1 && repairRejections[0].includes('may not change a settled target')
+        && finalSkill(result).category === 'programming language'
+        && result.profile.achievements[0].claim === 'Built Python service used by 50 users.'
+        && convergence.length === 3 && convergence[2].editRepairs === 1 && convergence[2].deterministicErrors > 0 && convergence[2].findingsRejected === 1
+        && convergence[1].editsApplied === 1 && convergence[1].editRepairs === 0,
+      `the deterministic invented-claim error must be fixed by one edit-repair whose settled-target edit is rejected first (${repairRejections.join(' || ')}; ${canonicalJson(convergence)})`);
+      return { repairs: repairs.length };
+    },
+  },
+  {
+    name: 'career snapshot edits: the contract bump keeps the prior contract pin-readable but not cache-readable',
+    run: async () => {
+      const previous = '2a819982e81b806e5ad0d919cf482532b01a52ed84c8eb94603c8f918b27888b';
+      const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ic-career-snapshot-'));
+      try {
+        const corpus = buildCareerSourceCorpus(sourceFiles());
+        const directory = path.join(root, 'career-snapshots');
+        fs.mkdirSync(directory, { recursive: true });
+        const snapshot = currentSnapshot(corpus, validProfile(corpus));
+        snapshot.compilationContract = previous;
+        snapshot.snapshotId = careerSnapshotIdForContract(corpus, previous);
+        fs.writeFileSync(path.join(directory, `${snapshot.snapshotId}.json`), `${JSON.stringify(snapshot)}\n`, 'utf8');
+        const pinned = await readPinnedCareerSnapshot(root, snapshot.snapshotId);
+        const cached = await readCareerSnapshot(root, snapshot.snapshotId);
+        assert(CAREER_SNAPSHOT_COMPILATION_CONTRACT !== previous && CAREER_SNAPSHOT_PINNED_LEGACY_V6_CONTRACTS.includes(previous)
+          && !CAREER_SNAPSHOT_PINNED_LEGACY_V6_CONTRACTS.includes(CAREER_SNAPSHOT_COMPILATION_CONTRACT)
+          && pinned?.snapshotId === snapshot.snapshotId && cached === null,
+        'the edit-protocol contract must differ from the whole-page contract, which stays pin-readable only');
+        return { pinned: true };
+      } finally {
+        fs.rmSync(root, { recursive: true, force: true });
+      }
+    },
+  },
+  {
+    name: 'career snapshot edits: the final round decision log is validated strictly and a malformed log is rejected',
+    run: async () => {
+      const { result } = await runEditProtocol({
+        audit: ({ lane, round, corpus: source }) => (lane === 'skills' && round === 0
+          ? [{ findings: [editFinding({ segmentIds: [source.segments[3].id], edits: [categoryEdit('programming language')] })] }]
+          : [{ findings: [] }]),
+      });
+      const log = finalDecisionLog(result);
+      const withLog = snapshot => validateCurrentCareerSnapshot(snapshot).valid;
+      const mutate = change => {
+        const copy = structuredClone(result.snapshot);
+        change(copy.auditHistory[copy.auditHistory.length - 1]);
+        return copy;
+      };
+      const withoutLog = mutate(round => { delete round.decisionLog; });
+      const wrongVersion = mutate(round => { round.decisionLog.version = 2; });
+      const badIndex = mutate(round => { round.decisionLog.targets[0].pageIndex = '0'; });
+      const extraKey = mutate(round => { round.decisionLog.extra = true; });
+      const unsorted = mutate(round => { round.decisionLog.targets.push(structuredClone(round.decisionLog.targets[0])); });
+      const badEvidence = mutate(round => { round.decisionLog.targets[0].consideredEvidenceSegmentIds = [7]; });
+      assert(log.version === 1 && log.targets.length === 1 && log.targets[0].current.origin === 'audit'
+        && withLog(result.snapshot) && withLog(withoutLog)
+        && [wrongVersion, badIndex, extraKey, unsorted, badEvidence].every(snapshot => !withLog(snapshot)),
+      'a present decision log must be exact while a final round without one still validates');
+      return { targets: log.targets.length };
+    },
+  },
+];
+
+// ── Restored regression coverage under the edit protocol ──────────────────
+const INTEGRATION_SKILL = 'p0001-skill-salesforce-integration';
+const INTEGRATION_ACHIEVEMENT = 'p0001-achievement-billing';
+const INTEGRATION_CLAIM = 'Built Python billing service with optional Salesforce integration for 50 users.';
+
+function integrationFiles() {
+  return pagedSourceFiles([
+    'Ada Lovelace',
+    'Integration Engineer at Acme in Toronto',
+    'January 2020 to Present',
+    INTEGRATION_CLAIM,
+    'ada@example.test',
+  ]).map(file => ({ ...file, contentHash: 'c'.repeat(64) }));
+}
+
+function integrationReferences(service, qualified) {
+  return [
+    {
+      technology: 'Python', disposition: 'skill', relationship: 'independent', relationshipGroup: '',
+      relationshipEvidence: 'Built Python billing service', evidenceSegmentIds: [service],
+    },
+    qualified
+      ? {
+        technology: 'Salesforce integration', disposition: 'skill', relationship: 'optional', relationshipGroup: 'optional-salesforce',
+        relationshipEvidence: 'optional Salesforce integration', evidenceSegmentIds: [service],
+      }
+      : {
+        technology: 'Salesforce integration', disposition: 'skill', relationship: 'independent', relationshipGroup: '',
+        relationshipEvidence: 'Salesforce integration', evidenceSegmentIds: [service],
+      },
+  ];
+}
+
+// The incident's compile output: the optional integration was flattened into
+// a direct, indexable skill with an independent ledger record.
+function integrationProfile(corpus) {
+  const evidence = corpus.segments.map(segment => segment.id);
+  const service = corpus.segments[3].id;
+  const entityIds = ['identity', 'role-acme', 'achievement-billing', 'skill-python', 'skill-salesforce-integration'];
+  return pageTransport({
+    identity: { name: 'Ada Lovelace', contacts: ['ada@example.test'], evidenceSegmentIds: evidence },
+    roles: [{
+      id: 'role-acme', title: 'Integration Engineer', employer: 'Acme', startDate: 'January 2020', endDate: 'Present', location: 'Toronto',
+      achievementIds: ['achievement-billing'], skillIds: ['skill-python', 'skill-salesforce-integration'], evidenceSegmentIds: evidence,
+    }],
+    achievements: [{
+      id: 'achievement-billing', roleId: 'role-acme', claim: INTEGRATION_CLAIM, technologies: ['Python', 'Salesforce integration'],
+      technologyReferences: integrationReferences(service, false),
+      metrics: [{ label: 'users', value: '50', unit: 'users', evidenceSegmentIds: [service] }], evidenceSegmentIds: evidence,
+    }],
+    projects: [],
+    skills: [
+      {
+        id: 'skill-python', name: 'Python', category: 'language', capabilityKind: 'language', supportMode: 'direct',
+        directEvidenceSegmentIds: [service], indexEligible: true, roleIds: ['role-acme'], evidenceSegmentIds: [service],
+      },
+      {
+        id: 'skill-salesforce-integration', name: 'Salesforce integration', category: 'integration', capabilityKind: 'capability', supportMode: 'direct',
+        directEvidenceSegmentIds: [service], indexEligible: true, roleIds: ['role-acme'], evidenceSegmentIds: [service],
+      },
+    ],
+    education: [], certifications: [], otherEvidence: [],
+    segmentCoverage: corpus.segments.map(segment => ({ segmentId: segment.id, disposition: 'achievement', entityIds })),
+  });
+}
+
+function referencesEdit(references, entityId = INTEGRATION_ACHIEVEMENT) {
+  return { op: 'set', group: 'achievements', entityId, field: 'technologyReferences', valueJson: JSON.stringify(references) };
+}
+
+function qualifyIntegrationEdits(service) {
+  return [
+    fieldEdit('supportMode', 'relationship-qualified', INTEGRATION_SKILL),
+    fieldEdit('directEvidenceSegmentIds', [], INTEGRATION_SKILL),
+    fieldEdit('indexEligible', false, INTEGRATION_SKILL),
+    referencesEdit(integrationReferences(service, true)),
+  ];
+}
+
+function directIntegrationEdits(service) {
+  return [
+    fieldEdit('supportMode', 'direct', INTEGRATION_SKILL),
+    fieldEdit('directEvidenceSegmentIds', [service], INTEGRATION_SKILL),
+    fieldEdit('indexEligible', true, INTEGRATION_SKILL),
+    referencesEdit(integrationReferences(service, false)),
+  ];
+}
+
+const INTEGRATION_TARGET_KEYS = [
+  `achievements\u0000${INTEGRATION_ACHIEVEMENT}\u0000technologyReferences`,
+  `skills\u0000${INTEGRATION_SKILL}\u0000directEvidenceSegmentIds`,
+  `skills\u0000${INTEGRATION_SKILL}\u0000indexEligible`,
+  `skills\u0000${INTEGRATION_SKILL}\u0000supportMode`,
+];
+
+function integrationFinding({ id, segmentIds, edits, challenge = NO_CHALLENGE, sourceQuote = 'optional Salesforce integration' }) {
+  return {
+    id, severity: 'blocker', category: 'skills', segmentIds, entityIds: [INTEGRATION_SKILL, INTEGRATION_ACHIEVEMENT],
+    detail: 'The Salesforce integration is stated as optional, so it is relationship-qualified rather than direct experience.',
+    edits, sourceQuote, challenge: structuredClone(challenge),
+  };
+}
+
+function integrationState(result) {
+  const skill = result.profile.skills.find(item => item.name === 'Salesforce integration');
+  const reference = result.profile.achievements[0].technologyReferences.find(item => item.technology === 'Salesforce integration');
+  return {
+    supportMode: skill.supportMode, directEvidenceSegmentIds: skill.directEvidenceSegmentIds, indexEligible: skill.indexEligible,
+    relationship: reference.relationship, relationshipGroup: reference.relationshipGroup, relationshipEvidence: reference.relationshipEvidence,
+    boundToSkill: reference.skillId === skill.id,
+  };
+}
+
+function integrationTargets(result) {
+  return finalDecisionLog(result).targets
+    .filter(target => INTEGRATION_TARGET_KEYS.includes(target.targetKey))
+    .sort((left, right) => left.targetKey.localeCompare(right.targetKey));
+}
+
+const removeEdit = (group, entityId) => ({ op: 'remove', group, entityId, field: '', valueJson: '' });
+
+function duplicateSkillPageShard(corpus, pageIndex) {
+  if (pageIndex !== 2) return crossPageShard(corpus, pageIndex);
+  const segmentId = corpus.segments[2].id;
+  const claim = 'Built optional Python export for the billing team.';
+  const achievement = {
+    id: 'achievement-2', roleId: 'p0002-role-acme', claim, technologies: ['Python'],
+    technologyReferences: [{
+      technology: 'Python', disposition: 'skill', relationship: 'optional', relationshipGroup: 'optional-python',
+      relationshipEvidence: 'optional Python export', evidenceSegmentIds: [segmentId],
+    }],
+    metrics: [], evidenceSegmentIds: [segmentId],
+  };
+  const skill = {
+    id: 'skill-python-2', name: 'Python', category: 'language', capabilityKind: 'language', supportMode: 'relationship-qualified',
+    directEvidenceSegmentIds: [], indexEligible: false, roleIds: ['p0002-role-acme'], evidenceSegmentIds: [segmentId],
+  };
+  return {
+    ...emptyPageShard(segmentId), achievements: [achievement], skills: [skill],
+    segmentCoverage: [{ segmentId, disposition: 'achievement', entityIds: ['identity', achievement.id, skill.id] }],
+  };
+}
+
+function duplicateSkillFiles() {
+  return pagedSourceFiles([
+    'Ada Lovelace',
+    'Software Engineer at Acme in Toronto from January 2020 to Present',
+    'Built optional Python export for the billing team.',
+    'Built Python report used by 60 users.',
+  ]);
+}
+
+const PATCH_ROLE_COUNT = 101;
+
+// Page schemas cap roles per page, so the live roles span two pages and the
+// third page continues all of them (more patches than one page may carry).
+const PATCH_ROLE_PAGES = [[0, 51], [51, PATCH_ROLE_COUNT]];
+const patchRoleNames = ([start, end]) => Array.from({ length: end - start }, (_, offset) => `Role ${start + offset}`).join(' ');
+
+function patchScopeFiles() {
+  const all = patchRoleNames([0, PATCH_ROLE_COUNT]);
+  return pagedSourceFiles([...PATCH_ROLE_PAGES.map(patchRoleNames), `${all} in Toronto`]).map(file => ({ ...file, contentHash: 'd'.repeat(64) }));
+}
+
+function scanLookup(prompt) {
+  const open = '<UNTRUSTED_CAREER_ACTIVE_CONTEXT_LOOKUP>\n';
+  const start = prompt.indexOf(open) + open.length;
+  return JSON.parse(prompt.slice(start, prompt.indexOf('\n</UNTRUSTED_CAREER_ACTIVE_CONTEXT_LOOKUP>')));
+}
+
+function patchScopeCompile(corpus, pageIndex, prompt, options) {
+  if (options.hints?.phase === 'active-context-scan') {
+    const payload = scanLookup(prompt);
+    const segmentId = payload.page.segments[0].id;
+    return {
+      activeStateDigest: payload.activeState.digest,
+      contextPageDigest: payload.contextPage.digest,
+      rolePatches: payload.contextPage.entries.filter(entry => entry.kind === 'roles').map(entry => ({
+        targetId: entry.id, evidenceSegmentIds: [segmentId], updates: { title: entry.context.title },
+      })),
+      projectPatches: [],
+    };
+  }
+  const segmentId = corpus.segments[pageIndex].id;
+  if (pageIndex >= PATCH_ROLE_PAGES.length) return emptyPageShard(segmentId);
+  const [start, end] = PATCH_ROLE_PAGES[pageIndex];
+  const roles = Array.from({ length: end - start }, (_, offset) => ({
+    id: `role-${start + offset}`, title: `Role ${start + offset}`, employer: '', startDate: '', endDate: '', location: '',
+    achievementIds: [], skillIds: [], evidenceSegmentIds: [segmentId],
+  }));
+  return pageTransport({
+    identity: { name: '', contacts: [], evidenceSegmentIds: [segmentId] },
+    roles, achievements: [], projects: [], skills: [], education: [], certifications: [], otherEvidence: [],
+    continuationState: { roles: { mode: pageIndex === 0 ? 'replace' : 'append', ids: roles.map(role => role.id) }, projects: { mode: 'inherit', ids: [] } },
+    segmentCoverage: [{ segmentId, disposition: 'role-header', entityIds: ['identity', ...roles.map(role => role.id)] }],
+  });
+}
+
+const restoredEditProtocolTests = [
+  {
+    name: 'career snapshot edits: the real incident — an optional integration skill is moved to relationship-qualified as one unit and an adversarial reversal on considered evidence is rejected every round',
+    run: async () => {
+      let settledGroupIds = [];
+      const { result, log, corpus } = await runEditProtocol({
+        files: integrationFiles(),
+        compile: source => integrationProfile(source),
+        audit: ({ lane, round, payload, corpus: source }) => {
+          const service = source.segments[3].id;
+          if (lane !== 'skills') return [{ findings: [] }];
+          if (round === 0) return [{ findings: [integrationFinding({ id: 'optional-integration', segmentIds: [service], edits: qualifyIntegrationEdits(service) })] }];
+          const settled = payload.settledDecisions.filter(decision => INTEGRATION_TARGET_KEYS.includes(decision.targetKey));
+          settledGroupIds = settled.map(decision => decision.groupId);
+          return [
+            { findings: [integrationFinding({ id: 'reverse-unchallenged', segmentIds: [service], sourceQuote: 'Salesforce integration', edits: directIntegrationEdits(service) })] },
+            { findings: [integrationFinding({ id: 'reverse-stale', segmentIds: [service], sourceQuote: 'Salesforce integration', challenge: { decisionId: settled[0].groupId, evidenceSegmentIds: [service] }, edits: directIntegrationEdits(service) })] },
+            { findings: [] },
+          ];
+        },
+      });
+      const service = corpus.segments[3].id;
+      const skillsCalls = log.calls.filter(call => call.task === 'career-profile-audit-skills').length;
+      const skillsRejections = log.rejected.filter(item => item.task === 'career-profile-audit-skills');
+      const targets = integrationTargets(result);
+      nodeAssert.strictEqual(result.snapshot.status, 'approved');
+      nodeAssert.ok(validateCurrentCareerSnapshot(result.snapshot).valid);
+      nodeAssert.deepStrictEqual(integrationState(result), {
+        supportMode: 'relationship-qualified', directEvidenceSegmentIds: [], indexEligible: false,
+        relationship: 'optional', relationshipGroup: 'optional-salesforce', relationshipEvidence: 'optional Salesforce integration', boundToSkill: true,
+      });
+      nodeAssert.deepStrictEqual(targets.map(target => target.targetKey), INTEGRATION_TARGET_KEYS);
+      nodeAssert.strictEqual(new Set(targets.map(target => target.current.groupId)).size, 1);
+      nodeAssert.ok(/^group-[0-9a-f]{16}$/u.test(targets[0].current.groupId));
+      nodeAssert.deepStrictEqual(targets.map(target => target.current.origin), ['audit', 'audit', 'audit', 'audit']);
+      nodeAssert.deepStrictEqual(targets.map(target => target.current.valueJson), [
+        canonicalJson(integrationReferences(service, true)), '[]', 'false', '"relationship-qualified"',
+      ]);
+      nodeAssert.deepStrictEqual(settledGroupIds, targets.map(target => target.current.groupId));
+      nodeAssert.ok(skillsCalls >= 2);
+      nodeAssert.strictEqual(skillsRejections.length, 2 * (skillsCalls - 1));
+      nodeAssert.ok(skillsRejections.every((item, index) => (index % 2 === 0
+        ? item.message.includes('skills finding reverse-unchallenged')
+        : item.message.includes('skills finding reverse-stale') && item.message.includes('cites no new evidence'))),
+      skillsRejections.map(item => item.message).join(' || '));
+      nodeAssert.strictEqual(log.calls.filter(call => call.task === 'career-profile-repair').length, 0);
+      nodeAssert.strictEqual(convergencePayloads(log)[0].editsApplied, 4);
+      return { skillsCalls, rejections: skillsRejections.length };
+    },
+  },
+  {
+    name: 'career snapshot edits: the real incident — a groupId challenge citing a new page segment is adjudicated once and its change ruling applies every reverse edit together',
+    run: async () => {
+      let firstGroupId = '';
+      const { result, log, corpus } = await runEditProtocol({
+        files: integrationFiles(),
+        compile: source => integrationProfile(source),
+        audit: ({ lane, round, payload, corpus: source }) => {
+          const service = source.segments[3].id;
+          if (lane !== 'skills') return [{ findings: [] }];
+          if (round === 0) return [{ findings: [integrationFinding({ id: 'optional-integration', segmentIds: [service], edits: qualifyIntegrationEdits(service) })] }];
+          if (round !== 1) return [{ findings: [] }];
+          firstGroupId = payload.settledDecisions.find(decision => INTEGRATION_TARGET_KEYS.includes(decision.targetKey)).groupId;
+          return [
+            { findings: [integrationFinding({ id: 'reverse-stale', segmentIds: [service], sourceQuote: 'Salesforce integration', challenge: { decisionId: firstGroupId, evidenceSegmentIds: [service] }, edits: directIntegrationEdits(service) })] },
+            { findings: [integrationFinding({ id: 'reverse-new-evidence', segmentIds: [service], sourceQuote: 'Salesforce integration', challenge: { decisionId: firstGroupId, evidenceSegmentIds: [source.segments[1].id] }, edits: directIntegrationEdits(service) })] },
+          ];
+        },
+        adjudicate: ({ corpus: source }) => [{
+          ruling: 'change', valueJson: JSON.stringify(directIntegrationEdits(source.segments[3].id)),
+          rationale: 'The integration role establishes direct integration work.', sourceQuote: 'Salesforce integration', evidenceSegmentIds: [source.segments[3].id],
+        }],
+      });
+      const service = corpus.segments[3].id;
+      const adjudications = log.calls.filter(call => call.phase === 'adjudication');
+      nodeAssert.strictEqual(adjudications.length, 1);
+      nodeAssert.strictEqual(adjudications[0].task, 'career-profile-repair');
+      const input = adjudicationPayload(adjudications[0].prompt);
+      nodeAssert.deepStrictEqual(input.proposals.map(proposal => proposal.findingId), ['reverse-new-evidence']);
+      nodeAssert.strictEqual(input.targets.length, 4);
+      nodeAssert.deepStrictEqual(input.currentDecisions.map(decision => decision.groupId), [firstGroupId, firstGroupId, firstGroupId, firstGroupId]);
+      nodeAssert.strictEqual(log.rejected.filter(item => item.task === 'career-profile-audit-skills').length, 1);
+      nodeAssert.strictEqual(log.calls.filter(call => call.phase === 'edit-repair').length, 0);
+      nodeAssert.strictEqual(result.snapshot.status, 'approved');
+      nodeAssert.deepStrictEqual(integrationState(result), {
+        supportMode: 'direct', directEvidenceSegmentIds: [service], indexEligible: true,
+        relationship: 'independent', relationshipGroup: '', relationshipEvidence: 'Salesforce integration', boundToSkill: true,
+      });
+      const targets = integrationTargets(result);
+      nodeAssert.deepStrictEqual(targets.map(target => target.targetKey), INTEGRATION_TARGET_KEYS);
+      nodeAssert.strictEqual(new Set(targets.map(target => target.current.groupId)).size, 1);
+      nodeAssert.notStrictEqual(targets[0].current.groupId, firstGroupId);
+      nodeAssert.deepStrictEqual(targets.map(target => target.supersededDecisionIds.length), [1, 1, 1, 1]);
+      nodeAssert.deepStrictEqual(targets.map(target => target.current.valueJson), [
+        canonicalJson(integrationReferences(service, false)), JSON.stringify([service]), 'true', '"direct"',
+      ]);
+      return { adjudications: adjudications.length };
+    },
+  },
+  {
+    name: 'career snapshot edits: a cross-category observation is recorded under the invoked lane in receipts and decisions',
+    run: async () => {
+      const settledSeenByLane = {};
+      const { result, log } = await runEditProtocol({
+        audit: ({ lane, round, payload, corpus: source }) => {
+          if (round === 1) settledSeenByLane[lane] = payload.settledDecisions.map(decision => [decision.targetKey, decision.origin, decision.valueJson]);
+          return lane === 'metrics' && round === 0
+            ? [{ findings: [editFinding({ id: 'other-lane', category: 'conflict', segmentIds: [source.segments[3].id], edits: [categoryEdit('programming language')] })] }]
+            : [{ findings: [] }];
+        },
+      });
+      const targetKey = `skills\u0000${EDIT_SKILL}\u0000category`;
+      const decision = finalDecisionLog(result).targets.find(target => target.targetKey === targetKey);
+      const [convergence] = convergencePayloads(log);
+      // The round receipt (convergence progress) and the settled ledger both
+      // record the finding under the invoked metrics lane, never 'conflict'.
+      nodeAssert.deepStrictEqual(convergence.byCategory, { metrics: { blocker: 0, warning: 1 } });
+      nodeAssert.deepStrictEqual([convergence.editsApplied, convergence.findingsRejected, convergence.adjudications], [1, 0, 0]);
+      nodeAssert.deepStrictEqual([decision.current.category, decision.current.origin, decision.current.valueJson], ['metrics', 'audit', '"programming language"']);
+      nodeAssert.deepStrictEqual(Object.keys(settledSeenByLane).sort(), EDIT_LANES.map(([lane]) => lane).sort());
+      nodeAssert.ok(Object.values(settledSeenByLane).every(entries => canonicalJson(entries) === canonicalJson([[targetKey, 'audit', '"programming language"']])), canonicalJson(settledSeenByLane));
+      nodeAssert.strictEqual(log.rejected.length, 0);
+      nodeAssert.strictEqual(finalSkill(result).category, 'programming language');
+      return { byCategory: convergence.byCategory };
+    },
+  },
+  {
+    name: 'career snapshot edits: an unreconcilable same-name skill is edit-repaired only on the page whose row is redundant',
+    run: async () => {
+      const ownedPages = __ownedDeterministicFindingsForTests(
+        ['skills[p0003-skill-python-2].name duplicates the Unicode/case-insensitive skill name used by skills[p0004-skill-python-3].'],
+        1, partitionCareerSourcePages(buildCareerSourceCorpus(duplicateSkillFiles()), { maxSegments: 1, maxSourceChars: 1 }),
+      ).map(finding => finding.pageIndex);
+      const { result, log } = await runEditProtocol({
+        files: duplicateSkillFiles(),
+        pageMaxSegments: 1,
+        compile: (source, pageIndex) => duplicateSkillPageShard(source, pageIndex),
+        repair: () => [{ edits: [removeEdit('skills', 'p0003-skill-python-2')], notes: 'The direct Python row on the later page subsumes this optional row.' }],
+      });
+      const repairs = log.calls.filter(call => call.phase === 'edit-repair');
+      nodeAssert.deepStrictEqual(ownedPages, [2]);
+      nodeAssert.deepStrictEqual(repairs.map(call => [call.task, call.pageIndex]), [['career-profile-repair', 2]]);
+      nodeAssert.strictEqual(log.rejected.length, 0);
+      nodeAssert.strictEqual(result.snapshot.status, 'approved');
+      const skills = result.profile.skills.map(skill => [skill.id, skill.name, skill.supportMode, skill.indexEligible]);
+      nodeAssert.deepStrictEqual(skills, [['p0004-skill-python-3', 'Python', 'direct', true]]);
+      const optionalReference = result.profile.achievements.find(item => item.id === 'p0003-achievement-2').technologyReferences[0];
+      nodeAssert.deepStrictEqual([optionalReference.relationship, optionalReference.skillId], ['optional', 'p0004-skill-python-3']);
+      return { repairs: repairs.length };
+    },
+  },
+  {
+    name: 'career snapshot edits: every host-merged patch scope is audited for all six lanes and a rolePatches edit addressed by targetId is applied and settled',
+    run: async () => {
+      let fixed = null;
+      const { result, log, corpus } = await runEditProtocol({
+        files: patchScopeFiles(),
+        pageMaxSegments: 1,
+        compile: patchScopeCompile,
+        audit: ({ lane, round, scopeKind, scopeIndex, prompt, corpus: source }) => {
+          if (lane !== 'attribution' || round !== 0 || scopeKind !== 'host-merged-patches' || fixed) return [{ findings: [] }];
+          if (!prompt.includes('"targetId":"p0001-role-0"')) return [{ findings: [] }];
+          fixed = { scopeIndex };
+          return [{ findings: [{
+            id: 'role-location', severity: 'warning', category: 'attribution', segmentIds: [source.segments[2].id], entityIds: ['p0001-role-0'],
+            detail: 'The continuation states the role location.', sourceQuote: 'in Toronto', challenge: structuredClone(NO_CHALLENGE),
+            edits: [{ op: 'set', group: 'rolePatches', entityId: 'p0001-role-0', field: 'updates', valueJson: JSON.stringify({ title: 'Role 0', location: 'Toronto' }) }],
+          }] }];
+        },
+      });
+      const patchAudits = log.calls.filter(call => EDIT_LANE_BY_TASK.has(call.task) && call.options.hints.auditScopeKind === 'host-merged-patches');
+      const scopeIndexes = [...new Set(patchAudits.map(call => call.options.hints.auditScopeIndex))].sort((a, b) => a - b);
+      const lanesByScope = scopeIndexes.map(index => [...new Set(patchAudits
+        .filter(call => call.options.hints.auditScopeIndex === index).map(call => EDIT_LANE_BY_TASK.get(call.task)))].sort());
+      nodeAssert.ok(fixed, 'a patch scope must carry the role-0 patch');
+      nodeAssert.ok(scopeIndexes.length >= 2, `patch scopes=${scopeIndexes.length}`);
+      const allLanes = EDIT_LANES.map(([lane]) => lane).sort();
+      nodeAssert.ok(lanesByScope.every(lanes => canonicalJson(lanes) === canonicalJson(allLanes)), canonicalJson(lanesByScope));
+      const perScopeLaneCounts = scopeIndexes.flatMap(index => allLanes.map(lane => patchAudits
+        .filter(call => call.options.hints.auditScopeIndex === index && EDIT_LANE_BY_TASK.get(call.task) === lane).length));
+      nodeAssert.strictEqual(new Set(perScopeLaneCounts).size, 1, canonicalJson(perScopeLaneCounts));
+      const role = result.profile.roles.find(item => item.id === 'p0001-role-0');
+      nodeAssert.deepStrictEqual([role.title, role.location], ['Role 0', 'Toronto']);
+      nodeAssert.ok(role.evidenceSegmentIds.includes(corpus.segments[2].id));
+      const decision = finalDecisionLog(result).targets.find(target => target.targetKey === 'rolePatches\u0000p0001-role-0\u0000updates');
+      nodeAssert.deepStrictEqual([decision.pageIndex, decision.current.origin, decision.current.category, decision.current.valueJson],
+        [2, 'audit', 'attribution', canonicalJson({ title: 'Role 0', location: 'Toronto' })]);
+      nodeAssert.strictEqual(log.calls.filter(call => call.task === 'career-profile-repair').length, 0);
+      nodeAssert.strictEqual(result.snapshot.status, 'approved');
+      return { patchScopes: scopeIndexes.length };
+    },
+  },
+];
+
 export default [
+  ...editProtocolTests,
+  ...restoredEditProtocolTests,
   {
     name: 'career snapshot: a deterministic finding goes to the page that owns its cited segment, not to the page whose id a merged skill kept',
     run: () => {
@@ -770,133 +1619,6 @@ export default [
     },
   },
   {
-    name: 'career snapshot: external objects retain a separate integration capability and later repair batches cannot regress it',
-    run: async () => {
-      const source = [
-        'Nova Example\n',
-        'Connectivity Specialist at Arbor Labs\n',
-        'January 2024 to Present\n',
-        'Endpoint integration connected to either Lumen endpoint or Solace endpoint through Auxiliary relay for scheduled retrieval.\n',
-        'nova@example.test\n',
-      ].join('');
-      const files = [{ name: 'fictional-integration-career.txt', text: source, transcriptionAudit: verbatimCareerTranscriptionAuditReceipt() }];
-      const corpus = buildCareerSourceCorpus(files);
-      const segment = literal => corpus.segments.find(item => item.text.includes(literal))?.id;
-      const identity = segment('Nova Example');
-      const roleHeader = segment('Connectivity Specialist');
-      const dates = segment('January 2024');
-      const action = segment('Endpoint integration connected');
-      const contact = segment('nova@example.test');
-      const relationEvidence = 'Endpoint integration connected to either Lumen endpoint or Solace endpoint through Auxiliary relay for scheduled retrieval.';
-      const profile = () => ({
-        identity: { name: 'Nova Example', contacts: ['nova@example.test'], evidenceSegmentIds: [identity, contact] },
-        roles: [{
-          id: 'role-arbor', title: 'Connectivity Specialist', employer: 'Arbor Labs', startDate: 'January 2024', endDate: 'Present', location: '',
-          achievementIds: ['achievement-connect'], skillIds: ['skill-endpoint-integration', 'skill-auxiliary-relay', 'skill-scheduled-retrieval'], evidenceSegmentIds: [roleHeader, dates],
-        }],
-        achievements: [{
-          id: 'achievement-connect', roleId: 'role-arbor', claim: relationEvidence,
-          technologies: ['Endpoint integration', 'Lumen endpoint', 'Solace endpoint', 'Auxiliary relay', 'scheduled retrieval'], metrics: [], evidenceSegmentIds: [action],
-          technologyReferences: [
-            { technology: 'Endpoint integration', disposition: 'skill', relationship: 'independent', relationshipGroup: '', relationshipEvidence: 'Endpoint integration', evidenceSegmentIds: [action] },
-            { technology: 'Lumen endpoint', disposition: 'non-skill', relationship: 'alternative', relationshipGroup: 'external-choice', relationshipEvidence: relationEvidence, evidenceSegmentIds: [action], nonSkillReason: 'An external endpoint is a consumed source, not a candidate capability.' },
-            { technology: 'Solace endpoint', disposition: 'non-skill', relationship: 'alternative', relationshipGroup: 'external-choice', relationshipEvidence: relationEvidence, evidenceSegmentIds: [action], nonSkillReason: 'An external endpoint is a consumed source, not a candidate capability.' },
-            { technology: 'Auxiliary relay', disposition: 'skill', relationship: 'independent', relationshipGroup: '', relationshipEvidence: 'Auxiliary relay', evidenceSegmentIds: [action] },
-            { technology: 'scheduled retrieval', disposition: 'skill', relationship: 'independent', relationshipGroup: '', relationshipEvidence: 'scheduled retrieval', evidenceSegmentIds: [action] },
-          ],
-        }],
-        projects: [],
-        skills: [
-          { id: 'skill-endpoint-integration', name: 'Endpoint integration', category: 'unreviewed', capabilityKind: 'capability', supportMode: 'direct', directEvidenceSegmentIds: [action], indexEligible: false, roleIds: ['role-arbor'], evidenceSegmentIds: [action] },
-          { id: 'skill-auxiliary-relay', name: 'Auxiliary relay', category: 'tool', capabilityKind: 'tool', supportMode: 'direct', directEvidenceSegmentIds: [action], indexEligible: false, roleIds: ['role-arbor'], evidenceSegmentIds: [action] },
-          { id: 'skill-scheduled-retrieval', name: 'scheduled retrieval', category: 'capability', capabilityKind: 'capability', supportMode: 'direct', directEvidenceSegmentIds: [action], indexEligible: false, roleIds: ['role-arbor'], evidenceSegmentIds: [action] },
-        ],
-        education: [], certifications: [], otherEvidence: [],
-        segmentCoverage: [
-          { segmentId: identity, disposition: 'identity', entityIds: ['identity'] },
-          { segmentId: roleHeader, disposition: 'role-header', entityIds: ['role-arbor'] },
-          { segmentId: dates, disposition: 'role-header', entityIds: ['role-arbor'] },
-          { segmentId: action, disposition: 'achievement', entityIds: ['achievement-connect', 'skill-endpoint-integration', 'skill-auxiliary-relay', 'skill-scheduled-retrieval'] },
-          { segmentId: contact, disposition: 'identity', entityIds: ['identity'] },
-        ],
-      });
-      const firstCorrection = profile();
-      firstCorrection.roles[0].skillIds = firstCorrection.roles[0].skillIds.filter(id => id !== 'skill-auxiliary-relay');
-      firstCorrection.skills = firstCorrection.skills.filter(skill => skill.id !== 'skill-auxiliary-relay');
-      firstCorrection.achievements[0].technologies = firstCorrection.achievements[0].technologies.filter(name => name !== 'Auxiliary relay');
-      firstCorrection.achievements[0].technologyReferences = firstCorrection.achievements[0].technologyReferences
-        .filter(reference => reference.technology !== 'Auxiliary relay');
-      firstCorrection.segmentCoverage[3].entityIds = firstCorrection.segmentCoverage[3].entityIds.filter(id => id !== 'skill-auxiliary-relay');
-      const secondCorrection = structuredClone(firstCorrection);
-      secondCorrection.skills.find(skill => skill.id === 'skill-scheduled-retrieval').category = 'method';
-      const explicitTargetCorrection = structuredClone(secondCorrection);
-      const initialAuxiliary = profile();
-      explicitTargetCorrection.roles[0].skillIds.splice(1, 0, 'skill-auxiliary-relay');
-      explicitTargetCorrection.skills.splice(1, 0, initialAuxiliary.skills.find(skill => skill.id === 'skill-auxiliary-relay'));
-      explicitTargetCorrection.achievements[0].technologies.splice(3, 0, 'Auxiliary relay');
-      explicitTargetCorrection.achievements[0].technologyReferences.splice(3, 0,
-        initialAuxiliary.achievements[0].technologyReferences.find(reference => reference.technology === 'Auxiliary relay'));
-      explicitTargetCorrection.segmentCoverage[3].entityIds.splice(2, 0, 'skill-auxiliary-relay');
-      const regressiveSecondCorrection = structuredClone(secondCorrection);
-      regressiveSecondCorrection.roles[0].skillIds.splice(1, 0, 'skill-auxiliary-relay');
-      regressiveSecondCorrection.skills.splice(1, 0, initialAuxiliary.skills.find(skill => skill.id === 'skill-auxiliary-relay'));
-      regressiveSecondCorrection.achievements[0].technologies.splice(3, 0, 'Auxiliary relay');
-      regressiveSecondCorrection.achievements[0].technologyReferences.splice(3, 0,
-        initialAuxiliary.achievements[0].technologyReferences.find(reference => reference.technology === 'Auxiliary relay'));
-      regressiveSecondCorrection.segmentCoverage[3].entityIds.splice(2, 0, 'skill-auxiliary-relay');
-      const findings = [
-        { id: 'remove-auxiliary-relay', severity: 'warning', category: 'skills', segmentIds: [action], entityIds: ['p0001-skill-auxiliary-relay'], detail: `Remove the unsupported auxiliary relay skill and ledger record. ${'evidence '.repeat(110)}`.slice(0, 1_200) },
-        { id: 'retrieval-category', severity: 'warning', category: 'skills', segmentIds: [action], entityIds: ['p0001-skill-scheduled-retrieval'], detail: `Correct the neighboring retrieval classification without changing other source-supported capability evidence. ${'evidence '.repeat(110)}`.slice(0, 1_200) },
-        { id: 'auxiliary-explicit-target', severity: 'warning', category: 'skills', segmentIds: [action], entityIds: ['p0001-skill-auxiliary-relay'], detail: `Revisit the explicitly named auxiliary relay correction. ${'evidence '.repeat(110)}`.slice(0, 1_200) },
-      ];
-      let auditPass = 0;
-      let repairCalls = 0;
-      let regression = null;
-      const prompts = [];
-      const progress = [];
-      const result = await compileAuditedCareerSnapshot({
-        onProgress: event => progress.push(event),
-        sourceFiles: files, maxPromptChars: 10_600,
-        callText: async (prompt, options) => {
-          if (options.task === 'career-profile-compile') return pageTransport(profile());
-          if (options.task === 'career-profile-audit-skills') return auditPass++ === 0 ? { findings } : { findings: [] };
-          if (options.task?.startsWith('career-profile-audit-')) return { findings: [] };
-          if (options.task === 'career-profile-repair') {
-            prompts.push(prompt);
-            if (repairCalls++ === 0) return pageTransport(firstCorrection);
-            if (repairCalls === 2) {
-              try { options.responseValidator(pageTransport(regressiveSecondCorrection)); } catch (error) { regression = error; }
-              return pageTransport(secondCorrection);
-            }
-            return pageTransport(explicitTargetCorrection);
-          }
-          throw new Error(`Unexpected task ${options.task}`);
-        },
-      });
-      assert(progress.some(event => event.phase === 'compiling' && event.completed === event.total)
-        && progress.some(event => event.phase === 'auditing' && event.completed === event.total)
-        && progress.some(event => event.phase === 'repairing'), 'real compiler reports page, audit, and repair progress');
-      assert(progress.every(event => !event.total || event.completed <= event.total), 'progress counts stay within their actual phase totals');
-      const achievement = result.profile.achievements[0];
-      const integration = result.profile.skills.find(skill => skill.name === 'Endpoint integration');
-      const externalReferences = achievement.technologyReferences.filter(reference => /endpoint$/u.test(reference.technology));
-      assert(result.snapshot.status === 'approved' && repairCalls === 3 && prompts.length === 3
-        && prompts[1].includes('Endpoint integration')
-        && prompts[1].includes('Across later finding batches, preserve earlier source-supported corrected skills')
-        && integration?.capabilityKind === 'capability' && integration.indexEligible === false
-        && externalReferences.length === 2 && externalReferences.every(reference => reference.disposition === 'non-skill'
-          && reference.relationship === 'alternative' && reference.relationshipGroup === 'external-choice')
-        && result.profile.skills.find(skill => skill.name === 'scheduled retrieval')?.category === 'method'
-        && regression?.code === 'CAREER_SNAPSHOT_PAGE_INVALID'
-        && regression?.validationDiagnostic?.reason === 'CAREER_PAGE_REPAIR_REGRESSION'
-        && /earlier removed capability skill/.test(regression.message)
-        && /earlier removed technology ledger record/.test(regression.message)
-        && validateCareerProfile(result.profile, corpus).valid,
-      'an external object can remain a relation-qualified non-skill while the source-supported integration action is a separate non-indexable capability, and an overlapping later repair batch cannot resurrect an unmentioned removed skill/ledger record while an explicitly targeted batch can revisit it');
-      return { repairCalls, integrationPreserved: Boolean(integration), relationPreserved: externalReferences.length, tombstoneReintroductionBlocked: true, explicitTargetCorrectionAllowed: true };
-    },
-  },
-  {
     name: 'career snapshot: current structured projections above the legacy raw freeze ceiling remain readable',
     run: async () => {
       const root = fs.mkdtempSync(path.join(os.tmpdir(), 'career-snapshot-large-projection-'));
@@ -935,50 +1657,6 @@ export default [
       } finally {
         fs.rmSync(root, { recursive: true, force: true });
       }
-    },
-  },
-  {
-    name: 'career snapshot: compiler converges beyond the former repair cap, fully re-audits in parallel, and records progress receipts',
-    run: async () => {
-      const corpus = buildCareerSourceCorpus(sourceFiles());
-      const good = validProfile(corpus);
-      const bad = structuredClone(good);
-      bad.achievements[0].claim = 'Invented outcome';
-      bad.skills.push({ ...good.skills[0], id: 'skill-python-duplicate', name: 'python' });
-      bad.roles[0].skillIds.push('skill-python-duplicate');
-      bad.segmentCoverage.forEach(entry => entry.entityIds.push('skill-python-duplicate'));
-      const badVariants = Array.from({ length: 6 }, (_value, index) => {
-        const variant = structuredClone(bad);
-        // Each retry is substantively distinct yet still source-invalid, so
-        // the state-recurrence guard—not array-order churn—proves convergence
-        // can continue beyond a historic aggregate retry cap.
-        variant.achievements[0].claim = `Invented outcome ${index + 1}`;
-        return variant;
-      });
-      const tasks = [];
-      let repairCalls = 0;
-      const result = await compileAuditedCareerSnapshot({
-        sourceFiles: sourceFiles(),
-        callText: async (_prompt, options) => {
-          tasks.push(options.task);
-          if (options.task === 'career-profile-compile') return pageTransport(bad);
-          if (options.task === 'career-profile-repair') return pageTransport(repairCalls++ < badVariants.length ? badVariants[repairCalls - 1] : good);
-          return { findings: [] };
-        },
-      });
-      const auditTasks = tasks.filter(task => task.startsWith('career-profile-audit-'));
-      assert(result.snapshot.status === 'approved' && result.snapshot.auditHistory.length === 2
-        && tasks[0] === 'career-profile-compile' && repairCalls === 7 && auditTasks.length === 6
-        && result.snapshot.auditHistory[0].kind === 'folded' && result.snapshot.auditHistory[0].roundCount === 7
-        && result.snapshot.auditHistory[1].audits.length === 6
-        && validateCurrentCareerSnapshot(result.snapshot).valid
-        && result.snapshot.auditHistory.slice(1).every(round => /^[a-f0-9]{64}$/.test(round.profileDigest)
-          && /^[a-f0-9]{64}$/.test(round.unresolvedFindingDigest) && /^[a-f0-9]{64}$/.test(round.stateDigest)),
-      'deterministic grounding or duplicate canonical-skill defects may require more than the former cap, then every independent audit reruns; old detailed rounds fold into one chained compact receipt instead of growing the snapshot without bound');
-      let oversized = null;
-      try { buildCareerProfileCompilePrompt(corpus, { maxPromptChars: 12 }); } catch (error) { oversized = error; }
-      assert(oversized?.code === 'CAREER_SNAPSHOT_PROMPT_TOO_LARGE', 'oversized source prompts must fail explicitly, never silently truncate career evidence');
-      return { tasks: tasks.length, repairCalls, auditTasks: auditTasks.length };
     },
   },
   {
@@ -1137,360 +1815,6 @@ export default [
     },
   },
   {
-    name: 'career snapshot: paged repair is scoped, abort stops later pages, and a repeated bounded state remains nonconvergent',
-    run: async () => {
-      const files = pagedSourceFiles([
-        'Ada Lovelace',
-        'Software Engineer Engineer Acme January 2020 Present Toronto',
-        'Built Python service used by 50 users.',
-        'Built Python report used by 60 users.',
-      ]);
-      const corpus = buildCareerSourceCorpus(files);
-      let repairPages = [];
-      let auditRound = 0;
-      const repaired = await compileAuditedCareerSnapshot({
-        sourceFiles: files, pageMaxSegments: 1, pageMaxSourceChars: 1,
-        callText: async (_prompt, options) => {
-          if (options.task === 'career-profile-compile') return crossPageShard(corpus, options.hints.pageIndex);
-          if (options.task === 'career-profile-repair') {
-            repairPages.push(options.hints.pageIndex);
-            return crossPageShard(corpus, options.hints.pageIndex, { changedRole: options.hints.pageIndex === 1 });
-          }
-          if (options.task === 'career-profile-audit-completeness' && options.hints.pageIndex === 1 && auditRound++ === 0) {
-            return { findings: [{ id: 'page-two-role', severity: 'warning', category: 'coverage', segmentIds: [corpus.segments[1].id], entityIds: ['p0002-role-acme'], detail: 'Repair this page role label.' }] };
-          }
-          return { findings: [] };
-        },
-      });
-      const controller = new AbortController();
-      let compileCalls = 0;
-      let aborted = null;
-      try {
-        await compileAuditedCareerSnapshot({
-          sourceFiles: files, signal: controller.signal, pageMaxSegments: 1, pageMaxSourceChars: 1,
-          callText: async (_prompt, options) => {
-            compileCalls += 1;
-            controller.abort(new Error('test cancellation'));
-            return crossPageShard(corpus, options.hints.pageIndex);
-          },
-        });
-      } catch (error) { aborted = error; }
-      let nonconvergent = null;
-      let repeatedRepairs = 0;
-      try {
-        await compileAuditedCareerSnapshot({
-          sourceFiles: files, pageMaxSegments: 1, pageMaxSourceChars: 1,
-          callText: async (_prompt, options) => {
-            if (options.task === 'career-profile-compile') return crossPageShard(corpus, options.hints.pageIndex);
-            if (options.task === 'career-profile-repair') { repeatedRepairs += 1; return crossPageShard(corpus, options.hints.pageIndex); }
-            if (options.task === 'career-profile-audit-completeness' && options.hints.pageIndex === 1) {
-              return { findings: [{ id: 'repeat-page-two', severity: 'warning', category: 'coverage', segmentIds: [corpus.segments[1].id], entityIds: ['p0002-role-acme'], detail: 'This deliberately repeats.' }] };
-            }
-            return { findings: [] };
-          },
-        });
-      } catch (error) { nonconvergent = error; }
-      let largeFindingCount = 0;
-      let largeFindingRepairs = 0;
-      let largeFindings = null;
-      try {
-        await compileAuditedCareerSnapshot({
-          sourceFiles: files, pageMaxSegments: 1, pageMaxSourceChars: 1,
-          callText: async (_prompt, options) => {
-            if (options.task === 'career-profile-compile') return crossPageShard(corpus, options.hints.pageIndex);
-            if (options.task === 'career-profile-repair') { largeFindingRepairs += 1; return crossPageShard(corpus, options.hints.pageIndex); }
-            if (options.task === 'career-profile-audit-completeness') {
-              const findings = Array.from({ length: 200 }, (_value, index) => ({
-                id: `page-${options.hints.pageIndex}-finding-${index}`, severity: 'warning', category: 'coverage',
-                segmentIds: [corpus.segments[options.hints.pageIndex].id], entityIds: ['identity'], detail: `Bounded finding ${index}.`,
-              }));
-              largeFindingCount += findings.length;
-              return { findings };
-            }
-            return { findings: [] };
-          },
-        });
-      } catch (error) { largeFindings = error; }
-      assert(repaired.snapshot.status === 'approved' && repairPages.join(',') === '1'
-        && aborted?.message === 'test cancellation' && compileCalls === 1
-        && nonconvergent?.code === 'CAREER_SNAPSHOT_PAGE_INVALID' && repeatedRepairs === 1
-        && largeFindingCount >= 1 && largeFindingRepairs >= 1 && largeFindings?.code === 'CAREER_SNAPSHOT_PAGE_INVALID',
-      'a finding scoped to one page must replace only that page, cancellation must prevent later page calls, and a transport that skips the response validator must still fail closed on its first unchanged replacement');
-      return { repairPages, abortCompileCalls: compileCalls, repeatedRepairs, largeFindingCount };
-    },
-  },
-  {
-    name: 'career snapshot: compiler stops precise no-op and repeated unresolved convergence states',
-    run: async () => {
-      const corpus = buildCareerSourceCorpus(sourceFiles());
-      const good = validProfile(corpus);
-      const coverageFinding = (id, detail) => ({
-        id, severity: 'warning', category: 'coverage', segmentIds: [corpus.segments[0].id], entityIds: ['identity'], detail,
-      });
-      let noOp = null;
-      try {
-        await compileAuditedCareerSnapshot({
-          sourceFiles: sourceFiles(),
-          callText: async (_prompt, options) => {
-            if (options.task === 'career-profile-compile' || options.task === 'career-profile-repair') return pageTransport(good);
-            return options.task === 'career-profile-audit-completeness' ? { findings: [coverageFinding('same-profile', 'Repair this coverage concern.')] } : { findings: [] };
-          },
-        });
-      } catch (error) { noOp = error; }
-      let repeated = null;
-      let repairCalls = 0;
-      let coverageCalls = 0;
-      const reordered = structuredClone(good);
-      reordered.identity.evidenceSegmentIds.reverse();
-      try {
-        await compileAuditedCareerSnapshot({
-          sourceFiles: sourceFiles(),
-          callText: async (_prompt, options) => {
-            if (options.task === 'career-profile-compile') return pageTransport(good);
-            if (options.task === 'career-profile-repair') return pageTransport(repairCalls++ === 0 ? reordered : good);
-            if (options.task === 'career-profile-audit-completeness') {
-              coverageCalls += 1;
-              const findings = [coverageFinding('first', 'Repair concern one.'), coverageFinding('second', 'Repair concern two.')];
-              return { findings: coverageCalls % 2 ? findings : findings.reverse() };
-            }
-            return { findings: [] };
-          },
-        });
-      } catch (error) { repeated = error; }
-      assert(noOp?.code === 'CAREER_SNAPSHOT_PAGE_INVALID' && noOp?.validationDiagnostic?.reason === 'CAREER_PAGE_REPAIR_NO_PROGRESS'
-        && repeated?.code === 'CAREER_SNAPSHOT_PAGE_INVALID' && repeated?.validationDiagnostic?.reason === 'CAREER_PAGE_REPAIR_NO_PROGRESS'
-        && repairCalls === 1 && coverageCalls === 2,
-      `a non-clean no-op and an order-only replacement must both fail before a transport that bypasses responseValidator can assemble them (no-op=${noOp?.message || 'none'}; repeat=${repeated?.message || 'none'}; repairCalls=${repairCalls}; coverageCalls=${coverageCalls})`);
-      return { noOpRejected: true, repeatedRejected: true, repairCalls, coverageCalls };
-    },
-  },
-  {
-    name: 'career snapshot: stale no-op repair is rejected in the same handoff and a corrected retry can recover',
-    run: async () => {
-      const corpus = buildCareerSourceCorpus(sourceFiles());
-      const prior = validProfile(corpus);
-      const corrected = structuredClone(prior);
-      corrected.skills[0].indexEligible = false;
-      const finding = {
-        id: 'repair-must-change-canonical-profile', severity: 'warning', category: 'coverage',
-        // This finding has only a source target. Changing the cited skill is
-        // still a relevant repair because its evidence links it to this
-        // segment; the coverage disposition itself need not change.
-        segmentIds: [corpus.segments[0].id], entityIds: [],
-        detail: 'Correct the skill inventory disposition.',
-      };
-      let audits = 0;
-      let noProgressRejection = null;
-      let noProgressRejections = 0;
-      let repairPrompt = '';
-      const result = await compileAuditedCareerSnapshot({
-        sourceFiles: sourceFiles(),
-        callText: async (prompt, options) => {
-          if (options.task === 'career-profile-compile') return pageTransport(prior);
-          if (options.task === 'career-profile-audit-completeness') {
-            return audits++ === 0 ? { findings: [finding] } : { findings: [] };
-          }
-          if (options.task?.startsWith('career-profile-audit-')) return { findings: [] };
-          if (options.task === 'career-profile-repair') {
-            repairPrompt = prompt;
-            // This models a stale accepted no-op reaching the new response
-            // validator during recovery. The validator rejects it before a
-            // durable acceptance; the same open handoff can then submit the
-            // complete corrected replacement.
-            for (let attempt = 0; attempt < 4; attempt += 1) {
-              try { options.responseValidator(pageTransport(prior)); } catch (error) {
-                noProgressRejection = error;
-                noProgressRejections += 1;
-              }
-            }
-            assert(noProgressRejection?.code === 'CAREER_SNAPSHOT_PAGE_INVALID'
-              && noProgressRejection?.validationDiagnostic?.reason === 'CAREER_PAGE_REPAIR_NO_PROGRESS'
-              && noProgressRejections === 4
-              && /canonical career profile unchanged/.test(noProgressRejection.message),
-            'a schema-valid no-op repair must remain actionable same-handoff correction work without an arbitrary retry cap before it is accepted');
-            options.responseValidator(pageTransport(corrected));
-            return pageTransport(corrected);
-          }
-          throw new Error(`Unexpected task ${options.task}`);
-        },
-      });
-      // Durable handoff keys derive from the materialized prompt. A prior
-      // repair-revision prompt cannot select the current response, so an old
-      // accepted no-op is revalidated/reissued rather than silently replayed.
-      const stalePrompt = repairPrompt.replace('Repair protocol revision 5.', 'Repair protocol revision 4.');
-      const staleAcceptedByPrompt = new Map([[stalePrompt, pageTransport(prior)]]);
-      assert(result.snapshot.status === 'approved' && result.profile.skills[0].indexEligible === false
-        && repairPrompt.includes('Repair protocol revision 5.')
-        && !staleAcceptedByPrompt.has(repairPrompt)
-        && buildCareerProfilePageRepairPrompt(corpus, partitionCareerSourcePages(corpus)[0], pageTransport(prior), [finding]).includes('Repair protocol revision 5.'),
-      'the current repair revision must reject a stale canonical no-op before acceptance, recover through the same handoff with a substantive page change, and use a distinct durable prompt identity');
-      return { noOpRejectedBeforeAcceptance: true, recovered: true };
-    },
-  },
-  {
-    name: 'career snapshot: repeated semantic audit findings receive one corrective retry then must reduce',
-    run: async () => {
-      const files = sourceFiles();
-      const corpus = buildCareerSourceCorpus(files);
-      const initial = validProfile(corpus);
-      const firstRevision = structuredClone(initial);
-      firstRevision.skills[0].indexEligible = false;
-      // Three distinct observations deliberately persist byte-for-byte while
-      // the repair alternates a cited canonical field. This models an audit
-      // digest that remains unchanged even though profileDigest changes.
-      const findings = Array.from({ length: 3 }, (_value, index) => ({
-        id: `persistent-skills-finding-${index + 1}`, severity: 'warning', category: 'skills',
-        segmentIds: [corpus.segments[3].id], entityIds: ['p0001-skill-python'],
-        detail: `Correct Python skill classification issue ${index + 1} from its cited source evidence.`,
-      }));
-      let auditPass = 0;
-      const repairPrompts = [];
-      let repairCalls = 0;
-      const recovered = await compileAuditedCareerSnapshot({
-        sourceFiles: files,
-        callText: async (prompt, options) => {
-          if (options.task === 'career-profile-compile') return pageTransport(initial);
-          // Each repair round replays the affected audit scope before it
-          // issues a replacement, so retain the finding for two full rounds.
-          if (options.task === 'career-profile-audit-skills') return { findings: auditPass++ < 4 ? findings : [] };
-          if (options.task?.startsWith('career-profile-audit-')) return { findings: [] };
-          if (options.task === 'career-profile-repair') {
-            repairPrompts.push(prompt);
-            return pageTransport(repairCalls++ === 0 ? firstRevision : initial);
-          }
-          throw new Error(`Unexpected task ${options.task}`);
-        },
-      });
-      let nonconvergent = null;
-      let failedAuditPass = 0;
-      let failedRepairCalls = 0;
-      try {
-        await compileAuditedCareerSnapshot({
-          sourceFiles: files,
-          callText: async (_prompt, options) => {
-            if (options.task === 'career-profile-compile') return pageTransport(initial);
-            if (options.task === 'career-profile-audit-skills') return { findings };
-            if (options.task?.startsWith('career-profile-audit-')) return { findings: [] };
-            if (options.task === 'career-profile-repair') {
-              failedRepairCalls += 1;
-              // Alternate source-targeted, schema-valid changes so the old
-              // {profile,finding} state check alone would keep spinning.
-              return pageTransport(failedAuditPass++ % 2 === 0 ? firstRevision : initial);
-            }
-            throw new Error(`Unexpected task ${options.task}`);
-          },
-        });
-      } catch (error) { nonconvergent = error; }
-      assert(recovered.snapshot.status === 'approved' && repairCalls === 2
-        && !repairPrompts[0].includes('Convergence correction:')
-        && repairPrompts[1].includes('Convergence correction:')
-        && /final corrective opportunity/.test(repairPrompts[1])
-        && nonconvergent?.code === 'CAREER_SNAPSHOT_NONCONVERGENT'
-        && /source-scoped audit finding survived/.test(nonconvergent.message)
-        && failedRepairCalls === 2,
-      `an unchanged semantic audit finding must get one explicit correction pass, then fail rather than churn profiles indefinitely (recovered repairs=${repairCalls}; failed repairs=${failedRepairCalls}; error=${nonconvergent?.message || 'none'})`);
-      return { recoveredRepairCalls: repairCalls, failedRepairCalls, correctionPrompted: true };
-    },
-  },
-  {
-    name: 'career snapshot: a persistent source-cited finding cannot hide behind entity rekeys, siblings, or audit lanes',
-    run: async () => {
-      const files = sourceFiles();
-      const corpus = buildCareerSourceCorpus(files);
-      const initial = validProfile(corpus);
-      const firstRevision = structuredClone(initial);
-      firstRevision.skills[0].indexEligible = false;
-      // Page-local IDs are labels, not source identity. A valid replacement
-      // can rekey the same supported skill while retaining its cited segment.
-      const rekeyedSkillId = 'p0001-skill-python-rekeyed';
-      firstRevision.skills[0].id = rekeyedSkillId;
-      firstRevision.roles[0].skillIds = [rekeyedSkillId];
-      const secondRevision = structuredClone(firstRevision);
-      secondRevision.skills[0].category = 'Programming language';
-      const persistent = {
-        id: 'persistent-cross-lane', severity: 'warning', category: 'skills',
-        segmentIds: [corpus.segments[3].id], entityIds: ['p0001-skill-python'],
-        detail: 'Correct the persistent Python classification from cited source evidence.',
-      };
-      const transient = (index, entityId = 'p0001-skill-python') => ({
-        id: `transient-${index}`, severity: 'warning', category: 'skills',
-        segmentIds: [corpus.segments[3].id], entityIds: [entityId],
-        detail: `A distinct neighbouring observation ${index}.`,
-      });
-      let repairCalls = 0;
-      let failure = null;
-      try {
-        await compileAuditedCareerSnapshot({
-          sourceFiles: files,
-          callText: async (_prompt, options) => {
-            if (options.task === 'career-profile-compile') return pageTransport(initial);
-            // The persistent observation moves from the skills lane to the
-            // completeness lane and changes its page-local entity ID after
-            // the first repair, while another observation changes each round.
-            // Scope/set or entity-label digests would treat all of that as
-            // progress even though this source-cited defect never moved.
-            if (options.task === 'career-profile-audit-skills') {
-              return repairCalls === 0 ? { findings: [persistent, transient('skills-first')] } : { findings: [] };
-            }
-            if (options.task === 'career-profile-audit-completeness') {
-              return repairCalls === 0
-                ? { findings: [] }
-                : { findings: [{ ...persistent, category: 'coverage', entityIds: [rekeyedSkillId] }, transient(`coverage-${repairCalls}`, rekeyedSkillId)] };
-            }
-            if (options.task?.startsWith('career-profile-audit-')) return { findings: [] };
-            if (options.task === 'career-profile-repair') {
-              repairCalls += 1;
-              return pageTransport(repairCalls === 1 ? firstRevision : secondRevision);
-            }
-            throw new Error(`Unexpected task ${options.task}`);
-          },
-        });
-      } catch (error) { failure = error; }
-      assert(failure?.code === 'CAREER_SNAPSHOT_NONCONVERGENT'
-        && /source-scoped audit finding survived/.test(failure.message)
-        && repairCalls === 2,
-      `a recurring cited finding must fail after its one corrective retry even when its entity ID, audit lane, and neighbouring findings change (repairs=${repairCalls}; error=${failure?.message || 'none'})`);
-      return { repairCalls, entityRekeyIndependent: true, laneIndependent: true, siblingIndependent: true };
-    },
-  },
-  {
-    name: 'career snapshot: a repair cannot satisfy a cited finding with unrelated profile churn',
-    run: async () => {
-      const corpus = buildCareerSourceCorpus(sourceFiles());
-      const prior = validProfile(corpus);
-      const unrelated = structuredClone(prior);
-      unrelated.skills[0].indexEligible = false;
-      const targeted = structuredClone(prior);
-      targeted.roles[0].title = 'Engineer';
-      const finding = {
-        id: 'role-title-target', severity: 'warning', category: 'coverage',
-        segmentIds: [], entityIds: ['p0001-role-acme'], detail: 'Correct this role title.',
-      };
-      let audits = 0;
-      let unrelatedRejection = null;
-      const result = await compileAuditedCareerSnapshot({
-        sourceFiles: sourceFiles(),
-        callText: async (_prompt, options) => {
-          if (options.task === 'career-profile-compile') return pageTransport(prior);
-          if (options.task === 'career-profile-audit-completeness') return audits++ < 2 ? { findings: [finding] } : { findings: [] };
-          if (options.task?.startsWith('career-profile-audit-')) return { findings: [] };
-          if (options.task === 'career-profile-repair') {
-            try { options.responseValidator(pageTransport(unrelated)); } catch (error) { unrelatedRejection = error; }
-            assert(unrelatedRejection?.code === 'CAREER_SNAPSHOT_PAGE_INVALID'
-              && unrelatedRejection?.validationDiagnostic?.reason === 'CAREER_PAGE_REPAIR_TARGET_MISSED',
-            'a repair that changes only an uncited entity must be rejected before the handoff accepts it');
-            options.responseValidator(pageTransport(targeted));
-            return pageTransport(targeted);
-          }
-          throw new Error(`Unexpected task ${options.task}`);
-        },
-      });
-      assert(result.snapshot.status === 'approved' && result.profile.roles[0].title === 'Engineer',
-        'a source-supported change to the entity named by the finding must remain repairable after unrelated churn is rejected');
-      return { unrelatedEditRejected: true, targetedRepairAccepted: true };
-    },
-  },
-  {
     name: 'career snapshot: malformed audit responses remain closed-schema rejected',
     run: async () => {
       const corpus = buildCareerSourceCorpus(sourceFiles());
@@ -1521,80 +1845,6 @@ export default [
         && !/returned a finding assigned/i.test(rejection.message),
       `an audit response cannot bypass its closed schema even when its lane metadata otherwise looks valid; got ${rejection?.code || 'no-code'}: ${rejection?.message || 'no error'}`);
       return { malformedAuditRejected: true };
-    },
-  },
-  {
-    name: 'career snapshot: cross-category audit observations are host-canonicalized, repaired, and validated before acceptance',
-    run: async () => {
-      const corpus = buildCareerSourceCorpus(sourceFiles());
-      const initial = validProfile(corpus);
-      const repaired = structuredClone(initial);
-      repaired.skills[0].indexEligible = false;
-      let repairCalls = 0;
-      let acceptedCrossCategory = false;
-      let outOfPageRejectedInValidator = false;
-      const result = await compileAuditedCareerSnapshot({
-        sourceFiles: sourceFiles(),
-        callText: async (prompt, options) => {
-          if (options.task === 'career-profile-compile') return pageTransport(initial);
-          if (options.task === 'career-profile-repair') {
-            repairCalls += 1;
-            assert(prompt.includes('"category":"grounding"') && prompt.includes('"audit":"grounding"'),
-              'a valid cross-category observation must enter the bounded repair prompt under its host-attested lane');
-            return pageTransport(repaired);
-          }
-          if (options.task === 'career-profile-audit-grounding') {
-            if (!acceptedCrossCategory) {
-              acceptedCrossCategory = true;
-              const crossCategory = {
-                findings: [{
-                  id: 'cross-cutting-attribution-observation', severity: 'warning', category: 'attribution',
-                  segmentIds: [corpus.segments[1].id], entityIds: ['p0001-skill-python'],
-                  detail: 'The skill inventory needs a grounded review before approval.',
-                }],
-              };
-              // Simulate the durable handoff acceptance boundary. The
-              // validator must accept the legitimate cross-lane observation
-              // after host canonicalization, rather than letting it abort the
-              // outer compiler later.
-              options.responseValidator(crossCategory);
-              return crossCategory;
-            }
-            return { findings: [] };
-          }
-          if (options.task === 'career-profile-audit-coverage' || options.task === 'career-profile-audit-completeness') return { findings: [] };
-          return { findings: [] };
-        },
-      });
-      // Independently prove the same acceptance hook rejects a bounded-page
-      // citation before a response can be committed. The compilation fixture
-      // has one page, so any syntactically plausible unknown segment is also
-      // outside the allowed set.
-      let rejection = null;
-      try {
-        await compileAuditedCareerSnapshot({
-          sourceFiles: sourceFiles(),
-          callText: async (_prompt, options) => {
-            if (options.task === 'career-profile-compile') return pageTransport(initial);
-            if (options.task === 'career-profile-audit-grounding') {
-              const invalid = { findings: [{
-                id: 'outside-page', severity: 'warning', category: 'grounding',
-                segmentIds: ['segment-9999'], entityIds: ['p0001-role-acme'], detail: 'This citation is not owned by this page.',
-              }] };
-              try { options.responseValidator(invalid); } catch (error) { outOfPageRejectedInValidator = error?.code === 'CAREER_SNAPSHOT_AUDIT_INVALID'; throw error; }
-              return invalid;
-            }
-            return { findings: [] };
-          },
-        });
-      } catch (error) { rejection = error; }
-      assert(result.snapshot.status === 'approved' && validateCurrentCareerSnapshot(result.snapshot).valid
-        && repairCalls === 1 && acceptedCrossCategory
-        && result.snapshot.auditHistory[0].kind === 'folded'
-        && outOfPageRejectedInValidator && rejection?.code === 'CAREER_SNAPSHOT_AUDIT_INVALID'
-        && /unknown segment segment-9999/i.test(rejection.message),
-      `cross-category observation must be canonicalized into its host lane and repaired, while out-of-page citations are rejected inside response acceptance (repairCalls=${repairCalls}; accepted=${acceptedCrossCategory}; validatorRejected=${outOfPageRejectedInValidator}; rejection=${rejection?.message || 'none'})`);
-      return { repairedCrossCategory: true, validatorRejectedOutOfPageCitation: true };
     },
   },
   {
@@ -1784,52 +2034,6 @@ export default [
     },
   },
   {
-    name: 'career snapshot: repair findings batch under prompt limits and compile prompts expose only local source metadata',
-    run: async () => {
-      const corpus = buildCareerSourceCorpus(sourceFiles());
-      const profile = validProfile(corpus);
-      const findings = Array.from({ length: 200 }, (_value, index) => ({
-        id: `bounded-${index}`, severity: 'warning', category: 'coverage', segmentIds: [corpus.segments[0].id], entityIds: ['identity'],
-        detail: `Repair bounded finding ${index}: ${'evidence '.repeat(50)}`,
-      }));
-      const repairBatchCounts = [];
-      let noProgress = null;
-      try {
-        await compileAuditedCareerSnapshot({
-          sourceFiles: sourceFiles(), maxPromptChars: 15_000,
-          callText: async (_prompt, options) => {
-            if (options.task === 'career-profile-compile' || options.task === 'career-profile-repair') {
-              if (options.task === 'career-profile-repair') repairBatchCounts.push(options.hints.findingBatchCount);
-              return pageTransport(profile);
-            }
-            return options.task === 'career-profile-audit-completeness' ? { findings } : { findings: [] };
-          },
-        });
-      } catch (error) { noProgress = error; }
-      const files = Array.from({ length: 5 }, (_value, index) => {
-        const text = `Source ${index + 1} context\n`;
-        return { name: `source-${index + 1}.txt`, text, transcriptionAudit: verbatimCareerTranscriptionAuditReceipt() };
-      });
-      const manySources = buildCareerSourceCorpus(files);
-      let finalCompilePrompt = '';
-      await compileAuditedCareerSnapshot({
-        sourceFiles: files, pageMaxSegments: 1, pageMaxSourceChars: 1,
-        callText: async (prompt, options) => {
-          if (options.task === 'career-profile-compile') {
-            if (options.hints.pageIndex === 4) finalCompilePrompt = prompt;
-            return emptyPageShard(manySources.segments[options.hints.pageIndex].id);
-          }
-          return { findings: [] };
-        },
-      });
-      assert(noProgress?.code === 'CAREER_SNAPSHOT_PAGE_INVALID'
-        && repairBatchCounts.length >= 1 && repairBatchCounts.every(count => count > 1)
-        && finalCompilePrompt.includes('source-0005') && !finalCompilePrompt.includes('source-0001'),
-      'a page repair must split an over-sized finding set into bounded batches without a global repair cap, and compile prompts must not carry unrelated source-file metadata');
-      return { repairCalls: repairBatchCounts.length, repairBatchCount: repairBatchCounts[0], sourcePages: manySources.segments.length };
-    },
-  },
-  {
     name: 'career snapshot: distant incompatible roles/projects and skill categories are never silently reconciled',
     run: async () => {
       const files = pagedSourceFiles([
@@ -1882,78 +2086,6 @@ export default [
         && skillCollision?.code === 'CAREER_SNAPSHOT_PAGE_INVALID',
       'host reconciliation must surface distant role/project disagreements to their owning pages and preserve a same-name skill category collision for repair instead of discarding an ID or controlled classification');
       return { crossConflictRejected: true, skillCollisionRejected: true };
-    },
-  },
-  {
-    name: 'career snapshot: an unreconcilable same-name skill is repaired by the one page whose row is redundant, never by the page whose row is correct',
-    run: async () => {
-      // Each case differs in exactly one governing fact between two pages naming the same skill. The row to change is the
-      // relationship-qualified one wherever it sits. (A category wording difference is not governing: it merges.)
-      const cases = [
-        { name: 'direct, then qualified', pages: [{}, { mode: 'relationship-qualified' }], redundantPage: 1 },
-        { name: 'qualified, then direct', pages: [{ mode: 'relationship-qualified' }, {}], redundantPage: 0 },
-      ];
-      for (const scenario of cases) {
-        const lines = scenario.pages.map((page, index) => `${index === 0 ? 'Engineer Acme January 2020 December 2021' : 'Analyst Beta January 2018 December 2019'} Python${page.mode ? ' when available' : ''}`);
-        const files = pagedSourceFiles(lines);
-        const corpus = buildCareerSourceCorpus(files);
-        const shardFor = (pageIndex, { removeSkill = false } = {}) => {
-          const { mode = 'direct', category = 'language' } = scenario.pages[pageIndex];
-          const qualified = mode === 'relationship-qualified';
-          const segmentId = corpus.segments[pageIndex].id;
-          const roleId = `role-${pageIndex}`;
-          const skillId = `skill-python-${pageIndex}`;
-          const slice = qualified ? 'Python when available' : 'Python';
-          return pageTransport({
-            identity: { name: '', contacts: [], evidenceSegmentIds: [segmentId] },
-            roles: [{
-              id: roleId, title: pageIndex === 0 ? 'Engineer' : 'Analyst', employer: pageIndex === 0 ? 'Acme' : 'Beta',
-              startDate: pageIndex === 0 ? 'January 2020' : 'January 2018', endDate: pageIndex === 0 ? 'December 2021' : 'December 2019', location: '',
-              achievementIds: [`ach-${pageIndex}`], skillIds: removeSkill ? [] : [skillId], evidenceSegmentIds: [segmentId],
-            }],
-            achievements: [{
-              id: `ach-${pageIndex}`, roleId, claim: slice, technologies: ['Python'],
-              technologyReferences: [{
-                technology: 'Python', disposition: 'skill', relationship: qualified ? 'conditional' : 'independent', relationshipGroup: qualified ? 'condition-1' : '',
-                relationshipEvidence: slice, evidenceSegmentIds: [segmentId],
-              }],
-              metrics: [], evidenceSegmentIds: [segmentId],
-            }],
-            projects: [],
-            skills: removeSkill ? [] : [{
-              id: skillId, name: 'Python', category, capabilityKind: 'language', supportMode: mode,
-              directEvidenceSegmentIds: qualified ? [] : [segmentId], indexEligible: !qualified, roleIds: [roleId], evidenceSegmentIds: [segmentId],
-            }],
-            education: [], certifications: [], otherEvidence: [], rolePatches: [], projectPatches: [],
-            continuationState: { roles: { mode: 'clear', ids: [] }, projects: { mode: 'clear', ids: [] } },
-            segmentCoverage: [{ segmentId, disposition: 'role-header', entityIds: [] }],
-          });
-        };
-        const compileWith = async (repairs, repair) => compileAuditedCareerSnapshot({
-          sourceFiles: files, pageMaxSegments: 1, pageMaxSourceChars: 48_000, now: () => '2026-10-07T00:00:00.000Z',
-          callText: async (_prompt, options) => {
-            if (options.task === 'career-profile-compile') return shardFor(options.hints.pageIndex);
-            if (options.task === 'career-profile-repair') { repairs.push(options.hints.pageIndex); return repair(options.hints.pageIndex); }
-            return { findings: [] };
-          },
-        });
-        // A faithful repair changes only the redundant page (drops its duplicate row) and is never asked of the other page.
-        const faithfulRepairs = [];
-        const approved = await compileWith(faithfulRepairs, pageIndex => shardFor(pageIndex, { removeSkill: pageIndex === scenario.redundantPage }));
-        const python = approved.profile.skills.filter(skill => skill.name === 'Python');
-        assert(faithfulRepairs.length >= 1 && faithfulRepairs.every(pageIndex => pageIndex === scenario.redundantPage),
-          `${scenario.name}: only the redundant page (${scenario.redundantPage}) is asked to repair (asked ${JSON.stringify(faithfulRepairs)})`);
-        assert(python.length === 1 && python[0].id === `p000${2 - scenario.redundantPage}-skill-python-${1 - scenario.redundantPage}`,
-          `${scenario.name}: exactly the correct row survives (${python.map(skill => skill.id).join(',')})`);
-        assert(validateCareerProfile(approved.profile, approved.corpus).valid, `${scenario.name}: the approved profile validates`);
-        // A repair that does not fix the duplicate is still refused with a typed error, and still only asked of the redundant page.
-        const stubbornRepairs = [];
-        let refusal = null;
-        try { await compileWith(stubbornRepairs, pageIndex => shardFor(pageIndex)); } catch (error) { refusal = error; }
-        assert(/^CAREER_SNAPSHOT_[A-Z_]+$/u.test(String(refusal?.code)) && stubbornRepairs.length >= 1 && stubbornRepairs.every(pageIndex => pageIndex === scenario.redundantPage),
-          `${scenario.name}: an unfixed duplicate is a typed refusal asked of the redundant page only (${refusal?.code}, ${JSON.stringify(stubbornRepairs)})`);
-      }
-      return { cases: cases.length };
     },
   },
   {
@@ -2430,141 +2562,6 @@ export default [
         && tampered?.code === 'CAREER_SNAPSHOT_ACTIVE_CONTEXT_INVALID' && tamperedSiblingStarted > 0 && tamperedSiblingAborted === tamperedSiblingStarted,
         `current compilation carries more than 100 simultaneous active roles and projects through append-only host state, merges more than one response-cap of literal active-context patches without weakening raw scan caps, audits every host-merged patch under every semantic category with chained coverage receipts, scans only the final distinct-key digest pages rather than re-censusing earlier sources, remains within the prompt envelope, executes independent scans through a bounded rolling roster that drains aborted siblings, restarts deterministically, and rejects a forged page/state echo instead of dropping a tail context: ${JSON.stringify({ patchAudit: patchAuditReceipts.map(receipts => receipts.map(receipt => [receipt.pageIndex, receipt.scopeIndex, receipt.scopeCount, receipt.rolePatchCount, receipt.projectPatchCount])), valid: validateCurrentCareerSnapshot(first.snapshot).valid, promptMax: Math.max(...prompts) })}`);
       return { activeRoles: first.profile.roles.length, activeProjects: first.profile.projects.length, activeContextPatchCount, contextPages: new Set(firstDigestPages).size, snapshotBytes };
-    },
-  },
-  {
-    name: 'career snapshot: every host-merged patch is semantically audited and a late-patch finding repairs through its bounded scope',
-    run: async () => {
-      const roleCount = 105;
-      const files = pagedSourceFiles([
-        ...Array.from({ length: roleCount }, (_, index) => `Role ${index}`),
-        Array.from({ length: roleCount }, (_, index) => `Role ${index} Detail ${index}`).join(' '),
-      ]);
-      const corpus = buildCareerSourceCorpus(files);
-      const finalPageIndex = roleCount;
-      const lateRoleId = `p${String(roleCount).padStart(4, '0')}-role-${roleCount - 1}`;
-      let lateFindingIssued = false;
-      let latePatchWasAudited = false;
-      let lateRepairWasScoped = false;
-      let disappearingReplayMode = false;
-      let lateGroundingAuditCalls = 0;
-      let earlyGroundingScopeIndex = null;
-      let releaseEarlyGrounding;
-      let earlyGroundingReady = new Promise(resolve => { releaseEarlyGrounding = resolve; });
-      const activePayload = prompt => {
-        const open = '<UNTRUSTED_CAREER_ACTIVE_CONTEXT_LOOKUP>\n';
-        const start = prompt.indexOf(open) + open.length;
-        return JSON.parse(prompt.slice(start, prompt.indexOf('\n</UNTRUSTED_CAREER_ACTIVE_CONTEXT_LOOKUP>')));
-      };
-      const compile = async (prompt, options) => {
-        const pageIndex = options.hints.pageIndex;
-        const segmentId = corpus.segments[pageIndex].id;
-        if (options.hints.phase === 'active-context-scan') {
-          const payload = activePayload(prompt);
-          return {
-            activeStateDigest: payload.activeState.digest,
-            contextPageDigest: payload.contextPage.digest,
-            rolePatches: payload.contextPage.entries.filter(entry => entry.kind === 'roles').map(entry => ({
-              targetId: entry.id, evidenceSegmentIds: [segmentId], updates: { title: entry.context.title },
-            })),
-            projectPatches: [],
-          };
-        }
-        if (options.task?.startsWith('career-profile-audit-')) {
-          const hasLatePatch = options.hints.auditScopeKind === 'host-merged-patches' && prompt.includes(`"targetId":"${lateRoleId}"`);
-          if (hasLatePatch) latePatchWasAudited = true;
-          if (disappearingReplayMode && pageIndex === finalPageIndex && !hasLatePatch
-            && options.hints.auditScopeKind === 'host-merged-patches'
-            && options.task === 'career-profile-audit-grounding'
-            && (earlyGroundingScopeIndex == null || earlyGroundingScopeIndex === options.hints.auditScopeIndex)) {
-            // Fill the category-wide diagnostic sample before the late scope
-            // resolves. The replay of these findings remains exact, so only
-            // the late, unsampled patch is allowed to exercise fail-closed.
-            earlyGroundingScopeIndex ??= options.hints.auditScopeIndex;
-            const visibleTarget = /"targetId":"([^"]+)"/.exec(prompt)?.[1];
-            releaseEarlyGrounding();
-            return { findings: Array.from({ length: 9 }, (_, index) => ({
-              id: `early-host-patch-${index}`, severity: 'warning', category: 'grounding', segmentIds: [segmentId],
-              entityIds: [visibleTarget], detail: `Earlier exact finding ${index}.`,
-            })) };
-          }
-          if (disappearingReplayMode && hasLatePatch && options.task === 'career-profile-audit-grounding') {
-            await earlyGroundingReady;
-            await new Promise(resolve => setTimeout(resolve, 0));
-            lateGroundingAuditCalls += 1;
-            if (lateGroundingAuditCalls === 1) {
-              lateFindingIssued = true;
-              return { findings: [{ id: 'late-host-patch', severity: 'warning', category: 'grounding', segmentIds: [segmentId], entityIds: [lateRoleId], detail: 'Late exact patch finding must not become a generic replay instruction.' }] };
-            }
-            return { findings: [] };
-          }
-          if (hasLatePatch && options.task === 'career-profile-audit-grounding' && !lateFindingIssued) {
-            lateFindingIssued = true;
-            return { findings: [{ id: 'late-host-patch', severity: 'warning', category: 'grounding', segmentIds: [segmentId], entityIds: [lateRoleId], detail: 'Exercise the bounded repair path for the patch after ordinal 100.' }] };
-          }
-          return { findings: [] };
-        }
-        if (options.task === 'career-profile-repair') {
-          if (disappearingReplayMode) return emptyPageShard(segmentId);
-          lateRepairWasScoped ||= prompt.includes('hostMergedPatchRepairScope') && prompt.includes(lateRoleId);
-          const base = emptyPageShard(segmentId);
-          return pageTransport({
-            ...base,
-            rolePatches: [{ targetId: lateRoleId, evidenceSegmentIds: [segmentId], updates: { location: `Detail ${roleCount - 1}` } }],
-            segmentCoverage: [{ segmentId, disposition: 'context', entityIds: ['identity', lateRoleId] }],
-          });
-        }
-        if (pageIndex < roleCount) {
-          const roleId = `role-${pageIndex}`;
-          return pageTransport({
-            identity: { name: '', contacts: [], evidenceSegmentIds: [segmentId] },
-            roles: [{ id: roleId, title: `Role ${pageIndex}`, employer: '', startDate: '', endDate: '', location: '', achievementIds: [], skillIds: [], evidenceSegmentIds: [segmentId] }],
-            achievements: [], projects: [], skills: [], education: [], certifications: [], otherEvidence: [], rolePatches: [], projectPatches: [],
-            continuationState: { roles: { mode: pageIndex === 0 ? 'replace' : 'append', ids: [roleId] }, projects: { mode: 'inherit', ids: [] } },
-            segmentCoverage: [{ segmentId, disposition: 'role-header', entityIds: ['identity', roleId] }],
-          });
-        }
-        return emptyPageShard(segmentId);
-      };
-      const result = await compileAuditedCareerSnapshot({
-        sourceFiles: files, pageMaxSegments: 1, pageMaxSourceChars: 48_000,
-        maxPromptChars: 200_000, workerCount: 3, callText: compile,
-        now: () => '2026-10-07T00:00:00.000Z',
-      });
-      const finalAudits = result.snapshot.auditHistory.at(-1).audits;
-      assert(latePatchWasAudited && lateFindingIssued && lateRepairWasScoped
-        && finalAudits.every(audit => {
-          const scopes = audit.pageAudits.filter(receipt => receipt.pageIndex === finalPageIndex);
-          return scopes.length === 3 && scopes[0].scopeKind === 'page'
-            && scopes.slice(1).reduce((total, scope) => total + scope.rolePatchCount, 0) === roleCount
-            && scopes.slice(1).some(scope => scope.rolePatchCount === 5)
-            && scopes.every(scope => scope.patchCoverageDigest === scopes[0].patchCoverageDigest);
-        })
-        && result.profile.roles.length === roleCount,
-      'a patch after ordinal 100 is sent to a literal patch audit, can raise a valid finding, repairs through only its bounded patch context, and leaves six chained scopes proving exact aggregate coverage');
-      // The second pass creates nine earlier exact grounding findings (larger
-      // than the global diagnostic sample) then makes the ordinal-105 finding
-      // disappear only during repair replay. It must fail closed instead of
-      // fabricating the old category-only receipt instruction.
-      disappearingReplayMode = true;
-      lateFindingIssued = false;
-      latePatchWasAudited = false;
-      lateGroundingAuditCalls = 0;
-      earlyGroundingScopeIndex = null;
-      earlyGroundingReady = new Promise(resolve => { releaseEarlyGrounding = resolve; });
-      let replayFailure = null;
-      try {
-        await compileAuditedCareerSnapshot({
-          sourceFiles: files, pageMaxSegments: 1, pageMaxSourceChars: 48_000,
-          maxPromptChars: 200_000, workerCount: 3, callText: compile,
-          now: () => '2026-10-07T00:00:00.000Z',
-        });
-      } catch (error) { replayFailure = error; }
-      assert(latePatchWasAudited && lateFindingIssued && lateGroundingAuditCalls === 2
-        && replayFailure?.code === 'CAREER_SNAPSHOT_AUDIT_REPLAY_INCOMPLETE'
-        && /Refusing a generic repair instruction/.test(replayFailure.message),
-      'after more than eight earlier findings consume the bounded diagnostic sample, a vanished ordinal-105 patch finding fails closed rather than becoming a generic repair');
-      return { roleCount, latePatchWasAudited, lateRepairWasScoped, replayFailure: replayFailure.code };
     },
   },
   {
