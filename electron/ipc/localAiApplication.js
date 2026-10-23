@@ -1,3 +1,4 @@
+import { ApplicationV2RenderUnavailableError, renderDocumentsWithHostRetry, fitRejectionMessage, hostOwnedPunctuationFaults, hostOwnedPunctuationMessage, fitMeasurement, sameFitMeasurement } from './applicationV2HostFaults.js';
 import { SAME_RULE_STOP_REASONS, APPLICATION_ROUTE_CLAUDE_RUNNER, ruleTallyFamily, cleanRuleTally, normalizedObservationFingerprint, recordRuleRejection, clearRuleTallyFamily, clearRuleTallyStep, ruleTallyEscalationRuns, ruleTallyLastRoundIds, summarizeRuleTally, canonicalAnswerSha256, sameRuleStopTerminal, runBudgetTerminal, terminalStopSummary, unchangedNotice } from './applicationRuleTally.js';
 /**
  * Human-in-the-loop Local AI application jobs.
@@ -35,7 +36,7 @@ import { approvedCareerEvidenceCatalog, CAREER_SNAPSHOT_SCHEMA_VERSION, careerSn
 import { cleanCareerSkillNames, readCareerCleanLayer } from './careerCleanLayer.js';
 import { authorityEntityEvidenceQuotes, authorityProjectRoleOf, buildApplicationCareerAuthority, resolveAuthorityCertification, resolveAuthorityEducation, resolveAuthorityEvidence, resolveAuthorityProject, validateAuthorityCertificationEvidence, validateAuthorityEducationEvidence, validateAuthorityIdentityAndLocation, validateAuthorityProjectEvidence, validateAuthorityRoleEvidence, validateAuthoritySkillGroup } from './applicationCareerAuthority.js';
 import { MAX_SOURCE_GROUNDING_QUOTE_CHARS as SOURCE_GROUNDING_QUOTE_CHARS } from './applicationSourceLimits.js';
-import { canonicalizeHostOwnedResumeFields } from './hostOwnedResumeFields.js';
+import { canonicalizeHostOwnedResumeFields, hostOwnedResumeRecordFields } from './hostOwnedResumeFields.js';
 import { expectedExactlyClause } from './hostOwnedText.js';
 import { CLAIM_GROUNDING_RULE, SPELLED_NUMBER_PATTERN, assessBulkQuantity, assessComparativeMagnitude, assessScaleWord, assessStrengthFamily, claimGroundingFindings, claimedIntervals, clauseIndexesContaining, describeClaimFinding, evidenceBody, groundingClauses, quoteVerbHints, relatedQuoteIndexes, relatednessStem, spelledNumberValue, statedBesideSameWords, statedIntervals } from './applicationClaimGrounding.js';
 import { supportsExpensePurpose } from './expenseOutcomeEquivalence.js';
@@ -5091,12 +5092,12 @@ async function writeVerifyHandoffRecord({ jobId, input, state, corrections = [] 
       const html = pasteRenderedResumeMainHtml(resume, renderState, input);
       const letter = authorLocalCoverLetterEnvelope(sanitizeCoverLetter({ ...coverLetter,
         paragraphs: coverLetter.paragraphs.map(paragraph => paragraph.text) }), html, input.job);
-      const resumeFit = await renderLocalResumeWithFit({ resumeMainHtml: html, ledger: [],
-        docId: crypto.randomUUID(), targetPageCount: 1, job: input.job,
-        trustedRenderedRoleDates: trustedRoleDatesForDashGate(selectedSourceRoles(renderState, input)) });
-      const letterFit = await renderLocalCoverLetter({ letter, variantAttrs: resumeFit.variantAttrs, docId: crypto.randomUUID() });
-      if (resumeFit.pageCount !== 1 || letterFit.pageCount !== 1 || !resumeFit.bytes || !letterFit.bytes
-        || resumeFit.layoutIssues?.length || letterFit.layoutIssues?.length) throw new Error('Application v2 judge requires both verified one-page renders for every accepted candidate.');
+      const phase = await writeVerifyRenderPhase({ html, letter, input, renderState });
+      if (phase.kind === 'render-fault') throw new ApplicationV2RenderUnavailableError(phase.renderFault);
+      if (phase.kind === 'host-fault') throw new Error(phase.hostFault.message);
+      const { resumeFit, letterFit } = phase;
+      if (phase.kind !== 'ok' || resumeFit.pageCount !== 1 || letterFit.pageCount !== 1 || !resumeFit.bytes || !letterFit.bytes)
+        throw new Error('Application v2 judge requires both verified one-page renders for every accepted candidate.');
       record.pageImages.push({ candidateId: id, document: 'resume', mimeType: 'image/png', data: await applicationV2PagePngImpl(resumeFit.bytes) });
       record.pageImages.push({ candidateId: id, document: 'cover-letter', mimeType: 'image/png', data: await applicationV2PagePngImpl(letterFit.bytes) });
     }
@@ -5117,7 +5118,24 @@ async function writeVerifyHandoffRecord({ jobId, input, state, corrections = [] 
   return record;
 }
 
-async function writeVerifyCandidateGate({ raw, state, input, frozen, manifest, fitRound = 1 }) {
+async function writeVerifyRenderPhase({ html, letter, input, renderState, render = async () => {
+  const resumeFit = await renderLocalResumeWithFit({ resumeMainHtml: html, ledger: [], docId: crypto.randomUUID(), targetPageCount: 1, job: input.job,
+    trustedRenderedRoleDates: trustedRoleDatesForDashGate(selectedSourceRoles(renderState, input)) });
+  const letterFit = await renderLocalCoverLetter({ letter, variantAttrs: resumeFit.variantAttrs, docId: crypto.randomUUID() });
+  return { resumeFit, letterFit };
+} }) {
+  const result = await renderDocumentsWithHostRetry(render);
+  const { resumeFit, letterFit, transient, punctuation, hostRenders } = result;
+  if (punctuation.length) return { kind: 'host-fault', hostFault: { message: `Application v2 stopped: the ${punctuation[0].document === 'resume' ? 'résumé' : 'cover letter'} text the host assembled contains forbidden punctuation that no rewrite can change (${punctuation[0].detail.slice(0, 160)}). Edit the career data or posting company name it comes from.` }, hostRenders };
+  if (transient.length) return { kind: 'render-fault', renderFault: { faults: transient, hostRenders } };
+  const layoutIssueMessages = [...measuredLayoutIssueMessages(resumeFit.layoutIssues, 'résumé'), ...measuredLayoutIssueMessages(letterFit.layoutIssues, 'cover letter')];
+  const message = fitRejectionMessage({ resumeFit, letterFit, layoutIssueMessages });
+  return message ? { kind: 'fit', fitErrors: [message], measured: fitMeasurement(result), hostRenders }
+    : { kind: 'ok', resumeFit, letterFit, hostRenders };
+}
+export function __writeVerifyRenderPhaseForTests(args) { return writeVerifyRenderPhase(args); }
+
+async function writeVerifyCandidateGate({ raw, state, input, frozen, manifest, render }) {
   const resume = raw?.resume;
   const coverLetter = raw?.coverLetter;
   const selectedRoleIds = Array.isArray(resume?.roles) ? resume.roles.map(role => role?.id) : [];
@@ -5138,6 +5156,12 @@ async function writeVerifyCandidateGate({ raw, state, input, frozen, manifest, f
   const base = { ...state, selectedRoleIds, evidencePlan };
   const canonical = canonicalizeParsedResumeForHost({ resume }, { ...base, stage: 'resume' }, input).parsed;
   const normalizedResume = canonical.resume;
+  const authority = applicationCareerAuthority(input);
+  const hostFaults = hostOwnedPunctuationFaults({ sourceRoles: selectedSourceRoles(base, input), identity: authorityTrustedIdentity(authority),
+    recordFields: hostOwnedResumeRecordFields(normalizedResume, { authority, acceptedEvidence: evidencePlan?.evidence || [] }) });
+  if (hostFaults.length) return { errors: [], contentErrors: [], fitErrors: [], hostFault: { message: hostOwnedPunctuationMessage(hostFaults) },
+    structured: { resume: normalizedResume, coverLetter }, checkIds: [] };
+
   const envelope = stage => ({ protocol: PASTE_APPLICATION_PROTOCOL_VERSION, jobId: input.jobId,
     stage, handoffCode: state.handoffCode, baseHashes: state.baseHashes });
   const resumeErrors = validatePasteResponse({ ...envelope('resume'), resume: normalizedResume }, { ...base, stage: 'resume' }, input);
@@ -5168,20 +5192,11 @@ async function writeVerifyCandidateGate({ raw, state, input, frozen, manifest, f
     const html = pasteRenderedResumeMainHtml(normalizedResume, renderState, input);
     const letter = authorLocalCoverLetterEnvelope(sanitizeCoverLetter({ ...coverLetter,
       paragraphs: coverLetter.paragraphs.map(paragraph => paragraph.text) }), html, input.job);
-    const resumeFit = await renderLocalResumeWithFit({ resumeMainHtml: html, ledger: [], docId: crypto.randomUUID(), targetPageCount: 1, job: input.job,
-      trustedRenderedRoleDates: trustedRoleDatesForDashGate(selectedSourceRoles(renderState, input)) });
-    const letterFit = await renderLocalCoverLetter({ letter, variantAttrs: resumeFit.variantAttrs, docId: crypto.randomUUID() });
-    const issues = [];
-    for (const [label, fit] of [['résumé', resumeFit], ['cover letter', letterFit]]) {
-      if (fit.renderError) issues.push(`${label} render failed: ${fit.renderError}`);
-      if (fit.fontsLoaded !== true) issues.push(`${label} PDF fonts did not load`);
-      if (fit.pageCount !== 1) issues.push(`${label} is ${fit.pageCount} pages (target: 1)`);
-      issues.push(...(fit.layoutIssues || []).map(issue => `${label}: ${issue}`));
-    }
-    if (issues.length) {
-      const fitErrors = [`${issues.join('; ')}. Continue the Local AI routine with measured revision ${fitRound} using fit-feedback.json; there is no fixed revision limit.`];
-      return { errors: fitErrors, contentErrors: [], fitErrors, structured: { resume: normalizedResume, coverLetter }, checkIds: ['measured-one-page-fit'] };
-    }
+    const phase = await writeVerifyRenderPhase({ html, letter, input, renderState, render });
+    const structured = { resume: normalizedResume, coverLetter };
+    if (phase.kind === 'host-fault' || phase.kind === 'render-fault') return { errors: [], contentErrors: [], fitErrors: [], structured, checkIds: [],
+      ...(phase.hostFault ? { hostFault: phase.hostFault } : { renderFault: phase.renderFault }) };
+    if (phase.kind === 'fit') return { errors: phase.fitErrors, contentErrors: [], fitErrors: phase.fitErrors, measured: phase.measured, structured, checkIds: ['measured-one-page-fit'] };
   }
   return { errors, contentErrors: errors, fitErrors: [], structured: { resume: normalizedResume, coverLetter }, checkIds: pasteRejectionCheckIds(errors).checkIds };
 }
@@ -7660,7 +7675,10 @@ export async function getLocalApplicationHandoff({ jobId, canvasFilePath } = {})
     // the one call site that omits `corrections` — a dialog reopen, per
     // resolvePasteCorrections' own header, is the one round that may need its
     // disk fallback.
-    return { handoff: await pasteHandoffRecord({ jobId, input, state, draft, root, dir }), localJob: { id: jobId, status: manifest.status, mode: 'paste', revision: state.revision, logCount: state.logCount || 0, folder: dir } };
+    const record = await pasteHandoffRecord({ jobId, input, state, draft, root, dir });
+    const hold = isWriteVerifyJob(input) ? await readWriteVerifyRenderHold(dir, state) : null;
+    if (hold) record.renderHold = { stage: hold.stage, revision: hold.revision, faults: hold.faults.map(({ document, code }) => ({ document, code })), hostRenders: hold.hostRenders, heldAt: hold.heldAt };
+    return { handoff: record, localJob: { id: jobId, status: manifest.status, mode: 'paste', revision: state.revision, logCount: state.logCount || 0, folder: dir } };
   });
   return snapshot;
 }
@@ -7782,6 +7800,23 @@ export function __recordWriteVerifyRoundDiagnosticsForTests(args) {
   return recordWriteVerifyRoundDiagnostics(args);
 }
 
+async function holdWriteVerifyRender({ dir, jobId, state, stage, candidateId, rawText, renderFault }) {
+  await atomicJson(path.join(dir, 'render-hold.json'), { version: 1, jobId, stage, revision: state.revision, handoffCode: state.handoffCode,
+    candidateId, responseSha256: pasteJsonHash(rawText), response: rawText, faults: renderFault.faults,
+    hostRenders: renderFault.hostRenders, heldAt: new Date().toISOString() });
+}
+async function readWriteVerifyRenderHold(dir, state) {
+  const target = path.join(dir, 'render-hold.json');
+  let hold;
+  try { hold = JSON.parse(await readOwnedFile(dir, target, { maxBytes: 3 * 1024 * 1024 })); }
+  catch (error) { if (error?.code === 'ENOENT') return null; if (!(error instanceof SyntaxError)) throw error; }
+  if (hold?.version === 1 && hold.jobId === path.basename(dir) && hold.stage === state.stage && hold.revision === state.revision
+    && hold.handoffCode === state.handoffCode && typeof hold.response === 'string' && pasteJsonHash(hold.response) === hold.responseSha256) return hold;
+  await fs.promises.unlink(target).catch(() => {}); return null;
+}
+export const __holdWriteVerifyRenderForTests = args => holdWriteVerifyRender(args);
+export const __readWriteVerifyRenderHoldForTests = (dir, state) => readWriteVerifyRenderHold(dir, state);
+
 async function submitWriteVerifyHandoff({ root, jobId, dir, manifest, input, frozen, state, response, route }) {
   const outgoingStage = state.stage;
   const work = structuredClone(state.writeVerify);
@@ -7802,6 +7837,8 @@ async function submitWriteVerifyHandoff({ root, jobId, dir, manifest, input, fro
   let parsed = null;
   let errors = [];
   let fitRejected = false;
+  let hostFault = null;
+  let measured = null;
   let factTransition = null;
   if (outgoingStage !== 'write') {
     try { parsed = parsePasteResponse(rawText); }
@@ -7824,10 +7861,20 @@ async function submitWriteVerifyHandoff({ root, jobId, dir, manifest, input, fro
     else {
       if (outgoingStage !== 'fact-correction') candidate.structured = { resume: parsed.resume, coverLetter: parsed.coverLetter };
       if (outgoingStage === 'fact-correction') errors.push(...writeVerifyChangedFindingErrors(work.factFindings || [], parsed));
-      const gate = errors.length ? null : await writeVerifyCandidateGate({ raw: parsed, state, input, frozen, manifest,
-        fitRound: (candidate?.fitCorrections || 0) + 1 });
-      if (gate) { errors.push(...gate.errors); fitRejected = gate.fitErrors.length > 0; }
-      if (!errors.length && gate) {
+      const gate = errors.length ? null : await writeVerifyCandidateGate({ raw: parsed, state, input, frozen, manifest });
+      if (gate?.renderFault) {
+        await holdWriteVerifyRender({ dir, jobId, state, stage: outgoingStage, candidateId: outgoingCandidateId, rawText, renderFault: gate.renderFault });
+        // A host event spends a log sequence only; the answer and revision stay held.
+        const sequence = (state.logCount || 0) + 1;
+        recordPasteHandoffDiagnostic({ stage: outgoingStage, outcome: 'held', reason: 'RENDER_UNAVAILABLE', revision: state.revision, logCount: sequence });
+        await appendPasteGenerationLog(dir, { type: 'write-verify-render-held', jobId, sequence, revision: state.revision, stage: outgoingStage,
+          reason: 'RENDER_UNAVAILABLE', faults: gate.renderFault.faults.map(({ document, code }) => ({ document, code })), hostRenders: gate.renderFault.hostRenders });
+        await atomicJson(path.join(dir, 'manifest.json'), { ...manifest, paste: { ...manifest.paste, logCount: sequence } });
+        throw new ApplicationV2RenderUnavailableError(gate.renderFault);
+      }
+      if (gate?.hostFault) hostFault = gate.hostFault;
+      else if (gate) { errors.push(...gate.errors); fitRejected = gate.fitErrors.length > 0; measured = gate.measured || null; }
+      if (!errors.length && gate && !hostFault) {
         if (outgoingStage === 'fact-correction') {
           const winner = work.candidates.find(row => row.id === work.ranking[work.factIndex]);
           winner.structured = gate.structured;
@@ -7884,13 +7931,17 @@ async function submitWriteVerifyHandoff({ root, jobId, dir, manifest, input, fro
       } else { work.factFindings = parsed.findings; work.factCorrectionRound = 0; }
     }
   }
+  if (hostFault) errors.push(`candidate-dash-punctuation: ${hostFault.message}`);
   // An accepted stage never hands a correction list to the next handoff.
   if (!errors.length) work.lastCorrections = [];
   if (errors.length && ['convert', 'verify-correction', 'fit-correction'].includes(outgoingStage)) {
     const separateFit = work.fitPolicy === 'separate-four-rounds' && fitRejected;
+    const previousFit = candidate.rejections.findLast(row => row.measured);
+    const fitNoProgress = fitRejected && sameFitMeasurement(previousFit?.measured, measured);
     candidate.rejections.push({ round: separateFit ? candidate.fitCorrections || 0 : candidate.corrections,
-      kind: separateFit ? 'fit' : 'content', checkIds: separateFit ? ['measured-one-page-fit'] : pasteRejectionCheckIds(errors).checkIds, errors });
-    if (separateFit) {
+      kind: separateFit ? 'fit' : 'content', checkIds: separateFit ? ['measured-one-page-fit'] : pasteRejectionCheckIds(errors).checkIds, errors, ...(measured ? { measured } : {}) });
+    if (fitNoProgress) { candidate.status = 'dropped'; candidate.dropReason = ['fit-no-progress']; work.lastCorrections = []; }
+    else if (separateFit) {
       if ((candidate.fitCorrections || 0) < WRITE_VERIFY_MAX_FIT_CORRECTIONS) {
         candidate.fitCorrections = (candidate.fitCorrections || 0) + 1;
         candidate.status = 'fit-correcting'; work.lastCorrections = errors;
@@ -7928,6 +7979,8 @@ async function submitWriteVerifyHandoff({ root, jobId, dir, manifest, input, fro
       { stage: outgoingStage, checkIds: pasteRejectionCheckIds(errors).checkIds, errors });
     work.lastCorrections = errors;
   }
+  if (hostFault && outgoingStage !== 'fact-correction') { candidate.status = 'dropped'; candidate.dropReason = [hostFault.message]; }
+  if (hostFault) work.lastCorrections = [];
   const counted = ['write', 'convert', 'verify-correction', 'fit-correction', 'fact-correction'].includes(outgoingStage);
   const stepEndedByCounter = counted && (outgoingStage === 'fact-correction' ? factTransition?.nextStage !== 'fact-correction' : candidate.status === 'dropped');
   const plan = errors.length ? planApplicationRejection({ state, stage: outgoingStage,
@@ -7967,6 +8020,7 @@ async function submitWriteVerifyHandoff({ root, jobId, dir, manifest, input, fro
   else if (outgoingStage === 'fact-recheck') nextStage = work.factPassed ? 'completed'
     : (work.factIndex < work.ranking.length ? 'fact-check' : 'write-verify-human-stop');
   else if (outgoingStage === 'pick' && work.ranking.length) nextStage = 'fact-check';
+  if (hostFault) nextStage = 'write-verify-human-stop';
   if (nextStage === 'pick' && !work.elimination && acceptedWriteVerifyCandidates(work).length > 6) {
     const ids = acceptedWriteVerifyCandidates(work).map(row => row.id);
     work.elimination = { activeIds: ids.slice(0, 2), pending: ids.slice(2), completed: [], priorLosers: [], round: 1 };
@@ -7974,8 +8028,8 @@ async function submitWriteVerifyHandoff({ root, jobId, dir, manifest, input, fro
   if (nextStage === 'write-verify-human-stop') {
     const ids = [...new Set(work.candidates.flatMap(row => [...row.rejections, ...(row.factCorrectionRejections || [])]
       .flatMap(item => item.checkIds || [])))];
-    work.terminal = { kind: 'write-verify-human-stop', checkIds: ids,
-      message: `Application v2 stopped after every candidate failed verification or fact-check. Failing checks: ${ids.join(', ') || 'fact-check'}.` };
+    work.terminal = { kind: 'write-verify-human-stop', checkIds: hostFault ? ['candidate-dash-punctuation'] : ids,
+      message: hostFault ? hostFault.message : `Application v2 stopped after every candidate failed verification or fact-check. Failing checks: ${ids.join(', ') || 'fact-check'}.` };
   }
   const next = { ...state, ruleTally: tally, writeVerify: work, stage: nextStage, revision: state.revision + 1,
     logCount: (state.logCount || 0) + 1, ...rotatePasteHandoffCode(state) };
@@ -8004,6 +8058,7 @@ async function submitWriteVerifyHandoff({ root, jobId, dir, manifest, input, fro
     revision: next.revision, stage: outgoingStage, nextStage, responseSha256: pasteJsonHash(rawText),
     ...(errors.length ? { checkIds: fitRejected ? ['measured-one-page-fit'] : pasteRejectionCheckIds(errors).checkIds } : {}) });
   await atomicJson(path.join(dir, 'manifest.json'), { ...manifest, status, paste: persisted });
+  await fs.promises.unlink(path.join(dir, 'render-hold.json')).catch(error => { if (error?.code !== 'ENOENT') throw error; });
   const localJob = { id: jobId, status, mode: 'paste', revision: next.revision, logCount: next.logCount, folder: dir };
   if (nextStage === 'completed' || nextStage === 'write-verify-human-stop') return { accepted: !errors.length, completed: true,
     terminal: nextStage === 'write-verify-human-stop', localJob, handoff: null, ...(errors.length ? { validationErrors: errors } : {}) };
@@ -8011,7 +8066,7 @@ async function submitWriteVerifyHandoff({ root, jobId, dir, manifest, input, fro
     ...(errors.length ? { validationErrors: errors } : {}), handoff: await writeVerifyHandoffRecord({ jobId, input, state: next, corrections: work.lastCorrections || [] }) };
 }
 
-export async function submitLocalApplicationHandoff({ jobId, canvasFilePath, handoffCode, response, route = null } = {}) {
+export async function submitLocalApplicationHandoff({ jobId, canvasFilePath, handoffCode, response, route = null, renderRetry = false } = {}) {
   return withLocalAiJobMutationLock(jobId, async () => {
     const { root, dir, manifest, input, frozen, state } = await getPasteApplicationState(jobId, canvasFilePath);
     if (pasteTerminalStop(state, input)) {
@@ -8032,6 +8087,11 @@ export async function submitLocalApplicationHandoff({ jobId, canvasFilePath, han
       throw new Error('That handoff code is stale. Copy the current prompt and try again.');
     }
     if (isWriteVerifyJob(input) && WRITE_VERIFY_STAGES.includes(state.stage)) {
+      if (renderRetry === true) {
+        const hold = await readWriteVerifyRenderHold(dir, state);
+        if (!hold) throw new Error('This job has no held render to retry.');
+        response = hold.response;
+      }
       return submitWriteVerifyHandoff({ root, jobId, dir, manifest, input, frozen, state, response, route });
     }
     let parsed;

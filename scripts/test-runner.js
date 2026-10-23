@@ -1,3 +1,4 @@
+import application_render_faults from './tests/application-render-faults.js';
 import application_rule_tally from './tests/application-rule-tally.js';
 import fs from 'node:fs';
 import base64 from './tests/base64.js';
@@ -201,6 +202,7 @@ const testGroups = [
   ['application-career-authority.js', application_career_authority],
   ['application-write-verify.js', application_write_verify],
   ['application-rule-tally.js', application_rule_tally],
+  ['application-render-faults.js', application_render_faults],
   ['cover-letter-hedged-diagnosis.js', cover_letter_hedged_diagnosis],
   ['claude-application-runner.js', claude_application_runner],
   ['claude-application-sdk-stage.js', claude_application_sdk_stage],

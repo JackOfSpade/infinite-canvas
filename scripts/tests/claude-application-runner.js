@@ -188,6 +188,30 @@ function scriptedApi(stages, { rejectFirst = false } = {}) {
 
 export default [
   {
+    name: 'claude runner driver: held render replays without a provider call and retry replays again',
+    async run() {
+      let providerCalls = 0, submissions = 0;
+      const runner = createClaudeApplicationRunner({ stateFile: tempStateFile(), logger: quietLogger(), homedir: '',
+        api: { getHandoff: async () => ({ handoff: { stage: 'convert', handoffCode: 'h', prompt: 'p', renderHold: { stage: 'convert' } } }),
+          submitHandoff: async args => {
+            assert.equal(args.renderRetry, true); assert.equal(args.response, ''); assert.equal(args.route, 'claude-runner');
+            if (++submissions === 1) throw Object.assign(new Error('Application v2 could not verify page layout: synthetic renderer unavailable.'), { code: 'APPLICATION_V2_RENDER_UNAVAILABLE' });
+            return { accepted: true, completed: true };
+          }, subscribeDiscards: () => () => {} },
+        runStage: async () => { providerCalls++; return { text: 'must not run' }; } });
+      try {
+        runner.ensure({ jobId: 'held-job', canvasFilePath: '/c.canvas' });
+        await waitFor(() => runner.status(['held-job'])['held-job']?.status === 'failed');
+        assert.match(runner.status(['held-job'])['held-job'].message, /could not verify page layout/);
+        runner.ensure({ jobId: 'held-job', canvasFilePath: '/c.canvas' }); assert.equal(submissions, 1);
+        await runner.retry({ jobId: 'held-job', canvasFilePath: '/c.canvas' });
+        await waitFor(() => runner.status(['held-job'])['held-job']?.status === 'done');
+        assert.equal(submissions, 2); assert.equal(providerCalls, 0);
+      } finally { await runner.shutdown(); }
+    },
+  },
+
+  {
     name: 'claude runner driver: needs-review diagnostics are best effort and malformed run counts are ignored',
     async run() {
       for (const rejectLog of [false, true]) {

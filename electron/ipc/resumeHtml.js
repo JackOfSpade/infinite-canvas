@@ -1,3 +1,5 @@
+import { forbiddenPunctuationKinds } from './candidatePunctuation.js';
+export { forbiddenPunctuationKinds } from './candidatePunctuation.js';
 /**
  * Self-contained HTML builders for the job-application generator (résumé +
  * cover letter). Design doc: docs/resume-achievement-mining-design.md §5.
@@ -58,7 +60,6 @@ import { ledgerById, derivationTooltip } from '../../src/utils/achievementLedger
 // because importing structuredResume.js from here closes a cycle back through
 // jobApplication.js → resumeRender.js → this file.
 import { titleCaseSkillGroupLabel } from './skillGroupLabel.js';
-import { enDashIsRange } from './dashRanges.js';
 // Posting-variant bounds and the URL policy have exactly ONE definition, in
 // applicationBundle.js — the same module that renders the Markdown companion.
 // The workspace bundle JSON and the rendered link list must not drift from it,
@@ -461,23 +462,13 @@ function candidateResumeText(value, trustedRenderedRoleDates) {
 // dashes, semicolons, spaced hyphens and en dashes outside a range are rejected.
 
 function dashPunctuationProblems(text, surface) {
-  const problems = [];
-  if (text.includes('—')) {
-    problems.push(`${surface} contains an em dash. Use a comma, a conjunction, parentheses, or separate sentences instead.`);
-  }
-  if (text.includes(';')) {
-    problems.push(`${surface} contains a semicolon. Split the clause into separate sentences.`);
-  }
-  if (/\s-\s/.test(text)) {
-    problems.push(`${surface} contains a spaced hyphen acting as sentence punctuation.`);
-  }
-  for (let index = text.indexOf('–'); index !== -1; index = text.indexOf('–', index + 1)) {
-    if (!enDashIsRange(text, index)) {
-      problems.push(`${surface} contains an en dash outside a date or numeric range.`);
-      break;
-    }
-  }
-  return problems;
+  const messages = {
+    'em-dash': `${surface} contains an em dash. Use a comma, a conjunction, parentheses, or separate sentences instead.`,
+    semicolon: `${surface} contains a semicolon. Split the clause into separate sentences.`,
+    'spaced-hyphen': `${surface} contains a spaced hyphen acting as sentence punctuation.`,
+    'en-dash': `${surface} contains an en dash outside a date or numeric range.`,
+  };
+  return forbiddenPunctuationKinds(text).map(kind => messages[kind]);
 }
 
 /**

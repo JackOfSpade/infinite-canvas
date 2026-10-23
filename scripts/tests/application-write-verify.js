@@ -45,6 +45,18 @@ const JOB_ID = '11111111-1111-4111-8111-111111111111';
 
 export default [
   {
+    name: 'v2 newest fit observations supersede older measurements and legacy newest rows stay excluded',
+    run() {
+      const content = { kind: 'content', errors: ['unit-source-grounding: b1 synthetic defect'] };
+      const old = { kind: 'fit', errors: ['measured-one-page-fit: older measurement'] };
+      const current = { kind: 'fit', errors: ['measured-one-page-fit: current measurement'] };
+      assert.deepEqual(priorRoundFindings([old, content, current], []), [...content.errors, ...current.errors]);
+      assert.deepEqual(priorRoundFindings([old, content, { kind: 'fit', errors: ['legacy fit-feedback.json'] }], []), content.errors);
+      assert.deepEqual(priorRoundFindings([old, content, current], current.errors), content.errors);
+    },
+  },
+
+  {
     name: 'v2 correction details preserve strict spans, bound output, and register each rule',
     run: () => {
       const text = `The team's ledger rebuild used five engineers.`;
@@ -259,7 +271,7 @@ export default [
     },
   },
   {
-    name: 'v2 prior-round findings keep only earlier content rounds, deduplicated, bounded and excluding the current corrections',
+    name: 'v2 prior-round findings keep earlier content and newest fit rounds, deduplicated, bounded and excluding the current corrections',
     run() {
       for (const [domain, action] of domains) {
         const t = n => `unit-source-grounding: ${domain} ${action} finding ${n}`;
@@ -269,10 +281,10 @@ export default [
           { round: 0, kind: 'fit', checkIds: ['measured-one-page-fit'], errors: [`${domain} render one line shorter`] },
           { round: 1, kind: 'content', checkIds: [], errors: [` ${t(1)} `, t(3), t(4)] },
         ];
-        assert.deepEqual(priorRoundFindings(rows, [t(4)]), [t(2), t(1), t(3)], domain);
+        assert.deepEqual(priorRoundFindings(rows, [t(4)]), [t(2), `${domain} render one line shorter`, t(1), t(3)], domain);
         assert.deepEqual(priorRoundFindings(rows, [t(4)], 2), [t(1), t(3)], `${domain}: newest win the bound, oldest first`);
         assert.deepEqual(priorRoundFindings(rows, [t(4)], 0), [], domain);
-        assert.deepEqual(priorRoundFindings(rows, []), [t(2), t(1), t(3), t(4)], domain);
+        assert.deepEqual(priorRoundFindings(rows, []), [t(2), `${domain} render one line shorter`, t(1), t(3), t(4)], domain);
         assert.deepEqual(priorRoundFindings([], [t(1)]), [], domain);
         assert.deepEqual(priorRoundFindings(undefined, undefined), [], domain);
         const many = [{ kind: 'content', errors: Array.from({ length: WRITE_VERIFY_PRIOR_ROUND_FINDINGS_MAX + 3 }, (_, index) => t(`m${index}`)) }];
@@ -306,8 +318,8 @@ export default [
           assert.equal(fresh.includes(WRITE_VERIFY_PRIOR_ROUNDS_HEADING), false, `${domain} ${stage}`);
           // Fit and write-stage rows are not grounding observations.
           candidate.rejections.push({ round: 0, checkIds: ['schema-invalid'], errors: [`${domain} plain text format`] });
-          candidate.rejections.push({ round: 0, kind: 'fit', checkIds: ['measured-one-page-fit'], errors: [`${domain} shorten by one line`] });
           assert.equal(writeVerifyPrompt({ stage, state, sourcePrompt, envelope, corrections: current }), fresh, `${domain} ${stage}: non-content rows change nothing`);
+          candidate.rejections.push({ round: 0, kind: 'fit', checkIds: ['measured-one-page-fit'], errors: [`${domain} shorten by one line`] });
           candidate.rejections.push({ round: 0, kind: 'content', checkIds: [], errors: [t(1), t(2)] });
           candidate.rejections.push({ round: 1, kind: 'content', checkIds: [], errors: [t(3), current[0]] });
           const prompt = writeVerifyPrompt({ stage, state, sourcePrompt, envelope, corrections: current });
@@ -317,7 +329,7 @@ export default [
           const correctAt = prompt.indexOf('Correct the complete documents');
           assert.ok(docsAt >= 0 && docsAt < headingAt && headingAt < correctAt, `${domain} ${stage}: between documents and correction instruction`);
           const section = prompt.slice(headingAt, correctAt);
-          assert.equal(section, `${WRITE_VERIFY_PRIOR_ROUNDS_HEADING}:\n${intro}\n- ${t(1)}\n- ${t(2)}\n- ${t(3)}\n\n`, `${domain} ${stage}: exact section`);
+          assert.equal(section, `${WRITE_VERIFY_PRIOR_ROUNDS_HEADING}:\n${intro}\n- ${domain} shorten by one line\n- ${t(1)}\n- ${t(2)}\n- ${t(3)}\n\n`, `${domain} ${stage}: exact section`);
           for (const text of [t(1), t(2), t(3)]) assert.ok(prompt.includes(`\n- ${text}`), `${domain} ${stage}`);
           for (const text of current) assert.equal(section.includes(text), false, `${domain} ${stage}: current corrections stay out of the section`);
           assert.equal(prompt.split(current[0]).length, 2, `${domain} ${stage}: the current correction prints once`);

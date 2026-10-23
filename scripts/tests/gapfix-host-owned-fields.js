@@ -180,6 +180,48 @@ const deepFreeze = value => {
 
 export default [
   {
+    name: 'v2 real host pre-check covers projected identity and selected education credentials without extending identity',
+    async run() {
+      const { __writeVerifyCandidateGateForTests } = await import('../../electron/ipc/localAiApplication.js');
+      for (const [field, expected] of [['name', 'identity.name'], ['email', 'identity.contact[0]'], ['education', 'education[edu-supply].institution'], ['certification', 'credentials[cert-broker].issuer']]) {
+        const career = structuredClone(CAREERS[0]);
+        if (field === 'name') career.name = 'Synthetic; Name';
+        if (field === 'email') career.email = 'synthetic;contact@example.test';
+        if (field === 'education') career.education.institution = 'Synthetic; Institute';
+        if (field === 'certification') career.certification.issuer = 'Synthetic; Council';
+        const kit = authorityKit(career);
+        assert(Object.keys(kit.authority.identity).join(',') === 'name,contact', 'the application identity projection stays unchanged');
+        const input = { jobId: 'synthetic-identity-fault', job: { title: career.role.title, company: career.role.employer },
+          careerAuthority: { snapshotId: 'synthetic', snapshotDigest: 'digest' }, __careerAuthorityIndex: kit.authority,
+          sourceRoles: kit.sourceRoles, hostCareerEvidenceCatalog: [], careerSkillEvidence: { skills: [] } };
+        const gate = await __writeVerifyCandidateGateForTests({ raw: { resume: unitResume(career), coverLetter: {} },
+          state: { handoffCode: 'synthetic', baseHashes: {}, evidencePlan: { evidence: kit.acceptedEvidence } }, input,
+          frozen: { authority: kit.authority, careerSkillEvidence: { skills: [] } }, manifest: {} });
+        assert(gate.hostFault?.message.includes(expected) && gate.errors.length === 0, `${field} stops at its host-owned field`);
+        assert(!gate.hostFault.message.includes('Synthetic;'), 'source values never become correction text');
+      }
+    },
+  },
+
+  {
+    name: 'v2 host-owned punctuation stops with a field path before content corrections',
+    async run() {
+      const { __writeVerifyCandidateGateForTests } = await import('../../electron/ipc/localAiApplication.js');
+      const career = structuredClone(CAREERS[0]); career.role.title = 'Synthetic Analyst - Platform';
+      const kit = authorityKit(career);
+      const input = { jobId: 'synthetic-host-fault', job: { title: career.role.title, company: career.role.employer },
+        careerAuthority: { snapshotId: 'synthetic', snapshotDigest: 'digest' }, __careerAuthorityIndex: kit.authority,
+        sourceRoles: kit.sourceRoles, hostCareerEvidenceCatalog: [], careerSkillEvidence: { skills: [] } };
+      const state = { handoffCode: 'synthetic', baseHashes: {}, evidencePlan: { evidence: kit.acceptedEvidence } };
+      const gate = await __writeVerifyCandidateGateForTests({ raw: { resume: unitResume(career), coverLetter: {} }, state, input,
+        frozen: { authority: kit.authority, careerSkillEvidence: { skills: [] } }, manifest: {} });
+      assert(gate.hostFault, 'host-owned spaced hyphen must stop before asking the model to rewrite it');
+      assert(gate.hostFault.message.includes(`roles[${career.role.id}].title`) && gate.hostFault.message.includes('spaced hyphen'), 'name field and mark');
+      assert(!gate.hostFault.message.includes(career.role.title) && gate.errors.length === 0, 'do not send source text as correction');
+    },
+  },
+
+  {
     name: 'Host-owned surface key: case, Unicode form, spacing, dash and quote variants are one value, and nothing else is',
     run: () => {
       for (const career of CAREERS) {

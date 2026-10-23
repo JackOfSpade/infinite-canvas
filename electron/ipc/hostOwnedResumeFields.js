@@ -207,3 +207,18 @@ export function canonicalizeHostOwnedResumeFields(resume, { authority = null, ac
     events,
   };
 }
+
+/** Trusted fields that the selected education and credential records always render. */
+export function hostOwnedResumeRecordFields(resume, { authority, acceptedEvidence }) {
+  const fields = [];
+  for (const [section, kind, keys, resolve] of [['education', 'education', EDUCATION_FIELDS, resolveAuthorityEducation],
+    ['credentials', 'certification', CERTIFICATION_FIELDS, resolveAuthorityCertification]]) {
+    for (const unit of resume?.[section] || []) {
+      const id = singleAuthorityEntity(authority, unit.evidenceIds, acceptedEvidence, kind);
+      if (id === null) continue;
+      let record; try { record = resolve(authority, id); } catch { continue; }
+      for (const field of keys) fields.push({ path: `${section}[${id}].${field}`, text: field === 'dates' ? formatRoleDateForPresentation(record[field]) : record[field] });
+    }
+  }
+  return fields;
+}

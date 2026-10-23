@@ -42,8 +42,9 @@ const SAFE_STAGES = new Set(['requirements', 'requirements-audit', 'requirements
   'requirements-audit-disagreement', 'career-match', 'evidence-plan', 'resume', 'cover-letter',
   'requirement-disposition', 'review',
   'write', 'convert', 'verify-correction', 'fit-correction', 'pick', 'fact-check', 'fact-correction', 'fact-recheck', 'write-verify-human-stop']);
-const SAFE_OUTCOMES = new Set(['accepted', 'rejected']);
+const SAFE_OUTCOMES = new Set(['accepted', 'rejected', 'held']);
 const SAFE_REASONS = new Set([
+  'RENDER_UNAVAILABLE',
   'INVALID_JSON',
   // The residual classification, and only the residual classification: what a
   // rejected round gets when some validator failed and the caller's own named
@@ -278,7 +279,8 @@ export function buildPasteHandoffDiagnosticsMarkdown() {
   const snapshot = getPasteHandoffDiagnosticsSnapshot();
   if (snapshot.receipts.length === 0) return '';
   const accepted = snapshot.receipts.filter(item => item.outcome === 'accepted').length;
-  const rejected = snapshot.receipts.length - accepted;
+  const held = snapshot.receipts.filter(item => item.outcome === 'held').length;
+  const rejected = snapshot.receipts.length - accepted - held;
   const retention = snapshot.omitted > 0
     ? ` · ${snapshot.omitted} older receipt(s) omitted (newest ${snapshot.receipts.length} of ${snapshot.total} shown)`
     : ` · ${snapshot.receipts.length} of ${snapshot.total} process receipt(s) shown`;
@@ -293,7 +295,7 @@ export function buildPasteHandoffDiagnosticsMarkdown() {
     // as a lost receipt rather than an index spent on a system event. Say
     // which number it is instead of leaving the gap to be interpreted.
     '> `log N` is the shared Generation Log sequence number, not a count of these receipts: system events (for example a host-requested fit revision) consume indices too, so gaps in `log N` are expected and are not missing receipts.',
-    `- Retained: ${snapshot.receipts.length} receipt(s) · ${accepted} accepted · ${rejected} rejected${retention} · source keeps newest ${snapshot.sourceLimit} receipt(s) per process`,
+    `- Retained: ${snapshot.receipts.length} receipt(s) · ${accepted} accepted · ${rejected} rejected${held ? ` · ${held} held` : ''}${retention} · source keeps newest ${snapshot.sourceLimit} receipt(s) per process`,
   ];
   for (const item of snapshot.receipts) {
     const at = Number.isFinite(item.at) ? new Date(item.at).toISOString() : 'time not recorded';

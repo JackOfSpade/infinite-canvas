@@ -342,3 +342,9 @@ export {
   normalizedObservationFingerprint, recordRuleRejection, ruleTallyEscalationRuns, ruleTallyFamily,
   ruleTallyLastRoundIds, runBudgetTerminal, sameRuleStopTerminal, summarizeRuleTally, terminalStopSummary, unchangedNotice,
 } from '../electron/ipc/applicationRuleTally.js';
+
+export { __writeVerifyRenderPhaseForTests } from '../electron/ipc/localAiApplication.js';
+export { __holdWriteVerifyRenderForTests, __readWriteVerifyRenderHoldForTests } from '../electron/ipc/localAiApplication.js';
+export { classifyRenderFaults, renderDocumentsWithHostRetry, fitRejectionMessage, hostOwnedPunctuationFaults, hostOwnedPunctuationMessage, fitMeasurement, sameFitMeasurement } from '../electron/ipc/applicationV2HostFaults.js';
+export { __setLocalAiRenderPdfForTests } from '../electron/ipc/localAiApplication.js';
+export { recordPasteHandoffDiagnostic, getPasteHandoffDiagnosticsSnapshot, buildPasteHandoffDiagnosticsMarkdown, _resetPasteHandoffDiagnostics } from '../electron/ipc/pasteHandoffDiagnostics.js';

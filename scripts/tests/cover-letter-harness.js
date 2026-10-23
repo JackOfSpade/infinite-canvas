@@ -2901,7 +2901,7 @@ export default [
         && legalSuffixJob.company === legalSuffixCompany,
       'a legal-entity suffix is omitted only from the salutation, while a spoken "Company" stays');
       const qualifiedEnvelope = authorCoverLetterEnvelope({ job: { company: 'Acme (Canada)' }, evidence });
-      for (const company of ['Orchard - Scheduling Tools', 'Harbor — Logistics', 'Elm – Research']) {
+      for (const company of ['Orchard; Scheduling Tools', 'Orchard - Scheduling Tools', 'Harbor — Logistics', 'Elm – Research']) {
         const job = { company };
         const letter = { ...authorCoverLetterEnvelope({ job, evidence }), paragraphs: ['I built reporting tools.'] };
         assert(letter.salutation === 'Dear Hiring Team,' && job.company === company,

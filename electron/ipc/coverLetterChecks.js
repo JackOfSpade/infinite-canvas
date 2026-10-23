@@ -223,7 +223,7 @@ function salutationCompanyName(value = '') {
   // The host owns this field, so a writer cannot repair punctuation copied
   // from a board's employer display name. Use the neutral salutation instead
   // of altering the employer's name or spending every correction on it.
-  return /[—–]|\s-\s/u.test(displayName) ? '' : displayName;
+  return /[\u2014\u2013;]|\s-\s/u.test(displayName) ? '' : displayName;
 }
 
 // Cover letters identify their preparation period without implying a

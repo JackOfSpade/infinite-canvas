@@ -326,8 +326,8 @@ export const WRITE_VERIFY_PRIOR_ROUNDS_HEADING = 'EARLIER ROUNDS OF THIS SAME DR
 
 /**
  * Findings earlier content rounds of the same draft already reported. Only
- * rows with kind === 'content' count: fit rows carry a render instruction and
- * write-stage rows (no kind) are about the plain-text format. Errors are
+ * Content rows and the newest non-legacy fit row count. Older fit and
+ * write-stage rows (no kind) are excluded. Errors are
  * trimmed, blanks dropped, any text in `corrections` (the current round,
  * printed separately) dropped, deduped by text keeping the newest occurrence,
  * and the newest `max` texts are returned oldest first.
@@ -336,8 +336,10 @@ export function priorRoundFindings(rows, corrections, max = WRITE_VERIFY_PRIOR_R
   if (!Number.isSafeInteger(max) || max < 0) throw new Error('Prior-round finding bound must be a non-negative integer.');
   const current = new Set((Array.isArray(corrections) ? corrections : []).map(item => String(item ?? '').trim()));
   const texts = [];
-  for (const row of Array.isArray(rows) ? rows : []) {
-    if (row?.kind !== 'content' || !Array.isArray(row.errors)) continue;
+  const list = Array.isArray(rows) ? rows : [];
+  const newestFit = list.findLastIndex(row => row?.kind === 'fit');
+  for (const [index, row] of list.entries()) {
+    if ((row?.kind !== 'content' && !(index === newestFit && !(row?.errors || []).some(error => /fit-feedback\.json/u.test(String(error))))) || !Array.isArray(row.errors)) continue;
     for (const item of row.errors) {
       const text = String(item ?? '').trim();
       if (text && !current.has(text)) texts.push(text);

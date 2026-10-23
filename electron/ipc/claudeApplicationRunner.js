@@ -1031,6 +1031,15 @@ export function createClaudeApplicationRunner({
       const handoff = current?.handoff;
       if (!handoff) throw new ClaudeRunnerError('APPLICATION_ERROR', 'The application returned no handoff.');
       entry.stage = handoff.stage ?? null;
+      if (handoff.renderHold && nonEmptyString(handoffCodeOf(handoff))) {
+        let held;
+        try { held = await submitHandoff({ jobId, canvasFilePath, handoffCode: handoffCodeOf(handoff), renderRetry: true, response: '', route: APPLICATION_ROUTE_CLAUDE_RUNNER }); }
+        catch (error) { if (isEnoent(error)) return { gone: true }; throw applicationError(error); }
+        if (held?.gone === true) return { gone: true };
+        if (held?.terminal === true) return { needsReview: true, stop: held.stop || null };
+        if (held?.accepted === true && held.completed === true) return { done: true };
+        continue;
+      }
       if (handoff.stage === HUMAN_STOP_STAGE) return { needsReview: true };
       const tasks = Array.isArray(handoff.parallelTasks) ? handoff.parallelTasks.filter(task => nonEmptyString(task?.id)) : [];
       if (tasks.length) {
