@@ -1,9 +1,10 @@
+import { createDecisionLedger, recordDecision, editTargetKey } from '../../electron/ipc/careerProfileEdits.js';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import nodeAssert from 'node:assert';
-import { __careerPageValidationDiagnosticForTests } from '../test-dependencies.js';
+import { __careerPageValidationDiagnosticForTests, __crossPageRulingForTests } from '../test-dependencies.js';
 import { assert } from './testHelpers.js';
 import { MAX_SOURCE_GROUNDING_QUOTE_CHARS } from '../../electron/ipc/applicationSourceLimits.js';
 import { careerDataProjectProvenanceHeadingForName, resumeRoleLocationFailures } from '../../electron/ipc/jobApplication.js';
@@ -288,8 +289,27 @@ function fieldEdit(field, value, entityId = EDIT_SKILL) {
 // Shared fake callText harness. `round` counts calls per lane AND per
 // page/scope, so on a single page it is the compile round; multi-page tests
 // pass `files` + `pageMaxSegments` and read `pageIndex`/`scopeKind`.
+
+function conflictingRoleProjectShard(corpus, pageIndex, skillCategory = 'language') {
+        const segmentId = corpus.segments[pageIndex].id;
+        const location = pageIndex === 0 ? 'Toronto' : 'Montreal';
+        const description = pageIndex === 0 ? 'First' : 'Second';
+        const roleId = `role-${pageIndex}`;
+        const projectId = `project-atlas-${pageIndex}`;
+        const skillId = `skill-python-${pageIndex}`;
+        return pageTransport({
+          identity: { name: '', contacts: [], evidenceSegmentIds: [segmentId] },
+          roles: [{ id: roleId, title: 'Engineer', employer: 'Acme', startDate: 'January 2020', endDate: 'Present', location, achievementIds: [], skillIds: [skillId], evidenceSegmentIds: [segmentId] }],
+          achievements: [], projects: [{ id: projectId, name: 'Atlas', description, roleId, technologies: [], metrics: [], evidenceSegmentIds: [segmentId] }],
+          skills: [{ id: skillId, name: 'Python', category: skillCategory, indexEligible: true, roleIds: [roleId], evidenceSegmentIds: [segmentId] }],
+          education: [], certifications: [], otherEvidence: [], rolePatches: [], projectPatches: [],
+          continuationState: { roles: { mode: 'clear', ids: [] }, projects: { mode: 'clear', ids: [] } },
+          segmentCoverage: [{ segmentId, disposition: 'role-header', entityIds: ['identity', roleId, projectId, skillId] }],
+        });
+}
+
 async function runEditProtocol({
-  audit = () => [{ findings: [] }], repair = () => [], adjudicate = () => [], compile = null,
+  audit = () => [{ findings: [] }], repair = () => [], adjudicate = () => [], rule = () => [], compile = null,
   files = sourceFiles(), pageMaxSegments = undefined,
 } = {}) {
   const corpus = buildCareerSourceCorpus(files);
@@ -303,9 +323,12 @@ async function runEditProtocol({
       const phase = options.hints?.phase || '';
       const pageIndex = options.hints?.pageIndex ?? 0;
       log.calls.push({ task: options.task, phase, prompt, options, pageIndex });
-      if (options.task === 'career-profile-compile') return compile ? compile(corpus, pageIndex, prompt, options) : pageTransport(validProfile(corpus));
       let candidates;
-      if (EDIT_LANE_BY_TASK.has(options.task)) {
+      if (options.task === 'career-profile-compile') {
+        const compiled = compile ? compile(corpus, pageIndex, prompt, options) : pageTransport(validProfile(corpus));
+        if (!Array.isArray(compiled)) return compiled;
+        candidates = compiled;
+      } else if (EDIT_LANE_BY_TASK.has(options.task)) {
         const lane = EDIT_LANE_BY_TASK.get(options.task);
         const scopeKind = options.hints?.auditScopeKind || '';
         const scopeIndex = options.hints?.auditScopeIndex ?? 0;
@@ -313,7 +336,7 @@ async function runEditProtocol({
         const round = roundsByLane.get(key) || 0;
         roundsByLane.set(key, round + 1);
         candidates = audit({ lane, round, payload: auditPayload(prompt), prompt, corpus, pageIndex, scopeKind, scopeIndex, options });
-      } else if (options.task === 'career-profile-repair' && phase === 'adjudication') candidates = adjudicate({ prompt, corpus, pageIndex });
+      } else if (options.task === 'career-profile-repair' && phase === 'adjudication') candidates = (options.hints.rulingScope === 'cross-page' ? rule : adjudicate)({ prompt, corpus, pageIndex, options });
       else if (options.task === 'career-profile-repair' && phase === 'edit-repair') candidates = repair({ prompt, corpus, pageIndex });
       else throw new Error(`Unexpected task ${options.task}/${phase}`);
       for (const candidate of candidates) {
@@ -322,7 +345,7 @@ async function runEditProtocol({
           return candidate;
         } catch (error) {
           log.rejected.push({ task: options.task, phase, pageIndex, message: error.message,
-            diagnostic: error.validationDiagnostic, details: error.correctionDetails, ruleIds: error.correctionRuleIds });
+            code: error.code, correctionDetails: error.correctionDetails, diagnostic: error.validationDiagnostic, details: error.correctionDetails, ruleIds: error.correctionRuleIds });
         }
       }
       throw new Error(`No ${options.task}/${phase} candidate was accepted: ${log.rejected.map(item => item.message).join(' || ')}`);
@@ -1097,7 +1120,248 @@ const restoredEditProtocolTests = [
   },
 ];
 
+
+function crossPageRulingPayload(prompt) {
+  const match = prompt.match(/<UNTRUSTED_CAREER_CROSS_PAGE_RULING_INPUT>\n([\s\S]*)\n<\/UNTRUSTED_CAREER_CROSS_PAGE_RULING_INPUT>/u);
+  return JSON.parse(match[1]);
+}
+const w6ReproTests = [
+  ...['role', 'project'].map(kind => ({ name: `W6 merge correction: a conflicting ${kind} patch is rejected before compile acceptance`, run: async () => {
+    const { result, log } = await runEditProtocol({ files: pagedSourceFiles(['Engineer Acme January 2020 Present Toronto Atlas First', 'Montreal Second']), pageMaxSegments: 1,
+      compile: (corpus, i) => {
+        if (i === 0) {
+          const shard = emptyPageShard(corpus.segments[0].id);
+          shard.roles = [{ id: 'role-0', title: 'Engineer', employer: 'Acme', startDate: 'January 2020', endDate: 'Present', location: 'Toronto', achievementIds: [], skillIds: [], evidenceSegmentIds: [corpus.segments[0].id] }];
+          shard.projects = [{ id: 'project-0', name: 'Atlas', description: 'First', roleId: 'role-0', technologies: [], technologyReferences: [], metrics: [], evidenceSegmentIds: [corpus.segments[0].id] }];
+          shard.continuationState = { roles: { mode: 'replace', ids: ['role-0'] }, projects: { mode: 'replace', ids: ['project-0'] } };
+          return shard;
+        }
+        const bad = emptyPageShard(corpus.segments[1].id), good = structuredClone(bad);
+        bad[`${kind}Patches`] = [
+          { targetId: `p0001-${kind}-0`, updates: kind === 'role' ? { location: 'Toronto' } : { description: 'First' }, evidenceSegmentIds: [corpus.segments[1].id] },
+          { targetId: `p0001-${kind}-0`, updates: kind === 'role' ? { location: 'Montreal' } : { description: 'Second' }, evidenceSegmentIds: [corpus.segments[1].id] },
+        ];
+        return [bad, good];
+      },
+    });
+    assert(log.rejected.length === 1 && log.rejected[0].code === 'CAREER_SNAPSHOT_PAGE_INVALID', 'patch conflict belongs to the answer validator');
+    const detail = log.rejected[0].correctionDetails.join(' ');
+    assert(detail.includes(`${kind}Patches`) && detail.includes('remove') && !detail.includes(kind === 'role' ? 'Toronto' : 'First'), 'patch correction never copies the owner value');
+    assert(validateCurrentCareerSnapshot(result.snapshot).valid, 'corrected shard reaches approval');
+  } })),
+  { name: 'W6 identity corrections clip the own value before JSON quoting', run: async () => {
+    const ownNames = ['Alternate '.repeat(10) + 'Candidate', 'Different '.repeat(10) + 'Candidate'];
+    const { log } = await runEditProtocol({ files: pagedSourceFiles(['Synthetic primary identity', ownNames.join(' ')]), pageMaxSegments: 1,
+      compile: (corpus, i) => i ? [...ownNames.map(name => emptyPageShard(corpus.segments[1].id, { name })), emptyPageShard(corpus.segments[1].id)] : emptyPageShard(corpus.segments[0].id, { name: 'Synthetic primary identity' }),
+    });
+    assert(log.rejected.length === 2 && log.rejected.every(rejected => {
+      const detail = rejected.correctionDetails[0], match = detail.match(/identity.name ("(?:[^"\\]|\\.)*") on/u);
+      return match && JSON.parse(match[1]).length <= 58 && !detail.includes('Synthetic primary identity');
+    }), 'clipped own values remain valid JSON spans without an expected string');
+  } },
+
+  { name: 'W6 rulings: reapply settled values, reopen only on unseen evidence, and fall back after supersession', run: async () => {
+    const corpus = buildCareerSourceCorpus(pagedSourceFiles(['Engineer Acme January 2020 Present Toronto', 'Additional Toronto context', 'Engineer Acme January 2020 Present Montreal', 'Additional Toronto evidence']));
+    const pages = partitionCareerSourcePages(corpus, { maxSegments: 2 });
+    const profiles = pages.map((page, i) => {
+      const shard = emptyPageShard(page.segmentIds[0]);
+      shard.roles = [{ id: `p000${i + 1}-role-${i}`, title: 'Engineer', employer: 'Acme', startDate: 'January 2020', endDate: 'Present', location: i ? 'Montreal' : 'Toronto', achievementIds: [], skillIds: [], evidenceSegmentIds: [page.segmentIds[0]] }];
+      shard.segmentCoverage.push({ segmentId: page.segmentIds[1], disposition: 'context', entityIds: [] });
+      return shard;
+    });
+    const seam = __crossPageRulingForTests, ledger = createDecisionLedger();
+    const conflict = seam.deterministicState(profiles, corpus).conflicts[0];
+    const targets = profiles.map((shard, pageIndex) => ({ pageIndex, targetKey: editTargetKey({ op: 'set', group: 'roles', entityId: shard.roles[0].id, field: 'location' }) }));
+    for (const target of targets) recordDecision(ledger, { ...target, value: 'Toronto', sourceQuote: 'Toronto', evidenceSegmentIds: ['segment-0001', 'segment-0003'], category: 'cross-page-ruling', round: 1, origin: 'adjudication', groupId: conflict.groupId });
+    const stats = { adjudications: 0, editsApplied: 0, findingsRejected: 0, editRepairs: 0 };
+    const args = { corpus, pages, pageProfiles: profiles, ledger, conflict, round: 1, maxPromptChars: 200_000, stats };
+    assert(await seam.resolveCrossPageConflict({ ...args, callText: () => { throw new Error('settled ruling must not call AI'); } }) === 'reapplied' && profiles[1].roles[0].location === 'Toronto', 'no unseen evidence reapplies without a call');
+    profiles[1].roles[0].location = 'Montreal'; profiles[1].roles[0].evidenceSegmentIds.push('segment-0004');
+    let calls = 0, invalid = 0;
+    const outcome = await seam.resolveCrossPageConflict({ ...args, callText: async (prompt, options) => {
+      calls++; const payload = crossPageRulingPayload(prompt);
+      const good = { ruling: 'change', valueJson: JSON.stringify(payload.proposals[0].edits), rationale: 'Synthetic supported value', sourceQuote: 'Toronto', evidenceSegmentIds: ['segment-0001'] };
+      for (const bad of [{ ...good, ruling: 'keep' }, { ...good, valueJson: '[]' }, { ...good, evidenceSegmentIds: ['segment-9999'] }, { ...good, sourceQuote: 'invented quote' }]) {
+        let caught; try { options.responseValidator(bad); } catch (error) { caught = error; }
+        assert(caught?.code === 'CAREER_SNAPSHOT_PAGE_INVALID' && caught.correctionDetails.length, 'each invalid ruling remains correctable'); invalid++;
+      }
+      options.responseValidator(good); return good;
+    } });
+    assert(outcome === 'ruled' && calls === 1 && invalid === 4 && profiles[1].roles[0].location === 'Toronto', 'one call with unseen evidence');
+    profiles[1].roles[0].location = 'Montreal';
+    recordDecision(ledger, { ...targets[0], value: 'Toronto', sourceQuote: '', evidenceSegmentIds: ['segment-0001', 'segment-0003', 'segment-0004'], category: 'edit-repair', round: 3, origin: 'repair' });
+    assert(await seam.resolveCrossPageConflict({ ...args, callText: () => { throw new Error('superseded ruling with no new evidence falls back'); } }) === 'fallback' && profiles[1].roles[0].location === 'Montreal', 'supersession is not silently undone');
+  } },
+  ...[false, true].map(allDecline => ({ name: `W6 deterministic fan-out: ${allDecline ? 'all declines stop without progress' : 'later pages are asked only while an unowned error persists'}`, run: async () => {
+    const files = pagedSourceFiles(['Synthetic first page', 'Synthetic second page', 'Synthetic third page']);
+    const calls = []; let caught, completed;
+    try { completed = await runEditProtocol({ files, pageMaxSegments: 1,
+      compile: (corpus, i) => emptyPageShard(corpus.segments[i].id, { contacts: i === 1 ? ['missing@example.test'] : [] }),
+      repair: ({ pageIndex }) => { calls.push(pageIndex); return allDecline || pageIndex !== 1 ? [{ edits: [], notes: 'This page cannot repair the contact.' }] : [{ edits: [{ op: 'set', group: 'identity', entityId: 'identity', field: 'contacts', valueJson: '[]' }], notes: 'Remove unsupported contact' }]; },
+    }); } catch (error) { caught = error; }
+    if (allDecline) assert(caught?.code === 'CAREER_SNAPSHOT_NONCONVERGENT' && JSON.stringify(calls) === '[0,1,2]', 'all declines leave the profile and ledger unchanged and stop');
+    else assert(!caught && JSON.stringify(calls) === '[0,1]' && finalDecisionLog(completed.result).targets.length === 1 && convergencePayloads(completed.log)[0].editRepairs === 1, 'declines consume no decisions or repair count and a fixed error never fans out later');
+  } })),
+  { name: 'W6 deterministic decline requires explanatory notes in the answer validator', run: async () => {
+    const { log } = await runEditProtocol({ files: pagedSourceFiles(['Synthetic page']), pageMaxSegments: 1,
+      compile: corpus => emptyPageShard(corpus.segments[0].id, { contacts: ['missing@example.test'] }),
+      repair: () => [{ edits: [], notes: '' }, { edits: [{ op: 'set', group: 'identity', entityId: 'identity', field: 'contacts', valueJson: '[]' }], notes: 'Remove unsupported contact' }],
+    });
+    assert(log.rejected.length === 1 && log.rejected[0].correctionDetails.some(line => line.includes('non-empty notes')), 'declines are checkable answers with their own correction');
+  } },
+
+  { name: 'W6 R6: the shipped edit-receipt contract stays pin-readable after the bump', run: async () => {
+    const shipped = '9c982a99cefee3f2d6e27416cbba76bb2b93c8d28f3e3ef170ac44e2eb34c85b';
+    const { result, corpus } = await runEditProtocol({ audit: ({ lane, round, corpus }) => lane === 'skills' && round === 0 ? [{ findings: [editFinding({ segmentIds: [corpus.segments[3].id], edits: [categoryEdit('programming language')] })] }] : [{ findings: [] }] });
+    assert(CAREER_SNAPSHOT_COMPILATION_CONTRACT !== shipped && CAREER_SNAPSHOT_PINNED_LEGACY_V6_CONTRACTS.includes(shipped), 'one bump retains the shipped contract');
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'career-shipped-edit-pin-'));
+    try {
+      const snapshot = structuredClone(result.snapshot); snapshot.compilationContract = shipped; snapshot.snapshotId = careerSnapshotIdForContract(corpus, shipped);
+      const dir = path.join(root, 'career-snapshots'); fs.mkdirSync(dir); fs.writeFileSync(path.join(dir, snapshot.snapshotId + '.json'), JSON.stringify(snapshot));
+      assert((await readPinnedCareerSnapshot(root, snapshot.snapshotId))?.snapshotId === snapshot.snapshotId && await readCareerSnapshot(root, snapshot.snapshotId) === null, 'real edit findings and final decision log remain pin-only readable');
+      snapshot.compilationContract = '2a819982e81b806e5ad0d919cf482532b01a52ed84c8eb94603c8f918b27888b'; snapshot.snapshotId = careerSnapshotIdForContract(corpus, snapshot.compilationContract);
+      fs.writeFileSync(path.join(dir, snapshot.snapshotId + '.json'), JSON.stringify(snapshot));
+      assert(await readPinnedCareerSnapshot(root, snapshot.snapshotId) === null, 'whole-page receipt history cannot borrow the edit receipt schema');
+    } finally { fs.rmSync(root, { recursive: true, force: true }); }
+  } },
+
+  { name: 'W6 R4: a poisoned active-state digest is rejected inside its own scan handoff', run: async () => {
+      const activeEntityCount = 350;
+      const detail = 'x'.repeat(2_000);
+      const files = pagedSourceFiles([
+        ...Array.from({ length: activeEntityCount }, (_, index) => `Role ${index} Project ${index} ${detail}`),
+        // A single source page deliberately names every distinct live role.
+        // It must retrieve all matching digest pages once, not re-scan the
+        // whole active ledger for every preceding page.
+        Array.from({ length: activeEntityCount }, (_, index) => `Role ${index} Project ${index}`).join(' '),
+      ]);
+      const prompts = [];
+      const scanPageDigests = [];
+      const scanSourcePageIndexes = [];
+      let activeContextPatchCount = 0;
+      let liveScans = 0;
+      let maxLiveScans = 0;
+      const scanPayload = prompt => {
+        const start = prompt.indexOf('<UNTRUSTED_CAREER_ACTIVE_CONTEXT_LOOKUP>\n') + '<UNTRUSTED_CAREER_ACTIVE_CONTEXT_LOOKUP>\n'.length;
+        return JSON.parse(prompt.slice(start, prompt.indexOf('\n</UNTRUSTED_CAREER_ACTIVE_CONTEXT_LOOKUP>')));
+      };
+      const compile = async (_prompt, options) => {
+        prompts.push(_prompt.length);
+        if (options.hints.phase === 'active-context-scan') {
+          liveScans += 1;
+          maxLiveScans = Math.max(maxLiveScans, liveScans);
+          await new Promise(resolve => setTimeout(resolve, (options.hints.activeContextPageCount - options.hints.activeContextPageIndex) % 3));
+          liveScans -= 1;
+          const payload = scanPayload(_prompt);
+          scanPageDigests.push(payload.contextPage.digest);
+          scanSourcePageIndexes.push(options.hints.pageIndex);
+          const segmentId = payload.page.segments[0].id;
+          const rolePatches = payload.contextPage.entries.filter(entry => entry.kind === 'roles').map(entry => ({
+            targetId: entry.id, evidenceSegmentIds: [segmentId], updates: { title: entry.context.title },
+          }));
+          const projectPatches = payload.contextPage.entries.filter(entry => entry.kind === 'projects').map(entry => ({
+            targetId: entry.id, evidenceSegmentIds: [segmentId], updates: { name: entry.context.name },
+          }));
+          activeContextPatchCount += rolePatches.length + projectPatches.length;
+          return {
+            activeStateDigest: payload.activeState.digest,
+            contextPageDigest: payload.contextPage.digest,
+            rolePatches, projectPatches,
+          };
+        }
+        if (options.task?.startsWith('career-profile-audit-')) return { findings: [] };
+        const index = options.hints.pageIndex;
+        const segmentId = `segment-${String(index + 1).padStart(4, '0')}`;
+        if (index >= activeEntityCount) return emptyPageShard(segmentId);
+        const roleId = `role-${index}`;
+        const projectId = `project-${index}`;
+        return pageTransport({
+          identity: { name: '', contacts: [], evidenceSegmentIds: [segmentId] },
+          roles: [{ id: roleId, title: `Role ${index}`, employer: '', startDate: '', endDate: '', location: '', achievementIds: [], skillIds: [], evidenceSegmentIds: [segmentId] }],
+          achievements: [],
+          projects: [{ id: projectId, name: `Project ${index}`, description: detail, roleId, technologies: [], metrics: [], evidenceSegmentIds: [segmentId] }],
+          skills: [], education: [], certifications: [], otherEvidence: [], rolePatches: [], projectPatches: [],
+          continuationState: {
+            roles: { mode: index === 0 ? 'replace' : 'append', ids: [roleId] },
+            projects: { mode: index === 0 ? 'replace' : 'append', ids: [projectId] },
+          },
+          segmentCoverage: [{ segmentId, disposition: 'role-header', entityIds: ['identity', roleId, projectId] }],
+        });
+      };
+
+      const rejected = [];
+      const result = await compileAuditedCareerSnapshot({ sourceFiles: files, pageMaxSegments: 1, pageMaxSourceChars: 48_000, maxPromptChars: 200_000, workerCount: 3,
+        callText: async (prompt, options) => {
+          const value = await compile(prompt, options);
+          if (options.hints.phase !== 'active-context-scan') return value;
+          const candidates = rejected.length ? [value] : [{ ...value, activeStateDigest: '0'.repeat(64) }, value];
+          for (const candidate of candidates) {
+            try { if (options.responseValidator) options.responseValidator(candidate); return candidate; }
+            catch (error) { rejected.push({ message: error.message, code: error.code, correctionDetails: error.correctionDetails }); }
+          }
+          throw new Error('No scan candidate accepted');
+        },
+      });
+      assert(rejected.length === 1 && rejected[0].code === 'CAREER_SNAPSHOT_ACTIVE_CONTEXT_INVALID' && rejected[0].correctionDetails.some(line => line.includes('active-state digest') && !/[a-f0-9]{64}/u.test(line)), 'scan correction names the field without a host digest');
+      assert(validateCurrentCareerSnapshot(result.snapshot).valid && result.profile.roles.length === activeEntityCount && activeContextPatchCount > 0 && maxLiveScans > 1, 'parallel scan correction reaches approval with all active entities');
+  } },
+
+  { name: 'W6 R1: round stamps do not hide a repeated profile and settled state', run: async () => {
+    let repairs = 0, caught;
+    try { await runEditProtocol({ compile: corpus => { const shard = pageTransport(validProfile(corpus)); shard.roles[0].location = 'Atlantis'; return shard; }, repair: () => {
+      repairs++; if (repairs === 9) throw new Error('runaway');
+      return [{ edits: [{ op: 'set', group: 'roles', entityId: 'p0001-role-acme', field: 'location', valueJson: JSON.stringify(repairs % 2 ? 'Narnia' : 'Atlantis') }], notes: 'Synthetic location repair' }];
+    } }); } catch (error) { caught = error; }
+    assert(caught?.code === 'CAREER_SNAPSHOT_NONCONVERGENT' && caught.message.includes('repeats round 1') && repairs === 3, `cycle must stop at round 3, got ${repairs}: ${caught?.message}`);
+  } },
+  { name: 'W6 R2: role and cascading project conflicts each receive one cross-page ruling', run: async () => {
+    let repairs = 0;
+    const { result, log } = await runEditProtocol({ files: pagedSourceFiles(['Engineer Acme January 2020 Present Toronto Atlas First Python', 'Engineer Acme January 2020 Present Montreal Atlas Second Python']), pageMaxSegments: 1,
+      compile: (corpus, index) => conflictingRoleProjectShard(corpus, index), repair: () => { repairs++; throw new Error('independent page repair must not decide a cross-page conflict'); },
+      rule: ({ prompt }) => { const payload = crossPageRulingPayload(prompt), role = payload.conflict.kind === 'role', word = role ? 'Toronto' : 'First';
+        const proposal = payload.proposals.find(proposal => proposal.edits[0].valueJson === JSON.stringify(word));
+        return [{ ruling: 'change', valueJson: JSON.stringify(proposal.edits), rationale: 'Synthetic supported value', sourceQuote: word, evidenceSegmentIds: ['segment-0001'] }]; },
+    });
+    const rulings = log.calls.filter(call => call.options.hints.rulingScope === 'cross-page');
+    assert(rulings.length === 2 && repairs === 0 && log.rejected.length === 0, 'one role ruling and then one project ruling, no independent repair');
+    assert(JSON.stringify(rulings.map(call => crossPageRulingPayload(call.prompt).conflict.kind)) === '["role","project"]', 'recompute reveals the project conflict after role remapping');
+    assert(result.profile.roles.length === 1 && result.profile.roles[0].location === 'Toronto' && validateCurrentCareerSnapshot(result.snapshot).valid, 'approved merged profile');
+    const targets = finalDecisionLog(result).targets;
+    const decisions = targets.map(target => ({ ...target.current, consideredEvidenceSegmentIds: target.consideredEvidenceSegmentIds }));
+    assert(decisions.length === 4 && decisions.every(entry => entry.origin === 'adjudication' && entry.category === 'cross-page-ruling' && entry.consideredEvidenceSegmentIds.includes('segment-0001') && entry.consideredEvidenceSegmentIds.includes('segment-0002')), 'both sides settle all evidence');
+    assert(new Set(decisions.map(entry => entry.groupId)).size === 2 && convergencePayloads(log)[0].adjudications === 2, 'one stable group per conflict');
+  } },
+  { name: 'W6 R3: a conflicting identity name is corrected before page acceptance', run: async () => {
+    const { result, log } = await runEditProtocol({ files: pagedSourceFiles(['Ada Lovelace', 'Ada L. Lovelace']), pageMaxSegments: 1,
+      compile: (corpus, index) => index === 0 ? emptyPageShard(corpus.segments[0].id, { name: 'Ada Lovelace' }) : [emptyPageShard(corpus.segments[1].id, { name: 'Ada L. Lovelace' }), emptyPageShard(corpus.segments[1].id)],
+    });
+    assert(log.rejected.length === 1 && log.rejected[0].code === 'CAREER_SNAPSHOT_PAGE_INVALID', 'one pre-acceptance page rejection');
+    const detail = log.rejected[0].correctionDetails.join(' ');
+    assert(detail.includes('identity.name') && detail.includes('page-0001') && detail.includes('"Ada L. Lovelace"') && !detail.includes('"Ada Lovelace"'), 'own value and other page id only');
+    assert(result.profile.identity.name === 'Ada Lovelace', 'first page identity remains authoritative');
+  } },
+  { name: 'W6 R5 audit: an identity edit cannot poison the next merge', run: async () => {
+    const { result, log } = await runEditProtocol({ files: pagedSourceFiles(['Ada Lovelace', 'Ada L. Lovelace']), pageMaxSegments: 1,
+      compile: (corpus, index) => emptyPageShard(corpus.segments[index].id, { name: 'Ada Lovelace' }),
+      audit: ({ lane, pageIndex, round, corpus }) => lane === 'coverage' && pageIndex === 1 && round === 0 ? [{ findings: [editFinding({ id: 'rename', category: 'coverage', segmentIds: [corpus.segments[1].id], entityIds: [], edits: [{ op: 'set', group: 'identity', entityId: 'identity', field: 'name', valueJson: '"Ada L. Lovelace"' }], sourceQuote: 'Ada' })] }, { findings: [] }] : [{ findings: [] }],
+    });
+    assert(log.rejected.length === 1 && log.rejected[0].message.includes('differs from the identity.name already recorded') && log.rejected[0].message.includes('drop the finding'), 'audit rejects the conflicting edit in its own gate');
+    assert(result.profile.identity.name === 'Ada Lovelace', 'original identity retained');
+  } },
+  { name: 'W6 R5 repair: a valid location repair must omit a conflicting identity edit', run: async () => {
+    const files = pagedSourceFiles(['Ada Lovelace', 'Ada Lovelace Engineer Acme January 2020 Present Toronto']);
+    const location = { op: 'set', group: 'roles', entityId: 'p0002-role-acme', field: 'location', valueJson: '"Toronto"' };
+    const { result, log } = await runEditProtocol({ files, pageMaxSegments: 1,
+      compile: (corpus, index) => { const shard = emptyPageShard(corpus.segments[index].id, { name: 'Ada Lovelace' }); if (index === 1) shard.roles = [{ id: 'role-acme', title: 'Engineer', employer: 'Acme', startDate: 'January 2020', endDate: 'Present', location: 'Atlantis', achievementIds: [], skillIds: [], evidenceSegmentIds: [corpus.segments[index].id] }]; return shard; },
+      repair: () => [{ edits: [{ op: 'set', group: 'identity', entityId: 'identity', field: 'name', valueJson: '"Ada L. Lovelace"' }, location], notes: 'Synthetic repair' }, { edits: [location], notes: 'Synthetic repair' }],
+    });
+    assert(log.rejected.length === 1 && Array.isArray(log.rejected[0].correctionDetails) && log.rejected[0].correctionDetails.some(line => line.includes('identity.name') && line.includes('page-0001')), `repair rejection must carry merge corrections: ${JSON.stringify(log.rejected)}`);
+    assert(result.profile.roles[0].location === 'Toronto', 'valid repair accepted');
+  } },
+];
+
 export default [
+  ...w6ReproTests,
   {
     name: 'W3 career pacing: only whole-profile no-progress or pure settled-target errors select pacing',
     run: () => {
@@ -2066,23 +2330,7 @@ export default [
         'Engineer Acme January 2020 Present Montreal Atlas Second Python',
       ]);
       const corpus = buildCareerSourceCorpus(files);
-      const conflictingShard = (pageIndex, skillCategory = 'language') => {
-        const segmentId = corpus.segments[pageIndex].id;
-        const location = pageIndex === 0 ? 'Toronto' : 'Montreal';
-        const description = pageIndex === 0 ? 'First' : 'Second';
-        const roleId = `role-${pageIndex}`;
-        const projectId = `project-atlas-${pageIndex}`;
-        const skillId = `skill-python-${pageIndex}`;
-        return pageTransport({
-          identity: { name: '', contacts: [], evidenceSegmentIds: [segmentId] },
-          roles: [{ id: roleId, title: 'Engineer', employer: 'Acme', startDate: 'January 2020', endDate: 'Present', location, achievementIds: [], skillIds: [skillId], evidenceSegmentIds: [segmentId] }],
-          achievements: [], projects: [{ id: projectId, name: 'Atlas', description, roleId, technologies: [], metrics: [], evidenceSegmentIds: [segmentId] }],
-          skills: [{ id: skillId, name: 'Python', category: skillCategory, indexEligible: true, roleIds: [roleId], evidenceSegmentIds: [segmentId] }],
-          education: [], certifications: [], otherEvidence: [], rolePatches: [], projectPatches: [],
-          continuationState: { roles: { mode: 'clear', ids: [] }, projects: { mode: 'clear', ids: [] } },
-          segmentCoverage: [{ segmentId, disposition: 'role-header', entityIds: ['identity', roleId, projectId, skillId] }],
-        });
-      };
+      const conflictingShard = (pageIndex, category = 'language') => conflictingRoleProjectShard(corpus, pageIndex, category);
       const rejected = [];
       let crossConflict = null;
       try {

@@ -327,6 +327,17 @@ export function decisionForTarget(ledger, pageIndex, targetKey) {
   return ledger.targets.get(ledgerKey(pageIndex, targetKey))?.current || null;
 }
 
+export function consideredEvidenceForTarget(ledger, pageIndex, targetKey) {
+  return [...(ledger.targets.get(ledgerKey(pageIndex, targetKey))?.consideredEvidenceSegmentIds || [])].sort();
+}
+
+export function settledStateDigest(ledger) {
+  const targets = [...ledger.targets.values()].sort((a, b) => a.pageIndex - b.pageIndex || (a.targetKey < b.targetKey ? -1 : a.targetKey > b.targetKey ? 1 : 0))
+    .map(record => ({ pageIndex: record.pageIndex, targetKey: record.targetKey, valueJson: record.current?.valueJson ?? null,
+      consideredEvidenceSegmentIds: [...record.consideredEvidenceSegmentIds].sort() }));
+  return sha256(canonicalJson(targets));
+}
+
 export function recordChallengeEvidence(ledger, pageIndex, targetKey, evidenceSegmentIds) {
   const record = targetRecord(ledger, pageIndex, targetKey);
   record.consideredEvidenceSegmentIds = sortedUnion(record.consideredEvidenceSegmentIds, evidenceSegmentIds);

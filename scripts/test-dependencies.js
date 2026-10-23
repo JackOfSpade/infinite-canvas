@@ -368,3 +368,6 @@ export { __rejectionCauseKeysForTests } from '../electron/ipc/nonApiAi.js';
 export { diagnoseCompensationExperienceBandLadder } from '../electron/ipc/jobCompensation.js';
 
 export { isValidCompensationExperienceBandLadder } from '../electron/ipc/jobCompensation.js';
+
+export { __crossPageRulingForTests } from '../electron/ipc/careerSnapshot.js';
+export { consideredEvidenceForTarget, settledStateDigest } from '../electron/ipc/careerProfileEdits.js';

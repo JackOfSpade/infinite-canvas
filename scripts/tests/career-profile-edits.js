@@ -1,5 +1,5 @@
 import nodeAssert from 'node:assert';
-import { applyProfileEditsWithRules, checkFindingAgainstLedgerWithRules, checkFindingAgainstLedgerWithForwardedDetails } from '../test-dependencies.js';
+import { consideredEvidenceForTarget, settledStateDigest, applyProfileEditsWithRules, checkFindingAgainstLedgerWithRules, checkFindingAgainstLedgerWithForwardedDetails } from '../test-dependencies.js';
 import { createHash } from 'node:crypto';
 
 import { assert } from './testHelpers.js';
@@ -98,6 +98,17 @@ function settledLedger() {
 }
 
 export default [
+  { name: 'W6 settled state hashes values and considered evidence, ignoring decision history labels', run: () => {
+    const ledger = createDecisionLedger(), targetKey = editTargetKey({ op: 'set', group: 'skills', entityId: 'p0001-skill-1', field: 'category' });
+    const record = (value, round, evidenceSegmentIds, groupId) => recordDecision(ledger, { pageIndex: 0, targetKey, value, round, evidenceSegmentIds, groupId, origin: round % 2 ? 'audit' : 'adjudication', sourceQuote: `Synthetic quote ${round}`, findingDetail: `Synthetic finding ${round}` });
+    record('language', 1, ['segment-0001'], 'group-first'); const initial = settledStateDigest(ledger);
+    record('language', 2, ['segment-0001'], 'group-later'); assert(settledStateDigest(ledger) === initial, 'round, ids, group, origin and history are not settled state');
+    const evidence = consideredEvidenceForTarget(ledger, 0, targetKey); evidence.push('forged');
+    assert(consideredEvidenceForTarget(ledger, 0, targetKey).length === 1 && consideredEvidenceForTarget(ledger, 7, targetKey).length === 0, 'evidence lookup returns a copy and unknown targets are empty');
+    record('tool', 3, ['segment-0001'], 'group-third'); const changed = settledStateDigest(ledger); assert(changed !== initial, 'a settled value changes the state');
+    recordChallengeEvidence(ledger, 0, targetKey, ['segment-0002']); assert(settledStateDigest(ledger) !== changed, 'considered evidence changes state even without a new decision');
+    const before = settledStateDigest(ledger); recordChallengeEvidence(ledger, 1, targetKey, ['segment-0003']); assert(settledStateDigest(ledger) !== before, 'a current-null target with considered evidence is part of state');
+  } },
   {
     name: 'W3 career edits: rule-aware variants align every rejection and preserve legacy result shapes',
     run: () => {
