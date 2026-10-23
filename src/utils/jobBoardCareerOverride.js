@@ -49,6 +49,40 @@ export function isJobBoardCareerOverrideRunId(value) {
     && value.startsWith(JOB_BOARD_CAREER_OVERRIDE_RUN_PREFIX);
 }
 
+// A run id that may belong to a Board Combine/scan transaction. Career
+// override runs share the Board's node id but never own Board-run state.
+export function isBoardCombineManualAiRunId(runId) {
+  return typeof runId === 'string'
+    && runId.length > 0
+    && !isJobBoardCareerOverrideRunId(runId);
+}
+
+// Patch that removes career override run ids wrongly adopted into Board-run
+// recovery state (manualAiResume, cleanup receipts, cancellation run ids).
+// Returns null when nothing needs cleaning; never touches the override record,
+// boardScanResume, or any non-career id.
+export function careerOverrideBoardMarkerCleanup(data) {
+  if (!data || typeof data !== 'object') return null;
+  const patch = {};
+  if (isJobBoardCareerOverrideRunId(data.manualAiResume?.runId)) {
+    patch.manualAiResume = null;
+  }
+  if (Array.isArray(data.manualAiCleanupReceipts)) {
+    const kept = data.manualAiCleanupReceipts.filter(
+      receipt => !isJobBoardCareerOverrideRunId(receipt?.runId),
+    );
+    if (kept.length !== data.manualAiCleanupReceipts.length) patch.manualAiCleanupReceipts = kept;
+  }
+  const cancellation = data.boardCancellation;
+  if (cancellation && typeof cancellation === 'object' && Array.isArray(cancellation.manualAiRunIds)) {
+    const kept = cancellation.manualAiRunIds.filter(runId => !isJobBoardCareerOverrideRunId(runId));
+    if (kept.length !== cancellation.manualAiRunIds.length) {
+      patch.boardCancellation = { ...cancellation, manualAiRunIds: kept };
+    }
+  }
+  return Object.keys(patch).length > 0 ? patch : null;
+}
+
 function entropy() {
   const uuid = globalThis.crypto?.randomUUID?.();
   const raw = typeof uuid === 'string' && uuid

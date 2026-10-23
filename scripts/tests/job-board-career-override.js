@@ -19,6 +19,8 @@ import {
   hasActiveJobBoardCareerOverrideRun,
   resolveApplicationCareerSnapshotId,
   jobBoardCareerOverrideView,
+  isBoardCombineManualAiRunId,
+  careerOverrideBoardMarkerCleanup,
 } from '../../src/utils/jobBoardCareerOverride.js';
 import { collectDeletedManualAiRetirements } from '../../src/utils/canvasInteractions.js';
 import { hasActiveExternalRunState } from '../../src/utils/undoNonRestorableState.js';
@@ -60,7 +62,95 @@ function board(record) {
   return { jobBoardCareerOverride: record };
 }
 
+const COMBINE_RUN = 'job-board:board-1:combine-1';
+const COMBINE_RUN_2 = 'job-board:board-1:combine-2';
+
 export default [
+  {
+    name: 'career override: isBoardCombineManualAiRunId separates Board runs from career runs',
+    run: () => {
+      assert.strictEqual(isBoardCombineManualAiRunId(COMBINE_RUN), true);
+      assert.strictEqual(isBoardCombineManualAiRunId('search-run-7'), true);
+      assert.strictEqual(isBoardCombineManualAiRunId(RUN_1), false);
+      assert.strictEqual(isBoardCombineManualAiRunId(''), false);
+      assert.strictEqual(isBoardCombineManualAiRunId(null), false);
+      assert.strictEqual(isBoardCombineManualAiRunId(undefined), false);
+      assert.strictEqual(isBoardCombineManualAiRunId(42), false);
+      assert.strictEqual(isBoardCombineManualAiRunId({ runId: COMBINE_RUN }), false);
+    },
+  },
+  {
+    name: 'career override: Board marker cleanup clears a saved career manualAiResume only',
+    run: () => {
+      const record = { version: 1, approved: approved(), pending: pending(), retirePending: [RUN_3] };
+      const saved = {
+        label: 'Board',
+        jobBoardCareerOverride: record,
+        boardScanResume: null,
+        manualAiResume: { runId: RUN_2, task: 'career', startedAt: 10, updatedAt: 20 },
+      };
+      const patch = careerOverrideBoardMarkerCleanup(saved);
+      assert.deepStrictEqual(patch, { manualAiResume: null });
+      const applied = { ...saved, ...patch };
+      assert.strictEqual(applied.manualAiResume, null);
+      assert.deepStrictEqual(applied.jobBoardCareerOverride, record);
+      assert.strictEqual(careerOverrideBoardMarkerCleanup(applied), null, 'idempotent');
+
+      const combine = {
+        manualAiResume: { runId: COMBINE_RUN, task: 'combine' },
+        boardScanResume: { boardRunId: 'br-1', combineManualAiRunId: RUN_1 },
+        jobBoardCareerOverride: record,
+      };
+      assert.strictEqual(careerOverrideBoardMarkerCleanup(combine), null);
+      assert.strictEqual(careerOverrideBoardMarkerCleanup({}), null);
+      assert.strictEqual(careerOverrideBoardMarkerCleanup(null), null);
+      assert.strictEqual(careerOverrideBoardMarkerCleanup({ manualAiResume: { task: 'x' } }), null);
+    },
+  },
+  {
+    name: 'career override: Board marker cleanup filters only career ids from receipts and cancellation',
+    run: () => {
+      const combineReceipt = { runId: COMBINE_RUN, nodeId: 'board-1', reason: 'superseded' };
+      const careerReceipt = { runId: RUN_1, nodeId: 'board-1', reason: 'superseded' };
+      const combineReceipt2 = { runId: COMBINE_RUN_2, nodeId: 'board-1' };
+      const cancellation = {
+        operationId: 'op-1',
+        boardRunId: 'br-1',
+        reason: 'board-run-cancelled',
+        manualAiRunIds: [COMBINE_RUN, RUN_2, COMBINE_RUN_2, RUN_3],
+      };
+      const saved = {
+        manualAiResume: { runId: COMBINE_RUN, task: 'combine' },
+        manualAiCleanupReceipts: [combineReceipt, careerReceipt, combineReceipt2],
+        boardCancellation: cancellation,
+      };
+      const patch = careerOverrideBoardMarkerCleanup(saved);
+      assert.deepStrictEqual(patch, {
+        manualAiCleanupReceipts: [combineReceipt, combineReceipt2],
+        boardCancellation: {
+          operationId: 'op-1',
+          boardRunId: 'br-1',
+          reason: 'board-run-cancelled',
+          manualAiRunIds: [COMBINE_RUN, COMBINE_RUN_2],
+        },
+      });
+      assert.deepStrictEqual(saved.boardCancellation.manualAiRunIds, [COMBINE_RUN, RUN_2, COMBINE_RUN_2, RUN_3], 'input not mutated');
+      assert.strictEqual(careerOverrideBoardMarkerCleanup({ ...saved, ...patch }), null, 'idempotent');
+
+      const onlyReceipts = careerOverrideBoardMarkerCleanup({
+        manualAiCleanupReceipts: [careerReceipt],
+        boardCancellation: { operationId: 'op-2', manualAiRunIds: [COMBINE_RUN] },
+      });
+      assert.deepStrictEqual(onlyReceipts, { manualAiCleanupReceipts: [] });
+
+      const allClean = {
+        manualAiResume: { runId: COMBINE_RUN },
+        manualAiCleanupReceipts: [combineReceipt],
+        boardCancellation: { operationId: 'op-3', manualAiRunIds: [COMBINE_RUN_2] },
+      };
+      assert.strictEqual(careerOverrideBoardMarkerCleanup(allClean), null);
+    },
+  },
   {
     name: 'career override: constants and run id grammar',
     run: () => {

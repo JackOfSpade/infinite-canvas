@@ -39,6 +39,9 @@ import {
   jobBoardCareerOverrideView,
   markJobBoardCareerOverrideRunsRetired,
   queueJobBoardCareerOverrideRetire,
+  isJobBoardCareerOverrideRunId,
+  isBoardCombineManualAiRunId,
+  careerOverrideBoardMarkerCleanup,
   resumeJobBoardCareerOverride,
 } from '../utils/jobBoardCareerOverride';
 import { replaceBoardDisplayChildren } from './jobboard/replaceBoardDisplayChildren';
@@ -5644,7 +5647,7 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
       // The normal Board manual-resume effect below owns a persisted taxonomy /
       // compensation prompt. If no prompt was published before the interruption,
       // restart only the combine from the completed source snapshots.
-      if (data.manualAiResume?.runId) return;
+      if (isBoardCombineManualAiRunId(data.manualAiResume?.runId)) return;
       const key = `combine:${recoveryKey}:${plan.combineManualAiRunId || 'unclaimed'}`;
       if (autoResumedBoardScanRef.current === key) return;
       autoResumedBoardScanRef.current = key;
@@ -6047,6 +6050,9 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
 
   useEffect(() => {
     const onManualAiNodeCancelled = (event) => {
+      // The career override owns its own run cancellation; never treat it as
+      // a Board transaction (no handleCancelRun, no Combine retirement).
+      if (isJobBoardCareerOverrideRunId(event.detail?.runId)) return;
       const cancelledNodeId = event.detail?.nodeId || null;
       const childPlan = getNode(id)?.data?.boardScanResume || null;
       const activeChildIds = new Set([
@@ -6155,6 +6161,9 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
     const onPending = (event) => {
       const detail = event.detail || {};
       if (!detail.runId) return;
+      // Career override handoffs keep their own state; never adopt them as a
+      // Combine recovery marker or retire them as superseded Combine runs.
+      if (isJobBoardCareerOverrideRunId(detail.runId)) return;
       const liveData = getNode(id)?.data || {};
       const childPlan = liveData.boardScanResume;
       const childActiveIds = new Set([
@@ -6310,7 +6319,9 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
   }, [getNode, id, retireActiveCombineManualAiRun, updateGlobal]);
 
   useEffect(() => {
-    const receipts = normalizeManualAiCleanupReceipts(data.manualAiCleanupReceipts);
+    // Career override runs are retired by the override's own retirePending path.
+    const receipts = normalizeManualAiCleanupReceipts(data.manualAiCleanupReceipts)
+      .filter(receipt => isBoardCombineManualAiRunId(receipt?.runId));
     if (receipts.length === 0) return;
     // The interactive deletion boundary owns acknowledged retirement while it
     // is pending. Starting a second recovery attempt here can race that exact
@@ -6320,7 +6331,7 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
     const liveData = getNode(id)?.data || data;
     const hasCurrentRecovery = !!liveData.boardCancellation
       || !!liveData.boardScanResume
-      || !!liveData.manualAiResume;
+      || (!!liveData.manualAiResume && !isJobBoardCareerOverrideRunId(liveData.manualAiResume.runId));
     if (liveData.boardCancellation) return;
     const next = receipts.find(receipt => (
       !attemptedSupersededCleanupRunIdsRef.current.has(receipt.runId)
@@ -6349,9 +6360,29 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
     });
   }, [data, deletionLifecycleRevision, getNode, id, retireBoardCleanupReceipt]);
 
+  // Self-heal canvases saved while career override handoffs were wrongly
+  // adopted as Board-run recovery state. The override's own retirePending
+  // path owns those runs' durable lifecycle, so only the markers are removed.
+  useEffect(() => {
+    const liveData = getNode(id)?.data || data;
+    const patch = careerOverrideBoardMarkerCleanup(liveData);
+    if (!patch) return;
+    const runIds = [
+      ...(patch.manualAiResume === null ? [liveData.manualAiResume?.runId] : []),
+      ...(Array.isArray(liveData.manualAiCleanupReceipts)
+        ? liveData.manualAiCleanupReceipts.map(receipt => receipt?.runId)
+        : []),
+      ...(Array.isArray(liveData.boardCancellation?.manualAiRunIds)
+        ? liveData.boardCancellation.manualAiRunIds
+        : []),
+    ].filter(isJobBoardCareerOverrideRunId);
+    updateGlobal(id, node => careerOverrideBoardMarkerCleanup(node?.data));
+    EventLogger.log(`[JobBoard] cleared career-override run from Board recovery state id=${id} run=${[...new Set(runIds)].join(',')}`);
+  }, [data, getNode, id, updateGlobal]);
+
   useEffect(() => {
     const resume = data.manualAiResume;
-    if (!resume?.runId) return;
+    if (!isBoardCombineManualAiRunId(resume?.runId)) return;
     if (boardRecoveryTouchesPendingDeletion(id, data.boardScanResume, resume)) {
       autoResumedManualAiRunRef.current = null;
       return;
@@ -6410,7 +6441,8 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
   // must not stay disabled behind a stale recoveryError forever.
   useEffect(() => {
     if (recoveryError !== SAVED_HANDOFF_READY_MESSAGE) return;
-    if (data.manualAiResume?.runId) return;
+    // A career override marker never justifies this notice; clear it.
+    if (isBoardCombineManualAiRunId(data.manualAiResume?.runId)) return;
     if (combineRunRef.current) return;
     setRecoveryError(null);
   }, [data.manualAiResume?.runId, recoveryError]);
@@ -6512,8 +6544,11 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
     void handleSearchSelected({ resumeBoardScan: true, plan, explicitRecoveryContinue: true });
   }, [getNode, handleCancelRun, handleCombine, handleSearchSelected, id, retireBoardCleanupReceipt, settleRecoveredCombine, updateGlobal]);
 
-  const durableRecoveryActive = !!data.boardCancellation || !!data.boardScanResume || !!data.manualAiResume;
-  const cleanupOnlyRecovery = normalizeManualAiCleanupReceipts(data.manualAiCleanupReceipts).length > 0
+  // A career override marker is never Board-run recovery (self-healed above).
+  const durableRecoveryActive = !!data.boardCancellation || !!data.boardScanResume
+    || (!!data.manualAiResume && !isJobBoardCareerOverrideRunId(data.manualAiResume.runId));
+  const cleanupOnlyRecovery = normalizeManualAiCleanupReceipts(data.manualAiCleanupReceipts)
+    .some(receipt => isBoardCombineManualAiRunId(receipt?.runId))
     && !durableRecoveryActive;
   const cancellationCleanupActive = hasPendingManualAiRetirement(data);
   // --- Board career override (career data for applications) ---------------
