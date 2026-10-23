@@ -21,6 +21,7 @@ import { abortNodeTasksAndWait, cancellationError, getCurrentIpcRequestContext, 
 import { logger } from '../logger.js';
 import { isBackgroundE2E } from '../utils/backgroundE2e.js';
 import { clipCorrectionItem, REJECTED_CAUTION } from './handoffBridge/framing.js';
+import { VALIDATION_DETAIL_LIMIT, VALIDATION_RULE_ID_RE, VALIDATION_SUMMARY_RULE_ID } from './validationFailure.js';
 
 const { app, ipcMain, shell } = electronPkg;
 
@@ -72,8 +73,8 @@ const DURABLE_REISSUE_BACKOFF_MAX_MS = 30_000;
 // one cause. When any one rule has failed in this many answers to the same
 // handoff, it goes back to the person's dock instead of the chat.
 const BRIDGE_SAME_CAUSE_REJECTION_LIMIT = 5;
-// Validator-vouched correction lines (see cleanCorrectionDetails).
-const CORRECTION_DETAIL_LIMIT = 12;
+// Validator-vouched correction lines (see cleanCorrection).
+const CORRECTION_DETAIL_LIMIT = VALIDATION_DETAIL_LIMIT;
 const CORRECTION_DETAIL_MAX_CHARS = 600;
 // Persisted per durable step; plenty for one handoff's distinct rules.
 const BRIDGE_REJECTION_CAUSE_LIMIT = 64;
@@ -262,6 +263,7 @@ export const SAFE_NON_API_AI_LOG_ERROR_CODES = new Set([
   'STRUCTURED_OUTPUT_SCHEMA_INVALID',
   'STRUCTURED_OUTPUT_SCHEMA_UNSUPPORTED_KEYWORD',
   'CAREER_SNAPSHOT_PAGE_INVALID',
+  'CAREER_SNAPSHOT_AUDIT_INVALID',
   'VALIDATION_FAILED',
 ]);
 
@@ -333,6 +335,7 @@ export const SAFE_VALIDATION_DIAGNOSTIC_REASONS = new Set([
   'CAREER_PAGE_REPAIR_NO_PROGRESS',
   'CAREER_PAGE_REPAIR_TARGET_MISSED',
   'CAREER_PAGE_VALIDATION_FAILED',
+  'CAREER_AUDIT_FINDINGS_INVALID',
   'DOMAIN_VALIDATION_FAILED',
   'VALIDATION_FAILED',
 ]);
@@ -374,6 +377,7 @@ function cloneSafeValidationDiagnostic(diagnostic) {
     'CAREER_PAGE_REPAIR_NO_PROGRESS',
     'CAREER_PAGE_REPAIR_TARGET_MISSED',
     'CAREER_PAGE_VALIDATION_FAILED',
+    'CAREER_AUDIT_FINDINGS_INVALID',
   ].includes(reason) && stage !== 'domain') return null;
   const counts = {};
   for (const key of SAFE_VALIDATION_DIAGNOSTIC_COUNT_KEYS) {
@@ -397,6 +401,7 @@ function defaultSafeValidationDiagnostic(error, validationCode) {
     case 'JOB_PREFERENCE_RESEARCH_RESPONSE_INVALID':
     case 'PREFERENCE_RESEARCH_RESPONSE_INVALID': return { stage: 'domain', reason: 'DOMAIN_VALIDATION_FAILED', counts: {} };
     case 'CAREER_SNAPSHOT_PAGE_INVALID': return { stage: 'domain', reason: 'CAREER_PAGE_VALIDATION_FAILED', counts: {} };
+    case 'CAREER_SNAPSHOT_AUDIT_INVALID': return { stage: 'domain', reason: 'CAREER_AUDIT_FINDINGS_INVALID', counts: {} };
     default: return { stage: 'domain', reason: 'VALIDATION_FAILED', counts: {} };
   }
 }
@@ -1342,13 +1347,15 @@ function updateHandoffLifecycle(record, update) {
       // rule and how many answers to this handoff have now failed it.
       causeTag: typeof update.causeTag === 'string' && /^[a-f0-9]{8}$/.test(update.causeTag) ? update.causeTag : null,
       causeRepeats: Number.isSafeInteger(update.causeRepeats) && update.causeRepeats > 0 ? update.causeRepeats : null,
+      // The code-authored rule id behind causeTag, when the validator named one.
+      ruleId: typeof update.ruleId === 'string' && VALIDATION_RULE_ID_RE.test(update.ruleId) ? update.ruleId : null,
     };
     lifecycle.failures.push(failure);
     if (lifecycle.failures.length > HANDOFF_FAILURES_PER_LIFECYCLE_LIMIT) lifecycle.failures.shift();
   }
-  else if (update?.escalated === 'rejection_cap') {
-    lifecycle.escalated = 'rejection_cap';
-    lifecycle.escalatedAfterRejections = lifecycle.rejected;
+  else if (update?.escalated === 'rejection_cap' || update?.escalated === 'worker_restart_cap') {
+    lifecycle.escalated = update.escalated;
+    if (update.escalated === 'rejection_cap') lifecycle.escalatedAfterRejections = lifecycle.rejected;
   }
   else if (update === 'accepted') {
     lifecycle.acceptedAt = now;
@@ -2084,7 +2091,10 @@ export function materializeNonApiPrompt({
   return sections.filter(Boolean).join('\n\n');
 }
 
-function safeCorrectionGuidance(diagnostic, validationCode) {
+// career-profile-repair carries both edit-repair and adjudication answers.
+const EDIT_PROTOCOL_TASKS = new Set(['career-profile-repair']);
+
+function safeCorrectionGuidance(diagnostic, validationCode, task) {
   const safe = cloneSafeValidationDiagnostic(diagnostic);
   if (validationCode === 'HANDOFF_CODE_MISSING'
     || safe?.reason === 'HANDOFF_CODE_MISSING') {
@@ -2142,6 +2152,23 @@ function safeCorrectionGuidance(diagnostic, validationCode) {
   if (validationCode === 'JOB_PREFERENCE_RESEARCH_RESPONSE_INVALID' || validationCode === 'PREFERENCE_RESEARCH_RESPONSE_INVALID') {
     return 'The prior Job Preference research response did not satisfy its validation contract. Follow the original response format and regenerate the complete answer.';
   }
+  if (safe?.stage === 'domain' && safe?.reason === 'CAREER_AUDIT_FINDINGS_INVALID') {
+    return 'Fix or drop each finding named below and return the complete audit answer again. Return {"findings": []} when nothing needs to change. Do not argue with a listed rule: change the finding so it satisfies it, or remove it.';
+  }
+  if (EDIT_PROTOCOL_TASKS.has(task) && safe?.stage === 'domain' && typeof safe.reason === 'string' && safe.reason.startsWith('CAREER_PAGE_')) {
+    // This task carries both edit-repair and adjudication answers, so the
+    // wording stays format-neutral unless the reason is edit-specific.
+    if (safe.reason === 'CAREER_PAGE_REPAIR_NO_PROGRESS') {
+      return 'Return edits that change the assembled career profile and resolve the assigned findings. An edit that proposes the current value, or only reorders or reformats, is not a repair.';
+    }
+    if (safe.reason === 'CAREER_PAGE_REPAIR_TARGET_MISSED') {
+      return 'Return edits only for the entities and segments named by the assigned problems; a settled target stays unchanged unless a listed problem names it.';
+    }
+    if (safe.reason === 'CAREER_PAGE_COVERAGE_RECIPROCITY') {
+      return 'Fix each numbered problem and return the complete answer again in the required response format. Do not edit segmentCoverage entityIds: the host derives that inverse index.';
+    }
+    return 'Fix each numbered problem and return the complete answer again in the required response format. Do not return a rewritten page shard.';
+  }
   if (safe?.stage === 'domain' && safe?.reason === 'CAREER_PAGE_COVERAGE_RECIPROCITY') {
     return 'Rebuild the complete career page shard with exact page-local evidenceSegmentIds and one valid segmentCoverage disposition for each source segment. Do not supply or repair segmentCoverage.entityIds: the host derives that inverse index after validating your evidence.';
   }
@@ -2179,7 +2206,7 @@ function promptForRetry(record, validationError) {
     : record.validationCode === 'STRUCTURED_OUTPUT_SCHEMA_INVALID'
       ? 'The previous answer was valid JSON but did not match the required schema.'
       : 'The previous answer failed the application\'s response checks.';
-  const safeGuidance = safeCorrectionGuidance(record.validationDiagnostic, record.validationCode);
+  const safeGuidance = safeCorrectionGuidance(record.validationDiagnostic, record.validationCode, record.task);
   // A category alone is goal-shaped: it cannot say which rule failed, and a
   // worker that cannot see the failing rule repeats it indefinitely.
   const details = Array.isArray(record.validationCorrectionDetails) ? record.validationCorrectionDetails : [];
@@ -2195,7 +2222,9 @@ function promptForRetry(record, validationError) {
         reason,
         ...(safeGuidance ? [safeGuidance] : []),
         ...detailLines,
-        'Regenerate the entire answer from the original inputs. Do not return a patch, only the corrected field, or an explanation of the mistake.',
+        EDIT_PROTOCOL_TASKS.has(record.task)
+          ? 'Return the complete corrected answer in exactly the required response format, built from the original inputs: every field and, for an edits array, every edit (the host applies them all together), not only the ones that failed. Do not return a rewritten page shard or an explanation of the mistake.'
+          : 'Regenerate the entire answer from the original inputs. Do not return a patch, only the corrected field, or an explanation of the mistake.',
         'Return exactly one complete `json` code block. Serialize the result once, then run a strict JSON.parse-equivalent check on the exact block before sending it.',
         'Pay special attention to commas and closing braces, and JSON-escape every quote, backslash, or line break that occurs inside a string value.',
       ].join('\n')
@@ -2224,6 +2253,11 @@ function publicRequest(record, validationError = record.validationError || null)
     // does not follow an asynchronous status snapshot: unavailable delivery
     // is a bridge setup/progress state, never permission to revive paste UI.
     mcpEligible: record.handoffRoute === 'mcp',
+    // Why a bridged handoff came back to the person (closed enum), so the
+    // dock can say so instead of silently reappearing.
+    bridgeEscalation: record.bridgeEscalation === 'rejection_cap' || record.bridgeEscalation === 'worker_restart_cap'
+      ? record.bridgeEscalation
+      : null,
     handoffCode: record.handoffCode || null,
     runId: record.runId || null,
     stepKey: record.stepKey || null,
@@ -2306,29 +2340,53 @@ function nextRetryDelayMs(rejectionCount) {
 // answer it just checked using material the answering chat already holds (its
 // own ids, labels and indices, the prompt's segment ids). Paths are still
 // scrubbed and long quoted spans clipped, as application-lane corrections are.
-function cleanCorrectionDetails(error) {
-  if (!Array.isArray(error?.correctionDetails)) return [];
-  return error.correctionDetails
-    .filter(line => typeof line === 'string' && line.trim())
-    .slice(0, CORRECTION_DETAIL_LIMIT)
-    .map(line => clipCorrectionItem(line.replace(/\p{Cc}+/gu, ' ').trim(), CORRECTION_DETAIL_MAX_CHARS));
+//
+// `error.correctionRuleIds` is the parallel array of code-authored rule ids.
+// Both are walked by ORIGINAL index so a skipped line never shifts an id.
+function cleanCorrection(error) {
+  const lines = [];
+  const ruleIds = [];
+  if (!Array.isArray(error?.correctionDetails)) return { lines, ruleIds };
+  const ids = Array.isArray(error.correctionRuleIds) ? error.correctionRuleIds : [];
+  for (let index = 0; index < error.correctionDetails.length && lines.length < CORRECTION_DETAIL_LIMIT; index += 1) {
+    const line = error.correctionDetails[index];
+    if (typeof line !== 'string' || !line.trim()) continue;
+    const cleaned = clipCorrectionItem(line.replace(/\p{Cc}+/gu, ' ').trim(), CORRECTION_DETAIL_MAX_CHARS);
+    if (!cleaned) continue;
+    lines.push(cleaned);
+    ruleIds.push(typeof ids[index] === 'string' && VALIDATION_RULE_ID_RE.test(ids[index]) ? ids[index] : null);
+  }
+  return { lines, ruleIds };
 }
 
 // Two rejections share a cause when the same rule failed, whatever entity,
 // index, quoted value or segment it named: fixing one entity and breaking
 // another the same way is still repeating the mistake. Without vouched lines
 // the safe classification is the only rule there is.
-function rejectionCauseKeys(validationCode, validationDiagnostic, details) {
+//
+// A line that carries a code-authored rule id is keyed by that id alone, so
+// entity names and indices can never fragment the count. A line without one
+// (or with an invalid one) falls back to its normalized shape. The "more
+// problems" summary line names no rule and is never counted.
+function rejectionCauses(validationCode, validationDiagnostic, lines, ruleIds = []) {
   const base = `${validationCode || 'VALIDATION_FAILED'}:${validationDiagnostic?.reason || 'VALIDATION_FAILED'}`;
-  const shapes = details.length
-    ? details.map(line => `${base}:${line
-      .replace(/"(?:[^"\\]|\\.)*"/gu, '""')
-      .replace(/\[[^\]]*\]/gu, '[]')
-      .replace(/\b[a-z][a-z0-9]*(?:-[a-z0-9]+)+\b/gu, '<id>')
-      .replace(/\d+/gu, '#')
-      .replace(/<id>(?:[\s,]+<id>)+/gu, '<id>')}`)
-    : [base];
-  return [...new Set(shapes)].map(shape => crypto.createHash('sha256').update(shape).digest('hex').slice(0, 16));
+  const hashShape = shape => crypto.createHash('sha256').update(shape).digest('hex').slice(0, 16);
+  const causes = new Map();
+  lines.forEach((line, index) => {
+    const ruleId = typeof ruleIds[index] === 'string' && VALIDATION_RULE_ID_RE.test(ruleIds[index]) ? ruleIds[index] : null;
+    if (ruleId === VALIDATION_SUMMARY_RULE_ID) return;
+    const shape = ruleId
+      ? `${base}:rule:${ruleId}`
+      : `${base}:${line
+        .replace(/"(?:[^"\\]|\\.)*"/gu, '""')
+        .replace(/\[[^\]]*\]/gu, '[]')
+        .replace(/\b[a-z][a-z0-9]*(?:-[a-z0-9]+)+\b/gu, '<id>')
+        .replace(/\d+/gu, '#')
+        .replace(/<id>(?:[\s,]+<id>)+/gu, '<id>')}`;
+    const key = hashShape(shape);
+    if (!causes.has(key)) causes.set(key, { key, ruleId });
+  });
+  return causes.size ? [...causes.values()] : [{ key: hashShape(base), ruleId: null }];
 }
 
 function cleanBridgeRejectionCauses(value) {
@@ -2341,18 +2399,34 @@ function cleanBridgeRejectionCauses(value) {
   return causes;
 }
 
-// Counts each rule once per answer (most recently seen last, oldest evicted)
-// and returns the most repeated of this answer's rules.
-function recordBridgeRejectionCauses(record, keys) {
+// Counts each rule once per answer (most recently seen last). When the map is
+// over its size bound the LOWEST-count entry is evicted (oldest first among
+// ties), never one of this answer's own keys, so a rule that keeps recurring
+// can always reach the cap however many one-off rules pass between its
+// failures. Returns the first most-repeated of this answer's rules.
+function recordBridgeRejectionCauses(record, entries) {
   const causes = record.bridgeRejectionCauses instanceof Map ? record.bridgeRejectionCauses : new Map();
-  for (const key of keys) {
+  const ownKeys = new Set(entries.map(entry => entry.key));
+  for (const { key } of entries) {
     const count = (causes.get(key) || 0) + 1;
     causes.delete(key);
     causes.set(key, count);
   }
-  while (causes.size > BRIDGE_REJECTION_CAUSE_LIMIT) causes.delete(causes.keys().next().value);
+  while (causes.size > BRIDGE_REJECTION_CAUSE_LIMIT) {
+    let victim = null;
+    let victimCount = Infinity;
+    for (const [key, count] of causes) {
+      if (ownKeys.has(key)) continue;
+      if (count < victimCount) { victim = key; victimCount = count; }
+    }
+    if (victim === null) break;
+    causes.delete(victim);
+  }
   record.bridgeRejectionCauses = causes;
-  return keys.reduce((top, key) => (causes.get(key) > top.count ? { key, count: causes.get(key) } : top), { key: keys[0], count: 0 });
+  return entries.reduce(
+    (top, entry) => (causes.get(entry.key) > top.count ? { key: entry.key, count: causes.get(entry.key), ruleId: entry.ruleId } : top),
+    { key: entries[0].key, count: 0, ruleId: entries[0].ruleId },
+  );
 }
 
 // Process-keyed like the response receipt tag, so a report can show that two
@@ -2365,6 +2439,11 @@ function bridgeRejectionDurablePatch(record) {
   return {
     bridgeRejectionCauses: record.bridgeRejectionCauses?.size ? Object.fromEntries(record.bridgeRejectionCauses) : null,
     bridgeEscalation: record.bridgeEscalation || null,
+    // Already clipped/cleaned lines (see cleanCorrection); persisted so a
+    // handed-back handoff still shows its numbered problems after a relaunch.
+    validationCorrectionDetails: Array.isArray(record.validationCorrectionDetails) && record.validationCorrectionDetails.length
+      ? record.validationCorrectionDetails.slice(0, CORRECTION_DETAIL_LIMIT)
+      : null,
   };
 }
 
@@ -2834,7 +2913,12 @@ export async function requestNonApiAi({
     validationError: null,
     validationCode: null,
     validationDiagnostic: null,
-    validationCorrectionDetails: [],
+    // Pending handoffs keep their numbered problems across a relaunch
+    // (re-cleaned, so a hand-edited file cannot
+    // smuggle control characters or an over-long list into a prompt).
+    validationCorrectionDetails: effectiveSavedStep?.status === 'accepted'
+      ? []
+      : cleanCorrection({ correctionDetails: effectiveSavedStep?.validationCorrectionDetails }).lines,
     // These are restored only from the durable step and are later discarded
     // for local/manual routes. They carry no prompt or answer content.
     retryRejectionCount: cleanRetryRejectionCount(effectiveSavedStep?.retryRejectionCount),
@@ -2842,7 +2926,7 @@ export async function requestNonApiAi({
     // Rule-shape digests and the escalation they caused survive a relaunch, so
     // restarting the app cannot hand a non-converging handoff back to ChatGPT.
     bridgeRejectionCauses: cleanBridgeRejectionCauses(effectiveSavedStep?.bridgeRejectionCauses),
-    bridgeEscalation: effectiveSavedStep?.bridgeEscalation === 'rejection_cap' ? 'rejection_cap' : null,
+    bridgeEscalation: ['rejection_cap', 'worker_restart_cap'].includes(effectiveSavedStep?.bridgeEscalation) ? effectiveSavedStep.bridgeEscalation : null,
     retryTimer: null,
     signal,
     materializedPrompt,
@@ -2876,6 +2960,11 @@ export async function requestNonApiAi({
   if (record.handoffRoute !== 'mcp' || !record.runId || !record.stepKey) {
     record.retryRejectionCount = 0;
     record.retryNotBefore = null;
+  }
+  // Restored problems need a (generic, memory-only) rejection marker or the
+  // prompt would not render the correction block for the person.
+  if (record.validationCorrectionDetails.length) {
+    record.validationError = 'The previous answer did not pass the application\'s checks. The numbered problems below say what to fix.';
   }
   record.lifecycle = createHandoffLifecycle(record);
   const progressScope = registerProgressRecord(record);
@@ -3079,6 +3168,7 @@ async function acceptNonApiAiResponse(record, args, { transport = 'local' } = {}
     phase = 'commit';
     await updateDurableStep(record, { status: 'accepted', response: args.response, draft: '',
       retryRejectionCount: 0, retryNotBefore: null, bridgeRejectionCauses: null, bridgeEscalation: null,
+      validationCorrectionDetails: null,
     });
     phase = 'committed';
     // The durable write yields. Cancellation or Back may settle this record
@@ -3137,11 +3227,12 @@ async function acceptNonApiAiResponse(record, args, { transport = 'local' } = {}
     record.validationError = message;
     record.validationCode = validationCode;
     record.validationDiagnostic = validationDiagnostic;
-    record.validationCorrectionDetails = phase === 'validate' ? cleanCorrectionDetails(error) : [];
+    const correction = phase === 'validate' ? cleanCorrection(error) : { lines: [], ruleIds: [] };
+    record.validationCorrectionDetails = correction.lines;
     // Only answers ChatGPT sends through the bridge count toward returning a
     // handoff to the person; a person's own paste is never capped.
     const cause = bridgeRejection && record.handoffRoute === 'mcp'
-      ? recordBridgeRejectionCauses(record, rejectionCauseKeys(validationCode, validationDiagnostic, record.validationCorrectionDetails))
+      ? recordBridgeRejectionCauses(record, rejectionCauses(validationCode, validationDiagnostic, correction.lines, correction.ruleIds))
       : null;
     updateHandoffLifecycle(record, {
       rejected: true,
@@ -3149,7 +3240,7 @@ async function acceptNonApiAiResponse(record, args, { transport = 'local' } = {}
       code: validationCode,
       validationDiagnostic,
       ...responseReceipt,
-      ...(cause ? { causeTag: rejectionCauseTag(cause.key), causeRepeats: cause.count } : {}),
+      ...(cause ? { causeTag: rejectionCauseTag(cause.key), causeRepeats: cause.count, ruleId: cause.ruleId } : {}),
     });
     logger.warn(`[Non-API AI] Rejected response for task '${record.task || 'unknown'}' (code=${nonApiAiLogErrorCode(error)}).`);
     if (cause && cause.count >= BRIDGE_SAME_CAUSE_REJECTION_LIMIT) {
@@ -3209,6 +3300,29 @@ async function acceptNonApiAiResponse(record, args, { transport = 'local' } = {}
     sendRequest(record, 'reissue');
     return { accepted: false, validationErrors: [message], reason: phase === 'validate' ? 'validation' : 'commit_failed' };
   }
+}
+
+/**
+ * Hand a bridged handoff back to the person's dock without a rejected answer,
+ * for example when the ChatGPT chat that owned it keeps being replaced. Same
+ * escalation the repeated-rejection cap uses; the reason is a closed enum.
+ */
+export function returnBridgeHandoffToPerson({ requestId, reason } = {}) {
+  const record = typeof requestId === 'string' ? pendingRequests.get(requestId) : null;
+  if (!record || record.handoffRoute !== 'mcp' || record.settling
+    || (reason !== 'rejection_cap' && reason !== 'worker_restart_cap')) return false;
+  clearReissueTimer(record);
+  record.handoffRoute = 'manual';
+  record.bridgeEscalation = reason;
+  record.retryRejectionCount = 0;
+  record.retryNotBefore = null;
+  updateHandoffLifecycle(record, { escalated: reason });
+  void updateDurableStep(record, {
+    status: 'pending', draft: record.initialResponse || '', response: null,
+    retryRejectionCount: 0, retryNotBefore: null, ...bridgeRejectionDurablePatch(record),
+  }).catch(() => logger.warn('[Non-API AI] Could not persist the bridge escalation.'));
+  sendRequest(record, 'reissue');
+  return true;
 }
 
 // ── In-process bridge seam ───────────────────────────────────────────────────

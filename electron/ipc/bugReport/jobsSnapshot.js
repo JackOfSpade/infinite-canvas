@@ -4990,7 +4990,7 @@ export function buildNonApiAiHandoffLifecycleMarkdown(currentNodeIds, reportWind
       // count is how many answers to this handoff have failed it so far.
       const causeRepeats = boardDiagnosticNumber(failure?.causeRepeats, { max: 1_000_000 });
       const cause = typeof failure?.causeTag === 'string' && /^[a-f0-9]{8}$/.test(failure.causeTag)
-        ? ` · cause \`${failure.causeTag}\`${Number.isInteger(causeRepeats) ? ` ×${causeRepeats}` : ''}`
+        ? ` · cause \`${failure.causeTag}\`${Number.isInteger(causeRepeats) ? ` ×${causeRepeats}` : ''}${typeof failure?.ruleId === 'string' && /^[A-Z][A-Z0-9_]{2,63}$/.test(failure.ruleId) ? ` · rule \`${failure.ruleId}\`` : ''}`
         : '';
       const clock = Number.isFinite(at) && at > 0 ? `${new Date(at).toISOString()} ` : '';
       return [`${clock}${code} · ${stage}:${reason}${counts.length ? ` (${counts.join(', ')})` : ''}${size}${hash}${cause}`];
@@ -5094,6 +5094,8 @@ export function buildNonApiAiHandoffLifecycleMarkdown(currentNodeIds, reportWind
     if (boardDiagnosticValue(item, 'escalated') === 'rejection_cap') {
       const after = boardDiagnosticNumber(boardDiagnosticValue(item, 'escalatedAfterRejections'));
       retries.push(`**returned to the person** (\`rejection_cap\`: one cause kept failing in ChatGPT's answers${after != null ? `, after ${after} rejection(s)` : ''})`);
+    } else if (boardDiagnosticValue(item, 'escalated') === 'worker_restart_cap') {
+      retries.push('**returned to the person** (`worker_restart_cap`: the ChatGPT chat was replaced repeatedly without answering this handoff)');
     }
     const accepted = acceptedAt && issuedAt
       ? ` · accepted after ${handoffElapsed(acceptedAt - issuedAt)}`

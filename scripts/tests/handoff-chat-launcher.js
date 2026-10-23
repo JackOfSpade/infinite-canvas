@@ -151,6 +151,21 @@ const cases = [
 ];
 
 export default [
+  { name: 'chat launcher: restart_cap keeps the tab and never launches or retries a replacement', async run() {
+    const clock = { now: Date.now() };
+    const worker = { ordinal: 1, state: 'waiting', firstCallAt: clock.now - 600_000, lastCallAt: clock.now - 61_000, restarts: 3 };
+    const attempts = [];
+    const h = observedWorkerUi({ worker, clock, diagnosis: () => ({ reason: 'delivery_timeout', assistantPresent: true, responding: false }),
+      controller: { restartWorker: async args => { attempts.push(args); return { copied: false, status: 'restart_cap' }; } } });
+    try {
+      await h.publish();
+      await h.tick(60_000);
+      await h.tick(60_000);
+      assert.equal(attempts.length, 1, 'the refused replacement is final for this incarnation');
+      assert.equal(attempts[0].automatic, true);
+      assert.deepEqual(h.calls, [], 'the existing tab stays open and no launch follows');
+    } finally { h.ui.dispose(); }
+  } },
   { name: 'chat launcher: explicitly selects and verifies Chat before typing and sending', async run() {
     const { launcher, calls } = harness();
     const result = await launcher.launch({ owner: 'mode', starter });
@@ -787,7 +802,7 @@ export default [
     try {
       await h.publish();
       assert.deepEqual(h.diagnoses, ['worker:31:1']);
-      assert.deepEqual(h.calls, [['restart', { generation: 31, workerOrdinal: 1, observedFailure: true }], ['close', 'worker:31:1'], ['launch']]);
+      assert.deepEqual(h.calls, [['restart', { generation: 31, workerOrdinal: 1, observedFailure: true, automatic: true }], ['close', 'worker:31:1'], ['launch']]);
     } finally { h.ui.dispose(); }
   } },
   { name: 'chat launcher: a waiting worker that polled recently is not diagnosed', async run() {
@@ -814,7 +829,7 @@ export default [
       assert.deepEqual(h.calls, []);
       assert.equal((await h.launch())?.reason, 'delivery_timeout');
       await h.tick(16_000);
-      assert.deepEqual(h.calls, [['restart', { generation: 31, workerOrdinal: 1, observedFailure: true }], ['close', 'worker:31:1'], ['launch']]);
+      assert.deepEqual(h.calls, [['restart', { generation: 31, workerOrdinal: 1, observedFailure: true, automatic: true }], ['close', 'worker:31:1'], ['launch']]);
     } finally { h.ui.dispose(); }
   } },
   { name: 'chat launcher: two consecutive looks without a Stop control classify the chat as stopped', async run() {
@@ -864,7 +879,7 @@ export default [
         await h.publish();
         assert.deepEqual(h.calls, []);
         await h.tick(15_000);
-        assert.deepEqual(h.calls, [['restart', { generation: 31, workerOrdinal: 1 }], ['close', 'worker:31:1'], ['launch']]);
+        assert.deepEqual(h.calls, [['restart', { generation: 31, workerOrdinal: 1, automatic: true }], ['close', 'worker:31:1'], ['launch']]);
       } finally { h.ui.dispose(); }
     }
     for (const [state, quietReason] of [['working', null], ['quiet', 'answer_silent'], ['waiting', null]]) {
@@ -900,7 +915,7 @@ export default [
         abandonWorkerStarter: async args => { abandoned.push(args.workerOrdinal); } } });
     try {
       await h.publish();
-      assert.deepEqual(h.calls, [['restart', { generation: 31, workerOrdinal: 1, observedFailure: true }], ['close', 'worker:31:1']]);
+      assert.deepEqual(h.calls, [['restart', { generation: 31, workerOrdinal: 1, observedFailure: true, automatic: true }], ['close', 'worker:31:1']]);
       assert.deepEqual(abandoned, [1]);
       assert.equal((await h.launch())?.reason, 'attachment_prepare_read_error');
     } finally { h.ui.dispose(); }

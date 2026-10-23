@@ -5,7 +5,7 @@ export const LANE_PHASES = Object.freeze(['unread', 'awaiting', 'host', 'done', 
 export const LANE_REASONS = Object.freeze([
   'user_hold', 'human_advance', 'rejection_cap', 'junk_cap', 'review_round_cap',
   'job_broken', 'render_retry', 'app_fix_required', 'canvas_unavailable', 'read_failed', 'write_failed',
-  'submit_stuck', 'host_silent', 'lapsed', 'restart', 'review_stop',
+  'submit_stuck', 'host_silent', 'lapsed', 'restart', 'review_stop', 'worker_restart_cap',
 ]);
 // The reasons that need the person to act: a lane held for one of them is
 // 'needs_user'. Every other reason is a plain 'held' lane. One list, so a hold
@@ -74,6 +74,9 @@ function makeCounters(value = {}) {
     revisedRounds: Number.isInteger(value.revisedRounds) ? value.revisedRounds : Number.isInteger(value.reviewRounds) ? value.reviewRounds : 0,
     errStreak: Number.isInteger(value.errStreak) ? value.errStreak : Number.isInteger(value.errors) ? value.errors : 0,
     attemptByStage: value.attemptByStage && typeof value.attemptByStage === 'object' ? { ...value.attemptByStage } : {},
+    // Memory only: automatic worker replacements for the current unanswered
+    // handoff. laneStore never serializes it (its counter list is strict).
+    workerRestarts: Number.isInteger(value.workerRestarts) && value.workerRestarts >= 0 ? value.workerRestarts : 0,
   };
 }
 
@@ -227,6 +230,8 @@ export function resumeLane(lane) {
     // A human-advance hold means the prompt this lane held is retired, so it
     // never resumes to 'awaiting' on that stale code; it re-reads instead.
     lane.phase = lane.reason !== 'human_advance' && LANE_PHASES.includes(lane.heldFrom) && !['done', 'gone'].includes(lane.heldFrom) ? lane.heldFrom : 'unread';
+    // A person resuming a lane held for the restart cap starts a fresh budget.
+    if (lane.reason === 'worker_restart_cap' && lane.counters) lane.counters.workerRestarts = 0;
     lane.reason = null;
     lane.heldFrom = null;
     lane.snapshot = null;

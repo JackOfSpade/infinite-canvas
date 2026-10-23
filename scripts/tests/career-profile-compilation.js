@@ -3,6 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import nodeAssert from 'node:assert';
+import { __careerPageValidationDiagnosticForTests } from '../test-dependencies.js';
 import { assert } from './testHelpers.js';
 import { MAX_SOURCE_GROUNDING_QUOTE_CHARS } from '../../electron/ipc/applicationSourceLimits.js';
 import { careerDataProjectProvenanceHeadingForName, resumeRoleLocationFailures } from '../../electron/ipc/jobApplication.js';
@@ -320,7 +321,8 @@ async function runEditProtocol({
           options.responseValidator(candidate);
           return candidate;
         } catch (error) {
-          log.rejected.push({ task: options.task, phase, pageIndex, message: error.message });
+          log.rejected.push({ task: options.task, phase, pageIndex, message: error.message,
+            diagnostic: error.validationDiagnostic, details: error.correctionDetails, ruleIds: error.correctionRuleIds });
         }
       }
       throw new Error(`No ${options.task}/${phase} candidate was accepted: ${log.rejected.map(item => item.message).join(' || ')}`);
@@ -633,6 +635,10 @@ const editProtocolTests = [
       });
       const repairs = log.calls.filter(call => call.phase === 'edit-repair');
       const repairRejections = log.rejected.filter(item => item.phase === 'edit-repair').map(item => item.message);
+      const repairFailure = log.rejected.find(item => item.phase === 'edit-repair');
+      assert(repairFailure.diagnostic.reason === 'CAREER_PAGE_REPAIR_TARGET_MISSED'
+        && repairFailure.ruleIds.includes('LEDGER_TARGET_SETTLED')
+        && repairFailure.details.every(line => !line.includes('value ')), 'the real edit-repair gate keys settled-target corrections by rule without forwarding the settled value');
       const convergence = convergencePayloads(log);
       assert(repairs.length === 1 && repairs[0].task === 'career-profile-repair'
         && repairRejections.length === 1 && repairRejections[0].includes('may not change a settled target')
@@ -1092,6 +1098,22 @@ const restoredEditProtocolTests = [
 ];
 
 export default [
+  {
+    name: 'W3 career pacing: only whole-profile no-progress or pure settled-target errors select pacing',
+    run: () => {
+      const unchanged = 'edits leave the assembled canonical career profile unchanged; resolve the listed problems';
+      const noop = 'edit[0]: edit to skills/p0001-skill-1/category proposes no change';
+      const target = 'edit-repair may not change a settled target that no deterministic error names: skills/p0001-skill-1/category';
+      const reason = lines => __careerPageValidationDiagnosticForTests(lines).reason;
+      assert(reason([unchanged]) === 'CAREER_PAGE_REPAIR_NO_PROGRESS' && reason([unchanged, noop]) === 'CAREER_PAGE_REPAIR_NO_PROGRESS', 'whole-profile no progress may include no-op edit details');
+      assert(reason([noop]) === 'CAREER_PAGE_VALIDATION_FAILED'
+        && reason([noop, 'edit[1]: roles has no entity with id missing']) === 'CAREER_PAGE_VALIDATION_FAILED'
+        && reason([unchanged, 'some other error']) === 'CAREER_PAGE_VALIDATION_FAILED', 'a lone no-op or mixed unrelated failure never earns no-progress pacing');
+      assert(reason([target, target]) === 'CAREER_PAGE_REPAIR_TARGET_MISSED'
+        && reason([target, noop]) === 'CAREER_PAGE_VALIDATION_FAILED'
+        && reason([]) === 'CAREER_PAGE_VALIDATION_FAILED', 'target-missed requires a nonempty pure settled-target error list');
+    },
+  },
   ...editProtocolTests,
   ...restoredEditProtocolTests,
   {
@@ -1844,6 +1866,9 @@ export default [
         && /audit schema .*unexpected.*not an allowed property/i.test(rejection.message)
         && !/returned a finding assigned/i.test(rejection.message),
       `an audit response cannot bypass its closed schema even when its lane metadata otherwise looks valid; got ${rejection?.code || 'no-code'}: ${rejection?.message || 'no error'}`);
+      assert(rejection.correctionDetails.some(line => line.includes('an unexpected property at findings[0]'))
+        && rejection.correctionDetails.every(line => !line.includes('unexpected is') && !line.includes('$.findings'))
+        && rejection.correctionRuleIds.includes('AUDIT_SCHEMA_INVALID'), 'raw-schema audit details hide the unexpected key while preserving the local message');
       return { malformedAuditRejected: true };
     },
   },
@@ -2757,6 +2782,55 @@ export default [
       } finally {
         fs.rmSync(root, { recursive: true, force: true });
       }
+    },
+  },
+  {
+    name: 'W3 repro R3: an audit-lane finding whose sourceQuote is a paraphrase is rejected with host-authored correction details and no corpus text',
+    run: async () => {
+      const corpus = buildCareerSourceCorpus(sourceFiles());
+      const profile = validProfile(corpus);
+      // A paraphrase that deliberately shares no 8-character run with the corpus.
+      const paraphrase = 'Constructed a data pipeline serving fifty clients';
+      const windows = (text) => {
+        const set = new Set();
+        for (let start = 0; start + 8 <= text.length; start += 1) set.add(text.slice(start, start + 8));
+        return set;
+      };
+      const corpusWindows = new Set();
+      for (const segment of corpus.segments) {
+        for (const text of [segment.text, segment.text.replace(/\s+/gu, ' ')]) for (const piece of windows(text)) corpusWindows.add(piece);
+      }
+      assert(![...windows(paraphrase)].some(piece => corpusWindows.has(piece)),
+        'the paraphrase fixture itself must not copy any 8-character run from the synthetic corpus');
+      const finding = editFinding({
+        id: 'paraphrased-quote', segmentIds: [corpus.segments[3].id], sourceQuote: paraphrase, edits: [categoryEdit('programming language')],
+      });
+      let captured = null;
+      let sampled = false;
+      await compileAuditedCareerSnapshot({
+        sourceFiles: sourceFiles(),
+        callText: async (_prompt, options) => {
+          if (options.task === 'career-profile-compile') return pageTransport(profile);
+          if (options.task === 'career-profile-audit-skills' && !sampled) {
+            sampled = true;
+            try { options.responseValidator({ findings: [finding] }); } catch (error) { captured = error; }
+            return { findings: [] };
+          }
+          if (options.task.startsWith('career-profile-audit-')) return { findings: [] };
+          throw new Error(`Unexpected task ${options.task}`);
+        },
+      });
+      assert(captured instanceof Error && captured.code === 'CAREER_SNAPSHOT_AUDIT_INVALID'
+        && /sourceQuote is not a verbatim quote/.test(captured.message),
+      `the real audit responseValidator must reject the paraphrased sourceQuote (got ${captured?.code}: ${captured?.message})`);
+      const details = captured.correctionDetails;
+      assert(Array.isArray(details) && details.length >= 1 && details.length <= 12 && details.every(line => typeof line === 'string' && line.length > 0),
+        `the rejection must carry 1..12 host-authored correctionDetails lines (got ${JSON.stringify(details)})`);
+      assert(Array.isArray(captured.correctionRuleIds) && captured.correctionRuleIds.includes('AUDIT_QUOTE_NOT_VERBATIM'),
+        `the rejection must declare the AUDIT_QUOTE_NOT_VERBATIM rule id (got ${JSON.stringify(captured.correctionRuleIds)})`);
+      const leaked = details.filter(line => [...windows(line)].some(piece => corpusWindows.has(piece)));
+      assert(leaked.length === 0, `no correction line may copy an 8+ character run of corpus text (leaked: ${JSON.stringify(leaked)})`);
+      return { lines: details.length };
     },
   },
 ];

@@ -28,7 +28,7 @@ export const RETRYABLE_LAUNCH_REASONS = Object.freeze([
 export const LAUNCH_REASONS = Object.freeze(['approval_required', 'delivery_timeout', 'conversation_unavailable', 'chat_stopped', 'invalid_launch', 'tab_not_owned', 'tab_open_failed', 'editor_timeout', 'editor_not_empty', 'chat_mode_unavailable', 'chat_mode_mismatch', 'chat_changed', 'insert_mismatch', 'model_menu_missing', 'model_selection_failed', 'effort_unavailable', 'account_unknown', 'send_unavailable', 'send_not_confirmed', 'apple_events_js_off', 'chrome_unavailable', 'chrome_timeout', 'starter_unavailable', 'bridge_not_presented', 'plugin_missing', 'reconnect_required', 'usage_limit', 'safety_block', 'attachment_invalid', 'attachment_draft_present', 'attachment_upload_failed', 'attachment_upload_timeout', ...['list_error', 'epoch_changed', 'scope_changed', 'candidate_missing', 'reservation_missing', 'file_missing', 'file_permission', 'file_rejected', 'read_error', 'reservation_changed', 'payload_invalid', 'unavailable'].map(reason => `attachment_prepare_${reason}`)]);
 export const JOB_PHASES = Object.freeze(['unread', 'awaiting', 'host', 'done', 'needs_user', 'held', 'gone', 'unknown']);
 export const JOB_REASONS = Object.freeze([
-  'user_hold', 'human_advance', 'rejection_cap', 'junk_cap', 'review_round_cap',
+  'user_hold', 'human_advance', 'rejection_cap', 'worker_restart_cap', 'junk_cap', 'review_round_cap',
   'job_broken', 'render_retry', 'app_fix_required', 'canvas_unavailable', 'canvas_missing', 'read_failed', 'write_failed',
   'submit_stuck', 'host_silent', 'lapsed', 'restart', 'review_stop', 'app_only_handoffs',
   'commit_failed', 'person_editing', 'hub_not_selected', 'task_disabled',

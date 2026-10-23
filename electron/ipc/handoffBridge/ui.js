@@ -424,8 +424,12 @@ export function registerHandoffBridgeUi({
     const result = await safeCall(controller, restart ? 'restartWorker' : 'copyWorkerStarter', {
       generation, workerOrdinal, ...(failedLaunch ? { failedLaunch: true } : {}),
       ...(observedFailure ? { observedFailure: true } : {}),
+      // Only this automatic path is counted against the per-handoff restart cap.
+      ...(restart && !failedLaunch ? { automatic: true } : {}),
     });
-    if (['not_quiet', 'session_ended'].includes(result?.status)) return true;
+    // restart_cap is final for this attempt: the engine hands the capped
+    // handoff to a person, so keep the tab, launch nothing and never retry.
+    if (['not_quiet', 'session_ended', 'restart_cap'].includes(result?.status)) return true;
     if (result?.copied !== true || !WORKER_SESSION_CODE.test(result.sessionCode || '')) {
       setLaunchProgress(owner, { stage: 'failed', reason: 'starter_unavailable' });
       publishStatus(currentStatus());

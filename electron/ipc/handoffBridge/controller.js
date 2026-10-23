@@ -69,7 +69,7 @@ const TASK_IDS = new Set([
   'interview-brief-research', 'interview-brief-assessment',
   'vision-product-analysis', 'marketplace-hub-scan', 'marketplace-hub-scan-batch',
 ]);
-const JOB_REASONS = new Set(['user_hold', 'human_advance', 'rejection_cap', 'junk_cap', 'review_round_cap', 'job_broken', 'render_retry', 'app_fix_required', 'canvas_unavailable', 'canvas_missing', 'read_failed', 'write_failed', 'submit_stuck', 'host_silent', 'lapsed', 'restart', 'review_stop', 'app_only_handoffs', 'commit_failed', 'person_editing', 'hub_not_selected', 'task_disabled', 'integrity_fault', 'failed', 'render_retry_required', 'user', 'answered_in_dock']);
+const JOB_REASONS = new Set(['user_hold', 'human_advance', 'rejection_cap', 'worker_restart_cap', 'junk_cap', 'review_round_cap', 'job_broken', 'render_retry', 'app_fix_required', 'canvas_unavailable', 'canvas_missing', 'read_failed', 'write_failed', 'submit_stuck', 'host_silent', 'lapsed', 'restart', 'review_stop', 'app_only_handoffs', 'commit_failed', 'person_editing', 'hub_not_selected', 'task_disabled', 'integrity_fault', 'failed', 'render_retry_required', 'user', 'answered_in_dock']);
 const ALARM_KINDS = new Set(['unknown_key', 'unknown_handoff', 'refresh_reuse', 'code_reuse', 'rate_limited', 'held_caps']);
 const PAUSE_CAUSES = new Set(['user', 'idle', 'anomaly', 'revoked', 'quit']);
 const FAULT_CODES = new Set(['socket_unavailable', 'tunnel_failed', 'state_unreadable', 'persist_failed', 'internal_error']);
@@ -1921,7 +1921,8 @@ export function createHandoffBridgeController(options = {}) {
     }
     try {
       const result = await call(activeEngine, 'restartWorker', { linkId: currentLinkId(), generation: poolGeneration,
-        workerOrdinal, failedLaunch: args?.failedLaunch === true, observedFailure: args?.observedFailure === true });
+        workerOrdinal, failedLaunch: args?.failedLaunch === true, observedFailure: args?.observedFailure === true,
+        automatic: args?.automatic === true });
       if (!currentRuntime(generation, activeEngine)) return { copied: false, status: 'session_ended' };
       if (result?.copied === true) {
         humanAction();

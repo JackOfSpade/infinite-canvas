@@ -84,6 +84,11 @@ export const CONSTANTS = Object.freeze({
   CODE_INDEX_PER_LANE: 16,
   APPLICATION_MAX_JUNK_STREAK: 5,
   APPLICATION_ERROR_STREAK: 3,
+  // Safety nets for loops with no correction to learn from. Automatic worker
+  // replacements per unanswered handoff, and consecutive unusable push
+  // submissions per served handoff.
+  WORKER_RESTART_CAP: 3,
+  PUSH_MAX_PRECHECK_STREAK: 5,
   SUBMIT_CONCURRENCY: 2,
   TOMBSTONES_PER_ENGINE: 64,
   PUSH_TOMBSTONE_RING: 500,

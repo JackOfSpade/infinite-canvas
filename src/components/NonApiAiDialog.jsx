@@ -73,6 +73,10 @@ const PREFERENCE_RESEARCH_RESPONSE_INVALID_CODES = new Set([
 
 const COMPENSATION_RESPONSE_INVALID_CODE = 'JOB_COMPENSATION_RESPONSE_INVALID';
 
+const BRIDGE_RETURN_LINES = {
+  rejection_cap: 'The same rule failed in 5 answers from ChatGPT.',
+  worker_restart_cap: 'The worker chat was replaced 3 times without an answer.',
+};
 const correctionGuidanceFor = (validationCode, validationDiagnostic) => {
   if (validationCode === COMPENSATION_RESPONSE_INVALID_CODE) {
     const reason = validationDiagnostic?.reason;
@@ -822,6 +826,8 @@ export function NonApiAiDialog() {
   const correctionGuidance = isCorrection
     ? correctionGuidanceFor(validationCode, activeRequest?.validationDiagnostic)
     : '';
+  // Why a handoff the bridge was answering came back to this dock.
+  const bridgeReturnLine = BRIDGE_RETURN_LINES[activeRequest?.bridgeEscalation] || '';
   // Set only for an application round whose correction prompt actually
   // carried an escalation block — never recomputed, only read off the item
   // applicationDockRequest copied it onto (see that function's own header).
@@ -2291,6 +2297,11 @@ export function NonApiAiDialog() {
                   ? 'The previous answer did not validate. Copy this correction prompt into the same AI chat, then replace the response below with the complete regenerated answer.'
                   : 'Copy this prompt into your AI chat, then paste its complete response below.'}
               </p>
+              {bridgeReturnLine && (
+                <p className="text-xs leading-relaxed text-amber-100/80">
+                  {bridgeReturnLine} It is kept here for you to answer.
+                </p>
+              )}
 
               {activeRequest.attachments?.length > 0 && (
                 <section aria-labelledby="non-api-ai-attachments-title" className="rounded-lg border border-amber-400/25 bg-amber-500/10 p-3">

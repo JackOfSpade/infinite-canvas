@@ -76,6 +76,104 @@ async function served(options = {}) {
 
 function cleanDirectory() { return fs.mkdtempSync(path.join(os.tmpdir(), 'ic-handoff-engine-')); }
 
+async function waitUntil(predicate, message) {
+  for (let index = 0; index < 200; index += 1) {
+    if (predicate()) return;
+    await new Promise(resolve => setTimeout(resolve, 5));
+  }
+  assert(false, message);
+}
+
+// W3 step 7: one push worker owning opaque claim ids (deliberately not job
+// ids). `state.claims` is the live roster; `state.handBack` answers the
+// engine's hand-back of capped claims.
+async function pushCapFixture() {
+  const clock = createFakeClock();
+  const state = { claims: ['opaque/claim #1'], handBacks: [], handBack: async () => 1 };
+  const push = {
+    refreshHubs: async () => true,
+    status: () => ({
+      claimWorkers: state.claims.map(claimId => ({ claimId, workerOrdinal: 1 })),
+      claimed: [...state.claims],
+      discovered: [{ tasks: [{ task: 'job-scoring', pending: state.claims.length }] }],
+      working: state.claims.length,
+    }),
+    get: async () => ({ status: 'served', handoffCode: 'PUSH-S7-CAP', task: 'job-scoring', prompt: 'Synthetic prompt', remaining: { ready: 0, working: 1, needsYou: 0 } }),
+    submit: async () => ({ status: 'unknown_handoff' }),
+    closeEpoch() {},
+    handBackClaims: async args => { state.handBacks.push({ ...args, claimIds: [...args.claimIds] }); return state.handBack(args); },
+  };
+  const engine = createHandoffEngine({
+    sources: { application: source().api, push }, scope: { applications: false, scoring: true, marketplace: false },
+    now: clock.now, timers: clock, holdMs: 0,
+  });
+  const pool = await engine.startWorkerPool({ linkId: LINK, requestedWorkers: 1 });
+  Object.assign(state, { clock, engine, pool, starter: engine.copyWorkerStarter({ linkId: LINK, generation: pool.generation, workerOrdinal: 1 }) });
+  // Serve the push handoff to the current chat, age it silent, restart automatically.
+  state.cycle = async () => {
+    const served = await engine.get({ session: state.starter.sessionCode, linkId: LINK });
+    assert(served.status === 'served', `the push worker must be served its handoff (got ${served.status})`);
+    clock.advance(CONSTANTS.STALL_NOTICE_MS);
+    assert(engine.snapshot().chat.pool.workers[0]?.quietReason === 'answer_silent', 'the push worker must be answer-silent');
+    const result = engine.restartWorker({ linkId: LINK, generation: pool.generation, workerOrdinal: 1, automatic: true });
+    if (result.copied) state.starter = result;
+    return result;
+  };
+  return state;
+}
+
+// W3 step 7: one application worker that owns one unanswered lane, with the
+// driver steps the restart-cap tests share. `serve` makes the current chat
+// receive the lane; `silent` additionally ages it past the stall window.
+async function restartCapFixture({ read = null, submit = null, engineOptions = {} } = {}) {
+  const clock = createFakeClock();
+  const application = source({
+    read: read || (async () => ({ kind: 'open', handoff: handoff({ code: 'W3-S7-CAP' }) })),
+    submit: submit || (async () => ({ kind: 'accepted', completed: true })),
+  });
+  const engine = createHandoffEngine({
+    source: application.api, scope: { applications: true, scoring: false, marketplace: false },
+    now: clock.now, timers: clock, holdMs: 0, ...engineOptions,
+  });
+  assert((await engine.release({ jobs: [{ jobId: JOB_A, canvasFilePath: PATH_A }] })).ok, 'the restart-cap fixture must own one released lane');
+  const pool = await engine.startWorkerPool({ linkId: LINK, requestedWorkers: 1 });
+  const fixture = { clock, engine, pool, starter: engine.copyWorkerStarter({ linkId: LINK, generation: pool.generation, workerOrdinal: 1 }) };
+  fixture.serve = async () => {
+    const served = await engine.get({ session: fixture.starter.sessionCode, linkId: LINK });
+    assert(served.status === 'served', `the current chat must be served the outstanding lane (got ${served.status})`);
+    return served;
+  };
+  fixture.silent = async () => {
+    const served = await fixture.serve();
+    clock.advance(CONSTANTS.STALL_NOTICE_MS);
+    assert(engine.snapshot().chat.pool.workers[0]?.quietReason === 'answer_silent', 'the worker must be answer-silent past the stall window');
+    return served;
+  };
+  fixture.restart = (options = {}) => {
+    const result = engine.restartWorker({ linkId: LINK, generation: pool.generation, workerOrdinal: 1, ...options });
+    if (result.copied) fixture.starter = result;
+    return result;
+  };
+  fixture.row = () => engine.snapshot().queue.jobs.find(job => job.jobId === JOB_A);
+  // Restart automatically `count` times; every one must replace the chat.
+  fixture.automaticRestarts = async count => {
+    for (let index = 0; index < count; index += 1) {
+      await fixture.silent();
+      const result = fixture.restart({ automatic: true });
+      assert(result.copied === true, `automatic restart ${index + 1} of ${count} must replace the chat (got ${result.status})`);
+    }
+  };
+  // The next automatic restart after the budget is spent is refused.
+  fixture.refusedAutomatic = async () => {
+    await fixture.silent();
+    const before = fixture.starter.sessionCode;
+    const result = fixture.restart({ automatic: true });
+    assert(result.copied === false && result.status === 'restart_cap' && result.sessionCode === undefined && fixture.starter.sessionCode === before,
+      `the automatic restart over budget must be refused without minting a credential (got ${JSON.stringify({ copied: result.copied, status: result.status })})`);
+  };
+  return fixture;
+}
+
 async function assertV2FreshChatTrace(steps, createEngine = createHandoffEngine) {
   const state = { candidates: Array.from({ length: 3 }, (_, index) => ({ id: `candidate-${index + 1}` })), ordinal: 0,
     ranking: ['candidate-2', 'candidate-3', 'candidate-1'], factIndex: 0, elimination: { round: 0 } };
@@ -1769,6 +1867,250 @@ const tests = [
       assert(settled.status === 'accepted' && engine.snapshot().chat.pool.workers[0]?.completed === 1,
         'the replayed application lane settles once through its replacement worker');
       await engine.close();
+    },
+  },
+  {
+    name: 'W3 repro R5: automatic restarts of an answer-silent worker are capped at three and the fourth is refused',
+    run: async () => {
+      const clock = createFakeClock();
+      const application = source({
+        read: async () => ({ kind: 'open', handoff: handoff({ code: 'W3-R5-RESTART-CAP' }) }),
+        submit: async () => ({ kind: 'accepted', completed: true }),
+      });
+      const engine = createHandoffEngine({
+        source: application.api, scope: { applications: true, scoring: false, marketplace: false },
+        now: clock.now, timers: clock, holdMs: 0,
+      });
+      try {
+        assert((await engine.release({ jobs: [{ jobId: JOB_A, canvasFilePath: PATH_A }] })).ok, 'the cap fixture must own one released application lane');
+        const pool = await engine.startWorkerPool({ linkId: LINK, requestedWorkers: 1 });
+        let starter = engine.copyWorkerStarter({ linkId: LINK, generation: pool.generation, workerOrdinal: 1 });
+        const results = [];
+        for (let attempt = 1; attempt <= 4; attempt += 1) {
+          const served = await engine.get({ session: starter.sessionCode, linkId: LINK });
+          assert(served.status === 'served' && served.handoffCode === 'W3-R5-RESTART-CAP',
+            `attempt ${attempt}: the lane is served to the current chat of worker 1 and no answer is accepted (${served.status})`);
+          clock.advance(CONSTANTS.STALL_NOTICE_MS);
+          assert(engine.snapshot().chat.pool.workers[0]?.quietReason === 'answer_silent',
+            `attempt ${attempt}: the worker is answer-silent past the stall window`);
+          const result = engine.restartWorker({ linkId: LINK, generation: pool.generation, workerOrdinal: 1, automatic: true });
+          results.push(result);
+          if (result.copied) starter = result;
+        }
+        assert(results.slice(0, 3).every(result => result.copied === true && typeof result.sessionCode === 'string'),
+          `the first three automatic restarts replace the silent chat (got ${JSON.stringify(results.slice(0, 3).map(({ copied, status }) => ({ copied, status })))})`);
+        assert(results[3].copied === false && results[3].status === 'restart_cap',
+          `the fourth automatic restart is refused with restart_cap (got ${JSON.stringify({ copied: results[3].copied, status: results[3].status })})`);
+      } finally {
+        await engine.close();
+      }
+    },
+  },
+  {
+    name: 'W3 step 7: the refused fourth restart mints nothing, holds the lane as worker_restart_cap and never serializes the count',
+    run: async () => {
+      const directory = cleanDirectory();
+      const store = createLaneStore({ userDataPath: directory });
+      const fixture = await restartCapFixture({ engineOptions: { store } });
+      try {
+        await fixture.automaticRestarts(3);
+        assert(fixture.engine.snapshot().chat.pool.workers[0]?.restarts === 3, 'three automatic restarts were minted');
+        await fixture.refusedAutomatic();
+        await waitUntil(() => fixture.row()?.phase === 'held' && fixture.row()?.reason === 'worker_restart_cap',
+          'the refused restart must hold the lane with the closed worker_restart_cap reason');
+        const worker = fixture.engine.snapshot().chat.pool.workers[0];
+        assert(worker.restarts === 3, 'the refused restart must not count as a replacement');
+        assert(worker.quietReason !== 'answer_silent' && fixture.row().stalled === false,
+          'the handed-back worker no longer owns an unanswered handoff');
+        await waitUntil(() => fs.existsSync(store.lanesPath) && fs.readFileSync(store.lanesPath, 'utf8').includes('worker_restart_cap'),
+          'the cap hold must be persisted');
+        assert(!fs.readFileSync(store.lanesPath, 'utf8').includes('workerRestarts'), 'the in-memory restart count is never written to disk');
+        const loaded = store.loadLanes();
+        assert(loaded.length === 1 && loaded[0].phase === 'held' && loaded[0].reason === 'worker_restart_cap',
+          `the held reason survives a reload (got ${JSON.stringify(loaded.map(item => [item.phase, item.reason]))})`);
+      } finally {
+        await fixture.engine.close();
+        fs.rmSync(directory, { recursive: true, force: true });
+      }
+    },
+  },
+  {
+    name: 'W3 step 7: a worker_restart_cap hold round-trips the lane store without a count, and only Resume of that hold resets the budget',
+    run: async () => {
+      const directory = cleanDirectory();
+      try {
+        const store = createLaneStore({ userDataPath: directory });
+        const lane = createApplicationLane({ ord: 1, jobId: JOB_A, canvasFilePath: PATH_A });
+        lane.counters.workerRestarts = 3;
+        holdLane(lane, 'worker_restart_cap');
+        assert(await store.saveLanes([lane]), 'a lane carrying the restart count must still save');
+        const raw = fs.readFileSync(store.lanesPath, 'utf8');
+        assert(raw.includes('worker_restart_cap') && !raw.includes('workerRestarts'), 'the reason is durable; the count is not');
+        const loaded = store.loadLanes();
+        assert(loaded.length === 1 && loaded[0].phase === 'held' && loaded[0].reason === 'worker_restart_cap'
+          && (loaded[0].counters?.workerRestarts ?? 0) === 0, 'a reloaded cap hold carries the reason and no count');
+        lane.counters.workerRestarts = 3;
+        resumeLane(lane);
+        assert(lane.phase !== 'held' && lane.reason === null && lane.counters.workerRestarts === 0, 'resuming the cap hold starts a fresh budget');
+        const other = createApplicationLane({ ord: 2, jobId: JOB_B, canvasFilePath: PATH_B });
+        other.counters.workerRestarts = 2;
+        holdLane(other, 'user_hold');
+        resumeLane(other);
+        assert(other.counters.workerRestarts === 2, 'resuming any other hold keeps the restart count');
+      } finally { fs.rmSync(directory, { recursive: true, force: true }); }
+    },
+  },
+  {
+    name: 'W3 step 7: Resume of a worker_restart_cap hold grants the handoff a fresh budget of three restarts',
+    run: async () => {
+      const fixture = await restartCapFixture();
+      try {
+        await fixture.automaticRestarts(3);
+        await fixture.refusedAutomatic();
+        await waitUntil(() => fixture.row()?.reason === 'worker_restart_cap', 'the lane must be held for the cap');
+        assert((await fixture.engine.resume({ jobId: JOB_A })).ok && fixture.row().phase !== 'held', 'the person resumes the capped lane');
+        await fixture.automaticRestarts(3);
+        await fixture.refusedAutomatic();
+      } finally { await fixture.engine.close(); }
+    },
+  },
+  {
+    name: 'W3 step 7: manual and failed-launch restarts never count toward the cap and are never refused',
+    run: async () => {
+      const fixture = await restartCapFixture();
+      try {
+        for (let index = 0; index < 5; index += 1) {
+          await fixture.silent();
+          const manual = fixture.restart({});
+          assert(manual.copied === true, `manual restart ${index + 1} must never be refused (got ${manual.status})`);
+        }
+        for (let index = 0; index < 5; index += 1) {
+          const failed = fixture.restart({ automatic: true, failedLaunch: true });
+          assert(failed.copied === true, `failed-launch restart ${index + 1} must never be refused (got ${failed.status})`);
+        }
+        assert(fixture.engine.snapshot().chat.pool.workers[0]?.restarts === 10, 'every manual and failed-launch restart minted a credential');
+        // None of those ten used any of the budget.
+        await fixture.automaticRestarts(3);
+        await fixture.refusedAutomatic();
+      } finally { await fixture.engine.close(); }
+    },
+  },
+  {
+    name: 'W3 step 7: fresh-context boundary rotations are never counted or refused even past the cap',
+    run: async () => {
+      let submits = 0;
+      const stages = ['cover-letter', 'resume', 'cover-letter', 'resume', 'cover-letter'];
+      const fixture = await restartCapFixture({
+        read: async () => ({ kind: 'open', handoff: handoff({ code: 'W3-S7-FRESH-0', stage: 'resume' }) }),
+        submit: async () => {
+          submits += 1;
+          return { kind: 'accepted', completed: false, handoff: { ...handoff({ code: `W3-S7-FRESH-${submits}`, stage: stages[submits - 1], revision: submits }), freshContextRequired: true } };
+        },
+      });
+      try {
+        for (let round = 1; round <= 5; round += 1) {
+          const served = await fixture.serve();
+          const accepted = await fixture.engine.submit({
+            session: fixture.starter.sessionCode, linkId: LINK, handoffCode: served.handoffCode,
+            response: answer({ code: served.handoffCode, stage: served.stage }),
+          });
+          assert(accepted.status === 'accepted', `round ${round}: the boundary answer is accepted (got ${accepted.status})`);
+          assert(fixture.engine.snapshot().chat.pool.workers[0]?.quietReason === 'fresh_context_required', `round ${round}: the worker is forced quiet at the boundary`);
+          const rotated = fixture.restart({ automatic: true });
+          assert(rotated.copied === true, `round ${round}: an automatic boundary rotation is never refused (got ${rotated.status})`);
+        }
+        assert(fixture.engine.snapshot().chat.pool.workers[0]?.restarts === 5, 'five boundary rotations exceed the cap of three without a refusal');
+      } finally { await fixture.engine.close(); }
+    },
+  },
+  {
+    name: 'W3 step 7: an accepted answer gives the next handoff a fresh restart budget',
+    run: async () => {
+      let submits = 0;
+      const fixture = await restartCapFixture({
+        read: async () => ({ kind: 'open', handoff: submits === 0 ? handoff({ code: 'W3-S7-FIRST' }) : handoff({ code: 'W3-S7-NEXT', stage: 'cover-letter' }) }),
+        submit: async () => {
+          submits += 1;
+          return submits === 1
+            ? { kind: 'accepted', completed: false, handoff: handoff({ code: 'W3-S7-NEXT', stage: 'cover-letter' }) }
+            : { kind: 'accepted', completed: true };
+        },
+      });
+      try {
+        await fixture.automaticRestarts(2);
+        const served = await fixture.serve();
+        assert(served.handoffCode === 'W3-S7-FIRST', 'the first handoff is still the one outstanding');
+        const accepted = await fixture.engine.submit({
+          session: fixture.starter.sessionCode, linkId: LINK, handoffCode: served.handoffCode,
+          response: answer({ code: served.handoffCode, stage: served.stage }),
+        });
+        assert(accepted.status === 'accepted' && submits === 1, 'the answer is accepted');
+        const next = await fixture.serve();
+        assert(next.handoffCode === 'W3-S7-NEXT', `the successor handoff is served (got ${next.handoffCode})`);
+        // Carrying the two prior restarts would refuse the second of these.
+        await fixture.automaticRestarts(3);
+        await fixture.refusedAutomatic();
+      } finally { await fixture.engine.close(); }
+    },
+  },
+  {
+    name: 'W3 step 7: opaque push claim ids count per handoff, are handed back once at the cap and pruned when they leave the roster',
+    run: async () => {
+      const state = await pushCapFixture();
+      // The seam reports it handed nothing back, so the count is retained until
+      // the claim leaves the roster (that is what the pruning below proves).
+      state.handBack = async () => 0;
+      try {
+        for (let attempt = 1; attempt <= 3; attempt += 1) {
+          const result = await state.cycle();
+          assert(result.copied === true, `automatic push restart ${attempt} replaces the chat (got ${result.status})`);
+        }
+        assert(state.handBacks.length === 0, 'nothing is handed back while the budget lasts');
+        const before = state.starter.sessionCode;
+        const refused = await state.cycle();
+        assert(refused.copied === false && refused.status === 'restart_cap' && state.starter.sessionCode === before,
+          `the fourth automatic push restart is refused without minting (got ${refused.status})`);
+        await waitUntil(() => state.handBacks.length === 1, 'the refused claim is handed back to its person');
+        assert(state.handBacks[0].claimIds.length === 1 && state.handBacks[0].claimIds[0] === 'opaque/claim #1'
+          && state.handBacks[0].reason === 'worker_restart_cap' && state.handBacks[0].epoch != null,
+        `an opaque non-UUID claim id is accepted and handed back with the closed reason (got ${JSON.stringify(state.handBacks[0])})`);
+        // A different handoff (claim) owns its own budget, and a claim that left
+        // the roster is forgotten, so returning to it starts over.
+        state.claims = ['opaque-claim-2'];
+        for (let attempt = 1; attempt <= 3; attempt += 1) {
+          assert((await state.cycle()).copied === true, `a second claim has its own budget (attempt ${attempt})`);
+        }
+        state.claims = ['opaque/claim #1'];
+        for (let attempt = 1; attempt <= 3; attempt += 1) {
+          assert((await state.cycle()).copied === true, `a reappearing claim id starts from a pruned count (attempt ${attempt})`);
+        }
+        assert((await state.cycle()).status === 'restart_cap', 'and is capped again after three');
+      } finally { await state.engine.close(); }
+    },
+  },
+  {
+    name: 'W3 step 7: a push claim keeps its restart count until the seam confirms the hand-back',
+    run: async () => {
+      const state = await pushCapFixture();
+      try {
+        for (let attempt = 1; attempt <= 3; attempt += 1) assert((await state.cycle()).copied === true, `restart ${attempt}`);
+        // Unconfirmed, thrown and rejected hand-backs all keep the count.
+        const modes = [async () => 0, async () => { throw new Error('seam down'); }];
+        for (const [index, mode] of modes.entries()) {
+          state.handBack = mode;
+          const refused = await state.cycle();
+          assert(refused.status === 'restart_cap', `unconfirmed hand-back ${index + 1}: still refused`);
+          await waitUntil(() => state.handBacks.length === index + 1, `unconfirmed hand-back ${index + 1} is attempted`);
+          await waitUntil(() => state.engine.snapshot().chat.pool.workers[0]?.quietReason !== 'answer_silent', 'the hand-back settles');
+        }
+        state.handBack = async () => 1;
+        assert((await state.cycle()).status === 'restart_cap', 'the retained count refuses again before any confirmation');
+        await waitUntil(() => state.handBacks.length === 3, 'the confirmed hand-back is attempted');
+        await waitUntil(() => state.engine.snapshot().chat.pool.workers[0]?.quietReason !== 'answer_silent', 'the hand-back settles');
+        // A confirmed hand-back starts the claim over.
+        for (let attempt = 1; attempt <= 3; attempt += 1) assert((await state.cycle()).copied === true, `after confirmation restart ${attempt} is allowed`);
+        assert((await state.cycle()).status === 'restart_cap', 'the budget is three again after confirmation');
+      } finally { await state.engine.close(); }
     },
   },
   {

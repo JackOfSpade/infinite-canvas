@@ -131,6 +131,11 @@ function rejects(fn, expectedMessage) {
   try { fn(); } catch (error) { caught = error; }
   assert(caught, `expected an error: ${expectedMessage}`);
   assert(caught.message === expectedMessage, `expected "${expectedMessage}" but got "${caught.message}"`);
+  if (expectedMessage.startsWith('Invalid job-gap-review response: ')) {
+    assert(caught.code === 'VALIDATION_FAILED' && caught.correctionDetails.length === 1
+      && caught.correctionDetails[0] === expectedMessage.replace('Invalid job-gap-review response: ', '')
+      && /^GAP_REVIEW_[A-Z_]+$/.test(caught.correctionRuleIds[0]), 'every rejection retains the exact local message and adds one typed correction');
+  }
 }
 
 const validate = (value, job = scoredJob(), batch = [batchFor(job)]) => validateGapReviewSubmission(value, batch, { candidateText: CANDIDATE_TEXT });
@@ -142,6 +147,34 @@ const confirmAll = [verdict('r1'), verdict('r2')];
 const idsOf = rows => rows.map(row => row.id);
 
 export default [
+  {
+    name: 'W3 gap review: every rejection family carries its own rule id',
+    run: () => {
+      const badRow = fields => response([verdict('r1', fields), verdict('r2')]);
+      const cases = [
+        [{ reviews: null }, 'GAP_REVIEW_NOT_ARRAY'],
+        [response(confirmAll, 9), 'GAP_REVIEW_INDEX_INVALID'],
+        [{ reviews: [{ index: 0, rows: confirmAll }, { index: 0, rows: confirmAll }] }, 'GAP_REVIEW_INDEX_DUPLICATE'],
+        [{ reviews: [] }, 'GAP_REVIEW_JOB_MISSING'],
+        [response(null), 'GAP_REVIEW_ROWS_NOT_ARRAY'],
+        [response([verdict('missing')]), 'GAP_REVIEW_ROW_ID_UNKNOWN'],
+        [response([verdict('r1'), verdict('r1')]), 'GAP_REVIEW_ROW_ID_DUPLICATE'],
+        [badRow({ verdict: 'wrong' }), 'GAP_REVIEW_VERDICT_INVALID'],
+        [badRow({ verdict: 'priority', priority: 'wrong' }), 'GAP_REVIEW_PRIORITY_INVALID'],
+        [badRow({ verdict: 'priority', priority: 'required' }), 'GAP_REVIEW_PRIORITY_NOT_LOWER'],
+        [badRow({ verdict: 'priority', priority: 'important', jobEvidence: '' }), 'GAP_REVIEW_QUOTE_EMPTY'],
+        [badRow({ verdict: 'priority', priority: 'important', jobEvidence: 'not in the synthetic posting' }), 'GAP_REVIEW_QUOTE_UNGROUNDED'],
+        [badRow({ verdict: 'evidence', status: 'wrong' }), 'GAP_REVIEW_STATUS_INVALID'],
+        [badRow({ verdict: 'duplicate', duplicateOf: 'r1' }), 'GAP_REVIEW_DUPLICATE_OF_INVALID'],
+        [response([verdict('r1')]), 'GAP_REVIEW_ROW_MISSING'],
+      ];
+      for (const [value, expected] of cases) {
+        let caught;
+        try { validate(value); } catch (error) { caught = error; }
+        assert(caught?.correctionRuleIds?.length === 1 && caught.correctionRuleIds[0] === expected, `${expected}: ${caught?.message}`);
+      }
+    },
+  },
   {
     name: 'Gap review: fixture job is an 86 pulled to 69 by two critical gaps',
     run: () => {

@@ -84,6 +84,26 @@ import { claimJobAnalysisOperationAuthority } from '../../electron/ipc/jobAnalys
 
 export default [
   {
+    name: 'W3 scoring: duplicate, invalid and ungrounded rows keep exact messages and typed corrections',
+    run: () => {
+      const jobs = [{ title: 'Synthetic engineer', snippet: 'Required: React experience.' }];
+      const row = { index: 0, matchScore: 95, requirementAssessments: [], materialGaps: [], reasoning: 'Synthetic fit', careerDirection: 'Engineering', confidence: 'high' };
+      for (const [scores, expected, message] of [
+        [[row, row], 'SCORING_INDEX_DUPLICATE', 'Invalid job-scoring response: duplicate indexes: 0.'],
+        [[{ ...row, index: 2 }], 'SCORING_INDEX_INVALID', 'Invalid job-scoring response: invalid indexes: 2.'],
+        [[row], 'SCORING_REQUIREMENT_EVIDENCE_UNGROUNDED', null],
+        [[{ ...row, materialGaps: [{ requirement: 'US work authorization', priority: 'required', status: 'not_documented', jobEvidence: 'authorized to work in the US', candidateEvidence: '' }] }], 'SCORING_LOGISTICS_PENALTY', 'Invalid job-scoring rows at index 0: work authorization, citizenship/sponsorship, and location/onsite/relocation constraints are informational logistics, not material professional gaps, and must contribute zero penalty to matchScore.'],
+      ]) {
+        let caught;
+        try { validateJobScoringSubmission({ scores }, jobs, { candidateText: 'Built React interfaces.', candidateRoles: [], requireComplete: true }); }
+        catch (error) { caught = error; }
+        assert(caught?.code === 'VALIDATION_FAILED' && caught.correctionRuleIds.includes(expected)
+          && caught.correctionDetails.length === caught.correctionRuleIds.length, `typed scoring failure ${expected}`);
+        if (message) assert(caught.message === message, 'the exact old scoring message remains');
+      }
+    },
+  },
+  {
     name: 'per-platform collection cap admits date-valid source-unique jobs before limiting',
     run: () => {
       const start = Date.parse('2026-10-01T00:00:00.000Z');
@@ -10186,6 +10206,9 @@ export default [
       } catch (error) { strictFailure = error; }
       assert(strictFailure?.message.includes('missing score rows at index 3'),
         'an incomplete final recovery stays pending with an accurate missing-row error');
+      assert(strictFailure.message === 'Invalid job-scoring response: missing score rows at index 3.'
+        && strictFailure.code === 'VALIDATION_FAILED' && strictFailure.correctionRuleIds[0] === 'SCORING_ROWS_MISSING',
+      'the old scoring message is exact and the missing-row correction has a stable rule id');
 
       // The merge mapping is POSITIONAL — recovered[i] restores indexes[i] —
       // and holds only because scoreBatch returns one row per input job. This is

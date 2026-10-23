@@ -18,6 +18,8 @@
  * dependency rather than silently treating that new constraint as enforced.
  */
 
+import { selectCorrectionDetails, VALIDATION_DETAIL_LIMIT } from './validationFailure.js';
+
 const VALIDATION_KEYWORDS = new Set([
   'type', 'enum', 'const',
   'minLength', 'maxLength', 'pattern',
@@ -304,6 +306,114 @@ export function validateResponseSchema(value, schema) {
   return errors;
 }
 
+const SCHEMA_DETAIL_MAX_CHARS = 300;
+const SCHEMA_ENUM_PRINT_LIMIT = 12;
+const PATH_TOKEN_RE = /\.([A-Za-z_$][A-Za-z0-9_$]*)|\[(\d+)\]|\[("(?:[^"\\]|\\.)*")\]/gy;
+
+function schemaParts(node) {
+  if (!node || typeof node !== 'object') return [];
+  const parts = [node];
+  for (const keyword of ['allOf', 'anyOf', 'oneOf']) {
+    if (Array.isArray(node[keyword])) {
+      for (const part of node[keyword]) parts.push(...schemaParts(part));
+    }
+  }
+  return parts;
+}
+
+function tokenizeSchemaPath(path) {
+  const text = typeof path === 'string' && path.startsWith('$') ? path.slice(1) : '';
+  const tokens = [];
+  PATH_TOKEN_RE.lastIndex = 0;
+  let match = PATH_TOKEN_RE.exec(text);
+  while (match) {
+    if (match[1] !== undefined) {
+      tokens.push({ kind: 'key', key: match[1] });
+    } else if (match[2] !== undefined) {
+      tokens.push({ kind: 'index', index: Number(match[2]) });
+    } else {
+      let key = '';
+      try { key = JSON.parse(match[3]); } catch { key = ''; }
+      tokens.push({ kind: 'key', key });
+    }
+    match = PATH_TOKEN_RE.exec(text);
+  }
+  return tokens;
+}
+
+function labelForKey(label, key) {
+  if (/^[A-Za-z_$][A-Za-z0-9_$]*$/.test(key)) return label ? `${label}.${key}` : key;
+  return `${label}[${JSON.stringify(key)}]`;
+}
+
+function prettyLabel(label, rootArray) {
+  return rootArray && label.startsWith('[') ? `answer${label}` : label;
+}
+
+/**
+ * Turn raw validator errors into short correction lines for the answering
+ * chat. Property names the schema does not declare are never printed, because
+ * they come from the AI's own (possibly adversarial) answer.
+ */
+export function describeSchemaErrors(errors, schema, { limit = VALIDATION_DETAIL_LIMIT } = {}) {
+  const lines = [];
+  const seen = new Set();
+  for (const error of Array.isArray(errors) ? errors : []) {
+    const message = typeof error?.message === 'string' ? error.message : '';
+    const tokens = tokenizeSchemaPath(error?.path);
+    const rootArray = tokens[0]?.kind === 'index';
+    let nodes = [schema];
+    let label = '';
+    let parentLabel = '';
+    let lastUnknown = false;
+    for (const token of tokens) {
+      parentLabel = label;
+      lastUnknown = false;
+      if (token.kind === 'index') {
+        nodes = nodes.flatMap((node) => schemaParts(node).flatMap((part) => (
+          part.items && typeof part.items === 'object' && !Array.isArray(part.items) ? [part.items] : [])));
+        label = `${label}[${token.index}]`;
+        continue;
+      }
+      const known = [];
+      for (const node of nodes) {
+        for (const part of schemaParts(node)) {
+          if (part.properties && Object.prototype.hasOwnProperty.call(part.properties, token.key)) known.push(part.properties[token.key]);
+        }
+      }
+      if (known.length) {
+        nodes = known;
+        label = labelForKey(label, token.key);
+      } else {
+        lastUnknown = true;
+        nodes = nodes.flatMap((node) => schemaParts(node).flatMap((part) => (
+          part.additionalProperties && typeof part.additionalProperties === 'object' && !Array.isArray(part.additionalProperties)
+            ? [part.additionalProperties]
+            : [])));
+        label = `${label}[<key>]`;
+        if (nodes.length === 0) break;
+      }
+    }
+    let line;
+    if (message === 'is not an allowed property' && lastUnknown) {
+      line = `an unexpected property at ${parentLabel ? prettyLabel(parentLabel, rootArray) : 'the top level'}`;
+    } else {
+      const shownLabel = tokens.length === 0 ? 'the answer' : prettyLabel(label, rootArray);
+      let shownMessage = message;
+      if (message.startsWith('must be one of: ')) {
+        const enumNode = nodes.flatMap((node) => schemaParts(node)).find((part) => Array.isArray(part.enum) && part.enum.length > SCHEMA_ENUM_PRINT_LIMIT);
+        if (enumNode) shownMessage = `must be one of the ${enumNode.enum.length} values the schema allows`;
+      }
+      line = `${shownLabel} ${shownMessage}`;
+    }
+    if (line.length > SCHEMA_DETAIL_MAX_CHARS) line = `${line.slice(0, SCHEMA_DETAIL_MAX_CHARS - 3)}...`;
+    if (seen.has(line)) continue;
+    seen.add(line);
+    lines.push(line);
+  }
+  return selectCorrectionDetails(lines.map((line) => ({ line, ruleId: null })), limit);
+}
+
 export function assertResponseMatchesSchema(value, schema, { provider = 'AI', task = null } = {}) {
   assertResponseSchemaVocabularySupported(schema, { task });
   const errors = validateResponseSchema(value, schema);
@@ -314,5 +424,8 @@ export function assertResponseMatchesSchema(value, schema, { provider = 'AI', ta
   const error = new Error(`${provider} returned a structured response that violates its required schema${taskLabel}: ${shown}${remainder}. Please retry; no partial result was used.`);
   error.code = 'STRUCTURED_OUTPUT_SCHEMA_INVALID';
   error.schemaErrors = errors;
+  const described = describeSchemaErrors(errors, schema);
+  error.correctionDetails = described.lines;
+  error.correctionRuleIds = described.ruleIds;
   throw error;
 }

@@ -110,33 +110,34 @@ function locate(shard, group, entityId) {
   return indexes;
 }
 
-/**
- * Apply edits to a copy of `shard`.  Any error returns the original shard
- * (the same reference, untouched) together with every error found.
- */
-export function applyProfileEdits(shard, edits, { entityIdPrefix = '' } = {}) {
+function applyProfileEditsCore(shard, edits, { entityIdPrefix = '' } = {}) {
   const working = structuredClone(shard);
   const applied = [];
   const errors = [];
+  const ruleIds = [];
+  const fail = (ruleId, text) => {
+    errors.push(text);
+    ruleIds.push(ruleId);
+  };
   const seenValues = new Map();
 
   (Array.isArray(edits) ? edits : []).forEach((edit, index) => {
     const label = describeEdit(edit, index);
     const shapeErrors = validateResponseSchema(edit, CAREER_PROFILE_EDIT_SCHEMA);
     if (shapeErrors.length) {
-      errors.push(`${label}: does not match the edit schema: ${schemaErrorText(shapeErrors)}`);
+      fail('EDIT_SCHEMA_INVALID', `${label}: does not match the edit schema: ${schemaErrorText(shapeErrors)}`);
       return;
     }
     const parsed = parseEditValue(edit);
     if (!parsed.ok) {
-      errors.push(`${label}: ${parsed.error}`);
+      fail('EDIT_VALUE_JSON_INVALID', `${label}: ${parsed.error}`);
       return;
     }
     const targetKey = editTargetKey(edit);
     const canonicalValue = edit.op === 'remove' ? '<remove>' : canonicalJson(parsed.value);
     if (seenValues.has(targetKey)) {
       if (seenValues.get(targetKey) !== canonicalValue) {
-        errors.push(`${label}: conflicts with an earlier edit to ${edit.group}/${edit.entityId}/${targetKey.split('\u0000')[2]} that proposes a different value`);
+        fail('EDIT_CONFLICT', `${label}: conflicts with an earlier edit to ${edit.group}/${edit.entityId}/${targetKey.split('\u0000')[2]} that proposes a different value`);
       }
       // An identical duplicate is the same proposal; apply it only once.
       return;
@@ -148,21 +149,21 @@ export function applyProfileEdits(shard, edits, { entityIdPrefix = '' } = {}) {
     if (op === 'set' || op === 'set-coverage') {
       const field = op === 'set-coverage' ? 'disposition' : edit.field;
       if (op === 'set-coverage' && group !== 'segmentCoverage') {
-        errors.push(`${label}: set-coverage is only valid for group segmentCoverage`);
+        fail('EDIT_COVERAGE_OP_INVALID', `${label}: set-coverage is only valid for group segmentCoverage`);
         return;
       }
       if (op === 'set-coverage' && edit.field !== '' && edit.field !== 'disposition') {
-        errors.push(`${label}: set-coverage field must be '' or 'disposition'`);
+        fail('EDIT_COVERAGE_OP_INVALID', `${label}: set-coverage field must be '' or 'disposition'`);
         return;
       }
       if (!CAREER_PROFILE_EDITABLE_FIELDS[group].includes(field)) {
-        errors.push(`${label}: field '${field}' is not editable for ${group}; editable fields: ${CAREER_PROFILE_EDITABLE_FIELDS[group].join(', ')}`);
+        fail('EDIT_FIELD_NOT_EDITABLE', `${label}: field '${field}' is not editable for ${group}; editable fields: ${CAREER_PROFILE_EDITABLE_FIELDS[group].join(', ')}`);
         return;
       }
       let entity;
       if (group === 'identity') {
         if (entityId !== 'identity') {
-          errors.push(`${label}: identity edits must use entityId 'identity'`);
+          fail('EDIT_IDENTITY_TARGET', `${label}: identity edits must use entityId 'identity'`);
           return;
         }
         if (!working.identity || typeof working.identity !== 'object') working.identity = { name: '', contacts: [], evidenceSegmentIds: [] };
@@ -170,25 +171,25 @@ export function applyProfileEdits(shard, edits, { entityIdPrefix = '' } = {}) {
       } else {
         const indexes = locate(working, group, entityId);
         if (indexes.length === 0) {
-          errors.push(group === 'segmentCoverage'
+          fail('EDIT_TARGET_MISSING', group === 'segmentCoverage'
             ? `${label}: segment ${entityId} has no segmentCoverage record`
             : `${label}: ${group} has no entity with ${idFieldFor(group)} '${entityId}'`);
           return;
         }
         if (indexes.length > 1) {
-          errors.push(`${label}: ${group} has ${indexes.length} records with ${idFieldFor(group)} '${entityId}'; the target is ambiguous`);
+          fail('EDIT_TARGET_AMBIGUOUS', `${label}: ${group} has ${indexes.length} records with ${idFieldFor(group)} '${entityId}'; the target is ambiguous`);
           return;
         }
         entity = working[group][indexes[0]];
       }
       const fieldErrors = validateResponseSchema(value, fieldSchemaFor(group, field));
       if (fieldErrors.length) {
-        errors.push(`${label}: value for ${group}/${entityId}/${field} is invalid: ${schemaErrorText(fieldErrors)}`);
+        fail('EDIT_VALUE_INVALID', `${label}: value for ${group}/${entityId}/${field} is invalid: ${schemaErrorText(fieldErrors)}`);
         return;
       }
       const before = entity[field] === undefined ? undefined : structuredClone(entity[field]);
       if (canonicalJson(before) === canonicalJson(value)) {
-        errors.push(`${label}: edit to ${group}/${entityId}/${field} proposes no change`);
+        fail('EDIT_NO_CHANGE', `${label}: edit to ${group}/${entityId}/${field} proposes no change`);
         return;
       }
       entity[field] = structuredClone(value);
@@ -197,7 +198,7 @@ export function applyProfileEdits(shard, edits, { entityIdPrefix = '' } = {}) {
     }
 
     if (group === 'identity') {
-      errors.push(`${label}: identity cannot be added or removed; use set on its fields`);
+      fail('EDIT_IDENTITY_ADD_REMOVE', `${label}: identity cannot be added or removed; use set on its fields`);
       return;
     }
     const idField = idFieldFor(group);
@@ -206,19 +207,19 @@ export function applyProfileEdits(shard, edits, { entityIdPrefix = '' } = {}) {
     if (op === 'add') {
       const entityErrors = validateResponseSchema(value, itemSchemaFor(group));
       if (entityErrors.length) {
-        errors.push(`${label}: entity for ${group}/${entityId} is invalid: ${schemaErrorText(entityErrors)}`);
+        fail('EDIT_ENTITY_INVALID', `${label}: entity for ${group}/${entityId} is invalid: ${schemaErrorText(entityErrors)}`);
         return;
       }
       if (value[idField] !== entityId) {
-        errors.push(`${label}: entity ${idField} '${value[idField]}' does not match entityId '${entityId}'`);
+        fail('EDIT_ID_MISMATCH', `${label}: entity ${idField} '${value[idField]}' does not match entityId '${entityId}'`);
         return;
       }
       if (ENTITY_GROUPS.includes(group) && !String(entityId).startsWith(entityIdPrefix)) {
-        errors.push(`${label}: new ${group} id '${entityId}' must start with page prefix '${entityIdPrefix}'`);
+        fail('EDIT_ID_PREFIX', `${label}: new ${group} id '${entityId}' must start with page prefix '${entityIdPrefix}'`);
         return;
       }
       if (indexes.length > 0) {
-        errors.push(`${label}: ${group} already has a record with ${idField} '${entityId}'`);
+        fail('EDIT_ID_EXISTS', `${label}: ${group} already has a record with ${idField} '${entityId}'`);
         return;
       }
       if (!Array.isArray(working[group])) working[group] = [];
@@ -229,19 +230,34 @@ export function applyProfileEdits(shard, edits, { entityIdPrefix = '' } = {}) {
 
     // remove
     if (indexes.length === 0) {
-      errors.push(`${label}: ${group} has no entity with ${idField} '${entityId}' to remove`);
+      fail('EDIT_REMOVE_TARGET_MISSING', `${label}: ${group} has no entity with ${idField} '${entityId}' to remove`);
       return;
     }
     if (indexes.length > 1) {
-      errors.push(`${label}: ${group} has ${indexes.length} records with ${idField} '${entityId}'; the target is ambiguous`);
+      fail('EDIT_TARGET_AMBIGUOUS', `${label}: ${group} has ${indexes.length} records with ${idField} '${entityId}'; the target is ambiguous`);
       return;
     }
     const [removed] = working[group].splice(indexes[0], 1);
     applied.push({ edit, targetKey, before: removed, after: null });
   });
 
-  if (errors.length) return { shard, applied: [], errors };
-  return { shard: working, applied, errors };
+  if (errors.length) return { shard, applied: [], errors, ruleIds };
+  return { shard: working, applied, errors, ruleIds };
+}
+
+/**
+ * Apply edits to a copy of `shard`.  Any error returns the original shard
+ * (the same reference, untouched) together with every error found.
+ * `ruleIds[i]` is the rule id of `errors[i]`.
+ */
+export function applyProfileEditsWithRules(shard, edits, opts = {}) {
+  const { shard: nextShard, applied, errors, ruleIds } = applyProfileEditsCore(shard, edits, opts);
+  return { shard: nextShard, applied, errors, ruleIds };
+}
+
+export function applyProfileEdits(shard, edits, opts = {}) {
+  const { shard: nextShard, applied, errors } = applyProfileEditsCore(shard, edits, opts);
+  return { shard: nextShard, applied, errors };
 }
 
 export function normalizeQuoteText(text) {
@@ -333,13 +349,10 @@ function decisionGroupId(decision) {
   return typeof decision?.groupId === 'string' && decision.groupId ? decision.groupId : decision?.id;
 }
 
-/**
- * A settled target may be challenged by naming its decision id or the groupId
- * shared by a coordinated set of decisions; either way every challenged target
- * still needs at least one challenge evidence segment not yet considered.
- */
-export function checkFindingAgainstLedger(ledger, pageIndex, finding, edits = finding?.edits) {
+function checkFindingAgainstLedgerCore(ledger, pageIndex, finding, edits = finding?.edits) {
   const errors = [];
+  const details = [];
+  const ruleIds = [];
   const challengedDecisions = [];
   const challenge = finding?.challenge || { decisionId: '', evidenceSegmentIds: [] };
   const challengeId = typeof challenge.decisionId === 'string' ? challenge.decisionId : '';
@@ -355,23 +368,58 @@ export function checkFindingAgainstLedger(ledger, pageIndex, finding, edits = fi
       const evidenceText = decision.evidenceSegmentIds.join(', ') || 'none';
       const groupId = decisionGroupId(decision);
       const groupText = groupId === decision.id ? '' : ` in group ${groupId}`;
+      // `details` are the lines forwarded to the answering chat: ids only, never
+      // the settled value. `errors` keep the full text for the local dock.
       if (challengeId === '') {
         errors.push(`${where} is settled by ${decision.id}${groupText} (value ${decision.valueJson}; evidence ${evidenceText}). Drop this finding, or challenge ${decision.id}${groupId === decision.id ? '' : ` or ${groupId}`} with evidence segments not yet considered.`);
+        details.push(`${where} is settled by ${decision.id}${groupText} (evidence ${evidenceText}). Drop this finding, or challenge ${decision.id}${groupId === decision.id ? '' : ` or ${groupId}`} with evidence segments not yet considered.`);
+        ruleIds.push('LEDGER_TARGET_SETTLED');
         continue;
       }
       if (challengeId !== decision.id && challengeId !== groupId) {
         errors.push(`challenge names ${challengeId} but ${where} is currently settled by ${decision.id}${groupText} (value ${decision.valueJson}; evidence ${evidenceText}).`);
+        details.push(`challenge names ${challengeId} but ${where} is currently settled by ${decision.id}${groupText} (evidence ${evidenceText}).`);
+        ruleIds.push('LEDGER_CHALLENGE_MISMATCH');
         continue;
       }
       const considered = new Set(record.consideredEvidenceSegmentIds);
       if (!challengeEvidence.some(id => !considered.has(id))) {
-        errors.push(`challenge of ${decision.id} on ${where} cites no new evidence; already considered: ${record.consideredEvidenceSegmentIds.join(', ') || 'none'}.`);
+        const text = `challenge of ${decision.id} on ${where} cites no new evidence; already considered: ${record.consideredEvidenceSegmentIds.join(', ') || 'none'}.`;
+        errors.push(text);
+        details.push(text);
+        ruleIds.push('LEDGER_CHALLENGE_NO_NEW_EVIDENCE');
         continue;
       }
       challengedDecisions.push(decision);
     }
   }
-  return { ok: errors.length === 0, errors, challengedDecisions };
+  return { ok: errors.length === 0, errors, ruleIds, challengedDecisions, details };
+}
+
+/**
+ * Like checkFindingAgainstLedgerWithRules, plus `details[i]`: the line for
+ * `errors[i]` that may be forwarded to the answering chat. It names ids only
+ * (target, decision, evidence segments), never the settled value.
+ */
+export function checkFindingAgainstLedgerWithForwardedDetails(ledger, pageIndex, finding, edits = finding?.edits) {
+  const { ok, errors, ruleIds, challengedDecisions, details } = checkFindingAgainstLedgerCore(ledger, pageIndex, finding, edits);
+  return { ok, errors, ruleIds, challengedDecisions, details };
+}
+
+/**
+ * A settled target may be challenged by naming its decision id or the groupId
+ * shared by a coordinated set of decisions; either way every challenged target
+ * still needs at least one challenge evidence segment not yet considered.
+ * `ruleIds[i]` is the rule id of `errors[i]`.
+ */
+export function checkFindingAgainstLedgerWithRules(ledger, pageIndex, finding, edits = finding?.edits) {
+  const { ok, errors, ruleIds, challengedDecisions } = checkFindingAgainstLedgerCore(ledger, pageIndex, finding, edits);
+  return { ok, errors, ruleIds, challengedDecisions };
+}
+
+export function checkFindingAgainstLedger(ledger, pageIndex, finding, edits = finding?.edits) {
+  const { ok, errors, challengedDecisions } = checkFindingAgainstLedgerCore(ledger, pageIndex, finding, edits);
+  return { ok, errors, challengedDecisions };
 }
 
 function canonicalEditValue(edit) {

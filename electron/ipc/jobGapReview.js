@@ -29,6 +29,7 @@
  */
 import { JOB_GAP_REVIEW_SCHEMA } from './aiSchemas.js';
 import { isMaterialGap, recalibrateAuditedFitAssessment } from './jobFitAssessment.js';
+import { validationFailure } from './validationFailure.js';
 
 export { JOB_GAP_REVIEW_SCHEMA };
 
@@ -165,14 +166,19 @@ export function buildGapReviewPrompt({ jobs, candidateText }) {
  * scripts/tests/job-gap-review.js.
  */
 export function validateGapReviewSubmission(value, batch, { candidateText = '' } = {}) {
-  const fail = (index, id, observation) => {
+  const fail = (index, id, observation, ruleId) => {
     const where = id ? `job ${index}, row ${id}` : `job ${index}`;
-    throw new Error(`Invalid job-gap-review response: ${where}: ${observation}`);
+    const line = `${where}: ${observation}`;
+    throw validationFailure({ message: `Invalid job-gap-review response: ${line}`, details: [line], ruleIds: [ruleId] });
   };
   const jobs = Array.isArray(batch) ? batch : [];
   const list = Array.isArray(value) ? value : value?.reviews;
   if (!Array.isArray(list)) {
-    throw new Error('Invalid job-gap-review response: reviews is not an array.');
+    throw validationFailure({
+      message: 'Invalid job-gap-review response: reviews is not an array.',
+      details: ['reviews is not an array.'],
+      ruleIds: ['GAP_REVIEW_NOT_ARRAY'],
+    });
   }
   const VERDICTS = ['confirmed', 'priority', 'evidence', 'duplicate'];
   const optional = (raw) => {
@@ -183,26 +189,30 @@ export function validateGapReviewSubmission(value, batch, { candidateText = '' }
   for (const review of list) {
     const index = review?.index;
     if (!Number.isInteger(index) || index < 0 || index >= jobs.length) {
-      throw new Error(`Invalid job-gap-review response: review index ${JSON.stringify(index) ?? 'undefined'} is not an integer in [0, ${jobs.length}).`);
+      throw validationFailure({
+        message: `Invalid job-gap-review response: review index ${JSON.stringify(index) ?? 'undefined'} is not an integer in [0, ${jobs.length}).`,
+        details: [`review index ${JSON.stringify(index) ?? 'undefined'} is not an integer in [0, ${jobs.length}).`],
+        ruleIds: ['GAP_REVIEW_INDEX_INVALID'],
+      });
     }
-    if (byIndex.has(index)) fail(index, '', 'a second review for this job index was returned');
+    if (byIndex.has(index)) fail(index, '', 'a second review for this job index was returned', 'GAP_REVIEW_INDEX_DUPLICATE');
     byIndex.set(index, review);
   }
   const reviews = [];
   jobs.forEach((job, index) => {
     const review = byIndex.get(index);
-    if (!review) fail(index, '', 'no review was returned for this job');
-    if (!Array.isArray(review.rows)) fail(index, '', 'rows is not an array');
+    if (!review) fail(index, '', 'no review was returned for this job', 'GAP_REVIEW_JOB_MISSING');
+    if (!Array.isArray(review.rows)) fail(index, '', 'rows is not an array', 'GAP_REVIEW_ROWS_NOT_ARRAY');
     const listed = (Array.isArray(job?.rows) ? job.rows : []);
     const listedById = new Map(listed.map(row => [row.id, row]));
     const seen = new Map();
     for (const entry of review.rows) {
       const id = text(entry?.id);
-      if (!listedById.has(id)) fail(index, id, 'this id is not among the listed gap row ids for this job');
-      if (seen.has(id)) fail(index, id, 'this id appears more than once in the review');
+      if (!listedById.has(id)) fail(index, id, 'this id is not among the listed gap row ids for this job', 'GAP_REVIEW_ROW_ID_UNKNOWN');
+      if (seen.has(id)) fail(index, id, 'this id appears more than once in the review', 'GAP_REVIEW_ROW_ID_DUPLICATE');
       const listedRow = listedById.get(id);
       const verdict = text(entry.verdict);
-      if (!VERDICTS.includes(verdict)) fail(index, id, `verdict "${verdict}" is not one of ${VERDICTS.join('|')}`);
+      if (!VERDICTS.includes(verdict)) fail(index, id, `verdict "${verdict}" is not one of ${VERDICTS.join('|')}`, 'GAP_REVIEW_VERDICT_INVALID');
       const normalized = {
         id,
         verdict,
@@ -216,38 +226,38 @@ export function validateGapReviewSubmission(value, batch, { candidateText = '' }
       if (verdict === 'priority') {
         const priority = optional(entry.priority);
         if (!Object.hasOwn(REVIEW_PRIORITY_TO_ROW, priority)) {
-          fail(index, id, `priority "${priority || 'unchanged'}" is not one of required|important|preferred`);
+          fail(index, id, `priority "${priority || 'unchanged'}" is not one of required|important|preferred`, 'GAP_REVIEW_PRIORITY_INVALID');
         }
         const listedRank = PRIORITY_RANK[REVIEW_PRIORITY_TO_ROW[listedRow.priority]] ?? PRIORITY_RANK.important;
         if (PRIORITY_RANK[REVIEW_PRIORITY_TO_ROW[priority]] >= listedRank) {
-          fail(index, id, `priority "${priority}" is not lower than the listed priority "${listedRow.priority}"`);
+          fail(index, id, `priority "${priority}" is not lower than the listed priority "${listedRow.priority}"`, 'GAP_REVIEW_PRIORITY_NOT_LOWER');
         }
         const quote = text(entry.jobEvidence);
-        if (!quote) fail(index, id, 'jobEvidence is empty');
-        if (!quoteIsGrounded(job.jobText, quote)) fail(index, id, 'jobEvidence quote is not found verbatim in the supplied posting text');
+        if (!quote) fail(index, id, 'jobEvidence is empty', 'GAP_REVIEW_QUOTE_EMPTY');
+        if (!quoteIsGrounded(job.jobText, quote)) fail(index, id, 'jobEvidence quote is not found verbatim in the supplied posting text', 'GAP_REVIEW_QUOTE_UNGROUNDED');
         normalized.priority = priority;
         normalized.jobEvidence = quote;
       } else if (verdict === 'evidence') {
         const status = optional(entry.status);
         if (status !== 'direct' && status !== 'adjacent') {
-          fail(index, id, `status "${status || 'unchanged'}" is not one of direct|adjacent`);
+          fail(index, id, `status "${status || 'unchanged'}" is not one of direct|adjacent`, 'GAP_REVIEW_STATUS_INVALID');
         }
         const quote = text(entry.candidateEvidence);
-        if (!quote) fail(index, id, 'candidateEvidence is empty');
-        if (!quoteIsGrounded(candidateText, quote)) fail(index, id, 'candidateEvidence quote is not found verbatim in the supplied career evidence');
+        if (!quote) fail(index, id, 'candidateEvidence is empty', 'GAP_REVIEW_QUOTE_EMPTY');
+        if (!quoteIsGrounded(candidateText, quote)) fail(index, id, 'candidateEvidence quote is not found verbatim in the supplied career evidence', 'GAP_REVIEW_QUOTE_UNGROUNDED');
         normalized.status = status;
         normalized.candidateEvidence = quote;
       } else if (verdict === 'duplicate') {
         const duplicateOf = text(entry.duplicateOf);
-        if (!duplicateOf) fail(index, id, 'duplicateOf is empty');
-        if (duplicateOf === id) fail(index, id, 'duplicateOf is the row\'s own id');
-        if (!listedById.has(duplicateOf)) fail(index, id, `duplicateOf "${duplicateOf}" is not another listed row id of this job`);
+        if (!duplicateOf) fail(index, id, 'duplicateOf is empty', 'GAP_REVIEW_DUPLICATE_OF_INVALID');
+        if (duplicateOf === id) fail(index, id, 'duplicateOf is the row\'s own id', 'GAP_REVIEW_DUPLICATE_OF_INVALID');
+        if (!listedById.has(duplicateOf)) fail(index, id, `duplicateOf "${duplicateOf}" is not another listed row id of this job`, 'GAP_REVIEW_DUPLICATE_OF_INVALID');
         normalized.duplicateOf = duplicateOf;
       }
       seen.set(id, normalized);
     }
     for (const row of listed) {
-      if (!seen.has(row.id)) fail(index, row.id, 'this listed row id is missing from the review');
+      if (!seen.has(row.id)) fail(index, row.id, 'this listed row id is missing from the review', 'GAP_REVIEW_ROW_MISSING');
     }
     reviews.push({ index, rows: listed.map(row => seen.get(row.id)) });
   });

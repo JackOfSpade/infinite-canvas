@@ -7,6 +7,7 @@ import {
   readBridgeableNonApiAiHandoff,
   readBridgeableNonApiAiAttachments,
   fallbackBridgeAttachmentToManual,
+  returnBridgeHandoffToPerson,
   submitNonApiAiResponseForBridge,
 } from '../../nonApiAi.js';
 import { snapshotActiveNodeTasks } from '../../ipcUtils.js';
@@ -162,6 +163,7 @@ export function createPushSource({ seam = {}, activeNodeTasks = snapshotActiveNo
     attachments: seam.attachments || readBridgeableNonApiAiAttachments,
     fallbackAttachment: seam.fallbackAttachment || fallbackBridgeAttachmentToManual,
     submit: seam.submit || submitNonApiAiResponseForBridge,
+    handBack: seam.handBack || returnBridgeHandoffToPerson,
   };
   const selected = new Map();
   // Discovery is main-owned, so it can safely make newly found reviewed hubs
@@ -228,7 +230,9 @@ export function createPushSource({ seam = {}, activeNodeTasks = snapshotActiveNo
         reservations: new Map(),
         attachedWorkers: new Map(),
         reservationNonce: 0,
-        byCode: new Map(), tombstones: new Map(), verdicts: new Map(), rejections: new Map(), commitFailures: new Map(), held: new Map(), budgeted: new Set(), lastAccept: null, remaining: { ready: 0, working: 0, needsYou: 0 },
+        byCode: new Map(), tombstones: new Map(), verdicts: new Map(), rejections: new Map(), commitFailures: new Map(),
+        // Consecutive submissions the precheck refused, per requestId.
+        precheckFailures: new Map(), held: new Map(), budgeted: new Set(), lastAccept: null, remaining: { ready: 0, working: 0, needsYou: 0 },
       });
     }
     return epochs.get(key);
@@ -633,11 +637,45 @@ export function createPushSource({ seam = {}, activeNodeTasks = snapshotActiveNo
     value.served.delete(requestId);
     value.rejections.delete(requestId);
     value.commitFailures.delete(requestId);
+    value.precheckFailures.delete(requestId);
     const handoffCodeGuard = requireCodeGuard();
     const canonical = canonicalCode(served.handoffCode);
     const key = handoffCodeGuard.key(canonical);
     const route = value.byCode.get(key);
     if (route?.requestId === requestId && handoffCodeGuard.sameDigest(handoffCodeGuard.digest(canonical), route.codeDigest)) value.byCode.delete(key);
+  }
+  // Hand a served or reserved handoff back to its person on the application's
+  // own terms (reason is a closed token). An entry is released here ONLY when
+  // the seam confirms the record really left the bridge route (`true`); a
+  // false/throwing seam leaves the entry owned so a later attempt can retry.
+  // Synchronous seam answers are used directly; a promise is awaited safely.
+  async function handBackClaims({ epoch = 'default', claimIds = [], reason = 'worker_restart_cap' } = {}) {
+    const value = epochs.get(epochKey(epoch));
+    if (!value || !Array.isArray(claimIds) || claimIds.length === 0) return 0;
+    const wanted = new Set(claimIds.filter(id => typeof id === 'string' && id));
+    if (wanted.size === 0) return 0;
+    let handed = 0;
+    const settle = async requestId => {
+      try {
+        const answer = port.handBack?.({ requestId, reason });
+        return (answer && typeof answer.then === 'function' ? await answer : answer) === true;
+      } catch { return false; }
+    };
+    for (const served of [...value.served.values()]) {
+      if (typeof served.bridgeClaimId !== 'string' || !wanted.has(served.bridgeClaimId)) continue;
+      const ok = await settle(served.requestId);
+      // The epoch can end, or the entry change owner, while the seam settles.
+      if (ok && stateCurrent(value) && value.served.get(served.requestId) === served) {
+        removeServed(value, served.requestId);
+        handed += 1;
+      }
+    }
+    for (const [requestId, reservation] of [...value.reservations]) {
+      if (typeof reservation.bridgeClaimId !== 'string' || !wanted.has(reservation.bridgeClaimId)) continue;
+      const ok = await settle(requestId);
+      if (ok && stateCurrent(value) && releaseReservation(value, requestId, reservation)) handed += 1;
+    }
+    return handed;
   }
   function releaseServedForHub(hub) {
     if (!hub) return;
@@ -880,7 +918,27 @@ export function createPushSource({ seam = {}, activeNodeTasks = snapshotActiveNo
       default: return result('retry');
     }
   }
-  async function submit({ epoch = 'default', handoffCode, response, worker = 'default' } = {}) { const value = state(epoch); const workerId = workerKey(worker); const code = canonicalCode(handoffCode); const handoffCodeGuard = requireCodeGuard(); const digest = handoffCodeGuard.digest(code); const codeKey = handoffCodeGuard.key(code); const route = value.byCode.get(codeKey); const live = route && handoffCodeGuard.sameDigest(digest, route.codeDigest) ? route : null; if (!live) { const tombstoneEntry = value.tombstones.get(codeKey); return result(tombstoneEntry && handoffCodeGuard.sameDigest(digest, tombstoneEntry.codeDigest) ? 'duplicate' : 'unknown_handoff'); } const requestId = live.requestId; const served = value.served.get(requestId); const tombstoneEntry = value.tombstones.get(codeKey); if (!served || (tombstoneEntry?.requestId === requestId && handoffCodeGuard.sameDigest(digest, tombstoneEntry.codeDigest))) return result('duplicate'); if (served.workerId !== workerId) return result('unknown_handoff'); if (!hubMatches(served, selected.get(`${served.windowId}\u0000${served.nodeId}`), windows)) { removeServed(value, requestId); value.held.set(requestId, 'hub_not_selected'); return result('held', { reason: 'hub_not_selected' }); } if (value.held.has(requestId)) return result('held', { reason: value.held.get(requestId) }); const checked = precheck(served, response); if (checked.status) return result(checked.status); const key = `${requestId}\u0000${codeKey}\u0000${checked.text}`; const cached = value.verdicts.get(key); if (cached && Number(now()) - cached.at < VERDICT_TTL_MS) return cached.promise; const promise = Promise.resolve().then(() => {
+  // A submission the precheck refuses (junk, misrouted, too_large) never
+  // reaches the seam, so the seam's own rejection cap cannot see it. Count the
+  // CONSECUTIVE refusals per served handoff; at the cap hand the record back to
+  // its person exactly like the seam's own cap, but only if the seam confirms.
+  async function refusePrecheck(value, served, status) {
+    const requestId = served.requestId;
+    const failures = (value.precheckFailures.get(requestId) || 0) + 1;
+    value.precheckFailures.set(requestId, failures);
+    if (failures < CONSTANTS.PUSH_MAX_PRECHECK_STREAK) return result(status);
+    let handed = false;
+    try {
+      const answer = port.handBack?.({ requestId, reason: 'rejection_cap' });
+      handed = (answer && typeof answer.then === 'function' ? await answer : answer) === true;
+    } catch { handed = false; }
+    if (handed && stateCurrent(value) && value.served.get(requestId) === served) {
+      removeServed(value, requestId);
+      return result('needs_user', { reason: 'rejection_cap' });
+    }
+    return result(status);
+  }
+  async function submit({ epoch = 'default', handoffCode, response, worker = 'default' } = {}) { const value = state(epoch); const workerId = workerKey(worker); const code = canonicalCode(handoffCode); const handoffCodeGuard = requireCodeGuard(); const digest = handoffCodeGuard.digest(code); const codeKey = handoffCodeGuard.key(code); const route = value.byCode.get(codeKey); const live = route && handoffCodeGuard.sameDigest(digest, route.codeDigest) ? route : null; if (!live) { const tombstoneEntry = value.tombstones.get(codeKey); return result(tombstoneEntry && handoffCodeGuard.sameDigest(digest, tombstoneEntry.codeDigest) ? 'duplicate' : 'unknown_handoff'); } const requestId = live.requestId; const served = value.served.get(requestId); const tombstoneEntry = value.tombstones.get(codeKey); if (!served || (tombstoneEntry?.requestId === requestId && handoffCodeGuard.sameDigest(digest, tombstoneEntry.codeDigest))) return result('duplicate'); if (served.workerId !== workerId) return result('unknown_handoff'); if (!hubMatches(served, selected.get(`${served.windowId}\u0000${served.nodeId}`), windows)) { removeServed(value, requestId); value.held.set(requestId, 'hub_not_selected'); return result('held', { reason: 'hub_not_selected' }); } if (value.held.has(requestId)) return result('held', { reason: value.held.get(requestId) }); const checked = precheck(served, response); if (checked.status) return refusePrecheck(value, served, checked.status); value.precheckFailures.delete(requestId); const key = `${requestId}\u0000${codeKey}\u0000${checked.text}`; const cached = value.verdicts.get(key); if (cached && Number(now()) - cached.at < VERDICT_TTL_MS) return cached.promise; const promise = Promise.resolve().then(() => {
     // Selection may change after the initial synchronous check but before this
     // queued callback runs. Recheck at the last possible point, before the
     // nonApi seam performs its own synchronous eligibility/settling claim.
@@ -980,7 +1038,7 @@ export function createPushSource({ seam = {}, activeNodeTasks = snapshotActiveNo
       needsYou: currentRemaining(value).needsYou,
     });
   }
-  return Object.freeze({ enabledTasks, setAllowedTasks, setDiscoveryOwner, selectedHubs, selectHub, selectHubKey, unselectHubKey, clearHubs, pruneHubs, refreshHubs, prepareAttachment, releaseAttachment, get, submit, nextAfterAccept, closeEpoch, status, setCodeGuard });
+  return Object.freeze({ enabledTasks, setAllowedTasks, setDiscoveryOwner, selectedHubs, selectHub, selectHubKey, unselectHubKey, clearHubs, pruneHubs, refreshHubs, prepareAttachment, releaseAttachment, get, submit, nextAfterAccept, handBackClaims, closeEpoch, status, setCodeGuard });
 }
 
 export { canonicalCode as normalizePushHandoffCode };

@@ -56,7 +56,184 @@ async function makeEngine({ pushGet, pushSubmit, appRead, submitBudgetMs = 25_00
   return { engine, session: chat.sessionCode };
 }
 
+// W3 step 7: a push source whose seam logs hand-backs and counts real submits.
+// `handBack` receives the seam arguments and may return, throw or reject.
+const JUNK_RESPONSES = Object.freeze({
+  junk: '{}',
+  misrouted: JSON.stringify({ handoffCode: 'HANDOFF-ZZZZZZ', text: 'Synthetic answer stamped for another handoff' }),
+  too_large: 'x'.repeat(1_000_001),
+});
+const VALID_RESPONSE = JSON.stringify({ handoffCode: CODE, text: 'Synthetic valid answer' });
+
+async function makeHandBackSource({ handBack = async () => true, submit = async () => ({ outcome: 'accepted', accepted: true }) } = {}) {
+  const log = { handBacks: [], seamSubmits: 0 };
+  const source = createPushSource({
+    seam: {
+      list: async () => ({ handoffs: [entry], excluded: {}, pending: 1 }),
+      read: async item => ({ ok: true, requestId: item.requestId, handoffCode: item.handoffCode, task: item.task, responseFormat: item.responseFormat,
+        prompt: 'Synthetic Ada scoring prompt', isCorrection: false, correction: '', attempt: 1 }),
+      submit: async item => { log.seamSubmits += 1; return submit(item); },
+      handBack: args => { log.handBacks.push({ ...args }); return handBack(args); },
+    },
+    windows: new Map([[71, { __canvasFilePath: '/tmp/ada.canvas' }]]), hubKey: testHubKey,
+    timers: { setTimeout(fn) { fn(); return { unref() {} }; } },
+  });
+  assert(source.selectHub({ windowId: 71, canvasFilePath: '/tmp/ada.canvas', nodeId: 'node-ada' }), 'synthetic hub must select');
+  assert((await source.get()).status === 'served', 'the synthetic handoff must be served before any submit');
+  return { source, log };
+}
+
+async function makeReservedSource(handBack) {
+  const attached = { ...entry, task: 'vision-product-analysis', hasAttachments: true };
+  const log = [];
+  const source = createPushSource({
+    experimentalAttachmentTasks: true,
+    seam: {
+      list: async () => ({ handoffs: [attached], excluded: {}, pending: 1 }),
+      read: async () => ({ ok: true, requestId: attached.requestId, handoffCode: CODE, task: attached.task, responseFormat: 'json', prompt: 'Inspect the attached photo', attempt: 1 }),
+      attachments: async () => ({ handoffCode: CODE, attachments: [{ name: 'item.png', mime: 'image/png', bytes: Buffer.from('photo') }] }),
+      submit: async () => ({ outcome: 'accepted', accepted: true }),
+      handBack: args => { log.push({ ...args }); return handBack(args); },
+    },
+    windows: new Map([[71, { __canvasFilePath: '/tmp/ada.canvas' }]]), hubKey: testHubKey,
+  });
+  assert(source.selectHub({ windowId: 71, canvasFilePath: '/tmp/ada.canvas', nodeId: 'node-ada' }), 'synthetic hub must select');
+  source.setAllowedTasks(new Set(['vision-product-analysis']));
+  assert((await source.prepareAttachment({ epoch: 'E', worker: 'worker-1' })).status === 'ready', 'worker 1 must hold the reservation');
+  return { source, log };
+}
+
+const HAND_BACK_MODES = Object.freeze([
+  { name: 'async false', handBack: async () => false, released: false },
+  { name: 'sync false', handBack: () => false, released: false },
+  { name: 'sync throw', handBack: () => { throw new Error('synthetic seam failure'); }, released: false },
+  { name: 'async rejection', handBack: async () => { throw new Error('synthetic seam failure'); }, released: false },
+  { name: 'truthy non-true', handBack: async () => 1, released: false },
+  { name: 'async true', handBack: async () => true, released: true },
+  { name: 'sync true', handBack: () => true, released: true },
+]);
+
 export default [
+  ...['junk', 'misrouted', 'too_large'].map(kind => ({
+    name: `W3 step 7: five consecutive ${kind} prechecks hand the handoff back once and never reach the seam`,
+    run: async () => {
+      const { source, log } = await makeHandBackSource();
+      const results = [];
+      for (let index = 0; index < 5; index += 1) results.push(await source.submit({ handoffCode: CODE, response: JUNK_RESPONSES[kind] }));
+      assert(results.slice(0, 4).every(result => result.status === kind),
+        `the first four ${kind} submits only report ${kind} (got ${results.map(result => result.status).join(',')}, handBacks=${log.handBacks.length})`);
+      assert(results[4].status === 'needs_user' && results[4].reason === 'rejection_cap' && log.handBacks.length === 1
+        && log.handBacks[0].requestId === entry.requestId && log.handBacks[0].reason === 'rejection_cap' && log.seamSubmits === 0,
+      `the fifth hands back once with rejection_cap (got ${JSON.stringify({ result: results[4], handBacks: log.handBacks, seam: log.seamSubmits })})`);
+      assert((await source.submit({ handoffCode: CODE, response: JUNK_RESPONSES[kind] })).status === 'unknown_handoff',
+        'a handed-back handoff is no longer served by the bridge');
+    },
+  })),
+  { name: 'W3 step 7: junk, misrouted and too_large prechecks share one consecutive streak', run: async () => {
+    const { source, log } = await makeHandBackSource();
+    const order = ['junk', 'misrouted', 'too_large', 'junk', 'misrouted'];
+    const results = [];
+    for (const kind of order) results.push(await source.submit({ handoffCode: CODE, response: JUNK_RESPONSES[kind] }));
+    assert(results.slice(0, 4).map(result => result.status).join(',') === 'junk,misrouted,too_large,junk',
+      `each mixed refusal reports its own precheck status (got ${results.map(result => result.status).join(',')})`);
+    assert(results[4].status === 'needs_user' && results[4].reason === 'rejection_cap' && log.handBacks.length === 1,
+      'the fifth mixed refusal reaches the cap');
+  } },
+  { name: 'W3 step 7: a submission that passes the precheck resets the consecutive precheck streak', run: async () => {
+    const { source, log } = await makeHandBackSource({ submit: async () => ({ outcome: 'rejected', validationCode: 'SYNTHETIC_REJECT', attempt: 2 }) });
+    for (let index = 0; index < 4; index += 1) assert((await source.submit({ handoffCode: CODE, response: '{}' })).status === 'junk', `junk ${index + 1}`);
+    const passed = await source.submit({ handoffCode: CODE, response: VALID_RESPONSE });
+    assert(log.seamSubmits === 1 && passed.status !== 'junk' && passed.status !== 'needs_user', `the valid answer reaches the seam (got ${passed.status})`);
+    for (let index = 0; index < 4; index += 1) {
+      const result = await source.submit({ handoffCode: CODE, response: '{}' });
+      assert(result.status === 'junk' && log.handBacks.length === 0, `after the reset, junk ${index + 1} of 4 must not hand back (got ${result.status})`);
+    }
+    const capped = await source.submit({ handoffCode: CODE, response: '{}' });
+    assert(capped.status === 'needs_user' && capped.reason === 'rejection_cap' && log.handBacks.length === 1,
+      'five consecutive refusals AFTER the reset reach the cap');
+  } },
+  { name: 'W3 step 7: removing the served handoff clears its precheck streak', run: async () => {
+    const { source, log } = await makeHandBackSource();
+    for (let index = 0; index < 4; index += 1) assert((await source.submit({ handoffCode: CODE, response: '{}' })).status === 'junk', `junk ${index + 1}`);
+    assert(await source.handBackClaims({ epoch: 'default', claimIds: [CLAIM], reason: 'worker_restart_cap' }) === 1, 'the claim is handed back and removed');
+    assert((await source.get()).status === 'served', 'the same request is served again afterwards');
+    for (let index = 0; index < 4; index += 1) {
+      const result = await source.submit({ handoffCode: CODE, response: '{}' });
+      assert(result.status === 'junk', `a re-served request starts a fresh streak (got ${result.status} at ${index + 1})`);
+    }
+    assert(log.handBacks.length === 1 && log.handBacks[0].reason === 'worker_restart_cap', 'only the explicit claim hand-back has happened so far');
+    const capped = await source.submit({ handoffCode: CODE, response: '{}' });
+    assert(capped.status === 'needs_user' && log.handBacks.length === 2 && log.handBacks[1].reason === 'rejection_cap', 'the fresh streak caps at five');
+  } },
+  { name: 'W3 step 7: an unconfirmed precheck hand-back keeps the handoff served and retries on the next refusal', run: async () => {
+    let confirmed = false;
+    const { source, log } = await makeHandBackSource({ handBack: async () => confirmed });
+    const results = [];
+    for (let index = 0; index < 5; index += 1) results.push(await source.submit({ handoffCode: CODE, response: '{}' }));
+    assert(results.every(result => result.status === 'junk') && log.handBacks.length === 1, 'an unconfirmed hand-back leaves the plain precheck status');
+    confirmed = true;
+    const retried = await source.submit({ handoffCode: CODE, response: '{}' });
+    assert(retried.status === 'needs_user' && retried.reason === 'rejection_cap' && log.handBacks.length === 2, 'the streak is retained so the next refusal retries and succeeds');
+  } },
+  ...HAND_BACK_MODES.map(mode => ({
+    name: `W3 step 7: handBackClaims releases a served handoff only on a true seam answer (${mode.name})`,
+    run: async () => {
+      const { source, log } = await makeHandBackSource({ handBack: mode.handBack });
+      const handed = await source.handBackClaims({ epoch: 'default', claimIds: [CLAIM], reason: 'worker_restart_cap' });
+      assert(log.handBacks.length === 1 && log.handBacks[0].requestId === entry.requestId && log.handBacks[0].reason === 'worker_restart_cap',
+        `the seam is asked once with the request id and closed reason (got ${JSON.stringify(log.handBacks)})`);
+      assert(handed === (mode.released ? 1 : 0), `released count must be ${mode.released ? 1 : 0} (got ${handed})`);
+      const probe = await source.submit({ handoffCode: CODE, response: '{}' });
+      assert(probe.status === (mode.released ? 'unknown_handoff' : 'junk'),
+        `the served entry is ${mode.released ? 'released' : 'still owned'} (probe returned ${probe.status})`);
+    },
+  })),
+  { name: 'W3 step 7: handBackClaims ignores unknown claim ids and never asks the seam', run: async () => {
+    const { source, log } = await makeHandBackSource();
+    assert(await source.handBackClaims({ epoch: 'default', claimIds: ['not-this-claim', 7, ''], reason: 'worker_restart_cap' }) === 0 && log.handBacks.length === 0,
+      'only a matching bridge claim id is handed back');
+    assert(await source.handBackClaims({ epoch: 'default', claimIds: [], reason: 'worker_restart_cap' }) === 0, 'an empty list hands back nothing');
+    assert((await source.submit({ handoffCode: CODE, response: '{}' })).status === 'junk', 'the served entry is untouched');
+  } },
+  ...HAND_BACK_MODES.map(mode => ({
+    name: `W3 step 7: handBackClaims releases an attachment reservation only on a true seam answer (${mode.name})`,
+    run: async () => {
+      const { source, log } = await makeReservedSource(mode.handBack);
+      const before = await source.prepareAttachment({ epoch: 'E', worker: 'worker-2' });
+      assert(before.status !== 'ready', 'while reserved, another worker cannot prepare the handoff');
+      const handed = await source.handBackClaims({ epoch: 'E', claimIds: [CLAIM], reason: 'worker_restart_cap' });
+      assert(log.length === 1 && log[0].requestId === entry.requestId && log[0].reason === 'worker_restart_cap', `the seam is asked once (got ${JSON.stringify(log)})`);
+      assert(handed === (mode.released ? 1 : 0), `released count must be ${mode.released ? 1 : 0} (got ${handed})`);
+      const after = await source.prepareAttachment({ epoch: 'E', worker: 'worker-2' });
+      assert((after.status === 'ready') === mode.released,
+        `the reservation is ${mode.released ? 'released to another worker' : 'still held'} (worker 2 prepare returned ${after.status})`);
+    },
+  })),
+  { name: 'W3 repro R6: five consecutive junk submits for one served handoff hand it back to the person with rejection_cap', run: async () => {
+    const handBacks = [];
+    let seamSubmits = 0;
+    const source = createPushSource({
+      seam: {
+        list: async () => ({ handoffs: [entry], excluded: {}, pending: 1 }),
+        read: async item => ({ ok: true, requestId: item.requestId, handoffCode: item.handoffCode, task: item.task, responseFormat: item.responseFormat,
+          prompt: 'Synthetic Ada scoring prompt', isCorrection: false, correction: '', attempt: 1 }),
+        submit: async () => { seamSubmits += 1; return { outcome: 'accepted', accepted: true }; },
+        handBack: async args => { handBacks.push({ ...args }); return true; },
+      },
+      windows: new Map([[71, { __canvasFilePath: '/tmp/ada.canvas' }]]), hubKey: testHubKey,
+      timers: { setTimeout(fn) { fn(); return { unref() {} }; } },
+    });
+    assert(source.selectHub({ windowId: 71, canvasFilePath: '/tmp/ada.canvas', nodeId: 'node-ada' }), 'synthetic hub must select');
+    assert((await source.get()).status === 'served', 'the synthetic handoff must be served before any submit');
+    const results = [];
+    for (let index = 0; index < 5; index += 1) results.push(await source.submit({ handoffCode: CODE, response: '{}' }));
+    assert(results.slice(0, 4).every(result => result.status === 'junk') && seamSubmits === 0,
+      `the first four empty-object submits are rejected by the precheck without reaching the seam (got ${results.map(result => result.status).join(',')}, seam=${seamSubmits})`);
+    assert(results[4].status === 'needs_user' && results[4].reason === 'rejection_cap',
+      `the fifth junk submit returns the handoff to the person (got ${JSON.stringify(results[4])})`);
+    assert(handBacks.length === 1 && handBacks[0].requestId === entry.requestId && handBacks[0].reason === 'rejection_cap',
+      `seam.handBack is called once with the request id and rejection_cap (got ${JSON.stringify(handBacks)})`);
+  } },
   { name: 'handoff bridge: an attachment reservation binds one handoff to one worker chat', run: async () => {
     const attached = { ...entry, task: 'vision-product-analysis', hasAttachments: true };
     const source = createPushSource({

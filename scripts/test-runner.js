@@ -56,6 +56,7 @@ import job_fit_assessment from './tests/job-fit-assessment.js';
 import auth_cookie_checkpoint from './tests/auth-cookie-checkpoint.js';
 import browser_launch_lock_regression from './tests/browser-launch-lock-regression.js';
 import schema_validation from './tests/schema-validation.js';
+import validation_failure from './tests/validation-failure.js';
 import job_resume_ingestion from './tests/job-resume-ingestion.js';
 import job_scoring_evidence from './tests/job-scoring-evidence.js';
 import job_analysis_operation_ledger from './tests/job-analysis-operation-ledger.js';
@@ -231,6 +232,7 @@ const testGroups = [
   ['auth-cookie-checkpoint.js', auth_cookie_checkpoint],
   ['browser-launch-lock-regression.js', browser_launch_lock_regression],
   ['schema-validation.js', schema_validation],
+  ['validation-failure.js', validation_failure],
   ['job-resume-ingestion.js', job_resume_ingestion],
   ['job-scoring-evidence.js', job_scoring_evidence],
   ['job-analysis-operation-ledger.js', job_analysis_operation_ledger],

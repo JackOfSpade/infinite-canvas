@@ -1,5 +1,6 @@
 import { JOB_SCORING_CONTRACT, materializeScoringCareerEvidence, scorePinnedJobEvidence } from './jobScoringEvidence.js';
 import { MAX_JOB_ANALYSIS_ARTIFACT_BYTES, assertJobAnalysisArtifactSize } from './jobAnalysisArtifactLimits.js';
+import { validationFailure, validationFailureCollector } from './validationFailure.js';
 /**
  * Jobs IPC handlers — resume parsing, multi-source job search, AI scoring.
  * 9 Sources: Google, Indeed, LinkedIn, RemoteOK, WeWorkRemotely,
@@ -4599,11 +4600,21 @@ export function validateJobScoringSubmission(value, batch, {
     }
   }
   if (duplicateIndexes.length || outOfRangeIndexes.length) {
-    const details = [
-      duplicateIndexes.length ? `duplicate indexes: ${[...new Set(duplicateIndexes)].join(', ')}` : null,
-      outOfRangeIndexes.length ? `invalid indexes: ${[...new Set(outOfRangeIndexes)].join(', ')}` : null,
-    ].filter(Boolean).join('; ');
-    throw new Error(`Invalid job-scoring response: ${details}.`);
+    const indexLines = [];
+    const indexRuleIds = [];
+    if (duplicateIndexes.length) {
+      indexLines.push(`duplicate indexes: ${[...new Set(duplicateIndexes)].join(', ')}`);
+      indexRuleIds.push('SCORING_INDEX_DUPLICATE');
+    }
+    if (outOfRangeIndexes.length) {
+      indexLines.push(`invalid indexes: ${[...new Set(outOfRangeIndexes)].join(', ')}`);
+      indexRuleIds.push('SCORING_INDEX_INVALID');
+    }
+    throw validationFailure({
+      message: `Invalid job-scoring response: ${indexLines.join('; ')}.`,
+      details: indexLines,
+      ruleIds: indexRuleIds,
+    });
   }
 
   const responsePlan = planPartialScoreRecovery(submittedScores, jobs.length);
@@ -4627,17 +4638,21 @@ export function validateJobScoringSubmission(value, batch, {
     ));
     if (logisticsIndices.length) {
       const indexes = [...new Set(logisticsIndices)].join(', ');
-      throw new Error(`Invalid job-scoring rows at index ${indexes}: work authorization, citizenship/sponsorship, and location/onsite/relocation constraints are informational logistics, not material professional gaps, and must contribute zero penalty to matchScore.`);
+      const logisticsText = `rows at index ${indexes}: work authorization, citizenship/sponsorship, and location/onsite/relocation constraints are informational logistics, not material professional gaps, and must contribute zero penalty to matchScore.`;
+      throw validationFailure({
+        message: `Invalid job-scoring rows at index ${indexes}: work authorization, citizenship/sponsorship, and location/onsite/relocation constraints are informational logistics, not material professional gaps, and must contribute zero penalty to matchScore.`,
+        details: [logisticsText],
+        ruleIds: ['SCORING_LOGISTICS_PENALTY'],
+      });
     }
-    const problems = [
-      responsePlan.missingIndices.length
-        ? `missing score rows at index ${responsePlan.missingIndices.join(', ')}`
-        : null,
-      invalidIndices.length
-        ? `rows at index ${invalidIndices.join(', ')} must contain grounded requirement evidence supported by the supplied candidate and job text; resolve each requirement once, and give distinct requirements different shortest verbatim jobEvidence spans instead of reusing a compound sentence`
-        : null,
-    ].filter(Boolean).join('; ');
-    if (problems) throw new Error(`Invalid job-scoring response: ${problems}.`);
+    const failures = validationFailureCollector({ prefix: 'Invalid job-scoring response: ', separator: '; ', suffix: '.' });
+    if (responsePlan.missingIndices.length) {
+      failures.add('SCORING_ROWS_MISSING', `missing score rows at index ${responsePlan.missingIndices.join(', ')}`);
+    }
+    if (invalidIndices.length) {
+      failures.add('SCORING_REQUIREMENT_EVIDENCE_UNGROUNDED', `rows at index ${invalidIndices.join(', ')} must contain grounded requirement evidence supported by the supplied candidate and job text; resolve each requirement once, and give distinct requirements different shortest verbatim jobEvidence spans instead of reusing a compound sentence`);
+    }
+    failures.throwIfAny();
   }
 
   return { submittedScores, responsePlan, invalidIndices };

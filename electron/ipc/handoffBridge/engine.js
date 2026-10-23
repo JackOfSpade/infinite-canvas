@@ -79,7 +79,7 @@ const PUSH_EXCLUSION_REASONS = ['ending', 'settling', 'attachment', 'free_text',
 const STATUS_STAGES = new Set(APPLICATION_QUEUE_STAGES);
 const STATUS_PHASES = new Set(['unread', 'awaiting', 'host', 'done', 'needs_user', 'held', 'gone']);
 const STATUS_REASONS = new Set([
-  'user_hold', 'human_advance', 'rejection_cap', 'junk_cap', 'review_round_cap',
+  'user_hold', 'human_advance', 'rejection_cap', 'worker_restart_cap', 'junk_cap', 'review_round_cap',
   'job_broken', 'render_retry', 'app_fix_required', 'canvas_unavailable', 'read_failed', 'write_failed',
   'submit_stuck', 'host_silent', 'lapsed', 'restart', 'review_stop',
 ]);
@@ -599,6 +599,9 @@ export function createHandoffEngine({
     // lanesDropped split by the closed cause the app or a status probe gave.
     droppedDiscarded: 0, droppedPruned: 0, droppedMissing: 0, droppedSaved: 0,
   };
+  // Automatic worker replacements per unanswered push claim (opaque claim id
+  // -> count). Memory only; pruned when the claim leaves push.status().claimed.
+  const handoffRestarts = new Map();
 
   function log(code, fields = {}) {
     try { logger?.record?.(code, fields); } catch { /* logging cannot break serving */ }
@@ -2939,6 +2942,7 @@ export function createHandoffEngine({
         lane.counters.rejections = 0;
         lane.counters.junkStreak = 0;
         lane.counters.errStreak = 0;
+        lane.counters.workerRestarts = 0;
         lane.retained = null;
         // The answer that was outstanding for this job has arrived. If a next
         // stage exists, serveLane below stamps it as served; until then nothing
@@ -4016,7 +4020,7 @@ export function createHandoffEngine({
   // aggregate completion count, and lane/push ownership so a fresh chat can
   // safely re-get the exact outstanding handoff.  The prior key stays in the
   // ended-key ledger and can never authenticate again.
-  function restartWorker({ linkId, generation, workerOrdinal, failedLaunch = false, observedFailure = false } = {}) {
+  function restartWorker({ linkId, generation, workerOrdinal, failedLaunch = false, observedFailure = false, automatic = false } = {}) {
     if (!epoch?.poolStarted || !Number.isInteger(generation) || generation !== epoch.poolGeneration) return { copied: false, status: 'session_ended' };
     if (typeof linkId !== 'string' || !linkId || !Number.isInteger(workerOrdinal) || workerOrdinal < 1 || workerOrdinal > MAX_WORKER_POOL_SIZE) return { copied: false, status: 'session_ended' };
     const worker = workerForId(epoch, workerId(workerOrdinal));
@@ -4034,6 +4038,21 @@ export function createHandoffEngine({
       && !lanes.some(lane => laneAwaitingAnswer(lane, worker))
       && Number.isFinite(worker.lastCallAt) && stamp - worker.lastCallAt >= CONSTANTS.OBSERVED_FAILURE_SILENCE_MS;
     if (!worker || (!workerIsQuiet(worker) && !unpresentedFailure && !observedStop)) return { copied: false, status: 'not_quiet' };
+    // Only an AUTOMATIC replacement of an answer-owning chat counts toward the
+    // per-handoff cap. A person's Replace chat, a failed-launch retry and a
+    // protocol rotation at a stage boundary never count and are never refused.
+    const countable = automatic === true && failedLaunch !== true
+      && workerQuietReason(worker, stamp) !== 'fresh_context_required';
+    const owned = countable ? ownedUnansweredHandoffs(worker) : { lanes: [], claims: [] };
+    const cap = CONSTANTS.WORKER_RESTART_CAP;
+    const cappedLanes = owned.lanes.filter(lane => (lane.counters?.workerRestarts ?? 0) >= cap);
+    const cappedClaims = owned.claims.filter(id => (handoffRestarts.get(id) ?? 0) >= cap);
+    if (cappedLanes.length > 0 || cappedClaims.length > 0) {
+      // Final for this attempt: no credential is minted. The hand-back runs on
+      // its own (fire and forget) and fences itself on the epoch/generation.
+      void handBackRestartCapped(worker, cappedLanes, cappedClaims, sourceGeneration, epoch).catch(() => undefined);
+      return { copied: false, status: 'restart_cap' };
+    }
     // The live ledger already contains this digest, but stamp it again before
     // dropping the only credential that could authenticate it.
     ledgerAdd(worker.endedDigest, stamp);
@@ -4075,11 +4094,75 @@ export function createHandoffEngine({
     worker.consecutiveWaits = 0;
     worker.idleSince = null;
     worker.restarts = Math.min(Number.MAX_SAFE_INTEGER, (Number.isSafeInteger(worker.restarts) ? worker.restarts : 0) + 1);
+    // The count follows the handoff, not the worker. It is incremented in the
+    // same synchronous turn as the replacement, in memory only.
+    for (const lane of owned.lanes) {
+      if (lane.counters) lane.counters.workerRestarts = (lane.counters.workerRestarts ?? 0) + 1;
+    }
+    for (const id of owned.claims) handoffRestarts.set(id, (handoffRestarts.get(id) ?? 0) + 1);
     persistLedger();
     auditEvent('worker_restarted', { worker: workerOrdinal });
     log('worker_restarted', { worker: workerOrdinal });
     wake();
     return { copied: true, sessionCode, generation: epoch.poolGeneration, workerOrdinal, workerCount: epoch.poolSize };
+  }
+
+  // The unanswered handoffs this worker owns right now: application lanes
+  // awaiting its answer and opaque push claim ids. Push claims are read only
+  // under the condition `workerAnswerSilent` uses for an outstanding push.
+  function ownedUnansweredHandoffs(worker) {
+    const owned = lanes.filter(lane => laneAwaitingAnswer(lane, worker));
+    const claims = [];
+    if (worker?.activeTask === true && worker.activeTaskKind === 'push') {
+      try {
+        const roster = push?.status?.(pushEpochId())?.claimWorkers;
+        if (Array.isArray(roster)) {
+          for (const item of roster) {
+            if (item && item.workerOrdinal === worker.workerOrdinal && typeof item.claimId === 'string'
+                && item.claimId.length > 0 && !claims.includes(item.claimId)) claims.push(item.claimId);
+          }
+        }
+      } catch { /* the roster is advisory; an unreadable one counts nothing */ }
+    }
+    return { lanes: owned, claims };
+  }
+
+  // A refused automatic replacement must still leave the capped handoffs with
+  // a person. Lanes are held (in memory first, then persisted); push claims are
+  // handed back to the dock. Every step is fenced on the epoch/generation that
+  // refused, so a later chat or source is never touched.
+  async function handBackRestartCapped(worker, cappedLanes, cappedClaims, generation, expectedEpoch) {
+    const incarnation = worker.contextIncarnation;
+    // Capture each code now: a lane that rotated while an earlier lane was
+    // being written has moved on and must not be held for the old handoff.
+    const targets = cappedLanes.map(lane => ({ lane, code: lane.current?.code }));
+    for (const { lane, code } of targets) {
+      try {
+        await persistCap(lane, 'worker_restart_cap', generation, {
+          expectedEpoch,
+          expectedPhase: 'awaiting',
+          expectedCode: code,
+        });
+      } catch { /* a failed write is retried by reconcile; the hold stands in memory */ }
+    }
+    if (cappedClaims.length > 0 && epochCurrent(expectedEpoch, generation)) {
+      let handed = null;
+      try {
+        handed = push?.handBackClaims?.({
+          epoch: pushEpochId(expectedEpoch),
+          claimIds: [...cappedClaims],
+          reason: 'worker_restart_cap',
+        });
+        if (handed && typeof handed.then === 'function') handed = await handed;
+      } catch { handed = 0; }
+      // Keep the count when the source reported it could not hand some back,
+      // so the next automatic attempt tries again instead of starting over.
+      if (!(Number.isInteger(handed) && handed < cappedClaims.length)) {
+        for (const id of cappedClaims) handoffRestarts.delete(id);
+      }
+    }
+    // A person may have replaced this chat meanwhile; never stop its successor.
+    if (epochCurrent(expectedEpoch, generation) && worker.contextIncarnation === incarnation) markChatStopped(worker);
   }
 
   // Job ids whose bundle the app discarded or pruned this session (insertion
@@ -4683,6 +4766,12 @@ export function createHandoffEngine({
     try {
       if (push?.status) pushState = { ...pushState, ...push.status(pushEpochId()) };
     } catch { /* status is advisory and must never break the control plane */ }
+    // A push handoff's restart count lives only while its claim is held.
+    // Prune only against an authoritative roster (never a failed status read).
+    if (Array.isArray(pushState.claimed) && handoffRestarts.size > 0) {
+      const liveClaims = new Set(pushState.claimed);
+      for (const id of [...handoffRestarts.keys()]) if (!liveClaims.has(id)) handoffRestarts.delete(id);
+    }
     const stamp = safeNow(now);
     // A renderer can cancel a push handoff without another worker call.
     // Reconcile only against an authoritative claim roster and never while a

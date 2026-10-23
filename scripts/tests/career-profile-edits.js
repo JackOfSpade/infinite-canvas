@@ -1,4 +1,5 @@
 import nodeAssert from 'node:assert';
+import { applyProfileEditsWithRules, checkFindingAgainstLedgerWithRules, checkFindingAgainstLedgerWithForwardedDetails } from '../test-dependencies.js';
 import { createHash } from 'node:crypto';
 
 import { assert } from './testHelpers.js';
@@ -97,6 +98,52 @@ function settledLedger() {
 }
 
 export default [
+  {
+    name: 'W3 career edits: rule-aware variants align every rejection and preserve legacy result shapes',
+    run: () => {
+      const input = shard();
+      const set = value => edit('set', 'roles', 'p0002-role-1', 'title', value);
+      const cases = [
+        [[{}], 'EDIT_SCHEMA_INVALID'],
+        [[{ ...set('Lead'), valueJson: '{' }], 'EDIT_VALUE_JSON_INVALID'],
+        [[set('Lead'), set('Manager')], 'EDIT_CONFLICT'],
+        [[edit('set-coverage', 'roles', 'p0002-role-1', '', 'context')], 'EDIT_COVERAGE_OP_INVALID'],
+        [[edit('set', 'roles', 'p0002-role-1', 'unknown', 'x')], 'EDIT_FIELD_NOT_EDITABLE'],
+        [[edit('set', 'identity', 'wrong', 'name', 'Ada')], 'EDIT_IDENTITY_TARGET'],
+        [[edit('set', 'roles', 'p0002-missing', 'title', 'Lead')], 'EDIT_TARGET_MISSING'],
+        [[set({ wrong: true })], 'EDIT_VALUE_INVALID'],
+        [[set('Engineer')], 'EDIT_NO_CHANGE'],
+        [[edit('remove', 'identity', 'identity', '')], 'EDIT_IDENTITY_ADD_REMOVE'],
+        [[edit('add', 'roles', 'p0002-role-2', '', {})], 'EDIT_ENTITY_INVALID'],
+        [[edit('add', 'roles', 'p0002-role-2', '', input.roles[0])], 'EDIT_ID_MISMATCH'],
+        [[edit('add', 'roles', 'wrong-role', '', { ...input.roles[0], id: 'wrong-role' })], 'EDIT_ID_PREFIX'],
+        [[edit('add', 'roles', 'p0002-role-1', '', input.roles[0])], 'EDIT_ID_EXISTS'],
+        [[edit('remove', 'roles', 'p0002-missing', '')], 'EDIT_REMOVE_TARGET_MISSING'],
+      ];
+      for (const [edits, expected] of cases) {
+        const result = applyProfileEditsWithRules(input, edits, { entityIdPrefix: PREFIX });
+        assert(result.errors.length === result.ruleIds.length && result.ruleIds.includes(expected), `${expected}: ${JSON.stringify(result)}`);
+        const { ruleIds: _ids, ...legacy } = result;
+        nodeAssert.deepStrictEqual(legacy, applyProfileEdits(input, edits, { entityIdPrefix: PREFIX }));
+      }
+      const ambiguous = shard(); ambiguous.roles.push({ ...ambiguous.roles[0] });
+      assert(applyProfileEditsWithRules(ambiguous, [set('Lead')]).ruleIds[0] === 'EDIT_TARGET_AMBIGUOUS', 'ambiguous targets have their own rule');
+      const { ledger, decision } = settledLedger();
+      for (const [challengeId, evidence, expected] of [
+        ['', [], 'LEDGER_TARGET_SETTLED'],
+        ['decision-other', ['segment-0007'], 'LEDGER_CHALLENGE_MISMATCH'],
+        [decision.id, ['segment-0002'], 'LEDGER_CHALLENGE_NO_NEW_EVIDENCE'],
+      ]) {
+        const value = finding([set('Lead')], challengeId, evidence);
+        const result = checkFindingAgainstLedgerWithRules(ledger, 2, value);
+        assert(result.ruleIds.length === result.errors.length && result.ruleIds[0] === expected, expected);
+        const { ruleIds: _ids, ...legacy } = result;
+        nodeAssert.deepStrictEqual(legacy, checkFindingAgainstLedger(ledger, 2, value));
+        const forwarded = checkFindingAgainstLedgerWithForwardedDetails(ledger, 2, value);
+        assert(forwarded.details.every(line => !line.includes('value ') && !line.includes('Engineer')), 'forwarded lines carry target, decision and evidence ids only');
+      }
+    },
+  },
   {
     name: 'career profile edits: sample shard is a valid page shard',
     run: () => {

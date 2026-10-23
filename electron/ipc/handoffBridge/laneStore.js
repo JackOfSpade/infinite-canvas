@@ -17,7 +17,7 @@ const LANE_PHASES = new Set(['unread', 'awaiting', 'host', 'done', 'needs_user',
 const LANE_REASONS = new Set([
   'user_hold', 'human_advance', 'rejection_cap', 'junk_cap', 'review_round_cap',
   'job_broken', 'render_retry', 'app_fix_required', 'canvas_unavailable', 'read_failed', 'write_failed',
-  'submit_stuck', 'host_silent', 'lapsed', 'restart', 'review_stop',
+  'submit_stuck', 'host_silent', 'lapsed', 'restart', 'review_stop', 'worker_restart_cap',
 ]);
 const COUNTER_KEYS = new Set(['rejections', 'junkStreak', 'revisedRounds', 'errStreak', 'attemptByStage']);
 

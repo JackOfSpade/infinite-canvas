@@ -92,6 +92,7 @@ export const JOB_ROW_COPY = Object.freeze({
   failed: 'Needs you: this job failed. See the dock.',
   render_retry_required: 'Needs you: press Retry layout check on the job card.',
   rejection_cap: 'Needs you: ChatGPT\'s answers were rejected too many times.',
+  worker_restart_cap: 'Kept for you: ChatGPT chats were replaced several times without an answer to this job.',
   review_round_cap: 'Needs you: too many review rounds.',
   junk_cap: 'Needs you: ChatGPT sent empty answers repeatedly.',
   host_silent: 'Needs you: the app has not moved this job for 10 minutes. Is its canvas open?',
