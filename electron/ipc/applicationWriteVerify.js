@@ -1,3 +1,5 @@
+import { applicationUnitRegistry, argumentBindings, renderedUnitCharacters, UNIT_PATCH_SCHEMA } from './applicationUnitPatches.js';
+import { bootstrapApplicationUnitState } from './applicationGateFindings.js';
 /** Application protocol v2 state and prompt policy. No candidate data is kept here. */
 import { APPLICATION_V2_LIMITS } from './applicationV2Limits.js';
 import { isCareerSkillIndexEligible } from './careerSnapshot.js';
@@ -137,7 +139,7 @@ export function writeVerifyStageKey(state, stage, jobId) {
     if (typeof candidateId !== 'string' || !state.candidates?.some(row => row.id === candidateId && row.status === 'accepted')) {
       throw new Error('Application v2 fresh-chat key requires a ranked accepted candidate.');
     }
-    return `v2:${jobId}:${candidateId}:${stage}`;
+    return `v2:${jobId}:${candidateId}:${stage}${stage === 'fact-recheck' && state.factRecheckReopens > 0 ? `:r${state.factRecheckReopens}` : ''}`;
   }
   return `v2:${jobId}:${stage}`;
 }
@@ -188,17 +190,33 @@ export function validateWriteVerifyRanking(ranking, acceptedIds) {
   if (errors.length) throw new Error(errors.join(' | '));
 }
 
-const WRITE_VERIFY_UNIT_KINDS = Object.freeze([
-  ['résumé bullets', docs => (docs?.resume?.roles || []).flatMap(role => role?.bullets || []), true],
-  ['projects', docs => docs?.resume?.projects || [], true],
-  ['skill groups', docs => docs?.resume?.skills || [], true],
-  ['education', docs => docs?.resume?.education || [], false],
-  ['credentials', docs => docs?.resume?.credentials || [], false],
-  ['letter paragraphs', docs => docs?.coverLetter?.paragraphs || [], true],
-]);
+// One table owns unit identity, enumeration and editable fields for prompts,
+// fact checking and correction patches. Pseudo-units are never fact targets.
+export const WRITE_VERIFY_UNIT_KINDS = Object.freeze([
+  ['résumé bullets', docs => (docs?.resume?.roles || []).flatMap(role => role?.bullets || []), true,
+    { kind: 'bullet', doc: 'resume', fields: ['text', 'evidenceIds'], editable: ['text', 'evidenceIds'] }],
+  ['projects', docs => docs?.resume?.projects || [], true,
+    { kind: 'project', doc: 'resume', collection: 'projects', fields: ['name', 'description', 'evidenceIds'], editable: ['name', 'description', 'evidenceIds'] }],
+  ['skill groups', docs => docs?.resume?.skills || [], true,
+    { kind: 'skill', doc: 'resume', collection: 'skills', fields: ['group', 'items', 'evidenceIds'], editable: ['group', 'items', 'evidenceIds'] }],
+  ['education', docs => docs?.resume?.education || [], false,
+    { kind: 'education', doc: 'resume', collection: 'education', fields: ['credential', 'institution', 'dates', 'evidenceIds'], editable: ['credential', 'institution', 'dates', 'evidenceIds'] }],
+  ['credentials', docs => docs?.resume?.credentials || [], false,
+    { kind: 'credential', doc: 'resume', collection: 'credentials', fields: ['name', 'issuer', 'dates', 'evidenceIds'], editable: ['name', 'issuer', 'dates', 'evidenceIds'] }],
+  ['letter paragraphs', docs => docs?.coverLetter?.paragraphs || [], true,
+    { kind: 'paragraph', doc: 'coverLetter', collection: 'paragraphs', fields: ['text', 'evidenceIds'], editable: ['text', 'evidenceIds'] }],
+  ['letter thesis', docs => typeof docs?.coverLetter?.roleThesis === 'string' ? [{ id: '@roleThesis', text: docs.coverLetter.roleThesis }] : [], false,
+    { kind: 'thesis', doc: 'coverLetter', pseudo: true, fields: ['text'], editable: ['text'] }],
+  ['primary argument', docs => docs?.coverLetter?.coverLetterArgument?.primaryEvidence ? [{ ...docs.coverLetter.coverLetterArgument.primaryEvidence, id: '@argument.primary' }] : [], false,
+    { kind: 'argument-primary', doc: 'coverLetter', pseudo: true, slot: 'primary', fields: ['evidence', 'evidenceRole', 'relationToThesis'], editable: ['bullet', 'relationToThesis'] }],
+  ['secondary argument', docs => docs?.coverLetter?.coverLetterArgument?.secondaryEvidence ? [{ ...docs.coverLetter.coverLetterArgument.secondaryEvidence, id: '@argument.secondary' }] : [], false,
+    { kind: 'argument-secondary', doc: 'coverLetter', pseudo: true, slot: 'secondary', fields: ['evidence', 'evidenceRole', 'narrativeRole', 'relationToPrimary'], editable: ['bullet', 'narrativeRole', 'relationToPrimary'] }],
+].map(([label, pick, listed, meta]) => Object.freeze([label, pick, listed, Object.freeze({ ...meta,
+  fields: Object.freeze(meta.fields), editable: Object.freeze(meta.editable) })])));
 export function writeVerifyUnitText(documents, id) {
   if (typeof id !== 'string' || !id) return null;
-  for (const [, pick] of WRITE_VERIFY_UNIT_KINDS) {
+  for (const [, pick, , meta] of WRITE_VERIFY_UNIT_KINDS) {
+    if (meta.pseudo) continue;
     const unit = pick(documents).find(row => row?.id === id);
     if (unit) return [unit.text, unit.description, unit.items?.join(' '), unit.credential, unit.name, unit.group].filter(Boolean).join(' ');
   }
@@ -371,16 +389,34 @@ export function writeVerifyPrompt({ stage, state, sourcePrompt, posting, hand, e
   const candidate = state.candidates[state.ordinal];
   const prefix = `APPLICATION V2 HANDOFF\n${JSON.stringify(envelope)}\nReply within ${APPLICATION_V2_LIMITS.chatReplyTokens} output tokens.\n`;
   if (stage === 'write') return `${prefix}${WRITE_VERIFY_SHORTLIST_STEP}\n\n${sourcePrompt}${droppedFindingsSection(droppedFindings)}\n\nOUTPUT FORMAT FOR THIS ARM:\nWrite the résumé and cover letter as plain text. No JSON. Only the EVIDENCE SHORTLIST appendix may contain catalog IDs; the résumé and letter contain no evidence IDs or citation markers. Finish the letter before either appendix. Start the application with a standalone RÉSUMÉ heading, include a skills block, and start the letter with a standalone COVER LETTER heading. A PERSONAL PROJECTS section is optional: include at most one project from Standalone projects, and only when it clearly strengthens this application; otherwise leave the section out. Put content in both sections. Keep the wording you want published; a separate converter will only make changes required by the production structure.\n${rejectionSection(corrections)}`;
-  if (stage === 'convert') return `${prefix}${sourcePrompt}\n\nPLAIN-TEXT WRITER RESULT TO CONVERT:\n${candidate.plainText}\n\nCONVERSION TASK:\nConvert that exact writer result to production shapes and attach IDs from the full approved catalog above. Change wording only where the production shape requires it. Do not add claims or alter the selection.\n\nOUTPUT FORMAT:\n${PRODUCTION_SHAPES}\nEcho the APPLICATION V2 HANDOFF fields at the top level of the returned JSON.\n`;
+  if (stage === 'convert') return `${prefix}${sourcePrompt}\n\nPLAIN-TEXT WRITER RESULT TO CONVERT:\n${candidate.plainText}\n\nCONVERSION TASK:\nConvert that exact writer result to production shapes and attach IDs from the full approved catalog above. Change wording only where the production shape requires it. Do not add claims or alter the selection.\n\nOUTPUT FORMAT:\n${PRODUCTION_SHAPES}\nEcho the APPLICATION V2 HANDOFF fields at the top level of the returned JSON.\n${rejectionSection(corrections)}`;
   if (stage === 'verify-correction' || stage === 'fit-correction' || stage === 'fact-correction') {
     const target = stage === 'fact-correction'
       ? state.candidates.find(row => row.id === state.ranking[state.factIndex]) : candidate;
+    if (!target?.structured) throw new Error('Application correction requires current structured documents.');
     const factSection = stage === 'fact-correction' ? factFindingsSection(state.factFindings) : '';
     const priorRows = stage === 'fact-correction'
       ? (Array.isArray(target?.factCorrectionRejections) ? target.factCorrectionRejections : []).map(row => ({ kind: 'content', errors: row?.errors }))
       : target?.rejections;
     const prior = priorRoundsSection(priorRoundFindings(priorRows, corrections));
     const rejectionText = corrections.length ? ` The rejection text follows verbatim:\n${corrections.join('\n')}` : '';
+    const units = target.unitState || bootstrapApplicationUnitState({ documents: target.structured, corrections, status: target.status,
+      ...(stage === 'fact-correction' ? { tier: 'fact', factFindings: state.factFindings } : {}) });
+    if (units.mode === 'patch') {
+      const registry = applicationUnitRegistry(target.structured), visibleOpen = units.open.filter(id => registry.rows.some(row => row.id === id)), open = new Set(visibleOpen);
+      const bindings = argumentBindings(target.structured);
+      const line = row => {
+        const checks = units.tier === 'fit' ? ['measured-one-page-fit'] : units.tier === 'fact' ? ['fact-check']
+          : units.findings.filter(finding => finding.units.includes(row.id) || finding.implicated?.includes(row.id)).map(finding => finding.checkId);
+        const slot = row.kind === 'argument-primary' ? 'primary' : row.kind === 'argument-secondary' ? 'secondary' : null;
+        const fields = slot ? { bullet: bindings[slot], ...Object.fromEntries(Object.entries(row.fields).filter(([key]) => !['evidence', 'evidenceRole'].includes(key))) } : row.fields;
+        return `[${row.id}] ${open.has(row.id) ? `OPEN (${checks.join(', ') || 'document'})` : 'settled'} ${row.kind}: ${slot ? `bound to bullet ${bindings[slot]}; fields ` : ''}${JSON.stringify(fields)}${slot ? ' (the app fills in the argument evidence text and role)' : ''}`;
+      };
+      const roles = (target.structured.resume.roles || []).map(role => `ROLE ${role.id}: ${role.title} at ${role.company}, ${role.dates} (host-owned, not a unit)`);
+      const sections = ['resume', 'coverLetter'].map(doc => `${doc === 'resume' ? 'RESUME' : 'COVER LETTER'}\n${registry.rows.filter(row => row.doc === doc).map(line).join('\n')}`);
+      const fit = units.tier === 'fit' ? `\n${(units.fitMeasurement || []).map(row => `MEASURED: ${row.document} renders ${row.pageCount} pages, content ${row.contentHeightPx}px of a ${row.typeAreaHeightPx}px type area. Only shorten text or remove units.`).join('\n')}\nUNIT SIZES: ${registry.rows.filter(row => open.has(row.id)).map(row => `${row.id}=${renderedUnitCharacters(row)}`).join(', ')}` : '';
+      return `${prefix}${sourcePrompt}\n\nCURRENT DOCUMENTS BY UNIT (one line per unit: [<unit id>] <OPEN (check ids) | settled> <kind>: <editable fields as JSON>).\n${roles.join('\n')}\n${sections.join('\n')}\nUNITS OPEN THIS ROUND: ${visibleOpen.join(', ')}. Every other unit is settled: a patch to it is rejected, so leave it out.${factSection}${prior}${fit}\nReturn only this JSON object, echoing the APPLICATION V2 HANDOFF fields at the top level: ${JSON.stringify(UNIT_PATCH_SCHEMA)}${rejectionText}\n`;
+    }
     return `${prefix}${sourcePrompt}\n\nCURRENT STRUCTURED DOCUMENTS:\n${JSON.stringify(target?.structured)}${factSection}${prior}\n\nCorrect the complete documents and return only the production JSON shapes.${rejectionText}\n\nOUTPUT FORMAT:\n${PRODUCTION_SHAPES}\nEcho the APPLICATION V2 HANDOFF fields at the top level.\n`;
   }
   if (stage === 'pick') {

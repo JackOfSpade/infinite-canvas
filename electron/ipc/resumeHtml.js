@@ -461,7 +461,7 @@ function candidateResumeText(value, trustedRenderedRoleDates) {
 // Colons are ordinary punctuation again (user decision, 2026-10-20). Only em
 // dashes, semicolons, spaced hyphens and en dashes outside a range are rejected.
 
-function dashPunctuationProblems(text, surface) {
+export function dashPunctuationProblems(text, surface) {
   const messages = {
     'em-dash': `${surface} contains an em dash. Use a comma, a conjunction, parentheses, or separate sentences instead.`,
     semicolon: `${surface} contains a semicolon. Split the clause into separate sentences.`,

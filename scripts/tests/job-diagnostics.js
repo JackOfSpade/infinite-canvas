@@ -6034,12 +6034,15 @@ export default [
       const report = buildJobsPipelineSnapshot(new Set(), null, null, [{ nodeId: 'synthetic-card', claudeRun: { runs: 12 }, localApplication: {
         id: 'synthetic-job', status: 'failed', terminalKind: 'write-verify-human-stop', terminalReason: 'same-rule-repeat', stopStage: 'requirements',
         ruleId: 'requirements-schema-coverage', ruleCount: 5,
+        unitPatchDiagnostics: { modes: { patch: 2, document: 1, environment: 'PRIVATE_COUNT' }, stops: { 'document-repeat': 1, 'fit-no-progress': 2, PRIVATE_REASON: 30 } },
         ruleTally: [{ family: 'requirements', subject: 'e0-l0-u0', ruleId: 'requirements-schema-coverage', count: 5 },
           { family: 'PRIVATE_FAMILY', subject: 'PRIVATE_VALUE', ruleId: 'private prose!', count: 9 }],
       } }]);
       assert(report.includes('reason `same-rule-repeat`') && report.includes('stop stage `requirements`')
         && report.includes('rule `requirements-schema-coverage` x5') && report.includes('Claude runs 12')
-        && report.includes('requirements/e0-l0-u0/requirements-schema-coveragex5'), 'show closed metadata');
+        && report.includes('requirements/e0-l0-u0/requirements-schema-coveragex5')
+        && report.includes('patch=2, document=1, environment=0') && report.includes('document-repeat=1, fit-no-progress=2')
+        && !report.includes('PRIVATE_COUNT') && !report.includes('PRIVATE_REASON'), 'show closed metadata');
       assert(!report.includes('PRIVATE_FAMILY') && !report.includes('PRIVATE_VALUE') && !report.includes('private prose!'), 'drop malformed metadata');
     },
   },

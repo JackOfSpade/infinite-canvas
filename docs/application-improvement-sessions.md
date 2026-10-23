@@ -84,3 +84,7 @@ Changes shipped:
 2. The edit log records why a pair was superseded (`same-build`, `rebuild`, `unknown-build`) so a rebuild re-run is never read as a rejection again.
 
 Not run: the blind play-the-hand panel and truth recall, because the writer is a live ChatGPT worker with no offline replay path; the before and after numbers above are the deterministic replay only. Frozen regression set: the 15 accepted pairs of this batch. Counter reset after this entry.
+
+### 2026-10-23 — mechanics change outside an improvement session; counter not reset
+
+Implemented the AI loop convergence handoff: delivered judge, fact-check and recheck corrections with same-rule stops, a durable Claude run budget, host render holds, host-owned punctuation stops and measured fit feedback, bounded bridge recovery, learnable job/interview/marketplace validator feedback, cross-page career conflict settlement and repeat detection, and application corrections as unit patches with settled-unit protection, shortening checks and document-repeat stops. The writer brief, rubric grading, truth gates and frozen regression set are unchanged. No improvement session or live application comparison was run; the private counter was 2 of 50 at the start and was not reset.

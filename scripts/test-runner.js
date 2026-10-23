@@ -1,3 +1,4 @@
+import application_unit_patches from './tests/application-unit-patches.js';
 import application_render_faults from './tests/application-render-faults.js';
 import application_rule_tally from './tests/application-rule-tally.js';
 import fs from 'node:fs';
@@ -203,6 +204,7 @@ const testGroups = [
   ['current-authority-parallel-match.js', current_authority_parallel_match],
   ['application-career-authority.js', application_career_authority],
   ['application-write-verify.js', application_write_verify],
+  ['application-unit-patches.js', application_unit_patches],
   ['application-rule-tally.js', application_rule_tally],
   ['application-render-faults.js', application_render_faults],
   ['cover-letter-hedged-diagnosis.js', cover_letter_hedged_diagnosis],

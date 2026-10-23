@@ -59,7 +59,9 @@ export function hostOwnedPunctuationMessage(faults) {
 }
 export function fitMeasurement({ resumeFit, letterFit }) {
   return Object.fromEntries([['resume', resumeFit], ['coverLetter', letterFit]].map(([key, fit]) => [key, {
-    pageCount: fit.pageCount, contentHeightPx: Number.isFinite(fit.layout?.contentHeightPx) ? fit.layout.contentHeightPx : null,
+    pageCount: fit.pageCount, typeAreaHeightPx: Number.isFinite(fit.layout?.typeAreaHeightPx) ? fit.layout.typeAreaHeightPx : null,
+    layoutIssues: (fit.layoutIssues || []).map(({ id, count, maxOverflowPx }) => ({ id, count, maxOverflowPx })), environment: null,
+    contentHeightPx: Number.isFinite(fit.layout?.contentHeightPx) ? fit.layout.contentHeightPx : null,
     horizontalOverflowCount: Number.isFinite(fit.layout?.horizontalOverflowCount) ? fit.layout.horizontalOverflowCount : (fit.layoutIssues || []).reduce((sum, row) => sum + (Number.isFinite(row.count) ? row.count : 0), 0),
   }]));
 }

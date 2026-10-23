@@ -1,3 +1,8 @@
+import { applicationUnitDiagnostics, bootstrapApplicationUnitState, advanceApplicationUnitState, locateGateFindings } from './applicationGateFindings.js';
+import { applicationUnitRegistry, structuredDocumentDigest, unitDigest, mergeUnitPatches, diffUnits } from './applicationUnitPatches.js';
+import { argumentEvidenceMatchesBullet } from './applicationUnitPatches.js';
+import { PASTE_VALIDATION_ERROR_ID_SET, PASTE_VALIDATION_ERROR_PROSE_UNITS, inferredPasteValidationErrorId, PASTE_DOCUMENT_PREFIX_STAGES, PASTE_RESUME_REPLACEMENT_PREFIX, PASTE_COVER_REPLACEMENT_PREFIX, PASTE_RESUME_REBIND_PREFIX, PASTE_RESUME_PROSE_FAILURE_PREFIX, PASTE_COVER_CHECK_FAILURE_PREFIX } from './applicationGateFindings.js';
+export { inferredPasteValidationErrorId } from './applicationGateFindings.js';
 import { ApplicationV2RenderUnavailableError, renderDocumentsWithHostRetry, fitRejectionMessage, hostOwnedPunctuationFaults, hostOwnedPunctuationMessage, fitMeasurement, sameFitMeasurement } from './applicationV2HostFaults.js';
 import { SAME_RULE_STOP_REASONS, APPLICATION_ROUTE_CLAUDE_RUNNER, ruleTallyFamily, cleanRuleTally, normalizedObservationFingerprint, recordRuleRejection, clearRuleTallyFamily, clearRuleTallyStep, ruleTallyEscalationRuns, ruleTallyLastRoundIds, summarizeRuleTally, canonicalAnswerSha256, sameRuleStopTerminal, runBudgetTerminal, terminalStopSummary, unchangedNotice } from './applicationRuleTally.js';
 /**
@@ -3798,23 +3803,18 @@ const PASTE_STAGE_PROSE_UNITS = Object.freeze({
 // and both sets carry the drafting battery's check ids after that name, so one
 // table reads all four: the prefix says which stage's prose unit the ids
 // behind it mean.
-const PASTE_RESUME_REPLACEMENT_PREFIX = 'Résumé replacement — ';
-const PASTE_COVER_REPLACEMENT_PREFIX = 'Cover-letter replacement — ';
+
+
 // Deliberately absent from PASTE_DOCUMENT_PREFIX_STAGES below: the two
 // repairs this one offers live in different documents — keep the bullet the
 // argument quotes, or replace the letter that quotes it — so scoping the
 // correction brief to either stage's prose units would assert a cause the
 // measurement does not have. An unregistered prefix leaves the brief unscoped,
 // which is the honest reading, and the message names both routes itself.
-const PASTE_RESUME_REBIND_PREFIX = 'Résumé replacement versus the accepted cover letter — ';
-const PASTE_RESUME_PROSE_FAILURE_PREFIX = 'Local AI résumé failed editorial checks: ';
-const PASTE_COVER_CHECK_FAILURE_PREFIX = 'Local AI cover letter failed required checks: ';
-const PASTE_DOCUMENT_PREFIX_STAGES = Object.freeze([
-  [PASTE_RESUME_REPLACEMENT_PREFIX, 'resume'],
-  [PASTE_RESUME_PROSE_FAILURE_PREFIX, 'resume'],
-  [PASTE_COVER_REPLACEMENT_PREFIX, 'cover-letter'],
-  [PASTE_COVER_CHECK_FAILURE_PREFIX, 'cover-letter'],
-]);
+
+
+
+
 
 // The per-unit reporters lead with the unit they graded, so that label decides
 // the part for the same reason a check id does: the code that did the grading
@@ -3847,52 +3847,6 @@ const PASTE_CHECK_ID_PREFIX_RE = /^([a-z][a-z0-9-]*):\s/u;
 // battery runs. Give those failures stable diagnostic ids too; no error may
 // reach Paste Rejections.json as an unidentified row. The fallback is a schema
 // error, never an advisory, and cannot turn a rejection into an acceptance.
-const PASTE_VALIDATION_ERROR_ID_SET = new Set([
-  'fact-findings-shape', 'fact-finding-shape', 'fact-finding-unit', 'fact-finding-claim', 'fact-finding-span', 'fact-finding-reason', 'judge-ranking-shape', 'judge-ranking-set', 'judge-ranking-reason', 'fact-check-unchanged',
-  'unsupported-experience-span', 'unit-source-grounding',
-  'host-owned-field-equality', 'candidate-dash-punctuation',
-  'structured-resume', 'paragraph-argument-links', 'measured-one-page-fit', 'schema-invalid',
-  'handoff-echo-protocol', 'handoff-echo-job-id', 'handoff-echo-stage',
-  'handoff-echo-code', 'handoff-echo-base-hashes',
-]);
-const PASTE_VALIDATION_ERROR_PROSE_UNITS = Object.freeze({
-  'fact-findings-shape': 'field',
-  'fact-finding-shape': 'field',
-  'fact-finding-unit': 'field',
-  'fact-finding-claim': 'field',
-  'fact-finding-span': 'field',
-  'fact-finding-reason': 'field',
-  'judge-ranking-shape': 'field',
-  'judge-ranking-set': 'field',
-  'judge-ranking-reason': 'field',
-  'fact-check-unchanged': 'field',
-
-  'unsupported-experience-span': 'prose-unit',
-  'unit-source-grounding': 'prose-unit',
-  'candidate-dash-punctuation': 'prose-unit',
-  'paragraph-argument-links': 'prose-unit',
-  'host-owned-field-equality': 'field',
-  'structured-resume': 'field',
-  'measured-one-page-fit': 'field',
-  'schema-invalid': 'field',
-  'handoff-echo-protocol': 'field', 'handoff-echo-job-id': 'field',
-  'handoff-echo-stage': 'field', 'handoff-echo-code': 'field',
-  'handoff-echo-base-hashes': 'field',
-});
-function inferredPasteValidationErrorId(message) {
-  const value = String(message || '');
-  const echoField = /^Application v2 response must echo the current (protocol|jobId|stage|handoffCode|baseHashes) exactly\.$/u.exec(value)?.[1];
-  if (echoField) return { protocol: 'handoff-echo-protocol', jobId: 'handoff-echo-job-id',
-    stage: 'handoff-echo-stage', handoffCode: 'handoff-echo-code', baseHashes: 'handoff-echo-base-hashes' }[echoField];
-  if (/Continue the Local AI routine with measured revision \d+ using fit-feedback\.json/iu.test(value)) return 'measured-one-page-fit';
-  if (/experience span|span of years|unsupported-experience-span/iu.test(value)) return 'unsupported-experience-span';
-  if (/source.?grounding|source quote|career-data quote|cited evidence|career-data evidence|attribution scope/iu.test(value)) return 'unit-source-grounding';
-  if (/trustedIdentity|host-owned|approved (?:role|project|identity|credential)|source role.*(?:title|company|dates|location)/iu.test(value)) return 'host-owned-field-equality';
-  if (/dash punctuation|em dash|en dash|spaced hyphen|semicolon|colon used as sentence punctuation/iu.test(value)) return 'candidate-dash-punctuation';
-  if (/argumentMapping|jobNeedQuote|argument span/iu.test(value)) return 'paragraph-argument-links';
-  if (/structured r[ée]sum[ée]|resume (?:roles|bullets|projects|skills)|r[ée]sum[ée] (?:role|bullet|project|skill)/iu.test(value)) return 'structured-resume';
-  return 'schema-invalid';
-}
 // These are host-owned review-flow controls, rather than editorial battery
 // checks. They remain coded for durable rejection diagnostics but intentionally
 // scope no prose repair brief of their own.
@@ -5136,6 +5090,12 @@ async function writeVerifyRenderPhase({ html, letter, input, renderState, render
 export function __writeVerifyRenderPhaseForTests(args) { return writeVerifyRenderPhase(args); }
 
 async function writeVerifyCandidateGate({ raw, state, input, frozen, manifest, render }) {
+  const findingMeta = {};
+  const finish = result => {
+    const registry = applicationUnitRegistry(result.structured);
+    return { ...result, findings: locateGateFindings({ errors: result.errors, documents: result.structured, registry, meta: findingMeta }),
+      fitMeasurement: result.measured ? Object.entries(result.measured).map(([document, values]) => ({ document, ...values })) : null };
+  };
   const resume = raw?.resume;
   const coverLetter = raw?.coverLetter;
   const selectedRoleIds = Array.isArray(resume?.roles) ? resume.roles.map(role => role?.id) : [];
@@ -5159,8 +5119,8 @@ async function writeVerifyCandidateGate({ raw, state, input, frozen, manifest, r
   const authority = applicationCareerAuthority(input);
   const hostFaults = hostOwnedPunctuationFaults({ sourceRoles: selectedSourceRoles(base, input), identity: authorityTrustedIdentity(authority),
     recordFields: hostOwnedResumeRecordFields(normalizedResume, { authority, acceptedEvidence: evidencePlan?.evidence || [] }) });
-  if (hostFaults.length) return { errors: [], contentErrors: [], fitErrors: [], hostFault: { message: hostOwnedPunctuationMessage(hostFaults) },
-    structured: { resume: normalizedResume, coverLetter }, checkIds: [] };
+  if (hostFaults.length) return finish({ errors: [], contentErrors: [], fitErrors: [], hostFault: { message: hostOwnedPunctuationMessage(hostFaults) },
+    structured: { resume: normalizedResume, coverLetter }, checkIds: [] });
 
   const envelope = stage => ({ protocol: PASTE_APPLICATION_PROTOCOL_VERSION, jobId: input.jobId,
     stage, handoffCode: state.handoffCode, baseHashes: state.baseHashes });
@@ -5185,20 +5145,20 @@ async function writeVerifyCandidateGate({ raw, state, input, frozen, manifest, r
       validateLocalApplicationResult(packageRaw, input.jobId, input.canvasRoot, input.job,
         completedResultValidationOptions({ manifest, frozen, sourceRoles }));
     } catch (error) {
-      errors.push(...(validationFailureRecords(error).map(record => record.message)));
+      for (const record of validationFailureRecords(error)) { errors.push(record.message); findingMeta[record.message] = { repairs: record.repairs }; }
     }
-    if (errors.length) return { errors, contentErrors: errors, fitErrors: [], structured: { resume: normalizedResume, coverLetter },
-      checkIds: pasteRejectionCheckIds(errors).checkIds };
+    if (errors.length) return finish({ errors, contentErrors: errors, fitErrors: [], structured: { resume: normalizedResume, coverLetter },
+      checkIds: pasteRejectionCheckIds(errors).checkIds });
     const html = pasteRenderedResumeMainHtml(normalizedResume, renderState, input);
     const letter = authorLocalCoverLetterEnvelope(sanitizeCoverLetter({ ...coverLetter,
       paragraphs: coverLetter.paragraphs.map(paragraph => paragraph.text) }), html, input.job);
     const phase = await writeVerifyRenderPhase({ html, letter, input, renderState, render });
     const structured = { resume: normalizedResume, coverLetter };
-    if (phase.kind === 'host-fault' || phase.kind === 'render-fault') return { errors: [], contentErrors: [], fitErrors: [], structured, checkIds: [],
-      ...(phase.hostFault ? { hostFault: phase.hostFault } : { renderFault: phase.renderFault }) };
-    if (phase.kind === 'fit') return { errors: phase.fitErrors, contentErrors: [], fitErrors: phase.fitErrors, measured: phase.measured, structured, checkIds: ['measured-one-page-fit'] };
+    if (phase.kind === 'host-fault' || phase.kind === 'render-fault') return finish({ errors: [], contentErrors: [], fitErrors: [], structured, checkIds: [],
+      ...(phase.hostFault ? { hostFault: phase.hostFault } : { renderFault: phase.renderFault }) });
+    if (phase.kind === 'fit') return finish({ errors: phase.fitErrors, contentErrors: [], fitErrors: phase.fitErrors, measured: phase.measured, structured, checkIds: ['measured-one-page-fit'] });
   }
-  return { errors, contentErrors: errors, fitErrors: [], structured: { resume: normalizedResume, coverLetter }, checkIds: pasteRejectionCheckIds(errors).checkIds };
+  return finish({ errors, contentErrors: errors, fitErrors: [], structured: { resume: normalizedResume, coverLetter }, checkIds: pasteRejectionCheckIds(errors).checkIds });
 }
 
 export async function __writeVerifyCandidateGateForTests(args) {
@@ -5747,6 +5707,8 @@ function pasteFailedCheckErrors(checks) {
   return partitionCheckResults(checks).blocking
     .map(check => `${check.id}: ${check.detail}`);
 }
+
+export const __pasteFailedCheckErrorsForTests = checks => pasteFailedCheckErrors(checks);
 
 function pasteFailedResumeCheckErrors(checks) {
   return partitionResumeCheckResults(checks).blocking
@@ -7840,6 +7802,10 @@ async function submitWriteVerifyHandoff({ root, jobId, dir, manifest, input, fro
   let hostFault = null;
   let measured = null;
   let factTransition = null;
+  let patchRefused = false, stopped = null, factReopened = false, patchEvidence = null;
+  const owner = outgoingStage.startsWith('fact-') ? work.candidates.find(row => row.id === work.ranking[work.factIndex]) : candidate;
+  const priorCounters = { corrections: owner?.corrections, fitCorrections: owner?.fitCorrections };
+  let unitState = owner?.unitState || null;
   if (outgoingStage !== 'write') {
     try { parsed = parsePasteResponse(rawText); }
     catch (error) { errors = [error?.message || 'Paste one valid JSON object.']; }
@@ -7857,11 +7823,45 @@ async function submitWriteVerifyHandoff({ root, jobId, dir, manifest, input, fro
     }
   }
   if (!errors.length && ['convert', 'verify-correction', 'fit-correction', 'fact-correction'].includes(outgoingStage)) {
-    if (!parsed?.resume || !parsed?.coverLetter) errors.push('Conversion must return both production structured documents.');
-    else {
-      if (outgoingStage !== 'fact-correction') candidate.structured = { resume: parsed.resume, coverLetter: parsed.coverLetter };
-      if (outgoingStage === 'fact-correction') errors.push(...writeVerifyChangedFindingErrors(work.factFindings || [], parsed));
-      const gate = errors.length ? null : await writeVerifyCandidateGate({ raw: parsed, state, input, frozen, manifest });
+    let documents = parsed?.resume && parsed?.coverLetter ? { resume: parsed.resume, coverLetter: parsed.coverLetter } : null;
+    if (outgoingStage !== 'convert') {
+      unitState ||= bootstrapApplicationUnitState({ documents: owner.structured, corrections: work.lastCorrections || [], status: owner.status,
+        ...(outgoingStage === 'fact-correction' ? { tier: 'fact', factFindings: work.factFindings || [] } : {}) });
+      owner.unitState = unitState;
+      work.unitModeCounts ||= {};
+      work.unitModeCounts[unitState.mode] = (work.unitModeCounts[unitState.mode] || 0) + 1;
+      const base = owner.structured, openText = unitState.open.join(', ');
+      const refuse = text => { errors.push(`unit-patch: ${text}`); patchRefused = true; };
+      if (unitState.mode === 'patch') {
+        if (parsed.resume || parsed.coverLetter) refuse(`this round takes unit patches ({"patches":[...]}), not whole documents; units open this round: ${openText}.`);
+        else {
+          const merge = mergeUnitPatches(base, parsed.patches, { open: unitState.open,
+            shortenOnly: outgoingStage === 'fit-correction' || unitState.tier === 'fit', knownBad: unitState.flagged });
+          errors.push(...merge.errors.map(error => error.text)); patchRefused = merge.errors.length > 0;
+          if (!patchRefused) documents = merge.documents;
+        }
+      } else if (!documents) errors.push('Conversion must return both production structured documents.');
+      else if (unitState.mode !== 'environment') {
+        const delta = diffUnits(base, documents);
+        for (const id of [...delta.changed, ...delta.removed].filter(id => !unitState.open.includes(id)))
+          refuse(`the returned documents change unit ${JSON.stringify(id)}, which no check named; return it exactly as the current documents hold it. Units open this round: ${openText}.`);
+        if (delta.added.length && !unitState.findings.some(finding => finding.scope === 'structure')) refuse(`the returned documents add units without an open structure finding. Units open this round: ${openText}.`);
+      }
+      if (!errors.length && unitState.mode !== 'environment') {
+        const hash = structuredDocumentDigest(documents), last = unitState.digests.length - 1, earlierRound = unitState.digests.indexOf(hash);
+        if (hash === unitState.digests[last]) refuse(`the returned documents are identical to the current documents; change one of the open units: ${openText}.`);
+        else if (earlierRound >= 0) {
+          stopped = { kind: 'document-repeat', round: unitState.round + 1, earlierRound, digest12: hash.slice(0, 12) };
+          errors.push(`document-repeat: round ${stopped.round} returned the same structured documents as round ${earlierRound} (digest ${stopped.digest12}); this candidate is stopped.`);
+        }
+      }
+      if (documents) { const delta = diffUnits(base, documents); patchEvidence = { mode: unitState.mode, changed: delta.changed, removed: delta.removed, mergedSha256: structuredDocumentDigest(documents) }; }
+    }
+    if (!errors.length && !documents) errors.push('Conversion must return both production structured documents.');
+    if (!errors.length) {
+      if (outgoingStage !== 'fact-correction') candidate.structured = documents;
+      if (outgoingStage === 'fact-correction') errors.push(...writeVerifyChangedFindingErrors(work.factFindings || [], documents));
+      const gate = errors.length ? null : await writeVerifyCandidateGate({ raw: documents, state, input, frozen, manifest });
       if (gate?.renderFault) {
         await holdWriteVerifyRender({ dir, jobId, state, stage: outgoingStage, candidateId: outgoingCandidateId, rawText, renderFault: gate.renderFault });
         // A host event spends a log sequence only; the answer and revision stay held.
@@ -7874,6 +7874,9 @@ async function submitWriteVerifyHandoff({ root, jobId, dir, manifest, input, fro
       }
       if (gate?.hostFault) hostFault = gate.hostFault;
       else if (gate) { errors.push(...gate.errors); fitRejected = gate.fitErrors.length > 0; measured = gate.measured || null; }
+      if (gate && !gate.hostFault && !gate.renderFault) owner.unitState = advanceApplicationUnitState({ previous: unitState,
+        documents: gate.errors.length ? documents : gate.structured, gate,
+        factFindings: outgoingStage === 'fact-correction' ? work.factFindings || [] : [] });
       if (!errors.length && gate && !hostFault) {
         if (outgoingStage === 'fact-correction') {
           const winner = work.candidates.find(row => row.id === work.ranking[work.factIndex]);
@@ -7926,21 +7929,39 @@ async function submitWriteVerifyHandoff({ root, jobId, dir, manifest, input, fro
     if (!errors.length) {
       if (!parsed.findings.length) work.factPassed = true;
       else if (outgoingStage === 'fact-recheck') {
-        winner.factFailure = { step: 'second-fact-check', findings: parsed.findings };
-        work.factIndex += 1;
-      } else { work.factFindings = parsed.findings; work.factCorrectionRound = 0; }
+        const registry = applicationUnitRegistry(winner.structured), baseline = winner.factBaseline?.unitDigests;
+        const changed = parsed.findings.filter(finding => {
+          const row = registry.rows.find(unit => unit.id === finding.id);
+          return !row || !baseline || !Object.hasOwn(baseline, finding.id) || unitDigest(row) !== baseline[finding.id];
+        }).map(finding => finding.id);
+        const transition = factCorrectionTransition({ priorRound: work.factCorrectionRound || 0, failed: true,
+          factIndex: work.factIndex, rankedCount: work.ranking.length });
+        if (!baseline || changed.length || transition.nextStage !== 'fact-correction') {
+          winner.factFailure = { step: 'second-fact-check', findings: parsed.findings, ...(changed.length ? { changedUnits: changed } : {}) };
+          work.factIndex += 1;
+        } else {
+          work.factFindings = parsed.findings; work.factCorrectionRound = transition.round;
+          work.factRecheckReopens = (work.factRecheckReopens || 0) + 1; factReopened = true;
+          winner.unitState = bootstrapApplicationUnitState({ documents: winner.structured, tier: 'fact', factFindings: parsed.findings });
+        }
+      } else {
+        work.factFindings = parsed.findings; work.factCorrectionRound = 0; work.factRecheckReopens = 0;
+        winner.factBaseline = { round: 0, unitDigests: Object.fromEntries(applicationUnitRegistry(winner.structured).rows.map(row => [row.id, unitDigest(row)])) };
+        winner.unitState = bootstrapApplicationUnitState({ documents: winner.structured, tier: 'fact', factFindings: parsed.findings });
+      }
     }
   }
   if (hostFault) errors.push(`candidate-dash-punctuation: ${hostFault.message}`);
   // An accepted stage never hands a correction list to the next handoff.
   if (!errors.length) work.lastCorrections = [];
   if (errors.length && ['convert', 'verify-correction', 'fit-correction'].includes(outgoingStage)) {
-    const separateFit = work.fitPolicy === 'separate-four-rounds' && fitRejected;
+    const fitCharged = fitRejected || (patchRefused && (outgoingStage === 'fit-correction' || unitState?.tier === 'fit'));
+    const separateFit = work.fitPolicy === 'separate-four-rounds' && fitCharged;
     const previousFit = candidate.rejections.findLast(row => row.measured);
     const fitNoProgress = fitRejected && sameFitMeasurement(previousFit?.measured, measured);
     candidate.rejections.push({ round: separateFit ? candidate.fitCorrections || 0 : candidate.corrections,
-      kind: separateFit ? 'fit' : 'content', checkIds: separateFit ? ['measured-one-page-fit'] : pasteRejectionCheckIds(errors).checkIds, errors, ...(measured ? { measured } : {}) });
-    if (fitNoProgress) { candidate.status = 'dropped'; candidate.dropReason = ['fit-no-progress']; work.lastCorrections = []; }
+      kind: separateFit ? 'fit' : 'content', checkIds: separateFit && fitRejected ? ['measured-one-page-fit'] : pasteRejectionCheckIds(errors).checkIds, errors, ...(measured ? { measured } : {}) });
+    if (fitNoProgress) { candidate.status = 'dropped'; candidate.dropReason = ['fit-no-progress']; candidate.stopReason = { kind: 'fit-no-progress' }; work.lastCorrections = []; }
     else if (separateFit) {
       if ((candidate.fitCorrections || 0) < WRITE_VERIFY_MAX_FIT_CORRECTIONS) {
         candidate.fitCorrections = (candidate.fitCorrections || 0) + 1;
@@ -7979,6 +8000,22 @@ async function submitWriteVerifyHandoff({ root, jobId, dir, manifest, input, fro
       { stage: outgoingStage, checkIds: pasteRejectionCheckIds(errors).checkIds, errors });
     work.lastCorrections = errors;
   }
+  if (stopped) {
+    owner.stopReason = stopped;
+    if (outgoingStage === 'fact-correction') {
+      owner.factFailure = { step: 'document-repeat', round: stopped.round, earlierRound: stopped.earlierRound };
+      // The ordinary budget branch may already have advanced work.factIndex.
+      const next = state.writeVerify.factIndex + 1;
+      factTransition = { round: work.factCorrectionRound, factIndex: next, nextStage: next < work.ranking.length ? 'fact-check' : 'write-verify-human-stop' };
+      work.factIndex = next;
+    } else {
+      candidate.status = 'dropped'; candidate.dropReason = state.writeVerify.lastCorrections || [];
+      // The repeated document is terminal, rather than another correction round.
+      candidate.corrections = priorCounters.corrections; candidate.fitCorrections = priorCounters.fitCorrections;
+    }
+    work.lastCorrections = [];
+  }
+  if (outgoingStage === 'convert' && errors.length && !candidate.structured && candidate.status !== 'dropped') candidate.status = 'written';
   if (hostFault && outgoingStage !== 'fact-correction') { candidate.status = 'dropped'; candidate.dropReason = [hostFault.message]; }
   if (hostFault) work.lastCorrections = [];
   const counted = ['write', 'convert', 'verify-correction', 'fit-correction', 'fact-correction'].includes(outgoingStage);
@@ -8001,6 +8038,8 @@ async function submitWriteVerifyHandoff({ root, jobId, dir, manifest, input, fro
     const rejectionEvidence = {
       stage: outgoingStage, revision: state.revision, candidateId: outgoingCandidateId || null,
       response: rawText, errors, checkIds: pasteRejectionCheckIds(errors).checkIds,
+      ...(patchEvidence ? { patch: patchEvidence } : {}),
+      findings: (owner?.unitState?.findings || []).map(({ checkId, scope, units }) => ({ checkId, scope, units })),
     };
     await atomicJson(rejectionPaths.working, rejectionEvidence);
     await atomicJson(rejectionPaths.retained, rejectionEvidence);
@@ -8017,7 +8056,7 @@ async function submitWriteVerifyHandoff({ root, jobId, dir, manifest, input, fro
   else if (outgoingStage === 'fact-correction') nextStage = errors.length ? factTransition.nextStage : 'fact-recheck';
   else if (outgoingStage === 'fact-check') nextStage = work.factPassed ? 'completed'
     : (work.factFindings?.length ? 'fact-correction' : 'fact-check');
-  else if (outgoingStage === 'fact-recheck') nextStage = work.factPassed ? 'completed'
+  else if (outgoingStage === 'fact-recheck') nextStage = factReopened ? 'fact-correction' : work.factPassed ? 'completed'
     : (work.factIndex < work.ranking.length ? 'fact-check' : 'write-verify-human-stop');
   else if (outgoingStage === 'pick' && work.ranking.length) nextStage = 'fact-check';
   if (hostFault) nextStage = 'write-verify-human-stop';
@@ -8059,7 +8098,7 @@ async function submitWriteVerifyHandoff({ root, jobId, dir, manifest, input, fro
     ...(errors.length ? { checkIds: fitRejected ? ['measured-one-page-fit'] : pasteRejectionCheckIds(errors).checkIds } : {}) });
   await atomicJson(path.join(dir, 'manifest.json'), { ...manifest, status, paste: persisted });
   await fs.promises.unlink(path.join(dir, 'render-hold.json')).catch(error => { if (error?.code !== 'ENOENT') throw error; });
-  const localJob = { id: jobId, status, mode: 'paste', revision: next.revision, logCount: next.logCount, folder: dir };
+  const localJob = { id: jobId, status, mode: 'paste', revision: next.revision, logCount: next.logCount, folder: dir, ...applicationUnitDiagnostics(work) };
   if (nextStage === 'completed' || nextStage === 'write-verify-human-stop') return { accepted: !errors.length, completed: true,
     terminal: nextStage === 'write-verify-human-stop', localJob, handoff: null, ...(errors.length ? { validationErrors: errors } : {}) };
   return { accepted: !errors.length, completed: false, localJob, ...(plan ? { rejection: rejectionSummary(plan) } : {}),
@@ -9064,7 +9103,7 @@ function writeVerifyHumanStopStatus(args) {
     checkIds: args.paste?.terminal?.checkIds || [],
     ...(SAME_RULE_STOP_REASONS.includes(args.paste?.terminal?.reason) ? { terminalReason: args.paste.terminal.reason, stopStage: args.paste.stage,
       ...(args.paste.terminal.ruleId ? { ruleId: args.paste.terminal.ruleId, ruleCount: args.paste.terminal.count } : {}) } : {}),
-    ruleTally: summarizeRuleTally(args.paste.ruleTally, 3) };
+    ruleTally: summarizeRuleTally(args.paste.ruleTally, 3), ...applicationUnitDiagnostics(args.paste.writeVerify) };
 }
 
 const LEGACY_APPLICATION_REGENERATE_MESSAGE = 'This application was made by an older version, so regenerate it.';
@@ -13128,13 +13167,6 @@ function tokenCoverage(needle, haystack) {
   return expected.filter(token => available.has(token)).length / expected.length;
 }
 
-function argumentEvidenceMatchesBullet(evidence, bullet) {
-  const candidate = normalizeSourceGroundingText(evidence).toLowerCase();
-  const finalText = normalizeSourceGroundingText(bullet).toLowerCase();
-  return candidate === finalText || candidate.includes(finalText) || finalText.includes(candidate)
-    || (normalizedTokens(candidate).length >= 5 && tokenCoverage(candidate, finalText) >= 0.6);
-}
-
 function argumentRoleMatchesResumeRole(evidenceRole, role) {
   const descriptor = normalizeSourceGroundingText(evidenceRole).toLowerCase();
   if (!descriptor || !role?.title) return false;
@@ -16280,6 +16312,7 @@ async function localApplicationStatusUnlocked(jobId, canvasFilePath, options = {
       canvasFilePath: canvas.canonicalCanvasFilePath, createdAt: manifest.createdAt || null,
       revision: manifest.paste.revision || 0, logCount: manifest.paste.logCount || 0,
       stage: manifest.paste.stage, resultSha256: null,
+      ...applicationUnitDiagnostics(manifest.paste.writeVerify),
       ...(manifest.paste.ruleTally ? { ruleTally: summarizeRuleTally(manifest.paste.ruleTally, 5) } : {}),
       message: manifest.paste.stage === 'completed'
         ? 'The final review passed. Infinite Canvas is preparing the deterministic document and import checks.'

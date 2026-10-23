@@ -371,3 +371,15 @@ export { isValidCompensationExperienceBandLadder } from '../electron/ipc/jobComp
 
 export { __crossPageRulingForTests } from '../electron/ipc/careerSnapshot.js';
 export { consideredEvidenceForTarget, settledStateDigest } from '../electron/ipc/careerProfileEdits.js';
+
+export { currentAuthorityFlowKit } from './tests/local-ai-application.js';
+
+export * as w5Findings from '../electron/ipc/applicationGateFindings.js';
+export * as w5CoverChecks from '../electron/ipc/coverLetterChecks.js';
+export { __pasteFailedCheckErrorsForTests, __pasteUnitGroundingErrorsForTests, __validateAuthorityResumeArtifactsForTests } from '../electron/ipc/localAiApplication.js';
+export { CAREERS as w5Careers, unitResume as w5UnitResume, authorityKit as w5AuthorityKit } from './tests/gapfix-host-owned-fields.js';
+
+export * as w5Policy from '../electron/ipc/applicationWriteVerify.js';
+export { APPLICATION_V2_LIMITS as w5Limits } from '../electron/ipc/applicationV2Limits.js';
+
+export { __setApplicationV2PagePngForTests } from '../electron/ipc/localAiApplication.js';

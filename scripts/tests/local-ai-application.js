@@ -309,7 +309,7 @@ const LOCAL_AI_TEST_JOB_ID = '123e4567-e89b-42d3-a456-426614174000';
 // real current-authority flow (requirements, match, draft, disposition, blind
 // review) for other synthetic careers instead of copying the fixtures.
 export const currentAuthorityFlowKit = Object.freeze({
-  createCanvasProject, listingCoverageFields, listingSemanticAuditFields, generationAuditFor, groundedQualityReview,
+  createCanvasProject, queueDiscardFixture, listingCoverageFields, listingSemanticAuditFields, generationAuditFor, groundedQualityReview,
   sourceGroundingFor, sha256, canonicalJson, cleanCareerSnapshotAuditHistory, atomicReplaceJson,
 });
 

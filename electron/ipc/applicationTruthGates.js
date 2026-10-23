@@ -69,8 +69,8 @@ export function validateSharedApplicationContent(response, state, input, authori
       for (const bullet of bullets) {
         if (!nonemptyText(bullet?.id) || !nonemptyText(bullet?.text) || !Array.isArray(bullet?.evidenceIds) || !bullet.evidenceIds.length) errors.push('Every resume bullet needs id, text, and evidenceIds.');
         const bulletEvidenceIds = Array.isArray(bullet?.evidenceIds) ? bullet.evidenceIds : [];
-        for (const id of bulletEvidenceIds) if (!evidenceIds.has(id)) errors.push(`evidence-id-is-verified: ${PASTE_RESUME_BULLET_FIELD_LABEL} references unknown evidence ${String(id)}.`);
-        if (!bulletEvidenceIds.some(id => acceptedEvidence.find(item => item?.id === id)?.sourceId === 'career-data')) errors.push('Every resume bullet needs career-data evidence, not only job-listing evidence.');
+        for (const id of bulletEvidenceIds) if (!evidenceIds.has(id)) errors.push(`evidence-id-is-verified: ${PASTE_RESUME_BULLET_FIELD_LABEL} ${String(bullet?.id ?? '')} references unknown evidence ${String(id)}.`);
+        if (!bulletEvidenceIds.some(id => acceptedEvidence.find(item => item?.id === id)?.sourceId === 'career-data')) errors.push(`Resume bullet ${String(bullet?.id ?? '')} needs career-data evidence, not only job-listing evidence.`);
         else {
           const durationError = unsupportedDurationClaimError(`${PASTE_RESUME_BULLET_FIELD_LABEL} ${String(bullet?.id)}`, bullet?.text, pasteCareerQuotesForEvidenceIds(bulletEvidenceIds, acceptedEvidence));
           if (durationError) errors.push(durationError);

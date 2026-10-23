@@ -5736,7 +5736,11 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
         && typeof row.subject === 'string' && /^[a-z0-9][a-z0-9-]{0,47}$/u.test(row.subject) && validRule(row.ruleId) && Number.isSafeInteger(row.count) && row.count > 0 && row.count <= 9999).slice(0, 3);
       const tallies = tallyRows.length ? ` · tallies: ${tallyRows.map(row => `${row.family}/${row.subject}/${row.ruleId}x${row.count}`).join(', ')}` : '';
       const runs = Number.isSafeInteger(item.claudeRun?.runs) && item.claudeRun.runs > 0 ? ` · Claude runs ${item.claudeRun.runs}` : '';
-      lines.push(`- card ${reportCorrelationDigest(item.nodeId)} · job ${reportCorrelationDigest(local.id)} · status: **${local.status || 'unknown'}**${stopStage}${terminal}${reason}${rule}${tallies}${runs}${message}`);
+      const unitDiagnostics = local.unitPatchDiagnostics;
+      const safeUnitCount = value => Number.isSafeInteger(value) && value >= 0 && value <= 1_000_000 ? value : 0;
+      const unitModes = unitDiagnostics ? ` · unit rounds: ${['patch', 'document', 'environment'].map(mode => `${mode}=${safeUnitCount(unitDiagnostics.modes?.[mode])}`).join(', ')}` : '';
+      const unitStops = unitDiagnostics ? ` · candidate stops: ${['document-repeat', 'fit-no-progress'].map(kind => `${kind}=${safeUnitCount(unitDiagnostics.stops?.[kind])}`).join(', ')}` : '';
+      lines.push(`- card ${reportCorrelationDigest(item.nodeId)} · job ${reportCorrelationDigest(local.id)} · status: **${local.status || 'unknown'}**${stopStage}${terminal}${reason}${rule}${tallies}${runs}${unitModes}${unitStops}${message}`);
     }
     if (visibleLocalApplications.length > 20) lines.push(`- _${visibleLocalApplications.length - 20} additional Local AI card state(s) omitted._`);
   }

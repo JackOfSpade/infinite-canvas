@@ -967,7 +967,7 @@ Dates: May 2019 — August 2019
       const oneBadGroup = rejection({ ...batchResume, skills: [{ id: 'skills-0', group: groupNames[0], items: ['JavaScript'], evidenceIds: ['career-proof'] }] });
       assert(oneBadGroup.includes(`skills[0].group "${groupNames[0]}"`) && !/same rule also rejects/u.test(oneBadGroup),
         'a lone offender still reports the single-offender message without a multi-offender tail');
-      assert(threeBadGroups.startsWith(oneBadGroup.replace(/\.$/u, '')) || threeBadGroups.includes(oneBadGroup),
+      assert(threeBadGroups.startsWith(oneBadGroup.replace(/ Units: [\s\S]*$/u, '').replace(/\.$/u, '')) || threeBadGroups.includes(oneBadGroup),
         'the batched failure restates the full rule before listing the remaining offenders');
 
       const ungroundedItems = rejection({

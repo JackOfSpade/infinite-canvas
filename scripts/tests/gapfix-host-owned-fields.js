@@ -147,7 +147,7 @@ function fieldRows(career) {
 }
 
 // A résumé over the authority's own catalog ids, for tests that do not run a flow.
-function unitResume(career, forms = {}) {
+export function unitResume(career, forms = {}) {
   const id = prefix => `host.career.${prefix}`;
   return {
     schemaVersion: 'structured-resume.v1', identity: { name: career.name, contact: [career.email] },
@@ -162,7 +162,7 @@ function unitResume(career, forms = {}) {
   };
 }
 
-function authorityKit(career) {
+export function authorityKit(career) {
   const snapshot = snapshotOf(career);
   const authority = buildApplicationCareerAuthority(snapshot);
   const acceptedEvidence = [...approvedCareerEvidenceCatalog(snapshot), { id: 'p1-listing', sourceId: 'job-listing', quote: listing(career) }];

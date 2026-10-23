@@ -556,16 +556,16 @@ function misspelledApprovedSkill(value, names) {
 function collectApprovedSkillSpellingOffenses(roles, projects, approvedSkills, offenses) {
   const names = mixedCaseApprovedSkillNames(approvedSkills);
   if (!names.length) return;
-  const check = (value, location) => {
+  const check = (value, location, unit) => {
     const found = misspelledApprovedSkill(value, names);
     if (found) {
       offend(offenses, APPROVED_SPELLING_RULE, location,
-        `${location} uses “${found.used}”; write the approved spelling “${found.approved}” exactly as the approved skill inventory gives it.`);
+        `${location} uses “${found.used}”; write the approved spelling “${found.approved}” exactly as the approved skill inventory gives it.`, unit);
     }
   };
   for (const [roleIndex, role] of roles.entries()) {
     for (const [bulletIndex, bullet] of role.bullets.entries()) {
-      check(bullet.text, `roles[${roleIndex}].bullets[${bulletIndex}].text`);
+      check(bullet.text, `roles[${roleIndex}].bullets[${bulletIndex}].text`, bullet.id);
     }
   }
   for (const [projectIndex, project] of projects.entries()) {
@@ -574,7 +574,7 @@ function collectApprovedSkillSpellingOffenses(roles, projects, approvedSkills, o
       description: project.description,
       metrics: project.metrics,
     })) {
-      check(value, `projects[${projectIndex}].${field}`);
+      check(value, `projects[${projectIndex}].${field}`, project.id);
     }
   }
 }
@@ -647,6 +647,8 @@ function describeOffenseGroups(offenses, { blocking }) {
         ? `${first.message} The same rule also rejects ${rest.length} more in this response: ${listed}. Fix all of them before resubmitting.`
         : `${first.message} The same observation also applies to ${rest.length} more in this response: ${listed}.`;
     }
+    const units = [...new Set([first, ...rest].flatMap(offense => Array.isArray(offense.unit) ? offense.unit : [offense.unit]).filter(unit => typeof unit === 'string' && unit))];
+    if (units.length) detail += ` Units: ${units.join(', ')}.`;
     return { id: rule, passed: false, detail, disposition: blocking ? 'gate' : 'advisory' };
   });
 }
@@ -675,8 +677,8 @@ function settleOffenses(offenses) {
   return advisoryChecks;
 }
 
-function offend(collect, rule, offender, message) {
-  if (collect) collect.push({ rule, offender, message });
+function offend(collect, rule, offender, message, unit = null) {
+  if (collect) collect.push({ rule, offender, message, unit });
   else fail(message);
 }
 
@@ -788,7 +790,7 @@ const CAREER_EVIDENCE_RULE = 'evidence-includes-career-data';
 
 // `collect` batches only the two grounding checks. The shape checks above them
 // guard the reads that follow, so they keep throwing on the first defect.
-function normalizeEvidenceIds(value, label, allowedEvidenceIds, careerEvidenceIds, { requireCareerEvidence, collect = null } = {}) {
+function normalizeEvidenceIds(value, label, allowedEvidenceIds, careerEvidenceIds, { requireCareerEvidence, collect = null, unit = null } = {}) {
   // Both of these decide whether the career-evidence rule below runs at all,
   // and neither is visible in the verdict when it is missing: an omitted
   // careerEvidenceIds and a defaulted requireCareerEvidence each leave a gate
@@ -807,13 +809,13 @@ function normalizeEvidenceIds(value, label, allowedEvidenceIds, careerEvidenceId
   for (const evidenceId of ids) {
     if (allowedEvidenceIds.has(evidenceId)) continue;
     unknownCited = true;
-    offend(collect, UNKNOWN_EVIDENCE_RULE, `${label} "${evidenceId}"`, `${label} references unknown evidence ID "${evidenceId}".`);
+    offend(collect, UNKNOWN_EVIDENCE_RULE, `${label} "${evidenceId}"`, `${label} references unknown evidence ID "${evidenceId}".`, unit);
   }
   // An unknown ID cannot be classified as career evidence, so the check below
   // would restate the same defect. Fail-fast callers never reach it at all.
   if (!unknownCited && requireCareerEvidence && careerEvidenceIds && !ids.some(evidenceId => careerEvidenceIds.has(evidenceId))) {
     offend(collect, CAREER_EVIDENCE_RULE, label,
-      `${label} needs at least one career-data evidence ID; job-listing evidence alone cannot support rendered candidate content.`);
+      `${label} needs at least one career-data evidence ID; job-listing evidence alone cannot support rendered candidate content.`, unit);
   }
   return ids;
 }
@@ -975,11 +977,11 @@ function approvedSkillsNamedIn(value, approvedSkills) {
   });
 }
 
-function collectUnstatedSkillNames(value, location, approvedSkills, careerQuotes, offenses) {
+function collectUnstatedSkillNames(value, location, approvedSkills, careerQuotes, offenses, unit) {
   for (const skill of approvedSkillsNamedIn(value, approvedSkills)) {
     if (careerQuotes.some(quote => snapshotSkillTermOccurs(skill.name, quote))) continue;
     offend(offenses, PROSE_NAMES_APPROVED_SKILL_RULE, `${location} “${skill.name}”`,
-      `${location} names “${skill.name}”, one of this candidate's approved skills, but none of the career-data quotes it cites states it. Naming a skill says this work used it: cite the career-data evidence that states “${skill.name}” for this work, or leave the name out.`);
+      `${location} names “${skill.name}”, one of this candidate's approved skills, but none of the career-data quotes it cites states it. Naming a skill says this work used it: cite the career-data evidence that states “${skill.name}” for this work, or leave the name out.`, unit);
   }
 }
 
@@ -1029,7 +1031,7 @@ function normalizeRole(raw, index, sourceById, allowedEvidenceIds, careerEvidenc
     const normalizedBullet = {
       id: id(bullet.id, `roles[${index}].bullets[${bulletIndex}].id`),
       text: text(bullet.text, `roles[${index}].bullets[${bulletIndex}].text`, { required: true }),
-      evidenceIds: normalizeEvidenceIds(bullet.evidenceIds, `roles[${index}].bullets[${bulletIndex}].evidenceIds`, allowedEvidenceIds, careerEvidenceIds, { requireCareerEvidence: true, collect: bulletOffenses }),
+      evidenceIds: normalizeEvidenceIds(bullet.evidenceIds, `roles[${index}].bullets[${bulletIndex}].evidenceIds`, allowedEvidenceIds, careerEvidenceIds, { requireCareerEvidence: true, collect: bulletOffenses, unit: bullet.id }),
     };
     evidenceAccepted[bulletIndex] = bulletOffenses.length === offensesBefore;
     return normalizedBullet;
@@ -1048,12 +1050,12 @@ function normalizeRole(raw, index, sourceById, allowedEvidenceIds, careerEvidenc
       if (!citedCareerEvidenceIds.length || careerQuotes.length !== citedCareerEvidenceIds.length
         || careerQuotes.some(quote => !careerQuoteOccursInRoleCareerRegion(quote, careerRegion))) {
         offend(bulletOffenses, ROLE_BULLET_SCOPE_RULE, `roles[${index}].bullets[${bulletIndex}]`,
-          `roles[${index}].bullets[${bulletIndex}] must cite career-data evidence only from the trusted role's career-data section.`);
+          `roles[${index}].bullets[${bulletIndex}] must cite career-data evidence only from the trusted role's career-data section.`, bullet.id);
       } else if (planBodyQuotes.length && !careerQuotes.some(quote => quoteReachesSectionBody(quote, careerRegion, bodyStart))) {
         offend(bulletOffenses, ROLE_BULLET_OPENING_BLOCK_RULE, `roles[${index}].bullets[${bulletIndex}]`,
           `roles[${index}].bullets[${bulletIndex}] cites career-data evidence only from inside that employer's career-data section opening block — ${CAREER_SECTION_OPENING_BLOCK_RULE}. `
           + 'The résumé prints those three from the saved work history already, so this bullet has nothing else to rewrite and can only restate the role header. '
-          + `The accepted evidence plan carries ${planBodyQuotes.length === 1 ? 'one career-data item' : `${planBodyQuotes.length} career-data items`} quoting that same section below its opening block: cite ${planBodyQuotes.length === 1 ? 'it' : 'at least one of them'} here instead, and write the bullet from what it says about the work.`);
+          + `The accepted evidence plan carries ${planBodyQuotes.length === 1 ? 'one career-data item' : `${planBodyQuotes.length} career-data items`} quoting that same section below its opening block: cite ${planBodyQuotes.length === 1 ? 'it' : 'at least one of them'} here instead, and write the bullet from what it says about the work.`, bullet.id);
       }
     }
   } else if (!authorityMode && careerEvidenceIds) {
@@ -1070,7 +1072,7 @@ function normalizeRole(raw, index, sourceById, allowedEvidenceIds, careerEvidenc
       if (!citedCareerEvidenceIds.length || careerQuotes.length !== citedCareerEvidenceIds.length
         || !careerQuotes.some(quote => quoteExplicitlyEstablishesRoleScope(quote, source))) {
         offend(bulletOffenses, ROLE_BULLET_SCOPE_RULE, `roles[${index}].bullets[${bulletIndex}]`,
-          `roles[${index}].bullets[${bulletIndex}] is nested under ${JSON.stringify(source.company || source.title)}, but its cited career-data evidence has no uniquely recognized role section and does not explicitly name that role's employer. Cite evidence that names the employer, or use an approved structured role relationship.`);
+          `roles[${index}].bullets[${bulletIndex}] is nested under ${JSON.stringify(source.company || source.title)}, but its cited career-data evidence has no uniquely recognized role section and does not explicitly name that role's employer. Cite evidence that names the employer, or use an approved structured role relationship.`, bullet.id);
       }
     }
   }
@@ -1082,7 +1084,7 @@ function normalizeRole(raw, index, sourceById, allowedEvidenceIds, careerEvidenc
       if (!evidenceAccepted[bulletIndex]) continue;
       const cited = bullet.evidenceIds.filter(evidenceId => careerEvidenceIds.has(evidenceId));
       collectUnstatedSkillNames(bullet.text, `roles[${index}].bullets[${bulletIndex}]`, approvedSkills,
-        careerQuotesForEvidenceIds(cited, careerEvidenceQuotesById), bulletOffenses);
+        careerQuotesForEvidenceIds(cited, careerEvidenceQuotesById), bulletOffenses, bullet.id);
     }
   }
   // Scoping a bullet to its own role's career section (above) cannot catch two
@@ -1103,7 +1105,7 @@ function normalizeRole(raw, index, sourceById, allowedEvidenceIds, careerEvidenc
         const earlierBullet = normalized.bullets[earlierIndex];
         const shared = [...laterIds];
         offend(bulletOffenses, ROLE_BULLET_EVIDENCE_REUSE_RULE, `roles[${index}].bullets[${bulletIndex}]`,
-          `roles[${index}] bullets "${earlierBullet.id}" and "${bullet.id}" both rest on career-data evidence ${shared.length === 1 ? 'id' : 'ids'} ${shared.map(evidenceId => `"${evidenceId}"`).join(', ')} with no career-data id of its own beyond ${shared.length === 1 ? 'that one' : 'those'}: two bullets reporting one source accomplishment, not two. Combine "${earlierBullet.id}" and "${bullet.id}" into a single bullet, or cite a career-data evidence id that no other bullet in roles[${index}] cites.`);
+          `roles[${index}] bullets "${earlierBullet.id}" and "${bullet.id}" both rest on career-data evidence ${shared.length === 1 ? 'id' : 'ids'} ${shared.map(evidenceId => `"${evidenceId}"`).join(', ')} with no career-data id of its own beyond ${shared.length === 1 ? 'that one' : 'those'}: two bullets reporting one source accomplishment, not two. Combine "${earlierBullet.id}" and "${bullet.id}" into a single bullet, or cite a career-data evidence id that no other bullet in roles[${index}] cites.`, bullet.id);
         // One offense per fragmented bullet is enough to fix it; the earliest
         // match already names the accomplishment it duplicates.
         break;
@@ -1552,7 +1554,7 @@ function collectEmployerTaskProjects(projects, sourceRoles, projectRoleOf, offen
       if (!role) continue;
       const roleLabel = [role.title, role.company].filter(Boolean).join(', ') || role.id;
       offend(offenses, PROJECT_EMPLOYER_TASK_RULE, `projects.${project.id}`,
-        `projects.${project.id} is linked, in the approved career record, to the role “${roleLabel}”, which this résumé also lists. Work done for an employer reads best as that role’s own bullet; filed under Projects it reads as separate personal work. Keep it as a project only if it carries a contribution of its own that the role’s bullets do not already state.`);
+        `projects.${project.id} is linked, in the approved career record, to the role “${roleLabel}”, which this résumé also lists. Work done for an employer reads best as that role’s own bullet; filed under Projects it reads as separate personal work. Keep it as a project only if it carries a contribution of its own that the role’s bullets do not already state.`, project.id);
       break;
     }
   }
@@ -1575,7 +1577,7 @@ function normalizeProjects(value, allowedEvidenceIds, careerEvidenceIds, careerE
       name: text(project.name, `projects[${index}].name`, { required: true, max: MAX_SHORT_TEXT }),
       description: text(project.description, `projects[${index}].description`, { max: MAX_PROJECT_DESCRIPTION }),
       metrics: text(project.metrics, `projects[${index}].metrics`, { max: MAX_LONG_TEXT }),
-      evidenceIds: normalizeEvidenceIds(project.evidenceIds, `projects[${index}].evidenceIds`, allowedEvidenceIds, careerEvidenceIds, { requireCareerEvidence: true, collect: projectOffenses }),
+      evidenceIds: normalizeEvidenceIds(project.evidenceIds, `projects[${index}].evidenceIds`, allowedEvidenceIds, careerEvidenceIds, { requireCareerEvidence: true, collect: projectOffenses, unit: project.id }),
     };
     evidenceAccepted[index] = projectOffenses.length === offensesBefore;
     return normalized;
@@ -1598,17 +1600,17 @@ function normalizeProjects(value, allowedEvidenceIds, careerEvidenceIds, careerE
         ? occursInQuotedCareerEvidence(value, careerQuotes)
         : !authorityMode && occursInCareerData(value, careerData))) {
         offend(projectOffenses, PROJECT_OCCURRENCE_RULE, `projects.${project.id}.${field} "${value}"`,
-          `projects.${project.id}.${field} must occur in its cited career-data evidence.`);
+          `projects.${project.id}.${field} must occur in its cited career-data evidence.`, project.id);
       }
     }
     if (project.description && !hasCareerOverlap(project.description, careerQuotes.length
       ? careerQuotes
       : authorityMode ? [] : [careerData])) {
       offend(projectOffenses, PROJECT_DESCRIPTION_RULE, `projects.${project.id}.description`,
-        `projects.${project.id}.description must share at least two distinct meaningful terms with its cited career-data evidence.`);
+        `projects.${project.id}.description must share at least two distinct meaningful terms with its cited career-data evidence.`, project.id);
     }
     if (careerEvidenceIds && approvedSkills?.length && careerQuotes.length) {
-      collectUnstatedSkillNames(project.description, `projects.${project.id}.description`, approvedSkills, careerQuotes, projectOffenses);
+      collectUnstatedSkillNames(project.description, `projects.${project.id}.description`, approvedSkills, careerQuotes, projectOffenses, project.id);
     }
     // Only gradeable when the caller supplied the source-tagged catalog. A
     // string-only evidence list cannot say which quotes came from the posting,
@@ -1620,10 +1622,10 @@ function normalizeProjects(value, allowedEvidenceIds, careerEvidenceIds, careerE
         .filter(quote => typeof quote === 'string' && quote);
       if (!listingQuotes.length) {
         offend(projectOffenses, PROJECT_LISTING_EVIDENCE_RULE, `projects.${project.id}`,
-          `projects.${project.id} cites no job-listing evidence, so nothing ties it to this posting; cite the listing quote it answers, or omit the project from this résumé.`);
+          `projects.${project.id} cites no job-listing evidence, so nothing ties it to this posting; cite the listing quote it answers, or omit the project from this résumé.`, project.id);
       } else if (!hasCareerOverlap(`${project.name} ${project.description || ''}`, listingQuotes)) {
         offend(projectOffenses, PROJECT_LISTING_OVERLAP_RULE, `projects.${project.id}`,
-          `projects.${project.id} must share at least two distinct meaningful terms with a job-listing quote it cites; a listing citation it has no words in common with does not make it relevant to this posting.`);
+          `projects.${project.id} must share at least two distinct meaningful terms with a job-listing quote it cites; a listing citation it has no words in common with does not make it relevant to this posting.`, project.id);
       }
     }
   }
@@ -1675,7 +1677,7 @@ function normalizeSkills(value, allowedEvidenceIds, careerEvidenceIds, careerEvi
       ? approvedByItem[itemIndex].cleanName || approvedByItem[itemIndex].name : item));
     unique(canonicalItems, `skills[${index}].items`);
     const offensesBefore = skillOffenses.length;
-    const evidenceIds = normalizeEvidenceIds(group.evidenceIds, `skills[${index}].evidenceIds`, allowedEvidenceIds, careerEvidenceIds, { requireCareerEvidence: true, collect: skillOffenses });
+    const evidenceIds = normalizeEvidenceIds(group.evidenceIds, `skills[${index}].evidenceIds`, allowedEvidenceIds, careerEvidenceIds, { requireCareerEvidence: true, collect: skillOffenses, unit: group.id });
     const careerQuotes = careerQuotesForEvidenceIds(evidenceIds, careerEvidenceQuotesById);
     // Items are measured against the evidence this group cites, so a group
     // whose citation was already rejected has nothing left to measure them
@@ -1686,7 +1688,7 @@ function normalizeSkills(value, allowedEvidenceIds, careerEvidenceIds, careerEvi
           ? occursInQuotedCareerEvidence(item, careerQuotes)
           : !authorityMode && occursInCareerData(item, careerData))) {
           offend(skillOffenses, SKILL_ITEM_RULE, `skills[${index}] item "${items[itemIndex]}"`,
-            `skills[${index}] item "${items[itemIndex]}" must occur in its cited career-data evidence.`);
+            `skills[${index}] item "${items[itemIndex]}" must occur in its cited career-data evidence.`, group.id);
         }
       }
     }
@@ -1698,7 +1700,7 @@ function normalizeSkills(value, allowedEvidenceIds, careerEvidenceIds, careerEvi
       const approved = approvedByItem[itemIndex];
       if (approvedSnapshotSkills && (!approved || approved.indexEligible === false)) {
         offend(skillOffenses, SKILL_ITEM_FILTERABLE_NOUN_RULE, `skills[${index}] item "${item}"`,
-          `skills[${index}] item "${item}" is not an exact, index-eligible approved snapshot skill. Write the name of a supported skill as the approved inventory spells it (a capitalization or spacing variant of that name resolves to it); do not infer aliases, plurals or longer names, or turn an ambiguous source mention into a keyword.`);
+          `skills[${index}] item "${item}" is not an exact, index-eligible approved snapshot skill. Write the name of a supported skill as the approved inventory spells it (a capitalization or spacing variant of that name resolves to it); do not infer aliases, plurals or longer names, or turn an ambiguous source mention into a keyword.`, group.id);
       } else if (!approvedSnapshotSkills && !FILTERABLE_SKILL_ITEM_RE.test(item)) {
         // A pre-snapshot job has no approved inventory to admit the item
         // against, so all that is left is a capitalisation guess at "this is a
@@ -1706,20 +1708,20 @@ function normalizeSkills(value, allowedEvidenceIds, careerEvidenceIds, careerEvi
         // the grounding rule above already proves the item is TRUE. Its own
         // id lets it advise while the approved-inventory test stays a gate.
         offend(skillOffenses, SKILL_ITEM_LOOKS_FILTERABLE_RULE, `skills[${index}] item "${item}"`,
-          `skills[${index}] item "${item}" must be a name a recruiter can filter on rather than a concept or an activity: ${SKILL_ITEM_FILTERABLE_RULE}.`);
+          `skills[${index}] item "${item}" must be a name a recruiter can filter on rather than a concept or an activity: ${SKILL_ITEM_FILTERABLE_RULE}.`, group.id);
       }
     }
     const groupName = text(group.group, `skills[${index}].group`, { required: true, max: MAX_SKILL_TEXT });
     if (!isNeutralSkillGroupLabel(groupName, groupVocabulary()) && (authorityMode || !occursInCareerData(groupName, careerData))) {
       offend(skillOffenses, SKILL_GROUP_RULE, `skills[${index}].group "${groupName}"`,
-        `skills[${index}].group "${groupName}" must be a neutral category label \u2014 ${neutralSkillGroupRule(groupVocabulary())}${authorityMode ? '.' : ' \u2014 or a label that occurs in frozen career data.'}`);
+        `skills[${index}].group "${groupName}" must be a neutral category label \u2014 ${neutralSkillGroupRule(groupVocabulary())}${authorityMode ? '.' : ' \u2014 or a label that occurs in frozen career data.'}`, group.id);
     }
     // The vocabulary above is a labelling preference and only advises. A label
     // that grades the candidate's own skill ("Advanced ...", "Expert ...") is a
     // strength claim, so it is held to what the evidence the group cites says.
     for (const levelWord of unsupportedSkillLevelWords(groupName, careerQuotes.length ? careerQuotes : (authorityMode ? [] : [careerData]))) {
       offend(skillOffenses, SKILL_GROUP_LEVEL_CLAIM_RULE, `skills[${index}].group "${groupName}"`,
-        `skills[${index}].group "${groupName}" grades the candidate\u2019s skill with \u201c${levelWord}\u201d, but none of the career-data quotes this group cites states that level. A label names a kind of skill; drop the level word, or cite the career-data quote that states it.`);
+        `skills[${index}].group "${groupName}" grades the candidate\u2019s skill with \u201c${levelWord}\u201d, but none of the career-data quotes this group cites states that level. A label names a kind of skill; drop the level word, or cite the career-data quote that states it.`, group.id);
     }
     return {
       id: id(group.id, `skills[${index}].id`), group: groupName, items: canonicalItems,
@@ -1738,15 +1740,15 @@ function normalizeSkills(value, allowedEvidenceIds, careerEvidenceIds, careerEvi
     // bolting one honest label onto a keyword run.
     if (totalItems >= MIN_SPLIT_SKILL_ITEMS && skills.length < MIN_SPLIT_SKILL_GROUPS) {
       offend(skillOffenses, SKILLS_BLOCK_SPLIT_RULE, `skills[0].group "${skills[0].group}"`,
-        `skills[0].group "${skills[0].group}" carries all ${totalItems} items of this block under one label; a block of ${MIN_SPLIT_SKILL_ITEMS} items or more must name at least ${MIN_SPLIT_SKILL_GROUPS} groups, so sort these items by the kind of skill they actually are.`);
+        `skills[0].group "${skills[0].group}" carries all ${totalItems} items of this block under one label; a block of ${MIN_SPLIT_SKILL_ITEMS} items or more must name at least ${MIN_SPLIT_SKILL_GROUPS} groups, so sort these items by the kind of skill they actually are.`, skills.map(group => group.id));
     }
     if (skills.length > MAX_DESIGN_SKILL_GROUPS) {
       offend(skillOffenses, SKILLS_BLOCK_ROWS_RULE, `skills (${skills.length} groups)`,
-        `skills renders ${skills.length} rows but this block carries at most ${MAX_DESIGN_SKILL_GROUPS}; a further row buys page space with the weakest content on the page, so keep the domains this posting asks about and drop the rest.`);
+        `skills renders ${skills.length} rows but this block carries at most ${MAX_DESIGN_SKILL_GROUPS}; a further row buys page space with the weakest content on the page, so keep the domains this posting asks about and drop the rest.`, skills.map(group => group.id));
     }
     if (totalItems > MAX_DESIGN_SKILL_ITEMS) {
       offend(skillOffenses, SKILLS_BLOCK_ITEMS_RULE, `skills (${totalItems} items)`,
-        `skills lists ${totalItems} items but this block carries at most ${MAX_DESIGN_SKILL_ITEMS} in total; drop the terms this posting never asks about rather than dropping a domain.`);
+        `skills lists ${totalItems} items but this block carries at most ${MAX_DESIGN_SKILL_ITEMS} in total; drop the terms this posting never asks about rather than dropping a domain.`, skills.map(group => group.id));
     }
     for (const [index, group] of skills.entries()) {
       // The exact string the renderer emits for this row, so the budget is
@@ -1754,7 +1756,7 @@ function normalizeSkills(value, allowedEvidenceIds, careerEvidenceIds, careerEvi
       const rowChars = group.items.join(SKILL_ITEM_SEPARATOR).length;
       if (rowChars > MAX_DESIGN_SKILL_ROW_CHARS) {
         offend(skillOffenses, SKILLS_ROW_LENGTH_RULE, `skills[${index}].items (${rowChars} characters)`,
-          `skills[${index}].items renders a row of ${rowChars} characters but a row holds at most ${MAX_DESIGN_SKILL_ROW_CHARS}, which is one line at this block's measure; move a term into another group or drop it.`);
+          `skills[${index}].items renders a row of ${rowChars} characters but a row holds at most ${MAX_DESIGN_SKILL_ROW_CHARS}, which is one line at this block's measure; move a term into another group or drop it.`, group.id);
       }
     }
   }
@@ -1811,7 +1813,7 @@ function normalizeCredentialItems(value, kind, allowedEvidenceIds, careerEvidenc
       // and dates are optional only because source files often omit them.
       normalized[field] = text(item[field], `${label}[${index}].${field}`, { required: field === (isEducation ? 'credential' : 'name'), max });
     }
-    normalized.evidenceIds = normalizeEvidenceIds(item.evidenceIds, `${label}[${index}].evidenceIds`, allowedEvidenceIds, careerEvidenceIds, { requireCareerEvidence: true, collect: offenses });
+    normalized.evidenceIds = normalizeEvidenceIds(item.evidenceIds, `${label}[${index}].evidenceIds`, allowedEvidenceIds, careerEvidenceIds, { requireCareerEvidence: true, collect: offenses, unit: normalized.id });
     const accepted = offenses.length === before;
     if (accepted) {
       const quotes = careerQuotesForEvidenceIds(normalized.evidenceIds, careerEvidenceQuotesById);
@@ -1821,10 +1823,10 @@ function normalizeCredentialItems(value, kind, allowedEvidenceIds, careerEvidenc
           ? occursInQuotedCareerEvidence(fieldValue, quotes)
           : !authorityMode && occursInCareerData(fieldValue, careerData))) {
           offend(offenses, rule, `${label}.${normalized.id}.${field}`,
-            `${label}.${normalized.id}.${field} must occur in its cited career-data evidence.`);
+            `${label}.${normalized.id}.${field} must occur in its cited career-data evidence.`, normalized.id);
         } else if (field === 'dates' && fieldValue && quotes.length && !datesStatedAsWholeValue(fieldValue, quotes)) {
           offend(offenses, credentialRangeRule(kind), `${label}.${normalized.id}.dates`,
-            `${label}.${normalized.id}.dates “${fieldValue}” is only one end of a date range its cited career-data evidence states as a range; write the whole range exactly as the evidence states it, or omit dates.`);
+            `${label}.${normalized.id}.dates “${fieldValue}” is only one end of a date range its cited career-data evidence states as a range; write the whole range exactly as the evidence states it, or omit dates.`, normalized.id);
         }
       }
     }
@@ -1925,7 +1927,7 @@ export function validateStructuredResumeDraft(raw, { sourceRoles, evidenceIds, e
     const missing = missingPostingNamedSkillTerms(skills, verifiedEvidence, careerSkillEvidence);
     if (missing.length) {
       offend(offenses, POSTING_NAMED_SKILL_TERM_RULE, 'skills',
-        `skills omits ${missing.join(', ')}: ${missing.length === 1 ? 'a technology name' : 'technology names'} this posting’s own requirement quotes state and your cited career-data evidence also states. The skills block is the index a recruiter filters on, so add ${missing.length === 1 ? 'it' : 'each'} to the group that fits, written in its canonical capitalization even where the career data spells it in lowercase (grounding ignores letter case), and cite the career-data quote that states it; make room by dropping terms this posting never asks about.`);
+        `skills omits ${missing.join(', ')}: ${missing.length === 1 ? 'a technology name' : 'technology names'} this posting’s own requirement quotes state and your cited career-data evidence also states. The skills block is the index a recruiter filters on, so add ${missing.length === 1 ? 'it' : 'each'} to the group that fits, written in its canonical capitalization even where the career data spells it in lowercase (grounding ignores letter case), and cite the career-data quote that states it; make room by dropping terms this posting never asks about.`, skills.map(group => group.id));
     }
     // Do not report a posting-named term twice. The established posting rule
     // above gives those omissions their more useful, job-specific wording; this
@@ -1936,7 +1938,7 @@ export function validateStructuredResumeDraft(raw, { sourceRoles, evidenceIds, e
       .filter(name => !postingRequired.has(name));
     if (missingCareer.length) {
       offend(offenses, SKILLS_BLOCK_PRESENCE_RULE_ID, 'skills',
-        `skills omits ${missingCareer.join(', ')} from the bounded career-attested index. The accepted plan supports ${missingCareer.length === 1 ? 'this technology' : 'these technologies'}, and the skills section is the recruiter and applicant-tracking index for them; add ${missingCareer.length === 1 ? 'it' : 'each'} under the neutral domain label that fits, cite the career-data quote that states it, and keep every posting-named term. The index stops at ${MAX_REQUIRED_CAREER_SKILL_TERMS} prioritized names, so page fit is not a reason to reduce it to one token.`);
+        `skills omits ${missingCareer.join(', ')} from the bounded career-attested index. The accepted plan supports ${missingCareer.length === 1 ? 'this technology' : 'these technologies'}, and the skills section is the recruiter and applicant-tracking index for them; add ${missingCareer.length === 1 ? 'it' : 'each'} under the neutral domain label that fits, cite the career-data quote that states it, and keep every posting-named term. The index stops at ${MAX_REQUIRED_CAREER_SKILL_TERMS} prioritized names, so page fit is not a reason to reduce it to one token.`, skills.map(group => group.id));
     }
   }
   collectApprovedSkillSpellingOffenses(roles, projects, approvedSnapshotSkills, offenses);

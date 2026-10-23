@@ -294,7 +294,7 @@ function sharedRunLength(leftWords, rightWords) {
   return longestSharedRun(leftWords, rightWords).length;
 }
 
-function boundedDetailValue(value) {
+export function boundedDetailValue(value) {
   const full = text(value);
   const visible = full.slice(0, MAX_CHECK_DETAIL_VALUE_CHARS);
   return `${visible}${full.length > visible.length ? ' …' : ''}`;
@@ -2832,8 +2832,12 @@ export function checkFigureDiscipline(paragraphs = [], evidence = {}, plan = nul
   const countObservation = letterFigures.length > MAX_LETTER_FIGURES
     ? `letter contains ${letterFigures.length} figures ${boundedQuotedList(letterFigures)}; maximum is ${MAX_LETTER_FIGURES}`
     : '';
+  const absentParagraphs = (Array.isArray(paragraphs) ? paragraphs : []).flatMap((paragraph, index) => {
+    const absent = figureTokens(paragraph).filter(token => !résuméFigures.has(token.key)).map(token => token.raw);
+    return absent.length ? [`paragraph ${index + 1}: ${boundedQuotedList(absent)}`] : [];
+  });
   const absentObservation = missingFigures.length
-    ? `figures absent from résumé evidence: ${boundedQuotedList(missingFigures)}`
+    ? `figures absent from résumé evidence: ${boundedQuotedList(missingFigures)}${absentParagraphs.length ? `; absent in ${absentParagraphs.join('; ')}` : ''}`
     : '';
   const observations = [countObservation, absentObservation].filter(Boolean);
   const row = observations.length
