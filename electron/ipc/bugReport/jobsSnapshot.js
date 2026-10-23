@@ -5722,11 +5722,19 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
       // accept arbitrary text from a renderer-provided terminal field.
       const terminal = ['requirements-audit-human-stop', 'blind-review-human-stop', 'write-verify-human-stop', 'legacy-application-regenerate'].includes(local.terminalKind)
         ? ` · terminal \`${local.terminalKind}\`` : '';
-      const reason = ['audit-re-epoch-cap', 'prior-adjudication-conflict'].includes(local.terminalReason)
+      const reason = ['audit-re-epoch-cap', 'prior-adjudication-conflict', 'same-rule-repeat', 'run-budget'].includes(local.terminalReason)
         ? ` · reason \`${local.terminalReason}\`` : '';
-      const stopStage = ['requirements-audit-disagreement', 'write-verify-human-stop'].includes(local.stage)
-        ? ` · stop stage \`${local.stage}\`` : '';
-      lines.push(`- card ${reportCorrelationDigest(item.nodeId)} · job ${reportCorrelationDigest(local.id)} · status: **${local.status || 'unknown'}**${stopStage}${terminal}${reason}${message}`);
+      const allowedStages = ['requirements', 'requirements-audit', 'requirements-adjudication', 'write', 'convert', 'verify-correction', 'fit-correction', 'pick', 'fact-check', 'fact-recheck', 'fact-correction', 'requirements-audit-disagreement', 'write-verify-human-stop'];
+      const stage = allowedStages.includes(local.stopStage) ? local.stopStage : ['requirements-audit-disagreement', 'write-verify-human-stop'].includes(local.stage) ? local.stage : null;
+      const stopStage = stage ? ` · stop stage \`${stage}\`` : '';
+      const validRule = id => typeof id === 'string' && /^[a-z][a-z0-9-]{0,63}$/u.test(id);
+      const rule = validRule(local.ruleId) && Number.isInteger(local.ruleCount) && local.ruleCount > 0 && local.ruleCount <= 999
+        ? ` · rule \`${local.ruleId}\` x${local.ruleCount}` : '';
+      const tallyRows = (Array.isArray(local.ruleTally) ? local.ruleTally : []).filter(row => row && ['requirements', 'requirements-audit', 'requirements-adjudication', 'write', 'documents', 'pick', 'fact-check', 'fact-correction'].includes(row.family)
+        && typeof row.subject === 'string' && /^[a-z0-9][a-z0-9-]{0,47}$/u.test(row.subject) && validRule(row.ruleId) && Number.isSafeInteger(row.count) && row.count > 0 && row.count <= 9999).slice(0, 3);
+      const tallies = tallyRows.length ? ` · tallies: ${tallyRows.map(row => `${row.family}/${row.subject}/${row.ruleId}x${row.count}`).join(', ')}` : '';
+      const runs = Number.isSafeInteger(item.claudeRun?.runs) && item.claudeRun.runs > 0 ? ` · Claude runs ${item.claudeRun.runs}` : '';
+      lines.push(`- card ${reportCorrelationDigest(item.nodeId)} · job ${reportCorrelationDigest(local.id)} · status: **${local.status || 'unknown'}**${stopStage}${terminal}${reason}${rule}${tallies}${runs}${message}`);
     }
     if (visibleLocalApplications.length > 20) lines.push(`- _${visibleLocalApplications.length - 20} additional Local AI card state(s) omitted._`);
   }

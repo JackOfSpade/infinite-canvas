@@ -1,3 +1,4 @@
+import { getClaudeApplicationRun } from '../utils/claudeApplicationRuns.js';
 import { useCallback } from 'react';
 import { useReactFlow } from '@xyflow/react';
 import { EventLogger } from '../utils/EventLogger';
@@ -285,6 +286,7 @@ export function useIssueReporter({
           title: n?.data?.title || '',
           company: n?.data?.company || '',
           localApplication,
+          claudeRun: getClaudeApplicationRun(localApplication.id) || null,
         }] : [];
       });
       // A Job Search run manifest proves durable recovery exists, but only the

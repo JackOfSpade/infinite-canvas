@@ -34,6 +34,16 @@ const handoff = (jobId, overrides = {}) => ({
 
 export default [
   {
+    name: 'claude dock: closed stop reasons and safe completed run counts survive normalization',
+    run() {
+      const run = normalizeClaudeRun({ status: 'needs-review', reason: 'same-rule-repeat', runs: 12 });
+      assert(run.reason === 'same-rule-repeat' && run.runs === 12, 'retain closed stop and count');
+      const malformed = normalizeClaudeRun({ status: 'failed', reason: 'private prose', runs: -1 });
+      assert(!('reason' in malformed) && !('runs' in malformed), 'drop untrusted diagnostic values');
+    },
+  },
+
+  {
     name: 'claude dock: normalizeClaudeRun keeps the rendered fields of a valid state',
     run() {
       const run = normalizeClaudeRun({

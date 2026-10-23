@@ -1,3 +1,4 @@
+import { APPLICATION_ROUTE_CLAUDE_RUNNER } from './applicationRuleTally.js';
 // Main-process Claude Code application runner.
 //
 // Application-bundle stages are answered through the local Claude Code CLI in
@@ -562,6 +563,7 @@ export function createClaudeApplicationRunner({
   const stageRunner = typeof runStage === 'function' ? runStage : createProductionRunStage({ workspaceDir, fsImpl });
   const semaphore = createSemaphore(concurrency);
   const states = new Map();
+  const runCounts = new Map();
   // jobId -> time of the last activity-only emit (never part of a state).
   const activityEmits = new Map();
   const drivers = new Map();
@@ -652,9 +654,10 @@ export function createClaudeApplicationRunner({
 
   async function dropSessions(jobId) {
     const lanes = sessions.get(jobId);
-    if (!lanes) return;
+    const hadRuns = runCounts.delete(jobId);
+    if (!lanes && !hadRuns) return;
     sessions.delete(jobId);
-    const ids = [...lanes.values()].map(lane => lane.sessionId).filter(Boolean);
+    const ids = [...(lanes?.values() || [])].map(lane => lane.sessionId).filter(Boolean);
     persist();
     try {
       await removeTranscripts(ids);
@@ -680,6 +683,9 @@ export function createClaudeApplicationRunner({
       ...(patch.code ? { code: patch.code } : {}),
       ...(patch.message ? { message: patch.message } : {}),
       updatedAt: now(),
+      ...((drivers.get(jobId)?.runs ?? runCounts.get(jobId)) > 0 ? { runs: drivers.get(jobId)?.runs ?? runCounts.get(jobId) } : {}),
+      ...(patch.reason ? { reason: patch.reason } : {}),
+      ...(patch.stop ? { stop: patch.stop } : {}),
     };
     states.set(jobId, state);
     activityEmits.delete(jobId);
@@ -720,7 +726,8 @@ export function createClaudeApplicationRunner({
       }
       if (Object.keys(out).length) sessionSnapshot[jobId] = out;
     }
-    const body = `${JSON.stringify({ failed, sessions: sessionSnapshot }, null, 2)}\n`;
+    const runs = Object.fromEntries([...runCounts].filter(([, n]) => n > 0));
+    const body = `${JSON.stringify({ failed, sessions: sessionSnapshot, ...(Object.keys(runs).length ? { runs } : {}) }, null, 2)}\n`;
     const write = async () => {
       if (!stateFile) return;
       await fsImpl.mkdir(path.dirname(stateFile), { recursive: true });
@@ -753,7 +760,7 @@ export function createClaudeApplicationRunner({
       return;
     }
     const isPlainObject = value => !!value && typeof value === 'object' && !Array.isArray(value);
-    const newFormat = ('failed' in data || 'sessions' in data)
+    const newFormat = ('failed' in data || 'sessions' in data || 'runs' in data)
       && data.failed?.status !== 'failed' && data.sessions?.status !== 'failed';
     let failedMap = data;
     if (newFormat) {
@@ -764,6 +771,9 @@ export function createClaudeApplicationRunner({
         return;
       }
       failedMap = data.failed || {};
+      if (isPlainObject(data.runs)) for (const [jobId, n] of Object.entries(data.runs)) {
+        if (nonEmptyString(jobId) && !drivers.has(jobId) && Number.isSafeInteger(n) && n > 0) runCounts.set(jobId, n);
+      }
       for (const [jobId, lanes] of Object.entries(data.sessions || {})) {
         if (!nonEmptyString(jobId) || !isPlainObject(lanes) || drivers.has(jobId)) continue;
         const restored = new Map();
@@ -807,7 +817,6 @@ export function createClaudeApplicationRunner({
       if (entry.runs >= maxRunsPerJob) {
         throw new ClaudeRunnerError('CLAUDE_TOO_MANY_RUNS', MESSAGES.tooMany(maxRunsPerJob));
       }
-      entry.runs += 1;
       const release = await semaphore.acquire(signal);
       const profile = claudeStageProfile(stage);
       const record = {
@@ -857,7 +866,8 @@ export function createClaudeApplicationRunner({
           await summaryChain;
           // Keep returned text before submission, cancellation or transcript cleanup.
           await logRun(jobId, canvasFilePath, { ...record, event: 'response', model: result?.model ?? null,
-            durationMs: result?.durationMs ?? null, answer: result?.text ?? '', ...coverage('complete') });
+            durationMs: result?.durationMs ?? null, answer: result?.text ?? '', ...coverage('complete'), runsCompleted: entry.runs + 1 });
+          entry.runs += 1; runCounts.set(jobId, entry.runs); persist();
           return { result, record };
         } catch (error) {
           acceptingSummaries = false;
@@ -976,6 +986,7 @@ export function createClaudeApplicationRunner({
           ...(matchTaskId ? { matchTaskId } : {}),
           handoffCode: handoffCodeOf(handoff),
           response: result?.text ?? '',
+          route: APPLICATION_ROUTE_CLAUDE_RUNNER,
         });
       } catch (error) {
         await logRun(jobId, canvasFilePath, { ...record, event: 'submission-error', error: auditFailure(applicationError(error)) });
@@ -986,6 +997,7 @@ export function createClaudeApplicationRunner({
         accepted: submitted?.accepted === true, completed: submitted?.completed === true,
         ...(Array.isArray(submitted?.validationErrors) && submitted.validationErrors.length ? { validationErrors: submitted.validationErrors } : {}),
         ...(submitted?.gone === true ? { gone: true } : {}),
+        ...(submitted?.rejection ? { rejection: submitted.rejection } : {}),
       } });
       return submitted;
     };
@@ -1015,7 +1027,7 @@ export function createClaudeApplicationRunner({
       if (signal.aborted) return { stopped: true };
       const current = await read();
       if (current?.gone === true) return { gone: true };
-      if (current?.completed === true) return { done: true };
+      if (current?.completed === true) return current.terminal === true ? { needsReview: true, stop: current.stop || null } : { done: true };
       const handoff = current?.handoff;
       if (!handoff) throw new ClaudeRunnerError('APPLICATION_ERROR', 'The application returned no handoff.');
       entry.stage = handoff.stage ?? null;
@@ -1029,6 +1041,7 @@ export function createClaudeApplicationRunner({
       }
       const submitted = await answer(handoff, null);
       if (submitted?.gone === true) return { gone: true };
+      if (submitted?.terminal === true) return { needsReview: true, stop: submitted.stop || null };
       if (submitted?.accepted === true && submitted.completed === true) return { done: true };
     }
   }
@@ -1038,7 +1051,7 @@ export function createClaudeApplicationRunner({
       jobId,
       canvasFilePath,
       controller: new AbortController(),
-      runs: 0,
+      runs: runCounts.get(jobId) ?? 0,
       stage: null,
       abortReason: null,
       firstError: null,
@@ -1046,6 +1059,15 @@ export function createClaudeApplicationRunner({
     };
     drivers.set(jobId, entry);
     setState(jobId, canvasFilePath, { status: 'running', stage: null });
+    const needsReview = async stop => {
+      const previous = states.get(jobId);
+      setState(jobId, canvasFilePath, { status: 'needs-review', stage: entry.stage, reason: stop?.reason, stop });
+      if (stop && !(previous?.status === 'needs-review' && previous.reason === stop.reason)) {
+        try { await logRun(jobId, canvasFilePath, { version: 2, jobId, stage: entry.stage, event: 'needs-review', stop, runs: entry.runs }); }
+        catch { /* stop remains authoritative if a best-effort diagnostic fails */ }
+      }
+      await dropSessions(jobId);
+    };
     entry.promise = (async () => {
       try {
         const outcome = await drive(entry);
@@ -1058,12 +1080,19 @@ export function createClaudeApplicationRunner({
           setState(jobId, canvasFilePath, { status: 'done', stage: entry.stage });
           await dropSessions(jobId);
         } else if (outcome?.needsReview) {
-          setState(jobId, canvasFilePath, { status: 'needs-review', stage: entry.stage });
+          await needsReview(outcome.stop);
         }
       } catch (caught) {
         if (entry.abortReason === 'discard') { await dropSessions(jobId); return; }
         if (entry.abortReason === 'shutdown') return;
         const raw = entry.abortReason === 'failed' && entry.firstError ? entry.firstError : caught;
+        if (raw?.code === 'CLAUDE_TOO_MANY_RUNS' && typeof api.stopHandoff === 'function') {
+          try {
+            const result = await api.stopHandoff({ jobId, canvasFilePath, reason: 'run-budget', runs: entry.runs, limit: maxRunsPerJob });
+            if (result?.stopped === true || result?.alreadyTerminal === true) { await needsReview(result.stop || { reason: 'run-budget', stage: entry.stage }); return; }
+            if (result?.completed === true) { setState(jobId, canvasFilePath, { status: 'done', stage: entry.stage }); await dropSessions(jobId); return; }
+          } catch { /* fall back to the visible runner failure */ }
+        }
         const error = raw instanceof ClaudeRunnerError ? raw : applicationError(raw);
         setState(jobId, canvasFilePath, { status: 'failed', stage: entry.stage, code: error.code, message: error.message });
         logger?.error?.(`[ClaudeRunner] job=${jobId.slice(0, 8)} stage=${entry.stage ?? 'none'} code=${error.code}`);
@@ -1120,7 +1149,7 @@ export function createClaudeApplicationRunner({
       removeState(jobId, event?.canvasFilePath);
       persist();
     }
-    if (sessions.has(jobId)) {
+    if (sessions.has(jobId) || runCounts.has(jobId)) {
       dropSessions(jobId).catch(() => { /* logged inside; never fails a job */ });
     }
   }

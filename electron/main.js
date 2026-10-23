@@ -33,7 +33,7 @@ import { loadInterviewHelperCareerSnapshot, registerInterviewHelperHandlers } fr
 import { loadInterviewPreparationBundle, registerInterviewPreparationHandlers } from './ipc/interviewPreparation.js';
 import { createInterviewWindowController, isTrustedInterviewNavigation } from './interviewWindow.js';
 import { registerJobApplicationHandlers } from './ipc/jobApplication.js';
-import { getLocalApplicationHandoff, registerLocalAiApplicationHandlers, submitLocalApplicationHandoff, subscribeLocalApplicationDiscards } from './ipc/localAiApplication.js';
+import { getLocalApplicationHandoff, registerLocalAiApplicationHandlers, submitLocalApplicationHandoff, stopLocalApplicationJob, subscribeLocalApplicationDiscards } from './ipc/localAiApplication.js';
 import { createClaudeApplicationRunner, registerClaudeApplicationRunnerHandlers } from './ipc/claudeApplicationRunner.js';
 import { getHandoffBridgeStatus } from './ipc/handoffBridge/index.js';
 import { registerApplicationGenerationGateHandlers } from './ipc/applicationGenerationGate.js';
@@ -1698,6 +1698,7 @@ if (!gotTheLock) {
         api: {
           getHandoff: getLocalApplicationHandoff,
           submitHandoff: submitLocalApplicationHandoff,
+          stopHandoff: stopLocalApplicationJob,
           subscribeDiscards: subscribeLocalApplicationDiscards,
         },
         stateFile: path.join(claudeRunnerRoot, 'state.json'),

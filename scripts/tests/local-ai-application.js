@@ -689,9 +689,26 @@ export default [
           nodeAssert.deepEqual(saved.paste.writeVerify.lastCorrections, rejected.validationErrors);
           nodeAssert.equal(saved.paste.writeVerify.candidates[0].factCheckRejections[0].stage, stage);
           nodeAssert.ok(saved.paste.writeVerify.candidates[0].factCheckRejections[0].checkIds.includes('fact-finding-span'));
+          nodeAssert.equal(saved.paste.ruleTally.steps[0].family, 'fact-check');
+          let latest = reread;
+          for (let attempt = 2; attempt <= (stage === 'fact-recheck' ? 5 : 2); attempt++) {
+            const repeated = await submitLocalApplicationHandoff({ ...args, handoffCode: latest.handoffCode,
+              route: stage === 'fact-recheck' ? 'claude-runner' : null,
+              response: reply(latest, { findings: [{ id: 'bullet-1', claim: 'led a team of five', reason: 'inflated' }] }) });
+            if (stage === 'fact-recheck' && attempt === 5) {
+              nodeAssert.equal(repeated.terminal, true);
+              nodeAssert.equal(repeated.stop.reason, 'same-rule-repeat');
+              nodeAssert.equal(repeated.stop.ruleId, 'fact-finding-span');
+              nodeAssert.equal((await getLocalApplicationHandoff(args)).terminal, true);
+            } else {
+              latest = repeated.handoff;
+              nodeAssert.ok(latest.corrections[0].startsWith('Unchanged reply:'));
+              nodeAssert.ok(!repeated.validationErrors.some(line => line.startsWith('Unchanged reply:')));
+            }
+          }
           if (stage === 'fact-check') {
-            const corrected = await submitLocalApplicationHandoff({ ...args, handoffCode: reread.handoffCode,
-              response: reply(reread, { findings: [{ id: 'bullet-1', claim: 'led five engineers', reason: 'inflated' }] }) });
+            const corrected = await submitLocalApplicationHandoff({ ...args, handoffCode: latest.handoffCode,
+              response: reply(latest, { findings: [{ id: 'bullet-1', claim: 'led five engineers', reason: 'inflated' }] }) });
             nodeAssert.equal(corrected.accepted, true);
             nodeAssert.equal(corrected.handoff.stage, 'fact-correction');
             nodeAssert.ok(!corrected.handoff.prompt.includes('YOUR PREVIOUS REPLY TO THIS HANDOFF WAS REJECTED BY THE APP'));

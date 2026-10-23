@@ -336,3 +336,9 @@ export { assert, runExtractorFixtureTest, runZeroResultFixtureTest } from './tes
 export { ABSORB_EXCLUDED_TYPES, buildGroupHoverState, collectAbsorptionClosure, findSeveredRelations, getAbsorptionRejection, partitionEdgesForMove } from '../src/utils/nestedCanvasAbsorption.js';
 export { isJobWorkflowDeletionPending, isJobWorkflowRelocationPending, markJobWorkflowDeletionPending, markJobWorkflowRelocationPending, settleJobWorkflowDeletion, settleJobWorkflowRelocation } from '../src/utils/nodeDeletionLifecycle.js';
 export { MINIMAP_NODE_COLORS } from '../src/utils/constants.js';
+export {
+  APPLICATION_ROUTE_CLAUDE_RUNNER, SAME_RULE_STOP_LIMIT, SAME_RULE_STOP_REASONS, UNCHANGED_NOTICE_PREFIX,
+  canonicalAnswerSha256, cleanRuleTally, clearRuleTallyFamily, clearRuleTallyStep, emptyRuleTally,
+  normalizedObservationFingerprint, recordRuleRejection, ruleTallyEscalationRuns, ruleTallyFamily,
+  ruleTallyLastRoundIds, runBudgetTerminal, sameRuleStopTerminal, summarizeRuleTally, terminalStopSummary, unchangedNotice,
+} from '../electron/ipc/applicationRuleTally.js';

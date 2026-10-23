@@ -188,6 +188,83 @@ function scriptedApi(stages, { rejectFirst = false } = {}) {
 
 export default [
   {
+    name: 'claude runner driver: needs-review diagnostics are best effort and malformed run counts are ignored',
+    async run() {
+      for (const rejectLog of [false, true]) {
+        const stateFile = tempStateFile(); fs.mkdirSync(path.dirname(stateFile), { recursive: true });
+        fs.writeFileSync(stateFile, JSON.stringify({ failed: {}, sessions: {}, runs: { 'job-stop': 'private text' } }));
+        const logFile = path.join(path.dirname(stateFile), 'runs.jsonl');
+        let calls = 0;
+        const runner = createClaudeApplicationRunner({ stateFile, runLogPath: () => logFile, logger: quietLogger(), homedir: '', maxRunsPerJob: 1,
+          fsImpl: { ...fs.promises, appendFile: async (...args) => {
+            if (rejectLog && JSON.parse(args[1]).event === 'needs-review') throw new Error('synthetic log failure');
+            return fs.promises.appendFile(...args);
+          } },
+          api: { getHandoff: async () => ({ handoff: { stage: 'draft', handoffCode: 'c', prompt: 'p' } }),
+            submitHandoff: async () => ({ accepted: false }), stopHandoff: async () => ({ stopped: true, stop: { reason: 'run-budget', stage: 'draft' } }),
+            subscribeDiscards: () => () => {} },
+          runStage: async () => { calls++; return { text: 'answer' }; } });
+        await runner.load(); runner.ensure({ jobId: 'job-stop', canvasFilePath: '/c.canvas' });
+        await waitFor(() => ['needs-review', 'failed'].includes(runner.status(['job-stop'])['job-stop']?.status));
+        await runner.shutdown();
+        assert.equal(calls, 1); assert.equal(runner.status(['job-stop'])['job-stop'].status, 'needs-review');
+        assert.equal(runner.status(['job-stop'])['job-stop'].reason, 'run-budget');
+        const rows = readRunLog(logFile);
+        assert.equal(rows.filter(row => row.event === 'needs-review').length, rejectLog ? 0 : 1);
+        assert.equal(rows.find(row => row.event === 'response').runsCompleted, 1);
+        assert.deepEqual(JSON.parse(fs.readFileSync(stateFile, 'utf8')), { failed: {}, sessions: {} });
+      }
+    },
+  },
+
+  {
+    name: 'claude runner driver: the run count survives Retry and a restart',
+    async run() {
+      const stateFile = tempStateFile(); let calls = 0; const stops = [];
+      const api = {
+        getHandoff: async () => ({ handoff: { handoffCode: 'c', stage: 'draft', prompt: 'p' } }),
+        submitHandoff: async () => ({ accepted: false, validationErrors: ['x'], handoff: {} }),
+        stopHandoff: async args => { stops.push(args); return { stopped: true, stop: { reason: 'run-budget', stage: 'draft' } }; },
+        subscribeDiscards: () => () => {},
+      };
+      const first = createClaudeApplicationRunner({ api, stateFile, maxRunsPerJob: 4, logger: quietLogger(), homedir: '',
+        runStage: async () => { if (++calls > 2) throw new ClaudeRunnerError('CLAUDE_USAGE_LIMIT', USAGE_MESSAGE); return { text: 'a' }; } });
+      first.ensure({ jobId: 'job-r1', canvasFilePath: '/c.canvas' });
+      await waitFor(() => first.status(['job-r1'])['job-r1']?.status === 'failed');
+      await first.shutdown();
+      assert.equal(JSON.parse(fs.readFileSync(stateFile, 'utf8')).runs?.['job-r1'], 2);
+      let answers = 0;
+      const second = createClaudeApplicationRunner({ api, stateFile, maxRunsPerJob: 4, logger: quietLogger(), homedir: '',
+        runStage: async () => { answers++; return { text: 'a' }; } });
+      try {
+        await second.load(); await second.retry({ jobId: 'job-r1', canvasFilePath: '/c.canvas' });
+        await waitFor(() => ['needs-review', 'failed'].includes(second.status(['job-r1'])['job-r1']?.status));
+        assert.equal(answers, 2);
+        assert.deepEqual(stops, [{ jobId: 'job-r1', canvasFilePath: '/c.canvas', reason: 'run-budget', runs: 4, limit: 4 }]);
+        assert.equal(second.status(['job-r1'])['job-r1'].status, 'needs-review');
+        assert.equal(second.status(['job-r1'])['job-r1'].reason, 'run-budget');
+      } finally { await second.shutdown(); }
+    },
+  },
+  {
+    name: 'claude runner driver: a completed human stop needs review',
+    async run() {
+      let calls = 0;
+      const runner = createClaudeApplicationRunner({ stateFile: tempStateFile(), logger: quietLogger(), homedir: '',
+        api: { getHandoff: async () => ({ completed: true, terminal: true, handoff: null, stop: { reason: 'same-rule-repeat', stage: 'requirements', subject: 'e0-l0-u0', ruleId: 'requirements-schema-coverage', count: 5 } }),
+          submitHandoff: async () => ({}), subscribeDiscards: () => () => {} },
+        runStage: async () => { calls++; return { text: 'a' }; } });
+      try {
+        runner.ensure({ jobId: 'job-r2', canvasFilePath: '/c.canvas' });
+        await waitFor(() => ['done', 'needs-review'].includes(runner.status(['job-r2'])['job-r2']?.status));
+        assert.equal(runner.status(['job-r2'])['job-r2'].status, 'needs-review');
+        assert.equal(runner.status(['job-r2'])['job-r2'].reason, 'same-rule-repeat');
+        assert.equal(calls, 0);
+      } finally { await runner.shutdown(); }
+    },
+  },
+
+  {
     name: 'claude runner: CLI args are exactly the headless, tool-less latest-Sonnet invocation',
     run() {
       assert.deepEqual(claudeCliArgs(), [
@@ -533,8 +610,8 @@ export default [
       // The runner tells runStage which stage it answers, so the stage picks its model.
       assert.deepEqual(stages, ['draft', 'verify']);
       assert.deepEqual(script.submits, [
-        { jobId: 'job-happy', canvasFilePath: '/c.canvas', handoffCode: 'code-1', response: 'answer to prompt one' },
-        { jobId: 'job-happy', canvasFilePath: '/c.canvas', handoffCode: 'code-2', response: 'answer to prompt two' },
+        { jobId: 'job-happy', canvasFilePath: '/c.canvas', handoffCode: 'code-1', response: 'answer to prompt one', route: 'claude-runner' },
+        { jobId: 'job-happy', canvasFilePath: '/c.canvas', handoffCode: 'code-2', response: 'answer to prompt two', route: 'claude-runner' },
       ]);
       assert.deepEqual(notes.filter(n => n.status === 'running' && n.stage).map(n => n.stage), ['draft', 'verify']);
       assert.deepEqual(runner.ensure({ jobId: '', canvasFilePath: '/c.canvas' }), { status: 'invalid' });
@@ -744,8 +821,8 @@ export default [
       await waitFor(() => runner.status(['job-par'])['job-par']?.status === 'done', 'done');
       assert.deepEqual([...texts].sort(), ['prompt-t1', 'prompt-t2']);
       assert.deepEqual([...submits].sort((a, b) => a.matchTaskId.localeCompare(b.matchTaskId)), [
-        { jobId: 'job-par', canvasFilePath: '/c.canvas', matchTaskId: 't1', handoffCode: 'code-t1', response: 'answer-prompt-t1' },
-        { jobId: 'job-par', canvasFilePath: '/c.canvas', matchTaskId: 't2', handoffCode: 'code-t2', response: 'answer-prompt-t2' },
+        { jobId: 'job-par', canvasFilePath: '/c.canvas', matchTaskId: 't1', handoffCode: 'code-t1', response: 'answer-prompt-t1', route: 'claude-runner' },
+        { jobId: 'job-par', canvasFilePath: '/c.canvas', matchTaskId: 't2', handoffCode: 'code-t2', response: 'answer-prompt-t2', route: 'claude-runner' },
       ]);
       assert.equal(texts.includes('unused'), false);
     },

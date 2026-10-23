@@ -325,6 +325,74 @@ export default [
     }
   },
 }, {
+  name: 'current authority independent audit and adjudication stop on a repeated structural rule',
+  run: async () => {
+    for (const stage of ['requirements-audit', 'requirements-adjudication']) {
+      const fixture = await makeCurrentAuthorityParallelMatchFixture();
+      try {
+        const queued = await queueLocalApplicationJob({ transport: 'paste', canvasFilePath: fixture.canvasFilePath, careerSnapshotId: fixture.snapshotId, job: fixture.job });
+        const args = { jobId: queued.id, canvasFilePath: fixture.canvasFilePath };
+        const discovered = await completeRequirementsDiscovery({ fixture, queued });
+        let handoff = discovered.handoff;
+        if (stage === 'requirements-adjudication') {
+          const audit = semanticAuditFor(contextOf(handoff), discovered.evidence, discovered.requirements);
+          audit.rows[0].disposition = audit.rows[0].disposition === 'requirement' ? 'not-a-requirement' : 'requirement';
+          const opened = await submitLocalApplicationHandoff({ ...args, handoffCode: handoff.handoffCode, response: discovered.reply(handoff, audit) });
+          assert(opened.accepted, 'valid disagreement opens adjudication'); handoff = opened.handoff;
+        }
+        assert(handoff.stage === stage, 'fixture reaches intended independent stage');
+        let result;
+        for (let attempt = 1; attempt <= 5; attempt++) {
+          const context = contextOf(handoff);
+          result = await submitLocalApplicationHandoff({ ...args, route: 'claude-runner', handoffCode: handoff.handoffCode,
+            response: discovered.reply(handoff, { storeDigest: context.authorityStore?.digest || context.storeDigest,
+              ...(stage === 'requirements-audit' ? { auditDigest: context.auditDigest } : { caseDigest: context.caseDigest }), rows: {} }) });
+          if (attempt < 5) { assert(result.handoff && !result.terminal, 'correction remains open before fifth same rule'); handoff = result.handoff; }
+        }
+        assert(result.terminal && result.stop.stage === stage && result.stop.count === 5, 'same-rule terminal names the independent stage');
+        assert((await getLocalApplicationHandoff(args)).terminal, 'retained-stage terminal reloads');
+      } finally { await fs.promises.rm(fixture.root, { recursive: true, force: true }); }
+    }
+  },
+}, {
+  name: 'current authority requirements: same-rule stop is durable and restricted to the Claude route',
+  run: async () => {
+    for (const route of ['claude-runner', null]) {
+      const fixture = await makeCurrentAuthorityParallelMatchFixture();
+      try {
+        const queued = await queueLocalApplicationJob({ transport: 'paste', canvasFilePath: fixture.canvasFilePath, careerSnapshotId: fixture.snapshotId, job: fixture.job });
+        const args = { jobId: queued.id, canvasFilePath: fixture.canvasFilePath };
+        let handoff = (await getLocalApplicationHandoff(args)).handoff;
+        const context = contextOf(handoff);
+        const malformed = () => JSON.stringify({ protocol: 1, jobId: queued.id, stage: handoff.stage, handoffCode: handoff.handoffCode, baseHashes: handoff.baseHashes,
+          storeDigest: context.authorityStore.digest, complete: false, identity: context.trustedIdentity,
+          evidence: [], requirements: [], coverage: {}, nextUnitIndex: context.requirementsProgress.sourceCoverage.unitStart });
+        for (let attempt = 1; attempt <= (route ? 5 : 7); attempt++) {
+          const result = await submitLocalApplicationHandoff({ ...args, handoffCode: handoff.handoffCode, response: malformed(), route });
+          assert(!result.accepted, 'malformed response must fail');
+          if (attempt === 5 && route) {
+            assert(result.terminal && result.completed && result.handoff === null, 'fifth same-rule rejection ends the runner step');
+            assert(result.stop.reason === 'same-rule-repeat' && result.stop.count === 5, 'typed same-rule stop');
+          } else {
+            assert(!result.terminal && result.handoff, 'manual replies stay available');
+            if (attempt >= 2) assert(result.handoff.corrections[0].startsWith('Unchanged reply:'), 'identical rejected content is explained');
+            assert(!result.validationErrors.some(line => line.startsWith('Unchanged reply:')), 'notice is not a failed rule');
+            handoff = result.handoff;
+          }
+        }
+        const manifest = JSON.parse(await fs.promises.readFile(path.join(queued.folder, 'manifest.json'), 'utf8'));
+        assert(manifest.paste.ruleTally.steps[0].rules[0].n === (route ? 5 : 7), 'tally survives file persistence');
+        if (route) {
+          assert(manifest.status === 'failed' && manifest.paste.stage === 'requirements', 'stop keeps the source cursor stage');
+          const reopened = await getLocalApplicationHandoff(args);
+          assert(reopened.completed && reopened.terminal && reopened.handoff === null && reopened.stop.reason === 'same-rule-repeat', 'reopened terminal is durable');
+          const status = await localApplicationStatus(queued.id, fixture.canvasFilePath);
+          assert(status.terminalReason === 'same-rule-repeat', 'card exposes stop reason');
+        }
+      } finally { await fs.promises.rm(fixture.root, { recursive: true, force: true }); }
+    }
+  },
+}, {
   name: 'current authority requirements: one generic requirement may retain distinct evidence across repeated source units',
   run: async () => {
     const fixture = await makeCurrentAuthorityParallelMatchFixture();

@@ -30,6 +30,8 @@ export function normalizeClaudeRun(state) {
     message: optionalString(state.message).slice(0, MESSAGE_LIMIT),
     updatedAt: optionalTime(state.updatedAt),
     lastActivityAt: optionalTime(state.lastActivityAt),
+    ...(['same-rule-repeat', 'run-budget'].includes(state.reason) ? { reason: state.reason } : {}),
+    ...(Number.isSafeInteger(state.runs) && state.runs > 0 ? { runs: state.runs } : {}),
   };
 }
 

@@ -1,3 +1,4 @@
+import { SAME_RULE_STOP_REASONS, APPLICATION_ROUTE_CLAUDE_RUNNER, ruleTallyFamily, cleanRuleTally, normalizedObservationFingerprint, recordRuleRejection, clearRuleTallyFamily, clearRuleTallyStep, ruleTallyEscalationRuns, ruleTallyLastRoundIds, summarizeRuleTally, canonicalAnswerSha256, sameRuleStopTerminal, runBudgetTerminal, terminalStopSummary, unchangedNotice } from './applicationRuleTally.js';
 /**
  * Human-in-the-loop Local AI application jobs.
  *
@@ -1851,7 +1852,7 @@ function blindReviewHumanStopTerminal(paste, input = null) {
 // carry the sentence the card shows.
 function pasteTerminalStop(paste, input = null) {
   return requirementsAuditDisagreementTerminal(paste, input) || blindReviewHumanStopTerminal(paste, input)
-    || (isWriteVerifyJob(input) && paste?.stage === 'write-verify-human-stop' && paste?.terminal?.kind === 'write-verify-human-stop');
+    || (isWriteVerifyJob(input) && paste?.terminal?.kind === 'write-verify-human-stop' && (paste.stage === 'write-verify-human-stop' || SAME_RULE_STOP_REASONS.includes(paste.terminal.reason)));
 }
 
 function requirementsAuditDisagreementReceipt(page, rows, { epoch = null, requirementsStream = null, auditStream = null, storeDigest = null } = {}) {
@@ -4870,12 +4871,76 @@ async function bumpPasteRejectionStreak(jobId, stage, checkIds, root, dir, revis
 // value recomputed from some other item set that could drift from what
 // bumpPasteRejectionStreak actually counted (see this map's own header).
 // Returns the zero/empty values whenever the stage has moved on, exactly as
-// the old key-comparison did.
-function peekPasteRejectionStreak(jobId, stage) {
-  const prior = jobId ? pasteRejectionStreakByJob.get(jobId) : null;
-  return prior && prior.stage === stage
-    ? { streak: prior.streak, checkIds: prior.checkIds, escalatedIds: pasteRejectionEscalatedIds(prior.idCounts) }
-    : { streak: 0, checkIds: [], escalatedIds: [] };
+// Durable rule observations also drive escalation after a restart.
+function ruleTallyStepOf(stage, state) {
+  const family = ruleTallyFamily(stage);
+  const work = state.writeVerify;
+  let subject;
+  if (['write', 'documents'].includes(family)) subject = work?.candidates?.[work.ordinal]?.id;
+  else if (['fact-check', 'fact-correction'].includes(family)) subject = work?.ranking?.[work.factIndex];
+  else if (family === 'pick') subject = `judge-round-${work?.elimination?.round ?? 0}`;
+  else if (family === 'requirements' && state.authorityListingPage) {
+    const page = state.authorityListingPage; subject = `e${page.epoch ?? 0}-l${page.index}-u${page.sourceCoverage?.unitStart ?? 0}`;
+  } else if (family === 'requirements-audit' && state.authorityListingAuditPage) {
+    const page = state.authorityListingAuditPage; subject = `e${page.epoch ?? 0}-a${page.index}`;
+  } else if (family === 'requirements-adjudication' && state.authorityAdjudicationCase) {
+    const item = state.authorityAdjudicationCase; subject = `e${item.epoch}-p${item.pageIndex}`;
+  }
+  return family && typeof subject === 'string' && /^[a-z0-9][a-z0-9-]{0,47}$/u.test(subject) ? { family, subject } : null;
+}
+function tallyRulesFor(errors, checkIds) {
+  return checkIds.flatMap(id => id === 'schema-invalid'
+    ? [...new Set(errors.filter(error => pasteRejectionCheckIds([error]).checkIds.includes(id)).map(normalizedObservationFingerprint))].map(fingerprint => ({ id, fingerprint }))
+    : [{ id, fingerprint: '' }]);
+}
+function peekRuleTallyEscalation(state) {
+  const step = ruleTallyStepOf(state.stage, state);
+  return step ? { checkIds: ruleTallyLastRoundIds(state.ruleTally, step.family, step.subject),
+    escalatedIds: pasteRejectionEscalatedIds(ruleTallyEscalationRuns(state.ruleTally, step.family, step.subject)) }
+    : { checkIds: [], escalatedIds: [] };
+}
+function planApplicationRejection({ state, stage, subject, errors, checkIds, answerSha256, route, allowStop = true, stepEndedByCounter = false }) {
+  const family = ruleTallyFamily(stage);
+  if (!family || typeof subject !== 'string' || !/^[a-z0-9][a-z0-9-]{0,47}$/u.test(subject)) return null;
+  const recorded = recordRuleRejection(state.ruleTally, { family, subject, rules: tallyRulesFor(errors, checkIds), answerSha256 });
+  const tally = stepEndedByCounter ? clearRuleTallyStep(recorded.tally, family, subject) : recorded.tally;
+  const stop = allowStop && route === APPLICATION_ROUTE_CLAUDE_RUNNER && !stepEndedByCounter && recorded.stop
+    ? sameRuleStopTerminal({ stage, family, subject, ruleId: recorded.stop.id, count: recorded.stop.n }) : null;
+  return { ...recorded, tally, stop, family, subject,
+    notice: recorded.unchanged ? unchangedNotice({ family, subject, ruleIds: [...new Set(recorded.rules.map(row => row.id))], n: Math.max(...recorded.rules.map(row => row.n)) }) : '' };
+}
+function rejectionSummary(plan) {
+  return plan ? { family: plan.family, subject: plan.subject, ruleIds: plan.rules.map(row => row.id), counts: plan.rules.map(row => row.n), unchanged: plan.unchanged } : null;
+}
+async function endJobWithStop({ jobId, dir, manifest, terminal, tally, validationErrors = [] }) {
+  await atomicJson(path.join(dir, 'manifest.json'), { ...manifest, status: 'failed', paste: { ...manifest.paste, terminal, ruleTally: tally } });
+  await rememberPasteCorrections(jobId, null, [], { dir }); clearPasteRejectionStreak(jobId);
+  return { accepted: false, completed: true, terminal: true, handoff: null, validationErrors, stop: terminalStopSummary(terminal),
+    localJob: { id: jobId, status: 'failed', mode: 'paste', revision: manifest.paste.revision, logCount: manifest.paste.logCount, folder: dir, message: terminal.message } };
+}
+async function applicationRejectionResult({ jobId, dir, manifest, input, state, response, parsed, validationErrors, route, rejectionPlan }) {
+  const plan = rejectionPlan === undefined ? planApplicationRejection({ state, stage: state.stage, subject: ruleTallyStepOf(state.stage, state)?.subject,
+    errors: validationErrors, checkIds: pasteRejectionCheckIds(validationErrors).checkIds,
+    answerSha256: canonicalAnswerSha256({ rawText: typeof response === 'string' ? response : '', parsed }), route }) : rejectionPlan;
+  if (plan?.stop) return endJobWithStop({ jobId, dir, manifest, terminal: plan.stop, tally: plan.tally, validationErrors });
+  if (plan) await atomicJson(path.join(dir, 'manifest.json'), { ...manifest, paste: { ...manifest.paste, ruleTally: plan.tally } });
+  const corrections = plan?.notice ? [plan.notice, ...validationErrors] : validationErrors;
+  await rememberPasteCorrections(jobId, state.handoffCode, corrections, { dir, stage: state.stage, revision: state.revision });
+  return { accepted: false, validationErrors, ...(plan ? { rejection: rejectionSummary(plan) } : {}),
+    handoff: await pasteHandoffRecord({ jobId, input, state: plan ? { ...state, ruleTally: plan.tally } : state,
+      draft: typeof response === 'string' ? response : '', corrections }) };
+}
+
+export async function stopLocalApplicationJob({ jobId, canvasFilePath, reason, runs, limit }) {
+  if (reason !== 'run-budget' || !Number.isSafeInteger(runs) || runs < 1 || !Number.isSafeInteger(limit) || limit < 1) throw new Error('Invalid application run-budget stop.');
+  return withLocalAiJobMutationLock(jobId, async () => {
+    const { dir, manifest, state, input } = await getPasteApplicationState(jobId, canvasFilePath);
+    if (pasteTerminalStop(state, input)) return { stopped: true, alreadyTerminal: true, stop: terminalStopSummary(state.terminal) };
+    if (state.stage === 'completed') return { stopped: false, completed: true };
+    const terminal = runBudgetTerminal({ stage: state.stage, runs, limit, tallies: summarizeRuleTally(state.ruleTally, 3) });
+    const result = await endJobWithStop({ jobId, dir, manifest, terminal, tally: cleanRuleTally(state.ruleTally) });
+    return { stopped: true, stop: result.stop };
+  });
 }
 
 function clearPasteRejectionStreak(jobId) {
@@ -5189,25 +5254,10 @@ async function pasteHandoffRecord({ jobId, input, state, draft = '', corrections
   attachPasteFreshContextMetadata(record, input, state);
   if (!items.length) return record;
   record.corrections = items;
-  // The escalation block's check ids and streak are read back from the SAME
-  // store bumpPasteRejectionStreak wrote to, not recomputed from `items`
-  // here: `items` mixes in measured host findings (state.findings' own
-  // 'host-' entries) that persist across rounds independently of what this
-  // job's actual rejection streak is about, so a checkIds set derived from it
-  // is a wider, DIFFERENT set than the one the streak was bumped with — see
-  // pasteRejectionStreakByJob's own header for the incident that caused. The
-  // numbered items list above is unaffected: it still prints every
-  // outstanding measured finding and recalled error, exactly as before.
-  const { checkIds, escalatedIds } = peekPasteRejectionStreak(jobId, state.stage);
-  // RECOVERED ROUND (correctionsRecovered above): hand over the full stage
-  // prompt with the outstanding items folded in, never the delta — see
-  // pasteRecoveredHandoffPrompt's own header for why. escalationTrimmed is
-  // forced false here rather than measured: the in-memory streak this
-  // process would score an escalation against is exactly what a restart
-  // discarded (pasteRejectionStreakByJob is a SEPARATE process-local map from
-  // pasteCorrectionsByJob, seeded only by a live bumpPasteRejectionStreak
-  // call, never by this read-only path), so escalatedIds is already `[]` here
-  // and there is nothing an escalation block could have been trimmed FROM.
+  // Read only the last rejected round of this durable step, not mixed host findings.
+  const { checkIds, escalatedIds } = peekRuleTallyEscalation(state);
+  // A recovered correction retains the full stage prompt and the persisted streak.
+  // It never trims an escalation block out of a delta prompt.
   const { prompt: correctionPrompt, escalationTrimmed } = correctionsRecovered
     ? { prompt: pasteRecoveredHandoffPrompt({ state, items, correctionsRecovered, stagePrompt: record.prompt }), escalationTrimmed: false }
     // The prompt this correction stands in for is already built on this record,
@@ -7568,7 +7618,7 @@ export async function getLocalApplicationHandoff({ jobId, canvasFilePath } = {})
     const { root, dir, input } = loaded;
     if (pasteTerminalStop(loaded.state, input)) {
       return {
-        completed: true, terminal: true, handoff: null,
+        completed: true, terminal: true, handoff: null, stop: terminalStopSummary(loaded.state.terminal),
         localJob: {
           id: jobId, status: 'failed', mode: 'paste', revision: loaded.state.revision,
           logCount: loaded.state.logCount || 0, folder: dir,
@@ -7732,7 +7782,7 @@ export function __recordWriteVerifyRoundDiagnosticsForTests(args) {
   return recordWriteVerifyRoundDiagnostics(args);
 }
 
-async function submitWriteVerifyHandoff({ root, jobId, dir, manifest, input, frozen, state, response }) {
+async function submitWriteVerifyHandoff({ root, jobId, dir, manifest, input, frozen, state, response, route }) {
   const outgoingStage = state.stage;
   const work = structuredClone(state.writeVerify);
   const candidate = work.candidates[work.ordinal];
@@ -7878,6 +7928,14 @@ async function submitWriteVerifyHandoff({ root, jobId, dir, manifest, input, fro
       { stage: outgoingStage, checkIds: pasteRejectionCheckIds(errors).checkIds, errors });
     work.lastCorrections = errors;
   }
+  const counted = ['write', 'convert', 'verify-correction', 'fit-correction', 'fact-correction'].includes(outgoingStage);
+  const stepEndedByCounter = counted && (outgoingStage === 'fact-correction' ? factTransition?.nextStage !== 'fact-correction' : candidate.status === 'dropped');
+  const plan = errors.length ? planApplicationRejection({ state, stage: outgoingStage,
+    subject: outgoingCandidateId || `judge-round-${state.writeVerify.elimination?.round ?? 0}`, errors,
+    checkIds: fitRejected ? ['measured-one-page-fit'] : pasteRejectionCheckIds(errors).checkIds,
+    answerSha256: canonicalAnswerSha256({ rawText, parsed }), route, allowStop: !counted, stepEndedByCounter }) : null;
+  const tally = plan?.tally || clearRuleTallyFamily(state.ruleTally, ruleTallyFamily(outgoingStage));
+  if (plan?.notice && work.lastCorrections.length) work.lastCorrections = [plan.notice, ...work.lastCorrections];
   if (errors.length) {
     // Private job evidence: exact rejected output and production wording for
     // every v2 stage, including a judge or fact-check response that retries.
@@ -7896,6 +7954,7 @@ async function submitWriteVerifyHandoff({ root, jobId, dir, manifest, input, fro
   }
   await recordWriteVerifyRoundDiagnostics({ root, dir, jobId, state, rawText, errors,
     checkIdsOverride: fitRejected ? ['measured-one-page-fit'] : null });
+  if (plan?.stop) return endJobWithStop({ jobId, dir, manifest, terminal: plan.stop, tally, validationErrors: errors });
   let nextStage = outgoingStage;
   if (errors.length && ['pick', 'fact-check', 'fact-recheck'].includes(outgoingStage)) { /* same-stage rejection: stay */ }
   else if (outgoingStage === 'write') nextStage = errors.length
@@ -7918,7 +7977,7 @@ async function submitWriteVerifyHandoff({ root, jobId, dir, manifest, input, fro
     work.terminal = { kind: 'write-verify-human-stop', checkIds: ids,
       message: `Application v2 stopped after every candidate failed verification or fact-check. Failing checks: ${ids.join(', ') || 'fact-check'}.` };
   }
-  const next = { ...state, writeVerify: work, stage: nextStage, revision: state.revision + 1,
+  const next = { ...state, ruleTally: tally, writeVerify: work, stage: nextStage, revision: state.revision + 1,
     logCount: (state.logCount || 0) + 1, ...rotatePasteHandoffCode(state) };
   if (work.terminal) next.terminal = work.terminal;
   if (nextStage === 'completed' || nextStage === 'write-verify-human-stop') next.handoffCode = null;
@@ -7948,16 +8007,16 @@ async function submitWriteVerifyHandoff({ root, jobId, dir, manifest, input, fro
   const localJob = { id: jobId, status, mode: 'paste', revision: next.revision, logCount: next.logCount, folder: dir };
   if (nextStage === 'completed' || nextStage === 'write-verify-human-stop') return { accepted: !errors.length, completed: true,
     terminal: nextStage === 'write-verify-human-stop', localJob, handoff: null, ...(errors.length ? { validationErrors: errors } : {}) };
-  return { accepted: !errors.length, completed: false, localJob,
+  return { accepted: !errors.length, completed: false, localJob, ...(plan ? { rejection: rejectionSummary(plan) } : {}),
     ...(errors.length ? { validationErrors: errors } : {}), handoff: await writeVerifyHandoffRecord({ jobId, input, state: next, corrections: work.lastCorrections || [] }) };
 }
 
-export async function submitLocalApplicationHandoff({ jobId, canvasFilePath, handoffCode, response } = {}) {
+export async function submitLocalApplicationHandoff({ jobId, canvasFilePath, handoffCode, response, route = null } = {}) {
   return withLocalAiJobMutationLock(jobId, async () => {
     const { root, dir, manifest, input, frozen, state } = await getPasteApplicationState(jobId, canvasFilePath);
     if (pasteTerminalStop(state, input)) {
       return {
-        accepted: true, completed: true, terminal: true, handoff: null,
+        accepted: true, completed: true, terminal: true, handoff: null, stop: terminalStopSummary(state.terminal),
         localJob: { id: jobId, status: 'failed', mode: 'paste', revision: state.revision, logCount: state.logCount || 0, folder: dir, message: state.terminal.message },
       };
     }
@@ -7973,11 +8032,13 @@ export async function submitLocalApplicationHandoff({ jobId, canvasFilePath, han
       throw new Error('That handoff code is stale. Copy the current prompt and try again.');
     }
     if (isWriteVerifyJob(input) && WRITE_VERIFY_STAGES.includes(state.stage)) {
-      return submitWriteVerifyHandoff({ root, jobId, dir, manifest, input, frozen, state, response });
+      return submitWriteVerifyHandoff({ root, jobId, dir, manifest, input, frozen, state, response, route });
     }
     let parsed;
+    let rejectionParsed;
     try {
       parsed = parsePasteResponse(response);
+      rejectionParsed = structuredClone(parsed);
     } catch (error) {
       const validationErrors = [error?.message || 'Paste one valid JSON object.'];
       recordPasteHandoffDiagnostic({
@@ -7986,11 +8047,7 @@ export async function submitLocalApplicationHandoff({ jobId, canvasFilePath, han
         responseChars, ...error?.pasteDiagnostic,
         revision: state.revision, logCount: state.logCount,
       });
-      await rememberPasteCorrections(jobId, state.handoffCode, validationErrors, { dir, stage: state.stage, revision: state.revision });
-      return {
-        accepted: false, validationErrors,
-        handoff: await pasteHandoffRecord({ jobId, input, state, draft: typeof response === 'string' ? response : '', corrections: validationErrors }),
-      };
+      return applicationRejectionResult({ jobId, dir, manifest, input, state, response, parsed: rejectionParsed, validationErrors, route });
     }
     parsed = normalizeEvidencePlanAliases(parsed, state.stage);
     // Populated by validatePasteResponse (the top-level call passes this
@@ -8166,7 +8223,10 @@ export async function submitLocalApplicationHandoff({ jobId, canvasFilePath, han
       // state.revision are passed through so a first-in-process bump can seed
       // itself from the durable trace (seedPasteRejectionStreakFromTrace's own
       // header) instead of silently restarting the escalation clock at 1.
-      const { streak: rejectionStreak, escalatedIds } = await bumpPasteRejectionStreak(jobId, state.stage, checkIds, root, dir, state.revision);
+      const { streak: rejectionStreak } = await bumpPasteRejectionStreak(jobId, state.stage, checkIds, root, dir, state.revision);
+      const rejectionPlan = planApplicationRejection({ state, stage: state.stage, subject: ruleTallyStepOf(state.stage, state)?.subject,
+        errors: validationErrors, checkIds, answerSha256: canonicalAnswerSha256({ rawText: typeof response === 'string' ? response : '', parsed: rejectionParsed }), route });
+      const { escalatedIds } = peekRuleTallyEscalation(rejectionPlan ? { ...state, ruleTally: rejectionPlan.tally } : state);
       recordPasteHandoffDiagnostic({
         stage: state.stage, outcome: 'rejected', reason, responseChars,
         revision: state.revision, logCount: state.logCount, echoMatch: pasteEnvelopeEchoMatch(envelopeEcho),
@@ -8208,11 +8268,7 @@ export async function submitLocalApplicationHandoff({ jobId, canvasFilePath, han
       } catch (logError) {
         logger.warn(`[LocalAI] failed to append a rejection row to ${PASTE_REJECTION_TRACE_FILE} for job ${jobId}: ${logError?.message || logError}`);
       }
-      await rememberPasteCorrections(jobId, state.handoffCode, validationErrors, { dir, stage: state.stage, revision: state.revision });
-      return {
-        accepted: false, validationErrors,
-        handoff: await pasteHandoffRecord({ jobId, input, state, draft: typeof response === 'string' ? response : '', corrections: validationErrors }),
-      };
+      return applicationRejectionResult({ jobId, dir, manifest, input, state, response, parsed: rejectionParsed, validationErrors, route, rejectionPlan });
     }
     // A tolerated echo is a repair the app makes silently: the pasted nonce is
     // stale even though the round it answers is current. Normalize it onto
@@ -8238,10 +8294,12 @@ export async function submitLocalApplicationHandoff({ jobId, canvasFilePath, han
         || (envelopeEcho.handoffCode === false && !envelopeEcho.toleratedStaleEcho) || envelopeEcho.baseHashes === false;
       const { checkIds, uncodedErrors, checkFingerprints } = pasteRejectionCheckIds(validationErrors);
       const reason = pasteRejectionReason({ envelopeMismatch, validationErrors, checkIds });
-      const { streak: rejectionStreak, escalatedIds } = await bumpPasteRejectionStreak(jobId, state.stage, checkIds, root, dir, state.revision);
+      const { streak: rejectionStreak } = await bumpPasteRejectionStreak(jobId, state.stage, checkIds, root, dir, state.revision);
+      const rejectionPlan = planApplicationRejection({ state, stage: state.stage, subject: ruleTallyStepOf(state.stage, state)?.subject,
+        errors: validationErrors, checkIds, answerSha256: canonicalAnswerSha256({ rawText: typeof response === 'string' ? response : '', parsed: rejectionParsed }), route });
+      const { escalatedIds } = peekRuleTallyEscalation(rejectionPlan ? { ...state, ruleTally: rejectionPlan.tally } : state);
       recordPasteHandoffDiagnostic({ stage: state.stage, outcome: 'rejected', reason, responseChars, revision: state.revision, logCount: state.logCount, echoMatch: pasteEnvelopeEchoMatch(envelopeEcho), errorCount: validationErrors.length, checkIds, uncodedErrors, checkFingerprints, rejectionStreak, escalated: escalatedIds.length > 0, ...(pasteDeltaDiagnostic || {}) });
-      await rememberPasteCorrections(jobId, state.handoffCode, validationErrors, { dir, stage: state.stage, revision: state.revision });
-      return { accepted: false, validationErrors, handoff: await pasteHandoffRecord({ jobId, input, state, draft: typeof response === 'string' ? response : '', corrections: validationErrors }) };
+      return applicationRejectionResult({ jobId, dir, manifest, input, state, response, parsed: rejectionParsed, validationErrors, route, rejectionPlan });
     }
     const persistedAuthorityStore = isCurrentAuthorityProtocol(input) && state.authorityStore ? authorityStoreReceipt(state.authorityStore) : null;
     const persistedAuthorityWorkflow = isCurrentAuthorityProtocol(input) ? manifest.paste?.authorityWorkflow || null : null;
@@ -8254,6 +8312,7 @@ export async function submitLocalApplicationHandoff({ jobId, canvasFilePath, han
       ...acceptedState
     } = persistedState;
     const next = { ...acceptedState, ...(persistedAuthorityStore ? { authorityStore: persistedAuthorityStore } : {}), ...(persistedAuthorityWorkflow ? { authorityWorkflow: persistedAuthorityWorkflow } : {}), revision: state.revision + 1, findings: [] };
+    if (state.ruleTally) next.ruleTally = clearRuleTallyFamily(state.ruleTally, ruleTallyFamily(state.stage));
     let authorityLedgerToWrite = null;
     let authorityStoreToWrite = null;
     let authorityRuntimeWorkflow = null;
@@ -8942,7 +9001,10 @@ function blindReviewHumanStopStatus(args) {
 
 function writeVerifyHumanStopStatus(args) {
   return { ...requirementsAuditDisagreementStatus(args), terminalKind: 'write-verify-human-stop',
-    checkIds: args.paste?.terminal?.checkIds || [] };
+    checkIds: args.paste?.terminal?.checkIds || [],
+    ...(SAME_RULE_STOP_REASONS.includes(args.paste?.terminal?.reason) ? { terminalReason: args.paste.terminal.reason, stopStage: args.paste.stage,
+      ...(args.paste.terminal.ruleId ? { ruleId: args.paste.terminal.ruleId, ruleCount: args.paste.terminal.count } : {}) } : {}),
+    ruleTally: summarizeRuleTally(args.paste.ruleTally, 3) };
 }
 
 const LEGACY_APPLICATION_REGENERATE_MESSAGE = 'This application was made by an older version, so regenerate it.';
@@ -16112,7 +16174,7 @@ async function localApplicationStatusUnlocked(jobId, canvasFilePath, options = {
     return pasteIntegrityFaultStatus({ jobId, dir, canvas, manifest, paste: manifest.paste });
   }
   if (manifest.transport === 'paste' && pasteTerminalStop(manifest.paste, input)) {
-    return (isWriteVerifyJob(input) && manifest.paste.stage === 'write-verify-human-stop' ? writeVerifyHumanStopStatus
+    return (isWriteVerifyJob(input) && manifest.paste.terminal?.kind === 'write-verify-human-stop' ? writeVerifyHumanStopStatus
       : blindReviewHumanStopTerminal(manifest.paste, input) ? blindReviewHumanStopStatus
         : requirementsAuditDisagreementStatus)({ jobId, dir, canvas, manifest, paste: manifest.paste });
   }
@@ -16158,6 +16220,7 @@ async function localApplicationStatusUnlocked(jobId, canvasFilePath, options = {
       canvasFilePath: canvas.canonicalCanvasFilePath, createdAt: manifest.createdAt || null,
       revision: manifest.paste.revision || 0, logCount: manifest.paste.logCount || 0,
       stage: manifest.paste.stage, resultSha256: null,
+      ...(manifest.paste.ruleTally ? { ruleTally: summarizeRuleTally(manifest.paste.ruleTally, 5) } : {}),
       message: manifest.paste.stage === 'completed'
         ? 'The final review passed. Infinite Canvas is preparing the deterministic document and import checks.'
         : `Paste-back application handoff is ready for ${manifest.paste.stage}.`,
@@ -17325,7 +17388,7 @@ export function registerLocalAiApplicationHandlers() {
     }
   });
   handleSafe('submit-local-application-handoff', async (_event, args = {}) =>
-    submitLocalApplicationHandoff(args));
+    submitLocalApplicationHandoff({ ...args, route: null }));
   handleSafe('update-local-application-draft', async (_event, args = {}) =>
     updateLocalApplicationDraft(args));
   handleSafe('discover-local-applications', async (_event, { canvasFilePath } = {}) => ({

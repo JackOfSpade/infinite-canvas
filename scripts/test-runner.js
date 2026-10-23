@@ -1,3 +1,4 @@
+import application_rule_tally from './tests/application-rule-tally.js';
 import fs from 'node:fs';
 import base64 from './tests/base64.js';
 import marketplace_monitor from './tests/marketplace-monitor.js';
@@ -199,6 +200,7 @@ const testGroups = [
   ['current-authority-parallel-match.js', current_authority_parallel_match],
   ['application-career-authority.js', application_career_authority],
   ['application-write-verify.js', application_write_verify],
+  ['application-rule-tally.js', application_rule_tally],
   ['cover-letter-hedged-diagnosis.js', cover_letter_hedged_diagnosis],
   ['claude-application-runner.js', claude_application_runner],
   ['claude-application-sdk-stage.js', claude_application_sdk_stage],
