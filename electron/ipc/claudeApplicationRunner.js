@@ -675,6 +675,8 @@ export function createClaudeApplicationRunner({
 
   function setState(jobId, canvasFilePath, patch) {
     const previous = states.get(jobId);
+    const sameAction = patch.status === 'running' && previous?.status === 'running'
+      && patch.stage === previous.stage && patch.activity === previous.activity && patch.updatedAt === previous.updatedAt;
     const state = {
       jobId,
       canvasFilePath,
@@ -682,7 +684,15 @@ export function createClaudeApplicationRunner({
       stage: patch.stage !== undefined ? patch.stage : (previous?.stage ?? null),
       ...(patch.code ? { code: patch.code } : {}),
       ...(patch.message ? { message: patch.message } : {}),
-      updatedAt: now(),
+      updatedAt: Number.isFinite(patch.updatedAt) ? patch.updatedAt : now(),
+      startedAt: previous?.startedAt ?? drivers.get(jobId)?.startedAt ?? now(),
+      ...(patch.progress !== undefined ? { progress: patch.progress } : previous?.progress ? { progress: previous.progress } : {}),
+      activity: patch.activity || 'running',
+      ...(sameAction && Number.isFinite(previous.lastActivityAt) ? { lastActivityAt: previous.lastActivityAt } : {}),
+      ...(patch.status === 'running' ? {
+        activeCalls: [...(drivers.get(jobId)?.actions?.values() || [])].filter(row => row.activity === 'running').length,
+        waitingCalls: [...(drivers.get(jobId)?.actions?.values() || [])].filter(row => row.activity === 'waiting').length,
+      } : {}),
       ...((drivers.get(jobId)?.runs ?? runCounts.get(jobId)) > 0 ? { runs: drivers.get(jobId)?.runs ?? runCounts.get(jobId) } : {}),
       ...(patch.reason ? { reason: patch.reason } : {}),
       ...(patch.stop ? { stop: patch.stop } : {}),
@@ -691,6 +701,12 @@ export function createClaudeApplicationRunner({
     activityEmits.delete(jobId);
     emit({ ...state });
     return state;
+  }
+
+  function publishActiveAction(entry) {
+    const actions = [...entry.actions.values()];
+    const action = actions.find(row => row.activity === 'running') || actions[0];
+    if (action) setState(entry.jobId, entry.canvasFilePath, { status: 'running', ...action });
   }
 
   // Liveness from the provider stream. updatedAt stays the stage start (it
@@ -817,7 +833,12 @@ export function createClaudeApplicationRunner({
       if (entry.runs >= maxRunsPerJob) {
         throw new ClaudeRunnerError('CLAUDE_TOO_MANY_RUNS', MESSAGES.tooMany(maxRunsPerJob));
       }
+      const actionId = Symbol('provider action');
+      entry.actions.set(actionId, { stage, activity: 'waiting', progress: handoff?.progress || null, updatedAt: now() });
+      publishActiveAction(entry);
       const release = await semaphore.acquire(signal);
+      entry.actions.set(actionId, { stage, activity: 'running', progress: handoff?.progress || null, updatedAt: now() });
+      publishActiveAction(entry);
       const profile = claudeStageProfile(stage);
       const record = {
         version: 2, runId: crypto.randomUUID(), jobId, stage, ...(matchTaskId ? { matchTaskId } : {}),
@@ -883,6 +904,8 @@ export function createClaudeApplicationRunner({
           throw failure;
         }
       } finally {
+        entry.actions.delete(actionId);
+        publishActiveAction(entry);
         release();
       }
     };
@@ -890,7 +913,6 @@ export function createClaudeApplicationRunner({
     const answer = async (handoff, matchTaskId) => {
       const stage = handoff?.stage ?? null;
       entry.stage = stage;
-      setState(jobId, canvasFilePath, { status: 'running', stage });
       let text = chooseText(handoff);
       const laneKey = matchTaskId || 'main';
       const key = freshContextKeyOf(handoff);
@@ -980,6 +1002,8 @@ export function createClaudeApplicationRunner({
       }
       let submitted;
       try {
+        if ([...entry.actions.values()].some(row => row.activity === 'running')) publishActiveAction(entry);
+        else setState(jobId, canvasFilePath, { status: 'running', stage: 'host-verification', progress: handoff?.progress || null });
         submitted = await submitHandoff({
           jobId,
           canvasFilePath,
@@ -1061,6 +1085,8 @@ export function createClaudeApplicationRunner({
       canvasFilePath,
       controller: new AbortController(),
       runs: runCounts.get(jobId) ?? 0,
+      startedAt: now(),
+      actions: new Map(),
       stage: null,
       abortReason: null,
       firstError: null,

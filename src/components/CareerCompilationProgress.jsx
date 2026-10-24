@@ -1,16 +1,16 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { BridgeStepList } from './BridgeProgress';
 import { Loader2, PauseCircle } from 'lucide-react';
+import { deriveCareerCompilationProgress } from '../utils/careerCompilationProgress';
+import { useCareerCompilationProgress } from '../hooks/useCareerCompilationProgress';
 
-const PHASES = [
-  ['reading', 'Reading career files'],
-  ['compiling', 'Compiling career pages'],
-  ['auditing', 'Auditing career data'],
-  ['saving', 'Saving approved snapshot'],
-  ['cleaning', 'Preparing career summary'],
-];
+const duration = seconds => `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
 
-export function CareerCompilationProgress({ progress, onPauseAndSave }) {
+export function LiveCareerCompilationProgress({ nodeId, runId, onPauseAndSave }) {
+  const progress = useCareerCompilationProgress(nodeId, runId);
+  return <CareerCompilationProgress progress={progress} onPauseAndSave={onPauseAndSave} compact />;
+}
+
+export function CareerCompilationProgress({ progress, onPauseAndSave, compact = false }) {
   const [now, setNow] = useState(Date.now);
   const [pausing, setPausing] = useState(false);
   const [notice, setNotice] = useState('');
@@ -31,35 +31,31 @@ export function CareerCompilationProgress({ progress, onPauseAndSave }) {
     }
   };
   useEffect(() => {
-    if (!Number.isFinite(progress?.startedAt)) return undefined;
+    if (!Number.isFinite(progress?.startedAt) && !Number.isFinite(progress?.phaseStartedAt)) return undefined;
     const timer = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(timer);
-  }, [progress?.startedAt]);
-  const phase = progress?.phase || 'reading';
-  const repairing = phase === 'repairing';
-  const index = repairing ? 2 : Math.max(0, PHASES.findIndex(([key]) => key === phase));
-  const label = repairing ? 'Repairing career data' : PHASES[index][1];
-  const elapsed = Number.isFinite(progress?.startedAt)
-    ? Math.max(0, Math.floor((now - progress.startedAt) / 1000)) : null;
-  const hasCounts = Number.isFinite(progress?.completed) && Number.isFinite(progress?.total) && progress.total > 0;
-  const completed = hasCounts ? Math.max(0, Math.min(progress.completed, progress.total)) : 0;
+  }, [progress?.startedAt, progress?.phaseStartedAt]);
+  const view = deriveCareerCompilationProgress(progress, now);
   return (
-    <section className="min-w-0 space-y-2 rounded-lg border border-violet-400/25 bg-violet-500/10 px-3 py-3 text-xs text-violet-100/80" aria-label="Career compilation progress" onPointerDown={event => event.stopPropagation()}>
-      <div className="flex items-center gap-1.5" role="status" aria-live="polite">
-        <Loader2 size={13} className="animate-spin shrink-0 text-blue-300" />
-        <span className="flex-1 font-medium">{label}{progress?.round ? ` · round ${progress.round}` : ''}</span>
-        {onPauseAndSave && <button type="button" onClick={pause} disabled={pausing} className="inline-flex items-center gap-1 rounded border border-white/15 px-1.5 py-1 hover:bg-white/10" aria-label="Pause and save career compilation"><PauseCircle size={12} />{pausing ? 'Saving…' : 'Pause & save'}</button>}
+    <section className={`min-w-0 space-y-2 rounded-lg border border-violet-400/25 bg-violet-500/10 text-violet-100/80 ${compact ? 'px-2 py-2 text-[10px]' : 'px-3 py-3 text-xs'}`} aria-label="Career compilation progress" onPointerDown={event => event.stopPropagation()}>
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <p className={`${compact ? 'text-[9px]' : 'text-[10px]'} font-semibold uppercase tracking-wider text-violet-200/65`}>Career data processing</p>
+        {onPauseAndSave && <button type="button" onClick={pause} disabled={pausing} className="inline-flex items-center gap-1 rounded border border-white/15 px-1.5 py-1 hover:bg-white/10 disabled:opacity-50" aria-label="Pause and save career compilation"><PauseCircle size={12} aria-hidden="true" />{pausing ? 'Saving…' : 'Pause & save'}</button>}
       </div>
-      <BridgeStepList steps={PHASES.map(([key], step) => ({ key,
-        label: ['Read files', 'Compile', 'Audit', 'Save', 'Summary'][step],
-        state: step < index ? 'done' : step === index ? 'current' : 'upcoming',
-      }))} />
-      {(hasCounts || elapsed !== null) && <p className="mt-1.5 tabular-nums">{[
-        hasCounts && `${completed}/${progress.total} ${phase === 'compiling' ? 'pages compiled' : 'checks returned'}`,
-        elapsed !== null && `${Math.floor(elapsed / 60)}m ${elapsed % 60}s elapsed`,
-      ].filter(Boolean).join(' · ')}</p>}
-      {hasCounts && <div role="progressbar" aria-label={phase === 'compiling' ? 'Career pages compiled' : 'Career audit checks returned'} aria-valuemin={0} aria-valuenow={completed} aria-valuemax={progress.total} className="h-1 w-full overflow-hidden rounded bg-white/10">
-        <div className="h-full bg-violet-400 transition-[width]" style={{ width: `${completed / progress.total * 100}%` }} />
+      <div className={`flex items-start gap-2 font-semibold text-violet-50 ${compact ? 'text-xs' : 'text-sm'}`} role="status" aria-live="polite">
+        <Loader2 size={15} className="mt-0.5 animate-spin shrink-0 text-violet-200" aria-hidden="true" />
+        <span>{view.label}</span>
+      </div>
+      <p className="leading-relaxed text-violet-100/65">{view.detail}</p>
+      {view.countLabel && <div className="space-y-1.5">
+        <p className="tabular-nums">{view.countLabel}</p>
+        <div role="progressbar" aria-label={`${view.countLabel}; current stage only`} aria-valuemin={0} aria-valuenow={view.completed} aria-valuemax={view.total} className="h-1 w-full overflow-hidden rounded bg-white/10">
+          <div className="h-full bg-violet-400 transition-[width]" style={{ width: `${view.completed / view.total * 100}%` }} />
+        </div>
+      </div>}
+      {(view.totalElapsed !== null || view.actionElapsed !== null) && <div className="flex flex-wrap gap-x-4 gap-y-1 border-t border-violet-300/10 pt-2 text-[11px] tabular-nums text-violet-100/60">
+        {view.totalElapsed !== null && <span>Total elapsed: {duration(view.totalElapsed)}</span>}
+        {view.actionElapsed !== null && <span>This action: {duration(view.actionElapsed)}</span>}
       </div>}
       {notice && <p role="status" className="text-amber-100">{notice}</p>}
     </section>

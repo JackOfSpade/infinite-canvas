@@ -4,6 +4,51 @@ import fs from 'node:fs';
 
 export default [
   {
+    name: 'job source progress measures the current activity without invented completion',
+    run: () => {
+      const sourceCard = fs.readFileSync(new URL('../../src/nodes/JobSourceCardNode.jsx', import.meta.url), 'utf8');
+      const start = sourceCard.indexOf('function jobSourceProgressDisplay(');
+      const end = sourceCard.indexOf('\n/**', start);
+      assert(start >= 0 && end > start, 'source-card progress has one activity-scoped display calculation');
+      const display = new Function(`${sourceCard.slice(start, end)}\nreturn jobSourceProgressDisplay;`)();
+
+      for (const [completed, total, percent] of [[0, 1, 0], [0, 100, 0], [1, 100, 1], [1, 4, 25], [99, 100, 99], [4, 4, 100]]) {
+        const measured = display('searching', { completed, total });
+        assert(measured.label === 'Search tasks' && measured.percent === percent
+          && measured.countLabel === `${completed} of ${total}`,
+        `source tasks ${completed}/${total} preserve their actual fraction, including single-task, zero, and near-complete progress`);
+      }
+      for (const progress of [null, {}, { total: 4 }, { completed: 1, total: 0 }, { completed: -1, total: 4 }, { completed: 5, total: 4 }, { completed: 1, total: Infinity }]) {
+        const unknown = display('searching', progress);
+        assert(unknown.percent === null && unknown.completed === null && unknown.total === null
+          && unknown.countLabel === 'In progress',
+        'missing or invalid measurement stays indeterminate without an invented fraction');
+      }
+
+      const descriptions = display('searching', {
+        completed: 1, total: 1,
+        activity: 'description-enrichment', activityCompleted: 140, activityTotal: 400,
+      });
+      assert(descriptions.label === 'Descriptions checked' && descriptions.percent === 35
+        && descriptions.completed === 140 && descriptions.total === 400,
+      'post-gather descriptions use the measured description walk instead of the already-complete source task');
+      const unknownDescriptions = display('searching', { completed: 1, total: 1, activity: 'description-enrichment' });
+      assert(unknownDescriptions.percent === null,
+        'an activity with no counters cannot borrow stale completed source counters');
+      for (const status of ['done', 'error', 'skipped', 'idle']) {
+        assert(display(status, { completed: 1, total: 1 }) === null,
+          `${status} shows its outcome rather than a completed progress meter`);
+      }
+      assert(sourceCard.includes('role="progressbar"')
+        && sourceCard.includes('aria-valuenow={progressDisplay.completed}')
+        && sourceCard.includes('{progressDisplay.percent != null && <div')
+        && sourceCard.includes('{isError || isSkipped ? statusLine : warning ? warningLabel : statusLine}')
+        && !sourceCard.includes(': 42') && !sourceCard.includes('Math.max(8, Math.min(96'),
+      'only measured source activity renders a progress meter; failed/skipped outcome labels remain explicit');
+      return { scopedMeasurement: true, truthfulUnknownAndTerminal: true };
+    },
+  },
+  {
     name: 'terminal source-card blocks immediately project to the active Job Search hub without changing final warning authority',
     run: () => {
       const existing = [{ sourceId: 'ziprecruiter', code: 'provider-total-shortfall', severity: 'warn' }];

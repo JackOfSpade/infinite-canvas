@@ -1,3 +1,4 @@
+import application_bundle_links from './tests/application-bundle-links.js';
 import application_unit_patches from './tests/application-unit-patches.js';
 import application_render_faults from './tests/application-render-faults.js';
 import application_rule_tally from './tests/application-rule-tally.js';
@@ -227,6 +228,7 @@ const testGroups = [
   ['login-url-markers.js', login_url_markers],
   ['compensation-assessment.js', compensation_assessment],
   ['personal-salary-recommendation.js', personal_salary_recommendation],
+  ['application-bundle-links.js', application_bundle_links],
   ['job-compensation-pipeline.js', job_compensation_pipeline],
   ['job-location-lookup.js', job_location_lookup],
   ['job-location-consolidation.js', job_location_consolidation],

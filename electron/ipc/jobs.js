@@ -10788,6 +10788,7 @@ async function extractCareerFileSections(
     // already-owned staging inode; ordinary unit seams retain their historical
     // path reader and cannot accidentally claim the private-stage privilege.
     readStagedAttachment = null,
+    onProgress = () => {},
   } = {},
 ) {
   const controller = new AbortController();
@@ -10850,11 +10851,16 @@ async function extractCareerFileSections(
 
   const orderedPaths = Array.isArray(paths) ? paths : [];
   const files = new Array(orderedPaths.length);
+  const reportReadProgress = completed => {
+    try { onProgress({ phase: 'reading', completed, total: orderedPaths.length }); } catch { /* observer only */ }
+  };
   try {
+    reportReadProgress(0);
     // Every file is read locally; a refusal stops the whole drop before any
     // AI work, so nothing is compiled from a partial corpus.
     for (let index = 0; index < orderedPaths.length; index += 1) {
       files[index] = await extractOne(orderedPaths[index], index);
+      reportReadProgress(index + 1);
     }
     return {
       sections: files.map(file => file.section),
@@ -10973,16 +10979,21 @@ function registerJobsHandlersWithDependencies(dependencies = {}) {
     };
     const startedAt = Date.now();
     let progressTelemetry = null;
+    let currentProgress = null;
     const reportProgress = (progress) => {
+      const updatedAt = Date.now();
+      const sameAction = currentProgress?.phase === progress.phase && currentProgress?.round === progress.round;
+      const phaseStartedAt = sameAction ? currentProgress.phaseStartedAt : updatedAt;
+      currentProgress = { ...progress, startedAt, phaseStartedAt, updatedAt };
       if (progressTelemetry) {
         // Per-round convergence is retained separately (sanitized, bounded);
         // keep the raw contract object out of the last-stage record.
-        const { convergence, ...stage } = progress || {};
-        progressTelemetry.progress = { ...stage, startedAt, updatedAt: Date.now() };
+        const { convergence, ...stage } = currentProgress;
+        progressTelemetry.progress = stage;
         if (convergence) appendCareerConvergenceRound(progressTelemetry, convergence);
       }
       if (!signal?.aborted && !event.sender.isDestroyed()) {
-        event.sender.send('career-compile-progress', { nodeId, manualAiRunId, startedAt, ...progress });
+        event.sender.send('career-compile-progress', { nodeId, manualAiRunId, ...currentProgress });
       }
     };
     reportProgress({ phase: 'reading' });
@@ -11004,7 +11015,7 @@ function registerJobsHandlersWithDependencies(dependencies = {}) {
     };
     jobsTelemetry.careerSnapshotCache = cacheTelemetry;
     progressTelemetry = cacheTelemetry;
-    cacheTelemetry.progress = { phase: 'reading', startedAt, updatedAt: Date.now() };
+    cacheTelemetry.progress = currentProgress;
     // No worker needs to start for an unchanged source. The snapshot id is
     // derived from the ordered original file descriptors and the immutable
     // compiler/audit contract; reading it still validates status, contract,
@@ -11050,7 +11061,7 @@ function registerJobsHandlersWithDependencies(dependencies = {}) {
     // global handoff queue. `extractCareerFileSections` preserves incoming
     // order at the join boundary and aborts every sibling on a failure.
     const { sections, sourceFiles, directTextFiles, transcribedFiles, transcriptionAuditCount, transcriptionRevisionCount } = await extractCareerFileSections(stagedPaths, {
-      signal, sourceNames, readStagedAttachment,
+      signal, sourceNames, readStagedAttachment, onProgress: reportProgress,
     });
     const careerData = sections.join('\n\n').trim();
     if (!careerData) throw new Error('Could not extract any text from the dropped files.');

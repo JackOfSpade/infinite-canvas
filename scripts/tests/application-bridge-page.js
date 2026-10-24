@@ -1,5 +1,6 @@
 import { assert } from './testHelpers.js';
 import { HANDOFF_CONCURRENCY } from '../../src/utils/handoffScheduler.js';
+import { applicationProgressStageLabel } from '../../src/utils/applicationProgress.js';
 import {
   isGroupableBridgeApplication,
   partitionBridgeApplications,
@@ -171,15 +172,15 @@ export default [
     },
   },
   {
-    name: 'application bridge page: post-letter workflow rows stay on the final review step',
+    name: 'application bridge page: iterative workflow rows name their exact current activity',
     run: () => {
       for (const stage of ['requirement-disposition', 'blind-review', 'blind-repair-context']) {
         const status = statusWith([heldJob('a', 'awaiting', { stage, awaitingAnswer: true, servedAt: 0 })], {
           state: 'working', ordinal: 1,
         });
         const [row] = buildApplicationPageRows({ held: [appRequest('a', { stage })], status });
-        assert(row.view.steps.map(step => step.state).join(',') === 'done,done,done,current', `${stage}: the row preserves completed authoring work`);
-        assert(row.view.kind === 'writing' && row.view.headline === 'ChatGPT is working on: Review and edit', `${stage}: the row remains a live final-step handoff`);
+        assert(row.view.steps.length === 0, `${stage}: iterative workflows do not infer earlier completions`);
+        assert(row.view.kind === 'writing' && row.view.headline === `ChatGPT is working on: ${applicationProgressStageLabel(stage)}`, `${stage}: the row names the actual handoff`);
       }
     },
   },

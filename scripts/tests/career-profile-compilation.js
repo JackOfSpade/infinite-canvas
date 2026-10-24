@@ -383,6 +383,11 @@ const editProtocolTests = [
         editRepairs: 0,
         deterministicErrors: 0,
       };
+      const repairProgress = log.progress.filter(event => event.phase === 'repairing');
+      nodeAssert.deepStrictEqual(repairProgress[0], { phase: 'repairing', round: 1 }, 'repair phase starts before publishing its outcome');
+      nodeAssert.strictEqual(repairProgress.at(-1).convergence?.editsApplied, 1);
+      nodeAssert(log.progress.some(event => event.phase === 'auditing' && event.round === 2 && event.completed === 0),
+        'a new audit round starts with its own zero count');
       assert(auditCalls.length === 12 && repairCalls.length === 0
         && auditCalls.every(call => call.options.responseSchema.properties.findings.items.required.includes('edits'))
         && finalSkill(result).category === 'programming language'

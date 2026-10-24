@@ -1,4 +1,5 @@
 import React, { useId, useState } from 'react';
+import { LiveCareerCompilationProgress } from '../../components/CareerCompilationProgress';
 import { RefreshCw, LayoutGrid } from 'lucide-react';
 import { useToast } from '../../components/ToastProvider';
 import { ScrapeWarningsPanel } from '../../components/ScrapeWarningsPanel';
@@ -153,6 +154,8 @@ export function JobSearchDoneState({
   // Career data was cleared but the saved jobs are kept, pending new files.
   careerCleared = false,
   careerCompiling = false,
+  careerNodeId = null,
+  careerRunId = null,
   careerCompileFailed = false,
   careerCompileUnstarted = false,
   careerCompileError = '',
@@ -356,18 +359,19 @@ export function JobSearchDoneState({
 
       {/* Career data was cleared but the saved jobs are kept: prompt for new
           files here instead of offering re-scan / re-analyze. */}
-      {careerCleared && !locked && (
+      {careerCleared && (!locked || careerCompiling) && (
         <div className="mt-2 w-full rounded-md border border-indigo-400/20 bg-indigo-500/5 px-2 py-1.5 text-[9px] leading-snug text-indigo-100/75">
           <p className="font-medium text-indigo-200/85">{careerCompiling || careerCompileFailed || careerCompileUnstarted ? 'Career compilation' : 'Career data cleared'}</p>
-          <p className="mt-0.5">
-            {careerCompiling
-              ? 'Compiling new career data… saved jobs are kept.'
-              : careerCompileFailed
+          {careerCompiling ? <div className="mt-1.5 space-y-1">
+            <LiveCareerCompilationProgress nodeId={careerNodeId} runId={careerRunId} />
+            <p>Saved jobs are kept.</p>
+          </div> : <p className="mt-0.5">
+            {careerCompileFailed
                 ? `Career compilation failed${careerCompileError ? `: ${careerCompileError}` : ''}.`
                 : careerCompileUnstarted
                   ? 'Career files retained. Compile them when you are ready; saved jobs are kept.'
                 : `Drop new career files to re-score ${savedJobCount} saved job${savedJobCount === 1 ? '' : 's'}. Jobs are kept.`}
-          </p>
+          </p>}
           {!careerCompiling && (careerCompileFailed || careerCompileUnstarted) && onRetryCareerCompile && (
             <button
               type="button"

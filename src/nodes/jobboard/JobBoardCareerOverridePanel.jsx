@@ -1,4 +1,5 @@
 import React from 'react';
+import { LiveCareerCompilationProgress } from '../../components/CareerCompilationProgress';
 
 import { TwoStepConfirmButton } from '../jobsearch/TwoStepConfirmButton';
 
@@ -63,6 +64,7 @@ function ImportControls({ disabled, onDropFiles, onPickFiles, onOpenCanvasFiles 
 }
 
 export function JobBoardCareerOverridePanel({
+  nodeId,
   view,
   busy = false,
   onDropFiles,
@@ -111,9 +113,7 @@ export function JobBoardCareerOverridePanel({
 
       {state === 'compiling' && (
         <div className="mt-1.5">
-          <p className="text-[10px] leading-snug text-blue-200/80">
-            Compiling career data for applications… answer its handoffs in the dock.
-          </p>
+          <LiveCareerCompilationProgress nodeId={nodeId} runId={pending?.manualAiRunId} />
           <FileList names={pending?.fileNames} />
         </div>
       )}

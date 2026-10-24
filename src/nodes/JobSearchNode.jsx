@@ -121,7 +121,7 @@ const SKIP_AI_FOR_TESTING = JOB_SEARCH_TEST_MODE.enabled && JOB_SEARCH_TEST_MODE
 // transient throttles on other sources) flows straight through to scoring.
 const STATE_LABELS = {
   empty: null,
-  parsing: 'Reading resume...',
+  parsing: 'Processing career data...',
   'interpreting-preferences': 'Understanding Job Preferences...',
   querying: 'Planning search strategy...',
   searching: 'Searching for jobs...',
@@ -14744,6 +14744,8 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         {/* Processing state */}
         {isProcessing && (
           <JobSearchProcessingState
+            nodeId={id}
+            careerRunId={data.careerImportCompilation?.manualAiRunId || null}
             statusLabel={statusLabel}
             hubState={hubState}
             totalSourceJobs={totalSourceJobs}
@@ -14834,6 +14836,8 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
               savedJobCount={listedSavedJobCount}
               careerCleared={careerReplacementPending}
               careerCompiling={replacementCompile?.status === 'compiling' && !(data.manualAiResume?.pausedByUser && data.manualAiResume?.runId === replacementCompile.manualAiRunId)}
+              careerNodeId={id}
+              careerRunId={replacementCompile?.manualAiRunId || null}
               careerCompileFailed={careerCompilationFailed}
               careerCompileUnstarted={careerCompilationUnstarted}
               careerCompileError={replacementCompile?.status === 'failed' ? (replacementCompile.error || '') : ''}

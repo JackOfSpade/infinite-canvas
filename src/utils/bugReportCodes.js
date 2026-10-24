@@ -366,6 +366,13 @@ export const CODE_DEFINITIONS = {
     excludeSections: ['nodes', 'edges', 'drawings', 'nodeInternals', 'nodeComponentStates', 'imageState', 'mediaState', 'sessionTraces', 'jobAuditDetail'],
   },
 
+  APPLINK: {
+    label: 'Saved Application Links',
+    description: 'Saved-bundle lookup counts and restoration events after card rebuilds. Included in FULL.',
+    logFilter: line => /ApplicationLinks|LocalAI|JobCard|JobBoard/.test(line),
+    excludeSections: ['drawings', 'nodeInternals', 'imageState', 'mediaState', 'jobAuditDetail'],
+  },
+
   JOBBOARD: {
     label: 'Job Board Admission & Recovery',
     description: 'Job Board selector/admission audit — connected Job Search readiness, interrupted Board ownership/recovery, mounted Combine stage and compensation progress, fresh-career-import admission, and login-preflight timing. Keeps the redacted nodes, edges, and mounted selector state required to explain a disabled Board action while omitting unrelated drawings, layout internals, and media snapshots.',

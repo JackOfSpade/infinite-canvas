@@ -269,7 +269,7 @@ export function BridgeProgress({
   const lines = progressTimeLines(view, now);
   // The page-level worker block never prints the timer lines, so it must not
   // re-render once a second for them either.
-  const ticking = !workersOnly && (view.since !== null || view.lastHeard !== null);
+  const ticking = !workersOnly && (view.since !== null || view.lastHeard !== null || view.startedAt != null);
 
   useEffect(() => {
     statusRef.current = status;
@@ -487,7 +487,8 @@ export function BridgeProgress({
       data-workers-only={workersOnly ? 'true' : undefined}
       className={`min-w-0 rounded-lg border px-3 py-3 text-xs leading-relaxed ${TONE_CLASS[view.tone] || TONE_CLASS.neutral}`}
     >
-      {!workersOnly && !isPush && view.steps.length > 0 && <BridgeStepList steps={view.steps} />}
+      {!workersOnly && !isPush && <div className="text-[10px] font-semibold uppercase tracking-wide text-white/50">{view.contextLabel || 'Application generation'}</div>}
+      {!workersOnly && !isPush && view.steps.length > 0 && <div className="mt-2"><BridgeStepList steps={view.steps} /></div>}
 
       {(!workersOnly || view.action) && (
         <div
@@ -504,9 +505,11 @@ export function BridgeProgress({
         </div>
       )}
 
-      {!workersOnly && (lines.elapsed || lines.heard) && (
-        <p className="mt-2 text-[11px] text-white/50">
-          {[lines.elapsed, lines.heard].filter(Boolean).join(' · ')}
+      {!workersOnly && !isPush && view.summary && <p className="mt-2 text-[11px] text-white/60">{view.summary}</p>}
+
+      {!workersOnly && (lines.total || lines.elapsed || lines.heard) && (
+        <p className="mt-2 text-[11px] tabular-nums text-white/50">
+          {[lines.total, lines.elapsed, lines.heard].filter(Boolean).join(' · ')}
         </p>
       )}
 

@@ -1,3 +1,4 @@
+import { applicationListingKeys } from '../utils/applicationBundleIdentity';
 import { useEffect, useRef } from 'react';
 import { EventLogger } from '../utils/EventLogger';
 import { requestApplicationHandoffRefresh } from '../utils/applicationHandoffDock';
@@ -600,6 +601,41 @@ export function useLocalAiFallbackManager({ navigation, getCurrentFile, addToast
       }));
     };
 
+    let restoredInventory = '';
+    const restoreSavedLinks = async (allNodes, generation) => {
+      const api = window.electronAPI;
+      const canvasFilePath = ctxRef.current.getCurrentFile?.();
+      if (!canvasFilePath || !api?.findSavedApplicationLinks) return;
+      const cards = allNodes.filter(node => node.type === 'jobcard' && !node.data?.localApplication);
+      const jobs = cards.map(node => ({ nodeId: node.id, url: node.data?.url,
+        googleCardUrl: node.data?.googleCardUrl, postingVariants: node.data?.postingVariants }));
+      const signature = JSON.stringify([canvasFilePath, jobs.map(job => [job.nodeId, applicationListingKeys(job)])]);
+      if (signature === restoredInventory || !jobs.length) return;
+      let result;
+      try { result = await api.findSavedApplicationLinks({ canvasFilePath, jobs }); }
+      catch (error) {
+        EventLogger.log(`[ApplicationLinks] lookup failed: ${error?.message || error}`);
+        return;
+      }
+      if (!result?.success || !Array.isArray(result.links)) return;
+      if (disposed || !isCurrentQuitGeneration(generation) || ctxRef.current.getCurrentFile?.() !== canvasFilePath) return;
+      restoredInventory = signature;
+      let restored = 0;
+      for (const link of result.links) {
+        const original = cards.find(node => node.id === link.nodeId);
+        ctxRef.current.navigation?.updateNodeDataGlobally?.(link.nodeId, node => {
+          if (!original || node?.type !== 'jobcard' || node.data?.localApplication
+            || JSON.stringify(applicationListingKeys(node.data)) !== JSON.stringify(applicationListingKeys(original.data))) return null;
+          restored++;
+          return { localApplication: link.localApplication };
+        });
+      }
+      if (restored) {
+        ctxRef.current.nudgePersistence?.();
+        EventLogger.log(`[ApplicationLinks] restored saved bundle pointers cards=${restored}`);
+      }
+    };
+
     const tick = async () => {
       if (disposed || tickBusyRef.current) return;
       const generation = currentQuitGeneration();
@@ -609,6 +645,8 @@ export function useLocalAiFallbackManager({ navigation, getCurrentFile, addToast
       tickBusyRef.current = true;
       try {
         const allNodes = nav.enumerateAllNodes();
+        await restoreSavedLinks(allNodes, generation);
+        if (!isCurrentQuitGeneration(generation)) return;
         // Fold the one-time hidden/unmounted saved-card reconciliation into
         // the same tick, before the pending-job driver: it is a bounded, once-
         // per-session check per saved card and never loops.

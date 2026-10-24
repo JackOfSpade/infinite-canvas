@@ -32,17 +32,12 @@ import {
   JOB_ROW_COPY,
 } from './handoffBridgeCopy.js';
 import { applicationStageLabel } from './applicationHandoffDock.js';
+import { applicationProgressContext, applicationProgressStageLabel } from './applicationProgress.js';
 import { CHAT_STATES, JOB_PHASES } from './handoffBridgeStatus.js';
 
 export const PROGRESS_STAGES = Object.freeze(['evidence-plan', 'resume', 'cover-letter', 'review']);
 export const PROGRESS_TONES = Object.freeze(['neutral', 'working', 'attention', 'problem']);
 export const PROGRESS_ACTIONS = Object.freeze(['start-chat', 'continue-chat']);
-
-// The current-authority workflow has verification and independent-review
-// handoffs after it writes the cover letter. They all belong to the final
-// user-facing review step; unknown stage names still make no progress claim.
-const REVIEW_PROGRESS_STAGES = new Set(['requirement-disposition', 'blind-review', 'blind-repair-context', 'refinement-judge',
-  'write', 'convert', 'verify-correction', 'fit-correction', 'pick', 'fact-check', 'fact-correction', 'fact-recheck', 'write-verify-human-stop']);
 
 const isObject = value => value !== null && typeof value === 'object' && !Array.isArray(value);
 const object = value => (isObject(value) ? value : {});
@@ -50,12 +45,15 @@ const time = value => (Number.isFinite(value) && value >= 0 ? value : null);
 const upperFirst = text => `${text.charAt(0).toUpperCase()}${text.slice(1)}`;
 
 export function progressStage(value) {
-  if (PROGRESS_STAGES.includes(value)) return value;
-  return REVIEW_PROGRESS_STAGES.has(value) ? 'review' : null;
+  return applicationProgressStageLabel(value) ? value : null;
 }
 
 export function stepsFor(stage, allDone) {
   const current = PROGRESS_STAGES.indexOf(stage);
+  // Only the original sequential workflow proves these four milestones.
+  // Modern candidate workflows repeat writing and checks; projecting their
+  // current stage onto the last pill invents three completed steps.
+  if (current < 0) return [];
   return PROGRESS_STAGES.map((key, index) => ({
     key,
     label: applicationStageLabel(key),
@@ -123,7 +121,7 @@ function deriveInner({ job: rawJob, chat: rawChat, item: rawItem, bridge: rawBri
   if (!JOB_PHASES.includes(phase) || phase === 'unknown') return generic();
 
   const stage = progressStage(job.stage) || progressStage(item.stage);
-  const label = stage ? applicationStageLabel(stage) : null;
+  const label = stage ? (PROGRESS_STAGES.includes(stage) ? applicationStageLabel(stage) : applicationProgressStageLabel(stage)) : null;
   const finished = phase === 'done';
   const base = steps => ({ steps, kind: phase });
   const steps = stepsFor(stage, finished);
@@ -271,7 +269,9 @@ function deriveInner({ job: rawJob, chat: rawChat, item: rawItem, bridge: rawBri
  */
 export function deriveBridgeJobProgress(input) {
   try {
-    return deriveInner(object(input));
+    const value = object(input);
+    const context = applicationProgressContext(value.item?.progress);
+    return { ...deriveInner(value), contextLabel: context.label, summary: context.summary, startedAt: context.startedAt };
   } catch {
     return generic();
   }
@@ -364,18 +364,22 @@ export function formatProgressDuration(ms) {
   return rest ? `${hours} h ${rest} min` : `${hours} h`;
 }
 
-/** One elapsed clock during normal work; activity adds context only when overdue. */
+/** Label the total and current handoff separately so a new call cannot look like a fresh application. */
 export function progressTimeLines(view, now) {
   const clock = time(now);
   const since = time(view?.since);
+  const startedAt = time(view?.startedAt);
   const heard = time(view?.lastHeard);
   const elapsed = clock !== null && since !== null ? formatProgressDuration(Math.max(0, clock - since)) : null;
+  const total = clock !== null && startedAt !== null ? formatProgressDuration(Math.max(0, clock - startedAt)) : null;
   const heardMs = clock !== null && heard !== null ? Math.max(0, clock - heard) : null;
   const ago = heardMs === null ? null : heardMs < 2000 ? BRIDGE_PROGRESS_COPY.justNow : BRIDGE_PROGRESS_COPY.ago(formatProgressDuration(heardMs));
   const overdue = view?.kind === 'response-overdue' || view?.kind === 'push-response-overdue';
   const showHeard = !elapsed || (overdue && formatProgressDuration(heardMs) !== elapsed);
+  const elapsedLabel = ['held', 'needs_user'].includes(view?.kind) ? 'Waiting' : 'Current handoff';
   return {
-    elapsed: elapsed ? BRIDGE_PROGRESS_COPY.elapsed(elapsed) : null,
+    total: total ? `Total elapsed: ${total}` : null,
+    elapsed: elapsed ? `${elapsedLabel}: ${elapsed}` : null,
     heard: ago && showHeard ? BRIDGE_PROGRESS_COPY.lastHeard(ago) : null,
   };
 }

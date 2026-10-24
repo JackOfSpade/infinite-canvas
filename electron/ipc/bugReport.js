@@ -1,3 +1,4 @@
+import { savedApplicationLinkDiagnosticsMarkdown } from './localAiApplication.js';
 import electronPkg from 'electron';
 const { dialog, app } = electronPkg;
 import fs from 'fs';
@@ -3093,7 +3094,7 @@ ${viewportBlock}
 - Runtime: Electron ${systemInfo.electronVersion || '?'} · Chromium ${systemInfo.chromiumVersion || '?'} · Node ${systemInfo.nodeVersion || '?'}
 - OS release: ${systemInfo.osRelease}
 - Report generated: ${systemInfo.generatedAt} · timezone ${systemInfo.timezone} · UTC offset ${systemInfo.utcOffsetMinutes >= 0 ? '+' : ''}${systemInfo.utcOffsetMinutes} min
-${buildRendererCrashMarkdown(app.getPath('userData'))}${buildFreshnessMarkdown}${pointerProbeMarkdown}${persistedWorkspaceMarkdown}${missingPreviewRelinkMarkdown}${activeTasksMarkdown}${handoffBridgeDiagnosticsMarkdown}${sellHubResolveMarkdown}${aiConfigMarkdown}${jobsConfigMarkdown}${jobCompletionAssessmentMarkdown}${jobBoardDiagnosticsMarkdown}${nonApiHandoffMarkdown}${pasteHandoffMarkdown}${pasteRejectionTraceMarkdown}${applicationOutputMarkdown}${jobLinkMarkdown}${jobRecoveryOfferMarkdown}${jobRecoveryMarkdown}${issueReporterDraftMarkdown}${jobsPipelineMarkdown}${marketplacePipelineMarkdown}${marketplaceModuleRollupMarkdown}${sellHubPriceDropRollupMarkdown}${sessionPersistenceMarkdown}${marketplaceSessionsMarkdown}${jobSessionsMarkdown}${verifyTimingMarkdown}${authWindowMarkdown}${scraperAdaptationMarkdown}${activeEditableMarkdown}${lastSaveErrorMarkdown}${nodeDiagMarkdown}${mediaMarkdown}${imageMarkdown}
+${buildRendererCrashMarkdown(app.getPath('userData'))}${buildFreshnessMarkdown}${pointerProbeMarkdown}${persistedWorkspaceMarkdown}${missingPreviewRelinkMarkdown}${activeTasksMarkdown}${handoffBridgeDiagnosticsMarkdown}${sellHubResolveMarkdown}${aiConfigMarkdown}${jobsConfigMarkdown}${jobCompletionAssessmentMarkdown}${jobBoardDiagnosticsMarkdown}${nonApiHandoffMarkdown}${pasteHandoffMarkdown}${pasteRejectionTraceMarkdown}${applicationOutputMarkdown}${(isFullReport || reportCodes.has('APPLINK')) ? savedApplicationLinkDiagnosticsMarkdown() : ''}${jobLinkMarkdown}${jobRecoveryOfferMarkdown}${jobRecoveryMarkdown}${issueReporterDraftMarkdown}${jobsPipelineMarkdown}${marketplacePipelineMarkdown}${marketplaceModuleRollupMarkdown}${sellHubPriceDropRollupMarkdown}${sessionPersistenceMarkdown}${marketplaceSessionsMarkdown}${jobSessionsMarkdown}${verifyTimingMarkdown}${authWindowMarkdown}${scraperAdaptationMarkdown}${activeEditableMarkdown}${lastSaveErrorMarkdown}${nodeDiagMarkdown}${mediaMarkdown}${imageMarkdown}
 `;
 
   const events = payload.eventLogs || [];

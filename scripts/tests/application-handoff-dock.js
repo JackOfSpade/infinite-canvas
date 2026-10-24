@@ -34,6 +34,7 @@ import {
 } from '../../src/utils/applicationHandoffDock.js';
 import { isWorkflowSuccessor } from '../../src/utils/nonApiAiNavigation.js';
 import { deriveBridgeJobProgress, formatProgressDuration, progressTimeLines, PROGRESS_STAGES } from '../../src/utils/bridgeJobProgress.js';
+import { applicationProgressContext, applicationProgressStageLabel, normalizeApplicationProgress } from '../../src/utils/applicationProgress.js';
 import { BRIDGE_PROGRESS_COPY, JOB_ROW_COPY, bridgePluginRef } from '../../src/utils/handoffBridgeCopy.js';
 import { deriveBridgeHealth, describeJobRow } from '../../src/utils/handoffBridgeView.js';
 import { EMPTY_BRIDGE_STATUS } from '../../src/utils/handoffBridgeStatus.js';
@@ -1718,14 +1719,14 @@ const bridgeJobProgressTests = [
       assert(view.steps.every(step => step.label === applicationStageLabel(step.key)), 'step labels must be the dock\'s STAGE_LABELS');
       assert(stepStates(view) === 'done,current,upcoming,upcoming', `resume must be the current step: ${stepStates(view)}`);
       assert(stepStates(progress({ job: progressJob({ stage: 'review' }) })) === 'done,done,done,current', 'review current means three done');
-      for (const stage of ['requirement-disposition', 'blind-review', 'blind-repair-context']) {
+      for (const stage of ['requirement-disposition', 'blind-review', 'blind-repair-context', 'write', 'convert', 'verify-correction', 'fit-correction', 'pick', 'fact-check', 'fact-correction', 'fact-recheck']) {
         const postLetter = progress({ job: progressJob({ stage }), item: { stage, corrections: [] } });
-        assert(stepStates(postLetter) === 'done,done,done,current', `${stage} belongs to the final review step`);
-        assert(postLetter.headline === 'ChatGPT is working on: Review and edit', `${stage} uses the final step's working copy`);
+        assert(postLetter.steps.length === 0, `${stage} must not invent completion of earlier steps`);
+        assert(postLetter.headline === `ChatGPT is working on: ${applicationProgressStageLabel(stage)}`, `${stage} names the actual current activity`);
         const legacyStatus = progress({ job: progressJob({ stage: null }), item: { stage, corrections: [] } });
-        assert(stepStates(legacyStatus) === 'done,done,done,current', `${stage} still projects from the request while an older status omits it`);
+        assert(legacyStatus.steps.length === 0 && legacyStatus.headline === postLetter.headline, `${stage} falls back to the exact request activity while an older status omits it`);
       }
-      assert(stepStates(progress({ job: progressJob({ stage: null }), item: {} })) === 'upcoming,upcoming,upcoming,upcoming', 'an unknown stage must not invent progress');
+      assert(progress({ job: progressJob({ stage: null }), item: {} }).steps.length === 0, 'an unknown stage must not invent a workflow');
     },
   },
   {
@@ -1861,7 +1862,7 @@ const bridgeJobProgressTests = [
       assert(!/reading|nothing is needed/i.test(`${unread.headline} ${unread.detail}`), `unread must not claim the app is reading it or that nothing is needed: ${unread.detail}`);
       const host = progress({ job: progressJob({ phase: 'host', stage: null }), item: {} });
       assert(host.kind === 'host' && host.tone === 'working' && host.headline === 'The app is saving this' && host.detail === 'The app is building the documents.', `host claims only the app-side work: ${host.detail}`);
-      assert(stepStates(host) === 'upcoming,upcoming,upcoming,upcoming', 'host cannot prove ChatGPT answered every stage, so it must not mark them done');
+      assert(host.steps.length === 0, 'host cannot prove ChatGPT answered every stage, so it must not invent a workflow');
       assert(stepStates(progress({ job: progressJob({ phase: 'host', stage: 'review' }) })) === 'done,done,done,current', 'host with a known stage marks that stage, not everything');
       assert(!/ChatGPT/.test(host.detail), 'host detail must not credit ChatGPT');
       const paused = progress({ bridge: { paused: true } });
@@ -1955,7 +1956,7 @@ const bridgeJobProgressTests = [
       for (const input of hostile) {
         let view;
         try { view = deriveBridgeJobProgress(input); } catch (error) { assert(false, `deriveBridgeJobProgress threw for ${JSON.stringify(input)}: ${error.message}`); }
-        assert(view.steps.length === 4 && typeof view.headline === 'string' && view.headline && typeof view.detail === 'string', 'a view model always has four steps and a headline');
+        assert(Array.isArray(view.steps) && [0, 4].includes(view.steps.length) && typeof view.headline === 'string' && view.headline && typeof view.detail === 'string', 'a view model has only supported steps and a headline');
         assert(['neutral', 'working', 'attention', 'problem'].includes(view.tone), 'tone stays in the closed set');
         assert(view.action === null || ['start-chat', 'continue-chat'].includes(view.action), 'action stays in the closed set');
       }
@@ -1972,15 +1973,39 @@ const bridgeJobProgressTests = [
       assert(formatProgressDuration(20000) === '20s' && formatProgressDuration(120000) === '2 min' && formatProgressDuration(3900000) === '1 h 5 min' && formatProgressDuration(3600000) === '1 h', 'duration format');
       assert(formatProgressDuration(-1) === null && formatProgressDuration(NaN) === null && formatProgressDuration('5') === null, 'bad durations are null');
       const lines = progressTimeLines({ since: PROGRESS_NOW - 120000, lastHeard: PROGRESS_NOW - 20000 }, PROGRESS_NOW);
-      assert(lines.elapsed === 'Elapsed: 2 min' && lines.heard === null, `${lines.elapsed} / ${lines.heard}`);
+      assert(lines.elapsed === 'Current handoff: 2 min' && lines.heard === null, `${lines.elapsed} / ${lines.heard}`);
       const duplicate = progressTimeLines({ kind: 'writing', since: PROGRESS_NOW - 4000, lastHeard: PROGRESS_NOW - 4000 }, PROGRESS_NOW);
-      assert(duplicate.elapsed === 'Elapsed: 4s' && duplicate.heard === null, 'normal work shows one labeled clock');
+      assert(duplicate.elapsed === 'Current handoff: 4s' && duplicate.heard === null, 'normal work labels the scope of the clock');
       const overdue = progressTimeLines({ kind: 'response-overdue', since: PROGRESS_NOW - 120000, lastHeard: PROGRESS_NOW - 20000 }, PROGRESS_NOW);
       assert(overdue.heard === 'Last heard from ChatGPT 20s ago', 'overdue work preserves distinct activity context');
       assert(progressTimeLines({ kind: 'response-overdue', since: PROGRESS_NOW - 4000, lastHeard: PROGRESS_NOW - 4000 }, PROGRESS_NOW).heard === null, 'even attention states do not repeat an identical duration');
       assert(progressTimeLines({ since: null, lastHeard: null }, PROGRESS_NOW).elapsed === null && progressTimeLines({ since: null, lastHeard: null }, PROGRESS_NOW).heard === null, 'no anchor, no line');
       assert(progressTimeLines({ lastHeard: PROGRESS_NOW + 5000 }, PROGRESS_NOW).heard === 'Last heard from ChatGPT just now', 'a clock skew clamps to just now');
       assert(progressTimeLines(null, PROGRESS_NOW).elapsed === null && progressTimeLines({ since: 5 }, undefined).elapsed === null, 'malformed input yields no lines');
+      const totals = progressTimeLines({ startedAt: PROGRESS_NOW - 600000, since: PROGRESS_NOW - 20000 }, PROGRESS_NOW);
+      assert(totals.total === 'Total elapsed: 10 min' && totals.elapsed === 'Current handoff: 20s', 'total and current handoff remain separate');
+      assert(progressTimeLines({ kind: 'held', since: PROGRESS_NOW - 20000 }, PROGRESS_NOW).elapsed === 'Waiting: 20s', 'a hold times the wait rather than claiming work');
+    },
+  },
+  {
+    name: 'bridge progress: candidate metadata names the actual pass and only host-reported check outcomes',
+    run: () => {
+      const metadata = { workflow: 'write-verify', candidate: 2, candidateCount: 5, checked: 1, ready: 0, rejected: 1, startedAt: PROGRESS_NOW - 600000 };
+      const candidate = progress({ job: progressJob({ stage: 'write' }), item: { stage: 'write', progress: metadata } });
+      assert(candidate.steps.length === 0 && candidate.contextLabel === 'Application candidates · Candidate 2 of 5', 'writing a new candidate is not a completed résumé milestone');
+      assert(candidate.headline === 'ChatGPT is working on: Write application', 'actual activity remains prominent');
+      assert(candidate.summary === '1 of 5 checked · 0 passed initial checks · 1 rejected in initial checks', candidate.summary);
+      assert(candidate.startedAt === metadata.startedAt, 'total time uses application creation, not the current call');
+      const ranking = applicationProgressContext({ ...metadata, candidate: null });
+      assert(ranking.label === 'Application candidates · 5 planned', 'ranking does not invent an active candidate');
+      const factFallback = applicationProgressContext({ ...metadata, candidate: 3, checked: 5, ready: 5, rejected: 0 });
+      assert(factFallback.summary.includes('0 rejected in initial checks'), 'initial-check counts do not claim that later fact-checks accepted every candidate');
+      const malformed = normalizeApplicationProgress({ ...metadata, candidate: 99, checked: -1, ready: '2', rejected: Infinity, startedAt: 'yesterday' });
+      assert(malformed.candidate === null && malformed.checked === null && malformed.ready === null && malformed.rejected === null && malformed.startedAt === null, 'invalid counters and dates cannot become progress claims');
+      for (const value of [null, {}, [], { workflow: 'other', candidateCount: 5 }, { ...metadata, candidateCount: 101 }]) {
+        assert(normalizeApplicationProgress(value) === null, 'unknown or malformed workflows are not projected');
+      }
+      assert(applicationProgressStageLabel('constructor') === null && applicationProgressStageLabel('requirements-audit') === 'Audit job requirements', 'stage labels use a closed activity list');
     },
   },
 ];

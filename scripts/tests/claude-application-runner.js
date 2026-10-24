@@ -188,6 +188,63 @@ function scriptedApi(stages, { rejectFirst = false } = {}) {
 
 export default [
   {
+    name: 'claude runner progress: a queued sibling cannot hide active work or reset its action clock',
+    async run() {
+      let clock = 1000, releaseFirst, firstStarted = false;
+      const finished = new Set();
+      const runner = createClaudeApplicationRunner({ concurrency: 1, stateFile: tempStateFile(), logger: quietLogger(),
+        now: () => clock++, api: {
+          getHandoff: async ({ matchTaskId }) => {
+            if (!matchTaskId) return finished.size === 2 ? { completed: true } : { handoff: { stage: 'match-wave', parallelTasks: [{ id: 'one' }, { id: 'two' }] } };
+            if (finished.has(matchTaskId)) return { completed: true };
+            if (matchTaskId === 'two') await waitFor(() => firstStarted);
+            return { handoff: { stage: 'requirements-audit', handoffCode: matchTaskId, prompt: matchTaskId } };
+          },
+          submitHandoff: async ({ matchTaskId }) => { finished.add(matchTaskId); return { accepted: true, completed: true }; },
+          subscribeDiscards: () => () => {},
+        }, runStage: async ({ text, onActivity }) => {
+          if (text === 'one') { onActivity(); firstStarted = true; await new Promise(resolve => { releaseFirst = resolve; }); }
+          return { text: '{}' };
+        },
+      });
+      try {
+        runner.ensure({ jobId: 'parallel-progress', canvasFilePath: '/c.canvas' });
+        await waitFor(() => runner.status(['parallel-progress'])['parallel-progress']?.waitingCalls === 1);
+        const current = runner.status(['parallel-progress'])['parallel-progress'];
+        assert.equal(current.activity, 'running'); assert.equal(current.activeCalls, 1); assert.equal(current.waitingCalls, 1);
+        assert(Number.isFinite(current.lastActivityAt), 'sibling queue retains provider activity');
+        const started = current.updatedAt;
+        clock += 100;
+        assert.equal(runner.status(['parallel-progress'])['parallel-progress'].updatedAt, started, 'current action start stays stable');
+        releaseFirst();
+        await waitFor(() => runner.status(['parallel-progress'])['parallel-progress']?.status === 'done');
+      } finally { releaseFirst?.(); await runner.shutdown(); }
+    },
+  },
+  {
+    name: 'claude runner progress: host candidate counts survive queue provider and validation transitions',
+    async run() {
+      let clock = 1000;
+      const progress = { workflow: 'write-verify', startedAt: 100, candidate: 2, candidateCount: 5, checked: 1, ready: 0, rejected: 1 };
+      const script = sequenceApi([{ handoffCode: 'progress-code', stage: 'write', prompt: 'synthetic writer', progress }]);
+      const notes = [];
+      const runner = createClaudeApplicationRunner({ api: script.api, stateFile: tempStateFile(), logger: quietLogger(),
+        now: () => clock++, notify: note => notes.push(note),
+        runStage: async () => ({ text: 'synthetic answer' }),
+      });
+      runner.ensure({ jobId: 'progress-job', canvasFilePath: '/c.canvas' });
+      await waitFor(() => runner.status(['progress-job'])['progress-job']?.status === 'done');
+      const actions = notes.filter(note => note.status === 'running' && note.progress);
+      assert.deepEqual(actions.map(note => [note.stage, note.activity]), [
+        ['write', 'waiting'], ['write', 'running'], ['host-verification', 'running'],
+      ]);
+      assert(actions.every(note => note.startedAt === actions[0].startedAt), 'driver start never resets on a handoff');
+      assert(actions.every(note => JSON.stringify(note.progress) === JSON.stringify(progress)), 'frozen job start and counts remain attached');
+      assert(actions[2].updatedAt > actions[1].updatedAt, 'host validation gets its own action clock');
+      await runner.shutdown();
+    },
+  },
+  {
     name: 'claude runner driver: held render replays without a provider call and retry replays again',
     async run() {
       let providerCalls = 0, submissions = 0;
@@ -637,7 +694,9 @@ export default [
         { jobId: 'job-happy', canvasFilePath: '/c.canvas', handoffCode: 'code-1', response: 'answer to prompt one', route: 'claude-runner' },
         { jobId: 'job-happy', canvasFilePath: '/c.canvas', handoffCode: 'code-2', response: 'answer to prompt two', route: 'claude-runner' },
       ]);
-      assert.deepEqual(notes.filter(n => n.status === 'running' && n.stage).map(n => n.stage), ['draft', 'verify']);
+      assert.deepEqual(notes.filter(n => n.status === 'running' && n.stage).map(n => [n.stage, n.activity]),
+        [['draft', 'waiting'], ['draft', 'running'], ['host-verification', 'running'],
+          ['verify', 'waiting'], ['verify', 'running'], ['host-verification', 'running']]);
       assert.deepEqual(runner.ensure({ jobId: '', canvasFilePath: '/c.canvas' }), { status: 'invalid' });
     },
   },

@@ -1,5 +1,6 @@
 import { HANDOFF_CONCURRENCY } from './handoffScheduler.js';
 import { getClaudeApplicationRun, normalizeClaudeRun } from './claudeApplicationRuns.js';
+import { normalizeApplicationProgress } from './applicationProgress.js';
 
 /**
  * Application-bundle handoffs, expressed as items of the global AI handoff
@@ -181,6 +182,11 @@ export function isApplicationRequestId(requestId) {
 }
 
 const STAGE_LABELS = {
+  requirements: 'Read job requirements',
+  'requirements-audit': 'Audit job requirements',
+  'requirements-adjudication': 'Resolve requirement disagreements',
+  'editorial-plan': 'Plan application',
+  'host-verification': 'Check response',
   'evidence-plan': 'Evidence plan',
   resume: 'Résumé',
   'cover-letter': 'Cover letter',
@@ -256,6 +262,7 @@ export function applicationDockRequest({ node, handoff, canvasFilePath = null })
     runId: local.id,
     task: handoff.stage || local.stage || 'application',
     stage: handoff.stage || '',
+    progress: normalizeApplicationProgress(handoff.progress),
     revision: Number.isFinite(Number(handoff.revision)) ? Number(handoff.revision) : null,
     handoffCode: handoff.handoffCode,
     prompt: handoff.prompt,

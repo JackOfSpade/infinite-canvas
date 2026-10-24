@@ -5,6 +5,7 @@
  * change events report, and applicationDockRequest reads it so the dock can
  * show "Claude is writing this" instead of a paste box.
  */
+import { normalizeApplicationProgress } from './applicationProgress.js';
 
 export const CLAUDE_RUN_STATUSES = Object.freeze([
   'running', 'failed', 'done', 'needs-review', 'bridge', 'invalid',
@@ -23,6 +24,7 @@ export function normalizeClaudeRun(state) {
   if (!state || typeof state !== 'object' || Array.isArray(state)) return null;
   const status = state.status;
   if (typeof status !== 'string' || !CLAUDE_RUN_STATUSES.includes(status)) return null;
+  const progress = normalizeApplicationProgress(state.progress);
   return {
     status,
     stage: optionalString(state.stage),
@@ -30,6 +32,11 @@ export function normalizeClaudeRun(state) {
     message: optionalString(state.message).slice(0, MESSAGE_LIMIT),
     updatedAt: optionalTime(state.updatedAt),
     lastActivityAt: optionalTime(state.lastActivityAt),
+    ...(optionalTime(state.startedAt) !== null ? { startedAt: state.startedAt } : {}),
+    ...(progress ? { progress } : {}),
+    ...(['waiting', 'running'].includes(state.activity) ? { activity: state.activity } : {}),
+    ...(Number.isSafeInteger(state.activeCalls) && state.activeCalls >= 0 && state.activeCalls <= 100 ? { activeCalls: state.activeCalls } : {}),
+    ...(Number.isSafeInteger(state.waitingCalls) && state.waitingCalls >= 0 && state.waitingCalls <= 100 ? { waitingCalls: state.waitingCalls } : {}),
     ...(['same-rule-repeat', 'run-budget'].includes(state.reason) ? { reason: state.reason } : {}),
     ...(Number.isSafeInteger(state.runs) && state.runs > 0 ? { runs: state.runs } : {}),
   };

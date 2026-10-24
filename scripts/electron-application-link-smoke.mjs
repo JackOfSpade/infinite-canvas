@@ -20,11 +20,20 @@ try {
     importedAt: new Date().toISOString(), outputDir };
   const receiptsRoot = path.join(root, '.local-ai', 'handoff-receipts');
   await fs.mkdir(receiptsRoot, { recursive: true });
-  await fs.writeFile(path.join(receiptsRoot, `${jobId}.json`), JSON.stringify(receipt));
+  await fs.writeFile(path.join(receiptsRoot, `${jobId}.json`), JSON.stringify({
+    ...receipt, listingKeys: ['https://example.test/jobs/synthetic'],
+  }));
+  await fs.writeFile(path.join(outputDir, 'Generation Audit.json'), JSON.stringify({
+    jobId, finalArtifacts: { resultSha256: receipt.resultSha256 },
+  }));
   await fs.writeFile(canvasFilePath, JSON.stringify({ schemaVersion: 1, nodes: [{
     id: 'saved-card', type: 'jobcard', position: { x: 0, y: 0 },
     data: { title: 'Synthetic Engineer', company: 'Synthetic', matchScore: 80,
       localApplication: { id: jobId, status: 'saved', mode: 'paste', canvasFilePath, savedDir: outputDir, receipt } },
+  }, {
+    id: 'rebuilt-card', type: 'jobcard', position: { x: 400, y: 0 },
+    data: { title: 'Synthetic Engineer', company: 'Synthetic', matchScore: 80,
+      url: 'https://example.test/jobs/synthetic' },
   }], edges: [], drawings: [] }));
   application = await electron.launch({ args: ['.', `--user-data-dir=${path.join(root, 'profile')}`], env });
   const page = await application.firstWindow();
@@ -39,7 +48,12 @@ try {
   await page.goto(url.href);
   const skip = page.getByRole('button', { name: 'Skip', exact: true });
   if (await skip.isVisible()) await skip.click();
-  const card = page.locator('.react-flow__node-jobcard');
+  const card = page.locator('.react-flow__node-jobcard[data-id="saved-card"]');
+  const rebuilt = page.locator('.react-flow__node-jobcard[data-id="rebuilt-card"]');
+  await rebuilt.getByRole('button', { name: 'Open saved folder', exact: true }).waitFor();
+  assert.equal(await rebuilt.getByTestId('job-card-bundle-cross').count(), 1, 'the restored bundle displays its red X');
+  assert.equal(await rebuilt.getByRole('button', { name: 'Generate', exact: true }).count(), 0,
+    'a rebuilt mounted card adopts its restored saved pointer');
   await card.getByRole('button', { name: 'Open saved folder', exact: true }).waitFor();
   assert.equal(await card.getByRole('button', { name: 'Generate', exact: true }).count(), 0,
     'a linked saved folder must hide Generate entirely');
@@ -49,13 +63,15 @@ try {
     'editing or deleting a file inside a linked folder must not unlock generation');
   await fs.rm(outputDir, { recursive: true });
   await card.getByRole('button', { name: 'Generate', exact: true }).waitFor({ timeout: 20_000 });
+  await rebuilt.getByRole('button', { name: 'Generate', exact: true }).waitFor({ timeout: 20_000 });
+  assert.equal(await rebuilt.getByTestId('job-card-bundle-cross').count(), 0, 'a deleted bundle clears the restored X');
   assert.equal(await card.getByRole('button', { name: 'Open saved folder', exact: true }).count(), 0,
     'external folder removal must clear the saved indicator');
   const status = await page.evaluate(args => window.electronAPI.getLocalApplicationStatus(args), { jobId, canvasFilePath });
   assert.equal(status.localJob.savedOutputMissing, true);
-  assert.equal(await fs.readFile(path.join(receiptsRoot, `${jobId}.json`), 'utf8'), JSON.stringify(receipt),
+  assert.equal(await fs.readFile(path.join(receiptsRoot, `${jobId}.json`), 'utf8'), JSON.stringify({ ...receipt, listingKeys: ['https://example.test/jobs/synthetic'] }),
     'a missing-output check must preserve the prior receipt');
-  console.log('PASS: linked bundle hides Generate; external folder deletion restores it without deleting the receipt.');
+  console.log('PASS: rebuilt card restores saved bundle; linked bundle hides Generate; external folder deletion restores it without deleting the receipt.');
 } catch (error) {
   const page = application?.windows()[0];
   if (page) {

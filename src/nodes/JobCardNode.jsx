@@ -298,7 +298,7 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
       // re-adopting it would put back the cross and a dead Open folder button.
       const external = data.localApplication;
       const outputMissing = localApplication?.savedOutputMissing === true;
-      if (!outputMissing && external?.status === 'saved' && external?.id && external.id === localApplication?.id && localApplication?.status !== 'saved') {
+      if (!outputMissing && external?.status === 'saved' && external?.id && (!localApplication || external.id === localApplication.id) && localApplication?.status !== 'saved') {
         setLocalApplication(external);
         return;
       }
@@ -311,7 +311,7 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
       const cardState = localApplication || null;
       updateGlobal(id, (node) => {
         const live = node?.data?.localApplication;
-        if (!outputMissing && live?.status === 'saved' && live?.id && live.id === cardState?.id && cardState?.status !== 'saved') return null;
+        if (!outputMissing && live?.status === 'saved' && live?.id && (!cardState || live.id === cardState.id) && cardState?.status !== 'saved') return null;
         return { localApplication: cardState };
       });
     }

@@ -6,8 +6,8 @@ import { BridgeProgress, BridgeStepList } from './BridgeProgress';
 import { HEADLINE_CLASS, TONE_CLASS } from '../utils/bridgeProgressStyles';
 
 // One shared page for every job-application bundle the ChatGPT bridge holds.
-// Each bundle keeps its own four-stage progress walk (evidence plan, resume,
-// cover letter, review), but worker chats are spawned and monitored exactly
+// Each bundle keeps its own current activity and candidate context, while
+// worker chats are spawned and monitored exactly
 // once for the whole page in a single block underneath the rows — the same
 // adaptive worker plan the push-scoring page already uses.
 
@@ -25,7 +25,7 @@ export function BridgeApplicationsPage({
 
   // Tick only while at least one row has a timer line (since/lastHeard).
   // Same shape as BridgeProgress: one shared interval, cleaned on unmount.
-  const ticking = rows.some(row => row.view.since !== null || row.view.lastHeard !== null);
+  const ticking = rows.some(row => row.view.since !== null || row.view.lastHeard !== null || row.view.startedAt != null);
 
   useEffect(() => {
     if (!ticking) return undefined;
@@ -93,6 +93,7 @@ export function BridgeApplicationsPage({
               </div>
 
               <div className="mt-2.5">
+                <div className="mb-2 text-[10px] font-semibold uppercase tracking-wide text-white/50">{row.view.contextLabel || 'Application generation'}</div>
                 <BridgeStepList steps={row.view.steps} />
               </div>
 
@@ -108,9 +109,11 @@ export function BridgeApplicationsPage({
                 {row.showDetail && row.view.detail && <div className="mt-1 text-white/70">{row.view.detail}</div>}
               </div>
 
-              {(lines.elapsed || lines.heard) && (
-                <p className="mt-2 text-[11px] text-white/50">
-                  {[lines.elapsed, lines.heard].filter(Boolean).join(' · ')}
+              {row.view.summary && <p className="mt-2 text-[11px] text-white/60">{row.view.summary}</p>}
+
+              {(lines.total || lines.elapsed || lines.heard) && (
+                <p className="mt-2 text-[11px] tabular-nums text-white/50">
+                  {[lines.total, lines.elapsed, lines.heard].filter(Boolean).join(' · ')}
                 </p>
               )}
             </li>

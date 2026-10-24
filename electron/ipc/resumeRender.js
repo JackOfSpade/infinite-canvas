@@ -133,6 +133,7 @@ export function fixedPageTypeAreaHeight(minPageHeightPx, paddingTopPx, paddingBo
 export function pageTextMeasurementExpression() {
   return [
     '(function () {',
+    '  var stage, priorZoom, priorZoomPriority;',
     '  try {',
     // A combined workspace keeps both documents' <main.page> in the DOM at
     // once, with the inactive one `hidden`. Falling back to the bare
@@ -140,6 +141,15 @@ export function pageTextMeasurementExpression() {
     // [data-ic-document-panel] wrapper at all.
     "    var page = document.querySelector('[data-ic-document-panel]:not([hidden]) main.page') || document.querySelector('main.page');",
     '    if (!page) return null;',
+    // Measure the paper at its actual size. The workspace zooms its preview
+    // to fit the window, which scales client rectangles but not CSS padding.
+    // Removing zoom also avoids glyph rounding differences at small scales.
+    "    stage = page.closest ? page.closest('.ic-page-stage') : null;",
+    '    if (stage) {',
+    "      priorZoom = stage.style.getPropertyValue('zoom');",
+    "      priorZoomPriority = stage.style.getPropertyPriority('zoom');",
+    "      stage.style.setProperty('zoom', '1', 'important');",
+    '    }',
     '    var pageStyle = getComputedStyle(page);',
     '    var pageRect = page.getBoundingClientRect();',
     "    var minPageHeight = parseFloat(pageStyle.minHeight || '0');",
@@ -200,6 +210,8 @@ export function pageTextMeasurementExpression() {
     '      hasHorizontalScrollOverflow: page.scrollWidth > page.clientWidth + horizontalTolerancePx };',
     '  } catch (_) {',
     '    return null;',
+    '  } finally {',
+    "    if (stage) { if (priorZoom) stage.style.setProperty('zoom', priorZoom, priorZoomPriority); else stage.style.removeProperty('zoom'); }",
     '  }',
     '})()',
   ].join('\n');

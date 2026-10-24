@@ -1,7 +1,46 @@
 import { __writeVerifyRenderPhaseForTests, __setLocalAiRenderPdfForTests, PDFLib, __holdWriteVerifyRenderForTests, __readWriteVerifyRenderHoldForTests, fs, os, path, classifyRenderFaults, renderDocumentsWithHostRetry, fitRejectionMessage, hostOwnedPunctuationFaults, hostOwnedPunctuationMessage, fitMeasurement, sameFitMeasurement, recordPasteHandoffDiagnostic, getPasteHandoffDiagnosticsSnapshot, buildPasteHandoffDiagnosticsMarkdown, _resetPasteHandoffDiagnostics } from '../test-dependencies.js';
 import { assert } from './testHelpers.js';
+import { pageTextMeasurementExpression } from '../../electron/ipc/resumeRender.js';
 const clean = () => ({ pageCount: 1, fontsLoaded: true, bytes: new Uint8Array([1]), layout: { contentHeightPx: 640, typeAreaHeightPx: 800, horizontalOverflowCount: 0 } });
 export default [
+  { name: 'Application page measurements use paper coordinates at every preview zoom', run() {
+    const probe = new Function('document', 'getComputedStyle', 'NodeFilter', `return ${pageTextMeasurementExpression()};`);
+    for (const scale of [0.4, 0.65, 1, 1.5]) for (const overflow of [0, 1.5, 12]) for (const initialZoom of ['', String(scale)]) {
+      let walked = false;
+      let zoom = initialZoom, priority = initialZoom ? 'important' : '';
+      const stage = { style: {
+        getPropertyValue: () => zoom, getPropertyPriority: () => priority,
+        setProperty: (key, value, rank) => { zoom = value; priority = rank; },
+        removeProperty: () => { zoom = ''; priority = ''; },
+      } };
+      const activeScale = () => zoom === '1' && priority === 'important' ? 1 : scale;
+      const result = probe({
+        querySelector: () => ({ closest: () => stage, getBoundingClientRect: () => ({ left: 140, right: 140 + 816 * activeScale() }), scrollWidth: 816, clientWidth: 816 }),
+        createTreeWalker: () => ({ nextNode: () => walked ? null : (walked = true) }),
+        createRange: () => ({ selectNodeContents() {}, getClientRects: () => [
+          { left: 140 + (54 - overflow) * activeScale(), right: 140 + 762 * activeScale(), top: 100, bottom: 100 + 20 * activeScale(), height: 20 * activeScale() },
+          { left: 140 + 54 * activeScale(), right: 140 + (762 + overflow) * activeScale(), top: 100 + 680 * activeScale(), bottom: 100 + 700 * activeScale(), height: 20 * activeScale() },
+        ] }),
+      }, () => ({ width: '816px', boxSizing: 'border-box', minHeight: '1056px', paddingTop: '69px', paddingBottom: '69px', paddingLeft: '54px', paddingRight: '54px' }),
+      { SHOW_TEXT: 4, FILTER_ACCEPT: 1, FILTER_REJECT: 2 });
+      assert(result.horizontalOverflowCount === (overflow > 2 ? 2 : 0), 'zoom preserves both real overflow and glyph tolerance');
+      assert(zoom === initialZoom && priority === (initialZoom ? 'important' : ''), 'measurement restores the preview zoom and its priority');
+      assert(Math.abs(result.contentHeightPx - 700) < 0.001 && Math.abs(result.lineHeightPx - 20) < 0.001
+        && result.typeAreaHeightPx === 918, 'height, line height and available space share paper coordinates');
+      if (overflow > 2) assert(Math.abs(result.maxHorizontalOverflowPx - overflow) < 0.001, 'overflow distance stays in paper pixels');
+    }
+  } },
+  { name: 'Application page measurement restores preview styling after a probe failure', run() {
+    let zoom = '0.5', priority = 'important';
+    const stage = { style: {
+      getPropertyValue: () => zoom, getPropertyPriority: () => priority,
+      setProperty: (key, value, rank) => { zoom = value; priority = rank; },
+    } };
+    const probe = new Function('document', 'getComputedStyle', `return ${pageTextMeasurementExpression()};`);
+    assert(probe({ querySelector: () => ({ closest: () => stage }) }, () => { throw new Error('synthetic layout failure'); }) === null,
+      'failed probes remain unavailable measurements');
+    assert(zoom === '0.5' && priority === 'important', 'probe failure cannot leave the preview at a different zoom');
+  } },
   { name: 'Application v2 held renders have explicit source-free diagnostics and stop before rejection bookkeeping', run() {
     _resetPasteHandoffDiagnostics();
     try {

@@ -1,6 +1,7 @@
 import React from 'react';
 import { Loader2, PauseCircle, Terminal } from 'lucide-react';
 import { JOB_SOURCE_BY_ID } from '../../utils/constants';
+import { LiveCareerCompilationProgress } from '../../components/CareerCompilationProgress';
 
 export function JobSearchProcessingState({
   statusLabel,
@@ -16,6 +17,8 @@ export function JobSearchProcessingState({
   chromeLaunchInfo,
   queuedRun,
   onCancelQueued,
+  nodeId,
+  careerRunId,
 }) {
   const finishingWithSavedListings = resumeCheckpoint?.mode === 'finish-with-saved-listings';
   const activeSourceName = JOB_SOURCE_BY_ID[activeSourceId]?.name || activeSourceId;
@@ -106,6 +109,12 @@ export function JobSearchProcessingState({
       });
     }
   };
+
+  if (hubState === 'parsing' && !queuedRun) {
+    return <div className="nodrag px-3 py-4">
+      <LiveCareerCompilationProgress nodeId={nodeId} runId={careerRunId} onPauseAndSave={onPauseAndSave} />
+    </div>;
+  }
 
   if (chromeLaunchInfo && !queuedRun) {
     return (

@@ -897,7 +897,8 @@ export default [
         'new queues reject missing, unknown, and historical snapshot pins before reserving a job folder or accepting renderer career fallback');
         const cardSource = await fs.promises.readFile(path.resolve('src/nodes/JobCardNode.jsx'), 'utf8');
         const queuePayload = cardSource.slice(cardSource.indexOf('const queued = await window.electronAPI.queueLocalApplication({'), cardSource.indexOf('      });\n      if (!queued?.success', cardSource.indexOf('const queued = await window.electronAPI.queueLocalApplication({')));
-        assert(cardSource.includes("if (!careerSnapshotId) {")
+        assert(cardSource.includes("if (!initialCareer.careerSnapshotId) {")
+          && cardSource.includes("if (!careerSnapshotId) throw new Error")
           && /careerSnapshotId,/.test(queuePayload)
           && !/\bcareerData\s*:/.test(queuePayload)
           && !/\bresumeProfile\s*:/.test(queuePayload)

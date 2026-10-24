@@ -119,9 +119,10 @@ export default [
     name: 'JobSearchDoneState shows the career-cleared panel and rescore note per spec',
     run: async () => {
       const src = done();
-      assert(src.includes('{careerCleared && !locked && ('), 'panel gated on careerCleared && !locked');
+      assert(src.includes('{careerCleared && (!locked || careerCompiling) && ('), 'passive progress remains visible while active compilation locks actions');
       assert(src.includes("? 'Career compilation' : 'Career data cleared'"), 'panel heading');
-      assert(src.includes("'Compiling new career data… saved jobs are kept.'"), 'compiling body');
+      assert(src.includes('<LiveCareerCompilationProgress nodeId={careerNodeId} runId={careerRunId} />'), 'compiling body uses the current host action for the exact run');
+      assert(src.includes('<p>Saved jobs are kept.</p>'), 'retained jobs remain explained while career processing runs');
       assert(src.includes("`Career compilation failed${careerCompileError ? `: ${careerCompileError}` : ''}.`"), 'failed body');
       assert(src.includes("`Drop new career files to re-score ${savedJobCount} saved job${savedJobCount === 1 ? '' : 's'}. Jobs are kept.`"), 'default body');
       assert(src.includes('{!careerCompiling && (careerCompileFailed || careerCompileUnstarted) && onRetryCareerCompile && ('), 'retry gate');

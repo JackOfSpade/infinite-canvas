@@ -75,6 +75,8 @@ export default [
           && history.imports[1].module === 'job-board' && history.imports[1].cacheHit
           && history.imports[1].change === 'baseline' && history.imports[1].scopeId !== history.imports[0].scopeId
           && progress.filter(item => item.phase === 'cleaning' && item.cached).length === 3
+          && progress.every(item => Number.isFinite(item.startedAt) && Number.isFinite(item.phaseStartedAt)
+            && item.phaseStartedAt >= item.startedAt && item.updatedAt >= item.phaseStartedAt)
           && !progress.some(item => item.phase === 'saving'),
         `the same snapshot in Job Board must log a distinct scope once, while a completed-run retry remains idempotent, got ${JSON.stringify(history)}`);
 
@@ -463,10 +465,16 @@ export default [
         const mixedError = await refusal([notesMd, pdfPath, notesTxt]);
         assert(mixedError?.reason === 'extension' && mixedError.message.includes('resume.pdf'), 'one non-text file refuses the whole drop');
 
-        const mixed = await __extractCareerFileSectionsForTests([notesMd, notesTxt]);
+        const fileProgress = [];
+        const mixed = await __extractCareerFileSectionsForTests([notesMd, notesTxt], { onProgress: event => fileProgress.push(event) });
         assert(mixed.directTextFiles === 2 && mixed.transcribedFiles === 0
           && mixed.sections[0] === '===== FILE: notes.md =====\n## Notes\n* one\n'
           && mixed.sections[1] === '===== FILE: notes.txt =====\nPlain notes\n', 'text files keep drop order and exact source bytes');
+        assert(JSON.stringify(fileProgress) === JSON.stringify([
+          { phase: 'reading', completed: 0, total: 2 },
+          { phase: 'reading', completed: 1, total: 2 },
+          { phase: 'reading', completed: 2, total: 2 },
+        ]), 'source-reading counts advance only after each whole file was read');
 
         const aborted = new AbortController();
         aborted.abort(new Error('stop now'));

@@ -245,8 +245,8 @@ export default [
         await dock.publishPush({ requestId: 'career-request', nodeId: 'career-hub', runId: 'career-run', task: 'career-profile-audit-skills', prompt: 'Career audit fixture', mcpEligible: false });
         const popup = dock.document.querySelector('#non-api-ai-handoff-panel');
         const progress = popup?.querySelector('[aria-label="Career compilation progress"]');
-        assert(progress && progress.textContent.includes('3/6 checks returned') && progress.textContent.includes('round 2'), 'real popup shows the host stage, counts, and audit round');
-        assert(progress.querySelector('ol[aria-label] li[aria-current="step"]')?.textContent.includes('Audit'), 'popup uses the same stepper as application generation');
+        assert(progress && progress.textContent.includes('3/6 audit checks returned this round') && progress.textContent.includes('round 2'), 'real popup shows counts scoped to this audit round');
+        assert(progress.textContent.includes('Total elapsed:') && !progress.querySelector('ol'), 'popup names its total clock and does not infer completed stages');
         await dock.emitCareerProgress({ nodeId: 'other-hub', manualAiRunId: 'career-run', phase: 'repairing', completed: 99, total: 100 });
         assert(!progress.textContent.includes('99/100'), 'another hub cannot overwrite the selected popup');
         let paused;

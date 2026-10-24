@@ -102,6 +102,25 @@ async function waitForTerminalProgressCommit(getNode, nodeId, expected) {
   return terminalProgressIsCommitted(getNode(nodeId), expected);
 }
 
+function jobSourceProgressDisplay(status, progress) {
+  if (status !== 'searching') return null;
+  const descriptions = progress?.activity === 'description-enrichment';
+  // Activity counters describe a distinct post-gather walk. Never fall back to
+  // the source's earlier query/task counters while that activity is running.
+  const activity = Boolean(progress?.activity);
+  const completed = activity ? progress.activityCompleted : progress?.completed;
+  const total = activity ? progress.activityTotal : progress?.total;
+  const measured = Number.isInteger(total) && total > 0
+    && Number.isInteger(completed) && completed >= 0 && completed <= total;
+  return {
+    label: descriptions ? 'Descriptions checked' : activity ? 'Current activity' : 'Search tasks',
+    completed: measured ? completed : null,
+    total: measured ? total : null,
+    percent: measured ? (completed / total) * 100 : null,
+    countLabel: measured ? `${completed} of ${total}` : 'In progress',
+  };
+}
+
 /**
  * JobSourceCardNode — persistent canvas node representing one job source
  * (LinkedIn, Indeed, Greenhouse, etc.) that a JobSearchNode searches against.
@@ -1971,27 +1990,8 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
   const isError     = status === 'error';
   const isSkipped   = status === 'skipped';
   const warningLabel = warning?.shortLabel || warning?.code || null;
-  const progressTotal = Number.isFinite(liveProgress?.total) && liveProgress.total > 0 ? liveProgress.total : null;
-  const progressDone = progressTotal && Number.isFinite(liveProgress?.completed)
-    ? Math.max(0, Math.min(liveProgress.completed, progressTotal))
-    : null;
-  // A single-query source can only ever report 0/1 until it finishes, so the
-  // "measured" bar rendered a frozen 8% and the text "0/1" for the entire walk —
-  // an implied measurement that never moves reads as a stalled job, which is
-  // exactly the wrong signal. With more than one query the fraction is real and
-  // does advance, so keep it there; otherwise fall through to the indeterminate
-  // working state and let the live detail line carry the progress.
-  const hasMeasuredProgress = progressTotal != null && progressDone != null && progressTotal > 1;
-  const progressPercent = (isDone || isSkipped || isError)
-    ? 100
-    : isSearching
-      ? hasMeasuredProgress
-        ? Math.max(8, Math.min(96, (progressDone / progressTotal) * 100))
-        : 42
-      : 0;
-  const progressText = hasMeasuredProgress && isSearching
-    ? `${progressDone}/${progressTotal}`
-    : null;
+  const progressDisplay = jobSourceProgressDisplay(status, liveProgress);
+  const isDescriptionEnrichment = liveProgress?.activity === 'description-enrichment';
 
   const statusLine = isError
     ? 'Failed'
@@ -2000,7 +2000,7 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
       : isDone
         ? `${count ?? 0} jobs`
         : isSearching
-          ? (liveProgress?.detail ? `Searching… ${liveProgress.detail}` : 'Searching…')
+          ? (isDescriptionEnrichment ? 'Reading descriptions…' : 'Searching…')
           : 'Idle';
 
   // Red for hard failures/blocks, amber for throttles/skips/warn
@@ -2043,29 +2043,40 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
             <span
               className="text-[9px] truncate"
               style={{ color: (isError || hasBlock) ? '#fca5a5' : (hasThrottle || hasInfo || isSkipped) ? '#fcd34d' : isDone ? '#a7f3d0' : 'rgba(255,255,255,0.45)' }}
+              title={warningLabel || statusLine}
             >
-              {warning ? warningLabel : statusLine}
+              {isError || isSkipped ? statusLine : warning ? warningLabel : statusLine}
             </span>
-            {progressText && (
-              <span className="ml-auto text-[8px] text-white/30 tabular-nums shrink-0">
-                {progressText}
-              </span>
-            )}
           </div>
         </div>
       </div>
-      <div className="px-2.5 pb-1.5">
-        <div className="h-1 overflow-hidden rounded-full bg-white/10">
-          <div
-            className={`h-full rounded-full transition-all duration-500 ease-out ${isSearching && !hasMeasuredProgress ? 'animate-pulse' : ''}`}
-            style={{
-              width: `${progressPercent}%`,
-              backgroundColor: accentColor,
-              opacity: progressPercent > 0 ? 0.9 : 0,
-            }}
-          />
+      {(isError || isSkipped) && warningLabel && <div className="px-2.5 pb-1.5 text-[8px] leading-snug text-white/50 break-words">
+        {warningLabel}
+      </div>}
+      {progressDisplay && <div className="px-2.5 pb-2">
+        <div className="flex items-start justify-between gap-1 text-[8px] leading-snug text-white/50 mb-1">
+          <span>{progressDisplay.label}</span>
+          <span className="tabular-nums text-right shrink-0">{progressDisplay.countLabel}</span>
         </div>
-      </div>
+        {progressDisplay.percent != null && <div
+          className="h-1 overflow-hidden rounded-full bg-white/10"
+          role="progressbar"
+          aria-label={progressDisplay.label}
+          aria-valuemin={0}
+          aria-valuemax={progressDisplay.total}
+          aria-valuenow={progressDisplay.completed}
+          aria-valuetext={`${progressDisplay.countLabel} processed`}
+          title={`${progressDisplay.label}: ${progressDisplay.countLabel}. This is source activity, not total Job Search completion.`}
+        >
+          <div
+            className="h-full rounded-full transition-[width] duration-500 ease-out"
+            style={{ width: `${progressDisplay.percent}%`, backgroundColor: accentColor }}
+          />
+        </div>}
+        {liveProgress?.detail && <div className="mt-1 text-[8px] leading-snug text-white/40 break-words">
+          {liveProgress.detail}
+        </div>}
+      </div>}
       {/* Embedded warning text — selectable so the user can copy/paste the
           full evidence + suggestion back into a bug report or chat. */}
       {!dismissed && <SourceWarningPanel

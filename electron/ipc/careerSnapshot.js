@@ -4725,6 +4725,9 @@ export async function compileAuditedCareerSnapshot({
       );
     }
     seenConvergenceStates.set(seenKey, round);
+    // Announce the work before any repair handoff starts. An event emitted
+    // only after repairs finish leaves the UI saying it is still auditing.
+    reportProgress({ phase: 'repairing', round: round + 1 });
     if (!deterministic.valid) {
       let current = state;
       const fallback = [], handled = new Set();

@@ -1,3 +1,5 @@
+import { applicationListingKeys, selectSavedApplicationBundle } from '../../src/utils/applicationBundleIdentity.js';
+import { applicationWorkflowProgress } from './applicationWorkflowProgress.js';
 import { applicationUnitDiagnostics, bootstrapApplicationUnitState, advanceApplicationUnitState, locateGateFindings } from './applicationGateFindings.js';
 import { applicationUnitRegistry, structuredDocumentDigest, unitDigest, mergeUnitPatches, diffUnits } from './applicationUnitPatches.js';
 import { argumentEvidenceMatchesBullet } from './applicationUnitPatches.js';
@@ -5034,7 +5036,7 @@ async function writeVerifyHandoffRecord({ jobId, input, state, corrections = [] 
   const prompt = writeVerifyPrompt({ stage: state.stage, state: state.writeVerify, ...context,
     envelope, corrections, droppedFindings: state.stage === 'write' ? droppedCandidateFindings(state.writeVerify) : [] });
   assertApplicationV2PromptLimit(prompt);
-  const record = { ...envelope, prompt, draft: '' };
+  const record = { ...envelope, prompt, draft: '', progress: applicationWorkflowProgress(input, state) };
   if (state.stage === 'pick') {
     const ids = state.writeVerify.elimination?.activeIds || acceptedWriteVerifyCandidates(state.writeVerify).map(row => row.id);
     record.pageImages = [];
@@ -5225,6 +5227,7 @@ async function pasteHandoffRecord({ jobId, input, state, draft = '', corrections
   const record = {
     jobId, stage: state.stage, revision: state.revision, handoffCode: state.handoffCode,
     baseHashes: state.baseHashes, prompt: assertPastePromptEnvelope(input, state), draft,
+    ...(isWriteVerifyJob(input) ? { progress: applicationWorkflowProgress(input, state) } : {}),
   };
   attachPasteFreshContextMetadata(record, input, state);
   if (!items.length) return record;
@@ -10138,7 +10141,7 @@ async function ensureLocalAiHandoffReceiptsRoot(canvasRoot) {
 
 async function writeLocalAiTerminalReceipt({
   canvasRoot, canvasFilePath, jobId, resultRaw, resumeFit, coverLetterFit, targetPageCount, outputDir,
-  pasteRejectionTrace = [], selectedModelEffort = null,
+  pasteRejectionTrace = [], selectedModelEffort = null, job = null,
 }) {
   const receiptsRoot = await ensureLocalAiHandoffReceiptsRoot(canvasRoot);
   // The private job folder is deleted right after this receipt is written, so
@@ -10160,6 +10163,7 @@ async function writeLocalAiTerminalReceipt({
     // canvases cannot observe or discard one another's UUID receipt.
     canvasFilePath,
     status: 'imported',
+    listingKeys: applicationListingKeys(job || {}),
     resultSha256: contentHash(resultRaw),
     importedAt: new Date().toISOString(),
     outputDir: resolvedOutputDir,
@@ -10327,9 +10331,8 @@ async function pruneAndCountLocalAiJobs(canvasRoot) {
   // someone can still act on (answer a stage, retry a render, fix a rejected
   // result), never an abandoned job — whatever its age.
   const ACTIONABLE_LOCAL_AI_STATUSES = ['queued', 'revision-required', 'render-retry-required', 'invalid'];
-  // Terminal receipts have no candidate content and exist solely to bridge the
-  // Local AI polling race after a successful save. Expire them with the
-  // same retention window as abandoned jobs.
+  // Receipts also reconnect rebuilt cards to saved bundles. Keep them while
+  // the output directory exists; only abandoned destinations age out.
   const receiptsRoot = await ensureLocalAiHandoffReceiptsRoot(canvasRoot);
   const receiptEntries = await fs.promises.readdir(receiptsRoot, { withFileTypes: true });
   await Promise.all(receiptEntries
@@ -10345,6 +10348,13 @@ async function pruneAndCountLocalAiJobs(canvasRoot) {
       await withLocalAiJobPruneClaim(receiptJobId, workDir, async () => {
         const observed = await fs.promises.lstat(receiptPath).catch(() => null);
         if (!observed?.isFile() || observed.isSymbolicLink() || observed.mtimeMs >= cutoff) return;
+        try {
+          const saved = JSON.parse(await readOwnedFile(receiptsRoot, receiptPath, { maxBytes: 64_000 }));
+          if (saved?.version === 2 && saved.jobId === receiptJobId && saved.status === 'imported') {
+            await resolveTrustedSavedApplicationOutputDirectory({ canvasRoot }, saved);
+            return;
+          }
+        } catch { /* only stale receipts without a live trusted output expire */ }
         const current = await fs.promises.lstat(receiptPath).catch(() => null);
         if (!current?.isFile() || current.isSymbolicLink()
           || current.dev !== observed.dev || current.ino !== observed.ino
@@ -17291,6 +17301,7 @@ async function importLocalApplicationJobAttempt({ jobId, canvasFilePath, senderI
         resumeFit,
         coverLetterFit, targetPageCount,
         outputDir: savedOutputDir,
+        job: input.job,
         pasteRejectionTrace,
         selectedModelEffort: generationSelectionSummary(canvas.canonicalCanvasFilePath, jobId),
       });
@@ -17420,7 +17431,64 @@ export async function discoverLocalApplicationJobs(canvasFilePath) {
   return discovered.sort((a, b) => String(a.createdAt || '').localeCompare(String(b.createdAt || '')) || a.id.localeCompare(b.id));
 }
 
+let applicationLinkDiagnostics = null;
+export function savedApplicationLinkDiagnosticsMarkdown() {
+  const d = applicationLinkDiagnostics;
+  return '\n## Saved Application Links (APPLINK)\n'
+    + (d ? `- Last lookup: ${d.at} · cards=${d.cards} · verified bundles=${d.bundles} · matched=${d.matched} · unavailable=${d.unavailable}\n`
+      : '- No saved-bundle lookup recorded in this process.\n');
+}
+
+// Read-only restoration after Board Clear/rebuild, including hidden/nested cards.
+export async function findSavedApplicationLinks({ canvasFilePath, jobs = [] } = {}) {
+  const canvas = await resolveCanvasProject(canvasFilePath);
+  if (!Array.isArray(jobs) || jobs.length > 10000) throw new Error('Invalid application link lookup.');
+  const root = localAiHandoffReceiptsRoot(canvas.canvasRoot);
+  const entries = await fs.promises.readdir(root, { withFileTypes: true }).catch(error => {
+    if (error.code === 'ENOENT') return [];
+    throw error;
+  });
+  const bundles = [];
+  let unavailable = 0;
+  for (const entry of entries) {
+    const jobId = entry.name.slice(0, -5);
+    if (!entry.isFile() || !entry.name.endsWith('.json') || !JOB_ID_RE.test(jobId)) continue;
+    try {
+      const receipt = await readLocalAiTerminalReceipt(canvas.canvasRoot, canvas.canonicalCanvasFilePath, jobId);
+      if (!receipt || receipt.version !== 2) continue;
+      const dir = await resolveTrustedSavedApplicationOutputDirectory(canvas, receipt);
+      let listingKeys = receipt.listingKeys;
+      if (!Array.isArray(listingKeys) || !listingKeys.length) {
+        // Legacy receipts lack identity. Require the generation audit to bind
+        // both the receipt and exact listing bytes before using its header URL.
+        const audit = JSON.parse(await readOwnedFile(dir, path.join(dir, 'Generation Audit.json'), { maxBytes: 4 * 1024 * 1024 }));
+        const listing = await readOwnedFile(dir, path.join(dir, 'Original Job Listing.md'), { maxBytes: 4 * 1024 * 1024 });
+        if (audit.jobId !== jobId || audit.finalArtifacts?.resultSha256 !== receipt.resultSha256
+          || audit.finalArtifacts?.originalJobListingSha256 !== contentHash(listing)) continue;
+        const header = listing.split(/\r?\n---\r?\n/)[0];
+        const url = /^\*\*Listing URL:\*\*[ \t]+<([^>\r\n]+)>[ \t]*$/m.exec(header)?.[1];
+        listingKeys = applicationListingKeys({ url });
+      }
+      // A regenerated folder must never adopt an older receipt's job id.
+      const audit = JSON.parse(await readOwnedFile(dir, path.join(dir, 'Generation Audit.json'), { maxBytes: 4 * 1024 * 1024 }));
+      if (audit.jobId !== jobId || audit.finalArtifacts?.resultSha256 !== receipt.resultSha256) continue;
+      bundles.push({ listingKeys, importedAt: receipt.importedAt, localApplication: {
+        id: jobId, status: 'saved', canvasFilePath: canvas.canonicalCanvasFilePath,
+        savedDir: dir, receipt, message: 'Application bundle restored from its saved receipt.',
+      } });
+    } catch { unavailable++; }
+  }
+  const links = jobs.flatMap(job => {
+    const localApplication = selectSavedApplicationBundle(job, bundles);
+    return localApplication ? [{ nodeId: job.nodeId, localApplication }] : [];
+  });
+  applicationLinkDiagnostics = { at: new Date().toISOString(), cards: jobs.length, bundles: bundles.length, matched: links.length, unavailable };
+  logger.info(`[ApplicationLinks] lookup cards=${jobs.length} verified-bundles=${bundles.length} matched=${links.length} unavailable=${unavailable}`);
+  return { links };
+}
+
 export function registerLocalAiApplicationHandlers() {
+  handleSafe('find-saved-application-links', async (_event, args) => findSavedApplicationLinks(args));
   handleSafe('queue-local-application', async (_event, args, signal) => {
     // queueLocalApplicationJob cooperates at every durable-write boundary.
     // Keep an abort listener through this handler's return as a final guard:

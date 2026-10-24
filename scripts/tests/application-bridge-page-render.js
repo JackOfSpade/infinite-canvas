@@ -88,7 +88,7 @@ const PROGRESS_ENTRY_BODY = componentFilePath => `import React from 'react';\nim
 
 export default [
   {
-    name: 'application bridge page: render: three held jobs each drive their own four-step walk with exactly one worker block and a silent console',
+    name: 'application bridge page: render: legacy steps and iterative candidate progress stay truthful in the same shared page',
     async run() {
       const directory = await fsPromises.mkdtemp(path.join(os.tmpdir(), 'ic-app-page-render-'));
       const entry = path.join(directory, 'PageProbe.jsx');
@@ -100,15 +100,17 @@ export default [
         const held = [
           request('req-a', JOB_A),
           request('req-b', JOB_B),
-          request('req-c', JOB_C),
+          request('req-c', JOB_C, { stage: 'write', progress: {
+            workflow: 'write-verify', candidate: 2, candidateCount: 5, checked: 1, ready: 0, rejected: 1, startedAt: NOW - 600000,
+          } }),
         ];
         const given = status(1, {
-          chat: { state: 'none' },
+          chat: { state: 'working', ordinal: 1 },
           queue: {
             jobs: [
               job(JOB_A, { phase: 'awaiting', stage: 'evidence-plan' }),
               job(JOB_B, { phase: 'unread', stage: 'resume' }),
-              job(JOB_C, { phase: 'host', stage: 'review' }),
+              job(JOB_C, { phase: 'awaiting', stage: 'write', awaitingAnswer: true, servedAt: NOW - 60000 }),
             ],
           },
         });
@@ -138,7 +140,6 @@ export default [
             const expected = [
               { id: 'req-a', stage: 'Evidence plan', ordinal: 'Application 1' },
               { id: 'req-b', stage: 'Résumé', ordinal: 'Application 2' },
-              { id: 'req-c', stage: 'Review and edit', ordinal: 'Application 3' },
             ];
             for (const expectation of expected) {
               const row = window.document.querySelector(`[data-application-row="${expectation.id}"]`);
@@ -155,6 +156,11 @@ export default [
               assert(current[0].textContent.includes(expectation.stage), `${expectation.id}: the current step matches the job stage`);
               assert(text(window).includes(expectation.ordinal), `${expectation.id}: ordinals reflect ordinalFor`);
             }
+            const candidate = window.document.querySelector('[data-application-row="req-c"]');
+            assert(!candidate.querySelector('ol[aria-label="Application steps"]'), 'the current candidate does not inherit three completed milestones');
+            assert(candidate.textContent.includes('Candidate 2 of 5') && candidate.textContent.includes('Write application'), 'candidate number and actual activity are visible together');
+            assert(candidate.textContent.includes('1 of 5 checked') && candidate.textContent.includes('0 passed initial checks') && candidate.textContent.includes('1 rejected'), 'host-reported check outcomes are visible');
+            assert(candidate.textContent.includes('Total elapsed:') && candidate.textContent.includes('Current handoff:'), 'application and current call timers have explicit scopes');
             assert(text(window).includes('Subject req-a') && text(window).includes('Subject req-b') && text(window).includes('Subject req-c'), 'each row shows its own subject');
             assert(entries.length === 0, `render must stay silent: ${entries.map(entry => entry.args.join(' ')).join(' | ')}`);
           } finally {

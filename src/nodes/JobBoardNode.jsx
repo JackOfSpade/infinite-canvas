@@ -6879,6 +6879,7 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
 
       <div className="px-3 pb-3">
         <JobBoardCareerOverridePanel
+          nodeId={id}
           view={careerOverrideView}
           busy={careerOverrideBusy}
           onDropFiles={handleCareerOverrideDrop}

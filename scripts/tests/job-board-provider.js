@@ -5985,7 +5985,7 @@ export default [
       const cleanup = handler.indexOf('delete job?.compensationRemoteResidences', finallyStart);
       assert(handlerStart >= 0 && handlerEnd > handlerStart && finallyStart >= 0 && cleanup > finallyStart,
         'the main handler must strip renderer-injected residences in finally on success, failure, and cancellation');
-      assert(handler.includes('{ jobs, nodeId, requestId = null, remoteResidences }')
+      assert((/\{ jobs, nodeId, requestId = null, remoteResidences(?:, [^}]+)? \}/).test(handler)
         && handler.includes('event, nodeId, requestId, signal')
         && main.includes('requestId: requestId || null'),
       'the optional request id must travel through IPC and every compensation progress event without breaking non-board callers');
