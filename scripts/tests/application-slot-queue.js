@@ -3,6 +3,9 @@ import { runInNewContext } from 'node:vm';
 import { assert } from './testHelpers.js';
 import { createModuleRunQueue } from '../../src/utils/moduleRunQueue.js';
 import { hasLinkedLocalApplicationOutput, queuedLocalApplicationStartDecision } from '../../src/utils/localAiApplicationLifecycle.js';
+import { resolveApplicationCareerSnapshotId } from '../../src/utils/jobBoardCareerOverride.js';
+import { getConnectedJobSearchIds } from '../../src/utils/jobBoardSearchSelection.js';
+import { collectNodesDeep } from '../../src/utils/navigationUtils.js';
 import {
   APPLICATION_HANDOFF_LIMIT,
   countActiveApplicationHandoffs,
@@ -70,23 +73,47 @@ const buildTenOccupyingCards = () => Array.from(
 
 export default [
   {
+    name: 'queued application career selection can read live connections across canvas levels without stale nested edges',
+    run() {
+      const source = readFileSync(new URL('../../src/hooks/useCanvasNavigation.js', import.meta.url), 'utf8');
+      const start = source.indexOf('const enumerateAllNodes = useCallback');
+      const end = source.indexOf('\n  /**\n   * Detach', start);
+      const group = { id: 'editing', type: 'group', data: { canvasData: {
+        nodes: [{ id: 'ghost', type: 'jobhub' }], edges: [{ id: 'ghost-edge', source: 'board', target: 'ghost' }],
+      } } };
+      const readers = runInNewContext(`(() => { ${source.slice(start, end)} return { enumerateAllNodes, enumerateAllEdges }; })()`, {
+        useCallback: fn => fn, collectNodesDeep,
+        nodesRef: { current: [{ id: 'search', type: 'jobhub' }] },
+        edgesRef: { current: [{ id: 'live', source: 'board', target: 'search' }] },
+        stackRef: { current: [{ nodeId: 'editing', nodes: [{ id: 'board', type: 'jobboard' }, group], edges: [{ id: 'parent', source: 'board', target: 'editing' }] }] },
+      });
+      const nodes = readers.enumerateAllNodes(), edges = readers.enumerateAllEdges();
+      assert(nodes.some(n => n.id === 'board') && !nodes.some(n => n.id === 'ghost')
+        && edges.some(e => e.id === 'live') && !edges.some(e => e.id === 'ghost-edge'),
+      'queued generation sees the parent Board and live connections without resurrecting the edited branch');
+      assert(getConnectedJobSearchIds('board', nodes, edges).join(',') === 'search');
+    },
+  },
+  {
     name: 'application slot queue: live changes after onStart cannot cross the final Generate IPC boundary',
     async run() {
       const source = readFileSync(new URL('../../src/nodes/JobCardNode.jsx', import.meta.url), 'utf8');
       const start = source.indexOf('const generateApplication = useCallback(');
       const end = source.indexOf('\n\n  return (', start);
       assert(start >= 0 && end > start, 'the actual Generate callback is available');
-      for (const change of ['unchanged', 'deleted', 'card-locked', 'board-locked', 'saved', 'pending']) {
+      for (const change of ['unchanged', 'newer-career', 'board-career', 'career-cleared', 'board-pending', 'deleted', 'card-locked', 'board-locked', 'saved', 'pending']) {
         const queue = createModuleRunQueue();
         let card = jobCard('card', null, { hubId: 'board', careerSnapshotId: 'approved-snapshot' });
         const board = { id: 'board', type: 'jobboard', data: {} };
+        const search = { id: 'search', type: 'jobhub', data: { careerSnapshotId: 'a'.repeat(64) } };
         const data = card.data;
         let ipcCalls = 0;
+        let selectedPin = null;
         let mutationAfterStart = false;
         const callback = runInNewContext(`${source.slice(start, end)}\ngenerateApplication;`, {
           useCallback: fn => fn,
           window: { electronAPI: {
-            queueLocalApplication: async () => { ipcCalls += 1; return { success: false }; },
+            queueLocalApplication: async args => { ipcCalls += 1; selectedPin = args.careerSnapshotId; return { success: false }; },
             checkApplicationGenerationGate: async () => ({ success: true, blocked: false }),
             completeNonApiAiRun: async () => {},
           } },
@@ -94,7 +121,10 @@ export default [
           applicationSubmissionRef: { current: false },
           hasApplicationRun: false, localJobPending: false, effectiveLock: false,
           id: 'card', idRef: { current: 'card' }, data, additionalNotes: '',
-          nav: { getCurrentFile: () => '/project/canvas.json', enumerateAllNodes: () => [card, board].filter(Boolean) },
+          nav: { getCurrentFile: () => '/project/canvas.json', enumerateAllNodes: () => [card, board, search].filter(Boolean),
+            enumerateAllEdges: () => [{ id: 'connection', source: 'board', target: 'search' }] },
+          resolveApplicationCareerSnapshotId, getConnectedJobSearchIds,
+          getNodes: () => [], getEdges: () => [],
           getLiveNode: id => id === 'card' ? card : id === 'board' ? board : null,
           setApplicationRun() {}, updateGlobal() {}, addToast() {},
           isMountedRef: { current: true },
@@ -116,13 +146,25 @@ export default [
                 if (change === 'board-locked') board.data.locked = true;
                 if (change === 'saved') card.data.localApplication = pasteJob('saved-job', 'saved');
                 if (change === 'pending') card.data.localApplication = pasteJob('new-job');
+                if (change === 'newer-career') search.data.careerSnapshotId = 'b'.repeat(64);
+                if (change === 'career-cleared') search.data.careerSnapshotId = null;
+                if (change === 'board-career') board.data.jobBoardCareerOverride = {
+                  version: 1, approved: { careerSnapshotId: 'c'.repeat(64), generation: 'job-board-career:board:1',
+                    fileNames: ['career.md'], approvedAt: 1, profileFingerprint: null }, pending: null, retirePending: [],
+                };
+                if (change === 'board-pending') board.data.jobBoardCareerOverride = {
+                  version: 1, approved: null, pending: { version: 1, generation: 'job-board-career:board:1', attemptId: 'attempt',
+                    status: 'compiling', manualAiRunId: 'job-board-career:board:1', startedAt: 1, filePaths: ['/tmp/career.md'], fileNames: ['career.md'] }, retirePending: [],
+                };
               });
             },
           }),
         });
         await callback();
-        assert(mutationAfterStart && ipcCalls === (change === 'unchanged' ? 1 : 0),
+        assert(mutationAfterStart && ipcCalls === (['unchanged', 'newer-career', 'board-career'].includes(change) ? 1 : 0),
           `${change}: only an unchanged live card may create a private handoff`);
+        if (change === 'newer-career') assert(selectedPin === 'b'.repeat(64), 'queued generation must re-resolve career data at start');
+        if (change === 'board-career') assert(selectedPin === 'c'.repeat(64), 'Board career data approved while queued must take priority');
         assert(queue.getSnapshot().active === null, `${change}: the skipped Generate releases its lease`);
       }
     },
@@ -142,6 +184,7 @@ export default [
         const queue = createModuleRunQueue();
         const card = jobCard('card', null, { hubId: 'board', careerSnapshotId: 'approved-snapshot' });
         const board = { id: 'board', type: 'jobboard', data: {} };
+        const search = { id: 'search', type: 'jobhub', data: { careerSnapshotId: 'a'.repeat(64) } };
         let queueCalls = 0;
         const gateCalls = [];
         const completed = [];
@@ -158,7 +201,10 @@ export default [
           applicationSubmissionRef: { current: false },
           hasApplicationRun: false, localJobPending: false, effectiveLock: false,
           id: 'card', idRef: { current: 'card' }, data: card.data, additionalNotes: '',
-          nav: { getCurrentFile: () => '/project/canvas.json', enumerateAllNodes: () => [card, board] },
+          nav: { getCurrentFile: () => '/project/canvas.json', enumerateAllNodes: () => [card, board, search],
+            enumerateAllEdges: () => [{ id: 'connection', source: 'board', target: 'search' }] },
+          resolveApplicationCareerSnapshotId, getConnectedJobSearchIds,
+          getNodes: () => [], getEdges: () => [],
           getLiveNode: id => id === 'card' ? card : id === 'board' ? board : null,
           setApplicationRun: run => runStates.push(run.state), updateGlobal() {}, addToast: toast => toasts.push(toast),
           isMountedRef: { current: true },

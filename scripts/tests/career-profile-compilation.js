@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import nodeAssert from 'node:assert';
+import { resolveCompensationCareerInput, resolveCompensationCareerInputs } from '../../electron/ipc/jobs.js';
 import { __careerPageValidationDiagnosticForTests, __crossPageRulingForTests } from '../test-dependencies.js';
 import { assert } from './testHelpers.js';
 import { MAX_SOURCE_GROUNDING_QUOTE_CHARS } from '../../electron/ipc/applicationSourceLimits.js';
@@ -3021,11 +3022,22 @@ export default [
         assert(await readCareerSnapshot(root, snapshotId) === null
           && (await readPinnedCareerSnapshot(root, snapshotId))?.snapshotId === snapshotId,
         'new-search cache reads reject historical policy receipts while an existing pin validates their structure and contract-bound identity');
+        const salaryInputs = await resolveCompensationCareerInputs([{ careerSnapshotId: snapshotId }], {
+          readPinned: input => resolveCompensationCareerInput({ ...input, root }),
+        });
+        assert(salaryInputs.get(snapshotId)?.careerData === projectApprovedCareerSnapshotForApplication(snapshot)
+          && salaryInputs.get(snapshotId)?.profile.workHistory.length > 0,
+        'salary guidance must load the validated historical card pin after a compiler update instead of silently losing career evidence');
         const malformed = structuredClone(snapshot);
         malformed.sources[0].transcriptionAudit.findingDigest = '0'.repeat(64);
         fs.writeFileSync(storedPath, `${JSON.stringify(malformed)}\n`, 'utf8');
         assert(await readPinnedCareerSnapshot(root, snapshotId) === null,
           'historical compatibility never permits malformed transcription receipts or a source fingerprint/id mismatch');
+        const invalidSalaryInputs = await resolveCompensationCareerInputs([{ careerSnapshotId: snapshotId }], {
+          readPinned: input => resolveCompensationCareerInput({ ...input, root }),
+        });
+        assert(invalidSalaryInputs.size === 0,
+          'salary compatibility must still reject a malformed historical approval');
         return { historicalPolicyPinned: true, malformedRejected: true };
       } finally {
         fs.rmSync(root, { recursive: true, force: true });

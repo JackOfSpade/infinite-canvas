@@ -30,6 +30,7 @@ import {
   projectApprovedCareerSnapshotForApplication,
   projectLegacyCareerProfile,
   readCareerSnapshot,
+  readPinnedCareerSnapshot,
   verbatimCareerTranscriptionAuditReceipt,
   writeCareerSnapshotAtomically,
 } from './careerSnapshot.js';
@@ -8624,7 +8625,24 @@ export function buildCompensationAssessmentListings(group) {
   }));
 }
 
-export async function resolveCompensationCareerInputs(jobs, { readPinned = resolvePinnedScoringInput, signal } = {}) {
+// Salary guidance consumes existing scored cards, whose approved snapshots
+// can predate the current compiler policy. Keep new-search reads strict while
+// using the validated historical-pin path for this downstream analysis.
+export async function resolveCompensationCareerInput({ careerSnapshotId, root = careerSnapshotRoot() } = {}) {
+  return resolvePinnedScoringInput({ careerSnapshotId, root, readSnapshot: readPinnedCareerSnapshot });
+}
+
+export async function resolveCompensationCareerInputs(jobs, { readPinned = resolveCompensationCareerInput, signal, salaryCareerSnapshotId } = {}) {
+  if (salaryCareerSnapshotId !== undefined) {
+    if (salaryCareerSnapshotId === null) return new Map();
+    const id = normalizeCareerSnapshotIdentifier(salaryCareerSnapshotId);
+    if (!id) throw new Error('Salary analysis requires a valid approved career snapshot.');
+    if (signal?.aborted) return new Map();
+    // An explicitly selected Board/Search source must not silently fall back
+    // to each job's older scoring profile if it cannot be loaded.
+    const pinned = await readPinned({ careerSnapshotId: id });
+    return signal?.aborted ? new Map() : new Map([[id, { profile: pinned.profile, careerData: pinned.careerData }]]);
+  }
   const ids = [...new Set((Array.isArray(jobs) ? jobs : [])
     .map(job => normalizeCareerSnapshotIdentifier(job?.careerSnapshotId)).filter(Boolean))];
   const inputs = new Map();
@@ -8639,6 +8657,11 @@ export async function resolveCompensationCareerInputs(jobs, { readPinned = resol
     if (result.status === 'rejected') logger.warn('[Jobs] Salary guidance could not load an approved career snapshot; using market evidence only.');
   }
   return inputs;
+}
+
+export function buildCompensationPersonalSalaryEvidence(job, careerInputs, salaryCareerSnapshotId) {
+  const id = normalizeCareerSnapshotIdentifier(salaryCareerSnapshotId === undefined ? job?.careerSnapshotId : salaryCareerSnapshotId) || '';
+  return buildPersonalSalaryEvidence(job, { ...careerInputs.get(id), careerSnapshotId: id });
 }
 
 function validExperienceBandCache(entry) {
@@ -10153,7 +10176,7 @@ ${batch.map((entry) => `BEGIN COMPENSATION RESEARCH ${entry.researchId}\nCOHORT 
  * Every failure is converted into an assessment on the affected card; no
  * research error may discard a scored job or reject the score-jobs IPC call.
  */
-export async function researchCompensationAssessments(scoredJobs, { remoteResidences = {}, event, nodeId, requestId = null, signal, legacyResearchStepProbe = null, legacyAssessmentStepProbe = null, manualAiRunId = null, locationLookupCallRaw = callLLMRaw, careerInputs = new Map() } = {}) {
+export async function researchCompensationAssessments(scoredJobs, { remoteResidences = {}, event, nodeId, requestId = null, signal, legacyResearchStepProbe = null, legacyAssessmentStepProbe = null, manualAiRunId = null, locationLookupCallRaw = callLLMRaw, careerInputs = new Map(), salaryCareerSnapshotId } = {}) {
   const researchedAt = new Date().toISOString();
   const total = Array.isArray(scoredJobs) ? scoredJobs.length : 0;
   let processed = 0;
@@ -10379,10 +10402,7 @@ export async function researchCompensationAssessments(scoredJobs, { remoteReside
     }
     candidates.push({
       job,
-      personalSalaryEvidence: buildPersonalSalaryEvidence(job, {
-        ...careerInputs.get(normalizeCareerSnapshotIdentifier(job.careerSnapshotId)),
-        careerSnapshotId: normalizeCareerSnapshotIdentifier(job.careerSnapshotId) || '',
-      }),
+      personalSalaryEvidence: buildCompensationPersonalSalaryEvidence(job, careerInputs, salaryCareerSnapshotId),
       offer: offer.usable ? offer : { ...offer, currency: marketCurrency },
       marketCurrency,
       currencyInferredFromLocation: marketCurrencyResolution.inferredFromLocation,
@@ -15939,15 +15959,15 @@ Return a JSON object with four arrays of search query strings:
   // bucketing, so equivalent jobs across all merged search hubs share market
   // cohorts. Failures are represented per job as uncertain assessments rather
   // than discarding the board's scored jobs.
-  handleSafe('research-job-compensation', async (event, { jobs, nodeId, requestId = null, remoteResidences } = {}, signal) => {
+  handleSafe('research-job-compensation', async (event, { jobs, nodeId, requestId = null, remoteResidences, salaryCareerSnapshotId } = {}, signal) => {
     if (!Array.isArray(jobs)) throw new Error('Compensation research requires a jobs array.');
     const startedAt = Date.now();
     logger.info(`[Jobs][${nodeId}] Board compensation started: ${jobs.length} job(s)`);
     try {
       const manualAiRunId = getCurrentIpcRequestContext()?.manualAiRunId;
-      const careerInputs = await resolveCompensationCareerInputs(jobs, { signal });
+      const careerInputs = await resolveCompensationCareerInputs(jobs, { signal, salaryCareerSnapshotId });
       const enrichedJobs = await researchCompensationAssessments(jobs, {
-        remoteResidences: remoteResidences || {}, event, nodeId, requestId, signal, manualAiRunId, careerInputs,
+        remoteResidences: remoteResidences || {}, event, nodeId, requestId, signal, manualAiRunId, careerInputs, salaryCareerSnapshotId,
         legacyResearchStepProbe: ({ prompt, task, grounding, hints }) => hasExactDurableRawHandoff(prompt, {
           manualAiRunId,
           nodeId,

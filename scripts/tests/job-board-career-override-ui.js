@@ -119,15 +119,15 @@ export default [
     run: () => {
       const src = card();
       assert(
-        /import \{ resolveApplicationCareerSnapshotId \} from '\.\.\/utils\/jobBoardCareerOverride';/.test(src),
+        /import \{[^}]*\bresolveApplicationCareerSnapshotId\b[^}]*\} from '\.\.\/utils\/jobBoardCareerOverride';/.test(src),
         'JobCardNode must import resolveApplicationCareerSnapshotId',
       );
       const start = src.indexOf('const generateApplication = useCallback');
       assert(start >= 0, 'generateApplication must exist');
-      const ownerAt = src.indexOf('const owningBoard = getLiveNode(data.hubId);', start);
-      const resolveAt = src.indexOf('resolveApplicationCareerSnapshotId({ cardData: { careerSnapshotId: data.careerSnapshotId }', start);
-      const guardAt = src.indexOf('if (!careerSnapshotId) {', start);
-      assert(ownerAt > start, 'owning Board must be resolved via getLiveNode(data.hubId)');
+      const ownerAt = src.indexOf('const owningBoard = getLiveNode(card?.data?.hubId);', start);
+      const resolveAt = src.indexOf('resolveApplicationCareerSnapshotId({', start);
+      const guardAt = src.indexOf('if (!careerSnapshotId) throw', start);
+      assert(ownerAt > start, 'owning Board must be resolved from the live card');
       assert(resolveAt > ownerAt, 'resolver must use the owning Board');
       assert(guardAt > resolveAt, 'resolver must run before the snapshot guard');
       const declAt = src.indexOf('const careerSnapshotId = ', start);

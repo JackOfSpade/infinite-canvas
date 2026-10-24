@@ -294,6 +294,28 @@ export function useCanvasNavigation({
     return out;
   }, []);
 
+  // Match the fresh-first node traversal for queued work whose owning Board
+  // may now be on a different canvas level. Never read the embedded edges of
+  // the branch currently being edited from a stale stack snapshot.
+  const enumerateAllEdges = useCallback(() => {
+    const seen = new Set();
+    const out = [];
+    const add = edges => {
+      for (const edge of edges || []) {
+        if (!edge?.id || seen.has(edge.id)) continue;
+        seen.add(edge.id);
+        out.push(edge);
+      }
+    };
+    add(edgesRef.current);
+    for (const level of [...stackRef.current].reverse()) add(level.edges);
+    const divedInto = new Set(stackRef.current.map(level => level?.nodeId).filter(Boolean));
+    for (const node of enumerateAllNodes()) {
+      if (!divedInto.has(node.id)) add(node.data?.canvasData?.edges);
+    }
+    return out;
+  }, [enumerateAllNodes]);
+
   /**
    * Detach one or more nodes (and their internal edges) from the current sub-canvas and move them to a parent canvas depth.
    */
@@ -511,6 +533,7 @@ export function useCanvasNavigation({
     jumpTo,
     flushStack,
     enumerateAllNodes,
+    enumerateAllEdges,
     extractToParent: extractToLevel,
     updateNodeDataGlobally,
     addElementsGlobally,
@@ -522,7 +545,7 @@ export function useCanvasNavigation({
     animPhase,
     stateSwapRef,
   }), [
-    diveIn, diveOut, jumpTo, flushStack, enumerateAllNodes, extractToLevel,
+    diveIn, diveOut, jumpTo, flushStack, enumerateAllNodes, enumerateAllEdges, extractToLevel,
     updateNodeDataGlobally, addElementsGlobally, resetStack, freezeForQuit,
     breadcrumbs, depth, isAnimating, animPhase, stateSwapRef,
   ]);

@@ -43,6 +43,7 @@ import {
   isBoardCombineManualAiRunId,
   careerOverrideBoardMarkerCleanup,
   resumeJobBoardCareerOverride,
+  resolveSalaryCareerSnapshotId,
 } from '../utils/jobBoardCareerOverride';
 import { replaceBoardDisplayChildren } from './jobboard/replaceBoardDisplayChildren';
 import { isJobBoardUserCancellation, isLegacyUnbucketedJobBoard, validateJobBoardTaxonomy } from '../utils/jobBoardAiProvider';
@@ -1402,13 +1403,22 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
     () => boardInputSignature(completedModules, connectedModules),
     [completedModules, connectedModules],
   );
+  const salaryCareerKey = useStore(useCallback(store => {
+    const connected = new Set(getConnectedJobSearchIds(id, store.nodes, store.edges));
+    const selected = resolveSalaryCareerSnapshotId({
+      boardData: store.nodeLookup.get(id)?.data,
+      searchModules: store.nodes.filter(node => node.type === 'jobhub' && connected.has(node.id)),
+    });
+    return selected.blocked ? 'pending' : selected.careerSnapshotId || '';
+  }, [id]));
+  const salaryNeedsRefresh = salaryCareerKey !== (data.salaryCareerSnapshotId || '');
   const stale = hubState === 'done' && !!data.stale;
   // The Combine action is only useful when the cached board is out of date or
   // a connected source is incomplete; a done, current, fully complete board
   // shows a status line instead of an inert-looking button.
   const boardUpToDate = isJobBoardUpToDate({
     hubState,
-    stale,
+    stale: stale || salaryNeedsRefresh,
     connectedCount: connectedModules.length,
     completedCount: completedModules.length,
     pendingSourceWork: connectedModules.some(module => module.boardAction && module.boardAction !== 'reuse'),
@@ -2940,6 +2950,14 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
       const inputsAtCombine = liveCombineInputs(id, getNodes(), getEdges());
       const completedAtCombine = inputsAtCombine.completed;
       const readyAtCombine = inputsAtCombine.ready;
+      const salarySources = new Set(getConnectedJobSearchIds(id, getNodes(), getEdges()));
+      const salaryCareerAtCombine = resolveSalaryCareerSnapshotId({
+        boardData: getNode(id)?.data,
+        searchModules: getNodes().filter(node => node.type === 'jobhub' && salarySources.has(node.id)),
+      });
+      if (salaryCareerAtCombine.blocked) {
+        return { status: 'not-ready', error: 'Finish or discard the Job Board career-data import before salary analysis.' };
+      }
       if (inputsAtCombine.all.some(module => isJobWorkflowDeletionPending(module.id))) {
         return { status: 'cancelled' };
       }
@@ -3217,6 +3235,7 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
           nodeId: id,
           requestId: compensationRequestId,
           manualAiRunId,
+          salaryCareerSnapshotId: salaryCareerAtCombine.careerSnapshotId,
         });
         if (cancelled() || !getNode(id)) {
           EventLogger.log(`[JobBoard] combine cancelled during compensation research id=${id}`);
@@ -3316,7 +3335,13 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
         );
         return { status: 'cancelled' };
       }
+      const salarySourcesAtCommit = new Set(getConnectedJobSearchIds(id, getNodes(), getEdges()));
+      const salaryCareerAtCommit = resolveSalaryCareerSnapshotId({
+        boardData: getNode(id)?.data,
+        searchModules: getNodes().filter(node => node.type === 'jobhub' && salarySourcesAtCommit.has(node.id)),
+      });
       const signatureMatches = (
+        !salaryCareerAtCommit.blocked && salaryCareerAtCommit.careerSnapshotId === salaryCareerAtCombine.careerSnapshotId &&
         boardInputSignature(
           liveInputsBeforeCommit,
           liveStateBeforeCommit.all,
@@ -3459,6 +3484,7 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
           // Baseline for staleness detection (connection/data drift vs. this combine).
           combineSignature: sigAtCombine,
           combineSourceRuns: sourceRunsAtCombine,
+          salaryCareerSnapshotId: salaryCareerAtCombine.careerSnapshotId,
           dismissedJobKeys: dismissedJobKeysAtCombine,
           stale: false, staleReason: null,
           clearProvenance: null,
@@ -6639,7 +6665,7 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
         return next ? { jobBoardCareerOverride: next } : null;
       });
       if (approvedNow) {
-        addToast({ title: 'Career data ready for applications', description: fileNames.join(', '), type: 'success' });
+        addToast({ title: 'Career data ready for applications and salary guidance', description: fileNames.join(', '), type: 'success' });
       } else {
         EventLogger.log(`[JobBoard][${id}] Career override result superseded; not approved`);
       }

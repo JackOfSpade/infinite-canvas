@@ -336,14 +336,35 @@ export function hasActiveJobBoardCareerOverrideRun(boardData) {
   return !!current && (!!current.pending || current.retirePending.length > 0);
 }
 
-export function resolveApplicationCareerSnapshotId({ cardData, boardData } = {}) {
-  const override = approvedJobBoardCareerOverrideSnapshotId(boardData);
-  if (override) return { careerSnapshotId: override, source: 'board-override' };
+export function resolveApplicationCareerSnapshotId({ cardData, boardData, searchModules } = {}) {
+  if (boardData) return resolveBoardCareerSnapshotId({ boardData, searchModules });
   const raw = cardData && typeof cardData === 'object' ? cardData.careerSnapshotId : null;
   const card = typeof raw === 'string' ? snapshotId(raw.trim()) : null;
   if (card) return { careerSnapshotId: card, source: 'card' };
   return { careerSnapshotId: null, source: null };
 }
+
+// Applications and salary analysis share one career record for the Board, independent of
+// the immutable career pins that originally produced each hiring-fit score.
+export function resolveBoardCareerSnapshotId({ boardData, searchModules = [] } = {}) {
+  const current = recordOf(boardData);
+  if (current?.approved) return { careerSnapshotId: current.approved.careerSnapshotId, source: 'board', blocked: false };
+  // Dropped but unfinished Board data is not an empty slot. Do not silently
+  // substitute a Search while its import is compiling, interrupted or failed.
+  if (current?.pending) return { careerSnapshotId: null, source: 'board', blocked: true };
+  const candidates = searchModules.flatMap(module => {
+    const data = module?.data || {};
+    const id = snapshotId(data.careerSnapshotId);
+    if (!id) return [];
+    const receipt = data.careerImportCompilation;
+    const importedAt = receipt?.status === 'approved' && receipt.careerSnapshotId === id
+      ? safeTime(receipt.approvedAt) : 0;
+    return [{ careerSnapshotId: id, importedAt, moduleId: String(module.id || '') }];
+  }).sort((a, b) => b.importedAt - a.importedAt || a.moduleId.localeCompare(b.moduleId));
+  return { careerSnapshotId: candidates[0]?.careerSnapshotId || null, source: candidates.length ? 'search' : null, blocked: false };
+}
+
+export const resolveSalaryCareerSnapshotId = resolveBoardCareerSnapshotId;
 
 // Verdict for a canvas document node dragged onto a Board: may its career
 // files become the Board's career data for applications right now? Mirrors

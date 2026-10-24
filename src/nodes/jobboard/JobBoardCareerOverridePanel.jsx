@@ -83,22 +83,22 @@ export function JobBoardCareerOverridePanel({
       className="rounded-lg border border-white/10 bg-white/5 px-2.5 py-2"
       onPointerDown={(e) => e.stopPropagation()}
     >
-      <p className="text-[10px] font-semibold text-white/70">Career data for applications</p>
+      <p className="text-[10px] font-semibold text-white/70">Career data for applications and salary guidance</p>
       <p className="text-[9px] leading-snug text-white/30">
-        Optional. Compiled here, used only when this board&apos;s job cards generate application bundles. Search results and scores are not changed.
+        Used for this board&apos;s applications and salary guidance. When empty, both use the most recently imported career data from a connected Job Search. Re-combine to refresh salary guidance after changing career data.
       </p>
 
       {approved && (
         <div className="mt-1.5">
           <p className="text-[10px] leading-snug text-emerald-200/80 break-words">
-            Applications use: {approved.fileNames.join(', ') || 'compiled career data'}, compiled {formatDate(approved.approvedAt)}
+            Applications and salary guidance use: {approved.fileNames.join(', ') || 'compiled career data'}, compiled {formatDate(approved.approvedAt)}
           </p>
           {state === 'approved' && (
             <div className="mt-1 flex justify-center">
               <TwoStepConfirmButton
                 label="Clear"
                 confirmLabel="Click again to clear"
-                title="Job cards go back to the career data of their Job Search"
+                title="Applications and salary guidance fall back to the latest career data from a connected Job Search"
                 onConfirm={onClear}
                 disabled={!view?.canClear || busy}
                 className={BUTTON_CLASS}

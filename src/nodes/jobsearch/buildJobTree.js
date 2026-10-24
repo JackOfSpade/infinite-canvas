@@ -1052,6 +1052,7 @@ export function buildJobTreeNodes({
         // it defensively for legacy/future schemas, and it must travel through
         // every valid AI-taxonomized board tree.
         compensationAssessment: job.compensationAssessment,
+        compensationCareerSnapshotId: job.compensationAssessment?.personalRecommendation?.careerSnapshotId ?? null,
         // Preference assessment is independent of hiring fit. Preserve it so
         // cards can explain why an otherwise equal-fit listing is ordered here.
         preferenceAssessment: job.preferenceAssessment,

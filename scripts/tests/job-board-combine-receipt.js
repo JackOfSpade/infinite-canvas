@@ -7,7 +7,8 @@ import { buildJobTreeNodes } from '../../src/nodes/jobsearch/buildJobTree.js';
 import { replaceBoardDisplayChildren } from '../../src/nodes/jobboard/replaceBoardDisplayChildren.js';
 import { combineCommitMismatchReason } from '../../src/nodes/jobboard/boardRecoveryNotice.js';
 import { attachProtectedCards, isProtectedJobCard } from '../../src/utils/jobLocationConsolidation.js';
-import { normalizeJobBoardRecoveryTimestamp } from '../../src/utils/jobBoardSearchSelection.js';
+import { getConnectedJobSearchIds, normalizeJobBoardRecoveryTimestamp } from '../../src/utils/jobBoardSearchSelection.js';
+import { resolveSalaryCareerSnapshotId } from '../../src/utils/jobBoardCareerOverride.js';
 
 import {
   boardHistoryAuthorityAvailable,
@@ -118,6 +119,7 @@ async function startCombineCommitFixture({ unmatchedProtected = false } = {}) {
     getNode: nodeId => nodes.find(node => node.id === nodeId), getNodes: () => nodes, getEdges: () => edges,
     setNodes: update => { nodes = typeof update === 'function' ? update(nodes) : update; }, updateGlobal,
     cancelled: () => false, liveCombineInputs: () => liveInputs, boardInputSignature: inputSignature,
+    getConnectedJobSearchIds, resolveSalaryCareerSnapshotId, salaryCareerAtCombine: { careerSnapshotId: null },
     isJobWorkflowDeletionPending: nodeId => pendingDeletionIds.has(nodeId),
     selectedRunsMatchExpected: () => true,
     combineInputsMatchExpected: (modules, expected) => modules.length === expected.length
@@ -170,6 +172,10 @@ export default [
       const cases = [
         ['changed score fingerprint', fixture => { fixture.liveInputs.completed[0].fingerprint = 'changed'; }, 'superseded'],
         ['changed source run', fixture => { fixture.liveInputs.completed[0].runId = 'run-2'; }, 'superseded'],
+        ['changed Board salary career data', fixture => fixture.updateGlobal('board', {
+          jobBoardCareerOverride: { version: 1, approved: { careerSnapshotId: 'a'.repeat(64),
+            generation: 'job-board-career:board:1', fileNames: ['career.md'], approvedAt: 1, profileFingerprint: null }, pending: null, retirePending: [] },
+        }), 'superseded'],
         ['disconnected source', fixture => { fixture.liveInputs.completed = []; fixture.liveInputs.all = []; }, 'superseded'],
         ['locked Board', fixture => fixture.updateGlobal('board', { locked: true }), 'not-ready'],
         ['deletion pending', fixture => fixture.pendingDeletionIds.add('search'), 'cancelled'],

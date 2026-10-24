@@ -1,7 +1,7 @@
 import { runInNewContext } from 'node:vm';
 import { assert, canonicalizeGeneratedUntrustedBoundaryNonces, COMPENSATION_MIN_FIT_SCORE, compensationAssessmentCacheMatchesResearch, compensationCohortAssessmentFits, compensationCohortAssessmentMaxTokens, compensationResearchFingerprint, buildRoleFamilyBatchResearchPrompt, getRoleFamilyExperienceBandCache, packCompensationAssessmentBatches, packCompensationResearchBatches, parseCompensationResearchSections, planRoleFamilyAssessmentBatches, planRoleFamilyResearchBatches, roleFamilyAssessmentMaxTokens, saveRoleFamilyExperienceBandsBatch, tryGetStore, validateCompensationEvidenceBatchSubmission, validateRoleFamilyExperienceBandsBatchSubmission } from '../test-dependencies.js';
 import { readFileSync } from 'node:fs';
-import { buildCompensationAssessmentListings, compensationContextForSalary, compensationPersonalizationSignature, researchCompensationAssessments, resolveCompensationCareerInputs } from '../../electron/ipc/jobs.js';
+import { buildCompensationAssessmentListings, buildCompensationPersonalSalaryEvidence, compensationContextForSalary, compensationPersonalizationSignature, researchCompensationAssessments, resolveCompensationCareerInputs } from '../../electron/ipc/jobs.js';
 import { createDependencyReadyQueue, mapAutomaticHandoffs, runAutomaticHandoffWorkers } from '../../src/utils/handoffScheduler.js';
 import {
   classifyCompensationFitEligibility,
@@ -683,10 +683,38 @@ Model prose happens to mention https://prose.example.test/untrusted.`);
     const source = readFileSync(new URL('../../electron/ipc/jobs.js', import.meta.url), 'utf8');
     const handlerStart = source.indexOf("handleSafe('research-job-compensation'");
     const handler = source.slice(handlerStart, source.indexOf("handleSafe(", handlerStart + 1));
-    assert(handlerStart >= 0 && handler.includes('await resolveCompensationCareerInputs(jobs, { signal })')
+    assert(handlerStart >= 0 && handler.includes('await resolveCompensationCareerInputs(jobs, { signal, salaryCareerSnapshotId })')
       && handler.includes('manualAiRunId, careerInputs,'),
     'the real IPC handler must resolve approved inputs itself before passing the host map into compensation research');
     return { uniqueApprovedReads: reads.length, resolvedSnapshots: inputs.size };
+  },
+}, {
+  name: 'Board salary source overrides every scoring pin and never silently falls back from an explicit selection',
+  run: async () => {
+    const sourceId = 'a'.repeat(64), selectedId = 'b'.repeat(64);
+    const job = { careerSnapshotId: sourceId, description: 'Build Python services.', fitAssessment: {
+      schemaVersion: 1, auditStatus: 'audited', requirementRows: [{
+        effectiveStatus: 'direct', jobEvidence: 'Build Python services.', candidateEvidence: 'Built Python services.',
+      }],
+    } };
+    const reads = [];
+    const inputs = await resolveCompensationCareerInputs([job], {
+      salaryCareerSnapshotId: selectedId,
+      readPinned: async ({ careerSnapshotId }) => { reads.push(careerSnapshotId); return { profile: {}, careerData: 'Built Python services.' }; },
+    });
+    const packet = buildCompensationPersonalSalaryEvidence(job, inputs, selectedId);
+    assert(reads.length === 1 && reads[0] === selectedId && inputs.size === 1
+      && packet.careerSnapshotId === selectedId && packet.evidence.length === 1 && job.careerSnapshotId === sourceId,
+    'all salary evidence comes from the selected approved source without retargeting the hiring-fit score');
+    const empty = await resolveCompensationCareerInputs([job], { salaryCareerSnapshotId: null, readPinned: async () => { throw new Error('must not read a score pin'); } });
+    assert(empty.size === 0 && buildCompensationPersonalSalaryEvidence(job, inputs, null).evidence.length === 0,
+      'an empty career selection cannot reuse the source job career evidence');
+    let failed = false;
+    try { await resolveCompensationCareerInputs([job], { salaryCareerSnapshotId: selectedId, readPinned: async () => { throw new Error('unavailable'); } }); } catch { failed = true; }
+    assert(failed, 'unreadable selected data must fail visibly instead of switching sources');
+    const changed = new Map([[selectedId, { profile: {}, careerData: 'Built different systems.' }]]);
+    assert(buildCompensationPersonalSalaryEvidence(job, changed, selectedId).evidence.length === 0,
+      'claims from the old scoring source must still be re-grounded against the selected career record');
   },
 }, {
   name: 'Compensation batch acceptance validates personalized ranges and career citations before handoff settlement',

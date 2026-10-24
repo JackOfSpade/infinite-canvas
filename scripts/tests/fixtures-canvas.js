@@ -1753,8 +1753,8 @@ export default [
       const latchSet = generationIndexOf('applicationSubmissionRef.current = true;');
       const acquire = generationIndexOf('lease = await acquireModuleRun({');
       const currentCanvasRead = generationIndexOf('const canvasFilePath = nav?.getCurrentFile ? nav.getCurrentFile() : nav?.currentFile ?? null;');
-      const snapshotPin = generationIndexOf("const careerSnapshotId = typeof data.careerSnapshotId === 'string' ? data.careerSnapshotId.trim() : '';");
-      const snapshotGuard = generationIndexOf('if (!careerSnapshotId) {');
+      const snapshotPin = generationIndexOf('const initialCareer = resolveLiveCareer(getLiveNode(idRef.current));');
+      const snapshotGuard = generationIndexOf('if (!initialCareer.careerSnapshotId) {');
       const queueIpc = generationIndexOf('await window.electronAPI.queueLocalApplication({');
       const release = generationIndexOf('lease?.release();');
       const canvasSource = fs.readFileSync(path.resolve('src/Canvas.jsx'), 'utf8');
@@ -5668,10 +5668,9 @@ export default [
       const generationStart = source.indexOf('const generateApplication = useCallback');
       const generationEnd = source.indexOf('\n  return (', generationStart);
       const generationScope = source.slice(generationStart, generationEnd);
-      // The pin may come from the owning Board's approved career override or
-      // from the card itself; both are immutable approved snapshot ids resolved
-      // by one helper, never mutable hub authority.
-      assert(generationScope.includes('resolveApplicationCareerSnapshotId({ cardData: { careerSnapshotId: data.careerSnapshotId }')
+      // Source selection passes only an approved immutable id to the host.
+      assert(generationScope.includes('resolveApplicationCareerSnapshotId({')
+        && generationScope.includes('searchModules: nodes.filter')
         && generationScope.includes("const careerSnapshotId = (resolvedCareer.careerSnapshotId || '')")
         && generationScope.includes('careerSnapshotId,')
         && !generationScope.includes('originHubId')

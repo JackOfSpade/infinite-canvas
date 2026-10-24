@@ -18,6 +18,7 @@ import {
   jobBoardCareerOverrideRunIds,
   hasActiveJobBoardCareerOverrideRun,
   resolveApplicationCareerSnapshotId,
+  resolveSalaryCareerSnapshotId,
   jobBoardCareerOverrideView,
   isBoardCombineManualAiRunId,
   careerOverrideBoardMarkerCleanup,
@@ -66,6 +67,27 @@ const COMBINE_RUN = 'job-board:board-1:combine-1';
 const COMBINE_RUN_2 = 'job-board:board-1:combine-2';
 
 export default [
+  {
+    name: 'salary source: Board wins; an empty Board uses the most recent connected Search import',
+    run: () => {
+      const search = (id, careerSnapshotId, approvedAt) => ({ id, data: { careerSnapshotId,
+        careerImportCompilation: { status: 'approved', careerSnapshotId, approvedAt } } });
+      const modules = [search('older', SNAP_B, 1000), search('newer', SNAP_C, 3000)];
+      assert.deepStrictEqual(resolveSalaryCareerSnapshotId({ boardData: board({ version: 1, approved: approved(), pending: null, retirePending: [] }), searchModules: modules }),
+        { careerSnapshotId: SNAP_A, source: 'board', blocked: false });
+      for (const searchModules of [modules, [...modules].reverse()]) {
+        assert.deepStrictEqual(resolveSalaryCareerSnapshotId({ boardData: {}, searchModules }),
+          { careerSnapshotId: SNAP_C, source: 'search', blocked: false });
+      }
+      assert.deepStrictEqual(resolveSalaryCareerSnapshotId({ boardData: {}, searchModules: [] }),
+        { careerSnapshotId: null, source: null, blocked: false });
+      assert.deepStrictEqual(resolveSalaryCareerSnapshotId({ boardData: board({ version: 1, approved: null, pending: pending(), retirePending: [] }), searchModules: modules }),
+        { careerSnapshotId: null, source: 'board', blocked: true });
+      const tied = [search('z', SNAP_B, 3000), search('a', SNAP_C, 3000)];
+      assert.deepStrictEqual(resolveSalaryCareerSnapshotId({ searchModules: tied }), resolveSalaryCareerSnapshotId({ searchModules: [...tied].reverse() }),
+        'identical import times must resolve deterministically');
+    },
+  },
   {
     name: 'career override: isBoardCombineManualAiRunId separates Board runs from career runs',
     run: () => {
@@ -320,11 +342,11 @@ export default [
       const overrideBoard = board({ version: 1, approved: approved(), pending: null });
       assert.deepStrictEqual(
         resolveApplicationCareerSnapshotId({ cardData: { careerSnapshotId: SNAP_C }, boardData: overrideBoard }),
-        { careerSnapshotId: SNAP_A, source: 'board-override' },
+        { careerSnapshotId: SNAP_A, source: 'board', blocked: false },
       );
       assert.deepStrictEqual(
         resolveApplicationCareerSnapshotId({ cardData: { careerSnapshotId: SNAP_C }, boardData: {} }),
-        { careerSnapshotId: SNAP_C, source: 'card' },
+        { careerSnapshotId: null, source: null, blocked: false },
       );
       assert.deepStrictEqual(
         resolveApplicationCareerSnapshotId({ cardData: { careerSnapshotId: `  ${SNAP_C}\n` }, boardData: null }),
@@ -332,8 +354,15 @@ export default [
       );
       assert.deepStrictEqual(
         resolveApplicationCareerSnapshotId({ cardData: { careerSnapshotId: 'short' }, boardData: {} }),
-        { careerSnapshotId: null, source: null },
+        { careerSnapshotId: null, source: null, blocked: false },
       );
+      const searches = [{ id: 'old', data: { careerSnapshotId: SNAP_B, careerImportCompilation: { status: 'approved', careerSnapshotId: SNAP_B, approvedAt: 1 } } },
+        { id: 'latest', data: { careerSnapshotId: SNAP_A, careerImportCompilation: { status: 'approved', careerSnapshotId: SNAP_A, approvedAt: 2 } } }];
+      for (const boardData of [{}, overrideBoard, board({ version: 1, approved: null, pending: pending(), retirePending: [] })]) {
+        assert.deepStrictEqual(resolveApplicationCareerSnapshotId({ cardData: { careerSnapshotId: SNAP_C }, boardData, searchModules: searches }),
+          resolveSalaryCareerSnapshotId({ boardData, searchModules: searches }),
+          'application and salary selection must agree, including an unfinished Board import');
+      }
     },
   },
   {

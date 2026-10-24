@@ -30,7 +30,8 @@ import {
 import { useBridgeHeldKey } from '../hooks/useBridgeHeldKey';
 import { bridgeHeldCardLine } from '../utils/bridgeHeldApplication';
 import { applicationBundleIndicator, APPLICATION_BUNDLE_TONES } from '../utils/jobCardBundleIndicator';
-import { resolveApplicationCareerSnapshotId } from '../utils/jobBoardCareerOverride';
+import { resolveApplicationCareerSnapshotId, resolveSalaryCareerSnapshotId } from '../utils/jobBoardCareerOverride';
+import { getConnectedJobSearchIds } from '../utils/jobBoardSearchSelection';
 
 // Accent color encodes the hiring-fit band: a compact evidence-based assessment
 // of full-process fit, not a guaranteed hiring outcome.
@@ -217,7 +218,7 @@ function compactHiringFitAudit(assessment) {
  *   language (optional 2-letter code, set only when non-English → shows a chip)
  */
 export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
-  const { deleteElements, getNode, setNodes, updateNodeData } = useReactFlow();
+  const { deleteElements, getNode, getNodes, getEdges, setNodes, updateNodeData } = useReactFlow();
   const nav = useContext(CanvasNavigationContext);
   const updateGlobal = nav?.updateNodeDataGlobally || updateNodeData;
   const { addToast } = useToast();
@@ -475,7 +476,18 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
     .map((source) => ({ ...source, safeUrl: normalizeExternalHttpUrl(source.url) }))
     .filter((source) => source.safeUrl), [compensationAssessment]);
   const personalRecommendation = compensationAssessment.personalRecommendation;
-  const personalRecommendationCurrent = isCompensationRecommendationCurrent(personalRecommendation, data.careerSnapshotId);
+  const liveSalaryCareerKey = useStore(useCallback(store => {
+    const board = store.nodeLookup.get(data.hubId);
+    if (board?.type !== 'jobboard') return undefined;
+    const connected = new Set(getConnectedJobSearchIds(board.id, store.nodes, store.edges));
+    const selected = resolveSalaryCareerSnapshotId({
+      boardData: board.data,
+      searchModules: store.nodes.filter(node => node.type === 'jobhub' && connected.has(node.id)),
+    });
+    return selected.blocked ? 'pending' : selected.careerSnapshotId || '';
+  }, [data.hubId]));
+  const personalRecommendationCurrent = isCompensationRecommendationCurrent(personalRecommendation,
+    liveSalaryCareerKey === undefined ? (data.compensationCareerSnapshotId ?? data.careerSnapshotId) : liveSalaryCareerKey);
   const personalRecommendationOutdated = personalRecommendation
     && personalRecommendation.status !== 'unavailable' && !personalRecommendationCurrent;
   const copyDesiredSalary = useCallback(async (event) => {
@@ -1060,9 +1072,8 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
   }, [localApplication?.id, localApplication?.canvasFilePath, savedFolder, nav]);
 
   // ── Full application (tailored résumé + cover letter HTML) ─────────────────
-  // New generation reads only the approved snapshot pinned to this scored
-  // card. The origin hub remains useful for display/history, but its mutable
-  // careerData must never regain authority for a fresh application.
+  // Resolve an approved immutable snapshot with the same Board-first priority
+  // used by salary analysis. Raw renderer career text is never authority.
   // Application Generate always writes a self-contained Local AI handoff next
   // to the saved canvas. New jobs use paste-back; legacy coding-agent jobs produce files, then
   // the existing polling/import path validates and saves the final bundle.
@@ -1072,24 +1083,27 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
     // The reactive effective lock gives mounted cards immediate feedback; the
     // live read remains the race-safe fence if a Board locks after that render.
     if (effectiveLock || getLiveNode(data.hubId)?.data?.locked) return;
-    // A Board-level career override wins over the card pin so new career data
-    // reaches applications without re-scraping or re-scoring the Board.
-    const owningBoard = getLiveNode(data.hubId);
-    // (The typeof fence keeps this callback evaluable by source-sliced
-    // harnesses that run it without module imports; there it uses the pin.)
-    const resolvedCareer = typeof resolveApplicationCareerSnapshotId === 'function'
-      ? resolveApplicationCareerSnapshotId({ cardData: { careerSnapshotId: data.careerSnapshotId }, boardData: owningBoard?.type === 'jobboard' ? owningBoard.data : null })
-      : { careerSnapshotId: typeof data.careerSnapshotId === 'string' ? data.careerSnapshotId.trim() || null : null, source: 'card' };
-    // The resolver trims and validates both sources; the card's own pin is
-    // only the fallback when the Board has no approved override.
-    const careerSnapshotId = (resolvedCareer.careerSnapshotId || '');
+    const resolveLiveCareer = card => {
+      const owningBoard = getLiveNode(card?.data?.hubId);
+      const nodes = nav?.enumerateAllNodes?.() || getNodes();
+      const edges = nav?.enumerateAllEdges?.() || getEdges();
+      const connected = new Set(getConnectedJobSearchIds(owningBoard?.id, nodes, edges));
+      return resolveApplicationCareerSnapshotId({
+        cardData: card?.data,
+        boardData: owningBoard?.type === 'jobboard' ? owningBoard.data : null,
+        searchModules: nodes.filter(node => node.type === 'jobhub' && connected.has(node.id)),
+      });
+    };
+    const initialCareer = resolveLiveCareer(getLiveNode(idRef.current));
     // Fast, non-queued validation prevents a legacy or stale card from taking
     // a queue turn. The main-process boundary repeats this check before any
     // job id or filesystem side effect.
-    if (!careerSnapshotId) {
+    if (!initialCareer.careerSnapshotId) {
       addToast({
         title: 'Refresh Career Snapshot',
-        description: 'This job card predates its approved career snapshot. Re-import your career files, re-run Job Search, and re-combine the board before generating an application.',
+        description: initialCareer.blocked
+          ? 'Finish or discard the Job Board career-data import before generating an application.'
+          : 'Import career data into this Job Board or a connected Job Search before generating an application.',
         type: 'error',
       });
       return;
@@ -1217,6 +1231,13 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
         return;
       }
       const expectedPriorLocalApplication = cardBeforeQueue.data?.localApplication || null;
+      // The queue and edit-history gate may both wait. Freeze the selected
+      // source only at the final IPC boundary, after those waits finish.
+      const resolvedCareer = resolveLiveCareer(cardBeforeQueue);
+      const careerSnapshotId = (resolvedCareer.careerSnapshotId || '');
+      if (!careerSnapshotId) throw new Error(resolvedCareer.blocked
+        ? 'Finish or discard the Job Board career-data import before generating an application.'
+        : 'Career data is no longer available on the Job Board or its connected Job Searches.');
       EventLogger.log(`[JobCard] application career source id=${id} source=${resolvedCareer.source}`);
       const queued = await window.electronAPI.queueLocalApplication({
         nodeId: idRef.current,
@@ -1364,7 +1385,7 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
       applicationSubmissionRef.current = false;
       if (isMountedRef.current) setApplicationRun({ state: 'idle', position: null });
     }
-  }, [data.hubId, data.careerSnapshotId, data.title, data.company, data.snippet, data.location, data.salary, data.url, data.googleCardUrl, data.source, data.posted, data.language, data.postingVariants, data.reasoning, data.matchScore, additionalNotes, id, getLiveNode, nav, addToast, isMountedRef, acquireModuleRun, hasApplicationRun, localJobPending, effectiveLock, updateGlobal]);
+  }, [data.hubId, data.title, data.company, data.snippet, data.location, data.salary, data.url, data.googleCardUrl, data.source, data.posted, data.language, data.postingVariants, data.reasoning, data.matchScore, additionalNotes, id, getLiveNode, getNodes, getEdges, nav, addToast, isMountedRef, acquireModuleRun, hasApplicationRun, localJobPending, effectiveLock, updateGlobal]);
 
   return (
     <div
