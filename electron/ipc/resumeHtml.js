@@ -969,11 +969,19 @@ const INJECTED_CHROME_CSS = `
 .ic-inferred-skill { white-space: normal; }
 @media screen {
   body { padding: 0; background: #e7e0d1; }
+  .ic-resume-workspace { height: 100vh; height: 100dvh; min-height: 0; overflow: hidden; }
+  .ic-workspace-sidebar { height: 100%; max-height: 100%; }
+  .ic-preview-area { display: flex; flex-direction: column; min-height: 0; padding: 20px 24px 24px; }
+  .ic-document-tabs { flex: none; width: var(--ic-preview-width, 794px); max-width: 100%; }
+  [data-ic-document-panel] { flex: 1; min-height: 0; overflow: auto; }
+  .ic-page-stage { zoom: var(--ic-preview-scale, 1); }
 }
-@media (max-width: 860px) {
-  .ic-resume-workspace { display: block; }
-  .ic-workspace-sidebar { position: static; max-height: none; }
-  .ic-preview-area { padding: 22px 12px 48px; overflow-x: auto; }
+@media screen and (max-width: 860px) {
+  .ic-resume-workspace { grid-template-columns: minmax(200px, 28%) minmax(0, 1fr); }
+  .ic-preview-area { padding: 16px 12px; }
+}
+@media screen and (max-width: 600px) {
+  .ic-resume-workspace { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 30%) minmax(0, 1fr); }
 }
 @media print {
   .ic-toolbar, .ic-banner { display: none !important; }
@@ -2771,13 +2779,37 @@ ${chrome}
       stage.setAttribute('data-ic-page-count', String(result.pageCount));
     }
 
+    function fitPreview(stage) {
+      var panel = stage.closest('[data-ic-document-panel]');
+      var preview = stage.closest('.ic-preview-area');
+      var pageEl = stage.querySelector('.page');
+      if (!panel || !preview || !pageEl) return;
+      var pageRect = pageEl.getBoundingClientRect();
+      var paperHeight = pxFromVar(getComputedStyle(document.documentElement).getPropertyValue('--page-h').trim() || '11in');
+      // Keep a full-size first page when a document grows beyond one page;
+      // its remaining content then scrolls inside the document panel.
+      var height = Number(stage.getAttribute('data-ic-page-count')) > 1
+        ? paperHeight : Math.max(paperHeight, pageRect.height);
+      var scale = Math.min(panel.clientWidth / pageRect.width, (panel.clientHeight - 1) / height);
+      if (!Number.isFinite(scale) || scale <= 0) return;
+      stage.style.setProperty('--ic-preview-scale', String(scale));
+      preview.style.setProperty('--ic-preview-width', (pageRect.width * scale) + 'px');
+    }
+
     var scheduled = false;
     function scheduleRecompute() {
       if (scheduled) return;
       scheduled = true;
       requestAnimationFrame(function () {
         scheduled = false;
-        stages.forEach(function (stage) { if (stage.offsetParent !== null) renderGuides(stage); });
+        stages.forEach(function (stage) {
+          if (stage.offsetParent === null) return;
+          // Guide positions and the pagination clone use physical paper
+          // geometry. Measure before applying the screen-only zoom.
+          stage.style.removeProperty('--ic-preview-scale');
+          renderGuides(stage);
+          fitPreview(stage);
+        });
       });
     }
     window.icPageGuidesRecompute = scheduleRecompute;
@@ -2787,6 +2819,8 @@ ${chrome}
         var pageEl = stage.querySelector('.page');
         if (pageEl) ro.observe(pageEl);
       });
+      var preview = document.querySelector('.ic-preview-area');
+      if (preview) ro.observe(preview);
     }
     window.addEventListener('resize', scheduleRecompute);
     new MutationObserver(scheduleRecompute).observe(document.documentElement, {
