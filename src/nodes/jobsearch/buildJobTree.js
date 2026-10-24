@@ -142,6 +142,74 @@ const MAX_COMPENSATION_TEXT_LENGTH = 2_400;
 const MAX_SOURCE_LABEL_LENGTH = 240;
 const MAX_SOURCE_DETAILS_LENGTH = 500;
 const MAX_LOCATION_LABEL_LENGTH = 300;
+const PERSONAL_RECOMMENDATION_STATUSES = new Set(['personalized', 'market_estimate', 'unavailable']);
+const PERSONAL_RECOMMENDATION_CONFIDENCES = new Set(['low', 'medium', 'high']);
+
+function unavailablePersonalRecommendation() {
+  return {
+    schemaVersion: 1,
+    status: 'unavailable',
+    range: null,
+    desiredSalary: null,
+    confidence: 'low',
+    explanation: 'The saved personal salary guidance could not be read safely. Combine jobs again on the Job Board to refresh it.',
+    limitations: [],
+    careerSnapshotId: '',
+    methodologyVersion: 1,
+  };
+}
+
+// Personal guidance is optional, and has a stricter boundary than legacy market
+// research. Never coerce numeric strings, fill a missing endpoint, infer units,
+// or silently repair a target: the copyable number must be a validated answer.
+function normalizedPersonalRecommendation(value, marketRange) {
+  if (value === undefined) return null;
+  const unavailable = unavailablePersonalRecommendation();
+  if (!value || typeof value !== 'object' || Array.isArray(value)
+    || value.schemaVersion !== 1 || value.methodologyVersion !== 1
+    || !PERSONAL_RECOMMENDATION_STATUSES.has(value.status)
+    || !PERSONAL_RECOMMENDATION_CONFIDENCES.has(value.confidence)
+    || typeof value.explanation !== 'string' || !value.explanation.trim()
+    || !Array.isArray(value.limitations) || !value.limitations.every((item) => typeof item === 'string')
+    || typeof value.careerSnapshotId !== 'string' || value.careerSnapshotId.length > 300) return unavailable;
+
+  const normalized = {
+    schemaVersion: 1,
+    status: value.status,
+    range: null,
+    desiredSalary: null,
+    confidence: value.confidence,
+    explanation: value.explanation.trim().slice(0, MAX_COMPENSATION_TEXT_LENGTH),
+    limitations: value.limitations.map((item) => item.trim().slice(0, 500)).filter(Boolean).slice(0, 8),
+    careerSnapshotId: value.careerSnapshotId.trim(),
+    methodologyVersion: 1,
+  };
+  if (value.status === 'unavailable') {
+    return value.range === null && value.desiredSalary === null ? normalized : unavailable;
+  }
+  const range = value.range;
+  const isPositiveCash = (amount) => typeof amount === 'number' && Number.isFinite(amount)
+    && amount > 0 && amount <= MAX_CREDIBLE_ANNUAL_CASH;
+  if (!range || typeof range !== 'object' || Array.isArray(range)
+    || !isPositiveCash(range.min) || !isPositiveCash(range.max) || range.min > range.max
+    || !isPositiveCash(value.desiredSalary) || value.desiredSalary < range.min || value.desiredSalary > range.max
+    || typeof range.currency !== 'string' || !/^[A-Z]{3}$/.test(range.currency)
+    || range.currency !== marketRange.currency || range.period !== 'annual' || marketRange.period !== 'annual'
+    || !(marketRange.min > 0) || !(marketRange.max > 0)
+    || range.min < marketRange.min || range.max > marketRange.max
+    || (value.status === 'personalized' && !/^[a-f0-9]{64}$/.test(normalized.careerSnapshotId))
+    || (value.status === 'market_estimate' && (value.confidence !== 'low'
+      || range.min !== marketRange.min || range.max !== marketRange.max))) return unavailable;
+  normalized.range = { min: range.min, max: range.max, currency: range.currency, period: 'annual' };
+  normalized.desiredSalary = value.desiredSalary;
+  return normalized;
+}
+
+/** A saved answer is usable only for the career snapshot it was calculated from. */
+export function isCompensationRecommendationCurrent(recommendation, careerSnapshotId) {
+  return Boolean(recommendation && recommendation.status !== 'unavailable'
+    && recommendation.careerSnapshotId === (typeof careerSnapshotId === 'string' ? careerSnapshotId.trim() : ''));
+}
 
 function numericScore(value) {
   const score = Number(value);
@@ -244,8 +312,9 @@ export function normalizeCompensationAssessment(value) {
       schemaVersion: 0,
       status: 'not_evaluated',
       reasonCode: 'legacy_unresearched',
-      justification: 'Compensation research was not run for this saved result. Re-run its Job Search module to evaluate the advertised cash salary.',
+      justification: 'Compensation research was not run for this saved result. Combine jobs again on the Job Board to evaluate the advertised cash salary.',
       offered: normalizedRange(), competitiveRange: normalizedRange(), comparisonLocation: '', researchedAt: '', currencyInferredFromLocation: false, sourceLinks: [],
+      personalRecommendation: null,
       isLegacy: true,
     };
   }
@@ -312,6 +381,9 @@ export function normalizeCompensationAssessment(value) {
           ? 'The available salary evidence was not comparable enough to make a reliable cash-pay conclusion.'
           : 'The listing did not provide enough guaranteed recurring cash compensation to evaluate.';
   }
+  normalized.personalRecommendation = schemaVersion === 1
+    ? normalizedPersonalRecommendation(source.personalRecommendation, normalized.competitiveRange)
+    : null;
   return normalized;
 }
 

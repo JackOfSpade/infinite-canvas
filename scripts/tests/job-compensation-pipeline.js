@@ -1,7 +1,7 @@
 import { runInNewContext } from 'node:vm';
 import { assert, canonicalizeGeneratedUntrustedBoundaryNonces, COMPENSATION_MIN_FIT_SCORE, compensationAssessmentCacheMatchesResearch, compensationCohortAssessmentFits, compensationCohortAssessmentMaxTokens, compensationResearchFingerprint, buildRoleFamilyBatchResearchPrompt, getRoleFamilyExperienceBandCache, packCompensationAssessmentBatches, packCompensationResearchBatches, parseCompensationResearchSections, planRoleFamilyAssessmentBatches, planRoleFamilyResearchBatches, roleFamilyAssessmentMaxTokens, saveRoleFamilyExperienceBandsBatch, tryGetStore, validateCompensationEvidenceBatchSubmission, validateRoleFamilyExperienceBandsBatchSubmission } from '../test-dependencies.js';
 import { readFileSync } from 'node:fs';
-import { compensationContextForSalary, researchCompensationAssessments } from '../../electron/ipc/jobs.js';
+import { buildCompensationAssessmentListings, compensationContextForSalary, compensationPersonalizationSignature, researchCompensationAssessments, resolveCompensationCareerInputs } from '../../electron/ipc/jobs.js';
 import { createDependencyReadyQueue, mapAutomaticHandoffs, runAutomaticHandoffWorkers } from '../../src/utils/handoffScheduler.js';
 import {
   classifyCompensationFitEligibility,
@@ -24,6 +24,7 @@ import {
   sourcesPresentInGroundedResearch,
 } from '../../electron/ipc/jobCompensation.js';
 import { ROLE_FAMILY_HANDOFF_BATCH_SIZE, COMPENSATION_COHORT_HANDOFF_BATCH_SIZE } from '../../electron/ipc/jobCompensationPlanning.js';
+import { COMPENSATION_ASSESSMENT_BASE_TOKENS, COMPENSATION_ASSESSMENT_PER_COHORT_TOKENS, COMPENSATION_ASSESSMENT_PER_ROW_TOKENS, MANUAL_AI_USABLE_OUTPUT_TOKENS, MAX_COMPENSATION_COHORTS_PER_ASSESSMENT, MAX_COMPENSATION_ROWS_PER_ASSESSMENT_COHORT } from '../../electron/ipc/resultCaps.js';
 import { normalizeRemoteResidences } from '../../src/utils/jobSearchLocations.js';
 import { JOB_COMPENSATION_EVIDENCE_BATCH_SCHEMA, ROLE_FAMILY_EXPERIENCE_BANDS_BATCH_SCHEMA, ROLE_FAMILY_EXPERIENCE_BANDS_SCHEMA } from '../../electron/ipc/aiSchemas.js';
 
@@ -218,7 +219,7 @@ export default [{
       && coverageDiagnostic?.expectedCount === 1
       && coverageDiagnostic?.receivedCount === 0
       && provenanceDiagnostic?.reason === 'COMPENSATION_EVIDENCE_NOT_GROUNDED'
-      && JOB_COMPENSATION_EVIDENCE_BATCH_SCHEMA.properties.cohorts.maxItems === 6,
+      && JOB_COMPENSATION_EVIDENCE_BATCH_SCHEMA.properties.cohorts.maxItems === MAX_COMPENSATION_COHORTS_PER_ASSESSMENT,
     'salary contract rejections stay fail-closed while carrying only fixed, correction-safe diagnostics through the manual handoff');
 
     let outsideSectionRejected = false;
@@ -295,14 +296,18 @@ export default [{
   run: () => {
     const roles = Array.from({ length: 21 }, (_, index) => ({ key: `role-${index}`, role: `Role ${index}`, researchId: `id-${index}`, cached: null }));
     const rolePlan = planRoleFamilyAssessmentBatches(roles);
-    const cohorts = Array.from({ length: 6 }, (_, index) => ({ researchKey: `market-${index}`, researchId: `cohort-${index}`, group: { jobs: [{}] } }));
+    const cohorts = Array.from({ length: MAX_COMPENSATION_COHORTS_PER_ASSESSMENT + 1 }, (_, index) => ({ researchKey: `market-${index}`, researchId: `cohort-${index}`, group: { jobs: [{}] } }));
     const rawPlan = packCompensationResearchBatches(cohorts);
     const assessmentPlan = packCompensationAssessmentBatches(cohorts);
     assert(rolePlan.length === 2 && rolePlan[0].batch.length === 20 && rolePlan[1].batch.length === 1
       && roleFamilyAssessmentMaxTokens(20) === 15024,
     'twenty compact role ladders fit one 15,024-token assessment even though raw research remains seven at a time');
-    assert(rawPlan.length === 2 && rawPlan[0].length === 4 && assessmentPlan.length === 1 && assessmentPlan[0].length === 6,
-      'six one-row salary assessments share one prompt while raw market research remains four cohorts per prompt');
+    assert(rawPlan.length === Math.ceil(cohorts.length / COMPENSATION_COHORT_HANDOFF_BATCH_SIZE)
+      && rawPlan[0].length === COMPENSATION_COHORT_HANDOFF_BATCH_SIZE
+      && assessmentPlan.length === 2
+      && assessmentPlan[0].length === MAX_COMPENSATION_COHORTS_PER_ASSESSMENT
+      && assessmentPlan[1].length === 1,
+      'one-row salary assessments use their shared output allowance while raw market research keeps its independent cohort bound');
     return { roleAssessment: rolePlan[0].batch.length, cohortAssessment: assessmentPlan[0].length };
   },
 }, {
@@ -360,18 +365,18 @@ export default [{
     assert(rawPlan.length === 3 && rawPlan[1].map(entry => entry.researchId).join(',') === 'cohort-5,cohort-6,cohort-7,cohort-8'
       && cacheAfterFirstRaw.size === 4
       && rawLater === 'cohort-5,cohort-6,cohort-7,cohort-8,cohort-9'
-      && assessmentLater === 'cohort-7,cohort-8,cohort-9',
+      && assessmentLater === entries.slice(MAX_COMPENSATION_COHORTS_PER_ASSESSMENT).map(entry => entry.researchId).join(','),
     'later raw and assessment handoff identities are derived from the full ordered plan, not a cache-filtered remainder');
     return { rawBatches: rawPlan.length, assessmentBatches: assessmentPlan.length };
   },
 }, {
   name: 'Oversized compensation cohort researches its market once, then reuses it across bounded assessment batches',
   run: () => {
-    // 39 rows become [19, 19, 1] assessment parts.  The fresh raw planner
+    // Two full row parts plus one tail stay bounded. The fresh raw planner
     // deliberately keeps a researchKey unique within each batch; after the
     // first accepted part, the remaining parts read its raw cache and issue
     // only their JSON assessment handoffs.
-    const parts = [19, 19, 1].map((count, index) => ({
+    const parts = [MAX_COMPENSATION_ROWS_PER_ASSESSMENT_COHORT, MAX_COMPENSATION_ROWS_PER_ASSESSMENT_COHORT, 1].map((count, index) => ({
       researchKey: 'same-market-cohort',
       researchId: `part-${index + 1}`,
       group: { jobs: Array.from({ length: count }, () => ({})) },
@@ -424,7 +429,7 @@ export default [{
       && !source.includes('useLegacyIndividualCompensation'),
     'exact legacy and fresh raw prompts share the rolling automatic scheduler, while their dependent legacy/current extractions remain later phases');
     assert(source.includes('MAX_COMPENSATION_ROWS_PER_ASSESSMENT_COHORT')
-      && packCompensationAssessmentBatches(Array.from({ length: 7 }, (_, index) => ({ researchKey: String(index), group: { jobs: [{}] } }))).length === 2
+      && packCompensationAssessmentBatches(Array.from({ length: MAX_COMPENSATION_COHORTS_PER_ASSESSMENT + 1 }, (_, index) => ({ researchKey: String(index), group: { jobs: [{}] } }))).length === 2
       && source.includes('const rawFirstParts = []')
       && source.includes('const stableRawBatches = packCompensationResearchBatches(rawFirstParts)')
       && source.includes('const stableAssessmentBatches = packCompensationAssessmentBatches(freshAll)')
@@ -434,9 +439,16 @@ export default [{
       && source.includes('mapAutomaticHandoffs(roleAssessmentBatches, HANDOFF_CONCURRENCY,')
       && source.includes('mapAutomaticHandoffs(assessmentBatchPlans, HANDOFF_CONCURRENCY,'),
     'independent role-family, salary-research, and salary-assessment batches refill the automatic worker pool while later row parts reuse their first market lookup');
-    assert(compensationCohortAssessmentMaxTokens(4, 13) === 15074
-      && compensationCohortAssessmentFits(4, 13)
-      && !compensationCohortAssessmentFits(4, 14),
+    const maxRowsForFourCohorts = Math.floor((MANUAL_AI_USABLE_OUTPUT_TOKENS
+      - COMPENSATION_ASSESSMENT_BASE_TOKENS - 4 * COMPENSATION_ASSESSMENT_PER_COHORT_TOKENS)
+      / COMPENSATION_ASSESSMENT_PER_ROW_TOKENS);
+    assert(compensationCohortAssessmentMaxTokens(4, maxRowsForFourCohorts)
+      === COMPENSATION_ASSESSMENT_BASE_TOKENS + 4 * COMPENSATION_ASSESSMENT_PER_COHORT_TOKENS
+        + maxRowsForFourCohorts * COMPENSATION_ASSESSMENT_PER_ROW_TOKENS
+      && compensationCohortAssessmentFits(4, maxRowsForFourCohorts)
+      && !compensationCohortAssessmentFits(4, maxRowsForFourCohorts + 1)
+      && compensationCohortAssessmentFits(1, MAX_COMPENSATION_ROWS_PER_ASSESSMENT_COHORT)
+      && !compensationCohortAssessmentFits(1, MAX_COMPENSATION_ROWS_PER_ASSESSMENT_COHORT + 1),
     'the shared compensation cap must match the batcher boundary exactly');
     const restartLayout = Array.from({ length: 8 }, (_, index) => ({ key: `role-${index}`, legacy: index === 0, cached: index === 0 }));
     const firstPassV2 = restartLayout.filter(entry => !entry.legacy).map(entry => entry.key);
@@ -467,7 +479,7 @@ export default [{
       && source.includes('saveRoleFamilyExperienceBandsBatch(validEntries.map')
       && source.includes('saveRoleFamilyExperienceBandsBatch,'),
     'a cached raw-only v1 role stays a cached annotated v2-plan member, and all valid rows from an accepted v2 slice are persisted in one Settings write');
-    return { roleRawBatch: 7, roleAssessmentBatch: 20, cohortRawBatch: 4, cohortAssessmentBatch: 6, exactLegacyMigration: true, restartLayoutStable: true, mixedAcceptedSliceSkipped: true, atomicV2CacheSave: true, maxRowsSingleCohort: 19 };
+    return { roleRawBatch: 7, roleAssessmentBatch: 20, cohortRawBatch: 4, cohortAssessmentBatch: MAX_COMPENSATION_COHORTS_PER_ASSESSMENT, exactLegacyMigration: true, restartLayoutStable: true, mixedAcceptedSliceSkipped: true, atomicV2CacheSave: true, maxRowsSingleCohort: MAX_COMPENSATION_ROWS_PER_ASSESSMENT_COHORT };
   },
 }, {
   name: 'classifyCompensationFitEligibility: the configured boundary is inclusive and an unscored job is not a low-scoring job',
@@ -633,6 +645,210 @@ Model prose happens to mention https://prose.example.test/untrusted.`);
     ).length === 0,
     'a present but malformed provider appendix fails closed instead of falling back to model prose');
     return { retained: retained.length, salaryRanges: salaryRanges.length, metadataOnly: metadataOnly.length };
+  },
+}, {
+  name: 'Salary personalization resolves approved host career snapshots once and ignores renderer career projections',
+  run: async () => {
+    const approvedId = 'a'.repeat(64);
+    const otherId = 'b'.repeat(64);
+    const missingId = 'c'.repeat(64);
+    const reads = [];
+    const hostProfile = { workHistory: [{ id: 'role-1', title: 'Engineer' }] };
+    const inputs = await resolveCompensationCareerInputs([
+      { careerSnapshotId: approvedId, careerData: 'FORGED RENDERER CAREER', profile: { private: 'FORGED' } },
+      { careerSnapshotId: ` ${approvedId} ` },
+      { careerSnapshotId: otherId }, { careerSnapshotId: missingId },
+      { careerSnapshotId: '../unapproved' }, { careerSnapshotId: 'A'.repeat(64) }, {},
+    ], { readPinned: async ({ careerSnapshotId }) => {
+      reads.push(careerSnapshotId);
+      await new Promise(resolve => setImmediate(resolve));
+      if (careerSnapshotId === missingId) throw new Error('private unavailable snapshot detail');
+      return { profile: hostProfile, careerData: `Approved host career ${careerSnapshotId.slice(0, 1)}`, pinned: true };
+    } });
+    assert(reads.length === 3 && new Set(reads).size === 3 && reads.includes(approvedId)
+      && inputs.size === 2 && inputs.get(approvedId).profile === hostProfile
+      && inputs.get(approvedId).careerData === 'Approved host career a'
+      && !inputs.has(missingId) && !JSON.stringify([...inputs.values()]).includes('FORGED'),
+    'duplicate approved references share one host read, malformed paths never read, and a failed snapshot cannot authorize raw renderer career data or block other market research');
+    let abortedReads = 0;
+    const aborted = await resolveCompensationCareerInputs([{ careerSnapshotId: approvedId }], {
+      signal: { aborted: true }, readPinned: async () => { abortedReads++; return {}; },
+    });
+    const midReadSignal = { aborted: false };
+    const interrupted = await resolveCompensationCareerInputs([{ careerSnapshotId: approvedId }], {
+      signal: midReadSignal, readPinned: async () => { midReadSignal.aborted = true; return { profile: hostProfile, careerData: 'Approved career' }; },
+    });
+    assert(aborted.size === 0 && abortedReads === 0 && interrupted.size === 0,
+      'a cancelled salary pass neither starts nor commits career reads after cancellation');
+    const source = readFileSync(new URL('../../electron/ipc/jobs.js', import.meta.url), 'utf8');
+    const handlerStart = source.indexOf("handleSafe('research-job-compensation'");
+    const handler = source.slice(handlerStart, source.indexOf("handleSafe(", handlerStart + 1));
+    assert(handlerStart >= 0 && handler.includes('await resolveCompensationCareerInputs(jobs, { signal })')
+      && handler.includes('manualAiRunId, careerInputs,'),
+    'the real IPC handler must resolve approved inputs itself before passing the host map into compensation research');
+    return { uniqueApprovedReads: reads.length, resolvedSnapshots: inputs.size };
+  },
+}, {
+  name: 'Compensation batch acceptance validates personalized ranges and career citations before handoff settlement',
+  run: () => {
+    const researchId = 'e'.repeat(24);
+    const evidence = {
+      methodologyVersion: 1, careerSnapshotId: 'a'.repeat(64), experience: [],
+      evidence: [{ id: 'requirement-1', status: 'direct', candidateQuote: 'Built APIs.', jobQuote: 'Build APIs.' }],
+    };
+    const requests = [{ researchId, group: { jobs: [{ marketCurrency: 'CAD', personalSalaryEvidence: evidence }] } }];
+    const sections = new Map([[researchId, 'Salary source: CAD 100,000 to 200,000 annual base pay. Updated 2026-10-01. https://salary.example.test/apis']]);
+    const personalRecommendation = {
+      status: 'personalized', min: 110000, max: 130000, desiredSalary: 125000, currency: 'CAD', confidence: 'medium',
+      explanation: 'Documented API delivery supports this position.', limitations: [], evidenceIds: ['requirement-1'],
+    };
+    const response = (personal) => ({ cohorts: [{ researchId, assessments: [{
+      index: 0, justification: 'Researched annual base pay.', sourceLinks: [], personalRecommendation: personal,
+      comparableRanges: [{ comparable: true, min: 100000, max: 200000, currency: 'CAD', sourceName: 'Salary source',
+        sourceUrl: 'https://salary.example.test/apis', evidenceQuote: 'CAD 100,000 to 200,000 annual base pay', sourceDate: '2026-10-01' }],
+    }] }] });
+    const accepted = validateCompensationEvidenceBatchSubmission(response(personalRecommendation), requests, sections);
+    assert(accepted.get(researchId)[0].personalRecommendation.desiredSalary === 125000,
+      'a numerically bounded recommendation with a career citation from its own host packet can settle');
+    const diagnostics = [];
+    for (const bad of [
+      { ...personalRecommendation, evidenceIds: ['another-candidate-evidence'] },
+      { ...personalRecommendation, max: 210000 },
+      { ...personalRecommendation, desiredSalary: 135000 },
+      { ...personalRecommendation, currency: 'USD' },
+    ]) {
+      try { validateCompensationEvidenceBatchSubmission(response(bad), requests, sections); }
+      catch (error) { diagnostics.push({ code: error.code, diagnostic: error.validationDiagnostic }); }
+    }
+    assert(diagnostics.length === 4 && diagnostics.every(value => value.code === 'JOB_COMPENSATION_RESPONSE_INVALID'
+      && value.diagnostic?.stage === 'compensation-assessment' && value.diagnostic?.reason === 'COMPENSATION_RANGE_INVALID')
+      && !JSON.stringify(diagnostics).includes('another-candidate-evidence'),
+    'foreign personal citations, out-of-market ranges, outside desired amounts and wrong currency must be rejected before acceptance using correction-safe diagnostics');
+    return { accepted: true, invalidPersonalResultsRejected: diagnostics.length };
+  },
+}, {
+  name: 'Personal salary assessment identity tracks career and listing evidence while market research stays shared',
+  run: () => {
+    const packet = {
+      methodologyVersion: 1, careerSnapshotId: 'a'.repeat(64),
+      evidence: [{ id: 'requirement-1', status: 'direct', requirement: 'Build APIs', candidateQuote: 'Built production APIs.', jobQuote: 'Build production APIs.' }],
+      experience: [],
+    };
+    const group = {
+      key: 'shared-market', role: 'Software Engineering',
+      context: { seniority: 'senior', employmentType: 'full-time' },
+      location: { display: 'Toronto, Ontario, Canada' },
+      experienceBand: { label: 'Senior', basis: 'listing-role-level' }, experienceBandSources: [],
+      jobs: [{
+        job: { title: 'Senior Software Engineer', company: 'Example', description: 'Build production APIs.' },
+        offer: { usable: false, raw: '', min: null, max: null, currency: 'CAD' },
+        marketCurrency: 'CAD', personalSalaryEvidence: packet,
+      }],
+    };
+    const copy = () => structuredClone(group);
+    const changedCareer = copy();
+    changedCareer.jobs[0].personalSalaryEvidence.evidence[0].candidateQuote = 'Built APIs and led platform delivery.';
+    const changedSnapshot = copy();
+    changedSnapshot.jobs[0].personalSalaryEvidence.careerSnapshotId = 'b'.repeat(64);
+    const changedListing = copy();
+    changedListing.jobs[0].job.description += ' Lead migrations.';
+    const changedTitle = copy();
+    changedTitle.jobs[0].job.title = 'Senior Platform Engineer';
+    const changedCompany = copy();
+    changedCompany.jobs[0].job.company = 'Different Employer';
+    const unrelated = copy();
+    unrelated.jobs[0].job.matchScore = 99;
+    unrelated.jobs[0].job.isSelected = true;
+    const originalSignature = compensationPersonalizationSignature(group);
+    assert([changedCareer, changedSnapshot, changedListing, changedTitle, changedCompany].every(value =>
+      compensationPersonalizationSignature(value) !== originalSignature)
+      && compensationPersonalizationSignature(unrelated) === originalSignature,
+    'career quotes, primary-record identity and listing evidence invalidate personal assessments; unrelated card state cannot do so');
+    const source = readFileSync(new URL('../../electron/ipc/jobs.js', import.meta.url), 'utf8');
+    const start = source.indexOf('function compensationResearchParametersForGroup(');
+    const end = source.indexOf('function applyCompensationEvidenceToGroup(', start);
+    const research = runInNewContext(`(function(){ ${source.slice(start, end)} return { parameters: compensationResearchParametersForGroup, prompt: buildCompensationResearchPrompt }; })()`, {
+      wrapUntrustedText: (_label, value) => value,
+    });
+    const rawPrompt = value => research.prompt([{ researchId: 'market-id', researchParameters: research.parameters(value) }]);
+    assert(rawPrompt(group) === rawPrompt(changedCareer)
+      && rawPrompt(group) === rawPrompt(changedSnapshot)
+      && !rawPrompt(group).includes(packet.evidence[0].candidateQuote),
+    'candidate evidence belongs only to the individual interpretation; the same market research remains reusable');
+    assert(source.includes('assessmentCacheKey: compensationAssessmentCacheKey(group)')
+      && source.includes('personal-v1:${compensationPersonalizationSignature(group)}'),
+    'production per-listing cache keys must actually include the candidate and listing signature');
+    return { signatureLength: originalSignature.length, marketResearchShared: true };
+  },
+}, {
+  name: 'Compensation assessment listings carry indexed host career packets without raw career records',
+  run: () => {
+    const packet = { methodologyVersion: 1, careerSnapshotId: 'a'.repeat(64), evidence: [], experience: [] };
+    const listings = buildCompensationAssessmentListings({ jobs: [{
+      job: { title: 'Engineer', company: 'Example', careerData: 'PRIVATE RAW CAREER', profile: { private: true } },
+      offer: { usable: false, raw: '' }, marketCurrency: 'CAD', personalSalaryEvidence: packet,
+    }, {
+      job: { title: 'Designer' }, offer: { usable: true, raw: 'C$125k', min: 125000, max: 125000 }, marketCurrency: 'CAD',
+    }] });
+    assert(listings[0].index === 0 && listings[1].index === 1
+      && listings[0].personalSalaryEvidence === packet && listings[1].personalSalaryEvidence === null
+      && listings[0].offeredAnnualMin === null && listings[1].offeredAnnualMax === 125000
+      && !JSON.stringify(listings).includes('PRIVATE RAW CAREER') && !JSON.stringify(listings).includes('private'),
+    'each exact listing index carries only the approved evidence packet and salary facts, never a renderer-supplied raw career record');
+    const source = readFileSync(new URL('../../electron/ipc/jobs.js', import.meta.url), 'utf8');
+    const start = source.indexOf('const assessBatch = async (batch, sections', source.indexOf('async function processCompensationCohortBatches('));
+    const end = source.indexOf('let refreshRawBatch = null', start);
+    const assessmentPrompt = source.slice(start, end);
+    assert(start >= 0 && end > start && assessmentPrompt.includes('PERSONAL_SALARY_GUIDANCE_PROMPT')
+      && assessmentPrompt.includes('buildCompensationAssessmentListings(entry.group)'),
+    'the live structured handoff must use the same host packet builder and candidate-positioning instructions');
+    return { indexedListings: listings.length };
+  },
+}, {
+  name: 'Applying personal salary guidance preserves market audits for advertised, unadvertised and legacy rows',
+  run: () => {
+    const packet = {
+      methodologyVersion: 1, careerSnapshotId: 'a'.repeat(64), experience: [],
+      evidence: [{ id: 'requirement-1', status: 'direct', candidateQuote: 'Built APIs.', jobQuote: 'Build APIs.' }],
+    };
+    const personal = {
+      status: 'personalized', min: 110000, max: 130000, desiredSalary: 125000, currency: 'CAD',
+      confidence: 'medium', explanation: 'Documented API delivery supports this position.', limitations: ['Employer leveling is unconfirmed.'], evidenceIds: ['requirement-1'],
+    };
+    const range = { comparable: true, min: 100000, max: 200000, currency: 'CAD', sourceName: 'Salary survey', sourceUrl: 'https://salary.example.test/apis', note: 'Annual cash base salary.' };
+    const research = 'Salary survey: CAD 100,000–200,000 annual base pay. https://salary.example.test/apis';
+    const posted = { usable: true, raw: 'C$110,000–150,000/year', min: 110000, max: 150000, currency: 'CAD', period: 'annual' };
+    const unposted = { usable: false, raw: '', min: null, max: null, currency: 'CAD', period: 'annual', reasonCode: 'salary_not_disclosed' };
+    const jobs = [posted, unposted, posted, unposted, posted].map((offer, index) => ({
+      job: { title: `Engineer ${index}` }, offer, marketCurrency: 'CAD', ...(index !== 3 ? { personalSalaryEvidence: packet } : {}),
+    }));
+    const group = { location: { display: 'Toronto, Ontario, Canada' }, experienceBand: { label: 'Senior' }, jobs };
+    const answers = jobs.map((_item, index) => ({
+      index, comparableRanges: [range], justification: 'Comparable salary research.',
+      ...(index < 2 ? { personalRecommendation: personal } : index === 4 ? { personalRecommendation: { ...personal, desiredSalary: 999999 } } : {}),
+    }));
+    const source = readFileSync(new URL('../../electron/ipc/jobs.js', import.meta.url), 'utf8');
+    const start = source.indexOf('function applyCompensationEvidenceToGroup(');
+    const end = source.indexOf('async function runFreshCompensationPipeline(', start);
+    const apply = runInNewContext(`(function(){ ${source.slice(start, end)} return applyCompensationEvidenceToGroup; })()`, {
+      sourcesPresentInGroundedResearch, selectComparableEvidence, compensationAssessment,
+      locationSourceLink: () => null,
+      compensationJustificationWithExperienceDisclosure: (_item, _band, justification) => justification,
+    });
+    const result = apply(group, answers, research, '2026-10-23T00:00:00.000Z');
+    const assessments = jobs.map(item => item.job.compensationAssessment);
+    assert(result.assessed === 5 && result.recommendedNoOffer === 2
+      && assessments[0].status === 'competitive' && assessments[1].status === 'market_recommendation'
+      && assessments.slice(0, 2).every(value => value.personalRecommendation?.status === 'personalized'
+        && value.personalRecommendation.desiredSalary === 125000 && value.personalRecommendation.range.max === 130000
+        && value.competitiveRange.min === 100000 && value.competitiveRange.max === 200000),
+    'a personal application answer must survive the real apply path for both disclosed and missing employer salary while preserving the independent full-market comparison');
+    assert(assessments[2].status === 'competitive' && assessments[2].personalRecommendation.status === 'unavailable'
+      && assessments[3].personalRecommendation.status === 'market_estimate'
+      && assessments[3].personalRecommendation.range.min === 100000 && assessments[3].personalRecommendation.range.max === 200000
+      && assessments[4].status === 'competitive' && assessments[4].personalRecommendation.status === 'unavailable',
+    'legacy or malformed personal output cannot invent candidate positioning or discard a valid market audit; missing career evidence yields an explicitly general full-market estimate');
+    return { personalDesiredSalary: assessments[0].personalRecommendation.desiredSalary, legacyMarketAudit: assessments[2].status };
   },
 }, {
   name: 'Compensation extraction cache is bound to its exact grounded research',

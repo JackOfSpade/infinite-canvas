@@ -10,7 +10,7 @@ import { languageLabel } from '../utils/jobLanguageLabels';
 import { NodeHandles } from './_shared/NodeHandles';
 import { useIsMountedRef } from '../hooks/useIsMountedRef';
 import { useModuleRunQueue } from '../contexts/useModuleRunQueue';
-import { computeJobTreeView, JOB_TREE_LAYOUT_RESTORE_KEY, normalizeCompensationAssessment, shouldReflowMeasuredJobCard } from './jobsearch/buildJobTree';
+import { computeJobTreeView, isCompensationRecommendationCurrent, JOB_TREE_LAYOUT_RESTORE_KEY, normalizeCompensationAssessment, shouldReflowMeasuredJobCard } from './jobsearch/buildJobTree';
 import { formatSalaryCurrencyLabel } from '../utils/salaryCurrency';
 import { normalizeExternalHttpUrl } from '../utils/urlSafety';
 import { openExternalFailureMessage, openExternalUrl } from '../utils/openExternal';
@@ -50,17 +50,17 @@ const COMPENSATION_NEUTRAL_BORDER = 'rgba(255,255,255,0.12)';
 function compensationLabel(status, currency = '') {
   if (status === 'competitive') return 'Competitive cash pay';
   if (status === 'below_market') return 'Likely below-market cash pay';
-  if (status === 'market_recommendation') return `Recommended salary range${currency ? ` (${currency})` : ''}`;
+  if (status === 'market_recommendation') return `Salary guidance${currency ? ` (${currency})` : ''}`;
   if (status === 'uncertain') return 'Cash-pay comparison uncertain';
   return 'Cash pay not evaluated';
 }
 
-function cashRangeLabel(range) {
+function cashRangeLabel(range, maximumFractionDigits = 0) {
   const min = typeof range?.min === 'number' && Number.isFinite(range.min) ? range.min : null;
   const max = typeof range?.max === 'number' && Number.isFinite(range.max) ? range.max : null;
   if (min === null && max === null) return '';
   const currency = String(range?.currency || '').trim().toUpperCase();
-  const formatter = new Intl.NumberFormat('en-US', { maximumFractionDigits: 0 });
+  const formatter = new Intl.NumberFormat('en-US', { maximumFractionDigits });
   const money = (amount) => `${currency ? `${currency} ` : ''}${formatter.format(amount)}`;
   const values = min !== null && max !== null && min !== max
     ? `${money(min)}–${money(max)}`
@@ -474,6 +474,23 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
   const compensationSourceLinks = useMemo(() => compensationAssessment.sourceLinks
     .map((source) => ({ ...source, safeUrl: normalizeExternalHttpUrl(source.url) }))
     .filter((source) => source.safeUrl), [compensationAssessment]);
+  const personalRecommendation = compensationAssessment.personalRecommendation;
+  const personalRecommendationCurrent = isCompensationRecommendationCurrent(personalRecommendation, data.careerSnapshotId);
+  const personalRecommendationOutdated = personalRecommendation
+    && personalRecommendation.status !== 'unavailable' && !personalRecommendationCurrent;
+  const copyDesiredSalary = useCallback(async (event) => {
+    event.stopPropagation();
+    if (!personalRecommendationCurrent || !personalRecommendation?.desiredSalary) return;
+    try {
+      const numericValue = personalRecommendation.desiredSalary.toLocaleString('en-US', {
+        useGrouping: false, maximumFractionDigits: 20,
+      });
+      await navigator.clipboard.writeText(numericValue);
+      addToast({ title: 'Desired salary copied', description: 'The number is ready to paste into an application.', type: 'success' });
+    } catch {
+      addToast({ title: 'Could not copy salary', description: 'Select and copy the desired salary number manually.', type: 'error' });
+    }
+  }, [personalRecommendationCurrent, personalRecommendation, addToast]);
   const hiringFitAudit = useMemo(() => compactHiringFitAudit(data.fitAssessment), [data.fitAssessment]);
 
   const score = data.matchScore || 0;
@@ -1492,12 +1509,54 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
 
         {showCompensationDetails && (
           <div className="px-3 pb-2.5 text-xs leading-relaxed text-white/55">
+            {personalRecommendationCurrent ? (
+              <div className="mb-2.5 rounded-md border border-blue-300/20 bg-blue-300/[0.045] p-2">
+                <div className="text-[10px] font-medium uppercase tracking-wider text-blue-200/65">Desired salary to enter</div>
+                <div className="mt-1 flex items-start justify-between gap-2">
+                  <div className="min-w-0 text-sm font-semibold text-white/90">
+                    {cashRangeLabel({ ...personalRecommendation.range, min: personalRecommendation.desiredSalary, max: personalRecommendation.desiredSalary }, 20)}
+                  </div>
+                  <button
+                    type="button"
+                    className="nodrag shrink-0 rounded border border-white/15 px-2 py-0.5 text-[11px] font-medium text-blue-200 hover:bg-white/10"
+                    onClick={copyDesiredSalary}
+                    aria-label="Copy desired salary number"
+                    title="Copy the number only, without currency or separators"
+                  >Copy</button>
+                </div>
+                <div className="mt-1.5 text-white/65">
+                  <span className="text-white/40">{personalRecommendation.status === 'personalized' ? 'Recommended range for you:' : 'Estimated application range:'}</span>{' '}
+                  {cashRangeLabel(personalRecommendation.range, 20)}
+                </div>
+                <p className="mt-1.5 text-white/65">{personalRecommendation.explanation}</p>
+                <div className="mt-1 text-[10px] text-white/40">
+                  {personalRecommendation.status === 'personalized' ? 'Based on your career data' : 'Market estimate · limited career evidence'}
+                  {' · '}{personalRecommendation.confidence.charAt(0).toUpperCase() + personalRecommendation.confidence.slice(1)} confidence
+                </div>
+                {personalRecommendation.limitations.length > 0 && (
+                  <ul className="mt-1 list-disc space-y-0.5 pl-3.5 text-[11px] text-white/45">
+                    {personalRecommendation.limitations.map((limitation, index) => <li key={index}>{limitation}</li>)}
+                  </ul>
+                )}
+              </div>
+            ) : (
+              <div className="mb-2.5 rounded-md border border-white/10 bg-white/[0.025] p-2 text-[11px] text-white/50">
+                {personalRecommendationOutdated
+                  ? 'Salary guidance is outdated because the career data changed. Combine jobs again on the Job Board for a current desired salary.'
+                  : personalRecommendation?.explanation || 'This saved result has no personal salary guidance. Combine jobs again on the Job Board to include your career data.'}
+                {!personalRecommendationOutdated && personalRecommendation?.limitations.length > 0 && (
+                  <ul className="mt-1 list-disc space-y-0.5 pl-3.5">
+                    {personalRecommendation.limitations.map((limitation, index) => <li key={index}>{limitation}</li>)}
+                  </ul>
+                )}
+              </div>
+            )}
             <p className="text-white/70">{compensationAssessment.justification}</p>
             {(cashRangeLabel(compensationAssessment.offered) || data.salary) && (
               <div className="mt-1.5"><span className="text-white/35">Advertised cash:</span> {cashRangeLabel(compensationAssessment.offered) || data.salary}</div>
             )}
             {cashRangeLabel(compensationAssessment.competitiveRange) && (
-              <div><span className="text-white/35">{compensationAssessment.status === 'market_recommendation' ? 'Recommended cash range:' : 'Competitive cash range:'}</span> {cashRangeLabel(compensationAssessment.competitiveRange)}</div>
+              <div><span className="text-white/35">Researched market range:</span> {cashRangeLabel(compensationAssessment.competitiveRange)}</div>
             )}
             {compensationAssessment.status === 'market_recommendation' && compensationAssessment.competitiveRange.currency && (
               <div><span className="text-white/35">Currency:</span> {compensationAssessment.competitiveRange.currency}{compensationAssessment.currencyInferredFromLocation ? ' (inferred from job location)' : ''}</div>

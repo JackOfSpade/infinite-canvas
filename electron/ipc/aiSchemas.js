@@ -20,6 +20,8 @@
 // with the renderer dropdown and the photo-analysis / price-synthesis prompts.
 import { CONDITION_VALUES } from '../../src/utils/productConditions.js';
 import { SELL_PLATFORMS } from '../../src/utils/constants.js';
+import { MAX_COMPENSATION_COHORTS_PER_ASSESSMENT } from './resultCaps.js';
+import { PERSONAL_SALARY_RECOMMENDATION_SCHEMA } from './personalSalaryRecommendation.js';
 
 // The platform-id enum for recommended_platforms is DERIVED from SELL_PLATFORMS
 // (the single source of truth for selling platforms) so adding/removing a
@@ -1804,9 +1806,8 @@ export const JOB_COMPENSATION_EVIDENCE_BATCH_SCHEMA = {
   properties: {
     cohorts: {
       type: 'array',
-      // Raw market research remains four cohorts, while a compact extraction
-      // can combine up to six small cohorts within its row-aware token cap.
-      maxItems: 6,
+      // The row-aware output cap includes each listing's personal guidance.
+      maxItems: MAX_COMPENSATION_COHORTS_PER_ASSESSMENT,
       items: {
         type: 'object',
         required: ['researchId', 'assessments'],
@@ -1816,7 +1817,7 @@ export const JOB_COMPENSATION_EVIDENCE_BATCH_SCHEMA = {
             type: 'array',
             items: {
               type: 'object',
-              required: ['index', 'comparableRanges', 'justification', 'sourceLinks'],
+              required: ['index', 'comparableRanges', 'justification', 'sourceLinks', 'personalRecommendation'],
               properties: {
                 index: { type: 'integer' },
                 comparableRanges: {
@@ -1833,6 +1834,7 @@ export const JOB_COMPENSATION_EVIDENCE_BATCH_SCHEMA = {
                 },
                 justification: { type: 'string' },
                 sourceLinks: { type: 'array', items: { type: 'string' } },
+                personalRecommendation: PERSONAL_SALARY_RECOMMENDATION_SCHEMA,
               },
             },
           },

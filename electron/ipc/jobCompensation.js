@@ -7,6 +7,7 @@
 import { inferSalaryCurrency } from '../../src/utils/salaryCurrency.js';
 import { normalizeLocationInput, normalizeCountry } from '../../src/utils/jobLocation.js';
 import { GROUNDED_SOURCE_METADATA_MARKER, groundedMetadataUrls } from './groundedSourceAppendix.js';
+import { normalizePersonalSalaryRecommendation } from './personalSalaryRecommendation.js';
 
 const VARIABLE_PAY_RE = /\b(?:commission(?:[-\s]?only)?|tips?|on[-\s]?target earnings|OTE|bonus(?:es)?|equity|stock(?:\s+options?)?|restricted stock|RSUs?|total\s+(?:comp(?:ensation)?|rewards?))\b/i;
 const NON_CASH_RE = /\b(?:medical|dental|vision|health(?:care)? benefits?|insurance|retirement|pension|401\s*\(?k\)?|paid time off|PTO)\b/i;
@@ -266,7 +267,7 @@ export function compensationMarketCurrency(comparisonLocation = null) {
   return resolveCompensationMarketCurrency({}, comparisonLocation).currency;
 }
 
-export function compensationAssessment({ offer, competitiveRanges, marketCurrency = '', currencyInferredFromLocation = false, comparisonLocation = null, justification = '', sourceLinks = [], researchedAt = new Date().toISOString(), reasonCode = '', researchAttempted = false } = {}) {
+export function compensationAssessment({ offer, competitiveRanges, marketCurrency = '', currencyInferredFromLocation = false, comparisonLocation = null, justification = '', sourceLinks = [], researchedAt = new Date().toISOString(), reasonCode = '', researchAttempted = false, personalRecommendation, personalSalaryEvidence } = {}) {
   const base = {
     schemaVersion: 1,
     status: 'not_evaluated',
@@ -284,11 +285,16 @@ export function compensationAssessment({ offer, competitiveRanges, marketCurrenc
   // two locally valid ranges in different currencies could be numerically
   // unioned into a meaningless recommendation.
   const merged = currency ? mergeCompetitiveRanges(competitiveRanges, currency) : null;
+  if (merged) {
+    base.personalRecommendation = normalizePersonalSalaryRecommendation(personalRecommendation, {
+      marketRange: merged, evidence: personalSalaryEvidence, offered: offer, researchedAt,
+    });
+  }
   if (!offer?.usable) {
     if (merged) {
       const explanation = [
         base.justification,
-        `The listing does not state a usable guaranteed cash salary, so no listing comparison was made. This researched ${merged.currency} market range is the recommended competitive salary range to use when an application asks for minimum or expected pay.`,
+        `The listing does not state a usable guaranteed cash salary, so no listing comparison was made. This researched ${merged.currency} market range provides context for the separate desired-salary guidance.`,
       ].filter(Boolean).join(' ').slice(0, 2400);
       return {
         ...base,

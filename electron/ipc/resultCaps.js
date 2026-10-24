@@ -368,7 +368,9 @@ export function jobPreferenceResearchAssessmentMaxTokens(itemCount = 1) {
 // manual handoffs or advertise a response that cannot fit.
 export const COMPENSATION_ASSESSMENT_BASE_TOKENS = 1024;
 export const COMPENSATION_ASSESSMENT_PER_COHORT_TOKENS = 1400;
-export const COMPENSATION_ASSESSMENT_PER_ROW_TOKENS = 650;
+// Each listing now includes a career-grounded application range, a rounded
+// desired salary and a brief explanation alongside its market evidence.
+export const COMPENSATION_ASSESSMENT_PER_ROW_TOKENS = 1200;
 // A role-family ladder is a smaller structured result than salary evidence.
 // Keep this next to the cohort formula because both share the same manual
 // extraction task, but deliberately let its downstream phase pack beyond the

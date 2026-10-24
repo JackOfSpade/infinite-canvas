@@ -46,6 +46,7 @@ import paste_application_fit_save from './tests/paste-application-fit-save.js';
 import local_ai_deletion from './tests/local-ai-deletion.js';
 import login_url_markers from './tests/login-url-markers.js';
 import compensation_assessment from './tests/compensation-assessment.js';
+import personal_salary_recommendation from './tests/personal-salary-recommendation.js';
 import job_compensation_pipeline from './tests/job-compensation-pipeline.js';
 import job_location_lookup from './tests/job-location-lookup.js';
 import job_location_consolidation from './tests/job-location-consolidation.js';
@@ -225,6 +226,7 @@ const testGroups = [
   ['local-ai-deletion.js', local_ai_deletion],
   ['login-url-markers.js', login_url_markers],
   ['compensation-assessment.js', compensation_assessment],
+  ['personal-salary-recommendation.js', personal_salary_recommendation],
   ['job-compensation-pipeline.js', job_compensation_pipeline],
   ['job-location-lookup.js', job_location_lookup],
   ['job-location-consolidation.js', job_location_consolidation],

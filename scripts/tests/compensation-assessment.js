@@ -1,6 +1,18 @@
 import { assert } from '../test-dependencies.js';
-import { buildJobTreeNodes, normalizeCompensationAssessment } from '../../src/nodes/jobsearch/buildJobTree.js';
+import { buildJobTreeNodes, isCompensationRecommendationCurrent, normalizeCompensationAssessment } from '../../src/nodes/jobsearch/buildJobTree.js';
 import { estimateCompensationExperienceYearsFromDescription, selectCompensationExperienceYears } from '../../electron/ipc/jobCompensation.js';
+
+const personalRecommendation = {
+  schemaVersion: 1,
+  status: 'personalized',
+  range: { min: 95000, max: 110000, currency: 'CAD', period: 'annual' },
+  desiredSalary: 105000,
+  confidence: 'medium',
+  explanation: 'Your documented system ownership and directly relevant experience support this portion of the market range.',
+  limitations: ['Leadership scope is not fully documented.'],
+  careerSnapshotId: 'a'.repeat(64),
+  methodologyVersion: 1,
+};
 
 const assessment = {
   schemaVersion: 1,
@@ -12,6 +24,7 @@ const assessment = {
   justification: 'Even the advertised maximum is below the researched competitive cash range.',
   researchedAt: '2026-08-22T12:00:00.000Z',
   sourceLinks: [{ title: 'Example salary source', url: 'https://example.test/salaries' }],
+  personalRecommendation,
 };
 
 export default [
@@ -23,6 +36,8 @@ export default [
         'a pre-research card must remain neutral/not evaluated');
       assert(legacy.justification.includes('not run for this saved result'),
         'legacy cards must retain a safe explanation without auto-research');
+      assert(legacy.personalRecommendation === null,
+        'old cards must not fabricate a personalized range or desired salary');
 
       const malformed = normalizeCompensationAssessment({ schemaVersion: 1, status: 'invented-status' });
       assert(malformed.status === 'not_evaluated' && malformed.reasonCode === 'unreadable_assessment',
@@ -111,6 +126,114 @@ export default [
     },
   },
   {
+    name: 'Personal salary guidance remains separate from the researched market verdict and career snapshot',
+    run: () => {
+      const normalized = normalizeCompensationAssessment(assessment);
+      assert(normalized.status === 'below_market' && normalized.competitiveRange.min === 90000,
+        'personal salary guidance must not change the independent offer comparison or market range');
+      assert(normalized.personalRecommendation?.desiredSalary === 105000
+        && normalized.personalRecommendation.range.min === 95000
+        && normalized.personalRecommendation.range.max === 110000
+        && normalized.personalRecommendation.explanation === personalRecommendation.explanation,
+      'valid personal guidance must retain its answer, range and evidence explanation');
+      assert(isCompensationRecommendationCurrent(normalized.personalRecommendation, 'a'.repeat(64))
+        && !isCompensationRecommendationCurrent(normalized.personalRecommendation, 'b'.repeat(64))
+        && !isCompensationRecommendationCurrent(normalized.personalRecommendation, undefined),
+      'a desired salary may only be displayed and copied for the exact career snapshot used to calculate it');
+      const legacy = normalizeCompensationAssessment({ ...assessment, personalRecommendation: undefined });
+      assert(legacy.personalRecommendation === null && legacy.status === 'below_market',
+        'legacy market assessments must remain renderable without creating a personal answer');
+      const marketEstimate = normalizeCompensationAssessment({
+        ...assessment,
+        personalRecommendation: {
+          ...personalRecommendation, status: 'market_estimate', careerSnapshotId: '', confidence: 'low',
+          range: { min: 90000, max: 120000, currency: 'CAD', period: 'annual' },
+        },
+      });
+      assert(marketEstimate.personalRecommendation.status === 'market_estimate'
+        && isCompensationRecommendationCurrent(marketEstimate.personalRecommendation, ''),
+      'a clearly labeled market estimate can exist without claiming candidate-specific evidence');
+      const unavailable = normalizeCompensationAssessment({
+        ...assessment,
+        personalRecommendation: {
+          ...personalRecommendation, status: 'unavailable', range: null, desiredSalary: null,
+          explanation: 'Salary evidence is too limited for a defensible target.',
+        },
+      });
+      assert(unavailable.personalRecommendation.desiredSalary === null
+        && unavailable.personalRecommendation.explanation.includes('too limited')
+        && !isCompensationRecommendationCurrent(unavailable.personalRecommendation, 'a'.repeat(64)),
+      'explicitly unavailable guidance must show the reason without offering a number to copy');
+      return { desiredSalary: normalized.personalRecommendation.desiredSalary, status: normalized.status };
+    },
+  },
+  {
+    name: 'Malformed personal salary guidance fails closed without changing a market comparison',
+    run: () => {
+      const invalid = [
+        null,
+        [],
+        { ...personalRecommendation, schemaVersion: 2 },
+        { ...personalRecommendation, schemaVersion: '1' },
+        { ...personalRecommendation, methodologyVersion: 2 },
+        { ...personalRecommendation, status: 'invented' },
+        { ...personalRecommendation, confidence: 'certain' },
+        { ...personalRecommendation, explanation: '' },
+        { ...personalRecommendation, limitations: [null] },
+        { ...personalRecommendation, careerSnapshotId: '' },
+        { ...personalRecommendation, careerSnapshotId: 'a'.repeat(63) },
+        { ...personalRecommendation, careerSnapshotId: 'A'.repeat(64) },
+        { ...personalRecommendation, careerSnapshotId: 'g'.repeat(64) },
+        { ...personalRecommendation, careerSnapshotId: 'x'.repeat(301) },
+        { ...personalRecommendation, desiredSalary: '105000' },
+        { ...personalRecommendation, desiredSalary: Infinity },
+        { ...personalRecommendation, desiredSalary: 0 },
+        { ...personalRecommendation, desiredSalary: null },
+        { ...personalRecommendation, desiredSalary: 94000 },
+        { ...personalRecommendation, desiredSalary: 111000 },
+        { ...personalRecommendation, range: { ...personalRecommendation.range, min: '95000' } },
+        { ...personalRecommendation, range: { ...personalRecommendation.range, max: NaN } },
+        { ...personalRecommendation, range: { ...personalRecommendation.range, min: 0 } },
+        { ...personalRecommendation, range: { ...personalRecommendation.range, max: 11000000 } },
+        { ...personalRecommendation, range: { ...personalRecommendation.range, min: 110000, max: 95000 } },
+        { ...personalRecommendation, range: { ...personalRecommendation.range, min: 89000 } },
+        { ...personalRecommendation, range: { ...personalRecommendation.range, max: 121000 } },
+        { ...personalRecommendation, range: { ...personalRecommendation.range, currency: 'USD' } },
+        { ...personalRecommendation, range: { ...personalRecommendation.range, currency: 'cad' } },
+        { ...personalRecommendation, range: { ...personalRecommendation.range, period: 'year' } },
+        { ...personalRecommendation, status: 'unavailable' },
+        { ...personalRecommendation, status: 'market_estimate', confidence: 'low' },
+        {
+          ...personalRecommendation, status: 'market_estimate', confidence: 'medium',
+          range: { min: 90000, max: 120000, currency: 'CAD', period: 'annual' },
+        },
+      ];
+      for (const value of invalid) {
+        const result = normalizeCompensationAssessment({ ...assessment, personalRecommendation: value });
+        assert(result.personalRecommendation?.status === 'unavailable'
+          && result.personalRecommendation.range === null && result.personalRecommendation.desiredSalary === null,
+        'malformed guidance must never expose a personal range or copyable salary');
+        assert(result.status === 'below_market' && result.competitiveRange.min === 90000,
+          'a rejected personal answer must leave the independently researched market verdict intact');
+      }
+      const bounded = normalizeCompensationAssessment({
+        ...assessment,
+        personalRecommendation: {
+          ...personalRecommendation,
+          explanation: 'x'.repeat(3000),
+          limitations: Array.from({ length: 12 }, () => 'y'.repeat(700)),
+        },
+      }).personalRecommendation;
+      assert(bounded.status === 'personalized' && bounded.explanation.length === 2400
+        && bounded.limitations.length === 8 && bounded.limitations.every((item) => item.length === 500),
+      'untrusted personal explanations and limitations must be bounded before rendering');
+      const future = normalizeCompensationAssessment({ ...assessment, schemaVersion: 2 });
+      assert(future.personalRecommendation === null,
+        'an unsupported parent assessment schema cannot expose a copyable personal recommendation');
+      return { rejectedGuidanceCases: invalid.length };
+    },
+  },
+  {
     name: 'Compensation assessments propagate through AI-taxonomized job trees',
     run: () => {
       const jobs = [{
@@ -128,6 +251,8 @@ export default [
       });
       assert(grouped.newNodes.find((node) => node.type === 'jobcard')?.data?.compensationAssessment === assessment,
         'grouped hierarchy cards must retain compensation research');
+      assert(grouped.newNodes.find((node) => node.type === 'jobcard')?.data?.compensationAssessment.personalRecommendation.desiredSalary === 105000,
+        'grouped hierarchy cards must retain personal guidance alongside the market assessment');
       return { groupedCards: grouped.newNodes.filter((node) => node.type === 'jobcard').length };
     },
   },

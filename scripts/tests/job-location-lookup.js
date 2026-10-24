@@ -347,8 +347,8 @@ export default [{
   run: async () => {
     const { readFileSync } = await import('node:fs');
     const source = readFileSync(new URL('../../electron/ipc/jobs.js', import.meta.url), 'utf8');
-    assert(source.split('item.locationSource ? 4 : 5').length === 3 && source.split('locationLink ? [...links, locationLink] : links').length === 3,
-      'the batch and per-cohort builders must each cap salary evidence at 4 and append the location link, so the verdict set equals the displayed set');
+    assert(source.split('item.locationSource ? 4 : 5').length === 4 && source.split('locationLink ? [...links, locationLink] : links').length === 3,
+      'the personal-guidance validator and both assessment builders must cap salary evidence at 4, and both builders append the location link, so guidance, verdict and display use the same salary evidence');
     return { builders: 2 };
   },
 }, {
