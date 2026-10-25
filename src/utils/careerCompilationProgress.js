@@ -24,15 +24,22 @@ export function deriveCareerCompilationProgress(progress, now = Date.now()) {
   const round = count(progress?.round);
   const completed = count(progress?.completed);
   const total = count(progress?.total);
+  const incremental = progress?.incremental === true;
+  const reusedPages = count(progress?.reusedPages) || 0;
+  const reusedAudits = count(progress?.reusedAudits) || 0;
   // These are phase-local measured units. A percentage for an audit round
   // must never imply the entire compiler is almost finished or has passed.
   const unit = { reading: 'files read', compiling: 'pages compiled', auditing: 'audit checks returned' }[phase];
   const hasCounts = Boolean(unit && completed !== null && total !== null && total > 0 && completed <= total);
   return {
-    label: `${label}${round && ['auditing', 'repairing'].includes(phase) ? ` · round ${round}` : ''}`,
+    label: `${incremental && phase === 'compiling' ? 'Updating career pages' : label}${round && ['auditing', 'repairing'].includes(phase) ? ` · round ${round}` : ''}`,
     detail: phase === 'cleaning' && progress?.cached === true
-      ? 'Using previously approved career data for these unchanged files.' : detail,
-    countLabel: hasCounts ? `${completed}/${total} ${unit}${phase === 'auditing' ? ' this round' : ''}` : null,
+      ? 'Using previously approved career data for these unchanged files.'
+      : incremental && phase === 'compiling'
+        ? `Updating changed facts. Reused ${reusedPages} previously approved ${reusedPages === 1 ? 'page' : 'pages'}.`
+        : incremental && phase === 'auditing' && reusedAudits
+          ? `Checking affected facts. Reused ${reusedAudits} checks whose source facts and context are unchanged.` : detail,
+    countLabel: hasCounts ? `${completed}/${total} ${incremental ? ({ compiling: 'pages processed', auditing: 'audit checks completed' }[phase] || unit) : unit}${phase === 'auditing' ? ' this round' : ''}` : null,
     completed: hasCounts ? completed : null,
     total: hasCounts ? total : null,
     totalElapsed: durationSince(progress?.startedAt, now),
@@ -57,6 +64,9 @@ export function recordCareerCompilationProgress(previous, progress) {
     total: count(progress.total),
     round: count(progress.round),
     cached: progress.cached === true,
+    incremental: progress.incremental === true,
+    reusedPages: count(progress.reusedPages),
+    reusedAudits: count(progress.reusedAudits),
   });
   while (next.size > 64) next.delete(next.keys().next().value);
   return next;

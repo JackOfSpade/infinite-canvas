@@ -192,13 +192,26 @@ export async function readCareerCleanLayer(root, snapshotId, catalog) {
 }
 
 /** The same handoff and verifier serve cache hits and freshly compiled snapshots. */
-export async function produceCareerCleanLayer({ snapshotId, catalog, root, callText, signal }) {
-  if (await readCareerCleanLayer(root, snapshotId, catalog)) return { reused: true };
+export async function produceCareerCleanLayer({ snapshotId, catalog, root, callText, signal, previous = null }) {
+  if (await readCareerCleanLayer(root, snapshotId, catalog)) return { reused: true, reusedItems: catalog.length, processedItems: 0 };
+  // An approved source update keeps most catalog rows byte-identical. Carry
+  // only spelling already verified against the same immutable id and quote;
+  // a prior clean spelling never establishes a new career fact.
+  const prior = previous && Array.isArray(previous.catalog)
+    && previous.catalog.every(row => typeof row?.id === 'string' && typeof row?.quote === 'string')
+    ? await readCareerCleanLayer(root, previous.snapshotId, previous.catalog) : null;
+  const priorRows = new Map((prior?.catalog || []).map(row => [row.id, row]));
+  const retained = []; const pending = [];
+  for (const row of catalog) {
+    const previousRow = priorRows.get(row.id);
+    if (previousRow && previousRow.quote === row.quote) retained.push({ id: row.id, clean: previousRow.cleanQuote });
+    else pending.push(row);
+  }
   // Pages are independent (each answers only its own ids), so they share one
   // bounded roster instead of waiting on each other: six pages took 3 min
   // one at a time on 2026-10-23 while nine bridge workers sat idle.
   const responses = await mapAutomaticHandoffs(
-    careerCleanLayerPages(catalog),
+    careerCleanLayerPages(pending),
     HANDOFF_CONCURRENCY,
     (page, _index, { signal: pageSignal }) => callText(careerCleanLayerPrompt(page), {
       signal: pageSignal, task: 'career-profile-clean', responseSchema: CAREER_CLEAN_RESPONSE_SCHEMA,
@@ -206,9 +219,9 @@ export async function produceCareerCleanLayer({ snapshotId, catalog, root, callT
     }),
     { signal },
   );
-  const layer = buildCareerCleanLayer(snapshotId, catalog, responses);
+  const layer = buildCareerCleanLayer(snapshotId, catalog, [{ items: retained }, ...responses]);
   await writeCareerCleanLayer(root, layer);
   const published = await readCareerCleanLayer(root, snapshotId, catalog);
   if (!published) throw new Error('The career clean layer could not be verified after publication.');
-  return { reused: false, layer: published.layer };
+  return { reused: false, layer: published.layer, reusedItems: retained.length, processedItems: pending.length };
 }

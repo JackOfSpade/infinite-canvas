@@ -6,10 +6,12 @@
 import { careerDataProjectProvenanceHeadingForName, resumeProjectProvenanceFailures } from './jobApplication.js';
 import { titleCaseSkillGroupLabel } from './skillGroupLabel.js';
 import { CAREER_SNAPSHOT_CAPABILITY_KINDS, isCareerSkillIndexEligible } from './careerSnapshot.js';
-import { CASE_SENSITIVE_SKILL_NAME_MAX_CHARS, resolveApprovedSkillByName } from './applicationCareerAuthority.js';
+import { applicationSkillPermittedForPosting, CASE_SENSITIVE_SKILL_NAME_MAX_CHARS, resolveApprovedSkillByName } from './applicationCareerAuthority.js';
 import { boundedExpectedValue } from './hostOwnedText.js';
 import { resumeCheckDisposition } from './resumeCheckDispositions.js';
 import { verifyCareerCleanText } from './careerCleanLayer.js';
+
+export { applicationSkillPermittedForPosting } from './applicationCareerAuthority.js';
 
 export const STRUCTURED_RESUME_SCHEMA_VERSION = 'structured-resume.v1';
 
@@ -324,6 +326,9 @@ function snapshotCareerSkills(careerSkillEvidence) {
       || !evidenceSegmentIds.length || evidenceSegmentIds.some(segmentId => typeof segmentId !== 'string' || !segmentId.trim())) {
       configurationFault(`careerSkillEvidence.skills[${index}] is not an approved, evidence-linked skill.`);
     }
+    if (skill.declaredInSkillsSection !== undefined && typeof skill.declaredInSkillsSection !== 'boolean') {
+      configurationFault(`careerSkillEvidence.skills[${index}].declaredInSkillsSection must be boolean when present.`);
+    }
     const carriesCurrentSupport = skill && typeof skill === 'object'
       && (skill.supportMode != null || skill.directEvidenceSegmentIds != null || skill.capabilityKind != null);
     const directEvidenceSegmentIds = Array.isArray(skill?.directEvidenceSegmentIds)
@@ -371,6 +376,7 @@ function snapshotCareerSkills(careerSkillEvidence) {
         ? isCareerSkillIndexEligible({ ...skill, name, evidenceSegmentIds, directEvidenceSegmentIds })
         : skill.indexEligible === true ? true : skill.indexEligible === false ? false : null,
       evidenceSegmentIds: [...new Set(evidenceSegmentIds)],
+      ...(typeof skill.declaredInSkillsSection === 'boolean' ? { declaredInSkillsSection: skill.declaredInSkillsSection } : {}),
       // An organizing category is not a career fact and nothing here grades it;
       // it is carried only so the skills-row label vocabulary can offer the
       // approved profile's own classification (skillGroupVocabulary).
@@ -408,6 +414,7 @@ function snapshotRequiredSkillTerms(evidenceCatalog, careerSkillEvidence, { post
   if (!listingEntries.length || !careerEntries.length) return [];
   const ranked = skills
     .filter(skill => skill.indexEligible === true)
+    .filter(skill => applicationSkillPermittedForPosting(skill, listingEntries))
     // A profile skill remains source-limited: only require it where the
     // accepted plan carries career evidence that actually names it.
     .filter(skill => snapshotSkillEvidenceSupports(skill, careerEntries))
@@ -478,7 +485,7 @@ export function missingPostingNamedSkillTerms(skills, evidenceCatalog, careerSki
   return required.filter(name => !items.some(item => snapshotSkillTermOccurs(name, item)));
 }
 
-export const POSTING_NAMED_SKILLS_RULE = `the skills block is the index a recruiter or applicant-tracking filter reads, so it carries every name from context.careerSkillEvidence whose indexEligible value is true, that one of the accepted plan’s job-listing quotes states and that one of the accepted plan’s career-data quotes also states, each matched as a whole term, and never more than ${MAX_REQUIRED_POSTING_SKILL_TERMS} such names, highest-priority first; write each in exactly the spelling that inventory gives it, file it under the group that fits it, and cite the career-data quote that states it; to make room, drop terms this posting never asks about, never a name it asks for`;
+export const POSTING_NAMED_SKILLS_RULE = `the skills block is the index a recruiter or applicant-tracking filter reads, so it carries every name from context.careerSkillEvidence whose indexEligible value is true, that one of the accepted plan’s job-listing quotes states and that one of the accepted plan’s career-data quotes also states, each matched as a whole term, and never more than ${MAX_REQUIRED_POSTING_SKILL_TERMS} such names, highest-priority first; a skill whose declaredInSkillsSection value is false is permitted only when a job-listing quote names it; write each in exactly the spelling that inventory gives it, file it under the group that fits it, and cite the career-data quote that states it; to make room, drop terms this posting never asks about, never a name it asks for`;
 const POSTING_NAMED_SKILL_TERM_RULE = 'skill-block-omits-posting-named-attested-term';
 
 /**
@@ -517,7 +524,7 @@ export function missingRequiredCareerSkillTerms(skills, evidenceCatalog, careerS
 
 // Kept under its established exported name because queued prompts interpolate
 // it, but this is now a completeness rule rather than a mere presence floor.
-export const SKILLS_BLOCK_PRESENCE_RULE = `the skills block is not optional once the accepted plan’s career-data quotes state a name from context.careerSkillEvidence whose indexEligible value is true. It carries the complete prioritized index returned by the same rule: every posting-named, career-attested name first, then the highest-priority remaining career-attested names in evidence order, up to ${MAX_REQUIRED_CAREER_SKILL_TERMS} names total, where a name that is only a shorter form of another listed name is carried by that longer name. This is a bounded recruiter and applicant-tracking index, not permission to ship one token or to dump every historical keyword. Write each name in exactly the spelling that inventory gives it, file it under the neutral domain label that fits it, and cite the career-data quote that states it. Where page space is short, tighten a bullet or drop a project rather than hollowing out this block`;
+export const SKILLS_BLOCK_PRESENCE_RULE = `the skills block carries the complete prioritized index of index-eligible, career-attested names: every posting-named name first, then only remaining names whose declaredInSkillsSection value is true, in evidence order, up to ${MAX_REQUIRED_CAREER_SKILL_TERMS} names total. A historical projection without that flag retains its frozen selection rule. A name that is only a shorter form of another listed name is carried by that longer name. This is a bounded recruiter and applicant-tracking index, not permission to dump historical keywords. No source Skills section and no posting-named attested skill means no additional skills are required. Write each name in exactly the spelling that inventory gives it, file it under the neutral domain label that fits it, and cite the career-data quote that states it. Where page space is short, tighten a bullet or drop a project rather than omitting a required name`;
 const SKILLS_BLOCK_PRESENCE_RULE_ID = 'skills-block-omits-prioritized-career-attested-term';
 const APPROVED_SPELLING_RULE = 'approved-skill-spelling';
 
@@ -1633,7 +1640,7 @@ function normalizeProjects(value, allowedEvidenceIds, careerEvidenceIds, careerE
   return projects;
 }
 
-function normalizeSkills(value, allowedEvidenceIds, careerEvidenceIds, careerEvidenceQuotesById, careerData, offenses, approvedSnapshotSkills = null, authorityMode = false) {
+function normalizeSkills(value, allowedEvidenceIds, careerEvidenceIds, careerEvidenceQuotesById, careerData, offenses, approvedSnapshotSkills = null, authorityMode = false, listingEvidence = []) {
   if (value == null) return [];
   if (!Array.isArray(value) || value.length > MAX_SKILL_GROUPS) fail(`skills must be an array with at most ${MAX_SKILL_GROUPS} groups.`);
   // An authority-backed résumé admits a skill only as a member of the approved
@@ -1698,9 +1705,9 @@ function normalizeSkills(value, allowedEvidenceIds, careerEvidenceIds, careerEvi
     // separately and the whole response still costs one correction round.
     for (const [itemIndex, item] of items.entries()) {
       const approved = approvedByItem[itemIndex];
-      if (approvedSnapshotSkills && (!approved || approved.indexEligible === false)) {
+      if (approvedSnapshotSkills && (!approved || approved.indexEligible === false || !applicationSkillPermittedForPosting(approved, listingEvidence))) {
         offend(skillOffenses, SKILL_ITEM_FILTERABLE_NOUN_RULE, `skills[${index}] item "${item}"`,
-          `skills[${index}] item "${item}" is not an exact, index-eligible approved snapshot skill. Write the name of a supported skill as the approved inventory spells it (a capitalization or spacing variant of that name resolves to it); do not infer aliases, plurals or longer names, or turn an ambiguous source mention into a keyword.`, group.id);
+          `skills[${index}] item "${item}" is not an exact, index-eligible approved snapshot skill permitted in this posting. A modern projected skill must also be declared in the source Skills section or named in this posting. Write the name of a supported skill as the approved inventory spells it (a capitalization or spacing variant of that name resolves to it); do not infer aliases, plurals or longer names, or turn an ambiguous source mention into a keyword. Historical projections without the declaration flag keep their frozen admission rule.`, group.id);
       } else if (!approvedSnapshotSkills && !FILTERABLE_SKILL_ITEM_RE.test(item)) {
         // A pre-snapshot job has no approved inventory to admit the item
         // against, so all that is left is a capitalisation guess at "this is a
@@ -1908,7 +1915,7 @@ export function validateStructuredResumeDraft(raw, { sourceRoles, evidenceIds, e
   for (const role of normalizedSourceRoles) if (!roleIds.has(role.id)) fail(`roles is missing trusted source role "${role.id}".`);
   const projects = normalizeProjects(draft.projects, allowedEvidenceIds, careerEvidenceIds, careerEvidenceQuotesById, careerData, listingEvidenceQuotesById, offenses, authorityMode, approvedSnapshotSkills);
   collectEmployerTaskProjects(projects, normalizedSourceRoles, projectRoleOf, offenses);
-  const skills = normalizeSkills(draft.skills, allowedEvidenceIds, careerEvidenceIds, careerEvidenceQuotesById, careerData, offenses, approvedSnapshotSkills, authorityMode);
+  const skills = normalizeSkills(draft.skills, allowedEvidenceIds, careerEvidenceIds, careerEvidenceQuotesById, careerData, offenses, approvedSnapshotSkills, authorityMode, [...listingEvidenceQuotesById.values()]);
   const education = normalizeCredentialItems(draft.education, 'education', allowedEvidenceIds, careerEvidenceIds, careerEvidenceQuotesById, careerData, offenses, authorityMode);
   const credentials = normalizeCredentialItems(draft.credentials, 'certification', allowedEvidenceIds, careerEvidenceIds, careerEvidenceQuotesById, careerData, offenses, authorityMode);
   if (!roles.length && !projects.length && !education.length && !credentials.length) {
@@ -1938,7 +1945,7 @@ export function validateStructuredResumeDraft(raw, { sourceRoles, evidenceIds, e
       .filter(name => !postingRequired.has(name));
     if (missingCareer.length) {
       offend(offenses, SKILLS_BLOCK_PRESENCE_RULE_ID, 'skills',
-        `skills omits ${missingCareer.join(', ')} from the bounded career-attested index. The accepted plan supports ${missingCareer.length === 1 ? 'this technology' : 'these technologies'}, and the skills section is the recruiter and applicant-tracking index for them; add ${missingCareer.length === 1 ? 'it' : 'each'} under the neutral domain label that fits, cite the career-data quote that states it, and keep every posting-named term. The index stops at ${MAX_REQUIRED_CAREER_SKILL_TERMS} prioritized names, so page fit is not a reason to reduce it to one token.`, skills.map(group => group.id));
+        `skills omits ${missingCareer.join(', ')} from the bounded career-attested index. Fill beyond posting-named terms comes only from skills declared in the approved source Skills section; historical projections without that flag keep their frozen required terms. Add ${missingCareer.length === 1 ? 'it' : 'each'} under the neutral domain label that fits, cite the career-data quote that states it, and keep every posting-named term. The index stops at ${MAX_REQUIRED_CAREER_SKILL_TERMS} prioritized names.`, skills.map(group => group.id));
     }
   }
   collectApprovedSkillSpellingOffenses(roles, projects, approvedSnapshotSkills, offenses);

@@ -10,6 +10,7 @@ import {
   compareCareerSources,
   logCareerDataImport,
   readCareerImportHistory,
+  readPreviousCareerImportSnapshot,
 } from '../../electron/ipc/careerImportLog.js';
 import {
   editedPairsSinceSession,
@@ -18,6 +19,8 @@ import {
   logSavedBundle,
 } from '../../electron/ipc/applicationEditLog.js';
 import { evaluateApplicationGenerationGate } from '../../electron/ipc/applicationGenerationGate.js';
+import { CAREER_INCREMENTAL_MAX_FILE_BYTES, readCareerIncrementalState, writeCareerIncrementalState } from '../../electron/ipc/careerIncrementalStore.js';
+import { compileSyntheticCareerSnapshot } from './careerIncrementalFixture.mjs';
 
 const hash = value => crypto.createHash('sha256').update(value).digest('hex');
 const at = day => `2030-01-${String(day).padStart(2, '0')}T00:00:00.000Z`;
@@ -101,6 +104,115 @@ export default [{
     await assert.rejects(imported(root, { ...candidate, status: 'draft' }, 'rejected'), /approved snapshot/);
     await assert.rejects(imported(root, { ...candidate, sources: [{ name: 'Career.txt', contentHash: 'bad' }] }, 'invalid-descriptor'), /exact source descriptors/);
     assert.equal((await careerImportStatus(root)).imports, 1, 'rejected inputs leave the history alone');
+  }),
+}, {
+  name: 'career import reuse: ordered private path lineage crosses modules without reopening edited sources',
+  run: async () => withRoot(async root => {
+    const original = snapshot('lineage-original');
+    const sourcePaths = [path.join(root, 'source', 'Career.txt')];
+    const unrelatedPaths = [path.join(root, 'different', 'Career.txt')];
+    await fs.mkdir(path.dirname(sourcePaths[0]));
+    await fs.writeFile(sourcePaths[0], original.sources[0].text);
+    await imported(root, original, 'original-lineage', { sourcePaths });
+    const unrelated = snapshot('unrelated-newer', [source('Career.txt', 'Unrelated synthetic person.')]);
+    await imported(root, unrelated, 'unrelated-lineage', { nodeId: 'different-node', sourcePaths: unrelatedPaths });
+    await fs.writeFile(sourcePaths[0], 'Edited current source, with the original historical words gone.');
+    const sourceDescriptors = [source('Career.txt', 'Edited current source, with the original historical words gone.')];
+    const calls = [];
+    const result = await readPreviousCareerImportSnapshot({
+      root, canvasScope: '/another-canvas.canvas', nodeId: 'new-board', sourcePaths, sourceDescriptors,
+    }, { loadSnapshot: async (storageRoot, id) => { calls.push([storageRoot, id]); return original; } });
+    assert.equal(result, original, 'the same source files can reuse the immutable history from another module');
+    assert.equal(result.sources[0].text, 'Original career evidence.', 'the baseline is historical text, not an edited live reread');
+    assert.deepEqual(calls, [[path.join(root, 'career-snapshot-store'), original.snapshotId]]);
+    const historyText = await fs.readFile(careerImportLogFile(root), 'utf8');
+    assert(!historyText.includes(sourcePaths[0]) && !historyText.includes(unrelatedPaths[0]), 'only hashed source paths may be retained');
+    assert((await readCareerImportHistory(root)).imports.every(item => /^[a-f0-9]{64}$/.test(item.sourceSetId)));
+  }),
+}, {
+  name: 'career import reuse: legacy lineage requires the immediate same scope and unambiguous ordered names',
+  run: async () => withRoot(async root => {
+    const original = snapshot('legacy-lineage', [source('Career.txt', 'Prior fact.'), source('Projects.md', 'Prior project.')]);
+    const scope = { root, canvasScope: '/private/canvas/synthetic.canvas', nodeId: 'search-node' };
+    const changed = original.sources.map(item => source(item.name, `${item.text} Revised.`));
+    await imported(root, original, 'legacy-lineage');
+    const loaded = [];
+    const loadSnapshot = async (_root, id) => { loaded.push(id); return original; };
+    assert.equal(await readPreviousCareerImportSnapshot({ ...scope, sourceDescriptors: changed }, { loadSnapshot }), original);
+    for (const input of [
+      { ...scope, nodeId: 'different-node', sourceDescriptors: changed },
+      { ...scope, sourceDescriptors: [...changed].reverse() },
+      { ...scope, sourceDescriptors: [changed[0]] },
+      { ...scope, sourceDescriptors: [changed[0], source('Renamed.md', 'Project.')] },
+    ]) assert.equal(await readPreviousCareerImportSnapshot(input, { loadSnapshot }), null);
+    const duplicates = snapshot('legacy-duplicates', [source('Career.txt', 'One.'), source('Career.txt', 'Two.')]);
+    await imported(root, duplicates, 'legacy-duplicates');
+    assert.equal(await readPreviousCareerImportSnapshot({ ...scope, sourceDescriptors: duplicates.sources }, { loadSnapshot }), null);
+    assert.deepEqual(loaded, [original.snapshotId], 'ambiguous or unrelated selections never open snapshots');
+  }),
+}, {
+  name: 'career import reuse: path changes, renamed inputs and invalid current snapshots fall back safely',
+  run: async () => withRoot(async root => {
+    const original = snapshot('guarded-lineage');
+    const sourcePaths = [path.join(root, 'source', 'Career.txt')];
+    await imported(root, original, 'guarded-lineage', { sourcePaths });
+    const context = { root, canvasScope: '/private/canvas/synthetic.canvas', nodeId: 'search-node', sourcePaths, sourceDescriptors: original.sources };
+    assert.equal(await readPreviousCareerImportSnapshot({ ...context, sourcePaths: [path.join(root, 'other', 'Career.txt')] }, { loadSnapshot: async () => original }), null,
+      'a logged path digest prevents falling back to names for a different path in the same scope');
+    assert.equal(await readPreviousCareerImportSnapshot({ ...context, sourceDescriptors: [source('Renamed.txt', 'Prior fact.')] }, { loadSnapshot: async () => original }), null);
+    for (const invalid of [null, { ...original, status: 'draft' }, { ...original, compilationContract: hash('different-contract') },
+      { ...original, sources: [source('Career.txt', 'Unrelated source.')] }, { ...original, sources: [{ name: 'Career.txt', contentHash: original.sources[0].contentHash }] }]) {
+      assert.equal(await readPreviousCareerImportSnapshot(context, { loadSnapshot: async () => invalid }), null);
+    }
+    assert.equal(await readPreviousCareerImportSnapshot(context, { loadSnapshot: async () => { throw new Error('corrupt previous snapshot'); } }), null);
+    const state = await readCareerImportHistory(root);
+    state.imports[0].sourceSetId = 'invalid';
+    await fs.writeFile(careerImportLogFile(root), JSON.stringify(state));
+    await assert.rejects(readCareerImportHistory(root), /invalid/);
+  }),
+}, {
+  name: 'career compiler reuse storage: verified receipts round-trip privately and invalid replacements preserve valid bytes',
+  run: async () => withRoot(async root => {
+    const compiled = await compileSyntheticCareerSnapshot();
+    assert.equal(await readCareerIncrementalState(root, compiled.snapshot), null);
+    const file = await writeCareerIncrementalState(root, compiled.snapshot, compiled.reuseState);
+    const bytes = await fs.readFile(file);
+    assert.deepEqual(await readCareerIncrementalState(root, compiled.snapshot), compiled.reuseState);
+    assert.equal((await fs.stat(file)).mode & 0o777, 0o600);
+    assert.equal((await fs.stat(path.dirname(file))).mode & 0o777, 0o700);
+    await assert.rejects(writeCareerIncrementalState(root, compiled.snapshot, { ...compiled.reuseState, snapshotId: hash('unrelated') }), /does not match/);
+    assert.deepEqual(await fs.readFile(file), bytes, 'an invalid receipt must never replace valid optimization state');
+    await Promise.all(Array.from({ length: 3 }, () => writeCareerIncrementalState(root, compiled.snapshot, compiled.reuseState)));
+    assert.deepEqual(await readCareerIncrementalState(root, compiled.snapshot), compiled.reuseState);
+    assert.deepEqual((await fs.readdir(path.dirname(file))).filter(name => name.endsWith('.tmp')), []);
+  }),
+}, {
+  name: 'career compiler reuse storage: corrupt oversized and linked receipts safely disable optimization',
+  run: async () => withRoot(async root => {
+    const compiled = await compileSyntheticCareerSnapshot();
+    const file = await writeCareerIncrementalState(root, compiled.snapshot, compiled.reuseState);
+    for (const corrupt of ['{ broken JSON', JSON.stringify({ ...compiled.reuseState, version: 99 })]) {
+      await fs.writeFile(file, corrupt);
+      assert.equal(await readCareerIncrementalState(root, compiled.snapshot), null);
+    }
+    await fs.truncate(file, CAREER_INCREMENTAL_MAX_FILE_BYTES + 1);
+    assert.equal(await readCareerIncrementalState(root, compiled.snapshot), null, 'oversized receipts are refused before reading their contents');
+    await fs.unlink(file);
+    const outside = path.join(root, 'outside-receipt.json');
+    await fs.writeFile(outside, JSON.stringify(compiled.reuseState));
+    await fs.symlink(outside, file);
+    assert.equal(await readCareerIncrementalState(root, compiled.snapshot), null);
+    await fs.unlink(file);
+    await fs.link(outside, file);
+    assert.equal(await readCareerIncrementalState(root, compiled.snapshot), null);
+    await fs.unlink(file);
+    await fs.rmdir(path.dirname(file));
+    const outsideDirectory = path.join(root, 'outside-directory');
+    await fs.mkdir(outsideDirectory);
+    await fs.symlink(outsideDirectory, path.dirname(file));
+    assert.equal(await readCareerIncrementalState(root, compiled.snapshot), null);
+    await assert.rejects(writeCareerIncrementalState(root, compiled.snapshot, compiled.reuseState), /symbolic link/);
+    assert.deepEqual(await fs.readdir(outsideDirectory), [], 'a linked sidecar directory cannot redirect a private write');
   }),
 }, {
   name: 'career import log: malformed history and snapshot collisions fail closed without replacing evidence',

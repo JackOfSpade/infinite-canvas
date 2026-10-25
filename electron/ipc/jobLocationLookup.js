@@ -49,34 +49,8 @@ const MISS_TTL_MS = 24 * 60 * 60 * 1000;
 // their drift tests for no behavioural gain.
 export const JOB_LOCATION_LOOKUP_TASK = 'job-compensation-research-batch';
 
-// Job boards and aggregators. They re-publish, so a match there says nothing
-// about where the EMPLOYER places the role, and many omit or rewrite the place.
-// Matched on a hostname boundary, never as a substring (a company called
-// "Monster Energy" is not a job board).
-const AGGREGATOR_BASE_DOMAINS = [
-  'talent.com', 'dice.com', 'builtin.com', 'wellfound.com', 'angel.co', 'remoteok.com', 'remoteok.io',
-  'weworkremotely.com', 'flexjobs.com', 'snagajob.com', 'lensa.com', 'jobgether.com', 'theladders.com',
-  'ladders.com', 'otta.com', 'joblist.com', 'jobrapido.com', 'neuvoo.com', 'learn4good.com',
-  'workatastartup.com', 'ycombinator.com', 'levels.fyi', 'jobs.google.com', 'careerjet.com',
-  'recruit.net', 'jobleads.com', 'whatjobs.com', 'jobisjob.com', 'trovit.com', 'ziprecruiter.com',
-  'themuse.com', 'hired.com', 'jobspresso.co', 'justremote.co', 'nodesk.co', 'remote.co',
-  'getwork.com', 'jobcase.com', 'monster.com', 'jobs.com', 'usajobs.gov', 'idealist.org',
-];
-// Boards that run on many country domains (indeed.co.uk, ca.indeed.com, ...).
-const AGGREGATOR_LABEL_RE = /(?:^|\.)(?:indeed|linkedin|glassdoor|ziprecruiter|monster|simplyhired|careerbuilder|jooble|adzuna|reed|totaljobs|seek|naukri|stepstone)\.(?:[a-z]{2,3}\.)?[a-z]{2,}$/i;
-
-// First-party applicant tracking systems. These host the EMPLOYER's own
-// posting, so they count as official without any company-name check.
-const ATS_BASE_DOMAINS = [
-  'greenhouse.io', 'lever.co', 'myworkdayjobs.com', 'myworkdaysite.com', 'ashbyhq.com',
-  'smartrecruiters.com', 'icims.com', 'jobvite.com', 'workable.com', 'bamboohr.com', 'taleo.net',
-  'successfactors.com', 'successfactors.eu', 'recruitee.com', 'breezy.hr', 'teamtailor.com',
-  'personio.de', 'personio.com', 'join.com', 'rippling.com', 'paylocity.com', 'ultipro.com',
-  'dayforcehcm.com', 'eightfold.ai', 'applytojob.com', 'pinpointhq.com', 'comeet.com',
-  'brassring.com', 'avature.net', 'csod.com', 'oraclecloud.com', 'workforcenow.adp.com',
-  'recruiting.adp.com', 'hrmdirect.com', 'jazz.co', 'freshteam.com', 'zohorecruit.com',
-  'gohire.io', 'greenhouse.com', 'ripplematch.com', 'phenompeople.com',
-];
+import { classifyOfficialSourceHost } from './officialSourceHosts.js';
+export { classifyOfficialSourceHost, isAggregatorHost, isKnownAtsHost } from './officialSourceHosts.js';
 
 const COMPANY_SUFFIXES = new Set([
   'inc', 'incorporated', 'llc', 'ltd', 'limited', 'corp', 'corporation', 'co', 'company', 'gmbh',
@@ -84,31 +58,6 @@ const COMPANY_SUFFIXES = new Set([
 ]);
 const TITLE_STOPWORDS = new Set(['a', 'an', 'the', 'of', 'and', 'for', 'at', 'in', 'to', 'with', 'or']);
 const TITLE_ABBREVIATIONS = new Map([['sr', 'senior'], ['jr', 'junior'], ['mgr', 'manager'], ['eng', 'engineer'], ['dev', 'developer']]);
-
-function hostMatchesDomain(host, domain) {
-  return host === domain || host.endsWith(`.${domain}`);
-}
-
-export function isAggregatorHost(host) {
-  const h = String(host || '').toLowerCase();
-  return AGGREGATOR_BASE_DOMAINS.some(d => hostMatchesDomain(h, d)) || AGGREGATOR_LABEL_RE.test(h);
-}
-
-export function isKnownAtsHost(host) {
-  const h = String(host || '').toLowerCase();
-  return ATS_BASE_DOMAINS.some(d => hostMatchesDomain(h, d));
-}
-
-const SECOND_LEVEL_SUFFIXES = new Set(['co', 'com', 'org', 'net', 'gov', 'ac', 'edu', 'ne', 'or']);
-
-/** Registrable label without a public-suffix list: "careers.acme.co.uk" -> "acme". */
-function registrableLabel(host) {
-  const labels = String(host || '').split('.').filter(Boolean);
-  if (labels.length < 2) return '';
-  const tld = labels[labels.length - 1];
-  const sld = labels[labels.length - 2];
-  return labels.length >= 3 && tld.length === 2 && SECOND_LEVEL_SUFFIXES.has(sld) ? labels[labels.length - 3] : sld;
-}
 
 function normalizedCompanyTokens(company) {
   return String(company || '')
@@ -176,27 +125,6 @@ export function titlesPlausiblyAgree(cardTitle, postedTitle) {
   if (!have.size) return false;
   const shared = want.filter(token => have.has(token)).length;
   return shared / want.length >= 0.5;
-}
-
-/**
- * True for an employer host or a known ATS host; false for a job board or an
- * unrelated site. A company-owned domain is recognised by the company name
- * appearing in the hostname.
- */
-export function classifyOfficialSourceHost(host, company) {
-  const h = String(host || '').toLowerCase().replace(/\.$/, '');
-  if (!h || h === 'localhost' || !h.includes('.') || /^\d{1,3}(?:\.\d{1,3}){3}$/.test(h) || h.includes(':')) return 'invalid';
-  if (isAggregatorHost(h)) return 'aggregator';
-  if (isKnownAtsHost(h)) return 'ats';
-  // The company must be the REGISTRABLE domain's own name. A substring test on
-  // the whole hostname accepts acme.evil.com, acmefake.com, acme.github.io and
-  // bankrate.com (for "Bank of America"); comparing the registrable label does not.
-  const tokens = normalizedCompanyTokens(company);
-  const compact = tokens.join('');
-  const registrable = registrableLabel(h).replace(/[^a-z0-9]/g, '');
-  if (registrable.length >= 3
-    && ((compact.length >= 3 && registrable === compact) || (tokens[0] && tokens[0].length >= 3 && registrable === tokens[0]))) return 'employer';
-  return 'unrelated';
 }
 
 // ---------------------------------------------------------------------------

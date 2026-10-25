@@ -5894,9 +5894,12 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
     const finalDedupStage = finalDedupDropped > 0
       ? ` → final-enrichment-dedup-dropped: ${finalDedupDropped}`
       : '';
+    const officialStage = s.officialPosting
+      ? ` → official-posting-resolved: ${Math.max(0, Number(s.officialPosting.total) || 0)} → official-posting-dedup-dropped: ${Math.max(0, Number(s.officialDedupDropped) || 0)}`
+      : '';
     const evidenceStage = descriptionDeferred > 0
-      ? ` → evidence-deferred: ${descriptionDeferred}${finalDedupStage} → **scoring-eligible: ${s.kept}**`
-      : `${finalDedupStage} → **new: ${s.kept}**`;
+      ? ` → evidence-deferred: ${descriptionDeferred}${finalDedupStage}${officialStage} → **scoring-eligible: ${s.kept}**`
+      : `${finalDedupStage}${officialStage} → **new: ${s.kept}**`;
     // The AI role screen sits between the age and history stages, where the
     // deterministic title gate it replaced used to sit. It is usually the
     // LARGEST drop in a run with resolved roles, so omitting it left the funnel
@@ -5956,6 +5959,13 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
         : '- _(dedup / age / history drops are by-design — not jobs we failed to analyze; provider-returned rows are not locally title-filtered)_');
     if (finalDedupDropped > 0) {
       lines.push('- _(The final-enrichment dedup removes only high-confidence same-listing copies after full descriptions become available.)_');
+    }
+    if (s.officialPosting) {
+      const resolution = s.officialPosting;
+      const counts = value => Object.entries(value || {}).filter(([, count]) => Number.isFinite(Number(count)))
+        .map(([key, count]) => `${key}=${Math.max(0, Math.floor(Number(count)))}`).join(', ') || 'none';
+      lines.push(`- Official postings: levels ${counts(resolution.levels)}; outcomes ${counts(resolution.outcomes)}; rejections ${counts(resolution.rejections)}.`);
+      lines.push(`- Official-posting bridge: ${Math.max(0, Number(resolution.handoffs) || 0)} handoff(s), ${Math.max(0, Number(resolution.handoffMs) || 0)} ms; material description changes ${Math.max(0, Number(resolution.materialJdChange) || 0)}; timeout ${Math.max(0, Number(resolution.bridgeTimeout) || 0)}; unavailable ${Math.max(0, Number(resolution.bridgeUnavailable) || 0)}.`);
     }
     const dedup = s.dedupProvenance;
     if (dedup?.total > 0) {
@@ -7427,6 +7437,7 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
         const blockingModalFailures = Number(e.blockingModalFailures ?? 0);
         const googleApplyLinksCaptured = Number(e.googleApplyLinksCaptured ?? 0);
         const googleApplyLinksMissing = Number(e.googleApplyLinksMissing ?? 0);
+        const googleApplyOptionsNonAggregator = Number(e.googleApplyOptionsNonAggregator ?? 0);
         // The post-click selected-card probe is separate from the pre-click
         // hit-test. A correct physical hit does not, by itself, prove that the
         // board activated that same row after its event handler ran.
@@ -7489,6 +7500,7 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
           (googleApplyLinksCaptured > 0 || googleApplyLinksMissing > 0)
             ? `direct-apply ${googleApplyLinksCaptured}/${googleApplyLinksCaptured + googleApplyLinksMissing} captured`
             : null,
+          googleApplyOptionsNonAggregator > 0 ? `non-aggregator-apply-options ${googleApplyOptionsNonAggregator} row(s)` : null,
           titleBypassed > 0 ? `title-bypassed ${titleBypassed} (intentional, page-local)` : null,
           abortLabel,
         ].filter(Boolean).join(' · ');

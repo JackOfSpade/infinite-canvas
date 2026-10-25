@@ -723,7 +723,7 @@ export default [
     },
   },
   {
-    name: 'application slot queue: JobCardNode wires canStart, the cap, and a queue-only Cancel with no refusal toast',
+    name: 'application slot queue: JobCardNode wires canStart, the cap, and separate queue and research Cancel controls',
     run: () => {
       const card = readFileSync(new URL('../../src/nodes/JobCardNode.jsx', import.meta.url), 'utf8');
 
@@ -736,7 +736,7 @@ export default [
       );
       assert(!card.includes('Too Many Pending Applications'), 'the old click-time refusal toast was removed');
 
-      // The Cancel affordance must live only inside the queued branch.
+      // Queued work keeps its queue cancellation; research has a separate scoped closure.
       const queuedMarker = "{displayedApplicationRun.state === 'queued' && (";
       const queuedIdx = card.indexOf(queuedMarker);
       assert(queuedIdx !== -1, 'the queued conditional exists');
@@ -747,6 +747,9 @@ export default [
         queuedBlock.includes("cancelQueuedRunsForNode(id, 'Application generation cancelled before it started')"),
         'the queued branch cancels the card before it started',
       );
+      const resolvingIdx = card.indexOf("{displayedApplicationRun.state === 'resolving' && (");
+      assert(resolvingIdx > queuedIdx && card.slice(resolvingIdx).includes('displayedApplicationRun.cancel?.()'),
+        'research cancellation invokes the active preparation closure without changing queued cancellation');
 
       // canStart is declared before onQueued within the acquireModuleRun options.
       assert(

@@ -63,6 +63,39 @@ export function resolveApprovedSkillByName(skills, spelled) {
   return matches.length === 1 ? matches[0] : null;
 }
 
+// Application-only selection leaves the shared career inventory intact. A
+// skill explicitly outside the source Skills section belongs in this index
+// only when the posting names it. Historical projections omit the flag and
+// retain their frozen selection behavior.
+export function applicationSkillPermittedForPosting(skill, listingEvidence = []) {
+  if (!skill || typeof skill !== 'object') return false;
+  if (skill.declaredInSkillsSection === undefined || skill.declaredInSkillsSection === true) return true;
+  const quotes = (Array.isArray(listingEvidence) ? listingEvidence : [])
+    .map(entry => typeof entry === 'string' ? entry : entry?.quote).filter(quote => typeof quote === 'string');
+  const names = [skill.name, ...(typeof skill.cleanName === 'string' && verifyCareerCleanText(skill.name, skill.cleanName) ? [skill.cleanName] : [])];
+  return names.some(name => {
+    const literal = String(name ?? '').trim();
+    if (!literal) return false;
+    const escaped = literal.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
+    const flags = [...literal].length <= CASE_SENSITIVE_SKILL_NAME_MAX_CHARS ? 'u' : 'iu';
+    // Use the same whole-term boundary as the structured résumé: C is not
+    // C++, and Node is not Node.js; punctuation around a term is allowed.
+    const pattern = new RegExp(`(?<![\\p{L}\\p{N}+#&@])(?<![\\p{L}\\p{N}]\\.)${escaped}(?![\\p{L}\\p{N}+#&@])(?!\\.[\\p{L}\\p{N}])`, flags);
+    return quotes.some(quote => pattern.test(quote));
+  });
+}
+
+function applicationSkillProjection(skill, careerSkillEvidence, cleanNames = null) {
+  const projected = (Array.isArray(careerSkillEvidence?.skills) ? careerSkillEvidence.skills : [])
+    .find(item => item?.id === skill.id);
+  const cleanName = cleanNames instanceof Map ? cleanNames.get(skill.id) : projected?.cleanName;
+  return {
+    ...skill,
+    ...(typeof projected?.declaredInSkillsSection === 'boolean' ? { declaredInSkillsSection: projected.declaredInSkillsSection } : {}),
+    ...(typeof cleanName === 'string' && verifyCareerCleanText(skill.name, cleanName) ? { cleanName } : {}),
+  };
+}
+
 function assertUniqueIndexEligibleSkillNames(skills) {
   const names = new Map();
   for (const skill of skills.values()) {
@@ -357,12 +390,15 @@ export function validateAuthorityCertificationEvidence(authority, certificationI
   return validateAuthorityEntityEvidence(authority, certificationId, evidenceIds, 'certification', resolveAuthorityCertification);
 }
 
-export function validateAuthoritySkill(authority, skillId, name, evidenceIds) {
+export function validateAuthoritySkill(authority, skillId, name, evidenceIds, { listingEvidence = [], careerSkillEvidence = null, cleanNames = null } = {}) {
   if (!Array.isArray(evidenceIds) || !evidenceIds.length) throw new Error('Skill evidence must be nonempty.');
   const skill = resolveAuthoritySkill(authority, skillId);
   // The name is checked under the same resolution the group uses, so a case or
   // spacing variant of the approved name denotes this skill; any other name does not.
   if (resolveApprovedSkillByName([skill], name) !== skill || !isCareerSkillIndexEligible(skill)) throw new Error(`Skill ${JSON.stringify(skillId)} is not an exact index-eligible approved skill.`);
+  if (!applicationSkillPermittedForPosting(applicationSkillProjection(skill, careerSkillEvidence, cleanNames), listingEvidence)) {
+    throw new Error(`Skill ${JSON.stringify(skillId)} is not declared in the approved source Skills section and is not named in this posting.`);
+  }
   for (const id of evidenceIds || []) {
     const unit = resolveAuthorityEvidence(authority, id);
     if (unit.kind !== 'skill' || unit.entityId !== skillId) throw new Error(`Authority evidence ${JSON.stringify(id)} does not belong to skill ${JSON.stringify(skillId)}.`);
@@ -370,7 +406,7 @@ export function validateAuthoritySkill(authority, skillId, name, evidenceIds) {
   return skill;
 }
 
-export function validateAuthoritySkillGroup(authority, items, evidenceIds, cleanNames = null) {
+export function validateAuthoritySkillGroup(authority, items, evidenceIds, cleanNames = null, { listingEvidence = [], careerSkillEvidence = null } = {}) {
   if (!Array.isArray(items) || !items.length) throw new Error('Skill group items must be nonempty.');
   if (!Array.isArray(evidenceIds) || !evidenceIds.length) throw new Error('Skill group evidence must be nonempty.');
   const state = stateOf(authority);
@@ -393,7 +429,7 @@ export function validateAuthoritySkillGroup(authority, items, evidenceIds, clean
     if (unit.kind !== 'skill' || !selected.has(unit.entityId)) throw new Error(`Authority evidence ${JSON.stringify(id)} does not belong to this skill group.`);
     bySkill.get(unit.entityId).push(id);
   }
-  for (const skill of selected.values()) validateAuthoritySkill(authority, skill.id, skill.name, bySkill.get(skill.id));
+  for (const skill of selected.values()) validateAuthoritySkill(authority, skill.id, skill.name, bySkill.get(skill.id), { listingEvidence, careerSkillEvidence, cleanNames });
   return [...selected.values()].map(skill => skill.name);
 }
 

@@ -40,7 +40,7 @@ const QUIT_PAUSE_WORK_CHANNELS = new Set([
   'parse-career-data', 'resolve-job-search-location', 'interpret-job-preferences', 'resolve-search-roles',
   'evaluate-job-preferences', 'generate-job-queries', 'search-jobs', 'search-jobs-single-source', 'score-jobs',
   'research-job-compensation', 'confirm-job-location-consolidations', 'bucket-jobs', 'resolve-job-source', 'resume-job-source',
-  'queue-local-application', 'check-application-generation-gate', 'import-local-application', 'save-application', 'build-interview-brief',
+  'queue-local-application', 'prepare-official-posting-for-generation', 'check-application-generation-gate', 'import-local-application', 'save-application', 'build-interview-brief',
   'analyze-photos', 'scrape-price-comps', 'synthesize-price', 'synthesize-prices-batch', 'synthesize-bundle-price',
   'rescrape-source', 'resolve-captcha', 'assess-platform-fit',
 ]);
@@ -499,6 +499,8 @@ export function __compactErrorStackForTests(error, maxFrames) {
  * it safe for routes whose node ID grammar is stricter than the generic task
  * registry. Throws use the normal IPC error payload and cleanup path. Do not
  * return a Promise: registration must not begin until validation has settled.
+ * `additionalNodeIds(args, event)` adds bounded secondary owners of the same
+ * controller after validation. `reportCancellation` opts into cancelled:true.
  */
 export function handleSafe(channel, handler, timeoutOrOptions = 0) {
   const options = timeoutOrOptions && typeof timeoutOrOptions === 'object'
@@ -511,6 +513,7 @@ export function handleSafe(channel, handler, timeoutOrOptions = 0) {
     }
     const { ac, signal, cleanup } = createSenderAbortController(event, timeoutMs);
     let nodeId = null;
+    let additionalNodeIds = [];
     let senderTaskRegistered = false;
 
     try {
@@ -525,6 +528,13 @@ export function handleSafe(channel, handler, timeoutOrOptions = 0) {
         }
       }
 
+      if (typeof options.additionalNodeIds === 'function') {
+        const ids = options.additionalNodeIds(args, event);
+        if (!Array.isArray(ids) || ids.length > 8 || ids.some(id => typeof id !== 'string' || !id || id.length > 300)) {
+          throw new TypeError('Additional IPC task owners must be bounded node identifiers.');
+        }
+        additionalNodeIds = [...new Set(ids)];
+      }
       nodeId = args?.nodeId;
       registerSenderTask(event.sender, ac, { channel, nodeId,
         manualAiRunId: typeof args?.manualAiRunId === 'string' ? args.manualAiRunId : null });
@@ -539,6 +549,9 @@ export function handleSafe(channel, handler, timeoutOrOptions = 0) {
           options.logTaskRegistration !== false,
         );
       }
+
+      for (const ownerId of additionalNodeIds) if (ownerId !== nodeId) registerNodeTask(event.sender, ownerId, ac, channel,
+        typeof args?.manualAiRunId === 'string' ? args.manualAiRunId : null, options.logTaskRegistration !== false);
 
       const result = await ipcRequestContext.run(
         {
@@ -572,7 +585,7 @@ export function handleSafe(channel, handler, timeoutOrOptions = 0) {
       if (event.sender.isDestroyed()) return { success: false, error: 'Window closed' };
       // A cooperative handler may finish just after its cancellation signal
       // fired. Do not report that detached work as successful.
-      if (signal.aborted) return { success: false, error: abortErrorMessage(signal) };
+      if (signal.aborted) return { success: false, error: abortErrorMessage(signal), ...(options.reportCancellation === true ? { cancelled: true } : {}) };
       
       return {
         success: true,
@@ -581,7 +594,7 @@ export function handleSafe(channel, handler, timeoutOrOptions = 0) {
       };
     } catch (e) {
       if (signal.aborted) {
-        return { success: false, error: abortErrorMessage(signal, e) };
+        return { success: false, error: abortErrorMessage(signal, e), ...(options.reportCancellation === true ? { cancelled: true } : {}) };
       }
       const failureStack = compactErrorStack(e);
       logger.error(`[${channel}] failed:`, e?.message || String(e), ...(failureStack ? [`stack: ${failureStack}`] : []));
@@ -597,6 +610,7 @@ export function handleSafe(channel, handler, timeoutOrOptions = 0) {
       if (nodeId) {
         unregisterNodeTask(event.sender, nodeId, ac);
       }
+      for (const ownerId of additionalNodeIds) if (ownerId !== nodeId) unregisterNodeTask(event.sender, ownerId, ac);
       try { cleanup(); }
       finally { if (senderTaskRegistered) unregisterSenderTask(event.sender, ac); }
     }

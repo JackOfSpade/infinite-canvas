@@ -488,6 +488,25 @@ const COVER_LETTER_THESIS_SCENARIOS = [
 const SHORTEST_LEGAL_THESIS = 'Delivery experience supports reliable reporting work';
 
 export default [
+  {
+    name: 'Skills instructions bind posting names to career evidence and limit additional fill to declared source skills',
+    run() {
+      assert(POSTING_NAMED_SKILLS_RULE.includes('whose indexEligible value is true')
+        && POSTING_NAMED_SKILLS_RULE.includes('one of the accepted plan’s job-listing quotes states')
+        && POSTING_NAMED_SKILLS_RULE.includes('one of the accepted plan’s career-data quotes also states')
+        && POSTING_NAMED_SKILLS_RULE.includes('each matched as a whole term'),
+      'the posting rule retains eligibility, both source requirements and whole-term matching');
+      assert(POSTING_NAMED_SKILLS_RULE.includes('declaredInSkillsSection value is false is permitted only when a job-listing quote names it')
+        && POSTING_NAMED_SKILLS_RULE.includes('exactly the spelling that inventory gives it')
+        && POSTING_NAMED_SKILLS_RULE.includes('cite the career-data quote that states it'),
+      'the new permission is explicit without changing exact spelling or career citation requirements');
+      assert(SKILLS_BLOCK_PRESENCE_RULE.includes('every posting-named name first, then only remaining names whose declaredInSkillsSection value is true')
+        && SKILLS_BLOCK_PRESENCE_RULE.includes('historical projection without that flag retains its frozen selection rule')
+        && SKILLS_BLOCK_PRESENCE_RULE.includes('No source Skills section and no posting-named attested skill means no additional skills are required')
+        && SKILLS_BLOCK_PRESENCE_RULE.includes('cite the career-data quote that states it'),
+      'the disclosed fill rule uses source declarations, states the empty-source result and preserves historical projections');
+    },
+  },
             {
     name: 'A rejected round reports its failed rules by check id and counts the items that carry none',
     run: () => {

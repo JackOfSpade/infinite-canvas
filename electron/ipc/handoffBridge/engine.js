@@ -57,6 +57,7 @@ const MARKETPLACE_PUSH_TASKS = new Set([
 // an injected/generic push port cannot turn arbitrary task text into report
 // telemetry. This is the release_one policy vocabulary from sources/push.js.
 const STATUS_PUSH_TASKS = new Set([
+  'job-official-posting-research', 'job-official-posting-match',
   'price-synthesis', 'price-synthesis-batch', 'bundle-price-synthesis', 'platform-fit-assessment',
   'resume-parse', 'career-profile-compile', 'career-profile-clean', 'career-profile-audit-completeness', 'career-profile-audit-grounding',
   'career-profile-audit-attribution', 'career-profile-audit-metrics', 'career-profile-audit-skills',

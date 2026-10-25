@@ -33,6 +33,7 @@ import { parseSalaryToNumeric } from '../../../src/nodes/jobsearch/buildJobTree.
 import { decodeHtmlEntities, repairMojibake, stripHtmlToText } from '../../../src/utils/textEncoding.js';
 import { markManualSolveRequired } from '../scrapeVerification.js';
 import { isBackgroundE2E, backgroundE2EDisabledError } from '../../utils/backgroundE2e.js';
+import { isAggregatorHost } from '../officialSourceHosts.js';
 
 // ── Timing ────────────────────────────────────────────────────────────────────
 const NAV_SETTLE_MS          = 2000;          // settle after navigation before first action
@@ -956,7 +957,7 @@ function normalizedApplySource(value) {
  * Google can offer several mirrors; prefer the provider named by the list
  * card's "via …" label, then fall back to the first safe non-Google target.
  */
-export function selectGoogleApplyUrl(candidates, preferredSource = '') {
+function googleApplyProviderCandidates(candidates, { httpsOnly = false } = {}) {
   const valid = [];
   for (const candidate of Array.isArray(candidates) ? candidates : []) {
     const label = String(candidate?.label || '').replace(/\s+/g, ' ').trim();
@@ -964,18 +965,38 @@ export function selectGoogleApplyUrl(candidates, preferredSource = '') {
     try {
       const url = new URL(String(candidate?.href || ''));
       if (url.protocol !== 'http:' && url.protocol !== 'https:') continue;
+      if (httpsOnly && (url.protocol !== 'https:' || url.username || url.password)) continue;
       const host = url.hostname.toLowerCase().replace(/\.$/, '');
       if (/(^|\.)google\.[a-z.]+$/.test(host)) continue;
       for (const key of ['utm_campaign', 'utm_source', 'utm_medium']) url.searchParams.delete(key);
       valid.push({
         url: url.href,
+        label,
         source: normalizedApplySource(label),
       });
     } catch { /* ignore malformed provider hrefs */ }
   }
+  return valid;
+}
+
+export function selectGoogleApplyUrl(candidates, preferredSource = '') {
+  const valid = googleApplyProviderCandidates(candidates);
   if (valid.length === 0) return '';
   const preferred = normalizedApplySource(preferredSource);
   return (preferred && valid.find(item => item.source === preferred)?.url) || valid[0].url;
+}
+
+/** Keep every bounded safe Apply-on lead from the same already-read panel. */
+export function normalizeGoogleApplyOptions(candidates) {
+  const result = []; const seen = new Set();
+  for (const candidate of googleApplyProviderCandidates(candidates, { httpsOnly: true })) {
+    if (seen.has(candidate.url)) continue;
+    // eslint-disable-next-line no-control-regex
+    const label = candidate.label.replace(/[\u0000-\u001f\u007f]/gu, ' ').replace(/\s+/gu, ' ').trim().slice(0, 120);
+    seen.add(candidate.url); result.push({ label, href: candidate.url });
+    if (result.length === 8) break;
+  }
+  return result;
 }
 
 /**
@@ -1667,7 +1688,8 @@ export function extractGlassdoorPanelResponseDetail(payload) {
         }
 
         if (/salary|pay|compensation/.test(key) && text.length <= 160 && parseSalaryToNumeric(text) > 0) {
-          salaryCandidates.push({ value: text, score: /display|text|range/.test(key) ? 100 : 80 });
+          salaryCandidates.push({ value: text, score: /display|text|range/.test(key) ? 100 : 80,
+            provenance: /estimate/iu.test(pathText) ? 'estimated' : 'unknown' });
         }
         if (/^(?:dateposted|posteddate|postingdate|listingage|age)$/.test(key) && text.length <= 120) {
           postedCandidates.push({ value: text, score: /dateposted|posteddate/.test(key) ? 100 : 70 });
@@ -1685,21 +1707,25 @@ export function extractGlassdoorPanelResponseDetail(payload) {
       if (value && typeof value === 'object') {
         if (/salary|pay|compensation/.test(key)) {
           const salary = glassdoorStructuredSalary(value);
-          if (salary && parseSalaryToNumeric(salary) > 0) salaryCandidates.push({ value: salary, score: 110 });
+          if (salary && parseSalaryToNumeric(salary) > 0) salaryCandidates.push({ value: salary, score: 110,
+            provenance: /estimate/iu.test(pathText) ? 'estimated' : key === 'basesalary' ? 'posted' : 'unknown' });
         }
         queue.push({ value, path });
       }
     }
   }
 
-  const best = candidates => candidates.sort((a, b) => b.score - a.score || b.value.length - a.value.length)[0]?.value || '';
+  const bestCandidate = candidates => candidates.sort((a, b) => b.score - a.score || b.value.length - a.value.length)[0];
+  const best = candidates => bestCandidate(candidates)?.value || '';
+  const salary = bestCandidate(salaryCandidates);
   const detail = {
     description: best(descriptionCandidates),
-    salary: best(salaryCandidates),
+    salary: salary?.value || '',
+    salaryProvenance: salary?.provenance || 'unknown',
     posted: best(postedCandidates),
     company: best(companyCandidates),
   };
-  return Object.values(detail).some(Boolean) ? detail : null;
+  return [detail.description, detail.salary, detail.posted, detail.company].some(Boolean) ? detail : null;
 }
 
 /** Merge one exact card response with its visible panel read, without clobbering list fields. */
@@ -1721,7 +1747,7 @@ export function mergeGlassdoorPanelDetail(job, { domText = '', responseDetail = 
   const mergedJob = {
     ...job,
     ...(description ? { snippet: description, descriptionCapture: panelText ? 'glassdoor-panel-dom' : 'glassdoor-panel-response-json' } : {}),
-    ...(salaryRecovered ? { salary: responseSalary } : {}),
+    ...(salaryRecovered ? { salary: responseSalary, salaryProvenance: ['posted', 'estimated'].includes(responseDetail?.salaryProvenance) ? responseDetail.salaryProvenance : 'unknown' } : {}),
     ...(postedRecovered ? { posted: String(responseDetail.posted).trim() } : {}),
     ...(companyRecovered ? { company: String(responseDetail.company).trim() } : {}),
   };
@@ -1840,6 +1866,7 @@ export function mergeExpandedJobDetail(job, {
   descriptionCapture = '',
   jsonLdDate = '',
   jsonLdSalary = '',
+  jsonLdSalaryProvenance = 'unknown',
   salaryChanged = false,
   reconciledSalary,
   jsonLdCompany = '',
@@ -1853,11 +1880,12 @@ export function mergeExpandedJobDetail(job, {
     ...(hasDescriptionText ? { snippet: text } : {}),
     ...(hasDescriptionText && descriptionCapture ? { descriptionCapture } : {}),
     ...(jsonLdDate && !job.posted ? { posted: jsonLdDate } : {}),
-    ...(salaryChanged ? { salary: reconciledSalary } : {}),
+    ...(salaryChanged ? { salary: reconciledSalary, salaryProvenance: 'unknown' } : {}),
     // Structured detail pay includes schema.org unitText. Let it repair a
     // present-but-unusable list chip (e.g. Glassdoor "US$19 - US$20 (Employer
     // provided)"), while leaving every already-parseable list salary untouched.
-    ...(jsonLdSalary && !existingSalaryUsable && !salaryChanged ? { salary: jsonLdSalary } : {}),
+    ...(jsonLdSalary && !existingSalaryUsable && !salaryChanged ? { salary: jsonLdSalary,
+      salaryProvenance: job?.source === 'google' ? 'unknown' : ['posted', 'estimated'].includes(jsonLdSalaryProvenance) ? jsonLdSalaryProvenance : 'unknown' } : {}),
     // ZipRecruiter's ItemList regex derives company from the listing URL
     // (/c/{Company}/Job/), which never matches externally-hosted postings
     // (ziprecruiter.com/job-redirect?match_token=…) — leaving company
@@ -1865,6 +1893,7 @@ export function mergeExpandedJobDetail(job, {
     // page's own JobPosting.hiringOrganization, but only when the list
     // extractor found nothing; never clobber a company it already resolved.
     ...(usableJsonLdCompany && !existingCompanyUsable ? { company: usableJsonLdCompany } : {}),
+    ...(job?.source === 'google' ? { salaryProvenance: 'unknown' } : {}),
   };
   // A navigation detail page can recover a row that was explicitly deferred by
   // an earlier source-wide block. Keep the marker for a blank detail page, but
@@ -3582,6 +3611,7 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
           let descriptionCapture = '';
           let jsonLdDate = '';
           let jsonLdSalary = ''; // formatted pay from JobPosting.baseSalary (if present)
+          let jsonLdSalaryProvenance = 'unknown';
           let jsonLdCompany = ''; // hiringOrganization.name backfill (if present)
           if (isExternalZipDetail) {
             // User-authorized shallow external enrichment: retain the complete
@@ -3676,6 +3706,7 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
             if (text) descriptionCapture = 'json-ld-job-description';
             jsonLdDate = ld.datePosted;
             jsonLdSalary = formatJsonLdSalary(ld.baseSalary);
+            if (jsonLdSalary) jsonLdSalaryProvenance = sourceId === 'google' ? 'unknown' : 'posted';
             jsonLdCompany = ld.company;
           }
           // __NEXT_DATA__ fallback: walk a dot-separated field path into pageProps.
@@ -3846,6 +3877,7 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
               }
               return '';
             }, ZIPRECRUITER_MONEY_SRC).catch(() => '');
+            if (jsonLdSalary) jsonLdSalaryProvenance = 'estimated';
           }
           // Record every partial row in the dedicated anomaly ring. The rich page
           // context below remains first-only so one degraded batch cannot crowd out
@@ -3919,6 +3951,7 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
             descriptionCapture,
             jsonLdDate,
             jsonLdSalary,
+            jsonLdSalaryProvenance,
             salaryChanged,
             reconciledSalary,
             jsonLdCompany,
@@ -4035,6 +4068,7 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
   let blockingModalFailures = 0;
   let googleApplyLinksCaptured = 0;
   let googleApplyLinksMissing = 0;
+  let googleApplyOptionsNonAggregator = 0;
   const googleApplyLinkMissSamples = [];
   const failureSamples = [];
   const modalSamples = [];
@@ -4761,8 +4795,10 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
       // user-facing job.url while googleCardUrl remains the click/dedup key.
       if (sourceId === 'google' && !selectionAssessment.selectionMismatch) {
         const applyResult = await waitForGoogleApplyDestination(page, job.applySource);
+        const applyOptions = normalizeGoogleApplyOptions(applyResult.candidates);
+        enhanced[i] = { ...enhanced[i], ...(applyResult.url ? { url: applyResult.url } : {}), applyOptions, salaryProvenance: 'unknown' };
+        if (applyOptions.some(option => !isAggregatorHost(new URL(option.href).hostname))) googleApplyOptionsNonAggregator++;
         if (applyResult.url) {
-          enhanced[i] = { ...enhanced[i], url: applyResult.url };
           googleApplyLinksCaptured++;
         } else {
           googleApplyLinksMissing++;
@@ -4906,6 +4942,7 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
     blockingModalFailures,
     googleApplyLinksCaptured,
     googleApplyLinksMissing,
+    googleApplyOptionsNonAggregator,
     googleApplyLinkMissSamples,
     modalSamples,
     failureSamples,

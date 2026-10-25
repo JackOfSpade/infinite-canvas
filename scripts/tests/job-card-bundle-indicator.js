@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import assert from 'node:assert';
 import { runInNewContext } from 'node:vm';
-import { canSaveImportedLocalApplication } from '../../src/utils/localAiApplicationLifecycle.js';
+import { canRegenerateLocalApplication, canSaveImportedLocalApplication } from '../../src/utils/localAiApplicationLifecycle.js';
 import * as localAiFallback from '../../src/utils/localAiFallback.js';
 
 import {
@@ -57,6 +57,71 @@ function fallbackManagerFixture(api) {
 }
 
 export default [
+  {
+    name: 'deleting a saved bundle clears canvas ownership before saved-state adoption and preserves a newer handoff',
+    run: async () => {
+      const source = readNodeSource();
+      const start = source.indexOf("{localApplication.status === 'saved' && localApplication.savedDir && window.electronAPI?.deleteLocalApplicationOutput");
+      const handlerStart = source.indexOf('onClick={(e) => {', start) + 'onClick={'.length;
+      const handlerEnd = source.indexOf('\n              }}', handlerStart) + '\n              }'.length;
+      const syncStart = source.indexOf('  useEffect(() => {\n    if (JSON.stringify(data.localApplication || null) !== localApplicationKey)');
+      const syncEnd = source.indexOf('\n  }, [', syncStart);
+      const syncBody = source.slice(syncStart + '  useEffect(() => {'.length, syncEnd);
+      assert.ok(start >= 0 && syncStart >= 0);
+      for (const newer of [false, true]) {
+        const saved = { id: 'saved-job', status: 'saved', savedDir: '/canvas/bundle' };
+        let state = saved;
+        const node = { data: { localApplication: saved } };
+        const updates = [];
+        let finishDelete;
+        const pending = new Promise(resolve => { finishDelete = resolve; });
+        const updateGlobal = (_id, patch) => {
+          const next = typeof patch === 'function' ? patch(node) : patch;
+          if (next) Object.assign(node.data, next);
+          updates.push('canvas');
+        };
+        const setLocalApplication = update => {
+          state = typeof update === 'function' ? update(state) : update;
+          updates.push('local');
+        };
+        const handler = runInNewContext(`(${source.slice(handlerStart, handlerEnd)})`, {
+          localApplication: saved, nav: null, id: 'card',
+          window: { electronAPI: { deleteLocalApplicationOutput: () => pending } },
+          localSavedProbeRef: { current: new Set() }, updateGlobal, setLocalApplication,
+          setSavedFolderRecheck() {}, addToast() {},
+        });
+        handler({ stopPropagation() {} });
+        if (newer) {
+          state = { id: 'new-job', status: 'queued' };
+          node.data.localApplication = state;
+        }
+        finishDelete({ success: true });
+        await pending;
+        await new Promise(resolve => setImmediate(resolve));
+        assert.deepStrictEqual(updates.slice(0, 2), ['canvas', 'local']);
+        // Run the real synchronization effect after the deletion response.
+        runInNewContext(`(() => {${syncBody}})()`, {
+          data: node.data, localApplication: state, localApplicationKey: JSON.stringify(state),
+          id: 'card', updateGlobal, setLocalApplication,
+        });
+        assert.strictEqual(state?.id ?? null, newer ? 'new-job' : null);
+        assert.strictEqual(node.data.localApplication?.id ?? null, newer ? 'new-job' : null);
+      }
+      // A previously stranded card heals on its durable no-receipt probe,
+      // even while the old saved snapshot is still present in canvas data.
+      let state = { id: 'saved-job', status: 'failed', savedReceiptMissing: true,
+        savedDir: null, receipt: null };
+      const node = { data: { localApplication: { id: 'saved-job', status: 'saved', savedDir: '/canvas/bundle' } } };
+      runInNewContext(`(() => {${syncBody}})()`, {
+        data: node.data, localApplication: state, localApplicationKey: JSON.stringify(state), id: 'card',
+        setLocalApplication: next => { state = next; },
+        updateGlobal: (_id, patch) => Object.assign(node.data, patch(node)),
+      });
+      assert.strictEqual(node.data.localApplication, state);
+      assert.ok(canRegenerateLocalApplication(state), 'a stranded deleted generation releases Generate');
+    },
+  },
+
   {
     name: 'fallback orphan recovery rechecks live card ownership after discovery and status waits',
     async run() {

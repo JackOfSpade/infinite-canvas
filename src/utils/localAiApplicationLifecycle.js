@@ -26,6 +26,7 @@ export function canRegenerateLocalApplication(localApplication) {
 // it protected during a status error or while the mount-time probe is pending.
 export function hasLinkedLocalApplicationOutput(localApplication) {
   return !!localApplication && localApplication.savedOutputMissing !== true
+    && localApplication.savedReceiptMissing !== true
     && (localApplication.status === 'saved' || !!localApplication.savedDir || !!localApplication.receipt?.outputDir);
 }
 

@@ -741,6 +741,7 @@ export function sanitizeLastRunReceipt(receipt = {}) {
     historyDropped: receiptNumber(receipt.funnel.historyDropped),
     descriptionEvidenceDropped: receiptNumber(receipt.funnel.descriptionEvidenceDropped),
     ...(receipt.funnel.finalDedupDropped != null ? { finalDedupDropped: receiptNumber(receipt.funnel.finalDedupDropped) } : {}),
+    ...(receipt.funnel.officialDedupDropped != null ? { officialDedupDropped: receiptNumber(receipt.funnel.officialDedupDropped) } : {}),
     kept: receiptNumber(receipt.funnel.kept),
   } : null;
   const scoring = sanitizeReceiptScoring(receipt.scoring);

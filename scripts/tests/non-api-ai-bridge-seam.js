@@ -11,9 +11,14 @@ import {
 } from '../test-dependencies.js';
 import { getRecentLogs } from '../../electron/logger.js';
 import {
-  __claimAcceptedResponseFingerprintForTests, BRIDGE_EXCLUSION_REASONS, BRIDGE_RAW_RESEARCH_TASKS, BRIDGE_RELEASE_ONE_TASKS, listBridgeableNonApiAiHandoffs, onNonApiAiEvent, readBridgeableNonApiAiHandoff, submitNonApiAiResponseForBridge,
+  __bridgeExclusionReasonForTests, __claimAcceptedResponseFingerprintForTests, BRIDGE_EXCLUSION_REASONS, BRIDGE_RAW_RESEARCH_TASKS, BRIDGE_RELEASE_ONE_TASKS, listBridgeableNonApiAiHandoffs, onNonApiAiEvent, readBridgeableNonApiAiHandoff, submitNonApiAiResponseForBridge,
 } from '../../electron/ipc/nonApiAi.js';
 import { callLLMRaw, getKnownTaskIds } from '../../electron/ipc/llm.js';
+import {
+  buildOfficialPostingMatchRequest, buildOfficialPostingResearchRequest, officialPostingResearchId,
+} from '../../electron/ipc/officialPostingBridge.js';
+import { resolveOfficialPostings } from '../../electron/ipc/officialPostingService.js';
+import { unresolvedOfficialPosting } from '../../electron/ipc/officialPostingResolver.js';
 
 const source = readFileSync(new URL('../../electron/ipc/nonApiAi.js', import.meta.url), 'utf8');
 const dialogSource = readFileSync(new URL('../../src/components/NonApiAiDialog.jsx', import.meta.url), 'utf8');
@@ -1122,6 +1127,101 @@ export default [
     },
   },
   {
+    name: 'non-API AI bridge seam: official posting research and JSON match are eligible and validate corrected answers through callLLMRaw',
+    run: async () => {
+      const { sender, waitFor } = freshHarness();
+      const nodeId = 'bridge-seam-official-postings';
+      const runId = `bridge-seam-official-postings-${process.pid}-${Date.now()}`;
+      const job = { title: 'Platform Engineer', company: 'Acme Talent Partners', location: 'Lakeview, Canada',
+        snippet: 'Maintain dependable platform services with documented delivery practices.', url: 'https://listing.example.test/platform' };
+      const description = 'Maintain dependable platform services with documented engineering delivery practices.';
+      const specs = [buildOfficialPostingResearchRequest([job]), buildOfficialPostingMatchRequest({ scrapedDescription: description, officialDescription: description })];
+      handleSafe('bridge-seam-official-postings-workflow', async (_event, _args, signal) => ({
+        values: await Promise.all(specs.map(({ prompt, ...options }) => callLLMRaw(prompt, { ...options, signal }))),
+      }));
+      const invoke = () => handler('bridge-seam-official-postings-workflow')({ sender }, { nodeId, manualAiRunId: runId });
+      const run = invoke();
+      const requests = await waitFor(2);
+      assert(requests.every(request => request.runId === runId && request.nodeId === nodeId),
+        'both task formats must retain the existing IPC ambient run and node scope through nested raw calls');
+      const allowed = { allowTasks: new Set(specs.map(spec => spec.task)), allowNodeIds: new Set([nodeId]) };
+      const listed = listBridgeableNonApiAiHandoffs(allowed);
+      assert(listed.handoffs.length === 2 && requests.every(request => request.mcpEligible), 'both reviewed task contracts must ride the bridge');
+      const research = requests.find(request => request.task === 'job-official-posting-research');
+      const match = requests.find(request => request.task === 'job-official-posting-match');
+      const identities = request => ({ requestId: request.requestId, handoffCode: request.handoffCode, ...allowed });
+      assert(listed.handoffs.find(item => item.task === research.task)?.responseFormat === 'text'
+        && listed.handoffs.find(item => item.task === match.task)?.responseFormat === 'json',
+      'the narrow callLLMRaw match dispatch must use the schema-backed JSON route while grounded research stays raw text');
+      const badResearch = await submitNonApiAiResponseForBridge({ ...identities(research), response: `Handoff: ${research.handoffCode}\n\nVERIFIED EMPLOYER: invented` });
+      const badMatch = await submitNonApiAiResponseForBridge({ ...identities(match), response: JSON.stringify({ handoffCode: match.handoffCode,
+        sameJob: true, matchingPairs: [{ scrapedQuote: 'Unique invented quoted content that never appears in either supplied description.', officialQuote: 'Unique invented quoted content that never appears in either supplied description.' }], conflicts: [] }) });
+      assert(badResearch.outcome === 'rejected' && badResearch.isCorrection && /sections|marker/iu.test(badResearch.correction), 'malformed research must yield a section correction');
+      assert(badMatch.outcome === 'rejected' && badMatch.isCorrection && /absent from its own supplied text/iu.test(badMatch.correction)
+        && !badMatch.correction.includes('Unique invented'), 'a nonverbatim JSON answer must yield a source-free domain correction');
+      for (const request of [research, match]) {
+        const retry = readBridgeableNonApiAiHandoff(identities(request));
+        assert(retry.ok && retry.isCorrection && retry.attempt === 2, 'both corrections remain bridge-eligible');
+      }
+      const id = officialPostingResearchId(job);
+      const validResearch = `BEGIN OFFICIAL POSTING RESEARCH ${id}\nCANDIDATE: ${JSON.stringify({ careersPageUrl: 'https://careers.example.test/', postingUrl: 'https://jobs.ashbyhq.com/northwind-synthetic/platform', employer: 'Northwind Labs', employerDomain: 'https://northwind.example.test', ats: 'ashby' })}\nEND OFFICIAL POSTING RESEARCH ${id}`;
+      const acceptedResearch = await submitNonApiAiResponseForBridge({ ...identities(research), response: `Handoff: ${research.handoffCode}\n\n${validResearch}` });
+      const acceptedMatch = await submitNonApiAiResponseForBridge({ ...identities(match), response: JSON.stringify({ handoffCode: match.handoffCode, sameJob: false, matchingPairs: [], conflicts: [] }) });
+      assert(acceptedResearch.accepted && acceptedMatch.accepted, 'valid raw leads and a valid JSON miss must both accept');
+      const completed = await run;
+      assert(completed.values?.[0] === validResearch
+        && completed.values?.[1]?.sameJob === false, 'the injected raw caller retains raw research and returns parsed JSON only for the new comparison task');
+      const replay = await invoke();
+      assert(replay.values?.[0] === validResearch && replay.values?.[1]?.sameJob === false
+        && (await waitFor(2)).length === 4, 'accepted tasks replay without emitting any new handoff requests');
+      // waitFor counts correction reissues as requests too: two originals plus
+      // one correction of each task are the complete delivered sequence.
+      await handler('complete-non-api-ai-run')({ sender }, { runId });
+    },
+  },
+  {
+    name: 'non-API AI bridge seam: official posting Stop and timeout mark the actual handoff signal ending and retire the pending request',
+    run: async () => {
+      for (const mode of ['stop', 'timeout']) {
+        const { sender, waitFor } = freshHarness();
+        const nodeId = `bridge-seam-official-${mode}`;
+        const runId = `${nodeId}-${process.pid}-${Date.now()}`;
+        const controller = new AbortController(); let handoffSignal;
+        const job = { title: 'Platform Engineer', company: 'Northwind Labs', location: 'Lakeview, Canada',
+          snippet: 'Maintain dependable platform services using documented delivery practices.', url: 'https://listing.example.test/platform' };
+        const channel = `bridge-seam-official-${mode}-workflow`;
+        handleSafe(channel, async () => resolveOfficialPostings([job], {
+          nodeId, manualAiRunId: runId, signal: controller.signal, timeoutMs: mode === 'timeout' ? 500 : 5000,
+          resolve: async source => unresolvedOfficialPosting(source),
+          store: { save: async (_source, result) => result },
+          callRaw: (prompt, options) => { handoffSignal = options.signal; return callLLMRaw(prompt, options); },
+        }));
+        const run = handler(channel)({ sender }, { nodeId, manualAiRunId: runId });
+        const [request] = await waitFor(1);
+        const allowed = { allowTasks: new Set(['job-official-posting-research']), allowNodeIds: new Set([nodeId]) };
+        const ids = { requestId: request.requestId, handoffCode: request.handoffCode, ...allowed };
+        assert(listBridgeableNonApiAiHandoffs(allowed).handoffs.length === 1 && handoffSignal?.aborted === false,
+          'the service must have a real eligible pending bridge request before cancellation');
+        if (mode === 'stop') controller.abort(new Error('Synthetic run Stop'));
+        // Keep the test process alive while the production timeout uses its
+        // intentionally unrefed timer; this does not control its expiry.
+        const keepAlive = setTimeout(() => {}, 1000);
+        let completed;
+        try { completed = await run; } finally { clearTimeout(keepAlive); }
+        assert(handoffSignal.aborted && __bridgeExclusionReasonForTests({ sender, signal: handoffSignal }, allowed) === 'ending',
+          'the actual request signal must meet the ending exclusion immediately after Stop or timeout');
+        assert(listBridgeableNonApiAiHandoffs(allowed).pending === 0
+          && readBridgeableNonApiAiHandoff(ids).ok === false,
+        'an aborted service handoff must leave no bridge-readable pending record');
+        assert((await submitNonApiAiResponseForBridge({ ...ids, response: `Handoff: ${request.handoffCode}\n\nlate answer` })).outcome === 'not_pending',
+          'a late response to a stopped or expired request must never revive it');
+        const code = mode === 'stop' ? 'bridge-aborted' : 'bridge-timeout';
+        assert(completed.jobs[0].officialPosting.trail.includes(code), 'the resolver falls back with the exact bounded cancellation reason');
+        await handler('complete-non-api-ai-run')({ sender }, { runId });
+      }
+    },
+  },
+  {
     name: 'non-API AI bridge seam: only structured or reviewed validated research text is listed, and the allowlist cannot unlock structural exclusions',
     run: async () => {
       const { sender, waitFor } = freshHarness();
@@ -1173,7 +1273,7 @@ export default [
       const refused = await submitNonApiAiResponseForBridge({ requestId: by('WITH FILE').requestId, handoffCode: by('WITH FILE').handoffCode, response: answer(by('WITH FILE')), ...everything });
       assert(refused.outcome === 'ineligible' && refused.exclusion === 'attachment', 'submitting to an attachment handoff is refused untouched');
       assert(BRIDGE_EXCLUSION_REASONS.every(reason => reason in listed.excluded), 'every reason is reported');
-      assert(BRIDGE_RAW_RESEARCH_TASKS.join() === 'job-compensation-research,job-compensation-research-batch,job-preference-research,job-preference-research-batch,interview-brief-research', 'raw bridge eligibility remains an exact reviewed task set');
+      assert(BRIDGE_RAW_RESEARCH_TASKS.join() === 'job-compensation-research,job-compensation-research-batch,job-preference-research,job-preference-research-batch,interview-brief-research,job-official-posting-research', 'raw bridge eligibility remains an exact reviewed task set');
       await cancelAll(sender, requests);
       await run.catch(() => {});
     },

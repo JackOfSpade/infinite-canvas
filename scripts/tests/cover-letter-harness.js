@@ -319,6 +319,111 @@ export default [
     },
   },
   {
+    name: 'target-company-binding: unnamed employers keep prior and poster targets forbidden without rejecting past evidence',
+    run: () => {
+      const prior = 'Cedar Works';
+      const poster = 'Acme Talent Partners';
+      const jobText = `${prior} and ${poster} support this search.`;
+      const options = { forbiddenNames: [poster], jobText };
+      for (const paragraph of [
+        `I would bring this practice to ${prior}.`,
+        `I would support ${poster}'s team.`,
+        `At ${prior}, I would build the release system.`,
+        'I would work for Northwind Labs.',
+      ]) {
+        assert(!checkTargetCompanyBinding([paragraph], '', [prior], options).passed,
+          `an unnamed employer cannot license a prospective organization target: ${paragraph}`);
+      }
+      const pastEvidence = `At ${prior}, I built the release system and would bring that practice to this role.`;
+      assert(checkTargetCompanyBinding([pastEvidence], '', [prior], options).passed,
+        'a known prior employer remains allowed in a genuine past-evidence clause');
+      assert(checkTargetCompanyBinding(['I would bring this practice to your team.'], '', [prior], options).passed,
+        'a letter naming no organization remains allowed');
+      assert(checkTargetCompanyBinding([`I would support ${poster}'s team.`], poster, [], options).passed,
+        'a poster identity identical to the target is not forbidden');
+      const battery = evaluateCoverLetterChecks({
+        paragraphs: [`I would support ${poster}'s team.`],
+        evidence: { roles: [{ company: prior }] },
+        companyName: '',
+        ...options,
+      });
+      assert(battery.find(check => check.id === 'target-company-binding')?.passed === false,
+        'the production evaluator passes forbidden poster names through when the employer is unnamed');
+      return { rejectedProspectiveFrames: 4, preservedPastEvidence: true, evaluatorForbidsPoster: true };
+    },
+  },
+  {
+    name: 'target-company-binding: alias scans bind poster and prior objects, subjects and plural possessives',
+    run: () => {
+      const prior = 'Cedar Works';
+      const poster = 'Acme Talent Partners';
+      let rejected = 0;
+      for (const companyName of ['', 'Northwind Labs']) {
+        const options = { forbiddenNames: [poster], jobText: `${poster} recruits candidates with experience at ${prior}.` };
+        for (const name of [poster, prior]) {
+          for (const paragraph of [
+            `I would join ${name}.`,
+            `I would support ${name}' team.`,
+            `I would support ${name}’ team.`,
+            `${name} would benefit if I could help your team.`,
+            `I'd help ${name} scale.`,
+            `I look forward to joining ${name}.`,
+          ]) {
+            assert(!checkTargetCompanyBinding([paragraph], companyName, [prior], options).passed,
+              `an alias-based prospective target is rejected with company ${JSON.stringify(companyName)}: ${paragraph}`);
+            rejected++;
+            assert(checkTargetCompanyBinding([paragraph], name, [prior], options).passed,
+              `the same organization is allowed when it is the target: ${paragraph}`);
+          }
+        }
+        assert(!checkTargetCompanyBinding([`Recruiters at ${poster} helped me find this role.`], companyName, [prior], options).passed,
+          'poster mentions in a recruiter sentence remain forbidden');
+        const battery = evaluateCoverLetterChecks({
+          paragraphs: [`I'd help ${poster} scale.`], companyName,
+          evidence: { roles: [{ company: prior }] }, ...options,
+        });
+        assert(battery.find(check => check.id === 'target-company-binding')?.passed === false,
+          'the evaluator applies poster binding to contraction objects');
+        for (const paragraph of [
+          `I admire ${poster}.`,
+          `I helped ${prior} scale the roster.`,
+          'I would join Willow Engineering.',
+        ]) {
+          assert(checkTargetCompanyBinding([paragraph], companyName, [prior], {
+            ...options, forbiddenNames: [poster, 'World Enterprise'],
+          }).passed, `non-prospective and short-alias controls pass: ${paragraph}`);
+        }
+      }
+      return { rejectedAliasFrames: rejected, identicalTargetsPass: true, recruiterMentionRejected: true };
+    },
+  },
+  {
+    name: 'target-company-binding: narrowed alias extraction preserves non-employer capitalized phrases and current evidence',
+    run: () => {
+      const prior = 'Cedar Works';
+      for (const paragraph of [
+        'I would contribute to KPI reviews for your team.',
+        'I would contribute to Q3 planning with your team.',
+        'I would bring discipline to Friday releases on your team.',
+        `At ${prior}, I build the nightly reconciliation tooling.`,
+        `At ${prior}, I support the nightly reconciliation tooling.`,
+        `At ${prior}, I work on the nightly reconciliation tooling.`,
+        `At ${prior}, I reduced triage time and would bring that practice to this role.`,
+        `I delivered the migration to ${prior} customers, and I would help your team the same way.`,
+      ]) {
+        assert(checkTargetCompanyBinding([paragraph], 'Northwind Labs', [prior]).passed,
+          `truthful evidence and non-company capitalized phrases pass: ${paragraph}`);
+      }
+      assert(checkTargetCompanyBinding(['I would help your team deliver value to Medicare patients.'], '', [prior], {
+        jobText: 'Deliver value to Medicare patients.',
+      }).passed, 'an unknown name mentioned in the posting remains allowed with an unnamed employer');
+      assert(checkTargetCompanyBinding(['I would help WE scale.'], 'Northwind Labs', [], {
+        forbiddenNames: ['World Enterprise'],
+      }).passed, 'a two-letter initialism cannot be mistaken for a forbidden organization through the new alias scan');
+      return { falseRejectionControls: 10 };
+    },
+  },
+  {
     name: 'target-company-binding: three domains keep past tools under this role and reject flipped future targets',
     run: () => {
       for (const [target, prior, tool] of [

@@ -32,6 +32,7 @@ import { bridgeHeldCardLine } from '../utils/bridgeHeldApplication';
 import { applicationBundleIndicator, APPLICATION_BUNDLE_TONES } from '../utils/jobCardBundleIndicator';
 import { resolveApplicationCareerSnapshotId, resolveSalaryCareerSnapshotId } from '../utils/jobBoardCareerOverride';
 import { getConnectedJobSearchIds } from '../utils/jobBoardSearchSelection';
+import { officialPostingDisplay } from '../utils/officialPostingDisplay';
 
 // Accent color encodes the hiring-fit band: a compact evidence-based assessment
 // of full-process fit, not a guaranteed hiring outcome.
@@ -297,7 +298,8 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
       // saved bundle folder was deleted, so 'saved' is no longer true and
       // re-adopting it would put back the cross and a dead Open folder button.
       const external = data.localApplication;
-      const outputMissing = localApplication?.savedOutputMissing === true;
+      const outputMissing = localApplication?.savedOutputMissing === true
+        || localApplication?.savedReceiptMissing === true;
       if (!outputMissing && external?.status === 'saved' && external?.id && (!localApplication || external.id === localApplication.id) && localApplication?.status !== 'saved') {
         setLocalApplication(external);
         return;
@@ -464,9 +466,10 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
   const bridgeHeldLine = localApplication
     ? bridgeHeldCardLine(bridgeHeldKey, { pasteTransport: isPasteApplication, awaitingPaste: applicationAwaitsPaste(localApplication.status) })
     : null;
+  const postingDisplay = useMemo(() => officialPostingDisplay(data), [data]);
   const salaryCurrencyLabel = useMemo(
-    () => formatSalaryCurrencyLabel(data.salary, data.location),
-    [data.salary, data.location]
+    () => formatSalaryCurrencyLabel(postingDisplay.salary, postingDisplay.location),
+    [postingDisplay.salary, postingDisplay.location]
   );
   const compensationAssessment = useMemo(
     () => normalizeCompensationAssessment(data.compensationAssessment),
@@ -522,13 +525,13 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
   // every posting in the subtitle. Legacy single-location cards are unchanged.
   const subtitleLocation = useMemo(() => {
     const variants = Array.isArray(data.postingVariants) ? data.postingVariants : [];
-    if (!variants.length) return data.location || '';
-    const base = String(data.location || 'Multiple locations');
+    if (!variants.length) return postingDisplay.location;
+    const base = String(postingDisplay.location || 'Multiple locations');
     return `${base} · ${variants.length} posting${variants.length === 1 ? '' : 's'}`;
-  }, [data.location, data.postingVariants]);
+  }, [postingDisplay.location, data.postingVariants]);
 
   const openJobUrl = useCallback(async () => {
-    const url = normalizeJobListingExternalUrl(data);
+    const url = normalizeJobListingExternalUrl({ ...data, url: postingDisplay.applyUrl || data.url });
     const diagnostic = summarizeJobListingUrl(data, url);
     // `summarizeJobListingUrl` deliberately redacts every non-vocabulary path
     // segment to `:segment`, so these are route SHAPES, never the URL. Naming
@@ -562,7 +565,7 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
         type: 'error',
       });
     }
-  }, [id, data, addToast]);
+  }, [id, data, postingDisplay.applyUrl, addToast]);
 
   const openResearchSource = useCallback(async (rawUrl) => {
     const opened = await openExternalUrl(rawUrl, {
@@ -721,6 +724,7 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
         jobListingPath: local.jobListingPath,
         generationAuditPath: local.generationAuditPath,
         generationLogPath: local.generationLogPath,
+        scrapedListingPath: local.scrapedListingPath,
         workDir: local.workDir,
         company: local.company,
         candidateName: local.candidateName,
@@ -1121,13 +1125,85 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
     applicationSubmissionRef.current = true;
     let lease = null;
     let cancelledBeforeStart = false;
+    let resolutionId = null;
+    let preparedPosting = data.officialPosting;
+    let preparedPoster = data.postedBy;
 
     setApplicationRun({ state: 'generating', position: null });
     try {
+      // Research joins the Board bridge hub before any application-lane lease.
+      // Keep this job projection identical to the later queue projection.
+      if (window.electronAPI.prepareOfficialPostingForGeneration) {
+        const prepareRunId = 'official-posting:' + idRef.current + ':' + generateId();
+        let prepared = null;
+        setApplicationRun({ state: 'resolving', position: null, cancel: () => {
+          cancelledBeforeStart = true;
+          window.electronAPI.cancelNodeTaskAndWait?.(idRef.current, 'official-posting-cancelled')?.catch?.(() => {});
+        } });
+        try {
+          prepared = await window.electronAPI.prepareOfficialPostingForGeneration?.({
+            nodeId: data.hubId,
+            cardId: idRef.current,
+            manualAiRunId: prepareRunId,
+            job: {
+              title: data.title, company: data.company, snippet: data.snippet,
+              postedBy: data.postedBy, applyOptions: data.applyOptions,
+              salaryProvenance: data.salaryProvenance, officialPosting: data.officialPosting,
+              googleCardUrl: data.googleCardUrl, sourceJobKey: data.sourceJobKey,
+              location: data.location, salary: data.salary, url: normalizeJobListingExternalUrl({
+                title: data.title,
+                company: data.company,
+                location: data.location,
+                url: data.url,
+                googleCardUrl: data.googleCardUrl,
+              }),
+              source: data.source, posted: data.posted, language: data.language,
+              postingVariants: (Array.isArray(data.postingVariants) ? data.postingVariants : [])
+                .filter((variant) => variant && typeof variant === 'object' && !Array.isArray(variant))
+                .map((variant) => ({
+                  location: variant.location,
+                  url: normalizeJobListingExternalUrl({
+                    title: variant.title || data.title,
+                    company: variant.company || data.company,
+                    location: variant.location,
+                    url: variant.url,
+                    googleCardUrl: variant.googleCardUrl,
+                  }),
+                  googleCardUrl: '',
+                  source: variant.source,
+                  posted: variant.posted,
+                  salary: variant.salary,
+                  applySource: variant.applySource,
+                })),
+            },
+          });
+        } catch (error) {
+          if (error?.code === 'APP_QUIT_PAUSED' || error?.message === 'App paused for quit') return;
+          EventLogger.log('[JobCard] official posting preparation unavailable; using listing fallback');
+        } finally {
+          await window.electronAPI.completeNonApiAiRun?.(prepareRunId)?.catch?.(() => {});
+        }
+        if (cancelledBeforeStart || prepared?.cancelled || prepared?.pausedForQuit || prepared?.errorCode === 'APP_QUIT_PAUSED') return;
+        const preparedCard = getLiveNode(idRef.current);
+        if (!queuedLocalApplicationStartDecision(preparedCard, getLiveNode(preparedCard?.data?.hubId)).allowed) {
+          cancelledBeforeStart = true;
+          return;
+        }
+        resolutionId = typeof prepared?.resolutionId === 'string' ? prepared.resolutionId : null;
+        if (prepared?.officialPosting && resolutionId) {
+          preparedPosting = prepared.officialPosting;
+          preparedPoster = prepared.postedBy;
+          updateGlobal(idRef.current, { officialPosting: preparedPosting, postedBy: preparedPoster });
+        }
+      }
       // Handoff creation uses the dedicated capacity-one 'application' lane,
       // so it queues only behind other application creations. Crucially, every
       // mutable input below is read only after the lease starts, so queued work
       // sees the latest canvas state before it materializes its durable job folder.
+      const applicationLabel = (preparedPosting?.level === 'L6'
+        ? [preparedPoster, data.company, preparedPosting?.title, data.title]
+        : [preparedPosting?.employer, data.company, preparedPoster, preparedPosting?.title, data.title])
+        .map(value => typeof value === 'string' ? value.replace(/\s+/gu, ' ').trim() : '').find(Boolean) || 'job';
       lease = await acquireModuleRun({
         nodeId: id,
         kind: 'application',
@@ -1137,7 +1213,7 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
         // runs (see moduleRunQueue.js — lanes are independently FIFO with
         // capacity 1).
         lane: 'application',
-        label: `Application: ${data.company || data.title || 'job'}`,
+        label: `Application: ${applicationLabel}`,
         // The dock caps how many application bundles may hold a slot at once
         // (see applicationHandoffDock.js) — an eleventh prompt could never be
         // worked on. Rather than refusing the click, the queue holds this card
@@ -1180,6 +1256,7 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
           if (isMountedRef.current) setApplicationRun({ state: 'idle', position: null });
         },
       });
+      if (cancelledBeforeStart) return;
 
       // The user could have used Save As while this card was waiting. Re-read
       // only after it owns the lease, then keep this path for the whole save.
@@ -1241,11 +1318,15 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
       EventLogger.log(`[JobCard] application career source id=${id} source=${resolvedCareer.source}`);
       const queued = await window.electronAPI.queueLocalApplication({
         nodeId: idRef.current,
+        resolutionId,
         canvasFilePath,
         priorLocalApplicationId: expectedPriorLocalApplication?.id || null,
         transport: 'paste',
         job: {
           title: data.title, company: data.company, snippet: data.snippet,
+          postedBy: data.postedBy, applyOptions: data.applyOptions,
+          salaryProvenance: data.salaryProvenance, officialPosting: data.officialPosting,
+          googleCardUrl: data.googleCardUrl, sourceJobKey: data.sourceJobKey,
           // New Google rows keep the direct Apply-on URL in `url`; legacy
           // cards may only retain Google’s internal identity. Materialize the
           // same safe, user-facing target as the card’s Open Listing action so
@@ -1318,7 +1399,11 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
       EventLogger.log(`[LocalAI] accepted queued handoff job=${queued.localJob.id} replacing=${expectedPriorLocalApplication?.id || 'none'} priorStatus=${expectedPriorLocalApplication?.status || 'none'}`);
       updateGlobal(idRef.current, (node) => {
         const liveSettlement = queuedLocalApplicationSettlement(node, queued.localJob, expectedPriorLocalApplication);
-        return liveSettlement.action === 'persist' ? { localApplication: queued.localJob } : null;
+        return liveSettlement.action === 'persist' ? {
+          localApplication: queued.localJob,
+          ...(Object.hasOwn(queued, 'officialPosting')
+            ? { officialPosting: queued.officialPosting, postedBy: queued.postedBy } : {}),
+        } : null;
       });
       // updateGlobal applies this guarded patch against React's live store, so
       // the pre-write settlement above is not enough authority to retire the
@@ -1385,7 +1470,7 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
       applicationSubmissionRef.current = false;
       if (isMountedRef.current) setApplicationRun({ state: 'idle', position: null });
     }
-  }, [data.hubId, data.title, data.company, data.snippet, data.location, data.salary, data.url, data.googleCardUrl, data.source, data.posted, data.language, data.postingVariants, data.reasoning, data.matchScore, additionalNotes, id, getLiveNode, getNodes, getEdges, nav, addToast, isMountedRef, acquireModuleRun, hasApplicationRun, localJobPending, effectiveLock, updateGlobal]);
+  }, [data.hubId, data.title, data.company, data.snippet, data.location, data.salary, data.url, data.googleCardUrl, data.sourceJobKey, data.postedBy, data.applyOptions, data.salaryProvenance, data.officialPosting, data.source, data.posted, data.language, data.postingVariants, data.reasoning, data.matchScore, additionalNotes, id, getLiveNode, getNodes, getEdges, nav, addToast, isMountedRef, acquireModuleRun, hasApplicationRun, localJobPending, effectiveLock, updateGlobal]);
 
   return (
     <div
@@ -1438,8 +1523,10 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
             : <span className="mt-0.5 text-xs font-bold">{score}/100</span>}
         </div>
         <div className="flex-1 min-w-0 pr-6 relative">
-          <div className="text-white/90 text-sm font-semibold leading-tight truncate">{data.title || 'Untitled'}</div>
-          <div className="text-white/50 text-xs mt-0.5 truncate">{data.company}{subtitleLocation ? ` · ${subtitleLocation}` : ''}</div>
+          <div className="text-white/90 text-sm font-semibold leading-tight truncate">{postingDisplay.title || 'Untitled'}</div>
+          <div className="text-white/50 text-xs mt-0.5 truncate">{postingDisplay.employerLabel}{subtitleLocation ? ` · ${subtitleLocation}` : ''}</div>
+          {postingDisplay.via && <div className="text-white/35 text-[10px] mt-0.5 truncate">{postingDisplay.via}</div>}
+          {postingDisplay.statusLabel && <div className="text-amber-300/70 text-[10px] mt-0.5">{postingDisplay.statusLabel}</div>}
           {unscoredPlaceholder && (
             <div className="mt-1 flex flex-wrap gap-1">
               <span
@@ -1450,9 +1537,9 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
               </span>
             </div>
           )}
-          {data.salary && (
+          {postingDisplay.salary && (
             <div className="text-emerald-400/80 text-xs mt-0.5">
-              <span>{data.salary}</span>
+              <span>{postingDisplay.salary}</span>
               <span className="text-emerald-300/60" title={salaryCurrencyLabel.includes('inferred') ? 'Salary currency inferred from the job location' : 'Salary currency stated explicitly in the listing, when available'}>
                 {' · '}{salaryCurrencyLabel}
               </span>
@@ -1487,12 +1574,13 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
           </span>
         )}
         {data.posted && <span className="text-white/20" title={data.posted}>{formatPostedForDisplay(data.posted)}</span>}
-        {(data.url || data.googleCardUrl) && (
+        {postingDisplay.levelLabel && <span className="px-1.5 py-0.5 rounded-full text-[9px] font-medium bg-white/10 text-white/60 border border-white/10">{postingDisplay.levelLabel}</span>}
+        {(postingDisplay.applyUrl || data.url || data.googleCardUrl) && (
           <button
             onClick={(e) => { e.stopPropagation(); openJobUrl(); }}
             className="ml-auto -my-1 p-1 text-white/30 hover:text-white/70 transition-colors"
-            title="Open job listing"
-            aria-label="Open job listing"
+            title={postingDisplay.levelLabel ? `${postingDisplay.levelLabel} · Open job listing` : 'Open job listing'}
+            aria-label={postingDisplay.levelLabel ? `${postingDisplay.levelLabel} · Open job listing` : 'Open job listing'}
           >
             <ExternalLink size={12} />
           </button>
@@ -1856,9 +1944,14 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
                   .then((result) => {
                     if (!result?.success) throw new Error(result?.error || 'not deleted');
                     localSavedProbeRef.current.delete(jobId);
+                    // Clear the authoritative canvas state first. Otherwise the
+                    // saved-state adoption effect restores this deleted bundle.
+                    updateGlobal(id, (node) => node?.data?.localApplication?.id === jobId
+                      ? { localApplication: null } : null);
                     setLocalApplication(current => (current?.id === jobId ? null : current));
                   })
-                  .catch(() => {
+                  .catch((error) => {
+                    addToast({ title: 'Could not delete saved folder', description: error?.message || String(error), type: 'error' });
                     localSavedProbeRef.current.delete(jobId);
                     setSavedFolderRecheck(count => count + 1);
                   });
@@ -1921,6 +2014,8 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
           }`}
           title={localJobPending
             ? bridgeHeldLine ? bridgeHeldLine.pendingTitle : 'A Local AI job is waiting for the local-agent routine or is being imported.'
+            : displayedApplicationRun.state === 'resolving'
+            ? 'Finding the official posting. Cancel to stop this preparation.'
             : displayedApplicationRun.state === 'queued'
             ? displayedApplicationRun.blocked
               ? applicationLimitMessage()
@@ -1932,6 +2027,7 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
             ? localApplication.status === 'importing' ? 'Importing…' : bridgeHeldLine ? bridgeHeldLine.pendingLabel : 'Local AI queued'
             : displayedApplicationRun.state === 'queued'
             ? `Queued · #${displayedApplicationRun.position}`
+            : displayedApplicationRun.state === 'resolving' ? 'Finding official posting…'
             : displayedApplicationRun.state === 'generating' ? 'Generating…' : 'Generate'}
         </button>
         {displayedApplicationRun.state === 'queued' && (
@@ -1939,6 +2035,15 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
             onClick={(e) => { e.stopPropagation(); cancelQueuedRunsForNode(id, 'Application generation cancelled before it started'); }}
             className="shrink-0 py-2 px-2.5 rounded-lg text-xs font-medium text-white/60 bg-white/5 hover:bg-white/10 hover:text-white/85 transition-colors"
             title="Remove this card from the application queue."
+          >
+            Cancel
+          </button>
+        )}
+        {displayedApplicationRun.state === 'resolving' && (
+          <button
+            onClick={(e) => { e.stopPropagation(); displayedApplicationRun.cancel?.(); }}
+            className="shrink-0 py-2 px-2.5 rounded-lg text-xs font-medium text-white/60 bg-white/5 hover:bg-white/10 hover:text-white/85 transition-colors"
+            title="Cancel finding the official posting for this card."
           >
             Cancel
           </button>

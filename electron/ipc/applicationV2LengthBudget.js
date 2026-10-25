@@ -6,11 +6,9 @@ export function writeVerifyLengthBudgetForStructure({ roles, education, skillsRo
   // Calibrated against rendered accepted and dropped drafts. Each extra fixed
   // row consumes space before prose; the fit gate remains the final authority.
   const capacity = Math.max(300, 1780 - 30 * roles - 25 * education - 65 * skillsRows - 25 * projects);
-  const minCharacters = Math.round(capacity * 0.85 / 10) * 10;
   const maxCharacters = Math.round(capacity / 10) * 10;
   const maxBullets = Math.max(2, Math.min(11, 11 - projects - Math.max(0, roles - 3)));
-  const minBullets = Math.max(1, maxBullets - 2);
-  return { structure: { roles, education, skillsRows, projects }, minCharacters, maxCharacters, minBullets, maxBullets };
+  return { structure: { roles, education, skillsRows, projects }, maxCharacters, maxBullets };
 }
 
 export function writeVerifyLengthBudgets(profile, sourceRoles) {

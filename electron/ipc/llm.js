@@ -64,6 +64,8 @@ const KNOWN_TASKS = new Set([
   'job-taxonomy-classify',
   'job-taxonomy-classify-batch',
   'job-location-consolidation-confirmation',
+  'job-official-posting-research',
+  'job-official-posting-match',
   'job-compensation-research',
   'job-compensation-assessment',
   'job-compensation-research-batch',
@@ -206,6 +208,10 @@ const TASK_MAX_TOKENS = {
     Math.min(2048, 512 + Math.max(1, itemCount) * 128),
   // One grounded search is shared by a role/seniority/location cohort.
   'job-compensation-research': 4096,
+  'job-official-posting-research': ({ itemCount = 1 } = {}) =>
+    Math.min(MANUAL_AI_USABLE_OUTPUT_TOKENS, 1024 + Math.max(1, Math.floor(Number(itemCount) || 1)) * 700),
+  'job-official-posting-match': ({ itemCount = 1 } = {}) =>
+    Math.min(MANUAL_AI_USABLE_OUTPUT_TOKENS, 1024 + Math.max(1, Math.floor(Number(itemCount) || 1)) * 1800),
   // Location-based cohort consolidation makes this per-job structured output
   // materially larger than the old city-fragmented cohorts. 12,288 preserves
   // headroom through roughly 17 normal rows before the ceiling applies.
@@ -441,6 +447,9 @@ export async function callLLMText(prompt, opts = {}) {
  * instruction inside the copied prompt (see materializeNonApiPrompt).
  */
 export async function callLLMRaw(prompt, opts = {}) {
+  // This reviewed comparison uses the same injected caller as research while
+  // retaining the existing schema-backed JSON transport and validator path.
+  if (opts.task === 'job-official-posting-match' && opts.responseSchema) return callLLMText(prompt, opts);
   const {
     signal,
     task,

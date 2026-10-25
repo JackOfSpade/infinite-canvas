@@ -355,7 +355,7 @@ export function registerPendingApplicationWorkspace({
   resumePdfPath = null, coverLetterPdfPath = null, jobListingPath,
   resumePdfPageCount = null, coverLetterPdfPageCount = null,
   generationAuditPath = null, generationAuditJobId = null, generationAuditRequired = null,
-  generationLogPath = null, careerSnapshotId = null, careerSourceFrozenAt = null,
+  generationLogPath = null, scrapedListingPath = null, identityCompany = null, careerSnapshotId = null, careerSourceFrozenAt = null,
   attemptId = null, cleanupOnDiscard = true, applicationRoot = null,
   artifactData = {}, cleanupOnSaveFailure = true, onBeforeSave = null, onBeforeDiscard = null,
   onSuccessfulSave = null, onBeforeSuccessfulCleanup = null, onAfterSuccessfulCleanup = null, onSaveFailure = null,
@@ -368,7 +368,7 @@ export function registerPendingApplicationWorkspace({
   }
   const resolvedWorkDir = path.resolve(String(workDir || ''));
   const required = [resumeHtmlPath, jobListingPath].map(value => path.resolve(String(value || '')));
-  const optional = [resumePdfPath, coverLetterPdfPath, generationAuditPath, generationLogPath]
+  const optional = [resumePdfPath, coverLetterPdfPath, generationAuditPath, generationLogPath, scrapedListingPath]
     .map(value => value ? path.resolve(String(value)) : null);
   const paths = [...required, ...optional.filter(Boolean)];
   const validPageCount = value => value == null || (Number.isSafeInteger(value) && value > 0);
@@ -394,12 +394,14 @@ export function registerPendingApplicationWorkspace({
     jobListing: applicationArtifactSha256(artifactData.jobListing),
     generationAudit: applicationArtifactSha256(artifactData.generationAudit),
     generationLog: applicationArtifactSha256(artifactData.generationLog),
+    scrapedListing: applicationArtifactSha256(artifactData.scrapedListing),
   };
   if (!artifactSha256.resumeHtml || !artifactSha256.jobListing
     || (optional[0] && !artifactSha256.resumePdf)
     || (optional[1] && !artifactSha256.coverLetterPdf)
     || (optional[2] && !artifactSha256.generationAudit)
-    || (optional[3] && !artifactSha256.generationLog)) {
+    || (optional[3] && !artifactSha256.generationLog)
+    || (optional[4] && !artifactSha256.scrapedListing)) {
     throw new Error('Cannot register application artifacts without trusted source fingerprints.');
   }
   const expectedGenerationAuditJobId = String(generationAuditJobId || '').trim();
@@ -423,6 +425,7 @@ export function registerPendingApplicationWorkspace({
         resumePdf: artifactData.resumePdf,
         coverLetterPdf: artifactData.coverLetterPdf,
         jobListing: artifactData.jobListing,
+        scrapedListing: optional[4] ? artifactData.scrapedListing : null,
       },
     });
   }
@@ -445,11 +448,13 @@ export function registerPendingApplicationWorkspace({
   }
   pendingApplicationArtifacts.set(resolvedWorkDir, {
     attemptId, senderId, company: String(company || ''), candidateName: String(candidateName || ''),
+    identityCompany: identityCompany == null ? null : String(identityCompany),
     resumeHtmlPath: required[0], resumePdfPath: optional[0], coverLetterPdfPath: optional[1],
     resumePdfPageCount: optional[0] ? resumePdfPageCount : null,
     coverLetterPdfPageCount: optional[1] ? coverLetterPdfPageCount : null,
     generationAuditPath: optional[2],
     generationLogPath: optional[3],
+    scrapedListingPath: optional[4],
     generationAuditJobId: optional[2] ? expectedGenerationAuditJobId : null,
     generationAuditRequired: optional[2] ? generationAuditRequired : null,
     // The host importer supplies the exact frozen source pin. Keep it on the
@@ -1944,6 +1949,11 @@ function generationAuditHashMatches(value, data) {
       && value === applicationArtifactSha256(data);
 }
 
+function optionalScrapedListingHashMatches(artifacts, data) {
+  return !Object.hasOwn(artifacts, 'scrapedListingSha256')
+    ? data == null : generationAuditHashMatches(artifacts.scrapedListingSha256, data);
+}
+
 function inspectGenerationAuditData(data, {
   expectedVersion = GENERATION_AUDIT_VERSION,
   expectedJobId = null,
@@ -1989,20 +1999,26 @@ function inspectGenerationAuditData(data, {
   const writerAuditValid = auditRequired
     ? isGenerationAuditObject(parsed?.writerAudit)
     : parsed?.writerAudit == null || isGenerationAuditObject(parsed?.writerAudit);
+  const optionalScrapedHashesValid = [parsed?.finalArtifacts, parsed?.savedArtifacts].every(artifacts =>
+    !isGenerationAuditObject(artifacts) || !Object.hasOwn(artifacts, 'scrapedListingSha256')
+      || artifacts.scrapedListingSha256 == null
+      || (typeof artifacts.scrapedListingSha256 === 'string' && GENERATION_AUDIT_SHA256_RE.test(artifacts.scrapedListingSha256)));
   const structureValid = objectRoot
     && typeof parsed.createdAt === 'string' && Boolean(parsed.createdAt.trim())
     && requiredObjectKeys.every(key => isGenerationAuditObject(parsed[key]))
-    && writerAuditValid;
+    && writerAuditValid && optionalScrapedHashesValid;
   const stagedArtifactsValid = !expectedStagedArtifacts || (isGenerationAuditObject(parsed?.finalArtifacts)
     && generationAuditHashMatches(parsed.finalArtifacts.stagedApplicationHtmlSha256, expectedStagedArtifacts.applicationHtml)
     && generationAuditHashMatches(parsed.finalArtifacts.resumePdfSha256, expectedStagedArtifacts.resumePdf)
     && generationAuditHashMatches(parsed.finalArtifacts.coverLetterPdfSha256, expectedStagedArtifacts.coverLetterPdf)
-    && generationAuditHashMatches(parsed.finalArtifacts.originalJobListingSha256, expectedStagedArtifacts.jobListing));
+    && generationAuditHashMatches(parsed.finalArtifacts.originalJobListingSha256, expectedStagedArtifacts.jobListing)
+    && optionalScrapedListingHashMatches(parsed.finalArtifacts, expectedStagedArtifacts.scrapedListing));
   const savedArtifactsValid = !expectedSavedArtifacts || (isGenerationAuditObject(parsed?.savedArtifacts)
     && generationAuditHashMatches(parsed.savedArtifacts.applicationHtmlSha256, expectedSavedArtifacts.applicationHtml)
     && generationAuditHashMatches(parsed.savedArtifacts.resumePdfSha256, expectedSavedArtifacts.resumePdf)
     && generationAuditHashMatches(parsed.savedArtifacts.coverLetterPdfSha256, expectedSavedArtifacts.coverLetterPdf)
-    && generationAuditHashMatches(parsed.savedArtifacts.originalJobListingSha256, expectedSavedArtifacts.jobListing));
+    && generationAuditHashMatches(parsed.savedArtifacts.originalJobListingSha256, expectedSavedArtifacts.jobListing)
+    && optionalScrapedListingHashMatches(parsed.savedArtifacts, expectedSavedArtifacts.scrapedListing));
   return {
     generationAuditParsed: objectRoot,
     generationAuditVersion: version ?? null,
@@ -2073,6 +2089,8 @@ function finalizeGenerationAuditData(data, {
       resumePdfSha256: applicationArtifactSha256(savedArtifacts?.resumePdf),
       coverLetterPdfSha256: applicationArtifactSha256(savedArtifacts?.coverLetterPdf),
       originalJobListingSha256: applicationArtifactSha256(savedArtifacts?.jobListing),
+      ...(savedArtifacts?.scrapedListing != null || Object.hasOwn(parsed.finalArtifacts, 'scrapedListingSha256')
+        ? { scrapedListingSha256: applicationArtifactSha256(savedArtifacts?.scrapedListing) } : {}),
     },
   };
   return `${JSON.stringify(finalized, null, 2)}\n`;
@@ -2315,6 +2333,27 @@ function updateApplicationTelemetryForAttempt(attemptId, changes = {}) {
   return true;
 }
 
+/** Remove only formatter-added bundle header lines; retain all other bytes. */
+export function legacyListingCollisionBytes(data) {
+  const bytes = Buffer.isBuffer(data) ? data : Buffer.from(data);
+  const separator = bytes.indexOf(Buffer.from('\n---\n'));
+  if (separator < 0) return bytes;
+  const prefixes = ['**Posted by:** ', '**Apply URL:** ', '**Source level:** '].map(value => Buffer.from(value));
+  const chunks = [];
+  let keepStart = 0;
+  for (let start = 0; start < separator;) {
+    const end = bytes.indexOf(10, start);
+    if (end < 0 || end > separator) break;
+    if (bytes[end - 1] !== 13 && prefixes.some(prefix => end > start + prefix.length
+      && bytes.subarray(start, start + prefix.length).equals(prefix))) {
+      chunks.push(bytes.subarray(keepStart, start));
+      keepStart = end + 1;
+    }
+    start = end + 1;
+  }
+  return keepStart ? Buffer.concat([...chunks, bytes.subarray(keepStart)]) : bytes;
+}
+
 /**
  * Resolve the ACTUAL directory one save should write into, disambiguating it
  * from a different job's already-saved bundle when the sanitized
@@ -2331,33 +2370,31 @@ function updateApplicationTelemetryForAttempt(attemptId, changes = {}) {
  * not happen here only because the second job failed earlier in the
  * pipeline, by chance, before reaching save.
  *
- * The identity this compares by is deliberately the ORIGINAL JOB LISTING
- * bytes about to be saved (formatOriginalJobListingMarkdown's output), not a
- * per-generation job id: queueLocalApplicationJob mints a brand-new id on
+ * Identity uses exact legacy Scraped Listing bytes when present, otherwise
+ * Original Job Listing bytes with only the three bundle header lines removed.
+ * A per-generation job id cannot serve this purpose: queueLocalApplicationJob mints a brand-new id on
  * every call, including an intentional Local AI regeneration of a card
  * that is already 'saved' (canRegenerateLocalApplication in
  * src/utils/localAiApplicationLifecycle.js allows exactly that) — so an
  * id-keyed check would treat every ordinary regenerate-and-resave of the
  * SAME card as a different job and reshuffle its already-saved folder on
  * every save, which is the one thing the design constraint below forbids.
- * The job listing content, by contrast, is built from the card's OWN job
- * fields and is unchanged across a regeneration (only the AI's résumé/letter
- * output differs); a genuinely different job posting almost always differs
+ * This identity retains the card's scraped job fields across official-body
+ * changes and level transitions; a genuinely different job posting differs
  * somewhere in that text (title, company, location, url, or description),
  * even when it happens to sanitize to the identical file-path.
  *
  * Regenerating and re-saving THE SAME job must keep landing on its existing
  * folder: that folder is reported back to the card as its "Saved to …" state
  * and drives the discard/cleanup pairing, so relocating it on every save
- * would break both. A destination whose own saved "Original Job Listing.md"
- * already matches these exact bytes is a re-save of the same job and reuses
+ * would break both. A destination whose saved scraped identity (or legacy
+ * Original fallback) matches these bytes is a re-save of the same job and reuses
  * the folder unchanged; one whose saved listing differs is a genuine
  * collision and gets a deterministic, listing-derived sibling folder
  * instead — one short enough to stay legible, widened once if even that
  * exact suffix happens to already belong to a THIRD distinct job. A
- * destination with no readable listing at all (nothing saved there yet, or a
- * folder predating this check, or one this save cannot itself compare
- * against) is left exactly as it is today — not treated as a collision — so
+ * destination with neither listing (nothing saved there yet, or a folder
+ * predating this check) keeps the existing behavior and is not a collision, so
  * nothing already on disk gets reshuffled the next time it is resaved; only
  * a job this function CAN identify is protected from silently replacing a
  * different one.
@@ -2390,9 +2427,9 @@ function updateApplicationTelemetryForAttempt(attemptId, changes = {}) {
  * never at risk, and this only ever removes a candidate the SAME resolve
  * call itself created and then superseded.
  */
-async function resolveApplicationExportDirectory(applicationOutputRoot, baseDir, currentJobListingData) {
+async function resolveApplicationExportDirectory(applicationOutputRoot, baseDir, currentJobListingData, { currentScrapedListing = false } = {}) {
   const currentListing = currentJobListingData == null ? null
-    : Buffer.isBuffer(currentJobListingData) ? currentJobListingData : Buffer.from(currentJobListingData);
+    : currentScrapedListing ? Buffer.from(currentJobListingData) : legacyListingCollisionBytes(currentJobListingData);
   const probedCandidates = [];
   // ensureDirectoryWithinRoot both creates a not-yet-existing candidate and
   // rejects one that escapes the root or traverses a symlink component, so
@@ -2421,10 +2458,15 @@ async function resolveApplicationExportDirectory(applicationOutputRoot, baseDir,
     if (entries.length === 0) return false; // Freshly created, or a pruned failed save.
     let occupantListing;
     try {
-      occupantListing = await fs.promises.readFile(path.join(candidateDir, 'Original Job Listing.md'));
+      occupantListing = await readRegisteredApplicationArtifact(candidateDir, path.join(candidateDir, 'Scraped Listing.md'));
     } catch (error) {
-      if (error?.code === 'ENOENT') return false; // No readable listing — see the comment above.
-      throw error;
+      if (error?.code !== 'ENOENT') throw error;
+      try {
+        occupantListing = legacyListingCollisionBytes(await fs.promises.readFile(path.join(candidateDir, 'Original Job Listing.md')));
+      } catch (fallbackError) {
+        if (fallbackError?.code === 'ENOENT') return false; // No readable listing — see the comment above.
+        throw fallbackError;
+      }
     }
     return !occupantListing.equals(currentListing);
   };
@@ -2456,8 +2498,8 @@ async function resolveApplicationExportDirectory(applicationOutputRoot, baseDir,
 // handler. Does NOT reproduce the save-application call site's own
 // baseDir-keyed lock; a caller testing that atomicity must go through the
 // real 'save-application' handler instead (see resume-download-bundle.js).
-export function __resolveApplicationExportDirectoryForTests(applicationOutputRoot, baseDir, currentJobListingData) {
-  return resolveApplicationExportDirectory(applicationOutputRoot, baseDir, currentJobListingData);
+export function __resolveApplicationExportDirectoryForTests(applicationOutputRoot, baseDir, currentJobListingData, options) {
+  return resolveApplicationExportDirectory(applicationOutputRoot, baseDir, currentJobListingData, options);
 }
 
 export function registerJobApplicationHandlers() {
@@ -2503,7 +2545,7 @@ export function registerJobApplicationHandlers() {
   // then open that folder in Finder. No picker — the location is deterministic
   // so the user's applications stay organized with the project. Cleans up the
   // temp working directory afterward.
-  handleSafe('save-application', async (event, { resumeHtmlPath, resumePdfPath, coverLetterPdfPath, jobListingPath, generationAuditPath, generationLogPath, workDir, jobTitle, location, canvasFilePath, suppressReveal = false }) => {
+  handleSafe('save-application', async (event, { resumeHtmlPath, resumePdfPath, coverLetterPdfPath, jobListingPath, generationAuditPath, generationLogPath, scrapedListingPath, workDir, jobTitle, location, canvasFilePath, suppressReveal = false }) => {
     const { resolvedWorkDir, pending } = resolvePendingApplicationWorkspaceForOwner(
       workDir, pendingApplicationArtifacts, event.sender.id,
     );
@@ -2512,7 +2554,8 @@ export function registerJobApplicationHandlers() {
       && (resumePdfPath ? path.resolve(resumePdfPath) : null) === pending.resumePdfPath
       && (coverLetterPdfPath ? path.resolve(coverLetterPdfPath) : null) === pending.coverLetterPdfPath
       && (generationAuditPath ? path.resolve(generationAuditPath) : null) === pending.generationAuditPath
-      && (generationLogPath ? path.resolve(generationLogPath) : null) === pending.generationLogPath;
+      && (generationLogPath ? path.resolve(generationLogPath) : null) === pending.generationLogPath
+      && (scrapedListingPath ? path.resolve(scrapedListingPath) : null) === pending.scrapedListingPath;
     if (!matchesPending) {
       throw new Error('Generated application paths did not match this generation session — please regenerate.');
     }
@@ -2536,6 +2579,7 @@ export function registerJobApplicationHandlers() {
     jobListingPath = pending.jobListingPath;
     generationAuditPath = pending.generationAuditPath;
     generationLogPath = pending.generationLogPath;
+    scrapedListingPath = pending.scrapedListingPath;
     const company = pending.company;
     let exportPhase = 'validating generated sources';
     let exportDir = null;
@@ -2558,7 +2602,7 @@ export function registerJobApplicationHandlers() {
     }
     assertRendererCanvasFilePathAllowed(canvasFilePath);
 
-    const where = sanitizeFilePart(company, 'Company');
+    const where = sanitizeFilePart(pending.identityCompany ?? company, 'Company');
     // Location is a hard part of job identity (§6.3) but here it's just a path
     // segment — a missing/unresolvable value degrades to a sane folder name
     // rather than collapsing the path (e.g. "Company//Role" if left empty).
@@ -2590,17 +2634,18 @@ export function registerJobApplicationHandlers() {
       });
     }
     const listingSource = jobListingPath || (workDir ? path.join(workDir, 'original-job-listing.md') : '');
-    // A quick, unverified peek at the job listing's current bytes, read
-    // before the destination directory below is resolved. This is
-    // deliberately separate from the sha256-verified, workspace-bound read of
-    // the same file in the Promise.all further down — that authoritative read
-    // still runs in its existing position and still decides whether the save
-    // itself succeeds. A miss or an error here only means
-    // resolveApplicationExportDirectory cannot compare content, so it leaves
-    // collision detection off for this save (see its own comment) rather than
-    // surfacing a second, earlier failure for the same file.
+    // A registered scraped audit is exact collision identity and must pass its
+    // workspace/hash checks before destination resolution. Without one, keep
+    // the legacy quick Original peek; its authoritative registered read below
+    // still decides whether the save succeeds. Only that legacy peek may miss
+    // without causing an earlier duplicate source failure.
     let precheckJobListingData = null;
-    if (listingSource) {
+    if (scrapedListingPath) {
+      precheckJobListingData = await readRegisteredApplicationArtifact(resolvedWorkDir, scrapedListingPath, {
+        workspaceIdentity: pending.workspaceIdentity,
+        expectedSha256: pending.artifactSha256?.scrapedListing,
+      });
+    } else if (listingSource) {
       try { precheckJobListingData = await fs.promises.readFile(listingSource); }
       catch { precheckJobListingData = null; }
     }
@@ -2647,15 +2692,17 @@ export function registerJobApplicationHandlers() {
     // is always taken first, no holder of the exact-dir key can be waiting on
     // a namespace this callback holds.
     let dir, applicationFile, resumeFile, coverLetterFile, jobListingFile,
-      generationAuditFile, generationLogFile, hasPdf, hasCoverLetterPdf,
-      hasListing, hasGenerationAudit;
+      generationAuditFile, generationLogFile, scrapedListingFile, hasPdf, hasCoverLetterPdf,
+      hasListing, hasGenerationAudit, hasScrapedListing;
     const manifest = await withApplicationSyncWorkspaceLock(exportNamespaceDir, async () => {
     // resolveApplicationExportDirectory both validates/creates whichever
     // candidate it returns and disambiguates it from a different job's
     // bundle already sitting at the sanitized path — see its own comment for
     // the collision this closes. No separate ensureDirectoryWithinRoot call
     // is needed here: every candidate it inspects is validated internally.
-    const resolution = await resolveApplicationExportDirectory(applicationOutputRoot, baseDir, precheckJobListingData);
+    const resolution = await resolveApplicationExportDirectory(applicationOutputRoot, baseDir, precheckJobListingData, {
+      currentScrapedListing: Boolean(scrapedListingPath),
+    });
     dir = resolution.dir;
     exportDir = dir;
     // Best-effort: remove any sibling candidate this resolution touched but
@@ -2676,11 +2723,12 @@ export function registerJobApplicationHandlers() {
     jobListingFile = path.join(dir, 'Original Job Listing.md');
     generationAuditFile = path.join(dir, 'Generation Audit.json');
     generationLogFile = path.join(dir, 'Generation Log.jsonl');
+    scrapedListingFile = path.join(dir, 'Scraped Listing.md');
     exportPhase = 'reading generated artifacts';
     const registeredReadOptions = {
       workspaceIdentity: pending.workspaceIdentity,
     };
-    const [sourceHtml, sourceResumePdfData, sourceCoverLetterPdfData, jobListingData, generationAuditData, generationLogData] = await Promise.all([
+    const [sourceHtml, sourceResumePdfData, sourceCoverLetterPdfData, jobListingData, generationAuditData, generationLogData, scrapedListingData] = await Promise.all([
       readRegisteredApplicationArtifact(resolvedWorkDir, resumeHtmlPath, {
         ...registeredReadOptions,
         encoding: 'utf8',
@@ -2711,6 +2759,10 @@ export function registerJobApplicationHandlers() {
         encoding: 'utf8',
         expectedSha256: pending.artifactSha256?.generationLog,
       }) : null,
+      scrapedListingPath ? readRegisteredApplicationArtifact(resolvedWorkDir, scrapedListingPath, {
+        ...registeredReadOptions,
+        expectedSha256: pending.artifactSha256?.scrapedListing,
+      }) : null,
     ]);
     if (generationAuditData != null) {
       assertGenerationAuditData(generationAuditData, {
@@ -2721,6 +2773,7 @@ export function registerJobApplicationHandlers() {
           resumePdf: sourceResumePdfData,
           coverLetterPdf: sourceCoverLetterPdfData,
           jobListing: jobListingData,
+          scrapedListing: scrapedListingData,
         },
       });
     }
@@ -2732,6 +2785,7 @@ export function registerJobApplicationHandlers() {
     hasCoverLetterPdf = coverLetterPdfData != null;
     hasListing = jobListingData != null;
     hasGenerationAudit = generationAuditData != null;
+    hasScrapedListing = scrapedListingData != null;
     // Embed a fresh capability before the transaction, but do not revoke the
     // previous saved workspace until every file has been promoted and passed
     // readback. Registration runs inside the transaction verifier, so a
@@ -2748,6 +2802,7 @@ export function registerJobApplicationHandlers() {
       resumePdf: resumePdfData,
       coverLetterPdf: coverLetterPdfData,
       jobListing: jobListingData,
+      scrapedListing: scrapedListingData,
     };
     const finalizedGenerationAuditData = generationAuditData == null
       ? null
@@ -2759,11 +2814,12 @@ export function registerJobApplicationHandlers() {
           resumePdf: sourceResumePdfData,
           coverLetterPdf: sourceCoverLetterPdfData,
           jobListing: jobListingData,
+          scrapedListing: scrapedListingData,
         },
         savedArtifacts: savedArtifactData,
       });
 
-    // The workspace is deliberately unzipped and predictable. Treat all six
+    // The workspace is deliberately unzipped and predictable. Treat all
     // siblings as one transaction: unavailable optional artifacts remove stale
     // predecessors, while any promotion/readback failure restores the complete
     // prior generation instead of leaving a mixed bundle.
@@ -2777,6 +2833,7 @@ export function registerJobApplicationHandlers() {
         { destination: jobListingFile, data: jobListingData },
         { destination: generationAuditFile, data: finalizedGenerationAuditData },
         { destination: generationLogFile, data: finalizedGenerationLogData },
+        { destination: scrapedListingFile, data: scrapedListingData },
       ], {
         verify: async () => {
           const readback = await inspectApplicationExport([
@@ -2784,6 +2841,7 @@ export function registerJobApplicationHandlers() {
             { path: resumeFile, expected: hasPdf, expectedData: resumePdfData, kind: 'pdf', expectedPageCount: pending.resumePdfPageCount, expectedPaper: expectedPdfPaperBox(sourceHtml) },
             { path: coverLetterFile, expected: hasCoverLetterPdf, expectedData: coverLetterPdfData, kind: 'pdf', expectedPageCount: pending.coverLetterPdfPageCount, expectedPaper: expectedPdfPaperBox(sourceHtml) },
             { path: jobListingFile, expected: hasListing, expectedData: jobListingData, kind: 'markdown' },
+            { path: scrapedListingFile, expected: hasScrapedListing, expectedData: scrapedListingData, kind: 'markdown' },
             {
               path: generationAuditFile,
               expected: hasGenerationAudit,
@@ -2797,6 +2855,7 @@ export function registerJobApplicationHandlers() {
                 resumePdf: sourceResumePdfData,
                 coverLetterPdf: sourceCoverLetterPdfData,
                 jobListing: jobListingData,
+                scrapedListing: scrapedListingData,
               },
               expectedSavedArtifacts: savedArtifactData,
             },
@@ -2924,6 +2983,7 @@ export function registerJobApplicationHandlers() {
       jobListingFile: hasListing ? jobListingFile : null,
       generationAuditFile: hasGenerationAudit ? generationAuditFile : null,
       generationLogFile: manifest.some(row => row.name === 'Generation Log.jsonl' && row.expected) ? generationLogFile : null,
+      scrapedListingFile: hasScrapedListing ? scrapedListingFile : null,
       bundleError,
     };
     } catch (error) {

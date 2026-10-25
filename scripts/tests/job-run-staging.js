@@ -17,7 +17,7 @@ import { interpretJobPreferences } from '../test-dependencies.js';
 import { JOB_SEARCH_MAX_PROVIDER_LOOKBACK_DAYS } from '../test-dependencies.js';
 import { validateResponseSchema } from '../test-dependencies.js';
 import { canAutomaticallyResolveJobSourceWarning, jobSourceWarningAction, jobSourceAuthPreflightScope } from '../test-dependencies.js';
-import { __canPerformJobSourceActionForTests, __createDescriptionRecoveryCheckpointForTests, __jobSourceActionAuthorizationForTests, __pruneSupersededDescriptionRecoveryCheckpointsForTests, authoritativeFreshJobSearchWindow, claimExactJobRunExecution, effectiveJobSearchWindow, filterAndDedupJobsByPostedSince, freshJobSearchWindow, jobSourceRecoveryDisposition, legacyJobSearchWindow, manualAiPreSearchRecoveryWindow, mergeJobSourceCollectionCap, mergeRoleScreenedJobs, registerJobsHandlers, shouldDiscardJobRunAfterAbort } from '../../electron/ipc/jobs.js';
+import { __canPerformJobSourceActionForTests, __createDescriptionRecoveryCheckpointForTests, __jobSourceActionAuthorizationForTests, __pruneSupersededDescriptionRecoveryCheckpointsForTests, authoritativeFreshJobSearchWindow, claimExactJobRunExecution, effectiveJobSearchWindow, filterAndDedupJobsByPostedSince, freshJobSearchWindow, jobSourceRecoveryDisposition, legacyJobSearchWindow, manualAiPreSearchRecoveryWindow, mergeJobSourceCollectionCap, mergeRoleScreenedJobs, __registerJobsHandlersForTests, shouldDiscardJobRunAfterAbort } from '../../electron/ipc/jobs.js';
 import { collectionCompletedAtForManifest, providerGatheredAtForManifest, rebindRunOperationAuthority, rebindJobRunRecoveryOwners, sanitizeJobSearchWindow } from '../../electron/ipc/jobRunStaging.js';
 import { beginJobContinuation, claimJobContinuation, completeJobContinuation, listJobContinuations, pauseJobContinuations, rebindJobContinuationOwners, releaseJobContinuationExecution } from '../../electron/ipc/jobContinuation.js';
 import { acquireCanvasRecoveryRead, __canvasRecoveryPathsForTests, withCanvasRecoveryOwner, withCanvasRecoveryRebind } from '../../electron/ipc/canvasRecoveryPaths.js';
@@ -33,6 +33,16 @@ import { HANDOFF_CONCURRENCY, mapAutomaticHandoffs, runAutomaticHandoffWorkers }
 import { canClaimJobRunCollectionCompletion, exactJobRunCareerSnapshotBindingMatches } from '../../src/utils/jobCareerSnapshotBinding.js';
 import electronPkg from 'electron';
 import { writeApprovedCareerSnapshotFixture } from './careerSnapshotFixture.mjs';
+import { unresolvedOfficialPosting } from '../../electron/ipc/officialPostingResolver.js';
+
+// These staging tests stub the newly added network/bridge boundary. Resolver
+// behavior is exercised separately; the real search/checkpoint code still runs.
+function registerJobsHandlers() {
+  __registerJobsHandlersForTests({ resolveOfficialPostings: async jobs => ({
+    jobs: jobs.map(job => ({ ...job, ...unresolvedOfficialPosting(job) })), telemetry: { total: jobs.length },
+  }) });
+}
+
 
 const continuationSha = value => crypto.createHash('sha256').update(value).digest('hex');
 
@@ -1198,6 +1208,9 @@ export default [
             && after?.manifest?.collectionCompletedAt === firstGatheredAt
             && after?.manifest?.lastUpdated > firstGatheredAt,
           `${testCase.label} gathered-only recovery must retain its original start/collection boundaries while refreshing lastUpdated, got ${JSON.stringify({ result, manifest: after?.manifest })}`);
+          assert(result.jobs.length === 1 && result.jobs[0].officialPosting?.level === 'L5'
+            && after.stagedJobs.some(entry => entry.job?.officialPosting?.level === 'L5'),
+          'old gathered rows must cross the official resolver and checkpoint their metadata before being returned');
           outcomes.push(testCase.label);
         } finally {
           await fs.promises.rm(root, { recursive: true, force: true });
@@ -1975,7 +1988,8 @@ export default [
         && renderer.includes('continuationData.pendingTargetRole')
         && renderer.includes('?? continuationData.activeTargetRole')
         && renderer.includes('?? continuationData.targetRole')
-        && preferences.includes('listingIdentity: listingIdentityForAudit(job)'),
+        && preferences.includes('const identity = identityJob(job);')
+        && preferences.includes('listingIdentity: listingIdentityForAudit(identity)'),
       'a run freezes Target role with its preferences across late and paused paths, and each emitted audit carries a bounded listing identity');
       return { appendCandidateGate: true, listingAwareAudits: true, frozenTargetRole: true };
     },

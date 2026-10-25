@@ -1,3 +1,4 @@
+import { COVER_LETTER_EVIDENCE_SELECTION_RULE } from '../../electron/ipc/applicationWriterGuidance.js';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import {
@@ -5,7 +6,7 @@ import {
   extractEditorialPlanSource, editorialPlanAllowedIds, editorialPlanBinding,
   buildEditorialPlanPrompt, parseEditorialPlanResponse, writerPromptWithEditorialPlan,
 } from '../../electron/ipc/applicationEditorialPlan.js';
-import { WRITE_VERIFY_BRIEF, WRITE_VERIFY_SHORTLIST_STEP } from '../../electron/ipc/applicationWriteVerify.js';
+import { WRITE_VERIFY_BRIEF, WRITE_VERIFY_SHORTLIST_STEP, WRITE_VERIFY_JUDGE_RUBRIC } from '../../electron/ipc/applicationWriteVerify.js';
 
 // Entirely synthetic cross-domain hands. No real candidate or posting facts.
 const DOMAINS = [
@@ -57,6 +58,7 @@ export default [
         assert.ok(planning.endsWith(source), domain.name);
         assert.equal(planning.split(source).length, 2, 'the full source occurs once');
         assert.ok(planning.includes(`BRIEF: ${WRITE_VERIFY_BRIEF}`));
+        assert.ok(planning.includes(COVER_LETTER_EVIDENCE_SELECTION_RULE), 'the planner selects evidence without a proof-count target');
         assert.ok(!planning.includes(WRITE_VERIFY_SHORTLIST_STEP), 'the writer appendix wrapper is removed');
         assert.ok(!planning.includes('OUTPUT FORMAT FOR THIS ARM:'));
         assert.ok(!planning.includes('APPLICATION V2 HANDOFF'));
@@ -158,8 +160,15 @@ export default [
       assert.deepEqual(parse(plan), plan, 'exceeding 300 words never adds a diagnostic repair round');
       plan.omissions = [];
       assert.deepEqual(parse(plan), plan, 'no invented omission is required');
+      assert.equal(parse(plan).paragraphs.length, 1, 'one developed proof is sufficient');
+      const { prompt } = fixture();
+      const oneProofWriter = writerPromptWithEditorialPlan(prompt, plan);
+      assert.ok(oneProofWriter.includes(COVER_LETTER_EVIDENCE_SELECTION_RULE), 'the writer can retain a single-proof proposal');
+      assert.ok(WRITE_VERIFY_JUDGE_RUBRIC.includes(COVER_LETTER_EVIDENCE_SELECTION_RULE), 'the judge uses the same value-based evidence selection');
+      assert.ok(!WRITE_VERIFY_JUDGE_RUBRIC.includes('one-page completeness'), 'page fullness earns no structure credit');
       plan.paragraphs = Array.from({ length: 8 }, () => clone(plan.paragraphs[0]));
       assert.equal(parse(plan).paragraphs.length, 8, 'there is no two-or-three paragraph prose gate');
+      assert.ok(writerPromptWithEditorialPlan(prompt, plan).includes(JSON.stringify(plan, null, 2)), 'several proofs remain available when they earn their space');
       plan.paragraphs.push(clone(plan.paragraphs[0]));
       assert.throws(() => parse(plan), /1 to 8 proposed paragraph rows/u);
     },

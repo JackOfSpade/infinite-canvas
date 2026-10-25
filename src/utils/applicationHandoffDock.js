@@ -1,6 +1,7 @@
 import { HANDOFF_CONCURRENCY } from './handoffScheduler.js';
 import { getClaudeApplicationRun, normalizeClaudeRun } from './claudeApplicationRuns.js';
 import { normalizeApplicationProgress } from './applicationProgress.js';
+import { officialPostingDisplay } from './officialPostingDisplay.js';
 
 /**
  * Application-bundle handoffs, expressed as items of the global AI handoff
@@ -251,8 +252,9 @@ export function applicationDockRequest({ node, handoff, canvasFilePath = null })
   const local = node?.data?.localApplication;
   if (!node?.id || !local?.id || !handoff?.handoffCode || typeof handoff.prompt !== 'string') return null;
   const corrections = Array.isArray(handoff.corrections) ? handoff.corrections.filter(Boolean) : [];
-  const company = typeof node.data?.company === 'string' ? node.data.company.trim() : '';
-  const title = typeof node.data?.title === 'string' ? node.data.title.trim() : '';
+  const display = officialPostingDisplay(node.data);
+  const company = display.employer || display.postedBy;
+  const title = display.title;
   return {
     kind: 'application',
     requestId: applicationRequestId(local.id),
@@ -296,8 +298,9 @@ export function brokenApplicationDockRequest({ node, message, canvasFilePath = n
   const local = node?.data?.localApplication;
   const text = typeof message === 'string' ? message.trim() : '';
   if (!node?.id || !local?.id || !text) return null;
-  const company = typeof node.data?.company === 'string' ? node.data.company.trim() : '';
-  const title = typeof node.data?.title === 'string' ? node.data.title.trim() : '';
+  const display = officialPostingDisplay(node.data);
+  const company = display.employer || display.postedBy;
+  const title = display.title;
   return {
     kind: 'application',
     requestId: applicationRequestId(local.id),
@@ -338,8 +341,9 @@ export function brokenApplicationDockRequest({ node, message, canvasFilePath = n
 export function workingApplicationDockRequest({ node, canvasFilePath = null, status, retryReproducesFailure = false }) {
   const local = node?.data?.localApplication;
   if (!node?.id || !local?.id) return null;
-  const company = typeof node.data?.company === 'string' ? node.data.company.trim() : '';
-  const title = typeof node.data?.title === 'string' ? node.data.title.trim() : '';
+  const display = officialPostingDisplay(node.data);
+  const company = display.employer || display.postedBy;
+  const title = display.title;
   return {
     kind: 'application',
     requestId: applicationRequestId(local.id),

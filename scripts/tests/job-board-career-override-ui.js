@@ -140,6 +140,15 @@ export default [
       assert(queueAt > guardAt, 'queue call must follow the guard');
       const payload = src.slice(queueAt, src.indexOf('});', queueAt));
       assert(/\n\s+careerSnapshotId,\n/.test(payload), 'queue payload must still pass careerSnapshotId,');
+      assert(/\n\s+resolutionId,\n/.test(payload), 'queue payload carries the opaque preparation result');
+      const prepareAt = src.indexOf('await window.electronAPI.prepareOfficialPostingForGeneration?.({', start);
+      const acquireAt = src.indexOf('lease = await acquireModuleRun({', start);
+      assert(prepareAt > start && acquireAt > prepareAt && acquireAt < queueAt,
+        'official preparation finishes before the application lane while final live career resolution still precedes queueing');
+      for (const field of ['postedBy', 'applyOptions', 'salaryProvenance', 'officialPosting', 'googleCardUrl', 'sourceJobKey']) {
+        assert(new RegExp(`\\b${field}:\\s*data\\.${field}\\b`).test(payload),
+          `the resolved snapshot payload must retain ${field} for host-side preparation`);
+      }
     },
   },
 ];

@@ -173,6 +173,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // New Local AI application jobs use an app-owned copy/paste handoff. Legacy
   // filesystem coding-agent jobs remain supported for existing job folders.
   queueLocalApplication: (args) => ipcRenderer.invoke('queue-local-application', args),
+  prepareOfficialPostingForGeneration: (args) => ipcRenderer.invoke('prepare-official-posting-for-generation', args),
   // Pre-generation check: refuses a new bundle while hand edits recur across bundles.
   checkApplicationGenerationGate: (args) => ipcRenderer.invoke('check-application-generation-gate', args),
   // Application paste-back handoffs are app-owned and resumable. The local AI

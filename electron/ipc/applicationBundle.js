@@ -7,6 +7,8 @@
  * company, and a pretty, source-faithful Markdown rendering of the scraped
  * job listing.
  */
+import { OFFICIAL_POSTING_LABELS } from './officialPostingFields.js';
+
 const WINDOWS_RESERVED_NAMES = new Set([
   'CON', 'PRN', 'AUX', 'NUL',
   'COM1', 'COM2', 'COM3', 'COM4', 'COM5', 'COM6', 'COM7', 'COM8', 'COM9',
@@ -177,7 +179,7 @@ function postingTargetLines(variants) {
 }
 
 /** Pretty-print exactly the source-side information supplied for a job card. */
-export function formatOriginalJobListingMarkdown(job = {}) {
+export function formatOriginalJobListingMarkdown(job = {}, { audience = 'prompt' } = {}) {
   const title = markdownInlineText(job.title) || 'Untitled role';
   const company = markdownInlineText(job.company) || 'Unknown company';
   const description = String(job.description || '');
@@ -202,6 +204,14 @@ export function formatOriginalJobListingMarkdown(job = {}) {
   const url = safeHttpUrl(job.url);
   const variants = normaliseJobPostingVariants(job.postingVariants);
   if (url) lines.push(`**Listing URL:** <${url}>`);
+  if (audience === 'bundle') {
+    const postedBy = markdownInlineText(job.postedBy);
+    const applyUrl = safeHttpUrl(job.applyUrl || job.officialPosting?.officialApplyUrl);
+    const level = job.officialPosting?.level;
+    if (postedBy) lines.push(`**Posted by:** ${postedBy}`);
+    if (applyUrl) lines.push(`**Apply URL:** <${applyUrl}>`);
+    if (Object.hasOwn(OFFICIAL_POSTING_LABELS, level)) lines.push(`**Source level:** ${level}: ${markdownInlineText(OFFICIAL_POSTING_LABELS[level])}`);
+  }
   // The shared description is emitted EXACTLY ONCE below; posting locations
   // and their safe listing URLs are appended after it so a consolidated card
   // never repeats the scraped body per mirror. Every variant field is escaped

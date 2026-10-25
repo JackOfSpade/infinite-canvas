@@ -94,12 +94,11 @@ export const GATE_FINDING_SCOPES = Object.freeze({
   'paragraph-argument-links': row('field', 'argument', { unreachable: 'write-verify v2 has no generationAudit' }),
   'measured-one-page-fit': row('cross', 'fit', { tier: 'fit' }),
   pasteResumeUnderfillErrors: row('cross', 'underfill', { openKinds: 'all-resume' }),
-  pasteCoverLetterUnderfillErrors: row('cross', 'underfill', { openKinds: 'all-letter' }),
   currentAuthorityRoleProjectDuplicateErrors: row('cross', 'pair', { openKinds: 'pair' }),
   validateAuthorityResumeArtifacts: row('unit', 'labels'),
   validateLocalApplicationResult: row('document', 'completion'),
 });
-const namedSources = ['pasteResumeUnderfillErrors', 'pasteCoverLetterUnderfillErrors', 'currentAuthorityRoleProjectDuplicateErrors', 'validateAuthorityResumeArtifacts', 'validateLocalApplicationResult'];
+const namedSources = ['pasteResumeUnderfillErrors', 'currentAuthorityRoleProjectDuplicateErrors', 'validateAuthorityResumeArtifacts', 'validateLocalApplicationResult'];
 export function gateFindingInventoryErrors({ letter = CHECK_DISPOSITIONS, resume = RESUME_CHECK_DISPOSITIONS, inventory = GATE_FINDING_SCOPES } = {}) {
   const errors = [], real = new Set([...Object.keys(letter), ...Object.keys(resume), ...PASTE_VALIDATION_ERROR_ID_SET, ...namedSources]);
   for (const [id, disposition] of [...Object.entries(letter), ...Object.entries(resume)]) if (disposition === 'gate' && !inventory[id]) errors.push(`Missing gate finding scope for ${id}.`);

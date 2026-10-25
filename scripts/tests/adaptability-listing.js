@@ -108,6 +108,7 @@ import {
   APPLICATION_QUALITY_CRITERIA,
   LOCAL_AI_GENERATION_AUDIT_VERSION,
   __snapshotCareerSkillEvidenceForTests,
+  createApplicationListingClosingValidator,
   assertSourceQuoteLinksFinalText,
   pasteAttributionScopeErrors,
   validateLocalApplicationResult,
@@ -288,6 +289,7 @@ const listingToolSentence = L => `Hands-on experience with ${L.tool}.`;
 const listingEvidence = L => [
   { id: 'job-need', sourceId: 'job-listing', quote: L.need, priority: 'highest' },
   { id: 'job-tool', sourceId: 'job-listing', quote: listingToolSentence(L), priority: 'high' },
+  { id: 'job-domain', sourceId: 'job-listing', quote: `${L.years}+ years of ${L.field} experience.`, priority: 'high' },
 ];
 
 // ---------------------------------------------------------------------------
@@ -571,13 +573,17 @@ const SKILL_GROUP = NEUTRAL_SKILL_GROUP_LABELS.includes('tools') ? 'tools' : NEU
 const skillRowId = skillId => `host.career.skill.${skillId}.1`;
 const roleRecord = (context, roleId) => context.sourceRoles.find(role => role.id === roleId);
 
-/** The bounded skills index production requires for this snapshot: every approved direct skill. */
-function defaultSkillGroups(context) {
-  const skills = context.skillEvidence.skills;
+// These synthetic sources have no Skills section. Their bullet-derived skills
+// may enter the index only when the current listing explicitly names them.
+// The listing slots are the fixture oracle; production still decides admission.
+function defaultSkillGroups(context, L) {
+  const namedByListing = new Set([L.tool, L.field].map(value => value.normalize('NFKC').toLowerCase()));
+  const skills = context.skillEvidence.skills.filter(skill => skill.declaredInSkillsSection !== false
+    || namedByListing.has(skill.name.normalize('NFKC').toLowerCase()));
   return skills.length ? [{ id: 'skills-1', group: SKILL_GROUP, items: skills.map(skill => skill.name), evidenceIds: skills.map(skill => skillRowId(skill.id)) }] : [];
 }
 
-function resumeDraft(context, skillGroups = defaultSkillGroups(context), credentials = undefined, education = undefined) {
+function resumeDraft(context, L, skillGroups = defaultSkillGroups(context, L), credentials = undefined, education = undefined) {
   return {
     ...(credentials ? { credentials } : {}),
     ...(education ? { education } : {}),
@@ -671,7 +677,7 @@ function packageFor(context, L, options = {}) {
     authority: context.authority, careerData: '', jobListing: listingText(L),
     paste: {
       trustedIdentity: context.trustedIdentity,
-      evidencePlan: { evidence: [...context.catalog.map(({ id, sourceId, quote }) => ({ id, sourceId, quote })), { id: 'job-need', sourceId: 'job-listing', quote: L.need }] },
+      evidencePlan: { evidence: [...context.catalog.map(({ id, sourceId, quote }) => ({ id, sourceId, quote })), ...listingEvidence(L)] },
       resume: {
         schemaVersion: 'structured-resume.v1', identity: context.trustedIdentity,
         roles: context.sourceRoles.map((role, index) => {
@@ -681,7 +687,7 @@ function packageFor(context, L, options = {}) {
             evidenceIds: index === 0 ? (options.bulletEvidenceIds ?? [baseEvidence]) : [evidenceId(first.id)],
           }] };
         }),
-        skills: defaultSkillGroups(context),
+        skills: defaultSkillGroups(context, L),
       },
       coverLetter: {
         name: context.trustedIdentity.name, contact: context.trustedIdentity.contact,
@@ -867,40 +873,40 @@ export default [
         const base = baseOf(spec);
         const notApproved = /not an exact, index-eligible approved snapshot skill/u;
         // Control and the absence of a phantom requirement: the listing names these terms, yet source A needs none of them.
-        assert(gradeResume(A, L, resumeDraft(A)).ok, `${spec.key}/${L.key}: the faithful skills block is accepted from source A`);
+        assert(gradeResume(A, L, resumeDraft(A, L)).ok, `${spec.key}/${L.key}: the faithful skills block is accepted from source A`);
         for (const { tag, term, extra, skillId } of [
           { tag: 'product', term: L.tool, extra: toolExtra(spec, L), skillId: 'skill-listing' },
           { tag: 'domain keyword', term: L.field, extra: domainExtra(spec, L), skillId: 'skill-domain' },
         ]) {
           const label = `${spec.key}/${L.key}/${tag}`;
           // The candidate's own approved skills plus the listing's term, cited to `evidence`.
-          const withTerm = (context, evidence) => resumeDraft(context, [{
-            id: 'skills-1', group: SKILL_GROUP, items: [...inventoryNames(A), term],
+          const withTerm = (context, evidence) => resumeDraft(context, L, [{
+            id: 'skills-1', group: SKILL_GROUP, items: [...defaultSkillGroups(A, L).flatMap(group => group.items), term],
             evidenceIds: [...A.skillEvidence.skills.map(skill => skillRowId(skill.id)), ...evidence],
           }]);
           // A1: the term slipped into the candidate's skills group; A2: cited to listing evidence only.
           const a1 = gradeResume(A, L, withTerm(A, []));
           assert(!a1.ok && a1.message.includes(term) && notApproved.test(a1.message), `${label}: the listing term in a skills group is not an approved snapshot skill (${a1.message})`);
-          const a2 = gradeResume(A, L, resumeDraft(A, [...defaultSkillGroups(A), { id: 'skills-2', group: SKILL_GROUP, items: [term], evidenceIds: ['job-tool'] }]));
+          const a2 = gradeResume(A, L, resumeDraft(A, L, [...defaultSkillGroups(A, L), { id: 'skills-2', group: SKILL_GROUP, items: [term], evidenceIds: ['job-tool'] }]));
           assert(!a2.ok && /needs at least one career-data evidence ID/u.test(a2.message), `${label}: a skills group cited to the listing alone is rejected (${a2.message})`);
           // B: the candidate used it. The recompiled inventory contains it and the draft that names it is accepted.
           const B = build(spec, [extra]);
           assert(inventoryNames(B).includes(term) && !inventoryNames(A).includes(term), `${label}: only the recompiled source puts the term in the approved inventory`);
           const row = skillRowId(skillId);
           assert(hasEvidence(B, row) && !hasEvidence(A, row), `${label}: the skill row exists only in the recompiled catalog`);
-          const b = gradeResume(B, L, resumeDraft(B));
+          const b = gradeResume(B, L, resumeDraft(B, L));
           assert(b.ok, `${label}: the recompiled skills block naming the term is accepted (${b.message})`);
           const bSame = gradeResume(B, L, withTerm(B, [row]));
           assert(bSame.ok, `${label}: the identical draft that source A rejected is accepted once the recompiled skill row is cited (${bSame.message})`);
           // The approved term still has to be CITED to evidence that states it: another skill's row does not carry it.
-          const miscited = gradeResume(B, L, resumeDraft(B, [
-            { id: 'skills-1', group: SKILL_GROUP, items: inventoryNames(A), evidenceIds: A.skillEvidence.skills.map(skill => skillRowId(skill.id)) },
+          const miscited = gradeResume(B, L, resumeDraft(B, L, [
+            ...defaultSkillGroups(A, L),
             { id: 'skills-2', group: SKILL_GROUP, items: [term], evidenceIds: [skillRowId('skill-own')] },
           ]));
           assert(!miscited.ok && /must occur in its cited career-data evidence/u.test(miscited.message) && !notApproved.test(miscited.message),
             `${label}: an approved term cited to another skill's evidence is refused for the citation alone (${miscited.message})`);
           // Once the posting names a term the candidate has, the bounded index must carry it; omitting it is rejected by name.
-          const omitted = gradeResume(B, L, resumeDraft(B, [{ id: 'skills-1', group: SKILL_GROUP, items: inventoryNames(A), evidenceIds: A.skillEvidence.skills.map(skill => skillRowId(skill.id)) }]));
+          const omitted = gradeResume(B, L, resumeDraft(B, L, defaultSkillGroups(A, L)));
           const omittedAdvice = omitted.ok ? omitted.value.advisories.map(entry => entry.detail).join(' ') : '';
           assert(omitted.ok && omittedAdvice.includes(term), `${label}: omitting the now-supported term is reported by name, as advice and not a rejection (${omitted.ok ? omittedAdvice : omitted.message})`);
           // C: B's text minus its line, recompiled: back to A.
@@ -913,8 +919,8 @@ export default [
           assert(!cCited.ok && /unknown evidence ID/u.test(cCited.message), `${label}: and its removed skill row is an unknown evidence ID (${cCited.message})`);
         }
         const label = `${spec.key}/${L.key}`;
-        const withTool = (context, evidence) => resumeDraft(context, [{
-          id: 'skills-1', group: SKILL_GROUP, items: [...inventoryNames(A), L.tool],
+        const withTool = (context, evidence) => resumeDraft(context, L, [{
+          id: 'skills-1', group: SKILL_GROUP, items: [...defaultSkillGroups(A, L).flatMap(group => group.items), L.tool],
           evidenceIds: [...A.skillEvidence.skills.map(skill => skillRowId(skill.id)), ...evidence],
         }]);
         // N1: the source only evaluated the product (an explicit non-skill disposition). N2: an either-or choice (relationship-qualified).
@@ -960,13 +966,13 @@ export default [
           },
         ]) {
           const label = `${spec.key}/${L.key}/${record.tag}`;
-          const draft = (context, item) => (record.section === 'credentials' ? resumeDraft(context, undefined, [item]) : resumeDraft(context, undefined, undefined, [item]));
+          const draft = (context, item) => (record.section === 'credentials' ? resumeDraft(context, L, undefined, [item]) : resumeDraft(context, L, undefined, undefined, [item]));
           // A: the listing's credential, cited to career evidence that does not state it, or to the listing alone.
           const asserted = gradeResume(A, L, draft(A, record.item([evidenceId(base.id)])));
           assert(!asserted.ok && occurs.test(asserted.message), `${label}: a credential the career evidence does not state is refused (${asserted.message})`);
           const listingOnly = gradeResume(A, L, draft(A, record.item(['job-need'])));
           assert(!listingOnly.ok && /needs at least one career-data evidence ID/u.test(listingOnly.message), `${label}: a credential cited to the listing alone is refused (${listingOnly.message})`);
-          assert(gradeResume(A, L, resumeDraft(A)).ok, `${label}: control: the same résumé without the credential is accepted`);
+          assert(gradeResume(A, L, resumeDraft(A, L)).ok, `${label}: control: the same résumé without the credential is accepted`);
           // B: the source states the record; the identical item is admitted.
           const B = build(spec, [record.extra]);
           assert(B.snapshotId !== A.snapshotId && B.profile[record.section === 'credentials' ? 'certifications' : 'education'].length === 1, `${label}: recompiling the extended source yields the record`);
@@ -995,7 +1001,7 @@ export default [
         const A = build(spec);
         const label = `${spec.key}/${L.key}`;
         const refuse = (what, mutate, pattern) => {
-          const draft = resumeDraft(A);
+          const draft = resumeDraft(A, L);
           mutate(draft);
           const verdict = gradeResume(A, L, draft);
           assert(!verdict.ok && pattern.test(verdict.message), `${label}: ${what} is refused (${verdict.message})`);
@@ -1016,7 +1022,7 @@ export default [
         const block = `${L.title} at ${L.company}\n${extraRole.location}\n${extraRole.start} to ${extraRole.end}\n${extraRole.achievements[0].line}\n\n`;
         assert(B.text.startsWith(A.text) && B.text.slice(A.text.length) === block, `${label}: B is source A plus exactly the role block`);
         assert(B.sourceRoles.length === A.sourceRoles.length + 1 && B.sourceRoles.some(role => role.title === L.title && role.company === L.company), `${label}: only the recompiled source has the role as a trusted source role`);
-        const draftB = resumeDraft(B);
+        const draftB = resumeDraft(B, L);
         assert(draftB.roles.some(role => role.title === L.title && role.company === L.company), `${label}: the draft for B carries the role`);
         const b = gradeResume(B, L, draftB);
         assert(b.ok, `${label}: the identical role is accepted once the source states it (${b.message})`);
@@ -1038,7 +1044,7 @@ export default [
         // The listing's own requirement sentence, verbatim, as if it were the candidate's accomplishment.
         const requirementAsBullet = `${L.ownBase} the work end to end for a team of ${L.teamSize}.`;
         const draftWithBullet = evidenceIds => {
-          const draft = resumeDraft(A);
+          const draft = resumeDraft(A, L);
           draft.roles[0].bullets = [{ id: 'bullet-listing', text: requirementAsBullet, evidenceIds }];
           return draft;
         };
@@ -1052,8 +1058,11 @@ export default [
         // The assembler is the second, independent holder of the same rule.
         const assembledBullet = attempt(() => assemblePasteApplicationResult(packageFor(A, L, { bullet: requirementAsBullet, bulletEvidenceIds: ['job-need'] })));
         assert(!assembledBullet.ok && /career-data evidence ID; job-listing evidence alone cannot support/u.test(assembledBullet.message), `${label}: assembly refuses a listing-only bullet (${assembledBullet.message})`);
-        const assembledLetter = attempt(() => assemblePasteApplicationResult(packageFor(A, L, { paragraphEvidenceIds: ['job-need'] })));
-        assert(!assembledLetter.ok && /job-listing evidence alone cannot support candidate copy/u.test(assembledLetter.message), `${label}: assembly refuses a listing-only cover-letter paragraph (${assembledLetter.message})`);
+        const oneParagraph = packageFor(A, L, { paragraphEvidenceIds: ['job-need'] });
+        oneParagraph.validateListingClosing = createApplicationListingClosingValidator({ input: oneParagraph.input,
+          state: { careerData: A.careerData, evidencePlan: oneParagraph.paste.evidencePlan }, authority: A.authority, sourceRoles: A.sourceRoles });
+        const assembledLetter = attempt(() => assemblePasteApplicationResult(oneParagraph));
+        assert(!assembledLetter.ok && /job-listing evidence alone cannot support candidate copy/u.test(assembledLetter.message), `${label}: even with the host closing validator, assembly refuses a one-paragraph listing-only cover letter (${assembledLetter.message})`);
         assert(attempt(() => assemblePasteApplicationResult(packageFor(A, L))).ok, `${label}: the same package assembles when the paragraph also cites career evidence`);
       }
     },
@@ -1139,7 +1148,7 @@ export default [
         }
         // The structured-résumé layer: a bullet citing the line resolves from B and is an unknown ID from A and C.
         const bulletDraft = (context, evidenceIds) => {
-          const draft = resumeDraft(context);
+          const draft = resumeDraft(context, L);
           draft.roles[0].bullets = [{ id: 'bullet-extra', text: achievementLine(extra), evidenceIds }];
           return draft;
         };
@@ -1199,7 +1208,7 @@ export default [
     },
   },
   {
-    name: 'Rotation invariance: what a candidate may claim depends on the approved source alone; the identical draft gets the same verdict under every listing',
+    name: 'Skill index rotation: a posting cannot create source support and a bullet-derived skill enters only the listing that names it',
     run() {
       for (const spec of CANDIDATES) {
         const A = build(spec);
@@ -1207,16 +1216,20 @@ export default [
         for (const { label, context, supported } of sources) {
           for (const Li of LISTINGS) {           // the listing being applied to
             for (const Lk of LISTINGS) {         // the product the draft claims
-              const expected = Boolean(supported && supported.key === Lk.key);
-              // The faithful block always carries every approved skill (the supported product included), so any
-              // refusal is attributable to the extra claimed product alone.
-              const groups = defaultSkillGroups(context);
-              if (!expected) groups.push({ id: 'skills-2', group: 'platforms', items: [Lk.tool], evidenceIds: [skillRowId('skill-own')] });
-              const verdict = gradeResume(context, Li, resumeDraft(context, groups));
-              assert(verdict.ok === expected, `${spec.key} ${label}: applying to ${Li.key}, claiming ${Lk.tool} is ${expected ? 'accepted' : 'rejected'} regardless of the listing (${verdict.message})`);
+              const sourceSupported = Boolean(supported && supported.key === Lk.key);
+              const expected = sourceSupported && Li.key === Lk.key;
+              // This source has no Skills declaration. Keep the claimed item
+              // explicit even when the faithful index would leave it out, so
+              // every unsupported or irrelevant claim is still graded.
+              const groups = defaultSkillGroups(context, Li);
+              if (!groups.some(group => group.items.includes(Lk.tool))) groups.push({ id: 'skills-2', group: 'platforms', items: [Lk.tool],
+                evidenceIds: [skillRowId(sourceSupported ? 'skill-listing' : 'skill-own')] });
+              const verdict = gradeResume(context, Li, resumeDraft(context, Li, groups));
+              assert(verdict.ok === expected, `${spec.key} ${label}: applying to ${Li.key}, claiming ${Lk.tool} is ${expected ? 'accepted' : 'rejected'} by source support and posting relevance (${verdict.message})`);
               if (!expected) assert(verdict.message.includes(Lk.tool) && /not an exact, index-eligible approved snapshot skill/u.test(verdict.message), `${spec.key} ${label}: the refusal names the claimed product (${verdict.message})`);
             }
-            // The unrelated-listing case is explicit: a supported product is accepted even where this listing never mentions it.
+            // The unrelated posting cannot admit a skill derived only from a
+            // bullet, even while the career still attests to that skill.
             if (supported && supported.key !== Li.key) assert(!listingText(Li).includes(supported.tool), `${spec.key}: ${Li.key} never mentions ${supported.tool}`);
           }
         }
@@ -1368,8 +1381,8 @@ export default [
       // Control: the same product as a SKILLS item is refused from every one of these sources.
       for (const { spec, L } of PAIRS) {
         const context = build(spec);
-        const groups = [...defaultSkillGroups(context), { id: 'skills-2', group: 'platforms', items: [L.tool], evidenceIds: [skillRowId('skill-own')] }];
-        assert(!gradeResume(context, L, resumeDraft(context, groups)).ok, `${spec.key}/${L.key}: control: the skills block refuses the product`);
+        const groups = [...defaultSkillGroups(context, L), { id: 'skills-2', group: 'platforms', items: [L.tool], evidenceIds: [skillRowId('skill-own')] }];
+        assert(!gradeResume(context, L, resumeDraft(context, L, groups)).ok, `${spec.key}/${L.key}: control: the skills block refuses the product`);
       }
       const accepted = acceptedByPipeline(claims);
       assert(accepted.length === 0, `${accepted.length} product claims reached the candidate unsupported, e.g. ${accepted.slice(0, 3).join(' || ')}`);
@@ -1411,7 +1424,7 @@ export default [
         const proof = `${spec.letter.proof.replace(/\.$/u, '')} while holding ${L.credential}.`;
         claims.push({ label: `${spec.key}/${L.key}`, context, L, form: 'paragraph', text: proof, evidenceIds, proof });
         // Control: the same credential as a credentials ITEM is refused.
-        const asItem = gradeResume(context, L, resumeDraft(context, undefined, [{ id: 'credential-1', name: L.certName, issuer: L.certIssuer, dates: L.certYear, evidenceIds }]));
+        const asItem = gradeResume(context, L, resumeDraft(context, L, undefined, [{ id: 'credential-1', name: L.certName, issuer: L.certIssuer, dates: L.certYear, evidenceIds }]));
         assert(!asItem.ok, `${spec.key}/${L.key}: control: the credentials section refuses the record`);
       }
       const accepted = acceptedByPipeline(claims);

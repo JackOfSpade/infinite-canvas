@@ -12,6 +12,7 @@ import { listingEvaluationBatchSize } from './resultCaps.js';
 import { sourceJobKey } from '../../src/utils/jobIdentity.js';
 import { validateGroundedResearchText } from './groundedResearchValidation.js';
 import { createDependencyReadyQueue, HANDOFF_CONCURRENCY, mapAutomaticHandoffs, runAutomaticHandoffWorkers } from '../../src/utils/handoffScheduler.js';
+import { checkPromptFits } from './llm.js';
 
 // Legacy exports remain for third-party/test compatibility. New production
 // code imports the explicit scheduler policy from handoffScheduler.js.
@@ -157,7 +158,7 @@ function safeHttpUrl(value) {
     return /^https?:$/.test(url.protocol) && url.hostname && !url.username && !url.password ? url.href : '';
   } catch { return ''; }
 }
-function normalizedEvidenceText(value) { return cleanText(value, MAX_LISTING_EVIDENCE_CHARS).toLowerCase(); }
+function normalizedEvidenceText(value, max = MAX_LISTING_EVIDENCE_CHARS) { return cleanText(value, max).toLowerCase(); }
 function normalizedGroundedResearchText(value) { return cleanText(value, MAX_GROUNDED_RESEARCH_CHARS).toLowerCase(); }
 function isGroundedEvidenceQuote(value, groundedResearch) {
   const quote = cleanText(value, 280);
@@ -202,7 +203,18 @@ function groundedSourceDate(value, groundedResearch) {
   }
   return '';
 }
+function hasOfficialPostingDescription(job) {
+  return ['L1', 'L2', 'L3'].includes(job?.officialPosting?.level);
+}
 function listingEvidenceText(job) {
+  if (hasOfficialPostingDescription(job)) {
+    // The host accessor has already loaded the bounded, verified official
+    // text. Its tail is evidence too; keep one complete copy in both prompts
+    // and quote validation rather than applying the legacy scrape caps.
+    return [cleanText(job?.title, 600), cleanText(job?.company || job?.employer, 600),
+      cleanText(job?.location, 600), cleanText(job?.salary, 600),
+      String(job?.description || job?.snippet || '')].filter(Boolean).join('\n');
+  }
   // Bound each field before joining. A scraper can supply an unexpectedly
   // large description, and joining it before a later slice defeats the size
   // bound for both the prompt and evidence validator.
@@ -943,7 +955,8 @@ export function listingIdsForRootBatch(jobs) {
   });
 }
 function slimListing(job, index, listingId = null) {
-  const listing = { index, title: cleanText(job?.title, 300), company: cleanText(job?.company || job?.employer, 300), location: cleanText(job?.location, 300), salary: cleanText(job?.salary, 300), descriptionCapture: cleanText(job?.descriptionCapture, 120), listingText: listingEvidenceText(job).slice(0, 16000), url: cleanText(job?.url || job?.link, 1200) };
+  const evidence = listingEvidenceText(job);
+  const listing = { index, title: cleanText(job?.title, 300), company: cleanText(job?.company || job?.employer, 300), location: cleanText(job?.location, 300), salary: cleanText(job?.salary, 300), descriptionCapture: cleanText(job?.descriptionCapture, 120), listingText: hasOfficialPostingDescription(job) ? evidence : evidence.slice(0, 16000), url: cleanText(job?.url || job?.link, 1200) };
   return listingId ? { index, listingId, ...listing } : listing;
 }
 function normalizeMatch(raw, item, source = 'listing') {
@@ -959,7 +972,8 @@ function listingAssessmentByIndex(raw, jobs, plan) {
   return jobs.map((job, index) => {
     const matches = new Map((Array.isArray(rows.get(index)?.matches) ? rows.get(index).matches.slice(0, items.length) : []).filter(match => typeof match?.preferenceId === 'string').map(match => [match.preferenceId, match]));
     const listingUrl = safeHttpUrl(job?.url || job?.link);
-    const listingText = normalizedEvidenceText(listingEvidenceText(job));
+    const evidence = listingEvidenceText(job);
+    const listingText = normalizedEvidenceText(evidence, hasOfficialPostingDescription(job) ? evidence.length : MAX_LISTING_EVIDENCE_CHARS);
     return items.map((item) => {
       const match = normalizeMatch(matches.get(item.id), item);
       const quote = normalizedEvidenceText(match.evidenceQuote);
@@ -1866,7 +1880,7 @@ async function assessCompletedCompanyResearch({ completed, ordered, packedLegacy
   }));
   return { results, legacyResults };
 }
-function attachAssessments(jobs, rows) {
+function attachAssessments(jobs, rows, identityJob = job => job) {
   const acceptedJobs = []; const filteredJobs = []; const candidatePool = []; const audits = []; let strictConflicts = 0; let strictUnverified = 0;
   jobs.forEach((job, index) => {
     const matches = rows[index] || []; const failures = matches.filter(match => match.strict && ['conflicts', 'unverified'].includes(match.outcome)); const status = failures.length ? 'filtered' : 'accepted';
@@ -1886,11 +1900,12 @@ function attachAssessments(jobs, rows) {
     const preferenceAssessment = { status, matches, confirmedSoftPreferences, conflictingSoftPreferences, preferenceScore, summary: status === 'accepted' ? 'Matches your strict Job Preferences; soft preferences are reflected in the assessment.' : 'Filtered by strict Job Preferences: ' + failures.map(match => match.criterion).join('; '), evaluatedAt: new Date().toISOString() };
     const enriched = { ...job, preferenceAssessment };
     candidatePool.push(enriched);
+    const identity = identityJob(job);
     audits.push({
       index,
-      title: cleanText(job?.title, 220),
-      company: cleanText(job?.company || job?.employer, 220),
-      listingIdentity: listingIdentityForAudit(job),
+      title: cleanText(identity?.title, 220),
+      company: cleanText(identity?.company || identity?.employer, 220),
+      listingIdentity: listingIdentityForAudit(identity),
       ...preferenceAssessment,
     });
     (status === 'accepted' ? acceptedJobs : filteredJobs).push(enriched);
@@ -1927,7 +1942,7 @@ function evaluationEnvelope(result, candidatePool) {
 // Injected rather than imported so this module stays independent of the
 // handoff transport and remains testable with a plain fake. Omit it and the
 // batch size falls back to the static conservative estimate.
-export async function evaluateJobPreferences({ jobs, jobPreferences, preferencePlan, jobPreferencesInterpretation, profile, careerData, targetRole, signal, callText, callRaw, calibration = null, useLegacyIndividualResearch = false, legacyResearchStepProbe = null, legacyResearchMigrationNeeded = null, legacyResearchAssessmentStepProbe = null, companyResearchPipelineEligible = true, meta = {} } = {}) {
+export async function evaluateJobPreferences({ jobs, jobPreferences, preferencePlan, jobPreferencesInterpretation, profile, careerData, targetRole, signal, callText, callRaw, calibration = null, useLegacyIndividualResearch = false, legacyResearchStepProbe = null, legacyResearchMigrationNeeded = null, legacyResearchAssessmentStepProbe = null, companyResearchPipelineEligible = true, checkFits = checkPromptFits, identityJob = job => job, meta = {} } = {}) {
   const pool = Array.isArray(jobs) ? jobs : [];
   const rawPreferences = cleanText(jobPreferences, MAX_PREFERENCES_CHARS);
   const suppliedPlan = preferencePlan || jobPreferencesInterpretation;
@@ -2082,6 +2097,20 @@ export async function evaluateJobPreferences({ jobs, jobPreferences, preferenceP
       throwIfAborted(listingSignal);
       const batch = pool.slice(start, start + listingBatchSize);
       const rootListingIds = listingIdsForRootBatch(batch);
+      const listingPrompt = buildListingPrompt(batch, rootListingIds);
+      const fit = await checkFits(listingPrompt, { signal: listingSignal, task: 'job-preference-evaluation',
+        responseSchema: JOB_PREFERENCE_LISTING_EVALUATION_SCHEMA,
+        hints: { itemCount: batch.length, matchCount: batch.length * items.length, planItemCount: items.length, observedTokensPerMatch } });
+      throwIfAborted(listingSignal);
+      if (fit && !fit.fits) {
+        if (batch.length === 1) throw new Error('The complete job posting is too large for the Job Preference evaluation context.');
+        const mid = Math.ceil(batch.length / 2);
+        // Split within one worker slot, in order, retaining every description
+        // byte. A single unsplittable posting fails before a handoff is issued.
+        await runRootBatch({ start, listingBatchSize: mid, observedTokensPerMatch, recalled, thisBatchIndex });
+        await runRootBatch({ start: start + mid, listingBatchSize: batch.length - mid, observedTokensPerMatch, recalled, thisBatchIndex });
+        return;
+      }
       // Only a bounded concurrent worker pool is materialized as handoffs at once,
       // but a worker-pool decision made now needs the whole remaining phase.
       // This is deliberately aggregate scheduling metadata: no listing text,
@@ -2111,7 +2140,7 @@ export async function evaluateJobPreferences({ jobs, jobPreferences, preferenceP
         ...legacyReplayMetadata,
       } : null;
       const progressUnitId = `listing-evaluation-${start}`;
-      const result = await callText(buildListingPrompt(batch, rootListingIds), { signal: listingSignal, task: 'job-preference-evaluation', responseSchema: JOB_PREFERENCE_LISTING_EVALUATION_SCHEMA, hints: { itemCount: batch.length, matchCount: batch.length * items.length, batch: thisBatchIndex, itemsDone: listingsDone, itemsTotal: pool.length, progressScopeId: listingProgressScopeId, progressUnitId, progressUnits: batch.length, queuedWorkForecast, planItemCount: items.length, observedTokensPerMatch }, responseValidator: value => validateJobPreferenceListingSubmission(value, batch, plan, { requireComplete: false, listingIds: rootListingIds }), legacyReplay,
+      const result = await callText(listingPrompt, { signal: listingSignal, task: 'job-preference-evaluation', responseSchema: JOB_PREFERENCE_LISTING_EVALUATION_SCHEMA, hints: { itemCount: batch.length, matchCount: batch.length * items.length, batch: thisBatchIndex, itemsDone: listingsDone, itemsTotal: pool.length, progressScopeId: listingProgressScopeId, progressUnitId, progressUnits: batch.length, queuedWorkForecast, planItemCount: items.length, observedTokensPerMatch }, responseValidator: value => validateJobPreferenceListingSubmission(value, batch, plan, { requireComplete: false, listingIds: rootListingIds }), legacyReplay,
         // A permissive first submission may cover only some listing rows. Its
         // contribution is those rows—not every preference match, and not the
         // full root batch that a targeted recovery will finish below.
@@ -2315,7 +2344,7 @@ export async function evaluateJobPreferences({ jobs, jobPreferences, preferenceP
     const matchIndex = rows[jobIndex].findIndex(match => match.preferenceId === researched[index].preferenceId);
     if (matchIndex >= 0) rows[jobIndex][matchIndex] = researched[index];
   }));
-  const assessed = attachAssessments(pool, rows);
+  const assessed = attachAssessments(pool, rows, identityJob);
   return evaluationEnvelope({ aiSkipped: false, preferencePlan: plan, jobPreferencesInterpretation: plan, preferenceFingerprint, ...assessed }, assessed.candidatePool);
 }
 

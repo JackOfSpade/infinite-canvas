@@ -31,6 +31,28 @@ import application_authority_ledger_store from './tests/application-authority-le
 import current_authority_parallel_match from './tests/current-authority-parallel-match.js';
 import application_career_authority from './tests/application-career-authority.js';
 import application_write_verify from './tests/application-write-verify.js';
+import official_posting_gates from './tests/official-posting-gates.js';
+import official_posting_skills from './tests/official-posting-skills.js';
+import official_posting_skill_selection from './tests/official-posting-skill-selection.js';
+import official_posting_fetch from './tests/official-posting-fetch.js';
+import official_posting_store from './tests/official-posting-store.js';
+import official_posting_match from './tests/official-posting-match.js';
+import official_posting_extractors from './tests/official-posting-extractors.js';
+import official_posting_resolver from './tests/official-posting-resolver.js';
+import official_posting_fields from './tests/official-posting-fields.js';
+import official_posting_scrape from './tests/official-posting-scrape.js';
+import official_posting_bridge from './tests/official-posting-bridge.js';
+import official_posting_service from './tests/official-posting-service.js';
+import official_posting_search from './tests/official-posting-search.js';
+import official_posting_consumers from './tests/official-posting-consumers.js';
+import official_posting_freeze from './tests/official-posting-freeze.js';
+import official_posting_bundle from './tests/official-posting-bundle.js';
+import official_posting_generation from './tests/official-posting-generation.js';
+import official_posting_ui from './tests/official-posting-ui.js';
+import official_posting_audit from './tests/official-posting-audit.js';
+import official_posting_audit_staging from './tests/official-posting-audit-staging.js';
+import official_posting_closing from './tests/official-posting-closing.js';
+import official_posting_closing_assembly from './tests/official-posting-closing-assembly.js';
 import cover_letter_hedged_diagnosis from './tests/cover-letter-hedged-diagnosis.js';
 import claude_application_runner from './tests/claude-application-runner.js';
 import claude_application_sdk_stage from './tests/claude-application-sdk-stage.js';
@@ -70,6 +92,7 @@ import career_canvas_file_import from './tests/career-canvas-file-import.js';
 import job_board_canvas_career_drop from './tests/job-board-canvas-career-drop.js';
 import career_text_files from './tests/career-text-files.js';
 import career_profile_compilation from './tests/career-profile-compilation.js';
+import career_incremental_compilation from './tests/career-incremental-compilation.js';
 import career_clean_layer from './tests/career-clean-layer.js';
 import career_profile_edits from './tests/career-profile-edits.js';
 import non_api_ai from './tests/non-api-ai.js';
@@ -208,6 +231,28 @@ const testGroups = [
   ['current-authority-parallel-match.js', current_authority_parallel_match],
   ['application-career-authority.js', application_career_authority],
   ['application-write-verify.js', application_write_verify],
+  ['official-posting-gates.js', official_posting_gates],
+  ['official-posting-skills.js', official_posting_skills],
+  ['official-posting-skill-selection.js', official_posting_skill_selection],
+  ['official-posting-fetch.js', official_posting_fetch],
+  ['official-posting-store.js', official_posting_store],
+  ['official-posting-match.js', official_posting_match],
+  ['official-posting-extractors.js', official_posting_extractors],
+  ['official-posting-resolver.js', official_posting_resolver],
+  ['official-posting-fields.js', official_posting_fields],
+  ['official-posting-scrape.js', official_posting_scrape],
+  ['official-posting-bridge.js', official_posting_bridge],
+  ['official-posting-service.js', official_posting_service],
+  ['official-posting-search.js', official_posting_search],
+  ['official-posting-consumers.js', official_posting_consumers],
+  ['official-posting-freeze.js', official_posting_freeze],
+  ['official-posting-bundle.js', official_posting_bundle],
+  ['official-posting-generation.js', official_posting_generation],
+  ['official-posting-ui.js', official_posting_ui],
+  ['official-posting-audit.js', official_posting_audit],
+  ['official-posting-audit-staging.js', official_posting_audit_staging],
+  ['official-posting-closing.js', official_posting_closing],
+  ['official-posting-closing-assembly.js', official_posting_closing_assembly],
   ['application-unit-patches.js', application_unit_patches],
   ['application-rule-tally.js', application_rule_tally],
   ['application-render-faults.js', application_render_faults],
@@ -251,6 +296,7 @@ const testGroups = [
   ['job-board-canvas-career-drop.js', job_board_canvas_career_drop],
   ['career-text-files.js', career_text_files],
   ['career-profile-compilation.js', career_profile_compilation],
+  ['career-incremental-compilation.js', career_incremental_compilation],
   ['career-clean-layer.js', career_clean_layer],
   ['career-profile-edits.js', career_profile_edits],
   ['non-api-ai.js', non_api_ai],

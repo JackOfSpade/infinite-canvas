@@ -31,11 +31,13 @@ import {
   projectLegacyCareerProfile,
   readCareerSnapshot,
   readPinnedCareerSnapshot,
+  stableCareerJsonDigest,
   verbatimCareerTranscriptionAuditReceipt,
   writeCareerSnapshotAtomically,
 } from './careerSnapshot.js';
 import { produceCareerCleanLayer } from './careerCleanLayer.js';
-import { logCareerDataImport } from './careerImportLog.js';
+import { logCareerDataImport, readPreviousCareerImportSnapshot } from './careerImportLog.js';
+import { readCareerIncrementalState, writeCareerIncrementalState } from './careerIncrementalStore.js';
 import { buildScoredJob } from './jobBatchReconcile.js';
 import { nonScoringJobConstraintKind, summarizeFitCalibration, validateAndNormalizeFitAssessment } from './jobFitAssessment.js';
 import {
@@ -128,6 +130,8 @@ import { normalizeJobSearchInitialLookbackDays, providerLookbackDaysForStart, re
 import { parseGuaranteedCashOffer, compensationAssessment, mergeCompetitiveRanges, resolveCompensationMarketCurrency, resolveCompensationLocation, compensationResidencesForJob, compensationCohortKey, selectComparableEvidence, classifyCompensationFitEligibility, selectCompensationExperienceYears, estimateCompensationExperienceYearsFromDescription, isValidCompensationExperienceBandLadder, selectCompensationExperienceBand, sourcesPresentInGroundedResearch, isAuditableCompensationSource, classifyCompensationLocationGap } from './jobCompensation.js';
 import { buildPersonalSalaryEvidence, PERSONAL_SALARY_GUIDANCE_PROMPT, validatePersonalSalaryRecommendation } from './personalSalaryRecommendation.js';
 import { buildJobLocationLookupRequest, selectLookupRequests, runJobLocationLookup, applyLookedUpLocation, locationSourceLink } from './jobLocationLookup.js';
+import { getOfficialPostingView, resolveOfficialPostings, officialPostingDedup } from './officialPostingService.js';
+import { normalizeOfficialPosting } from './officialPostingFields.js';
 import { blankJobPreferencePlan, interpretJobPreferences, evaluateJobPreferences, isValidJobPreferencePlanSubmission, normalizeJobPreferencePlan, resolveSearchRoles, screenJobRolesByTitle } from './jobPreferences.js';
 import { acquireCanvasRecoveryRead, resolveCanvasRecoveryPath, withCanvasRecoveryOwner } from './canvasRecoveryPaths.js';
 import { createDependencyReadyQueue, HANDOFF_CONCURRENCY, mapAutomaticHandoffs, runAutomaticHandoffWorkers } from '../../src/utils/handoffScheduler.js';
@@ -736,9 +740,12 @@ function careerSnapshotRoot() {
   return careerSnapshotStorageRoot(app.getPath('userData'));
 }
 
-async function ensureCareerCleanLayer(snapshot, signal) {
+async function ensureCareerCleanLayer(snapshot, signal, previousSnapshot = null) {
   return produceCareerCleanLayer({ snapshotId: snapshot.snapshotId,
     catalog: approvedCareerEvidenceCatalog(snapshot), root: careerSnapshotRoot(),
+    ...(previousSnapshot ? { previous: {
+      snapshotId: previousSnapshot.snapshotId, catalog: approvedCareerEvidenceCatalog(previousSnapshot),
+    } } : {}),
     callText: callLLMText, signal });
 }
 
@@ -4375,6 +4382,48 @@ function buildCandidateEvidenceForScoring(profile, careerData, { approvedSnapsho
   };
 }
 
+const OFFICIAL_CONSUMER_ORIGINAL = Symbol('official-consumer-original');
+const SCRAPED_CONSUMER_FIELDS = ['title', 'company', 'location', 'salary', 'snippet', 'description', 'url', 'googleCardUrl', 'sourceJobKey', 'remote', 'remoteCountry', 'remoteRegion', 'officialPosting', 'postedBy'];
+export async function officialPostingConsumerJobs(jobs, { getView = getOfficialPostingView } = {}) {
+  return Promise.all((Array.isArray(jobs) ? jobs : []).map(async job => {
+    const view = await getView(job);
+    const location = view.location && typeof view.location === 'object' ? view.location : view.officialPosting?.location;
+    return { ...job, [OFFICIAL_CONSUMER_ORIGINAL]: job, title: view.title, company: view.employer,
+      officialPosting: view.officialPosting, postedBy: view.postedBy,
+      location: typeof view.location === 'object' ? view.location?.display || '' : view.location,
+      salary: typeof view.salary === 'object' ? view.salary?.text || '' : view.salary,
+      ...(location ? { remote: location.remote === true,
+        remoteCountry: location.remoteCountry || '', remoteRegion: location.remoteRegion || '' } : {}),
+      snippet: view.description, description: view.description };
+  }));
+}
+
+export function restoreOfficialPostingConsumerIdentity(job) {
+  const original = job?.[OFFICIAL_CONSUMER_ORIGINAL];
+  if (!original) return job;
+  const restored = { ...job };
+  for (const field of SCRAPED_CONSUMER_FIELDS) {
+    if (Object.hasOwn(original, field)) restored[field] = original[field];
+    else delete restored[field];
+  }
+  delete restored[OFFICIAL_CONSUMER_ORIGINAL];
+  return restored;
+}
+
+async function officialPostingConsumerMap(jobs, options) {
+  const rows = Array.isArray(jobs) ? jobs : [];
+  const shadows = await officialPostingConsumerJobs(rows, options);
+  const byObject = new Map(rows.map((job, index) => [job, shadows[index]]));
+  const byIdentity = new Map(rows.map((job, index) => [sourceJobKey(job), shadows[index]]));
+  return job => {
+    const shadow = byObject.get(job) || byIdentity.get(sourceJobKey(job));
+    return shadow ? { ...job, title: shadow.title, company: shadow.company, location: shadow.location,
+      salary: shadow.salary, snippet: shadow.snippet, description: shadow.description,
+      remote: shadow.remote, remoteCountry: shadow.remoteCountry, remoteRegion: shadow.remoteRegion,
+      officialPosting: shadow.officialPosting, postedBy: shadow.postedBy } : job;
+  };
+}
+
 function jobEvidenceTextForFit(job = {}) {
   return [job.title, job.company, job.location, job.salary, job.snippet, job.description]
     .filter(value => typeof value === 'string' && value.trim())
@@ -4659,6 +4708,7 @@ export function reconcileSearchFunnel(search) {
   // enrichment/markup cleanup. Keep that last-mile dedup as its own explicit
   // stage rather than making the scored input look smaller than the funnel.
   const finalDedupDropped = Math.max(0, Number(search.finalDedupDropped) || 0);
+  const officialDedupDropped = Math.max(0, Number(search.officialDedupDropped) || 0);
   const kept = Math.max(0, Number(search.kept) || 0);
   const relevanceKept = Math.max(0, raw - relevanceDropped);
   const countryScopeKept = Math.max(0, relevanceKept - countryScopeDropped);
@@ -4673,7 +4723,8 @@ export function reconcileSearchFunnel(search) {
       - roleDropped
       - historyDropped
       - descriptionEvidenceDropped
-      - finalDedupDropped,
+      - finalDedupDropped
+      - officialDedupDropped,
   );
   const windowUnexplainedDelta = hasWindowFirstFunnel
     ? windowEligible - expectedWindowEligible
@@ -4714,6 +4765,7 @@ export function reconcileSearchFunnel(search) {
     historyDropped,
     descriptionEvidenceDropped,
     finalDedupDropped,
+    officialDedupDropped,
     kept,
     expectedKept,
     unexplainedDelta: kept - expectedKept,
@@ -4772,7 +4824,7 @@ export function __consumeRecoveryBlockedUrlForTests(state, sourceId, resolvedUrl
   return consumeRecoveryBlockedUrl(state, sourceId, resolvedUrl);
 }
 
-export function buildJobAnalysisSnapshot({ jobs, descriptionRecoveryJobs, descriptionRecoveryState, profile, careerData, careerSnapshotId: requestedCareerSnapshotId, approvedScoringSnapshot = false, nodeId, targetRole, jobPreferences, jobPreferencePlan, preferenceEvaluation, preferenceCandidatePool, operationAuthority, snapshotContext }) {
+export function buildJobAnalysisSnapshot({ jobs, descriptionRecoveryJobs, descriptionRecoveryState, profile, careerData, careerSnapshotId: requestedCareerSnapshotId, approvedScoringSnapshot = false, nodeId, targetRole, jobPreferences, jobPreferencePlan, preferenceEvaluation, preferenceCandidatePool, operationAuthority, snapshotContext, postingJob = job => job }) {
   const gathered = Array.isArray(jobs) ? jobs : [];
   const recoveryMode = typeof snapshotContext?.recoveryMode === 'string'
     ? snapshotContext.recoveryMode.trim().slice(0, 80)
@@ -4836,7 +4888,7 @@ export function buildJobAnalysisSnapshot({ jobs, descriptionRecoveryJobs, descri
   // fixed target (resultCaps.jobScoringBatchSize). The free-count preflight
   // below still verifies each real batch fits the window and halves it if not.
   const batchSize = jobScoringBatchSize();
-  const slimBatch = (batch) => batch.map((j, idx) => ({
+  const slimBatch = (batch) => batch.map(postingJob).map((j, idx) => ({
     index: idx,
     title:    j.title || '',
     company:  j.company || '',
@@ -5810,6 +5862,7 @@ export function buildJobRunCompletionReceipt(runId, completedAt = Date.now(), te
         historyDropped: search.historyDropped,
         descriptionEvidenceDropped: search.descriptionEvidenceDropped?.total,
         finalDedupDropped: search.finalDedupDropped,
+        ...(search.officialDedupDropped != null ? { officialDedupDropped: search.officialDedupDropped } : {}),
         kept: search.kept,
       },
     } : {}),
@@ -8599,9 +8652,9 @@ export function compensationPersonalizationSignature(group) {
   return crypto.createHash('sha256').update(JSON.stringify({
     methodologyVersion: 1,
     jobs: group.jobs.map(item => ({
-      title: item.job?.title || '',
-      company: item.job?.company || '',
-      description: jobEvidenceTextForFit(item.job),
+      title: (item.postingJob || item.job)?.title || '',
+      company: (item.postingJob || item.job)?.company || '',
+      description: jobEvidenceTextForFit(item.postingJob || item.job),
       evidence: item.personalSalaryEvidence || null,
     })),
   }), 'utf8').digest('hex');
@@ -8614,8 +8667,8 @@ function compensationAssessmentCacheKey(group) {
 export function buildCompensationAssessmentListings(group) {
   return group.jobs.map((item, index) => ({
     index,
-    title: String(item.job?.title || '').slice(0, 240),
-    company: String(item.job?.company || '').slice(0, 240),
+    title: String((item.postingJob || item.job)?.title || '').slice(0, 240),
+    company: String((item.postingJob || item.job)?.company || '').slice(0, 240),
     hasUsableAdvertisedCash: item.offer.usable,
     advertisedCash: item.offer.raw || '',
     offeredAnnualMin: item.offer.usable ? item.offer.min : null,
@@ -9820,8 +9873,8 @@ async function processCompensationCohortBatches(groups, { signal, nodeId, resear
     }
     for (const item of group.jobs) {
       item.job.compensationAssessment = signal?.aborted
-        ? compensationFallback(item.job, 'research_interrupted', 'Compensation research was interrupted; fit scoring completed normally.', group.location)
-        : compensationFallback(item.job, 'research_unavailable', 'Compensation research was unavailable or incomplete. Hiring-fit scoring completed normally; no compensation judgment was made.', group.location);
+        ? compensationFallback(item.postingJob || item.job, 'research_interrupted', 'Compensation research was interrupted; fit scoring completed normally.', group.location)
+        : compensationFallback(item.postingJob || item.job, 'research_unavailable', 'Compensation research was unavailable or incomplete. Hiring-fit scoring completed normally; no compensation judgment was made.', group.location);
       metrics.processed++;
     }
   };
@@ -10176,7 +10229,8 @@ ${batch.map((entry) => `BEGIN COMPENSATION RESEARCH ${entry.researchId}\nCOHORT 
  * Every failure is converted into an assessment on the affected card; no
  * research error may discard a scored job or reject the score-jobs IPC call.
  */
-export async function researchCompensationAssessments(scoredJobs, { remoteResidences = {}, event, nodeId, requestId = null, signal, legacyResearchStepProbe = null, legacyAssessmentStepProbe = null, manualAiRunId = null, locationLookupCallRaw = callLLMRaw, careerInputs = new Map(), salaryCareerSnapshotId } = {}) {
+export async function researchCompensationAssessments(scoredJobs, { remoteResidences = {}, event, nodeId, requestId = null, signal, legacyResearchStepProbe = null, legacyAssessmentStepProbe = null, manualAiRunId = null, locationLookupCallRaw = callLLMRaw, careerInputs = new Map(), salaryCareerSnapshotId, getPostingView = getOfficialPostingView } = {}) {
+  const postingJob = await officialPostingConsumerMap(scoredJobs, { getView: getPostingView });
   const researchedAt = new Date().toISOString();
   const total = Array.isArray(scoredJobs) ? scoredJobs.length : 0;
   let processed = 0;
@@ -10216,6 +10270,20 @@ export async function researchCompensationAssessments(scoredJobs, { remoteReside
   };
   const locationLookupHits = new Map(); // job -> { job, context, source } copies for resolveCompensationLocation
   const locationLookupAttempt = new Map(); // job -> 'rejected' | 'not-found' | 'failed' | 'interrupted' | 'found'
+  // Resolved rows use existing official metadata through shadow copies. They
+  // never start another employer-posting research handoff at Board Combine.
+  for (const job of scoredJobs || []) {
+    const consumer = postingJob(job);
+    const resolved = consumer.officialPosting;
+    if (!resolved) continue;
+    const salary = typeof resolved.salary?.text === 'string' && resolved.salary.text ? resolved.salary.text : consumer.salary;
+    const shadow = { ...consumer, salary, salaryProvenance: resolved.salary?.provenance || job.salaryProvenance || 'unknown' };
+    const context = compensationContextForSalary(shadow, job.compensationContext || {});
+    const found = resolved.location;
+    const located = found ? applyLookedUpLocation(shadow, context, found) : { job: shadow, context };
+    locationLookupHits.set(job, { ...located, official: true,
+      source: resolved.sourceUrl && (found?.display || found?.remote) ? { sourceUrl: resolved.sourceUrl } : null });
+  }
   let roleBandLookups = 0;
   let roleBandResearches = 0;
   let roleBandCacheHits = 0;
@@ -10243,6 +10311,9 @@ export async function researchCompensationAssessments(scoredJobs, { remoteReside
   {
     const lookupEntries = [];
     for (const job of scoredJobs || []) {
+      // A well-shaped prior resolution still suppresses new Combine research
+      // when its record is missing; its untrusted facts stay out of the view.
+      if (postingJob(job)?.officialPosting || normalizeOfficialPosting(job?.officialPosting)) continue;
       if (classifyCompensationFitEligibility(job.matchScore, {
         minScore: COMPENSATION_MIN_FIT_SCORE,
         unscoredSentinel: UNSCORED_FALLBACK_SCORE,
@@ -10313,13 +10384,13 @@ export async function researchCompensationAssessments(scoredJobs, { remoteReside
       // scored" without string-matching a justification.
       job.compensationAssessment = fitEligibility === 'below-threshold'
         ? compensationFallback(
-          job,
+          postingJob(job),
           'below_fit_threshold',
           `The competitive-pay check is reserved for stronger matches (fit score ${COMPENSATION_MIN_FIT_SCORE} or above); this job scored ${Math.round(rawScore)}. No judgment was made on whether the pay itself is good or bad.`,
           null,
         )
         : compensationFallback(
-          job,
+          postingJob(job),
           'fit_score_unavailable',
           `The competitive-pay check is reserved for stronger matches (fit score ${COMPENSATION_MIN_FIT_SCORE} or above); this job's fit score was unavailable, so no comparison was made.`,
           null,
@@ -10328,7 +10399,8 @@ export async function researchCompensationAssessments(scoredJobs, { remoteReside
       continue;
     }
     eligible++;
-    const context = compensationContextForSalary(job, job.compensationContext || {});
+    const consumer = postingJob(job);
+    const context = compensationContextForSalary(consumer, job.compensationContext || {});
     // A board can unite results from several Job Search modules, each with a
     // different saved residence. The renderer attaches this transient field
     // before Combine; never let one board-level fallback overwrite it.
@@ -10337,9 +10409,10 @@ export async function researchCompensationAssessments(scoredJobs, { remoteReside
     // rewritten. When the lookup found nothing usable the originals resolve to
     // null exactly as before.
     const lookupHit = locationLookupHits.get(job);
-    const location = resolveCompensationLocation(lookupHit?.job || job, lookupHit?.context || context, compensationResidencesForJob(job, remoteResidences));
-    const offer = parseGuaranteedCashOffer(job, location);
-    if (lookupHit) {
+    const evaluationJob = lookupHit?.job || consumer;
+    const location = resolveCompensationLocation(evaluationJob, lookupHit?.context || context, compensationResidencesForJob(job, remoteResidences));
+    const offer = parseGuaranteedCashOffer(evaluationJob, location);
+    if (lookupHit && !lookupHit.official) {
       if (location) locationLookup.resolved++;
       else locationLookup.foundUnresolved++;
     }
@@ -10354,7 +10427,7 @@ export async function researchCompensationAssessments(scoredJobs, { remoteReside
           : attempt === 'failed' || attempt === 'interrupted'
             ? ' The search for the employer\'s own posting did not complete.'
             : '';
-      job.compensationAssessment = compensationFallback(job, 'comparison_location_unavailable', `Compensation is uncertain because the applicable work location or remote residence could not be established.${lookupNote}`, null);
+      job.compensationAssessment = compensationFallback(evaluationJob, 'comparison_location_unavailable', `Compensation is uncertain because the applicable work location or remote residence could not be established.${lookupNote}`, null);
       processed++; progress();
       continue;
     }
@@ -10363,7 +10436,7 @@ export async function researchCompensationAssessments(scoredJobs, { remoteReside
     // research from producing a useful application-answer range.
     const marketCurrencyResolution = offer.usable
       ? { currency: offer.currency, inferredFromLocation: Boolean(offer.currencyInferredFromLocation) }
-      : resolveCompensationMarketCurrency(job, location);
+      : resolveCompensationMarketCurrency(evaluationJob, location);
     const marketCurrency = marketCurrencyResolution.currency;
     if (!offer.usable) {
       missingOffer++;
@@ -10380,11 +10453,11 @@ export async function researchCompensationAssessments(scoredJobs, { remoteReside
         continue;
       }
     }
-    const corroboratedContext = { ...context, job };
+    const corroboratedContext = { ...(lookupHit?.context || context), job: evaluationJob };
     const establishedExperience = selectCompensationExperienceYears(job.experienceAssessment, corroboratedContext);
     const experience = Number.isFinite(establishedExperience.years)
       ? establishedExperience
-      : estimateCompensationExperienceYearsFromDescription(job, context);
+      : estimateCompensationExperienceYearsFromDescription(evaluationJob, corroboratedContext);
     // When fit evidence cannot establish a candidate-linked requirement, use
     // the listing's own stated years or seniority level as an explicitly marked
     // market estimate. This remains after the structural location/currency
@@ -10392,7 +10465,7 @@ export async function researchCompensationAssessments(scoredJobs, { remoteReside
     if (!Number.isFinite(experience.years)) {
       skippedNoExperience++;
       job.compensationAssessment = compensationFallback(
-        job,
+        evaluationJob,
         'experience_band_unavailable',
         'The listing and candidate evidence did not establish years that could be placed in a role-family experience band, so no salary-market comparison was made.',
         location,
@@ -10402,15 +10475,16 @@ export async function researchCompensationAssessments(scoredJobs, { remoteReside
     }
     candidates.push({
       job,
-      personalSalaryEvidence: buildCompensationPersonalSalaryEvidence(job, careerInputs, salaryCareerSnapshotId),
+      postingJob: evaluationJob,
+      personalSalaryEvidence: buildCompensationPersonalSalaryEvidence(evaluationJob, careerInputs, salaryCareerSnapshotId),
       offer: offer.usable ? offer : { ...offer, currency: marketCurrency },
       marketCurrency,
       currencyInferredFromLocation: marketCurrencyResolution.inferredFromLocation,
-      context,
+      context: lookupHit?.context || context,
       location,
       experience,
       locationSource: lookupHit ? lookupHit.source : null,
-      role: String(context.roleFamily || job.title || 'this role').trim().slice(0, 180),
+      role: String(context.roleFamily || consumer.title || 'this role').trim().slice(0, 180),
     });
   }
 
@@ -10467,7 +10541,7 @@ export async function researchCompensationAssessments(scoredJobs, { remoteReside
       // affected rows explicit so the diagnostic equation can reconcile.
       roleBandInterruptedJobs += roleCandidates.length;
       for (const candidate of roleCandidates) {
-        candidate.job.compensationAssessment = compensationFallback(candidate.job, 'research_interrupted', 'Compensation research was interrupted; fit scoring completed normally.', candidate.location);
+        candidate.job.compensationAssessment = compensationFallback(candidate.postingJob || candidate.job, 'research_interrupted', 'Compensation research was interrupted; fit scoring completed normally.', candidate.location);
         processed++;
       }
       progress();
@@ -10506,7 +10580,7 @@ export async function researchCompensationAssessments(scoredJobs, { remoteReside
       }
       if (signal?.aborted) {
         for (const candidate of roleCandidates) {
-          candidate.job.compensationAssessment = compensationFallback(candidate.job, 'research_interrupted', 'Compensation research was interrupted; fit scoring completed normally.', candidate.location);
+          candidate.job.compensationAssessment = compensationFallback(candidate.postingJob || candidate.job, 'research_interrupted', 'Compensation research was interrupted; fit scoring completed normally.', candidate.location);
           processed++;
         }
         progress();
@@ -10529,12 +10603,12 @@ export async function researchCompensationAssessments(scoredJobs, { remoteReside
         // A successful ladder cannot honestly place a job with no supported
         // headline years. Do not manufacture an "unbanded" salary cohort.
         skippedNoExperienceBand++;
-        candidate.job.compensationAssessment = compensationFallback(candidate.job, 'experience_band_unavailable', 'The listing and candidate evidence did not establish years that could be placed in the researched role-family experience bands, so no salary-market comparison was made.', candidate.location);
+        candidate.job.compensationAssessment = compensationFallback(candidate.postingJob || candidate.job, 'experience_band_unavailable', 'The listing and candidate evidence did not establish years that could be placed in the researched role-family experience bands, so no salary-market comparison was made.', candidate.location);
         processed++;
         continue;
       }
       const key = compensationCohortKey({
-        job: candidate.job,
+        job: candidate.postingJob || candidate.job,
         context: candidate.context,
         location: candidate.location,
         offer: candidate.offer,
@@ -10583,7 +10657,7 @@ export async function researchCompensationAssessments(scoredJobs, { remoteReside
     if (signal?.aborted) {
       failedCohorts++;
       for (const item of group.jobs) {
-        item.job.compensationAssessment = compensationFallback(item.job, 'research_interrupted', 'Compensation research was interrupted; fit scoring completed normally.', group.location);
+        item.job.compensationAssessment = compensationFallback(item.postingJob || item.job, 'research_interrupted', 'Compensation research was interrupted; fit scoring completed normally.', group.location);
         processed++;
       }
       progress();
@@ -10716,8 +10790,8 @@ export async function researchCompensationAssessments(scoredJobs, { remoteReside
       logger.warn(`[Jobs][${nodeId}] Compensation research failed for ${role} / ${location.display}:`, err?.message || err);
       for (const item of group.jobs) {
         item.job.compensationAssessment = signal?.aborted
-          ? compensationFallback(item.job, 'research_interrupted', 'Compensation research was interrupted; fit scoring completed normally.', location)
-          : compensationFallback(item.job, 'research_unavailable', 'Compensation research was unavailable or incomplete. Hiring-fit scoring completed normally; no compensation judgment was made.', location);
+          ? compensationFallback(item.postingJob || item.job, 'research_interrupted', 'Compensation research was interrupted; fit scoring completed normally.', location)
+          : compensationFallback(item.postingJob || item.job, 'research_unavailable', 'Compensation research was unavailable or incomplete. Hiring-fit scoring completed normally; no compensation judgment was made.', location);
         processed++;
       }
     }
@@ -10766,6 +10840,16 @@ export async function researchCompensationAssessments(scoredJobs, { remoteReside
     roleBandFailureDetails,
     aiTransport: 'non-api-ai',
   };
+  // Keep the official work-location receipt even when a later salary stage
+  // falls back. This annotates the assessment, never the scraped card fields.
+  for (const job of scoredJobs || []) {
+    const lookup = locationLookupHits.get(job);
+    const link = lookup?.official ? locationSourceLink(lookup.source) : null;
+    const assessment = job.compensationAssessment;
+    if (link && assessment && !assessment.sourceLinks?.some(source => source.url === link.url)) {
+      assessment.sourceLinks = [...(assessment.sourceLinks || []).slice(0, 4), link];
+    }
+  }
   return scoredJobs;
 }
 
@@ -10901,6 +10985,7 @@ export function __registerJobsHandlersForTests(dependencies = {}) {
 }
 
 function registerJobsHandlersWithDependencies(dependencies = {}) {
+  const compileCareerSnapshot = dependencies.compileCareerSnapshot || compileAuditedCareerSnapshot;
   const resolvePinnedScoringInputForHandler = dependencies.resolvePinnedScoringInput || resolvePinnedScoringInput;
   const resolveRequiredPinnedCareerInputForHandler = dependencies.resolveRequiredPinnedCareerInput || resolveRequiredPinnedCareerInput;
   const beforeScoreSideEffect = dependencies.beforeScoreSideEffect || (async () => {});
@@ -10909,6 +10994,30 @@ function registerJobsHandlersWithDependencies(dependencies = {}) {
   const runHttpSources = dependencies.fetchHttpSources || fetchHttpSources;
   const beforeSearchStageWrite = dependencies.beforeSearchStageWrite || (async () => {});
   const afterSearchProviderResult = dependencies.afterSearchProviderResult || (async () => {});
+  const runOfficialPostings = dependencies.resolveOfficialPostings || resolveOfficialPostings;
+  // Every provider and recovery path crosses this boundary after its existing
+  // evidence gate. Identity rows stay scraped; only resolution fields are added.
+  const resolveScoreSafePostings = async (rows, { event, nodeId, signal, jobRunId = null } = {}) => {
+    const context = getCurrentIpcRequestContext();
+    const onProgress = ({ completed = 0, total = rows.length } = {}) => {
+      if (signal?.aborted || event?.sender?.isDestroyed?.()) return;
+      const payload = { nodeId, jobRunId, sourceId: 'official-posting', count: 0,
+        status: completed >= total ? 'done' : 'searching',
+        detail: `Finding official postings ${completed} / ${total}`, warning: null };
+      // This is a progress stage with zero provider volume. The existing
+      // searching detail renders it without adding a provider card or count.
+      recordJobSourceProgress(payload, { updatePipeline: false, expectedNodeId: nodeId });
+      event?.sender?.send?.('job-source-progress', payload);
+    };
+    onProgress({ completed: 0, total: rows.length });
+    const resolved = await runOfficialPostings(rows, { signal, nodeId: context?.nodeId || nodeId,
+      manualAiRunId: context?.manualAiRunId || null, onProgress });
+    if (signal?.aborted) throw signal.reason || nodeCancellationError();
+    const deduped = officialPostingDedup(resolved.jobs);
+    onProgress({ completed: rows.length, total: rows.length });
+    return { jobs: deduped.kept, officialPosting: resolved.telemetry,
+      officialDedupDropped: deduped.dropped.length, officialDedupDrops: deduped.dropped };
+  };
   void pruneStaleUnsavedAnalysisArtifacts();
   void pruneStaleCareerInputStages();
   // This acknowledgement is the durable admission boundary for analysis
@@ -10969,6 +11078,7 @@ function registerJobsHandlersWithDependencies(dependencies = {}) {
     const importContext = {
       root: app.getPath('userData'), nodeId, module: importModule, manualAiRunId,
       canvasScope: event.sender.__canvasPath || unsavedAnalysisScopeForCurrentRequest(null),
+      sourcePaths: paths,
     };
     const recordProcessedImport = async (snapshot, cacheHit = false) => {
       if (signal?.aborted) throw nodeCancellationError();
@@ -11084,8 +11194,22 @@ function registerJobsHandlersWithDependencies(dependencies = {}) {
       legacyText: sections[index]?.slice(`===== FILE: ${source.name} =====\n`.length) || source.text,
       transcriptionAudit: source.transcriptionAudit,
     }));
-    const compiled = await compileAuditedCareerSnapshot({
+    let previousCompilation = null;
+    let previousSnapshot = null;
+    if (forceRecompile !== true) {
+      previousSnapshot = await readPreviousCareerImportSnapshot({
+        ...importContext, sourceDescriptors: fileDescriptors,
+      });
+      const previousState = previousSnapshot
+        ? await readCareerIncrementalState(careerSnapshotRoot(), previousSnapshot) : null;
+      if (previousState) {
+        previousCompilation = { snapshot: previousSnapshot, state: previousState };
+        cacheTelemetry.previousSnapshot = previousSnapshot.snapshotId.slice(0, 12);
+      }
+    }
+    const compiled = await compileCareerSnapshot({
       sourceFiles: snapshotSourceFiles,
+      previousCompilation,
       callText: callLLMText,
       signal,
       // Transcription remains an attachment-only stable wave. These text-only
@@ -11100,6 +11224,7 @@ function registerJobsHandlersWithDependencies(dependencies = {}) {
     await assertCareerInputDescriptorsStillMatch(paths, fileDescriptors);
     reportProgress({ phase: 'saving' });
     let approved = null;
+    let snapshotCollision = false;
     try {
       await writeCareerSnapshotAtomically(careerSnapshotRoot(), compiled.snapshot);
     } catch (error) {
@@ -11111,6 +11236,7 @@ function registerJobsHandlersWithDependencies(dependencies = {}) {
       // contract against this request's original descriptors.  Treat every
       // other write error, or an unreadable/cross-input collision, as fatal.
       if (error?.code !== 'CAREER_SNAPSHOT_COLLISION') throw error;
+      snapshotCollision = true;
       approved = await readCareerSnapshot(careerSnapshotRoot(), compiled.snapshotId);
       if (!approved || !approvedSnapshotMatchesCareerDescriptors(approved, fileDescriptors)) throw error;
       logger.info(`[Jobs][${nodeId}] Adopted concurrently published approved career snapshot ${compiled.snapshotId.slice(0, 12)}`);
@@ -11120,7 +11246,7 @@ function registerJobsHandlersWithDependencies(dependencies = {}) {
       throw new Error('The approved career snapshot could not be verified after publication. No job search was started.');
     }
     reportProgress({ phase: 'cleaning' });
-    await ensureCareerCleanLayer(approved, signal);
+    await ensureCareerCleanLayer(approved, signal, snapshotCollision ? null : previousSnapshot);
     // Publishing and re-reading are asynchronous. Recheck the live ordered
     // descriptors once more at the return boundary so an edit in that small
     // interval cannot hand the renderer a profile for bytes that are no
@@ -11133,6 +11259,15 @@ function registerJobsHandlersWithDependencies(dependencies = {}) {
     cacheTelemetry.ts = Date.now();
     cacheTelemetry.outcome = 'published';
     cacheTelemetry.snapshot = approved.snapshotId.slice(0, 12);
+
+    // Reuse receipts are optional private acceleration data. Never associate
+    // one publisher's page state with a different concurrently approved JSON.
+    if (compiled.reuseState && !snapshotCollision
+      && stableCareerJsonDigest(compiled.snapshot.profile) === stableCareerJsonDigest(approved.profile)) {
+      try { await writeCareerIncrementalState(careerSnapshotRoot(), approved, compiled.reuseState); }
+      catch (error) { logger.warn(`[Jobs][${nodeId}] Career compiler reuse receipts could not be saved: ${error.message}`); }
+      await assertCareerInputDescriptorsStillMatch(paths, fileDescriptors);
+    }
 
     await recordProcessedImport(approved);
 
@@ -11246,7 +11381,7 @@ function registerJobsHandlersWithDependencies(dependencies = {}) {
     if (backstopTitles.length > 0 && unscreened.length > 0) {
       const backstopMeta = {};
       const backstop = await screenJobRolesByTitle({
-        jobs: unscreened.map(entry => entry.job),
+        jobs: await officialPostingConsumerJobs(unscreened.map(entry => entry.job)),
         titles: backstopTitles,
         signal,
         callText: callLLMText,
@@ -11270,7 +11405,8 @@ function registerJobsHandlersWithDependencies(dependencies = {}) {
     }
     backstopLateArrivals = unscreened.length;
     const result = await evaluateJobPreferences({
-      jobs: screenedJobs,
+      jobs: await officialPostingConsumerJobs(screenedJobs),
+      identityJob: restoreOfficialPostingConsumerIdentity,
       jobPreferences,
       preferencePlan: preferencePlan || jobPreferencePlan,
       jobPreferencesInterpretation,
@@ -11330,7 +11466,11 @@ function registerJobsHandlersWithDependencies(dependencies = {}) {
         roleScreenBackstopLateArrivals: (Number(prior.roleScreenBackstopLateArrivals) || 0) + backstopLateArrivals,
       };
     }
-    return { success: true, ...result, model: meta.model || null };
+    const restored = { ...result };
+    for (const field of ['jobs', 'matchedJobs', 'acceptedJobs', 'filteredJobs', 'candidatePool', 'preferenceCandidatePool']) {
+      if (Array.isArray(restored[field])) restored[field] = restored[field].map(restoreOfficialPostingConsumerIdentity);
+    }
+    return { success: true, ...restored, model: meta.model || null };
   });
 
   handleSafe('generate-job-queries', async (_event, { profile, careerData, targetRole, preferredLocation, jobPreferences, preferencePlan, jobPreferencePlan, jobPreferencesInterpretation, careerSnapshotId }, signal) => {
@@ -13941,12 +14081,24 @@ Return a JSON object with four arrays of search query strings:
       logger.info(`[Jobs] Final enrichment-ready dedup removed ${finalDedupDropped} duplicate score-safe listing(s)`);
     }
     kept = finalDeduped;
+    jobsTelemetry.pipeline = { ...(jobsTelemetry.pipeline || {}), phase: 'finding-official-postings', ts: Date.now(), active: true, pendingSources: [] };
+    await assertSearchCurrent();
+    const officialResolution = await resolveScoreSafePostings(kept, {
+      event, nodeId, signal: combinedSignal, jobRunId: activeRunId,
+    });
+    await assertSearchCurrent();
+    kept = officialResolution.jobs;
+    const officialDedupDropped = officialResolution.officialDedupDropped;
+    const officialResolutionChanged = officialDedupDropped > 0 || kept.some((job, index) =>
+      JSON.stringify([job?.postedBy, job?.officialPosting])
+        !== JSON.stringify([finalDeduped[index]?.postedBy, finalDeduped[index]?.officialPosting]));
     // Keep bounded provenance for BOTH passes. The final-pass count is also a
     // first-class funnel stage below, so it cannot silently look like an AI or
     // renderer loss.
     const dedupProvenance = boundedDedupProvenance([
       ...dedupDrops.map(entry => ({ ...entry, stage: 'admission' })),
       ...finalDedupDrops.map(entry => ({ ...entry, stage: 'final-enrichment' })),
+      ...officialResolution.officialDedupDrops.map(entry => ({ ...entry, stage: 'official-posting' })),
     ]);
 
     // Do NOT write even the eligible rows to seen-history yet. The Job Board is
@@ -14273,6 +14425,8 @@ Return a JSON object with four arrays of search query strings:
       historyDropSamples,
       kept: kept.length,
       finalDedupDropped,
+      officialDedupDropped,
+      officialPosting: officialResolution.officialPosting,
       descriptionEvidenceDropped: {
         total: descriptionEvidence.dropped.length,
         deferred: descriptionEvidence.quality.deferred,
@@ -14342,9 +14496,9 @@ Return a JSON object with four arrays of search query strings:
     // the evidence gate all happen after the original page flushes. Recovery is
     // last-wins per source/job, so these rows make a gathered-only restart
     // reproduce the same eligible inputs without re-opening any network path.
-    // A gathered-only recovery already reads those final copies; writing again
-    // would only grow the append-only ledger and obscure its crash checkpoint.
-    if (!resumeGatheredOnly) {
+    // A gathered-only recovery needs another checkpoint only when old staged
+    // rows acquired resolution metadata or the official dedup changed its set.
+    if (!resumeGatheredOnly || officialResolutionChanged) {
       const finalScoreSafeBySource = new Map();
       for (const job of kept) {
         const sourceId = String(job?.source || '').trim();
@@ -15099,6 +15253,8 @@ Return a JSON object with four arrays of search query strings:
     if (descriptionEvidence.dropped.length > 0) {
       logger.info(`[Jobs][${sourceId}] Deferred ${descriptionEvidence.dropped.length} description-incomplete listing(s) (explicit=${descriptionEvidence.quality.deferred}, empty=${descriptionEvidence.quality.empty}, short=${descriptionEvidence.quality.short}; threshold=400 chars) — not returned or marked seen`);
     }
+    const officialResolution = await resolveScoreSafePostings(kept, { event, nodeId, signal, jobRunId });
+    kept = officialResolution.jobs;
     tagJobLanguages(kept);
 
     let status = 'done';
@@ -15120,6 +15276,8 @@ Return a JSON object with four arrays of search query strings:
     return {
       success: true,
       jobs: kept,
+      officialPosting: officialResolution.officialPosting,
+      officialDedupDropped: officialResolution.officialDedupDropped,
       warning,
     };
   }, { beforeReply: checkpointContinuationBeforeReply('search-jobs-single-source') });
@@ -15193,9 +15351,11 @@ Return a JSON object with four arrays of search query strings:
     }
     const scoringProfile = pinnedScoringInput.profile;
     const scoringCareerData = pinnedScoringInput.careerData;
+    const postingJob = await officialPostingConsumerMap(jobs);
+    await assertScoringCurrent();
     const { role, gathered, toScore, cappedForBudget, scoringBatches, slimBatch, cachedPrefix: snapshotCachedPrefix, candidateEvidencePages, snapshot } =
       buildJobAnalysisSnapshot({
-        jobs, profile: scoringProfile, careerData: scoringCareerData, careerSnapshotId, approvedScoringSnapshot: pinnedScoringInput.pinned, nodeId, targetRole, jobPreferences, jobPreferencePlan, preferenceEvaluation, preferenceCandidatePool, operationAuthority,
+        jobs, postingJob, profile: scoringProfile, careerData: scoringCareerData, careerSnapshotId, approvedScoringSnapshot: pinnedScoringInput.pinned, nodeId, targetRole, jobPreferences, jobPreferencePlan, preferenceEvaluation, preferenceCandidatePool, operationAuthority,
         snapshotContext: manualAiRecoveryMode
           ? {
             ...(snapshotContext || {}),
@@ -15285,7 +15445,7 @@ Return a JSON object with four arrays of search query strings:
           : null;
       const responsePlan = planPartialScoreRecovery(submittedScores, batch.length);
       if (!responsePlan.usable) return 0;
-      return prepareLiveScoringResults(responsePlan.alignedScores, batch, {
+      return prepareLiveScoringResults(responsePlan.alignedScores, batch.map(postingJob), {
         candidateText: candidateFitText,
         candidateRoles,
       }).scores.filter(Boolean).length;
@@ -15341,7 +15501,7 @@ Return a JSON object with four arrays of search query strings:
       }, SCORING_HEARTBEAT_MS);
       try {
         return await scorePinnedJobEvidence({
-          job: slimBatch([job])[0], jobText: jobEvidenceTextForFit(job),
+          job: slimBatch([job])[0], jobText: jobEvidenceTextForFit(postingJob(job)),
           pages: candidateEvidencePages, candidateRoles, assertCurrent: assertScoringCurrent,
           request: async ({ stage, schema, prompt, validate, itemCount = 22 }) => {
             const envelope = scoringPromptFitsEnvelopeForTests({ prompt, responseSchema: schema });
@@ -15367,11 +15527,11 @@ Return a JSON object with four arrays of search query strings:
               measureProgressUnits: value => {
                 if (stage !== 'synthesis') return 0;
                 const composed = validate(value);
-                return calibratedScoreForJob(composed, job, { candidateText: candidateFitText, candidateRoles }) ? 1 : 0;
+                return calibratedScoreForJob(composed, postingJob(job), { candidateText: candidateFitText, candidateRoles }) ? 1 : 0;
               },
               responseValidator: value => {
                 const composed = validate(value);
-                if (stage === 'synthesis' && !calibratedScoreForJob(composed, job, {
+                if (stage === 'synthesis' && !calibratedScoreForJob(composed, postingJob(job), {
                   candidateText: candidateFitText, candidateRoles,
                 })) throw new Error('Final score must have grounded whole-record requirement evidence.');
                 return value;
@@ -15540,7 +15700,7 @@ Return a JSON object with four arrays of search query strings:
             // That recovery handoff is strict and remains pending until every
             // requested row is grounded, so raw invalid scores never reach a
             // card and a long packed answer never has to be regenerated.
-            responseValidator: (value) => validateJobScoringSubmission(value, batch, {
+            responseValidator: (value) => validateJobScoringSubmission(value, batch.map(postingJob), {
               candidateText: activeCandidateText,
               candidateRoles,
               requireComplete: !!context.partialRecovery,
@@ -15600,7 +15760,7 @@ Return a JSON object with four arrays of search query strings:
           // placeholders after this bounded pass.
           const initialLiveResults = prepareLiveScoringResults(
             responsePlan.alignedScores,
-            batch,
+            batch.map(postingJob),
             { candidateText: activeCandidateText, candidateRoles },
           );
           const recoveryIndices = initialLiveResults.scores.reduce((indices, score, index) => {
@@ -15690,7 +15850,7 @@ Return a JSON object with four arrays of search query strings:
           if (signal?.aborted) throw signal.reason || new Error('Job scoring cancelled.');
           const topLevelBatch = batchIndex + 1;
           const results = await scoreBatch(batch, { topLevelBatch, rootBatchSize: batch.length });
-          const liveResults = prepareLiveScoringResults(results, batch, { candidateText: candidateFitText, candidateRoles });
+          const liveResults = prepareLiveScoringResults(results, batch.map(postingJob), { candidateText: candidateFitText, candidateRoles });
           completedScoringJobCount += batch.length;
           emitScoringProgress(completedScoringJobCount, {
             phase: 'batch-complete', batch: topLevelBatch, attemptSize: batch.length,
@@ -15757,7 +15917,7 @@ Return a JSON object with four arrays of search query strings:
       const reviewUnits = gapReviewIndexes.map(index => ({
         index,
         rows: gapReviewRowsForJob(scoredJobs[index]),
-        jobText: jobEvidenceTextForFit(scoredJobs[index]),
+        jobText: jobEvidenceTextForFit(postingJob(scoredJobs[index])),
       }));
       const reviewBatches = [];
       for (let start = 0; start < reviewUnits.length; start += JOB_GAP_REVIEW_BATCH_SIZE) {
@@ -16013,7 +16173,9 @@ Return a JSON object with four arrays of search query strings:
   // automatic handoff pool. A false/unclear verdict leaves both cards intact.
   handleSafe('confirm-job-location-consolidations', async (_event, { jobs, nodeId } = {}, signal) => {
     if (!Array.isArray(jobs)) throw new Error('Job location consolidation requires a jobs array.');
+    const postingJob = await officialPostingConsumerMap(jobs);
     const result = await confirmSimilarJobLocationPairs(jobs, {
+      postingJob,
       signal,
       callText: callLLMText,
       onProgress: ({ completed, total, batch, batchTotal }) => {
@@ -16036,6 +16198,8 @@ Return a JSON object with four arrays of search query strings:
   handleSafe('bucket-jobs', async (event, { jobs, nodeId }, signal) => {
     logger.info(`[Jobs][${nodeId}] Bucketing ${jobs.length} jobs into fit-score/salary/role taxonomy`);
     recordJobsBoardScope(nodeId, event.sender?.id ?? null);
+    // This handler returns a taxonomy only; its local shadows never replace rows.
+    jobs = await officialPostingConsumerJobs(jobs);
     const provider = NON_API_AI_TRANSPORT;
     const bucketMeta = {}; // populated with the model that actually served a taxonomy stage
     let taxonomyProgress = { stage: 'planning', completedBatches: 0, batchCount: 0, chunkSize: 0, vocabularySize: 0, representativeCount: 0, plannedAssignments: 0, classifiedAssignments: 0 };
@@ -16501,14 +16665,16 @@ Return a JSON object with four arrays of search query strings:
           ? allLinkedInRaw
           : allLinkedInRaw.slice(0, normalizedCollectionLimits.jobsPerPlatform);
         const needEnrich = filterJobsByDescriptionEvidence(allLinkedIn).dropped;
-        const admitForScoring = rows => filterJobsByDescriptionEvidence(rows).jobs;
+        const admitForScoring = async rows => (await resolveScoreSafePostings(
+          filterJobsByDescriptionEvidence(rows).jobs, { event, nodeId, signal, jobRunId },
+        )).jobs;
         const persistRecoveryPool = async (updatedLinkedIn) => {
           const descriptionRecoveryJobs = mergeDescriptionRecoverySourceJobs(
             snapshotRecoveryJobs,
             'linkedin',
             updatedLinkedIn,
           );
-          const scoringJobs = filterJobsByDescriptionEvidence(descriptionRecoveryJobs).jobs;
+          const scoringJobs = await admitForScoring(descriptionRecoveryJobs);
           const { snapshot: nextSnapshot } = buildJobAnalysisSnapshot({
             jobs: scoringJobs,
             descriptionRecoveryJobs,
@@ -16573,20 +16739,20 @@ Return a JSON object with four arrays of search query strings:
                 canWriteTelemetry,
               });
             if (probeTotalEnriched > 0) await persistRecoveryPool(merged);
-            if (aborted) return { resolved: true, items: admitForScoring(merged), replaceSourceItems: true, nextBlockedUrl: null };
+            if (aborted) return { resolved: true, items: await admitForScoring(merged), replaceSourceItems: true, nextBlockedUrl: null };
             const stillEmpty = filterJobsByDescriptionEvidence(merged).dropped.length;
             if (browserUnavailable) {
               const browserWarning = linkedInBrowserUnavailableWarning({ profileReserved, browserError });
               recordResolve({ needEnrich: needEnrich.length, enrichSuccess: probeTotalEnriched, walled: false, stillEmpty, cooldownProbe: true, browserUnavailable: true });
               sendProgress({ nodeId, sourceId: 'linkedin', count: merged.length, status: 'error', url: 'https://www.linkedin.com/jobs', warning: browserWarning });
-              return { resolved: true, items: admitForScoring(merged), warning: browserWarning, replaceSourceItems: true, nextBlockedUrl: null };
+              return { resolved: true, items: await admitForScoring(merged), warning: browserWarning, replaceSourceItems: true, nextBlockedUrl: null };
             }
             recordResolve({ needEnrich: needEnrich.length, enrichSuccess: probeTotalEnriched, walled: foundMs == null, stillEmpty, cooldownProbe: true, cooldownFoundMs: foundMs });
             if (foundMs != null) {
               if (canWriteTelemetry()) clearLinkedInCeiling();
               logger.info(`[Jobs][${nodeId}] Cooldown probe FOUND: guest wall clears after ~${Math.round(foundMs / 60000)}m idle on the same IP/browser.`);
               sendProgress({ nodeId, sourceId: 'linkedin', count: merged.length, status: 'done' });
-              return { resolved: true, items: admitForScoring(merged), replaceSourceItems: true, nextBlockedUrl: null };
+              return { resolved: true, items: await admitForScoring(merged), replaceSourceItems: true, nextBlockedUrl: null };
             }
             const maxMin = Math.round(Math.max(...waitsMs) / 60000);
             const exhaustedWarning = {
@@ -16595,7 +16761,7 @@ Return a JSON object with four arrays of search query strings:
               suggestion: `The cooldown is longer than ${maxMin}m, or idle alone won't clear it. Extend JOB_SEARCH_PROBE_WAITS_MIN, Reset browser session, or try a residential IP.`,
             };
             sendProgress({ nodeId, sourceId: 'linkedin', count: merged.length, status: 'error', url: 'https://www.linkedin.com/jobs', warning: exhaustedWarning });
-            return { resolved: true, items: admitForScoring(merged), warning: exhaustedWarning, replaceSourceItems: true, nextBlockedUrl: null };
+            return { resolved: true, items: await admitForScoring(merged), warning: exhaustedWarning, replaceSourceItems: true, nextBlockedUrl: null };
           }
 
           // Skip only an IMMEDIATE same-IP retry. A guest ceiling can cool while
@@ -16626,7 +16792,7 @@ Return a JSON object with four arrays of search query strings:
             recordLinkedinEnrichPass({ kind: 'solve', nodeId, jobRunId, ip: currentIp, ipOk: !!currentIp, walled: true, skippedSameIp: true, attempted: 0, remainingBefore: needEnrich.length, enriched: 0, startedAt: passStartedAt });
             logger.info(`[Jobs][${nodeId}] LinkedIn re-fetch skipped — egress IP unchanged (${currentIp}); ${waitSeconds}s cooldown remains before same-IP retry`);
             sendProgress({ nodeId, sourceId: 'linkedin', count: allLinkedIn.length, status: 'error', url: 'https://www.linkedin.com/jobs', warning: switchWarning });
-            return { resolved: true, items: admitForScoring(allLinkedIn), warning: switchWarning, replaceSourceItems: true, nextBlockedUrl: null };
+            return { resolved: true, items: await admitForScoring(allLinkedIn), warning: switchWarning, replaceSourceItems: true, nextBlockedUrl: null };
           }
 
           sendProgress({ nodeId, sourceId: 'linkedin', status: 'searching', count: needEnrich.length, detail: 're-fetching descriptions', warning: null });
@@ -16646,7 +16812,7 @@ Return a JSON object with four arrays of search query strings:
           const enrichedByUrl = new Map(enriched.map(j => [j.url, j]));
           items = allLinkedIn.map(j => enrichedByUrl.get(j.url) || j);
           const stillEmpty = filterJobsByDescriptionEvidence(items).dropped.length;
-          const scoringItems = admitForScoring(items);
+          const scoringItems = await admitForScoring(items);
           recordResolve({ needEnrich: needEnrich.length, enrichSuccess: successCount, contextRotations, walled, stillEmpty });
           // Egress-IP trail entry for this Solve. `walled` distinguishes the
           // re-walled outcome from a clean finish; comparing `ip` to the prior
@@ -16739,7 +16905,7 @@ Return a JSON object with four arrays of search query strings:
           // Everything already has a description — return them so the hub merge
           // still replaces the pending set (clears the warning cleanly).
           logger.info(`[Jobs][${nodeId}] LinkedIn re-fetch: all ${allLinkedIn.length} jobs already have descriptions`);
-          items = admitForScoring(allLinkedIn);
+          items = await admitForScoring(allLinkedIn);
           if (canWriteTelemetry()) clearLinkedInCeiling();
           sendProgress({ nodeId, sourceId: 'linkedin', count: allLinkedIn.length, status: 'done' });
           return { resolved: true, items, replaceSourceItems: true, nextBlockedUrl: null };
@@ -16892,7 +17058,9 @@ Return a JSON object with four arrays of search query strings:
       const descriptionRecoveryJobs = mergeDescriptionRecoverySourceJobs(
         snapshotDescriptionRecoveryJobs(sourceRecoverySnapshot), sourceId, recoveryJobs,
       );
-      const scoringJobs = filterJobsByDescriptionEvidence(descriptionRecoveryJobs).jobs;
+      const scoringJobs = (await resolveScoreSafePostings(
+        filterJobsByDescriptionEvidence(descriptionRecoveryJobs).jobs, { event, nodeId, signal, jobRunId },
+      )).jobs;
       const { snapshot: nextSnapshot } = buildJobAnalysisSnapshot({
         jobs: scoringJobs,
         descriptionRecoveryJobs,
@@ -17244,7 +17412,8 @@ Return a JSON object with four arrays of search query strings:
     normalizeJobsMarkup(items);
     items = items.map(reconcileGlassdoorSalaryFromDescription);
     const descriptionEvidence = filterJobsByDescriptionEvidence(items);
-    items = descriptionEvidence.jobs;
+    const officialResolution = await resolveScoreSafePostings(descriptionEvidence.jobs, { event, nodeId, signal, jobRunId });
+    items = officialResolution.jobs;
     tagJobLanguages(items);
     // A successful challenge clear does not make a list-card stub score-safe.
     // Retain the actionable source warning when a detail pass still left rows
@@ -17305,6 +17474,8 @@ Return a JSON object with four arrays of search query strings:
       historyDropped,
       historyDropSamples,
       kept: items.length,
+      officialPosting: officialResolution.officialPosting,
+      officialDedupDropped: officialResolution.officialDedupDropped,
       descriptionEvidenceDropped: {
         total: descriptionEvidence.dropped.length,
         deferred: descriptionEvidence.quality.deferred,
@@ -17510,7 +17681,8 @@ Return a JSON object with four arrays of search query strings:
       repairJobsMojibake(retriedItems);
       normalizeJobsMarkup(retriedItems);
       const descriptionEvidence = filterJobsByDescriptionEvidence(retriedItems);
-      const items = descriptionEvidence.jobs;
+      const officialResolution = await resolveScoreSafePostings(descriptionEvidence.jobs, { event, nodeId, signal, jobRunId });
+      const items = officialResolution.jobs;
       tagJobLanguages(items);
       if (canWriteTelemetry()) {
         const priorResolveMergeNet = Number(jobsTelemetry.resolves.indeed?.cumulativeMergeNet) || 0;
@@ -17833,7 +18005,8 @@ Return a JSON object with four arrays of search query strings:
     repairJobsMojibake(items);
     normalizeJobsMarkup(items);
     const descriptionEvidence = filterJobsByDescriptionEvidence(items);
-    items = descriptionEvidence.jobs;
+    const officialResolution = await resolveScoreSafePostings(descriptionEvidence.jobs, { event, nodeId, signal, jobRunId });
+    items = officialResolution.jobs;
     tagJobLanguages(items);
     const enrichment = {
       ...(result?.enrichment || result?.enrichmentMeta || {}),

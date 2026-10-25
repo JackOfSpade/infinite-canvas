@@ -1030,6 +1030,12 @@ export function buildJobTreeNodes({
         hubId,
         title: job.title, company: job.company, location: job.location,
         salary: job.salary, snippet: job.snippet, matchScore: job.matchScore,
+        // Always overwrite a protected card's prior resolution, including
+        // clearing it when the latest source row has none.
+        postedBy: job.postedBy,
+        applyOptions: job.applyOptions,
+        salaryProvenance: job.salaryProvenance,
+        officialPosting: job.officialPosting,
         reasoning: job.reasoning, careerDirection: job.careerDirection,
         // Preserve the scorer's audit trail so a merged board never turns an
         // evidence-grounded hiring-fit assessment back into an opaque number. Some fields
@@ -1056,7 +1062,7 @@ export function buildJobTreeNodes({
         // Preference assessment is independent of hiring fit. Preserve it so
         // cards can explain why an otherwise equal-fit listing is ordered here.
         preferenceAssessment: job.preferenceAssessment,
-        source: job.source, url: job.url, googleCardUrl: job.googleCardUrl,
+        source: job.source, sourceJobKey: job.sourceJobKey, url: job.url, googleCardUrl: job.googleCardUrl,
         applySource: job.applySource, posted: job.posted, language: job.language,
         // Consolidated multi-location rows persist their bounded variant union;
         // ordinary cards omit the field entirely.

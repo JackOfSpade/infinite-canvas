@@ -90,16 +90,16 @@ export default [{
     const rows = [
       ['boards.greenhouse.io', 'Acme Robotics', 'ats'],
       ['acme-robotics.myworkdayjobs.com', 'Anything', 'ats'],
-      ['careers.acmerobotics.com', 'Acme Robotics Inc.', 'employer'],
-      ['careers.google.com', 'Google', 'employer'],
-      ['careers.monsterenergy.com', 'Monster Energy', 'employer'],
+      ['careers.acmerobotics.com', 'Acme Robotics Inc.', 'unrelated'],
+      ['careers.google.com', 'Google', 'unrelated'],
+      ['careers.monsterenergy.com', 'Monster Energy', 'unrelated'],
       ['www.linkedin.com', 'Acme Robotics', 'aggregator'],
       ['ca.indeed.com', 'Acme Robotics', 'aggregator'],
       ['indeed.co.uk', 'Acme Robotics', 'aggregator'],
       ['www.glassdoor.ca', 'Acme Robotics', 'aggregator'],
       ['jobs.ziprecruiter.com', 'Acme Robotics', 'aggregator'],
       ['www.monster.com', 'Acme Robotics', 'aggregator'],
-      ['careers.acme.co.uk', 'Acme', 'employer'],
+      ['careers.acme.co.uk', 'Acme', 'unrelated'],
       ['acme.evil.com', 'Acme Robotics', 'unrelated'],
       ['acmefake.com', 'Acme Robotics', 'unrelated'],
       ['acme.github.io', 'Acme Robotics', 'unrelated'],
@@ -113,6 +113,9 @@ export default [{
     for (const [host, company, want] of rows) {
       assert(classifyOfficialSourceHost(host, company) === want, `${host} / ${company} should classify as ${want}, got ${classifyOfficialSourceHost(host, company)}`);
     }
+    assert(classifyOfficialSourceHost('careers.acmerobotics.com', 'Acme Robotics Inc.', { rootSiteName: 'Acme Robotics' }) === 'employer'
+      && classifyOfficialSourceHost('careers.acme.co.uk', 'Acme Robotics', { rootSiteName: 'Acme' }) === 'unrelated',
+    'an employer site needs strict host-fetched attestation; matching the first company word is insufficient');
     assert(companiesAgree('Acme Robotics', 'Acme Robotics Inc.') && companiesAgree('Acme', 'ACME, LLC') && companiesAgree('Acme', 'Acme Robotics')
       && !companiesAgree('Go', 'Google') && !companiesAgree('Acme', 'Globex')
       && !companiesAgree('Meta', 'Metabolic Health Inc') && !companiesAgree('Apple', "Applebee's") && !companiesAgree('Block', 'Blockchain Foundation'),

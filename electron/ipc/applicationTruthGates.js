@@ -1,5 +1,5 @@
 // Shared production truth predicates used by the v2 content gate.
-export function targetIdentityNameLicensed(sentence, finding, ctx, { reportsNoPastWork, attributionTerms, sentenceAddressesTarget }) {
+export function targetIdentityNameLicensed(sentence, finding, ctx, { reportsNoPastWork, attributionTerms, sentenceAddressesTarget, groundingClauses, intentLeadInRemainder, hasWorkIngWord }) {
   if (finding?.code !== 'name') return false;
   const text = String(sentence ?? '');
   const noPastWork = reportsNoPastWork(text);
@@ -40,9 +40,47 @@ export function targetIdentityNameLicensed(sentence, finding, ctx, { reportsNoPa
   // Its exact prefix is a target reference too, including its possessive;
   // this licenses no claim that the candidate previously worked there.
   const companyNames = [...new Set([company, company.split(/\s+[-–—|]\s+/u)[0]])].filter(name => name.length >= 3);
+  const need = String.raw`(?:needs?|requirements?|priorit(?:y|ies)|goals?|mission|roadmap|challenges?|problems?|standards?)`;
+  const word = String.raw`[\p{L}'’-]+`;
+  const needPhrase = new RegExp(`^\\s+(?:${word}\\s+){0,2}${need}\\b`, 'iu');
+  const clauseWindow = (at, end) => {
+    let start = 0;
+    for (const clause of groundingClauses(text)) if (clause.start <= at) start = Math.max(start, clause.start);
+    for (const boundary of text.slice(0, at).matchAll(/\b(?:which|that|who|and|so)\s+/giu)) start = Math.max(start, boundary.index + boundary[0].length);
+    return { before: text.slice(start, at), text: text.slice(start, end) };
+  };
   for (const name of companyNames) if (sentenceAddressesTarget(text, name)) {
     const pattern = new RegExp(`(?<![\\p{L}\\p{N}])${phrase(name)}(?:['’]s)?(?![\\p{L}\\p{N}])`, 'giu');
-    for (const match of text.matchAll(pattern)) if (noPastWork || forwardReference(match.index)) spans.push([match.index, match.index + match[0].length]);
+    for (const match of text.matchAll(pattern)) {
+      const at = match.index;
+      const end = at + match[0].length;
+      // Preserve the existing licence first. The structural pre-pass rejects
+      // candidate employment before a trusted name or classifier can hide it.
+      if (noPastWork || forwardReference(at)) { spans.push([at, end]); continue; }
+      const after = text.slice(end);
+      const noun = after.match(needPhrase);
+      const window = clauseWindow(at, end + (noun?.[0].length || 0));
+      const possessive = /['’]s$/iu.test(match[0]);
+      const deny = /\b(?:at|for|with|inside|within|on|using|via|under|from|during|after|since)\s+$/iu.test(window.before)
+        || /\b(?:joined|joining|served|serves|helped|helps|worked)\s+$/iu.test(window.before)
+        || (possessive && /^\s+(?:platform|product|customers|users|codebase|stack|system|infrastructure|data|pipeline|app|service)\b/iu.test(after));
+      if (deny) continue;
+      const lead = intentLeadInRemainder(window.text.trim());
+      const intent = lead.matched && !/\b(?:i|we)\b/iu.test(lead.remainder)
+        && reportsNoPastWork(lead.remainder) && !hasWorkIngWord(lead.remainder)
+        && (/\b(?:join|help|contribute\s+to|support|bring\b[^.!?;]*\bto)\s+$/iu.test(window.before)
+          || /\blook(?:ing)?\s+forward\s+to\s+(?:joining|helping|contributing\s+to|supporting|bringing\b[^.!?;]*\bto)\s+$/iu.test(window.before));
+      const plain = reportsNoPastWork(window.text) && !hasWorkIngWord(window.before);
+      const fit = Boolean(noun) && /\b(?:meets|meet|fits|fit|matches|match|suits|suit|addresses)\s+$/iu.test(window.before);
+      const ownedNeed = possessive && Boolean(noun) && ((/^\s*$/u.test(window.before)
+        && /^\s+(?:is|are|needs|wants|asks)\b/iu.test(after.slice(noun[0].length)))
+        || /\b(?:is|are|needs|wants|asks)\s+$/iu.test(window.before));
+      const clauseTail = after.split(/[,;.!?]|\b(?:which|that|who|and|so)\b/iu)[0];
+      const subject = !possessive && /^\s*$/u.test(window.before)
+        && !/\b(?:i|we|me|my|our|us)\b/iu.test(clauseTail)
+        && /^\s+(?!(?:was|has\s+been)\b)(?:is|are|has|does|[\p{L}]+s)\b/iu.test(after);
+      if (intent || (plain && (fit || ownedNeed || subject))) spans.push([at, end]);
+    }
   }
   if (!spans.length || !finding.term) return false;
   const pattern = new RegExp(`(?<![\\p{L}\\p{N}])${phrase(finding.term)}(?![\\p{L}\\p{N}])`, 'giu');
@@ -53,7 +91,7 @@ export function targetIdentityNameLicensed(sentence, finding, ctx, { reportsNoPa
 
 // Shared résumé and letter validation called by v2 and by historical stage replay.
 export function validateSharedApplicationContent(response, state, input, authority, {
-  nonemptyText, PASTE_RESUME_BULLET_FIELD_LABEL, unsupportedDurationClaimError, pasteCareerQuotesForEvidenceIds, selectedSourceRoles, validateAuthorityResumeArtifacts, isCurrentAuthorityProtocol, isWriteVerifyJob, currentAuthorityFinalResumeArtifactErrors, assertAuthorityDraftSelection, frozenPlanListingEvidenceIds, validateStructuredApplicationResume, selectedAuthorityCareerSkillEvidence, structuredResumeFailureParts, pasteResumeCompletionTwinErrors, pasteResumeUnderfillErrors, pasteCoverLetterUnderfillErrors, projectContactChannels, PASTE_COVER_PARAGRAPH_UNIT_LABEL, MAX_COVER_LETTER_PARAGRAPH_EVIDENCE_IDS, pasteCoverLetterCompletionTwinErrors
+  nonemptyText, PASTE_RESUME_BULLET_FIELD_LABEL, unsupportedDurationClaimError, pasteCareerQuotesForEvidenceIds, selectedSourceRoles, validateAuthorityResumeArtifacts, isCurrentAuthorityProtocol, isWriteVerifyJob, currentAuthorityFinalResumeArtifactErrors, assertAuthorityDraftSelection, frozenPlanListingEvidenceIds, validateStructuredApplicationResume, selectedAuthorityCareerSkillEvidence, structuredResumeFailureParts, pasteResumeCompletionTwinErrors, pasteResumeUnderfillErrors, projectContactChannels, PASTE_COVER_PARAGRAPH_UNIT_LABEL, MAX_COVER_LETTER_PARAGRAPH_EVIDENCE_IDS, pasteCoverLetterCompletionTwinErrors, createApplicationListingClosingValidator
 }) {
   const errors = [];
   if (state.stage === 'resume') {
@@ -82,7 +120,7 @@ export function validateSharedApplicationContent(response, state, input, authori
     let structurallyValid = true;
     try {
       if (authority) {
-        const authorityErrors = validateAuthorityResumeArtifacts(response.resume, acceptedEvidence, authority, selectedSourceRoles(state, input));
+        const authorityErrors = validateAuthorityResumeArtifacts(response.resume, acceptedEvidence, authority, selectedSourceRoles(state, input), input.careerSkillEvidence);
         if (isCurrentAuthorityProtocol(input) && !isWriteVerifyJob(input)) {
           authorityErrors.push(...currentAuthorityFinalResumeArtifactErrors({
             resume: response.resume,
@@ -135,8 +173,8 @@ export function validateSharedApplicationContent(response, state, input, authori
     const paragraphs = Array.isArray(response.coverLetter?.paragraphs) ? response.coverLetter.paragraphs : [];
     const evidenceIds = new Set(acceptedEvidence.map(item => item?.id));
     const paragraphIds = new Set();
+    let validateListingClosing = null;
     if (!paragraphs.length) errors.push('Cover letter needs at least one paragraph.');
-    errors.push(...pasteCoverLetterUnderfillErrors(response.coverLetter, acceptedEvidence));
     // Split by cause (pasteStableIdError above states the same reasoning for
     // the same reason): a name mismatch and a contact mismatch are different
     // repairs, and merging them into one verdict left a responder who fixed
@@ -168,11 +206,26 @@ export function validateSharedApplicationContent(response, state, input, authori
       }
       const ids = paragraphEvidenceIds || [];
       for (const id of ids) if (!evidenceIds.has(id)) errors.push(`${unit} references unknown evidence ${String(id)}. evidenceIds may only name an ID from the accepted evidence plan.`);
-      if (!ids.some(id => acceptedEvidence.find(item => item?.id === id)?.sourceId === 'career-data')) errors.push(`${unit} needs at least one career-data evidence ID.`);
-      else {
-        const durationError = unsupportedDurationClaimError(unit, paragraph?.text, pasteCareerQuotesForEvidenceIds(ids, acceptedEvidence));
-        if (durationError) errors.push(durationError);
+      const careerQuotes = pasteCareerQuotesForEvidenceIds(ids, acceptedEvidence);
+      if (!ids.some(id => acceptedEvidence.find(item => item?.id === id)?.sourceId === 'career-data')) {
+        // Historical callers and ordinary career-grounded paragraphs do not
+        // need the optional closing context. Missing injection keeps the old
+        // citation rule; only a host validator can grant the exception.
+        if (!validateListingClosing && ids.length && ids.every(id => acceptedEvidence.find(item => item?.id === id)?.sourceId === 'job-listing')
+          && typeof createApplicationListingClosingValidator === 'function') {
+          validateListingClosing = createApplicationListingClosingValidator({
+            input, state: { ...state, resume: response.resume || state.resume }, authority,
+          });
+        }
+        const validation = validateListingClosing?.({ paragraphs, index, acceptedEvidence });
+        if (!validation?.eligible) {
+          errors.push(`${unit} needs at least one career-data evidence ID.`);
+          if (Array.isArray(validation?.corrections)) errors.push(...validation.corrections);
+        }
       }
+      // Listing-only prose never borrows the posting's requested duration.
+      const durationError = unsupportedDurationClaimError(unit, paragraph?.text, careerQuotes);
+      if (durationError) errors.push(durationError);
     });
     // Same reason as the résumé twin: the editorial battery that grades this
     // letter runs only when the package is assembled, three stages after the

@@ -23,6 +23,23 @@ import { legacyJobScoringMaxTokens } from '../../electron/ipc/resultCaps.js';
 import { APPLICATION_COVER_LETTER_SCHEMA, APPLICATION_DIRECT_COVER_LETTER_SCHEMA, JOB_TAXONOMY_CHUNK_SIZE, JOB_TAXONOMY_CLASSIFY_SCHEMA, JOB_TAXONOMY_PLAN_SCHEMA, LETTER_GROUNDING_AUDIT_SCHEMA, LETTER_NEEDS_SCHEMA, LETTER_PLAN_SCHEMA, POSTED_DATE_PATTERN, assert, buildCoverLetterDocument, buildJobTaxonomyPlanSummary, buildResumeDocument, cancellationError, checkPromptFits, decodeTextEscapes, dicePostedBucket, extractDiceSalaryBadge, extractJobPostingBaseSalary, extractJobPostingDescription, fetchDiceListings, filterJobsByAge, formatDiceBaseSalary, getKnownTaskIds, inspectJobTaxonomyRoleIndexes, jobPreferenceResearchAssessmentMaxTokens, jobPreferenceResearchMaxTokens, jobScoringBatchFits, jobScoringBatchSize, jobScoringEstimatedTokens, jobScoringMaxTokens, listingEvaluationBatchSize, listingEvaluationMaxTokens, marketplaceHubScanBatchEstimatedTokens, marketplaceHubScanBatchFits, marketplaceHubScanMaxPagesForPlatform, nodeCancellationError, normalizeJobTaxonomyPlan, parsePostedDate, parseSalaryToNumeric, priceSynthesisBatchEstimatedTokens, priceSynthesisBatchFits, priceSynthesisBatchMaxComps, priceSynthesisBatchMaxTokens, runBoundedJobTaxonomy, safeApiFetch, taskMaxTokensFor, validateJobTaxonomyPlan } from '../test-dependencies.js';
 
 export default [
+  {
+    name: 'llm: official posting research and comparison tasks have bounded item-count guidance',
+    run() {
+      const known = getKnownTaskIds();
+      for (const task of ['job-official-posting-research', 'job-official-posting-match']) {
+        assert(known.has(task), `${task} must never fall through to the default task`);
+        for (const itemCount of [0, 1, 3, 12, 1000]) {
+          const cap = taskMaxTokensFor(task, { itemCount });
+          assert(Number.isFinite(cap) && cap > 0 && cap <= 15360, `${task} has a bounded output cap`);
+        }
+      }
+      assert(taskMaxTokensFor('job-official-posting-research', { itemCount: 1 }) === 1724);
+      assert(taskMaxTokensFor('job-official-posting-research', { itemCount: 12 }) === 9424);
+      assert(taskMaxTokensFor('job-official-posting-match', { itemCount: 1 }) === 2824);
+      assert(taskMaxTokensFor('job-official-posting-match', { itemCount: 12 }) === 15360);
+    },
+  },
 {
     name: 'llm: compensation and scoring token-budget floors accommodate larger cohorts',
     run: () => {

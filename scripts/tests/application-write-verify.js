@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {
-  WRITE_VERIFY_BRIEF, WRITE_VERIFY_BRIEF_MAX_CHARS, WRITE_VERIFY_JUDGE_RUBRIC, WRITE_VERIFY_SHORTLIST_STEP,
+  WRITE_VERIFY_BRIEF, WRITE_VERIFY_BRIEF_MAX_CHARS, WRITE_VERIFY_JUDGE_RUBRIC, WRITE_VERIFY_SHORTLIST_STEP, WRITE_VERIFY_LISTING_CLOSING_RULE,
   WRITE_VERIFY_PROTOCOL, WRITE_VERIFY_DEFAULT_CANDIDATES, WRITE_VERIFY_STAGES, WRITE_VERIFY_MAX_FIT_CORRECTIONS, acceptedWriteVerifyCandidates,
   WRITE_VERIFY_DROPPED_FINDINGS_HEADING, WRITE_VERIFY_DROPPED_FINDINGS_MAX, droppedCandidateFindings,
   WRITE_VERIFY_PRIOR_ROUND_FINDINGS_MAX, WRITE_VERIFY_PRIOR_ROUNDS_HEADING, priorRoundFindings,
@@ -187,7 +187,7 @@ export default [
       assert.equal(WRITE_VERIFY_BRIEF.split("which of this job's needs it meets").length, 2, 'the need-it-meets phrase appears exactly once');
       assert.ok(WRITE_VERIFY_BRIEF.includes('Do not open consecutive paragraphs with the same word or link two paragraphs to the job with the same sentence pattern.'), 'the brief forbids consecutive paragraphs opening with the same word');
       assert.equal(WRITE_VERIFY_BRIEF.includes('where this job needs it'), false, 'the old where-this-job-needs-it wording is gone (user decision, 2026-10-20)');
-      assert.equal(WRITE_VERIFY_BRIEF.length, 968, 'the brief is exactly 968 characters after the 2026-10-21 need-it-meets change');
+      assert.equal(WRITE_VERIFY_BRIEF.length, 968, 'the brief is exactly 968 characters after the equal-length closing sentence swap');
       assert.equal(WRITE_VERIFY_BRIEF.includes('the need it serves'), false, 'the need-it-serves wording was replaced so the point says the work meets the need (user decision, 2026-10-21)');
       assert.equal(WRITE_VERIFY_BRIEF.includes('in plain words'), false, 'the plain-words wording was replaced by the explicit-link wording (user decision, 2026-10-21)');
       assert.equal(WRITE_VERIFY_BRIEF.includes('a claim about your work this job needs'), false, 'the implicit-link wording is gone');
@@ -196,7 +196,8 @@ export default [
       assert.match(WRITE_VERIFY_SHORTLIST_STEP, /a line reading exactly EDITORIAL SUMMARY, give a short explanation of the finished application/u);
       assert.ok(WRITE_VERIFY_SHORTLIST_STEP.indexOf('EDITORIAL SUMMARY') > WRITE_VERIFY_SHORTLIST_STEP.indexOf('EVIDENCE SHORTLIST'), 'the explanation follows the evidence appendix');
       assert.match(WRITE_VERIFY_SHORTLIST_STEP, /After the complete letter, add two editorial appendices/u);
-      assert.ok(WRITE_VERIFY_BRIEF.includes(' End on your argument, not stock courtesy. '), 'the close is the argument, not courtesy');
+      assert.ok(WRITE_VERIFY_BRIEF.includes(' Close on wider significance, not a recap. '), 'the close widens the argument rather than recapping it');
+      assert.equal(WRITE_VERIFY_BRIEF.includes('End on your argument, not stock courtesy.'), false, 'the old closing sentence is replaced');
       // Sabotage: the replaced letter sentences must be gone, so the brief carries one letter instruction set, not two.
       assert.equal(WRITE_VERIFY_BRIEF.includes('your hedged read'), false, 'the old hedged-read wording is gone');
       assert.equal(WRITE_VERIFY_BRIEF.includes('your read of what the role most needs, hedged once'), false, 'the old thesis wording is gone');
@@ -208,7 +209,8 @@ export default [
       assert.match(WRITE_VERIFY_JUDGE_RUBRIC, /the letter argues rather than lists/u, 'the panel that picks the draft rewards the same structure');
       assert.ok(WRITE_VERIFY_JUDGE_RUBRIC.includes('states its full point in its first one or two sentences'), 'the panel rewards point-first paragraphs');
       assert.ok(WRITE_VERIFY_JUDGE_RUBRIC.includes('opens on evidence or only on what the role needs'), 'the panel marks evidence-first paragraphs down');
-      assert.ok(WRITE_VERIFY_JUDGE_RUBRIC.includes('a closing of stock courtesy'), 'the panel marks a courtesy close down');
+      assert.ok(WRITE_VERIFY_JUDGE_RUBRIC.includes("a closing of stock courtesy rather than the letter's own argument"), 'the panel marks a courtesy close down');
+      assert.ok(WRITE_VERIFY_JUDGE_RUBRIC.includes("a close that recaps the letter's examples instead of widening the case"), 'the panel marks an example-recap close down');
       assert.ok(WRITE_VERIFY_JUDGE_RUBRIC.includes('framed once as that reading rather than as a probability'), 'the panel rewards a thesis framed as a reading, not a probability');
       assert.ok(WRITE_VERIFY_JUDGE_RUBRIC.includes('same connective or sentence pattern linking the candidate\'s work to the job in two or more paragraphs'), 'the panel marks a repeated connective down');
       assert.ok(WRITE_VERIFY_JUDGE_RUBRIC.includes('past or present perfect'), 'the panel checks the tense of past work');
@@ -237,8 +239,12 @@ export default [
       assert.equal(contract.split(CLAIM_GROUNDING_RULE).length, 2, 'the claim rule prints once');
       assert.ok(contract.includes('sole ownership (single-handedly, solely, sole, independently, alone, on my own)'), 'sole-ownership forms');
       assert.ok(contract.includes('reduction outcome (reduce(d/s/ing), reduction(s)'), 'reduction forms');
-      assert.ok(contract.includes(`. ${SOURCE_FIGURE_GROUNDING_RULE}. Every sentence about the candidate's own work must share at least ${MIN_SHARED_SOURCE_TERMS} meaningful terms with the quotes its unit cites, where ${SOURCE_TERM_OVERLAP_RULE}, and ${LETTER_TERM_FORMS_RULE}.`), 'figure rule then the overlap floor');
-      assert.ok(contract.endsWith(`where ${SOURCE_TERM_OVERLAP_RULE}, and ${LETTER_TERM_FORMS_RULE}.`), 'ends on the overlap rule, the letter word-form clause and a period');
+      const employerLicence = 'The employer this letter is addressed to may be named without a quote as the owner of a need the work meets, never as a place the work happened';
+      assert.equal(contract.split(employerLicence).length, 2, 'the target-employer need licence prints once');
+      assert.ok(contract.includes(`. ${employerLicence}. ${SOURCE_FIGURE_GROUNDING_RULE}.`), 'the employer licence follows the qualifier families and precedes the figure rule');
+      assert.ok(contract.includes(`. ${SOURCE_FIGURE_GROUNDING_RULE}. ${WRITE_VERIFY_LISTING_CLOSING_RULE} Every sentence about the candidate's own work must share at least ${MIN_SHARED_SOURCE_TERMS} meaningful terms with the quotes its unit cites, where ${SOURCE_TERM_OVERLAP_RULE}, and ${LETTER_TERM_FORMS_RULE}.`), 'figure rule then the scoped final-paragraph exception and unchanged career overlap floor');
+      assert.ok(contract.endsWith(`where ${SOURCE_TERM_OVERLAP_RULE}, and ${LETTER_TERM_FORMS_RULE}.`), 'ends on the unchanged career overlap rule, the letter word-form clause and a period');
+      assert.equal(contract.split(WRITE_VERIFY_LISTING_CLOSING_RULE).length, 2, 'the structural closing exception is stated once outside the brief');
       assert.ok(contract.includes(`${MIN_SHARED_SOURCE_TERMS} meaningful terms`));
       assert.ok(contract.includes('word form'));
       const heading = 'GROUNDING CONTRACT (deterministic checks read every unit against the quotes it cites, literally): ';
@@ -257,7 +263,8 @@ export default [
         assert.equal(withContract.replace(`${heading}${contract}\n\n`, ''), without, `${domain}: the section is the only difference`);
       }
       const hostSource = fs.readFileSync(new URL('../../electron/ipc/localAiApplication.js', import.meta.url), 'utf8');
-      assert.match(hostSource, /lengthBudget,\s*groundingContract: writeVerifyGroundingContract\(\),\s*\}\);/u, 'the frozen context supplies the contract');
+      assert.match(hostSource, /lengthBudget,\s*careerSkillEvidence: hydrated\.skillEvidence,\s*groundingContract: writeVerifyGroundingContract\(\),\s*\}\);/u,
+        'the frozen context supplies the same hydrated skill projection and the grounding contract');
     },
   },
   {
@@ -629,6 +636,54 @@ export default [
     },
   },
   {
+    name: 'writer skill index permits declared fill and posting-named attested skills while preserving legacy projections',
+    run() {
+      const profile = {
+        roles: [], achievements: [], projects: [], education: [], certifications: [], otherEvidence: [],
+        skills: [
+          { id: 'skill-runtime', name: 'Aster Runtime', indexEligible: true },
+          { id: 'skill-queue', name: 'Cirrus Queue', indexEligible: true },
+          { id: 'skill-query', name: 'Boreal Query', indexEligible: true },
+          { id: 'skill-excluded', name: 'Meadow Wire', indexEligible: false },
+        ],
+      };
+      const catalog = profile.skills.map(skill => ({
+        id: `host.career.skill.${skill.id}.1`, sourceId: 'career-data',
+        quote: `Used ${skill.name} to maintain the dispatch service.`,
+      }));
+      const careerSkillEvidence = { skills: [
+        { id: 'skill-runtime', declaredInSkillsSection: false },
+        { id: 'skill-queue', declaredInSkillsSection: true },
+        { id: 'skill-query' },
+        { id: 'skill-excluded', declaredInSkillsSection: true },
+      ] };
+      const index = (listingEvidence, projection = careerSkillEvidence) => {
+        const prompt = writeVerifySourcePrompt({
+          posting: 'Aster Runtime and Meadow Wire appear outside the accepted listing quotes.',
+          requirements: [], listingEvidence, identity: {}, sourceRoles: [], profile, catalog,
+          careerSkillEvidence: projection,
+        });
+        const marker = 'INDEX-ELIGIBLE SKILLS (exact item names and their only permitted skill-group citation IDs):\n';
+        assert.equal(prompt.split(marker).length, 2, 'the permitted index is printed exactly once');
+        return JSON.parse(prompt.split(marker)[1]);
+      };
+      const names = rows => rows.map(row => row.name);
+      assert.deepEqual(names(index([])), ['Cirrus Queue', 'Boreal Query'],
+        'a modern non-declared skill is omitted without a cited posting name, declared fill is retained, and an undefined flag keeps its former behavior');
+      const named = index([{ id: 'listing-runtime', quote: 'Maintain aster runtime and Meadow Wire for dispatch.' }]);
+      assert.deepEqual(names(named), ['Aster Runtime', 'Cirrus Queue', 'Boreal Query'],
+        'a whole-term posting name admits the career-attested non-declared skill, while eligibility still excludes a false-eligible row');
+      assert.deepEqual(named[0].evidenceIds, ['host.career.skill.skill-runtime.1'],
+        'the new posting permission retains the existing career-only skill citation IDs');
+      assert.deepEqual(names(index([{ quote: 'Maintain Aster RuntimePlus for dispatch.' }])), ['Cirrus Queue', 'Boreal Query'],
+        'a longer posting name does not admit a non-declared subterm');
+      assert.deepEqual(names(index([], null)), ['Aster Runtime', 'Cirrus Queue', 'Boreal Query'],
+        'a job with no frozen declaration projection retains the complete earlier eligible index');
+      assert.deepEqual(names(index([], { skills: profile.skills.map(skill => ({ id: skill.id })) })), ['Aster Runtime', 'Cirrus Queue', 'Boreal Query'],
+        'an older frozen projection without declaration flags retains its earlier index');
+    },
+  },
+  {
     name: 'converter instructions require full catalog ids and entity-correct citations across three careers',
     run() {
       for (const [domain, action] of domains) {
@@ -935,11 +990,17 @@ export default [
     },
   },
   {
-    name: 'v2 measured character ranges respond to trusted role, project, skill and education structure',
+    name: 'v2 measured capacity provides upper estimates without minimum content targets',
     run() {
       const roleHeavy = writeVerifyLengthBudgetForStructure({ roles: 3, education: 1, skillsRows: 3, projects: 0 });
       const projectHeavy = writeVerifyLengthBudgetForStructure({ roles: 3, education: 1, skillsRows: 1, projects: 3 });
-      assert.ok(roleHeavy.minCharacters >= roleHeavy.maxCharacters * 0.84 && roleHeavy.maxCharacters > 1095);
+      assert.ok(roleHeavy.maxCharacters > 1095);
+      assert.equal('minCharacters' in roleHeavy, false);
+      assert.equal('minBullets' in roleHeavy, false);
+      const prompt = writeVerifySourcePrompt({ posting: '', requirements: [], listingEvidence: [], identity: {},
+        sourceRoles: [], profile: { roles: [], achievements: [], projects: [], skills: [] }, catalog: [], lengthBudget: [roleHeavy] });
+      assert.ok(prompt.includes('upper estimates') && prompt.includes('up to'));
+      assert.ok(!prompt.includes('85–100%') && !prompt.includes('drafting targets'));
       assert.ok(projectHeavy.maxCharacters !== roleHeavy.maxCharacters);
       assert.ok(projectHeavy.maxBullets < roleHeavy.maxBullets);
       // At most one Personal Projects entry, and only from unlinked projects.

@@ -1,0 +1,111 @@
+// Pure shared wire schema: main-process records and renderer whitelists use
+// the same field list. Scraped identity fields remain separate from these.
+export const OFFICIAL_POSTING_ROW_FIELDS = Object.freeze(['postedBy', 'applyOptions', 'salaryProvenance', 'officialPosting']);
+export const LOCAL_AI_APPLICATION_SNIPPET_MAX_CHARS = 80_000;
+export const OFFICIAL_POSTING_LEVELS = Object.freeze(['L1', 'L2', 'L3', 'L4', 'L5', 'L6']);
+export const OFFICIAL_POSTING_OUTCOMES = Object.freeze(['found', 'link-only', 'not-found', 'ambiguous', 'unreadable', 'closed', 'failed']);
+export const SALARY_PROVENANCES = Object.freeze(['posted', 'estimated', 'unknown']);
+export const OFFICIAL_POSTING_TRAIL = Object.freeze([
+  'free-lead', 'careers-page', 'ats-adapter', 'json-ld', 'structured-proof', 'domain-proof',
+  'salary-anchor', 'identifier-anchor', 'description-anchor', 'quoted-match', 'cache-hit', 'recent-miss',
+  'bridge-research', 'bridge-timeout', 'bridge-unavailable', 'bridge-aborted', 'research-miss',
+  'title-mismatch', 'location-mismatch', 'employer-mismatch', 'tenant-unproven', 'poster-tenant',
+  'salary-mismatch', 'no-anchor', 'invalid-quotes', 'ambiguous', 'closed', 'unreadable', 'oversize',
+  'unsafe-url', 'unsafe-address', 'fetch-timeout', 'fetch-failed', 'unsupported-content-type',
+  'invalid-text', 'stub-text', 'official-text-missing', 'no-resolution', 'reverified', 'material-jd-change',
+]);
+export const OFFICIAL_POSTING_LABELS = Object.freeze({
+  L1: 'Official careers site', L2: 'ATS linked from careers page', L3: "Employer's ATS",
+  L4: 'Official link, listing text', L5: 'Original listing', L6: 'Original listing (employer unknown)',
+});
+
+export function officialHttpsUrl(value) {
+  if (typeof value !== 'string' || value.length > 2_000 || [...value].some(char => char.charCodeAt(0) <= 32 || char.charCodeAt(0) === 127)) return '';
+  try {
+    const url = new URL(value);
+    if (url.protocol !== 'https:' || url.username || url.password || !url.hostname) return '';
+    url.hash = '';
+    for (const key of [...url.searchParams.keys()]) if (/^utm_/iu.test(key)) url.searchParams.delete(key);
+    return url.href;
+  } catch { return ''; }
+}
+
+export function normalizeApplyOptions(value) {
+  const options = []; const seen = new Set();
+  for (const item of Array.isArray(value) ? value : []) {
+    const href = officialHttpsUrl(item?.href);
+    if (!href || seen.has(href)) continue;
+    const label = typeof item?.label === 'string' ? [...item.label].map(char => char.charCodeAt(0) < 32 || char.charCodeAt(0) === 127 ? ' ' : char).join('').replace(/\s+/gu, ' ').trim().slice(0, 120) : '';
+    seen.add(href); options.push({ label, href });
+    if (options.length === 8) break;
+  }
+  return options;
+}
+
+function exactKeys(value, keys) {
+  return value && typeof value === 'object' && !Array.isArray(value) && Object.keys(value).every(key => keys.includes(key));
+}
+function shortString(value, max = 500) {
+  return typeof value === 'string' && value.length <= max && !/[<>]/u.test(value)
+    && ![...value].some(char => char.charCodeAt(0) < 32 || char.charCodeAt(0) === 127);
+}
+export function normalizeOfficialSalary(value) {
+  if (!exactKeys(value, ['text', 'provenance']) || !shortString(value.text, 500) || !SALARY_PROVENANCES.includes(value.provenance)) return null;
+  return { text: value.text, provenance: value.provenance };
+}
+export function normalizeOfficialLocation(value) {
+  if (!exactKeys(value, ['display', 'workMode', 'remote', 'remoteCountry', 'remoteRegion'])) return null;
+  if (!shortString(value.display, 500) || !['', 'remote', 'hybrid', 'onsite', 'on-site'].includes(value.workMode ?? '')
+    || (value.remote !== undefined && typeof value.remote !== 'boolean')
+    || !shortString(value.remoteCountry ?? '', 120) || !shortString(value.remoteRegion ?? '', 160)) return null;
+  const suppliedMode = value.workMode || '';
+  if ((value.remote === true && suppliedMode && suppliedMode !== 'remote') || (value.remote === false && suppliedMode === 'remote')) return null;
+  const remote = value.remote === true || suppliedMode === 'remote';
+  const remoteCountry = value.remoteCountry || ''; const remoteRegion = value.remoteRegion || '';
+  const statedRestriction = restriction => restriction.trim() && !/^(?:none|n\/a|not stated|unspecified|unknown)$/iu.test(restriction.trim());
+  if (remote ? !statedRestriction(remoteCountry) && !statedRestriction(remoteRegion) : remoteCountry || remoteRegion) return null;
+  return { display: value.display, workMode: remote ? 'remote' : suppliedMode, remote, remoteCountry, remoteRegion };
+}
+
+export function normalizeOfficialPosting(value) {
+  const keys = ['level', 'outcome', 'employer', 'title', 'location', 'salary', 'sourceUrl', 'officialApplyUrl',
+    'ats', 'tenant', 'fetchedAt', 'contentHash', 'scrapedListingSha256', 'trail', 'alternatives'];
+  if (!exactKeys(value, keys) || !OFFICIAL_POSTING_LEVELS.includes(value.level) || !OFFICIAL_POSTING_OUTCOMES.includes(value.outcome)
+    || !shortString(value.employer, 120)) return null;
+  const result = { level: value.level, outcome: value.outcome, employer: value.employer };
+  for (const [key, max] of [['title', 500], ['ats', 80], ['tenant', 240]]) {
+    if (value[key] === undefined) continue;
+    if (!shortString(value[key], max)) return null;
+    result[key] = value[key];
+  }
+  for (const key of ['sourceUrl', 'officialApplyUrl']) {
+    if (value[key] === undefined || value[key] === '') continue;
+    const url = officialHttpsUrl(value[key]); if (!url) return null; result[key] = url;
+  }
+  for (const [key, normalize] of [['location', normalizeOfficialLocation], ['salary', normalizeOfficialSalary]]) {
+    if (value[key] === undefined) continue;
+    result[key] = normalize(value[key]); if (!result[key]) return null;
+  }
+  for (const key of ['contentHash', 'scrapedListingSha256']) {
+    if (value[key] === undefined || value[key] === '') continue;
+    if (!/^[a-f0-9]{64}$/u.test(value[key])) return null; result[key] = value[key];
+  }
+  if (value.fetchedAt !== undefined) {
+    if (!shortString(value.fetchedAt, 40) || !Number.isFinite(Date.parse(value.fetchedAt))) return null;
+    result.fetchedAt = value.fetchedAt;
+  }
+  if (value.trail !== undefined) {
+    if (!Array.isArray(value.trail) || value.trail.length > 32 || value.trail.some(item => !OFFICIAL_POSTING_TRAIL.includes(item))) return null;
+    result.trail = [...new Set(value.trail)];
+  }
+  if (value.alternatives !== undefined) {
+    if (!Array.isArray(value.alternatives) || value.alternatives.length > 12) return null;
+    result.alternatives = [];
+    for (const item of value.alternatives) {
+      if (!exactKeys(item, ['url', 'title']) || !shortString(item.title, 500)) return null;
+      const url = officialHttpsUrl(item.url); if (!url) return null;
+      result.alternatives.push({ url, title: item.title });
+    }
+  }
+  return result;
+}

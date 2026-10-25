@@ -1751,6 +1751,7 @@ export default [
       const generationIndexOf = (needle) => generationStart + generationScope.indexOf(needle);
       const latchGuard = generationIndexOf('applicationSubmissionRef.current || hasApplicationRun || localJobPending) return;');
       const latchSet = generationIndexOf('applicationSubmissionRef.current = true;');
+      const prepareIpc = generationIndexOf('await window.electronAPI.prepareOfficialPostingForGeneration?.({');
       const acquire = generationIndexOf('lease = await acquireModuleRun({');
       const currentCanvasRead = generationIndexOf('const canvasFilePath = nav?.getCurrentFile ? nav.getCurrentFile() : nav?.currentFile ?? null;');
       const snapshotPin = generationIndexOf('const initialCareer = resolveLiveCareer(getLiveNode(idRef.current));');
@@ -1764,6 +1765,11 @@ export default [
 
       assert(latchGuard >= 0 && latchSet > latchGuard && acquire > latchSet,
         'a synchronous per-card latch must reject duplicate clicks before a queue lease is requested');
+      assert(prepareIpc > latchSet && acquire > prepareIpc
+        && generationScope.includes('nodeId: data.hubId,')
+        && generationScope.includes('cardId: idRef.current,')
+        && generationScope.includes('await window.electronAPI.completeNonApiAiRun?.(prepareRunId)'),
+      'official preparation must use Board ownership after the latch and retire its fresh run before requesting an application lane');
       assert(snapshotPin >= 0 && snapshotGuard > snapshotPin && snapshotGuard < acquire
         && currentCanvasRead > acquire && queueIpc > currentCanvasRead,
       'Generate must reject an unpinned card before its FIFO lease, then re-read the current canvas path after owning the lease before queueing');
@@ -1780,6 +1786,10 @@ export default [
         && !generationScope.includes('originHubId')
         && !generationScope.includes('const originHub ='),
       'the queue payload must carry only the immutable career snapshot pin, never mutable hub authority or an origin-hub recovery path');
+      for (const field of ['postedBy', 'applyOptions', 'salaryProvenance', 'officialPosting', 'googleCardUrl', 'sourceJobKey']) {
+        assert(new RegExp(`\\b${field}:\\s*data\\.${field}\\b`).test(generationScope),
+          `Generate must carry ${field} inline without adding a free sandbox identifier`);
+      }
       assert(source.includes('getLocalApplicationStatus({ jobId, canvasFilePath })')
         && source.includes('const jobCanvasFilePath = queuedCanvasFilePath || canvasFilePath;')
         && source.includes('canvasFilePath: jobCanvasFilePath,')

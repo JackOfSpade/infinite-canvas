@@ -55,10 +55,12 @@ const GENERATION_AUDIT_SAVED_REQUIRED_HASH_KEYS = [
 // Save-time export permits a missing optional PDF sibling; its audit binding is
 // deliberately null until that document exists. Sync can subsequently create
 // one PDF, so reject malformed receipts but retain a truthful null for the
-// untouched optional sibling.
-const GENERATION_AUDIT_OPTIONAL_PDF_HASH_KEYS = [
+// untouched optional sibling. The scraped-listing audit hash is also optional
+// for older bundles and is preserved without modification by Sync.
+const GENERATION_AUDIT_OPTIONAL_HASH_KEYS = [
   'resumePdfSha256',
   'coverLetterPdfSha256',
+  'scrapedListingSha256',
 ];
 const workspaces = new Map();
 const editWatchers = new Map();
@@ -507,8 +509,8 @@ function withSyncedGenerationAuditSavedArtifacts(data, { applicationHtml, pdf, d
     || audit.version !== GENERATION_AUDIT_VERSION
     || audit.schema !== GENERATION_AUDIT_SCHEMA
     || typeof audit.jobId !== 'string' || !audit.jobId.trim()
-    || !validHashMap(audit.finalArtifacts, GENERATION_AUDIT_FINAL_REQUIRED_HASH_KEYS, GENERATION_AUDIT_OPTIONAL_PDF_HASH_KEYS)
-    || !validHashMap(audit.savedArtifacts, GENERATION_AUDIT_SAVED_REQUIRED_HASH_KEYS, GENERATION_AUDIT_OPTIONAL_PDF_HASH_KEYS)) {
+    || !validHashMap(audit.finalArtifacts, GENERATION_AUDIT_FINAL_REQUIRED_HASH_KEYS, GENERATION_AUDIT_OPTIONAL_HASH_KEYS)
+    || !validHashMap(audit.savedArtifacts, GENERATION_AUDIT_SAVED_REQUIRED_HASH_KEYS, GENERATION_AUDIT_OPTIONAL_HASH_KEYS)) {
     throw new Error('Generation Audit.json cannot be updated because it is not a supported durable application audit.');
   }
   const bindings = pdfs && typeof pdfs === 'object' ? pdfs : { [documentKind]: pdf };

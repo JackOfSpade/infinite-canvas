@@ -46,7 +46,7 @@ export function reconcileGlassdoorSalaryFromDescription(job) {
     ? `${currencyPrefix}${symbol}${firstRaw} - ${rangeSymbol}${secondRaw} ${cadence}`
     : `${currencyPrefix}${symbol}${firstRaw} ${cadence}`;
   const normalized = captured.replace(/\s+/g, ' ').replace(/\s+\//g, '/').trim();
-  if (parseSalaryToNumeric(normalized) > 0) return { ...job, salary: normalized };
+  if (parseSalaryToNumeric(normalized) > 0) return { ...job, salary: normalized, salaryProvenance: 'unknown' };
 
   // The shared annualizer intentionally rejects tiny explicit annual minima.
   // Glassdoor currently emits exactly that sentinel shape for some listings.
@@ -55,7 +55,7 @@ export function reconcileGlassdoorSalaryFromDescription(job) {
   const annual = /(?:\/\s*(?:yr|year)|\b(?:per|a|an)\s+(?:year|annum)\b|\b(?:annually|annual|yearly)\b)/i.test(cadence);
   if (annual && first != null && first > 0 && first < 1_000
       && second != null && second >= 10_000 && second <= 2_000_000) {
-    return { ...job, salary: `Up to ${currencyPrefix}${rangeSymbol}${compactNumber(second)}/yr` };
+    return { ...job, salary: `Up to ${currencyPrefix}${rangeSymbol}${compactNumber(second)}/yr`, salaryProvenance: 'unknown' };
   }
 
   return job;

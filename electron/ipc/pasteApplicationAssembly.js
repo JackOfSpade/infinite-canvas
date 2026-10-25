@@ -650,6 +650,9 @@ export function assemblePasteApplicationResult({
   // only after their current-authority store validator has checked the exact
   // receipt root and every page.
   authorityListingReceiptValidated = false,
+  // A trusted host callback reads the frozen listing body and applies the
+  // final-paragraph exception. Absence preserves the legacy career-only rule.
+  validateListingClosing = null,
   outputBundleRoot = DEFAULT_OUTPUT_BUNDLE_ROOT,
 } = {}) {
   const jobInput = frozenState(FROZEN_JOB_RECORD, () => record(input, 'input'));
@@ -755,10 +758,27 @@ export function assemblePasteApplicationResult({
     bullet: bullet.text,
     careerDataQuotes: careerQuotesForIds(bullet.evidenceIds, evidenceById, occursInCareerData, `résumé bullet ${bullet.id}`),
   }))));
-  const coverLetterParagraphs = withRepairs(['coverLetter:authored'], () => letter.paragraphs.map(paragraph => ({
-    paragraph: paragraph.text,
-    careerDataQuotes: careerQuotesForIds(paragraph.evidenceIds, evidenceById, occursInCareerData, `cover-letter paragraph ${paragraph.id}`),
-  })));
+  const coverLetterParagraphs = withRepairs(['coverLetter:authored'], () => letter.paragraphs.map((paragraph, index) => {
+    const listingClosing = typeof validateListingClosing === 'function'
+      ? validateListingClosing({ paragraphs: letter.paragraphs, index, acceptedEvidence: [...evidenceById.values()] })
+      : null;
+    if (listingClosing?.eligible && listingClosing.listingOnly) {
+      return { paragraph: paragraph.text, careerDataQuotes: [], jobListingQuotes: [...listingClosing.listingQuotes] };
+    }
+    try {
+      return {
+        paragraph: paragraph.text,
+        careerDataQuotes: careerQuotesForIds(paragraph.evidenceIds, evidenceById, occursInCareerData, `cover-letter paragraph ${paragraph.id}`),
+      };
+    } catch (error) {
+      if (listingClosing?.listingOnly && listingClosing.corrections?.length) {
+        const messages = [...listingClosing.corrections, error.message];
+        error.message = messages.join('\n');
+        error.failureRecords = messages.map(message => ({ message, repairs: ['coverLetter:authored'] }));
+      }
+      throw error;
+    }
+  }));
   // Preserve the model's canonical checklist notes verbatim. Host code only
   // projects exact source bindings from accepted evidence identifiers.
   const qualityReview = writeVerifyV2 ? null : {

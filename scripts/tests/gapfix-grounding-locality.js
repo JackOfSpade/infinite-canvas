@@ -490,7 +490,9 @@ export default [
           stem: 'nightly pipelines load appointment and billing records from three clinic scheduling systems into one reporting database', tail: 'billing records', verb: 'I run nightly pipelines that load appointment and billing records from three clinic scheduling systems into one reporting database' },
       ];
       for (const d of domains) {
-        const options = tool => ({ postingText: d.posting(tool), targetCompany: d.company });
+        // Re-applying to an approved former employer keeps the structural
+        // employment guard from pre-empting this test of posting-name locality.
+        const options = tool => ({ postingText: d.posting(tool), targetCompany: d.company, approvedOrganizations: [d.company] });
         const v = (text, tool = d.tool) => verdict(text, [d.quote], [], options(tool));
         const Stem = `${d.stem.charAt(0).toUpperCase()}${d.stem.slice(1)}`;
         // B: the round-1 shape, an impersonal sentence addressed to the target, still gets the posting's name.
@@ -506,6 +508,10 @@ export default [
           `For your team, ${d.stem.replace(/^/u, 'my ')} in ${d.tool}.`,
           `The ${d.stem} for me in ${d.tool} at ${d.company}.`,
         ]) {
+          if (text.includes(`at ${d.company}`)) {
+            const unapproved = verdict(text, [d.quote], [], { postingText: d.posting(d.tool), targetCompany: d.company });
+            assert(/the employer this letter is addressed to/u.test(unapproved), `${d.key}/A: an unapproved target employment frame is rejected before tool grounding`);
+          }
           const got = v(text);
           assert(NAMES.test(got) && got.includes(`“${d.tool}”`), `${d.key}/A: a first-person clause gets no posting name (${text}; got ${got || 'acceptance'})`);
         }

@@ -1,13 +1,15 @@
 import { __analysisPathsForCurrentRequestForTests, __createDescriptionRecoveryCheckpointForTests, __discardJobAnalysisSnapshotForTests, __discardOwnedJobRunForTests, __formatJobAnalysisPromptForTests, __getJobAnalysisRetirementStateForTests, __loadDescriptionRecoveryCheckpointForTests, __loadJobAnalysisSnapshotForTests, __removeDescriptionRecoveryCheckpointForTests, __runWithIpcRequestContextForTests, __saveDescriptionRecoverySnapshotIfCurrentForTests, __saveJobAnalysisSnapshotForTests, assessDescriptionRecoverySnapshotOwnership, assert, canRecoverGatheredRunDirectly, claimJobAnalysisOperationAuthority, collectDeletedJobAnalysisDiscards, collectDeletedJobRunDiscards, createDescriptionRecoveryMutex, filterJobsByDescriptionEvidence, fs, getJobAnalysisPaths, ipcMain, isLiveDescriptionRecoveryRun, isSafeJobAnalysisCleanupNoop, listDescriptionRecoveryCheckpointsSync, markSourceStatus, path, PDFDocument, readRunState, recordSourcePage, setStage, startRun } from '../test-dependencies.js';
 import electronPkg from 'electron';
 import { writeApprovedCareerSnapshotFixture } from './careerSnapshotFixture.mjs';
-import { approvedCareerEvidenceCatalog, careerSnapshotPath, careerSnapshotStorageRoot, readCareerSnapshot } from '../../electron/ipc/careerSnapshot.js';
+import { approvedCareerEvidenceCatalog, careerSnapshotPath, careerSnapshotStorageRoot, readCareerSnapshot, writeCareerSnapshotAtomically } from '../../electron/ipc/careerSnapshot.js';
 import { buildCareerCleanLayer, writeCareerCleanLayer } from '../../electron/ipc/careerCleanLayer.js';
 import { careerImportLogFile, careerImportReview, readCareerImportHistory } from '../../electron/ipc/careerImportLog.js';
+import { readCareerIncrementalState, writeCareerIncrementalState } from '../../electron/ipc/careerIncrementalStore.js';
+import { compileSyntheticCareerSnapshot } from './careerIncrementalFixture.mjs';
 import { normalizeJobsMarkup, repairJobsMojibake } from '../../src/utils/textEncoding.js';
 import { careerFilesCleanupNeedsWarning, isJobAnalysisSnapshotAfterClear, nextJobAnalysisClearWatermark, normalizeJobAnalysisClearRunId, normalizeJobAnalysisClearWatermark } from '../../src/utils/jobAnalysisRecovery.js';
 import { getJobDescriptionRecoveryCheckpointPath } from '../../electron/ipc/jobAnalysisPaths.js';
-import { __assertCareerInputDescriptorsStillMatchForTests, __extractCareerFileSectionsForTests, __pruneStaleCareerInputStagesForTests, __recordJobSourceResumeAttemptForTests, __resolvePinnedScoringInputForTests, __stageCareerInputFilesForTests, buildJobAnalysisSnapshot, getJobsResumeAttributionForReport, getJobsTelemetryHubCountForReport, partitionPinnedScoringEvidenceForTests, registerJobsHandlers, scoringPromptFitsEnvelopeForTests, subdividePinnedScoringEvidenceForEnvelopeForTests } from '../../electron/ipc/jobs.js';
+import { __assertCareerInputDescriptorsStillMatchForTests, __extractCareerFileSectionsForTests, __pruneStaleCareerInputStagesForTests, __recordJobSourceResumeAttemptForTests, __registerJobsHandlersForTests, __resolvePinnedScoringInputForTests, __stageCareerInputFilesForTests, buildJobAnalysisSnapshot, getJobsResumeAttributionForReport, getJobsTelemetryHubCountForReport, partitionPinnedScoringEvidenceForTests, registerJobsHandlers, scoringPromptFitsEnvelopeForTests, subdividePinnedScoringEvidenceForEnvelopeForTests } from '../../electron/ipc/jobs.js';
 import { finishRunWithSavedListings, isRunCollectionFinishedWithSavedListings } from '../../electron/ipc/jobRunStaging.js';
 import { receiptTime } from '../../electron/ipc/bugReport/jobsSnapshot.js';
 import { discardDeletedJobAnalysisSnapshots, discardDeletedJobRuns } from '../../src/utils/canvasInteractions.js';
@@ -16,6 +18,93 @@ import { formatJobAnalysisRecoveryLifecycleMarkdown, readJobAnalysisRecoveryLife
 import { CODE_DEFINITIONS } from '../../src/utils/bugReportCodes.js';
 
 export default [
+  {
+    name: 'career imports share verified incremental state across modules and forced recompilation bypasses all baselines',
+    run: async () => {
+      const directory = fs.realpathSync(fs.mkdtempSync(path.join('/tmp', 'ic-career-incremental-handler-')));
+      const originalGetPath = electronPkg.app.getPath;
+      const userData = path.join(directory, 'user-data');
+      electronPkg.app.getPath = name => name === 'userData' ? userData : originalGetPath(name);
+      try {
+        await fs.promises.mkdir(userData);
+        const originalText = 'Synthetic Candidate\n';
+        const editedText = 'Synthetic Candidate Revised\n';
+        const original = await compileSyntheticCareerSnapshot(originalText);
+        const edited = await compileSyntheticCareerSnapshot(editedText);
+        const snapshotRoot = careerSnapshotStorageRoot(userData);
+        await writeCareerSnapshotAtomically(snapshotRoot, original.snapshot);
+        await writeCareerIncrementalState(snapshotRoot, original.snapshot, original.reuseState);
+        for (const compiled of [original, edited]) {
+          const catalog = approvedCareerEvidenceCatalog(compiled.snapshot);
+          await writeCareerCleanLayer(snapshotRoot, buildCareerCleanLayer(compiled.snapshotId, catalog, [{
+            items: catalog.map(item => ({ id: item.id, clean: item.quote })),
+          }]));
+        }
+        const sourceFile = path.join(directory, 'Career.txt');
+        await fs.promises.writeFile(sourceFile, originalText);
+        const sender = { id: 98_224, __canvasPath: path.join(directory, 'workspace.canvas'),
+          isDestroyed: () => false, once: () => {}, on: () => {}, removeListener: () => {}, send: () => {} };
+        registerJobsHandlers();
+        const cached = await ipcMain.__getInvokeHandler('parse-career-data')({ sender }, {
+          filePaths: [sourceFile], nodeId: 'search-original', importModule: 'job-search',
+        });
+        assert(cached.success === true, `the original cached import should succeed: ${JSON.stringify(cached)}`);
+        await fs.promises.writeFile(sourceFile, editedText);
+        let previous = null;
+        __registerJobsHandlersForTests({ compileCareerSnapshot: async input => {
+          previous = input.previousCompilation;
+          assert(input.sourceFiles[0].text === editedText, 'new compilation receives the exact edited staged bytes');
+          return edited;
+        } });
+        const result = await ipcMain.__getInvokeHandler('parse-career-data')({ sender }, {
+          filePaths: [sourceFile], nodeId: 'board-revised', importModule: 'job-board',
+        });
+        assert(result.success === true && result.careerSnapshotId === edited.snapshotId
+          && previous?.snapshot.snapshotId === original.snapshotId
+          && previous.snapshot.sources[0].text === originalText
+          && previous.state.snapshotId === original.snapshotId,
+        `the Job Board edit must receive the Job Search historical source and validated page state: ${JSON.stringify(result)}`);
+        assert(await readCareerIncrementalState(snapshotRoot, await readCareerSnapshot(snapshotRoot, edited.snapshotId)),
+          'a newly approved compiled snapshot durably publishes reusable state');
+        const historyBytes = await fs.promises.readFile(careerImportLogFile(userData));
+        const history = await readCareerImportHistory(userData);
+        assert(history.imports.length === 2 && history.imports[0].sourceSetId === history.imports[1].sourceSetId,
+          'the shared lineage is retained across distinct module scopes');
+
+        await fs.promises.unlink(path.join(snapshotRoot, 'incremental-compilations', `${edited.snapshotId}.json`));
+        await fs.promises.writeFile(sourceFile, 'Synthetic Candidate Further Revised\n');
+        let missingReceiptBypassed = false;
+        __registerJobsHandlersForTests({ compileCareerSnapshot: async input => {
+          missingReceiptBypassed = input.previousCompilation === null;
+          throw new Error('missing receipt used ordinary compilation');
+        } });
+        const missingReceipt = await ipcMain.__getInvokeHandler('parse-career-data')({ sender }, {
+          filePaths: [sourceFile], nodeId: 'board-revised', importModule: 'job-board',
+        });
+        assert(missingReceiptBypassed && /missing receipt used ordinary compilation/u.test(missingReceipt.error),
+          'missing optional optimization state must reach the ordinary compiler without a baseline');
+
+        await fs.promises.writeFile(sourceFile, editedText);
+        await fs.promises.writeFile(careerImportLogFile(userData), '{ corrupt history is deliberately never read by forced baseline discovery');
+        let forcedBypassed = false;
+        __registerJobsHandlersForTests({ compileCareerSnapshot: async input => {
+          forcedBypassed = input.previousCompilation === null;
+          throw new Error('forced ordinary compilation reached');
+        } });
+        const forced = await ipcMain.__getInvokeHandler('parse-career-data')({ sender }, {
+          filePaths: [sourceFile], nodeId: 'board-revised', importModule: 'job-board', forceRecompile: true,
+        });
+        assert(forcedBypassed && /forced ordinary compilation reached/u.test(forced.error),
+          'forceRecompile bypasses both exact cache and historical baseline lookup');
+        await fs.promises.writeFile(careerImportLogFile(userData), historyBytes);
+        return { sharedHistoricalBaseline: true, newStatePublished: true, missingReceiptFallback: true, forcedBypass: true };
+      } finally {
+        electronPkg.app.getPath = originalGetPath;
+        registerJobsHandlers();
+        fs.rmSync(directory, { recursive: true, force: true });
+      }
+    },
+  },
   {
     name: 'career cached imports log each module scope, deduplicate retries, and fail visibly when history is corrupt',
     run: async () => {
@@ -622,8 +711,14 @@ export default [
       const finalizationStart = source.indexOf("jobsTelemetry.pipeline = { ...(jobsTelemetry.pipeline || {}), phase: 'finalizing-search'");
       const gatheredStage = source.indexOf("await setJobRunStage(canvasFilePath, 'gathered'", finalizationStart);
       const finalization = source.slice(finalizationStart, gatheredStage);
+      const officialResolution = source.indexOf('const officialResolution = await resolveScoreSafePostings(kept, {');
+      const finalCheckpoint = source.indexOf('await recordSourcePage(canvasFilePath, {', finalizationStart);
+      assert(officialResolution > source.indexOf('kept = finalDeduped;')
+        && finalCheckpoint > officialResolution && gatheredStage > finalCheckpoint
+        && source.includes('const officialResolutionChanged = officialDedupDropped > 0'),
+      'legacy gathered rows must resolve after dedup and checkpoint changed official metadata before the gathered stage advances');
       assert(finalization.includes('const finalScoreSafeBySource = new Map()')
-        && finalization.includes('if (!resumeGatheredOnly)')
+        && finalization.includes('if (!resumeGatheredOnly || officialResolutionChanged)')
         && finalization.includes('await recordSourcePage(canvasFilePath, {')
         && finalization.includes('const finalGatingSourceIds = new Set(')
         && finalization.includes("warning?.code === 'linkedin-rate-limited'")

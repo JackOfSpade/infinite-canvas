@@ -6225,6 +6225,10 @@ export default [
         assert(probed?.localJob?.status !== 'saved' && probed?.localJob?.savedOutputMissing !== true,
           `after a deliberate delete nothing reads as saved or as a lost bundle, got ${JSON.stringify(probed).slice(0, 300)}`);
 
+        assert(probed.localJob.savedReceiptMissing === true && probed.localJob.savedDir === null
+          && probed.localJob.receipt === null,
+          'the durable no-receipt verdict releases stale renderer links after deletion or restart');
+
         // With the receipt retired there is nothing left to delete: a repeat
         // request is refused like any job with no recorded save (the card no
         // longer shows the button by then), never reported as a deletion.
@@ -6245,6 +6249,18 @@ export default [
         const cleared = await deleteOutput({ sender }, { jobId: queued.id, canvasFilePath: project.canvasFilePath });
         assert(cleared?.success === true && cleared.missing === true && cleared.receiptRemoved === true && !fs.existsSync(receiptPath),
           `deleting an already-lost folder retires its receipt, got ${JSON.stringify(cleared)}`);
+
+        const finalCompany = path.join(project.root, 'Applied Jobs', 'Final Company');
+        const finalLocation = path.join(finalCompany, 'Location');
+        const finalBundle = path.join(finalLocation, 'Role');
+        await fs.promises.mkdir(finalBundle, { recursive: true });
+        await fs.promises.writeFile(path.join(finalLocation, '.DS_Store'), 'Finder');
+        await fs.promises.writeFile(path.join(finalCompany, '.DS_Store'), 'Finder');
+        await fs.promises.writeFile(receiptPath, `${JSON.stringify({ ...receipt, outputDir: finalBundle })}\n`, 'utf8');
+        const finalDeleted = await deleteOutput({ sender }, { jobId: queued.id, canvasFilePath: project.canvasFilePath });
+        assert(finalDeleted?.success === true && !fs.existsSync(finalCompany)
+          && fs.existsSync(path.join(project.root, 'Applied Jobs')) && fs.existsSync(sibling),
+          'deleting the last application prunes its empty company/location while preserving the root and other applications');
 
         const neverSavedJobId = '223e4567-e89b-42d3-a456-426614174002';
         const noReceipt = await deleteOutput({ sender }, { jobId: neverSavedJobId, canvasFilePath: project.canvasFilePath });

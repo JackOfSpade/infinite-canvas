@@ -143,7 +143,7 @@ const CANDIDATES = [
       kind: 'tool', category: 'clinical',
       directText: 'Calibrated the manual sphygmomanometer against the unit reference gauge each month.',
     },
-    listed: { text: 'Core competencies: telemetry monitoring, arterial line insertion.', items: [{ label: 'telemetry monitoring', name: 'Telemetry monitoring', kind: 'method', category: 'clinical' }, { label: 'arterial line insertion', name: 'Arterial line insertion', kind: 'method', category: 'clinical' }] },
+    listed: { text: 'Skills: telemetry monitoring, arterial line insertion.', items: [{ label: 'telemetry monitoring', name: 'Telemetry monitoring', kind: 'method', category: 'clinical' }, { label: 'arterial line insertion', name: 'Arterial line insertion', kind: 'method', category: 'clinical' }] },
     nearMiss: { sibling: 'Arterial line insertion', extension: 'Telemetry monitoring certification', embedded: 'Monitor' },
     listing: {
       requires: 'Required: continuous telemetry monitoring experience on a cardiac step-down unit.',
@@ -171,7 +171,7 @@ const CANDIDATES = [
       kind: 'tool', category: 'culinary',
       directText: 'Cleaned and descaled the convection oven at the close of every week.',
     },
-    listed: { text: 'Core competencies: chocolate tempering, sugar pulling.', items: [{ label: 'chocolate tempering', name: 'Chocolate tempering', kind: 'method', category: 'culinary' }, { label: 'sugar pulling', name: 'Sugar pulling', kind: 'method', category: 'culinary' }] },
+    listed: { text: 'Skills: chocolate tempering, sugar pulling.', items: [{ label: 'chocolate tempering', name: 'Chocolate tempering', kind: 'method', category: 'culinary' }, { label: 'sugar pulling', name: 'Sugar pulling', kind: 'method', category: 'culinary' }] },
     nearMiss: { sibling: 'Sugar pulling', extension: 'Chocolate tempering by machine', embedded: 'Temper' },
     listing: {
       requires: 'Required: chocolate tempering for plated desserts and retail confections.',
@@ -199,7 +199,7 @@ const CANDIDATES = [
       kind: 'method', category: 'engineering',
       directText: 'Maintained the office span table after each code amendment.',
     },
-    listed: { text: 'Core competencies: finite element analysis, seismic base isolation design.', items: [{ label: 'finite element analysis', name: 'Finite element analysis', kind: 'method', category: 'engineering' }, { label: 'seismic base isolation design', name: 'Seismic base isolation design', kind: 'method', category: 'engineering' }] },
+    listed: { text: 'Skills: finite element analysis, seismic base isolation design.', items: [{ label: 'finite element analysis', name: 'Finite element analysis', kind: 'method', category: 'engineering' }, { label: 'seismic base isolation design', name: 'Seismic base isolation design', kind: 'method', category: 'engineering' }] },
     nearMiss: { sibling: 'Seismic base isolation design', extension: 'Finite element analysis with nonlinear solvers', embedded: 'Punch' },
     listing: {
       requires: 'Required: finite element analysis of concrete floor systems.',
@@ -227,7 +227,7 @@ const CANDIDATES = [
       kind: 'tool', category: 'analytics',
       directText: 'Trained three colleagues on Quillsheet formulas.',
     },
-    listed: { text: 'Core competencies: regression analysis, time series forecasting.', items: [{ label: 'regression analysis', name: 'Regression analysis', kind: 'method', category: 'analytics' }, { label: 'time series forecasting', name: 'Time series forecasting', kind: 'method', category: 'analytics' }] },
+    listed: { text: 'Skills: regression analysis, time series forecasting.', items: [{ label: 'regression analysis', name: 'Regression analysis', kind: 'method', category: 'analytics' }, { label: 'time series forecasting', name: 'Time series forecasting', kind: 'method', category: 'analytics' }] },
     nearMiss: { sibling: 'Time series forecasting', extension: 'Regression analysis with Bayesian priors', embedded: 'Model' },
     listing: {
       requires: 'Required: regression analysis to support demand planning.',
@@ -255,7 +255,7 @@ const CANDIDATES = [
       kind: 'tool', category: 'logistics',
       directText: 'Replaced the thermal printer ribbon and platen on the shipping desk.',
     },
-    listed: { text: 'Core competencies: cycle counting, slotting optimization.', items: [{ label: 'cycle counting', name: 'Cycle counting', kind: 'method', category: 'logistics' }, { label: 'slotting optimization', name: 'Slotting optimization', kind: 'method', category: 'logistics' }] },
+    listed: { text: 'Skills: cycle counting, slotting optimization.', items: [{ label: 'cycle counting', name: 'Cycle counting', kind: 'method', category: 'logistics' }, { label: 'slotting optimization', name: 'Slotting optimization', kind: 'method', category: 'logistics' }] },
     nearMiss: { sibling: 'Slotting optimization', extension: 'Cycle counting by RFID', embedded: 'Count' },
     listing: {
       requires: 'Required: cycle counting experience in a high-volume distribution centre.',
@@ -283,7 +283,7 @@ const CANDIDATES = [
       kind: 'framework', category: 'testing',
       directText: 'Upgraded Jest across the monorepo to remove deprecated matchers.',
     },
-    listed: { text: 'Core competencies: PostgreSQL, Redis.', items: [{ label: 'PostgreSQL', name: 'PostgreSQL', kind: 'technology', category: 'database' }, { label: 'Redis', name: 'Redis', kind: 'technology', category: 'database' }] },
+    listed: { text: 'Skills: PostgreSQL, Redis.', items: [{ label: 'PostgreSQL', name: 'PostgreSQL', kind: 'technology', category: 'database' }, { label: 'Redis', name: 'Redis', kind: 'technology', category: 'database' }] },
     nearMiss: { sibling: 'Redis', extension: 'PostgreSQL 16', embedded: 'Postgres' },
     listing: {
       requires: 'Required: PostgreSQL performance tuning for reporting workloads.',
@@ -575,10 +575,22 @@ function skillEvidenceIdsFor(view, name) {
 // real skill-row catalog lines when the row exists, otherwise a forged id.
 // production checks the NAME against the approved inventory before it looks at
 // any evidence id, so a rejection here is about the skill itself.
-function authorityVerdict(view, name, evidenceIds = null) {
+// These direct-evidence probes name the tested item in the posting so the
+// application-only declaration rule does not replace the inventory defect
+// each probe is isolating. Selection-policy tests explicitly turn this off.
+function applicationListing(view, names, postingNamesProbe = true) {
+  const terms = (Array.isArray(names) ? names : [names]).filter(Boolean);
+  return [...view.listing, ...(postingNamesProbe && terms.length ? [{
+    id: 'listing-probe-skill', sourceId: 'job-listing', quote: `The role requires ${terms.join(', ')}.`, priority: 'highest',
+  }] : [])];
+}
+
+function authorityVerdict(view, name, evidenceIds = null, { postingNamesProbe = true, careerSkillEvidence = view.careerSkillEvidence } = {}) {
   let ids = evidenceIds || skillEvidenceIdsFor(view, name);
   if (!ids.length) ids = [`host.career.skill.skill-${slug(name)}.1`];
-  try { validateAuthoritySkillGroup(view.authority, [name], ids); return { admitted: true, message: '' }; } catch (error) { return { admitted: false, message: String(error?.message || error) }; }
+  try { validateAuthoritySkillGroup(view.authority, [name], ids, null, {
+    listingEvidence: applicationListing(view, name, postingNamesProbe), careerSkillEvidence,
+  }); return { admitted: true, message: '' }; } catch (error) { return { admitted: false, message: String(error?.message || error) }; }
 }
 
 const authorityAdmits = (view, name) => authorityVerdict(view, name).admitted;
@@ -591,9 +603,9 @@ const CORE_SKILL_GROUP_LABELS = ['Competencies', 'Tools'];
 // evidence a responder could find (the quotes that literally name it).
 // `wire` replaces the projection the validator receives (tamper tests);
 // `evidenceFor` replaces the evidence a group cites for an item.
-function resumeAttempt(view, name, { omit = [], items = null, wire = null, evidenceFor = null } = {}) {
+function resumeAttempt(view, name, { omit = [], items = null, wire = null, evidenceFor = null, postingNamesProbe = true } = {}) {
   const role = view.authority.sourceRoles[0];
-  const evidenceCatalog = [...view.catalog, ...view.listing];
+  const evidenceCatalog = [...view.catalog, ...applicationListing(view, name, postingNamesProbe)];
   const required = requiredCareerAttestedSkillTerms(evidenceCatalog, view.careerSkillEvidence);
   const baseItems = items || required.filter(item => !omit.some(skipped => canon(skipped) === canon(item)));
   const claimEvidence = itemName => {
@@ -666,10 +678,17 @@ function assertViewMatchesOracle(c, bullets, view, label) {
     assert(names.size === supported.size && [...supported].every(name => names.has(name)),
       `${label}: ${kind} skill inventory ${JSON.stringify([...names])} must equal the source-evidenced set ${JSON.stringify([...supported])}`);
   }
-  // What a skills block MUST carry is derived by production from the same approved snapshot.
+  // Compilation keeps every directly supported skill. Application fill is
+  // narrower: a posting must name it or its direct source must declare it in
+  // the explicit Skills section. This oracle reads only the synthetic spec.
+  const declared = new Set(bullets.filter(item => item.list).flatMap(item => item.uses)
+    .filter(use => use.disposition === 'skill' && use.relationship === 'independent' && use.indexEligible !== false)
+    .map(use => canon(use.name)));
+  const expectedRequired = new Set([...supported].filter(name => declared.has(name)
+    || view.listing.some(entry => occursIn(entry.quote, name))));
   const required = namesOf(resumeAttempt(view, null).required);
-  assert(required.size === supported.size && [...supported].every(name => required.has(name)),
-    `${label}: required skills ${JSON.stringify([...required])} must equal the source-evidenced set ${JSON.stringify([...supported])}`);
+  assert(required.size === expectedRequired.size && [...expectedRequired].every(name => required.has(name)),
+    `${label}: required skills ${JSON.stringify([...required])} must equal the declared or posting-named, source-evidenced set ${JSON.stringify([...expectedRequired])}`);
   for (const name of universe(c)) {
     const why = explain(c, bullets, name);
     // The oracle's verdict must follow from the source text and the spec's annotations.
@@ -1397,7 +1416,7 @@ export default [
         const L = await compileScenario(c, listedBullets);
         const [first, second] = c.listed.uses;
         // Partial list: the same line shortened to the second skill only.
-        const partial = bullet(`Core competencies: ${second.label}.`, [second], { list: true });
+        const partial = bullet(`Skills: ${second.label}.`, [second], { list: true });
         const partialBullets = replaceBullet(listedBullets, c.listed, partial);
         const P = await compileScenario(c, partialBullets);
         const C = await compileScenario(c, withoutBullet(listedBullets, c.listed));
@@ -1412,6 +1431,8 @@ export default [
         }
         const names = c.listed.uses.map(use => use.name);
         const viewL = productionView(L.snapshot, [c.listing.requires, c.listing.unrelated]);
+        assert(names.every(name => viewL.careerSkillEvidence.skills.find(skill => canon(skill.name) === canon(name))?.declaredInSkillsSection === true),
+          `${c.key}: every bare item under the explicit Skills label is declared in the frozen projection`);
         assertViewMatchesOracle(c, listedBullets, viewL, 'skills-section line');
         for (const name of names) expectAdmission(viewL, name, true, `${c.key} listed ${name}`);
         // The posting names both listed skills, so a complete skills block must now carry them.
@@ -1627,7 +1648,7 @@ export default [
     },
   },
   {
-    name: 'adaptability skills: what a skills block must carry is limited to skills the posting names (posting-named) or the cited career evidence states (career-attested), never both lists merged',
+    name: 'adaptability skills: required modern fill is posting-named and career-attested or explicitly declared, while flagless projections retain their earlier admission',
     run: async () => {
       for (const c of CANDIDATES) {
         const B = await compileScenario(c, bulletsFor(c, 'both'));
@@ -1635,11 +1656,29 @@ export default [
         const postingNames = (view, wire = view.careerSkillEvidence) => postingNamedAttestedSkillTerms([...view.catalog, ...view.listing], wire).map(canon);
         const neutral = productionView(B.snapshot, neutralListing());
         const asking = productionView(B.snapshot, [c.listing.requires, c.listing.unrelated]);
-        // Career-attested: every supported skill is required, whatever the posting says.
+        // All three skills remain directly supported inventory entries. None
+        // is declared in a source Skills section, so only the posting-named
+        // one becomes application fill under the modern projection.
+        assert(neutral.careerSkillEvidence.skills.every(skill => skill.declaredInSkillsSection === false), `${c.key}: duty-derived inventory rows carry an explicit false declaration flag`);
+        assert(resumeAttempt(neutral, null).required.length === 0, `${c.key}: no Skills section and no posting-named attested term requires no additional fill`);
+        assert(named(asking, c.addedName) && !named(asking, c.practice.uses[0].name) && !named(asking, c.mentions[0].uses[0].label), `${c.key}: exactly the supported posting-named skill enters the modern required index`);
         for (const view of [neutral, asking]) {
-          assert(named(view, c.practice.uses[0].name) && named(view, c.addedName) && named(view, c.mentions[0].uses[0].label), `${c.key}: all three supported skills are in the career-attested index`);
           assert(!named(view, c.nearMiss.sibling) && !named(view, c.mentions[1].uses[0].label), `${c.key}: unsupported names never enter the index`);
         }
+        const modernRefused = resumeAttempt(neutral, c.addedName, { postingNamesProbe: false });
+        const authorityRefused = authorityVerdict(neutral, c.addedName, null, { postingNamesProbe: false });
+        assert(!modernRefused.accepted && modernRefused.message.includes(`item "${c.addedName}" is not an exact, index-eligible approved snapshot skill`),
+          `${c.key}: a supported but non-declared skill is refused when the posting does not name it (${modernRefused.message.slice(0, 240)})`);
+        assert(!authorityRefused.admitted && authorityRefused.message.includes('not declared in the approved source Skills section and is not named in this posting'),
+          `${c.key}: the authority enforces the same modern permission (${authorityRefused.message})`);
+        const legacy = structuredClone(neutral.careerSkillEvidence);
+        for (const skill of legacy.skills) delete skill.declaredInSkillsSection;
+        assert(resumeAttempt(neutral, c.addedName, { wire: legacy, postingNamesProbe: false }).accepted
+          && authorityVerdict(neutral, c.addedName, null, { postingNamesProbe: false, careerSkillEvidence: legacy }).admitted,
+        `${c.key}: omitting the declaration flag preserves the earlier supported-skill admission at both application seams`);
+        const legacyRequired = requiredCareerAttestedSkillTerms([...neutral.catalog, ...neutral.listing], legacy).map(canon);
+        assert(legacyRequired.length === 3 && [c.practice.uses[0].name, c.addedName, c.mentions[0].uses[0].label].every(name => legacyRequired.includes(canon(name))),
+          `${c.key}: the flagless projection retains its complete earlier career-attested required index`);
         // Posting-named: only the supported skill the posting itself names, never the posting's unsupported sibling.
         assert(JSON.stringify(postingNames(neutral)) === '[]', `${c.key}: a posting that names no skill makes none posting-named`);
         assert(JSON.stringify(postingNames(asking)) === JSON.stringify([canon(c.addedName)]), `${c.key}: exactly the supported skill the posting names is posting-named (${JSON.stringify(postingNames(asking))})`);
@@ -1647,7 +1686,7 @@ export default [
         const planWithoutIt = { ...asking, catalog: asking.catalog.filter(entry => !occursIn(entry.quote, c.addedName)) };
         assert(planWithoutIt.catalog.length < asking.catalog.length && planWithoutIt.catalog.length > 0, `${c.key}: control: the plan lost only the quotes that name ${c.addedName}`);
         const limited = requiredCareerAttestedSkillTerms([...planWithoutIt.catalog, ...asking.listing], asking.careerSkillEvidence).map(canon);
-        assert(!limited.includes(canon(c.addedName)) && limited.includes(canon(c.practice.uses[0].name)), `${c.key}: a skill the accepted plan never quotes is not required even though the approved inventory holds it (${JSON.stringify(limited)})`);
+        assert(!limited.includes(canon(c.addedName)) && limited.length === 0, `${c.key}: a skill the accepted plan never quotes is not required, and undeclared non-posting skills do not fill the gap (${JSON.stringify(limited)})`);
         assert(postingNamedAttestedSkillTerms([...planWithoutIt.catalog, ...asking.listing], asking.careerSkillEvidence).length === 0, `${c.key}: and it is not posting-named either, since the plan carries no career quote for it`);
         // Word boundaries: the name inside a longer word is no evidence for it, the name set off by punctuation is.
         const decoy = quote => [...planWithoutIt.catalog, { id: 'decoy-quote', sourceId: 'career-data', quote }, ...asking.listing];
@@ -1680,7 +1719,9 @@ export default [
         `${c.key}: an approved skill cited with a line that does not state it is refused for lack of evidence, not for lack of approval (${wrongEvidence.message.slice(0, 240)})`);
 
         // Authority: evidence must be skill lines of exactly the selected skills.
-        const refusal = (items, ids) => { try { validateAuthoritySkillGroup(view.authority, items, ids); return ''; } catch (error) { return String(error?.message || error); } };
+        const refusal = (items, ids) => { try { validateAuthoritySkillGroup(view.authority, items, ids, null, {
+          listingEvidence: applicationListing(view, items), careerSkillEvidence: view.careerSkillEvidence,
+        }); return ''; } catch (error) { return String(error?.message || error); } };
         assert(refusal([c.addedName], [addedSkillLine]) === '', `${c.key}: control: the skill's own catalog line is accepted`);
         assert(/does not belong to this skill group/u.test(refusal([c.addedName], [fillerLine])), `${c.key}: a duty line is not skill evidence`);
         assert(/does not belong to this skill group/u.test(refusal([c.addedName], [practiceSkillLine])), `${c.key}: another skill's catalog line is not this skill's evidence`);

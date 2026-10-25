@@ -3355,6 +3355,7 @@ export const BRIDGE_RAW_RESEARCH_TASKS = Object.freeze([
   'job-preference-research',
   'job-preference-research-batch',
   'interview-brief-research',
+  'job-official-posting-research',
 ]);
 const bridgeRawResearchTasks = new Set(BRIDGE_RAW_RESEARCH_TASKS);
 
@@ -3364,6 +3365,7 @@ const bridgeRawResearchTasks = new Set(BRIDGE_RAW_RESEARCH_TASKS);
 // source policy imports this list and adds its explicit never rows, so a new
 // task is manual by default until it is deliberately reviewed here.
 export const BRIDGE_RELEASE_ONE_TASKS = Object.freeze([
+  'job-official-posting-research', 'job-official-posting-match',
   'bundle-price-synthesis', 'job-compensation-assessment', 'job-compensation-assessment-batch',
   'job-compensation-research', 'job-compensation-research-batch', 'job-preference-evaluation',
   'job-preference-interpretation', 'job-preference-research', 'job-preference-research-assessment',
@@ -3449,6 +3451,7 @@ function bridgeExclusionReason(record, { allowTasks, allowNodeIds, allowWindowNo
   // step restored for editing. Either way the dock is not done with this handoff.
   return null;
 }
+export { bridgeExclusionReason as __bridgeExclusionReasonForTests };
 
 // The dock's own order (NonApiAiDialog.jsx receiveRequest): arrival order, except
 // that a request is inserted ahead of a queued one from the same hub and task

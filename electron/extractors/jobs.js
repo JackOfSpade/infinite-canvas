@@ -149,6 +149,7 @@ export const GLASSDOOR_EXTRACTOR = `
           company: employer.shortName || employer.name || value.employerName || '',
           location: value.locationName || value.location || '',
           salary: value.salarySource?.payRange ? String(value.salarySource.payRange) : (value.salaryEstimate || ''),
+          salaryProvenance: value.salarySource?.payRange ? 'unknown' : value.salaryEstimate ? 'estimated' : 'unknown',
           snippet: (employer.overallRating ? 'Rating: ' + employer.overallRating + '/5 | ' : '') + (value.jobDescription || ''),
           url: value.seoJobLink ? (gdOrigin + value.seoJobLink) : (value.jobLink || ''),
           posted: value.ageInDays != null ? (value.ageInDays + 'd ago') : '',
@@ -203,7 +204,7 @@ export const GLASSDOOR_EXTRACTOR = `
         const dateEl = card.querySelector('[data-test="job-age"], [class*="jobAge"]');
         const posted = dateEl?.innerText?.trim() || '';
 
-        jobs.push({ title, company, location, salary, snippet: '', url, posted, source: 'glassdoor' });
+        jobs.push({ title, company, location, salary, salaryProvenance: 'unknown', snippet: '', url, posted, source: 'glassdoor' });
       } catch {}
     });
   }
@@ -300,7 +301,7 @@ export const GOOGLE_JOBS_EXTRACTOR = `
       // (and downstream scoring receive) the truthful empty state until the
       // card panel was actually read.
       jobs.push({
-        title, company, location, salary, employmentType: empType, snippet: '',
+        title, company, location, salary, salaryProvenance: 'unknown', employmentType: empType, snippet: '',
         url: '', googleCardUrl, applySource, posted, source: 'google',
       });
     } catch {}

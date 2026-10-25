@@ -418,14 +418,12 @@ export async function logSavedBundle({ root, workspaceDir, html, letterRemoved =
   });
 }
 
-// The full session waits for a batch (SESSION_DUE_COUNT bundles) because a
-// habit needs that much evidence to tell from noise. A SYSTEMATIC defect does
-// not: it shows as the same section edited bundle after bundle, and the user
-// fixes it by hand until a session notices. So a second, earlier signal reads
-// recurrence rather than volume: one section of one document edited in
+// Review after SESSION_DUE_COUNT bundles; collect more if the evidence is
+// insufficient for a supported change. A separate signal reads recurrence
+// rather than volume: one section of one document edited in
 // RECURRING_MIN_BUNDLES of the last RECURRING_WINDOW accepted bundles logged
 // since the last session. It suggests a session; it never starts one.
-export const SESSION_DUE_COUNT = 50;
+export const SESSION_DUE_COUNT = 3;
 export const RECURRING_WINDOW = 8;
 export const RECURRING_MIN_BUNDLES = 4;
 const EDIT_OPS = new Set(['added', 'removed', 'rewritten', 'moved']);

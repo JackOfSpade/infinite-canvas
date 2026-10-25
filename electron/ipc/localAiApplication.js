@@ -34,6 +34,7 @@ import { RESUME_CHECK_DISPOSITIONS, partitionResumeCheckResults } from './resume
 import { atomicWriteJson, ensureDirectoryWithinRoot, isWithinDirectory } from '../utils/pathSafety.js';
 import { logger } from '../logger.js';
 import { isBackgroundE2E } from '../utils/backgroundE2e.js';
+import { pruneEmptyApplicationParents } from '../utils/emptyApplicationFolders.js';
 import { FROZEN_CAREER_DATA, FROZEN_COMPLETED_PACKAGE, FROZEN_EVIDENCE_PLAN, FROZEN_JOB_LISTING, FROZEN_JOB_MANIFEST, FROZEN_JOB_RECORD, LOCAL_AI_JOB_INTEGRITY_CODE, LocalAiJobIntegrityError, MAX_FROZEN_SOURCE_CHARS, MAX_UNIT_CAREER_DATA_QUOTES, assemblePasteApplicationResult, assertAuthorityDraftSelection, assertFrozenEvidencePlan, assertFrozenTrustedIdentity, frozenSourceQuoteTest, frozenState, gradeFrozenSource, isJobIntegrityFault, normalizeBoundDocumentText } from './pasteApplicationAssembly.js';
 import { assertTrustedSourceRoles, occursInQuotedCareerEvidence, careerQuoteHasDeterministicRoleScope, formatRoleDateForPresentation, projectContactChannels, projectTrustedIdentity, CAREER_DATA_ROLE_SECTION_RULE, CAREER_SECTION_OPENING_BLOCK_RULE, CAREER_TERM_OVERLAP_RULE, isUnsafeControlCharacter, MIN_SHARED_CAREER_TERMS, NEUTRAL_SKILL_GROUP_RULE, PROJECT_JOB_RELEVANCE_RULE_TEXT, renderStructuredApplicationResume, ROLE_BULLET_EVIDENCE_EXCLUSIVITY_RULE, SKILL_ITEM_FILTERABLE_RULE, SKILL_ITEM_GROUNDING_RULE, SKILLS_BLOCK_BUDGET_RULE, STRUCTURED_RESUME_ID_PATTERN, STRUCTURED_RESUME_LIMITS, structuredResumeRoleEvidenceGaps, missingPostingNamedSkillTerms, missingRequiredCareerSkillTerms, POSTING_NAMED_SKILLS_RULE, postingNamedAttestedSkillTerms, careerAttestedSkillTerms, requiredCareerAttestedSkillTerms, MAX_REQUIRED_CAREER_SKILL_TERMS, SKILLS_BLOCK_PRESENCE_RULE, CAREER_SNAPSHOT_HISTORICAL_SKILL_EVIDENCE_VERSION, CAREER_SNAPSHOT_SKILL_EVIDENCE_VERSION, validateStructuredApplicationResume } from './structuredResume.js';
 import { removeChatGptContentReferenceArtifacts } from './jsonRepair.js';
@@ -45,7 +46,8 @@ import { authorityEntityEvidenceQuotes, authorityProjectRoleOf, buildApplication
 import { MAX_SOURCE_GROUNDING_QUOTE_CHARS as SOURCE_GROUNDING_QUOTE_CHARS } from './applicationSourceLimits.js';
 import { canonicalizeHostOwnedResumeFields, hostOwnedResumeRecordFields } from './hostOwnedResumeFields.js';
 import { expectedExactlyClause } from './hostOwnedText.js';
-import { CLAIM_GROUNDING_RULE, SPELLED_NUMBER_PATTERN, assessBulkQuantity, assessComparativeMagnitude, assessScaleWord, assessStrengthFamily, claimGroundingFindings, claimedIntervals, clauseIndexesContaining, describeClaimFinding, evidenceBody, groundingClauses, quoteVerbHints, relatedQuoteIndexes, relatednessStem, spelledNumberValue, statedBesideSameWords, statedIntervals } from './applicationClaimGrounding.js';
+import { CLAIM_GROUNDING_RULE, SPELLED_NUMBER_PATTERN, assessBulkQuantity, assessComparativeMagnitude, assessScaleWord, assessStrengthFamily, claimGroundingFindings, claimedIntervals, clauseIndexesContaining, credentialFindings, describeClaimFinding, evidenceBody, groundingClauses, namedTermFindings, quoteVerbHints, relatedQuoteIndexes, relatednessStem, scanStrengthMentions, spelledNumberValue, statedBesideSameWords, statedIntervals } from './applicationClaimGrounding.js';
+import { evaluateFinalParagraphListingGrounding } from './applicationListingClosing.js';
 import { supportsExpensePurpose } from './expenseOutcomeEquivalence.js';
 import { createAuthorityLedgerStore, openAuthorityLedgerStore } from './applicationAuthorityLedgerStore.js';
 import { APPLICATION_AUTHORITY_MATCH_PAGE_EVIDENCE, APPLICATION_AUTHORITY_WORKFLOW_VERSION, authorityDigest, createStoreAuthorityWorkflowRoot } from './applicationAuthorityWorkflow.js';
@@ -53,13 +55,18 @@ import { applicationBlindReviewValidatorStamp, isApplicationBlindReviewValidator
 import { BLIND_REPAIR_RAISED_CYCLES_RULE, BLIND_REPAIR_TRUNCATION_RULE } from './applicationRepairConvergence.js';
 import { RESUME_SUPPORT_VERB_RULE } from './applicationWriterGuidance.js';
 import { describeRoleStrengthFinding, roleStrengthFindings } from './applicationRoleStrength.js';
-import { WRITE_VERIFY_PROTOCOL, WRITE_VERIFY_STAGES, WRITE_VERIFY_MAX_CORRECTIONS, WRITE_VERIFY_MAX_FIT_CORRECTIONS, acceptedWriteVerifyCandidates, droppedCandidateFindings, factCorrectionTransition, fullApprovedHand, initialWriteVerifyState, isWriteVerifyJob, appendWriteVerifyRejection, writeVerifyRankingErrors, writeVerifyRankingShapeError, writeVerifyRankingReasonErrors, writeVerifyCandidateCount, writeVerifyNextAfterCandidate, writeVerifyPrompt, writeVerifySourcePrompt, writeVerifyStageKey, writeVerifyFactFindingErrors, writeVerifyChangedFindingErrors } from './applicationWriteVerify.js';
+import { WRITE_VERIFY_PROTOCOL, WRITE_VERIFY_STAGES, WRITE_VERIFY_MAX_CORRECTIONS, WRITE_VERIFY_MAX_FIT_CORRECTIONS, WRITE_VERIFY_LISTING_CLOSING_RULE, acceptedWriteVerifyCandidates, droppedCandidateFindings, factCorrectionTransition, fullApprovedHand, initialWriteVerifyState, isWriteVerifyJob, appendWriteVerifyRejection, writeVerifyRankingErrors, writeVerifyRankingShapeError, writeVerifyRankingReasonErrors, writeVerifyCandidateCount, writeVerifyNextAfterCandidate, writeVerifyPrompt, writeVerifySourcePrompt, writeVerifyStageKey, writeVerifyFactFindingErrors, writeVerifyChangedFindingErrors } from './applicationWriteVerify.js';
 import { applicationProtocolSetting } from './applicationProtocolSetting.js';
 import { targetIdentityNameLicensed, validateSharedApplicationContent } from './applicationTruthGates.js';
 import { v2RejectionEvidencePaths } from './applicationV2RejectionEvidence.js';
 import { archiveV2Content } from './applicationV2EvidenceArchive.js';
 import { archiveV2WriterNotes, splitWriteVerifyWriterResponse } from './applicationV2WriterShortlist.js';
 import { tryGetStore } from './settings.js';
+import { normalizeApplyOptions, normalizeOfficialPosting, officialHttpsUrl, OFFICIAL_POSTING_ROW_FIELDS, SALARY_PROVENANCES, LOCAL_AI_APPLICATION_SNIPPET_MAX_CHARS } from './officialPostingFields.js';
+export { LOCAL_AI_APPLICATION_SNIPPET_MAX_CHARS } from './officialPostingFields.js';
+import { unresolvedOfficialPosting } from './officialPostingResolver.js';
+import { frozenOfficialEmployer } from './officialPostingMatch.js';
+import { getPreparedOfficialPosting, registerOfficialPostingGenerationHandlers } from './officialPostingGeneration.js';
 import { assertApplicationV2PromptLimit, assertApplicationV2ReplyLimit } from './applicationV2Limits.js';
 import { writeVerifyLengthBudgets } from './applicationV2LengthBudget.js';
 import { applicationV2PagePng } from './applicationV2PageImages.js';
@@ -193,7 +200,6 @@ const MAX_BLIND_REPAIR_CONTEXT_BYTES = 12 * 1024;
 // quotas. A source with genuinely sparse evidence can use the audited escape
 // hatch below; ordinary drafts cannot turn a one-line artifact into a pass.
 export const MIN_RESUME_UNDERFILL_CHARACTERS_PER_ROLE = 38;
-export const MIN_COVER_LETTER_UNDERFILL_WORDS = 90;
 // Context and input are created by this process, then reopened before a
 // person can paste a response. Keep their queue-time byte envelope identical
 // to every trusted reader; character limits alone are unsafe for Unicode.
@@ -3096,7 +3102,7 @@ function authorityRecordFieldErrors(item, approvedRecord, fields, careerQuotes) 
 // Authority-backed jobs do not reconstruct a monolithic career corpus merely
 // to reuse legacy substring validators. Every candidate fact is bound to a
 // reserved catalog ID and exact approved quote instead.
-function validateAuthorityResumeArtifacts(resume, acceptedEvidence, authority, sourceRoles) {
+function validateAuthorityResumeArtifacts(resume, acceptedEvidence, authority, sourceRoles, careerSkillEvidence = null) {
   const errors = [];
   const evidenceById = new Map((acceptedEvidence || []).map(item => [item?.id, item]));
   const roleById = new Map((sourceRoles || []).map(role => [role?.id, role]));
@@ -3151,7 +3157,9 @@ function validateAuthorityResumeArtifacts(resume, acceptedEvidence, authority, s
     } catch (error) { errors.push(`Resume credential ${String(item?.id)}: ${error.message}`); }
   }
   for (const group of (Array.isArray(resume?.skills) ? resume.skills : [])) {
-    try { validateAuthoritySkillGroup(authority, group?.items, careerIds(group?.evidenceIds), acceptedEvidence.__cleanSkillNames); }
+    try { validateAuthoritySkillGroup(authority, group?.items, careerIds(group?.evidenceIds), acceptedEvidence.__cleanSkillNames, {
+      listingEvidence: (acceptedEvidence || []).filter(item => item?.sourceId === 'job-listing'), careerSkillEvidence,
+    }); }
     catch (error) { errors.push(`Resume skill group ${String(group?.id)}: ${error.message}`); }
   }
   return errors;
@@ -3159,8 +3167,8 @@ function validateAuthorityResumeArtifacts(resume, acceptedEvidence, authority, s
 
 // Narrow seam for the authority résumé identity gate (role fields, project name,
 // education and certification fields), shared with the stage validator.
-export function __validateAuthorityResumeArtifactsForTests(resume, acceptedEvidence, authority, sourceRoles) {
-  return validateAuthorityResumeArtifacts(resume, acceptedEvidence, authority, sourceRoles);
+export function __validateAuthorityResumeArtifactsForTests(resume, acceptedEvidence, authority, sourceRoles, careerSkillEvidence = null) {
+  return validateAuthorityResumeArtifacts(resume, acceptedEvidence, authority, sourceRoles, careerSkillEvidence);
 }
 
 // Host-owned résumé fields are written by the host. A response that restates a
@@ -3387,12 +3395,12 @@ function pastePrompt({ input, state }) {
   // under context.job repeated the whole posting (about a quarter of this
   // prompt) and invited quoting the copy the validator never reads. Keep the
   // small identifying facts here and the posting text in the listing alone.
-  const { snippet: _snippet, ...jobFacts } = input.job || {};
+  const { snippet: _snippet, applyUrl: _applyUrl, googleCardUrl: _googleCardUrl, sourceJobKey: _sourceJobKey, ...jobFacts } = input.job || {};
   // safeJob() fills every key it knows, so an unscraped field ships as
   // "salary": "" — bytes that read like a fact the responder has to account
   // for. A missing key says the same thing in nothing.
   const job = input.job
-    ? Object.fromEntries(Object.entries(jobFacts).filter(([, value]) => value !== '' && value != null))
+    ? Object.fromEntries(Object.entries(jobFacts).filter(([key, value]) => !OFFICIAL_POSTING_ROW_FIELDS.includes(key) && value !== '' && value != null))
     : input.job;
   // Computed once so reviewFindings and requiredChangeTargets below are
   // gated on the identical set — see the comment at reviewFindings for why
@@ -3444,6 +3452,7 @@ function pastePrompt({ input, state }) {
   }
   throw new Error('This application was made by an older version, so regenerate it.');
 }
+export { pastePrompt as __pastePromptForTests };
 
 function assertPastePromptEnvelope(input, state) {
   const prompt = pastePrompt({ input, state });
@@ -4130,7 +4139,9 @@ export function writeVerifyGroundingContract() {
   return [
     CLAIM_GROUNDING_RULE,
     `Qualifier words are matched by word form, never by meaning, in these families: ${sourceGroundingQualifierForms()}`,
+    'The employer this letter is addressed to may be named without a quote as the owner of a need the work meets, never as a place the work happened',
     SOURCE_FIGURE_GROUNDING_RULE,
+    WRITE_VERIFY_LISTING_CLOSING_RULE.replace(/\.$/u, ''),
     `Every sentence about the candidate's own work must share at least ${MIN_SHARED_SOURCE_TERMS} meaningful terms with the quotes its unit cites, where ${SOURCE_TERM_OVERLAP_RULE}, and ${LETTER_TERM_FORMS_RULE}`,
   ].join('. ') + '.';
 }
@@ -5020,6 +5031,7 @@ async function writeVerifyFrozenContext(input, state) {
   const sourcePrompt = writeVerifySourcePrompt({
     posting, requirements, listingEvidence, identity: hydrated.snapshot.profile.identity,
     sourceRoles: hydrated.sourceRoles, profile: hydrated.snapshot.profile, catalog, lengthBudget,
+    careerSkillEvidence: hydrated.skillEvidence,
     groundingContract: writeVerifyGroundingContract(),
   });
   return { posting, requirements, listingEvidence, catalog, hand, sourcePrompt,
@@ -5143,6 +5155,7 @@ async function writeVerifyCandidateGate({ raw, state, input, frozen, manifest, r
         __careerCleanQuoteById: input.__careerCleanQuoteById,
         careerSkillEvidence: frozen.careerSkillEvidence }, paste: packageState,
         careerData: frozen.careerData, jobListing: frozen.jobListing, authority: frozen.authority,
+        validateListingClosing: createApplicationListingClosingValidator({ input, state: packageState, sourceRoles, careerData: frozen.careerData, authority: frozen.authority }),
         authorityListingReceiptValidated: isCurrentAuthorityProtocol(input) });
       validateLocalApplicationResult(packageRaw, input.jobId, input.canvasRoot, input.job,
         completedResultValidationOptions({ manifest, frozen, sourceRoles }));
@@ -5624,7 +5637,7 @@ function pasteAcceptedAdvisories(state, response, input) {
       plan: localCoverLetterPlan(argument), paragraphs,
       evidence: extractResumeEvidence(resumeMainHtml),
       jobText: jobTextForCoverLetter(input.job || {}), researchText: '',
-      companyName: input.job?.company || '', referenceDate: input.createdAt,
+      companyName: input.job?.company || '', postedBy: input.job?.postedBy || '', referenceDate: input.createdAt,
       paragraphCitations: pasteTwinParagraphCitations(rawParagraphs, state.evidencePlan?.evidence || []),
     });
     for (const advisory of partitionCheckResults(checks).advisory) add(advisory.id, advisory.count);
@@ -5638,12 +5651,12 @@ function pasteAcceptedAdvisories(state, response, input) {
 // A check added to the battery reaches the totality test without a second
 // edit, which is what keeps PASTE_CHECK_PROSE_UNITS total as the pipeline
 // grows.
-function pasteCoverLetterChecks({ plan, paragraphs, evidence, jobText, researchText, companyName, referenceDate = null, paragraphCitations = null }, { activeOnly = true } = {}) {
+function pasteCoverLetterChecks({ plan, paragraphs, evidence, jobText, researchText, companyName, postedBy = '', referenceDate = null, paragraphCitations = null }, { activeOnly = true } = {}) {
   return [
     checkRoleThesis(plan),
     ...(activeOnly && checkDisposition('mapping-narrative-structure') === 'off' ? [] : [checkMappingNarrativeStructure(plan)]),
     checkEvidenceGrounding(plan, evidence),
-    ...evaluateCoverLetterChecks({ plan, paragraphs, evidence, jobText, researchText, companyName, referenceDate, paragraphCitations, activeOnly }),
+    ...evaluateCoverLetterChecks({ plan, paragraphs, evidence, jobText, researchText, companyName, forbiddenNames: postedBy ? [postedBy] : [], referenceDate, paragraphCitations, activeOnly }),
   ];
 }
 
@@ -5675,10 +5688,6 @@ export function __pasteTwinParagraphCitationsForTests(rawParagraphs, acceptedEvi
 
 export function __completedParagraphCitationsForTests(raw, paragraphs) {
   return completedParagraphCitations(raw, paragraphs);
-}
-
-export function __pasteCoverLetterUnderfillErrorsForTests(coverLetter, acceptedEvidence) {
-  return pasteCoverLetterUnderfillErrors(coverLetter, acceptedEvidence);
 }
 
 /**
@@ -5910,6 +5919,15 @@ function trustedNamesForRoles(roles, projects = []) {
   ].map(value => String(value || '').trim()).filter(Boolean);
 }
 
+function approvedOrganizationsForCareer(sourceRoles, authority, projects = []) {
+  return [...new Set([
+    ...(Array.isArray(sourceRoles) ? sourceRoles.map(role => role?.company) : []),
+    ...(Array.isArray(authority?.sourceEducation) ? authority.sourceEducation.map(item => item?.institution) : []),
+    ...(Array.isArray(authority?.sourceCertifications) ? authority.sourceCertifications.map(item => item?.issuer) : []),
+    ...(Array.isArray(projects) ? projects.map(project => project?.name) : []),
+  ].map(value => String(value || '').trim()).filter(Boolean))];
+}
+
 export function pasteAttributionScopeErrors({ unitLabel, unitId, finalText, evidenceIds, acceptedEvidence, sourceRoles, careerData, authority, projects = [], targetCompany = '' }) {
   const text = normalizedAttributionText(finalText);
   const quotes = pasteUnitCareerQuotes(evidenceIds, acceptedEvidence).normalized;
@@ -5967,12 +5985,7 @@ export function pasteAttributionScopeErrors({ unitLabel, unitId, finalText, evid
   // mentioning a client, vendor, example or listing company in a quote does
   // not make it one.
   if (roles.length) {
-    const approvedOrganizations = [
-      ...[...employers.values()].map(entry => entry.company),
-      ...(Array.isArray(authority?.sourceEducation) ? authority.sourceEducation.map(item => item?.institution) : []),
-      ...(Array.isArray(authority?.sourceCertifications) ? authority.sourceCertifications.map(item => item?.issuer) : []),
-      ...(Array.isArray(projects) ? projects.map(project => project?.name) : []),
-    ].map(value => String(value || '').trim()).filter(Boolean);
+    const approvedOrganizations = approvedOrganizationsForCareer(roles, authority, projects);
     const reported = new Set();
     // The posting's own company is the one organization a letter may name in
     // these frames without it being an employer ("At <target>, the team ...");
@@ -6079,10 +6092,102 @@ function boundAuthorityEntityQuoteGroups(evidenceIds, acceptedEvidence, authorit
   return [...groups.values()];
 }
 
-function pasteUnitGroundingErrors({ unitLabel, unitId, finalText, evidenceIds, acceptedEvidence, identityTokens, label, sourceRoles = [], careerData = '', authority = null, projects = [], targetCompany = '', targetTitle = '', postingText = '' }) {
+// This exception receives only host-owned sources. The frozen full companion
+// supplies the body boundary even when a modern prompt projects a listing page.
+export function createApplicationListingClosingValidator(hostContext = {}) {
+  const { input = {}, state = {} } = hostContext;
+  const sourceRoles = hostContext.sourceRoles ?? selectedSourceRoles(state, input);
+  const authority = hostContext.authority === undefined ? applicationCareerAuthority(input) : hostContext.authority;
+  const careerData = hostContext.careerData ?? state.careerData ?? '';
+  let renderedEvidence = null;
+  let renderedContextUnavailable = false;
+  if (state.resume && (hostContext.projects === undefined || hostContext.identityTokens === undefined)) {
+    try {
+      renderedEvidence = extractResumeEvidence(pasteRenderedResumeMainHtml(state.resume,
+        { ...state, careerData }, { ...input, sourceRoles }));
+    } catch (error) {
+      if (error?.code === 'STRUCTURED_RESUME_CONFIGURATION' || error?.code === 'LOCAL_AI_VALIDATION_CONFIGURATION') throw error;
+      // An invalid résumé cannot establish the earlier paragraph's baseline.
+      renderedContextUnavailable = true;
+    }
+  }
+  const projects = hostContext.projects ?? renderedEvidence?.projects ?? [];
+  const identityTokens = hostContext.identityTokens ?? careerIdentityTokens(renderedEvidence || { roles: sourceRoles });
+  const frozenJobListing = jobListingQuoteSource(input.job || {});
+  const company = input.job?.company || '';
+  const qualifierContext = { meaningful: meaningfulSourceTokens, trustedNames: [] };
+  const openingVerb = /^(?:(?:also|then|later|now|still|always|never|personally|currently|just|even|once|often)\s+)*(?:am|is|are|was|were|be|been|being|have|has|had|do|does|did|can|could|will|would|shall|should|may|might|must|need|needs|require|requires|support|report|review|plan|built|wrote|led|ran|kept|held|made|took|gave|got|set|put|cut|sent|taught|chose|began|won|spent|drove|found|met|paid|sold|told|brought|thought|understood|grew|drew|rose|lost|left|saw|knew|became|fed|hold|lead|run|build|write|keep|make|take|give|get|send|teach|choose|own|manage|coach|train|mentor|maintain|deliver|create|develop|analyze|analyse|monitor|oversee|supervise|organize|organise|prepare|produce|provide|serve|hire|handle|schedule|track|ship|launch|\p{L}+ed|\p{L}+ing)\b/iu;
+  const nonverbOpener = /^(?:you|your|yours|the|this|that|these|those|a|an)\b/iu;
+  const prepositionalOpener = /^(?:at|in|within|for|to|from|with|without|through|across|around|alongside|under|on|of|by|before|after|between|among|during|since|throughout|into|onto|upon|beyond|toward|towards|beside|beneath|behind|outside|inside)\s+(.+)$/iu;
+  const companyOpeners = [...new Set([company, company.split(/\s+[-–—|]\s+/u)[0]])]
+    .filter(name => name.length >= 3)
+    .map(name => new RegExp(String.raw`^${name.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')}(?:['’]s)?(?![\p{L}\p{N}])`, 'iu'));
+  return ({ paragraphs = [], index, acceptedEvidence = state.evidencePlan?.evidence || [] } = {}) => {
+    const byId = new Map(acceptedEvidence.map(item => [item?.id, item]));
+    return evaluateFinalParagraphListingGrounding({ paragraphs, index, acceptedEvidence, frozenJobListing, company, identityTokens }, {
+      groundingSentences, groundingClauses, speaksOnlyOfApplicationIntent, speaksOnlyOfIntent, reportsNoPastWork,
+      intentLeadInRemainder, hasWorkIngWord, speaksAsCandidate, sentenceAddressesTarget, isCandidateCareerSentence,
+      meaningfulSourceTokens, MIN_SHARED_SOURCE_TERMS,
+      hasCareerClaimFrame: text => CAREER_CLAIM_FRAME_RE.test(text),
+      hasFigureOrYear: text => /\d/u.test(text) || new RegExp(`\\b${SPELLED_NUMBER_PATTERN}\\b`, 'iu').test(text),
+      hasCredentialWord: text => credentialFindings(text, []).length > 0,
+      hasQualifierWord: text => scanStrengthMentions(text, 'claim').length > 0
+        || SOURCE_GROUNDING_QUALIFIER_RULES.some(rule => rule.assess
+          ? Boolean(rule.assess(text, [], qualifierContext)) : rule.claim.test(text)),
+      opensWithVerb: text => {
+        const value = String(text).trim().replace(/^["“(]+/u, '')
+          .replace(/^(?:(?:also|then|later|now|still|always|never|personally|currently|just|even|once|often)\s+)+/iu, '');
+        // This bounded exception needs positive grammatical proof. An unknown
+        // noun opener and an unknown imperative both keep the baseline rules.
+        const nounOpener = value => nonverbOpener.test(value) || companyOpeners.some(pattern => pattern.test(value));
+        const prepositionalNoun = value.match(prepositionalOpener)?.[1];
+        return openingVerb.test(value) || !(nounOpener(value) || (prepositionalNoun && nounOpener(prepositionalNoun)));
+      },
+      namedTermFindings: (text, bodies, context) => namedTermFindings(text, bodies, { ...context, meaningful: meaningfulSourceTokens, currencyCodes: SOURCE_FIGURE_CURRENCY_CODE_SET }),
+      validateEarlierParagraph: (paragraph, priorIndex) => {
+        const ids = paragraph?.evidenceIds;
+        if (renderedContextUnavailable || typeof paragraph?.id !== 'string' || !paragraph.id.trim()
+          || typeof paragraph?.text !== 'string' || !paragraph.text.trim()
+          || !Array.isArray(ids) || ids.length < 1 || ids.length > MAX_COVER_LETTER_PARAGRAPH_EVIDENCE_IDS
+          || ids.some(id => !byId.has(id)) || !ids.some(id => byId.get(id)?.sourceId === 'career-data')) return ['Earlier paragraph fails the unchanged citation shape.'];
+        return pasteUnitGroundingErrors({
+          unitLabel: PASTE_COVER_PARAGRAPH_UNIT_LABEL, unitId: paragraph.id, finalText: paragraph.text,
+          evidenceIds: ids, acceptedEvidence, identityTokens, label: 'coverLetterParagraphs', sourceRoles,
+          careerData, authority, projects, targetCompany: company, targetTitle: input.job?.title || '',
+          postingText: jobTextForCoverLetter(input.job || {}), paragraphs, paragraphIndex: priorIndex, allowListingClosing: false,
+        });
+      },
+    });
+  };
+}
+
+export function __finalParagraphListingGroundingForTests(context) {
+  return createApplicationListingClosingValidator(context)(context);
+}
+
+function pasteUnitGroundingErrors({ unitLabel, unitId, finalText, evidenceIds, acceptedEvidence, identityTokens, label, sourceRoles = [], careerData = '', authority = null, projects = [], targetCompany = '', targetTitle = '', postingText = '', paragraphs = [], paragraphIndex = 0, validateListingClosing = null, allowListingClosing = true }) {
   const errors = [];
   const { normalized, citationCount } = pasteUnitCareerQuotes(evidenceIds, acceptedEvidence);
-  if (!normalized.length) return errors;
+  const text = normalizeSourceGroundingText(finalText);
+  if (!normalized.length) {
+    if (label === 'coverLetterParagraphs') {
+      // The amendment's guard must run before the listing-only early return.
+      errors.push(...targetEmploymentFrameFailureParts(text, paragraphIndex, {
+        targetCompany, approvedOrganizations: approvedOrganizationsForCareer(sourceRoles, authority, projects),
+      }));
+      const durationError = unsupportedDurationClaimError(`${unitLabel} ${String(unitId ?? '')}`, text, []);
+      if (durationError) errors.push(durationError);
+      const validation = allowListingClosing && typeof validateListingClosing === 'function'
+        ? validateListingClosing({ paragraphs, index: paragraphIndex, acceptedEvidence }) : null;
+      if (!validation?.eligible) {
+        errors.push(`${unitLabel} ${JSON.stringify(String(unitId ?? ''))} needs at least one career-data evidence ID unless it passes the structural final-paragraph listing-grounding rule.`);
+        if (Array.isArray(validation?.corrections)) errors.push(...validation.corrections);
+      }
+    }
+    // A proven final closing bypasses the career unit/sentence/figure floors
+    // together. All other units below retain those exact existing checks.
+    return errors;
+  }
   if (citationCount > MAX_UNIT_CAREER_DATA_QUOTES) {
     errors.push(`${unitLabel} ${JSON.stringify(String(unitId ?? ''))} cites ${citationCount} distinct career-data quotes; assembly binds at most ${MAX_UNIT_CAREER_DATA_QUOTES} to one unit, so retain only the evidence IDs that actually support it.`);
   }
@@ -6090,12 +6195,12 @@ function pasteUnitGroundingErrors({ unitLabel, unitId, finalText, evidenceIds, a
     if (sourceQuoteIsSpecific(quote)) continue;
     errors.push(`${unitLabel} ${JSON.stringify(String(unitId ?? ''))} cites a career-data quote that is too short to bind a claim (${JSON.stringify(quote)}); a bound quote needs at least ${MIN_SOURCE_GROUNDING_QUOTE_CHARS} characters and ${MIN_SOURCE_GROUNDING_QUOTE_WORDS} words. The accepted evidence plan is frozen, so cite one of its longer passages for this unit.`);
   }
-  const text = normalizeSourceGroundingText(finalText);
   if (!text) return errors;
   try {
     assertSourceQuoteLinksFinalText(text, normalized, label, 0, {
       identityTokens,
       trustedNames: trustedNamesForRoles(sourceRoles, projects),
+      approvedOrganizations: approvedOrganizationsForCareer(sourceRoles, authority, projects),
       trustedYears: trustedYearsForRoles(sourceRoles),
       postingText,
       targetCompany,
@@ -6367,6 +6472,7 @@ function pasteCoverLetterCompletionTwinErrors(response, state, input) {
       jobText: jobTextForCoverLetter(input.job || {}),
       researchText: '',
       companyName: input.job?.company || '',
+      postedBy: input.job?.postedBy || '',
       referenceDate: input.createdAt,
       // Only when the assembled letter still lines up with the response's
       // paragraphs, which is when the citations below name the same units.
@@ -6395,6 +6501,8 @@ function pasteCoverLetterCompletionTwinErrors(response, state, input) {
     // a gate in checkParagraphArgumentLinks at review time.
     const acceptedEvidence = Array.isArray(state.evidencePlan?.evidence) ? state.evidencePlan.evidence : [];
     const identityTokens = careerIdentityTokens(evidence);
+    const validateListingClosing = createApplicationListingClosingValidator({ input, state, identityTokens, projects: evidence.projects });
+    const paragraphs = rawParagraphs.map((paragraph, index) => ({ ...paragraph, text: paragraphTexts[index] }));
     if (coverLetter.paragraphs.length === rawParagraphs.length) {
       coverLetter.paragraphs.forEach((text, index) => {
         errors.push(...pasteUnitGroundingErrors({
@@ -6414,6 +6522,9 @@ function pasteCoverLetterCompletionTwinErrors(response, state, input) {
           // The same posting copy the completion gate reads, so the twin is
           // never stricter than the gate about a name the posting uses.
           postingText: jobTextForCoverLetter(input.job || {}),
+          paragraphs,
+          paragraphIndex: index,
+          validateListingClosing,
         }));
       });
     }
@@ -6471,24 +6582,15 @@ function pasteResumeUnderfillErrors(resume, acceptedEvidence) {
   return rationaleError ? [`Résumé has only ${visible} visible highlight characters across ${roles.length} retained role(s), below the conservative ${minimum}-character floor. ${rationaleError}`] : [];
 }
 
-function pasteCoverLetterUnderfillErrors(coverLetter, acceptedEvidence) {
-  const paragraphs = Array.isArray(coverLetter?.paragraphs) ? coverLetter.paragraphs : [];
-  // At this stage a paragraph is { id, text, evidenceIds }, so the words are the
-  // TEXT's. Joining the objects themselves read “[object Object]” for every
-  // paragraph, which is two words however long the paragraph is: a letter of
-  // four real paragraphs measured 8 words and was rejected as underfilled
-  // whenever the career held 180 words of proof (every real career does), and
-  // the rejection counted paragraphs, not words, so the only response that
-  // satisfied it was more paragraphs. A letter reached 90 “words” at exactly 45
-  // paragraphs, 41 of them one sentence. A bare string is read as itself, for
-  // a caller that already flattened the letter.
-  const paragraphTexts = paragraphs.map(paragraph => (typeof paragraph === 'string' ? paragraph : String(paragraph?.text ?? '')));
-  const words = paragraphTexts.join(' ').trim().split(/\s+/u).filter(Boolean).length;
-  if (paragraphs.length >= 2 && words >= MIN_COVER_LETTER_UNDERFILL_WORDS) return [];
-  const capacity = careerEvidenceCapacity(acceptedEvidence);
-  const rationaleError = evidenceLimitedUnderfillRationale(coverLetter, 'Cover letter', capacity,
-    MIN_COVER_LETTER_UNDERFILL_WORDS * 2);
-  return rationaleError ? [`Cover letter has ${paragraphs.length} body paragraph(s) and ${words} words; it needs at least 2 paragraphs and ${MIN_COVER_LETTER_UNDERFILL_WORDS} words unless evidenceLimitedRationale truthfully documents an accepted one-item evidence limit. ${rationaleError}`] : [];
+function sharedApplicationContentErrors(response, state, input, authority = applicationCareerAuthority(input)) {
+  const nonemptyText = value => typeof value === 'string' && value.trim().length > 0;
+  return validateSharedApplicationContent(response, state, input, authority, {
+    nonemptyText, PASTE_RESUME_BULLET_FIELD_LABEL, unsupportedDurationClaimError, pasteCareerQuotesForEvidenceIds, selectedSourceRoles, validateAuthorityResumeArtifacts, isCurrentAuthorityProtocol, isWriteVerifyJob, currentAuthorityFinalResumeArtifactErrors, assertAuthorityDraftSelection, frozenPlanListingEvidenceIds, validateStructuredApplicationResume, selectedAuthorityCareerSkillEvidence, structuredResumeFailureParts, pasteResumeCompletionTwinErrors, pasteResumeUnderfillErrors, projectContactChannels, PASTE_COVER_PARAGRAPH_UNIT_LABEL, MAX_COVER_LETTER_PARAGRAPH_EVIDENCE_IDS, pasteCoverLetterCompletionTwinErrors, createApplicationListingClosingValidator,
+  });
+}
+
+export function __validateSharedApplicationContentForTests(response, state, input) {
+  return sharedApplicationContentErrors(response, state, input);
 }
 
 // envelopeEcho is an optional out-parameter: when the caller passes an object,
@@ -6833,9 +6935,7 @@ function validatePasteResponse(response, state, input, envelopeEcho) {
       errors.push(...pasteEvidencePlanProjectCoverageErrors(knownEvidence, state));
     }
   } else if (state.stage === 'resume' || state.stage === 'cover-letter') {
-    errors.push(...validateSharedApplicationContent(response, state, input, authority, {
-      nonemptyText, PASTE_RESUME_BULLET_FIELD_LABEL, unsupportedDurationClaimError, pasteCareerQuotesForEvidenceIds, selectedSourceRoles, validateAuthorityResumeArtifacts, isCurrentAuthorityProtocol, isWriteVerifyJob, currentAuthorityFinalResumeArtifactErrors, assertAuthorityDraftSelection, frozenPlanListingEvidenceIds, validateStructuredApplicationResume, selectedAuthorityCareerSkillEvidence, structuredResumeFailureParts, pasteResumeCompletionTwinErrors, pasteResumeUnderfillErrors, pasteCoverLetterUnderfillErrors, projectContactChannels, PASTE_COVER_PARAGRAPH_UNIT_LABEL, MAX_COVER_LETTER_PARAGRAPH_EVIDENCE_IDS, pasteCoverLetterCompletionTwinErrors
-    }));
+    errors.push(...sharedApplicationContentErrors(response, state, input, authority));
   } else if (state.stage === 'review') {
     const checklist = Array.isArray(response.checklist) ? response.checklist : [];
     const findings = Array.isArray(response.findings) ? response.findings : [];
@@ -7007,6 +7107,7 @@ async function pastePassingReviewFinalPackageErrors({ jobId, root, dir, manifest
       careerData: frozen.careerData,
       jobListing: frozen.jobListing,
       authority: frozen.authority,
+      validateListingClosing: createApplicationListingClosingValidator({ input, state: candidate, sourceRoles: selectedRoles, careerData: frozen.careerData, authority: frozen.authority }),
       authorityListingReceiptValidated: isCurrentAuthorityProtocol(input),
     });
     // Measured-fit stamps are host-owned input to the same final validator.
@@ -8087,6 +8188,7 @@ async function submitWriteVerifyHandoff({ root, jobId, dir, manifest, input, fro
     const raw = assemblePasteApplicationResult({ input: { ...input, sourceRoles: selectedSourceRoles(next, input), careerSkillEvidence: frozen.careerSkillEvidence,
       __careerCleanSkillNames: input.__careerCleanSkillNames, __careerCleanQuoteById: input.__careerCleanQuoteById },
       paste: next, careerData: frozen.careerData, jobListing: frozen.jobListing, authority: frozen.authority,
+      validateListingClosing: createApplicationListingClosingValidator({ input, state: next, careerData: frozen.careerData, authority: frozen.authority }),
       authorityListingReceiptValidated: isCurrentAuthorityProtocol(input) });
     validateLocalApplicationResult(raw, jobId, input.canvasRoot, input.job, validationOptions);
     await atomicJson(path.join(dir, 'result.json'), raw);
@@ -8714,6 +8816,7 @@ export async function submitLocalApplicationHandoff({ jobId, canvasFilePath, han
           // source-order skill a late, completion-only requirement.
           careerSkillEvidence: frozen.careerSkillEvidence,
         }, paste: next, careerData: frozen.careerData, jobListing: frozen.jobListing, authority: frozen.authority,
+          validateListingClosing: createApplicationListingClosingValidator({ input, state: next, careerData: frozen.careerData, authority: frozen.authority }),
           authorityListingReceiptValidated: isCurrentAuthorityProtocol(input) });
         // A paste workflow's own editorial rounds happen before its first PDF
         // measurement.  Once a measured fit advisory exists, however, the
@@ -9470,11 +9573,10 @@ function canonicalSha256(value) {
   return crypto.createHash('sha256').update(canonicalFrozenValue(value), 'utf8').digest('hex');
 }
 
-function pinnedCareerAuthorityRecord(snapshot) {
+function pinnedCareerAuthorityRecord(snapshot, skillEvidence = snapshotCareerSkillEvidence(snapshot)) {
   const careerData = projectApprovedCareerSnapshotForApplication(snapshot);
   const catalog = approvedCareerEvidenceCatalog(snapshot);
   const sourceRoles = snapshotSourceRoles(snapshot);
-  const skillEvidence = snapshotCareerSkillEvidence(snapshot);
   return {
     version: CAREER_AUTHORITY_VERSION,
     snapshotId: String(snapshot.snapshotId || ''),
@@ -9486,6 +9588,29 @@ function pinnedCareerAuthorityRecord(snapshot) {
     sourceRoles: { count: sourceRoles.length, sha256: canonicalSha256(sourceRoles) },
     skillEvidence: { count: skillEvidence.skills.length, sha256: canonicalSha256(skillEvidence) },
   };
+}
+
+function pinnedCareerSkillProjection(snapshot, authority = null) {
+  const skillEvidence = snapshotCareerSkillEvidence(snapshot);
+  const expected = pinnedCareerAuthorityRecord(snapshot, skillEvidence);
+  if (authority == null || canonicalFrozenValue(authority) === canonicalFrozenValue(expected)) {
+    return { authority: expected, skillEvidence };
+  }
+  // Existing jobs pinned the same immutable snapshot before declaration flags
+  // existed. Verify that exact former projection, then retain its old policy.
+  const legacyEvidence = { ...skillEvidence, skills: skillEvidence.skills.map(skill => {
+    const { declaredInSkillsSection: _declared, ...legacySkill } = skill;
+    return legacySkill;
+  }) };
+  const legacyAuthority = pinnedCareerAuthorityRecord(snapshot, legacyEvidence);
+  if (canonicalFrozenValue(authority) === canonicalFrozenValue(legacyAuthority)) {
+    return { authority: legacyAuthority, skillEvidence: legacyEvidence };
+  }
+  throw new Error(`The pinned career authority no longer matches approved snapshot ${authority.snapshotId}.`);
+}
+
+export function __pinnedCareerSkillProjectionForTests(snapshot, authority = null) {
+  return pinnedCareerSkillProjection(snapshot, authority);
 }
 
 /**
@@ -9508,10 +9633,7 @@ export async function hydratePinnedCareerAuthority(input) {
     }
     const snapshot = await readPinnedCareerSnapshot(careerSnapshotStorageRoot(app.getPath('userData')), authority.snapshotId);
     if (!snapshot) throw new Error('The pinned career snapshot is missing or no longer valid.');
-    const expected = pinnedCareerAuthorityRecord(snapshot);
-    if (canonicalFrozenValue(authority) !== canonicalFrozenValue(expected)) {
-      throw new Error(`The pinned career authority no longer matches approved snapshot ${authority.snapshotId}.`);
-    }
+    const { skillEvidence } = pinnedCareerSkillProjection(snapshot, authority);
     const catalog = approvedCareerEvidenceCatalog(snapshot);
     const cleanLayer = isWriteVerifyJob(input)
       ? await readCareerCleanLayer(careerSnapshotStorageRoot(app.getPath('userData')), snapshot.snapshotId, catalog)
@@ -9525,7 +9647,7 @@ export async function hydratePinnedCareerAuthority(input) {
       cleanSkillNames: cleanCareerSkillNames(snapshot.profile, cleanLayer?.catalog || catalog),
       cleanQuoteById: new Map((cleanLayer?.catalog || []).map(row => [row.id, row.cleanQuote])),
       sourceRoles: snapshotSourceRoles(snapshot),
-      skillEvidence: snapshotCareerSkillEvidence(snapshot),
+      skillEvidence,
     };
   } catch (error) {
     if (isJobIntegrityFault(error)) throw error;
@@ -9974,10 +10096,16 @@ function throwIfAborted(signal) {
 function safeJob(raw = {}) {
   return {
     title: cleanText(raw.title, 500).trim(), company: cleanText(raw.company, 500).trim(),
-    snippet: cleanText(raw.snippet, 80_000).trim(), location: cleanText(raw.location, 500).trim(),
+    snippet: cleanText(raw.snippet, LOCAL_AI_APPLICATION_SNIPPET_MAX_CHARS).trim(), location: cleanText(raw.location, 500).trim(),
     salary: cleanText(raw.salary, 500).trim(), url: cleanText(raw.url, 2_000).trim(),
+    googleCardUrl: cleanText(raw.googleCardUrl, 2_000).trim(), sourceJobKey: cleanText(raw.sourceJobKey, 16_384).trim(),
     source: cleanText(raw.source, 500).trim(), posted: cleanText(raw.posted, 500).trim(),
     language: cleanText(raw.language, 120).trim(),
+    postedBy: cleanText(raw.postedBy, 500).trim(),
+    applyUrl: officialHttpsUrl(raw.applyUrl),
+    applyOptions: normalizeApplyOptions(raw.applyOptions),
+    salaryProvenance: SALARY_PROVENANCES.includes(raw.salaryProvenance) ? raw.salaryProvenance : 'unknown',
+    officialPosting: normalizeOfficialPosting(raw.officialPosting) || undefined,
     // Multi-location consolidation targets travel WITH the frozen job so the
     // one shared description can list every posting location/URL. Only the
     // shared normalizer's bounded, security-checked output is retained: a raw
@@ -9985,6 +10113,52 @@ function safeJob(raw = {}) {
     // or the rendered workspace. A single-posting job normalizes to [].
     postingVariants: normaliseJobPostingVariants(raw.postingVariants),
   };
+}
+
+// Only a main-process prepare record can replace frozen posting facts. The
+// renderer projection supplies matching identity and the scraped fallback.
+function frozenJobWithOfficialPosting(scrapedJob, prepared = null) {
+  const base = { ...scrapedJob, postedBy: '', applyUrl: '', officialPosting: undefined };
+  const fallback = () => {
+    const result = unresolvedOfficialPosting(base, { trail: ['no-resolution'] });
+    return { ...base, company: result.officialPosting.level === 'L6' ? '' : result.officialPosting.employer,
+      postedBy: result.postedBy || '', officialPosting: result.officialPosting };
+  };
+  let posting = normalizeOfficialPosting(prepared?.officialPosting);
+  if (!posting) return fallback();
+  const verified = ['L1', 'L2', 'L3', 'L4'].includes(posting.level);
+  if (verified && !officialHttpsUrl(posting.officialApplyUrl || posting.sourceUrl)) return fallback();
+  const employer = posting.level === 'L6' ? '' : frozenOfficialEmployer(scrapedJob, posting.employer);
+  if (!verified && posting.level !== 'L6' && !employer) {
+    posting = normalizeOfficialPosting({ ...posting, level: 'L6', employer: '',
+      trail: [...new Set([...(posting.trail || []), 'invalid-text'])].slice(-32) });
+  }
+  const postedBy = prepared.postedBy || (posting.level === 'L6' || employer !== scrapedJob.company ? scrapedJob.company : '');
+  let snippet = scrapedJob.snippet;
+  let rejectedText = '';
+  if (['L1', 'L2', 'L3'].includes(posting.level)) {
+    const text = prepared.description;
+    if (!employer || typeof text !== 'string' || !text.trim()
+      || cleanText(text, Number.MAX_SAFE_INTEGER).trim() !== text
+      || crypto.createHash('sha256').update(text).digest('hex') !== posting.contentHash) rejectedText = 'invalid-text';
+    else if (text.length > LOCAL_AI_APPLICATION_SNIPPET_MAX_CHARS || text.length > MAX_FROZEN_SOURCE_CHARS) rejectedText = 'oversize';
+    else snippet = text;
+  }
+  const withMetadata = () => ({ ...base, company: employer, snippet, postedBy,
+    applyUrl: verified ? officialHttpsUrl(posting.officialApplyUrl || posting.sourceUrl) : '', officialPosting: posting });
+  if (!rejectedText && ['L1', 'L2', 'L3'].includes(posting.level)) {
+    try { jobListingQuoteSource(withMetadata()); } catch { rejectedText = 'oversize'; }
+  }
+  if (rejectedText) {
+    snippet = scrapedJob.snippet;
+    posting = normalizeOfficialPosting({ ...posting, level: 'L4', outcome: 'link-only', employer,
+      contentHash: '', trail: [...new Set([...(posting.trail || []), rejectedText])].slice(-32) });
+  }
+  return withMetadata();
+}
+
+export function __freezeOfficialPostingJobForTests(raw, prepared) {
+  return safeJob(frozenJobWithOfficialPosting(safeJob(raw), prepared));
 }
 // Not registered with IPC. The acceptance harness uses the exact queue-time
 // projection to reserve only the bundle paths this module can later save.
@@ -10668,6 +10842,18 @@ async function readFrozenJobFile({ subject, label, root, candidate, maxBytes }) 
 // checks before reading bytes.
 async function readOwnedGenerationLog(root, candidate) {
   return readOwnedFile(root, candidate, { maxBytes: Infinity });
+}
+
+// Audit-only companion. Read it only while importing/exporting artifacts,
+// never while grading frozen prompt or career/listing authority inputs.
+async function readScrapedListingAudit(root, dir, input) {
+  const expected = input.job?.officialPosting?.scrapedListingSha256;
+  if (!expected) return null;
+  const markdown = await readOwnedFile(root, path.join(dir, 'context', 'scraped-listing.md'), {
+    maxBytes: MAX_FROZEN_SOURCE_CHARS * 4, label: 'scraped listing audit',
+  });
+  if (contentHash(markdown) !== expected) throw new Error('Local AI scraped listing audit no longer matches its recorded fingerprint.');
+  return markdown;
 }
 
 // Thin wrapper over the shared atomic-write helper: every call site here
@@ -12271,7 +12457,8 @@ function careerIdentityTokens(resumeEvidence = {}) {
 // default would restore the same quiet narrowing one level down.
 function isCandidateCareerSentence(sentence, identityTokens) {
   if (speaksOnlyOfApplicationIntent(sentence)) return false;
-  const hasCareerAction = CAREER_ASSERTION_ACTION_RE.test(sentence) || CAREER_ASSERTION_REGULAR_PAST_RE.test(sentence);
+  const { remainder } = intentLeadInRemainder(sentence);
+  const hasCareerAction = CAREER_ASSERTION_ACTION_RE.test(remainder) || CAREER_ASSERTION_REGULAR_PAST_RE.test(remainder);
   if (!hasCareerAction) return false;
   const firstPerson = /\b(?:i|we|my|our)\b/iu.test(withoutStanceHedges(sentence));
   if (firstPerson) return true;
@@ -12487,9 +12674,31 @@ const FIRST_PERSON_POSSESSIVE_RE = /(?<![\p{L}\p{N}])(?:[Mm]y|[Mm]ine|[Oo]ur|[Oo
 const FIRST_PERSON_SUBJECT_RE = /(?<![\p{L}\p{N}])(?:I|[Ww]e)(?![\p{L}\p{N}])/gu;
 const INTENT_AFTER_SUBJECT_RE = /^(?:['’](?:d|ll)(?![\p{L}\p{N}])|\s+(?:(?:also|really|truly|just|still|very\s+much)\s+)*(?:would|will|could|can|might|may|should|shall|hope|want|plan|intend|aim|look\s+forward|welcome)(?![\p{L}\p{N}]))/iu;
 
+// Strip exactly one closed, anchored first-person intent lead. Its present
+// copula, emotion adjective or look-forward gerund is not a past-work claim;
+// everything after it still receives the ordinary past/participle tests.
+const INTENT_ADJECTIVE_LEAD_RE = /^(?:\s+(?:am|are)|['’](?:m|re))\s+(?:(?:very|so|really)\s+)?(?:eager|excited|ready|keen|happy|glad|thrilled|delighted|pleased|motivated|prepared|enthusiastic)\s+to\s+/iu;
+const INTENT_FORWARD_LEAD_RE = /^(?:(?:\s+(?:am|are)|['’](?:m|re))\s+looking|\s+look(?:ing)?)\s+forward\s+to\s+\p{L}+ing(?![\p{L}\p{N}])\s*/iu;
+const APPLICATION_INTENT_LEAD_RE = /^(?:\s+(?:am|are)|['’](?:m|re))\s+(?:applying\s+for|writing\s+to\s+apply\s+for)\s+/iu;
+
+export function intentLeadInRemainder(text) {
+  const value = String(text ?? '');
+  const subject = value.match(/^\s*(?:(?:and|so|but)\s+)?(?:I|we)(?![\p{L}\p{N}])/iu);
+  if (!subject) return { matched: false, remainder: value };
+  const afterSubject = value.slice(subject[0].length);
+  const lead = afterSubject.match(INTENT_ADJECTIVE_LEAD_RE)
+    || afterSubject.match(INTENT_FORWARD_LEAD_RE)
+    || afterSubject.match(APPLICATION_INTENT_LEAD_RE)
+    || afterSubject.match(INTENT_AFTER_SUBJECT_RE);
+  return lead
+    ? { matched: true, remainder: afterSubject.slice(lead[0].length) }
+    : { matched: false, remainder: value };
+}
+
 function speaksOnlyOfIntent(text) {
   const value = String(text ?? '');
   if (FIRST_PERSON_POSSESSIVE_RE.test(value)) return false;
+  if (targetEmploymentIntentClause(value)) return true;
   const subjects = [...value.matchAll(FIRST_PERSON_SUBJECT_RE)];
   return subjects.length > 0 && subjects.every(subject => INTENT_AFTER_SUBJECT_RE.test(value.slice(subject.index + subject[0].length)));
 }
@@ -12498,12 +12707,116 @@ function speaksOnlyOfApplicationIntent(text) {
   const value = String(text ?? '').trim();
   return /^(?:I am|We are) (?:applying for|writing to apply for) [^,;.!?]+[.!?]?$/iu.test(value)
     && !FIRST_PERSON_POSSESSIVE_RE.test(value)
+    && !/\b(?:that|which|where|who|when)\s+(?:I|we)(?![\p{L}\p{N}])/iu.test(value)
     && !/\b(?:who|having|after|because|where)\b/iu.test(value);
+}
+
+export const NON_PAST_ED_WORDS = Object.freeze(new Set([
+  'need', 'speed', 'seed', 'feed', 'indeed', 'exceed', 'proceed', 'succeed', 'deed', 'heed', 'breed', 'bleed', 'greed', 'creed', 'weed', 'embed', 'hundred', 'sacred', 'kindred',
+]));
+
+export function isPastEdWord(word) {
+  const value = String(word ?? '').toLowerCase();
+  return /^\p{L}+ed$/u.test(value) && !NON_PAST_ED_WORDS.has(value);
 }
 
 function reportsNoPastWork(text) {
   const value = String(text ?? '');
-  return !PAST_EFFECT_WORD_RE.test(value) && !CAREER_ASSERTION_ACTION_RE.test(value) && !CAREER_ASSERTION_REGULAR_PAST_RE.test(value);
+  return ![...value.matchAll(new RegExp(PAST_EFFECT_WORD_RE, 'giu'))].some(match => !/ed$/iu.test(match[0]) || isPastEdWord(match[0]))
+    && !CAREER_ASSERTION_ACTION_RE.test(value)
+    && ![...value.matchAll(new RegExp(CAREER_ASSERTION_REGULAR_PAST_RE, 'giu'))].some(match => isPastEdWord(match[0]));
+}
+
+export const __reportsNoPastWorkForTests = reportsNoPastWork;
+
+const TARGET_EMPLOYMENT_BOUNDARY_RE = /(?:[;:]\s+|\s[—–]\s|,?\s+(?:and|but|then|while|so|yet|which|that|who|where)\s+)/giu;
+const TARGET_LOCATING_NOUN_RE = /(?<![\p{L}\p{N}])(?:roles?|positions?|openings?|teams?|groups?|colleagues?|missions?|customers?|the\s+work)\s+$/iu;
+const TARGET_EMPLOYMENT_FRAMES = Object.freeze([
+  { frame: 'initial-at', before: /^\s*["“(]*(?:at|within|inside|under)\s+$/iu },
+  { frame: 'prep', before: /(?<![\p{L}\p{N}])(?:at|for|with|inside|within|on|under|from)\s+$/iu },
+  { frame: 'temporal', before: /(?<![\p{L}\p{N}])(?:while|when|during|after|since|before|throughout)\s+(?:(?:at|working\s+(?:at|for|with)|employed\s+(?:at|by)|joining|leaving)\s+)?$/iu },
+  { frame: 'my-work-at', before: /(?<![\p{L}\p{N}])(?:my|our)\s+(?:[\p{L}'’-]+\s+)*?(?:work|role|time|tenure|years?|job|position|employment|career)\s+(?:at|with|for|on)\s+$/iu },
+  { frame: 'bare-verb', before: /(?<![\p{L}\p{N}])(?:joined|joining|worked|served|serves|serving|helped|helps|helping)\s+$|(?<![\p{L}\p{N}])to\s+(?:help|serve|assist|support)\s+(?:the\s+)?$/iu },
+  { frame: 'artifact', after: /^\s+(?:platforms?|products?|customers?|users?|codebase|stack|systems?|infrastructure|data|pipelines?|apps?|services?)(?![\p{L}\p{N}])/iu },
+  { frame: 'relative-where', after: /^\s*,?\s*(?:(?:is\s+)?where|(?:at|in|for|under|with)\s+which)\s+(?:I|we)(?![\p{L}\p{N}])/iu },
+]);
+
+function targetEmploymentClauseStart(text, at) {
+  let start = 0;
+  for (const boundary of text.slice(0, at).matchAll(TARGET_EMPLOYMENT_BOUNDARY_RE)) start = boundary.index + boundary[0].length;
+  return start;
+}
+
+export function hasWorkIngWord(text) {
+  return [...String(text ?? '').matchAll(/(?<![\p{L}\p{N}])\p{L}+ing(?![\p{L}\p{N}])/giu)]
+    .some(match => match[0].toLowerCase() !== 'bring');
+}
+
+function targetEmploymentIntentClause(text) {
+  const { matched, remainder } = intentLeadInRemainder(text);
+  return matched && !/(?<![\p{L}\p{N}])(?:I|we)(?![\p{L}\p{N}])/iu.test(remainder)
+    && reportsNoPastWork(remainder)
+    && !hasWorkIngWord(remainder);
+}
+
+// This structural guard precedes every grounding classifier. A target name
+// cannot turn a candidate's employer claim into an unexamined listing fact,
+// regardless of the verb used for the work.
+export function targetEmploymentFrames(sentence, targetCompany, { approvedOrganizations = [] } = {}) {
+  const text = String(sentence ?? '');
+  const company = String(targetCompany ?? '').trim();
+  const names = [...new Set([company, company.split(/\s+-\s+/u)[0]])].filter(name => attributionTerms(name).length);
+  if (!names.length || !speaksAsCandidate(text)) return [];
+  if (names.some(name => approvedOrganizations.some(approved => organizationDenotes(name, approved)))) return [];
+  const findings = [];
+  const seen = new Set();
+  for (const name of names) {
+    const body = attributionTerms(name).map(term => term.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')).join('[^\\p{L}\\p{N}]+');
+    const pattern = new RegExp(`(?<![\\p{L}\\p{N}])${body}(?:['’]s)?(?![\\p{L}\\p{N}])`, 'giu');
+    for (const match of text.matchAll(pattern)) {
+      if (seen.has(match.index)) continue;
+      const before = text.slice(0, match.index);
+      const end = match.index + match[0].length;
+      const after = text.slice(end);
+      for (const frame of TARGET_EMPLOYMENT_FRAMES) {
+        const beforeMatch = frame.before ? before.match(frame.before) : null;
+        if (!(beforeMatch || frame.after?.test(after))) continue;
+        if (frame.frame === 'prep') {
+          if (TARGET_LOCATING_NOUN_RE.test(before.slice(0, beforeMatch.index))) continue;
+          if (/^on\s+$/iu.test(beforeMatch[0]) && /['’]s$/iu.test(match[0]) && /^\s+careers\s+page(?![\p{L}\p{N}])/iu.test(after)) continue;
+        }
+        const followsName = frame.frame === 'relative-where' || (beforeMatch && !before.slice(0, beforeMatch.index).trim());
+        let governing;
+        if (followsName) {
+          const rest = frame.frame === 'relative-where'
+            ? after.replace(/^\s*,?\s*(?:(?:is\s+)?where|(?:at|in|for|under|with)\s+which)\s+/iu, '')
+            : after.replace(/^\s*,\s*/u, '');
+          const nextBoundary = [...rest.matchAll(TARGET_EMPLOYMENT_BOUNDARY_RE)][0];
+          governing = nextBoundary ? rest.slice(0, nextBoundary.index) : rest;
+        } else {
+          governing = text.slice(targetEmploymentClauseStart(text, match.index), end);
+        }
+        if (targetEmploymentIntentClause(governing)) continue;
+        seen.add(match.index);
+        findings.push({ code: 'target-employment-frame', term: match[0], frame: frame.frame, index: match.index });
+        break;
+      }
+    }
+  }
+  return findings;
+}
+
+function targetEmploymentFrameFailureParts(finalText, index, options) {
+  const targetCompany = String(options?.targetCompany ?? '').trim();
+  if (!targetCompany) return [];
+  // Completion has the trusted-name projection rather than the full career
+  // authority; paste callers supply the narrower approved organizations list.
+  const approvedOrganizations = Array.isArray(options?.approvedOrganizations)
+    ? options.approvedOrganizations
+    : Array.isArray(options?.trustedNames) ? options.trustedNames : [];
+  return groundingSentences(finalText).flatMap((sentence, sentenceIndex) =>
+    targetEmploymentFrames(sentence, targetCompany, { approvedOrganizations }).map(finding =>
+      describeClaimFinding(`cover-letter paragraph ${index + 1}, sentence ${sentenceIndex + 1}`, finding, { targetCompany })));
 }
 
 // A trailing or coordinated clause that ONLY addresses the target ("..., which
@@ -12545,9 +12858,11 @@ function clauseOnlyAddressesTarget(part, sentence, grounding, targetCompany, ref
     && !/^\p{L}+ing\b/iu.test(text)
     && sentenceAddressesTarget(text, targetCompany)
     && !speaksAsCandidate(text, referenceTexts)
-    && !CAREER_ASSERTION_ACTION_RE.test(text) && !CAREER_ASSERTION_REGULAR_PAST_RE.test(text) && !PAST_EFFECT_WORD_RE.test(text)
+    && reportsNoPastWork(text)
     && !textWritesGroundedClaim(text, grounding, targetCompany, { strength: true });
 }
+
+export const __clauseOnlyAddressesTargetForTests = clauseOnlyAddressesTarget;
 
 // claimGroundingFindings, with the posting's names and counts freed only in the
 // clauses postingFreeClauses grants (ctx.postingFree). Without that grant it is
@@ -12557,7 +12872,7 @@ function clauseOnlyAddressesTarget(part, sentence, grounding, targetCompany, ref
 function sentenceClaimFindings(sentence, quotes, ctx) {
   const findings = postingGrantedClaimFindings(sentence, quotes, ctx);
   // A name or count written only as the reader's, in a first-person sentence that reports no past work; see speaksAsCandidateWithClaim.
-  return findings.filter(finding => !targetIdentityNameLicensed(sentence, finding, ctx, { reportsNoPastWork, attributionTerms, sentenceAddressesTarget })
+  return findings.filter(finding => !targetIdentityNameLicensed(sentence, finding, ctx, { reportsNoPastWork, attributionTerms, sentenceAddressesTarget, groundingClauses, intentLeadInRemainder, hasWorkIngWord })
     && !(ctx?.targetOwnedFree && termOnlyWrittenAsTargets(sentence, finding)));
 }
 
@@ -12873,9 +13188,9 @@ const MAX_REPORTED_CLAIM_FINDINGS = 4;
 // Names, tool-use strength, counts, rate intervals, credentials, calendar
 // years and appended clauses: one numbered item per ungrounded claim, so a
 // bullet that invents a tool AND a count is repaired in one round.
-function claimGroundingFailureParts(sentence, sourceQuotes, unit, grounding) {
+function claimGroundingFailureParts(sentence, sourceQuotes, unit, grounding, targetCompany = '') {
   const findings = sentenceClaimFindings(sentence, sourceQuotes, grounding);
-  const parts = findings.slice(0, MAX_REPORTED_CLAIM_FINDINGS).map(finding => describeClaimFinding(unit, finding));
+  const parts = findings.slice(0, MAX_REPORTED_CLAIM_FINDINGS).map(finding => describeClaimFinding(unit, finding, { targetCompany }));
   if (findings.length > MAX_REPORTED_CLAIM_FINDINGS) {
     parts.push(`${unit} has ${findings.length - MAX_REPORTED_CLAIM_FINDINGS} further ungrounded claim(s) of these kinds that are not listed here.`);
   }
@@ -13016,6 +13331,10 @@ export function assertSourceQuoteLinksFinalText(finalText, sourceQuotes, label, 
     targetTitle: label === 'coverLetterParagraphs' ? String(options.targetTitle || '') : '',
     targetCompany: label === 'coverLetterParagraphs' && options.targetTitle ? String(options.targetCompany || '') : '',
   };
+  if (label === 'coverLetterParagraphs' && String(options.targetCompany ?? '').trim()) {
+    const employmentFailures = targetEmploymentFrameFailureParts(finalText, index, options);
+    if (employmentFailures.length) throwValidationFailures(employmentFailures);
+  }
   const finalTokens = meaningfulSourceTokens(finalText);
   const quoteTokens = new Set(meaningfulSourceTokens(sourceQuotes.join(' ')));
   const sharedTerms = label === 'coverLetterParagraphs' ? letterSharedTerms(quoteTokens) : tokens => tokens.filter(token => quoteTokens.has(token));
@@ -13133,7 +13452,7 @@ export function assertSourceQuoteLinksFinalText(finalText, sourceQuotes, label, 
     const failures = collectGroundingFailures([
       () => assertSupportedSourceQualifiers(sentence, sourceQuotes, sentenceUnit, grounding),
     ]);
-    failures.push(...claimGroundingFailureParts(sentence, sourceQuotes, sentenceUnit, sentenceGrounding));
+    failures.push(...claimGroundingFailureParts(sentence, sourceQuotes, sentenceUnit, sentenceGrounding, targetCompany));
     failures.push(...roleStrengthFailureParts(sentence, sourceQuotes, sentenceUnit, options));
     // Every claim above is supported by SOME cited quote. A claim a quote about
     // other work supports is still borrowed; see poolingBorrowFailures.
@@ -13607,6 +13926,10 @@ function sanitizeSourceGrounding(raw, { careerData, resumeEvidence, coverLetter,
   return { resumeBullets: resumeBulletsGrounding, coverLetterParagraphs };
 }
 
+// Retained filesystem jobs keep career-only grounding even though structured
+// paste jobs can prove a final listing-grounded closing through host context.
+export const __sanitizeSourceGroundingForTests = sanitizeSourceGrounding;
+
 // Exported for the focused test that calls it directly: its strictness lives
 // entirely in arguments the one production caller always supplies, so nothing
 // reachable through validateLocalApplicationResult can prove they are still
@@ -13918,6 +14241,7 @@ export function validateLocalApplicationResult(raw, jobId, projectRoot, job, opt
     jobText,
     researchText: '',
     companyName: job?.company || '',
+    postedBy: job?.postedBy || '',
     referenceDate: options.referenceDate,
     paragraphCitations: completedParagraphCitations(raw, coverLetter.paragraphs),
   });
@@ -14436,6 +14760,7 @@ export function buildLocalGenerationAuditArtifact({
   careerData = null,
   careerDataProvenance = null,
   jobListingMarkdown = '',
+  scrapedListingMarkdown = null,
   result = {},
   resultRaw = '',
   applicationHtml = '',
@@ -14502,6 +14827,7 @@ export function buildLocalGenerationAuditArtifact({
       resumePdfSha256: binaryContentHash(resumePdf),
       coverLetterPdfSha256: binaryContentHash(coverPdf),
       originalJobListingSha256: contentHash(jobListingMarkdown),
+      ...(scrapedListingMarkdown == null ? {} : { scrapedListingSha256: contentHash(scrapedListingMarkdown) }),
     },
     writerAudit: projectWriterGenerationAudit(result?.generationAudit, currentAuthorityDisposition),
     coverLetterArgument: projectGenerationAuditArgument(result?.coverLetterArgument),
@@ -14589,6 +14915,7 @@ export async function stageLocalApplicationWorkspaceArtifacts({
   resumePdf = null,
   coverLetterPdf = null,
   jobListingMarkdown,
+  scrapedListingMarkdown = null,
   generationAuditArtifact,
   generationLog = null,
   currentAuthorityDisposition = null,
@@ -14605,6 +14932,7 @@ export async function stageLocalApplicationWorkspaceArtifacts({
   const resumePdfFile = path.join(trustedDir, 'Resume.pdf');
   const coverLetterPdfFile = path.join(trustedDir, 'Cover Letter.pdf');
   const jobListingPath = path.join(trustedDir, 'Original Job Listing.md');
+  const scrapedListingPath = path.join(trustedDir, 'Scraped Listing.md');
   const generationAuditPath = path.join(trustedDir, 'Generation Audit.json');
   const generationLogPath = path.join(trustedDir, PASTE_APPLICATION_LOG_FILE);
   await replaceApplicationBundleAtomically([
@@ -14612,6 +14940,7 @@ export async function stageLocalApplicationWorkspaceArtifacts({
     { destination: resumePdfFile, data: resumePdf },
     { destination: coverLetterPdfFile, data: coverLetterPdf },
     { destination: jobListingPath, data: jobListingMarkdown },
+    { destination: scrapedListingPath, data: scrapedListingMarkdown },
     { destination: generationAuditPath, data: generationAuditArtifact },
     ...(generationLog == null ? [] : [{ destination: generationLogPath, data: generationLog }]),
   ]);
@@ -14623,6 +14952,7 @@ export async function stageLocalApplicationWorkspaceArtifacts({
     resumePdfPath: resumePdf == null ? null : resumePdfFile,
     coverLetterPdfPath: coverLetterPdf == null ? null : coverLetterPdfFile,
     jobListingPath,
+    scrapedListingPath: scrapedListingMarkdown == null ? null : scrapedListingPath,
     generationAuditPath,
     generationLogPath: generationLog == null ? null : generationLogPath,
     generationAuditDispositionPath,
@@ -15504,6 +15834,77 @@ export async function recordLocalAiSaveFailure(args = {}) {
   );
 }
 
+function careerSourceSectionHeading(line) {
+  const markdown = line.match(/^ {0,3}(#{1,6})(?:[\t ]+|$)(.*)$/u);
+  if (markdown) {
+    return { level: markdown[1].length, skills: /\bskills\b/iu.test(markdown[2].replace(/[\t ]+#+[\t ]*$/u, '')), afterHeading: true };
+  }
+  const label = line.match(/^[\t ]*([\p{L}][\p{L}\p{N}\t &/()'’-]*):/u);
+  if (label) return { level: 1, skills: /^skills$/iu.test(label[1].trim()) };
+  const title = line.trim();
+  if (/\p{Lu}/u.test(title) && !/\p{Ll}/u.test(title) && /^[\p{L}\p{N}][\p{L}\p{N}\t &/()'’-]*$/u.test(title)) {
+    return { level: 1, skills: /\bSKILLS\b/u.test(title), afterHeading: true, allCaps: true };
+  }
+  return null;
+}
+
+function declaredSkillsSectionSegmentIds(snapshot) {
+  const rangesBySource = new Map();
+  const exactName = value => String(value ?? '').normalize('NFKC').trim().toLocaleLowerCase();
+  const segmentsById = new Map((Array.isArray(snapshot?.segments) ? snapshot.segments : []).map(segment => [segment?.id, segment]));
+  const directLinesByName = new Map();
+  for (const skill of vettedCareerSkillInventory(snapshot?.profile)) {
+    const name = exactName(skill.name);
+    for (const id of Array.isArray(skill.directEvidenceSegmentIds) ? skill.directEvidenceSegmentIds : []) {
+      const segment = segmentsById.get(id);
+      if (!segment || !name || exactName(segment.text) !== name) continue;
+      if (!directLinesByName.has(name)) directLinesByName.set(name, []);
+      directLinesByName.get(name).push(segment);
+    }
+  }
+  for (const source of Array.isArray(snapshot?.sources) ? snapshot.sources : []) {
+    const text = typeof source?.text === 'string' ? source.text : '';
+    const ranges = [];
+    const headingRanges = [];
+    let section = null;
+    // Work in the pinned source's original offsets, including CRLF and any
+    // source preamble. A repeated skill name elsewhere is not its declaration.
+    for (const line of text.matchAll(/[^\r\n]*(?:\r\n|[\r\n]|$)/gu)) {
+      if (!line[0]) continue;
+      const heading = careerSourceSectionHeading(line[0].replace(/[\r\n]+$/u, ''));
+      if (!heading) continue;
+      // An approved direct skill may itself be an acronym on one line.
+      // Inside Skills only, its exact validated source segment is content,
+      // rather than a new all-caps section. Markdown/label headings and
+      // Skills titles keep their ordinary boundary and exclusion rules.
+      if (section && heading.allCaps && !heading.skills
+        && directLinesByName.get(exactName(line[0]))?.some(segment => segment.sourceId === source.id
+          && Number.isInteger(segment.startOffset) && Number.isInteger(segment.endOffset)
+          && segment.startOffset >= line.index && segment.endOffset > segment.startOffset
+          && segment.endOffset <= line.index + line[0].length
+          && text.slice(segment.startOffset, segment.endOffset) === segment.text)) continue;
+      if (heading.afterHeading) headingRanges.push([line.index, line.index + line[0].length]);
+      if (section && heading.level <= section.level) {
+        ranges.push([section.start, line.index]);
+        section = null;
+      }
+      if (!section && heading.skills) section = { level: heading.level, start: line.index + (heading.afterHeading ? line[0].length : 0) };
+    }
+    if (section) ranges.push([section.start, text.length]);
+    rangesBySource.set(source.id, { text, ranges, headingRanges });
+  }
+  const declared = new Set();
+  for (const segment of Array.isArray(snapshot?.segments) ? snapshot.segments : []) {
+    const source = rangesBySource.get(segment?.sourceId);
+    if (!source || !Number.isInteger(segment?.startOffset) || !Number.isInteger(segment?.endOffset)
+      || segment.startOffset < 0 || segment.endOffset <= segment.startOffset || segment.endOffset > source.text.length
+      || source.text.slice(segment.startOffset, segment.endOffset) !== segment.text) continue;
+    if (source.headingRanges.some(([start, end]) => segment.startOffset < end && segment.endOffset > start)) continue;
+    if (source.ranges.some(([start, end]) => segment.startOffset >= start && segment.endOffset <= end)) declared.add(segment.id);
+  }
+  return declared;
+}
+
 // A card can outlive, or be deliberately detached from, its origin Job Search
 // node. Its snapshot id is therefore the authority for a new application, not
 // the renderer's cached careerData/profile projection. The snapshot reader
@@ -15531,6 +15932,7 @@ function snapshotCareerSkillEvidence(snapshot) {
   // must emit the current v2 protocol rather than accidentally falling back
   // to the historical reader shape.
   const currentSnapshot = snapshot?.schemaVersion === CAREER_SNAPSHOT_SCHEMA_VERSION;
+  const declaredSegmentIds = currentSnapshot ? declaredSkillsSectionSegmentIds(snapshot) : null;
   // v6's v2 wire contract is deliberately the centralized *direct* skill
   // inventory, not an exhaustive copy of profile.skills. A relation-qualified
   // row is evidence for the achievement/project relationship ledger, but it
@@ -15562,6 +15964,7 @@ function snapshotCareerSkillEvidence(snapshot) {
       projected.directEvidenceSegmentIds = Array.isArray(skill?.directEvidenceSegmentIds)
         ? [...skill.directEvidenceSegmentIds]
         : [];
+      projected.declaredInSkillsSection = projected.directEvidenceSegmentIds.some(id => declaredSegmentIds.has(id));
     }
     projectedSkills.push(projected);
   }
@@ -15690,7 +16093,13 @@ async function queueLocalApplicationJobWithAuthority(args = {}, signal = null, r
   try {
     await ensureDirectoryWithinRoot(realRoot, dir, { mode: 0o700, label: 'Local AI job folder' });
     throwIfAborted(signal);
-    const job = safeJob(args.job);
+    const scrapedJob = safeJob(args.job);
+    const preparedPosting = getPreparedOfficialPosting(args.resolutionId, scrapedJob);
+    const job = safeJob(frozenJobWithOfficialPosting(scrapedJob, preparedPosting));
+    delete job.officialPosting.scrapedListingSha256;
+    const scrapedListingMarkdown = job.snippet !== scrapedJob.snippet || job.company !== scrapedJob.company
+      ? formatOriginalJobListingMarkdown(scrapedJob) : null;
+    if (scrapedListingMarkdown != null) job.officialPosting.scrapedListingSha256 = contentHash(scrapedListingMarkdown);
     // A snapshot authority is not copied into this job folder. Its complete
     // projection may exceed a single handoff/file envelope; legacy fixtures
     // alone retain their historical frozen source representation.
@@ -15795,6 +16204,9 @@ async function queueLocalApplicationJobWithAuthority(args = {}, signal = null, r
     const manifest = {
       version: LOCAL_AI_APPLICATION_VERSION, id, status: 'queued', createdAt: input.createdAt,
       canvasFilePath: canvas.canonicalCanvasFilePath, canvasRoot: canvas.canvasRoot,
+      // Export identity stays in the scraped card's namespace across resolver
+      // upgrades and fallbacks. This bookkeeping is never prompt authority.
+      scrapedCompany: scrapedJob.company,
       generationAudit: {
         version: LOCAL_AI_GENERATION_AUDIT_VERSION,
         required: true,
@@ -15833,6 +16245,7 @@ async function queueLocalApplicationJobWithAuthority(args = {}, signal = null, r
     }
     await Promise.all([
       atomicJson(path.join(dir, 'input.json'), input), atomicJson(path.join(dir, 'manifest.json'), manifest),
+      ...(scrapedListingMarkdown == null ? [] : [fs.promises.writeFile(path.join(dir, 'context', 'scraped-listing.md'), scrapedListingMarkdown, { encoding: 'utf8', mode: 0o600 })]),
       ...(authorityStore ? [] : [fs.promises.writeFile(path.join(dir, 'context', 'job-listing.md'), jobListing, { encoding: 'utf8', mode: 0o600 })]),
       ...(snapshotInput ? [] : [fs.promises.writeFile(path.join(dir, 'context', 'career-data.txt'), careerData, { encoding: 'utf8', mode: 0o600 })]),
       ...(pasteTransport ? [appendPasteGenerationLog(dir, { type: 'paste-job-created', sequence: 0, jobId: id, stage: authorityStore ? 'requirements' : 'evidence-plan' })] : [fs.promises.writeFile(path.join(dir, 'LOCAL_AI_PROMPT.md'), launchPrompt, { encoding: 'utf8', mode: 0o600 })]),
@@ -15844,7 +16257,9 @@ async function queueLocalApplicationJobWithAuthority(args = {}, signal = null, r
     try { await writeLocalAiJobPhase(canvas.canvasRoot, canvas.canonicalCanvasFilePath, id, pasteTransport ? 'awaiting-paste' : 'generating'); }
     catch (phaseError) { logger.warn(`[LocalAI] failed to record the initial phase stamp for job ${id}: ${phaseError?.message || phaseError}`); }
     throwIfAborted(signal);
-    return { id, status: 'queued', mode: pasteTransport ? 'paste' : 'filesystem', folder: dir, canvasFilePath: canvas.canonicalCanvasFilePath, prompt: launchPrompt, message: pasteTransport ? `Paste-back application job is ready. Copy the ${authorityStore ? 'requirements' : 'evidence-plan'} prompt and paste the JSON response back into Infinite Canvas.` : 'Local AI job is ready beside this canvas in .local-ai/jobs. Paste LOCAL_AI_PROMPT.md into any local coding-agent with filesystem access.' };
+    return { id, status: 'queued', mode: pasteTransport ? 'paste' : 'filesystem', folder: dir, canvasFilePath: canvas.canonicalCanvasFilePath,
+      officialPosting: job.officialPosting, postedBy: job.postedBy,
+      prompt: launchPrompt, message: pasteTransport ? `Paste-back application job is ready. Copy the ${authorityStore ? 'requirements' : 'evidence-plan'} prompt and paste the JSON response back into Infinite Canvas.` : 'Local AI job is ready beside this canvas in .local-ai/jobs. Paste LOCAL_AI_PROMPT.md into any local coding-agent with filesystem access.' };
   } catch (error) {
     await fs.promises.rm(dir, { recursive: true, force: true }).catch(() => {});
     throw error;
@@ -16185,6 +16600,11 @@ async function localApplicationStatusUnlocked(jobId, canvasFilePath, options = {
         canvasFilePath: typeof canvasFilePath === 'string' ? canvasFilePath : null,
         createdAt: null,
         resultSha256: null,
+        // A stale saved card can survive a deliberate output deletion. With
+        // neither job nor receipt, it must release its old saved link on probe.
+        savedReceiptMissing: true,
+        savedDir: null,
+        receipt: null,
         message: `This Local AI job folder is gone and no completed-save receipt was found for it. ${localAiJobPhaseObservationClause(phaseRecord)} Generate a new application to start another handoff.`,
       };
     }
@@ -16780,7 +17200,7 @@ async function importLocalApplicationJobAttempt({ jobId, canvasFilePath, senderI
     return {
       id: jobId,
       status: 'render-retry-required',
-      company: input.job?.company || '',
+      company: input.job?.company || input.job?.postedBy || '',
       renderMessage,
       retryReproducesFailure: true,
       resultSha256,
@@ -16878,7 +17298,7 @@ async function importLocalApplicationJobAttempt({ jobId, canvasFilePath, senderI
       : String(priorFeedback.message || 'The résumé or cover letter exceeded its measured page target. Re-run the Local AI routine to revise result.json using fit-feedback.json.');
     return {
       id: jobId, status: 'revision-required',
-      company: input.job?.company || '', candidateName: result.coverLetter.name,
+      company: input.job?.company || input.job?.postedBy || '', candidateName: result.coverLetter.name,
       resumeFit: { targetPageCount, pageCount: resumePageCount, targetMet, compactApplied: Boolean(priorFeedback?.resume?.attempts?.some(attempt => attempt?.density === 'compact')), layout: resumeLayout, layoutIssues: resumeLayoutIssues, contentUtilization: resumeTypeAreaUtilization(resumeLayout) },
       coverLetterFit: { targetPageCount: 1, pageCount: coverLetterPageCount, targetMet: coverLetterTargetMet, layout: coverLetterLayout, layoutIssues: coverLayoutIssues, contentUtilization: resumeTypeAreaUtilization(coverLetterLayout) },
       fitIssues, fitMessage, revisionRound: Number.isFinite(priorFeedback.revisionRound) ? priorFeedback.revisionRound : null,
@@ -16992,7 +17412,7 @@ async function importLocalApplicationJobAttempt({ jobId, canvasFilePath, senderI
       localAi: { jobId, verificationIssues: boundedVerificationIssues, chronology: localAiChronologyTelemetry(result), qualityReview: compactLocalAiQualityReview(result.qualityReview), handoffHistory: handoffManifest.handoffHistory },
     });
     return {
-      id: jobId, status: 'render-retry-required', company: input.job?.company || '', candidateName: result.coverLetter.name,
+      id: jobId, status: 'render-retry-required', company: input.job?.company || input.job?.postedBy || '', candidateName: result.coverLetter.name,
       renderMessage, verificationIssues: boundedVerificationIssues, resultSha256: contentHash(resultRaw),
       localJob: {
         id: jobId, status: 'render-retry-required', folder: dir,
@@ -17121,7 +17541,7 @@ async function importLocalApplicationJobAttempt({ jobId, canvasFilePath, senderI
       localAi: { jobId, targetMet: false, coverLetterTargetMet, revisionRequested: true, revisionRound, fitIssues, chronology: localAiChronologyTelemetry(result), qualityReview: compactLocalAiQualityReview(result.qualityReview), handoffHistory: handoffManifest.handoffHistory },
     });
     return {
-      id: jobId, status: 'revision-required', company: input.job?.company || '', candidateName: result.coverLetter.name,
+      id: jobId, status: 'revision-required', company: input.job?.company || input.job?.postedBy || '', candidateName: result.coverLetter.name,
       resumeFit: { targetPageCount, pageCount: resumeFit.pageCount, targetMet, compactApplied: resumeFit.compactApplied, layout: resumeFit.layout, layoutIssues: validatedResumeLayoutIssues, contentUtilization: resumeFit.contentUtilization },
       coverLetterFit: { targetPageCount: 1, pageCount: coverLetterFit.pageCount, targetMet: coverLetterTargetMet, layout: coverLetterFit.layout, layoutIssues: validatedCoverLayoutIssues, contentUtilization: coverLetterFit.contentUtilization },
       fitIssues, fitMessage,
@@ -17142,8 +17562,9 @@ async function importLocalApplicationJobAttempt({ jobId, canvasFilePath, senderI
   // Resume.pdf, while Application.html remains the combined editable workspace.
   // Printing the tabbed workspace makes PDF production depend on injected tab
   // controls that are irrelevant to the document itself.
-  const jobListingMarkdown = formatOriginalJobListingMarkdown(input.job);
-  const applicationHtml = buildResumeDocument({ resumeMainHtml: resumeFit.mainHtml, variantAttrs: resumeFit.variantAttrs, ledger, docId, coverLetter: result.coverLetter, trustedRenderedRoleDates: validationOptions.trustedRenderedRoleDates, jobContext: { title: input.job?.title || '', company: input.job?.company || '', location: input.job?.location || '' }, downloadBundle: { company: input.job?.company || '', candidateName: result.coverLetter.name, jobUrl: input.job?.url || '', jobMarkdown: jobListingMarkdown, postingVariants: input.job?.postingVariants || [] } });
+  const jobListingMarkdown = formatOriginalJobListingMarkdown(input.job, { audience: 'bundle' });
+  const scrapedListingMarkdown = await readScrapedListingAudit(root, dir, input);
+  const applicationHtml = buildResumeDocument({ resumeMainHtml: resumeFit.mainHtml, variantAttrs: resumeFit.variantAttrs, ledger, docId, coverLetter: result.coverLetter, trustedRenderedRoleDates: validationOptions.trustedRenderedRoleDates, jobContext: { title: input.job?.title || '', company: input.job?.company || '', location: input.job?.location || '' }, downloadBundle: { company: input.job?.company || input.job?.postedBy || '', candidateName: result.coverLetter.name, jobUrl: input.job?.applyUrl || input.job?.url || '', jobMarkdown: jobListingMarkdown, postingVariants: input.job?.postingVariants || [] } });
   let resumePdf = resumeFit.bytes; let coverPdf = coverLetterFit.bytes;
   const missingArtifacts = [];
   if (!resumePdf) {
@@ -17183,6 +17604,7 @@ async function importLocalApplicationJobAttempt({ jobId, canvasFilePath, senderI
     careerData: auditCareerData,
     careerDataProvenance,
     jobListingMarkdown,
+    scrapedListingMarkdown,
     result,
     resultRaw,
     applicationHtml,
@@ -17204,13 +17626,14 @@ async function importLocalApplicationJobAttempt({ jobId, canvasFilePath, senderI
     : null;
   postRenderFailure.phase = 'staging imported application workspace';
   const {
-    resumeHtmlPath, resumePdfPath, coverLetterPdfPath, jobListingPath, generationAuditPath, generationLogPath, generationAuditDispositionPath,
+    resumeHtmlPath, resumePdfPath, coverLetterPdfPath, jobListingPath, scrapedListingPath, generationAuditPath, generationLogPath, generationAuditDispositionPath,
   } = await stageLocalApplicationWorkspaceArtifacts({
     outDir,
     applicationHtml,
     resumePdf,
     coverLetterPdf: coverPdf,
     jobListingMarkdown,
+    scrapedListingMarkdown,
     generationAuditArtifact,
     generationLog: manifest.transport === 'paste' ? await readOwnedGenerationLog(root, path.join(dir, PASTE_APPLICATION_LOG_FILE)) : null,
     currentAuthorityDisposition: frozen.currentAuthorityDisposition,
@@ -17261,8 +17684,9 @@ async function importLocalApplicationJobAttempt({ jobId, canvasFilePath, senderI
   postRenderFailure.phase = 'registering application save capability';
   await assertLocalAiResultHashCurrent(root, dir, resultSha256);
   const workDir = registerPendingApplicationWorkspace({
-    workDir: dir, senderId, company: input.job?.company, candidateName: result.coverLetter.name,
-    resumeHtmlPath, resumePdfPath, coverLetterPdfPath, jobListingPath, generationAuditPath, generationLogPath, generationAuditDispositionPath,
+    workDir: dir, senderId, company: input.job?.company || input.job?.postedBy, candidateName: result.coverLetter.name,
+    identityCompany: typeof manifest.scrapedCompany === 'string' ? manifest.scrapedCompany : null,
+    resumeHtmlPath, resumePdfPath, coverLetterPdfPath, jobListingPath, scrapedListingPath, generationAuditPath, generationLogPath, generationAuditDispositionPath,
     resumePdfPageCount: resumePdf ? resumeFit.pageCount : null,
     coverLetterPdfPageCount: coverPdf ? coverLetterFit.pageCount : null,
     generationAuditJobId: jobId,
@@ -17338,6 +17762,7 @@ async function importLocalApplicationJobAttempt({ jobId, canvasFilePath, senderI
       resumePdf,
       coverLetterPdf: coverPdf,
       jobListing: jobListingMarkdown,
+      scrapedListing: scrapedListingMarkdown,
       generationAudit: generationAuditArtifact,
       generationLog: generationLogPath ? await readOwnedGenerationLog(outDir, generationLogPath) : null,
     },
@@ -17346,7 +17771,7 @@ async function importLocalApplicationJobAttempt({ jobId, canvasFilePath, senderI
   // without this a clean run leaves no import entry in the main-process log a
   // HANDOFF bug report could show.
   logger.info(`[LocalAI] Imported job ${jobId}: résumé ${resumeFit.pageCount}/${targetPageCount} page(s), cover letter ${coverLetterFit.pageCount}/1 — awaiting bundle save`);
-  return { id: jobId, status: 'imported', workDir, resumeHtmlPath, resumePdfPath, coverLetterPdfPath, jobListingPath, generationAuditPath, generationLogPath, generationAuditDispositionPath, company: input.job?.company || '', candidateName: result.coverLetter.name, missingArtifacts, resumeFit: { targetPageCount, pageCount: resumeFit.pageCount, targetMet, compactApplied: resumeFit.compactApplied, layout: resumeFit.layout, layoutIssues: safeMeasuredLayoutIssues(resumeFit.layoutIssues), contentUtilization: resumeFit.contentUtilization }, coverLetterFit: { targetPageCount: 1, pageCount: coverLetterFit.pageCount, targetMet: coverLetterTargetMet, layout: coverLetterFit.layout, layoutIssues: safeMeasuredLayoutIssues(coverLetterFit.layoutIssues), contentUtilization: coverLetterFit.contentUtilization }, localJob: { id: jobId, status: 'imported', folder: dir, canvasFilePath: canvas.canonicalCanvasFilePath } };
+  return { id: jobId, status: 'imported', workDir, resumeHtmlPath, resumePdfPath, coverLetterPdfPath, jobListingPath, scrapedListingPath, generationAuditPath, generationLogPath, generationAuditDispositionPath, company: input.job?.company || input.job?.postedBy || '', candidateName: result.coverLetter.name, missingArtifacts, resumeFit: { targetPageCount, pageCount: resumeFit.pageCount, targetMet, compactApplied: resumeFit.compactApplied, layout: resumeFit.layout, layoutIssues: safeMeasuredLayoutIssues(resumeFit.layoutIssues), contentUtilization: resumeFit.contentUtilization }, coverLetterFit: { targetPageCount: 1, pageCount: coverLetterFit.pageCount, targetMet: coverLetterTargetMet, layout: coverLetterFit.layout, layoutIssues: safeMeasuredLayoutIssues(coverLetterFit.layoutIssues), contentUtilization: coverLetterFit.contentUtilization }, localJob: { id: jobId, status: 'imported', folder: dir, canvasFilePath: canvas.canonicalCanvasFilePath } };
 }
 
 /**
@@ -17488,6 +17913,7 @@ export async function findSavedApplicationLinks({ canvasFilePath, jobs = [] } = 
 }
 
 export function registerLocalAiApplicationHandlers() {
+  registerOfficialPostingGenerationHandlers({ projectJob: safeJob });
   handleSafe('find-saved-application-links', async (_event, args) => findSavedApplicationLinks(args));
   handleSafe('queue-local-application', async (_event, args, signal) => {
     // queueLocalApplicationJob cooperates at every durable-write boundary.
@@ -17514,7 +17940,7 @@ export function registerLocalAiApplicationHandlers() {
         throwIfAborted(signal);
       }
       const { prompt, ...durableLocalJob } = localJob;
-      return { localJob: durableLocalJob, prompt };
+      return { localJob: durableLocalJob, prompt, officialPosting: localJob.officialPosting, postedBy: localJob.postedBy };
     } catch (error) {
       if (signal?.aborted) await discardQueuedJob();
       throw error;
@@ -17600,6 +18026,10 @@ export function registerLocalAiApplicationHandlers() {
     }
     if (dir) await fs.promises.rm(dir, { recursive: true, force: true });
     const receiptRemoved = await discardLocalAiTerminalReceipt(canvas.canvasRoot, canvas.canonicalCanvasFilePath, normalizedJobId);
+    if (dir) {
+      try { await pruneEmptyApplicationParents(dir, canvas.canvasRoot); }
+      catch (error) { logger.warn(`[LocalAI] Could not prune empty application parents: ${error?.message || error}`); }
+    }
     return { deleted: dir !== null, missing: dir === null, receiptRemoved: receiptRemoved === true };
   });
   handleSafe('import-local-application', async (event, { jobId, canvasFilePath, expectedResultSha256 } = {}, signal) => ({ localApplication: await importLocalApplicationJob({ jobId, canvasFilePath, expectedResultSha256, senderId: event.sender.id, signal }) }));

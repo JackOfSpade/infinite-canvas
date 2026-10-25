@@ -3,6 +3,7 @@ export const LOCATION_CONSOLIDATION_CORRECTION_TEMPLATES = templatesFor('locconf
 import { JOB_LOCATION_CONSOLIDATION_CONFIRMATION_SCHEMA } from './aiSchemas.js';
 import { wrapUntrustedText } from './promptSafety.js';
 import { HANDOFF_CONCURRENCY, mapAutomaticHandoffs } from '../../src/utils/handoffScheduler.js';
+import { checkPromptFits } from './llm.js';
 import {
   descriptionText,
   findSimilarLocationCandidates,
@@ -16,6 +17,9 @@ const MAX_DESCRIPTION_CHARS_PER_SIDE = 9_000;
 const CONFIRMATION_BATCH_SIZE = 4;
 
 function compactDescription(job) {
+  if (['L1', 'L2', 'L3'].includes(job?.officialPosting?.level)) {
+    return String(job?.description || job?.snippet || '');
+  }
   const value = descriptionText(job).replace(/\s+/g, ' ').trim();
   if (value.length <= MAX_DESCRIPTION_CHARS_PER_SIDE) return value;
   const headLength = Math.floor(MAX_DESCRIPTION_CHARS_PER_SIDE * 0.7);
@@ -80,13 +84,15 @@ export async function confirmSimilarJobLocationPairs(jobs, {
   callText,
   signal,
   onProgress = null,
+  postingJob = job => job,
+  checkFits = checkPromptFits,
 } = {}) {
   if (typeof callText !== 'function') throw new TypeError('confirmSimilarJobLocationPairs requires callText.');
   const input = Array.isArray(jobs) ? jobs : [];
   const candidates = findSimilarLocationCandidates(input).map((pair) => ({
     ...pair,
-    leftJob: input[pair.leftIndex],
-    rightJob: input[pair.rightIndex],
+    leftJob: postingJob(input[pair.leftIndex]),
+    rightJob: postingJob(input[pair.rightIndex]),
   }));
   if (candidates.length === 0) {
     return { candidateCount: 0, batchCount: 0, confirmedPairIds: [] };
@@ -96,35 +102,48 @@ export async function confirmSimilarJobLocationPairs(jobs, {
     (_, index) => candidates.slice(index * CONFIRMATION_BATCH_SIZE, (index + 1) * CONFIRMATION_BATCH_SIZE),
   );
   let completed = 0;
+  let dispatched = 0;
+  const confirmBatch = async (batch, index, workerSignal) => {
+    const prompt = confirmationPrompt(batch);
+    const fit = await checkFits(prompt, { signal: workerSignal, task: 'job-location-consolidation-confirmation',
+      hints: { itemCount: batch.length }, responseSchema: JOB_LOCATION_CONSOLIDATION_CONFIRMATION_SCHEMA });
+    if (workerSignal?.aborted) throw workerSignal.reason || new Error('Location consolidation cancelled.');
+    if (fit && !fit.fits) {
+      if (batch.length === 1) throw new Error('The complete job postings are too large for the location-consolidation context.');
+      const mid = Math.ceil(batch.length / 2);
+      const left = await confirmBatch(batch.slice(0, mid), index, workerSignal);
+      const right = await confirmBatch(batch.slice(mid), index, workerSignal);
+      return [...left, ...right];
+    }
+    dispatched++;
+    const response = await callText(prompt, {
+      signal: workerSignal,
+      task: 'job-location-consolidation-confirmation',
+      hints: {
+        itemCount: batch.length,
+        batch: index + 1,
+        batchTotal: batches.length,
+        itemsDone: index * CONFIRMATION_BATCH_SIZE,
+        itemsTotal: candidates.length,
+      },
+      responseSchema: JOB_LOCATION_CONSOLIDATION_CONFIRMATION_SCHEMA,
+      responseValidator: value => validateConfirmation(value, batch),
+    });
+    // Revalidate direct callers too: pair IDs still belong to the raw rows.
+    validateConfirmation(response, batch);
+    completed += batch.length;
+    onProgress?.({ completed, total: candidates.length, batch: index + 1, batchTotal: batches.length });
+    return response.confirmations;
+  };
   const results = await mapAutomaticHandoffs(
     batches,
     HANDOFF_CONCURRENCY,
-    async (batch, index, { signal: workerSignal }) => {
-      const response = await callText(confirmationPrompt(batch), {
-        signal: workerSignal,
-        task: 'job-location-consolidation-confirmation',
-        hints: {
-          itemCount: batch.length,
-          batch: index + 1,
-          batchTotal: batches.length,
-          itemsDone: index * CONFIRMATION_BATCH_SIZE,
-          itemsTotal: candidates.length,
-        },
-        responseSchema: JOB_LOCATION_CONSOLIDATION_CONFIRMATION_SCHEMA,
-        responseValidator: value => validateConfirmation(value, batch),
-      });
-      // Revalidate after the transport's generic schema checker so a direct
-      // caller/test cannot smuggle a foreign or incomplete pair through.
-      validateConfirmation(response, batch);
-      completed += batch.length;
-      onProgress?.({ completed, total: candidates.length, batch: index + 1, batchTotal: batches.length });
-      return response.confirmations;
-    },
+    (batch, index, { signal: workerSignal }) => confirmBatch(batch, index, workerSignal),
     { signal },
   );
   return {
     candidateCount: candidates.length,
-    batchCount: batches.length,
+    batchCount: dispatched,
     confirmedPairIds: results.flat().filter(row => row.sameJob).map(row => row.pairId),
   };
 }

@@ -10,6 +10,7 @@ import { stripNonRestorableNodeDataForUndo } from './undoNonRestorableState.js';
 import { isRestorableMarketplaceRecovery } from './marketplaceRunRecovery.js';
 import { consolidateBoardCascadeNodes } from './jobLocationConsolidation.js';
 import { isLegacyUnscoredPlaceholder, UNSCORED_SCORE_STATUS } from './jobCardFilters.js';
+import { OFFICIAL_POSTING_ROW_FIELDS } from '../../electron/ipc/officialPostingFields.js';
 
 /** Stable, pure snapshot fingerprint — no hook needed. */
 export function fingerprint(snap) {
@@ -113,7 +114,8 @@ const JOBCARD_SCORED_FIELDS = [
   'reasoning', 'careerDirection', 'requirementAssessments', 'materialGaps',
   'strengths', 'experienceAssessment', 'confidence', 'fitAssessment', 'rawScore',
   'adjustedScore', 'adjustments', 'calibration', 'scoreStatus', 'source', 'url', 'posted',
-  'language', 'resumeProfile', 'googleCardUrl', 'applySource', 'originHubId', 'careerSnapshotId',
+  'language', 'resumeProfile', 'googleCardUrl', 'sourceJobKey', 'applySource', 'originHubId', 'careerSnapshotId',
+  ...OFFICIAL_POSTING_ROW_FIELDS,
   // These arrived after the original on-canvas jobcard shape but can occur in
   // an unversioned/exported legacy canvas. Preserve them during the broad
   // card→hub migration instead of silently turning a preference-filtered or

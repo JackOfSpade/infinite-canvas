@@ -3,10 +3,16 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { ensureDirectoryWithinRoot } from '../utils/pathSafety.js';
-import { careerSnapshotStorageRoot, readPinnedCareerSnapshot } from './careerSnapshot.js';
+import { careerSnapshotStorageRoot, readCareerSnapshot, readPinnedCareerSnapshot } from './careerSnapshot.js';
 
 const sha = value => crypto.createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const HASH = /^[a-f0-9]{64}$/;
+const importScopeId = (canvasScope, nodeId) => canvasScope && nodeId ? sha([String(canvasScope), String(nodeId)]) : null;
+function sourceSetId(sourcePaths) {
+  if (!Array.isArray(sourcePaths) || !sourcePaths.length
+    || sourcePaths.some(file => typeof file !== 'string' || !path.isAbsolute(file))) return null;
+  return sha(sourcePaths.map(file => path.resolve(file)));
+}
 let queue = Promise.resolve();
 function serialize(operation) {
   const result = queue.then(operation);
@@ -45,6 +51,7 @@ async function read(root) {
         || !['job-search', 'job-board', 'unknown'].includes(item.module)
         || (item.scopeId !== null && !HASH.test(item.scopeId))
         || (item.requestKey !== null && !HASH.test(item.requestKey))
+        || (item.sourceSetId != null && !HASH.test(item.sourceSetId))
         || !state.snapshots.some(snapshot => snapshot.snapshotId === item.snapshotId))) {
       throw new Error('Career import history is invalid; the existing evidence was preserved.');
     }
@@ -86,11 +93,12 @@ function snapshotRecord(snapshot) {
 }
 
 /** The host calls this only after all import/audit/cleaning and live-file checks succeed. */
-export async function logCareerDataImport({ root, snapshot, canvasScope, nodeId, module, manualAiRunId, cacheHit = false, now = () => new Date().toISOString() }) {
+export async function logCareerDataImport({ root, snapshot, canvasScope, nodeId, module, manualAiRunId, sourcePaths, cacheHit = false, now = () => new Date().toISOString() }) {
   const record = snapshotRecord(snapshot);
   const target = ['job-search', 'job-board'].includes(module) ? module : 'unknown';
   // Neither paths nor provider/run IDs are retained in the history.
-  const scopeId = canvasScope && nodeId ? sha([String(canvasScope), String(nodeId)]) : null;
+  const scopeId = importScopeId(canvasScope, nodeId);
+  const sourceIdentity = sourcePaths?.length === record.sources.length ? sourceSetId(sourcePaths) : null;
   const requestKey = manualAiRunId ? sha([scopeId, target, String(manualAiRunId), record.snapshotId]) : null;
   return serialize(async () => {
     const state = await read(root);
@@ -107,6 +115,9 @@ export async function logCareerDataImport({ root, snapshot, canvasScope, nodeId,
       scopeId, module: target, requestKey, cacheHit: cacheHit === true,
       previousImportId: previous?.id || null, change,
     };
+    // File lineage can cross Job Search and Job Board without retaining a
+    // source path. Ordered paths distinguish unrelated files with one name.
+    if (sourceIdentity) event.sourceSetId = sourceIdentity;
     if (!existing) state.snapshots.push(record);
     state.imports.push(event);
     state.startedAt ||= event.processedAt;
@@ -117,6 +128,46 @@ export async function logCareerDataImport({ root, snapshot, canvasScope, nodeId,
 
 export async function readCareerImportHistory(root) {
   return serialize(() => read(root));
+}
+
+/**
+ * Find an approved historical input for these files, never a global latest
+ * snapshot. Old logs have no path digest: only their immediate predecessor
+ * in this same canvas/module scope with unique ordered names is eligible.
+ * The loader reads immutable source text; edited live files are never opened.
+ */
+export async function readPreviousCareerImportSnapshot({ root, canvasScope, nodeId, sourcePaths, sourceDescriptors }, {
+  loadSnapshot = readCareerSnapshot,
+} = {}) {
+  const descriptors = Array.isArray(sourceDescriptors) ? sourceDescriptors : [];
+  if (!descriptors.length || descriptors.some(source => typeof source?.name !== 'string' || !HASH.test(source?.contentHash))) return null;
+  if (sourcePaths != null && sourcePaths.length !== descriptors.length) return null;
+  const state = await readCareerImportHistory(root);
+  const identity = sourceSetId(sourcePaths);
+  const scopeId = importScopeId(canvasScope, nodeId);
+  const scoped = scopeId ? state.imports.findLast(item => item.scopeId === scopeId) : null;
+  const sameOrderedNames = sources => sources?.length === descriptors.length
+    && sources.every((source, index) => source.name === descriptors[index].name);
+  let previous = identity ? state.imports.findLast(item => item.sourceSetId === identity) : null;
+  if (!previous && scoped && scoped.sourceSetId == null) {
+    const scopedRecord = state.snapshots.find(item => item.snapshotId === scoped.snapshotId);
+    if (sameOrderedNames(scopedRecord?.sources)
+      && new Set(descriptors.map(source => source.name)).size === descriptors.length) previous = scoped;
+  }
+  if (!previous) return null;
+  const record = state.snapshots.find(item => item.snapshotId === previous.snapshotId);
+  // Names, count and order still guard path-based lineage. A renamed or
+  // reordered corpus can safely take the ordinary complete-compile route.
+  if (!sameOrderedNames(record?.sources)) return null;
+  let snapshot;
+  try { snapshot = await loadSnapshot(careerSnapshotStorageRoot(root), record.snapshotId); }
+  catch { return null; }
+  if (snapshot?.status !== 'approved' || snapshot.snapshotId !== record.snapshotId
+    || snapshot.inputFingerprint !== record.inputFingerprint || snapshot.compilationContract !== record.compilationContract
+    || !Array.isArray(snapshot.sources) || snapshot.sources.length !== record.sources.length
+    || snapshot.sources.some((source, index) => source.name !== record.sources[index].name
+      || source.contentHash !== record.sources[index].contentHash || typeof source.text !== 'string')) return null;
+  return snapshot;
 }
 
 export async function careerImportStatus(root) {

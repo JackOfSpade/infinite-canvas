@@ -310,6 +310,7 @@ export function useLocalAiFallbackManager({ navigation, getCurrentFile, addToast
           jobListingPath: result.jobListingPath,
           generationAuditPath: result.generationAuditPath,
           generationLogPath: result.generationLogPath,
+          scrapedListingPath: result.scrapedListingPath,
           workDir: result.workDir,
           company: result.company,
           candidateName: result.candidateName,

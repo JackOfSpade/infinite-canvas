@@ -1,3 +1,4 @@
+import { validateSharedApplicationContent } from '../../electron/ipc/applicationTruthGates.js';
 // Cover-letter PROPORTION and impersonal-sentence grounding.
 //
 // The failure these tests pin: a letter of dozens of one-sentence paragraphs,
@@ -34,9 +35,9 @@ import {
   evaluateCoverLetterChecks, letterFirstPersonActionParagraphFloor, letterSingleSentenceAllowance, paragraphStatesFirstPersonAction, sentences,
 } from '../../electron/ipc/coverLetterChecks.js';
 import {
-  MIN_COVER_LETTER_UNDERFILL_WORDS, MIN_IMPERSONAL_RESTATEMENT_SHARED_TERMS, MIN_IMPERSONAL_RESTATEMENT_SOURCE_SHARE,
+  MIN_IMPERSONAL_RESTATEMENT_SHARED_TERMS, MIN_IMPERSONAL_RESTATEMENT_SOURCE_SHARE,
   PASTE_CHECK_PROSE_UNITS, __completedParagraphCitationsForTests, __localizedCoverLetterCorrectiveGuidanceForTests,
-  __pasteCoverLetterUnderfillErrorsForTests, __pasteTwinParagraphCitationsForTests, assertSourceQuoteLinksFinalText, sentenceAddressesTarget,
+  __pasteTwinParagraphCitationsForTests, assertSourceQuoteLinksFinalText, sentenceAddressesTarget,
 } from '../../electron/ipc/localAiApplication.js';
 
 // ---------------------------------------------------------------------------
@@ -399,6 +400,33 @@ const FIXED_RULE = Object.freeze({
 
 export default [
   {
+    name: 'Legacy letter validation accepts brief grounded text without a word or paragraph quota',
+    run() {
+      const evidence = [{ id: 'proof', sourceId: 'career-data', quote: 'Built a dispatch service.' }];
+      const state = { stage: 'cover-letter', evidencePlan: { evidence }, trustedIdentity: { name: 'Alex', contact: [] } };
+      const response = { coverLetter: { name: 'Alex', contact: [], roleThesis: 'Reliable service delivery.',
+        coverLetterArgument: { primaryEvidence: {} }, paragraphs: [{ id: 'p1', text: 'I built a dispatch service.', evidenceIds: ['proof'] }] } };
+      const dependencies = {
+        nonemptyText: value => typeof value === 'string' && value.trim().length > 0,
+        projectContactChannels: value => value,
+        PASTE_COVER_PARAGRAPH_UNIT_LABEL: 'Cover letter paragraph', MAX_COVER_LETTER_PARAGRAPH_EVIDENCE_IDS: 8,
+        pasteCareerQuotesForEvidenceIds: ids => evidence.filter(row => ids.includes(row.id)).map(row => row.quote),
+        unsupportedDurationClaimError: () => '', pasteCoverLetterCompletionTwinErrors: () => [],
+      };
+      assert(validateSharedApplicationContent(response, state, {}, {}, dependencies).length === 0,
+        'one short paragraph is not rejected for length');
+      const empty = structuredClone(response);
+      empty.coverLetter.paragraphs = [];
+      assert(validateSharedApplicationContent(empty, state, {}, {}, dependencies).includes('Cover letter needs at least one paragraph.'),
+        'an empty letter is still rejected');
+      const ungrounded = structuredClone(response);
+      ungrounded.coverLetter.paragraphs[0].evidenceIds = ['unknown'];
+      assert(validateSharedApplicationContent(ungrounded, state, {}, {}, dependencies).some(error => error.includes('unknown evidence')),
+        'removing the length floor preserves evidence validation');
+    },
+  },
+
+  {
     name: 'Letter proportion: five good letters in unrelated fields pass the whole editorial battery, every paragraph\'s grounding, and every proportion limit with room to spare',
     run() {
       for (const letter of GOOD_LETTERS) {
@@ -537,7 +565,7 @@ export default [
       // Under the judged-from floor nothing is judged, even a letter that would break every limit.
       const stub = Array.from({ length: 8 }, (_, index) => `The stub${index} holds.`);
       assert(!analyzeLetterProportion(stub).judged && checkLetterProportion(stub).passed && /skipped/u.test(checkLetterProportion(stub).detail),
-        'a stub letter is not judged for proportion (the underfill rule speaks for it)');
+        'a short letter is not judged for proportion');
       // Eight one-sentence paragraphs that break the ceiling and the standalone limit, one word either side of the floor.
       const stubOfWords = total => Array.from({ length: 8 }, (_, index) => impersonal(Math.floor(total / 8) + (index < total % 8 ? 1 : 0), `n${index}`));
       const eightyNine = stubOfWords(LETTER_PROPORTION_MIN_JUDGED_WORDS - 1);
@@ -546,8 +574,6 @@ export default [
       const ninety = stubOfWords(LETTER_PROPORTION_MIN_JUDGED_WORDS);
       assert(ninety.join(' ').split(/\s+/u).length === LETTER_PROPORTION_MIN_JUDGED_WORDS && analyzeLetterProportion(ninety).judged && gatesOf(ninety).includes('paragraph-count') && !checkLetterProportion(ninety).passed,
         'exactly the floor is judged');
-      assert(LETTER_PROPORTION_MIN_JUDGED_WORDS === MIN_COVER_LETTER_UNDERFILL_WORDS,
-        'the proportion check judges from the same word floor the underfill rule uses, so the two never leave a gap or an overlap');
     },
   },
   {
@@ -682,40 +708,6 @@ export default [
       'absent or misaligned grounding records yield null');
       const garbled = { qualityReview: { sourceGrounding: { coverLetterParagraphs: textsOf(letter).map(() => ({ careerDataQuotes: [7, null, 'kept quote'] })) } } };
       assert(JSON.stringify(__completedParagraphCitationsForTests(garbled, textsOf(letter))[0]) === JSON.stringify(['kept quote']), 'a non-string quote is ignored, not counted');
-    },
-  },
-  {
-    // The measured root of the atomised letter: the underfill rule joined the paragraph OBJECTS, so every paragraph
-    // read as the two words “[object Object]”, whatever it said. Four real paragraphs measured 8 words and were rejected
-    // for it, with a message that counted paragraphs, and the only reply that could satisfy it was more paragraphs.
-    name: 'Letter underfill: the rule counts the words of each paragraph\'s text, so a real letter is not told it has two words per paragraph (and a run of tiny paragraphs is not the way to reach the floor)',
-    run() {
-      const proofOf = (words, tag) => ({ id: `proof-${tag}`, sourceId: 'career-data', quote: Array.from({ length: words }, (_, index) => `${tag}w${index}`).join(' ') });
-      const rich = [proofOf(60, 'a'), proofOf(60, 'b'), proofOf(60, 'c')]; // 180 words of career proof: the rule applies
-      const paragraphOf = (words, tag) => ({ id: tag, text: Array.from({ length: words }, (_, index) => `${tag}x${index}`).join(' '), evidenceIds: ['proof-a'] });
-      const verdict = (paragraphs, evidence = rich) => __pasteCoverLetterUnderfillErrorsForTests({ paragraphs }, evidence);
-      // Four real paragraphs of 60 words are a 240-word letter, whatever the objects print as.
-      assert(verdict([0, 1, 2, 3].map(index => paragraphOf(60, `p${index}`))).length === 0, 'four 60-word paragraphs are not underfilled');
-      // Two paragraphs are enough when their words are: the boundary is on words, not on paragraphs.
-      assert(verdict([paragraphOf(45, 'x'), paragraphOf(45, 'y')]).length === 0, 'two paragraphs of 45 words reach the 90-word floor');
-      const short = verdict([paragraphOf(45, 'x'), paragraphOf(44, 'y')]);
-      assert(short.length === 1 && /has 2 body paragraph\(s\) and 89 words/u.test(short[0]),
-        `89 words are reported as 89 words (got ${JSON.stringify(short)})`);
-      // The count in the message is the letter's own: a one-paragraph letter of 30 words says 30, not 2.
-      const one = verdict([paragraphOf(30, 'z')]);
-      assert(one.length === 1 && /has 1 body paragraph\(s\) and 30 words/u.test(one[0]), `one paragraph of 30 words reports 30 words (got ${JSON.stringify(one)})`);
-      // A run of one-word paragraphs is not a letter either: at two counted words per paragraph it would have reached the floor at half of it.
-      const dust = count => verdict(Array.from({ length: count }, (_, index) => paragraphOf(1, `d${index}`)));
-      const half = LETTER_PROPORTION_MIN_JUDGED_WORDS / 2;
-      assert(dust(half - 1).length === 1 && dust(half).length === 1 && new RegExp(`has ${half} body paragraph\\(s\\) and ${half} words`, 'u').test(dust(half)[0]),
-        `${half} one-word paragraphs are ${half} words: the paragraph that used to reach the floor by arithmetic no longer satisfies the rule`);
-      // Mutation of the evidence: with a thin career (one item) the same short letter is not asked for more proof than exists.
-      assert(verdict([paragraphOf(30, 'z')], [proofOf(60, 'a')]).length === 0,
-        'a one-item career is not asked for more proof than it holds');
-      assert(verdict([paragraphOf(30, 'z')], rich).length === 1 && verdict([paragraphOf(30, 'z')], [proofOf(10, 'a'), proofOf(10, 'b')]).length === 0,
-        'the same letter is rejected against 180 words of career proof and accepted against 20: the rule only asks for what the career can support');
-      // A caller that already flattened the letter to strings is read as itself.
-      assert(__pasteCoverLetterUnderfillErrorsForTests({ paragraphs: [paragraphOf(45, 'x').text, paragraphOf(45, 'y').text] }, rich).length === 0, 'string paragraphs are read as their own words');
     },
   },
   {

@@ -1,4 +1,5 @@
 import { readFileSync } from 'node:fs';
+import * as officialPosting from '../../electron/ipc/officialPostingBridge.js';
 import { validateGapReviewSubmission as gapValidator, w4Lines as lines, __rejectionCauseKeysForTests as causeKeys, diagnoseCompensationExperienceBandLadder, isValidCompensationExperienceBandLadder } from '../test-dependencies.js';
 import {
   assert, w4Jobs as jobs, w4Scoring as scoring, w4Preferences as prefs,
@@ -92,7 +93,7 @@ export default [
       assert(key === causeKeys('VALIDATION_FAILED', null, [two])[0], `${id}: own values and numbers cannot evade same-rule counting`);
       assert(!allKeys.has(key), `${id} collides with ${allKeys.get(key)}`); allKeys.set(key, id);
     }
-    for (const area of [jobs, scoring, prefs, taxonomy, location, consolidation, interview, market, hub, text]) {
+    for (const area of [jobs, scoring, prefs, taxonomy, location, consolidation, interview, market, hub, text, officialPosting]) {
       const maps = Object.entries(area).filter(([name]) => name.endsWith('_CORRECTION_TEMPLATES'));
       assert(maps.length > 0 && maps.every(([, map]) => Object.isFrozen(map)), 'each area exports frozen templates');
     }

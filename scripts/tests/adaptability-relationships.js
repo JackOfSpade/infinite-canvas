@@ -496,7 +496,12 @@ function authorityVerdict(d, label) {
   const own = skillCatalogIds(d.catalog, d.profile, label);
   const evidenceIds = own.length ? own : mentionCatalogIds(d.catalog, label);
   assert(evidenceIds.length > 0, `fixture invariant: "${label}" must be citable by some catalog row so a refusal cannot be an empty-evidence artifact`);
-  try { validateAuthoritySkillGroup(d.authority, [label], evidenceIds); return { accepted: true }; } catch (error) { return { accepted: false, message: String(error?.message || error) }; }
+  try {
+    validateAuthoritySkillGroup(d.authority, [label], evidenceIds, null, {
+      careerSkillEvidence: d.skillEvidence, listingEvidence: [`Required: ${label}.`],
+    });
+    return { accepted: true };
+  } catch (error) { return { accepted: false, message: String(error?.message || error) }; }
 }
 
 // A minimal, otherwise-valid current-authority résumé whose only variable is
@@ -542,7 +547,10 @@ const hasName = (names, label) => names.some(name => name.toLowerCase() === labe
 // `label` as a standalone skill?". The seams must agree.
 function seamVerdict(d, label) {
   const authority = authorityVerdict(d, label);
-  const resume = resumeVerdict(d, [label]);
+  // These probes measure candidate support. Naming the tested skill in the
+  // posting keeps the application-specific selection gate satisfied without
+  // admitting any non-skill or relationship-qualified source mention.
+  const resume = resumeVerdict(d, [label], { listing: `Required: ${label}.` });
   const skillRowQuote = `- ${label.toLowerCase()} [skill id:`;
   return {
     inventory: hasName(d.inventory, label),
@@ -1050,15 +1058,18 @@ export default [
           const claimedWithPosting = [dA, dB].map(item => resumeVerdict(item, [profile.label], { listing: profile.listing }));
           assert(claimedWithPosting[1].accepted && !claimedWithPosting[0].accepted && NOT_APPROVED_SKILL_RESUME.test(claimedWithPosting[0].message),
             `${context}: with the posting present the skill is accepted only after the flip, and a refusal names the approved-skill gate (${claimedWithPosting[0].message})`);
-          // Near miss: an unrelated posting (some other domain's equipment) never makes a NON-candidate
-          // technology required, whereas the genuine skill is still part of the required career index.
+          // Near miss: an unrelated posting names neither this technology nor
+          // a source Skills section. Neither source state adds a required term.
           const unrelated = PROFILES[(index + 1) % PROFILES.length];
           assert(!unrelated.listing.toLowerCase().includes(profile.label.toLowerCase()), 'fixture invariant: the unrelated posting must not name the technology');
           const unrelatedA = resumeVerdict(dA, [], { listing: unrelated.listing });
           const unrelatedB = resumeVerdict(dB, [], { listing: unrelated.listing });
           assert(unrelatedA.accepted && unrelatedB.accepted && !/from the bounded career-attested index/u.test(unrelatedA.advice)
-            && /from the bounded career-attested index/u.test(unrelatedB.advice) && unrelatedB.advice.includes(profile.label),
-          `${context}: with any posting the career index must name the genuine skill (after the flip) and never the non-candidate one (${unrelatedA.advice}|${unrelatedB.advice})`);
+            && !/from the bounded career-attested index/u.test(unrelatedB.advice),
+          `${context}: an undeclared skill is not required by an unrelated posting (${unrelatedA.advice}|${unrelatedB.advice})`);
+          const unrelatedClaim = resumeVerdict(dB, [profile.label], { listing: unrelated.listing });
+          assert(!unrelatedClaim.accepted && NOT_APPROVED_SKILL_RESUME.test(unrelatedClaim.message),
+            `${context}: direct support alone does not admit an undeclared skill to an unrelated application's index (${unrelatedClaim.message})`);
         }
       }
     },
@@ -1152,9 +1163,10 @@ export default [
           && ledgerOf(dB.profile, profile.label)[0].reference.relationship === 'independent' && !ledgerOf(dB.profile, profile.label)[0].reference.relationshipGroup,
         `${context}: the choice shares one group; simultaneous use carries none`);
         assert(A.snapshotId !== B.snapshotId && A.snapshotId === C.snapshotId && JSON.stringify(A.profile) === JSON.stringify(C.profile), `${context}: ids and the compiled profile must follow the source`);
-        // Resume side: both labels become required career-index terms only in B.
-        const requiredA = resumeVerdict(dA, [], { listing: profile.listing });
-        const requiredB = resumeVerdict(dB, [], { listing: profile.listing });
+        // Resume side: a posting asking for both labels requires them only in B.
+        const bothNamed = `${profile.listing} Work with ${profile.other}.`;
+        const requiredA = resumeVerdict(dA, [], { listing: bothNamed });
+        const requiredB = resumeVerdict(dB, [], { listing: bothNamed });
         assert(requiredA.accepted && requiredB.accepted && !requiredA.advice.includes(profile.label) && requiredB.advice.includes(profile.label) && requiredB.advice.includes(profile.other),
           `${context}: simultaneous use must require both labels in the index and the choice neither (${requiredA.advice}|${requiredB.advice})`);
       }

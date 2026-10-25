@@ -1,6 +1,53 @@
+import os from 'node:os';
+import { cleanupEmptyApplicationFolders, pruneEmptyApplicationParents } from '../../electron/utils/emptyApplicationFolders.js';
 import { assert, collectOrphanTextDocumentPaths, collectRemainingTextDocumentPaths, collectSurvivingRepresentedPaths, collectTrashEligiblePaths, fs, path } from '../test-dependencies.js';
 
 export default [
+  {
+    name: 'Application folder cleanup removes empty ancestors and Finder metadata while preserving content and links',
+    async run() {
+      const project = fs.mkdtempSync(path.join(os.tmpdir(), 'application-empty-folders-'));
+      const root = fs.realpathSync(project);
+      try {
+        const output = path.join(root, 'Applied Jobs');
+        const company = path.join(output, 'Acme & Co');
+        const location = path.join(company, 'San Francisco');
+        const role = path.join(location, 'Engineer');
+        fs.mkdirSync(role, { recursive: true });
+        for (const dir of [company, location]) fs.writeFileSync(path.join(dir, '.DS_Store'), 'Finder');
+        fs.rmdirSync(role);
+        const removed = await pruneEmptyApplicationParents(role, root);
+        assert(removed.length === 2 && !fs.existsSync(company) && fs.existsSync(output),
+          'deleting the final role removes location and company, retaining Applied Jobs');
+        fs.mkdirSync(location, { recursive: true });
+        fs.writeFileSync(path.join(location, 'notes.md'), 'keep');
+        assert((await pruneEmptyApplicationParents(role, root)).length === 0 && fs.existsSync(location),
+          'other content prevents ancestor removal');
+        const empty = path.join(output, 'Empty', 'Location');
+        fs.mkdirSync(empty, { recursive: true });
+        fs.writeFileSync(path.join(empty, '.DS_Store'), 'Finder');
+        const hidden = path.join(output, 'Hidden');
+        fs.mkdirSync(hidden);
+        fs.writeFileSync(path.join(hidden, '.keep'), '');
+        const linked = path.join(output, 'Linked');
+        fs.symlinkSync(location, linked);
+        const fakeMetadata = path.join(output, 'MetadataLink');
+        fs.mkdirSync(fakeMetadata);
+        fs.symlinkSync(path.join(location, 'notes.md'), path.join(fakeMetadata, '.DS_Store'));
+        const cleaned = await cleanupEmptyApplicationFolders(output);
+        assert(cleaned.length === 2 && !fs.existsSync(path.dirname(empty)), 'maintenance removes empty descendants bottom-up');
+        assert(fs.readFileSync(path.join(location, 'notes.md'), 'utf8') === 'keep'
+          && fs.existsSync(hidden) && fs.lstatSync(linked).isSymbolicLink()
+          && fs.lstatSync(path.join(fakeMetadata, '.DS_Store')).isSymbolicLink(),
+          'documents, hidden content and symbolic links survive');
+        assert((await cleanupEmptyApplicationFolders(output)).length === 0, 'cleanup is idempotent');
+        let refused = false;
+        try { await cleanupEmptyApplicationFolders(linked); } catch { refused = true; }
+        assert(refused, 'a symlink root cannot redirect maintenance');
+      } finally { fs.rmSync(root, { recursive: true, force: true }); }
+    },
+  },
+
   {
     name: 'Local AI handoffs survive result-card, Job Board, and canvas display deletion',
     run: () => {

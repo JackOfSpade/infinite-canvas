@@ -1749,11 +1749,8 @@ export function checkCandidateAgency(paragraphs = []) {
 // writer's voice, and one quote under many paragraphs. Below, "judged" means
 // these limits apply.
 
-// Judged only from this many words. Under it the letter is not yet a letter
-// and the underfill rule (MIN_COVER_LETTER_UNDERFILL_WORDS in the Local AI
-// module, the same 90) is the one that speaks; judging a 40-word stub here
-// would answer a length problem with a proportion message the writer cannot
-// act on.
+// Apply proportion advice only when there is enough text to assess it.
+// This threshold never requires a shorter letter to be expanded.
 export const LETTER_PROPORTION_MIN_JUDGED_WORDS = 90;
 // The design system's letter is "3-4 paragraphs" and a persuasive one-page
 // letter is an opening that states the thesis, one to three proofs and a
@@ -3705,8 +3702,9 @@ const NAMED_COMPANY_POSSESSIVE = /\b([\p{Lu}][\p{L}\p{N}&.'’-]*(?:\s+[\p{Lu}][
 const NON_COMPANY_ACRONYMS = new Set(['AI', 'API', 'APIS', 'B2B', 'B2C', 'CI', 'CD', 'CRM', 'CSS', 'ERP', 'HTML', 'IT', 'ML', 'SaaS', 'SDK', 'SQL', 'UI', 'UX']);
 
 function sameCompanyReference(value, aliases) {
-  const candidate = normalized(value).replace(/[.,;:]+$/u, '').trim();
-  return aliases.some(alias => normalized(alias) === candidate);
+  const reference = item => normalized(item).replace(/[.,;:]+$/u, '').replace(/['’]s?$/u, '').trim();
+  const candidate = reference(value);
+  return aliases.some(alias => reference(alias) === candidate);
 }
 
 function plausibleNamedCompany(value) {
@@ -3747,7 +3745,7 @@ function occursAsWholeName(name, corpus) {
 // A known prior employer named after a past-tense verb in the same clause is a
 // reference to history (“the way it worked at <employer>”, “as I did at
 // <employer>”), not the employer a future contribution is directed to.
-const PAST_HISTORY_BEFORE_EMPLOYER = /\b(?:did|had|was|were|built|created|delivered|designed|developed|drove|implemented|improved|led|managed|operated|ran|shipped|supported|wrote|worked)\s+(?:[\p{L}'’-]+\s+){0,3}(?:at|for|with)\s+$/iu;
+const PAST_HISTORY_BEFORE_EMPLOYER = /\b(?:did|had|was|were|built|created|delivered|designed|developed|drove|implemented|improved|led|managed|operated|ran|shipped|supported|wrote|worked)\s+(?:[\p{L}'’-]+\s+){0,3}(?:at|for|with|to)\s+$/iu;
 
 /**
  * Keeps a named prospective employer bound to this job.  Known prior
@@ -3764,11 +3762,21 @@ const PAST_HISTORY_BEFORE_EMPLOYER = /\b(?:did|had|was|were|built|created|delive
  * after “at” or “for”, or a possessive, that the evidence and the posting never
  * mention is still refused.
  */
-export function checkTargetCompanyBinding(paragraphs = [], companyName = '', priorEmployers = [], { evidence = null, jobText = '' } = {}) {
+export function checkTargetCompanyBinding(paragraphs = [], companyName = '', priorEmployers = [], { evidence = null, jobText = '', forbiddenNames = [] } = {}) {
   const targetAliases = companyReferenceAliases(companyName);
-  if (!targetAliases.length) return result('target-company-binding', true, 'skipped: job company is unavailable');
   const priorAliases = (Array.isArray(priorEmployers) ? priorEmployers : [])
     .flatMap(companyReferenceAliases);
+  const forbiddenAliases = (Array.isArray(forbiddenNames) ? forbiddenNames : [])
+    .filter(name => !sameCompanyReference(name, targetAliases))
+    .flatMap(companyReferenceAliases);
+  // Initialisms as short as "WE" can be pronouns, so the additional forms
+  // scan substantive approved aliases rather than arbitrary capitalised runs.
+  const substantiveAlias = alias => alias.length > 3 || /\s/u.test(alias);
+  const bindingAliases = [...new Set([...priorAliases, ...forbiddenAliases])].filter(substantiveAlias);
+  const substantiveForbiddenAliases = forbiddenAliases.filter(substantiveAlias);
+  if (!targetAliases.length && !priorAliases.length && !forbiddenAliases.length) {
+    return result('target-company-binding', true, 'skipped: no company identities are available');
+  }
   const postingCorpus = normalized(jobText);
   const projectText = (Array.isArray(evidence?.projects) ? evidence.projects : [])
     .map(project => `${project?.name || ''} ${project?.description || ''}`).join(' ');
@@ -3777,7 +3785,12 @@ export function checkTargetCompanyBinding(paragraphs = [], companyName = '', pri
   (Array.isArray(paragraphs) ? paragraphs : []).forEach((paragraph, paragraphIndex) => {
     sentences(paragraph).forEach((sentence, sentenceIndex) => {
       const value = text(sentence);
-      if (!PROSPECTIVE_COMPANY_FRAME.test(value)) return;
+      const aliasObjects = bindingAliases.flatMap(alias =>
+        [...value.matchAll(new RegExp(`(?<![\\p{L}\\p{N}])(to|join|joining|help|helping|support|supporting|serve|serving|assist|assisting)\\s+(?:the\\s+)?(${escapeRegExp(alias)})(?:['’]s?)?(?![\\p{L}\\p{N}])`, 'giu'))].map(match => ({
+          value: match[2], index: match.index ?? -1, preposition: match[1].toLowerCase(), prefixEnd: (match.index ?? 0) + match[0].indexOf(match[2]),
+        })));
+      if (!PROSPECTIVE_COMPANY_FRAME.test(value)
+        && !(aliasObjects.length && /\b(?:i|we)(?:['’](?:d|ll))?\b/iu.test(value))) return;
       const explicitlyTargetBound = /\b(?:for|in|to)\s+this\s+role\b|\b(?:your|this)\s+(?:team|company|organization|organisation|mission|platform|product)\b/iu.test(value)
         || targetAliases.some(alias => occursAsWholeName(alias, normalized(value)));
       const namedEmployers = [
@@ -3787,14 +3800,30 @@ export function checkTargetCompanyBinding(paragraphs = [], companyName = '', pri
         ...[...value.matchAll(NAMED_COMPANY_POSSESSIVE)].map(match => ({
           value: match[1], index: match.index ?? -1, preposition: '', prefixEnd: match.index ?? 0,
         })),
+        ...aliasObjects,
+        ...bindingAliases.flatMap(alias =>
+          [...value.matchAll(new RegExp(`^(At|For|With|To)\\s+(${escapeRegExp(alias)})(?=,?\\s+(?:i|we)\\s+(?:would|could|can|will)\\b)`, 'giu'))].map(match => ({
+            value: match[2], index: 0, preposition: match[1].toLowerCase(), prefixEnd: match[0].indexOf(match[2]),
+          }))),
+        // Prior-employer subjects and plural possessives are prospective
+        // targets too, without widening the ordinary preposition extractor.
+        ...bindingAliases.flatMap(alias =>
+          [...value.matchAll(new RegExp(`(?<![\\p{L}\\p{N}])(${escapeRegExp(alias)})(?:['’]s?(?=\\s)|(?=\\s+(?:would|could|can|will)\\b))(?![\\p{L}\\p{N}])`, 'giu'))].map(match => ({
+            value: match[1], index: match.index ?? -1, preposition: '', prefixEnd: match.index ?? 0,
+          }))),
+        ...substantiveForbiddenAliases.flatMap(alias =>
+          [...value.matchAll(new RegExp(`(?<![\\p{L}\\p{N}])(${escapeRegExp(alias)})(?:['’]s?)?(?![\\p{L}\\p{N}])`, 'giu'))].map(match => ({
+            value: match[1], index: match.index ?? -1, preposition: '', prefixEnd: match.index ?? 0,
+          }))),
       ].filter(match => plausibleNamedCompany(match.value));
       for (const employer of namedEmployers) {
         const named = employer.value;
         if (sameCompanyReference(named, targetAliases)) continue;
         const knownPrior = sameCompanyReference(named, priorAliases);
+        const forbidden = sameCompanyReference(named, forbiddenAliases);
         if (knownPrior && isPriorEmployerEvidenceBeforeProspectiveFrame(value, employer.index)) continue;
         if (knownPrior && PAST_HISTORY_BEFORE_EMPLOYER.test(value.slice(0, employer.prefixEnd))) continue;
-        if (!knownPrior) {
+        if (!knownPrior && !forbidden) {
           if (namesOnlyTools(named)) continue;
           if (occursAsWholeName(named, postingCorpus) || occursAsWholeName(named, evidenceCorpus)) continue;
           // A "with X" phrase names past tools or experience when the same
@@ -3806,7 +3835,7 @@ export function checkTargetCompanyBinding(paragraphs = [], companyName = '', pri
           // known to be an employer, which the branches above already did.
           if (employer.preposition === 'with' && !/\s/u.test(named.trim()) && !COMPANY_SUFFIX_RE.test(named)) continue;
         }
-        observations.push(`paragraph ${paragraphIndex + 1} sentence ${sentenceIndex + 1} directs prospective contribution to “${boundedDetailValue(named)}”${knownPrior ? ', a prior employer' : ''}; bind future-facing work to this job’s employer or use “this role”, and keep prior employers only in past-tense evidence context`);
+        observations.push(`paragraph ${paragraphIndex + 1} sentence ${sentenceIndex + 1} directs prospective contribution to “${boundedDetailValue(named)}”${forbidden ? ', the poster' : knownPrior ? ', a prior employer' : ''}; bind future-facing work to this job’s employer or use “this role”, and keep prior employers only in past-tense evidence context`);
         break;
       }
     });
@@ -7529,7 +7558,7 @@ export function describeCheckDispositions(table = CHECK_DISPOSITIONS) {
 }
 
 /** Evaluates the prose-level checks used to decide the single revision attempt. */
-export function evaluateCoverLetterChecks({ plan = {}, paragraphs = [], evidence = {}, jobText = '', researchText = '', companyName = '', referenceDate = null, paragraphCitations = null, activeOnly = false } = {}) {
+export function evaluateCoverLetterChecks({ plan = {}, paragraphs = [], evidence = {}, jobText = '', researchText = '', companyName = '', forbiddenNames = [], referenceDate = null, paragraphCitations = null, activeOnly = false } = {}) {
   const plannedCompanyDetail = text(plan?.companyHook?.detail);
   const priorEmployers = (Array.isArray(evidence?.roles) ? evidence.roles : [])
     .map(role => text(role?.company)).filter(Boolean);
@@ -7567,7 +7596,7 @@ export function evaluateCoverLetterChecks({ plan = {}, paragraphs = [], evidence
     ['opening-job-summary-scaffolding', () => checkOpeningJobSummaryScaffolding(paragraphs)],
     ['anchor-relevance', () => checkAnchorRelevance(paragraphs, jobText, researchText)],
     ['target-claim-scope', () => checkTargetClaimScope(plan, paragraphs, evidence, jobText)],
-    ['target-company-binding', () => checkTargetCompanyBinding(paragraphs, companyName, priorEmployers, { evidence, jobText })],
+    ['target-company-binding', () => checkTargetCompanyBinding(paragraphs, companyName, priorEmployers, { evidence, jobText, forbiddenNames })],
     ['detached-relevance-claim', () => checkDetachedRelevanceClaim(paragraphs)],
     ['prospective-contribution-tense', () => checkProspectiveContributionTense(paragraphs, companyName)],
     ['additive-seam', () => checkAdditiveSeam(paragraphs)],

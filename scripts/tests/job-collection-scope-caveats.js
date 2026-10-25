@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { assert } from './testHelpers.js';
 import { __compactErrorStackForTests, buildJobTasks, claimJobAnalysisOperationAuthority, fs, ipcMain, markSourceStatus, os, path, readRunState, recordSourcePage, setStage, startRun } from '../test-dependencies.js';
-import { registerJobsHandlers } from '../../electron/ipc/jobs.js';
+import { __registerJobsHandlersForTests } from '../../electron/ipc/jobs.js';
 import {
   COLLECTION_SCOPE_CAVEAT,
   collectionScopeCaveatsForSavedJobReanalysis,
@@ -404,7 +404,11 @@ export default [
         assert(resumeClaim?.admitted === true && resumeClaim.receipt,
           'the exact-resume fixture must make a successor authority claim that names the staged receipt as its immediate predecessor');
         const operationAuthority = resumeClaim.receipt;
-        registerJobsHandlers();
+        __registerJobsHandlersForTests({ resolveOfficialPostings: async jobs => ({
+          jobs,
+          telemetry: { total: jobs.length, levels: {}, outcomes: {}, rejections: {}, handoffs: 0, handoffMs: 0,
+            materialJdChange: 0, bridgeTimeout: 0, bridgeUnavailable: 0 },
+        }) });
         const searchJobs = ipcMain.__getInvokeHandler('search-jobs');
         const guard = setTimeout(() => destroy(), 20_000);
         let result;

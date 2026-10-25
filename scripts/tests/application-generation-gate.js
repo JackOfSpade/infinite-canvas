@@ -236,6 +236,11 @@ export default [{
     const gateCall = body.indexOf('await window.electronAPI.checkApplicationGenerationGate(');
     const blocked = body.indexOf('if (gate.blocked) {');
     const queueCall = body.indexOf('window.electronAPI.queueLocalApplication(');
+    const prepareCall = body.indexOf('await window.electronAPI.prepareOfficialPostingForGeneration?.({');
+    const acquireCall = body.indexOf('lease = await acquireModuleRun({');
+    assert(prepareCall > body.indexOf('applicationSubmissionRef.current = true;')
+      && acquireCall > prepareCall && acquireCall < canvasCheck,
+    'official preparation runs after the synchronous latch and before the lane; the gate still follows the saved-canvas check');
     assert(canvasCheck > 0 && gateCall > canvasCheck && blocked > gateCall && queueCall > blocked, 'gate runs after the canvas check and before the queue call');
     const blockedBranch = body.slice(blocked, body.indexOf('\n      }\n', blocked));
     assert(/\n\s+return;$/.test(blockedBranch.trimEnd()) || blockedBranch.includes('return;'), 'a blocked gate returns');

@@ -10,6 +10,8 @@
  *   { title, company, location, salary, snippet, url, posted, source }
  */
 import { logger } from '../logger.js';
+import { walkJsonLdJobPostings } from './jobPostingJsonLd.js';
+export { walkJsonLdJobPostings } from './jobPostingJsonLd.js';
 import { getRandomUA, refreshDiceApiKey, getStealthBrowser, getStealthBrowserInfo } from '../ipc/stealthBrowser.js';
 import { humanCooldown } from '../utils/humanDelay.js';
 import { getDiceApiKey } from '../ipc/settings.js';
@@ -1706,6 +1708,7 @@ function mapUSAJobsRows(resultItems) {
       company: pos.OrganizationName || pos.DepartmentName || '',
       location: pos.PositionLocationDisplay || '',
       salary: salaryStr,
+      salaryProvenance: salaryStr ? 'posted' : 'unknown',
       snippet: (() => {
         const d = pos.UserArea?.Details || {};
         const duties = Array.isArray(d.MajorDuties) ? d.MajorDuties.join('\n') : (d.MajorDuties || '');
@@ -2172,6 +2175,7 @@ export async function fetchRemoteOKJobs(queries, signal = null, geoTerms = EMPTY
       // scoring prompt. Never invent a cadence — parseSalaryToNumeric's range
       // path annualizes correctly from this shape.
       salary: formatRemoteOkSalary(job.salary_min, job.salary_max),
+      salaryProvenance: formatRemoteOkSalary(job.salary_min, job.salary_max) ? 'posted' : 'unknown',
       // Pipeline convention: the FULL JD lives in `snippet` — that's the field the
       // scorer reads (jobs.js slimBatch + "Description: ${job.snippet}") and the
       // bug-report field-quality check measures. RemoteOK's API hands us the full
@@ -2399,6 +2403,7 @@ export async function fetchWeWorkRemotelyJobs(queries, signal = null, geoTerms =
       company,
       location: regionMatch?.[1]?.trim() || 'Remote',
       salary: extractSalaryFromText(descText),
+      salaryProvenance: 'unknown',
       snippet: descText,
       description: descText,
       url,
@@ -2954,6 +2959,7 @@ function normalizeIndeedCandidate(record) {
     company: firstText(job.company, job.companyName, job.employer?.name, job.hiringOrganization?.name),
     location: firstText(job.formattedLocation, job.location, job.locationName, job.jobLocation?.address?.addressLocality),
     salary: salaryText(job.salarySnippet || job.salaryInfo || job.extractedSalary || job.salary),
+    salaryProvenance: 'unknown',
     snippet: firstText(job.snippet?.htmlSnippet, job.snippet?.text, job.snippet, job.description, job.jobDescription),
     url: normalizeIndeedUrl(rawUrl, key),
     jobkey: key,
@@ -3335,11 +3341,13 @@ function mapDiceListing(job) {
     ? job.description.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim()
     : '';
   const descText = descFromHtml || (job?.summary || '').trim();
+  const salary = cleanDiceSalary(job?.salary);
   return {
     title: job?.title || '',
     company: job?.companyName || '',
     location: job?.jobLocation?.displayName || '',
-    salary: cleanDiceSalary(job?.salary),
+    salary,
+    salaryProvenance: salary && !/\b(?:estimat(?:e|ed|ion)|projected|predicted|prediction)\b/iu.test(salary) ? 'posted' : 'unknown',
     snippet: descText,
     description: descText,
     url: job?.detailsPageUrl || `https://www.dice.com/job-detail/${job?.guid || job?.id}`,
@@ -3639,44 +3647,6 @@ export async function warmDiceApiKey(signal = null) {
 }
 
 /**
- * Walk every JSON-LD `<script>` block in a page's HTML looking for
- * `JobPosting` nodes (handles `@graph` wrappers and array `@type`), calling
- * `visit(node)` for each one found. The first call whose return value is not
- * `undefined` short-circuits the walk and becomes the return value. Never
- * throws on malformed JSON-LD — a bad block is just skipped.
- *
- * Shared by extractJobPostingDescription (harvests `.description`) and
- * extractJobPostingBaseSalary (harvests `.baseSalary`) so the traversal
- * itself — the actual source of truth for "how do we find a JobPosting node
- * in this page" — lives in exactly one place.
- * @param {string} html
- * @param {(node: object) => any} visit
- * @returns {any} — visit's first non-undefined return, or undefined
- */
-function walkJsonLdJobPostings(html, visit) {
-  const re = /<script[^>]+type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi;
-  let m;
-  while ((m = re.exec(html || ''))) {
-    let data;
-    try { data = JSON.parse(m[1].trim()); } catch { continue; }
-    const stack = [data];
-    while (stack.length) {
-      const node = stack.shift();
-      if (!node || typeof node !== 'object') continue;
-      if (Array.isArray(node)) { stack.push(...node); continue; }
-      const type = node['@type'];
-      const isJob = type === 'JobPosting' || (Array.isArray(type) && type.includes('JobPosting'));
-      if (isJob) {
-        const result = visit(node);
-        if (result !== undefined) return result;
-      }
-      if (Array.isArray(node['@graph'])) stack.push(...node['@graph']);
-    }
-  }
-  return undefined;
-}
-
-/**
  * Extract JobPosting.description from a page's JSON-LD (handles @graph wrappers
  * and array `@type`). Node-side analogue of the browser scrapers' JSON-LD
  * harvest. Returns '' when no JobPosting description is present, and never throws
@@ -3875,23 +3845,25 @@ export async function enrichDiceDescriptions(jobs, signal) {
           // own text stays authoritative whenever it already parses to a real
           // number.
           let salaryPatch = null;
+          let salaryPatchProvenance = 'unknown';
           if (parseSalaryToNumeric(job.salary) === 0) {
-            const formatted = formatDiceBaseSalary(extractJobPostingBaseSalary(html)) || extractDiceSalaryBadge(html);
-            if (formatted) { salaryPatch = formatted; salaryUpgraded += 1; }
+            const structuredSalary = formatDiceBaseSalary(extractJobPostingBaseSalary(html));
+            const formatted = structuredSalary || extractDiceSalaryBadge(html);
+            if (formatted) { salaryPatch = formatted; salaryPatchProvenance = structuredSalary ? 'posted' : 'unknown'; salaryUpgraded += 1; }
           }
           const descHtml = extractJobPostingDescription(html);
           if (!descHtml) {
             note('no-jsonld-desc', url);
-            return salaryPatch ? { ...job, salary: salaryPatch } : job;
+            return salaryPatch ? { ...job, salary: salaryPatch, salaryProvenance: salaryPatchProvenance } : job;
           }
           const descText = descHtml.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
           if (!descText) {
             note('empty-after-strip', url);
-            return salaryPatch ? { ...job, salary: salaryPatch } : job;
+            return salaryPatch ? { ...job, salary: salaryPatch, salaryProvenance: salaryPatchProvenance } : job;
           }
           const rest = { ...job };
           delete rest._diceId;
-          if (salaryPatch) rest.salary = salaryPatch;
+          if (salaryPatch) { rest.salary = salaryPatch; rest.salaryProvenance = salaryPatchProvenance; }
           // Keep whichever is longer — guards against a stub JSON-LD shorter than
           // the list summary we already had.
           if (descText.length > summaryLen) {
