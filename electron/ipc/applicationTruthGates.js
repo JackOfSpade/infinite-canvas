@@ -1,6 +1,6 @@
 // Shared production truth predicates used by the v2 content gate.
-import { targetCompanyNames } from './coverLetterChecks.js';
-export function targetIdentityNameLicensed(sentence, finding, ctx, { reportsNoPastWork, attributionTerms, sentenceAddressesTarget, groundingClauses, hasWorkIngWord, hasCandidateNonIntentClause, targetEmploymentIntentClause, nonEmploymentTargetReference }) {
+import { targetCompanyNames, targetIntentCompanyNames } from './coverLetterChecks.js';
+export function targetIdentityNameLicensed(sentence, finding, ctx, { reportsNoPastWork, attributionTerms, sentenceAddressesTarget, groundingClauses, hasWorkIngWord, hasCandidateNonIntentClause, targetEmploymentIntentClause, speaksOnlyOfApplicationIntent, nonEmploymentTargetReference }) {
   if (finding?.code !== 'name') return false;
   const text = String(sentence ?? '');
   const noPastWork = reportsNoPastWork(text);
@@ -41,6 +41,16 @@ export function targetIdentityNameLicensed(sentence, finding, ctx, { reportsNoPa
   // Its exact prefix is a target reference too, including its possessive;
   // this licenses no claim that the candidate previously worked there.
   const companyNames = targetCompanyNames(company).filter(name => name.length >= 3);
+  // A distinctive brand prefix is licensed only by a complete joining intent
+  // or application opener. A sibling claim keeps the whole sentence outside
+  // these closed frames, and ordinary employment receives no new exemption.
+  if (targetEmploymentIntentClause(text, company)
+    || (typeof speaksOnlyOfApplicationIntent === 'function' && speaksOnlyOfApplicationIntent(text, company, ctx?.targetTitle))) {
+    for (const name of targetIntentCompanyNames(company).filter(name => !companyNames.includes(name))) {
+      const pattern = new RegExp(`(?<![\\p{L}\\p{N}])${phrase(name)}(?:['’]s)?(?![\\p{L}\\p{N}])`, 'giu');
+      for (const match of text.matchAll(pattern)) spans.push([match.index, match.index + match[0].length]);
+    }
+  }
   const need = String.raw`(?:needs?|requirements?|priorit(?:y|ies)|goals?|mission|roadmap|challenges?|problems?|standards?)`;
   const word = String.raw`[\p{L}'’-]+`;
   const needPhrase = new RegExp(`^\\s+(?:${word}\\s+){0,2}${need}\\b`, 'iu');

@@ -272,8 +272,8 @@ export async function resolveOfficialPostings(jobs, {
     }
   };
   const persist = async (member, result, { researchRan = false } = {}) => {
-    // The row budget also ends for incidental host limits (sixty seconds of host time, sixteen pages). That may discard a crawl's
-    // miss but never a verified match already found; only the run being stopped makes a verified result non-durable.
+    // A row budget can end while the run continues. The shared predicate
+    // requires a deterministic anchor before a partial verified crawl is durable.
     const durability = VERIFIED_LEVELS.has(result.officialPosting?.level) ? signal : member.rowBudget.signal;
     if (!store || result.record || result.officialPosting?.trail?.includes('recent-miss')
       || !shouldPersistOfficialPostingResult(result, { signal: durability, researchRan })) return result;
@@ -344,7 +344,7 @@ export async function resolveOfficialPostings(jobs, {
         if (materiallyDifferent(member.job.snippet || member.job.description, description)) {
           result = addTrail(result, 'material-jd-change'); stats.materialJdChange += 1;
           // A newer complete proof wins over feedback about an older record.
-          if (store && result.record && !member.rowBudget.signal.aborted) try {
+          if (store && result.record && shouldPersistOfficialPostingResult(result, { signal })) try {
             const record = await store.save(member.job, { officialPosting: result.officialPosting, expectedRecord: result.record });
             if (record) result = { ...result, record, officialPosting: record.officialPosting };
           } catch { /* Telemetry and row retain the detected change. */ }

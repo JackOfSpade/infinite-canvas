@@ -60,6 +60,51 @@ export default [
     },
   },
   {
+    name: 'Official posting resolver proves apex and www root redirects in either direction for own leads and sameAs',
+    async run() {
+      const ats = 'https://jobs.lever.co/northwind/one';
+      for (const [requestedRoot, finalRoot] of [['https://nwlhq.test/', 'https://www.nwlhq.test/'],
+        ['https://www.nwlhq.test/', 'https://nwlhq.test/']]) {
+        const ownUrl = `${requestedRoot}jobs/one`;
+        const ownRow = row({ company: 'Northwind Labs', title: 'Software Engineer', snippet: description, url: ownUrl });
+        const pages = { [requestedRoot]: { url: finalRoot, body: '<title>Northwind Labs</title>' },
+          [finalRoot]: '<title>Northwind Labs</title>',
+          [ownUrl]: jsonld({ url: ownUrl, hiringOrganization: { name: 'Northwind Labs' } }),
+          [ats]: jsonld({ url: ats, hiringOrganization: { name: 'Northwind Labs', sameAs: requestedRoot } }) };
+        const own = await resolveOfficialPosting(ownRow, { fetch: network(pages) });
+        assert.equal(own.officialPosting.level, 'L1', requestedRoot);
+        assert.equal(own.officialPosting.sourceUrl, ownUrl);
+        for (const leads of [[ats, requestedRoot], [requestedRoot, ats]]) {
+          const sameAs = await resolveOfficialPosting(row({ company: 'Northwind Labs', title: 'Software Engineer', snippet: description }),
+            { fetch: network(pages), candidateUrls: leads });
+          assert.equal(sameAs.officialPosting.level, 'L3', `${requestedRoot}: ${leads.join(', ')}`);
+          assert.equal(sameAs.officialPosting.sourceUrl, ats);
+        }
+      }
+    },
+  },
+  {
+    name: 'Official posting resolver keeps root ownership redirect and requested-url boundaries outside apex and www',
+    async run() {
+      const root = 'https://nwlhq.test/'; const url = `${root}jobs/one`;
+      const own = row({ company: 'Northwind Labs', title: 'Software Engineer', snippet: description, url });
+      for (const finalRoot of ['https://careers.nwlhq.test/', 'https://www.careers.nwlhq.test/', 'https://elsewhere.test/',
+        'https://www.elsewhere.test/', 'https://jobs.lever.co/northwind/']) {
+        const result = await resolveOfficialPosting(own, { fetch: network({
+          [root]: { url: finalRoot, body: '<title>Northwind Labs</title>' },
+          [url]: jsonld({ url, hiringOrganization: { name: 'Northwind Labs' } }),
+        }) });
+        assert.equal(result.officialPosting.level, 'L5', finalRoot);
+        assert.equal(result.officialPosting.sourceUrl, undefined);
+      }
+      const mismatchedRequest = await resolveOfficialPosting(own, { fetch: network({
+        [root]: { url: 'https://www.nwlhq.test/', requestedUrl: 'https://www.nwlhq.test/', body: '<title>Northwind Labs</title>' },
+        [url]: jsonld({ url, hiringOrganization: { name: 'Northwind Labs' } }),
+      }) });
+      assert.equal(mismatchedRequest.officialPosting.level, 'L5', 'the response still belongs to this exact requested root');
+    },
+  },
+  {
     name: 'Official posting resolver refuses title-only careers identity, absent links and sibling-tenant proof transfer',
     async run() {
       const base = careersPages();

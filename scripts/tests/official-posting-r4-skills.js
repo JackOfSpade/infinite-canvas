@@ -81,6 +81,7 @@ export default [
         '## Technical Skills & Tools', '## Skills - Technical', '## Skills Profile', '## Skills & Certifications', '## **Skills & Tools**',
         '## __Technical Skills:__', '## Skills Overview ###', '### Core Skills and Competencies', '## Skills 🛠', '## 🛠 Technical Skills',
         'SKILLS SUMMARY', 'SKILLS AND TOOLS', 'SKILLS & EXPERTISE', 'TECHNICAL SKILLS & TOOLS', 'SKILLS / TECHNOLOGIES',
+        '## Skills Section', '## Skills Snapshot', '## Skills at a Glance', '## Skills Used', '## Skills & Interests',
       ];
       for (const heading of openers) {
         const snapshot = snapshotFor(`${heading}\n- Linden\n## Experience\n- Built Willow services.\n`, [['Linden', '- Linden'], ['Willow', '- Built Willow services.']]);

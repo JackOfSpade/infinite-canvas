@@ -731,6 +731,56 @@ export default [
     },
   },
   {
+    name: 'Amendment 4 flat and sentence-case company regions never hide a differing sibling role summary',
+    run() {
+      const company = ['Northwind Labs builds workflow software for regional carriers.', 'We value steady progress and thoughtful conversations in every office.',
+        'Our teams work across three time zones and meet in person twice a year.', 'We publish our engineering notes openly for the whole industry to read.'];
+      const candidate = (id, description, extra = {}) => ({ title: 'Software Engineer', employer: EMPLOYER, location: { display: 'Lakeview, Ontario, Canada' }, description,
+        sourceUrl: `https://careers.northwind.test/job/${id}`, employerDomainProven: true, live: true, isListed: true, statusCode: 200, ...extra });
+      for (const flat of [false, true]) for (const heading of ['Your impact', 'A day in the life', 'The opportunity', "Who we're looking for", 'Your day to day', 'Why this role matters', 'Overview', 'Summary', 'Description']) {
+        for (const requirements of ['What You Bring', 'Key Responsibilities', 'Minimum Qualifications']) {
+          const make = seed => ['About Northwind Labs', ...company, heading, ...lines(seed, 4), requirements, ...lines(3000, 6)].join(flat ? ' ' : '\n');
+          const actual = make(100); const sibling = candidate('sibling', make(500)); const scraped = row({ snippet: actual });
+          for (const pool of [[sibling], [sibling, candidate('true', actual, { live: false, isListed: false, statusCode: 410 })]]) {
+            const result = selectOfficialPostingMatch(scraped, pool, { now: NOW });
+            assert.equal(result.candidate, null, `${flat ? 'flat' : 'structured'} / ${heading} / ${requirements} never picks the sibling`);
+          }
+          const deterministic = selectOfficialPostingMatch({ ...scraped, applyOptions: [{ label: 'Apply', href: sibling.sourceUrl }] }, [sibling], { now: NOW });
+          assert.equal(deterministic.candidate?.sourceUrl, sibling.sourceUrl, 'an own lead remains independently decisive');
+        }
+      }
+      // A short swallowed summary can be less than half the source, while a
+      // huge company block can dominate any text leaked by a fixed cap.
+      for (const [intro, count] of [[['Northwind builds freight tools.'], 100], [lines(8000, 200), 6]]) {
+        const make = seed => ['About Northwind Labs', ...intro, 'An unfamiliar heading', ...lines(seed, 1), 'What You Bring', ...lines(3000, count)].join(' ');
+        const sibling = candidate('sibling', make(500));
+        assert.equal(selectOfficialPostingMatch(row({ snippet: make(100) }), [sibling], { now: NOW }).candidate, null, `${intro.length} company sentences / ${count} shared requirements`);
+      }
+    },
+  },
+  {
+    name: 'Amendment 4 company openers drop this company and organization what we do and how we work copy',
+    run() {
+      for (const heading of ['About This Company', 'About This Organization', 'About What We Do', 'About How We Work']) {
+        const retained = __debug.roleDescription(`${heading}\nNorthwind makes freight tools.\nResponsibilities\n${lines(100, 4).join('\n')}`);
+        assert.ok(!retained.includes('freight tools'), heading);
+        assert.ok(retained.includes(sentence(100)), heading);
+      }
+    },
+  },
+  {
+    name: 'Amendment 4 structured scraped Overview and Opportunity retain safe matches against flat official text',
+    run() {
+      for (const heading of ['Overview', 'The Opportunity', 'Your impact', 'Your day to day', 'A day in the life', "Who we're looking for", 'Why this role matters']) {
+        const parts = ['About Northwind Labs', ...lines(1000, 4), heading, ...lines(100, 5), 'What You Bring', ...lines(3000, 6)];
+        const actual = parts.join(' '); const snippet = parts.join('\n');
+        const candidate = { title: 'Software Engineer', employer: EMPLOYER, location: { display: 'Lakeview, Ontario, Canada' }, description: actual,
+          sourceUrl: 'https://careers.northwind.test/job/true', employerDomainProven: true, live: true, isListed: true, statusCode: 200 };
+        assert.equal(selectOfficialPostingMatch(row({ snippet }), [candidate], { now: NOW }).candidate?.sourceUrl, candidate.sourceUrl, heading);
+      }
+    },
+  },
+  {
     name: 'Amendment 3 ownership: a recruiter tenant whose slug extends the poster name is still the poster tenant, even when it names the client',
     async run() {
       const root = ROOT;

@@ -228,6 +228,37 @@ export function targetCompanyNames(value = '') {
   return targetCompanyNameForms(value).map(form => form.name);
 }
 
+// A short brand can replace the frozen company only in closed application or
+// joining intent. It grants no general identity or employment exemption.
+export function targetIntentCompanyNames(value = '') {
+  const names = targetCompanyNames(value);
+  const generic = new Set(['group', 'company', 'corporation', 'limited', 'labs', 'systems', 'technologies', 'solutions',
+    'services', 'partners', 'holdings', 'blue', 'green', 'red', 'white', 'black', 'anchor', 'platform', 'united', 'first', 'global',
+    'sage', 'bright', 'stone', 'bramble', 'clear', 'open', 'happy', 'good', 'great', 'better', 'best', 'bold', 'true', 'new', 'next',
+    'north', 'south', 'east', 'west', 'northern', 'southern', 'eastern', 'western', 'central', 'national', 'international',
+    'silver', 'gold', 'golden', 'orange', 'purple', 'yellow', 'brown', 'gray', 'grey', 'pink', 'light', 'dark', 'deep', 'high',
+    'river', 'lake', 'ocean', 'sea', 'sky', 'cloud', 'rain', 'snow', 'wind', 'water', 'fire', 'earth', 'rock', 'mountain', 'hill',
+    'forest', 'wood', 'woods', 'tree', 'leaf', 'root', 'branch', 'pine', 'cedar', 'maple', 'willow', 'birch', 'alder', 'oak',
+    'bird', 'hawk', 'eagle', 'fox', 'wolf', 'bear', 'lion', 'tiger', 'horse', 'deer', 'dog', 'cat', 'bird', 'wild',
+    'home', 'house', 'garden', 'yard', 'road', 'street', 'path', 'trail', 'route', 'point', 'line', 'edge', 'center', 'centre',
+    'capital', 'market', 'trade', 'trading', 'business', 'people', 'human', 'team', 'work', 'works', 'job', 'jobs', 'career',
+    'talent', 'horizon', 'summit', 'peak', 'crest', 'valley', 'canyon', 'harbor', 'harbour', 'haven', 'spring', 'summer',
+    'autumn', 'winter', 'morning', 'evening', 'night', 'star', 'moon', 'solar', 'sun', 'sunrise', 'sunset', 'spark', 'flame']);
+  const prefixes = names.flatMap(name => {
+    const terms = name.replace(/^the\s+/iu, '').trim().split(/\s+/u);
+    const first = terms[0] || '';
+    if (terms.length < 2 || !/^\p{L}{4,}$/u.test(first) || COMMON_COMPANY_ALIAS_WORDS.has(first.toLowerCase())
+      || TOOL_NAME_WORDS.has(first.toLowerCase()) || generic.has(first.toLowerCase())) return [];
+    const result = [];
+    for (let size = 1; size < terms.length; size += 1) {
+      if (terms.slice(0, size).some(term => generic.has(term.toLowerCase()) || COMMON_COMPANY_ALIAS_WORDS.has(term.toLowerCase()))) break;
+      result.push(terms.slice(0, size).join(' '));
+    }
+    return result;
+  });
+  return [...new Set([...names, ...prefixes])];
+}
+
 /** The same names, each marked `derived` when only the suffix/initialism
  * normalization produced it ("Anchor" from "Anchor Corporation"), as opposed
  * to the frozen name itself or its pre-separator prefix. A derived one-word

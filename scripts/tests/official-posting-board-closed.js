@@ -321,9 +321,9 @@ const pureTests = [
       assert.equal(resumed.mergedPending.includes(closedLinkedIn), false);
       assert.deepEqual(resumed.keep, [unrelated]);
 
-      // A pending closed copy that already reached an official posting loses to the open copy too.
+      // A verified pending copy needs a verified replacement, so an unchecked open copy cannot downgrade it.
       const officialClosed = closedRow({ source: 'linkedin', url: 'https://www.linkedin.com/jobs/view/31', officialPosting: posting() });
-      assert.deepEqual(sourcesOf(mergeResolvedSourceItems([officialClosed], [openIndeed], 'indeed')), ['indeed']);
+      assert.deepEqual(sourcesOf(mergeResolvedSourceItems([officialClosed], [openIndeed], 'indeed')), ['linkedin(closed)']);
 
       // The other arrival order: a pending open copy keeps the posting, the closed copy is the duplicate.
       const lateClosed = mergeResolvedSourceItems([openIndeed], [closedLinkedIn], 'linkedin');
@@ -355,6 +355,40 @@ const pureTests = [
       const pending = [closedLinkedIn, unrelated];
       mergeResolvedSourceItems(pending, [openIndeed], 'indeed');
       assert.deepEqual(pending, [closedLinkedIn, unrelated]);
+    },
+  },
+
+  {
+    name: 'Amendment 4 renderer merge never supplants a pending row with a dropped ghost representative',
+    run() {
+      for (const incomingLocation of ['Lakeview, Ontario, Canada', '']) {
+        const base = { source: 'linkedin', title: 'Platform Analyst', company: 'Northwind Labs', location: 'Lakeview, Ontario, Canada' };
+        const first = row({ ...base, url: 'https://www.linkedin.com/jobs/view/2001', snippet: longText('Revision Alpha') });
+        const closed = closedRow({ ...base, url: 'https://www.linkedin.com/jobs/view/2002', snippet: longText('Revision Beta') });
+        const incoming = row({ ...base, source: 'indeed', url: 'https://www.indeed.com/viewjob?jk=ghost', jobkey: 'ghost',
+          location: incomingLocation, snippet: closed.snippet });
+        const previous = [first, closed]; const fresh = [incoming]; const before = JSON.stringify({ previous, fresh });
+        assert.deepEqual(dedupJobsAcrossSources(previous), previous, 'different concurrent requisitions on the same board survive');
+        const merged = mergeResolvedSourceItems(previous, fresh, 'indeed');
+        assert.deepEqual(merged.keep, previous, 'the lost incoming copy cannot supplant the closed pending requisition');
+        assert.deepEqual(merged.fresh, []); assert.deepEqual(merged.mergedPending, previous); assert.equal(merged.replacedExisting, 0);
+        assert.equal(JSON.stringify({ previous, fresh }), before, 'inputs are unchanged');
+      }
+    },
+  },
+  {
+    name: 'Amendment 4 renderer merge protects every verified pending closed level from an unchecked or missed open copy',
+    run() {
+      for (const level of ['L1', 'L2', 'L3', 'L4']) for (const incomingPosting of [undefined, miss(['bridge-unavailable']), miss(['bridge-research'])]) {
+        const closed = closedRow({ source: 'linkedin', url: 'https://www.linkedin.com/jobs/view/31',
+          officialPosting: posting({ level, outcome: level === 'L4' ? 'link-only' : 'found' }) });
+        const incoming = row({ source: 'indeed', url: 'https://www.indeed.com/viewjob?jk=31', jobkey: '31', officialPosting: incomingPosting });
+        const merged = mergeResolvedSourceItems([closed], [incoming], 'indeed');
+        assert.deepEqual(merged.keep, [closed], `${level} verified pending copy survives an unverified open copy`);
+        assert.deepEqual(merged.fresh, []); assert.equal(merged.replacedExisting, 0);
+        const verified = { ...incoming, officialPosting: posting() };
+        assert.deepEqual(mergeResolvedSourceItems([closed], [verified], 'indeed').mergedPending, [verified], 'a verified open copy can replace it');
+      }
     },
   },
 

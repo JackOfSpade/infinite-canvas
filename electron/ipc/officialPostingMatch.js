@@ -157,7 +157,7 @@ const normalizedDescription = value => text(value).replace(/([\p{Ll}])(\p{Lu})/g
 // A recognized company, benefits or EEO heading opens a boilerplate region that runs until a role heading. "About <Name>" opens one
 // only when it names an organization: it is tested case-sensitively for a capitalized name (under /i, \p{Lu} matches any letter, so
 // "About this role" once opened a region and dropped the whole role summary) and never for the role-bearing continuations below.
-const BOILERPLATE_HEADING = /^(?:about\s+(?:us|the\s+company|our\s+company)|(?:our\s+)?benefits|what\s+we\s+offer|compensation\s+(?:and|&)\s+benefits|(?:equal\s+(?:employment\s+)?opportunity|diversity\s+(?:and|&)\s+inclusion))\b/iu;
+const BOILERPLATE_HEADING = /^(?:about\s+(?:us|(?:the|our|this)\s+(?:company|organization)|what\s+we\s+do|how\s+we\s+work)|(?:our\s+)?benefits|what\s+we\s+offer|compensation\s+(?:and|&)\s+benefits|(?:equal\s+(?:employment\s+)?opportunity|diversity\s+(?:and|&)\s+inclusion))\b/iu;
 // Other company sub-headings never open a region. Inside one they keep it open instead of reading as a short role heading.
 const COMPANY_SUBHEADING = /^(?:perks|eeo|total\s+rewards|who\s+we\s+are|life\s+at|why\s+(?:join|work)|our\s+(?:mission|values|culture|story|vision|people)|company\s+(?:overview|description|culture|values|background|profile))\b/iu;
 const ABOUT_SUBJECT = /^about\s+(\S.*)$/iu;
@@ -169,45 +169,66 @@ const ROLE_HEADING = new RegExp(`^(?:${[
   '(?:role|position|job)\\s+(?:overview|summary|description|purpose|details|duties|responsibilities|requirements)',
   '(?:key|main|primary|core|essential|principal)\\s+(?:responsibilit\\w*|dut(?:y|ies)|functions?|requirements?|qualifications?|skills?)',
   '(?:minimum|basic|preferred|required|desired|additional|bonus)\\s+(?:qualifications?|requirements?|skills?|experience)',
+  'overview', 'summary', 'description', 'the\\s+opportunity', 'your\\s+(?:impact|day\\s+to\\s+day)',
+  'a\\s+day\\s+in\\s+the\\s+life', 'who\\s+we[’\']re\\s+looking\\s+for', 'why\\s+this\\s+role\\s+matters',
 ].join('|')})\\b`, 'iu');
 const BOILERPLATE_SENTENCE = /^(?:(?:we|our\s+company)\s+(?:offer|value|welcome|celebrate|are\s+(?:an?\s+)?equal)|(?:[\p{L}\p{N}&'’.-]+\s+){0,8}is\s+an?\s+equal\s+opportunity|all\s+(?:qualified\s+)?applicants\b|(?:qualified\s+)?applicants\s+(?:will\s+receive|are\s+considered)|reasonable\s+accommodations?\b|(?:health|medical|dental|vision|parental\s+leave|paid\s+time\s+off)\s+(?:coverage|insurance|benefits?)\b)/iu;
 const LIST_MARKER = /^([ \t]*)(?:(?:[*•·●○◦▪▫■□‣⁃-]|\d{1,3}[.)])(?:[ \t]+|$))+/u;
-const HEADING_CONNECTORS = new Set(['a', 'an', 'and', 'or', 'of', 'the', 'to', 'for', 'in', 'on', 'at', 'with', 'by', 'you', 'your', 'we', 'our', 'will', 'do', 'be', 'is', 'are', 'what', 'how', 'who']);
 function companyHeading(sentence) {
   if (BOILERPLATE_HEADING.test(sentence)) return true;
   const subject = ABOUT_SUBJECT.exec(sentence)?.[1];
   return Boolean(subject) && /^\p{Lu}/u.test(subject) && !ROLE_ABOUT_SUBJECT.test(subject);
 }
-/** A line that is only a short Title Case or upper-case heading: no list marker, no sentence punctuation, eight words at most. */
+/** A short heading may use sentence case: no list marker, terminal sentence punctuation, or more than eight words. */
 function headingLine(raw) {
   if (LIST_MARKER.test(raw)) return false;
   const line = text(raw).replace(/^#+\s*/u, '').replace(/:$/u, '');
   const words = line.split(' ');
-  return line.length > 0 && line.length <= 80 && words.length <= 8 && !/[.!?;,]$/u.test(line) && /^[\p{Lu}\p{N}]/u.test(line)
-    && words.every(word => /^[\p{Lu}\p{N}&(]/u.test(word) || HEADING_CONNECTORS.has(word.toLocaleLowerCase().replace(/[’'].*$/u, '')));
+  return line.length > 0 && line.length <= 80 && words.length <= 8 && !/[.!?;,]$/u.test(line) && /^[\p{Lu}\p{N}]/u.test(line);
 }
-function roleDescription(value) {
+const COMPANY_REGION_MAX_WORDS = 128;
+function roleDescription(value, { metadata = false } = {}) {
   const lines = String(value ?? '').normalize('NFKC').split(/\r\n?|\n/u);
-  // A heading ends a company region only when it introduces a paragraph: a run of short Title Case lines is a list ("Paid Time Off").
+  // A heading ends a company region only when it introduces a paragraph: a run of short headings is a list ("Paid Time Off").
   const introducesBody = from => {
     for (let index = from + 1; index < lines.length; index++) if (lines[index].trim()) return !headingLine(lines[index]);
     return false;
   };
-  let boilerplate = false; const role = [];
+  let boilerplate = false; let companyWords = 0; let hadCompanyRegion = false; const role = [];
   lines.forEach((line, lineIndex) => {
     const parts = line.split(/(?<=[.!?])\s+/u);
     for (const part of parts) {
       const sentence = text(part).replace(/^#+\s*/u, '');
       if (!sentence) continue;
       if (ROLE_HEADING.test(sentence)) boilerplate = false;
-      else if (companyHeading(sentence)) { boilerplate = true; continue; }
+      else if (companyHeading(sentence)) {
+        boilerplate = true; hadCompanyRegion = true; companyWords = normalizedDescription(sentence).length;
+        if (companyWords <= COMPANY_REGION_MAX_WORDS) continue;
+        boilerplate = false;
+      }
       else if (boilerplate && parts.length === 1 && !COMPANY_SUBHEADING.test(sentence) && headingLine(line) && introducesBody(lineIndex)) boilerplate = false;
+      if (boilerplate) {
+        companyWords += normalizedDescription(sentence).length;
+        if (companyWords > COMPANY_REGION_MAX_WORDS) boilerplate = false;
+      }
       if (!boilerplate && !BOILERPLATE_SENTENCE.test(sentence)) role.push(sentence);
     }
   });
-  return role.join(' ');
+  const retained = role.join(' ');
+  return metadata ? { retained, hadCompanyRegion } : retained;
 }
 const descriptionGrams = words => new Set(words.slice(0, -4).map((_, index) => words.slice(index, index + 5).join(' ')));
+function companyStrippingPreservesAnchor(scraped, official) {
+  if (![scraped, official].some(source => roleDescription(source, { metadata: true }).hadCompanyRegion)) return true;
+  // A company region can swallow an unrecognized role summary, even when
+  // shared requirements are most of the source; a cap alone can instead leak
+  // huge company copy. Require exact containment of the unstripped text as
+  // corroboration before either effect can name a posting by description.
+  const left = descriptionGrams(normalizedDescription(scraped)); const right = descriptionGrams(normalizedDescription(official));
+  if (!left.size || !right.size) return false;
+  const smaller = left.size <= right.size ? left : right; const larger = left.size <= right.size ? right : left;
+  return [...smaller].every(gram => larger.has(gram));
+}
 // Amendment 3, section 2. A gram is boilerplate when it occurs in at least
 // max(3, 20%) of the fetched peer postings on the host or tenant. Fewer than
 // four peers cannot estimate that, so only the recognized sections go.
@@ -473,7 +494,8 @@ export function evaluateOfficialPostingMatch(row, candidate, { now = Date.now(),
   // T1: equal posted pay never overrides the closed-twin and outranked checks (pay bands are shared by same-title postings).
   if (payEqual) return accept('salary-anchor');
   const leads = own.containment - best >= RIVAL_MARGIN - EPSILON;
-  if (own.anchored && leads && (!smallPool || Math.max(own.containment, own.coverageRight) >= SMALL_POOL_NESTING)) return accept('description-anchor');
+  if (own.anchored && leads && (!smallPool || Math.max(own.containment, own.coverageRight) >= SMALL_POOL_NESTING)
+    && companyStrippingPreservesAnchor(description(row), description(candidate))) return accept('description-anchor');
   // T6: a quote shared with ANY same-identity twin, closed or live, is not evidence for this posting.
   const rivalDescriptions = rivals.map(rival => description(rival.peer));
   if (tieBreaker && verifiedTieBreakerMatch(description(row), description(candidate), tieBreaker, { peerDescriptions, rivalDescriptions })) return accept('quoted-match');

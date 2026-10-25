@@ -2,7 +2,7 @@ import crypto from 'node:crypto';
 import { fetchOfficialPosting } from './officialPostingFetch.js';
 import { normalizeApplyOptions, normalizeOfficialLocation, normalizeOfficialPosting, normalizeOfficialSalary, officialHttpsUrl, OFFICIAL_POSTING_TRAIL } from './officialPostingFields.js';
 import { extractOfficialPostingCandidates, scanOfficialCareersPage } from './officialPostingExtractors.js';
-import { domainBrandMatchesEmployer, extractAtsTenant, isAggregatorHost, isKnownAtsHost, isPosterAtsTenant, normalizedSourceHost, proveBidirectionalOwnership, proveEmployerDomain, registrableDomain, rootBrandingNamesPoster, rootFooterText, strictEmployerEqual } from './officialSourceHosts.js';
+import { domainBrandMatchesEmployer, extractAtsTenant, isAggregatorHost, isKnownAtsHost, isPosterAtsTenant, normalizedSourceHost, proveBidirectionalOwnership, proveEmployerDomain, registrableDomain, rootBrandingNamesPoster, rootFooterText, sameOwnershipHost, strictEmployerEqual } from './officialSourceHosts.js';
 import { canonicalLeadUrl, coreTitle, evaluateOfficialPostingMatch, frozenOfficialEmployer, locationsCompatible, posterEmployerSignals, resolveScrapedEmployer, selectOfficialPostingMatch } from './officialPostingMatch.js';
 import { officialPostingRecordMatchesScrapedIdentity } from './officialPostingStore.js';
 
@@ -60,14 +60,18 @@ export function createOfficialPostingRowBudget({ signal, maxPages = 16, timeoutM
   return budget;
 }
 
-/** Reads and writes use the same rule, including historical cached misses.
- * A verified result survives incidental failures; an actual abort never does. */
+/** Reads and writes use the same rule, including historical cached results.
+ * A partial crawl needs a deterministic winning anchor; a run abort never writes. */
 export function shouldPersistOfficialPostingResult(value, { signal, researchRan = false } = {}) {
   if (signal?.aborted) return false;
   const posting = normalizeOfficialPosting(value?.officialPosting || value?.posting || value);
   if (!posting) return false;
-  if (['L1', 'L2', 'L3', 'L4'].includes(posting.level)) return ['found', 'link-only'].includes(posting.outcome);
   const trail = posting.trail || [];
+  if (['L1', 'L2', 'L3', 'L4'].includes(posting.level)) {
+    const partial = trail.includes('fetch-timeout') || trail.includes('crawl-budget');
+    const deterministic = trail.includes('identifier-anchor') || trail.includes('salary-anchor');
+    return ['found', 'link-only'].includes(posting.outcome) && (!partial || deterministic);
+  }
   if (posting.outcome === 'failed' || trail.some(code => RETRYABLE_MISS_TRAIL.has(code))) return false;
   return researchRan || trail.includes('bridge-research') || posting.outcome === 'closed'
     || trail.some(code => DEFINITIVE_MISS_TRAIL.has(code));
@@ -277,7 +281,7 @@ export async function resolveOfficialPosting(job, {
     const rootUrl = new URL('/', url).href;
     const page = await read(rootUrl);
     if (!page || !/html/iu.test(page.contentType || '')) return false;
-    if (normalizedSourceHost(page.url || page.sourceUrl || rootUrl) !== host) return false;
+    if (!sameOwnershipHost(page.url || page.sourceUrl || rootUrl, host)) return false;
     if (normalizedSourceHost(page.requestedUrl || rootUrl) !== host) return false;
     const scan = { ...scanOfficialCareersPage(page.body, page.url || rootUrl), footer: rootFooterText(page.body) };
     if (!rootSites.has(host)) proofEpoch += 1;
@@ -580,8 +584,8 @@ export async function resolveOfficialPosting(job, {
   };
   const persist = async result => {
     if (result.description) result.officialPosting.contentHash = crypto.createHash('sha256').update(result.description).digest('hex');
-    // The row budget also ends for incidental host limits (time, pages). That makes a crawl's miss non-durable but never a verified
-    // match already found; only a stopped run does.
+    // Incidental host limits end the crawl without stopping the run. The
+    // shared predicate keeps a partial match durable only on a deterministic anchor.
     const durability = ['L1', 'L2', 'L3', 'L4'].includes(result.officialPosting?.level)
       ? { aborted: Boolean(signal?.aborted || budgetState.sourceSignal?.aborted) } : budget.signal;
     if (store && persistResults && (persistMisses || !['L5', 'L6'].includes(result.officialPosting?.level))
@@ -603,7 +607,8 @@ export async function resolveOfficialPosting(job, {
             trail: [...(record.officialPosting.trail || []), 'recent-miss'], alternatives: record.officialPosting.alternatives || [] });
           return { ...current, record: { ...record, officialPosting: current.officialPosting } };
         }
-        if (!['L5', 'L6'].includes(record.officialPosting?.level)) return { record, postedBy: strictEmployerEqual(record.officialPosting.employer, job?.company) ? undefined : job?.company,
+        if (!['L5', 'L6'].includes(record.officialPosting?.level)
+          && shouldPersistOfficialPostingResult(record, { signal: budget.signal })) return { record, postedBy: strictEmployerEqual(record.officialPosting.employer, job?.company) ? undefined : job?.company,
           officialPosting: { ...record.officialPosting, trail: trailCodes([...(record.officialPosting.trail || []), 'cache-hit']) } };
       }
     }

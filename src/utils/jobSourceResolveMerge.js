@@ -1,16 +1,35 @@
-import { normalizeBoardClosed } from '../../electron/ipc/officialPostingFields.js';
+import { normalizeBoardClosed, normalizeOfficialPosting } from '../../electron/ipc/officialPostingFields.js';
 import { dedupJobsAcrossSources, sourceJobKey, uniqueJobsAcrossSources } from './jobIdentity.js';
 
 const isBoardClosed = job => normalizeBoardClosed(job?.boardClosed) !== null;
+const hasVerifiedPosting = job => {
+  const posting = normalizeOfficialPosting(job?.officialPosting);
+  return posting !== null && ['L1', 'L2', 'L3', 'L4'].includes(posting.level) && ['found', 'link-only'].includes(posting.outcome);
+};
+
+/** Priority for first-wins source dedup; every row stays present and inputs stay untouched. */
+function orderSourceCopiesOpenFirst(retained, incoming) {
+  const previous = Array.isArray(retained) ? retained : [];
+  const next = Array.isArray(incoming) ? incoming : [];
+  const combined = [...previous, ...next];
+  if (!combined.some(isBoardClosed)) return combined;
+  const open = job => !isBoardClosed(job);
+  const protectedClosed = previous.filter(job => isBoardClosed(job) && hasVerifiedPosting(job));
+  // A pending verified official result beats an unchecked incoming board copy;
+  // an incoming verified open copy can still replace it.
+  return [
+    ...previous.filter(open), ...next.filter(job => open(job) && hasVerifiedPosting(job)),
+    ...protectedClosed, ...next.filter(job => open(job) && !hasVerifiedPosting(job)),
+    ...previous.filter(job => isBoardClosed(job) && !hasVerifiedPosting(job)), ...next.filter(isBoardClosed),
+  ];
+}
 
 /**
  * Dedup `incoming` against `retained` the way uniqueJobsAcrossSources does
- * (retained rows win), with one exception: a pending board-closed copy never
- * beats an open copy of the same posting. The main process already orders open
- * rows ahead of closed ones before its first-wins dedup; this is the only other
- * place the two copies meet (a source that was blocked during the search, then
- * resumed), so it applies the same rule. Returns the retained rows that lost to
- * an incoming open copy as `supplanted`.
+ * (retained rows win), except an incoming open copy can replace a pending
+ * board-closed copy after a blocked source resumes. A verified pending copy
+ * requires a verified replacement. Returns only pending rows whose incoming
+ * open replacement actually survived the dedup as `supplanted`.
  */
 function dedupIncomingOpenFirst(retained, incoming) {
   if (!retained.some(isBoardClosed) || incoming.every(isBoardClosed)) {
@@ -18,16 +37,14 @@ function dedupIncomingOpenFirst(retained, incoming) {
   }
   const retainedSet = new Set(retained);
   const supplanted = new Set();
+  const duplicatePairs = [];
   const isOpen = job => !isBoardClosed(job);
-  // Open rows first (pending, then incoming), then the closed ones: first-wins dedup.
-  const survivors = new Set(dedupJobsAcrossSources([
-    ...retained.filter(isOpen), ...incoming.filter(isOpen),
-    ...retained.filter(isBoardClosed), ...incoming.filter(isBoardClosed),
-  ], {
+  const survivors = new Set(dedupJobsAcrossSources(orderSourceCopiesOpenFirst(retained, incoming), {
     onDuplicate: ({ kept, dropped }) => {
-      if (retainedSet.has(dropped) && isBoardClosed(dropped) && !retainedSet.has(kept) && isOpen(kept)) supplanted.add(dropped);
+      if (retainedSet.has(dropped) && isBoardClosed(dropped) && !retainedSet.has(kept) && isOpen(kept)) duplicatePairs.push({ kept, dropped });
     },
   }));
+  for (const { kept, dropped } of duplicatePairs) if (survivors.has(kept)) supplanted.add(dropped);
   // Each surviving incoming row once, in the order the source returned them.
   const fresh = [...new Set(incoming)].filter(job => survivors.has(job) && !retainedSet.has(job));
   return { fresh, supplanted };

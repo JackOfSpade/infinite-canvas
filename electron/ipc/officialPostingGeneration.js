@@ -110,7 +110,10 @@ async function reverify(job, record, { fetch, signal, now, store }) {
     let description;
     if (textLevels.has(prior.level) && prior.contentHash) try { description = await store.readText(prior.contentHash); } catch { /* A missing text file cannot invalidate the proof record. */ }
     active(signal);
-    return { postedBy, officialPosting: withTrail(prior, code, 'reverify-failed'), ...(typeof description === 'string' ? { description } : {}) };
+    // A failed recheck does not turn the prior complete discovery proof into
+    // a partial crawl. Keep old trail codes; classify only this new failure.
+    const recheckCode = ['fetch-timeout', 'crawl-budget'].includes(code) ? 'fetch-failed' : code;
+    return { postedBy, officialPosting: withTrail(prior, recheckCode, 'reverify-failed'), ...(typeof description === 'string' ? { description } : {}) };
   };
   const closed = () => unresolvedOfficialPosting(job, { outcome: 'closed', trail: ['closed'] });
   if (!url) return preserve('unreadable');
@@ -219,7 +222,7 @@ export async function prepareOfficialPostingForGeneration(args, {
       const record = await store.find(scrapedJob); active(controller.signal);
       if (record && officialPostingRecordMatchesScrapedIdentity(scrapedJob, record)) {
         const storedPosting = normalizeOfficialPosting(record.officialPosting);
-        if (officialLevels.has(storedPosting?.level)) {
+        if (officialLevels.has(storedPosting?.level) && shouldPersistOfficialPostingResult(record, { signal: controller.signal })) {
           verifiedFallback = { officialPosting: storedPosting,
             postedBy: strictEmployerEqual(scrapedJob.company, storedPosting.employer) ? '' : scrapedJob.company };
           if (textLevels.has(storedPosting.level) && storedPosting.contentHash) try {

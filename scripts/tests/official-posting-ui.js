@@ -13,6 +13,8 @@ import {
 import { resolveApplicationCareerSnapshotId } from '../../src/utils/jobBoardCareerOverride.js';
 import { getConnectedJobSearchIds } from '../../src/utils/jobBoardSearchSelection.js';
 import { APPLICATION_HANDOFF_LIMIT, countActiveApplicationHandoffs } from '../../src/utils/applicationHandoffDock.js';
+import { dedupJobsAcrossSources, uniqueJobsAcrossSources } from '../../src/utils/jobIdentity.js';
+import { mergeResolvedSourceItems } from '../../src/utils/jobSourceResolveMerge.js';
 
 const copy = value => JSON.parse(JSON.stringify(value));
 const posting = extra => ({ level: 'L2', outcome: 'found', employer: 'Northwind Labs', title: 'Official Platform Engineer',
@@ -217,6 +219,42 @@ export default [
       const body = generateBody(); const prepareAt = body.indexOf('await window.electronAPI.prepareOfficialPostingForGeneration?.(');
       assert.ok(prepareAt > body.indexOf('applicationSubmissionRef.current = true;') && prepareAt < body.indexOf('lease = await acquireModuleRun('));
       assert.ok(body.includes('        careerSnapshotId,\n'));
+    },
+  },
+  {
+    name: 'Amendment 4 both late renderer merges preserve open copies verified closed copies and ghost survivors',
+    run() {
+      const source = fs.readFileSync(new URL('../../src/nodes/JobSearchNode.jsx', import.meta.url), 'utf8');
+      const lateAt = source.indexOf("if (currentState === 'sources-ready')");
+      const lateStart = source.indexOf('const prevPending =', lateAt);
+      const lateEnd = source.indexOf('// This source completed', lateStart);
+      assert.ok(lateAt > 0 && lateStart > lateAt && lateEnd > lateStart);
+      const lateBody = source.slice(lateStart, lateEnd);
+      const resolvedAt = source.indexOf('const resolvedItems = prevPending.filter(j => sourceWarningOverrides.has(j?.source));');
+      const resolvedExpression = source.slice(resolvedAt).match(/foundJobs = ([^\n]+);/u)?.[1];
+      assert.ok(resolvedAt > 0 && resolvedExpression);
+      const marker = { board: 'linkedin', reason: 'linkedin-no-longer-accepting', at: '2026-10-24T12:00:00.000Z' };
+      const make = (source, id, extra = {}) => ({ title: 'Platform Engineer', company: 'Northwind Labs', location: 'Lakeview, Canada',
+        source, url: `https://${source}.example.test/jobs/${id}`, snippet: 'Synthetic role description.', ...extra });
+      const runMerge = (site, retained, incoming) => {
+        const context = { dedupJobsAcrossSources, uniqueJobsAcrossSources, mergeResolvedSourceItems,
+          pendingJobsRef: { current: retained }, freshJobs: incoming, resolvedItems: retained, foundJobs: incoming };
+        const result = runInNewContext(site === 'late-usajobs' ? `${lateBody}\nmergedPending;` : resolvedExpression, context);
+        return Array.from(result);
+      };
+      for (const site of ['late-usajobs', 'post-backend']) {
+        for (const [priorVerified, incomingVerified, expectedSource] of [[false, false, 'usajobs'], [true, false, 'linkedin'], [true, true, 'usajobs']]) {
+          const retained = [make('linkedin', 'closed', { boardClosed: marker, ...(priorVerified ? { officialPosting: posting() } : {}) })];
+          const incoming = [make('usajobs', 'open', incomingVerified ? { officialPosting: posting() } : {})];
+          const before = JSON.stringify([retained, incoming]);
+          assert.deepEqual(runMerge(site, retained, incoming).map(job => job.source), [expectedSource], site);
+          assert.equal(JSON.stringify([retained, incoming]), before, 'the merge does not mutate inputs');
+        }
+        const first = make('linkedin', '2001', { url: 'https://www.linkedin.com/jobs/view/2001', snippet: 'First distinct synthetic responsibilities. '.repeat(30) });
+        const closed = make('linkedin', '2002', { url: 'https://www.linkedin.com/jobs/view/2002', boardClosed: marker, snippet: 'Second distinct synthetic responsibilities. '.repeat(30) });
+        const ghost = make('usajobs', 'copy', { snippet: closed.snippet });
+        assert.deepEqual(runMerge(site, [first, closed], [ghost]), [first, closed], `${site}: a discarded incoming representative cannot remove the closed row`);
+      }
     },
   },
 ];

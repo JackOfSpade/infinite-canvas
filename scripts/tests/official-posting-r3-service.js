@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { getEventListeners } from 'node:events';
 import { officialPostingAliases } from '../../electron/ipc/officialPostingStore.js';
 import { normalizeOfficialPosting } from '../../electron/ipc/officialPostingFields.js';
-import { officialPostingChunks, unresolvedOfficialPosting } from '../../electron/ipc/officialPostingResolver.js';
+import { officialPostingChunks, resolveOfficialPosting, unresolvedOfficialPosting } from '../../electron/ipc/officialPostingResolver.js';
 import { mergeOfficialPostingTelemetry, partitionOfficialPostingRows, resolveOfficialPostings } from '../../electron/ipc/officialPostingService.js';
 
 const description = 'Requirements include building reliable dispatch services, reviewing route reports, and documenting operational changes with the engineering team.';
@@ -186,6 +186,50 @@ export default [
           fetch: async target => serve(target, read => { if (read === apply[0]) controller.abort(); }) });
         assert.equal(halted.jobs[0].officialPosting.level, 'L1');
         assert.equal(stopped.saves.length, 0, 'a stopped run never writes a result');
+      } finally { Date.now = realNow; }
+    },
+  },
+  {
+    name: 'Amendment 4 service keeps partial text-only crawl matches for the current run without making them durable',
+    async run() {
+      const text = 'Requirements include experience building reliable services and maintaining reporting workflows. Engineers design clear interfaces for dispatch teams and validate operational changes with careful review. The role includes improving data quality across scheduled pipelines and documenting decisions for partner teams. You will work with colleagues to investigate delivery failures and make service behavior understandable. Responsibilities include writing tests for new features and improving the tools used by support teams every day.';
+      const first = 'https://northwind.test/jobs/one'; const twin = 'https://northwind.test/jobs/two';
+      const page = (url, body) => `<script type="application/ld+json">${JSON.stringify({ '@type': 'JobPosting', title: 'Software Engineer', url,
+        hiringOrganization: { name: 'Northwind Labs' }, description: body, jobLocation: { address: { addressLocality: 'Lakeview', addressRegion: 'Ontario', addressCountry: 'Canada' } } })}</script>`;
+      const pages = { 'https://northwind.test/': '<title>Northwind Labs</title>', [first]: page(first, text), [twin]: page(twin, `${text} Extra duties include travelling monthly.`) };
+      const row = job('partial', { title: 'Software Engineer', snippet: text });
+      const realNow = Date.now; let skew = 0; Date.now = () => realNow() + skew;
+      try {
+        const store = memoryStore();
+        const result = await resolveOfficialPostings([row], { store, bridgeAvailable: false,
+          resolve: (value, options) => resolveOfficialPosting(value, { ...options, candidateUrls: [first, twin] }),
+          fetch: async url => { if (url === first) skew += 61_000; if (!pages[url]) throw Object.assign(new Error('closed'), { code: 'closed' });
+            return { url, sourceUrl: url, statusCode: 200, contentType: 'text/html', body: pages[url] }; } });
+        assert.equal(result.jobs[0].officialPosting.level, 'L1', 'the run retains its partial match');
+        assert.ok(result.jobs[0].officialPosting.trail.includes('fetch-timeout'));
+        assert.ok(result.jobs[0].officialPosting.trail.includes('description-anchor'));
+        assert.equal(store.saves.length, 0, 'an unread sibling makes this text-only match non-durable');
+      } finally { Date.now = realNow; }
+    },
+  },
+  {
+    name: 'Amendment 4 material change resave survives only a row budget timeout under the same safe durability policy',
+    async run() {
+      const text = 'Requirements include experience building reliable services and maintaining reporting workflows. Engineers design clear interfaces for dispatch teams and validate operational changes with careful review. The role includes improving data quality across scheduled pipelines and documenting decisions for partner teams. You will work with colleagues to investigate delivery failures and make service behavior understandable. Responsibilities include writing tests for new features and improving the tools used by support teams every day.';
+      const url = 'https://northwind.test/jobs/one';
+      const row = job('material', { title: 'Software Engineer', url, snippet: 'Short scraped summary about dispatch services.' });
+      const pages = { 'https://northwind.test/': '<title>Northwind Labs</title>', [url]: `<script type="application/ld+json">${JSON.stringify({ '@type': 'JobPosting', title: row.title,
+        hiringOrganization: { name: 'Northwind Labs' }, description: text, jobLocation: { address: { addressLocality: 'Lakeview', addressRegion: 'Ontario', addressCountry: 'Canada' } } })}</script>` };
+      const realNow = Date.now; let skew = 0; Date.now = () => realNow() + skew;
+      try {
+        const store = memoryStore();
+        const result = await resolveOfficialPostings([row], { store, bridgeAvailable: false,
+          fetch: async target => { if (target === url) skew += 61_000; if (!pages[target]) throw Object.assign(new Error('closed'), { code: 'closed' });
+            return { url: target, sourceUrl: target, statusCode: 200, contentType: 'text/html', body: pages[target] }; } });
+        assert.equal(result.jobs[0].officialPosting.level, 'L1');
+        assert.ok(result.jobs[0].officialPosting.trail.includes('identifier-anchor'));
+        assert.ok(result.jobs[0].officialPosting.trail.includes('material-jd-change'));
+        assert.ok(store.saves.at(-1).payload.officialPosting.trail.includes('material-jd-change'), 'the durable metadata needs the same material-change signal');
       } finally { Date.now = realNow; }
     },
   },

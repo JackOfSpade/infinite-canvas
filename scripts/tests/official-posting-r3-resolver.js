@@ -60,7 +60,7 @@ export default [
       }
       for (const code of ['bridge-aborted', 'bridge-timeout', 'bridge-unavailable', 'research-miss', 'fetch-failed', 'fetch-timeout', 'crawl-budget', 'failed']) {
         assert.equal(shouldPersistOfficialPostingResult(miss(['bridge-research', 'closed', code]), { researchRan: true }), false, code);
-        assert.equal(shouldPersistOfficialPostingResult({ officialPosting: verified([code]) }), true, `verified survives incidental ${code}`);
+        assert.equal(shouldPersistOfficialPostingResult({ officialPosting: verified(['identifier-anchor', code]) }), true, `deterministically verified survives incidental ${code}`);
       }
       for (const code of ['unreadable', 'oversize', 'unsafe-url', 'unsafe-address', 'unsupported-content-type', 'invalid-text']) {
         assert.equal(shouldPersistOfficialPostingResult(miss([code])), false, `a partial free pass is not definitive: ${code}`);
@@ -69,6 +69,27 @@ export default [
       assert.equal(shouldPersistOfficialPostingResult(verified(), { signal: controller.signal }), false);
       assert.equal(shouldPersistOfficialPostingResult(miss(['closed']), { signal: controller.signal, researchRan: true }), false);
       assert.equal(shouldPersistOfficialPostingResult(miss(['closed'], { outcome: 'failed' })), false);
+    },
+  },
+  {
+    name: 'Amendment 4 partial verified crawl durability needs a deterministic winning anchor and old partial cache entries retry',
+    async run() {
+      for (const level of ['L1', 'L2', 'L3', 'L4']) for (const partial of ['fetch-timeout', 'crawl-budget']) {
+        for (const anchor of [null, 'description-anchor', 'quoted-match', 'identifier-anchor', 'salary-anchor']) {
+          const value = { ...verified([partial, ...(anchor ? [anchor] : [])]), level, outcome: level === 'L4' ? 'link-only' : 'found' };
+          assert.equal(shouldPersistOfficialPostingResult(value), ['identifier-anchor', 'salary-anchor'].includes(anchor), `${level} / ${partial} / ${anchor}`);
+          assert.equal(shouldPersistOfficialPostingResult(value, { signal: AbortSignal.abort() }), false, 'a stopped run is never durable');
+        }
+      }
+      assert.equal(shouldPersistOfficialPostingResult(verified(['description-anchor'])), true, 'a complete crawl can retain a text match');
+      const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'official-partial-cache-'));
+      try {
+        const store = createOfficialPostingStore(dir);
+        await store.save(row(), { officialPosting: { ...verified(['fetch-timeout', 'description-anchor']), level: 'L1', outcome: 'found' }, description: DESCRIPTION });
+        const result = await resolveOfficialPosting(row(), { store, persistResults: false, fetch: async () => { throw error('closed'); } });
+        assert.notEqual(result.officialPosting.level, 'L1', 'an old partial text-only record must not short-circuit fresh resolution');
+        assert.ok(!result.officialPosting.trail.includes('cache-hit'));
+      } finally { await fs.rm(dir, { recursive: true, force: true }); }
     },
   },
   {

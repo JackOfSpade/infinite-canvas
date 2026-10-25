@@ -8329,7 +8329,7 @@ export default [
       const dedupedLateRows = []; // all three can collapse against the paused cross-source pool
       const foundAfterLateSource = initialFound + lateUSAJobsRows.length;
       assert(sourcesReadyStart >= 0 && sourcesReadyEnd > sourcesReadyStart
-        && sourcesReadyPath.includes('const fresh = uniqueJobsAcrossSources(prevPending, freshJobs)')
+        && sourcesReadyPath.includes("const { mergedPending } = mergeResolvedSourceItems(prevPending, freshJobs, 'usajobs')")
         && sourcesReadyPath.includes('gatheredCountRef.current = Math.max(')
         && sourcesReadyPath.includes('(Number(gatheredCountRef.current) || 0) + freshJobs.length')
         && sourcesReadyPath.includes('gatheredCount: gatheredCountRef.current')

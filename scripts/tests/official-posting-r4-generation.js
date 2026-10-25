@@ -47,6 +47,43 @@ async function assertPreserved(store, job, before, fetch) {
 
 export default [
   {
+    name: 'Amendment 4 complete cached proof survives repeated transient rechecks without becoming a partial crawl',
+    async run() {
+      await withStore(async store => {
+        const job = row(); await store.save(job, { officialPosting: posting(), description });
+        let research = 0;
+        const options = { store, bridgeStatus: () => status(true),
+          fetch: async () => { throw Object.assign(new Error('transient'), { code: 'fetch-timeout' }); },
+          resolve: async jobs => { research++; return { jobs: jobs.map(value => ({ ...value, officialPosting: { level: 'L5', outcome: 'not-found', employer: value.company, trail: [] } })) }; } };
+        const first = await prepareOfficialPostingForGeneration(args(job), options);
+        const second = await prepareOfficialPostingForGeneration(args(job), options);
+        assert.equal(first.officialPosting.level, 'L2'); assert.equal(second.officialPosting.level, 'L2');
+        assert.equal(research, 0, 'a later transient recheck still inherits the original complete proof');
+      });
+    },
+  },
+  {
+    name: 'Amendment 4 Generate retries old partial text-only records without reverify fallback or resaving the unsafe proof',
+    async run() {
+      for (const partial of ['fetch-timeout', 'crawl-budget']) for (const failedRecheck of [false, true]) for (const resolverFails of [false, true]) await withStore(async store => {
+        const job = row();
+        const before = await store.save(job, { officialPosting: posting({ trail: ['description-anchor', partial, ...(failedRecheck ? ['reverify-failed'] : [])] }), description });
+        let calls = 0; let reads = 0; let saves = 0;
+        const counted = { ...store, save: async (...values) => { saves++; return store.save(...values); } };
+        const result = await prepareOfficialPostingForGeneration(args(job), { store: counted, bridgeStatus: () => status(true),
+          fetch: async () => { reads++; return page(html()); },
+          resolve: async jobs => { calls++; if (resolverFails) throw Object.assign(new Error('failed'), { code: 'fetch-failed' });
+            return { jobs: jobs.map(value => ({ ...value, officialPosting: { level: 'L5', outcome: 'not-found', employer: value.company, trail: [] } })) }; } });
+        assert.equal(calls, 1, 'unsafe partial proof falls through to fresh resolution');
+        assert.equal(reads, 0, 'it is never reverified as trusted cached proof');
+        assert.equal(saves, 0, 'failed fresh research cannot re-save an unsafe cached result');
+        assert.ok(['L5', 'L6'].includes(result.officialPosting.level));
+        assert.equal(getPreparedOfficialPosting(result.resolutionId, job).description, undefined);
+        assert.deepEqual(await store.find(job), before, 'the old record remains intact for review');
+      });
+    },
+  },
+  {
     name: 'R4 Generate keeps the active-pool gate without storing an idle skip and researches the next active click',
     async run() {
       for (const legacy of [false, true]) await withStore(async store => {

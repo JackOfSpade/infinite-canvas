@@ -11,18 +11,18 @@ const QUOTE = `I built and rebuilt ${WORK}. I now run ${WORK}. My work on dispat
 const OPTIONS = { identityTokens: [], targetTitle: 'Freight Systems Engineer', targetCompany: EMPLOYER,
   postingText: `${EMPLOYER} needs dispatch rosters for freight routes across four sites using ZephyrConsole.` };
 
-function gates(text, options = {}) {
+function gates(text, options = {}, quote = QUOTE) {
   let completion = [];
-  try { assertSourceQuoteLinksFinalText(text, [QUOTE], 'coverLetterParagraphs', 0, { ...OPTIONS, ...options }); }
+  try { assertSourceQuoteLinksFinalText(text, [quote], 'coverLetterParagraphs', 0, { ...OPTIONS, ...options }); }
   catch (error) { completion = error.validationFailures || [error.message]; }
   const drafting = __pasteUnitGroundingErrorsForTests({ unitLabel: 'Cover-letter paragraph', unitId: 'p1',
-    finalText: text, evidenceIds: ['career-one'], acceptedEvidence: [{ id: 'career-one', sourceId: 'career-data', quote: QUOTE }],
+    finalText: text, evidenceIds: ['career-one'], acceptedEvidence: [{ id: 'career-one', sourceId: 'career-data', quote }],
     label: 'coverLetterParagraphs', sourceRoles: [{ title: 'Dispatch Engineer', company: 'Cedar Works' }], ...OPTIONS, ...options });
   return { completion, drafting };
 }
 
-function expectVerdict(text, accepted, options = {}) {
-  for (const [gate, errors] of Object.entries(gates(text, options))) {
+function expectVerdict(text, accepted, options = {}, quote = QUOTE) {
+  for (const [gate, errors] of Object.entries(gates(text, options, quote))) {
     if (accepted) assert.deepEqual(errors, [], `${gate} accepts ${text}`);
     else assert.ok(errors.length > 0, `${gate} rejects ${text}`);
   }
@@ -297,6 +297,146 @@ export default [
         `I saw the posting on the ${EMPLOYER} website I rebuilt.`,
         `I built ${WORK} on the ${EMPLOYER} platform.`,
       ]) expectVerdict(`${PROOF} ${text}`, false);
+    },
+  },
+  {
+    name: 'R2 Amendment 4 sibling employment clauses cannot borrow a closed alignment thanks gerund or reading exemption',
+    run() {
+      const rejected = [
+        `My work aligns with ${EMPLOYER}, which is my current employer.`,
+        `My work aligns with ${EMPLOYER}, which employs me.`,
+        `My work aligns with ${EMPLOYER} — my current employer.`,
+        `My work aligns with ${EMPLOYER}; where I currently work.`,
+        `I identify with ${EMPLOYER}: the company I work for.`,
+        `My work aligns with ${EMPLOYER}'s mission, and I rebuilt ${WORK} there.`,
+        `Joining ${EMPLOYER} would be a natural step, so I rebuilt ${WORK} at the company.`,
+        ...['which', 'who', 'that'].map(relative => `My work aligns with ${EMPLOYER}, ${relative} employs me.`),
+        `My work aligns with ${EMPLOYER}, that pays me.`,
+        `My work aligns with ${EMPLOYER}, and the company employs me.`,
+        `My work aligns with ${EMPLOYER}, and ${WORK} are my work there.`,
+        `Thank you for considering my application to ${EMPLOYER}, which employs me.`,
+        `Thank you for considering my application to ${EMPLOYER}, and I rebuilt ${WORK} for the company.`,
+        `I read the post by the ${EMPLOYER} team, which employs me.`,
+        `I read the post by the ${EMPLOYER} team, and I rebuilt ${WORK} there.`,
+        `Joining ${EMPLOYER} would be exciting, and I rebuilt ${WORK} during my tenure.`,
+        `My work aligns with ${EMPLOYER}, and I rebuilt ${WORK} as a member of their team.`,
+        `My work aligns with ${EMPLOYER}, and I would help there because the company employs me.`,
+        `My work aligns with ${EMPLOYER}, which would let me contribute because the company pays me.`,
+        `My work aligns with ${EMPLOYER}, and work there.`,
+        `I read the post by the ${EMPLOYER} team and rebuild ${WORK} there.`,
+        `I identify with ${EMPLOYER} and run ${WORK} there.`,
+        `My work aligns with ${EMPLOYER}, and have a job there.`,
+        `I read the post by the ${EMPLOYER} team and get paid there.`,
+        `I would join ${EMPLOYER}, because it employs me.`,
+        `${EMPLOYER} employs me.`, `${EMPLOYER} is my current employer.`,
+      ];
+      for (const text of rejected) expectVerdict(`${PROOF} ${text}`, false);
+      for (const text of [
+        `My work aligns with ${EMPLOYER}.`, `I identify with ${EMPLOYER}.`,
+        `My work aligns with ${EMPLOYER}'s mission.`, `Joining ${EMPLOYER} would be a natural step.`,
+        `My work aligns with ${EMPLOYER}'s mission, and I rebuilt ${WORK}.`,
+        `My work aligns with ${EMPLOYER}'s mission, and I would rebuild ${WORK} there.`,
+        `For ${EMPLOYER}, rosters for freight routes are central, and I know them well.`,
+        `For ${EMPLOYER}, dispatch rosters for freight routes matter, and I know them well.`,
+      ]) expectVerdict(`${PROOF} ${text}`, true);
+    },
+  },
+  {
+    name: 'R2 Amendment 4 title fallback and plain opener window reject trailing participle claims',
+    run() {
+      for (const text of [
+        `I am applying for the role of engineer having led payment ledgers at ${EMPLOYER}.`,
+        `I am applying for the role of engineer having rebuilt dispatch rosters at ${EMPLOYER}.`,
+        `I am applying for the engineer having migrated payment ledgers role at ${EMPLOYER}.`,
+      ]) expectVerdict(text, false, { targetTitle: '' });
+      expectVerdict(`I am applying for the engineer having migrated payment ledgers role at ${EMPLOYER}.`, false);
+      expectVerdict(`I am applying for the role of Freight Systems Engineer at ${EMPLOYER}.`, true, { targetTitle: '' });
+    },
+  },
+  {
+    name: 'R2 Amendment 4 gerund and reading clauses reject continuity and paid employment while preserving plain source references',
+    run() {
+      for (const text of [
+        `Working at ${EMPLOYER} is a pleasure for me.`, `Leading dispatch rosters at ${EMPLOYER} is a privilege for me.`,
+        `Working at ${EMPLOYER} feels rewarding for me.`, `Leading ${WORK} at ${EMPLOYER} feels rewarding for me.`,
+        ...['seems', 'sounds', 'looks'].map(copula => `Working at ${EMPLOYER} ${copula} rewarding for me.`),
+        `Staying at ${EMPLOYER} would be great for me.`, `Remaining at ${EMPLOYER} would be great for me.`,
+        `Continuing at ${EMPLOYER} would be great for me.`, `Resuming at ${EMPLOYER} would be great for me.`,
+        `Building ${WORK} for ${EMPLOYER} is a job that pays me.`,
+        `I learned ${WORK} from ${EMPLOYER} docs on the job.`,
+      ]) expectVerdict(`${PROOF} ${text}`, false);
+      for (const text of [
+        `I came across ${EMPLOYER} while researching dispatch rosters.`,
+        `I read a post from the ${EMPLOYER} team.`, `My work fits the team at ${EMPLOYER}.`,
+        `Joining the team at ${EMPLOYER} would be exciting.`,
+      ]) expectVerdict(`${PROOF} ${text}`, true);
+    },
+  },
+  {
+    name: 'R2 Amendment 4 distinctive frozen brand prefixes license only closed intent and opener frames',
+    run() {
+      const options = { targetCompany: 'Zorvex Group', postingText: 'Zorvex Group needs dispatch rosters for freight routes.' };
+      for (const text of ['I am excited to join Zorvex.', 'I am applying for the Freight Systems Engineer role at Zorvex.',
+        'I am applying for the role of Freight Systems Engineer at Zorvex.']) expectVerdict(text, true, options);
+      for (const text of [`I rebuilt ${WORK} at Zorvex.`, `I rebuilt ${WORK} at zorvex.`, `I am excited to join Zorvex, where I rebuilt ${WORK}.`,
+        `I am applying for the Freight Systems Engineer role at Zorvex, where I rebuilt ${WORK}.`,
+        'I am excited to join Zorvex because the company employs me.', 'I would help Zorvex because it pays me.',
+        'Working at Zorvex is a pleasure for me.', 'Working at zorvex is a pleasure for me.',
+        'Working at Zorvex feels rewarding for me.']) expectVerdict(`${PROOF} ${text}`, false, options);
+      for (const targetCompany of ['Target Group', 'Blue Group', 'The Group', 'Abc Group', 'Sage Group', 'Bright Group', 'Stone Group', 'Bramble Group']) {
+        const brand = targetCompany.split(' ')[0];
+        expectVerdict(`I am excited to join ${brand}.`, false, { targetCompany, postingText: `${targetCompany} needs dispatch rosters.` });
+      }
+    },
+  },
+  {
+    name: 'R2 inherited first-person sibling predicates are structural and do not depend on a work-verb dictionary',
+    run() {
+      for (const text of [
+        `My work aligns with ${EMPLOYER} and operates there.`,
+        `My dispatch rosters work aligns with ${EMPLOYER} and runs there.`,
+        `Our work aligns with ${EMPLOYER} and supports ${WORK} there.`,
+      ]) expectVerdict(`${PROOF} ${text}`, false);
+      for (const verb of ['code', 'calculate', 'consult', 'debug', 'excel']) {
+        for (const head of [`I identify with ${EMPLOYER}`, `We identify with ${EMPLOYER}`, `I read the post by the ${EMPLOYER} team`,
+          `Also I read the post by the ${EMPLOYER} team`, `And I read the post by the ${EMPLOYER} team`]) {
+          for (const separator of [' and ', '; ', ', so ']) expectVerdict(`${PROOF} ${head}${separator}${verb} ${WORK} there.`, false);
+        }
+      }
+      for (const text of [
+        `I identify with ${EMPLOYER} and would code ${WORK} there.`,
+        `I identify with ${EMPLOYER} and could debug ${WORK} at the company.`,
+        `I identify with ${EMPLOYER} and code ${WORK}.`,
+        `I identify with ${EMPLOYER} and they debug ${WORK} there.`,
+        `I identify with ${EMPLOYER} and the team codes ${WORK} there.`,
+        `I identify with ${EMPLOYER} and ${EMPLOYER} engineers debug ${WORK} there.`,
+        `I identify with ${EMPLOYER} and they debug ${WORK} there and calculate ${WORK} there.`,
+      ]) expectVerdict(`${PROOF} ${text}`, true);
+      const scopedQuote = `I built and rebuilt ${WORK}. I code ${WORK}. I previously managed ${WORK}. I worked on ${WORK}.`;
+      const scopedOptions = { postingText: `${EMPLOYER} needs ${WORK}.` };
+      for (const text of [
+        `I am excited to join ${EMPLOYER} and already code ${WORK} there.`,
+        `I would join ${EMPLOYER} and previously managed ${WORK} there.`,
+        `I would join ${EMPLOYER} and previously worked on ${WORK} there.`,
+        `I would join ${EMPLOYER} and continue to code ${WORK} there.`,
+        `I would join ${EMPLOYER} and would continue to code ${WORK} there.`,
+        ...['currently', 'now', 'still', 'always', 'again'].map(marker => `I would join ${EMPLOYER} and ${marker} code ${WORK} there.`),
+      ]) expectVerdict(`${PROOF} ${text}`, false, scopedOptions, scopedQuote);
+      for (const text of [
+        `I am excited to join ${EMPLOYER} and code ${WORK} there.`,
+        `I would join ${EMPLOYER} and code ${WORK} there.`,
+        `I would join ${EMPLOYER} and would now code ${WORK} there.`,
+        `I would join ${EMPLOYER} and would always code ${WORK} there.`,
+      ]) expectVerdict(`${PROOF} ${text}`, true, scopedOptions, scopedQuote);
+    },
+  },
+  {
+    name: 'R2 Amendment 4 sibling guard bounds repeated employer mentions without a target-referring sibling',
+    run() {
+      const text = `My work aligns with ${EMPLOYER}${`, and ${EMPLOYER}`.repeat(600)}.`;
+      const started = performance.now();
+      targetEmploymentFrames(text, EMPLOYER);
+      assert.ok(performance.now() - started < 1000, '600 target mentions without a sibling claim take less than one second');
     },
   },
   {

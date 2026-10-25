@@ -3029,8 +3029,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
 
       if (currentState === 'sources-ready') {
         const prevPending = Array.isArray(pendingJobsRef.current) ? pendingJobsRef.current : [];
-        const fresh = uniqueJobsAcrossSources(prevPending, freshJobs);
-        const mergedPending = [...prevPending, ...fresh];
+        const { mergedPending } = mergeResolvedSourceItems(prevPending, freshJobs, 'usajobs');
         // This source completed after the main search paused. Its collected
         // volume belongs in the funnel even when every returned row collapses
         // against another source before scoring.
@@ -5627,10 +5626,9 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
 
       // Merge backend's foundJobs with any jobs already resolved via paste during
       // the search — they're in pendingJobsRef but absent from the backend result.
-      // Resolved items go FIRST: the dedup is first-wins, and on a collision the
-      // resolved copy is the one carrying work the user paid for mid-run (a
-      // LinkedIn Solve's enriched descriptions) while the backend copy of the
-      // same posting is the pre-enrichment one.
+      // Prefer an open copy while preserving a verified official posting over
+      // an unchecked replacement. Otherwise retain the resolved copy's enriched
+      // description, using the same survivor-aware merge as source continuations.
       let foundJobs = (searchResult.success && Array.isArray(searchResult.jobs)) ? searchResult.jobs : [];
       // `gatheredCount` is the source-card-aligned collection total. `rawCount`
       // remains the broader provider funnel used only for diagnostics; retain it
@@ -5640,7 +5638,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         const prevPending = Array.isArray(pendingJobsRef.current) ? pendingJobsRef.current : [];
         const resolvedItems = prevPending.filter(j => sourceWarningOverrides.has(j?.source));
         if (resolvedItems.length > 0) {
-          foundJobs = dedupJobsAcrossSources([...resolvedItems, ...foundJobs]);
+          foundJobs = mergeResolvedSourceItems(resolvedItems, foundJobs).mergedPending;
         }
       }
 

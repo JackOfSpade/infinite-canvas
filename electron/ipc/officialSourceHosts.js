@@ -34,6 +34,14 @@ export function normalizedSourceHost(value) {
     return host && host.includes('.') && !host.includes(':') && !/^\d+(?:\.\d+){3}$/u.test(host) ? host : '';
   } catch { return ''; }
 }
+/** Ownership may cross between an apex and its www host, never other subdomains. */
+export function sameOwnershipHost(left, right) {
+  const a = normalizedSourceHost(left); const b = normalizedSourceHost(right);
+  if (!a || !b) return false;
+  if (a === b) return true;
+  const apex = registrableDomain(a);
+  return Boolean(apex) && ((a === apex && b === `www.${apex}`) || (b === apex && a === `www.${apex}`));
+}
 export function isAggregatorHost(host) {
   const value = normalizedSourceHost(host);
   return Boolean(value) && (AGGREGATOR_BASE_DOMAINS.some(domain => hostMatches(value, domain)) || AGGREGATOR_LABEL_RE.test(value));
@@ -217,7 +225,7 @@ export function extractAtsTenant(value, { html = '' } = {}) {
 /** Proof is supplied only from pages fetched by the host, never AI verdicts. */
 export function proveEmployerDomain({ domain, employer, poster = '', posterDomain = '', postingUrl = '', sameAs = '', careersPageUrl = '', careersPageEmployer = '', careersLinks = [], rootSiteName = '', rootTitle = '', rootFooter = '', independentEmployer = '', offDomainAttestations = [] } = {}) {
   const host = normalizedSourceHost(domain);
-  const sameDomain = value => normalizedSourceHost(value) === host;
+  const sameDomain = value => sameOwnershipHost(value, host);
   if (!host || isAggregatorHost(host) || isKnownAtsHost(host)) return false;
   if (posterDomain && sameDomain(posterDomain) && !strictEmployerEqual(poster, employer)) return false;
   if (rootBrandingNamesPoster({ rootSiteName, rootTitle, rootFooter }, poster) && !strictEmployerEqual(poster, employer)) return false;

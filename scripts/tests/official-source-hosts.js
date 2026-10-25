@@ -104,6 +104,23 @@ export default [
     },
   },
   {
+    name: 'Official source ownership equates only the apex and www hosts for independent careers proof and poster vetoes',
+    run() {
+      const postingUrl = 'https://jobs.lever.co/northwind/one';
+      for (const [domain, careersHost] of [['nwlhq.test', 'www.nwlhq.test'], ['www.nwlhq.test', 'nwlhq.test']]) {
+        const page = { domain, employer, independentEmployer: employer, careersPageEmployer: employer,
+          careersPageUrl: `https://${careersHost}/careers`, careersLinks: [postingUrl], postingUrl };
+        assert.equal(proveEmployerDomain(page), true, `${domain} and ${careersHost} have the same ownership`);
+        assert.equal(proveEmployerDomain({ domain, employer, poster, posterDomain: careersHost, rootTitle: employer }), false,
+          'the alias cannot evade a poster-domain veto');
+      }
+      for (const careersHost of ['careers.nwlhq.test', 'www.careers.nwlhq.test', 'elsewhere.test', 'www.elsewhere.test']) {
+        assert.equal(proveEmployerDomain({ domain: 'nwlhq.test', employer, independentEmployer: employer,
+          careersPageEmployer: employer, careersPageUrl: `https://${careersHost}/careers`, careersLinks: [postingUrl], postingUrl }), false, careersHost);
+      }
+    },
+  },
+  {
     name: 'Official source hosts require independent host ownership before accepting a careers title or off-domain attestation',
     run() {
       const page = { domain: 'careers.northwind.test', employer, poster,
