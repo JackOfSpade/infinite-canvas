@@ -1,5 +1,6 @@
 // Shared production truth predicates used by the v2 content gate.
-export function targetIdentityNameLicensed(sentence, finding, ctx, { reportsNoPastWork, attributionTerms, sentenceAddressesTarget, groundingClauses, intentLeadInRemainder, hasWorkIngWord }) {
+import { targetCompanyNames } from './coverLetterChecks.js';
+export function targetIdentityNameLicensed(sentence, finding, ctx, { reportsNoPastWork, attributionTerms, sentenceAddressesTarget, groundingClauses, hasWorkIngWord, hasCandidateNonIntentClause, targetEmploymentIntentClause, nonEmploymentTargetReference }) {
   if (finding?.code !== 'name') return false;
   const text = String(sentence ?? '');
   const noPastWork = reportsNoPastWork(text);
@@ -39,7 +40,7 @@ export function targetIdentityNameLicensed(sentence, finding, ctx, { reportsNoPa
   // Boards sometimes append a product description to the employer name.
   // Its exact prefix is a target reference too, including its possessive;
   // this licenses no claim that the candidate previously worked there.
-  const companyNames = [...new Set([company, company.split(/\s+[-–—|]\s+/u)[0]])].filter(name => name.length >= 3);
+  const companyNames = targetCompanyNames(company).filter(name => name.length >= 3);
   const need = String.raw`(?:needs?|requirements?|priorit(?:y|ies)|goals?|mission|roadmap|challenges?|problems?|standards?)`;
   const word = String.raw`[\p{L}'’-]+`;
   const needPhrase = new RegExp(`^\\s+(?:${word}\\s+){0,2}${need}\\b`, 'iu');
@@ -54,20 +55,23 @@ export function targetIdentityNameLicensed(sentence, finding, ctx, { reportsNoPa
     for (const match of text.matchAll(pattern)) {
       const at = match.index;
       const end = at + match[0].length;
-      // Preserve the existing licence first. The structural pre-pass rejects
-      // candidate employment before a trusted name or classifier can hide it.
-      if (noPastWork || forwardReference(at)) { spans.push([at, end]); continue; }
       const after = text.slice(end);
       const noun = after.match(needPhrase);
       const window = clauseWindow(at, end + (noun?.[0].length || 0));
       const possessive = /['’]s$/iu.test(match[0]);
+      const subjectPosition = !possessive && /^\s*$/u.test(window.before);
+      // A new employer-subject clause cannot attribute earlier candidate work
+      // to the employer. Check this before the legacy no-past-work shortcut,
+      // which intentionally does not classify present/irregular work verbs.
+      const earlier = text.slice(0, at).replace(/[,;]?\s*(?:and|so|which|that|who)\s*$/iu, '').trim();
+      if (subjectPosition && hasCandidateNonIntentClause(earlier, company, ctx?.targetTitle)
+        && !nonEmploymentTargetReference(earlier)) continue;
+      if (noPastWork || forwardReference(at)) { spans.push([at, end]); continue; }
       const deny = /\b(?:at|for|with|inside|within|on|using|via|under|from|during|after|since)\s+$/iu.test(window.before)
         || /\b(?:joined|joining|served|serves|helped|helps|worked)\s+$/iu.test(window.before)
         || (possessive && /^\s+(?:platform|product|customers|users|codebase|stack|system|infrastructure|data|pipeline|app|service)\b/iu.test(after));
       if (deny) continue;
-      const lead = intentLeadInRemainder(window.text.trim());
-      const intent = lead.matched && !/\b(?:i|we)\b/iu.test(lead.remainder)
-        && reportsNoPastWork(lead.remainder) && !hasWorkIngWord(lead.remainder)
+      const intent = targetEmploymentIntentClause(window.text.trim(), company)
         && (/\b(?:join|help|contribute\s+to|support|bring\b[^.!?;]*\bto)\s+$/iu.test(window.before)
           || /\blook(?:ing)?\s+forward\s+to\s+(?:joining|helping|contributing\s+to|supporting|bringing\b[^.!?;]*\bto)\s+$/iu.test(window.before));
       const plain = reportsNoPastWork(window.text) && !hasWorkIngWord(window.before);
@@ -76,9 +80,9 @@ export function targetIdentityNameLicensed(sentence, finding, ctx, { reportsNoPa
         && /^\s+(?:is|are|needs|wants|asks)\b/iu.test(after.slice(noun[0].length)))
         || /\b(?:is|are|needs|wants|asks)\s+$/iu.test(window.before));
       const clauseTail = after.split(/[,;.!?]|\b(?:which|that|who|and|so)\b/iu)[0];
-      const subject = !possessive && /^\s*$/u.test(window.before)
+      const subject = subjectPosition
         && !/\b(?:i|we|me|my|our|us)\b/iu.test(clauseTail)
-        && /^\s+(?!(?:was|has\s+been)\b)(?:is|are|has|does|[\p{L}]+s)\b/iu.test(after);
+        && /^\s+(?:needs|wants|asks|seeks|requires|expects|hires|is\s+(?:hiring|looking|seeking|building)|has\s+(?:a|an)\s+(?:need|mission|roadmap|goal|priority)|exists)\b/iu.test(after);
       if (intent || (plain && (fit || ownedNeed || subject))) spans.push([at, end]);
     }
   }

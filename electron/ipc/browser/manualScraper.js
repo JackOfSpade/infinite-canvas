@@ -34,6 +34,7 @@ import { decodeHtmlEntities, repairMojibake, stripHtmlToText } from '../../../sr
 import { markManualSolveRequired } from '../scrapeVerification.js';
 import { isBackgroundE2E, backgroundE2EDisabledError } from '../../utils/backgroundE2e.js';
 import { isAggregatorHost } from '../officialSourceHosts.js';
+import { boardClosedDetailAllowed, withBoardClosed } from '../officialPostingBoardClosed.js';
 
 // ── Timing ────────────────────────────────────────────────────────────────────
 const NAV_SETTLE_MS          = 2000;          // settle after navigation before first action
@@ -580,7 +581,10 @@ export function selectManualSourcePageJobs(newJobs, existingJobs, jobsPerPlatfor
  */
 export function didDetailBlockReprobeRecover(result = {}) {
   const expanded = Math.max(0, Number(result.expandedCount) || 0);
-  const unavailable = Math.max(0, Number(result.unavailableDetailDropped) || 0);
+  // A listing the board reported closed (kept, flagged for the official-posting
+  // resolver) is the same terminal proof as one retired outright.
+  const unavailable = Math.max(0, Number(result.unavailableDetailDropped) || 0)
+    + Math.max(0, Number(result.boardClosedDetailKept) || 0);
   const reBlocked = ['description-rate-limited', 'description-panel-http-error']
     .includes(result.descWarning?.code);
   return (expanded > 0 || unavailable > 0) && !result.descError && !reBlocked;
@@ -596,6 +600,7 @@ export function composeDetailBlockReprobeResult(probeResult = {}, restResult = n
   const probeJobs = Array.isArray(probeResult.jobs) ? probeResult.jobs : [];
   const probeExpanded = Math.max(0, Number(probeResult.expandedCount) || 0);
   const probeUnavailable = Math.max(0, Number(probeResult.unavailableDetailDropped) || 0);
+  const probeBoardClosed = Math.max(0, Number(probeResult.boardClosedDetailKept) || 0);
   if (didDetailBlockReprobeRecover(probeResult)) {
     const rest = restResult || {};
     return {
@@ -604,6 +609,7 @@ export function composeDetailBlockReprobeResult(probeResult = {}, restResult = n
       descWarning: rest.descWarning || probeResult.descWarning || null,
       expandedCount: probeExpanded + Math.max(0, Number(rest.expandedCount) || 0),
       unavailableDetailDropped: probeUnavailable + Math.max(0, Number(rest.unavailableDetailDropped) || 0),
+      boardClosedDetailKept: probeBoardClosed + Math.max(0, Number(rest.boardClosedDetailKept) || 0),
     };
   }
   return {
@@ -618,6 +624,7 @@ export function composeDetailBlockReprobeResult(probeResult = {}, restResult = n
     descWarning: probeResult.descWarning || probeResult.descError || null,
     expandedCount: probeExpanded,
     unavailableDetailDropped: probeUnavailable,
+    boardClosedDetailKept: probeBoardClosed,
   };
 }
 
@@ -1495,6 +1502,27 @@ export function isUnavailableDetailPage({
   zipRecruiterClosedJobRedirect = false,
 } = {}) {
   return Boolean(isNotFound) || workdayPostingAvailable === false || zipRecruiterClosedJobRedirect;
+}
+
+/**
+ * What an unavailable detail page means for its row. Only an aggregator board's
+ * own "gone" page is a board verdict (the employer may still be hiring), and only
+ * for the two generic not-found reasons: the row is kept with a boardClosed marker
+ * for the official-posting resolver. Workday's availability flag, and any
+ * not-found page on an employer or ATS host, ARE the official source saying
+ * closed, so those keep the original drop (row: null).
+ */
+export function unavailableDetailDisposition({ pageInfo = {}, job = null, sourceId = '', expectedUrl = '', finalUrl = '', now = new Date() } = {}) {
+  const reason = pageInfo.zipRecruiterClosedJobRedirect
+    ? 'ziprecruiter-closed-job-redirect'
+    : pageInfo.workdayPostingAvailable === false
+      ? 'workday-posting-unavailable'
+      : 'detail-page-not-found';
+  const flagged = job && ['detail-page-not-found', 'ziprecruiter-closed-job-redirect'].includes(reason)
+    && boardClosedDetailAllowed({ expectedUrl, finalUrl })
+    ? withBoardClosed(job, { board: sourceId, reason, now })
+    : null;
+  return { reason, row: flagged && flagged !== job ? flagged : null };
 }
 
 /** Convert a Retry-After header to a safe, bounded wait for a single retry. */
@@ -2872,6 +2900,7 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
       // This is deliberately distinct from a description miss: a confirmed
       // closed/not-found posting is removed from the returned usable rows.
       unavailableDetailDropped: 0,
+      boardClosedDetailKept: 0,
     };
   }
 
@@ -2889,6 +2918,11 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
   // subset retired after a confirmed unavailable detail page here, so reporting
   // can say what was traversed versus what remained usable.
   let unavailableDetailDropped = 0;
+  // Aggregator-board "gone" verdicts are NOT retired here: the row is kept with a
+  // boardClosed marker so the official-posting resolver can look for the
+  // employer's own posting. Counted apart so unavailableDetailDropped stays the
+  // number of rows actually removed.
+  let boardClosedDetailKept = 0;
 
   // Navigation-based expansion: navigate to each job's individual page and extract
   // the description there. Used for ZipRecruiter where the extractor
@@ -3580,18 +3614,22 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
           }
 
           if (isUnavailableDetailPage(pageInfo)) {
-            const reason = pageInfo.zipRecruiterClosedJobRedirect
-              ? 'ziprecruiter-closed-job-redirect'
-              : pageInfo.workdayPostingAvailable === false
-                ? 'workday-posting-unavailable'
-                : 'detail-page-not-found';
-            logger.info(`[BrowserScraper] ${overlayBase.srcName} dropped unavailable detail listing "${job.title || job.url || '?'}" (${reason})`);
+            const { reason, row: boardClosedRow } = unavailableDetailDisposition({
+              pageInfo, job: enhanced[i], sourceId, expectedUrl: viewUrl, finalUrl: rawPageInfo.finalUrl || fetchPage.url(),
+            });
+            const keptBoardClosed = boardClosedRow != null;
+            logger.info(`[BrowserScraper] ${overlayBase.srcName} ${keptBoardClosed ? 'kept board-closed' : 'dropped unavailable'} detail listing "${job.title || job.url || '?'}" (${reason})`);
             recordManualScraperTelemetry({
               phase: 'detail-unavailable', srcName: overlayBase.srcName,
-              key: `${(job.title || job.url || '?').slice(0, 65)} | unavailable listing`,
-              reason, status: navigationStatus,
+              key: `${(job.title || job.url || '?').slice(0, 65)} | ${keptBoardClosed ? 'board-closed listing kept' : 'unavailable listing'}`,
+              reason, status: navigationStatus, disposition: keptBoardClosed ? 'kept-board-closed' : 'dropped',
               expectedUrl: viewUrl.slice(0, 240), finalUrl: fetchPage.url().slice(0, 240),
             }, { updateActive: false });
+            if (keptBoardClosed) {
+              boardClosedDetailKept += 1;
+              enhanced[i] = boardClosedRow;
+              continue;
+            }
             if (enhanced[i] != null) unavailableDetailDropped += 1;
             enhanced[i] = null;
             continue;
@@ -4037,6 +4075,7 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
       descWarning,
       expandedCount,
       unavailableDetailDropped,
+      boardClosedDetailKept,
     };
   }
 
@@ -4967,6 +5006,7 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
     panelHttpFailureCount,
     selectionMismatchCount,
     unavailableDetailDropped,
+    boardClosedDetailKept,
   };
   } finally {
     if (sourceId === 'glassdoor') page.off('response', glassdoorPanelResponseListener);
@@ -6440,6 +6480,7 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
       // not synonymous with usable rows returned in `data`.
       const providerSeen = new Set();
       let sourceUnavailableDetailDropped = 0;
+      let sourceBoardClosedDetailKept = 0;
       // Every task for a source is built from the same persisted hub limits.
       // Keep the aggregate job limit at source scope so several role queries
       // cannot each consume a separate allowance.
@@ -7514,8 +7555,10 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
             descWarning,
             expandedCount,
             unavailableDetailDropped = 0,
+            boardClosedDetailKept = 0,
           } = detailResult;
           sourceUnavailableDetailDropped += Math.max(0, Number(unavailableDetailDropped) || 0);
+          sourceBoardClosedDetailKept += Math.max(0, Number(boardClosedDetailKept) || 0);
           // Exactly the rows the scoring-evidence gate will drop — no inference
           // about which branch deferred them, and it stays correct on the
           // triggering page where only a suffix of the cards was deferred.
@@ -7984,6 +8027,9 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
         // candidate-traversed → usable-row report.
         providerGathered: providerSeen.size,
         unavailableDetailDropped: sourceUnavailableDetailDropped,
+        // Rows an aggregator board reported closed but that stay in `data`, flagged
+        // for the official-posting resolver. NOT part of unavailableDetailDropped.
+        boardClosedDetailKept: sourceBoardClosedDetailKept,
         providerDuplicatesDropped: Math.max(0, sourcePhysicalCards - providerSeen.size),
         // A ZipRecruiter empty page below its verified advertised total is not
         // a clean end-of-results. Keep the partial result usable while making

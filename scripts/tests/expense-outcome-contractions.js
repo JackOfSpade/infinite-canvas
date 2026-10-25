@@ -97,7 +97,9 @@ export default [{
     const nameSource = fs.readFileSync(fileURLToPath(new URL('../../electron/ipc/applicationClaimGrounding.js', import.meta.url)), 'utf8');
     const nameFence = 'if (NAME_CONTRACTIONS.has(String(piece).toLowerCase().replace(APOSTROPHES, "\'"))) return false;';
     assert.ok(nameSource.includes(nameFence));
-    const sabotagedName = await import(`data:text/javascript;base64,${Buffer.from(nameSource.replace(nameFence, '')).toString('base64')}`);
+    const dependencyUrl = new URL('../../electron/ipc/coverLetterChecks.js', import.meta.url).href;
+    const copiedNameSource = nameSource.replace("from './coverLetterChecks.js'", `from '${dependencyUrl}'`);
+    const sabotagedName = await import(`data:text/javascript;base64,${Buffer.from(copiedNameSource.replace(nameFence, '')).toString('base64')}`);
     assert.ok(!namedTermFindings("For this role, I've maintained records.", ['I maintained records.'], nameCtx).some(item => item.term === "I've"));
     assert.ok(sabotagedName.namedTermFindings("For this role, I've maintained records.", ['I maintained records.'], nameCtx).some(item => item.term === "I've"));
   },

@@ -47,9 +47,9 @@ export default [
         ['https://boards.greenhouse.io/embed/job_board/js?for=northwind', 'greenhouse', 'northwind'],
         ['https://boards.greenhouse.io/embed/job_board?for=northwind', 'greenhouse', 'northwind'],
         ['https://jobs.lever.co/northwind/123', 'lever', 'northwind'],
-        ['https://northwind.wd5.myworkdayjobs.com/External/job/123', 'workday', 'northwind/External'],
-        ['https://northwind.wd5.myworkdayjobs.com/en-US/External/job/123', 'workday', 'northwind/External'],
-        ['https://northwind.wd5.myworkdayjobs.com/fr-CA/External/job/123', 'workday', 'northwind/External'],
+        ['https://northwind.wd5.myworkdayjobs.com/External/job/123', 'workday', 'northwind/external'],
+        ['https://northwind.wd5.myworkdayjobs.com/en-US/External/job/123', 'workday', 'northwind/external'],
+        ['https://northwind.wd5.myworkdayjobs.com/fr-CA/External/job/123', 'workday', 'northwind/external'],
       ]) assert.deepEqual(extractAtsTenant(url), { ats, tenant });
       assert.deepEqual(extractAtsTenant('https://careers.northwind.example/', { html: '<script src="https://cdn.teamtailor-cdn.com/app.js"></script>' }), { ats: 'teamtailor', tenant: 'careers.northwind.example' });
       for (const html of [
@@ -112,20 +112,22 @@ export default [
       assert.equal(careersPageEmployerFromTitle(`Careers at Other Labs | ${EMPLOYER}`), 'Other Labs');
       const attestation = { domain: 'northwind.example', employer: EMPLOYER, sameAs: 'https://northwind.example/', postingUrl: 'https://northwind.example/jobs/1' };
       assert.equal(proveEmployerDomain(attestation), false);
-      assert.equal(proveEmployerDomain({ ...attestation, postingUrl: 'https://jobs.ashbyhq.com/northwind/123' }), true);
+      assert.equal(proveEmployerDomain({ ...attestation, postingUrl: 'https://jobs.ashbyhq.com/northwind/123' }), false, 'the posting cannot self-attest its sameAs host');
+      assert.equal(proveEmployerDomain({ ...attestation, postingUrl: 'https://jobs.ashbyhq.com/northwind/123', independentEmployer: EMPLOYER }), true);
       assert.equal(proveEmployerDomain({ ...attestation, domain: 'linkedin.com', rootTitle: EMPLOYER }), false);
       assert.equal(proveEmployerDomain({ ...attestation, poster: 'Acme Talent', posterDomain: 'northwind.example', rootTitle: EMPLOYER }), false);
       const careers = { domain: 'northwind.example', employer: EMPLOYER, careersPageUrl: 'https://northwind.example/careers', careersPageEmployer: EMPLOYER,
         careersLinks: ['https://jobs.ashbyhq.com/northwind'], postingUrl: 'https://jobs.ashbyhq.com/northwind/123' };
-      assert.equal(proveEmployerDomain(careers), true);
-      assert.equal(proveEmployerDomain({ ...careers, careersPageEmployer: 'Northwind Consulting' }), false);
-      assert.equal(proveEmployerDomain({ ...careers, careersLinks: ['https://jobs.ashbyhq.com/another-tenant'] }), false);
+      assert.equal(proveEmployerDomain(careers), false, 'a path title cannot establish its host');
+      assert.equal(proveEmployerDomain({ ...careers, independentEmployer: EMPLOYER }), true);
+      assert.equal(proveEmployerDomain({ ...careers, independentEmployer: EMPLOYER, careersPageEmployer: 'Northwind Consulting' }), false);
+      assert.equal(proveEmployerDomain({ ...careers, independentEmployer: EMPLOYER, careersLinks: ['https://jobs.ashbyhq.com/another-tenant'] }), false);
     },
   },
   {
     name: 'Official posting matching: core titles normalize presentation while retaining sibling and level identity',
     run() {
-      assert.equal(coreTitle('Sr. Software Eng. at Northwind Labs'), 'senior software engineer');
+      assert.equal(coreTitle('Sr. Software Eng. at Northwind Labs', { company: 'Northwind Labs' }), 'senior software engineer');
       assert.equal(coreTitle('Sr. Software Eng. - CAD 120k-150k + equity'), 'senior software engineer');
       assert.equal(coreTitle('Senior Software Engineer (Hybrid) - Toronto, ON', { location: 'Toronto, ON' }), 'senior software engineer');
       assert.equal(coreTitle('Senior Software Engineer - Toronto', { location: 'Toronto, ON, Canada' }), 'senior software engineer');
@@ -293,6 +295,105 @@ export default [
         snippet: `Company Description\n${EMPLOYER} is a technology company.` })).S4, [EMPLOYER]);
       assert.deepEqual(posterEmployerSignals(row({ company: 'Acme Talent Partners',
         snippet: `About this role. ${EMPLOYER} is a technology company.` })).S4, [EMPLOYER]);
+    },
+  },
+  {
+    name: 'Official posting matching: description anchors need containment of the scraped text and an independent anchor for weak overlap',
+    run() {
+      const added = 'Coordinate exception handling across outbound warehouse feeds while operators compare rejected records against documented delivery contracts. '
+        + 'Review archival retention settings and reconcile delayed transfers with the transport scheduling staff.';
+      const longer = `${DESCRIPTION} ${added}`;
+      // Amendment 3: a partial scraped description contained in a longer official text anchors.
+      // The weak band is the reverse: a scraped text that the official text contains only in part.
+      assert.equal(descriptionOverlap(DESCRIPTION, longer).anchored, true);
+      const overlap = descriptionOverlap(longer, DESCRIPTION);
+      assert.ok(overlap.score >= 0.6 && overlap.score < 0.85, JSON.stringify(overlap));
+      assert.equal(overlap.anchored, false);
+      assert.equal(overlap.weak, true);
+      assert.ok(overlap.coverageRight > overlap.coverageLeft);
+      const scraped = row({ snippet: longer, salaryProvenance: 'unknown' });
+      const official = candidate({ description: DESCRIPTION, salary: { text: '', provenance: 'unknown' } });
+      assert.equal(evaluate(scraped, official).reason, 'no-anchor');
+      assert.equal(evaluate({ ...scraped, identifier: 'REQ-42' }, { ...official, identifier: 'REQ-42' }).anchor, 'identifier-anchor');
+      assert.equal(evaluate(row({ snippet: longer }), candidate({ description: DESCRIPTION })).anchor, 'salary-anchor');
+      assert.equal(descriptionOverlap('ledger route queue audit export '.repeat(10), 'ledger route queue audit export '.repeat(10)).anchored, false, 'repetition cannot supply twelve distinctive grams');
+      assert.equal(descriptionOverlap(DESCRIPTION, DESCRIPTION).anchored, true);
+    },
+  },
+  {
+    name: 'Official posting matching: benefits, company copy and closed peer postings cannot identify a live sibling or stub',
+    run() {
+      const about = 'About Northwind Labs. Northwind Labs develops workflow products for regional businesses across the country. '
+        + 'We value kind colleagues and measured progress in every office. We offer health coverage, flexible hours and paid parental leave. '
+        + 'Northwind Labs is an equal opportunity employer and welcomes applicants from every background.';
+      const other = 'Maintain embedded camera calibration firmware for industrial inspection stations and diagnose faulty exposure timing. '
+        + 'Develop sensor readout scheduling, validate image capture latency and document mechanical alignment procedures for production technicians. '
+        + 'Requirements include expertise in optical measurements, low power processors, physical tolerances and repeatable laboratory experiments.';
+      const scraped = row({ snippet: `${DESCRIPTION} ${about}`, salaryProvenance: 'unknown' });
+      for (const body of [about, `${other} ${about}`, `${other.split('. ')[0]}. ${about}`]) {
+        const official = candidate({ description: body, salary: { text: '', provenance: 'unknown' } });
+        assert.equal(evaluate(scraped, official).reason, 'no-anchor');
+        assert.equal(selectOfficialPostingMatch(scraped, [official], { now: NOW }).candidate, null);
+      }
+      const shared = candidate({ identifier: 'CLOSED-ROLE', sourceUrl: 'https://jobs.ashbyhq.com/northwind/closed-role', live: false, isListed: false, statusCode: 410 });
+      const sibling = candidate({ identifier: 'LIVE-SIBLING', salary: { text: '', provenance: 'unknown' } });
+      assert.equal(evaluate(row({ salaryProvenance: 'unknown' }), sibling, { peerCandidates: [shared] }).reason, 'no-anchor', 'even unlabelled role-looking copy shared with a closed peer is not distinctive');
+      assert.equal(evaluate(row({ salaryProvenance: 'unknown' }), sibling, { peerCandidates: [{ ...shared, sourceUrl: 'https://jobs.ashbyhq.com/another-company/closed-role', tenant: 'another-company' }] }).anchor, 'description-anchor', 'another tenant does not erase role evidence');
+      assert.equal(evaluate(row({ salaryProvenance: 'unknown' }), { ...sibling, identifier: 'SAME-ROLE' }, { peerCandidates: [{ ...shared, identifier: 'SAME-ROLE' }] }).anchor, 'description-anchor', 'a duplicate representation of one requisition is not a sibling');
+    },
+  },
+  {
+    name: 'Official posting matching: quote pairs need corresponding content vocabulary and must be absent from peer postings',
+    run() {
+      const quotes = DESCRIPTION.split(/(?<=\.)\s+/u).filter(Boolean);
+      const pairs = [quotes[0], quotes[2], quotes[4]].map(quote => ({ scrapedQuote: quote, officialQuote: quote }));
+      const answer = { sameJob: true, matchingPairs: pairs, conflicts: [] };
+      assert.equal(verifiedTieBreakerMatch(DESCRIPTION, DESCRIPTION, answer), true);
+      assert.equal(verifiedTieBreakerMatch(DESCRIPTION, DESCRIPTION, { ...answer, matchingPairs: pairs.map((pair, index) => ({ ...pair, officialQuote: pairs[(index + 1) % pairs.length].officialQuote })) }), false, 'verbatim but unrelated pairs are not correspondence');
+      assert.equal(verifiedTieBreakerMatch(DESCRIPTION, DESCRIPTION, answer, { peerDescriptions: [`${quotes[0]} Other work involves production camera calibration.`] }), false, 'either quoted side appearing in a peer invalidates the pair');
+      const benefits = 'We offer comprehensive health insurance and flexible paid parental leave to every eligible employee. ';
+      const boilerplate = { sameJob: true, matchingPairs: Array.from({ length: 3 }, () => ({ scrapedQuote: benefits.trim(), officialQuote: benefits.trim() })), conflicts: [] };
+      assert.equal(verifiedTieBreakerMatch(benefits.repeat(6), benefits.repeat(6), boilerplate), false);
+    },
+  },
+  {
+    name: 'Official posting signals: ordinary pronouns, skills, client-service copy, company brands and title decorations preserve the employer',
+    run() {
+      const prefixes = ['This is a full-time role.', 'It is an exciting opportunity.', 'There is a lot to do.', 'SQL is a must.',
+        'Python is a plus.', 'Machine Learning is a requirement.', 'Data Science is a useful background.',
+        'Communication is a core part of the job.', 'Remote is a requirement.', 'Our Mission is the reason we exist.',
+        'Northwind is a leading technology company.', 'Northwind Labs Research is a technology company.',
+        'We build tools that our customers love.', 'We deliver services for our clients.', 'We are hiring for a Software Engineer.',
+        'We are recruiting for several engineering roles.', 'Act on behalf of the support team during incidents.'];
+      for (const prefix of prefixes) {
+        const scraped = row({ snippet: `${prefix} ${DESCRIPTION}` });
+        assert.equal(posterEmployerSignals(scraped).pointsAway, false, prefix);
+        assert.equal(resolveScrapedEmployer(scraped).level, 'L5', prefix);
+        assert.equal(resolveScrapedEmployer(scraped).employer, EMPLOYER, prefix);
+        assert.equal(evaluate(scraped, candidate()).passed, true, prefix);
+      }
+      for (const decoration of ['(Remote)', '- Remote', ', Toronto', '| Hiring now', '$120k', 'Inc.']) {
+        const scraped = row({ title: `Senior Software Engineer at ${EMPLOYER} ${decoration}` });
+        assert.equal(posterEmployerSignals(scraped).S1, '', decoration);
+        assert.equal(resolveScrapedEmployer(scraped).employer, EMPLOYER, decoration);
+      }
+      assert.equal(posterEmployerSignals(row({ title: `Senior Software Engineer at The ${EMPLOYER}` })).S1, '');
+      assert.equal(posterEmployerSignals(row({ company: 'Northwind', title: `Senior Software Engineer at ${EMPLOYER}` })).S1, '');
+      const recruiting = row({ company: 'Acme Talent Partners', snippet: 'We are recruiting for Northwind Labs. Company Description Northwind Labs is a technology company.' });
+      assert.equal(posterEmployerSignals(recruiting).S3, true);
+      assert.deepEqual(posterEmployerSignals(recruiting).S4, [EMPLOYER]);
+    },
+  },
+  {
+    name: 'Official posting matching: genuine intermediary copy vetoes both poster-owned domains and poster tenants',
+    run() {
+      const scraped = row({ company: 'Acme Talent Partners', snippet: `Our client, a dispatch software company, is hiring. ${DESCRIPTION}` });
+      const own = candidate({ employer: 'Acme Talent Partners', sourceUrl: 'https://acme-talent.example/jobs/one', ats: '', tenant: '', tenantProven: false, employerDomainProven: true });
+      assert.equal(posterEmployerSignals(scraped).S3, true);
+      assert.equal(evaluate(scraped, own).reason, 'poster-tenant');
+      assert.equal(evaluate(scraped, { ...own, sourceUrl: 'https://jobs.lever.co/acme-talent/one', ats: 'lever', tenant: 'acme-talent', tenantProven: true }).reason, 'poster-tenant');
+      assert.equal(evaluate({ ...scraped, title: `Senior Software Engineer at ${EMPLOYER}` }, candidate({ sourceUrl: 'https://jobs.ashbyhq.com/acme-talent/one', tenant: 'acme-talent' })).reason, 'poster-tenant');
+      assert.equal(evaluate(row(), candidate()).passed, true, 'a name-related own employer tenant is not a poster veto');
     },
   },
   {

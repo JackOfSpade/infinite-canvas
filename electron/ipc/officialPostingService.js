@@ -1,14 +1,17 @@
 import path from 'node:path';
 import crypto from 'node:crypto';
 import electronPkg from 'electron';
+import { sourceJobKey } from '../../src/utils/jobIdentity.js';
 import { callLLMRaw } from './llm.js';
-import { createOfficialPostingStore, officialPostingView } from './officialPostingStore.js';
+import { createOfficialPostingStore, officialPostingView, officialPostingRecordMatchesScrapedIdentity, officialPostingAliases } from './officialPostingStore.js';
 import { fetchOfficialPosting } from './officialPostingFetch.js';
+import { createOfficialPostingFetchSession } from './officialPostingFetchSession.js';
 import { extractOfficialPostingCandidates } from './officialPostingExtractors.js';
-import { officialPostingChunks, resolveOfficialPosting, unresolvedOfficialPosting } from './officialPostingResolver.js';
+import { officialPostingChunks, resolveOfficialPosting, unresolvedOfficialPosting, createOfficialPostingRowBudget, shouldPersistOfficialPostingResult } from './officialPostingResolver.js';
 import { descriptionOverlap } from './officialPostingMatch.js';
-import { extractAtsTenant } from './officialSourceHosts.js';
+import { extractAtsTenant, strictEmployerEqual } from './officialSourceHosts.js';
 import { normalizeOfficialPosting, officialHttpsUrl, OFFICIAL_POSTING_LEVELS, OFFICIAL_POSTING_OUTCOMES, OFFICIAL_POSTING_TRAIL } from './officialPostingFields.js';
+import { mergeBoardClosedTelemetry } from './officialPostingBoardClosed.js';
 import { buildOfficialPostingResearchRequest, parseOfficialPostingResearchResponse, buildOfficialPostingMatchRequest, validateOfficialPostingMatchResponse } from './officialPostingBridge.js';
 
 export const OFFICIAL_POSTING_HANDOFF_TIMEOUT_MS = 20 * 60 * 1_000;
@@ -74,7 +77,7 @@ async function cappedHandoff(request, { call, signal, timeoutMs, manualAiRunId, 
 }
 
 function addTrail(result, code) {
-  const posting = result.officialPosting;
+  const posting = result?.officialPosting || unresolvedOfficialPosting({}).officialPosting;
   return { ...result, officialPosting: { ...posting,
     trail: [...new Set([...(posting.trail || []), code].filter(item => OFFICIAL_POSTING_TRAIL.includes(item)))].slice(-32) } };
 }
@@ -84,120 +87,284 @@ function materiallyDifferent(left, right) {
   const words = value => value.split(/\s+/u).length;
   return descriptionOverlap(a, b).score < 0.9 || Math.abs(words(a) - words(b)) / Math.max(words(a), words(b)) > 0.15;
 }
+const REJECTION_CODES = Object.freeze(['title-mismatch', 'location-mismatch', 'employer-mismatch', 'tenant-unproven', 'poster-tenant', 'salary-mismatch', 'no-anchor', 'invalid-quotes', 'ambiguous', 'closed', 'unreadable', 'oversize', 'unsafe-url', 'unsafe-address', 'fetch-timeout', 'fetch-failed', 'unsupported-content-type', 'invalid-text', 'crawl-budget']);
+const FETCH_COUNTERS = Object.freeze(['fetches', 'uniqueUrls', 'cacheHits', 'breakerTrips']);
+const MISS_TTL_MS = 24 * 60 * 60 * 1_000;
+const ROW_CONCURRENCY = 6;
 function telemetryBlock() {
   return { total: 0, levels: Object.fromEntries(OFFICIAL_POSTING_LEVELS.map(level => [level, 0])),
     outcomes: Object.fromEntries(OFFICIAL_POSTING_OUTCOMES.map(outcome => [outcome, 0])), rejections: {},
-    handoffs: 0, handoffMs: 0,
-    materialJdChange: 0, bridgeTimeout: 0, bridgeUnavailable: 0 };
+    handoffs: 0, handoffMs: 0, failed: 0, materialJdChange: 0, bridgeTimeout: 0, bridgeUnavailable: 0,
+    fetches: 0, uniqueUrls: 0, cacheHits: 0, maxPerHostRate: 0, breakerTrips: 0 };
+}
+function countPosting(stats, posting) {
+  stats.total += 1;
+  stats.levels[posting.level] += 1; stats.outcomes[posting.outcome] += 1;
+  for (const code of new Set(posting.trail || [])) {
+    if (code === 'bridge-timeout') stats.bridgeTimeout += 1;
+    if (code === 'bridge-unavailable') stats.bridgeUnavailable += 1;
+    if (REJECTION_CODES.includes(code)) stats.rejections[code] = (stats.rejections[code] || 0) + 1;
+  }
+}
+const count = value => typeof value === 'number' && Number.isFinite(value) ? Math.max(0, value) : 0;
+
+/** Combine disjoint carried/resolved row counts without retaining page facts. */
+export function mergeOfficialPostingTelemetry(...blocks) {
+  const result = telemetryBlock();
+  for (const block of blocks) {
+    if (!block || typeof block !== 'object') continue;
+    for (const key of Object.keys(result)) {
+      if (typeof result[key] === 'number') result[key] = key === 'maxPerHostRate'
+        ? Math.max(result[key], count(block[key])) : result[key] + count(block[key]);
+    }
+    for (const level of OFFICIAL_POSTING_LEVELS) result.levels[level] += count(block.levels?.[level]);
+    for (const outcome of OFFICIAL_POSTING_OUTCOMES) result.outcomes[outcome] += count(block.outcomes?.[outcome]);
+    for (const code of REJECTION_CODES) if (count(block.rejections?.[code])) result.rejections[code] = (result.rejections[code] || 0) + count(block.rejections[code]);
+  }
+  // Per-board counts of rows an aggregator board reported closed. Present only
+  // when a pass saw any, so a pass without them keeps its historical shape.
+  const boardClosed = mergeBoardClosedTelemetry(...blocks.map(block => block?.boardClosed));
+  if (Object.keys(boardClosed).length) result.boardClosed = boardClosed;
+  return result;
+}
+async function parallelRows(members, operation) {
+  let next = 0;
+  await Promise.all(Array.from({ length: Math.min(ROW_CONCURRENCY, members.length) }, async () => {
+    while (next < members.length) {
+      const member = members[next++];
+      await operation(member);
+    }
+  }));
+}
+function abortTrail(signal) {
+  return OFFICIAL_POSTING_TRAIL.includes(signal?.reason?.code) ? signal.reason.code : 'bridge-aborted';
 }
 
-/** Chunks are frozen before cache reads. Free host verification precedes all
- * research; a partial cache hit never changes a handoff's members or hints. */
+/** Only host records bound to this scraped identity can settle an inline row.
+ * Unresolved indices preserve input order for the caller's exact merge. */
+export async function partitionOfficialPostingRows(jobs, { store, signal, now = Date.now } = {}) {
+  const rows = Array.isArray(jobs) ? jobs : [];
+  const carried = rows.slice(); const settled = new Set(); const settledTelemetry = telemetryBlock();
+  const instant = typeof now === 'function' ? Number(now()) : Number(now);
+  try { store ||= getOfficialPostingStore(); } catch { store = null; }
+  await parallelRows(rows.map((job, index) => ({ job, index })), async ({ job, index }) => {
+    if (signal?.aborted || !store || !normalizeOfficialPosting(job?.officialPosting)) return;
+    let record;
+    try { record = await store.find(job); } catch { return; }
+    const posting = normalizeOfficialPosting(record?.officialPosting);
+    if (!posting || !officialPostingRecordMatchesScrapedIdentity(job, record)
+      || !shouldPersistOfficialPostingResult(posting, { signal })) return;
+    if (!VERIFIED_LEVELS.has(posting.level)) {
+      const age = instant - record.savedAt;
+      if (!Number.isFinite(age) || age < 0 || age >= MISS_TTL_MS) return;
+    }
+    if (signal?.aborted) return;
+    const postedBy = VERIFIED_LEVELS.has(posting.level)
+      ? strictEmployerEqual(posting.employer, job?.company) ? undefined : job?.company
+      : unresolvedOfficialPosting(job).postedBy;
+    carried[index] = { ...job, postedBy, officialPosting: posting };
+    settled.add(index); countPosting(settledTelemetry, posting);
+  });
+  return { jobs: carried, unresolvedIndices: rows.flatMap((_, index) => settled.has(index) ? [] : [index]), settledTelemetry };
+}
+
+/** One generic Solve handler can checkpoint and publish the same inputs.
+ * This receipt is local to that pass, never a durable transient-miss cache. */
+export function createOfficialPostingRecoveryPassResolver(resolveRows, { signal } = {}) {
+  if (typeof resolveRows !== 'function') throw new TypeError('Recovery resolution needs a host resolver.');
+  const receipts = new Map(); const drops = []; const boardClosedDrops = [];
+  let passTelemetry = telemetryBlock();
+  return async rows => {
+    if (signal?.aborted) throw signal.reason || bridgeError('bridge-aborted');
+    const input = Array.isArray(rows) ? rows : [];
+    const consumed = new Set();
+    const planned = input.map(job => {
+      const receipt = (receipts.get(sourceJobKey(job)) || []).find(value => !consumed.has(value)
+        && officialPostingRecordMatchesScrapedIdentity(job, value));
+      if (receipt) consumed.add(receipt);
+      return { job, receipt };
+    });
+    const fresh = planned.filter(item => !item.receipt);
+    // Snapshot authorization before a provider or cleanup can mutate a row.
+    const identities = fresh.map(({ job }) => ({ key: sourceJobKey(job), aliases: officialPostingAliases(job) }));
+    if (fresh.length) {
+      const resolved = await resolveRows(fresh.map(item => item.job));
+      if (signal?.aborted) throw signal.reason || bridgeError('bridge-aborted');
+      if (!Array.isArray(resolved?.jobs)) throw new TypeError('Recovery resolution returned invalid rows.');
+      const resolvedDrops = Array.isArray(resolved.officialDedupDrops) ? resolved.officialDedupDrops : [];
+      if ((Number(resolved.officialDedupDropped) || 0) !== resolvedDrops.length) throw new TypeError('Recovery resolution needs every dedup receipt.');
+      // Board-closed rows the official source did not keep leave the pass the same
+      // way a dedup loser does: each input identity is either kept or receipted.
+      const resolvedBoardDrops = Array.isArray(resolved.boardClosedDrops) ? resolved.boardClosedDrops : [];
+      if ((Number(resolved.boardClosedDropped) || 0) !== resolvedBoardDrops.length) throw new TypeError('Recovery resolution needs every board-closed receipt.');
+      const accountedDrops = [...resolvedDrops, ...resolvedBoardDrops];
+      const usedKept = new Set(); const usedDrops = new Set();
+      for (const [index, item] of fresh.entries()) {
+        const identity = identities[index];
+        const sameInput = candidate => sourceJobKey(candidate) === identity.key
+          && officialPostingRecordMatchesScrapedIdentity(candidate, identity);
+        const keptIndex = resolved.jobs.findIndex((value, at) => !usedKept.has(at) && sameInput(value));
+        const droppedIndex = keptIndex < 0 ? accountedDrops.findIndex((value, at) => !usedDrops.has(at) && sameInput(value.dropped)) : -1;
+        if (keptIndex < 0 && droppedIndex < 0) throw new TypeError('Recovery resolution omitted an input identity.');
+        if (keptIndex >= 0) usedKept.add(keptIndex); else usedDrops.add(droppedIndex);
+        const kept = resolved.jobs[keptIndex];
+        const bucket = receipts.get(identity.key) || [];
+        item.receipt = { aliases: identity.aliases, dropped: !kept,
+          postedBy: kept?.postedBy, officialPosting: normalizeOfficialPosting(kept?.officialPosting) || undefined };
+        bucket.push(item.receipt);
+        receipts.set(identity.key, bucket);
+      }
+      drops.push(...resolvedDrops); boardClosedDrops.push(...resolvedBoardDrops);
+      passTelemetry = mergeOfficialPostingTelemetry(passTelemetry, resolved.officialPosting);
+    }
+    const outputReceipts = new Map();
+    const combined = planned.flatMap(({ job, receipt }) => {
+      if (receipt.dropped) return [];
+      const row = { ...job, postedBy: receipt.postedBy, officialPosting: receipt.officialPosting };
+      outputReceipts.set(row, receipt);
+      return [row];
+    });
+    const deduped = officialPostingDedup(combined);
+    for (const drop of deduped.dropped) {
+      const receipt = outputReceipts.get(drop.dropped);
+      if (receipt) receipt.dropped = true;
+    }
+    drops.push(...deduped.dropped);
+    return { jobs: deduped.kept, officialPosting: passTelemetry,
+      officialDedupDropped: drops.length, officialDedupDrops: [...drops],
+      boardClosedDropped: boardClosedDrops.length, boardClosedDrops: [...boardClosedDrops] };
+  };
+}
+
+/** Chunks are frozen from this input before cache reads. Six host workers do
+ * not change research membership; handoff chunks remain strictly sequential. */
 export async function resolveOfficialPostings(jobs, {
   manualAiRunId, nodeId, signal, callRaw = callLLMRaw, callMatch = callRaw, onProgress, telemetry,
-  store, fetch = fetchOfficialPosting, resolve = resolveOfficialPosting, now = Date.now,
+  store, fetch = fetchOfficialPosting, fetchSession, resolve = resolveOfficialPosting, now = Date.now,
   timeoutMs = OFFICIAL_POSTING_HANDOFF_TIMEOUT_MS, bridgeAvailable = true,
 } = {}) {
   const rows = Array.isArray(jobs) ? jobs : [];
   const chunks = officialPostingChunks(rows);
   const clock = () => typeof now === 'function' ? Number(now()) : Number(now);
   const stats = telemetryBlock();
-  stats.total = rows.length;
   const results = new Map(); const finished = new Set();
+  const session = fetchSession || createOfficialPostingFetchSession({ fetch, signal });
+  const initialFetchStats = session.telemetry();
+  const members = chunks.flat();
+  for (const member of members) member.rowBudget = createOfficialPostingRowBudget({ signal });
   try { store ||= getOfficialPostingStore(); } catch { store = null; }
   const progress = () => { try { onProgress?.({ completed: finished.size, total: rows.length }); } catch { /* Progress cannot fail the search. */ } };
   const settle = member => { finished.add(member); progress(); };
-  const safeResolve = async (job, options) => {
-    try { return await resolve(job, { store, fetch, signal, now: clock, ...options }); }
-    catch (error) { return unresolvedOfficialPosting(job, { outcome: 'failed', trail: [signal?.aborted ? 'bridge-aborted' : error?.code || 'fetch-failed'] }); }
+  const safeResolve = async (member, options) => {
+    const rowSignal = member.rowBudget.signal;
+    if (rowSignal.aborted) return unresolvedOfficialPosting(member.job, { outcome: 'failed', trail: [abortTrail(rowSignal)] });
+    try {
+      const result = await resolve(member.job, { store, fetch: session.fetch, signal: rowSignal, rowBudget: member.rowBudget,
+        now: clock, persistResults: false, persistMisses: false, ...options });
+      if (!normalizeOfficialPosting(result?.officialPosting)) throw new TypeError('Invalid official posting resolution.');
+      return result;
+    } catch (error) {
+      if (!rowSignal.aborted) {
+        stats.failed += 1;
+        console.warn('[OfficialPosting] Row resolution failed:', error?.code || error?.name || 'Error');
+      }
+      return unresolvedOfficialPosting(member.job, { outcome: 'failed', trail: [rowSignal.aborted ? abortTrail(rowSignal) : 'failed'] });
+    }
   };
-  const persist = async (member, result) => {
-    if (!store || signal?.aborted || result.officialPosting.trail?.includes('recent-miss')) return result;
+  const persist = async (member, result, { researchRan = false } = {}) => {
+    // The row budget also ends for incidental host limits (sixty seconds of host time, sixteen pages). That may discard a crawl's
+    // miss but never a verified match already found; only the run being stopped makes a verified result non-durable.
+    const durability = VERIFIED_LEVELS.has(result.officialPosting?.level) ? signal : member.rowBudget.signal;
+    if (!store || result.record || result.officialPosting?.trail?.includes('recent-miss')
+      || !shouldPersistOfficialPostingResult(result, { signal: durability, researchRan })) return result;
     try {
       const record = await store.save(member.job, { officialPosting: result.officialPosting, description: result.description });
       return { ...result, record, officialPosting: record.officialPosting };
-    } catch { return unresolvedOfficialPosting(member.job, { outcome: 'failed', trail: [...(result.officialPosting.trail || []), 'fetch-failed'] }); }
-  };
-  progress();
-  // Do not persist new misses here: they must remain eligible for this run's
-  // later batched discovery rather than looking like a prior 24-hour miss.
-  for (const chunk of chunks) for (const member of chunk) {
-    const result = await safeResolve(member.job, { persistMisses: false });
-    results.set(member, result);
-    if (VERIFIED_LEVELS.has(result.officialPosting.level)) settle(member);
-  }
-  for (let batch = 0; batch < chunks.length; batch += 1) {
-    const chunk = chunks[batch];
-    if (chunk.every(member => VERIFIED_LEVELS.has(results.get(member).officialPosting.level))) continue;
-    const pending = chunk.filter(member => !finished.has(member) && !results.get(member).officialPosting.trail?.includes('recent-miss'));
-    if (signal?.aborted || !bridgeAvailable) {
-      for (const member of pending) {
-        const result = addTrail(results.get(member), signal?.aborted ? 'bridge-aborted' : 'bridge-unavailable');
-        results.set(member, await persist(member, result)); settle(member);
-      }
-      for (const member of chunk) if (!finished.has(member)) settle(member);
-      continue;
-    }
-    let leads;
-    try {
-      const request = buildOfficialPostingResearchRequest(chunk.map(member => member.job));
-      const raw = await cappedHandoff(request, { call: callRaw, signal, timeoutMs, manualAiRunId, nodeId,
-        hints: { itemCount: chunk.length, batch: batch + 1, batchTotal: chunks.length }, now: clock, stats });
-      leads = new Map(parseOfficialPostingResearchResponse(raw, chunk.map(member => member.id)).map(row => [row.id, row.candidates]));
     } catch (error) {
-      for (const member of pending) {
-        results.set(member, await persist(member, addTrail(results.get(member), failureCode(error, signal)))); settle(member);
+      stats.failed += 1;
+      console.warn('[OfficialPosting] Resolution storage failed:', error?.code || error?.name || 'Error');
+      return unresolvedOfficialPosting(member.job, { outcome: 'failed', trail: [...(result.officialPosting?.trail || []), 'failed'] });
+    }
+  };
+  try {
+    progress();
+    await parallelRows(members, async member => {
+      let result = await safeResolve(member);
+      if (VERIFIED_LEVELS.has(result.officialPosting?.level)) result = await persist(member, result);
+      results.set(member, result);
+      if (VERIFIED_LEVELS.has(result.officialPosting?.level) || result.officialPosting?.trail?.includes('recent-miss') || member.rowBudget.signal.aborted) settle(member);
+    });
+    for (let batch = 0; batch < chunks.length; batch += 1) {
+      const chunk = chunks[batch];
+      const pending = chunk.filter(member => !finished.has(member));
+      if (pending.length === 0) continue;
+      if (signal?.aborted || !bridgeAvailable) {
+        for (const member of pending) {
+          const result = addTrail(results.get(member), signal?.aborted ? 'bridge-aborted' : 'bridge-unavailable');
+          results.set(member, await persist(member, result)); settle(member);
+        }
+        continue;
       }
-      for (const member of chunk) if (!finished.has(member)) settle(member);
-      continue;
-    }
-    for (const member of pending) {
-      if (signal?.aborted) { results.set(member, addTrail(results.get(member), 'bridge-aborted')); settle(member); continue; }
-      let matchFailure = null;
-      const match = async (job, candidate) => {
-        if (matchFailure) throw matchFailure;
-        const request = buildOfficialPostingMatchRequest({ scrapedDescription: job.snippet || job.description || '', officialDescription: candidate.description });
-        try {
-          const raw = await cappedHandoff(request, { call: callMatch, signal, timeoutMs, manualAiRunId, nodeId,
-            hints: { itemCount: 1, batch: batch + 1, batchTotal: chunks.length }, now: clock, stats });
-          return validateOfficialPostingMatchResponse(raw, { scrapedDescription: job.snippet || job.description || '', officialDescription: candidate.description });
-        } catch (error) { matchFailure = bridgeError(failureCode(error, signal)); throw matchFailure; }
-      };
-      let result = await safeResolve(member.job, { candidateUrls: leads.get(member.id) || [], bypassCache: true, match });
-      result = addTrail(result, 'bridge-research');
-      results.set(member, await persist(member, result)); settle(member);
-    }
-    for (const member of chunk) if (!finished.has(member)) settle(member);
-  }
-  for (const chunk of chunks) for (const member of chunk) {
-    let result = results.get(member);
-    if (TEXT_LEVELS.has(result.officialPosting.level)) {
-      let description = result.description;
-      if (!description && store && result.officialPosting.contentHash) try { description = await store.readText(result.officialPosting.contentHash); } catch { /* The view handles missing/corrupt text. */ }
-      if (materiallyDifferent(member.job.snippet || member.job.description, description)) {
-        result = addTrail(result, 'material-jd-change'); stats.materialJdChange += 1;
-        // Only durable verified results reach this branch. Preserve a newer
-        // proof if another operation changed the complete record meanwhile.
-        if (store && result.record && !signal?.aborted) try {
-          const record = await store.save(member.job, { officialPosting: result.officialPosting, expectedRecord: result.record });
-          if (record) result = { ...result, record, officialPosting: record.officialPosting };
-        } catch { /* Telemetry and the row still retain the detected change. */ }
-        results.set(member, result);
+      let leads;
+      try {
+        const request = buildOfficialPostingResearchRequest(chunk.map(member => member.job));
+        const raw = await cappedHandoff(request, { call: callRaw, signal, timeoutMs, manualAiRunId, nodeId,
+          hints: { itemCount: chunk.length, batch: batch + 1, batchTotal: chunks.length }, now: clock, stats });
+        leads = new Map(parseOfficialPostingResearchResponse(raw, chunk.map(member => member.id)).map(row => [row.id, row.candidates]));
+      } catch (error) {
+        for (const member of pending) {
+          results.set(member, await persist(member, addTrail(results.get(member), failureCode(error, signal)))); settle(member);
+        }
+        continue;
       }
+      await parallelRows(pending, async member => {
+        if (signal?.aborted || member.rowBudget.signal.aborted) {
+          results.set(member, addTrail(results.get(member), abortTrail(member.rowBudget.signal))); settle(member); return;
+        }
+        let matchFailure = null;
+        const match = async (job, candidate) => {
+          if (matchFailure) throw matchFailure;
+          try {
+            const request = buildOfficialPostingMatchRequest({ scrapedDescription: job.snippet || job.description || '', officialDescription: candidate.description });
+            const raw = await cappedHandoff(request, { call: callMatch, signal: member.rowBudget.signal, timeoutMs, manualAiRunId, nodeId,
+              hints: { itemCount: 1, batch: batch + 1, batchTotal: chunks.length }, now: clock, stats });
+            return validateOfficialPostingMatchResponse(raw, { scrapedDescription: job.snippet || job.description || '', officialDescription: candidate.description });
+          } catch (error) { matchFailure = bridgeError(failureCode(error, member.rowBudget.signal)); throw matchFailure; }
+        };
+        let result = await safeResolve(member, { candidateUrls: leads.get(member.id) || [], bypassCache: true, match, researchRan: true });
+        result = addTrail(result, 'bridge-research');
+        results.set(member, await persist(member, result, { researchRan: true })); settle(member);
+      });
     }
-    const posting = result.officialPosting;
-    stats.levels[posting.level] += 1; stats.outcomes[posting.outcome] += 1;
-    for (const code of new Set(posting.trail || [])) {
-      if (code === 'bridge-timeout') stats.bridgeTimeout += 1;
-      if (code === 'bridge-unavailable') stats.bridgeUnavailable += 1;
-      if (['title-mismatch', 'location-mismatch', 'employer-mismatch', 'tenant-unproven', 'poster-tenant', 'salary-mismatch', 'no-anchor', 'invalid-quotes', 'ambiguous', 'closed', 'unreadable', 'oversize', 'unsafe-url', 'unsafe-address', 'fetch-timeout', 'fetch-failed', 'unsupported-content-type', 'invalid-text'].includes(code)) stats.rejections[code] = (stats.rejections[code] || 0) + 1;
+    for (const member of members) {
+      let result = results.get(member);
+      if (TEXT_LEVELS.has(result.officialPosting?.level)) {
+        let description = result.description;
+        if (!description && store && result.officialPosting.contentHash) try { description = await store.readText(result.officialPosting.contentHash); } catch { /* The view handles missing/corrupt text. */ }
+        if (materiallyDifferent(member.job.snippet || member.job.description, description)) {
+          result = addTrail(result, 'material-jd-change'); stats.materialJdChange += 1;
+          // A newer complete proof wins over feedback about an older record.
+          if (store && result.record && !member.rowBudget.signal.aborted) try {
+            const record = await store.save(member.job, { officialPosting: result.officialPosting, expectedRecord: result.record });
+            if (record) result = { ...result, record, officialPosting: record.officialPosting };
+          } catch { /* Telemetry and row retain the detected change. */ }
+          results.set(member, result);
+        }
+      }
+      countPosting(stats, result?.officialPosting || unresolvedOfficialPosting(member.job, { outcome: 'failed', trail: ['failed'] }).officialPosting);
     }
+    const finalFetchStats = session.telemetry();
+    for (const key of FETCH_COUNTERS) stats[key] = Math.max(0, count(finalFetchStats[key]) - count(initialFetchStats[key]));
+    stats.maxPerHostRate = count(finalFetchStats.maxPerHostRate);
+    const byJob = new Map([...results].map(([member, result]) => [member.job, result]));
+    const resolved = rows.map(job => { const result = byJob.get(job); return { ...job, postedBy: result?.postedBy,
+      officialPosting: normalizeOfficialPosting(result?.officialPosting) || undefined }; });
+    if (telemetry && typeof telemetry === 'object') telemetry.officialPosting = stats;
+    return { jobs: resolved, telemetry: stats };
+  } finally {
+    for (const member of members) member.rowBudget.dispose();
+    if (!fetchSession) session.dispose?.();
   }
-  const byJob = new Map([...results].map(([member, result]) => [member.job, result]));
-  const resolved = rows.map(job => { const result = byJob.get(job); return { ...job, postedBy: result?.postedBy,
-    officialPosting: normalizeOfficialPosting(result?.officialPosting) || undefined }; });
-  if (telemetry && typeof telemetry === 'object') telemetry.officialPosting = stats;
-  return { jobs: resolved, telemetry: stats };
 }
 
 function atsPostingKey(posting) {

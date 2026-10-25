@@ -202,8 +202,8 @@ function text(value) {
 // Job boards often append an all-caps shorthand to the employer's display
 // name. It is useful metadata, but spelling it out in a salutation is an
 // unnecessary introduction to the team receiving the letter. This is strictly
-// a salutation display rule: body copy and all matching continue to receive
-// the unmodified job.company value.
+// a salutation display rule. The body identity helper below exposes the same
+// normalized spelling while callers retain the unmodified job.company value.
 const TRAILING_PARENTHESIZED_ACRONYM_RE = /^(.*?)\s+\(\s*([A-Z0-9.&/+_-]+)\s*\)$/u;
 
 // The same display rule covers a legal-entity suffix: "Dear Reddit, Inc.
@@ -212,14 +212,35 @@ const TRAILING_PARENTHESIZED_ACRONYM_RE = /^(.*?)\s+\(\s*([A-Z0-9.&/+_-]+)\s*\)$
 // the name people actually say ("The Walt Disney Company").
 const SALUTATION_LEGAL_SUFFIX_RE = /[,\s]+(?:incorporated|corporation|limited|l\.l\.c\.?|llc|inc\.?|ltd\.?|corp\.?|plc|gmbh|pbc)\s*$/iu;
 
-function salutationCompanyName(value = '') {
+function normalizedCompanyDisplayName(value = '') {
   const company = text(value);
   const match = TRAILING_PARENTHESIZED_ACRONYM_RE.exec(company);
   // Require an actual initialism rather than removing a one-letter or numeric qualifier.
   const acronymCharacters = match ? match[2].replace(/[^A-Z0-9]/g, '') : '';
   const withoutAcronym = match && acronymCharacters.length >= 2 && /[A-Z]/.test(acronymCharacters) ? text(match[1]) : company;
   const withoutSuffix = withoutAcronym.replace(SALUTATION_LEGAL_SUFFIX_RE, '').trim();
-  const displayName = withoutSuffix || withoutAcronym;
+  return withoutSuffix || withoutAcronym;
+}
+
+/** Body identity variants share the salutation's exact suffix/initialism
+ * normalization without changing its punctuation-based neutral greeting. */
+export function targetCompanyNames(value = '') {
+  return targetCompanyNameForms(value).map(form => form.name);
+}
+
+/** The same names, each marked `derived` when only the suffix/initialism
+ * normalization produced it ("Anchor" from "Anchor Corporation"), as opposed
+ * to the frozen name itself or its pre-separator prefix. A derived one-word
+ * name can be an ordinary lowercase word, so its readers can ask for it. */
+export function targetCompanyNameForms(value = '') {
+  const company = typeof value === 'string' ? value.normalize('NFKC').replace(/\s+/gu, ' ').trim() : '';
+  const forms = [company, company.split(/\s+[-–—|]\s+/u)[0]];
+  return [...new Set(forms.flatMap(name => [name, normalizedCompanyDisplayName(name)]).filter(Boolean))]
+    .map(name => ({ name, derived: !forms.includes(name) }));
+}
+
+function salutationCompanyName(value = '') {
+  const displayName = normalizedCompanyDisplayName(value);
   // The host owns this field, so a writer cannot repair punctuation copied
   // from a board's employer display name. Use the neutral salutation instead
   // of altering the employer's name or spending every correction on it.
@@ -483,7 +504,10 @@ function joinAbbreviationSegments(segments) {
   for (const segment of segments) {
     const last = joined.length - 1;
     const boundary = last >= 0 ? abbreviationBoundary(joined[last].text, segment) : null;
-    if (boundary === 'join') {
+    if (last >= 0 && /(?:^|\s)\.$/u.test(joined[last].text) && /^\p{L}/u.test(segment)) {
+      // A word that opens with its period (".NET") is one token, not a sentence end.
+      joined[last].text = `${joined[last].text}${segment}`;
+    } else if (boundary === 'join') {
       joined[last].text = `${joined[last].text}${/\s$/u.test(joined[last].text) ? '' : ' '}${segment}`;
     } else {
       joined.push({ text: segment, uncertainStart: boundary === 'likely-end' });
@@ -3671,12 +3695,13 @@ function companyReferenceAliases(companyName = '') {
   // Job boards vary between a trading name and a legal name.  Treat the
   // suffix-less name as the same employer without guessing from a token in a
   // longer unrelated company name.
-  const tradingName = name.replace(/\b(?:incorporated|inc\.?|llc|ltd\.?|limited|corp\.?|corporation|co\.?|company|plc)\s*$/iu, '').trim();
+  const tradingName = normalizedCompanyDisplayName(name)
+    .replace(/\b(?:incorporated|inc\.?|llc|ltd\.?|limited|corp\.?|corporation|co\.?|company|plc)\s*$/iu, '').replace(/[,\s]+$/u, '');
   const ignored = new Set(['and', 'of', 'the', 'for', 'at']);
   const acronym = words(tradingName || name)
     .filter(word => !ignored.has(normalized(word)))
     .map(word => word[0] || '')
-    .join('');
+    .join('').toUpperCase();
   return [...new Set([name, tradingName, acronym.length >= 2 ? acronym : ''].filter(Boolean))];
 }
 
@@ -3705,6 +3730,22 @@ function sameCompanyReference(value, aliases) {
   const reference = item => normalized(item).replace(/[.,;:]+$/u, '').replace(/['’]s?$/u, '').trim();
   const candidate = reference(value);
   return aliases.some(alias => reference(alias) === candidate);
+}
+
+// These are ordinary English nouns, verbs, adjectives and adverbs as well as
+// possible organization labels. Their lowercase use supplies no proper name.
+const COMMON_COMPANY_ALIAS_WORDS = new Set([
+  ...ARGUMENT_STOP_WORDS,
+  'apple', 'beacon', 'block', 'box', 'bridge', 'canvas', 'compass', 'current', 'field', 'forward',
+  'guide', 'hired', 'indeed', 'level', 'linear', 'loop', 'monday', 'notion', 'orange', 'remote',
+  'scale', 'shift', 'signal', 'square', 'stripe', 'talent', 'target', 'track', 'way',
+]);
+
+function aliasSurfaceAllowed(alias, written) {
+  const plain = value => text(value).replace(/[.,;:]+$/u, '').replace(/['’]s?$/u, '').trim();
+  const original = plain(alias);
+  const caseSensitive = !/\s/u.test(original) && (original.length <= 3 || COMMON_COMPANY_ALIAS_WORDS.has(original.toLowerCase()) || TOOL_NAME_WORDS.has(original.toLowerCase()));
+  return !caseSensitive || plain(written) === original;
 }
 
 function plausibleNamedCompany(value) {
@@ -3763,17 +3804,21 @@ const PAST_HISTORY_BEFORE_EMPLOYER = /\b(?:did|had|was|were|built|created|delive
  * mention is still refused.
  */
 export function checkTargetCompanyBinding(paragraphs = [], companyName = '', priorEmployers = [], { evidence = null, jobText = '', forbiddenNames = [] } = {}) {
-  const targetAliases = companyReferenceAliases(companyName);
+  const targetAliases = [...new Set(targetCompanyNames(companyName).flatMap(companyReferenceAliases))];
   const priorAliases = (Array.isArray(priorEmployers) ? priorEmployers : [])
     .flatMap(companyReferenceAliases);
   const forbiddenAliases = (Array.isArray(forbiddenNames) ? forbiddenNames : [])
     .filter(name => !sameCompanyReference(name, targetAliases))
     .flatMap(companyReferenceAliases);
-  // Initialisms as short as "WE" can be pronouns, so the additional forms
-  // scan substantive approved aliases rather than arbitrary capitalised runs.
-  const substantiveAlias = alias => alias.length > 3 || /\s/u.test(alias);
-  const bindingAliases = [...new Set([...priorAliases, ...forbiddenAliases])].filter(substantiveAlias);
-  const substantiveForbiddenAliases = forbiddenAliases.filter(substantiveAlias);
+  // Generated short initialisms keep the existing refusal to guess a company
+  // from "WE". An explicit short name such as "Box" can be scanned, but only
+  // in its original case, just like an ordinary-word company label.
+  const explicitShortAliases = new Set([...(Array.isArray(priorEmployers) ? priorEmployers : []), ...(Array.isArray(forbiddenNames) ? forbiddenNames : [])]
+    .flatMap(name => [text(name), normalizedCompanyDisplayName(name)])
+    .filter(name => name.length <= 3 && !/\s/u.test(name)));
+  const additionalAlias = alias => alias.length > 3 || /\s/u.test(alias) || explicitShortAliases.has(alias);
+  const bindingAliases = [...new Set([...priorAliases, ...forbiddenAliases])].filter(additionalAlias);
+  const bindingForbiddenAliases = forbiddenAliases.filter(additionalAlias);
   if (!targetAliases.length && !priorAliases.length && !forbiddenAliases.length) {
     return result('target-company-binding', true, 'skipped: no company identities are available');
   }
@@ -3785,8 +3830,11 @@ export function checkTargetCompanyBinding(paragraphs = [], companyName = '', pri
   (Array.isArray(paragraphs) ? paragraphs : []).forEach((paragraph, paragraphIndex) => {
     sentences(paragraph).forEach((sentence, sentenceIndex) => {
       const value = text(sentence);
+      const targetSpans = targetAliases.flatMap(alias => [...value.matchAll(new RegExp(`(?<![\\p{L}\\p{N}])${escapeRegExp(alias)}(?:['’]s?)?(?![\\p{L}\\p{N}])`, 'giu'))]
+        .map(match => [match.index, match.index + match[0].length]))
+        .sort((left, right) => right[1] - right[0] - (left[1] - left[0]));
       const aliasObjects = bindingAliases.flatMap(alias =>
-        [...value.matchAll(new RegExp(`(?<![\\p{L}\\p{N}])(to|join|joining|help|helping|support|supporting|serve|serving|assist|assisting)\\s+(?:the\\s+)?(${escapeRegExp(alias)})(?:['’]s?)?(?![\\p{L}\\p{N}])`, 'giu'))].map(match => ({
+        [...value.matchAll(new RegExp(`(?<![\\p{L}\\p{N}])(to|join|joining|help|helping|support|supporting|serve|serving|assist|assisting)\\s+(?:the\\s+)?(${escapeRegExp(alias)})(?:['’]s?)?(?![\\p{L}\\p{N}])`, 'giu'))].filter(match => aliasSurfaceAllowed(alias, match[2])).map(match => ({
           value: match[2], index: match.index ?? -1, preposition: match[1].toLowerCase(), prefixEnd: (match.index ?? 0) + match[0].indexOf(match[2]),
         })));
       if (!PROSPECTIVE_COMPANY_FRAME.test(value)
@@ -3811,11 +3859,17 @@ export function checkTargetCompanyBinding(paragraphs = [], companyName = '', pri
           [...value.matchAll(new RegExp(`(?<![\\p{L}\\p{N}])(${escapeRegExp(alias)})(?:['’]s?(?=\\s)|(?=\\s+(?:would|could|can|will)\\b))(?![\\p{L}\\p{N}])`, 'giu'))].map(match => ({
             value: match[1], index: match.index ?? -1, preposition: '', prefixEnd: match.index ?? 0,
           }))),
-        ...substantiveForbiddenAliases.flatMap(alias =>
+        ...bindingForbiddenAliases.flatMap(alias =>
           [...value.matchAll(new RegExp(`(?<![\\p{L}\\p{N}])(${escapeRegExp(alias)})(?:['’]s?)?(?![\\p{L}\\p{N}])`, 'giu'))].map(match => ({
             value: match[1], index: match.index ?? -1, preposition: '', prefixEnd: match.index ?? 0,
           }))),
-      ].filter(match => plausibleNamedCompany(match.value));
+      ].filter(match => {
+        if (!plausibleNamedCompany(match.value)) return false;
+        const start = match.prefixEnd; const end = start + match.value.length;
+        if (targetSpans.some(([targetStart, targetEnd]) => targetStart <= start && end <= targetEnd)) return false;
+        const approvedAliases = [...priorAliases, ...forbiddenAliases].filter(alias => sameCompanyReference(match.value, [alias]));
+        return !approvedAliases.length || approvedAliases.some(alias => aliasSurfaceAllowed(alias, match.value));
+      });
       for (const employer of namedEmployers) {
         const named = employer.value;
         if (sameCompanyReference(named, targetAliases)) continue;

@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import { runInNewContext } from 'node:vm';
 import { officialPostingDisplay } from '../../src/utils/officialPostingDisplay.js';
+import { beginOfficialPostingPreparation } from '../../src/utils/officialPostingPreparation.js';
 import { OFFICIAL_POSTING_LABELS } from '../../electron/ipc/officialPostingFields.js';
 import { normalizeJobListingExternalUrl } from '../../src/utils/jobListingUrl.js';
 import { createModuleRunQueue } from '../../src/utils/moduleRunQueue.js';
@@ -69,7 +70,7 @@ function harness({ prepare, data = row(), queueResult = { success: false }, abse
     getDismissedApplicationBundles: () => new Set(), hasLinkedLocalApplicationOutput, queuedLocalApplicationStartDecision,
     queuedLocalApplicationSettlement, replacedLocalApplicationForCleanup,
     requestApplicationHandoffFocus() {}, requestApplicationHandoffRefresh() {},
-    normalizeJobListingExternalUrl, setTimeout: fn => { fn(); return 0; },
+    normalizeJobListingExternalUrl, beginOfficialPostingPreparation, setTimeout: fn => { fn(); return 0; },
     acquireModuleRun: options => { leases++; laneLabel = options.label; return queue.acquireModuleRun(options); },
   };
   return { callback: runInNewContext(`${generateBody()}\ngenerateApplication;`, context), context, states, calls, completed, cancelled, updates, toasts,

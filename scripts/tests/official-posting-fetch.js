@@ -121,6 +121,18 @@ export default [
     },
   },
   {
+    name: 'Official posting fetch gives a reused hop transfer this request\'s own requestedUrl while keeping the reused bytes and final URL',
+    async run() {
+      const shared = { body: '<main>Shared</main>', url: 'https://www.northwind.test/', sourceUrl: 'https://www.northwind.test/',
+        contentType: 'text/html', statusCode: 200, requestedUrl: 'https://northwind.test/' };
+      const result = await fetchOfficialPosting('https://www.northwind.test/', { lookup: publicLookup,
+        request: () => { throw new Error('a reused hop must not request'); },
+        hopHooks: { beforeRequest: async () => ({ reuse: Promise.resolve(shared) }) } });
+      assert.equal(result.requestedUrl, 'https://www.northwind.test/'); assert.equal(result.url, shared.url); assert.equal(result.body, shared.body);
+      assert.equal(shared.requestedUrl, 'https://northwind.test/', 'the shared transfer is not mutated for its other subscribers');
+    },
+  },
+  {
     name: 'Official posting remote schema requires a stated restriction and consistent remote flags without inferring a location',
     run() {
       assert.deepEqual(normalizeOfficialLocation({ display: '', workMode: 'remote', remoteCountry: 'Canada' }), {
@@ -141,7 +153,7 @@ export default [
   {
     name: 'Official posting shared wire schema is exact and bounded and never carries a row applyUrl',
     run() {
-      assert.deepEqual(OFFICIAL_POSTING_ROW_FIELDS, ['postedBy', 'applyOptions', 'salaryProvenance', 'officialPosting']);
+      assert.deepEqual(OFFICIAL_POSTING_ROW_FIELDS, ['postedBy', 'applyOptions', 'salaryProvenance', 'officialPosting', 'boardClosed']);
       const valid = { level: 'L2', outcome: 'found', employer: 'Northwind Labs', title: 'Engineer',
         location: { display: 'Lakeview', remote: false, workMode: 'onsite' }, salary: { text: '$50/hr', provenance: 'posted' },
         sourceUrl: 'https://jobs.northwind.test/1', officialApplyUrl: 'https://jobs.northwind.test/1/apply', trail: ['careers-page', 'salary-anchor'],

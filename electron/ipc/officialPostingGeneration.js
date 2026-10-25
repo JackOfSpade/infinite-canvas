@@ -7,7 +7,7 @@ import { fetchOfficialPosting } from './officialPostingFetch.js';
 import { extractOfficialPostingCandidates } from './officialPostingExtractors.js';
 import { evaluateOfficialPostingMatch, frozenOfficialEmployer } from './officialPostingMatch.js';
 import { extractAtsTenant, strictEmployerEqual } from './officialSourceHosts.js';
-import { officialPostingAdapterUrl, readableOfficialPostingDescription, unresolvedOfficialPosting, verifiedOfficialPostingApplyUrl } from './officialPostingResolver.js';
+import { officialPostingAdapterUrl, readableOfficialPostingDescription, unresolvedOfficialPosting, verifiedOfficialPostingApplyUrl, shouldPersistOfficialPostingResult } from './officialPostingResolver.js';
 import { normalizeOfficialLocation, normalizeOfficialPosting, normalizeOfficialSalary, officialHttpsUrl, OFFICIAL_POSTING_TRAIL } from './officialPostingFields.js';
 
 export const OFFICIAL_POSTING_PREPARE_TIMEOUT_MS = 15 * 60 * 1000;
@@ -51,9 +51,10 @@ const semaphore = createOfficialPostingPrepareSemaphore();
 function remember(scrapedJob, result, now) {
   for (const [id, entry] of prepared) if (now - entry.createdAt >= PREPARED_TTL_MS) prepared.delete(id);
   const aliases = aliasesOf(scrapedJob);
-  const record = { scrapedJob: structuredClone(scrapedJob), officialPosting: structuredClone(result.officialPosting),
+  const officialPosting = normalizeOfficialPosting(result?.officialPosting) || unresolvedOfficialPosting(scrapedJob, { outcome: 'failed', trail: ['failed'] }).officialPosting;
+  const record = { scrapedJob: structuredClone(scrapedJob), officialPosting: structuredClone(officialPosting),
     description: typeof result.description === 'string' ? result.description : undefined,
-    postedBy: result.postedBy || '', applyUrl: result.officialPosting.officialApplyUrl || '', aliases, createdAt: now };
+    postedBy: result.postedBy || '', applyUrl: officialPosting.officialApplyUrl || '', aliases, createdAt: now };
   const resolutionId = crypto.randomUUID();
   prepared.set(resolutionId, record);
   let bytes = [...prepared.values()].reduce((sum, value) => sum + Buffer.byteLength(JSON.stringify(value)), 0);
@@ -74,58 +75,110 @@ export function getPreparedOfficialPosting(resolutionId, scrapedJob, { now = Dat
   return structuredClone(record);
 }
 
-async function reverify(job, record, { fetch, signal, now }) {
+function failedBoardPayload(data) {
+  return Boolean(data?.success === false || data?.ok === false || data?.error
+    || Array.isArray(data?.errors) && data.errors.length || data?.errors && !Array.isArray(data.errors)
+    || typeof data?.status === 'string' && /^(?:error|failed|failure|unavailable)$/iu.test(data.status)
+    || Number.isFinite(data?.statusCode) && data.statusCode >= 400);
+}
+function failedBoardPage(page) {
+  try { return failedBoardPayload(JSON.parse(page.body)); } catch { return false; }
+}
+function authoritativeBoardPage(page, route) {
+  if (!/json/iu.test(page?.contentType || '') || typeof page.body !== 'string') return false;
+  let data;
+  try { data = JSON.parse(page.body); } catch { return false; }
+  if (failedBoardPayload(data)) return false;
+  const jobs = route.ats === 'lever' ? data : ['ashby', 'greenhouse'].includes(route.ats) ? data?.jobs : null;
+  if (!Array.isArray(jobs) || data?.hasMore === true || data?.more === true || data?.nextPage || data?.nextCursor || data?.links?.next) return false;
+  if (data?.meta?.total !== undefined && (!Number.isInteger(data.meta.total) || data.meta.total < 0 || data.meta.total > jobs.length)) return false;
+  return jobs.every(job => {
+    const url = officialHttpsUrl(route.ats === 'ashby' ? job?.jobUrl : route.ats === 'greenhouse' ? job?.absolute_url : job?.hostedUrl);
+    const tenant = url && extractAtsTenant(url);
+    const id = job?.id; const title = route.ats === 'lever' ? job?.text : job?.title;
+    return job && typeof job === 'object' && !Array.isArray(job)
+      && (typeof id === 'string' && id.trim() || typeof id === 'number' && Number.isFinite(id))
+      && typeof title === 'string' && title.trim()
+      && tenant?.ats === route.ats && tenant?.tenant === route.tenant;
+  });
+}
+
+async function reverify(job, record, { fetch, signal, now, store }) {
   const prior = record.officialPosting; const url = prior.sourceUrl;
-  if (!url || !prior.employer) return unresolvedOfficialPosting(job, { outcome: 'unreadable', trail: ['unreadable'] });
+  const postedBy = strictEmployerEqual(job.company, prior.employer) ? '' : job.company;
+  const preserve = async code => {
+    let description;
+    if (textLevels.has(prior.level) && prior.contentHash) try { description = await store.readText(prior.contentHash); } catch { /* A missing text file cannot invalidate the proof record. */ }
+    active(signal);
+    return { postedBy, officialPosting: withTrail(prior, code, 'reverify-failed'), ...(typeof description === 'string' ? { description } : {}) };
+  };
+  const closed = () => unresolvedOfficialPosting(job, { outcome: 'closed', trail: ['closed'] });
+  if (!url) return preserve('unreadable');
   let page;
   try { page = await fetch(url, { signal }); active(signal); }
   catch (error) {
     active(signal);
-    if (error?.code === 'closed') return unresolvedOfficialPosting(job, { outcome: 'closed', trail: ['closed'] });
-    return { postedBy: strictEmployerEqual(job.company, prior.employer) ? '' : job.company,
-      officialPosting: withTrail({ ...prior, level: 'L4', outcome: 'unreadable', contentHash: undefined }, error?.code || 'fetch-failed') };
+    return [404, 410].includes(error?.statusCode) ? closed() : preserve(error?.code || 'fetch-failed');
   }
-  if (page.statusCode && page.statusCode !== 200) return unresolvedOfficialPosting(job, { outcome: 'closed', trail: ['closed'] });
-  const fetchedUrl = officialHttpsUrl(page.url || page.sourceUrl || url);
-  if (fetchedUrl !== officialHttpsUrl(url)) return unresolvedOfficialPosting(job, { outcome: 'not-found', trail: ['unsafe-url'] });
+  if (!page || typeof page !== 'object') return preserve('unreadable');
+  const fetchedUrl = officialHttpsUrl(page?.url || page?.sourceUrl || url);
+  if (fetchedUrl !== officialHttpsUrl(url) || page.requestedUrl && officialHttpsUrl(page.requestedUrl) !== officialHttpsUrl(url)) return preserve('unsafe-url');
+  if ([404, 410].includes(page.statusCode)) return closed();
+  if (page.statusCode && page.statusCode !== 200) return preserve('fetch-failed');
+  if (failedBoardPage(page)) return preserve('unreadable');
+  if (!prior.employer) return preserve('unreadable');
   const route = extractAtsTenant(url, { html: page.body });
   const extract = value => extractOfficialPostingCandidates({ body: value.body, sourceUrl: value.url || value.sourceUrl || url,
     contentType: value.contentType, ats: route?.ats || prior.ats || '', tenant: route?.tenant || prior.tenant || '', employer: prior.employer, now });
-  let candidates = extract(page).filter(candidate => officialHttpsUrl(candidate.sourceUrl) === officialHttpsUrl(url));
-  if (!candidates.length && route) {
+  let candidates;
+  try { candidates = extract(page).filter(candidate => officialHttpsUrl(candidate.sourceUrl) === officialHttpsUrl(url)); }
+  catch { return preserve('unreadable'); }
+  let authoritativeBoard = false;
+  if (!candidates.length && route && route.tenant === prior.tenant && (!prior.ats || prior.ats === route.ats)) {
     const adapter = officialPostingAdapterUrl(route, url);
     if (adapter) try {
       const board = await fetch(adapter, { signal }); active(signal);
-      if (officialHttpsUrl(board.url || board.sourceUrl || adapter) === officialHttpsUrl(adapter)) candidates = extract(board)
-        .filter(candidate => officialHttpsUrl(candidate.sourceUrl) === officialHttpsUrl(url));
+      if (officialHttpsUrl(board.url || board.sourceUrl || adapter) === officialHttpsUrl(adapter)
+        && (!board.requestedUrl || officialHttpsUrl(board.requestedUrl) === officialHttpsUrl(adapter))
+        && (!board.statusCode || board.statusCode === 200)) {
+        if (!failedBoardPage(board)) {
+          authoritativeBoard = authoritativeBoardPage(board, route);
+          candidates = extract(board).filter(candidate => officialHttpsUrl(candidate.sourceUrl) === officialHttpsUrl(url));
+        }
+      }
     } catch { active(signal); }
   }
-  if (!candidates.length) return { postedBy: strictEmployerEqual(job.company, prior.employer) ? '' : job.company,
-    officialPosting: withTrail({ ...prior, level: 'L4', outcome: 'unreadable', contentHash: undefined }, 'unreadable', 'reverified') };
-  if (candidates.length !== 1) return unresolvedOfficialPosting(job, { outcome: 'ambiguous', trail: ['ambiguous'] });
+  if (!candidates.length) return authoritativeBoard ? closed() : preserve('unreadable');
+  if (candidates.length !== 1) return preserve('ambiguous');
   const candidate = candidates[0];
-  // These proof flags come only from the original host record and its exact
-  // canonical URL. New page fields must still pass every current hard gate.
+  if (authoritativeBoard && candidate.isListed === false) return closed();
+  // Proof is inherited only for this exact stored URL. Changed content still
+  // passes current employer, title, location and tenant hard gates.
   const verified = { ...candidate, tenantProven: Boolean(route && prior.tenant && route.tenant === prior.tenant),
     employerDomainProven: !route, officialPortalProven: /^(?:www\.)?usajobs\.gov$/u.test(new URL(url).hostname) };
   const evaluation = evaluateOfficialPostingMatch(job, verified, { now: now(), employerHypotheses: [prior.employer] });
   if (!strictEmployerEqual(candidate.employer, prior.employer) || (!evaluation.passed && evaluation.reason !== 'no-anchor')) {
-    const code = strictEmployerEqual(candidate.employer, prior.employer) ? evaluation.reason : 'employer-mismatch';
-    return unresolvedOfficialPosting(job, { outcome: code === 'closed' ? 'closed' : 'not-found', trail: [code] });
+    return preserve(strictEmployerEqual(candidate.employer, prior.employer) ? evaluation.reason : 'employer-mismatch');
+  }
+  if (typeof candidate.description !== 'string' || !candidate.description.trim()) return preserve('unreadable');
+  const changed = sha256(candidate.description) !== prior.contentHash;
+  if (!changed) {
+    return { postedBy, officialPosting: withTrail(prior, 'reverified'), ...(textLevels.has(prior.level) ? { description: candidate.description } : {}) };
   }
   const employer = frozenOfficialEmployer(job, candidate.employer);
   const readable = employer && readableOfficialPostingDescription(candidate, job);
-  const posting = normalizeOfficialPosting({ ...prior, employer, level: readable ? prior.level === 'L4' ? route ? 'L3' : 'L1' : prior.level : 'L4',
-    outcome: readable ? 'found' : 'link-only', title: candidate.title,
+  if (!readable) return preserve('stub-text');
+  const posting = normalizeOfficialPosting({ ...prior, employer, level: prior.level === 'L4' ? route ? 'L3' : 'L1' : prior.level,
+    outcome: 'found', title: candidate.title,
     location: normalizeOfficialLocation(candidate.location) || prior.location,
     salary: normalizeOfficialSalary(candidate.salary) || { text: '', provenance: 'unknown' },
     sourceUrl: url, officialApplyUrl: verifiedOfficialPostingApplyUrl(candidate), fetchedAt: new Date(now()).toISOString(),
-    contentHash: readable ? sha256(candidate.description) : undefined,
-    trail: [...new Set([...(prior.trail || []), 'reverified', ...(!readable ? ['stub-text'] : [])])].slice(-32) });
-  if (!posting) return unresolvedOfficialPosting(job, { outcome: 'unreadable', trail: ['invalid-text'] });
+    contentHash: sha256(candidate.description),
+    trail: [...new Set([...(prior.trail || []), 'reverified'])].slice(-32) });
+  if (!posting) return preserve('invalid-text');
   active(signal);
   return { officialPosting: posting, postedBy: strictEmployerEqual(job.company, employer) ? '' : job.company,
-    description: readable ? candidate.description : undefined };
+    description: candidate.description };
 }
 
 /** Whole-budget prepare includes the semaphore wait. Every non-cancellation
@@ -133,16 +186,30 @@ async function reverify(job, record, { fetch, signal, now }) {
 export async function prepareOfficialPostingForGeneration(args, {
   projectJob = value => value, signal, store, fetch = fetchOfficialPosting, resolve = resolveOfficialPostings,
   bridgeStatus = getHandoffBridgeStatus, now = Date.now, timeoutMs = OFFICIAL_POSTING_PREPARE_TIMEOUT_MS,
-  slots = semaphore, callRaw,
+  slots = semaphore, callRaw, telemetry = { failed: 0 },
 } = {}) {
-  const scrapedJob = structuredClone(projectJob(args.job || {}));
+  const failed = error => {
+    telemetry.failed = (Number(telemetry.failed) || 0) + 1;
+    console.warn('[OfficialPosting] Prepare failed:', error?.code || error?.name || 'Error');
+  };
+  let scrapedJob;
+  try {
+    scrapedJob = structuredClone(projectJob(args.job || {}));
+    if (!scrapedJob || typeof scrapedJob !== 'object' || Array.isArray(scrapedJob)) throw new TypeError('Invalid scraped job projection.');
+  }
+  catch (error) {
+    if (signal?.aborted) throw signal.reason || error;
+    failed(error);
+    return { officialPosting: unresolvedOfficialPosting(args.job, { outcome: 'failed', trail: ['failed'] }).officialPosting,
+      telemetry: { failed: telemetry.failed } };
+  }
   delete scrapedJob.applyUrl; delete scrapedJob.officialPosting; delete scrapedJob.postedBy;
   const controller = new AbortController(); const abort = () => controller.abort(signal.reason || errorWithCode('bridge-aborted'));
   if (signal?.aborted) abort(); else signal?.addEventListener('abort', abort, { once: true });
   const timer = setTimeout(() => controller.abort(errorWithCode('bridge-timeout')), timeoutMs); timer.unref?.();
   let onAbort; const cancelled = new Promise((_, reject) => { onAbort = () => reject(controller.signal.reason); });
   controller.signal.addEventListener('abort', onAbort, { once: true });
-  let release; let result; let bridgeAvailable = false;
+  let release; let result; let bridgeAvailable = false; let verifiedFallback;
   try {
     result = await Promise.race([(async () => {
       active(controller.signal);
@@ -151,14 +218,22 @@ export async function prepareOfficialPostingForGeneration(args, {
       store ||= getOfficialPostingStore();
       const record = await store.find(scrapedJob); active(controller.signal);
       if (record && officialPostingRecordMatchesScrapedIdentity(scrapedJob, record)) {
-        if (officialLevels.has(record.officialPosting.level)) {
-          const verified = await reverify(scrapedJob, record, { fetch, signal: controller.signal, now }); active(controller.signal);
+        const storedPosting = normalizeOfficialPosting(record.officialPosting);
+        if (officialLevels.has(storedPosting?.level)) {
+          verifiedFallback = { officialPosting: storedPosting,
+            postedBy: strictEmployerEqual(scrapedJob.company, storedPosting.employer) ? '' : scrapedJob.company };
+          if (textLevels.has(storedPosting.level) && storedPosting.contentHash) try {
+            const cachedText = await store.readText(storedPosting.contentHash);
+            if (typeof cachedText === 'string') verifiedFallback.description = cachedText;
+          } catch { /* Keep proof metadata when the stored text cannot be read. */ }
+          active(controller.signal);
+          const verified = await reverify(scrapedJob, record, { fetch, signal: controller.signal, now, store }); active(controller.signal);
           if (!bridgeAvailable) verified.officialPosting = withTrail(verified.officialPosting, 'bridge-unavailable');
           await store.save(scrapedJob, { officialPosting: verified.officialPosting, description: verified.description, expectedRecord: record }); active(controller.signal);
           return verified;
         }
-        return unresolvedOfficialPosting(scrapedJob, { outcome: record.officialPosting.outcome,
-          trail: [...(record.officialPosting.trail || []), 'recent-miss'] });
+        if (shouldPersistOfficialPostingResult(record, { signal: controller.signal })) return unresolvedOfficialPosting(scrapedJob, { outcome: record.officialPosting.outcome,
+          trail: [...(record.officialPosting.trail || []), 'recent-miss'], alternatives: record.officialPosting.alternatives || [] });
       }
       const resolved = await resolve([scrapedJob], { store, fetch, signal: controller.signal,
         manualAiRunId: args.manualAiRunId, nodeId: args.nodeId, callRaw, now, bridgeAvailable,
@@ -171,13 +246,22 @@ export async function prepareOfficialPostingForGeneration(args, {
     })(), cancelled]);
   } catch (error) {
     if (signal?.aborted) throw signal.reason || error;
+    failed(error);
     const code = controller.signal.reason?.code === 'bridge-timeout' ? 'bridge-timeout' : error?.code || 'fetch-failed';
-    result = unresolvedOfficialPosting(scrapedJob, { outcome: 'failed', trail: [code] });
+    result = code === 'bridge-timeout' && controller.signal.aborted && verifiedFallback
+      ? { ...verifiedFallback, officialPosting: withTrail(verifiedFallback.officialPosting, 'bridge-timeout', 'reverify-failed') }
+      : unresolvedOfficialPosting(scrapedJob, { outcome: 'failed', trail: [code] });
   } finally {
     clearTimeout(timer); signal?.removeEventListener('abort', abort); controller.signal.removeEventListener('abort', onAbort); release?.();
   }
   if (!bridgeAvailable) result.officialPosting = withTrail(result.officialPosting, 'bridge-unavailable');
-  return remember(scrapedJob, result, now());
+  try { return { ...remember(scrapedJob, result, now()), telemetry: { failed: telemetry.failed } }; }
+  catch (error) {
+    if (signal?.aborted) throw signal.reason || error;
+    failed(error);
+    return { officialPosting: unresolvedOfficialPosting(scrapedJob, { outcome: 'failed', trail: ['failed'] }).officialPosting,
+      telemetry: { failed: telemetry.failed } };
+  }
 }
 
 function validateArgs(args) {

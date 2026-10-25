@@ -1,6 +1,6 @@
 // Pure shared wire schema: main-process records and renderer whitelists use
 // the same field list. Scraped identity fields remain separate from these.
-export const OFFICIAL_POSTING_ROW_FIELDS = Object.freeze(['postedBy', 'applyOptions', 'salaryProvenance', 'officialPosting']);
+export const OFFICIAL_POSTING_ROW_FIELDS = Object.freeze(['postedBy', 'applyOptions', 'salaryProvenance', 'officialPosting', 'boardClosed']);
 export const LOCAL_AI_APPLICATION_SNIPPET_MAX_CHARS = 80_000;
 export const OFFICIAL_POSTING_LEVELS = Object.freeze(['L1', 'L2', 'L3', 'L4', 'L5', 'L6']);
 export const OFFICIAL_POSTING_OUTCOMES = Object.freeze(['found', 'link-only', 'not-found', 'ambiguous', 'unreadable', 'closed', 'failed']);
@@ -12,7 +12,7 @@ export const OFFICIAL_POSTING_TRAIL = Object.freeze([
   'title-mismatch', 'location-mismatch', 'employer-mismatch', 'tenant-unproven', 'poster-tenant',
   'salary-mismatch', 'no-anchor', 'invalid-quotes', 'ambiguous', 'closed', 'unreadable', 'oversize',
   'unsafe-url', 'unsafe-address', 'fetch-timeout', 'fetch-failed', 'unsupported-content-type',
-  'invalid-text', 'stub-text', 'official-text-missing', 'no-resolution', 'reverified', 'material-jd-change',
+  'crawl-budget', 'invalid-text', 'stub-text', 'official-text-missing', 'no-resolution', 'reverified', 'reverify-failed', 'material-jd-change', 'failed',
 ]);
 export const OFFICIAL_POSTING_LABELS = Object.freeze({
   L1: 'Official careers site', L2: 'ATS linked from careers page', L3: "Employer's ATS",
@@ -108,4 +108,43 @@ export function normalizeOfficialPosting(value) {
     }
   }
   return result;
+}
+
+// A job board's detail page said the listing is gone. That is evidence about the
+// board, never the final word: the employer's own posting may still be live, so
+// the row travels to the official-posting resolver carrying this bounded marker.
+export const BOARD_CLOSED_REASONS = Object.freeze([
+  'detail-page-not-found', 'ziprecruiter-closed-job-redirect',
+  'indeed-page-unavailable', 'indeed-job-unavailable', 'linkedin-no-longer-accepting',
+]);
+const BOARD_LABELS = Object.freeze({
+  linkedin: 'LinkedIn', indeed: 'Indeed', ziprecruiter: 'ZipRecruiter', glassdoor: 'Glassdoor', dice: 'Dice',
+  google: 'Google', remoteok: 'RemoteOK', weworkremotely: 'WWRemotely',
+});
+const BOARD_ID_RE = /^[a-z0-9][a-z0-9-]{0,39}$/u;
+export function boardClosedBoardLabel(board) {
+  if (typeof board !== 'string' || !BOARD_ID_RE.test(board)) return '';
+  return BOARD_LABELS[board] || board.charAt(0).toUpperCase() + board.slice(1);
+}
+/** Exact keys, a source id, an enumerated reason and a real instant. Anything else is not a board-closed row. */
+export function normalizeBoardClosed(value) {
+  if (!exactKeys(value, ['board', 'reason', 'at']) || !['board', 'reason', 'at'].every(key => Object.hasOwn(value, key))) return null;
+  if (typeof value.board !== 'string' || !BOARD_ID_RE.test(value.board) || !BOARD_CLOSED_REASONS.includes(value.reason)) return null;
+  if (!shortString(value.at, 40)) return null;
+  const instant = Date.parse(value.at);
+  if (!Number.isFinite(instant)) return null;
+  return { board: value.board, reason: value.reason, at: new Date(instant).toISOString() };
+}
+
+// Trail codes meaning the research step did not run, did not finish, or hit a
+// transient failure. A miss carrying any of them is retryable, never a conclusion.
+const RESEARCH_UNSETTLED_TRAIL = Object.freeze(['bridge-aborted', 'bridge-timeout', 'bridge-unavailable', 'research-miss',
+  'fetch-failed', 'fetch-timeout', 'crawl-budget', 'official-text-missing', 'failed']);
+/** True only for a definitive miss reached after research actually ran (or an official page that is itself closed). */
+export function officialResearchSettled(value) {
+  const posting = value && typeof value === 'object' ? value : null;
+  if (!posting || !['L5', 'L6'].includes(posting.level) || !['not-found', 'ambiguous', 'closed'].includes(posting.outcome)) return false;
+  const trail = Array.isArray(posting.trail) ? posting.trail : [];
+  if (trail.some(code => RESEARCH_UNSETTLED_TRAIL.includes(code))) return false;
+  return posting.outcome === 'closed' || trail.includes('bridge-research');
 }

@@ -102,7 +102,7 @@ function sameVerifiedOfficialPosting(left, right) {
 }
 
 function durableRecord(record) {
-  return DURABLE_LEVELS.has(record.officialPosting.level) && DURABLE_OUTCOMES.has(record.officialPosting.outcome);
+  return DURABLE_LEVELS.has(record.officialPosting?.level) && DURABLE_OUTCOMES.has(record.officialPosting?.outcome);
 }
 
 function storeError(message, code = 'OFFICIAL_POSTING_STORE_INVALID') {
@@ -265,7 +265,7 @@ export function createOfficialPostingStore(rootDir, { now = Date.now } = {}) {
 
 function scrapedView(job, posting = null) {
   const scrapedEmployer = String(job?.company ?? '');
-  const employer = posting ? (posting.level === 'L6' ? '' : posting.employer || scrapedEmployer) : scrapedEmployer;
+  const employer = posting ? (posting.level === 'L6' ? scrapedEmployer : posting.employer || scrapedEmployer) : scrapedEmployer;
   return {
     employer,
     postedBy: posting && (posting.level === 'L6' || identityPart(employer) !== identityPart(scrapedEmployer)) ? scrapedEmployer : '',

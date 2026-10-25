@@ -1,4 +1,41 @@
 // Pure JSON-LD traversal shared by host-only resolution and scrape extraction.
+const htmlSpace = character => character === ' ' || character === '\t' || character === '\n' || character === '\r' || character === '\f';
+
+// Each opening tag is consumed once, including malformed unterminated tags.
+// A backtracking `<script...>` expression retries the entire remaining page
+// for every `<script ` prefix when an untrusted page omits its closing `>`.
+function scriptTagEnd(source, start) {
+  let quote = '';
+  for (let index = start; index < source.length; index += 1) {
+    const character = source[index];
+    if (quote) { if (character === quote) quote = ''; }
+    else if (character === '"' || character === "'") quote = character;
+    else if (character === '>') return index;
+  }
+  return -1;
+}
+
+function isJsonLdTag(source, start, end) {
+  let index = start;
+  while (index < end) {
+    while (index < end && (htmlSpace(source[index]) || source[index] === '/')) index += 1;
+    const nameStart = index;
+    while (index < end && !htmlSpace(source[index]) && source[index] !== '=' && source[index] !== '/') index += 1;
+    const name = source.slice(nameStart, index).toLowerCase();
+    while (index < end && htmlSpace(source[index])) index += 1;
+    if (source[index] !== '=') { if (index === nameStart) index += 1; continue; }
+    index += 1;
+    while (index < end && htmlSpace(source[index])) index += 1;
+    const quote = source[index] === '"' || source[index] === "'" ? source[index++] : '';
+    const valueStart = index;
+    while (index < end && (quote ? source[index] !== quote : !htmlSpace(source[index]))) index += 1;
+    const value = source.slice(valueStart, index);
+    if (quote && index < end) index += 1;
+    if (name === 'type') return /^application\/ld\+json(?:\s*;[^]*)?$/iu.test(value.trim());
+  }
+  return false;
+}
+
 /**
  * Walk every JSON-LD `<script>` block in a page's HTML looking for
  * `JobPosting` nodes (handles `@graph` wrappers and array `@type`), calling
@@ -19,16 +56,29 @@
  */
 export function walkJsonLdJobPostings(html, visit) {
   const postings = [];
-  const re = /<script\b[^>]*\btype\s*=\s*(["'])application\/ld\+json(?:\s*;[^"']*)?\1[^>]*>([\s\S]*?)<\/script\s*>/gi;
-  let m;
-  while ((m = re.exec(html || ''))) {
+  const source = String(html || '');
+  const opening = /<script(?=[\t\n\f\r />])/gi;
+  const closing = /<\/script\s*>/gi;
+  while (opening.exec(source)) {
+    const tagEnd = scriptTagEnd(source, opening.lastIndex);
+    if (tagEnd < 0) break;
+    const jsonLd = isJsonLdTag(source, opening.lastIndex, tagEnd);
+    opening.lastIndex = tagEnd + 1;
+    if (!jsonLd) continue;
+    closing.lastIndex = tagEnd + 1;
+    const end = closing.exec(source);
+    if (!end) break;
+    opening.lastIndex = closing.lastIndex;
     let data;
-    try { data = JSON.parse(m[2].trim()); } catch { continue; }
+    try { data = JSON.parse(source.slice(tagEnd + 1, end.index).trim()); } catch { continue; }
     const stack = [data];
     for (let index = 0; index < stack.length; index += 1) {
       const node = stack[index];
       if (!node || typeof node !== 'object') continue;
-      if (Array.isArray(node)) { stack.push(...node); continue; }
+      if (Array.isArray(node)) {
+        for (const value of node) stack.push(value);
+        continue;
+      }
       const type = node['@type'];
       const isJob = (Array.isArray(type) ? type : [type])
         .some(value => typeof value === 'string' && /(?:^|[/#])JobPosting$/u.test(value));

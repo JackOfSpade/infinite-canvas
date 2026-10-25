@@ -253,7 +253,7 @@ export function applicationDockRequest({ node, handoff, canvasFilePath = null })
   if (!node?.id || !local?.id || !handoff?.handoffCode || typeof handoff.prompt !== 'string') return null;
   const corrections = Array.isArray(handoff.corrections) ? handoff.corrections.filter(Boolean) : [];
   const display = officialPostingDisplay(node.data);
-  const company = display.employer || display.postedBy;
+  const company = display.unnamedOfficial ? display.label : display.employer || display.postedBy;
   const title = display.title;
   return {
     kind: 'application',
@@ -299,7 +299,7 @@ export function brokenApplicationDockRequest({ node, message, canvasFilePath = n
   const text = typeof message === 'string' ? message.trim() : '';
   if (!node?.id || !local?.id || !text) return null;
   const display = officialPostingDisplay(node.data);
-  const company = display.employer || display.postedBy;
+  const company = display.unnamedOfficial ? display.label : display.employer || display.postedBy;
   const title = display.title;
   return {
     kind: 'application',
@@ -342,7 +342,7 @@ export function workingApplicationDockRequest({ node, canvasFilePath = null, sta
   const local = node?.data?.localApplication;
   if (!node?.id || !local?.id) return null;
   const display = officialPostingDisplay(node.data);
-  const company = display.employer || display.postedBy;
+  const company = display.unnamedOfficial ? display.label : display.employer || display.postedBy;
   const title = display.title;
   return {
     kind: 'application',

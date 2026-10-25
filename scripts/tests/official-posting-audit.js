@@ -76,7 +76,8 @@ const tests = [
   {
     name: 'official-posting audit collision normalization removes only formatter header lines and preserves all other bytes',
     run() {
-      const original = job({ snippet: '**Posted by:** keep this body line\n**Apply URL:** keep this too\n**Source level:** keep this body level' });
+      const original = job({ snippet: '**Posted by:** keep this body line\n**Apply URL:** keep this too\n**Official posting:** keep this body link\n**Source level:** keep this body level',
+        officialPosting: { level: 'L4', employer: 'Acme Talent Partners', sourceUrl: 'https://careers.example.test/platform' } });
       const legacy = Buffer.from(formatOriginalJobListingMarkdown(original));
       assert.equal(legacyListingCollisionBytes(legacy), legacy, 'header-free legacy bytes need no reconstruction');
       for (let mask = 1; mask < 8; mask++) {
@@ -93,10 +94,11 @@ const tests = [
     },
   },
   {
-    name: 'official-posting audit saves exact scraped bytes and L2 to L4 regeneration reuses its raw-company folder while removing stale audit',
+    name: 'official-posting audit saves exact scraped bytes and L2 to L4 regeneration reuses its employer folder while removing stale audit',
     async run() {
       await fixture(async test => {
-        const original = job(); const scraped = formatOriginalJobListingMarkdown(original);
+        const original = job({ company: 'Northwind Labs', postedBy: '', officialPosting: { level: 'L4', employer: 'Northwind Labs' } });
+        const scraped = formatOriginalJobListingMarkdown(original);
         const l2 = await test.workspace({ value: job({ company: 'Northwind Labs', snippet: 'Different synthetic official posting body.',
           officialPosting: { level: 'L2', employer: 'Northwind Labs' } }), scraped, identityCompany: original.company, label: 'L2' });
         const saved = await test.save(l2); assert.equal(saved.success, true, saved.error);
@@ -115,6 +117,29 @@ const tests = [
         assert.equal(fs.existsSync(saved.scrapedListingFile), false, 'absence removes the previous optional audit in the same transaction');
         assert.match(await fs.promises.readFile(regenerated.applicationFile, 'utf8'), /L4 resume/u);
         assert.equal(JSON.parse(await fs.promises.readFile(regenerated.generationAuditFile, 'utf8')).savedArtifacts.scrapedListingSha256, null);
+      });
+    },
+  },
+  {
+    name: 'official-posting audit files recruiter-posted L2 under the verified employer and reuses that folder at L4',
+    async run() {
+      await fixture(async test => {
+        const original = job(); const scraped = formatOriginalJobListingMarkdown(original);
+        const employer = 'Northwind Labs';
+        const l2 = await test.workspace({ value: job({ company: employer, snippet: 'Complete synthetic official duties.',
+          officialPosting: { level: 'L2', employer, sourceUrl: 'https://careers.northwind.test/platform' } }),
+        scraped, identityCompany: original.company, label: 'Recruiter L2' });
+        const saved = await test.save(l2); assert.equal(saved.success, true, saved.error);
+        assert.equal(saved.dir, path.join(test.outputRoot, employer, original.location, original.title));
+        assert.equal(await fs.promises.readFile(saved.scrapedListingFile, 'utf8'), scraped);
+        const l4 = await test.workspace({ value: job({ company: employer,
+          officialPosting: { level: 'L4', employer, sourceUrl: 'https://careers.northwind.test/platform' } }),
+        scraped, identityCompany: original.company, label: 'Recruiter L4' });
+        const regenerated = await test.save(l4); assert.equal(regenerated.success, true, regenerated.error);
+        assert.equal(regenerated.dir, saved.dir);
+        assert.equal(await fs.promises.readFile(regenerated.scrapedListingFile, 'utf8'), scraped);
+        assert.match(await fs.promises.readFile(regenerated.applicationFile, 'utf8'), /Recruiter L4 resume/u);
+        assert.equal(fs.existsSync(path.join(test.outputRoot, original.company)), false);
       });
     },
   },

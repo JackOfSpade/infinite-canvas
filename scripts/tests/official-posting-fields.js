@@ -36,7 +36,8 @@ function row(extra = {}) {
     url: 'https://listing.example.test/job/platform', googleCardUrl: 'https://www.google.com/search?htidocid=synthetic-platform',
     sourceJobKey: 'synthetic-platform-key', source: 'google', posted: 'Today', language: 'English',
     postedBy: 'Acme Talent Partners', applyOptions: [{ label: 'Northwind careers', href: 'https://careers.example.test/jobs/platform' }],
-    salaryProvenance: 'posted', officialPosting: posting(), ...extra,
+    salaryProvenance: 'posted', officialPosting: posting(),
+    boardClosed: { board: 'linkedin', reason: 'linkedin-no-longer-accepting', at: '2026-10-24T12:00:00.000Z' }, ...extra,
   };
 }
 
@@ -65,7 +66,7 @@ export default [
   {
     name: 'official-posting shared fields survive every whitelist and legacy card migration without drift',
     run() {
-      assert.deepEqual(OFFICIAL_POSTING_ROW_FIELDS, ['postedBy', 'applyOptions', 'salaryProvenance', 'officialPosting']);
+      assert.deepEqual(OFFICIAL_POSTING_ROW_FIELDS, ['postedBy', 'applyOptions', 'salaryProvenance', 'officialPosting', 'boardClosed']);
       assert.ok(Object.isFrozen(OFFICIAL_POSTING_ROW_FIELDS));
       const input = row(); const card = cardFor(input); const frozen = safeJob(input); const scope = generateScope();
       const queuePayload = scope.slice(scope.indexOf('queueLocalApplication({'));
@@ -136,7 +137,7 @@ export default [
       const frozen = safeJob(input);
       assert.deepEqual(Object.keys(frozen).sort(), [
         'title', 'company', 'snippet', 'location', 'salary', 'url', 'googleCardUrl', 'sourceJobKey',
-        'source', 'posted', 'language', 'postedBy', 'applyUrl', 'applyOptions', 'salaryProvenance', 'officialPosting', 'postingVariants',
+        'source', 'posted', 'language', 'postedBy', 'applyUrl', 'applyOptions', 'salaryProvenance', 'officialPosting', 'boardClosed', 'postingVariants',
       ].sort());
       assert.equal(frozen.applyUrl, input.applyUrl, 'the second safeJob retains the host-frozen apply URL; queue admission discards renderer authority separately');
       for (const level of OFFICIAL_POSTING_LEVELS) assert.equal(safeJob(row({ officialPosting: posting({ level }) })).officialPosting.level, level);
@@ -212,7 +213,8 @@ export default [
       job.applyUrl = 'https://frozen-apply-sentinel.example.test/job';
       const sentinels = [job.postedBy, job.snippet, job.applyOptions[0].href, job.applyUrl,
         job.googleCardUrl, job.sourceJobKey, 'tenant-unproven', 'bridge-unavailable',
-        job.officialPosting.officialApplyUrl, job.officialPosting.sourceUrl, job.officialPosting.alternatives[0].url];
+        job.officialPosting.officialApplyUrl, job.officialPosting.sourceUrl, job.officialPosting.alternatives[0].url,
+        job.boardClosed.reason, job.boardClosed.at];
       const input = { jobId: 'synthetic-metadata-job', job, authorityProtocol: 'requirements-ledger.v3', careerAuthority: { version: 1 },
         __careerAuthorityIndex: { identity: { name: 'Jordan Sample', contact: ['jordan@example.test'] } },
         hostCareerEvidenceCatalog: [], sourceRoles: [], careerSkillEvidence: { skills: [] } };

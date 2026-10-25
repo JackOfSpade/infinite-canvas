@@ -22,6 +22,7 @@ import { prepareBackgroundScrapeLaunchOptions, createBackgroundScrapePage } from
 import { sourceJobKey } from '../../src/utils/jobIdentity.js';
 import { normalizeCountry } from '../../src/utils/jobLocation.js';
 import { isBackgroundE2E, backgroundE2EDisabledError } from '../utils/backgroundE2e.js';
+import { boardClosedDetailAllowed, withBoardClosed } from '../ipc/officialPostingBoardClosed.js';
 
 // Indeed runs a SEPARATE site per country and each one only returns that
 // country's postings — `l=` is a place filter WITHIN a site, not a country
@@ -194,8 +195,30 @@ export function isIndeedScoreSafeDescription(job) {
     && indeedDescriptionLength(job) >= DESCRIPTION_EVIDENCE_MIN_CHARS;
 }
 
+// A board-closed row (Indeed's own "this job is no longer available" page) is a
+// terminal observation: reopening the same dead page cannot produce a description.
+// The official-posting resolver, not another Indeed visit, decides what happens next.
 export function needsIndeedDescriptionRetry(job) {
-  return !isIndeedScoreSafeDescription(job);
+  return !isIndeedScoreSafeDescription(job) && !job?.boardClosed;
+}
+
+/**
+ * Indeed said the listing is gone. Mark the row instead of retiring it: the
+ * employer may still be hiring, and the official-posting resolver decides whether
+ * a board-closed row survives. Keeps the established deferral marker so the
+ * scoring-evidence gate still treats the scraped text as unusable.
+ */
+export function markIndeedBoardClosed(job, unavailableReason, { expectedUrl = '', finalUrl = '' } = {}) {
+  if (!job || typeof job !== 'object') return false;
+  job.descriptionDeferredReason = `indeed-${unavailableReason}`;
+  // Indeed's wording is generic. Only an aggregator host's own page is a board
+  // verdict; a redirect to an employer or ATS page saying the same thing is the
+  // official source closing, and the row is retired exactly as before.
+  if (!boardClosedDetailAllowed({ expectedUrl, finalUrl })) return false;
+  const flagged = withBoardClosed(job, { board: 'indeed', reason: `indeed-${unavailableReason}` });
+  if (flagged === job) return false;
+  job.boardClosed = flagged.boardClosed;
+  return true;
 }
 
 // The exact-detail retry operates on recovery rows that may still carry a
@@ -551,6 +574,9 @@ export async function retryIndeedJobDescriptions(jobs, signal = null, profileDir
   let recovered = 0;
   let challengeReason = null;
   const unavailable = [];
+  // Rows whose unavailable page was NOT an aggregator host's own: that source is
+  // the official one and its verdict is final, so they leave the result as before.
+  const officialClosedKeys = new Set();
   try {
     browser = await launchWithProfileLockRetry(launchOpts, 'indeed-description-retry');
 
@@ -597,13 +623,16 @@ export async function retryIndeedJobDescriptions(jobs, signal = null, profileDir
         const unavailableReason = await getIndeedUnavailableReason(page);
         if (unavailableReason) {
           recordIndeedEnrichmentAttempt(job, { stage: 'exact-retry', outcome: 'unavailable', reason: unavailableReason });
+          if (!markIndeedBoardClosed(job, unavailableReason, { expectedUrl: jobUrl, finalUrl: page.url() })) {
+            officialClosedKeys.add(sourceJobKey(job));
+          }
           unavailable.push({
             key: sourceJobKey(job),
             title: String(job.title || '(untitled)').replace(/\s+/g, ' ').slice(0, 140),
             url: jobUrl,
             reason: unavailableReason,
           });
-          logger.info(`[Indeed/Browser] Description retry retired unavailable listing (${unavailableReason}): ${job.jobkey || jobUrl}`);
+          logger.info(`[Indeed/Browser] Description retry flagged board-closed listing (${unavailableReason}): ${job.jobkey || jobUrl}`);
           continue;
         }
         const description = await page.$eval(DESC_SELECTOR, el => el.textContent?.trim() || '').catch(() => '');
@@ -626,8 +655,9 @@ export async function retryIndeedJobDescriptions(jobs, signal = null, profileDir
       }
     }
 
-    const unavailableKeys = new Set(unavailable.map(item => item.key));
-    const activeRows = rows.filter(job => !unavailableKeys.has(sourceJobKey(job)));
+    // A board-closed row stays in the result, flagged: the caller's official-posting
+    // pass keeps or retires it. `unavailable` remains the observation record.
+    const activeRows = rows.filter(job => !officialClosedKeys.has(sourceJobKey(job)));
     const remaining = activeRows.filter(needsIndeedDescriptionRetry).length;
     retainIndeedResidualDiagnostics(activeRows);
     logger.info(`[Indeed/Browser] Exact description retry complete: ${recovered}/${targets.length} recovered, ${unavailable.length} unavailable, ${remaining} still incomplete`);
@@ -1285,9 +1315,9 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
           }
           const unavailableReason = await getIndeedUnavailableReason(page);
           if (unavailableReason) {
-            job.descriptionDeferredReason = `indeed-${unavailableReason}`;
+            markIndeedBoardClosed(job, unavailableReason, { expectedUrl: jobUrl, finalUrl: page.url() });
             recordIndeedEnrichmentAttempt(job, { stage, outcome: 'unavailable', reason: unavailableReason });
-            logger.info(`[Indeed/Browser] ${label} retired unavailable listing (${unavailableReason}): ${job.jobkey || jobUrl}`);
+            logger.info(`[Indeed/Browser] ${label} flagged board-closed listing (${unavailableReason}): ${job.jobkey || jobUrl}`);
             continue;
           }
           const desc = await page.$eval(DESC_SELECTOR, el => el.textContent?.trim() || '').catch(() => '');

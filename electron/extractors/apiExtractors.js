@@ -26,6 +26,7 @@ import { parseSalaryToNumeric } from '../../src/nodes/jobsearch/buildJobTree.js'
 import { decodeHtmlEntities, repairMojibake } from '../../src/utils/textEncoding.js';
 import { normalizeJobCollectionLimits, resolveJobsPerPlatform, resolvePageCeiling } from '../../src/utils/jobCollectionLimits.js';
 import { runRollingWorkers } from '../../src/utils/handoffScheduler.js';
+import { withBoardClosed } from '../ipc/officialPostingBoardClosed.js';
 
 // Per-source API fetch timeouts. These are SEEDS / ceilings, read through the
 // shared scrapeBudget store so they live in one place and share the budget
@@ -623,6 +624,43 @@ export function linkedInDescriptionPacing({ mode = 'guest', requestsIssued = 0 }
   };
 }
 
+/**
+ * Runs INSIDE the LinkedIn job page (no closures; Puppeteer serializes it). LinkedIn
+ * prints "No longer accepting applications" in the top card of a closed posting.
+ * The phrase can also appear in a posting's own description, so count it on the
+ * whole page and inside the description container separately: only an occurrence
+ * outside the description is the board talking.
+ */
+export function linkedInClosedMarkerProbe() {
+  const phrase = /no\s+longer\s+accepting\s+applications/gi;
+  const hits = value => (String(value || '').match(phrase) || []).length;
+  let description = 0;
+  for (const selector of ['#job-details', '.jobs-description-content__text', '.jobs-description__content',
+    '.jobs-box__html-content', '.description__text', '.show-more-less-html__markup']) {
+    const element = document.querySelector(selector);
+    if (element) { description = hits(element.textContent); break; }
+  }
+  return { page: hits(document.body ? document.body.innerText : ''), description };
+}
+export function linkedInPostingClosed(probe) {
+  return Number.isFinite(probe?.page) && Number.isFinite(probe?.description) && probe.page > probe.description;
+}
+const LINKEDIN_BOARD_CLOSED = Object.freeze({ board: 'linkedin', reason: 'linkedin-no-longer-accepting' });
+/**
+ * The row a successful LinkedIn detail read produces. A closed posting keeps its
+ * description (LinkedIn rows are never dropped here) and gains boardClosed; a
+ * re-read that no longer shows the marker clears a stale one.
+ */
+export function linkedInEnrichedRow(job, text, closed) {
+  const { boardClosed: _staleMarker, ...unmarked } = job || {};
+  const described = { ...unmarked, description: text, snippet: text };
+  return closed ? withBoardClosed(described, LINKEDIN_BOARD_CLOSED) : described;
+}
+/** A closed page that served no description still carries the marker; any other page leaves the row alone. */
+export function linkedInUndescribedRow(job, closed) {
+  return closed ? withBoardClosed(job, LINKEDIN_BOARD_CLOSED) : job;
+}
+
 export async function enrichLinkedInDescriptionsBrowser(jobs, signal, { preferAuthenticated = false, onProgress = null } = {}) {
   if (!jobs?.length) return { jobs, loginWall: false, loginWallUrl: null };
   const cancelledResult = () => ({
@@ -1003,9 +1041,14 @@ export async function enrichLinkedInDescriptionsBrowser(jobs, signal, { preferAu
         // Guest/SEO page: description is server-rendered in JSON-LD at
         // domcontentloaded — no hydration wait needed.
         const result = await page.evaluate(extractDesc).catch(evalCatch);
+        // The board's own closed marker is evidence, not a drop: the row keeps its
+        // description and carries boardClosed to the official-posting resolver. A
+        // failed probe (or an evaluation that already failed) never flags a row.
+        const closedMarker = result.evalFailed ? false
+          : linkedInPostingClosed(await page.evaluate(linkedInClosedMarkerProbe).catch(() => null));
 
         if (result.ok) {
-          enriched[i] = { ...job, description: result.text, snippet: result.text };
+          enriched[i] = linkedInEnrichedRow(job, result.text, closedMarker);
           successCount++;
           consecutiveEvalErrors = 0; // reset streak on success
         } else if (result.evalFailed) {
@@ -1050,6 +1093,7 @@ export async function enrichLinkedInDescriptionsBrowser(jobs, signal, { preferAu
             i--; continue;
           }
           if (contextSetupError || signal?.aborted) break;
+          enriched[i] = linkedInUndescribedRow(job, closedMarker);
           noDesc++;
           // Classify: gutted soft-block page (no title, no JSON-LD) vs a real page
           // that genuinely lacks a description. The former is recoverable.
@@ -3654,8 +3698,30 @@ export async function warmDiceApiKey(signal = null) {
  * @param {string} html — raw page HTML
  * @returns {string} — the description HTML (caller strips tags), or ''
  */
-export function extractJobPostingDescription(html) {
-  const desc = walkJsonLdJobPostings(html, (node) => {
+// A related ItemList may precede the main posting in another script block.
+// Dice knows the fetched page URL, so bind both fields to one posting rather
+// than independently borrowing the first available field from another job.
+function pageJobPostingField(html, pageUrl, read) {
+  if (!pageUrl) return walkJsonLdJobPostings(html, read);
+  const canonical = value => {
+    try {
+      const url = new URL(value, pageUrl);
+      if (!value || !/^https?:$/u.test(url.protocol)) return '';
+      url.hash = '';
+      for (const key of [...url.searchParams.keys()]) if (/^utm_/iu.test(key)) url.searchParams.delete(key);
+      url.pathname = url.pathname.replace(/\/+$/u, '') || '/';
+      return url.href;
+    } catch { return ''; }
+  };
+  const nodes = walkJsonLdJobPostings(html);
+  const bound = nodes.filter(node => node.url && canonical(node.url) === canonical(pageUrl));
+  const unique = [...new Map(bound.map(node => [JSON.stringify(node), node])).values()];
+  const selected = unique.length === 1 ? unique[0] : !unique.length && nodes.length === 1 && !nodes[0].url ? nodes[0] : null;
+  return selected ? read(selected) : undefined;
+}
+
+export function extractJobPostingDescription(html, pageUrl = '') {
+  const desc = pageJobPostingField(html, pageUrl, (node) => {
     if (typeof node.description === 'string' && node.description.trim()) return node.description;
     return undefined;
   });
@@ -3673,8 +3739,8 @@ export function extractJobPostingDescription(html) {
  * @param {string} html — raw page HTML
  * @returns {object|null}
  */
-export function extractJobPostingBaseSalary(html) {
-  const bs = walkJsonLdJobPostings(html, (node) => {
+export function extractJobPostingBaseSalary(html, pageUrl = '') {
+  const bs = pageJobPostingField(html, pageUrl, (node) => {
     if (node.baseSalary && typeof node.baseSalary === 'object') return node.baseSalary;
     return undefined;
   });
@@ -3847,11 +3913,11 @@ export async function enrichDiceDescriptions(jobs, signal) {
           let salaryPatch = null;
           let salaryPatchProvenance = 'unknown';
           if (parseSalaryToNumeric(job.salary) === 0) {
-            const structuredSalary = formatDiceBaseSalary(extractJobPostingBaseSalary(html));
+            const structuredSalary = formatDiceBaseSalary(extractJobPostingBaseSalary(html, url));
             const formatted = structuredSalary || extractDiceSalaryBadge(html);
             if (formatted) { salaryPatch = formatted; salaryPatchProvenance = structuredSalary ? 'posted' : 'unknown'; salaryUpgraded += 1; }
           }
-          const descHtml = extractJobPostingDescription(html);
+          const descHtml = extractJobPostingDescription(html, url);
           if (!descHtml) {
             note('no-jsonld-desc', url);
             return salaryPatch ? { ...job, salary: salaryPatch, salaryProvenance: salaryPatchProvenance } : job;

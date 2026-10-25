@@ -130,8 +130,10 @@ import { normalizeJobSearchInitialLookbackDays, providerLookbackDaysForStart, re
 import { parseGuaranteedCashOffer, compensationAssessment, mergeCompetitiveRanges, resolveCompensationMarketCurrency, resolveCompensationLocation, compensationResidencesForJob, compensationCohortKey, selectComparableEvidence, classifyCompensationFitEligibility, selectCompensationExperienceYears, estimateCompensationExperienceYearsFromDescription, isValidCompensationExperienceBandLadder, selectCompensationExperienceBand, sourcesPresentInGroundedResearch, isAuditableCompensationSource, classifyCompensationLocationGap } from './jobCompensation.js';
 import { buildPersonalSalaryEvidence, PERSONAL_SALARY_GUIDANCE_PROMPT, validatePersonalSalaryRecommendation } from './personalSalaryRecommendation.js';
 import { buildJobLocationLookupRequest, selectLookupRequests, runJobLocationLookup, applyLookedUpLocation, locationSourceLink } from './jobLocationLookup.js';
-import { getOfficialPostingView, resolveOfficialPostings, officialPostingDedup } from './officialPostingService.js';
+import { getOfficialPostingView, resolveOfficialPostings, officialPostingDedup, partitionOfficialPostingRows, mergeOfficialPostingTelemetry, createOfficialPostingRecoveryPassResolver } from './officialPostingService.js';
+import { officialPostingAliases, officialPostingRecordMatchesScrapedIdentity } from './officialPostingStore.js';
 import { normalizeOfficialPosting } from './officialPostingFields.js';
+import { boardClosedRetirement, boardClosedSetAside, boardClosedTelemetryBlock, isBoardClosedRow, preferOpenRows, scoreSafeRowsWithBoardClosed, settleBoardClosedRows } from './officialPostingBoardClosed.js';
 import { blankJobPreferencePlan, interpretJobPreferences, evaluateJobPreferences, isValidJobPreferencePlanSubmission, normalizeJobPreferencePlan, resolveSearchRoles, screenJobRolesByTitle } from './jobPreferences.js';
 import { acquireCanvasRecoveryRead, resolveCanvasRecoveryPath, withCanvasRecoveryOwner } from './canvasRecoveryPaths.js';
 import { createDependencyReadyQueue, HANDOFF_CONCURRENCY, mapAutomaticHandoffs, runAutomaticHandoffWorkers } from '../../src/utils/handoffScheduler.js';
@@ -4709,6 +4711,12 @@ export function reconcileSearchFunnel(search) {
   // stage rather than making the scored input look smaller than the funnel.
   const finalDedupDropped = Math.max(0, Number(search.finalDedupDropped) || 0);
   const officialDedupDropped = Math.max(0, Number(search.officialDedupDropped) || 0);
+  // Board-closed rows the evidence gate dropped are set aside and rejoin the
+  // funnel before the final dedup (they were already counted in
+  // descriptionEvidenceDropped); the official-posting pass then removes the ones
+  // no official source kept. Both default to 0, so a run without any is unchanged.
+  const boardClosedSetAside = Math.max(0, Number(search.boardClosedSetAside) || 0);
+  const boardClosedDropped = Math.max(0, Number(search.boardClosedDropped) || 0);
   const kept = Math.max(0, Number(search.kept) || 0);
   const relevanceKept = Math.max(0, raw - relevanceDropped);
   const countryScopeKept = Math.max(0, relevanceKept - countryScopeDropped);
@@ -4723,8 +4731,10 @@ export function reconcileSearchFunnel(search) {
       - roleDropped
       - historyDropped
       - descriptionEvidenceDropped
+      + boardClosedSetAside
       - finalDedupDropped
-      - officialDedupDropped,
+      - officialDedupDropped
+      - boardClosedDropped,
   );
   const windowUnexplainedDelta = hasWindowFirstFunnel
     ? windowEligible - expectedWindowEligible
@@ -4766,6 +4776,7 @@ export function reconcileSearchFunnel(search) {
     descriptionEvidenceDropped,
     finalDedupDropped,
     officialDedupDropped,
+    ...(boardClosedSetAside > 0 || boardClosedDropped > 0 ? { boardClosedSetAside, boardClosedDropped } : {}),
     kept,
     expectedKept,
     unexplainedDelta: kept - expectedKept,
@@ -5804,6 +5815,7 @@ export function buildJobRunCompletionReceipt(runId, completedAt = Date.now(), te
         // posting; `unavailableDetailDropped` carries that explicit delta.
         providerGathered: source?.providerGathered ?? source?.gathered,
         unavailableDetailDropped: source?.unavailableDetailDropped,
+        boardClosedDetailKept: source?.boardClosedDetailKept,
         locationScopeUnenforced: source?.locationScopeUnenforced === true,
         // Corpus-coverage evidence. `providerGathered` alone cannot say whether
         // the walk saw the whole result set, so a receipt read after restart
@@ -5863,6 +5875,8 @@ export function buildJobRunCompletionReceipt(runId, completedAt = Date.now(), te
         descriptionEvidenceDropped: search.descriptionEvidenceDropped?.total,
         finalDedupDropped: search.finalDedupDropped,
         ...(search.officialDedupDropped != null ? { officialDedupDropped: search.officialDedupDropped } : {}),
+        ...(search.boardClosedSetAside > 0 ? { boardClosedSetAside: search.boardClosedSetAside } : {}),
+        ...(search.boardClosedDropped > 0 ? { boardClosedDropped: search.boardClosedDropped } : {}),
         kept: search.kept,
       },
     } : {}),
@@ -7086,6 +7100,9 @@ export function filterJobsByDescriptionEvidence(jobs, shortThreshold = JOB_DESCR
 // 'description-panel-http-error', 'description-card-unavailable' and the
 // detail-block reprobe codes. Every one of those is written onto rows the
 // scraper explicitly RETAINED for a later pass to recover.
+// Those rows also carry a boardClosed marker now: Indeed's own "gone" page is a
+// board verdict, so the listing is retired only if the official-posting resolver
+// did not keep it (see retiredListingKeys).
 const RETIRED_LISTING_DEFERRED_REASONS = new Set(['indeed-page-unavailable', 'indeed-job-unavailable']);
 
 /**
@@ -7104,17 +7121,40 @@ const RETIRED_LISTING_DEFERRED_REASONS = new Set(['indeed-page-unavailable', 'in
  * replaceMatchingItems pairing does NOT make the raw drop set safe there; see
  * the comment on that branch's return.
  */
-function retiredListingKeys(droppedJobs = []) {
-  return (Array.isArray(droppedJobs) ? droppedJobs : [])
+export function retiredListingKeys(droppedJobs = [], boardClosed = null) {
+  const retired = (Array.isArray(droppedJobs) ? droppedJobs : [])
     .filter(job => RETIRED_LISTING_DEFERRED_REASONS.has(String(job?.descriptionDeferredReason || '')))
     .map(sourceJobKey)
     .filter(Boolean);
+  // A board-closed row is only retired if the official-posting resolver did not
+  // keep it: the board saying "gone" no longer settles anything by itself. Rows the
+  // resolver dropped after the evidence gate (a board-closed row that still had a
+  // description) retire here too.
+  if (!boardClosed) return retired;
+  const kept = boardClosed.keptKeys instanceof Set ? boardClosed.keptKeys : new Set();
+  return [...new Set([...retired, ...(Array.isArray(boardClosed.droppedKeys) ? boardClosed.droppedKeys : [])])]
+    .filter(key => !kept.has(key));
+}
+
+function overlayResolvedRecoveryRows(rows, resolvedRows) {
+  const resolved = new Map((Array.isArray(resolvedRows) ? resolvedRows : [])
+    .filter(job => normalizeOfficialPosting(job?.officialPosting)).map(job => [sourceJobKey(job), job]));
+  const source = Array.isArray(rows) ? rows : [];
+  if (!resolved.size) return source;
+  let changed = false;
+  const overlaid = source.map(job => {
+    const prior = resolved.get(sourceJobKey(job));
+    if (!prior || !officialPostingRecordMatchesScrapedIdentity(job, { aliases: officialPostingAliases(prior) })) return job;
+    changed = true;
+    return { ...job, postedBy: prior.postedBy, officialPosting: normalizeOfficialPosting(prior.officialPosting) };
+  });
+  return changed ? overlaid : source;
 }
 
 export function snapshotDescriptionRecoveryJobs(snapshot) {
-  return Array.isArray(snapshot?.descriptionRecoveryJobs)
-    ? snapshot.descriptionRecoveryJobs
-    : (Array.isArray(snapshot?.jobs) ? snapshot.jobs : []);
+  const recovery = Array.isArray(snapshot?.descriptionRecoveryJobs)
+    ? snapshot.descriptionRecoveryJobs : (Array.isArray(snapshot?.jobs) ? snapshot.jobs : []);
+  return overlayResolvedRecoveryRows(recovery, snapshot?.jobs);
 }
 
 export function mergeDescriptionRecoverySourceJobs(recoveryJobs, sourceId, updatedSourceJobs) {
@@ -7140,7 +7180,10 @@ export function reconcileResolvedDescriptionRecovery(recoveryJobs, sourceId, res
   return {
     recoveryJobs: universe,
     completeRows: evidence.jobs.filter(job => job?.source === sourceId),
-    emptyRows: evidence.dropped.filter(job => job?.source === sourceId),
+    // A board-closed row is terminal, not "not recovered yet": reopening a page
+    // the board already reported gone cannot add a description, and the
+    // official-posting pass (not another Solve) decides whether it stays.
+    emptyRows: evidence.dropped.filter(job => job?.source === sourceId && !isBoardClosedRow(job)),
   };
 }
 
@@ -7167,7 +7210,8 @@ export function mergeResolvedDescriptionRecoveryCandidate(candidate, resolvedRow
 export function partitionResolvedDescriptionRecoveryCandidates(recoveryJobs, sourceId, providerRows) {
   const sourceRecovery = (Array.isArray(recoveryJobs) ? recoveryJobs : [])
     .filter(job => job?.source === sourceId);
-  const deferred = filterJobsByDescriptionEvidence(sourceRecovery).dropped;
+  // Board-closed rows are terminal (see reconcileResolvedDescriptionRecovery).
+  const deferred = filterJobsByDescriptionEvidence(sourceRecovery).dropped.filter(job => !isBoardClosedRow(job));
   const deferredKeys = new Set(deferred.map(sourceJobKey).filter(Boolean));
   if (deferredKeys.size === 0) return { candidates: [], unavailable: [] };
   const candidates = (Array.isArray(providerRows) ? providerRows : [])
@@ -10995,8 +11039,33 @@ function registerJobsHandlersWithDependencies(dependencies = {}) {
   const beforeSearchStageWrite = dependencies.beforeSearchStageWrite || (async () => {});
   const afterSearchProviderResult = dependencies.afterSearchProviderResult || (async () => {});
   const runOfficialPostings = dependencies.resolveOfficialPostings || resolveOfficialPostings;
+  const readOfficialPostingView = dependencies.getOfficialPostingView || getOfficialPostingView;
+  const retryIndeedDescriptions = dependencies.retryIndeedJobDescriptions || retryIndeedJobDescriptions;
+  // After resolution: keep or retire every row an aggregator board reported
+  // closed. Official text counts as description evidence here (stored view), and
+  // a failure of this step is contained to the conservative rule: a board-closed
+  // row without a score-safe description leaves, everything else stays.
+  const settleBoardClosed = async (rows, signal) => {
+    try {
+      return await settleBoardClosedRows(rows, { scoreSafe: hasResolvedJobDescription,
+        getView: row => readOfficialPostingView(row, { store: dependencies.officialPostingStore, signal }),
+        minChars: JOB_DESCRIPTION_EVIDENCE_MIN_CHARS });
+    } catch (error) {
+      if (signal?.aborted) throw signal.reason || error;
+      logger.warn(`[OfficialPosting] Board-closed settlement failed: ${error?.code || error?.name || 'Error'}`);
+      const kept = []; const dropped = []; const dispositions = new Map();
+      for (const row of Array.isArray(rows) ? rows : []) {
+        if (!isBoardClosedRow(row)) kept.push(row);
+        else if (!hasResolvedJobDescription(row)) dropped.push({ row, disposition: 'dropped-no-description' });
+        else { kept.push(row); dispositions.set(row, 'kept-unchecked'); }
+      }
+      return { kept, dropped, dispositions };
+    }
+  };
   // Every provider and recovery path crosses this boundary after its existing
   // evidence gate. Identity rows stay scraped; only resolution fields are added.
+  // Board-closed rows the evidence gate dropped arrive here too (see
+  // scoreSafeRowsWithBoardClosed) and are kept or removed after resolution.
   const resolveScoreSafePostings = async (rows, { event, nodeId, signal, jobRunId = null } = {}) => {
     const context = getCurrentIpcRequestContext();
     const onProgress = ({ completed = 0, total = rows.length } = {}) => {
@@ -11009,14 +11078,42 @@ function registerJobsHandlersWithDependencies(dependencies = {}) {
       recordJobSourceProgress(payload, { updatePipeline: false, expectedNodeId: nodeId });
       event?.sender?.send?.('job-source-progress', payload);
     };
-    onProgress({ completed: 0, total: rows.length });
-    const resolved = await runOfficialPostings(rows, { signal, nodeId: context?.nodeId || nodeId,
-      manualAiRunId: context?.manualAiRunId || null, onProgress });
-    if (signal?.aborted) throw signal.reason || nodeCancellationError();
-    const deduped = officialPostingDedup(resolved.jobs);
-    onProgress({ completed: rows.length, total: rows.length });
-    return { jobs: deduped.kept, officialPosting: resolved.telemetry,
-      officialDedupDropped: deduped.dropped.length, officialDedupDrops: deduped.dropped };
+    try {
+      onProgress({ completed: 0, total: rows.length });
+      const partition = await partitionOfficialPostingRows(rows, { store: dependencies.officialPostingStore, signal });
+      const unresolved = partition.unresolvedIndices.map(index => partition.jobs[index]);
+      const carriedCount = rows.length - unresolved.length;
+      const resolved = unresolved.length ? await runOfficialPostings(unresolved, { signal, nodeId: context?.nodeId || nodeId,
+        manualAiRunId: context?.manualAiRunId || null,
+        onProgress: progress => onProgress({ completed: carriedCount + (progress?.completed || 0), total: rows.length }),
+      }) : { jobs: [], telemetry: null };
+      if (signal?.aborted) throw signal.reason || nodeCancellationError();
+      if (!Array.isArray(resolved?.jobs) || resolved.jobs.length !== unresolved.length) throw new TypeError('Official posting resolution returned incomplete rows.');
+      const complete = [...partition.jobs];
+      partition.unresolvedIndices.forEach((rowIndex, index) => { complete[rowIndex] = resolved.jobs[index]; });
+      const deduped = officialPostingDedup(complete);
+      const settled = await settleBoardClosed(deduped.kept, signal);
+      onProgress({ completed: rows.length, total: rows.length });
+      return { jobs: settled.kept,
+        officialPosting: mergeOfficialPostingTelemetry(partition.settledTelemetry, resolved.telemetry,
+          { boardClosed: boardClosedTelemetryBlock({ input: rows, settled, officialDedupDrops: deduped.dropped }) }),
+        officialDedupDropped: deduped.dropped.length, officialDedupDrops: deduped.dropped,
+        boardClosedDropped: settled.dropped.length,
+        boardClosedDrops: settled.dropped.map(entry => ({ kept: null, dropped: entry.row, reason: entry.disposition, stage: 'board-closed' })) };
+    } catch (error) {
+      if (signal?.aborted) throw signal.reason || error;
+      logger.warn(`[OfficialPosting] Search resolution failed: ${error?.code || error?.name || 'Error'}`);
+      // Resolution failure never fails the run; board-closed rows then follow the
+      // same rule as an unresolved pass (no description: gone; description: kept).
+      const settled = await settleBoardClosed(rows, signal);
+      const boardClosed = boardClosedTelemetryBlock({ input: rows, settled });
+      return { jobs: settled.kept, officialPosting: { total: rows.length, failed: rows.length,
+        levels: {}, outcomes: { failed: rows.length }, rejections: { failed: rows.length },
+        ...(Object.keys(boardClosed).length ? { boardClosed } : {}) },
+      officialDedupDropped: 0, officialDedupDrops: [],
+      boardClosedDropped: settled.dropped.length,
+      boardClosedDrops: settled.dropped.map(entry => ({ kept: null, dropped: entry.row, reason: entry.disposition, stage: 'board-closed' })) };
+    }
   };
   void pruneStaleUnsavedAnalysisArtifacts();
   void pruneStaleCareerInputStages();
@@ -13134,6 +13231,12 @@ Return a JSON object with four arrays of search query strings:
         sourceResults[sourceId].unavailableDetailDropped =
           (sourceResults[sourceId].unavailableDetailDropped || 0) + Math.max(0, Number(result.unavailableDetailDropped) || 0);
       }
+      // Rows an aggregator board reported closed stay in `jobs`, flagged for the
+      // official-posting resolver; they are NOT part of unavailableDetailDropped.
+      if (result.boardClosedDetailKept > 0) {
+        sourceResults[sourceId].boardClosedDetailKept =
+          (sourceResults[sourceId].boardClosedDetailKept || 0) + Math.max(0, Number(result.boardClosedDetailKept) || 0);
+      }
       // A nation-tier Glassdoor location can be accepted and echoed without
       // actually filtering rows. It is a source-level scope fact, not a source
       // warning: warning severity drives card state and must not hide real
@@ -13578,7 +13681,9 @@ Return a JSON object with four arrays of search query strings:
     // Source quotas are independent.  Only after each platform has its
     // date-valid, source-unique allowance do we reconcile copies returned by
     // different providers.
-    const deduped = dedupByTitleCompany(platformCap.jobs, {
+    // A board-closed copy loses every first-wins tie to an open copy of the same
+    // posting (preferOpenRows is the identity function when nothing is flagged).
+    const deduped = dedupByTitleCompany(preferOpenRows(platformCap.jobs), {
       onDuplicate: (entry) => { dedupDrops.push(entry); },
     });
     // Per-source unique survivors of the dedup — lets the funnel tell a genuine
@@ -14064,6 +14169,12 @@ Return a JSON object with four arrays of search query strings:
     if (descriptionEvidence.dropped.length > 0) {
       logger.info(`[Jobs] Deferred ${descriptionEvidence.dropped.length} description-incomplete listing(s) (explicit=${descriptionEvidence.quality.deferred}, empty=${descriptionEvidence.quality.empty}, short=${descriptionEvidence.quality.short}; threshold=400 chars) — not scored or marked seen`);
     }
+    // A job board reporting a listing closed is not the last word: the employer's
+    // own posting may still be live. Board-closed rows this gate dropped are set
+    // aside (they stay in descriptionEvidence.dropped for every existing
+    // bookkeeping use) and rejoin the final dedup and the official-posting
+    // resolver; the keep/drop rule runs after resolution.
+    const boardClosedAside = boardClosedSetAside(descriptionEvidence);
 
     // Descriptions obtained during enrichment can turn two formerly
     // incomparable board cards into an exact cross-source match. Run the same
@@ -14073,6 +14184,9 @@ Return a JSON object with four arrays of search query strings:
     // an incomplete listing remains recoverable instead of being hidden merely
     // because a better-described board copy happened to arrive first.
     const finalDedupDrops = [];
+    // Set-aside board-closed rows join the dedup. preferOpenRows: first-wins dedup
+    // must never let a closed copy beat an open copy of the same posting.
+    kept = preferOpenRows([...kept, ...boardClosedAside]);
     const finalDeduped = dedupByTitleCompany(kept, {
       onDuplicate: (entry) => { finalDedupDrops.push(entry); },
     });
@@ -14089,9 +14203,13 @@ Return a JSON object with four arrays of search query strings:
     await assertSearchCurrent();
     kept = officialResolution.jobs;
     const officialDedupDropped = officialResolution.officialDedupDropped;
-    const officialResolutionChanged = officialDedupDropped > 0 || kept.some((job, index) =>
+    const boardClosedDropped = Math.max(0, Number(officialResolution.boardClosedDropped) || 0);
+    const officialResolutionChanged = officialDedupDropped > 0 || boardClosedDropped > 0 || kept.some((job, index) =>
       JSON.stringify([job?.postedBy, job?.officialPosting])
         !== JSON.stringify([finalDeduped[index]?.postedBy, finalDeduped[index]?.officialPosting]));
+    // preferOpenRows moved board-closed rows behind the open ones for dedup; put
+    // the survivors back in recency order.
+    if (kept.some(isBoardClosedRow)) kept.sort((a, b) => postedMs(b) - postedMs(a));
     // Keep bounded provenance for BOTH passes. The final-pass count is also a
     // first-class funnel stage below, so it cannot silently look like an AI or
     // renderer loss.
@@ -14255,6 +14373,7 @@ Return a JSON object with four arrays of search query strings:
       if (data.platformDuplicateDropped) bySource[sid].platformDuplicateDropped = data.platformDuplicateDropped;
       if (data.collectionAgeDropped) bySource[sid].collectionAgeDropped = data.collectionAgeDropped;
       if (data.unavailableDetailDropped) bySource[sid].unavailableDetailDropped = data.unavailableDetailDropped;
+      if (data.boardClosedDetailKept) bySource[sid].boardClosedDetailKept = data.boardClosedDetailKept;
       if (data.locationScopeUnenforced === true) bySource[sid].locationScopeUnenforced = true;
       if (data.providerGathered != null) bySource[sid].providerGathered = data.providerGathered;
       // The API-side twin of `claimedTotal` above. Without it a source that
@@ -14426,6 +14545,10 @@ Return a JSON object with four arrays of search query strings:
       kept: kept.length,
       finalDedupDropped,
       officialDedupDropped,
+      // Funnel stages for board-closed rows: rescued from the evidence gate for the
+      // official-posting pass, and removed by it when no official source kept them.
+      ...(boardClosedAside.length > 0 || boardClosedDropped > 0
+        ? { boardClosedSetAside: boardClosedAside.length, boardClosedDropped } : {}),
       officialPosting: officialResolution.officialPosting,
       descriptionEvidenceDropped: {
         total: descriptionEvidence.dropped.length,
@@ -15249,7 +15372,9 @@ Return a JSON object with four arrays of search query strings:
     normalizeJobsMarkup(kept);
     kept = kept.map(reconcileGlassdoorSalaryFromDescription);
     const descriptionEvidence = filterJobsByDescriptionEvidence(kept);
-    kept = descriptionEvidence.jobs;
+    // Board-closed rows without a score-safe description still reach the
+    // official-posting pass; it keeps or removes them afterwards.
+    kept = scoreSafeRowsWithBoardClosed(descriptionEvidence);
     if (descriptionEvidence.dropped.length > 0) {
       logger.info(`[Jobs][${sourceId}] Deferred ${descriptionEvidence.dropped.length} description-incomplete listing(s) (explicit=${descriptionEvidence.quality.deferred}, empty=${descriptionEvidence.quality.empty}, short=${descriptionEvidence.quality.short}; threshold=400 chars) — not returned or marked seen`);
     }
@@ -16647,7 +16772,7 @@ Return a JSON object with four arrays of search query strings:
             nextBlockedUrl: null,
           };
         }
-        const snapshotRecoveryJobs = snapshotDescriptionRecoveryJobs(snapshot);
+        let snapshotRecoveryJobs = snapshotDescriptionRecoveryJobs(snapshot);
         const allLinkedInRaw = snapshotRecoveryJobs.filter(j => j.source === 'linkedin');
         if (allLinkedInRaw.length === 0) {
           return {
@@ -16666,7 +16791,7 @@ Return a JSON object with four arrays of search query strings:
           : allLinkedInRaw.slice(0, normalizedCollectionLimits.jobsPerPlatform);
         const needEnrich = filterJobsByDescriptionEvidence(allLinkedIn).dropped;
         const admitForScoring = async rows => (await resolveScoreSafePostings(
-          filterJobsByDescriptionEvidence(rows).jobs, { event, nodeId, signal, jobRunId },
+          scoreSafeRowsWithBoardClosed(filterJobsByDescriptionEvidence(overlayResolvedRecoveryRows(rows, snapshotRecoveryJobs))), { event, nodeId, signal, jobRunId },
         )).jobs;
         const persistRecoveryPool = async (updatedLinkedIn) => {
           const descriptionRecoveryJobs = mergeDescriptionRecoverySourceJobs(
@@ -16707,7 +16832,7 @@ Return a JSON object with four arrays of search query strings:
                 ?? scoringJobs.length,
             },
           });
-          return requireDescriptionRecoveryCheckpointPersisted(
+          requireDescriptionRecoveryCheckpointPersisted(
             await saveDescriptionRecoverySnapshotIfCurrent(nextSnapshot, {
               nodeId, jobRunId, sender: event.sender,
               continuation: continuationAdmission.continuation ? {
@@ -16716,6 +16841,8 @@ Return a JSON object with four arrays of search query strings:
               } : null,
             }),
           );
+          snapshotRecoveryJobs = snapshotDescriptionRecoveryJobs(nextSnapshot);
+          return scoringJobs.filter(job => job?.source === 'linkedin');
         };
 
         if (needEnrich.length > 0) {
@@ -16738,21 +16865,21 @@ Return a JSON object with four arrays of search query strings:
                 ownership: { nodeId, jobRunId },
                 canWriteTelemetry,
               });
-            if (probeTotalEnriched > 0) await persistRecoveryPool(merged);
-            if (aborted) return { resolved: true, items: await admitForScoring(merged), replaceSourceItems: true, nextBlockedUrl: null };
+            const scoringMerged = probeTotalEnriched > 0 ? await persistRecoveryPool(merged) : await admitForScoring(merged);
+            if (aborted) return { resolved: true, items: scoringMerged, replaceSourceItems: true, nextBlockedUrl: null };
             const stillEmpty = filterJobsByDescriptionEvidence(merged).dropped.length;
             if (browserUnavailable) {
               const browserWarning = linkedInBrowserUnavailableWarning({ profileReserved, browserError });
               recordResolve({ needEnrich: needEnrich.length, enrichSuccess: probeTotalEnriched, walled: false, stillEmpty, cooldownProbe: true, browserUnavailable: true });
               sendProgress({ nodeId, sourceId: 'linkedin', count: merged.length, status: 'error', url: 'https://www.linkedin.com/jobs', warning: browserWarning });
-              return { resolved: true, items: await admitForScoring(merged), warning: browserWarning, replaceSourceItems: true, nextBlockedUrl: null };
+              return { resolved: true, items: scoringMerged, warning: browserWarning, replaceSourceItems: true, nextBlockedUrl: null };
             }
             recordResolve({ needEnrich: needEnrich.length, enrichSuccess: probeTotalEnriched, walled: foundMs == null, stillEmpty, cooldownProbe: true, cooldownFoundMs: foundMs });
             if (foundMs != null) {
               if (canWriteTelemetry()) clearLinkedInCeiling();
               logger.info(`[Jobs][${nodeId}] Cooldown probe FOUND: guest wall clears after ~${Math.round(foundMs / 60000)}m idle on the same IP/browser.`);
               sendProgress({ nodeId, sourceId: 'linkedin', count: merged.length, status: 'done' });
-              return { resolved: true, items: await admitForScoring(merged), replaceSourceItems: true, nextBlockedUrl: null };
+              return { resolved: true, items: scoringMerged, replaceSourceItems: true, nextBlockedUrl: null };
             }
             const maxMin = Math.round(Math.max(...waitsMs) / 60000);
             const exhaustedWarning = {
@@ -16761,7 +16888,7 @@ Return a JSON object with four arrays of search query strings:
               suggestion: `The cooldown is longer than ${maxMin}m, or idle alone won't clear it. Extend JOB_SEARCH_PROBE_WAITS_MIN, Reset browser session, or try a residential IP.`,
             };
             sendProgress({ nodeId, sourceId: 'linkedin', count: merged.length, status: 'error', url: 'https://www.linkedin.com/jobs', warning: exhaustedWarning });
-            return { resolved: true, items: await admitForScoring(merged), warning: exhaustedWarning, replaceSourceItems: true, nextBlockedUrl: null };
+            return { resolved: true, items: scoringMerged, warning: exhaustedWarning, replaceSourceItems: true, nextBlockedUrl: null };
           }
 
           // Skip only an IMMEDIATE same-IP retry. A guest ceiling can cool while
@@ -16812,7 +16939,7 @@ Return a JSON object with four arrays of search query strings:
           const enrichedByUrl = new Map(enriched.map(j => [j.url, j]));
           items = allLinkedIn.map(j => enrichedByUrl.get(j.url) || j);
           const stillEmpty = filterJobsByDescriptionEvidence(items).dropped.length;
-          const scoringItems = await admitForScoring(items);
+          let scoringItems;
           recordResolve({ needEnrich: needEnrich.length, enrichSuccess: successCount, contextRotations, walled, stillEmpty });
           // Egress-IP trail entry for this Solve. `walled` distinguishes the
           // re-walled outcome from a clean finish; comparing `ip` to the prior
@@ -16829,7 +16956,7 @@ Return a JSON object with four arrays of search query strings:
           // walk DEEPER into the list as LinkedIn's guest quota cools.
           if (successCount > 0) {
             try {
-              await persistRecoveryPool(items);
+              scoringItems = await persistRecoveryPool(items);
             } catch (error) {
               logger.warn(`[Jobs][${nodeId}] LinkedIn re-fetch: could not persist descriptions to snapshot — ${error.message}`);
               const persistenceWarning = descriptionRecoveryPersistenceWarning(
@@ -16847,6 +16974,8 @@ Return a JSON object with four arrays of search query strings:
                 nextBlockedUrl: null,
               };
             }
+          } else {
+            scoringItems = await admitForScoring(items);
           }
 
           if (browserUnavailable) {
@@ -16946,6 +17075,8 @@ Return a JSON object with four arrays of search query strings:
     // initial run’s unresolved rows or falsely unlock scoring.
     let sourceRecoverySnapshot = null;
     let sourceRecoveryJobs = [];
+    const resolveGenericPostings = createOfficialPostingRecoveryPassResolver(rows =>
+      resolveScoreSafePostings(rows, { event, nodeId, signal, jobRunId }), { signal });
     // Load the recovery snapshot for ANY source whose Solve can recover
     // descriptions, not just Google: a Glassdoor panel-429 strands rows exactly
     // the same way, and without the snapshot the postprocessor below falls back
@@ -17058,9 +17189,7 @@ Return a JSON object with four arrays of search query strings:
       const descriptionRecoveryJobs = mergeDescriptionRecoverySourceJobs(
         snapshotDescriptionRecoveryJobs(sourceRecoverySnapshot), sourceId, recoveryJobs,
       );
-      const scoringJobs = (await resolveScoreSafePostings(
-        filterJobsByDescriptionEvidence(descriptionRecoveryJobs).jobs, { event, nodeId, signal, jobRunId },
-      )).jobs;
+      const scoringJobs = (await resolveGenericPostings(scoreSafeRowsWithBoardClosed(filterJobsByDescriptionEvidence(descriptionRecoveryJobs)))).jobs;
       const { snapshot: nextSnapshot } = buildJobAnalysisSnapshot({
         jobs: scoringJobs,
         descriptionRecoveryJobs,
@@ -17102,7 +17231,7 @@ Return a JSON object with four arrays of search query strings:
           }),
         );
         sourceRecoverySnapshot = nextSnapshot;
-        sourceRecoveryJobs = descriptionRecoveryJobs.filter(job => job?.source === sourceId);
+        sourceRecoveryJobs = snapshotDescriptionRecoveryJobs(nextSnapshot).filter(job => job?.source === sourceId);
         recoveryCheckpointOutcome = 'saved';
         return persisted;
       } catch (error) {
@@ -17412,18 +17541,21 @@ Return a JSON object with four arrays of search query strings:
     normalizeJobsMarkup(items);
     items = items.map(reconcileGlassdoorSalaryFromDescription);
     const descriptionEvidence = filterJobsByDescriptionEvidence(items);
-    const officialResolution = await resolveScoreSafePostings(descriptionEvidence.jobs, { event, nodeId, signal, jobRunId });
+    const officialResolution = await resolveGenericPostings(
+      overlayResolvedRecoveryRows(scoreSafeRowsWithBoardClosed(descriptionEvidence), sourceRecoverySnapshot?.jobs));
     items = officialResolution.jobs;
     tagJobLanguages(items);
     // A successful challenge clear does not make a list-card stub score-safe.
     // Retain the actionable source warning when a detail pass still left rows
     // without evidence, rather than returning `resolved: true` and letting the
     // renderer silently clear the source card.
+    // Board-closed rows are terminal (kept by the official-posting pass or gone),
+    // never "still lack a full description": no further Solve can recover them.
     const resolveWarning = buildResolvedDescriptionWarning(
       sourceId,
       result?.warning || null,
       items,
-      descriptionEvidence.dropped,
+      descriptionEvidence.dropped.filter(job => !isBoardClosedRow(job)),
     );
 
     logger.info(
@@ -17610,7 +17742,7 @@ Return a JSON object with four arrays of search query strings:
       // Append semantics: this pass adds recovered rows, it does not restate the
       // source's full set. Reporting every evidence drop as removed deleted
       // listings an earlier Solve had already completed — see retiredListingKeys.
-      removedItemKeys: retiredListingKeys(descriptionEvidence.dropped),
+      removedItemKeys: retiredListingKeys(descriptionEvidence.dropped, boardClosedRetirement(officialResolution)),
     };
     };
     // Every generic Solve may now consume an exact checkpoint-owned URL queue,
@@ -17676,13 +17808,16 @@ Return a JSON object with four arrays of search query strings:
         return { resolved: false, items: [] };
       }
       logger.info(`[Jobs][${nodeId}] Retrying ${retryRows.length} exact Indeed description(s)`);
-      const retried = await withSharedProfileLock(() => retryIndeedJobDescriptions(retryRows, signal), signal, 'job Indeed description retry');
+      const retried = await withSharedProfileLock(() => retryIndeedDescriptions(retryRows, signal), signal, 'job Indeed description retry');
       const retriedItems = Array.isArray(retried.jobs) ? retried.jobs : retryRows;
       repairJobsMojibake(retriedItems);
       normalizeJobsMarkup(retriedItems);
       const descriptionEvidence = filterJobsByDescriptionEvidence(retriedItems);
-      const officialResolution = await resolveScoreSafePostings(descriptionEvidence.jobs, { event, nodeId, signal, jobRunId });
+      const officialResolution = await resolveScoreSafePostings(scoreSafeRowsWithBoardClosed(descriptionEvidence), { event, nodeId, signal, jobRunId });
       const items = officialResolution.jobs;
+      const boardClosedOutcome = boardClosedRetirement(officialResolution);
+      const retriedUnavailable = Array.isArray(retried.unavailable) ? retried.unavailable : [];
+      const retriedBoardClosedKept = retriedUnavailable.filter(item => boardClosedOutcome.keptKeys.has(item?.key)).length;
       tagJobLanguages(items);
       if (canWriteTelemetry()) {
         const priorResolveMergeNet = Number(jobsTelemetry.resolves.indeed?.cumulativeMergeNet) || 0;
@@ -17698,7 +17833,10 @@ Return a JSON object with four arrays of search query strings:
         attemptedDescriptions: retried.attempted || 0,
         recoveredDescriptions: retried.recovered || 0,
         remainingDescriptions: retried.remaining || 0,
-        unavailableDescriptions: Array.isArray(retried.unavailable) ? retried.unavailable : [],
+        // Indeed's "gone" page is a board verdict now: only the rows the
+        // official-posting pass did not keep were removed. The kept ones are counted apart.
+        unavailableDescriptions: retriedUnavailable.filter(item => !boardClosedOutcome.keptKeys.has(item?.key)),
+        ...(retriedBoardClosedKept > 0 ? { boardClosedKept: retriedBoardClosedKept } : {}),
         challengeReason: retried.challengeReason || null,
         };
       }
@@ -17721,9 +17859,11 @@ Return a JSON object with four arrays of search query strings:
         resolved: true,
         items,
         replaceMatchingItems: true,
-        // `retried.unavailable` is an explicit retirement observation — Indeed
-        // served a "this job is no longer available" page — so it retires rows
-        // unconditionally. The evidence drops go through the same retirement
+        // `retried.unavailable` is an explicit observation — Indeed served a
+        // "this job is no longer available" page. That is a BOARD verdict now: the
+        // row retires only if the official-posting pass did not keep it (a kept
+        // board-closed row is in `items`, replaced in place), so kept keys are
+        // subtracted. The evidence drops go through the same retirement
         // filter the append paths use, for a reason replaceMatchingItems does
         // not cover: this pass can stop early. retryIndeedJobDescriptions breaks
         // out of its loop on the first challenge signal, so every target it
@@ -17733,10 +17873,10 @@ Return a JSON object with four arrays of search query strings:
         // definition absent from it, so deriving removedItemKeys from the whole
         // drop set deleted listings this retry never even attempted. See
         // retiredListingKeys.
-        removedItemKeys: [
-          ...(Array.isArray(retried.unavailable) ? retried.unavailable : []).map(item => item?.key),
-          ...retiredListingKeys(descriptionEvidence.dropped),
-        ].filter(Boolean),
+        removedItemKeys: [...new Set([
+          ...retriedUnavailable.map(item => item?.key),
+          ...retiredListingKeys(descriptionEvidence.dropped, boardClosedOutcome),
+        ].filter(key => key && !boardClosedOutcome.keptKeys.has(key)))],
       };
     }
     let effectiveResumeState = resumeState || {};
@@ -18005,7 +18145,7 @@ Return a JSON object with four arrays of search query strings:
     repairJobsMojibake(items);
     normalizeJobsMarkup(items);
     const descriptionEvidence = filterJobsByDescriptionEvidence(items);
-    const officialResolution = await resolveScoreSafePostings(descriptionEvidence.jobs, { event, nodeId, signal, jobRunId });
+    const officialResolution = await resolveScoreSafePostings(scoreSafeRowsWithBoardClosed(descriptionEvidence), { event, nodeId, signal, jobRunId });
     items = officialResolution.jobs;
     tagJobLanguages(items);
     const enrichment = {
@@ -18114,7 +18254,7 @@ Return a JSON object with four arrays of search query strings:
       // Append semantics, same as the generic resolve return: a resumed page
       // contributes rows, so only an explicitly retired listing may retire one
       // the renderer already holds. See retiredListingKeys.
-      removedItemKeys: retiredListingKeys(descriptionEvidence.dropped),
+      removedItemKeys: retiredListingKeys(descriptionEvidence.dropped, boardClosedRetirement(officialResolution)),
     };
   }, { beforeReply: checkpointContinuationBeforeReply('resume-job-source') });
 

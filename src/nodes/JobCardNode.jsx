@@ -1,4 +1,4 @@
-import React, { useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useContext, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { useReactFlow, useStore } from '@xyflow/react';
 import { CanvasNavigationContext } from '../contexts/CanvasNavigationContext';
 import { ExternalLink, X, Sparkles, ChevronDown } from 'lucide-react';
@@ -33,6 +33,7 @@ import { applicationBundleIndicator, APPLICATION_BUNDLE_TONES } from '../utils/j
 import { resolveApplicationCareerSnapshotId, resolveSalaryCareerSnapshotId } from '../utils/jobBoardCareerOverride';
 import { getConnectedJobSearchIds } from '../utils/jobBoardSearchSelection';
 import { officialPostingDisplay } from '../utils/officialPostingDisplay';
+import { beginOfficialPostingPreparation, getOfficialPostingPreparation, subscribeOfficialPostingPreparation } from '../utils/officialPostingPreparation';
 
 // Accent color encodes the hiring-fit band: a compact evidence-based assessment
 // of full-process fit, not a guaranteed hiring outcome.
@@ -438,6 +439,12 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
   // synchronous latch too, so two click events in the same render frame cannot
   // enqueue duplicate applications for this one card.
   const applicationSubmissionRef = useRef(false);
+  const preparationCanvasFilePath = nav?.getCurrentFile ? nav.getCurrentFile() : nav?.currentFile ?? null;
+  const sharedPreparation = useSyncExternalStore(
+    subscribeOfficialPostingPreparation,
+    () => getOfficialPostingPreparation(preparationCanvasFilePath, id),
+    () => null,
+  );
   // Local state is only the fast feedback for this mounted view. The global
   // snapshot is authoritative across a hidden-card unmount/remount, preventing
   // a remounted card from accidentally enqueueing a second application.
@@ -450,7 +457,7 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
   const activeApplicationRun = moduleRunSnapshot.activeRuns?.some((entry) => entry.nodeId === id && entry.kind === 'application');
   const displayedApplicationRun = queuedApplicationRun
     ? { state: 'queued', position: queuedApplicationRun.position, blocked: queuedApplicationRun.blocked === true }
-    : activeApplicationRun ? { state: 'generating', position: null } : applicationRun;
+    : activeApplicationRun ? { state: 'generating', position: null } : sharedPreparation || applicationRun;
   const hasApplicationRun = displayedApplicationRun.state !== 'idle';
   const localJobPending = !!localApplication && !canRegenerateLocalApplication(localApplication);
   const hasLinkedApplicationOutput = hasLinkedLocalApplicationOutput(localApplication)
@@ -1124,6 +1131,7 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
     }
     applicationSubmissionRef.current = true;
     let lease = null;
+    let preparation = null;
     let cancelledBeforeStart = false;
     let resolutionId = null;
     let preparedPosting = data.officialPosting;
@@ -1136,10 +1144,16 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
       if (window.electronAPI.prepareOfficialPostingForGeneration) {
         const prepareRunId = 'official-posting:' + idRef.current + ':' + generateId();
         let prepared = null;
-        setApplicationRun({ state: 'resolving', position: null, cancel: () => {
-          cancelledBeforeStart = true;
-          window.electronAPI.cancelNodeTaskAndWait?.(idRef.current, 'official-posting-cancelled')?.catch?.(() => {});
-        } });
+        preparation = beginOfficialPostingPreparation({
+          canvasFilePath: nav?.getCurrentFile ? nav.getCurrentFile() : nav?.currentFile ?? null,
+          nodeId: idRef.current,
+          cancel: () => {
+            cancelledBeforeStart = true;
+            window.electronAPI.cancelNodeTaskAndWait?.(idRef.current, 'official-posting-cancelled')?.catch?.(() => {});
+          },
+        });
+        if (!preparation) return;
+        setApplicationRun(preparation);
         try {
           prepared = await window.electronAPI.prepareOfficialPostingForGeneration?.({
             nodeId: data.hubId,
@@ -1148,7 +1162,7 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
             job: {
               title: data.title, company: data.company, snippet: data.snippet,
               postedBy: data.postedBy, applyOptions: data.applyOptions,
-              salaryProvenance: data.salaryProvenance, officialPosting: data.officialPosting,
+              salaryProvenance: data.salaryProvenance, officialPosting: data.officialPosting, boardClosed: data.boardClosed,
               googleCardUrl: data.googleCardUrl, sourceJobKey: data.sourceJobKey,
               location: data.location, salary: data.salary, url: normalizeJobListingExternalUrl({
                 title: data.title,
@@ -1200,7 +1214,13 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
       // so it queues only behind other application creations. Crucially, every
       // mutable input below is read only after the lease starts, so queued work
       // sees the latest canvas state before it materializes its durable job folder.
-      const applicationLabel = (preparedPosting?.level === 'L6'
+      const unnamedOfficialEmployer = preparedPosting?.level === 'L4'
+        && !(typeof preparedPosting.employer === 'string' && preparedPosting.employer.trim());
+      const posterLabel = [preparedPoster, data.company]
+        .map(value => typeof value === 'string' ? value.replace(/\s+/gu, ' ').trim() : '').find(Boolean);
+      const applicationLabel = unnamedOfficialEmployer
+        ? ['Employer unknown', posterLabel ? `via ${posterLabel}` : ''].filter(Boolean).join(' · ')
+        : (preparedPosting?.level === 'L6'
         ? [preparedPoster, data.company, preparedPosting?.title, data.title]
         : [preparedPosting?.employer, data.company, preparedPoster, preparedPosting?.title, data.title])
         .map(value => typeof value === 'string' ? value.replace(/\s+/gu, ' ').trim() : '').find(Boolean) || 'job';
@@ -1325,7 +1345,7 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
         job: {
           title: data.title, company: data.company, snippet: data.snippet,
           postedBy: data.postedBy, applyOptions: data.applyOptions,
-          salaryProvenance: data.salaryProvenance, officialPosting: data.officialPosting,
+          salaryProvenance: data.salaryProvenance, officialPosting: data.officialPosting, boardClosed: data.boardClosed,
           googleCardUrl: data.googleCardUrl, sourceJobKey: data.sourceJobKey,
           // New Google rows keep the direct Apply-on URL in `url`; legacy
           // cards may only retain Google’s internal identity. Materialize the
@@ -1467,10 +1487,11 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
       // The lease only covers durable handoff creation. Paste-back authoring or legacy coding-agent execution,
       // polling, validation, and final save continue independently.
       lease?.release();
+      preparation?.finish();
       applicationSubmissionRef.current = false;
       if (isMountedRef.current) setApplicationRun({ state: 'idle', position: null });
     }
-  }, [data.hubId, data.title, data.company, data.snippet, data.location, data.salary, data.url, data.googleCardUrl, data.sourceJobKey, data.postedBy, data.applyOptions, data.salaryProvenance, data.officialPosting, data.source, data.posted, data.language, data.postingVariants, data.reasoning, data.matchScore, additionalNotes, id, getLiveNode, getNodes, getEdges, nav, addToast, isMountedRef, acquireModuleRun, hasApplicationRun, localJobPending, effectiveLock, updateGlobal]);
+  }, [data.hubId, data.title, data.company, data.snippet, data.location, data.salary, data.url, data.googleCardUrl, data.sourceJobKey, data.postedBy, data.applyOptions, data.salaryProvenance, data.officialPosting, data.boardClosed, data.source, data.posted, data.language, data.postingVariants, data.reasoning, data.matchScore, additionalNotes, id, getLiveNode, getNodes, getEdges, nav, addToast, isMountedRef, acquireModuleRun, hasApplicationRun, localJobPending, effectiveLock, updateGlobal]);
 
   return (
     <div

@@ -197,14 +197,14 @@ export default [
     },
   },
   {
-    name: 'official-posting L4 and L5 views use scraped text with the verified employer while L6 has no employer and preserves the poster',
+    name: 'official-posting L4 and L5 views use scraped text with the verified employer while L6 keeps scraped company for scoring',
     async run() {
       await withStore(async ({ store }) => {
         const job = row();
         for (const [level, outcome, employer] of [['L4', 'link-only', 'Northwind Labs'], ['L5', 'not-found', 'Northwind Labs'], ['L6', 'not-found', '']]) {
           const record = await store.save(job, { officialPosting: posting({ level, outcome, employer }) });
           const view = await officialPostingView({ ...job, officialPosting: record.officialPosting }, { store });
-          assert.equal(view.description, job.snippet); assert.equal(view.title, job.title); assert.equal(view.employer, employer); assert.equal(view.postedBy, job.company);
+          assert.equal(view.description, job.snippet); assert.equal(view.title, job.title); assert.equal(view.employer, level === 'L6' ? job.company : employer); assert.equal(view.postedBy, job.company);
         }
       });
     },

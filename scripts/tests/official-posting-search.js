@@ -107,10 +107,13 @@ export default [
       assert.match(linked, /const scoringJobs = await admitForScoring\(descriptionRecoveryJobs\)/u);
       assert.doesNotMatch(linked, /items: admitForScoring\(/u);
       const generic = block('const runGenericResolve = async () =>', "checkpointContinuationBeforeReply('resolve-job-source')");
-      assert.match(generic, /const scoringJobs = \(await resolveScoreSafePostings/u);
-      assert.match(generic, /const officialResolution = await resolveScoreSafePostings\(descriptionEvidence.jobs,/u);
+      assert.match(generic, /const resolveGenericPostings = createOfficialPostingRecoveryPassResolver\(rows =>\s*resolveScoreSafePostings\(rows, \{ event, nodeId, signal, jobRunId \}\), \{ signal \}\)/u);
+      assert.match(generic, /const scoringJobs = \(await resolveGenericPostings\(scoreSafeRowsWithBoardClosed\(filterJobsByDescriptionEvidence\(descriptionRecoveryJobs\)\)\)\).jobs/u);
+      assert.match(generic, /const officialResolution = await resolveGenericPostings\(\s*overlayResolvedRecoveryRows\(scoreSafeRowsWithBoardClosed\(descriptionEvidence\), sourceRecoverySnapshot\?\.jobs\)\)/u);
+      assert.match(linked, /scoringItems = await persistRecoveryPool\(items\)/u);
+      assert.doesNotMatch(linked, /const scoringItems = await admitForScoring\(items\)/u);
       const indeed = block("handleSafe('resume-job-source',", "checkpointContinuationBeforeReply('resume-job-source')");
-      assert.equal([...indeed.matchAll(/await resolveScoreSafePostings\(descriptionEvidence.jobs,/gu)].length, 2);
+      assert.equal([...indeed.matchAll(/await resolveScoreSafePostings\(scoreSafeRowsWithBoardClosed\(descriptionEvidence\),/gu)].length, 2);
     },
   },
 ];

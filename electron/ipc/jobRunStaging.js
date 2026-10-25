@@ -614,6 +614,11 @@ function sanitizeReceiptSource(source = {}) {
     ...(receiptNumber(source.unavailableDetailDropped) > 0
       ? { unavailableDetailDropped: receiptNumber(source.unavailableDetailDropped) }
       : {}),
+    // Listings an aggregator board reported closed that were kept, flagged for the
+    // official-posting resolver. Apart from the dropped count above.
+    ...(receiptNumber(source.boardClosedDetailKept) > 0
+      ? { boardClosedDetailKept: receiptNumber(source.boardClosedDetailKept) }
+      : {}),
     // A known Glassdoor nation-tier caveat. This is intentionally independent
     // from the source warning slot, so a benign scope disclosure cannot mask a
     // later block/error and remains available after process restart.
@@ -742,6 +747,10 @@ export function sanitizeLastRunReceipt(receipt = {}) {
     descriptionEvidenceDropped: receiptNumber(receipt.funnel.descriptionEvidenceDropped),
     ...(receipt.funnel.finalDedupDropped != null ? { finalDedupDropped: receiptNumber(receipt.funnel.finalDedupDropped) } : {}),
     ...(receipt.funnel.officialDedupDropped != null ? { officialDedupDropped: receiptNumber(receipt.funnel.officialDedupDropped) } : {}),
+    // Board-closed rows rescued from the evidence gate for the official-posting
+    // pass, and those that pass then removed. Present only when a run had any.
+    ...(receiptNumber(receipt.funnel.boardClosedSetAside) > 0 ? { boardClosedSetAside: receiptNumber(receipt.funnel.boardClosedSetAside) } : {}),
+    ...(receiptNumber(receipt.funnel.boardClosedDropped) > 0 ? { boardClosedDropped: receiptNumber(receipt.funnel.boardClosedDropped) } : {}),
     kept: receiptNumber(receipt.funnel.kept),
   } : null;
   const scoring = sanitizeReceiptScoring(receipt.scoring);

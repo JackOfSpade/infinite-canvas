@@ -70,10 +70,11 @@ export default [
         `I would love to contribute to ${EMPLOYER}.`,
         `I built ${WORK}. I am ready to bring ${WORK} to ${EMPLOYER}.`,
         `I built ${WORK}, which meets ${EMPLOYER}'s need for dispatch rosters.`,
-        `I built ${WORK}, and ${EMPLOYER} needs dispatch rosters for freight routes.`,
         `I am applying for the Freight Systems Engineer role at ${EMPLOYER}.`,
       ]) for (const [gate, errors] of Object.entries(gateErrors(text))) assert.deepEqual(errors, [], `${gate}: ${text}`);
+      // AMENDMENT-2 item 10 deliberately tightens the old coordinated SUBJECT pin.
       for (const text of [
+        `I built ${WORK}, and ${EMPLOYER} needs dispatch rosters for freight routes.`,
         `I built ${WORK}. I was excited to join ${EMPLOYER}.`,
         `I built ${WORK} to help ${EMPLOYER}.`, `I rebuilt ${WORK} to help ${EMPLOYER}.`,
         `I helped ${EMPLOYER} with ${WORK}.`,

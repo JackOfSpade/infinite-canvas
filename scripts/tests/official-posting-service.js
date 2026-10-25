@@ -43,6 +43,9 @@ export default [
     async run() {
       await withStore(async store => {
         const jobs = Array.from({ length: 13 }, (_, index) => row(index + 1));
+        // Each unavailable mirror is a different host, so this ordering
+        // fixture does not trip the independently tested per-host breaker.
+        for (const [index, job] of jobs.entries()) job.url = `https://mirror-${index}.example/jobs/${index + 1}`;
         jobs[0].url = sourceUrl(1);
         const before = JSON.stringify(jobs); const requests = []; const calls = []; const progress = [];
         const pages = { 'https://northwind.test/': '<title>Northwind Labs</title>' };
@@ -75,6 +78,7 @@ export default [
     async run() {
       await withStore(async store => {
         const jobs = Array.from({ length: 25 }, (_, index) => row(index));
+        for (const [index, job] of jobs.entries()) job.url = `https://mirror-${index}.example/jobs/${index}`;
         const controller = new AbortController(); const stopped = []; const resumed = [];
         const first = await resolveOfficialPostings(jobs, { store, fetch: network({}), signal: controller.signal,
           callRaw: async (prompt, options) => { stopped.push({ prompt, hints: options.hints });
@@ -85,25 +89,26 @@ export default [
         const again = await resolveOfficialPostings(jobs, { store, fetch: network({}), callRaw: async (prompt, options) => {
           resumed.push({ prompt, hints: options.hints }); return response(prompt);
         } });
-        assert.equal(resumed.length, 3, 'the first all-recent-miss chunk still consumes its deterministic full replay');
-        assert.deepEqual(resumed[1], stopped[1]);
-        assert.deepEqual(resumed.map(call => call.hints.itemCount), [12, 12, 1]);
+        assert.equal(resumed.length, 2, 'an all-settled miss chunk no longer dispatches a handoff');
+        assert.deepEqual(resumed[0], stopped[1]);
+        assert.deepEqual(resumed.map(call => call.hints.itemCount), [12, 1]);
+        assert.deepEqual(resumed.map(call => [call.hints.batch, call.hints.batchTotal]), [[2, 3], [3, 3]], 'remaining raw-input chunks retain their original deterministic hints');
         assert.ok(again.jobs.every(job => ['L5', 'L6'].includes(job.officialPosting.level)));
       });
     },
   },
   {
-    name: 'official-posting service retains a cached miss until twenty-four hours while replaying its complete chunk without accepting fresh AI leads',
+    name: 'official-posting service retains a definitive cached miss until twenty-four hours without a fresh handoff',
     async run() {
       let time = Date.parse('2026-01-01T00:00:00Z');
       await withStore(async store => {
-        const job = row(); const old = await store.save(job, { officialPosting: { level: 'L5', outcome: 'not-found', employer: job.company, trail: [] } });
+        const job = row(); const old = await store.save(job, { officialPosting: { level: 'L5', outcome: 'not-found', employer: job.company, trail: ['bridge-research'] } });
         const leads = new Map([[officialPostingRequestId(job), sourceUrl(1)]]); let fetches = 0; let handoffs = 0;
         time += 1000;
         const recent = await resolveOfficialPostings([job], { store, now: () => time, fetch: async () => { fetches++; throw new Error('cached miss'); },
           callRaw: async prompt => { handoffs++; return response(prompt, leads); } });
         assert.equal(recent.jobs[0].officialPosting.level, 'L5'); assert.ok(recent.jobs[0].officialPosting.trail.includes('recent-miss'));
-        assert.equal(fetches, 0); assert.equal(handoffs, 1); assert.equal((await store.find(job)).savedAt, old.savedAt);
+        assert.equal(fetches, 0); assert.equal(handoffs, 0); assert.equal((await store.find(job)).savedAt, old.savedAt);
         time += 24 * 60 * 60 * 1000;
         const found = await resolveOfficialPostings([job], { store, now: () => time, fetch: network({ 'https://northwind.test/': '<title>Northwind Labs</title>', [sourceUrl(1)]: jsonld(job) }),
           callRaw: async prompt => response(prompt, leads) });
@@ -121,10 +126,12 @@ export default [
             return new Promise(resolve => setTimeout(() => resolve(response(prompt)), 25)); } });
         assert.equal(calls, 1); assert.equal(aborted, true); assert.ok(timed.jobs[0].officialPosting.trail.includes('bridge-timeout'));
         assert.equal(timed.telemetry.bridgeTimeout, 1); assert.equal(timed.telemetry.handoffs, 1);
+        assert.equal(await store.find(row()), null, 'a timed-out research handoff does not store a miss');
         const unavailable = await resolveOfficialPostings([row(2, { company: 'Acme Talent Partners', snippet: `Our client is hiring. ${description}` })], {
           store, fetch: network({}), bridgeAvailable: false, callRaw: () => { throw new Error('disabled'); } });
         assert.equal(unavailable.jobs[0].officialPosting.level, 'L6'); assert.ok(unavailable.jobs[0].officialPosting.trail.includes('bridge-unavailable'));
         assert.equal(unavailable.telemetry.bridgeUnavailable, 1); assert.equal(unavailable.telemetry.handoffs, 0);
+        assert.equal(await store.find(row(2, { company: 'Acme Talent Partners', snippet: `Our client is hiring. ${description}` })), null, 'an unavailable bridge does not store a miss');
         assert.equal(/Requirements include|Northwind|Acme/u.test(JSON.stringify(timed.telemetry)), false, 'telemetry contains counts and enums only');
       });
     },
@@ -133,14 +140,16 @@ export default [
     name: 'official-posting service uses quoted JSON matching only for a host hard-pass candidate and counts material text changes',
     async run() {
       await withStore(async store => {
-        const scraped = 'The hired engineer will create software for local dispatch operators every morning. This position focuses on clear account reports across the entire delivery network. Applicants should understand how to explain design decisions to experienced business partners. You will coordinate regularly with regional teams and review all workflow changes carefully.';
-        const official = 'Requirements include creating operational applications for regional logistics groups throughout each working week. The role maintains readable financial summaries within a broad freight planning organization. Engineers need experience communicating implementation choices with established customer representatives and project leads. Responsibilities involve collaborating with local departments while inspecting proposed process updates thoroughly.';
-        const job = row(1, { snippet: scraped, url: sourceUrl(1) });
+        const scraped = 'The engineer creates dispatch software for operators and reviews delayed routing records every morning. Account reports across the delivery network need clear explanations for regional planning partners. Applicants should understand how to explain design decisions to experienced business partners. Coordinate regularly with regional teams and review workflow changes through diagnostic tests before release.';
+        const official = 'Requirements: operators rely on dispatch software; engineer responsibilities include reviews of delayed routing records. Responsibilities include clear account reports, delivery network explanations, and coordination with regional planning partners. Engineers need experience communicating implementation choices with established customer representatives and project leads. You will coordinate diagnostic tests, review release readiness, and discuss workflow changes with regional teams.';
+        // Amendment 3: the row's own url is a lead identity anchor, so this posting arrives through the research lead instead.
+        const job = row(1, { snippet: scraped });
         const left = scraped.split(/(?<=\.)\s+/u); const right = official.split(/(?<=\.)\s+/u);
         const answer = { sameJob: true, matchingPairs: [0, 1, 3].map(index => ({ scrapedQuote: left[index], officialQuote: right[index] })), conflicts: [] };
         const calls = [];
+        const leads = new Map([[officialPostingRequestId(job), sourceUrl(1)]]);
         const result = await resolveOfficialPostings([job], { store, fetch: network({ 'https://northwind.test/': '<title>Northwind Labs</title>', [sourceUrl(1)]: jsonld(job, official) }),
-          callRaw: async (prompt, options) => { calls.push(options.task); const raw = options.task.endsWith('-research') ? response(prompt) : answer;
+          callRaw: async (prompt, options) => { calls.push(options.task); const raw = options.task.endsWith('-research') ? response(prompt, leads) : answer;
             options.responseValidator(raw); return raw; } });
         assert.deepEqual(calls, ['job-official-posting-research', 'job-official-posting-match']);
         assert.equal(result.jobs[0].officialPosting.level, 'L1'); assert.ok(result.jobs[0].officialPosting.trail.includes('quoted-match'));
@@ -155,8 +164,10 @@ export default [
     async run() {
       await withStore(async store => {
         const reversed = description.split(/\s+/u).reverse().join(' ');
-        const job = row(1, { applyOptions: [{ label: 'One', href: sourceUrl(1) }, { label: 'Two', href: sourceUrl(2) }] });
-        const pages = { 'https://northwind.test/': '<title>Northwind Labs</title>', [sourceUrl(1)]: jsonld(job, reversed), [sourceUrl(2)]: jsonld(job, reversed) };
+        // Amendment 3: apply options are lead identity anchors, so the two candidates are reached from the employer's careers page.
+        const job = row(1, { url: 'https://northwind.test/careers' });
+        const pages = { 'https://northwind.test/': '<title>Northwind Labs</title>', 'https://northwind.test/careers': `<a href="${sourceUrl(1)}">One</a><a href="${sourceUrl(2)}">Two</a>`,
+          [sourceUrl(1)]: jsonld(job, reversed), [sourceUrl(2)]: jsonld(job, reversed) };
         let matches = 0; let aborted = false;
         const result = await resolveOfficialPostings([job], { store, fetch: network(pages), timeoutMs: 5,
           callRaw: async (prompt, options) => {
@@ -167,6 +178,7 @@ export default [
         assert.equal(matches, 1, 'a second unresolved candidate cannot trigger another handoff after the first timeout');
         assert.equal(aborted, true); assert.equal(result.telemetry.bridgeTimeout, 1);
         assert.ok(result.jobs[0].officialPosting.trail.includes('bridge-timeout')); assert.equal(result.jobs[0].officialPosting.level, 'L5');
+        assert.equal(await store.find(job), null, 'a match timeout is retryable even after research parsed successfully');
         const mismatch = row(2, { title: 'Staff Engineer', applyOptions: [{ label: 'One', href: sourceUrl(1) }] });
         const hard = await resolveOfficialPostings([mismatch], { store, fetch: network(pages), callRaw: async (prompt, options) => {
           assert.equal(options.task, 'job-official-posting-research', 'a title mismatch cannot reach JSON comparison'); return response(prompt);

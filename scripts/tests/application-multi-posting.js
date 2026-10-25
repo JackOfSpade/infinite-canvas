@@ -147,6 +147,14 @@ export default [
       assert(countOccurrences(multi, '<div class="ic-job-posting-links">') === 1, 'multiple links render inside the bounded posting-links container');
       assert(/href="https:\/\/jobs\.example\.test\/lakeview"/.test(multi), 'the safe Lakeview href must be rendered');
       assert(/href="https:\/\/jobs\.example\.test\/berlin"/.test(multi), 'the safe Berlin href must be rendered');
+      const officialMulti = renderApplication({ jobUrl: 'https://jobs.example.test/primary',
+        officialPosting: { level: 'L2', sourceUrl: 'https://careers.example.test/official', officialApplyUrl: 'https://careers.example.test/apply' },
+        postingVariants: [{ location: 'Lakeview', url: 'https://jobs.example.test/lakeview' }, { location: 'Berlin', url: 'https://jobs.example.test/berlin' }],
+      });
+      const officialAt = officialMulti.indexOf('View official job posting</a>');
+      assert(officialAt >= 0 && officialAt < officialMulti.indexOf('View original job posting — Lakeview')
+        && officialAt < officialMulti.indexOf('View original job posting — Berlin'), 'official page precedes retained location-specific scraped links');
+      assert(officialMulti.includes('href="https://careers.example.test/official"'), 'official page URL wins over its apply form');
 
       // Legacy one-link: with no variants, the exact legacy label must remain
       // and the new multi-link container must not appear.

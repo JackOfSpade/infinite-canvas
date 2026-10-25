@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
 import { assert } from './testHelpers.js';
 import { createModuleRunQueue } from '../../src/utils/moduleRunQueue.js';
+import { beginOfficialPostingPreparation } from '../../src/utils/officialPostingPreparation.js';
 import { hasLinkedLocalApplicationOutput, queuedLocalApplicationStartDecision } from '../../src/utils/localAiApplicationLifecycle.js';
 import { resolveApplicationCareerSnapshotId } from '../../src/utils/jobBoardCareerOverride.js';
 import { getConnectedJobSearchIds } from '../../src/utils/jobBoardSearchSelection.js';
@@ -133,6 +134,7 @@ export default [
           getDismissedApplicationBundles: () => new Set(),
           hasLinkedLocalApplicationOutput, queuedLocalApplicationStartDecision,
           normalizeJobListingExternalUrl: job => job.url || 'https://example.test/job',
+          beginOfficialPostingPreparation,
           acquireModuleRun: options => queue.acquireModuleRun({
             ...options,
             onStart: info => {
@@ -213,6 +215,7 @@ export default [
           getDismissedApplicationBundles: () => new Set(),
           hasLinkedLocalApplicationOutput, queuedLocalApplicationStartDecision,
           normalizeJobListingExternalUrl: job => job.url || 'https://example.test/job',
+          beginOfficialPostingPreparation,
           acquireModuleRun: options => queue.acquireModuleRun(options),
         });
         await callback();

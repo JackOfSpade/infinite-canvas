@@ -742,7 +742,11 @@ export default [
       const quote = ['Compared on-time delivery rates for twelve carriers over six months for the weekly rotation.'];
       const lead = 'I compared on-time delivery rates for twelve carriers over six months.';
       assert(verdict(`${lead} I would run that comparison across your four distribution centers.`, quote) === '', 'an intent clause about the reader\'s sites is not a candidate claim');
-      assert(verdict(`${lead} My carrier comparison would serve your four distribution centers.`, quote) === '', 'a count written as the reader\'s is the reader\'s');
+      // AMENDMENT-2 item 12 keeps first-person possessive counts grounded in every tense.
+      const possessiveCount = `${lead} My carrier comparison would serve your four distribution centers.`;
+      assert(/states the count “four”/u.test(verdict(possessiveCount, quote)), 'a non-intent first-person clause cannot free a target-owned count');
+      const countedQuote = ['Compared on-time delivery rates for twelve carriers over six months for the weekly rotation across four distribution centers.'];
+      assert(verdict(possessiveCount, countedQuote) === '', 'the same count is accepted when its bound career quote states it for the same sites');
       assert(/states the count “four”/u.test(verdict(`${lead} My carrier comparison would serve my four distribution centers.`, quote)), 'the same count written as the candidate\'s is a claim');
       assert(/states the count “four”/u.test(verdict(`${lead} I ranked carriers across your four distribution centers.`, quote)), 'and past work at the reader\'s sites is a claim');
       assert(NAMES.test(verdict(`${lead} I look forward to bringing my Kubernetes skills to your team.`, quote)), 'a possessive skill claim in an intent sentence is still a claim');

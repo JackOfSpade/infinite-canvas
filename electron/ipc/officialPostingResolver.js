@@ -2,13 +2,97 @@ import crypto from 'node:crypto';
 import { fetchOfficialPosting } from './officialPostingFetch.js';
 import { normalizeApplyOptions, normalizeOfficialLocation, normalizeOfficialPosting, normalizeOfficialSalary, officialHttpsUrl, OFFICIAL_POSTING_TRAIL } from './officialPostingFields.js';
 import { extractOfficialPostingCandidates, scanOfficialCareersPage } from './officialPostingExtractors.js';
-import { careersPageEmployerFromTitle, extractAtsTenant, isAggregatorHost, isKnownAtsHost, normalizedSourceHost, proveEmployerDomain, strictEmployerEqual } from './officialSourceHosts.js';
-import { coreTitle, evaluateOfficialPostingMatch, frozenOfficialEmployer, locationsCompatible, posterEmployerSignals, resolveScrapedEmployer, selectOfficialPostingMatch } from './officialPostingMatch.js';
+import { domainBrandMatchesEmployer, extractAtsTenant, isAggregatorHost, isKnownAtsHost, isPosterAtsTenant, normalizedSourceHost, proveBidirectionalOwnership, proveEmployerDomain, registrableDomain, rootBrandingNamesPoster, rootFooterText, strictEmployerEqual } from './officialSourceHosts.js';
+import { canonicalLeadUrl, coreTitle, evaluateOfficialPostingMatch, frozenOfficialEmployer, locationsCompatible, posterEmployerSignals, resolveScrapedEmployer, selectOfficialPostingMatch } from './officialPostingMatch.js';
 import { officialPostingRecordMatchesScrapedIdentity } from './officialPostingStore.js';
 
 export const OFFICIAL_POSTING_BATCH_SIZE = 12;
 export { adapterUrl as officialPostingAdapterUrl, readableDescription as readableOfficialPostingDescription, verifiedApplyUrl as verifiedOfficialPostingApplyUrl };
+// T10: only the registrable apex or one conventional single-label careers/www host speaks for a domain. Tenant subdomains of a hosting
+// platform (evil.vendor.example) and user-content subdomains never do.
+const OWN_HOST_LABELS = new Set(['www', 'careers', 'career', 'jobs', 'job', 'join', 'work', 'talent']);
+function speaksForDomain(host) {
+  const domain = registrableDomain(host);
+  if (!domain) return false;
+  return host === domain || (host.endsWith(`.${domain}`) && OWN_HOST_LABELS.has(host.slice(0, -(domain.length + 1))));
+}
 const canonical = value => String(value ?? '').normalize('NFKC').replace(/\s+/gu, ' ').trim().toLowerCase();
+const ROW_BUDGETS = new WeakMap();
+const ROW_ABORT_FANOUTS = new WeakMap();
+const RETRYABLE_MISS_TRAIL = new Set(['bridge-aborted', 'bridge-timeout', 'bridge-unavailable', 'research-miss',
+  'fetch-failed', 'fetch-timeout', 'crawl-budget', 'official-text-missing', 'failed']);
+const DEFINITIVE_MISS_TRAIL = new Set(['closed', 'title-mismatch', 'location-mismatch', 'employer-mismatch',
+  'tenant-unproven', 'poster-tenant', 'salary-mismatch', 'no-anchor', 'invalid-quotes', 'ambiguous']);
+
+/** Shared by both discovery passes. Human handoff time is never charged to
+ * this host-only budget; its signal also makes a stopped crawl non-durable. */
+export function createOfficialPostingRowBudget({ signal, maxPages = 16, timeoutMs = 60_000, now = Date.now } = {}) {
+  const controller = new AbortController();
+  let fanout;
+  if (signal?.aborted) controller.abort(signal.reason);
+  else if (signal) {
+    fanout = ROW_ABORT_FANOUTS.get(signal);
+    if (!fanout) {
+      fanout = { controllers: new Set() };
+      fanout.abort = () => {
+        for (const child of fanout.controllers) child.abort(signal.reason);
+        fanout.controllers.clear(); ROW_ABORT_FANOUTS.delete(signal);
+      };
+      ROW_ABORT_FANOUTS.set(signal, fanout);
+      signal.addEventListener('abort', fanout.abort, { once: true });
+    }
+    fanout.controllers.add(controller);
+  }
+  let disposed = false;
+  const budget = Object.freeze({ signal: controller.signal,
+    dispose: () => {
+      if (disposed || !fanout) return;
+      disposed = true;
+      fanout.controllers.delete(controller);
+      if (!fanout.controllers.size) {
+        signal.removeEventListener('abort', fanout.abort); ROW_ABORT_FANOUTS.delete(signal);
+      }
+    } });
+  ROW_BUDGETS.set(budget, { controller, sourceSignal: signal, pages: new Map(), reads: new Set(), locales: new Map(), elapsedMs: 0,
+    maxPages: Math.max(1, Math.min(16, Math.floor(Number(maxPages) || 16))),
+    timeoutMs: Math.max(1, Math.min(60_000, Number(timeoutMs) || 60_000)),
+    now: typeof now === 'function' ? now : () => Number(now) });
+  return budget;
+}
+
+/** Reads and writes use the same rule, including historical cached misses.
+ * A verified result survives incidental failures; an actual abort never does. */
+export function shouldPersistOfficialPostingResult(value, { signal, researchRan = false } = {}) {
+  if (signal?.aborted) return false;
+  const posting = normalizeOfficialPosting(value?.officialPosting || value?.posting || value);
+  if (!posting) return false;
+  if (['L1', 'L2', 'L3', 'L4'].includes(posting.level)) return ['found', 'link-only'].includes(posting.outcome);
+  const trail = posting.trail || [];
+  if (posting.outcome === 'failed' || trail.some(code => RETRYABLE_MISS_TRAIL.has(code))) return false;
+  return researchRan || trail.includes('bridge-research') || posting.outcome === 'closed'
+    || trail.some(code => DEFINITIVE_MISS_TRAIL.has(code));
+}
+
+function crawlUrlAllowed(value) {
+  const url = new URL(value);
+  let pathname;
+  try { pathname = decodeURIComponent(url.pathname); } catch { return false; }
+  if (/\.(?:[cm]?js|css|map|png|jpe?g|gif|svg|webp|avif|ico|woff2?|ttf|otf|eot|mp[34]|webm|wav|pdf|zip|gz|webmanifest|txt)$/iu.test(pathname)) return false;
+  return !pathname.split('/').some(segment => /^(?:assets?|static|_next|_nuxt|images?|img|fonts?|scripts?|styles?|login|log-in|signin|sign-in|signup|sign-up|register|registration|registrationmethods|password|(?:reset|forgot|change)-?password|account|logout|log-out|privacy(?:-?policy)?|cookies?(?:-?policy)?|terms(?:-?(?:conditions|of-?use|of-?service))?|jobapplication)$/iu.test(segment.replace(/_/gu, '-')));
+}
+
+// Locale presentation does not create a second posting. Do not mistake a
+// path-based ATS tenant (for example a tenant named "it") for a locale.
+function crawlLocaleKey(value) {
+  const url = new URL(value); const parts = url.pathname.split('/');
+  const route = extractAtsTenant(value);
+  const locale = /^(?:en|fr|de|es|it|pt|nl|sv|no|da|fi|pl|cs|sk|hu|ro|bg|el|tr|uk|ru|ar|he|ja|ko|zh|th|vi|id|ms|hi)(?:[-_][a-z]{4})?(?:[-_](?:[a-z]{2}|\d{3}))?$/iu;
+  if (locale.test(parts[1] || '') && (!route || canonical(route.tenant) !== canonical(parts[1]))) parts.splice(1, 1);
+  url.pathname = parts.join('/');
+  for (const name of [...url.searchParams.keys()]) if (/^(?:lang|language|locale|culture|ui_locales|candidate_locale)$/iu.test(name)) url.searchParams.delete(name);
+  url.searchParams.sort();
+  return url.href;
+}
 export function officialPostingRequestId(job) {
   return crypto.createHash('sha256').update([job?.title, job?.company, job?.url || job?.googleCardUrl, job?.location].map(canonical).join('|')).digest('hex').slice(0, 24);
 }
@@ -20,18 +104,39 @@ export function officialPostingChunks(jobs) {
   return chunks;
 }
 function trailCodes(values) { return [...new Set(values.filter(value => OFFICIAL_POSTING_TRAIL.includes(value)))].slice(0, 32); }
-function fallback(job, { outcome = 'not-found', trail = [], alternatives = [] } = {}) {
-  const scraped = resolveScrapedEmployer(job);
-  return { postedBy: scraped.postedBy || undefined, officialPosting: normalizeOfficialPosting({ level: scraped.level,
-    outcome, employer: scraped.employer, trail: trailCodes(trail), alternatives }) };
+function fallback(job, options = {}) {
+  try {
+    const { outcome = 'not-found', trail = [], alternatives = [] } = options || {};
+    // Scraped identity remains untouched; only the bounded resolution display
+    // fields use this projection. A malformed display cannot poison a run.
+    // eslint-disable-next-line no-control-regex
+    const display = (value, max) => String(value ?? '').normalize('NFKC').replace(/[<>\u0000-\u001f\u007f]/gu, '').trim().slice(0, max);
+    const scraped = resolveScrapedEmployer(job || {});
+    const safeAlternatives = (Array.isArray(alternatives) ? alternatives : []).slice(0, 12).flatMap(item => {
+      const url = officialHttpsUrl(item?.url); const title = display(item?.title, 500);
+      return url && title ? [{ url, title }] : [];
+    });
+    const officialPosting = normalizeOfficialPosting({ level: scraped.level, outcome,
+      employer: display(scraped.employer, 120), trail: trailCodes(Array.isArray(trail) ? trail : []), alternatives: safeAlternatives });
+    if (officialPosting) return { postedBy: scraped.postedBy || undefined, officialPosting };
+  } catch { /* Even the fallback must tolerate an invalid scraped row. */ }
+  return { officialPosting: { level: 'L6', outcome: 'failed', employer: '', trail: ['failed'] } };
 }
 export function unresolvedOfficialPosting(job, options) { return fallback(job, options); }
 
 export function freeOfficialPostingLeads(job) {
   const urls = normalizeApplyOptions(job?.applyOptions).map(option => option.href);
-  for (const match of String(job?.snippet || '').matchAll(/https:\/\/[^\s<>"'`]+/gu)) urls.push(match[0].replace(/[),.;]+$/gu, ''));
+  for (const match of String(job?.snippet || '').matchAll(/https:\/\/[^\s<>"'`]+/gu)) {
+    const token = match[0];
+    // Reject an overlong token rather than clipping it into a different URL.
+    // Punctuation trimming is therefore bounded by the URL validator's cap.
+    if (token.length > 2000) continue;
+    let end = token.length;
+    while (end > 0 && '),.;'.includes(token[end - 1])) end -= 1;
+    urls.push(token.slice(0, end));
+  }
   urls.push(job?.url);
-  return [...new Set(urls.map(officialHttpsUrl).filter(url => url && !isAggregatorHost(new URL(url).hostname)))].slice(0, 32);
+  return [...new Set(urls.map(officialHttpsUrl).filter(url => url && !isAggregatorHost(new URL(url).hostname) && crawlUrlAllowed(url)))].slice(0, 32);
 }
 function verifiedApplyUrl(candidate) {
   const source = new URL(candidate.sourceUrl);
@@ -65,10 +170,24 @@ function readableDescription(candidate, job) {
  * here. This core has no IPC, bridge registration or renderer dependency. */
 export async function resolveOfficialPosting(job, {
   store = null, fetch = fetchOfficialPosting, candidateUrls = [], research = null, match = null,
-  signal, now = Date.now, bypassCache = false, persistMisses = true,
+  signal, now = Date.now, bypassCache = false, persistMisses = true, persistResults = true, researchRan = false, rowBudget,
 } = {}) {
   const instant = () => typeof now === 'function' ? now() : Number(now);
-  const trail = []; const candidates = new Map(); const pages = new Map();
+  const ownsBudget = !ROW_BUDGETS.has(rowBudget);
+  const budget = ownsBudget ? createOfficialPostingRowBudget({ signal }) : rowBudget;
+  const budgetState = ROW_BUDGETS.get(budget);
+  const cancel = signal && budgetState.sourceSignal !== signal ? () => budgetState.controller.abort(signal.reason) : null;
+  if (cancel) {
+    if (signal.aborted) cancel();
+    else signal.addEventListener('abort', cancel, { once: true });
+  }
+  const abortBudget = code => {
+    if (!budget.signal.aborted) budgetState.controller.abort(Object.assign(new Error(code), { code }));
+  };
+  const abortCode = () => ['fetch-timeout', 'crawl-budget'].includes(budget.signal.reason?.code)
+    ? budget.signal.reason.code : 'bridge-aborted';
+  let researchSucceeded = researchRan === true;
+  const trail = []; const candidates = new Map(); const pages = budgetState.pages; const fetchedCandidates = [];
   const rssCandidates = new Map(); const conflictingUrls = new Set();
   const signals = posterEmployerSignals(job);
   const hypotheses = [job?.company, ...signals.hypotheses].filter(Boolean);
@@ -77,18 +196,42 @@ export async function resolveOfficialPosting(job, {
   const statedEmployers = signals.S1 || signals.S2 ? [signals.S1, signals.S2].filter(Boolean)
     : signals.S4.length ? signals.S4 : !signals.S3 ? [job?.company].filter(Boolean) : [];
   const domains = new Map(); const tenants = new Map(); const queue = []; const queued = new Set();
-  const rootSites = new Map(); const careersPages = new Map();
-  const ownPoster = canonical(job?.company);
+  const rootSites = new Map(); const careersPages = new Map(); const discoveredDomains = new Map(); const posterHosts = new Set();
+  // Amendment 3 section 1: which fetched root or careers pages link to a tenant or posting.
+  const linkSources = new Map();
+  // Round-trip ownership is decided on the pages read, not on the order they were read in. A posting whose proof had nothing to
+  // work with is parked here and tried again whenever a root or link source is first learned (proofEpoch changes).
+  const pendingRoundTrips = new Map(); let proofEpoch = 0;
+  const noteLinks = (pageUrl, links) => {
+    const host = normalizedSourceHost(pageUrl);
+    if (!host || isKnownAtsHost(host) || isAggregatorHost(host) || !speaksForDomain(host)) return;
+    const path = new URL(pageUrl).pathname;
+    if (path !== '/' && !/\/(?:careers?|jobs?|positions?|openings?)(?:\/|$)/iu.test(path)) return;
+    for (const link of links) {
+      if (link.tag === 'script') continue;
+      const linked = extractAtsTenant(link.url);
+      for (const key of [linked ? `tenant|${linked.ats}|${linked.tenant}` : '', `posting|${officialHttpsUrl(link.url)}`]) {
+        if (!key || key.endsWith('|')) continue;
+        if (!linkSources.has(key)) linkSources.set(key, new Set());
+        const sources = linkSources.get(key);
+        if (!sources.has(host)) { sources.add(host); proofEpoch += 1; }
+      }
+    }
+  };
   const enqueue = (value, context = {}) => {
     const url = officialHttpsUrl(value);
-    if (!url || isAggregatorHost(new URL(url).hostname)) return;
+    if (!url || isAggregatorHost(new URL(url).hostname) || (!context.adapter && !crawlUrlAllowed(url))) return false;
+    const localeKey = crawlLocaleKey(url);
+    if (budgetState.locales.has(localeKey) && budgetState.locales.get(localeKey) !== url) return false;
     if (queued.has(url)) {
       const existing = queue.find(item => item.url === url);
       if (existing && context.provenEmployer) Object.assign(existing, context);
-      return;
+      return false;
     }
-    if (queue.length >= 64) return;
+    if (queue.length >= 64) return false;
+    budgetState.locales.set(localeKey, url);
     queued.add(url); queue.push({ url, ...context });
+    return true;
   };
   const addLead = lead => {
     if (typeof lead === 'string') { enqueue(lead); return; }
@@ -99,78 +242,171 @@ export async function resolveOfficialPosting(job, {
     }
   };
   const read = async url => {
-    if (!pages.has(url)) pages.set(url, Promise.resolve().then(() => fetch(url, { signal })).catch(error => {
-      trail.push(error?.code || 'fetch-failed'); return null;
-    }));
-    return pages.get(url);
+    if (budget.signal.aborted) { trail.push(abortCode()); return null; }
+    if (!pages.has(url)) {
+      if (budgetState.reads.size >= budgetState.maxPages) { abortBudget('crawl-budget'); trail.push('crawl-budget'); return null; }
+      budgetState.reads.add(url);
+      const pending = (async () => {
+        let onAbort;
+        const interrupted = new Promise((resolve, reject) => {
+          onAbort = () => reject(Object.assign(new Error(abortCode()), { code: abortCode() }));
+          budget.signal.addEventListener('abort', onAbort, { once: true });
+          if (budget.signal.aborted) onAbort();
+        });
+        try {
+          const page = await Promise.race([Promise.resolve().then(() => {
+            if (budget.signal.aborted) throw Object.assign(new Error(abortCode()), { code: abortCode() });
+            return fetch(url, { signal: budget.signal });
+          }), interrupted]);
+          return { page: page ? { ...page, requestedUrl: page.requestedUrl || url } : page };
+        } catch (error) { return { error: budget.signal.aborted ? abortCode() : error?.code || 'fetch-failed' }; }
+        finally { budget.signal.removeEventListener('abort', onAbort); }
+      })();
+      pages.set(url, pending);
+      const result = await pending;
+      const finalUrl = officialHttpsUrl(result.page?.url || result.page?.sourceUrl);
+      if (finalUrl && normalizedSourceHost(finalUrl) === normalizedSourceHost(url) && !pages.has(finalUrl)) pages.set(finalUrl, pending);
+    }
+    const result = await pages.get(url);
+    if (result.error) trail.push(result.error);
+    return result.page || null;
   };
   const rootProof = async (url, organization) => {
     const host = normalizedSourceHost(url);
     if (!host || isKnownAtsHost(host) || isAggregatorHost(host)) return false;
-    if (domains.has(host)) return strictEmployerEqual(domains.get(host), organization);
     const rootUrl = new URL('/', url).href;
     const page = await read(rootUrl);
     if (!page || !/html/iu.test(page.contentType || '')) return false;
     if (normalizedSourceHost(page.url || page.sourceUrl || rootUrl) !== host) return false;
-    const scan = scanOfficialCareersPage(page.body, page.url || rootUrl);
-    rootSites.set(host, scan);
+    if (normalizedSourceHost(page.requestedUrl || rootUrl) !== host) return false;
+    const scan = { ...scanOfficialCareersPage(page.body, page.url || rootUrl), footer: rootFooterText(page.body) };
+    if (!rootSites.has(host)) proofEpoch += 1;
+    rootSites.set(host, scan); noteLinks(rootUrl, scan.links);
+    if (!strictEmployerEqual(job?.company, organization)
+      && rootBrandingNamesPoster({ rootSiteName: scan.siteName, rootTitle: scan.title, rootFooter: scan.footer }, job?.company)) {
+      posterHosts.add(host); domains.delete(host); discoveredDomains.delete(host);
+      trail.push('poster-tenant'); return false;
+    }
+    if (posterHosts.has(host)) return false;
     const proof = proveEmployerDomain({ domain: host, employer: organization, poster: job?.company,
-      rootSiteName: scan.siteName, rootTitle: scan.title });
-    if (proof) { domains.set(host, organization); trail.push('domain-proof'); }
-    return proof;
+      rootSiteName: scan.siteName, rootTitle: scan.title, rootFooter: scan.footer,
+      independentEmployer: discoveredDomains.get(host) || '' });
+    const discovered = strictEmployerEqual(discoveredDomains.get(host), organization);
+    if (proof || discovered) {
+      const fetchedName = [scan.siteName, scan.title].find(name => strictEmployerEqual(name, organization));
+      domains.set(host, fetchedName || discoveredDomains.get(host) || organization);
+      trail.push('domain-proof');
+    }
+    return proof || discovered;
   };
   const careersLinkProof = (page, postingUrl) => {
-    if (domains.has(page.host) && !strictEmployerEqual(domains.get(page.host), page.employer)) return false;
+    if (posterHosts.has(page.host) || !strictEmployerEqual(domains.get(page.host), page.employer)) return false;
     const root = rootSites.get(page.host);
     const proven = proveEmployerDomain({ domain: page.host, employer: page.employer, poster: job?.company,
       rootSiteName: root?.siteName || '', rootTitle: root?.title || '', careersPageUrl: page.url,
+      rootFooter: root?.footer || '', independentEmployer: domains.get(page.host),
       careersPageEmployer: page.employer, careersLinks: page.links, postingUrl });
-    if (proven) { domains.set(page.host, page.employer); trail.push('domain-proof'); }
     return proven;
+  };
+  // Amendment 3 section 1. D links to T or P, T's posting names the employer and
+  // points back to D, D's brand is the employer's, and no veto applies.
+  const roundTripOwnership = async (candidate, route, url, organization) => {
+    const sameAs = candidate.sameAs || candidate.hiringOrganization?.sameAs || '';
+    const domain = registrableDomain(sameAs);
+    if (!domain || !strictEmployerEqual(candidate.hiringOrganization?.name, organization) || registrableDomain(url) === domain) return false;
+    const organizationHost = normalizedSourceHost(sameAs);
+    if (!speaksForDomain(organizationHost)) return false;
+    const linkersOf = () => [...(linkSources.get(`tenant|${route.ats}|${route.tenant}`) || []), ...(linkSources.get(`posting|${url}`) || [])]
+      .filter(host => registrableDomain(host) === domain);
+    if (![...rootSites.keys()].some(host => registrableDomain(host) === domain)) await rootProof(sameAs, organization);
+    let linkers = linkersOf();
+    if (!linkers.length) {
+      // T5: the proof must not depend on which page the crawl happened to read first. Read up to two careers pages that D's own root links to.
+      const rootScan = rootSites.get(organizationHost) || rootSites.get([...rootSites.keys()].find(host => registrableDomain(host) === domain));
+      const careers = (rootScan?.links || []).filter(link => link.tag === 'a' && registrableDomain(link.url) === domain
+        && /\/(?:careers?|jobs?|positions?|openings?)(?:\/|$)/iu.test(new URL(link.url).pathname) && crawlUrlAllowed(link.url)).slice(0, 2);
+      for (const link of careers) {
+        const page = await read(link.url);
+        if (page && /html/iu.test(page.contentType || '')) noteLinks(link.url, scanOfficialCareersPage(page.body, link.url).links);
+      }
+      linkers = linkersOf();
+    }
+    if (!linkers.length) return false;
+    const root = rootSites.get(organizationHost) || rootSites.get([...rootSites.keys()].find(host => registrableDomain(host) === domain)) || {};
+    if (!proveBidirectionalOwnership({ domain, employer: organization, poster: job?.company, route, linksToTenant: true, tenantPointsBack: true,
+      rootTitle: root.title || '', rootSiteName: root.siteName || '', rootFooter: root.footer || '' })) return false;
+    for (const host of new Set([...linkers, organizationHost])) if (!domains.has(host)) domains.set(host, organization);
+    tenants.set(`${route.ats}|${route.tenant}`, organization);
+    for (const [key, earlier] of candidates) {
+      if (earlier.ats === route.ats && earlier.tenant === route.tenant && strictEmployerEqual(earlier.employer, organization)) {
+        candidates.set(key, { ...earlier, tenantProven: true, provenance: 'careers' });
+      }
+    }
+    trail.push('domain-proof');
+    return true;
   };
   const capture = async (candidate, context) => {
     const url = officialHttpsUrl(candidate.sourceUrl);
     if (!url) return;
     if (conflictingUrls.has(url)) return;
-    if (!context.boardApi && url !== officialHttpsUrl(context.fetchedUrl)) { enqueue(url); return; }
+    if (!context.boardApi && url !== officialHttpsUrl(context.fetchedUrl)) {
+      if (context.follow) context.follow(url);
+      else enqueue(url);
+      return;
+    }
     const host = normalizedSourceHost(url); const route = extractAtsTenant(url, {
       html: url === officialHttpsUrl(context.fetchedUrl) ? context.fetchedHtml || '' : '',
     });
     if (context.route && (!route || context.route.ats !== route.ats || context.route.tenant !== route.tenant)) {
       trail.push('tenant-unproven'); return;
     }
+    fetchedCandidates.push({ ...candidate, sourceUrl: url, ats: route?.ats || '', tenant: route?.tenant || '' });
     const routeKey = route ? `${route.ats}|${route.tenant}` : '';
     const careerEmployer = tenants.get(routeKey) || context.provenEmployer || '';
     const organization = candidate.employer || candidate.hiringOrganization?.name || careerEmployer;
     const matchesHypothesis = hypotheses.some(name => strictEmployerEqual(name, organization));
     if (!organization || !matchesHypothesis || (statedEmployers.length && !statedEmployers.some(name => strictEmployerEqual(name, organization)))) return;
+    if (route && (!strictEmployerEqual(organization, job?.company) || signals.S3) && isPosterAtsTenant(route, job?.company)) {
+      trail.push('poster-tenant'); return;
+    }
     const sameAs = candidate.sameAs || candidate.hiringOrganization?.sameAs || '';
     const organizationHost = normalizedSourceHost(sameAs);
-    const offDomain = organizationHost && organizationHost !== host && proveEmployerDomain({
+    const independentlyTied = organizationHost && organizationHost !== host && await rootProof(sameAs, organization);
+    const offDomain = independentlyTied && proveEmployerDomain({
       domain: organizationHost, employer: organization, poster: job?.company, postingUrl: url, sameAs,
+      independentEmployer: domains.get(organizationHost) || '',
+      rootSiteName: rootSites.get(organizationHost)?.siteName || '', rootTitle: rootSites.get(organizationHost)?.title || '',
+      rootFooter: rootSites.get(organizationHost)?.footer || '',
     });
-    if (offDomain) domains.set(organizationHost, organization);
     const linked = Boolean(careerEmployer && strictEmployerEqual(careerEmployer, organization));
     const structured = Boolean(offDomain && candidate.hiringOrganization?.name
       && strictEmployerEqual(candidate.hiringOrganization.name, organization));
     for (const page of careersPages.values()) {
       if (page.host === host && strictEmployerEqual(page.employer, organization)) careersLinkProof(page, url);
     }
+    // T11: an own-employer row whose own lead IS this self-hosted posting, on the employer's apex or conventional careers host whose
+    // registrable label is the employer's name, needs no root-title match ("Snowflake Careers", "Working at Intuit" are not exact).
+    const ownLead = [job?.url, ...normalizeApplyOptions(job?.applyOptions).map(option => option.href)].map(canonicalLeadUrl).includes(canonicalLeadUrl(url));
+    const brandLead = !route && ownLead && strictEmployerEqual(job?.company, organization) && !signals.S3 && !signals.S1 && !signals.S2 && !signals.S4.length
+      && speaksForDomain(host) && !isAggregatorHost(host) && !isKnownAtsHost(host) && domainBrandMatchesEmployer({ domain: host, employer: organization });
     const domainProven = Boolean(domains.has(host) && strictEmployerEqual(domains.get(host), organization))
-      || (!route && await rootProof(url, organization));
+      || (!route && await rootProof(url, organization))
+      || Boolean(brandLead && (domains.set(host, organization), trail.push('domain-proof')));
     const officialPortalProven = /^(?:www\.)?usajobs\.gov$/u.test(host)
       && /^\/job\/\d+\/?$/u.test(new URL(url).pathname)
       && url === officialHttpsUrl(context.fetchedUrl)
       && strictEmployerEqual(candidate.hiringOrganization?.name, job?.company);
-    const proven = linked || structured || (route?.ats === 'teamtailor' && domainProven);
+    const roundTrip = Boolean(route) && !linked && !structured && await roundTripOwnership(candidate, route, url, organization);
+    const proven = linked || structured || roundTrip || (route?.ats === 'teamtailor' && domainProven);
     const enriched = { ...candidate, employer: organization, sourceUrl: url, ats: route?.ats || '', tenant: route?.tenant || '',
       tenantProven: Boolean(route && proven), employerDomainProven: domainProven,
       officialPortalProven,
-      posterTenant: Boolean(route && !strictEmployerEqual(organization, job?.company) && context.provenEmployer && canonical(context.provenEmployer) === ownPoster),
-      provenance: linked ? 'careers' : route ? 'structured' : 'employer' };
+      posterTenant: false,
+      provenance: linked || roundTrip ? 'careers' : route ? 'structured' : 'employer' };
     const existing = candidates.get(url);
     if (existing && (!strictEmployerEqual(existing.employer, enriched.employer)
-      || coreTitle(existing.title) !== coreTitle(enriched.title)
+      || coreTitle(existing.title, { company: existing.employer, location: existing.location })
+        !== coreTitle(enriched.title, { company: enriched.employer, location: enriched.location })
       || !locationsCompatible(existing, enriched)
       || (existing.identifier && enriched.identifier && existing.identifier !== enriched.identifier))) {
       candidates.delete(url); conflictingUrls.add(url); trail.push('ambiguous'); return;
@@ -187,27 +423,52 @@ export async function resolveOfficialPosting(job, {
       tenants.set(routeKey, organization);
       const adapter = adapterUrl(route, url);
       if (adapter) enqueue(adapter, { route, provenEmployer: organization, adapter: true });
+    } else if (route && sameAs) pendingRoundTrips.set(url, { candidate, route, organization, epoch: proofEpoch });
+  };
+  // Try parked round trips again when a root or link source has been learned since their last attempt. The proof is the same
+  // proof, so this only removes the dependence on which lead the crawl happened to read first.
+  const retryRoundTrips = async () => {
+    for (const [url, pending] of [...pendingRoundTrips]) {
+      if (budget.signal.aborted) return;
+      if (!candidates.has(url) || conflictingUrls.has(url) || candidates.get(url).tenantProven) { pendingRoundTrips.delete(url); continue; }
+      if (pending.epoch === proofEpoch) continue;
+      let proven = false;
+      try { proven = await roundTripOwnership(pending.candidate, pending.route, url, pending.organization); }
+      finally { pending.epoch = proofEpoch; }
+      if (!proven) continue;
+      pendingRoundTrips.delete(url);
+      const adapter = adapterUrl(pending.route, url);
+      if (adapter) enqueue(adapter, { route: pending.route, provenEmployer: pending.organization, adapter: true });
     }
   };
-  const matchOptions = () => ({ now: instant(), employerHypotheses: [...new Set([...candidates.values()]
+  const matchOptions = () => ({ now: instant(), peerCandidates: fetchedCandidates, employerHypotheses: [...new Set([...candidates.values()]
     .filter(candidate => candidate.tenantProven || candidate.employerDomainProven || candidate.officialPortalProven).map(candidate => candidate.employer))] });
   const drain = async () => {
+    if (budget.signal.aborted) { trail.push(abortCode()); return; }
+    const remaining = budgetState.timeoutMs - budgetState.elapsedMs;
+    if (remaining <= 0) { abortBudget('fetch-timeout'); trail.push('fetch-timeout'); return; }
+    const started = budgetState.now();
+    const timer = setTimeout(() => abortBudget('fetch-timeout'), remaining);
+    try {
     for (let cursor = 0; cursor < queue.length; cursor += 1) {
-      if (signal?.aborted) { trail.push('bridge-aborted'); break; }
+      if (budgetState.now() - started >= remaining) abortBudget('fetch-timeout');
+      if (budget.signal.aborted) { trail.push(abortCode()); break; }
       const context = queue[cursor];
       const page = await read(context.url);
       if (!page) continue;
       const sourceUrl = page.url || page.sourceUrl || context.url;
       if (context.adapter && officialHttpsUrl(sourceUrl) !== officialHttpsUrl(context.url)) { trail.push('tenant-unproven'); continue; }
       const route = context.route || extractAtsTenant(sourceUrl, { html: page.body });
+      let followed = 0;
       let scan = null;
       if (/html/iu.test(page.contentType || '')) {
         scan = scanOfficialCareersPage(page.body, sourceUrl);
         const host = normalizedSourceHost(sourceUrl);
+        noteLinks(sourceUrl, scan.links);
         for (const organization of hypotheses) if (await rootProof(sourceUrl, organization)) break;
-        // Section 5.3(b) accepts an explicit employer careers page plus its
-        // actual links. A marketing root title still cannot satisfy 5.3(c).
-        const careersEmployer = careersPageEmployerFromTitle(scan.title);
+        // A path title is never authority. This host must already be tied to
+        // the employer by a fetched strict root or proven-host discovery.
+        const careersEmployer = domains.get(host) || '';
         if (!isKnownAtsHost(host) && !isAggregatorHost(host)
           && /\/(?:careers?|jobs?|positions?|openings?)(?:\/|$)/iu.test(new URL(sourceUrl).pathname)
           && hypotheses.some(name => strictEmployerEqual(name, careersEmployer))) {
@@ -225,15 +486,32 @@ export async function resolveOfficialPosting(job, {
         }
         const provenEmployer = domains.get(host) || '';
         if (route && provenEmployer) tenants.set(`${route.ats}|${route.tenant}`, provenEmployer);
-        for (const link of scan.links) {
+        // Navigation wins over resource detection. A script can identify a
+        // tenant and its bounded board adapter, but is never a fetch target.
+        const links = [...scan.links.filter(link => link.tag !== 'script'), ...scan.links.filter(link => link.tag === 'script')];
+        for (const link of links) {
           const linkedRoute = extractAtsTenant(link.url);
+          if (link.tag === 'script') {
+            if (linkedRoute && provenEmployer) tenants.set(`${linkedRoute.ats}|${linkedRoute.tenant}`, provenEmployer);
+            const adapter = linkedRoute && adapterUrl(linkedRoute, link.url);
+            if (adapter && followed < 8 && enqueue(adapter, { route: linkedRoute, ...(provenEmployer ? { provenEmployer } : {}), adapter: true })) followed += 1;
+            continue;
+          }
+          if (followed >= 8 || !crawlUrlAllowed(link.url)) continue;
+          const linkHost = normalizedSourceHost(link.url);
+          if (provenEmployer && link.tag === 'a' && link.attribute === 'href' && !linkedRoute && linkHost !== host && !isKnownAtsHost(linkHost)
+            && !isAggregatorHost(linkHost) && (/\/(?:careers?|jobs?|positions?|openings?)(?:\/|$)/iu.test(new URL(link.url).pathname)
+              || /^(?:careers?|jobs?)\./iu.test(linkHost))) {
+            discoveredDomains.set(linkHost, provenEmployer);
+            if (enqueue(link.url)) followed += 1;
+          }
           if (linkedRoute && provenEmployer) tenants.set(`${linkedRoute.ats}|${linkedRoute.tenant}`, provenEmployer);
           if (linkedRoute || (normalizedSourceHost(link.url) === host && /\/(?:careers?|jobs?|positions?|openings?)(?:\/|$)/iu.test(new URL(link.url).pathname))) {
-            enqueue(link.url, { ...(linkedRoute ? { route: linkedRoute } : {}),
-              ...(linkedRoute && provenEmployer ? { provenEmployer } : {}) });
-            if (linkedRoute && provenEmployer) {
+            if (enqueue(link.url, { ...(linkedRoute ? { route: linkedRoute } : {}),
+              ...(linkedRoute && provenEmployer ? { provenEmployer } : {}) })) followed += 1;
+            if (linkedRoute && provenEmployer && followed < 8) {
               const adapter = adapterUrl(linkedRoute, link.url);
-              if (adapter) enqueue(adapter, { route: linkedRoute, provenEmployer, adapter: true });
+              if (adapter && enqueue(adapter, { route: linkedRoute, provenEmployer, adapter: true })) followed += 1;
             }
           }
         }
@@ -247,31 +525,67 @@ export async function resolveOfficialPosting(job, {
         const employer = context.provenEmployer || (route ? tenants.get(`${route.ats}|${route.tenant}`) : '') || '';
         const extracted = extractOfficialPostingCandidates({ body: page.body, sourceUrl, contentType: page.contentType,
           ats: route?.ats || '', tenant: route?.tenant || '', employer, now: instant });
+        let rssFollowed = 0;
         for (const candidate of extracted) {
           if (route?.ats === 'teamtailor' && /(?:xml|rss)/iu.test(page.contentType || '')) {
+            // The board bytes are already fetched. Keep every description in
+            // the distinctive-phrase cohort, even when its page is irrelevant.
+            fetchedCandidates.push({ ...candidate, ats: route.ats, tenant: route.tenant });
+            const rowTitle = coreTitle(job?.title, { company: job?.company, location: job?.location,
+              employerHypotheses: [employer, ...signals.hypotheses].filter(Boolean) });
+            if (!rowTitle || rowTitle !== coreTitle(candidate.title, { company: candidate.employer || employer,
+              location: candidate.location }) || !locationsCompatible(job, candidate)) continue;
+            if (rssFollowed >= 8) continue;
             rssCandidates.set(officialHttpsUrl(candidate.sourceUrl), candidate);
-            enqueue(candidate.sourceUrl, { route, provenEmployer: employer }); continue;
+            if (enqueue(candidate.sourceUrl, { route, provenEmployer: employer })) rssFollowed += 1;
+            continue;
           }
           const rss = rssCandidates.get(officialHttpsUrl(candidate.sourceUrl));
           const idsAgree = rss && (!(rss.identifier && candidate.identifier) || rss.identifier === candidate.identifier);
           const employersAgree = rss && (!(rss.employer && candidate.employer) || strictEmployerEqual(rss.employer, candidate.employer));
-          const boundRss = rss && idsAgree && employersAgree && coreTitle(rss.title) === coreTitle(candidate.title)
+          const boundRss = rss && idsAgree && employersAgree
+            && coreTitle(rss.title, { company: rss.employer, location: rss.location })
+              === coreTitle(candidate.title, { company: candidate.employer, location: candidate.location })
             && ((rss.identifier && candidate.identifier && rss.identifier === candidate.identifier) || locationsCompatible(rss, candidate));
           await capture(boundRss && rss.description.length > candidate.description.length
             ? { ...candidate, description: rss.description } : candidate, { ...context, provenEmployer: employer,
               fetchedUrl: sourceUrl, fetchedHtml: /html/iu.test(page.contentType || '') ? page.body : '',
+              follow: url => { if (followed < 8 && enqueue(url)) followed += 1; },
               boardApi: context.adapter === true && /json/iu.test(page.contentType || '') });
         }
         if (extracted.length) trail.push(context.adapter ? 'ats-adapter' : 'json-ld');
       } catch { trail.push('unreadable'); }
+      try { await retryRoundTrips(); } catch { trail.push('unreadable'); }
       const verified = selectOfficialPostingMatch(job, [...candidates.values()], matchOptions());
       if (verified.outcome === 'found' && frozenOfficialEmployer(job, verified.candidate.employer)
-        && readableDescription(verified.candidate, job)) break;
+        && readableDescription(verified.candidate, job)) {
+        // T4: stop early only on a deterministic anchor with none of the row's own leads left to read. A text-only
+        // match waits until the same host or tenant has no unread queued page, so a closed twin cannot arrive after it.
+        const anchor = verified.evaluations.find(item => item.passed)?.anchor;
+        const winner = verified.candidate; const winnerHost = normalizedSourceHost(winner.sourceUrl);
+        const unread = queue.slice(cursor + 1);
+        const ownLeads = new Set([job?.url, ...normalizeApplyOptions(job?.applyOptions).map(option => option.href)].map(canonicalLeadUrl).filter(Boolean));
+        const unreadLead = unread.some(item => ownLeads.has(canonicalLeadUrl(item.url)));
+        const unreadSite = unread.some(item => normalizedSourceHost(item.url) === winnerHost
+          || (item.route && winner.ats && item.route.ats === winner.ats && item.route.tenant === winner.tenant));
+        if (!unreadLead && (anchor === 'identifier-anchor' || !unreadSite)) break;
+      }
+    }
+    } finally {
+      clearTimeout(timer);
+      budgetState.elapsedMs += Math.max(0, budgetState.now() - started);
+      if (budgetState.elapsedMs >= budgetState.timeoutMs) abortBudget('fetch-timeout');
+      if (budget.signal.aborted) trail.push(abortCode());
     }
   };
   const persist = async result => {
     if (result.description) result.officialPosting.contentHash = crypto.createHash('sha256').update(result.description).digest('hex');
-    if (store && (persistMisses || !['L5', 'L6'].includes(result.officialPosting.level))) {
+    // The row budget also ends for incidental host limits (time, pages). That makes a crawl's miss non-durable but never a verified
+    // match already found; only a stopped run does.
+    const durability = ['L1', 'L2', 'L3', 'L4'].includes(result.officialPosting?.level)
+      ? { aborted: Boolean(signal?.aborted || budgetState.sourceSignal?.aborted) } : budget.signal;
+    if (store && persistResults && (persistMisses || !['L5', 'L6'].includes(result.officialPosting?.level))
+      && shouldPersistOfficialPostingResult(result, { signal: durability, researchRan: researchSucceeded })) {
       try {
         result.record = await store.save(job, { officialPosting: result.officialPosting, description: result.description });
         result.officialPosting = result.record.officialPosting;
@@ -283,12 +597,13 @@ export async function resolveOfficialPosting(job, {
     if (store && !bypassCache) {
       const record = await store.find(job);
       if (record && officialPostingRecordMatchesScrapedIdentity(job, record)) {
-        if (['L5', 'L6'].includes(record.officialPosting.level)) {
+        if (['L5', 'L6'].includes(record.officialPosting?.level)
+          && shouldPersistOfficialPostingResult(record, { signal: budget.signal })) {
           const current = fallback(job, { outcome: record.officialPosting.outcome,
             trail: [...(record.officialPosting.trail || []), 'recent-miss'], alternatives: record.officialPosting.alternatives || [] });
           return { ...current, record: { ...record, officialPosting: current.officialPosting } };
         }
-        return { record, postedBy: strictEmployerEqual(record.officialPosting.employer, job?.company) ? undefined : job?.company,
+        if (!['L5', 'L6'].includes(record.officialPosting?.level)) return { record, postedBy: strictEmployerEqual(record.officialPosting.employer, job?.company) ? undefined : job?.company,
           officialPosting: { ...record.officialPosting, trail: trailCodes([...(record.officialPosting.trail || []), 'cache-hit']) } };
       }
     }
@@ -296,27 +611,30 @@ export async function resolveOfficialPosting(job, {
     for (const lead of candidateUrls) addLead(lead);
     await drain();
     let decision = selectOfficialPostingMatch(job, [...candidates.values()], matchOptions());
-    if (decision.outcome !== 'found' && !signal?.aborted && research) {
+    if (decision.outcome !== 'found' && !budget.signal.aborted && research) {
       trail.push('bridge-research');
       try {
-        const leads = await research(job, { signal });
-        for (const lead of Array.isArray(leads) ? leads : []) addLead(lead);
+        const leads = await research(job, { signal: budget.signal });
+        if (!Array.isArray(leads)) throw Object.assign(new Error('Invalid research result'), { code: 'research-miss' });
+        researchSucceeded = true;
+        for (const lead of leads) addLead(lead);
         await drain();
-      } catch (error) { trail.push(error?.code || (signal?.aborted ? 'bridge-aborted' : 'research-miss')); }
+      } catch (error) { trail.push(error?.code || (budget.signal.aborted ? abortCode() : 'research-miss')); }
       decision = selectOfficialPostingMatch(job, [...candidates.values()], matchOptions());
     }
     const tieBreakers = new Map();
-    if (decision.outcome !== 'found' && match && !signal?.aborted) {
+    if (decision.outcome !== 'found' && match && !budget.signal.aborted) {
       for (const candidate of candidates.values()) {
+        if (budget.signal.aborted) { trail.push(abortCode()); break; }
         const evaluation = evaluateOfficialPostingMatch(job, candidate, matchOptions());
         if (!evaluation.hardPass || evaluation.reason !== 'no-anchor') continue;
-        try { tieBreakers.set(candidate.sourceUrl, await match(job, candidate, { signal })); }
-        catch (error) { trail.push(error?.code || (signal?.aborted ? 'bridge-aborted' : 'research-miss')); }
+        try { tieBreakers.set(candidate.sourceUrl, await match(job, candidate, { signal: budget.signal })); }
+        catch (error) { trail.push(error?.code || (budget.signal.aborted ? abortCode() : 'research-miss')); }
       }
       decision = selectOfficialPostingMatch(job, [...candidates.values()], { ...matchOptions(), tieBreakers });
     }
     for (const evaluation of decision.evaluations) trail.push(...(evaluation.reasons || []));
-    if (decision.outcome !== 'found') return persist(fallback(job, { outcome: decision.outcome, trail,
+    if (decision.outcome !== 'found') return await persist(fallback(job, { outcome: decision.outcome, trail,
       alternatives: decision.alternatives }));
     const candidate = decision.candidate;
     const employer = frozenOfficialEmployer(job, candidate.employer);
@@ -330,10 +648,13 @@ export async function resolveOfficialPosting(job, {
       ats: candidate.ats || '', tenant: candidate.tenant || '', fetchedAt: new Date(instant()).toISOString(),
       trail: trailCodes([...trail, ...(evaluation?.anchors || []), ...(!readable ? ['stub-text'] : [])]),
     });
-    if (!officialPosting) return persist(fallback(job, { outcome: 'unreadable', trail: [...trail, 'invalid-text'] }));
-    return persist({ postedBy: !strictEmployerEqual(job?.company, employer) ? job?.company : undefined,
+    if (!officialPosting) return await persist(fallback(job, { outcome: 'unreadable', trail: [...trail, 'invalid-text'] }));
+    return await persist({ postedBy: !strictEmployerEqual(job?.company, employer) ? job?.company : undefined,
       officialPosting, ...(readable ? { description: candidate.description } : {}) });
   } catch (error) {
-    return persist(fallback(job, { outcome: 'failed', trail: [...trail, error?.code || 'fetch-failed'] }));
+    return await persist(fallback(job, { outcome: 'failed', trail: [...trail, error?.code || 'fetch-failed'] }));
+  } finally {
+    if (cancel) signal.removeEventListener('abort', cancel);
+    if (ownsBudget) budget.dispose();
   }
 }

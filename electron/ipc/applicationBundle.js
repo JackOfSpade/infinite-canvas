@@ -7,7 +7,7 @@
  * company, and a pretty, source-faithful Markdown rendering of the scraped
  * job listing.
  */
-import { OFFICIAL_POSTING_LABELS } from './officialPostingFields.js';
+import { OFFICIAL_POSTING_LABELS, officialHttpsUrl } from './officialPostingFields.js';
 
 const WINDOWS_RESERVED_NAMES = new Set([
   'CON', 'PRN', 'AUX', 'NUL',
@@ -207,9 +207,11 @@ export function formatOriginalJobListingMarkdown(job = {}, { audience = 'prompt'
   if (audience === 'bundle') {
     const postedBy = markdownInlineText(job.postedBy);
     const applyUrl = safeHttpUrl(job.applyUrl || job.officialPosting?.officialApplyUrl);
+    const officialUrl = ['L1', 'L2', 'L3', 'L4'].includes(job.officialPosting?.level) ? officialHttpsUrl(job.officialPosting.sourceUrl) : '';
     const level = job.officialPosting?.level;
     if (postedBy) lines.push(`**Posted by:** ${postedBy}`);
     if (applyUrl) lines.push(`**Apply URL:** <${applyUrl}>`);
+    if (officialUrl) lines.push(`**Official posting:** <${officialUrl}>`);
     if (Object.hasOwn(OFFICIAL_POSTING_LABELS, level)) lines.push(`**Source level:** ${level}: ${markdownInlineText(OFFICIAL_POSTING_LABELS[level])}`);
   }
   // The shared description is emitted EXACTLY ONCE below; posting locations

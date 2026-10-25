@@ -13,7 +13,7 @@ const job = {
   title: 'Platform Engineer', company: 'Northwind', location: 'Toronto, Ontario, Canada', salary: 'C$140,000 per year',
   url: 'https://board.example.test/jobs/one', snippet: 'Own reliable systems and maintain the platform.',
   postedBy: 'Recruiter * Team', applyUrl: 'https://careers.northwind.example/jobs/one',
-  officialPosting: { level: 'L3', outcome: 'found', employer: 'Northwind', officialApplyUrl: 'https://careers.northwind.example/jobs/one', trail: ['structured-proof'] },
+  officialPosting: { level: 'L3', outcome: 'found', employer: 'Northwind', sourceUrl: 'https://careers.northwind.example/jobs/one', officialApplyUrl: 'https://careers.northwind.example/jobs/one/application', trail: ['structured-proof'] },
   postingVariants: [{ location: 'Toronto', url: 'https://board.example.test/jobs/one' }, { location: 'Ottawa', url: 'https://board.example.test/jobs/two' }],
 };
 
@@ -38,6 +38,7 @@ export default [
       const [header, body] = markdown.split('\n---\n');
       assert.ok(header.includes('**Posted by:** Recruiter \\* Team'));
       assert.ok(header.includes(`**Apply URL:** <${job.applyUrl}>`));
+      assert.ok(header.includes(`**Official posting:** <${job.officialPosting.sourceUrl}>`));
       assert.ok(header.includes('**Source level:** L3: Employer\'s ATS'));
       assert.ok(header.includes(`**Listing URL:** <${job.url}>`));
       assert.ok(body.includes(ORIGINAL_JOB_LISTING_BODY_HEADING)); assert.ok(body.includes(job.snippet));
@@ -64,12 +65,13 @@ export default [
       assert.ok(source.includes('const posting = jobListingQuoteSource(input.job);'));
       assert.ok(source.includes("formatOriginalJobListingMarkdown(input.job, { audience: 'bundle' })"));
       assert.ok(source.includes("downloadBundle: { company: input.job?.company || input.job?.postedBy || ''"));
-      assert.ok(source.includes("jobUrl: input.job?.applyUrl || input.job?.url || ''"));
+      assert.ok(source.includes("jobUrl: input.job?.url || ''"));
+      assert.ok(source.includes('officialPosting: downloadOfficialPosting'));
       assert.ok(source.includes("jobContext: { title: input.job?.title || '', company: input.job?.company || '', location: input.job?.location || '' }"));
     },
   },
   {
-    name: 'Official posting bundle: download metadata may name the poster while documents retain the unknown employer and official opening link',
+    name: 'Official posting bundle: download metadata may name the poster while documents retain the unknown employer and original fallback link',
     run() {
       const unknown = { ...job, company: '', postedBy: 'Unique Recruiting Poster', postingVariants: [], officialPosting: { ...job.officialPosting, level: 'L6', employer: '' } };
       const html = buildResumeDocument({
@@ -77,15 +79,16 @@ export default [
         docId: 'official-bundle-synthetic', coverLetter: { name: 'Synthetic Candidate', greeting: 'Dear Hiring Team,', paragraphs: ['I would welcome a discussion.'] },
         jobContext: { title: unknown.title, company: unknown.company, location: unknown.location },
         downloadBundle: { company: unknown.company || unknown.postedBy, candidateName: 'Synthetic Candidate',
-          jobUrl: unknown.applyUrl || unknown.url, jobMarkdown: formatOriginalJobListingMarkdown(unknown, { audience: 'bundle' }) },
+          jobUrl: unknown.url, officialPosting: unknown.officialPosting, jobMarkdown: formatOriginalJobListingMarkdown(unknown, { audience: 'bundle' }) },
       });
       const dom = new JSDOM(html);
       try {
         const data = JSON.parse(dom.window.document.getElementById('ic-application-bundle-data').textContent);
-        assert.equal(data.company, unknown.postedBy); assert.equal(data.jobUrl, unknown.applyUrl);
+        assert.equal(data.company, unknown.postedBy); assert.equal(data.jobUrl, unknown.url);
+        assert.equal(data.officialPosting, undefined);
         assert.ok(data.jobMarkdown.includes('**Company:** Unknown company'));
         const link = dom.window.document.querySelector('.ic-job-posting-link');
-        assert.equal(link.href, unknown.applyUrl); assert.equal(link.textContent, 'View original job posting');
+        assert.equal(link.href, unknown.url); assert.equal(link.textContent, 'View original job posting');
         const panels = [...dom.window.document.querySelectorAll('[data-ic-document-panel]')];
         assert.ok(panels.length >= 2); assert.ok(panels.every(panel => !panel.textContent.includes(unknown.postedBy)));
         assert.ok(!dom.window.document.getElementById('ic-print-variant-note')?.getAttribute('data-ic-paper-context')?.includes(unknown.postedBy));

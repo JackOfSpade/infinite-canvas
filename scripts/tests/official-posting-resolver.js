@@ -42,11 +42,12 @@ function teamtailorPages({ rssId = 'req-one', pageId = 'req-one' } = {}) {
 
 export default [
   {
-    name: 'Official posting resolver proves an explicitly named careers page by actual ATS links while root marketing stays unproven',
+    name: 'Official posting resolver follows a careers host discovered from a strictly proven employer root',
     async run() {
       const pages = careersPages();
-      pages['https://northwind.test/'] = '<title>Northwind Labs | Build the future</title><a href="/careers">Careers</a>';
-      pages['https://northwind.test/careers'] = '<title>Careers at Northwind Labs | Build the future</title><a href="https://jobs.ashbyhq.com/northwind">Open roles</a>';
+      pages['https://northwind.test/'] = '<title>Northwind Labs</title><a href="https://careers.northwind.test/careers">Careers</a>';
+      pages['https://careers.northwind.test/'] = '<title>Build the future | Open opportunities</title>';
+      pages['https://careers.northwind.test/careers'] = '<title>Build the future | Open opportunities</title><a href="https://jobs.ashbyhq.com/northwind">Open roles</a>';
       const result = await resolveOfficialPosting(row(), { fetch: network(pages), candidateUrls: ['https://northwind.test/'] });
       assert.equal(result.officialPosting.level, 'L2'); assert.equal(result.officialPosting.employer, 'Northwind Labs');
       assert.equal(result.officialPosting.officialApplyUrl, boardJob().applyUrl);
@@ -55,11 +56,11 @@ export default [
       const direct = { ...pages, [sameHostUrl]: jsonld({ hiringOrganization: { name: 'Northwind Labs' } }) };
       direct['https://northwind.test/careers'] = `<title>Careers at Northwind Labs | Build the future</title><a href="${sameHostUrl}">Open role</a>`;
       const own = await resolveOfficialPosting(row(), { fetch: network(direct), candidateUrls: [sameHostUrl, 'https://northwind.test/careers'] });
-      assert.equal(own.officialPosting.level, 'L1', 'a fetched matching job also receives proof from the exact same-host careers link');
+      assert.equal(own.officialPosting.level, 'L1', 'the fetched strict employer root independently proves its own matching job');
     },
   },
   {
-    name: 'Official posting resolver refuses marketing titles, wrong careers identity, absent links and sibling-tenant proof transfer',
+    name: 'Official posting resolver refuses title-only careers identity, absent links and sibling-tenant proof transfer',
     async run() {
       const base = careersPages();
       base['https://northwind.test/'] = '<title>Northwind Labs | Build the future</title><a href="/careers">Careers</a>';
@@ -80,6 +81,85 @@ export default [
       const wrongPath = { ...base, 'https://northwind.test/marketing': `${validTitle}<a href="https://jobs.ashbyhq.com/northwind">Open roles</a>` };
       delete wrongPath['https://northwind.test/careers'];
       assert.equal((await resolveOfficialPosting(row(), { fetch: network(wrongPath), candidateUrls: ['https://northwind.test/marketing'] })).officialPosting.level, 'L6');
+    },
+  },
+  {
+    name: 'Official posting resolver rejects recruiter careers-title and unlisted mirror self-attestations',
+    async run() {
+      const recruiterBoard = 'https://api.ashbyhq.com/posting-api/job-board/acme-talent?includeCompensation=true';
+      const recruiter = {
+        'https://acmetalent.test/': '<title>Acme Talent Partners | Executive Search</title><a href="/careers/northwind">Careers</a>',
+        'https://acmetalent.test/careers/northwind': '<title>Careers at Northwind Labs | Acme Talent Partners</title><a href="https://jobs.ashbyhq.com/acme-talent">Apply</a>',
+        'https://jobs.ashbyhq.com/acme-talent': '<main>Open roles</main>',
+        [recruiterBoard]: { body: JSON.stringify({ jobs: [boardJob({ jobUrl: 'https://jobs.ashbyhq.com/acme-talent/req-one' })] }), contentType: 'application/json' },
+      };
+      const poster = await resolveOfficialPosting(row(), { fetch: network(recruiter), candidateUrls: ['https://acmetalent.test/careers/northwind'] });
+      assert.equal(poster.officialPosting.level, 'L6');
+      assert.equal(poster.officialPosting.officialApplyUrl, undefined);
+      const mirrorUrl = 'https://jobmirror.test/jobs/123';
+      const mirror = { 'https://jobmirror.test/': '<title>JobMirror | Find jobs</title>',
+        'https://jobmirror.test/careers/northwind': `<title>Careers at Northwind Labs | JobMirror</title><a href="${mirrorUrl}">Software Engineer</a>`,
+        [mirrorUrl]: jsonld({ url: mirrorUrl }) };
+      for (const applyOptions of [[], [{ label: 'Apply', href: mirrorUrl }]]) {
+        const result = await resolveOfficialPosting(row({ applyOptions }), { fetch: network(mirror), candidateUrls: ['https://jobmirror.test/careers/northwind'] });
+        assert.equal(result.officialPosting.level, 'L6');
+        assert.equal(result.officialPosting.officialApplyUrl, undefined);
+      }
+    },
+  },
+  {
+    name: 'Official posting resolver vetoes poster root branding and poster tenant slugs despite independent client proof',
+    async run() {
+      const url = 'https://recruiter.test/jobs/one';
+      for (const branding of [
+        '<title>Acme Talent Partners | Executive Search</title>',
+        '<title>Northwind Labs</title><meta property="og:site_name" content="Careers by Acme Talent Partners">',
+        '<title>Northwind Labs</title><footer>Recruiting services by <b>Acme Talent Partners</b> Incorporated</footer>',
+      ]) {
+        const result = await resolveOfficialPosting(row({ applyOptions: [{ label: 'Apply', href: url }] }), {
+          fetch: network({ 'https://recruiter.test/': branding, [url]: jsonld({ url, hiringOrganization: { name: 'Northwind Labs' } }) }),
+        });
+        assert.equal(result.officialPosting.level, 'L6', branding);
+        assert.ok(result.officialPosting.trail.includes('poster-tenant'));
+      }
+      for (const slug of ['acme-talent', 'Acme-Talent']) {
+        const lever = `https://jobs.lever.co/${slug}/one`;
+        const result = await resolveOfficialPosting(row({ applyOptions: [{ label: 'Apply', href: lever }] }), {
+          fetch: network({ 'https://northwind.test/': '<title>Northwind Labs</title>', [lever]: jsonld({ url: lever }) }),
+        });
+        assert.equal(result.officialPosting.level, 'L6');
+        assert.ok(result.officialPosting.trail.includes('poster-tenant'));
+      }
+      const legitimate = await resolveOfficialPosting(row({ company: 'Acme Talent Partners', title: 'Software Engineer', snippet: description,
+        applyOptions: [{ label: 'Apply', href: 'https://jobs.lever.co/acme-talent/one' }] }), {
+        fetch: network({ 'https://acmetalent.test/': '<title>Acme Talent Partners</title>',
+          'https://jobs.lever.co/acme-talent/one': jsonld({ hiringOrganization: { name: 'Acme Talent Partners', sameAs: 'https://acmetalent.test/' } }) }),
+      });
+      assert.equal(legitimate.officialPosting.level, 'L3', 'an ordinary own-employer tenant is not a poster veto');
+    },
+  },
+  {
+    name: 'Official posting resolver requires fetched independent sameAs ownership and never inherits script or unrelated-host claims',
+    async run() {
+      const url = 'https://jobs.lever.co/northwind/one';
+      for (const root of [undefined, '<title>Unrelated opportunities</title>', '<title>Acme Talent Partners | Executive Search</title>']) {
+        const result = await resolveOfficialPosting(row({ applyOptions: [{ label: 'Apply', href: url }] }), {
+          fetch: network({ [url]: jsonld(), 'https://northwind.test/': root }),
+        });
+        assert.equal(result.officialPosting.level, 'L6');
+        assert.equal(result.officialPosting.officialApplyUrl, undefined);
+      }
+      for (const link of ['<script src="https://careers.northwind.test/careers"></script>',
+        '<a href="https://unrelated.test/marketing">Marketing</a>']) {
+        const pages = careersPages();
+        pages['https://northwind.test/'] = `<title>Northwind Labs</title>${link}`;
+        pages['https://careers.northwind.test/'] = '<title>Open opportunities</title>';
+        pages['https://careers.northwind.test/careers'] = '<a href="https://jobs.ashbyhq.com/northwind">Apply</a>';
+        pages['https://unrelated.test/'] = '<title>Open opportunities</title>';
+        pages['https://unrelated.test/marketing'] = '<a href="https://jobs.ashbyhq.com/northwind">Apply</a>';
+        const result = await resolveOfficialPosting(row(), { fetch: network(pages), candidateUrls: ['https://northwind.test/'] });
+        assert.equal(result.officialPosting.level, 'L6');
+      }
     },
   },
   {
@@ -130,7 +210,7 @@ export default [
       try {
         const store = createOfficialPostingStore(path.join(root, 'official-postings'), { now: () => clock });
         const job = row({ title: 'Software Engineer', company: 'Northwind Labs', snippet: description, url: 'https://board.test/careers' });
-        await store.save(job, { officialPosting: { level: 'L5', outcome: 'not-found', employer: job.company } });
+        await store.save(job, { officialPosting: { level: 'L5', outcome: 'not-found', employer: job.company, trail: ['bridge-research'] } });
         clock = 23 * 60 * 60 * 1000;
         const current = { ...job, company: 'Northwind Labs Inc.' };
         const cached = await resolveOfficialPosting(current, { store, fetch: () => { throw new Error('A recent miss does not fetch'); } });
@@ -145,21 +225,21 @@ export default [
   {
     name: 'Official posting resolver distinguishes employer-domain L1, structured ATS L3 and verified stub L4',
     async run() {
-      const l1 = await resolveOfficialPosting(row({ company: 'Northwind Labs', title: 'Software Engineer', url: 'https://northwind.test/jobs/one' }), {
+      const l1 = await resolveOfficialPosting(row({ company: 'Northwind Labs', title: 'Software Engineer', snippet: description, url: 'https://northwind.test/jobs/one' }), {
         fetch: network({ 'https://northwind.test/': '<title>Northwind Labs</title>', 'https://northwind.test/jobs/one': jsonld() }),
       });
       assert.equal(l1.officialPosting.level, 'L1');
       const portalUrl = 'https://www.usajobs.gov/job/123';
-      const portal = await resolveOfficialPosting(row({ company: 'Northwind Labs', title: 'Software Engineer', url: portalUrl }), {
+      const portal = await resolveOfficialPosting(row({ company: 'Northwind Labs', title: 'Software Engineer', snippet: description, url: portalUrl }), {
         fetch: network({ [portalUrl]: jsonld() }),
       });
       assert.equal(portal.officialPosting.level, 'L1');
       assert.equal(portal.officialPosting.employer, 'Northwind Labs');
       const url = 'https://jobs.lever.co/northwind/one';
-      const l3 = await resolveOfficialPosting(row({ applyOptions: [{ label: 'Employer', href: url }] }), { fetch: network({ [url]: jsonld() }) });
+      const l3 = await resolveOfficialPosting(row({ applyOptions: [{ label: 'Employer', href: url }] }), { fetch: network({ [url]: jsonld(), 'https://northwind.test/': '<title>Northwind Labs</title>' }) });
       assert.equal(l3.officialPosting.level, 'L3'); assert.equal(l3.officialPosting.employer, 'Northwind Labs');
       const l4 = await resolveOfficialPosting(row({ identifier: 'req-one', applyOptions: [{ label: 'Employer', href: url }] }), {
-        fetch: network({ [url]: jsonld({ description: 'A brief role summary.' }) }),
+        fetch: network({ [url]: jsonld({ description: 'A brief role summary.' }), 'https://northwind.test/': '<title>Northwind Labs</title>' }),
       });
       assert.equal(l4.officialPosting.level, 'L4'); assert.equal(l4.description, undefined);
       assert.equal(l4.officialPosting.officialApplyUrl, url);
@@ -180,6 +260,21 @@ export default [
       const ambiguous = await resolveOfficialPosting(row(), { fetch: network(careersPages([boardJob(), boardJob({ id: 'req-two', jobUrl: 'https://jobs.ashbyhq.com/northwind/req-two' })])), candidateUrls: ['https://northwind.test/'] });
       assert.equal(ambiguous.officialPosting.outcome, 'ambiguous'); assert.equal(ambiguous.officialPosting.alternatives.length, 2);
       assert.equal(ambiguous.officialPosting.officialApplyUrl, undefined);
+    },
+  },
+  {
+    name: 'Official posting resolver keeps closed and employer-filtered fetched siblings in the description comparison pool',
+    async run() {
+      for (const companyName of [undefined, 'Other Labs']) {
+        const closed = boardJob({ id: 'req-closed', jobUrl: 'https://jobs.ashbyhq.com/northwind/req-closed', isListed: false, companyName });
+        const sibling = boardJob({ id: 'req-active', jobUrl: 'https://jobs.ashbyhq.com/northwind/req-active',
+          descriptionPlain: `${description} Manage the consumer payment gateway roadmap.` });
+        const result = await resolveOfficialPosting(row(), {
+          fetch: network(careersPages([closed, sibling])), candidateUrls: ['https://northwind.test/'],
+        });
+        assert.equal(result.officialPosting.level, 'L6');
+        assert.equal(result.officialPosting.officialApplyUrl, undefined, 'shared board copy cannot anchor a different live sibling');
+      }
     },
   },
   {
@@ -243,7 +338,7 @@ export default [
     name: 'Official posting resolver cannot promote a URL-bound stub with a related or ambiguous JSON-LD posting body',
     async run() {
       const url = 'https://northwind.test/jobs/one';
-      const job = row({ company: 'Northwind Labs', title: 'Software Engineer', identifier: 'req-one', url });
+      const job = row({ company: 'Northwind Labs', title: 'Software Engineer', snippet: description, identifier: 'req-one', url });
       const stub = { '@type': 'JobPosting', title: 'Software Engineer', hiringOrganization: { name: 'Northwind Labs' },
         identifier: 'req-one', description: 'A brief role summary.', url,
         jobLocation: { address: { addressLocality: 'Lakeview', addressRegion: 'Ontario', addressCountry: 'Canada' } } };
@@ -260,7 +355,8 @@ export default [
         [stub, { ...stub, description }],
       ]) {
         const ambiguous = await resolve(nodes);
-        assert.equal(ambiguous.officialPosting.level, 'L6', 'the unresolved client-posted row falls back without claiming a verified employer');
+        assert.equal(ambiguous.officialPosting.level, 'L5', 'the ordinary own-employer row keeps only its scraped employer when the posting body is ambiguous');
+        assert.equal(ambiguous.officialPosting.employer, 'Northwind Labs');
         assert.equal(ambiguous.officialPosting.officialApplyUrl, undefined);
         assert.equal(ambiguous.description, undefined);
       }

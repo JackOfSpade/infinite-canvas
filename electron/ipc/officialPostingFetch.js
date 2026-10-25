@@ -5,9 +5,14 @@ import net from 'node:net';
 export const OFFICIAL_FETCH_MAX_BYTES = 3 * 1024 * 1024;
 export const OFFICIAL_FETCH_TIMEOUT_MS = 15_000;
 export const OFFICIAL_FETCH_MAX_REDIRECTS = 5;
+export const OFFICIAL_FETCH_HOP_CAPABILITY = Symbol.for('infinite-canvas.official-posting-fetch-hop-hooks');
 
 export class OfficialPostingFetchError extends Error {
-  constructor(code) { super(`Official posting fetch rejected: ${code}`); this.name = 'OfficialPostingFetchError'; this.code = code; }
+  constructor(code, { statusCode, retryAfter } = {}) {
+    super(`Official posting fetch rejected: ${code}`); this.name = 'OfficialPostingFetchError'; this.code = code;
+    if (Number.isInteger(statusCode) && statusCode >= 100 && statusCode <= 599) this.statusCode = statusCode;
+    if (typeof retryAfter === 'string') this.retryAfter = retryAfter.slice(0, 160);
+  }
 }
 
 function hasUnsafeTextControl(body) {
@@ -49,6 +54,7 @@ function fetchUrl(value) {
   url.hash = '';
   return url;
 }
+export { fetchUrl as officialPostingFetchUrl };
 
 async function pinnedAddress(url, lookup) {
   const host = url.hostname.replace(/^\[|\]$/gu, '');
@@ -68,13 +74,14 @@ async function pinnedAddress(url, lookup) {
 // the request lookup hook returns only the already validated address. A second
 // DNS lookup cannot swap a public answer for an internal address.
 export async function fetchOfficialPosting(value, {
-  lookup = dns.lookup, request = https.request, now = Date.now, signal,
+  lookup = dns.lookup, request = https.request, now = Date.now, signal, hopHooks,
 } = {}) {
-  const deadline = now() + OFFICIAL_FETCH_TIMEOUT_MS;
+  let deadline = now() + OFFICIAL_FETCH_TIMEOUT_MS;
   const controller = new AbortController();
   const abort = () => controller.abort(signal?.reason);
   if (signal?.aborted) abort(); else signal?.addEventListener('abort', abort, { once: true });
-  const timer = setTimeout(() => controller.abort(new OfficialPostingFetchError('fetch-timeout')), OFFICIAL_FETCH_TIMEOUT_MS);
+  const timeout = () => controller.abort(new OfficialPostingFetchError('fetch-timeout'));
+  let timer = setTimeout(timeout, OFFICIAL_FETCH_TIMEOUT_MS);
   timer.unref?.();
   const interrupted = () => controller.signal.reason instanceof OfficialPostingFetchError
     ? controller.signal.reason : new OfficialPostingFetchError('bridge-aborted');
@@ -85,15 +92,40 @@ export async function fetchOfficialPosting(value, {
     controller.signal.addEventListener('abort', onAbort, { once: true });
     Promise.resolve(promise).then(value => { cleanup(); resolve(value); }, error => { cleanup(); reject(error); });
   });
+  // Only the trusted run scheduler/cache may pause this budget. DNS, HTTP
+  // headers/body and redirect work retain one shared hard fifteen seconds.
+  const hostWait = async promise => {
+    const start = now(); clearTimeout(timer);
+    try { return await bounded(promise); }
+    finally {
+      deadline += Math.max(0, now() - start);
+      timer = setTimeout(timeout, Math.max(0, deadline - now())); timer.unref?.();
+    }
+  };
   try {
     let url = fetchUrl(value);
+    const requestedUrl = url.href;
     for (let redirects = 0; ; redirects += 1) {
       if (controller.signal.aborted) throw interrupted();
       if (now() >= deadline) throw new OfficialPostingFetchError('fetch-timeout');
       const pinned = await bounded(pinnedAddress(url, lookup));
       if (controller.signal.aborted) throw interrupted();
       if (now() >= deadline) throw new OfficialPostingFetchError('fetch-timeout');
-      const result = await new Promise((resolve, reject) => {
+      let lease; let result; let hopError;
+      try {
+        if (hopHooks?.beforeRequest) {
+          const pendingLease = Promise.resolve().then(() => hopHooks.beforeRequest(url.href, { signal: controller.signal }));
+          try { lease = await hostWait(pendingLease); }
+          catch (error) { void pendingLease.then(value => value?.release?.(error), () => {}); throw error; }
+          if (lease?.reuse) {
+            // Another chain already transferred this hop. Its bytes and final URL are ours, its request origin is not.
+            const reused = await hostWait(lease.reuse);
+            return reused && typeof reused === 'object' ? { ...reused, requestedUrl } : reused;
+          }
+        }
+        if (controller.signal.aborted) throw interrupted();
+        if (now() >= deadline) throw new OfficialPostingFetchError('fetch-timeout');
+        result = await new Promise((resolve, reject) => {
         let req; let response; let finished = false;
         const cleanup = () => controller.signal.removeEventListener('abort', onAbort);
         const fail = error => {
@@ -104,6 +136,7 @@ export async function fetchOfficialPosting(value, {
         const onAbort = () => fail(interrupted());
         controller.signal.addEventListener('abort', onAbort, { once: true });
         try {
+          lease?.start?.();
           req = request(url, {
             method: 'GET', agent: false,
             headers: { Accept: 'text/html, application/json, application/ld+json, application/xml, text/xml, application/rss+xml',
@@ -123,9 +156,11 @@ export async function fetchOfficialPosting(value, {
               if (!location || redirects >= OFFICIAL_FETCH_MAX_REDIRECTS) { fail(new OfficialPostingFetchError('unsafe-url')); return; }
               let next;
               try { next = fetchUrl(new URL(location, url).href); } catch (error) { fail(error); return; }
-              finished = true; cleanup(); res.destroy(); req?.destroy(); resolve({ redirect: next }); return;
+              finished = true; cleanup(); res.destroy(); req?.destroy(); resolve({ redirect: next, statusCode: status }); return;
             }
-            if (status !== 200) { fail(new OfficialPostingFetchError(status === 404 || status === 410 ? 'closed' : 'fetch-failed')); return; }
+            if (status !== 200) { fail(new OfficialPostingFetchError(status === 404 || status === 410 ? 'closed' : 'fetch-failed', {
+              statusCode: status, retryAfter: String(res.headers['retry-after'] || ''),
+            })); return; }
             const contentType = String(res.headers['content-type'] || '').split(';')[0].trim().toLowerCase();
             if (!/^(?:text\/(?:html|xml)|application\/(?:json|ld\+json|xml|rss\+xml|atom\+xml|xhtml\+xml))$/u.test(contentType)
               || (res.headers['content-encoding'] && res.headers['content-encoding'] !== 'identity')) {
@@ -153,11 +188,15 @@ export async function fetchOfficialPosting(value, {
           req.end();
           if (controller.signal.aborted) onAbort();
         } catch (error) { fail(error); }
-      });
-      if (!result.redirect) return result;
+        });
+        if (now() >= deadline) throw new OfficialPostingFetchError('fetch-timeout');
+      } catch (error) { hopError = error; throw error; }
+      finally { lease?.release?.(hopError, result); }
+      if (!result.redirect) return { ...result, requestedUrl };
       url = result.redirect;
     }
   } finally {
     clearTimeout(timer); signal?.removeEventListener('abort', abort);
   }
 }
+fetchOfficialPosting[OFFICIAL_FETCH_HOP_CAPABILITY] = true;

@@ -51,12 +51,16 @@ export default [
         `We'd join ${company}.`, `We’d join ${company}.`, `We'll join ${company}.`, `We’ll join ${company}.`,
         `I would support ${company}’ mission.`, `I would support ${company}'s mission.`,
       ]) {
-        const ctx = context({ paragraphs: [structuredClone(prior), closing(text)] });
+        // Token coverage requires the actual mission quote for this positive.
+        const ids = text === listingQuotes[1] ? ['job-two'] : ['job-one'];
+        const ctx = context({ paragraphs: [structuredClone(prior), closing(text, ids)] });
         const result = local.__finalParagraphListingGroundingForTests(ctx);
         assert.equal(result.eligible, true, `${text}: ${JSON.stringify(result.corrections)}`);
         assert.equal(result.listingOnly, true); assert.deepEqual(result.corrections, []);
         assert.deepEqual(twin(ctx), [], `drafting twin accepts ${text}`);
       }
+      const unrelated = evaluate({ paragraphs: [structuredClone(prior), closing(listingQuotes[1], ['job-one'])] });
+      assert.equal(unrelated.eligible, false, 'a dispatch-roster quote does not license an uncited mission sentence');
       for (let count = 1; count <= 4; count++) {
         const ids = ['job-one', 'job-two', 'job-three', 'job-four'].slice(0, count);
         const result = evaluate({ paragraphs: [structuredClone(prior), closing(listingQuotes[0], ids)] });

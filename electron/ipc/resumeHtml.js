@@ -1,4 +1,5 @@
 import { forbiddenPunctuationKinds } from './candidatePunctuation.js';
+import { officialHttpsUrl } from './officialPostingFields.js';
 export { forbiddenPunctuationKinds } from './candidatePunctuation.js';
 /**
  * Self-contained HTML builders for the job-application generator (résumé +
@@ -1353,10 +1354,17 @@ export function normaliseResumeDownloadBundle(raw = {}) {
       : 'checks-passed',
     note: 'Deterministic checks support factual and structural review; they are not a persuasive-quality score.',
   } : undefined;
+  const official = raw.officialPosting;
+  const officialPosting = ['L1', 'L2', 'L3', 'L4'].includes(official?.level) ? {
+    level: official.level,
+    sourceUrl: officialHttpsUrl(official.sourceUrl),
+    officialApplyUrl: officialHttpsUrl(official.officialApplyUrl),
+  } : null;
   return {
     company: safePart(raw.company, 'Company'),
     candidateName: safePart(raw.candidateName, 'Application'),
     jobUrl: safeJobPostingUrl(raw.jobUrl),
+    ...(officialPosting && (officialPosting.sourceUrl || officialPosting.officialApplyUrl) ? { officialPosting } : {}),
     jobMarkdown: String(raw.jobMarkdown || '').replace(/\r\n/g, '\n'),
     postingVariants: normalisePostingVariants(raw.postingVariants),
     resumePdfBase64,
@@ -1641,7 +1649,7 @@ function injectInferredSkills(mainHtml, insights, showAllVerifySkills = false) {
   return mainHtml.replace(/<\/main>\s*$/i, `${fallback}</main>`);
 }
 
-function buildSkillWorkspace({ skillInsights, skillHistogram, jobContext, jobUrl, postingVariants, skillOpportunityError, coverLetterCheckSummary }) {
+function buildSkillWorkspace({ skillInsights, skillHistogram, jobContext, jobUrl, officialPosting, postingVariants, skillOpportunityError, coverLetterCheckSummary }) {
   const insights = normaliseSkillInsights(skillInsights);
   const rawRole = skillInsights?.role && typeof skillInsights.role === 'object' ? skillInsights.role : {};
   const matchedRoleId = String(rawRole.matchedRoleId || '').trim();
@@ -1664,12 +1672,8 @@ function buildSkillWorkspace({ skillInsights, skillHistogram, jobContext, jobUrl
   const context = [title, company].filter(Boolean).join(' · ')
     || (contextRoles.length ? `Tailored for ${contextRoles.join(' · ')}` : 'Review high-value adjacent skills before export.');
   const safeOriginalJobUrl = safeJobPostingUrl(jobUrl);
-  // Multi-location consolidation: a card may carry several safe mirror
-  // targets for the ONE shared posting. Render one link per target, labelled
-  // with its location, and keep the exact legacy label for a single/legacy
-  // URL so already-generated callers and tests are untouched. Unsafe URLs are
-  // dropped rather than rendered. All links stay target=_blank with noopener
-  // noreferrer and inherit the print-neutral .ic-job-posting-link styling.
+  const officialUrl = officialPosting?.sourceUrl || officialPosting?.officialApplyUrl || '';
+  // The official page precedes retained location-specific scraped links.
   const safePostingVariants = normalisePostingVariants(postingVariants);
   const postingLinkTargets = safePostingVariants
     .map(variant => ({
@@ -1680,10 +1684,11 @@ function buildSkillWorkspace({ skillInsights, skillHistogram, jobContext, jobUrl
   const postingLinks = postingLinkTargets.length > 1
     ? postingLinkTargets.map(target => `<a class="ic-job-posting-link" href="${escapeHtml(target.url)}" target="_blank" rel="noopener noreferrer">View original job posting — ${escapeHtml(target.location || 'Unspecified location')}</a>`)
     : [];
-  const singlePostingUrl = safeOriginalJobUrl || (postingLinkTargets.length === 1 ? postingLinkTargets[0].url : '');
+  const singlePostingUrl = officialUrl || safeOriginalJobUrl || (postingLinkTargets.length === 1 ? postingLinkTargets[0].url : '');
   const originalJobLink = singlePostingUrl
-    ? `<a class="ic-job-posting-link" href="${escapeHtml(singlePostingUrl)}" target="_blank" rel="noopener noreferrer">View original job posting</a>`
+    ? `<a class="ic-job-posting-link" href="${escapeHtml(singlePostingUrl)}" target="_blank" rel="noopener noreferrer">View ${officialUrl ? 'official' : 'original'} job posting</a>`
     : '';
+  if (officialUrl && postingLinks.length) postingLinks.unshift(originalJobLink);
   const postingLinksBlock = postingLinks.length ? `<div class="ic-job-posting-links">${postingLinks.join('\n')}</div>` : '';
   const card = (item) => `<article class="ic-insight-card${item.kind === 'learn' ? ' ic-learn-card' : ''}" data-ic-insight="${escapeHtml(item.id)}" data-ic-kind="${item.kind}">
   <p class="ic-insight-skill">${escapeHtml(item.skill)}</p>
@@ -2587,7 +2592,7 @@ export function buildResumeDocument({ resumeMainHtml, variantAttrs, ledger, docI
   main = injectReceipts(main, ledger);
   const bundle = normaliseResumeDownloadBundle(downloadBundle);
   const workspace = buildSkillWorkspace({
-    skillInsights, skillHistogram, jobContext, jobUrl: bundle.jobUrl,
+    skillInsights, skillHistogram, jobContext, jobUrl: bundle.jobUrl, officialPosting: bundle.officialPosting,
     postingVariants: bundle.postingVariants,
     skillOpportunityError, coverLetterCheckSummary,
   });

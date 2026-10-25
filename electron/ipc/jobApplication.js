@@ -2338,7 +2338,7 @@ export function legacyListingCollisionBytes(data) {
   const bytes = Buffer.isBuffer(data) ? data : Buffer.from(data);
   const separator = bytes.indexOf(Buffer.from('\n---\n'));
   if (separator < 0) return bytes;
-  const prefixes = ['**Posted by:** ', '**Apply URL:** ', '**Source level:** '].map(value => Buffer.from(value));
+  const prefixes = ['**Posted by:** ', '**Apply URL:** ', '**Official posting:** ', '**Source level:** '].map(value => Buffer.from(value));
   const chunks = [];
   let keepStart = 0;
   for (let start = 0; start < separator;) {
@@ -2371,7 +2371,7 @@ export function legacyListingCollisionBytes(data) {
  * pipeline, by chance, before reaching save.
  *
  * Identity uses exact legacy Scraped Listing bytes when present, otherwise
- * Original Job Listing bytes with only the three bundle header lines removed.
+ * Original Job Listing bytes with only the bundle provenance header lines removed.
  * A per-generation job id cannot serve this purpose: queueLocalApplicationJob mints a brand-new id on
  * every call, including an intentional Local AI regeneration of a card
  * that is already 'saved' (canRegenerateLocalApplication in
@@ -2602,7 +2602,7 @@ export function registerJobApplicationHandlers() {
     }
     assertRendererCanvasFilePathAllowed(canvasFilePath);
 
-    const where = sanitizeFilePart(pending.identityCompany ?? company, 'Company');
+    const where = sanitizeFilePart(company, 'Company');
     // Location is a hard part of job identity (§6.3) but here it's just a path
     // segment — a missing/unresolvable value degrades to a sane folder name
     // rather than collapsing the path (e.g. "Company//Role" if left empty).

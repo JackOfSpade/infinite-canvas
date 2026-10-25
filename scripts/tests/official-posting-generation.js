@@ -59,19 +59,22 @@ export default [
     },
   },
   {
-    name: 'official-posting prepare drops closed, expired, wrong-title and redirected cached postings without retaining their apply link',
+    name: 'official-posting prepare drops explicit 404 postings while preserving cached proof on weak expired wrong-title or redirected pages',
     async run() {
       for (const kind of ['closed', 'expired', 'title', 'redirect']) await withStore(async store => {
         const original = job(); await store.save(original, { officialPosting: posting(), description: text });
         const fetched = kind === 'closed' ? {} : { [officialUrl]: kind === 'redirect'
           ? { url: 'https://elsewhere.example/jobs/foreign', body: page() }
           : page(text, kind === 'expired' ? { validThrough: '2000-01-01T00:00:00Z' } : { title: 'Staff Engineer' }) };
-        const prepared = await prepareOfficialPostingForGeneration(args(original), { store, bridgeStatus: status, fetch: network(fetched) });
-        assert.equal(prepared.officialPosting.level, 'L6', kind); assert.equal(prepared.officialPosting.officialApplyUrl, undefined, kind);
-        assert.equal(getPreparedOfficialPosting(prepared.resolutionId, original).description, undefined);
-        if (['closed', 'expired'].includes(kind)) {
+        const read = network(fetched);
+        const prepared = await prepareOfficialPostingForGeneration(args(original), { store, bridgeStatus: status, fetch: kind === 'closed'
+          ? async () => { throw Object.assign(new Error('closed'), { code: 'closed', statusCode: 404 }); } : read });
+        assert.equal(prepared.officialPosting.level, kind === 'closed' ? 'L6' : 'L1', kind);
+        assert.equal(prepared.officialPosting.officialApplyUrl, kind === 'closed' ? undefined : officialUrl, kind);
+        assert.equal(getPreparedOfficialPosting(prepared.resolutionId, original).description, kind === 'closed' ? undefined : text);
+        if (kind === 'closed') {
           assert.equal(prepared.officialPosting.outcome, 'closed'); assert.equal((await store.find(original)).officialPosting.outcome, 'closed');
-        }
+        } else assert.ok(prepared.officialPosting.trail.includes('reverify-failed'), kind);
       });
     },
   },
@@ -88,8 +91,9 @@ export default [
             location: place, isListed: true, descriptionPlain: changed, jobUrl: foreign ? 'https://jobs.ashbyhq.com/other/req-one' : url, applyUrl: url }] }) },
         }, calls) });
         assert.deepEqual(calls, [url, api]);
-        assert.equal(prepared.officialPosting.level, foreign ? 'L4' : 'L2');
-        assert.equal(getPreparedOfficialPosting(prepared.resolutionId, original).description, foreign ? undefined : changed);
+        assert.equal(prepared.officialPosting.level, 'L2');
+        assert.equal(getPreparedOfficialPosting(prepared.resolutionId, original).description, foreign ? text : changed);
+        assert.equal(prepared.officialPosting.trail.includes('reverify-failed'), foreign);
       });
     },
   },
@@ -98,7 +102,7 @@ export default [
     async run() {
       let time = Date.parse('2026-01-01T00:00:00Z');
       await withStore(async store => {
-        const original = job(); await store.save(original, { officialPosting: { level: 'L6', outcome: 'not-found', employer: '', trail: [] } });
+        const original = job(); await store.save(original, { officialPosting: { level: 'L6', outcome: 'not-found', employer: '', trail: ['bridge-research'] } });
         let calls = 0; const order = [];
         const options = { store: { ...store, find: async row => { order.push('store'); return store.find(row); } }, now: () => time,
           bridgeStatus: () => { order.push('status'); return status(); }, slots: { acquire: async () => { order.push('slot'); return () => {}; } },

@@ -32,6 +32,19 @@ import current_authority_parallel_match from './tests/current-authority-parallel
 import application_career_authority from './tests/application-career-authority.js';
 import application_write_verify from './tests/application-write-verify.js';
 import official_posting_gates from './tests/official-posting-gates.js';
+import official_posting_r2_subject from './tests/official-posting-r2-subject.js';
+import official_posting_r3_identities from './tests/official-posting-r3-identities.js';
+import official_posting_r3_fetch_session from './tests/official-posting-r3-fetch-session.js';
+import official_posting_r3_resolver from './tests/official-posting-r3-resolver.js';
+import official_posting_r3_service from './tests/official-posting-r3-service.js';
+import official_posting_r3_recovery from './tests/official-posting-r3-recovery.js';
+import official_posting_r4_bundle from './tests/official-posting-r4-bundle.js';
+import official_posting_r4_ui from './tests/official-posting-r4-ui.js';
+import official_posting_r4_skills from './tests/official-posting-r4-skills.js';
+import official_posting_r4_generation from './tests/official-posting-r4-generation.js';
+import official_posting_r2_guard from './tests/official-posting-r2-guard.js';
+import official_posting_r2_binding from './tests/official-posting-r2-binding.js';
+import official_posting_r2_closing from './tests/official-posting-r2-closing.js';
 import official_posting_skills from './tests/official-posting-skills.js';
 import official_posting_skill_selection from './tests/official-posting-skill-selection.js';
 import official_posting_fetch from './tests/official-posting-fetch.js';
@@ -39,6 +52,13 @@ import official_posting_store from './tests/official-posting-store.js';
 import official_posting_match from './tests/official-posting-match.js';
 import official_posting_extractors from './tests/official-posting-extractors.js';
 import official_posting_resolver from './tests/official-posting-resolver.js';
+import official_posting_resilience from './tests/official-posting-resilience.js';
+import official_posting_r1_parsing from './tests/official-posting-r1-parsing.js';
+import official_posting_r1_legacy_binding from './tests/official-posting-r1-legacy-binding.js';
+import official_posting_match_integrity from './tests/official-posting-match-integrity.js';
+import official_posting_amendment3 from './tests/official-posting-amendment3.js';
+import official_posting_board_closed from './tests/official-posting-board-closed.js';
+import official_source_hosts from './tests/official-source-hosts.js';
 import official_posting_fields from './tests/official-posting-fields.js';
 import official_posting_scrape from './tests/official-posting-scrape.js';
 import official_posting_bridge from './tests/official-posting-bridge.js';
@@ -232,6 +252,19 @@ const testGroups = [
   ['application-career-authority.js', application_career_authority],
   ['application-write-verify.js', application_write_verify],
   ['official-posting-gates.js', official_posting_gates],
+  ['official-posting-r2-subject.js', official_posting_r2_subject],
+  ['official-posting-r3-identities.js', official_posting_r3_identities],
+  ['official-posting-r3-fetch-session.js', official_posting_r3_fetch_session],
+  ['official-posting-r3-resolver.js', official_posting_r3_resolver],
+  ['official-posting-r3-service.js', official_posting_r3_service],
+  ['official-posting-r3-recovery.js', official_posting_r3_recovery],
+  ['official-posting-r4-bundle.js', official_posting_r4_bundle],
+  ['official-posting-r4-ui.js', official_posting_r4_ui],
+  ['official-posting-r4-skills.js', official_posting_r4_skills],
+  ['official-posting-r4-generation.js', official_posting_r4_generation],
+  ['official-posting-r2-guard.js', official_posting_r2_guard],
+  ['official-posting-r2-binding.js', official_posting_r2_binding],
+  ['official-posting-r2-closing.js', official_posting_r2_closing],
   ['official-posting-skills.js', official_posting_skills],
   ['official-posting-skill-selection.js', official_posting_skill_selection],
   ['official-posting-fetch.js', official_posting_fetch],
@@ -239,6 +272,13 @@ const testGroups = [
   ['official-posting-match.js', official_posting_match],
   ['official-posting-extractors.js', official_posting_extractors],
   ['official-posting-resolver.js', official_posting_resolver],
+  ['official-posting-resilience.js', official_posting_resilience],
+  ['official-posting-r1-parsing.js', official_posting_r1_parsing],
+  ['official-posting-r1-legacy-binding.js', official_posting_r1_legacy_binding],
+  ['official-posting-match-integrity.js', official_posting_match_integrity],
+  ['official-posting-amendment3.js', official_posting_amendment3],
+  ['official-posting-board-closed.js', official_posting_board_closed],
+  ['official-source-hosts.js', official_source_hosts],
   ['official-posting-fields.js', official_posting_fields],
   ['official-posting-scrape.js', official_posting_scrape],
   ['official-posting-bridge.js', official_posting_bridge],

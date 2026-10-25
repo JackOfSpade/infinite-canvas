@@ -90,7 +90,12 @@ function jsonLocation(node) {
   return location(display || (remote ? 'Remote' : ''), { remote, remoteCountry: remote ? [...new Set(countries)].join(' | ') : '' });
 }
 
-const SALARY_UNITS = Object.freeze({ YEAR: '/yr', ANNUAL: '/yr', HOUR: '/hr', HOURLY: '/hr', MONTH: '/mo', WEEK: '/wk', DAY: '/day', '1 YEAR': '/yr' });
+const SALARY_UNITS = Object.freeze({
+  YEAR: '/yr', ANNUAL: '/yr', YEARLY: '/yr', '1 YEAR': '/yr', 'PER-YEAR-SALARY': '/yr',
+  HOUR: '/hr', HOURLY: '/hr', '1 HOUR': '/hr', 'PER-HOUR-WAGE': '/hr',
+  MONTH: '/mo', MONTHLY: '/mo', '1 MONTH': '/mo', 'PER-MONTH-SALARY': '/mo',
+  WEEK: '/wk', WEEKLY: '/wk', '1 WEEK': '/wk', DAY: '/day', DAILY: '/day', '1 DAY': '/day',
+});
 function numericSalary({ min, max, value, currency = '', interval = '' }) {
   const number = input => ['number', 'string'].includes(typeof input) && String(input).trim() !== ''
     && Number.isFinite(Number(input)) && Number(input) >= 0 ? Number(input) : null;
@@ -102,7 +107,7 @@ function numericSalary({ min, max, value, currency = '', interval = '' }) {
   else if (low != null) amount = `From ${low}`;
   else if (high != null) amount = `Up to ${high}`;
   if (!amount) return unknownSalary();
-  return { text: `${plain(currency)} ${amount}${SALARY_UNITS[String(interval).toUpperCase()] || ''}`.trim(), provenance: 'posted' };
+  return { text: `${plain(currency)} ${amount}${SALARY_UNITS[String(interval).trim().toUpperCase()] || ''}`.trim(), provenance: 'posted' };
 }
 
 function jsonSalary(value) {

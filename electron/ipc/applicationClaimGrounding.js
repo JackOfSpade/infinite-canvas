@@ -1,3 +1,5 @@
+import { targetCompanyNames } from './coverLetterChecks.js';
+
 /**
  * Claim-versus-evidence grounding for generated application prose.
  *
@@ -1526,7 +1528,7 @@ export function describeClaimFinding(unit, finding, { targetCompany = '' } = {})
   const q = value => `“${value}”`;
   const tokens = value => String(value ?? '').replace(/['’]s\b/giu, '').toLowerCase().match(/[\p{L}\p{N}]+/gu) || [];
   const term = tokens(finding.term);
-  const employerTerm = term.length > 0 && [targetCompany, String(targetCompany ?? '').split(' - ')[0]].some(name => {
+  const employerTerm = term.length > 0 && targetCompanyNames(targetCompany).some(name => {
     const company = tokens(name);
     return company.some((_, index) => term.every((word, offset) => company[index + offset] === word));
   });

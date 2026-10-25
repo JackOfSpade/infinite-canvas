@@ -133,6 +133,13 @@ export default [
       });
       assert(normalized.jobUrl === 'https://jobs.example.test/opening?source=canvas&role=senior',
         'a valid HTTP(S) job URL must be retained in canonical form');
+      const official = normaliseResumeDownloadBundle({ jobUrl: normalized.jobUrl,
+        officialPosting: { level: 'L2', sourceUrl: 'https://careers.example.test/opening', officialApplyUrl: 'https://careers.example.test/opening/application' } });
+      assert(official.officialPosting.sourceUrl === 'https://careers.example.test/opening'
+        && official.jobUrl === normalized.jobUrl, 'official metadata and original job URL retain separate targets');
+      assert(!normaliseResumeDownloadBundle({ jobUrl: normalized.jobUrl,
+        officialPosting: { level: 'L6', sourceUrl: 'https://careers.example.test/opening' } }).officialPosting,
+      'scraped fallback levels must retain their legacy original-link label');
       for (const unsafe of [
         'javascript:alert(1)', 'data:text/html,hi', '/relative-job',
         'https://user:password@jobs.example.test/opening', 'https://jobs.example.test/\nopening',
