@@ -48,6 +48,32 @@ export { comparisonVisible, serviceComparisonAnswer, comparativeServiceFixture }
 
 export default [
   {
+    name: 'deferred expiry partition retries historical closed-trail misses with no candidate confirmation receipt',
+    async run() {
+      const target = job('synthetic-legacy-expiry', { officialPosting: { level: 'L5', outcome: 'not-found',
+        employer: 'Northwind Labs', trail: ['bridge-research', 'closed'] } });
+      const old = record(target, { level: 'L5', outcome: 'not-found', employer: target.company,
+        trail: ['bridge-research', 'closed'] });
+      const partition = await partitionOfficialPostingRows([target], { store: memoryStore([[target.sourceJobKey, old]]) });
+      assert.deepEqual(partition.unresolvedIndices, [0]);
+      assert.equal(partition.settledTelemetry.total, 0);
+    },
+  },
+  {
+    name: 'deferred expiry service keeps candidate URLs in a run receipt and does not persist an unconfirmed miss',
+    async run() {
+      const target = job('synthetic-expiry');
+      const url = 'https://northwind.test/jobs/synthetic-expiry';
+      const store = memoryStore();
+      const resolved = await resolveOfficialPostings([target], { store, fetch: noNetwork, bridgeAvailable: false,
+        resolve: async () => ({ officialPosting: { level: 'L5', outcome: 'not-found', employer: 'Northwind Labs',
+          trail: ['closed'] }, expiryCandidates: [url] }) });
+      assert.deepEqual(resolved.expiryCandidates, [[url]]);
+      assert.equal(resolved.jobs[0].expiryCandidates, undefined, 'URLs stay off rows');
+      assert.equal(store.saves.length, 0, 'the service cannot cache a miss before candidate confirmation');
+    },
+  },
+  {
     name: 'comparative trail compaction never turns a saturated partial crawl into a durable match',
     run() {
       const decorations = OFFICIAL_POSTING_TRAIL.filter(code => !code.startsWith('comparative-')

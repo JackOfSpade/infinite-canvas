@@ -7,7 +7,7 @@
  * company, and a pretty, source-faithful Markdown rendering of the scraped
  * job listing.
  */
-import { OFFICIAL_POSTING_LABELS, officialHttpsUrl } from './officialPostingFields.js';
+import { OFFICIAL_POSTING_LABELS, boardClosedBoardLabel, officialHttpsUrl } from './officialPostingFields.js';
 
 const WINDOWS_RESERVED_NAMES = new Set([
   'CON', 'PRN', 'AUX', 'NUL',
@@ -135,7 +135,8 @@ export function normaliseJobPostingVariants(raw) {
     const googleCardUrl = normalizeJobListingExternalUrl(entry.googleCardUrl);
     if (!url && !googleCardUrl) continue;
     const location = safeVariantText(entry.location, MAX_POSTING_VARIANT_LOCATION_LENGTH);
-    const key = `${(url || googleCardUrl).toLowerCase()}\u0000${location.toLowerCase()}`;
+    const liveness = entry.liveness === 'closed' ? 'closed' : '';
+    const key = `${(url || googleCardUrl).toLowerCase()}\u0000${location.toLowerCase()}\u0000${liveness}`;
     if (seen.has(key)) continue;
     seen.add(key);
     out.push({
@@ -146,6 +147,7 @@ export function normaliseJobPostingVariants(raw) {
       posted: safeVariantText(entry.posted, MAX_POSTING_VARIANT_FIELD_LENGTH),
       salary: safeVariantText(entry.salary, MAX_POSTING_VARIANT_FIELD_LENGTH),
       applySource: safeVariantText(entry.applySource, MAX_POSTING_VARIANT_FIELD_LENGTH),
+      ...(liveness ? { liveness } : {}),
     });
     if (out.length >= MAX_POSTING_VARIANTS) break;
   }
@@ -171,7 +173,7 @@ export const ORIGINAL_JOB_LISTING_TARGETS_HEADING = '## Posting locations';
 
 /** One safe, escaped `- Location: <url>` line per retained posting target. */
 function postingTargetLines(variants) {
-  return variants.map(variant => {
+  return variants.filter(variant => variant.liveness !== 'closed').map(variant => {
     const label = markdownInlineText(variant.location) || 'Unspecified location';
     const url = normalizeJobListingExternalUrl(variant.url) || normalizeJobListingExternalUrl(variant.googleCardUrl);
     return `- **${label}:** <${url}>`;
@@ -201,10 +203,21 @@ export function formatOriginalJobListingMarkdown(job = {}, { audience = 'prompt'
     if (!text) continue;
     lines.push(`**${label}:** ${text}`);
   }
-  const url = safeHttpUrl(job.url);
+  const selectedListingUrl = audience === 'bundle' ? safeHttpUrl(job.listingLinkUrl) : '';
+  const url = selectedListingUrl || safeHttpUrl(job.url);
   const variants = normaliseJobPostingVariants(job.postingVariants);
-  if (url) lines.push(`**Listing URL:** <${url}>`);
+  const closedBoard = audience === 'bundle' && !selectedListingUrl && job.listingLiveness?.verdict === 'closed'
+    ? boardClosedBoardLabel(job.listingLiveness.board) : '';
+  if (url) lines.push(`**Listing URL:** <${url}>${closedBoard ? ` (closed on ${closedBoard})` : ''}`);
   if (audience === 'bundle') {
+    const listingOutcomes = {
+      open: 'Open', alternate: 'Open alternate listing', unobservable: 'Not re-checked (unobservable)',
+      override: 'Proceeded by user override', unavailable: 'Not checked',
+      official: 'Official posting found',
+    };
+    const listingOutcome = Object.hasOwn(listingOutcomes, job.listingAudit?.outcome)
+      ? listingOutcomes[job.listingAudit.outcome] : '';
+    if (listingOutcome) lines.push(`**Listing check:** ${listingOutcome}`);
     const postedBy = markdownInlineText(job.postedBy);
     const applyUrl = safeHttpUrl(job.applyUrl || job.officialPosting?.officialApplyUrl);
     const officialUrl = ['L1', 'L2', 'L3', 'L4'].includes(job.officialPosting?.level) ? officialHttpsUrl(job.officialPosting.sourceUrl) : '';
@@ -223,8 +236,9 @@ export function formatOriginalJobListingMarkdown(job = {}, { audience = 'prompt'
   if (description) lines.push(textFence(description));
   else if (snippet) lines.push(textFence(snippet));
   else lines.push(EMPTY_JOB_LISTING_BODY_NOTE);
-  if (variants.length) {
-    lines.push('', ORIGINAL_JOB_LISTING_TARGETS_HEADING, '', ...postingTargetLines(variants));
+  const postingTargets = postingTargetLines(variants);
+  if (postingTargets.length) {
+    lines.push('', ORIGINAL_JOB_LISTING_TARGETS_HEADING, '', ...postingTargets);
   }
   lines.push('');
   return lines.join('\n');

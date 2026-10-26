@@ -5,6 +5,7 @@ import electronPkg from 'electron';
 import { AsyncLocalStorage } from 'node:async_hooks';
 const { ipcMain } = electronPkg;
 import { logger } from '../logger.js';
+import { ensureListingLivenessRules } from './listingLivenessCalibration.js';
 
 // AI handoffs can be reached several async layers below an IPC handler. Keep
 // the originating WebContents in async-local state so a sensitive manual-AI
@@ -553,12 +554,17 @@ export function handleSafe(channel, handler, timeoutOrOptions = 0) {
       for (const ownerId of additionalNodeIds) if (ownerId !== nodeId) registerNodeTask(event.sender, ownerId, ac, channel,
         typeof args?.manualAiRunId === 'string' ? args.manualAiRunId : null, options.logTaskRegistration !== false);
 
+      const livenessRules = options.captureListingLiveness === true
+        ? await ensureListingLivenessRules() : null;
+      if (signal.aborted) throw signal.reason || nodeCancellationError();
       const result = await ipcRequestContext.run(
         {
           sender: event.sender,
           abortController: ac,
           nodeId: nodeId || null,
           channel,
+          livenessEvidence: new Map(),
+          livenessRules,
           // A renderer-created id spanning every manual AI step in one logical
           // workflow. nonApiAi uses it to replay accepted copy/paste steps after
           // a process restart without ever confusing two runs of the same node.

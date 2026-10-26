@@ -81,8 +81,37 @@ import { collectCompactJobBoardTopology } from '../../src/utils/jobBoardReportTo
 import os from 'node:os';
 import { appendJobsHistory, loadJobsHistory } from '../../electron/ipc/jobsHistory.js';
 import { claimJobAnalysisOperationAuthority } from '../../electron/ipc/jobAnalysisOperationAuthorityStore.js';
+import { checkListingForGeneration } from '../../electron/ipc/listingLivenessProbe.js';
 
 export default [
+  {
+    name: 'listing-liveness bug report prints bounded board and Generate counts without page data',
+    async run() {
+      const telemetry = getJobsTelemetry(); const saved = structuredClone(telemetry);
+      try {
+        for (const key of Object.keys(telemetry)) delete telemetry[key];
+        Object.assign(telemetry, { nodeId: 'synthetic-listing-report', windowId: null,
+          search: { ts: Date.now(), queries: 1, raw: 2, deduped: 2, ageDropped: 0, historyDropped: 0, kept: 2,
+            officialPosting: { total: 2, levels: { L5: 2 }, outcomes: { 'not-found': 2 },
+              listingLiveness: { linkedin: { observed: 2, structuralClosed: 1, expiryOnlyClosedCopies: 1 },
+              'bad/board': { observed: 99 } } } } });
+        let probes = 0;
+        const checked = await checkListingForGeneration({ job: { title: 'Synthetic Engineer', company: 'Northwind Labs',
+          source: 'remoteok', url: 'https://remoteok.com/jobs/synthetic-one' },
+        posting: { level: 'L5', outcome: 'not-found', employer: '' },
+        probe: { probe: async () => { probes += 1; return { unknown: 'synthetic-wall' }; } } });
+        assert(probes === 1 && checked.listingAudit?.outcome === 'unobservable');
+        const report = buildJobsPipelineSnapshot(new Set(['synthetic-listing-report']), null, null);
+        assert(report.includes('Listing liveness (per board, counts only): `linkedin` observed=2, structuralClosed=1'));
+        assert(report.includes('expiryOnlyClosedCopies=1'));
+        assert(report.includes('### Generate listing checks (this process)') && report.includes('unobservable='));
+        assert(!report.includes('bad/board'));
+      } finally {
+        for (const key of Object.keys(telemetry)) delete telemetry[key];
+        Object.assign(telemetry, saved);
+      }
+    },
+  },
   {
     name: 'official-posting comparative bug report exposes only closed option-count bins and outcome counts',
     run() {
@@ -12224,7 +12253,7 @@ export default [
       assert(scraperSource.includes('let errorShellRetryIndex = -1;')
         && scraperSource.indexOf('let errorShellRetryIndex = -1;') < scraperSource.indexOf('for (let i = 0; i < enhanced.length; i++)'),
       'the error-shell retry budget is declared outside the detail loop so `i--; continue;` cannot reset it');
-      assert(scraperSource.indexOf('isZipRecruiterDetailErrorShell({') < scraperSource.indexOf('if (isUnavailableDetailPage(pageInfo))'),
+      assert(scraperSource.indexOf('isZipRecruiterDetailErrorShell({') < scraperSource.indexOf('if (isUnavailableDetailPage(pageInfo) && !otherHostNotFound && !detailErrorShellSeen) {'),
       'the transient error shell is classified BEFORE the conclusively-unavailable drop, so a copy change can never discard a live listing');
       return { retries: 2 };
     },
@@ -12308,7 +12337,7 @@ export default [
         && !isZipRecruiterClosedDetailRedirect('https://www.ziprecruiter.com/c/Acme/Job/Software-Engineer/-in-Toronto,ON?jid=abc')
         && !isZipRecruiterClosedDetailRedirect('https://jobs.example.com/jobseeker/home?closed_job_redirect=1'),
       'only ZipRecruiter\'s explicit closed-job redirect is retired; ordinary home, job, and external URLs remain eligible');
-      assert(isUnavailableDetailPage({ isNotFound: true })
+      assert(!isUnavailableDetailPage({ isNotFound: true })
         && isUnavailableDetailPage({ workdayPostingAvailable: false })
         && isUnavailableDetailPage({ zipRecruiterClosedJobRedirect: true })
         && !isUnavailableDetailPage({ workdayPostingAvailable: true })

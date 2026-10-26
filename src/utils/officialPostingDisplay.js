@@ -13,6 +13,7 @@ function boardClosedStatus(job, posting, outcomeLabel) {
   const board = closed ? boardClosedBoardLabel(closed.board) : '';
   if (!board) return null;
   if (['L1', 'L2', 'L3', 'L4'].includes(posting?.level) && ['found', 'link-only'].includes(posting.outcome)) return `Closed on ${board} · open on official site`;
+  if (posting?.outcome === 'ambiguous' || posting?.trail?.includes('comparative-disagree')) return `Closed on ${board} · several official postings match`;
   if (officialResearchSettled(posting)) return [`Closed on ${board}`, outcomeLabel].filter(Boolean).join(' · ');
   return `Closed on ${board} · official posting not checked`;
 }

@@ -1,6 +1,6 @@
 // Pure shared wire schema: main-process records and renderer whitelists use
 // the same field list. Scraped identity fields remain separate from these.
-export const OFFICIAL_POSTING_ROW_FIELDS = Object.freeze(['postedBy', 'applyOptions', 'salaryProvenance', 'officialPosting', 'boardClosed']);
+export const OFFICIAL_POSTING_ROW_FIELDS = Object.freeze(['postedBy', 'applyOptions', 'salaryProvenance', 'officialPosting', 'boardClosed', 'listingLiveness', 'alternateListings']);
 export const LOCAL_AI_APPLICATION_SNIPPET_MAX_CHARS = 80_000;
 export const OFFICIAL_POSTING_LEVELS = Object.freeze(['L1', 'L2', 'L3', 'L4', 'L5', 'L6']);
 export const OFFICIAL_POSTING_OUTCOMES = Object.freeze(['found', 'link-only', 'not-found', 'ambiguous', 'unreadable', 'closed', 'failed']);
@@ -15,7 +15,7 @@ export const OFFICIAL_POSTING_TRAIL = Object.freeze([
   'title-mismatch', 'location-mismatch', 'employer-mismatch', 'tenant-unproven', 'poster-tenant',
   'salary-mismatch', 'no-anchor', 'invalid-quotes', 'ambiguous', 'closed', 'unreadable', 'oversize',
   'unsafe-url', 'unsafe-address', 'fetch-timeout', 'fetch-failed', 'unsupported-content-type',
-  'crawl-budget', 'crawl-partial', 'invalid-text', 'stub-text', 'official-text-missing', 'no-resolution', 'reverified', 'reverify-failed', 'material-jd-change', 'failed',
+  'crawl-budget', 'crawl-partial', 'invalid-text', 'stub-text', 'official-text-missing', 'no-resolution', 'reverified', 'reverify-failed', 'official-liveness-unconfirmed', 'material-jd-change', 'failed',
   ...OFFICIAL_POSTING_COMPARATIVE_CODES,
   'comparative-a-valid', 'comparative-a-invalid', 'comparative-b-valid', 'comparative-b-invalid', 'comparative-truncated', 'insufficient-text',
   ...['a', 'b', 'choice'].flatMap(run => ['none', ...Array.from({ length: 8 }, (_, index) => `p${index + 1}`)]
@@ -147,12 +147,26 @@ export function normalizeOfficialPosting(value) {
 export const BOARD_CLOSED_REASONS = Object.freeze([
   'detail-page-not-found', 'ziprecruiter-closed-job-redirect',
   'indeed-page-unavailable', 'indeed-job-unavailable', 'linkedin-no-longer-accepting',
+  'http-not-found', 'ai-confirmed-closed', 'workday-posting-unavailable',
 ]);
 const BOARD_LABELS = Object.freeze({
   linkedin: 'LinkedIn', indeed: 'Indeed', ziprecruiter: 'ZipRecruiter', glassdoor: 'Glassdoor', dice: 'Dice',
   google: 'Google', remoteok: 'RemoteOK', weworkremotely: 'WWRemotely',
 });
 const BOARD_ID_RE = /^[a-z0-9][a-z0-9-]{0,39}$/u;
+/** Bounded board links only; scraped identity and page evidence are separate. */
+export function normalizeAlternateListings(value) {
+  const links = []; const seen = new Set();
+  for (const item of Array.isArray(value) ? value : []) {
+    if (!exactKeys(item, ['board', 'url']) || !['board', 'url'].every(key => Object.hasOwn(item, key))
+      || typeof item.board !== 'string' || !BOARD_ID_RE.test(item.board)) continue;
+    const url = officialHttpsUrl(item.url);
+    if (!url || seen.has(url)) continue;
+    seen.add(url); links.push({ board: item.board, url });
+    if (links.length === 3) break;
+  }
+  return links;
+}
 export function boardClosedBoardLabel(board) {
   if (typeof board !== 'string' || !BOARD_ID_RE.test(board)) return '';
   return BOARD_LABELS[board] || board.charAt(0).toUpperCase() + board.slice(1);
@@ -165,6 +179,29 @@ export function normalizeBoardClosed(value) {
   const instant = Date.parse(value.at);
   if (!Number.isFinite(instant)) return null;
   return { board: value.board, reason: value.reason, at: new Date(instant).toISOString() };
+}
+
+export const LISTING_LIVENESS_VERDICTS = Object.freeze(['open', 'closed', 'pending', 'unclear']);
+export const LISTING_LIVENESS_BASES = Object.freeze(['open-marker', 'structural', 'ai', 'closed-marker', 'neither', 'both']);
+/** A bounded observation, never a copy of page text or a URL. */
+export function normalizeListingLiveness(value) {
+  if (!exactKeys(value, ['verdict', 'basis', 'board', 'at'])
+    || !['verdict', 'basis', 'board', 'at'].every(key => Object.hasOwn(value, key))) return null;
+  if (!LISTING_LIVENESS_VERDICTS.includes(value.verdict) || !LISTING_LIVENESS_BASES.includes(value.basis)
+    || typeof value.board !== 'string' || !BOARD_ID_RE.test(value.board) || !shortString(value.at, 40)) return null;
+  const instant = Date.parse(value.at);
+  if (!Number.isFinite(instant)) return null;
+  return { verdict: value.verdict, basis: value.basis, board: value.board, at: new Date(instant).toISOString() };
+}
+
+/** Stable source-copy preference; legacy boardClosed alone is still unconfirmed. */
+export function listingStateRank(job) {
+  const state = normalizeListingLiveness(job?.listingLiveness);
+  if (state?.verdict === 'closed') return 4;
+  if (state?.verdict === 'open' && !normalizeBoardClosed(job?.boardClosed)) return 1;
+  if (state?.verdict === 'pending' && ['closed-marker', 'both'].includes(state.basis)) return 3;
+  if (!state && normalizeBoardClosed(job?.boardClosed)) return 3;
+  return 2;
 }
 
 // Trail codes meaning the research step did not run, did not finish, or hit a

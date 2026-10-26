@@ -152,6 +152,93 @@ export default [
     },
   },
   {
+    name: 'listing liveness card: typed refusal and hold stop before the application lane and retain the returned pair',
+    async run() {
+      const at = '2026-10-26T12:00:00.000Z';
+      for (const action of ['refuse-final', 'refuse-retry', 'hold']) {
+        const listingLiveness = { verdict: action === 'hold' ? 'pending' : 'closed',
+          basis: action === 'hold' ? 'neither' : 'structural', board: 'linkedin', at };
+        const boardClosed = action === 'hold' ? null : { board: 'linkedin', reason: 'http-not-found', at };
+        const test = harness({ data: row({ url: 'https://www.linkedin.com/jobs/view/synthetic-card' }),
+          prepare: { success: true, listingCheck: { action }, listingLiveness, boardClosed, message: 'Synthetic listing decision.' } });
+        await test.callback();
+        assert.equal(test.calls.filter(call => call.kind === 'queue').length, 0, action);
+        assert.equal(test.leases, 0, action);
+        assert.equal(test.updates.length, 1, action);
+        assert.deepEqual(test.updates[0], { listingLiveness, ...(boardClosed ? { boardClosed } : {}), listingHold: action === 'hold' });
+        assert.equal(test.toasts[0]?.title, 'Listing check');
+        assert.equal(test.toasts[0]?.description, 'Synthetic listing decision.');
+        assert.equal(test.states.at(-1)?.state, 'idle');
+        assert.equal(test.context.applicationSubmissionRef.current, false);
+      }
+    },
+  },
+  {
+    name: 'listing liveness card: a failed or missing probe result holds board URLs and override can continue',
+    async run() {
+      for (const [url, shouldHold] of [
+        ['https://www.linkedin.com/jobs/view/synthetic-card', true],
+        ['https://careers.ziprecruiter.com/jobs/synthetic-card', true],
+        ['https://www.dice.com/job-detail/synthetic-card', true],
+        ['https://ca.indeed.co.uk/viewjob?jk=synthetic', true],
+        ['https://linkedin.com.evil.test/jobs/view/synthetic-card', false],
+        ['https://listing.example.test/jobs/synthetic-card', false],
+      ]) {
+        const test = harness({ data: row({ url }), prepare: { success: false, error: 'Synthetic unavailable.' } });
+        await test.callback();
+        assert.equal(test.leases, shouldHold ? 0 : 1, url);
+        assert.equal(test.calls.some(call => call.kind === 'queue'), !shouldHold, url);
+        assert.equal(test.card.data.listingHold, shouldHold ? true : undefined, url);
+        if (shouldHold) {
+          assert.equal(test.toasts[0]?.title, 'Listing check', url);
+          assert.equal(test.toasts[0]?.description, "Couldn't confirm the listing is still open", url);
+        }
+      }
+      const override = harness({ data: row({ url: 'https://www.linkedin.com/jobs/view/synthetic-override' }),
+        prepare: async () => { throw new Error('Synthetic transport error'); } });
+      await override.callback({ listingOverride: true });
+      assert.equal(override.calls.find(call => call.kind === 'prepare')?.args.listingOverride, true);
+      assert.equal(override.calls.some(call => call.kind === 'queue'), true);
+      assert.equal(override.leases, 1);
+      assert.equal(override.toasts.some(toast => toast.title === 'Listing check'), false);
+    },
+  },
+  {
+    name: 'listing liveness card: proceed updates only a changed pair and both payloads retain closed variants',
+    async run() {
+      const at = '2026-10-26T12:00:00.000Z';
+      const open = { verdict: 'open', basis: 'ai', board: 'linkedin', at };
+      const variants = [
+        { location: 'Lakeview', url: 'https://listing.example.test/closed', liveness: 'closed' },
+        { location: 'Bayview', url: 'https://listing.example.test/open' },
+      ];
+      const changed = harness({ data: row({ postingVariants: variants }),
+        prepare: { success: true, listingCheck: { action: 'proceed' }, listingLiveness: open, boardClosed: null } });
+      await changed.callback();
+      assert.equal(changed.leases, 1);
+      assert.deepEqual(changed.updates[0], { listingLiveness: open, listingHold: false });
+      const prepareJob = changed.calls.find(call => call.kind === 'prepare')?.args.job;
+      const queueJob = changed.calls.find(call => call.kind === 'queue')?.args.job;
+      assert.equal(JSON.stringify(prepareJob), JSON.stringify(queueJob));
+      assert.equal(prepareJob.postingVariants[0].liveness, 'closed');
+      assert.equal(Object.hasOwn(prepareJob.postingVariants[1], 'liveness'), false);
+      const same = harness({ data: row({ listingLiveness: open }),
+        prepare: { success: true, listingCheck: { action: 'proceed' }, listingLiveness: open, boardClosed: null } });
+      await same.callback();
+      assert.equal(same.leases, 1);
+      assert.deepEqual(same.updates, []);
+      assert.deepEqual(same.calls.find(call => call.kind === 'prepare')?.args.job.listingLiveness, open,
+        'the card sends its listing state to Prepare');
+      assert.deepEqual(same.calls.find(call => call.kind === 'queue')?.args.job.listingLiveness, open,
+        'the queue receives the same listing state projection');
+      const source = fs.readFileSync(new URL('../../src/nodes/JobCardNode.jsx', import.meta.url), 'utf8');
+      assert.equal(source.split("liveness: variant.liveness === 'closed' ? 'closed' : undefined,").length - 1, 2);
+      assert.ok(source.includes("displayedApplicationRun.state === 'idle' && !localJobPending && data.listingHold === true && (")
+        && source.includes("generateApplication({ listingOverride: true })")
+        && source.includes('Generate anyway'));
+    },
+  },
+  {
     name: 'official-posting Generate cancellation prevents every queue call even when preparation returns a late success',
     async run() {
       let release;

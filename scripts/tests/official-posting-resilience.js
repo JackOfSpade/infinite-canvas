@@ -137,7 +137,10 @@ export default [
         { store: { async find() { throw new Error('Synthetic read failure.'); } } },
       ]) {
         const telemetry = { failed: 0 };
-        const result = await prepareOfficialPostingForGeneration(args, { ...dependencies, telemetry, bridgeStatus: () => ({ enabled: false }) });
+        // This fault fixture verifies official fallback, not a live LinkedIn visit.
+        const listingProbe = { probe: async () => ({ unknown: 'synthetic-unavailable' }) };
+        const result = await prepareOfficialPostingForGeneration(args, { ...dependencies, telemetry,
+          bridgeStatus: () => ({ enabled: false }), listingProbe });
         assert.ok(normalizeOfficialPosting(result.officialPosting));
         assert.equal(telemetry.failed, 1); assert.equal(result.telemetry.failed, 1);
         assert.equal(input.company, 'Tech <3 Labs');

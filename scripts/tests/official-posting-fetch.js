@@ -153,7 +153,7 @@ export default [
   {
     name: 'Official posting shared wire schema is exact and bounded and never carries a row applyUrl',
     run() {
-      assert.deepEqual(OFFICIAL_POSTING_ROW_FIELDS, ['postedBy', 'applyOptions', 'salaryProvenance', 'officialPosting', 'boardClosed']);
+      assert.deepEqual(OFFICIAL_POSTING_ROW_FIELDS, ['postedBy', 'applyOptions', 'salaryProvenance', 'officialPosting', 'boardClosed', 'listingLiveness', 'alternateListings']);
       const valid = { level: 'L2', outcome: 'found', employer: 'Northwind Labs', title: 'Engineer',
         location: { display: 'Lakeview', remote: false, workMode: 'onsite' }, salary: { text: '$50/hr', provenance: 'posted' },
         sourceUrl: 'https://jobs.northwind.test/1', officialApplyUrl: 'https://jobs.northwind.test/1/apply', trail: ['careers-page', 'salary-anchor'],

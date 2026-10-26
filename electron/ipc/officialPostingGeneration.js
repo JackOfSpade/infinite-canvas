@@ -1,14 +1,24 @@
 import crypto from 'node:crypto';
+import { stripHtmlToText } from '../../src/utils/textEncoding.js';
 import { handleSafe } from './ipcUtils.js';
 import { getHandoffBridgeStatus } from './handoffBridge/index.js';
+import { bridgeWorkerPoolActive } from './handoffBridge/bridgeAvailability.js';
 import { officialPostingAliases, officialPostingRecordMatchesScrapedIdentity } from './officialPostingStore.js';
 import { getOfficialPostingStore, mergeOfficialPostingTelemetry, resolveOfficialPostings } from './officialPostingService.js';
 import { fetchOfficialPosting } from './officialPostingFetch.js';
 import { extractOfficialPostingCandidates } from './officialPostingExtractors.js';
-import { evaluateOfficialPostingMatch, frozenOfficialEmployer } from './officialPostingMatch.js';
+import { evaluateOfficialPostingMatch, flatPostingText, frozenOfficialEmployer } from './officialPostingMatch.js';
 import { extractAtsTenant, strictEmployerEqual } from './officialSourceHosts.js';
 import { officialPostingAdapterUrl, readableOfficialPostingDescription, unresolvedOfficialPosting, verifiedOfficialPostingApplyUrl, shouldPersistOfficialPostingResult } from './officialPostingResolver.js';
-import { normalizeOfficialLocation, normalizeOfficialPosting, normalizeOfficialSalary, officialHttpsUrl, boundedOfficialPostingTrail } from './officialPostingFields.js';
+import { normalizeAlternateListings, normalizeOfficialLocation, normalizeOfficialPosting, normalizeOfficialSalary, officialHttpsUrl, boundedOfficialPostingTrail } from './officialPostingFields.js';
+import { checkListingForGeneration, decideGenerationListingCheck, normalizeListingAudit, recordGenerationFallbackHold } from './listingLivenessProbe.js';
+import { checkPostingVariantsForGeneration } from './listingLivenessProbe.js';
+import { normaliseJobPostingVariants } from './applicationBundle.js';
+import { normalizeBoardClosed, normalizeListingLiveness } from './officialPostingFields.js';
+import { buildListingLivenessRequest, validateListingLivenessResponse } from './listingLivenessAi.js';
+import { LISTING_LIVENESS_RULES, classifyListingLiveness, evidenceFromHtml } from './listingLiveness.js';
+import { cappedHandoff } from './officialPostingService.js';
+import { callLLMText } from './llm.js';
 
 export const OFFICIAL_POSTING_PREPARE_TIMEOUT_MS = 15 * 60 * 1000;
 const PREPARED_TTL_MS = 24 * 60 * 60 * 1000;
@@ -22,7 +32,7 @@ const aliasesOf = job => officialPostingAliases(job).sort();
 function errorWithCode(code) { return Object.assign(new Error(code), { code }); }
 function withTrail(posting, ...codes) { return { ...posting, trail: boundedOfficialPostingTrail([...(posting.trail || []), ...codes]) }; }
 function active(signal) { if (signal?.aborted) throw signal.reason || errorWithCode('bridge-aborted'); }
-function available(status) { return status?.enabled === true && status?.link?.state === 'linked' && status?.chat?.pool?.active === true; }
+function available(status) { return bridgeWorkerPoolActive(status); }
 
 export function createOfficialPostingPrepareSemaphore(limit = 3) {
   let running = 0; const waiting = [];
@@ -54,14 +64,62 @@ function remember(scrapedJob, result, now) {
   const officialPosting = normalizeOfficialPosting(result?.officialPosting) || unresolvedOfficialPosting(scrapedJob, { outcome: 'failed', trail: ['failed'] }).officialPosting;
   const record = { scrapedJob: structuredClone(scrapedJob), officialPosting: structuredClone(officialPosting),
     description: typeof result.description === 'string' ? result.description : undefined,
-    postedBy: result.postedBy || '', applyUrl: officialPosting.officialApplyUrl || '', aliases, createdAt: now };
+    postedBy: result.postedBy || '', applyUrl: officialPosting.officialApplyUrl || '',
+    listingAudit: normalizeListingAudit(result.listingAudit),
+    listingLinkUrl: officialHttpsUrl(result.listingLinkUrl) || '',
+    postingVariants: normaliseJobPostingVariants(result.postingVariants ?? scrapedJob.postingVariants),
+    listingLiveness: normalizeListingLiveness(result.listingLiveness),
+    boardClosed: normalizeBoardClosed(result.boardClosed), aliases, createdAt: now };
   const resolutionId = crypto.randomUUID();
   prepared.set(resolutionId, record);
   let bytes = [...prepared.values()].reduce((sum, value) => sum + Buffer.byteLength(JSON.stringify(value)), 0);
   while (prepared.size > MAX_PREPARED_RECORDS || bytes > MAX_PREPARED_BYTES) {
     const first = prepared.keys().next().value; bytes -= Buffer.byteLength(JSON.stringify(prepared.get(first))); prepared.delete(first);
   }
-  return { resolutionId: prepared.has(resolutionId) ? resolutionId : undefined, officialPosting: record.officialPosting, postedBy: record.postedBy };
+  return { resolutionId: prepared.has(resolutionId) ? resolutionId : undefined,
+    officialPosting: record.officialPosting, postedBy: record.postedBy,
+    listingCheck: result.listingCheck, listingLiveness: record.listingLiveness,
+    boardClosed: record.boardClosed, listingLinkUrl: record.listingLinkUrl,
+    postingVariants: record.postingVariants,
+    message: String(result.message || '').slice(0, 160) };
+}
+
+async function checkAlternateLinks({ job, posting, primary, probe, callText, bridgeAvailable,
+  calibrationStore, signal, now, deadline, manualAiRunId, nodeId }) {
+  if (!['refuse-final', 'refuse-retry'].includes(primary?.listingCheck?.action)
+    || primary.listingCheck.verdict !== 'closed') return primary;
+  const alternates = normalizeAlternateListings(job?.alternateListings);
+  if (!alternates.length) return primary;
+  const hold = () => ({ ...primary, listingCheck: { ...primary.listingCheck,
+    action: 'hold', verdict: 'unknown', basis: 'neither', override: false },
+  message: "Couldn't confirm an alternate listing is still open", listingAudit: null });
+  if (signal?.aborted || now() >= deadline) return hold();
+  let undecided = false;
+  for (const link of alternates) {
+    if (now() >= deadline) { undecided = true; break; }
+    const alternateJob = { ...job, source: link.board, url: link.url,
+      listingLiveness: undefined, boardClosed: undefined, alternateListings: [] };
+    let checked;
+    try {
+      checked = await checkListingForGeneration({ job: alternateJob, posting, probe,
+        callText, bridgeAvailable, calibrationStore, signal, now, deadline,
+        manualAiRunId, nodeId, listingOverride: false });
+      active(signal);
+    } catch (error) {
+      if (signal?.aborted && signal.reason?.code !== 'bridge-timeout') throw signal.reason || error;
+      undecided = true;
+      continue;
+    }
+    if (checked.listingCheck?.action === 'proceed' && checked.listingCheck.verdict === 'open') {
+      const at = new Date(now()).toISOString();
+      return { ...primary, listingCheck: { action: 'proceed', verdict: 'open', basis: checked.listingCheck.basis,
+        board: link.board, at, override: false }, message: '', listingLinkUrl: link.url,
+      listingAudit: normalizeListingAudit({ outcome: 'alternate', basis: checked.listingCheck.basis, at }) };
+    }
+    if (checked.listingCheck?.verdict !== 'closed') undecided = true;
+  }
+  if (!undecided) return primary;
+  return hold();
 }
 
 /** UUIDs carry no renderer authority. Failed/foreign lookups do not consume a
@@ -103,7 +161,7 @@ function authoritativeBoardPage(page, route) {
   });
 }
 
-async function reverify(job, record, { fetch, signal, now, store }) {
+async function reverify(job, record, { fetch, signal, now, store, callText, bridgeAvailable, deadline, manualAiRunId, nodeId }) {
   const prior = record.officialPosting; const url = prior.sourceUrl;
   const postedBy = strictEmployerEqual(job.company, prior.employer) ? '' : job.company;
   const preserve = async code => {
@@ -160,10 +218,40 @@ async function reverify(job, record, { fetch, signal, now, store }) {
   const verified = { ...candidate, tenantProven: Boolean(route && prior.tenant && route.tenant === prior.tenant),
     employerDomainProven: !route, officialPortalProven: /^(?:www\.)?usajobs\.gov$/u.test(new URL(url).hostname) };
   const evaluation = evaluateOfficialPostingMatch(job, verified, { now: now(), employerHypotheses: [prior.employer] });
-  if (!strictEmployerEqual(candidate.employer, prior.employer) || (!evaluation.passed && evaluation.reason !== 'no-anchor')) {
+  const pastValidThrough = candidate.validThrough && Number.isFinite(Date.parse(candidate.validThrough))
+    && Date.parse(candidate.validThrough) < now();
+  if (!strictEmployerEqual(candidate.employer, prior.employer)
+    || (!evaluation.passed && evaluation.reason !== 'no-anchor' && !(evaluation.reason === 'closed' && pastValidThrough))) {
     return preserve(strictEmployerEqual(candidate.employer, prior.employer) ? evaluation.reason : 'employer-mismatch');
   }
   if (typeof candidate.description !== 'string' || !candidate.description.trim()) return preserve('unreadable');
+  const evidence = evidenceFromHtml(page.body, { board: 'official', ruleKey: 'generic',
+    requestedUrl: url, finalUrl: fetchedUrl, httpStatus: page.statusCode || 200,
+    expectedTitle: job.title, expectedCompany: prior.employer, expectedLocation: job.location });
+  const outsideClosedNotice = evidence.closedHits.some(hit => hit.insideDescription === false);
+  if (pastValidThrough || outsideClosedNotice) {
+    const unconfirmed = async () => {
+      const result = await preserve('closed');
+      result.officialPosting = withTrail(result.officialPosting, 'official-liveness-unconfirmed');
+      return result;
+    };
+    const classification = classifyListingLiveness(evidence, LISTING_LIVENESS_RULES.generic);
+    const remaining = deadline - now();
+    if (classification.verdict !== 'needs-ai' || !bridgeAvailable || remaining < 90_000 || typeof callText !== 'function') return unconfirmed();
+    const members = [{ row: job, evidence }];
+    const request = buildListingLivenessRequest(members);
+    const stats = { handoffs: 0, handoffMs: 0 };
+    try {
+      const raw = await cappedHandoff(request, { call: callText, signal, timeoutMs: Math.min(5 * 60_000, remaining),
+        manualAiRunId, nodeId, now, stats });
+      active(signal);
+      const answer = validateListingLivenessResponse(typeof raw === 'string' ? JSON.parse(raw) : raw, members).rows[0];
+      const quoteKey = flatPostingText(answer.quote).replace(/\p{Cf}/gu, '').toLocaleLowerCase();
+      const visibleKey = flatPostingText(stripHtmlToText(page.body).slice(0, 200_000)).replace(/\p{Cf}/gu, '').toLocaleLowerCase();
+      if (answer.verdict === 'closed' && quoteKey && visibleKey.includes(quoteKey)) return closed();
+    } catch { active(signal); }
+    return unconfirmed();
+  }
   const changed = sha256(candidate.description) !== prior.contentHash;
   if (!changed) {
     return { postedBy, officialPosting: withTrail(prior, 'reverified'), ...(textLevels.has(prior.level) ? { description: candidate.description } : {}) };
@@ -189,11 +277,43 @@ async function reverify(job, record, { fetch, signal, now, store }) {
 export async function prepareOfficialPostingForGeneration(args, {
   projectJob = value => value, signal, store, fetch = fetchOfficialPosting, resolve = resolveOfficialPostings,
   bridgeStatus = getHandoffBridgeStatus, now = Date.now, timeoutMs = OFFICIAL_POSTING_PREPARE_TIMEOUT_MS,
-  slots = semaphore, callRaw, callMatch, telemetry = { failed: 0 },
+  slots = semaphore, callRaw, callMatch, callText = callLLMText, telemetry = { failed: 0 }, listingProbe, calibrationStore,
 } = {}) {
   const failed = error => {
     telemetry.failed = (Number(telemetry.failed) || 0) + 1;
     console.warn('[OfficialPosting] Prepare failed:', error?.code || error?.name || 'Error');
+  };
+  const pair = job => ({
+    listingLiveness: normalizeListingLiveness(job?.listingLiveness),
+    boardClosed: normalizeBoardClosed(job?.boardClosed),
+  });
+  // The budget can expire before research or during the tail. Stored closed,
+  // fresh open and unobservable decisions need neither a probe nor the AI.
+  const typedFallback = (job, posting) => checkListingForGeneration({
+    job, posting, calibrationStore, now, deadline: now(),
+    listingOverride: args.listingOverride === true,
+  });
+  const holdFallback = (job, posting) => {
+    if (args.listingOverride === true) {
+      const stored = normalizeListingLiveness(job?.listingLiveness);
+      const marker = normalizeBoardClosed(job?.boardClosed);
+      const closed = stored?.verdict === 'closed' && ['structural', 'ai'].includes(stored.basis);
+      const basis = stored?.basis || (marker ? 'closed-marker' : 'neither');
+      const verdict = closed ? 'closed' : ['closed-marker', 'both'].includes(basis) ? 'pending' : 'unknown';
+      return recordGenerationFallbackHold({
+        ...decideGenerationListingCheck({ job, posting, verdict, basis, at: now(), listingOverride: true }),
+        ...pair(job),
+      });
+    }
+    return recordGenerationFallbackHold({
+      listingCheck: { action: 'hold', verdict: 'unknown', basis: 'neither',
+        board: normalizeListingLiveness(job?.listingLiveness)?.board || normalizeBoardClosed(job?.boardClosed)?.board
+          || (/^[a-z0-9][a-z0-9-]{0,39}$/u.test(job?.source || '') ? job.source : 'listing'),
+        at: new Date(now()).toISOString(), override: false },
+      listingLiveness: normalizeListingLiveness(job?.listingLiveness),
+      boardClosed: normalizeBoardClosed(job?.boardClosed),
+      message: "Couldn't confirm the listing is still open", listingAudit: null,
+    });
   };
   let scrapedJob;
   try {
@@ -203,18 +323,25 @@ export async function prepareOfficialPostingForGeneration(args, {
   catch (error) {
     if (signal?.aborted) throw signal.reason || error;
     failed(error);
-    return { officialPosting: unresolvedOfficialPosting(args.job, { outcome: 'failed', trail: ['failed'] }).officialPosting,
-      telemetry: { failed: telemetry.failed } };
+    const officialPosting = unresolvedOfficialPosting(args.job, { outcome: 'failed', trail: ['failed'] }).officialPosting;
+    return { officialPosting, ...holdFallback(args.job, officialPosting), telemetry: { failed: telemetry.failed } };
   }
   delete scrapedJob.applyUrl; delete scrapedJob.officialPosting; delete scrapedJob.postedBy;
+  delete scrapedJob.listingAudit; delete scrapedJob.listingCheck;
+  const deadline = now() + timeoutMs;
   const controller = new AbortController(); const abort = () => controller.abort(signal.reason || errorWithCode('bridge-aborted'));
   if (signal?.aborted) abort(); else signal?.addEventListener('abort', abort, { once: true });
   const timer = setTimeout(() => controller.abort(errorWithCode('bridge-timeout')), timeoutMs); timer.unref?.();
   let onAbort; const cancelled = new Promise((_, reject) => { onAbort = () => reject(controller.signal.reason); });
   controller.signal.addEventListener('abort', onAbort, { once: true });
-  let release; let result; let bridgeAvailable = false; let verifiedFallback; let resolvedTelemetry = null;
+  const cleanup = () => {
+    clearTimeout(timer);
+    signal?.removeEventListener('abort', abort);
+    controller.signal.removeEventListener('abort', onAbort);
+  };
+  let release; let finalPosting; let bridgeAvailable = false; let verifiedFallback; let resolvedTelemetry = null;
   try {
-    result = await Promise.race([(async () => {
+    finalPosting = await Promise.race([(async () => {
       active(controller.signal);
       try { bridgeAvailable = available(await bridgeStatus()); } catch { bridgeAvailable = false; }
       active(controller.signal); release = await slots.acquire(controller.signal); active(controller.signal);
@@ -230,7 +357,8 @@ export async function prepareOfficialPostingForGeneration(args, {
             if (typeof cachedText === 'string') verifiedFallback.description = cachedText;
           } catch { /* Keep proof metadata when the stored text cannot be read. */ }
           active(controller.signal);
-          const verified = await reverify(scrapedJob, record, { fetch, signal: controller.signal, now, store }); active(controller.signal);
+          const verified = await reverify(scrapedJob, record, { fetch, signal: controller.signal, now, store,
+            callText, bridgeAvailable, deadline, manualAiRunId: args.manualAiRunId, nodeId: args.nodeId }); active(controller.signal);
           if (!bridgeAvailable) verified.officialPosting = withTrail(verified.officialPosting, 'bridge-unavailable');
           await store.save(scrapedJob, { officialPosting: verified.officialPosting, description: verified.description, expectedRecord: record }); active(controller.signal);
           return verified;
@@ -249,28 +377,68 @@ export async function prepareOfficialPostingForGeneration(args, {
         description: textLevels.has(posting.level) && posting.contentHash ? await store.readText(posting.contentHash) : undefined };
     })(), cancelled]);
   } catch (error) {
-    if (signal?.aborted) throw signal.reason || error;
+    if (signal?.aborted) { cleanup(); throw signal.reason || error; }
     failed(error);
     const code = controller.signal.reason?.code === 'bridge-timeout' ? 'bridge-timeout' : error?.code || 'fetch-failed';
-    result = code === 'bridge-timeout' && controller.signal.aborted && verifiedFallback
+    finalPosting = code === 'bridge-timeout' && controller.signal.aborted && verifiedFallback
       ? { ...verifiedFallback, officialPosting: withTrail(verifiedFallback.officialPosting, 'bridge-timeout', 'reverify-failed') }
       : unresolvedOfficialPosting(scrapedJob, { outcome: 'failed', trail: [code] });
   } finally {
-    clearTimeout(timer); signal?.removeEventListener('abort', abort); controller.signal.removeEventListener('abort', onAbort); release?.();
+    release?.();
   }
-  if (!bridgeAvailable) result.officialPosting = withTrail(result.officialPosting, 'bridge-unavailable');
-  try { return { ...remember(scrapedJob, result, now()), telemetry: { failed: telemetry.failed, ...(resolvedTelemetry ? { officialPosting: resolvedTelemetry } : {}) } }; }
-  catch (error) {
+  try {
+    if (!bridgeAvailable) finalPosting.officialPosting = withTrail(finalPosting.officialPosting, 'bridge-unavailable');
+    let listing;
+    if (controller.signal.aborted && !signal?.aborted) {
+      listing = await typedFallback(scrapedJob, finalPosting.officialPosting);
+    } else {
+      try {
+        listing = await checkListingForGeneration({
+          job: scrapedJob, posting: finalPosting.officialPosting, probe: listingProbe,
+          callText, bridgeAvailable, calibrationStore, signal: controller.signal,
+          deadline, now, manualAiRunId: args.manualAiRunId, nodeId: args.nodeId,
+          listingOverride: args.listingOverride === true,
+        });
+      } catch (error) {
+        if (signal?.aborted) throw signal.reason || error;
+        listing = controller.signal.reason?.code === 'bridge-timeout' || error?.code === 'bridge-timeout'
+          ? await typedFallback(scrapedJob, finalPosting.officialPosting)
+          : holdFallback(scrapedJob, finalPosting.officialPosting);
+      }
+    }
+    listing = await checkAlternateLinks({ job: scrapedJob,
+      posting: finalPosting.officialPosting, primary: listing, probe: listingProbe,
+      callText, bridgeAvailable, calibrationStore, signal: controller.signal, now, deadline,
+      manualAiRunId: args.manualAiRunId, nodeId: args.nodeId });
+    let postingVariants = normaliseJobPostingVariants(scrapedJob.postingVariants);
+    if (!controller.signal.aborted && postingVariants.length) try {
+      postingVariants = await checkPostingVariantsForGeneration({ job: scrapedJob,
+        variants: postingVariants, probe: listingProbe, callText, bridgeAvailable,
+        calibrationStore, signal: controller.signal, now, deadline,
+        manualAiRunId: args.manualAiRunId, nodeId: args.nodeId });
+    } catch (error) {
+      if (signal?.aborted) throw signal.reason || error;
+      // Variant availability cannot change the primary listing decision.
+    }
+    if (signal?.aborted) throw signal.reason || errorWithCode('bridge-aborted');
+    return { ...remember(scrapedJob, { ...finalPosting, ...listing, postingVariants }, now()),
+      telemetry: { failed: telemetry.failed, ...(resolvedTelemetry ? { officialPosting: resolvedTelemetry } : {}) } };
+  } catch (error) {
     if (signal?.aborted) throw signal.reason || error;
     failed(error);
-    return { officialPosting: unresolvedOfficialPosting(scrapedJob, { outcome: 'failed', trail: ['failed'] }).officialPosting,
+    const officialPosting = normalizeOfficialPosting(finalPosting?.officialPosting)
+      || unresolvedOfficialPosting(scrapedJob, { outcome: 'failed', trail: ['failed'] }).officialPosting;
+    return { officialPosting, ...holdFallback(scrapedJob, officialPosting),
       telemetry: { failed: telemetry.failed, ...(resolvedTelemetry ? { officialPosting: resolvedTelemetry } : {}) } };
+  } finally {
+    cleanup();
   }
 }
 
 function validateArgs(args) {
-  if (!args || typeof args !== 'object' || Array.isArray(args) || Object.keys(args).some(key => !['job', 'nodeId', 'cardId', 'manualAiRunId'].includes(key))
+  if (!args || typeof args !== 'object' || Array.isArray(args) || Object.keys(args).some(key => !['job', 'nodeId', 'cardId', 'manualAiRunId', 'listingOverride'].includes(key))
     || !args.job || typeof args.job !== 'object' || Array.isArray(args.job)
+    || (args.listingOverride !== undefined && typeof args.listingOverride !== 'boolean')
     || ![args.nodeId, args.cardId].every(id => typeof id === 'string' && /^[a-zA-Z0-9_.:-]{1,300}$/u.test(id))
     || typeof args.manualAiRunId !== 'string' || !/^[a-zA-Z0-9_.:-]{1,160}$/u.test(args.manualAiRunId)) throw new TypeError('Invalid official posting preparation request.');
 }

@@ -1288,7 +1288,7 @@ export default [
       const lockStart = card.indexOf('const owningBoardLocked = useStore(');
       const lockEnd = card.indexOf('\n  const previousMeasuredHeightRef =', lockStart);
       const effectiveLock = card.slice(lockStart, lockEnd);
-      const generateStart = card.indexOf('const generateApplication = useCallback(async () => {');
+      const generateStart = card.indexOf('const generateApplication = useCallback(async (options = {}) => {');
       const generateEnd = card.indexOf('\n\n  return (', generateStart);
       const generate = card.slice(generateStart, generateEnd);
       const dismissStart = card.indexOf('onClick={effectiveLock ? undefined : () => dismissCard()}');

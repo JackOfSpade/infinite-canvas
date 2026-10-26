@@ -64,12 +64,13 @@ import { v2RejectionEvidencePaths } from './applicationV2RejectionEvidence.js';
 import { archiveV2Content } from './applicationV2EvidenceArchive.js';
 import { archiveV2WriterNotes, splitWriteVerifyWriterResponse } from './applicationV2WriterShortlist.js';
 import { tryGetStore } from './settings.js';
-import { normalizeApplyOptions, normalizeBoardClosed, normalizeOfficialPosting, officialHttpsUrl, OFFICIAL_POSTING_ROW_FIELDS, SALARY_PROVENANCES, LOCAL_AI_APPLICATION_SNIPPET_MAX_CHARS } from './officialPostingFields.js';
+import { normalizeAlternateListings, normalizeApplyOptions, normalizeBoardClosed, normalizeListingLiveness, normalizeOfficialPosting, officialHttpsUrl, OFFICIAL_POSTING_ROW_FIELDS, SALARY_PROVENANCES, LOCAL_AI_APPLICATION_SNIPPET_MAX_CHARS } from './officialPostingFields.js';
 export { LOCAL_AI_APPLICATION_SNIPPET_MAX_CHARS } from './officialPostingFields.js';
 import { unresolvedOfficialPosting } from './officialPostingResolver.js';
 import { frozenOfficialEmployer } from './officialPostingMatch.js';
 import { strictEmployerEqual } from './officialSourceHosts.js';
 import { getPreparedOfficialPosting, registerOfficialPostingGenerationHandlers } from './officialPostingGeneration.js';
+import { normalizeListingAudit } from './listingLivenessProbe.js';
 import { assertApplicationV2PromptLimit, assertApplicationV2ReplyLimit } from './applicationV2Limits.js';
 import { writeVerifyLengthBudgets } from './applicationV2LengthBudget.js';
 import { applicationV2PagePng } from './applicationV2PageImages.js';
@@ -3398,12 +3399,16 @@ function pastePrompt({ input, state }) {
   // under context.job repeated the whole posting (about a quarter of this
   // prompt) and invited quoting the copy the validator never reads. Keep the
   // small identifying facts here and the posting text in the listing alone.
-  const { snippet: _snippet, applyUrl: _applyUrl, googleCardUrl: _googleCardUrl, sourceJobKey: _sourceJobKey, ...jobFacts } = input.job || {};
+  const { snippet: _snippet, applyUrl: _applyUrl, googleCardUrl: _googleCardUrl, sourceJobKey: _sourceJobKey,
+    listingAudit: _listingAudit, ...jobFacts } = input.job || {};
   // safeJob() fills every key it knows, so an unscraped field ships as
   // "salary": "" — bytes that read like a fact the responder has to account
   // for. A missing key says the same thing in nothing.
   const job = input.job
-    ? Object.fromEntries(Object.entries(jobFacts).filter(([key, value]) => !OFFICIAL_POSTING_ROW_FIELDS.includes(key) && value !== '' && value != null))
+    ? Object.fromEntries(Object.entries(jobFacts)
+      .filter(([key, value]) => !OFFICIAL_POSTING_ROW_FIELDS.includes(key) && value !== '' && value != null)
+      .map(([key, value]) => [key, key === 'postingVariants' && Array.isArray(value)
+        ? value.map(variant => Object.fromEntries(Object.entries(variant).filter(([field]) => field !== 'liveness'))) : value]))
     : input.job;
   // Computed once so reviewFindings and requiredChangeTargets below are
   // gated on the identical set — see the comment at reviewFindings for why
@@ -10113,6 +10118,7 @@ function throwIfAborted(signal) {
 }
 
 function safeJob(raw = {}) {
+  const listingLinkUrl = officialHttpsUrl(raw.listingLinkUrl);
   return {
     title: cleanText(raw.title, 500).trim(), company: cleanText(raw.company, 500).trim(),
     snippet: cleanText(raw.snippet, LOCAL_AI_APPLICATION_SNIPPET_MAX_CHARS).trim(), location: cleanText(raw.location, 500).trim(),
@@ -10126,6 +10132,10 @@ function safeJob(raw = {}) {
     salaryProvenance: SALARY_PROVENANCES.includes(raw.salaryProvenance) ? raw.salaryProvenance : 'unknown',
     officialPosting: normalizeOfficialPosting(raw.officialPosting) || undefined,
     boardClosed: normalizeBoardClosed(raw.boardClosed) || undefined,
+    listingLiveness: normalizeListingLiveness(raw.listingLiveness) || undefined,
+    alternateListings: normalizeAlternateListings(raw.alternateListings),
+    ...(listingLinkUrl ? { listingLinkUrl } : {}),
+    listingAudit: normalizeListingAudit(raw.listingAudit) || undefined,
     // Multi-location consolidation targets travel WITH the frozen job so the
     // one shared description can list every posting location/URL. Only the
     // shared normalizer's bounded, security-checked output is retained: a raw
@@ -14730,6 +14740,7 @@ export function buildLocalGenerationAuditArtifact({
       source: safeGenerationAuditSummary(input?.job?.source, 500),
       posted: safeGenerationAuditSummary(input?.job?.posted, 500),
     },
+    listingAudit: normalizeListingAudit(input?.job?.listingAudit) || { outcome: 'unavailable' },
     inputSummary: {
       createdAt: safeGenerationAuditSummary(input?.createdAt, 120) || null,
       matchScore: Number.isFinite(input?.matchScore) ? input.matchScore : null,
@@ -16067,7 +16078,16 @@ async function queueLocalApplicationJobWithAuthority(args = {}, signal = null, r
   try {
     await ensureDirectoryWithinRoot(realRoot, dir, { mode: 0o700, label: 'Local AI job folder' });
     throwIfAborted(signal);
-    const scrapedJob = safeJob(args.job);
+    // Listing facts from the renderer are display state, not queue authority.
+    // The prepared record is identity-checked against the scraped projection
+    // before any such fact is frozen into this application job.
+    const rendererJob = { ...args.job };
+    delete rendererJob.listingAudit;
+    delete rendererJob.listingLiveness;
+    delete rendererJob.boardClosed;
+    delete rendererJob.listingLinkUrl;
+    delete rendererJob.alternateListings;
+    const scrapedJob = safeJob(rendererJob);
     const officialPostingTelemetry = { failed: 0 };
     let preparedPosting = null;
     try { preparedPosting = getPreparedOfficialPosting(args.resolutionId, scrapedJob); }
@@ -16076,7 +16096,16 @@ async function queueLocalApplicationJobWithAuthority(args = {}, signal = null, r
       officialPostingTelemetry.failed += 1;
       console.warn('[OfficialPosting] Queue preparation lookup failed:', error?.code || error?.name || 'Error');
     }
-    const job = safeJob(frozenJobWithOfficialPosting(scrapedJob, preparedPosting, officialPostingTelemetry));
+    const job = safeJob({
+      ...frozenJobWithOfficialPosting(scrapedJob, preparedPosting, officialPostingTelemetry),
+      listingAudit: normalizeListingAudit(preparedPosting?.listingAudit) || { outcome: 'unavailable' },
+      listingLiveness: preparedPosting?.listingLiveness,
+      boardClosed: preparedPosting?.boardClosed,
+      listingLinkUrl: preparedPosting?.listingLinkUrl,
+      alternateListings: preparedPosting?.scrapedJob?.alternateListings,
+      postingVariants: preparedPosting?.postingVariants ?? preparedPosting?.scrapedJob?.postingVariants
+        ?? (args.resolutionId ? [] : scrapedJob.postingVariants),
+    });
     delete job.officialPosting.scrapedListingSha256;
     const scrapedListingMarkdown = job.snippet !== scrapedJob.snippet || job.company !== scrapedJob.company
       ? formatOriginalJobListingMarkdown(scrapedJob) : null;
@@ -17549,7 +17578,7 @@ async function importLocalApplicationJobAttempt({ jobId, canvasFilePath, senderI
   const downloadOfficialPosting = trustedBundlePosting && ['L1', 'L2', 'L3', 'L4'].includes(trustedBundlePosting.level)
     ? { level: trustedBundlePosting.level, ...(trustedBundlePosting.sourceUrl ? { sourceUrl: trustedBundlePosting.sourceUrl } : {}),
       ...(trustedBundlePosting.officialApplyUrl ? { officialApplyUrl: trustedBundlePosting.officialApplyUrl } : {}) } : undefined;
-  const applicationHtml = buildResumeDocument({ resumeMainHtml: resumeFit.mainHtml, variantAttrs: resumeFit.variantAttrs, ledger, docId, coverLetter: result.coverLetter, trustedRenderedRoleDates: validationOptions.trustedRenderedRoleDates, jobContext: { title: input.job?.title || '', company: input.job?.company || '', location: input.job?.location || '' }, downloadBundle: { company: input.job?.company || input.job?.postedBy || '', candidateName: result.coverLetter.name, jobUrl: input.job?.url || '', officialPosting: downloadOfficialPosting, jobMarkdown: jobListingMarkdown, postingVariants: input.job?.postingVariants || [] } });
+  const applicationHtml = buildResumeDocument({ resumeMainHtml: resumeFit.mainHtml, variantAttrs: resumeFit.variantAttrs, ledger, docId, coverLetter: result.coverLetter, trustedRenderedRoleDates: validationOptions.trustedRenderedRoleDates, jobContext: { title: input.job?.title || '', company: input.job?.company || '', location: input.job?.location || '' }, downloadBundle: { company: input.job?.company || input.job?.postedBy || '', candidateName: result.coverLetter.name, jobUrl: input.job?.url || '', listingLinkUrl: input.job?.listingLinkUrl || '', officialPosting: downloadOfficialPosting, jobMarkdown: jobListingMarkdown, postingVariants: input.job?.postingVariants || [] } });
   let resumePdf = resumeFit.bytes; let coverPdf = coverLetterFit.bytes;
   const missingArtifacts = [];
   if (!resumePdf) {

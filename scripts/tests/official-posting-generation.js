@@ -22,6 +22,10 @@ const status = () => ({ enabled: true, link: { state: 'linked' }, chat: { pool: 
 function page(description = text, extra = {}) { return `<script type="application/ld+json">${JSON.stringify({ '@type': 'JobPosting',
   title: 'Software Engineer', hiringOrganization: { name: 'Northwind Labs' }, description,
   jobLocation: { address: { addressLocality: 'Lakeview', addressRegion: 'Ontario', addressCountry: 'Canada' } }, ...extra })}</script>`; }
+function livenessPage({ description = text, notice = '', extra = {} } = {}) {
+  const surrounding = 'The careers page explains interview steps, team structure, benefits and working arrangements for candidates. '.repeat(5);
+  return `<html><head><title>Software Engineer</title></head><body>${page(description, extra)}<main><h1>Software Engineer</h1><p>${description}</p><p>${surrounding}</p><aside>${notice}</aside></main></body></html>`;
+}
 function network(pages, calls = []) { return async url => { calls.push(url); const value = pages[url];
   if (!value) { const error = new Error('closed'); error.code = 'closed'; throw error; }
   return { url, contentType: 'text/html', statusCode: 200, ...(typeof value === 'string' ? { body: value } : value) };
@@ -76,6 +80,114 @@ export default [
           assert.equal(prepared.officialPosting.outcome, 'closed'); assert.equal((await store.find(original)).officialPosting.outcome, 'closed');
         } else assert.ok(prepared.officialPosting.trail.includes('reverify-failed'), kind);
       });
+    },
+  },
+  {
+    name: 'official-page expiry is demoted only after quoted AI closure and checks the board link in the same Generate',
+    async run() {
+      await withStore(async store => {
+        const original = job({ source: 'linkedin', url: 'https://www.linkedin.com/jobs/view/synthetic-one' });
+        await store.save(original, { officialPosting: posting(), description: text });
+        const now = Date.parse('2026-10-26T12:00:00Z');
+        let aiCalls = 0; let boardVisits = 0;
+        const prepared = await prepareOfficialPostingForGeneration(args(original), {
+          store, now: () => now, bridgeStatus: status,
+          fetch: network({ [officialUrl]: livenessPage({ notice: 'Applications for this opening have ended.',
+            extra: { validThrough: '2000-01-01T00:00:00Z' } }) }),
+          callText: async (_prompt, request) => {
+            aiCalls += 1; assert.equal(request.task, 'job-listing-liveness');
+            return { rows: [{ id: 'r1', verdict: 'closed', quote: 'Applications for this opening have ended.' }] };
+          },
+          listingProbe: { probe: async url => { boardVisits += 1; assert.equal(url, original.url);
+            return { board: 'linkedin', ruleKey: 'linkedin', requestedUrl: url, finalUrl: url,
+              httpStatus: 404, title: 'Page not found', chromeText: 'This posting could not be found.' }; } },
+        });
+        assert.equal(aiCalls, 1); assert.equal(boardVisits, 1);
+        assert.equal(prepared.officialPosting.level, 'L6'); assert.equal(prepared.officialPosting.outcome, 'closed');
+        assert.equal(prepared.listingCheck.action, 'refuse-final');
+        assert.equal(prepared.boardClosed.reason, 'http-not-found');
+        assert.equal((await store.find(original)).officialPosting.outcome, 'closed');
+      });
+    },
+  },
+  {
+    name: 'official-page outside-description closure needs AI while description wording and mismatched pages never invoke it',
+    async run() {
+      await withStore(async store => {
+        const original = job(); await store.save(original, { officialPosting: posting(), description: text });
+        let calls = 0;
+        const result = await prepareOfficialPostingForGeneration(args(original), { store, bridgeStatus: status,
+          fetch: network({ [officialUrl]: livenessPage({ notice: 'This position has been filled.' }) }),
+          callText: async () => { calls += 1; return { rows: [{ id: 'r1', verdict: 'closed', quote: 'This position has been filled.' }] }; } });
+        assert.equal(calls, 1); assert.equal(result.officialPosting.level, 'L6'); assert.equal(result.officialPosting.outcome, 'closed');
+      });
+      for (const kind of ['description', 'title', 'redirect', 'unreadable', 'server']) await withStore(async store => {
+        const original = job(); await store.save(original, { officialPosting: posting(), description: text });
+        const inside = `${text} This position has been filled.`;
+        const value = kind === 'description' ? livenessPage({ description: inside })
+          : kind === 'title' ? livenessPage({ notice: 'This position has been filled.', extra: { title: 'Staff Engineer' } })
+            : kind === 'redirect' ? { url: 'https://elsewhere.example/jobs/foreign', body: livenessPage({ notice: 'This position has been filled.' }) }
+              : kind === 'unreadable' ? '<main><h1>Software Engineer</h1><p>This position has been filled.</p></main>'
+                : { statusCode: 503, body: livenessPage({ notice: 'This position has been filled.' }) };
+        let calls = 0;
+        const result = await prepareOfficialPostingForGeneration(args(original), { store, bridgeStatus: status,
+          fetch: network({ [officialUrl]: value }), callText: async () => { calls += 1; return { rows: [{ id: 'r1', verdict: 'closed', quote: 'This position has been filled.' }] }; } });
+        assert.equal(calls, 0, kind); assert.equal(result.officialPosting.level, 'L1', kind);
+        assert.notEqual(result.officialPosting.outcome, 'closed', kind);
+      });
+    },
+  },
+  {
+    name: 'official-page unconfirmed expiry preserves the prior proof with a bounded liveness audit fact',
+    async run() {
+      for (const kind of ['unavailable', 'unclear', 'no-quote', 'description-quote', 'json-only-quote', 'timeout']) await withStore(async store => {
+        const original = job(); await store.save(original, { officialPosting: posting(), description: text });
+        let calls = 0;
+        const body = kind === 'json-only-quote'
+          ? `<html><body>${page(text, { validThrough: '2000-01-01T00:00:00Z' })}<main><h1>Software Engineer</h1><p>${'Candidates can read the application steps and learn about the hiring process. '.repeat(4)}</p></main></body></html>`
+          : livenessPage({ extra: { validThrough: '2000-01-01T00:00:00Z' } });
+        const prepared = await prepareOfficialPostingForGeneration(args(original), {
+          store, bridgeStatus: kind === 'unavailable' ? () => ({ enabled: false }) : status,
+          fetch: network({ [officialUrl]: body }),
+          callText: async () => {
+            calls += 1;
+            if (kind === 'timeout') throw Object.assign(new Error('timed out'), { code: 'bridge-timeout' });
+            return { rows: [{ id: 'r1', verdict: kind === 'unclear' ? 'unclear' : 'closed',
+              quote: ['description-quote', 'json-only-quote'].includes(kind) ? 'Engineers design clear interfaces' : '' }] };
+          },
+        });
+        assert.equal(calls, kind === 'unavailable' ? 0 : 1, kind);
+        assert.equal(prepared.officialPosting.level, 'L1', kind);
+        assert.ok(prepared.officialPosting.trail.includes('reverify-failed'), kind);
+        assert.ok(prepared.officialPosting.trail.includes('official-liveness-unconfirmed'), kind);
+        assert.equal((await store.find(original)).officialPosting.outcome, 'found', kind);
+      });
+    },
+  },
+  {
+    name: 'official-posting prepare freezes confirmed-open-or-unknown variants after the primary decision',
+    async run() {
+      const closedUrl = 'https://www.linkedin.com/jobs/view/synthetic-variant-closed';
+      const unknownUrl = 'https://www.linkedin.com/jobs/view/synthetic-variant-unknown';
+      const original = job({ postingVariants: [
+        { location: 'North', url: closedUrl }, { location: 'South', url: unknownUrl },
+      ] });
+      const visits = [];
+      const prepared = await prepareOfficialPostingForGeneration(args(original), {
+        store: { find: async () => null }, resolve: fallbackResolve,
+        bridgeStatus: () => ({ enabled: false }),
+        listingProbe: { probe: async url => { visits.push(url);
+          if (url === closedUrl) return { requestedUrl: url, finalUrl: url, httpStatus: 404,
+            board: 'linkedin', ruleKey: 'linkedin', title: 'Page not found', chromeText: 'Page not found' };
+          return { unknown: true }; } },
+      });
+      assert.equal(prepared.listingCheck.action, 'proceed');
+      assert.deepEqual(visits, [closedUrl, unknownUrl]);
+      assert.deepEqual(prepared.postingVariants.map(variant => variant.location), ['South']);
+      const frozen = getPreparedOfficialPosting(prepared.resolutionId, original);
+      assert.deepEqual(frozen.postingVariants, prepared.postingVariants);
+      assert.deepEqual(frozen.scrapedJob.postingVariants, original.postingVariants,
+        'variant filtering must not change scraped identity');
     },
   },
   {

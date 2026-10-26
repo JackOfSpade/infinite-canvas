@@ -137,10 +137,10 @@ export default [
         const again = await resolveOfficialPostings(jobs, { store, fetch: network({}), callRaw: async (prompt, options) => {
           resumed.push({ prompt, hints: options.hints }); return response(prompt);
         } });
-        assert.equal(resumed.length, 2, 'an all-settled miss chunk no longer dispatches a handoff');
-        assert.deepEqual(resumed[0], stopped[1]);
-        assert.deepEqual(resumed.map(call => call.hints.itemCount), [12, 1]);
-        assert.deepEqual(resumed.map(call => [call.hints.batch, call.hints.batchTotal]), [[2, 3], [3, 3]], 'remaining raw-input chunks retain their original deterministic hints');
+        assert.equal(resumed.length, 3, 'a cached closed-trail miss is retried because its closure was never confirmed');
+        assert.deepEqual(resumed[1], stopped[1], 'the interrupted next chunk keeps its prompt and hints');
+        assert.deepEqual(resumed.map(call => call.hints.itemCount), [12, 12, 1]);
+        assert.deepEqual(resumed.map(call => [call.hints.batch, call.hints.batchTotal]), [[1, 3], [2, 3], [3, 3]], 'raw-input chunks retain their original deterministic hints');
         assert.ok(again.jobs.every(job => ['L5', 'L6'].includes(job.officialPosting.level)));
       });
     },

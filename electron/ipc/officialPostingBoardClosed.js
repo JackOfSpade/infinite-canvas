@@ -8,7 +8,7 @@
 // scraped-evidence test and the stored-view reader so this stays unit-testable.
 import { sourceJobKey } from '../../src/utils/jobIdentity.js';
 import { isAggregatorHost } from './officialSourceHosts.js';
-import { normalizeBoardClosed, normalizeOfficialPosting, officialResearchSettled } from './officialPostingFields.js';
+import { listingStateRank, normalizeBoardClosed, normalizeListingLiveness, normalizeOfficialPosting, officialResearchSettled } from './officialPostingFields.js';
 
 const TEXT_LEVELS = new Set(['L1', 'L2', 'L3']);
 const OFFICIAL_LINK_LEVELS = new Set(['L1', 'L2', 'L3', 'L4']);
@@ -19,8 +19,11 @@ const BOARD_ID_RE = /^[a-z0-9][a-z0-9-]{0,39}$/u;
 export const BOARD_CLOSED_DISPOSITIONS = Object.freeze({
   keptOfficial: 'kept-official',
   keptUnchecked: 'kept-unchecked',
+  keptAmbiguous: 'kept-ambiguous',
+  deferredUnchecked: 'deferred-unchecked',
   droppedNoDescription: 'dropped-no-description',
   droppedSettled: 'dropped-settled',
+  droppedOfficialClosed: 'dropped-official-closed',
 });
 
 export function boardClosedOf(job) { return normalizeBoardClosed(job?.boardClosed); }
@@ -33,34 +36,56 @@ export function withBoardClosed(job, { board, reason, now = new Date() } = {}) {
   return boardClosed ? { ...job, boardClosed } : job;
 }
 
+/** The two liveness fields are replaced together so an old close cannot survive a fresh visit. */
+export function withListingLiveness(job, { verdict, basis, board, now = new Date() } = {}) {
+  if (verdict === 'closed') return job;
+  const at = now instanceof Date ? now : new Date(now);
+  const listingLiveness = Number.isFinite(at.getTime())
+    ? normalizeListingLiveness({ verdict, basis, board, at: at.toISOString() }) : null;
+  if (!listingLiveness) return job;
+  const { boardClosed: _oldClosed, listingLiveness: _oldLiveness, ...rest } = job || {};
+  return { ...rest, listingLiveness };
+}
+
+export function withListingClosed(job, { board, reason, basis = 'structural', now = new Date() } = {}) {
+  const at = now instanceof Date ? now : new Date(now);
+  if (!Number.isFinite(at.getTime())) return job;
+  const boardClosed = normalizeBoardClosed({ board, reason, at: at.toISOString() });
+  const listingLiveness = normalizeListingLiveness({ verdict: 'closed', basis, board, at: at.toISOString() });
+  if (!boardClosed || !listingLiveness || !['structural', 'ai'].includes(basis)) return job;
+  const { boardClosed: _oldClosed, listingLiveness: _oldLiveness, ...rest } = job || {};
+  return { ...rest, boardClosed, listingLiveness };
+}
+
 function hostnameOf(value) {
   try { return new URL(String(value ?? '')).hostname.toLowerCase().replace(/\.$/u, ''); } catch { return ''; }
 }
 
 /**
- * A detail page may only mark a row board-closed when EVERY URL involved is an
- * aggregator host. If the page we reached (or the page we meant to reach) is the
- * employer's or an ATS host, that source is the official one and its "gone"
- * verdict is final: the row is dropped exactly as before.
+ * The final host owns the detail-page verdict. The expected URL is used only
+ * when navigation did not reveal a final URL.
  */
 export function boardClosedDetailAllowed({ expectedUrl = '', finalUrl = '' } = {}) {
-  const hosts = [expectedUrl, finalUrl].map(hostnameOf).filter(Boolean);
-  return hosts.length > 0 && hosts.every(host => isAggregatorHost(host));
+  const host = hostnameOf(finalUrl) || hostnameOf(expectedUrl);
+  return Boolean(host) && isAggregatorHost(host);
 }
 
 /**
- * First-wins dedup keeps the earlier row, so a closed copy must never beat an
- * open copy of the same posting. Returns the SAME array when nothing is flagged.
+ * First-wins dedup keeps the earlier row. Partition copies by the shared
+ * liveness rank, preserving arrival order within each rank. A uniform list
+ * returns the same array so callers can retain their identity fast path.
  */
 export function preferOpenRows(rows) {
   const list = Array.isArray(rows) ? rows : [];
-  if (!list.some(isBoardClosedRow)) return list;
-  return [...list.filter(job => !isBoardClosedRow(job)), ...list.filter(isBoardClosedRow)];
+  if (list.length < 2) return list;
+  const ranks = list.map(listingStateRank);
+  if (ranks.every(rank => rank === ranks[0])) return list;
+  return [1, 2, 3, 4].flatMap(rank => list.filter((_, index) => ranks[index] === rank));
 }
 
-/** Board-closed rows the evidence gate dropped: they still go to the resolver. */
+/** Pending-closed and confirmed-closed rows the evidence gate set aside still reach the resolver. */
 export function boardClosedSetAside(evidence) {
-  return (Array.isArray(evidence?.dropped) ? evidence.dropped : []).filter(isBoardClosedRow);
+  return (Array.isArray(evidence?.dropped) ? evidence.dropped : []).filter(job => listingStateRank(job) >= 3);
 }
 
 /**
@@ -75,6 +100,13 @@ export function scoreSafeRowsWithBoardClosed(evidence) {
 }
 
 const normalizedText = value => String(value ?? '').normalize('NFKC').replace(/\s+/gu, ' ').trim();
+// Match the request-local evidence key without importing its IPC context into
+// this pure settlement module. Some boards use the same bare native job id.
+const setAsideIdentity = row => {
+  const source = typeof row?.source === 'string' ? row.source : '';
+  const identity = sourceJobKey(row);
+  return source && identity ? `${source}|${identity}` : '';
+};
 
 async function officialTextIsEvidence(row, { getView, minChars }) {
   if (typeof getView !== 'function') return false;
@@ -87,40 +119,59 @@ async function officialTextIsEvidence(row, { getView, minChars }) {
 }
 
 /**
- * Keep or drop every board-closed row after the resolver ran. Rows without the
- * marker pass through untouched.
- *
- *  1. A live official posting (L1-L3) with evidence (the scraped description, or
- *     the stored official text: official text counts) : KEEP, official.
- *  2. Otherwise no score-safe scraped description: DROP, exactly as before.
- *  3. A live official link (L4) beside a scraped description: KEEP, official.
- *  4. Otherwise (the board still gave us a description): DROP only after a
- *     settled research conclusion; if research did not run, KEEP, unchecked.
+ * Settle confirmed-closed rows and pending-closed rows. A row that has been
+ * stamped open or unclear after its description-less set-aside also enters;
+ * those observations do not make its blank text score-safe.
  *
  * `kept` preserves input order; `dispositions` maps each kept board-closed row
  * to why it was kept, `dropped` lists each removed row with why.
  */
-export async function settleBoardClosedRows(rows, { scoreSafe, getView, minChars = 400 } = {}) {
+export async function settleBoardClosedRows(rows, {
+  scoreSafe, getView, minChars = 400, setAsideKeys = null, expiryCandidatesConfirmedClosed = null,
+} = {}) {
   const kept = []; const dropped = []; const dispositions = new Map();
   const keep = (row, disposition) => { kept.push(row); dispositions.set(row, disposition); };
   for (const row of Array.isArray(rows) ? rows : []) {
-    if (!isBoardClosedRow(row)) { kept.push(row); continue; }
-    const posting = normalizeOfficialPosting(row.officialPosting);
+    const rank = listingStateRank(row);
     const scrapedOk = typeof scoreSafe === 'function' && scoreSafe(row) === true;
+    // The caller preserves the identity of a description-less set-aside row
+    // across an AI restamp that can remove its closed marker and lower its rank.
+    const wasSetAside = setAsideKeys instanceof Set && setAsideKeys.has(setAsideIdentity(row));
+    if (rank < 3 && !wasSetAside) { kept.push(row); continue; }
+    const posting = normalizeOfficialPosting(row.officialPosting);
     const live = Boolean(posting) && ['found', 'link-only'].includes(posting.outcome);
     if (live && TEXT_LEVELS.has(posting.level) && (scrapedOk || await officialTextIsEvidence(row, { getView, minChars }))) {
       keep(row, BOARD_CLOSED_DISPOSITIONS.keptOfficial); continue;
     }
-    if (!scrapedOk) { dropped.push({ row, disposition: BOARD_CLOSED_DISPOSITIONS.droppedNoDescription }); continue; }
-    if (live && OFFICIAL_LINK_LEVELS.has(posting.level)) { keep(row, BOARD_CLOSED_DISPOSITIONS.keptOfficial); continue; }
-    if (officialResearchSettled(posting)) { dropped.push({ row, disposition: BOARD_CLOSED_DISPOSITIONS.droppedSettled }); continue; }
+    if (live && posting.level === 'L4' && scrapedOk) { keep(row, BOARD_CLOSED_DISPOSITIONS.keptOfficial); continue; }
+    if (rank !== 4) {
+      if (scrapedOk) kept.push(row);
+      else dropped.push({ row, disposition: BOARD_CLOSED_DISPOSITIONS.deferredUnchecked });
+      continue;
+    }
+    if (live && OFFICIAL_LINK_LEVELS.has(posting.level) && !scrapedOk) {
+      dropped.push({ row, disposition: BOARD_CLOSED_DISPOSITIONS.droppedNoDescription }); continue;
+    }
+    if (posting?.outcome === 'ambiguous' || posting?.trail?.includes('comparative-disagree')) {
+      if (scrapedOk) keep(row, BOARD_CLOSED_DISPOSITIONS.keptAmbiguous);
+      else dropped.push({ row, disposition: BOARD_CLOSED_DISPOSITIONS.deferredUnchecked });
+      continue;
+    }
+    const expiryUnconfirmed = posting?.trail?.includes('closed')
+      && typeof expiryCandidatesConfirmedClosed === 'function'
+      && expiryCandidatesConfirmedClosed(row) !== true;
+    if (!expiryUnconfirmed && officialResearchSettled(posting) && ['not-found', 'closed'].includes(posting.outcome)) {
+      dropped.push({ row, disposition: scrapedOk ? BOARD_CLOSED_DISPOSITIONS.droppedSettled : BOARD_CLOSED_DISPOSITIONS.droppedNoDescription });
+      continue;
+    }
+    if (!scrapedOk) { dropped.push({ row, disposition: BOARD_CLOSED_DISPOSITIONS.deferredUnchecked }); continue; }
     keep(row, BOARD_CLOSED_DISPOSITIONS.keptUnchecked);
   }
   return { kept, dropped, dispositions };
 }
 
 // ── Counts only: per source board, never a title, URL or page text. ──────────
-function boardOf(job) { return boardClosedOf(job)?.board || ''; }
+export function boardOf(job) { return boardClosedOf(job)?.board || normalizeListingLiveness(job?.listingLiveness)?.board || ''; }
 function bump(block, board, field) {
   if (!BOARD_ID_RE.test(board) || !COUNT_FIELDS.includes(field)) return;
   if (!block[board] && Object.keys(block).length >= MAX_TELEMETRY_BOARDS) return;
@@ -138,7 +189,8 @@ export function boardClosedTelemetryBlock({ input = [], settled = null, official
   const block = {};
   for (const row of Array.isArray(input) ? input : []) if (isBoardClosedRow(row)) bump(block, boardOf(row), 'detected');
   for (const [row, disposition] of settled?.dispositions || []) {
-    bump(block, boardOf(row), disposition === BOARD_CLOSED_DISPOSITIONS.keptOfficial ? 'keptOfficial' : 'keptUnchecked');
+    if (disposition === BOARD_CLOSED_DISPOSITIONS.keptOfficial) bump(block, boardOf(row), 'keptOfficial');
+    else if (disposition === BOARD_CLOSED_DISPOSITIONS.keptUnchecked) bump(block, boardOf(row), 'keptUnchecked');
   }
   for (const entry of settled?.dropped || []) bump(block, boardOf(entry.row), 'dropped');
   for (const entry of Array.isArray(officialDedupDrops) ? officialDedupDrops : []) {
@@ -166,8 +218,9 @@ export function mergeBoardClosedTelemetry(...blocks) {
 /** Keys a renderer-held pending row set must retire or keep after a resolver pass. */
 export function boardClosedRetirement(resolution) {
   const keptKeys = new Set((Array.isArray(resolution?.jobs) ? resolution.jobs : [])
-    .filter(isBoardClosedRow).map(sourceJobKey).filter(Boolean));
-  const droppedKeys = (Array.isArray(resolution?.boardClosedDrops) ? resolution.boardClosedDrops : [])
-    .map(entry => sourceJobKey(entry?.dropped)).filter(Boolean);
-  return { keptKeys, droppedKeys };
+    .map(sourceJobKey).filter(Boolean));
+  const drops = Array.isArray(resolution?.boardClosedDrops) ? resolution.boardClosedDrops : [];
+  const droppedKeys = drops.filter(entry => entry?.retire !== false).map(entry => sourceJobKey(entry?.dropped)).filter(Boolean);
+  const deferredKeys = new Set(drops.filter(entry => entry?.retire === false).map(entry => sourceJobKey(entry?.dropped)).filter(Boolean));
+  return { keptKeys, droppedKeys, deferredKeys };
 }

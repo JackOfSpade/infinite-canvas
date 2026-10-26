@@ -1364,6 +1364,7 @@ export function normaliseResumeDownloadBundle(raw = {}) {
     company: safePart(raw.company, 'Company'),
     candidateName: safePart(raw.candidateName, 'Application'),
     jobUrl: safeJobPostingUrl(raw.jobUrl),
+    listingLinkUrl: safeJobPostingUrl(raw.listingLinkUrl),
     ...(officialPosting && (officialPosting.sourceUrl || officialPosting.officialApplyUrl) ? { officialPosting } : {}),
     jobMarkdown: String(raw.jobMarkdown || '').replace(/\r\n/g, '\n'),
     postingVariants: normalisePostingVariants(raw.postingVariants),
@@ -1649,7 +1650,7 @@ function injectInferredSkills(mainHtml, insights, showAllVerifySkills = false) {
   return mainHtml.replace(/<\/main>\s*$/i, `${fallback}</main>`);
 }
 
-function buildSkillWorkspace({ skillInsights, skillHistogram, jobContext, jobUrl, officialPosting, postingVariants, skillOpportunityError, coverLetterCheckSummary }) {
+function buildSkillWorkspace({ skillInsights, skillHistogram, jobContext, jobUrl, listingLinkUrl, officialPosting, postingVariants, skillOpportunityError, coverLetterCheckSummary }) {
   const insights = normaliseSkillInsights(skillInsights);
   const rawRole = skillInsights?.role && typeof skillInsights.role === 'object' ? skillInsights.role : {};
   const matchedRoleId = String(rawRole.matchedRoleId || '').trim();
@@ -1671,11 +1672,13 @@ function buildSkillWorkspace({ skillInsights, skillHistogram, jobContext, jobUrl
     && cityKey(candidateLocation) && cityKey(jobLocation) && cityKey(candidateLocation) !== cityKey(jobLocation);
   const context = [title, company].filter(Boolean).join(' · ')
     || (contextRoles.length ? `Tailored for ${contextRoles.join(' · ')}` : 'Review high-value adjacent skills before export.');
-  const safeOriginalJobUrl = safeJobPostingUrl(jobUrl);
+  const selectedListingUrl = safeJobPostingUrl(listingLinkUrl);
+  const safeOriginalJobUrl = selectedListingUrl || safeJobPostingUrl(jobUrl);
   const officialUrl = officialPosting?.sourceUrl || officialPosting?.officialApplyUrl || '';
   // The official page precedes retained location-specific scraped links.
   const safePostingVariants = normalisePostingVariants(postingVariants);
   const postingLinkTargets = safePostingVariants
+    .filter(variant => variant.liveness !== 'closed')
     .map(variant => ({
       url: normalizeJobListingExternalUrl(variant.url) || normalizeJobListingExternalUrl(variant.googleCardUrl),
       location: String(variant.location || '').trim(),
@@ -1688,7 +1691,7 @@ function buildSkillWorkspace({ skillInsights, skillHistogram, jobContext, jobUrl
   const originalJobLink = singlePostingUrl
     ? `<a class="ic-job-posting-link" href="${escapeHtml(singlePostingUrl)}" target="_blank" rel="noopener noreferrer">View ${officialUrl ? 'official' : 'original'} job posting</a>`
     : '';
-  if (officialUrl && postingLinks.length) postingLinks.unshift(originalJobLink);
+  if ((officialUrl || selectedListingUrl) && postingLinks.length) postingLinks.unshift(originalJobLink);
   const postingLinksBlock = postingLinks.length ? `<div class="ic-job-posting-links">${postingLinks.join('\n')}</div>` : '';
   const card = (item) => `<article class="ic-insight-card${item.kind === 'learn' ? ' ic-learn-card' : ''}" data-ic-insight="${escapeHtml(item.id)}" data-ic-kind="${item.kind}">
   <p class="ic-insight-skill">${escapeHtml(item.skill)}</p>
@@ -2592,7 +2595,7 @@ export function buildResumeDocument({ resumeMainHtml, variantAttrs, ledger, docI
   main = injectReceipts(main, ledger);
   const bundle = normaliseResumeDownloadBundle(downloadBundle);
   const workspace = buildSkillWorkspace({
-    skillInsights, skillHistogram, jobContext, jobUrl: bundle.jobUrl, officialPosting: bundle.officialPosting,
+    skillInsights, skillHistogram, jobContext, jobUrl: bundle.jobUrl, listingLinkUrl: bundle.listingLinkUrl, officialPosting: bundle.officialPosting,
     postingVariants: bundle.postingVariants,
     skillOpportunityError, coverLetterCheckSummary,
   });

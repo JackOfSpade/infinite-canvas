@@ -43,6 +43,7 @@ export const SOURCE_SCAN_ROWS = Object.freeze({
   // The shared scheduler owns the single capacity value; constants re-exports
   // it as bridge policy without acquiring capabilities.
   'constants.js': { allow: ['../../../src/utils/handoffScheduler.js'] },
+  'bridgeAvailability.js': { allow: [] },
   'contracts.js': { allow: [] },
   'respond.js': { allow: sibling('node:crypto', 'node:net', 'node:util') },
   'wire.js': { allow: sibling('node:crypto', 'node:net', 'node:util') },
@@ -359,7 +360,7 @@ export default [
   {
     name: 'handoff bridge: source-scan: complete table skips absent planned modules and rejects a no-row module',
     run: () => {
-      assert(Object.keys(SOURCE_SCAN_ROWS).length === 53, 'every planned handoffBridge module needs exactly one row');
+      assert(Object.keys(SOURCE_SCAN_ROWS).length === 54, 'every planned handoffBridge module needs exactly one row');
       assert(scanHandoffBridgeSource().length === 0, 'the current subset and absent planned rows must conform');
       const root = makeScratchBridge();
       try {

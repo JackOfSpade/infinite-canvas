@@ -34,7 +34,10 @@ import { decodeHtmlEntities, repairMojibake, stripHtmlToText } from '../../../sr
 import { markManualSolveRequired } from '../scrapeVerification.js';
 import { isBackgroundE2E, backgroundE2EDisabledError } from '../../utils/backgroundE2e.js';
 import { isAggregatorHost } from '../officialSourceHosts.js';
-import { boardClosedDetailAllowed, withBoardClosed } from '../officialPostingBoardClosed.js';
+import { withListingClosed, withListingLiveness } from '../officialPostingBoardClosed.js';
+import { LISTING_LIVENESS_RULES, classifyListingLiveness, finalizeListingEvidence, listingLivenessPageProbe } from '../listingLiveness.js';
+import { recordListingEvidence } from '../listingLivenessStore.js';
+import { getCurrentIpcRequestContext } from '../ipcUtils.js';
 
 // ── Timing ────────────────────────────────────────────────────────────────────
 const NAV_SETTLE_MS          = 2000;          // settle after navigation before first action
@@ -1497,11 +1500,11 @@ export function isZipRecruiterClosedDetailRedirect(rawUrl) {
  * and exposes that state in its bootstrap object, so status alone is not enough.
  */
 export function isUnavailableDetailPage({
-  isNotFound = false,
+  httpStatus = null,
   workdayPostingAvailable,
   zipRecruiterClosedJobRedirect = false,
 } = {}) {
-  return Boolean(isNotFound) || workdayPostingAvailable === false || zipRecruiterClosedJobRedirect;
+  return [404, 410].includes(Number(httpStatus)) || workdayPostingAvailable === false || zipRecruiterClosedJobRedirect;
 }
 
 /**
@@ -1517,12 +1520,42 @@ export function unavailableDetailDisposition({ pageInfo = {}, job = null, source
     ? 'ziprecruiter-closed-job-redirect'
     : pageInfo.workdayPostingAvailable === false
       ? 'workday-posting-unavailable'
-      : 'detail-page-not-found';
-  const flagged = job && ['detail-page-not-found', 'ziprecruiter-closed-job-redirect'].includes(reason)
-    && boardClosedDetailAllowed({ expectedUrl, finalUrl })
-    ? withBoardClosed(job, { board: sourceId, reason, now })
+      : 'http-not-found';
+  const finalHostClass = finalizeListingEvidence({}, { requestedUrl: expectedUrl, finalUrl }).finalHostClass;
+  const flagged = job && finalHostClass === 'aggregator' && reason !== 'workday-posting-unavailable'
+    ? withListingClosed(job, { board: sourceId, reason, basis: 'structural', now })
     : null;
   return { reason, row: flagged && flagged !== job ? flagged : null };
+}
+
+export async function captureZipRecruiterListingLiveness(page, row, {
+  requestedUrl, httpStatus, descriptionText = '', descriptionCapture = '', workdayPostingAvailable = null, wall = null,
+} = {}) {
+  const rules = getCurrentIpcRequestContext()?.livenessRules?.rulesFor?.('ziprecruiter') || LISTING_LIVENESS_RULES.ziprecruiter;
+  const probed = await page.evaluate(listingLivenessPageProbe, {
+    rules, expectedTitle: row.title, descriptionCapture, descriptionText,
+  }).catch(() => null);
+  if (!probed) return row;
+  const evidence = finalizeListingEvidence(probed, {
+    board: row.source || 'ziprecruiter', ruleKey: 'ziprecruiter', requestedUrl, finalUrl: page.url(), httpStatus,
+    expectedTitle: row.title, expectedCompany: row.company, expectedLocation: row.location,
+    workdayPostingAvailable, wall,
+  });
+  const result = classifyListingLiveness(evidence, rules);
+  recordListingEvidence(row, evidence);
+  if (result.verdict === 'unknown') return row;
+  if (result.verdict === 'closed') {
+    // A tracker or employer URL returning 404 does not establish the listing's
+    // status. ATS structural closure is final; aggregator closure waits for the
+    // official-posting search.
+    if (evidence.finalHostClass === 'other' && [404, 410].includes(Number(httpStatus))) return row;
+    if (evidence.finalHostClass === 'ats') return null;
+    return withListingClosed(row, { board: row.source || 'ziprecruiter',
+      reason: [404, 410].includes(Number(httpStatus)) ? 'http-not-found' : 'ziprecruiter-closed-job-redirect',
+      basis: 'structural' });
+  }
+  return withListingLiveness(row, { verdict: result.verdict === 'needs-ai' ? 'pending' : result.verdict,
+    basis: result.basis, board: row.source || 'ziprecruiter' });
 }
 
 /** Convert a Retry-After header to a safe, bounded wait for a single retry. */
@@ -2097,7 +2130,7 @@ export function resolveManualDetailChallengeDisposition({
   };
 }
 
-async function getChallengeSignals(page) {
+export async function getChallengeSignals(page) {
   const evaluated = await page.evaluate((verificationTextMarkers, hardBlockTextMarkers) => {
     const bodyTextRaw = document.body?.innerText || '';
     const bodyText = bodyTextRaw.toLowerCase();
@@ -2889,7 +2922,7 @@ async function dismissGlassdoorOpportunityModal(page) {
 // selectors appear stale (≥ DESC_STALE_THRESHOLD consecutive failures of the same
 // type). A non-null descError is an abort signal — the caller must set earlyExit
 // and surface the error just like a SITE_CHANGED extraction failure.
-async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar, signal = null, walkPlan = null) {
+async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar, signal = null, walkPlan = null, runtime = null) {
   const cfg = DESC_CONFIGS[sourceId];
   if (!cfg || jobs.length === 0) {
     return {
@@ -3036,7 +3069,7 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
           : 0;
         if (detailGapMs > 0 && lastDetailNavigationAt) {
           const waitMs = detailGapMs - (Date.now() - lastDetailNavigationAt);
-          if (waitMs > 0 && !(await waitForAbortableDelay(waitMs, signal))) break;
+          if (waitMs > 0 && !(await (runtime?.delay || waitForAbortableDelay)(waitMs, signal))) break;
         }
 
         await updateOverlay(page, {
@@ -3161,21 +3194,13 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
               bodyText.includes('too many requests') ||
               bodyText.includes('maximum number of requests allowed') ||
               bodyText.includes('rate limit exceeded');
-            const isNotFound =
-              bodyText.includes('page not found') ||
-              bodyText.includes("we can't find this page") ||
-              bodyText.includes('no longer available') ||
-              bodyText.includes('this job has expired') ||
-              title.includes('404');
             return {
-              isNotFound,
               isRateLimited,
               workdayPostingAvailable,
               finalUrl: location.href,
               visibleText: document.body?.innerText || '',
             };
           }).catch(() => ({
-            isNotFound: false,
             isRateLimited: false,
             workdayPostingAvailable: null,
             finalUrl: '',
@@ -3187,6 +3212,7 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
           // retain a closed listing and show a misleading retry warning.
           const pageInfo = {
             ...rawPageInfo,
+            httpStatus: navigationStatus,
             zipRecruiterClosedJobRedirect: isZipRecruiterClosedDetailRedirect(rawPageInfo.finalUrl),
           };
 
@@ -3586,7 +3612,7 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
                 count: baseCount + i + 1,
                 status: `Retrying a failed job page… ${i + 1}/${enhanced.length}`,
               });
-              if (!await waitForAbortableDelay(waitMs, signal)) break;
+              if (!await (runtime?.delay || waitForAbortableDelay)(waitMs, signal)) break;
               i--; // retry this job — the same thing the page's Reload button does
               continue;
             }
@@ -3613,7 +3639,24 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
             logger.warn(`[BrowserScraper] ZipRecruiter detail error shell persisted for "${title}" after ${errorShellRetries} retr${errorShellRetries === 1 ? 'y' : 'ies'}; continuing without its description`);
           }
 
-          if (isUnavailableDetailPage(pageInfo)) {
+          const detailFinalHostClass = finalizeListingEvidence({}, {
+            requestedUrl: viewUrl, finalUrl: rawPageInfo.finalUrl || fetchPage.url(),
+          }).finalHostClass;
+          const otherHostNotFound = [404, 410].includes(Number(navigationStatus))
+            && detailFinalHostClass === 'other'
+            && pageInfo.workdayPostingAvailable !== false && !pageInfo.zipRecruiterClosedJobRedirect;
+          // The persistent error shell is a wall even if its response happens
+          // to carry a not-found status; it cannot establish posting closure.
+          if (isUnavailableDetailPage(pageInfo) && !otherHostNotFound && !detailErrorShellSeen) {
+            if (sourceId === 'ziprecruiter') {
+              recordListingEvidence(enhanced[i], finalizeListingEvidence({}, {
+                board: 'ziprecruiter', ruleKey: 'ziprecruiter', requestedUrl: viewUrl,
+                finalUrl: rawPageInfo.finalUrl || fetchPage.url(), httpStatus: navigationStatus,
+                expectedTitle: enhanced[i]?.title, expectedCompany: enhanced[i]?.company,
+                expectedLocation: enhanced[i]?.location,
+                workdayPostingAvailable: pageInfo.workdayPostingAvailable,
+              }));
+            }
             const { reason, row: boardClosedRow } = unavailableDetailDisposition({
               pageInfo, job: enhanced[i], sourceId, expectedUrl: viewUrl, finalUrl: rawPageInfo.finalUrl || fetchPage.url(),
             });
@@ -3994,6 +4037,19 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
             reconciledSalary,
             jsonLdCompany,
           });
+          if (sourceId === 'ziprecruiter') {
+            const stamped = await captureZipRecruiterListingLiveness(fetchPage, enhanced[i], {
+              requestedUrl: viewUrl, httpStatus: navigationStatus, descriptionText: text,
+              descriptionCapture, workdayPostingAvailable: pageInfo.workdayPostingAvailable,
+              wall: detailErrorShellSeen ? 'ziprecruiter-error-shell' : null,
+            });
+            if (stamped === null) {
+              if (enhanced[i] != null) unavailableDetailDropped += 1;
+              enhanced[i] = null;
+              continue;
+            }
+            enhanced[i] = stamped;
+          }
           if (text) expandedCount++;
           // Date-miss diagnostic (once per batch): a description was recovered but
           // NO posted date — not from the list extractor, the JobPosting JSON-LD,
@@ -5025,7 +5081,7 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
  * works directly with its Puppeteer page and therefore must not try to acquire
  * another browser or shared-profile lease.
  */
-export async function enrichResolvedJobDescriptions(page, jobs, sourceId, signal = null, walkPlan = {}) {
+export async function enrichResolvedJobDescriptions(page, jobs, sourceId, signal = null, walkPlan = {}, runtime = null) {
   const list = Array.isArray(jobs) ? jobs : [];
   const srcName = SOURCE_LABELS[sourceId] || sourceId || 'Job source';
   const overlayBase = {
@@ -5044,7 +5100,7 @@ export async function enrichResolvedJobDescriptions(page, jobs, sourceId, signal
   // before it, however many hours ago that was.
   recordManualScraperTelemetry({ phase: 'recovery-start', sourceId, srcName, count: list.length });
   try {
-    return await expandDescriptions(page, list, sourceId, overlayBase, list.length, signal, walkPlan);
+    return await expandDescriptions(page, list, sourceId, overlayBase, list.length, signal, walkPlan, runtime);
   } finally {
     // Settle the slot the same way an ordinary run's completion does, so a
     // report opened after this pass ends sees it as over — not as a recovery

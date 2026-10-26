@@ -22,7 +22,10 @@ import { prepareBackgroundScrapeLaunchOptions, createBackgroundScrapePage } from
 import { sourceJobKey } from '../../src/utils/jobIdentity.js';
 import { normalizeCountry } from '../../src/utils/jobLocation.js';
 import { isBackgroundE2E, backgroundE2EDisabledError } from '../utils/backgroundE2e.js';
-import { boardClosedDetailAllowed, withBoardClosed } from '../ipc/officialPostingBoardClosed.js';
+import { withListingClosed, withListingLiveness } from '../ipc/officialPostingBoardClosed.js';
+import { LISTING_LIVENESS_RULES, classifyListingLiveness, finalizeListingEvidence, listingLivenessPageProbe } from '../ipc/listingLiveness.js';
+import { recordListingEvidence } from '../ipc/listingLivenessStore.js';
+import { getCurrentIpcRequestContext } from '../ipc/ipcUtils.js';
 
 // Indeed runs a SEPARATE site per country and each one only returns that
 // country's postings — `l=` is a place filter WITHIN a site, not a country
@@ -208,17 +211,75 @@ export function needsIndeedDescriptionRetry(job) {
  * a board-closed row survives. Keeps the established deferral marker so the
  * scoring-evidence gate still treats the scraped text as unusable.
  */
-export function markIndeedBoardClosed(job, unavailableReason, { expectedUrl = '', finalUrl = '' } = {}) {
+export function markIndeedBoardClosed(job, unavailableReason, { finalUrl = '', now = new Date() } = {}) {
   if (!job || typeof job !== 'object') return false;
-  job.descriptionDeferredReason = `indeed-${unavailableReason}`;
-  // Indeed's wording is generic. Only an aggregator host's own page is a board
-  // verdict; a redirect to an employer or ATS page saying the same thing is the
-  // official source closing, and the row is retired exactly as before.
-  if (!boardClosedDetailAllowed({ expectedUrl, finalUrl })) return false;
-  const flagged = withBoardClosed(job, { board: 'indeed', reason: `indeed-${unavailableReason}` });
+  // Page wording alone is a marker for AI, never a confirmed close. Only a
+  // structural signal on the final aggregator page writes this paired verdict.
+  if (!['http-not-found', 'workday-posting-unavailable', 'ziprecruiter-closed-job-redirect'].includes(unavailableReason)) return false;
+  const hostClass = finalizeListingEvidence({}, { finalUrl }).finalHostClass;
+  if (hostClass !== 'aggregator') return false;
+  const flagged = withListingClosed(job, { board: 'indeed', reason: unavailableReason, basis: 'structural', now });
   if (flagged === job) return false;
+  job.descriptionDeferredReason = 'description-pending-liveness';
   job.boardClosed = flagged.boardClosed;
+  job.listingLiveness = flagged.listingLiveness;
   return true;
+}
+
+function applyIndeedListingStamp(job, evidence, rules) {
+  const classified = classifyListingLiveness(evidence, rules);
+  recordListingEvidence(job, evidence);
+  if (classified.verdict === 'unknown') return classified;
+  if (classified.verdict === 'closed') {
+    if (evidence.finalHostClass === 'aggregator') {
+      const reason = evidence.workdayPostingAvailable === false ? 'workday-posting-unavailable'
+        : [404, 410].includes(evidence.httpStatus) ? 'http-not-found'
+          : 'ziprecruiter-closed-job-redirect';
+      markIndeedBoardClosed(job, reason, { finalUrl: evidence.finalUrl });
+    }
+    return classified;
+  }
+  const stamp = withListingLiveness(job, {
+    verdict: classified.verdict === 'needs-ai' ? 'pending' : classified.verdict,
+    basis: classified.basis, board: 'indeed',
+  });
+  if (stamp !== job) {
+    delete job.boardClosed;
+    job.listingLiveness = stamp.listingLiveness;
+  }
+  return classified;
+}
+
+export async function captureIndeedListingLiveness(page, job, { requestedUrl, httpStatus, descriptionText = '' } = {}) {
+  const rules = getCurrentIpcRequestContext()?.livenessRules?.rulesFor?.('indeed') || LISTING_LIVENESS_RULES.indeed;
+  const probed = await page.evaluate(listingLivenessPageProbe, {
+    rules, expectedTitle: job.title, descriptionText, excludeSelectors: ['#__ic-panel'],
+  }).catch(() => null);
+  if (!probed) return { verdict: 'unknown', basis: 'wall' };
+  const evidence = finalizeListingEvidence(probed, {
+    board: 'indeed', ruleKey: 'indeed', requestedUrl, finalUrl: page.url(), httpStatus,
+    expectedTitle: job.title, expectedCompany: job.company, expectedLocation: job.location,
+  });
+  return applyIndeedListingStamp(job, evidence, rules);
+}
+
+async function indeedStructuralDetail(page, job, requestedUrl, httpStatus) {
+  const workdayPostingAvailable = await page.evaluate(() =>
+    typeof window.workday?.postingAvailable === 'boolean' ? window.workday.postingAvailable : null
+  ).catch(() => null);
+  const evidence = finalizeListingEvidence({}, {
+    board: 'indeed', ruleKey: 'indeed', requestedUrl, finalUrl: page.url(), httpStatus,
+    expectedTitle: job.title, expectedCompany: job.company, expectedLocation: job.location,
+    workdayPostingAvailable,
+  });
+  const classified = classifyListingLiveness(evidence, LISTING_LIVENESS_RULES.indeed);
+  const reason = classified.verdict !== 'closed' || classified.basis !== 'structural'
+    || ([404, 410].includes(httpStatus) && evidence.finalHostClass === 'other' && workdayPostingAvailable !== false)
+    ? null : workdayPostingAvailable === false
+      ? 'workday-posting-unavailable'
+      : [404, 410].includes(httpStatus) ? 'http-not-found' : 'ziprecruiter-closed-job-redirect';
+  if (reason) recordListingEvidence(job, evidence);
+  return { evidence, reason };
 }
 
 // The exact-detail retry operates on recovery rows that may still carry a
@@ -320,18 +381,6 @@ export function classifyIndeedUnavailablePage({ title = '', body = '' } = {}) {
     return 'job-unavailable';
   }
   return null;
-}
-
-async function getIndeedUnavailableReason(page) {
-  try {
-    const pageText = await page.evaluate(() => ({
-      title: document.title || '',
-      body: document.body?.innerText || '',
-    }));
-    return classifyIndeedUnavailablePage(pageText);
-  } catch {
-    return null;
-  }
 }
 
 // Scroll card into view + real mouse move + click — mirrors the probe step 5/6 approach
@@ -481,7 +530,7 @@ async function enrichWithDescriptions(page, pageJobs, signal, overlayBase = null
   return { enriched, cfBlankAt: null };
 }
 
-async function getChallengeSignals(page) {
+export async function getChallengeSignals(page) {
   const url = page.url();
   const challengeUrl = /__cf_chl|cf_chl|cf-chl/i.test(url);
   if (url.includes('secure.indeed.com/auth') || url.includes('/auth?co=')) {
@@ -527,7 +576,7 @@ async function getChallengeSignals(page) {
  * have written these rows to seen-history before the review decision. Direct
  * detail retries replace the low-evidence pending rows regardless of history.
  */
-export async function retryIndeedJobDescriptions(jobs, signal = null, profileDir = null) {
+export async function retryIndeedJobDescriptions(jobs, signal = null, profileDir = null, runtime = null) {
   const rows = (Array.isArray(jobs) ? jobs : []).map(job => ({ ...job, source: 'indeed' }));
   const targets = rows.filter(needsIndeedDescriptionRetry);
   if (isBackgroundE2E()) {
@@ -544,14 +593,14 @@ export async function retryIndeedJobDescriptions(jobs, signal = null, profileDir
     return { jobs: rows, attempted: 0, recovered: 0, remaining: 0, unavailable: [], challengeReason: null };
   }
 
-  const existingReservation = getSharedProfileReservationInfo();
+  const existingReservation = (runtime?.getSharedProfileReservationInfo || getSharedProfileReservationInfo)();
   if (existingReservation) {
     logger.warn(`[Indeed/Browser] Description retry deferred — shared profile is reserved for ${existingReservation.reason}`);
     return { jobs: rows, attempted: 0, recovered: 0, remaining: targets.length, unavailable: [], challengeReason: 'shared-profile-reserved' };
   }
 
   const userDataDir = profileDir || await getUserDataDir().catch(() => getProfileDir());
-  const executablePath = await findSystemChromePath() || await findChromePath();
+  const executablePath = await (runtime?.findSystemChromePath || findSystemChromePath)() || await findChromePath();
   const launchOpts = prepareBackgroundScrapeLaunchOptions({
     headless: false,
     executablePath,
@@ -564,7 +613,7 @@ export async function retryIndeedJobDescriptions(jobs, signal = null, profileDir
 
   let releaseProfileReservation;
   try {
-    releaseProfileReservation = reserveSharedProfile('indeed-description-retry');
+    releaseProfileReservation = (runtime?.reserveSharedProfile || reserveSharedProfile)('indeed-description-retry');
   } catch (error) {
     logger.warn(`[Indeed/Browser] Description retry could not reserve shared profile: ${error?.message || error}`);
     return { jobs: rows, attempted: 0, recovered: 0, remaining: targets.length, unavailable: [], challengeReason: 'shared-profile-reserved' };
@@ -578,9 +627,9 @@ export async function retryIndeedJobDescriptions(jobs, signal = null, profileDir
   // the official one and its verdict is final, so they leave the result as before.
   const officialClosedKeys = new Set();
   try {
-    browser = await launchWithProfileLockRetry(launchOpts, 'indeed-description-retry');
+    browser = await (runtime?.launchBrowser || launchWithProfileLockRetry)(launchOpts, 'indeed-description-retry');
 
-    const page = await createBackgroundScrapePage(browser, { width: 1400, height: 900 });
+    const page = await (runtime?.createPage || createBackgroundScrapePage)(browser, { width: 1400, height: 900 });
     await page.setExtraHTTPHeaders({ 'Accept-Language': 'en-US,en;q=0.9' });
     await page.evaluateOnNewDocument(OVERLAY_SCRIPT);
     logger.info(`[Indeed/Browser] Retrying ${targets.length} exact low-evidence description(s)`);
@@ -604,35 +653,35 @@ export async function retryIndeedJobDescriptions(jobs, signal = null, profileDir
       const jobUrl = safeJobUrl || (safeJobKey ? `https://${host}/viewjob?jk=${encodeURIComponent(safeJobKey)}` : null);
       if (!jobUrl) continue;
       try {
-        await page.goto(jobUrl, { waitUntil: 'networkidle2', timeout: 30000 });
-        await injectOverlay(page);
-        await updateOverlay(page, {
+        const navigationResponse = await page.goto(jobUrl, { waitUntil: 'networkidle2', timeout: 30000 });
+        const httpStatus = navigationResponse?.status?.() ?? null;
+        await (runtime?.injectOverlay || injectOverlay)(page);
+        await (runtime?.updateOverlay || updateOverlay)(page, {
           srcName: 'Indeed',
           srcLabel: 'Retrying descriptions…',
           count: index + 1,
           status: `${index + 1}/${targets.length}`,
         }).catch(() => {});
-        await new Promise(resolve => setTimeout(resolve, 3000 + Math.round(Math.random() * 1000)));
-        const signals = await getChallengeSignals(page);
+        await (runtime?.sleep || (ms => new Promise(resolve => setTimeout(resolve, ms))))(3000 + Math.round(Math.random() * 1000));
+        const signals = await (runtime?.getChallengeSignals || getChallengeSignals)(page);
         if (signals.isChallenge) {
           challengeReason = signals.reason || 'challenge';
           recordIndeedEnrichmentAttempt(job, { stage: 'exact-retry', outcome: 'challenge', reason: challengeReason });
           logger.warn(`[Indeed/Browser] Description retry blocked (${challengeReason}) after ${index}/${targets.length} listing(s)`);
           break;
         }
-        const unavailableReason = await getIndeedUnavailableReason(page);
-        if (unavailableReason) {
-          recordIndeedEnrichmentAttempt(job, { stage: 'exact-retry', outcome: 'unavailable', reason: unavailableReason });
-          if (!markIndeedBoardClosed(job, unavailableReason, { expectedUrl: jobUrl, finalUrl: page.url() })) {
-            officialClosedKeys.add(sourceJobKey(job));
-          }
+        const structural = await indeedStructuralDetail(page, job, jobUrl, httpStatus);
+        if (structural.reason) {
+          recordIndeedEnrichmentAttempt(job, { stage: 'exact-retry', outcome: 'unavailable', reason: structural.reason });
+          if (structural.evidence.finalHostClass === 'aggregator') markIndeedBoardClosed(job, structural.reason, { finalUrl: page.url() });
+          else officialClosedKeys.add(sourceJobKey(job));
           unavailable.push({
             key: sourceJobKey(job),
             title: String(job.title || '(untitled)').replace(/\s+/g, ' ').slice(0, 140),
             url: jobUrl,
-            reason: unavailableReason,
+            reason: structural.reason,
           });
-          logger.info(`[Indeed/Browser] Description retry flagged board-closed listing (${unavailableReason}): ${job.jobkey || jobUrl}`);
+          logger.info(`[Indeed/Browser] Description retry saw structural not-found listing: ${job.jobkey || jobUrl}`);
           continue;
         }
         const description = await page.$eval(DESC_SELECTOR, el => el.textContent?.trim() || '').catch(() => '');
@@ -640,14 +689,16 @@ export async function retryIndeedJobDescriptions(jobs, signal = null, profileDir
           recordIndeedEnrichmentAttempt(job, { stage: 'exact-retry', outcome: 'recovered', length: description.length });
           recovered++;
         } else {
+          if (!description) job.descriptionDeferredReason = 'description-pending-liveness';
           recordIndeedEnrichmentAttempt(job, {
             stage: 'exact-retry',
             outcome: description ? 'short' : 'blank',
             length: description.length,
           });
         }
+        await captureIndeedListingLiveness(page, job, { requestedUrl: jobUrl, httpStatus, descriptionText: description });
         if (index < targets.length - 1) {
-          await new Promise(resolve => setTimeout(resolve, 1500 + Math.round(Math.random() * 1000)));
+          await (runtime?.sleep || (ms => new Promise(resolve => setTimeout(resolve, ms))))(1500 + Math.round(Math.random() * 1000));
         }
       } catch (error) {
         recordIndeedEnrichmentAttempt(job, { stage: 'exact-retry', outcome: 'error', reason: error.message });
@@ -663,9 +714,64 @@ export async function retryIndeedJobDescriptions(jobs, signal = null, profileDir
     logger.info(`[Indeed/Browser] Exact description retry complete: ${recovered}/${targets.length} recovered, ${unavailable.length} unavailable, ${remaining} still incomplete`);
     return { jobs: activeRows, attempted: targets.length, recovered, remaining, unavailable, challengeReason };
   } finally {
-    await closeOwnedIndeedBrowser(browser, 'description retry');
+    await (runtime?.closeBrowser || closeOwnedIndeedBrowser)(browser, 'description retry');
     releaseProfileReservation?.();
   }
+}
+
+export async function runIndeedReEnrichPass(page, { jobs, stage, label, waitUntil, timeout, settleMs, gapMs,
+  signal = null, host = 'www.indeed.com', officialClosedKeys = new Set(), runtime = null } = {}) {
+  let recovered = 0;
+  for (let ri = 0; ri < jobs.length; ri++) {
+    if (signal?.aborted) break;
+    const job = jobs[ri];
+    const jobUrl = job.url || (job.jobkey ? `https://${host}/viewjob?jk=${job.jobkey}` : null);
+    if (!jobUrl) continue;
+    try {
+      const navigationResponse = await page.goto(jobUrl, { waitUntil, timeout });
+      const httpStatus = navigationResponse?.status?.() ?? null;
+      await (runtime?.sleep || (ms => new Promise(resolve => setTimeout(resolve, ms))))(settleMs[0] + Math.round(Math.random() * settleMs[1]));
+      const sigs = await (runtime?.getChallengeSignals || getChallengeSignals)(page);
+      if (sigs.isChallenge) {
+        recordIndeedEnrichmentAttempt(job, { stage, outcome: 'challenge', reason: sigs.reason });
+        logger.warn(`[Indeed/Browser] ${label}: CF active (${sigs.reason}) — skipping remaining ${jobs.length - ri}, CF window still hot`);
+        break;
+      }
+      const structural = await indeedStructuralDetail(page, job, jobUrl, httpStatus);
+      if (structural.reason) {
+        if (structural.evidence.finalHostClass === 'aggregator') markIndeedBoardClosed(job, structural.reason, { finalUrl: page.url() });
+        else officialClosedKeys.add(sourceJobKey(job));
+        recordIndeedEnrichmentAttempt(job, { stage, outcome: 'unavailable', reason: structural.reason });
+        logger.info(`[Indeed/Browser] ${label} saw structural not-found listing: ${job.jobkey || jobUrl}`);
+        continue;
+      }
+      const desc = await page.$eval(DESC_SELECTOR, el => el.textContent?.trim() || '').catch(() => '');
+      if (desc) {
+        const scoreSafe = acceptIndeedScoreSafeDescription(job, desc);
+        if (!scoreSafe) {
+          job.description = desc;
+          job.snippet = desc;
+        }
+        recordIndeedEnrichmentAttempt(job, {
+          stage,
+          outcome: scoreSafe ? 'recovered' : 'short',
+          length: desc.length,
+        });
+        if (scoreSafe) recovered++;
+      } else {
+        job.descriptionDeferredReason = 'description-pending-liveness';
+        recordIndeedEnrichmentAttempt(job, { stage, outcome: 'blank', length: 0 });
+      }
+      await captureIndeedListingLiveness(page, job, { requestedUrl: jobUrl, httpStatus, descriptionText: desc });
+      if (ri < jobs.length - 1) {
+        await (runtime?.sleep || (ms => new Promise(resolve => setTimeout(resolve, ms))))(gapMs[0] + Math.round(Math.random() * gapMs[1]));
+      }
+    } catch (e) {
+      recordIndeedEnrichmentAttempt(job, { stage, outcome: 'error', reason: e.message });
+      logger.warn(`[Indeed/Browser] ${label} failed (${job.jobkey || 'no-key'}): ${e.message}`);
+    }
+  }
+  return recovered;
 }
 
 /**
@@ -950,6 +1056,7 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
     const preflightWasClean = !preflightSignals?.isChallenge;
 
     const allJobs = [];
+    const officialClosedKeys = new Set();
     const seenKeys = new Set();
     const providerSeenKeys = new Set();
     let pagesWalked = 0;
@@ -1297,52 +1404,7 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
     // One navigate → classify → record body shared by both re-enrichment passes
     // below; each pass supplies its own pacing and stage label. Returns the
     // number of jobs that came back with enough text to score.
-    const runReEnrichPass = async ({ jobs, stage, label, waitUntil, timeout, settleMs, gapMs }) => {
-      let recovered = 0;
-      for (let ri = 0; ri < jobs.length; ri++) {
-        if (signal?.aborted) break;
-        const job = jobs[ri];
-        const jobUrl = job.url || (job.jobkey ? `https://${host}/viewjob?jk=${job.jobkey}` : null);
-        if (!jobUrl) continue;
-        try {
-          await page.goto(jobUrl, { waitUntil, timeout });
-          await new Promise(r => setTimeout(r, settleMs[0] + Math.round(Math.random() * settleMs[1])));
-          const sigs = await getChallengeSignals(page);
-          if (sigs.isChallenge) {
-            recordIndeedEnrichmentAttempt(job, { stage, outcome: 'challenge', reason: sigs.reason });
-            logger.warn(`[Indeed/Browser] ${label}: CF active (${sigs.reason}) — skipping remaining ${jobs.length - ri}, CF window still hot`);
-            break;
-          }
-          const unavailableReason = await getIndeedUnavailableReason(page);
-          if (unavailableReason) {
-            markIndeedBoardClosed(job, unavailableReason, { expectedUrl: jobUrl, finalUrl: page.url() });
-            recordIndeedEnrichmentAttempt(job, { stage, outcome: 'unavailable', reason: unavailableReason });
-            logger.info(`[Indeed/Browser] ${label} flagged board-closed listing (${unavailableReason}): ${job.jobkey || jobUrl}`);
-            continue;
-          }
-          const desc = await page.$eval(DESC_SELECTOR, el => el.textContent?.trim() || '').catch(() => '');
-          if (desc) {
-            job.description = desc;
-            job.snippet = desc;
-            recordIndeedEnrichmentAttempt(job, {
-              stage,
-              outcome: desc.length >= DESCRIPTION_EVIDENCE_MIN_CHARS ? 'recovered' : 'short',
-              length: desc.length,
-            });
-            if (desc.length >= DESCRIPTION_EVIDENCE_MIN_CHARS) recovered++;
-          } else {
-            recordIndeedEnrichmentAttempt(job, { stage, outcome: 'blank', length: 0 });
-          }
-          if (ri < jobs.length - 1) {
-            await new Promise(r => setTimeout(r, gapMs[0] + Math.round(Math.random() * gapMs[1])));
-          }
-        } catch (e) {
-          recordIndeedEnrichmentAttempt(job, { stage, outcome: 'error', reason: e.message });
-          logger.warn(`[Indeed/Browser] ${label} failed (${job.jobkey || 'no-key'}): ${e.message}`);
-        }
-      }
-      return recovered;
-    };
+    const runReEnrichPass = options => runIndeedReEnrichPass(page, { ...options, signal, host, officialClosedKeys });
 
     // ── Post-run re-enrichment pass ─────────────────────────────────────────────
     // Jobs with empty descriptions after the main pass may be silent CF blanks —
@@ -1355,7 +1417,9 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
     // CF is still active and the re-enrichment gets blocked on the first request.
     // Heuristic: 30s per 10 challenges, capped at 120s.
     const missingDescJobs = allJobs.filter(job =>
-      !job.descriptionDeferredReason && indeedDescriptionLength(job) < DESCRIPTION_EVIDENCE_MIN_CHARS
+      !job.boardClosed
+      && (!job.descriptionDeferredReason || job.descriptionDeferredReason === 'description-pending-liveness')
+      && indeedDescriptionLength(job) < DESCRIPTION_EVIDENCE_MIN_CHARS
     );
     let reEnriched = 0;
     if (missingDescJobs.length > 0 && !signal?.aborted && !manualChallenge) {
@@ -1381,7 +1445,9 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
       // low-evidence rows should be scored. Keep it bounded to the residual set:
       // it is a recovery attempt, not another crawl of every result.
       const residualDescJobs = missingDescJobs.filter(job =>
-        !job.descriptionDeferredReason && indeedDescriptionLength(job) < DESCRIPTION_EVIDENCE_MIN_CHARS
+        !job.boardClosed
+        && (!job.descriptionDeferredReason || job.descriptionDeferredReason === 'description-pending-liveness')
+        && indeedDescriptionLength(job) < DESCRIPTION_EVIDENCE_MIN_CHARS
       );
       if (residualDescJobs.length > 0 && !signal?.aborted) {
         logger.info(`[Indeed/Browser] Slow re-enriching ${residualDescJobs.length} residual job(s)`);
@@ -1398,9 +1464,10 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
         logger.info(`[Indeed/Browser] Slow re-enrich complete: ${slowRecovered}/${residualDescJobs.length} recovered`);
       }
     }
-    logIndeedResidualEnrichmentDiagnostics(allJobs);
-    const enrichment = summarizeIndeedEnrichmentAttempts(allJobs);
-    retainIndeedResidualDiagnostics(allJobs);
+    const retainedJobs = allJobs.filter(job => !officialClosedKeys.has(sourceJobKey(job)));
+    logIndeedResidualEnrichmentDiagnostics(retainedJobs);
+    const enrichment = summarizeIndeedEnrichmentAttempts(retainedJobs);
+    retainIndeedResidualDiagnostics(retainedJobs);
 
     // Compact per-query summary — 1 line per query so the full run picture fits
     // within the 60-line ring buffer regardless of how long the scrape ran.
@@ -1409,11 +1476,11 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
       const cfNote      = cf      ? ` ${cf} CF`            : ' clean';
       logger.info(`[Indeed/Browser] q${i + 1} "${queryList[i]}":${cfNote}`);
     }
-    logger.info(`[Indeed/Browser] ${allJobs.length} unique jobs, ${totalChallenges} challenges, ${queryList.length} queries${reEnriched > 0 ? `, ${reEnriched} re-enriched` : ''}`);
+    logger.info(`[Indeed/Browser] ${retainedJobs.length} unique jobs, ${totalChallenges} challenges, ${queryList.length} queries${reEnriched > 0 ? `, ${reEnriched} re-enriched` : ''}`);
 
     const inWindow = collectionStartTimestamp != null
-      ? filterJobsByPostedSince(allJobs, collectionStartTimestamp)
-      : maxAgeDays ? filterJobsByAge(allJobs, maxAgeDays) : allJobs;
+      ? filterJobsByPostedSince(retainedJobs, collectionStartTimestamp)
+      : maxAgeDays ? filterJobsByAge(retainedJobs, maxAgeDays) : retainedJobs;
     const items = inWindow;
 
     let warning = null;
@@ -1472,6 +1539,7 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
       items,
       warning,
       gathered: inWindow.length,
+      unavailableDetailDropped: officialClosedKeys.size,
       providerGathered: providerSeenKeys.size,
       pagesFetched: pagesWalked,
       stopReasons: [

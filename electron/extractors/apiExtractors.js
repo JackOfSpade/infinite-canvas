@@ -26,7 +26,10 @@ import { parseSalaryToNumeric } from '../../src/nodes/jobsearch/buildJobTree.js'
 import { decodeHtmlEntities, repairMojibake } from '../../src/utils/textEncoding.js';
 import { normalizeJobCollectionLimits, resolveJobsPerPlatform, resolvePageCeiling } from '../../src/utils/jobCollectionLimits.js';
 import { runRollingWorkers } from '../../src/utils/handoffScheduler.js';
-import { withBoardClosed } from '../ipc/officialPostingBoardClosed.js';
+import { withListingClosed, withListingLiveness } from '../ipc/officialPostingBoardClosed.js';
+import { classifyListingLiveness, evidenceFromHtml, finalizeListingEvidence, listingLivenessPageProbe, LISTING_LIVENESS_RULES } from '../ipc/listingLiveness.js';
+import { recordListingEvidence } from '../ipc/listingLivenessStore.js';
+import { getCurrentIpcRequestContext } from '../ipc/ipcUtils.js';
 
 // Per-source API fetch timeouts. These are SEEDS / ceilings, read through the
 // shared scrapeBudget store so they live in one place and share the budget
@@ -624,6 +627,9 @@ export function linkedInDescriptionPacing({ mode = 'guest', requestsIssued = 0 }
   };
 }
 
+/** Exact auth routes only; a job slug containing these words is not a wall. */
+export const LINKEDIN_LOGIN_WALL_RE = /^https?:\/\/(?:[a-z0-9-]+\.)*linkedin\.com\/(?:login|uas|checkpoint|authwall|signup|join|session)(?:\/|[?#]|$)/i;
+
 /**
  * Runs INSIDE the LinkedIn job page (no closures; Puppeteer serializes it). LinkedIn
  * prints "No longer accepting applications" in the top card of a closed posting.
@@ -645,23 +651,47 @@ export function linkedInClosedMarkerProbe() {
 export function linkedInPostingClosed(probe) {
   return Number.isFinite(probe?.page) && Number.isFinite(probe?.description) && probe.page > probe.description;
 }
-const LINKEDIN_BOARD_CLOSED = Object.freeze({ board: 'linkedin', reason: 'linkedin-no-longer-accepting' });
-/**
- * The row a successful LinkedIn detail read produces. A closed posting keeps its
- * description (LinkedIn rows are never dropped here) and gains boardClosed; a
- * re-read that no longer shows the marker clears a stale one.
- */
-export function linkedInEnrichedRow(job, text, closed) {
-  const { boardClosed: _staleMarker, ...unmarked } = job || {};
-  const described = { ...unmarked, description: text, snippet: text };
-  return closed ? withBoardClosed(described, LINKEDIN_BOARD_CLOSED) : described;
+/** A rendered wall at the original detail URL is still an unknown visit. */
+export function linkedInCapturedVisitWall(result, probed) {
+  if (result?.ok || result?.evalFailed || result?.ldCount !== 0) return null;
+  const title = String(result?.pageTitle || probed?.title || '').trim();
+  if (!title) return 'linkedin-soft-block';
+  const heading = String(probed?.h1 || '').trim();
+  if (/^(?:sign[\s-]*(?:in|up)|log[\s-]*in|join[\s-]*(?:now|to view))/iu.test(title)
+    || /^join\s+to\s+view\s+this\s+job\b/iu.test(heading)) return 'linkedin-authwall';
+  return null;
 }
-/** A closed page that served no description still carries the marker; any other page leaves the row alone. */
-export function linkedInUndescribedRow(job, closed) {
-  return closed ? withBoardClosed(job, LINKEDIN_BOARD_CLOSED) : job;
+export function livenessRulesFor(ruleKey) {
+  return getCurrentIpcRequestContext()?.livenessRules?.rulesFor?.(ruleKey)
+    || LISTING_LIVENESS_RULES[ruleKey] || LISTING_LIVENESS_RULES.generic;
 }
 
-export async function enrichLinkedInDescriptionsBrowser(jobs, signal, { preferAuthenticated = false, onProgress = null } = {}) {
+/** A fresh, usable visit replaces both old liveness fields; unknown preserves both. */
+function rowWithListingDecision(job, decision, board, evidence = null) {
+  if (decision?.verdict === 'closed' && decision.basis === 'structural') {
+    const reason = evidence?.workdayPostingAvailable === false ? 'workday-posting-unavailable'
+      : [404, 410].includes(evidence?.httpStatus) ? 'http-not-found'
+        : evidence?.finalUrl ? 'ziprecruiter-closed-job-redirect' : 'http-not-found';
+    return withListingClosed(job, { board, reason, basis: 'structural' });
+  }
+  if (decision?.verdict === 'needs-ai') {
+    return withListingLiveness(job, { board, verdict: 'pending', basis: decision.basis });
+  }
+  if (decision?.verdict === 'open') {
+    return withListingLiveness(job, { board, verdict: 'open', basis: 'open-marker' });
+  }
+  return job;
+}
+
+/** Keep the same description read, then replace the liveness pair together. */
+export function linkedInEnrichedRow(job, text, decision, evidence = null) {
+  return rowWithListingDecision({ ...job, description: text, snippet: text }, decision, 'linkedin', evidence);
+}
+export function linkedInUndescribedRow(job, decision, evidence = null) {
+  return rowWithListingDecision(job, decision, 'linkedin', evidence);
+}
+
+export async function enrichLinkedInDescriptionsBrowser(jobs, signal, { preferAuthenticated = false, onProgress = null, runtime = null } = {}) {
   if (!jobs?.length) return { jobs, loginWall: false, loginWallUrl: null };
   const cancelledResult = () => ({
     jobs, loginWall: false, loginWallUrl: null, cancelled: true,
@@ -685,7 +715,7 @@ export async function enrichLinkedInDescriptionsBrowser(jobs, signal, { preferAu
   // silently and the pass looks hung; instead we return noInternet so the caller
   // can ask the user to switch to a working VPN server. The mid-run detector in
   // the loop catches an uplink that dies partway through.
-  const internetAvailable = await probeInternet(signal);
+  const internetAvailable = await (runtime?.probeInternet || probeInternet)(signal);
   if (signal?.aborted) return cancelledResult();
   if (!internetAvailable) {
     logger.warn('[LinkedIn/Browser] Connectivity probe failed before enrichment — egress IP appears offline. Skipping; user should switch VPN to a working server.');
@@ -694,7 +724,7 @@ export async function enrichLinkedInDescriptionsBrowser(jobs, signal, { preferAu
 
   let browser;
   try {
-    browser = await getStealthBrowser();
+    browser = await (runtime?.getStealthBrowser || getStealthBrowser)();
   } catch (err) {
     logger.warn(`[LinkedIn/Browser] Cannot get shared browser for enrichment: ${err.message}`);
     return { ...linkedInBrowserUnavailableResult(jobs, err), usedAuthenticated: preferAuthenticated, authenticatedFallback: false };
@@ -709,7 +739,7 @@ export async function enrichLinkedInDescriptionsBrowser(jobs, signal, { preferAu
   // per-IP": if the IP changes but the limit doesn't recover within one browser
   // generation, it's the browser; if a relaunch (new generation) on the same IP
   // recovers it, it's the browser too — not the IP.
-  const browserInfo = getStealthBrowserInfo();
+  const browserInfo = (runtime?.getStealthBrowserInfo || getStealthBrowserInfo)();
 
   // Prefer the user's verified LinkedIn session when one is available. The old
   // implementation *always* created an isolated context, explicitly discarding
@@ -832,6 +862,7 @@ export async function enrichLinkedInDescriptionsBrowser(jobs, signal, { preferAu
   }
 
   const enriched = [...jobs];
+  const structuralDroppedKeys = new Set();
   let successCount = 0;
   let navErrors = 0;
   let noDesc = 0;
@@ -875,7 +906,7 @@ export async function enrichLinkedInDescriptionsBrowser(jobs, signal, { preferAu
 
   // Shared login-wall URL pattern. Applied to both the pre-evaluate finalUrl
   // (HTTP redirects) and the post-evaluate page.url() (JS redirects).
-  const LOGIN_WALL_RE = /\/(login|uas\/|checkpoint|authwall|signup|join|session)\b/i;
+  const LOGIN_WALL_RE = LINKEDIN_LOGIN_WALL_RE;
 
   // Wall handler: rotate the guest context and retry, OR stop. Returns true if
   // the caller should STOP (set loginWallAt first); false means "rotated, retry
@@ -944,10 +975,11 @@ export async function enrichLinkedInDescriptionsBrowser(jobs, signal, { preferAu
           });
         } catch { /* progress reporting must never break enrichment */ }
         detailRequestsIssued++;
-        await page.goto(job.url, { waitUntil: 'domcontentloaded', timeout: 15000 });
+        const response = await page.goto(job.url, { waitUntil: 'domcontentloaded', timeout: 15000 });
         navOk = true;
 
         const finalUrl = page.url();
+        const httpStatus = typeof response?.status === 'function' ? response.status() : null;
         consecutiveNavErrors = 0; // a navigation completed → the uplink is alive
 
         // HTTP-redirect login wall: LinkedIn changed the URL to an auth page.
@@ -958,6 +990,32 @@ export async function enrichLinkedInDescriptionsBrowser(jobs, signal, { preferAu
           if (contextSetupError || signal?.aborted) break;
           if (await handleWall(finalUrl, i)) break;
           i--; continue; // retry this job on the fresh context
+        }
+
+        // Structural closure is decisive on an ATS host. An aggregator keeps
+        // the row for official resolution; a different host cannot close it.
+        const finalHostClass = finalizeListingEvidence({ requestedUrl: job.url, finalUrl }).finalHostClass;
+        const ruleKey = finalHostClass === 'aggregator' ? 'linkedin' : 'generic';
+        if (httpStatus === 404 || httpStatus === 410) {
+          const structuralEvidence = finalizeListingEvidence({
+            board: 'linkedin', ruleKey, requestedUrl: job.url,
+            finalUrl, httpStatus, expectedTitle: job.title,
+            expectedCompany: job.company, expectedLocation: job.location,
+          });
+          const structuralDecision = classifyListingLiveness(structuralEvidence, livenessRulesFor(ruleKey));
+          if (structuralEvidence.finalHostClass === 'ats') {
+            recordListingEvidence(job, structuralEvidence);
+            structuralDroppedKeys.add(sourceJobKey(job));
+            enriched[i] = null;
+            jobsThisContext++;
+            continue;
+          }
+          if (structuralEvidence.finalHostClass === 'aggregator' && structuralDecision.verdict === 'closed') {
+            enriched[i] = linkedInUndescribedRow(job, structuralDecision, structuralEvidence);
+            recordListingEvidence(enriched[i], structuralEvidence);
+            jobsThisContext++;
+            continue;
+          }
         }
 
         // The authenticated LinkedIn app hydrates its description after
@@ -1041,14 +1099,34 @@ export async function enrichLinkedInDescriptionsBrowser(jobs, signal, { preferAu
         // Guest/SEO page: description is server-rendered in JSON-LD at
         // domcontentloaded — no hydration wait needed.
         const result = await page.evaluate(extractDesc).catch(evalCatch);
-        // The board's own closed marker is evidence, not a drop: the row keeps its
-        // description and carries boardClosed to the official-posting resolver. A
-        // failed probe (or an evaluation that already failed) never flags a row.
-        const closedMarker = result.evalFailed ? false
-          : linkedInPostingClosed(await page.evaluate(linkedInClosedMarkerProbe).catch(() => null));
+        // Build evidence on the same page after the existing description read.
+        // Failed evaluation supplies no fresh liveness verdict.
+        const rules = livenessRulesFor(ruleKey);
+        const probed = result.evalFailed ? null : await page.evaluate(listingLivenessPageProbe, {
+          rules, expectedTitle: job.title, descriptionText: result.ok ? result.text : '',
+        }).catch(() => null);
+        const visitWall = linkedInCapturedVisitWall(result, probed);
+        const evidence = probed || visitWall ? finalizeListingEvidence({ ...probed, wall: visitWall || probed?.wall }, {
+          board: 'linkedin', ruleKey, requestedUrl: job.url,
+          finalUrl, httpStatus, expectedTitle: job.title,
+          expectedCompany: job.company, expectedLocation: job.location,
+        }) : null;
+        const classified = evidence ? classifyListingLiveness(evidence, rules) : null;
+        const decision = evidence?.finalHostClass === 'other' && [404, 410].includes(httpStatus)
+          ? { verdict: 'unknown', basis: 'thin' } : classified;
+
+        if (decision?.verdict === 'closed' && decision.basis === 'structural'
+          && evidence.finalHostClass === 'ats') {
+          recordListingEvidence(job, evidence);
+          structuralDroppedKeys.add(sourceJobKey(job));
+          enriched[i] = null;
+          jobsThisContext++;
+          continue;
+        }
 
         if (result.ok) {
-          enriched[i] = linkedInEnrichedRow(job, result.text, closedMarker);
+          enriched[i] = linkedInEnrichedRow(job, result.text, decision, evidence);
+          if (decision && decision.verdict !== 'unknown') recordListingEvidence(enriched[i], evidence);
           successCount++;
           consecutiveEvalErrors = 0; // reset streak on success
         } else if (result.evalFailed) {
@@ -1093,7 +1171,8 @@ export async function enrichLinkedInDescriptionsBrowser(jobs, signal, { preferAu
             i--; continue;
           }
           if (contextSetupError || signal?.aborted) break;
-          enriched[i] = linkedInUndescribedRow(job, closedMarker);
+          enriched[i] = linkedInUndescribedRow(job, decision, evidence);
+          if (decision && decision.verdict !== 'unknown') recordListingEvidence(enriched[i], evidence);
           noDesc++;
           // Classify: gutted soft-block page (no title, no JSON-LD) vs a real page
           // that genuinely lacks a description. The former is recoverable.
@@ -1126,7 +1205,7 @@ export async function enrichLinkedInDescriptionsBrowser(jobs, signal, { preferAu
         if (networkLevel) {
           consecutiveNavErrors++;
           const internetAvailable = consecutiveNavErrors >= NO_INTERNET_NAV_ERRORS
-            ? await probeInternet(signal)
+            ? await (runtime?.probeInternet || probeInternet)(signal)
             : true;
           // `probeInternet` deliberately wakes on cancellation. Check the
           // owning signal before interpreting a failed probe, otherwise Reset
@@ -1167,7 +1246,8 @@ export async function enrichLinkedInDescriptionsBrowser(jobs, signal, { preferAu
   const firstFailSuffix = firstFailNote !== null ? ` — first fail: ${firstFailNote}` : '';
   logger.info(`[LinkedIn/Browser] ${successCount}/${attempted} descriptions enriched${failSuffix}${rotateSuffix}${wallSuffix}${offlineSuffix}${firstFailSuffix}`);
   return {
-    jobs: enriched, loginWall: loginWallAt !== null, loginWallUrl, successCount, attempted, contextRotations, noInternet,
+    jobs: enriched.filter(Boolean), structuralDroppedKeys: [...structuralDroppedKeys],
+    loginWall: loginWallAt !== null, loginWallUrl, successCount, attempted, contextRotations, noInternet,
     cancelled: !!signal?.aborted,
     browserUnavailable: !!contextSetupError,
     profileReserved: false,
@@ -3896,7 +3976,27 @@ export async function enrichDiceDescriptions(jobs, signal) {
             },
             signal: createTimeoutSignal(signal, apiTimeout('dice-api')),
           }, 'dice-detail');
-          if (!r.ok) { note(`http-${r.status}`, url); return job; }
+          const ruleKey = finalizeListingEvidence({ requestedUrl: url }).finalHostClass === 'aggregator'
+            ? 'dice' : 'generic';
+          const rules = livenessRulesFor(ruleKey);
+          if (!r.ok) {
+            note(`http-${r.status}`, url);
+            if (r.status !== 404 && r.status !== 410) return job;
+            const evidence = evidenceFromHtml(r.text || '', {
+              board: 'dice', ruleKey, requestedUrl: url, finalUrl: null,
+              httpStatus: r.status, expectedTitle: job.title,
+              expectedCompany: job.company, expectedLocation: job.location, rules,
+            });
+            const decision = classifyListingLiveness(evidence, rules);
+            if (decision.verdict !== 'closed' || evidence.finalHostClass === 'other') return job;
+            if (evidence.finalHostClass === 'ats') {
+              recordListingEvidence(job, evidence);
+              return null;
+            }
+            const closed = rowWithListingDecision(job, decision, 'dice');
+            recordListingEvidence(closed, evidence);
+            return closed;
+          }
           const html = r.text || '';
           // Salary cadence recovery: Dice's free-text `salary` field sometimes
           // loses its cadence in cleanup ("25", "$20 - $24") and annualizes to
@@ -3918,15 +4018,7 @@ export async function enrichDiceDescriptions(jobs, signal) {
             if (formatted) { salaryPatch = formatted; salaryPatchProvenance = structuredSalary ? 'posted' : 'unknown'; salaryUpgraded += 1; }
           }
           const descHtml = extractJobPostingDescription(html, url);
-          if (!descHtml) {
-            note('no-jsonld-desc', url);
-            return salaryPatch ? { ...job, salary: salaryPatch, salaryProvenance: salaryPatchProvenance } : job;
-          }
-          const descText = descHtml.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
-          if (!descText) {
-            note('empty-after-strip', url);
-            return salaryPatch ? { ...job, salary: salaryPatch, salaryProvenance: salaryPatchProvenance } : job;
-          }
+          const descText = descHtml ? descHtml.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim() : '';
           const rest = { ...job };
           delete rest._diceId;
           if (salaryPatch) { rest.salary = salaryPatch; rest.salaryProvenance = salaryPatchProvenance; }
@@ -3934,11 +4026,30 @@ export async function enrichDiceDescriptions(jobs, signal) {
           // the list summary we already had.
           if (descText.length > summaryLen) {
             lengthened += 1;
-            return { ...rest, description: descText, snippet: descText };
+            rest.description = descText;
+            rest.snippet = descText;
+          } else if (descText) {
+            note('not-longer-than-summary', url);
+            const best = (rest.snippet && rest.snippet.length >= descText.length) ? rest.snippet : descText;
+            rest.description = best;
+            rest.snippet = best;
+          } else {
+            note(descHtml ? 'empty-after-strip' : 'no-jsonld-desc', url);
           }
-          note('not-longer-than-summary', url);
-          const best = (rest.snippet && rest.snippet.length >= descText.length) ? rest.snippet : descText;
-          return { ...rest, description: best, snippet: best };
+          const evidence = evidenceFromHtml(html, {
+            board: 'dice', ruleKey, requestedUrl: url, finalUrl: null,
+            httpStatus: r.status, expectedTitle: job.title,
+            expectedCompany: job.company, expectedLocation: job.location,
+            descriptionText: descText, rules,
+          });
+          const decision = classifyListingLiveness(evidence, rules);
+          if (decision.verdict === 'closed' && evidence.finalHostClass === 'ats') {
+            recordListingEvidence(job, evidence);
+            return null;
+          }
+          const settled = rowWithListingDecision(rest, decision, 'dice');
+          if (decision.verdict !== 'unknown') recordListingEvidence(settled, evidence);
+          return settled;
         } catch {
           note('fetch-error', url);
           return job; // keep summary on error
@@ -3949,7 +4060,7 @@ export async function enrichDiceDescriptions(jobs, signal) {
   });
 
   // Strip _diceId from any jobs not enriched above (e.g. aborted mid-run)
-  const cleaned = enriched.filter(job => job !== undefined).map((job) => {
+  const cleaned = enriched.filter(job => job !== undefined).filter(job => job !== null).map((job) => {
     const rest = { ...job };
     delete rest._diceId;
     return rest;

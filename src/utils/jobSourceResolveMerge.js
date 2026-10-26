@@ -1,7 +1,7 @@
-import { normalizeBoardClosed, normalizeOfficialPosting } from '../../electron/ipc/officialPostingFields.js';
+import { listingStateRank, normalizeOfficialPosting } from '../../electron/ipc/officialPostingFields.js';
 import { dedupJobsAcrossSources, sourceJobKey, uniqueJobsAcrossSources } from './jobIdentity.js';
 
-const isBoardClosed = job => normalizeBoardClosed(job?.boardClosed) !== null;
+const isBoardClosed = job => listingStateRank(job) >= 3;
 const hasVerifiedPosting = job => {
   const posting = normalizeOfficialPosting(job?.officialPosting);
   return posting !== null && ['L1', 'L2', 'L3', 'L4'].includes(posting.level) && ['found', 'link-only'].includes(posting.outcome);

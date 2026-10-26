@@ -1037,6 +1037,8 @@ export function buildJobTreeNodes({
         salaryProvenance: job.salaryProvenance,
         officialPosting: job.officialPosting,
         boardClosed: job.boardClosed,
+        listingLiveness: job.listingLiveness,
+        alternateListings: job.alternateListings,
         reasoning: job.reasoning, careerDirection: job.careerDirection,
         // Preserve the scorer's audit trail so a merged board never turns an
         // evidence-grounded hiring-fit assessment back into an opaque number. Some fields

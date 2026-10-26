@@ -1111,12 +1111,14 @@ export default [
     name: 'job search gathered-only resume returns the original collection boundary while refreshing manifest liveness',
     run: async () => {
       registerJobsHandlers();
-      const searchJobs = ipcMain.__getInvokeHandler('search-jobs');
+      let searchJobs = ipcMain.__getInvokeHandler('search-jobs');
       const fingerprint = 'c'.repeat(64);
       const { snapshotId: careerSnapshotId } = await writeApprovedCareerSnapshotFixture();
       const cases = [
         { label: 'modern', removeDedicatedBoundary: false },
         { label: 'legacy', removeDedicatedBoundary: true },
+        { label: 'pair-only', removeDedicatedBoundary: false, pairOnly: true },
+        { label: 'link-only', removeDedicatedBoundary: false, linkOnly: true },
       ];
       const outcomes = [];
 
@@ -1158,6 +1160,12 @@ export default [
               url: `https://example.com/jobs/${testCase.label}`,
               posted: 'recently listed',
               description: `Platform engineering role ${'x'.repeat(500)}`,
+              ...(testCase.pairOnly || testCase.linkOnly ? {
+                ...unresolvedOfficialPosting({ company: `Resume Boundary ${testCase.label}` }, { trail: ['bridge-unavailable'] }),
+                ...(testCase.pairOnly ? {
+                  listingLiveness: { verdict: 'pending', basis: 'neither', board: 'indeed', at: new Date(startedAt).toISOString() },
+                } : {}),
+              } : {}),
             }],
           });
           await markSourceStatus(canvasPath, 'indeed', 'done', firstGatheredAt - 1, {
@@ -1190,6 +1198,20 @@ export default [
           const resumeAuthority = await claimStagingAuthority(canvasPath, nodeId, runId, careerSnapshotId, {
             kind: 'resume', predecessor: initialAuthority,
           });
+          let changedOnlyFinalWrites = 0;
+          if (testCase.pairOnly || testCase.linkOnly) {
+            __registerJobsHandlersForTests({
+              resolveOfficialPostings: async jobs => ({ jobs: jobs.map(job => ({ ...job,
+                ...(testCase.pairOnly ? {
+                  listingLiveness: { verdict: 'open', basis: 'open-marker', board: 'indeed', at: new Date().toISOString() },
+                } : {
+                  googleCardUrl: 'https://google.example/card/synthetic-link-only',
+                }),
+              })), telemetry: { total: jobs.length } }),
+              beforeSearchStageWrite: async ({ phase }) => { if (phase === 'before-final-stage') changedOnlyFinalWrites += 1; },
+            });
+            searchJobs = ipcMain.__getInvokeHandler('search-jobs');
+          }
           const result = await searchJobs({ sender }, {
             nodeId,
             canvasFilePath: canvasPath,
@@ -1211,6 +1233,19 @@ export default [
           assert(result.jobs.length === 1 && result.jobs[0].officialPosting?.level === 'L5'
             && after.stagedJobs.some(entry => entry.job?.officialPosting?.level === 'L5'),
           'old gathered rows must cross the official resolver and checkpoint their metadata before being returned');
+          if (testCase.pairOnly) {
+            assert(changedOnlyFinalWrites === 1, 'a pair-only resolution change dirties the gathered-only final checkpoint');
+            assert(result.jobs[0].listingLiveness?.verdict === 'open', 'the result carries the refreshed verdict');
+            assert(after.stagedJobs.some(entry => entry.job?.listingLiveness?.verdict === 'open'),
+              'the refreshed verdict is durable in the final checkpoint');
+          }
+          if (testCase.linkOnly) {
+            assert(changedOnlyFinalWrites === 1, 'a link-only resolution change dirties the gathered-only final checkpoint');
+            assert(result.jobs[0].googleCardUrl === 'https://google.example/card/synthetic-link-only',
+              'the result carries the refreshed link');
+            assert(after.stagedJobs.some(entry => entry.job?.googleCardUrl === 'https://google.example/card/synthetic-link-only'),
+              'the refreshed link is durable in the final checkpoint');
+          }
           outcomes.push(testCase.label);
         } finally {
           await fs.promises.rm(root, { recursive: true, force: true });

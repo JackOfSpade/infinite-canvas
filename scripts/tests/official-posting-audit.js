@@ -80,9 +80,11 @@ const tests = [
         officialPosting: { level: 'L4', employer: 'Acme Talent Partners', sourceUrl: 'https://careers.example.test/platform' } });
       const legacy = Buffer.from(formatOriginalJobListingMarkdown(original));
       assert.equal(legacyListingCollisionBytes(legacy), legacy, 'header-free legacy bytes need no reconstruction');
-      for (let mask = 1; mask < 8; mask++) {
+      for (let mask = 1; mask < 32; mask++) {
         const value = job({ ...original, postedBy: mask & 1 ? original.postedBy : '', applyUrl: mask & 2 ? original.applyUrl : '',
-          officialPosting: mask & 4 ? original.officialPosting : undefined });
+          officialPosting: mask & 4 ? original.officialPosting : undefined,
+          listingAudit: mask & 8 ? { outcome: 'official', basis: 'official', at: '2026-10-26T12:00:00.000Z' } : undefined,
+          listingLiveness: mask & 16 ? { verdict: 'closed', basis: 'ai', board: 'linkedin', at: '2026-10-26T12:00:00.000Z' } : undefined });
         assert.deepEqual(legacyListingCollisionBytes(Buffer.from(formatOriginalJobListingMarkdown(value, { audience: 'bundle' }))), legacy);
       }
       const malformed = Buffer.from('# A\n**Posted by:** Leave this without a separator\n');

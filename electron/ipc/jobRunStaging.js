@@ -47,6 +47,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { logger } from '../logger.js';
+import { mergeListingLivenessTelemetry } from './listingLivenessTelemetry.js';
 import { normalizeCollectionScopeCaveats } from '../../src/utils/jobCollectionScopeCaveats.js';
 import { JOB_SEARCH_MAX_PROVIDER_LOOKBACK_DAYS } from '../../src/utils/jobSearchDateWindow.js';
 import { JOB_PREFERENCE_CRITERION_MAX_LENGTH, JOB_PREFERENCE_TITLE_MAX_LENGTH } from './aiSchemas.js';
@@ -755,6 +756,7 @@ export function sanitizeLastRunReceipt(receipt = {}) {
   } : null;
   const scoring = sanitizeReceiptScoring(receipt.scoring);
   const recovery = sanitizeReceiptRecovery(receipt.recovery);
+  const listingLiveness = mergeListingLivenessTelemetry(receipt.listingLiveness);
   return {
     version: JOB_RUN_RECEIPT_VERSION,
     runId,
@@ -772,6 +774,7 @@ export function sanitizeLastRunReceipt(receipt = {}) {
     ...(funnel ? { funnel } : {}),
     ...(scoring ? { scoring } : {}),
     ...(recovery ? { recovery } : {}),
+    ...(Object.keys(listingLiveness).length ? { listingLiveness } : {}),
     sources,
     stagingStarted: receipt.stagingStarted === true,
     cleanup: {

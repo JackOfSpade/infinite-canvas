@@ -156,3 +156,36 @@ The fact-check and fact-recheck prompts now include employment inflation at the 
 Final verification: 5,013 unit tests and all 12 PDF suites/439 checks pass. The 5,221-row gate replay and 294,327-row review matrix show zero weakening against the pre-feature truth gates; all 60 C+ rows reject. Private naming replay passes 43 of 45, the synthetic battery 74 of 76, and the guard flags zero of 561 saved-letter sentences. Same-input host acceptance reaches both required L2 postings with zero wrong postings among 12 accepted results. The real-bridge find rate remains INCONCLUSIVE. Lint, oracle and distinctive-literal checks are clean. The private counter remains due at five and was not reset. No candidate or posting facts were added to tracked files.
 
 Amendment 8 corrects excluded-sibling contradiction checks and live-copy preference, bridge replacement and launch waiting, and employment-guard performance, target forms, casing and approved-name handling. Completion grounding now uses the draft path's approved-organization masking. Removed obsolete target arguments and the uncommitted Amendment-5 session entry. Final Amendment-8 measurements are recorded in the private implementation report; the earlier numbers above describe Amendment 7.
+
+### 2026-10-26 — listing liveness and Generate checks; user-directed; counter not reset
+
+Added bounded listing-state evidence for LinkedIn, Indeed, ZipRecruiter and Dice; confirmed closure remains separate from page wording that needs AI review. Search-time resolution now carries a paired liveness verdict through official-posting settlement, preserves description-less pending rows for later searches, prefers an open alternate when available, and records count-only telemetry. Candidate open controls ship in shadow and become active only after the private calibration store's independent AI checks meet its thresholds. Official-posting identity and truth checks were retained.
+
+Generate now checks the final official posting first, then uses stored liveness or a single bounded host probe and, when available, a structured AI check. The typed result distinguishes proceeding, final refusal, retryable refusal and an uncertain hold; Generate anyway applies only to a hold. A bounded audit fact follows a permitted generation into the bundle. This was an implementation request outside a batch writing-improvement session; it did not change writer guidance, the model label or the frozen regression set. No live board, headed-browser or real-bridge acceptance run was performed, so no real-world liveness accuracy or writing-quality gain is claimed.
+
+Validation by phase: P1 5,060 unit tests, P2 5,070, P3 5,085, P4 5,106 and P5 5,124, each with zero failures; each phase also passed all 12 PDF suites/439 checks. The private improvement counter remains due at 5 and was not reset. No candidate or posting facts were added to tracked files.
+
+Amendment-1 repaired deferred-row retention, Generate fallbacks, capture evidence boundaries, prompt and bundle metadata, and added registered regression guards; its verification and residuals are recorded in the private listing-liveness report.
+
+Amendment-2 closed the remaining Indeed recovery, live-page text, LinkedIn rule-lookup, Generate test-runner, and audit-sampling gaps. Its probe and acceptance results are recorded in the private listing-liveness report. The earlier improvement-status command rewrote private state while leaving the due counter at five; it was not run again.
+
+The deferred listing-liveness follow-up added official-page and expiry-candidate confirmation, alternate and variant checks at Generate, and observable remote-board probes; its calibration-store write was verified under an injected root. Implementation evidence and remaining limits are in the private listing-liveness report.
+
+The due improvement-evidence review found too few accepted edited bundles to establish a recurring generator defect. The collection window was extended under the playbook; the counter and frozen regression set remain intact. Reassess after further accepted edits with reasons and source provenance.
+
+### 2026-10-26 — improvement session; no new guidance; counter reset
+
+Run at the user's request with the counter at 5. Coverage: all 5 pairs since the 2026-10-19 session were retained, under one model label. Three were superseded by rebuild re-runs and left out of the edit analysis. That leaves 2 accepted bundles, both edited, both with edit notes. No truth errors.
+
+Classification, by the user's notes first:
+- **Recurring, already resolved.** Résumé Skills listed a skill that the source states only inside an achievement bullet (2 of 2 bundles). The 2026-10-24 source-declaration rule now admits such a skill to Skills only when the posting names it. Resolved by code, not by source.
+- **Already resolved.** A letter closed by restating the thesis and points (1 bundle). The 2026-10-24 brief line "Close on wider significance, not a recap" matches the user's stated preference, wider significance plus a final thought.
+- **Already resolved.** A salutation addressed the job poster instead of the employer (1 bundle). The official-posting identity work now addresses the verified employer or the hiring team.
+- **One-off wording, not acted on:**
+  - a repeated "first" qualifier;
+  - an awkward time connective;
+  - one point sentence whose phrasing read as if the employer needed the candidate's own artifact.
+
+  Each appears once. They are evidence to watch, not rules.
+
+No guidance, brief, rubric or truth-gate change was proposed, so no offline replay or panel was run, and no quality gain is claimed. Frozen regression set: the 15 earlier pairs plus the 2 accepted pairs of this window (17). Counter reset after this entry.

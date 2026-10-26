@@ -426,7 +426,7 @@ const QUEUE_POOL_CLOSE_REASONS = new Set(['drained', 'source_ended', 'continued'
 const QUEUE_MAX_WORKERS = MAX_HANDOFF_CONCURRENCY;
 const QUEUE_ACTIVITY_LIMIT = 20;
 const QUEUE_PUSH_TASKS = new Set([
-  'job-official-posting-research', 'job-official-posting-match',
+  'job-listing-liveness', 'job-official-posting-research', 'job-official-posting-match',
   'price-synthesis', 'price-synthesis-batch', 'bundle-price-synthesis', 'platform-fit-assessment',
   'resume-parse', 'career-profile-compile', 'career-profile-clean', 'career-profile-audit-completeness', 'career-profile-audit-grounding',
   'career-profile-audit-attribution', 'career-profile-audit-metrics', 'career-profile-audit-skills',

@@ -100,6 +100,7 @@ const GENERATION_AUDIT_TOP_LEVEL_KEYS = new Set([
   'createdAt',
   'scope',
   'job',
+  'listingAudit',
   'inputSummary',
   'finalArtifacts',
   'savedArtifacts',
@@ -2338,7 +2339,7 @@ export function legacyListingCollisionBytes(data) {
   const bytes = Buffer.isBuffer(data) ? data : Buffer.from(data);
   const separator = bytes.indexOf(Buffer.from('\n---\n'));
   if (separator < 0) return bytes;
-  const prefixes = ['**Posted by:** ', '**Apply URL:** ', '**Official posting:** ', '**Source level:** '].map(value => Buffer.from(value));
+  const prefixes = ['**Posted by:** ', '**Apply URL:** ', '**Official posting:** ', '**Source level:** ', '**Listing check:** '].map(value => Buffer.from(value));
   const chunks = [];
   let keepStart = 0;
   for (let start = 0; start < separator;) {
@@ -2348,6 +2349,13 @@ export function legacyListingCollisionBytes(data) {
       && bytes.subarray(start, start + prefix.length).equals(prefix))) {
       chunks.push(bytes.subarray(keepStart, start));
       keepStart = end + 1;
+    } else if (bytes[end - 1] !== 13) {
+      const line = bytes.subarray(start, end).toString('utf8');
+      const suffix = /^\*\*Listing URL:\*\* <https?:\/\/[^>\n]+>( \(closed on [A-Za-z0-9-]{1,40}\))$/u.exec(line)?.[1];
+      if (suffix) {
+        chunks.push(bytes.subarray(keepStart, end - Buffer.byteLength(suffix)));
+        keepStart = end;
+      }
     }
     start = end + 1;
   }

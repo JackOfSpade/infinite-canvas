@@ -1088,7 +1088,7 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
   // Application Generate always writes a self-contained Local AI handoff next
   // to the saved canvas. New jobs use paste-back; legacy coding-agent jobs produce files, then
   // the existing polling/import path validates and saves the final bundle.
-  const generateApplication = useCallback(async () => {
+  const generateApplication = useCallback(async (options = {}) => {
     if (!window.electronAPI?.queueLocalApplication || applicationSubmissionRef.current || hasApplicationRun || localJobPending) return;
     if (hasLinkedLocalApplicationOutput(getLiveNode(idRef.current)?.data?.localApplication)) return;
     // The reactive effective lock gives mounted cards immediate feedback; the
@@ -1159,10 +1159,11 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
             nodeId: data.hubId,
             cardId: idRef.current,
             manualAiRunId: prepareRunId,
+            listingOverride: options.listingOverride === true,
             job: {
               title: data.title, company: data.company, snippet: data.snippet,
               postedBy: data.postedBy, applyOptions: data.applyOptions,
-              salaryProvenance: data.salaryProvenance, officialPosting: data.officialPosting, boardClosed: data.boardClosed,
+              salaryProvenance: data.salaryProvenance, officialPosting: data.officialPosting, boardClosed: data.boardClosed, listingLiveness: data.listingLiveness, alternateListings: data.alternateListings,
               googleCardUrl: data.googleCardUrl, sourceJobKey: data.sourceJobKey,
               location: data.location, salary: data.salary, url: normalizeJobListingExternalUrl({
                 title: data.title,
@@ -1188,6 +1189,7 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
                   posted: variant.posted,
                   salary: variant.salary,
                   applySource: variant.applySource,
+                  liveness: variant.liveness === 'closed' ? 'closed' : undefined,
                 })),
             },
           });
@@ -1202,6 +1204,40 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
         if (!queuedLocalApplicationStartDecision(preparedCard, getLiveNode(preparedCard?.data?.hubId)).allowed) {
           cancelledBeforeStart = true;
           return;
+        }
+        if (prepared?.listingCheck?.action === 'refuse-final'
+          || prepared?.listingCheck?.action === 'refuse-retry'
+          || prepared?.listingCheck?.action === 'hold'
+          || (!prepared?.listingCheck?.action && options.listingOverride !== true
+            // eslint-disable-next-line no-useless-escape -- Keep the specified renderer fallback literal byte-for-byte.
+            && /^https?:\/\/(?:[a-z0-9-]+\.)*(?:linkedin\.com|ziprecruiter\.com|dice\.com|indeed\.[a-z.]{2,})(?:[\/:?#]|$)/i.test(
+              normalizeJobListingExternalUrl({
+                title: data.title,
+                company: data.company,
+                location: data.location,
+                url: data.url,
+                googleCardUrl: data.googleCardUrl,
+              }),
+            ))) {
+          updateGlobal(idRef.current, {
+            listingLiveness: prepared?.listingLiveness ?? undefined,
+            boardClosed: prepared?.boardClosed ?? undefined,
+            listingHold: prepared?.listingCheck?.action === 'hold' || !prepared?.listingCheck?.action,
+          });
+          addToast({
+            title: 'Listing check',
+            description: prepared?.message || "Couldn't confirm the listing is still open",
+            type: 'error',
+          });
+          return;
+        }
+        if (JSON.stringify(prepared?.listingLiveness ?? null) !== JSON.stringify(preparedCard?.data?.listingLiveness ?? null)
+          || JSON.stringify(prepared?.boardClosed ?? null) !== JSON.stringify(preparedCard?.data?.boardClosed ?? null)) {
+          updateGlobal(idRef.current, {
+            listingLiveness: prepared?.listingLiveness ?? undefined,
+            boardClosed: prepared?.boardClosed ?? undefined,
+            listingHold: false,
+          });
         }
         resolutionId = typeof prepared?.resolutionId === 'string' ? prepared.resolutionId : null;
         if (prepared?.officialPosting && resolutionId) {
@@ -1345,7 +1381,7 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
         job: {
           title: data.title, company: data.company, snippet: data.snippet,
           postedBy: data.postedBy, applyOptions: data.applyOptions,
-          salaryProvenance: data.salaryProvenance, officialPosting: data.officialPosting, boardClosed: data.boardClosed,
+          salaryProvenance: data.salaryProvenance, officialPosting: data.officialPosting, boardClosed: data.boardClosed, listingLiveness: data.listingLiveness, alternateListings: data.alternateListings,
           googleCardUrl: data.googleCardUrl, sourceJobKey: data.sourceJobKey,
           // New Google rows keep the direct Apply-on URL in `url`; legacy
           // cards may only retain Google’s internal identity. Materialize the
@@ -1381,6 +1417,7 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
               posted: variant.posted,
               salary: variant.salary,
               applySource: variant.applySource,
+              liveness: variant.liveness === 'closed' ? 'closed' : undefined,
             })),
         },
         // The main process resolves and validates the immutable pin again;
@@ -1491,7 +1528,7 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
       applicationSubmissionRef.current = false;
       if (isMountedRef.current) setApplicationRun({ state: 'idle', position: null });
     }
-  }, [data.hubId, data.title, data.company, data.snippet, data.location, data.salary, data.url, data.googleCardUrl, data.sourceJobKey, data.postedBy, data.applyOptions, data.salaryProvenance, data.officialPosting, data.boardClosed, data.source, data.posted, data.language, data.postingVariants, data.reasoning, data.matchScore, additionalNotes, id, getLiveNode, getNodes, getEdges, nav, addToast, isMountedRef, acquireModuleRun, hasApplicationRun, localJobPending, effectiveLock, updateGlobal]);
+  }, [data.hubId, data.title, data.company, data.snippet, data.location, data.salary, data.url, data.googleCardUrl, data.sourceJobKey, data.postedBy, data.applyOptions, data.salaryProvenance, data.officialPosting, data.boardClosed, data.listingLiveness, data.alternateListings, data.source, data.posted, data.language, data.postingVariants, data.reasoning, data.matchScore, additionalNotes, id, getLiveNode, getNodes, getEdges, nav, addToast, isMountedRef, acquireModuleRun, hasApplicationRun, localJobPending, effectiveLock, updateGlobal]);
 
   return (
     <div
@@ -2051,6 +2088,16 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
             : displayedApplicationRun.state === 'resolving' ? 'Finding official posting…'
             : displayedApplicationRun.state === 'generating' ? 'Generating…' : 'Generate'}
         </button>
+        {displayedApplicationRun.state === 'idle' && !localJobPending && data.listingHold === true && (
+          <button
+            onClick={effectiveLock ? undefined : (e) => { e.stopPropagation(); generateApplication({ listingOverride: true }); }}
+            disabled={effectiveLock}
+            className="shrink-0 py-2 px-2.5 rounded-lg text-xs font-medium text-amber-200 bg-amber-400/10 hover:bg-amber-400/15 disabled:opacity-50"
+            title="Generate an application even though this listing could not be confirmed open."
+          >
+            Generate anyway
+          </button>
+        )}
         {displayedApplicationRun.state === 'queued' && (
           <button
             onClick={(e) => { e.stopPropagation(); cancelQueuedRunsForNode(id, 'Application generation cancelled before it started'); }}

@@ -11,6 +11,7 @@ import { officialPostingChunks, resolveOfficialPosting, unresolvedOfficialPostin
 import { descriptionOverlap } from './officialPostingMatch.js';
 import { extractAtsTenant, strictEmployerEqual } from './officialSourceHosts.js';
 import { normalizeOfficialPosting, officialHttpsUrl, boundedOfficialPostingTrail, OFFICIAL_POSTING_LEVELS, OFFICIAL_POSTING_OUTCOMES, OFFICIAL_POSTING_TRAIL, OFFICIAL_POSTING_COMPARATIVE_CODES } from './officialPostingFields.js';
+import { mergeListingLivenessTelemetry } from './listingLivenessTelemetry.js';
 import { mergeBoardClosedTelemetry } from './officialPostingBoardClosed.js';
 import { buildOfficialPostingResearchRequest, parseOfficialPostingResearchResponse, buildOfficialPostingMatchRequest, validateOfficialPostingMatchResponse } from './officialPostingBridge.js';
 import { hasLiveObservedWorker, hasPendingObservedWorkerLaunch } from './handoffBridge/observedChatContext.js';
@@ -56,7 +57,7 @@ function failureCode(error, signal) {
   return 'research-miss';
 }
 
-async function cappedHandoff(request, { call, signal, timeoutMs, manualAiRunId, nodeId, hints, now, stats,
+export async function cappedHandoff(request, { call, signal, timeoutMs, manualAiRunId, nodeId, hints, now, stats,
   comparativeWorkerAvailable = null, comparativeWorkerLaunching = null, comparativeGraceMs = OFFICIAL_POSTING_COMPARATIVE_WORKER_GRACE_MS }) {
   const controller = new AbortController();
   const abort = () => controller.abort(signal?.reason || bridgeError('bridge-aborted'));
@@ -168,6 +169,8 @@ export function mergeOfficialPostingTelemetry(...blocks) {
   // when a pass saw any, so a pass without them keeps its historical shape.
   const boardClosed = mergeBoardClosedTelemetry(...blocks.map(block => block?.boardClosed));
   if (Object.keys(boardClosed).length) result.boardClosed = boardClosed;
+  const listingLiveness = mergeListingLivenessTelemetry(...blocks.map(block => block?.listingLiveness));
+  if (Object.keys(listingLiveness).length) result.listingLiveness = listingLiveness;
   return result;
 }
 async function parallelRows(members, operation) {
@@ -197,6 +200,9 @@ export async function partitionOfficialPostingRows(jobs, { store, signal, now = 
     const posting = normalizeOfficialPosting(record?.officialPosting);
     if (!posting || !officialPostingRecordMatchesScrapedIdentity(job, record)
       || !shouldPersistOfficialPostingResult(posting, { signal })) return;
+    // Older closed-trail misses lack a candidate confirmation receipt. Revisit
+    // them rather than treating an expired validThrough as a proved closure.
+    if (['L5', 'L6'].includes(posting.level) && posting.trail?.includes('closed')) return;
     if (!VERIFIED_LEVELS.has(posting.level)) {
       const age = instant - record.savedAt;
       if (!Number.isFinite(age) || age < 0 || age >= MISS_TTL_MS) return;
@@ -253,7 +259,8 @@ export function createOfficialPostingRecoveryPassResolver(resolveRows, { signal 
         const kept = resolved.jobs[keptIndex];
         const bucket = receipts.get(identity.key) || [];
         item.receipt = { aliases: identity.aliases, dropped: !kept,
-          postedBy: kept?.postedBy, officialPosting: normalizeOfficialPosting(kept?.officialPosting) || undefined };
+          postedBy: kept?.postedBy, officialPosting: normalizeOfficialPosting(kept?.officialPosting) || undefined,
+          boardClosed: kept?.boardClosed, listingLiveness: kept?.listingLiveness };
         bucket.push(item.receipt);
         receipts.set(identity.key, bucket);
       }
@@ -264,6 +271,10 @@ export function createOfficialPostingRecoveryPassResolver(resolveRows, { signal 
     const combined = planned.flatMap(({ job, receipt }) => {
       if (receipt.dropped) return [];
       const row = { ...job, postedBy: receipt.postedBy, officialPosting: receipt.officialPosting };
+      if (receipt.boardClosed === undefined) delete row.boardClosed;
+      else row.boardClosed = receipt.boardClosed;
+      if (receipt.listingLiveness === undefined) delete row.listingLiveness;
+      else row.listingLiveness = receipt.listingLiveness;
       outputReceipts.set(row, receipt);
       return [row];
     });
@@ -321,7 +332,8 @@ export async function resolveOfficialPostings(jobs, {
     // A row budget can end while the run continues. The shared predicate
     // requires a deterministic anchor before a partial verified crawl is durable.
     const durability = VERIFIED_LEVELS.has(result.officialPosting?.level) ? signal : member.rowBudget.signal;
-    if (!store || result.record || result.officialPosting?.trail?.includes('recent-miss')
+    if (!store || result.record || result.expiryCandidates?.length
+      || result.officialPosting?.trail?.includes('recent-miss')
       || !shouldPersistOfficialPostingResult(result, { signal: durability, researchRan })) return result;
     try {
       const record = await store.save(member.job, { officialPosting: result.officialPosting, description: result.description });
@@ -427,7 +439,8 @@ export async function resolveOfficialPostings(jobs, {
     const resolved = rows.map(job => { const result = byJob.get(job); return { ...job, postedBy: result?.postedBy,
       officialPosting: normalizeOfficialPosting(result?.officialPosting) || undefined }; });
     if (telemetry && typeof telemetry === 'object') telemetry.officialPosting = stats;
-    return { jobs: resolved, telemetry: stats };
+    return { jobs: resolved, telemetry: stats,
+      expiryCandidates: rows.map(job => byJob.get(job)?.expiryCandidates || []) };
   } finally {
     for (const member of members) member.rowBudget.dispose();
     if (!fetchSession) session.dispose?.();

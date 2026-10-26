@@ -132,8 +132,14 @@ import { buildPersonalSalaryEvidence, PERSONAL_SALARY_GUIDANCE_PROMPT, validateP
 import { buildJobLocationLookupRequest, selectLookupRequests, runJobLocationLookup, applyLookedUpLocation, locationSourceLink } from './jobLocationLookup.js';
 import { getOfficialPostingView, resolveOfficialPostings, officialPostingDedup, partitionOfficialPostingRows, mergeOfficialPostingTelemetry, createOfficialPostingRecoveryPassResolver } from './officialPostingService.js';
 import { officialPostingAliases, officialPostingRecordMatchesScrapedIdentity } from './officialPostingStore.js';
-import { normalizeOfficialPosting } from './officialPostingFields.js';
-import { boardClosedRetirement, boardClosedSetAside, boardClosedTelemetryBlock, isBoardClosedRow, preferOpenRows, scoreSafeRowsWithBoardClosed, settleBoardClosedRows } from './officialPostingBoardClosed.js';
+import { listingStateRank, normalizeBoardClosed, normalizeListingLiveness, normalizeOfficialPosting } from './officialPostingFields.js';
+import { bumpListingLivenessCount, listingLivenessTelemetryBlock, mergeListingLivenessTelemetry } from './listingLivenessTelemetry.js';
+import { listingEvidenceKey, officialExpiryCandidatesConfirmedClosed, readListingEvidence } from './listingLivenessStore.js';
+import { createListingLivenessSearchSession } from './listingLivenessSearch.js';
+import { carryListingAlternates, collectListingAlternates, restoreListingAlternates } from './listingLivenessAlternates.js';
+import { getListingLivenessCalibrationStore } from './listingLivenessCalibration.js';
+import { getHandoffBridgeStatus } from './handoffBridge/index.js';
+import { boardClosedRetirement, boardClosedSetAside, boardClosedTelemetryBlock, preferOpenRows, scoreSafeRowsWithBoardClosed, settleBoardClosedRows } from './officialPostingBoardClosed.js';
 import { blankJobPreferencePlan, interpretJobPreferences, evaluateJobPreferences, isValidJobPreferencePlanSubmission, normalizeJobPreferencePlan, resolveSearchRoles, screenJobRolesByTitle } from './jobPreferences.js';
 import { acquireCanvasRecoveryRead, resolveCanvasRecoveryPath, withCanvasRecoveryOwner } from './canvasRecoveryPaths.js';
 import { createDependencyReadyQueue, HANDOFF_CONCURRENCY, mapAutomaticHandoffs, runAutomaticHandoffWorkers } from '../../src/utils/handoffScheduler.js';
@@ -5898,6 +5904,7 @@ export function buildJobRunCompletionReceipt(runId, completedAt = Date.now(), te
       },
     } : {}),
     ...(hasRunScopedRecovery ? { recovery: { mergeNet: recoveryMergeNet } } : {}),
+    ...(search?.officialPosting?.listingLiveness ? { listingLiveness: search.officialPosting.listingLiveness } : {}),
     sources,
     stagingStarted: pipeline?.stagingStarted === true,
   };
@@ -7132,13 +7139,15 @@ export function retiredListingKeys(droppedJobs = [], boardClosed = null) {
   // description) retire here too.
   if (!boardClosed) return retired;
   const kept = boardClosed.keptKeys instanceof Set ? boardClosed.keptKeys : new Set();
+  const deferred = boardClosed.deferredKeys instanceof Set ? boardClosed.deferredKeys : new Set();
   return [...new Set([...retired, ...(Array.isArray(boardClosed.droppedKeys) ? boardClosed.droppedKeys : [])])]
-    .filter(key => !kept.has(key));
+    .filter(key => !kept.has(key) && !deferred.has(key));
 }
 
 function overlayResolvedRecoveryRows(rows, resolvedRows) {
   const resolved = new Map((Array.isArray(resolvedRows) ? resolvedRows : [])
-    .filter(job => normalizeOfficialPosting(job?.officialPosting)).map(job => [sourceJobKey(job), job]));
+    .filter(job => normalizeOfficialPosting(job?.officialPosting) || normalizeListingLiveness(job?.listingLiveness))
+    .map(job => [sourceJobKey(job), job]));
   const source = Array.isArray(rows) ? rows : [];
   if (!resolved.size) return source;
   let changed = false;
@@ -7146,7 +7155,18 @@ function overlayResolvedRecoveryRows(rows, resolvedRows) {
     const prior = resolved.get(sourceJobKey(job));
     if (!prior || !officialPostingRecordMatchesScrapedIdentity(job, { aliases: officialPostingAliases(prior) })) return job;
     changed = true;
-    return { ...job, postedBy: prior.postedBy, officialPosting: normalizeOfficialPosting(prior.officialPosting) };
+    const projected = { ...job };
+    const posting = normalizeOfficialPosting(prior.officialPosting);
+    if (posting) { projected.postedBy = prior.postedBy; projected.officialPosting = posting; }
+    const priorState = normalizeListingLiveness(prior.listingLiveness);
+    const currentState = normalizeListingLiveness(job?.listingLiveness);
+    if (priorState && (!currentState || Date.parse(priorState.at) >= Date.parse(currentState.at))) {
+      projected.listingLiveness = priorState;
+      const closed = normalizeBoardClosed(prior.boardClosed);
+      if (closed) projected.boardClosed = closed;
+      else delete projected.boardClosed;
+    }
+    return projected;
   });
   return changed ? overlaid : source;
 }
@@ -7183,7 +7203,7 @@ export function reconcileResolvedDescriptionRecovery(recoveryJobs, sourceId, res
     // A board-closed row is terminal, not "not recovered yet": reopening a page
     // the board already reported gone cannot add a description, and the
     // official-posting pass (not another Solve) decides whether it stays.
-    emptyRows: evidence.dropped.filter(job => job?.source === sourceId && !isBoardClosedRow(job)),
+    emptyRows: evidence.dropped.filter(job => job?.source === sourceId && listingStateRank(job) < 3),
   };
 }
 
@@ -7197,6 +7217,12 @@ export function reconcileResolvedDescriptionRecovery(recoveryJobs, sourceId, res
  */
 export function mergeResolvedDescriptionRecoveryCandidate(candidate, resolvedRow, sourceId) {
   const merged = { ...candidate, ...resolvedRow, source: sourceId };
+  if (Object.hasOwn(resolvedRow || {}, 'boardClosed') || Object.hasOwn(resolvedRow || {}, 'listingLiveness')) {
+    delete merged.boardClosed;
+    delete merged.listingLiveness;
+    if (resolvedRow?.boardClosed !== undefined) merged.boardClosed = resolvedRow.boardClosed;
+    if (resolvedRow?.listingLiveness !== undefined) merged.listingLiveness = resolvedRow.listingLiveness;
+  }
   if (hasResolvedJobDescription(resolvedRow)) delete merged.descriptionDeferredReason;
   return merged;
 }
@@ -7211,7 +7237,7 @@ export function partitionResolvedDescriptionRecoveryCandidates(recoveryJobs, sou
   const sourceRecovery = (Array.isArray(recoveryJobs) ? recoveryJobs : [])
     .filter(job => job?.source === sourceId);
   // Board-closed rows are terminal (see reconcileResolvedDescriptionRecovery).
-  const deferred = filterJobsByDescriptionEvidence(sourceRecovery).dropped.filter(job => !isBoardClosedRow(job));
+  const deferred = filterJobsByDescriptionEvidence(sourceRecovery).dropped.filter(job => listingStateRank(job) < 3);
   const deferredKeys = new Set(deferred.map(sourceJobKey).filter(Boolean));
   if (deferredKeys.size === 0) return { candidates: [], unavailable: [] };
   const candidates = (Array.isArray(providerRows) ? providerRows : [])
@@ -7410,7 +7436,8 @@ async function runCooldownProbe(nodeId, waitsMs, initialPool, signal, progressFn
       ? enrichLinkedInDescriptionsLocked(batch, signal)
       : enrichLinkedInDescriptionsBrowser(batch, signal));
     const byUrl = new Map((pr.jobs || []).map(j => [j.url, j]));
-    pool = pool.map(j => byUrl.get(j.url) || j);
+    const structurallyDropped = new Set(pr.structuralDroppedKeys || []);
+    pool = pool.filter(j => !structurallyDropped.has(sourceJobKey(j))).map(j => byUrl.get(j.url) || j);
     probeTotalEnriched += pr.successCount || 0;
     const stillEmptyAfter = filterJobsByDescriptionEvidence(pool).dropped.length;
     recordLinkedinEnrichPass({ kind: 'probe', ...(ownership || {}), ip, ipOk: !!ip, walled: pr.loginWall, browserUnavailable: !!pr.browserUnavailable, attempted: pr.attempted ?? batch.length, remainingBefore: stillEmpty.length, enriched: pr.successCount || 0, stillEmpty: stillEmptyAfter, contextRotations: pr.contextRotations || 0, browserGen: pr.browserGen ?? null, browserAgeMs: pr.browserAgeMs ?? null, startedAt });
@@ -11040,34 +11067,37 @@ function registerJobsHandlersWithDependencies(dependencies = {}) {
   const afterSearchProviderResult = dependencies.afterSearchProviderResult || (async () => {});
   const runOfficialPostings = dependencies.resolveOfficialPostings || resolveOfficialPostings;
   const readOfficialPostingView = dependencies.getOfficialPostingView || getOfficialPostingView;
+  const callListingLiveness = dependencies.callListingLiveness || callLLMText;
+  const handoffBridgeStatus = dependencies.handoffBridgeStatus || getHandoffBridgeStatus;
+  const listingLivenessCalibrationStore = dependencies.listingLivenessCalibrationStore || getListingLivenessCalibrationStore();
   const retryIndeedDescriptions = dependencies.retryIndeedJobDescriptions || retryIndeedJobDescriptions;
+  const settleBoardClosedRowsForHandler = dependencies.settleBoardClosedRowsForTests || settleBoardClosedRows;
   // After resolution: keep or retire every row an aggregator board reported
   // closed. Official text counts as description evidence here (stored view), and
   // a failure of this step is contained to the conservative rule: a board-closed
   // row without a score-safe description leaves, everything else stays.
-  const settleBoardClosed = async (rows, signal) => {
+  const settleBoardClosed = async (rows, signal, expiryCandidatesConfirmedClosed = null) => {
+    const setAsideKeys = getCurrentIpcRequestContext()?.listingSetAsideKeys
+      || new Set((Array.isArray(rows) ? rows : []).filter(row => listingStateRank(row) >= 3 && !hasResolvedJobDescription(row)).map(listingEvidenceKey));
     try {
-      return await settleBoardClosedRows(rows, { scoreSafe: hasResolvedJobDescription,
+      return await settleBoardClosedRowsForHandler(rows, { scoreSafe: hasResolvedJobDescription,
         getView: row => readOfficialPostingView(row, { store: dependencies.officialPostingStore, signal }),
-        minChars: JOB_DESCRIPTION_EVIDENCE_MIN_CHARS });
+        minChars: JOB_DESCRIPTION_EVIDENCE_MIN_CHARS, setAsideKeys, expiryCandidatesConfirmedClosed });
     } catch (error) {
       if (signal?.aborted) throw signal.reason || error;
       logger.warn(`[OfficialPosting] Board-closed settlement failed: ${error?.code || error?.name || 'Error'}`);
-      const kept = []; const dropped = []; const dispositions = new Map();
-      for (const row of Array.isArray(rows) ? rows : []) {
-        if (!isBoardClosedRow(row)) kept.push(row);
-        else if (!hasResolvedJobDescription(row)) dropped.push({ row, disposition: 'dropped-no-description' });
-        else { kept.push(row); dispositions.set(row, 'kept-unchecked'); }
-      }
-      return { kept, dropped, dispositions };
+      return settleBoardClosedRows(rows, { scoreSafe: hasResolvedJobDescription,
+        minChars: JOB_DESCRIPTION_EVIDENCE_MIN_CHARS, setAsideKeys, expiryCandidatesConfirmedClosed });
     }
   };
   // Every provider and recovery path crosses this boundary after its existing
   // evidence gate. Identity rows stay scraped; only resolution fields are added.
   // Board-closed rows the evidence gate dropped arrive here too (see
   // scoreSafeRowsWithBoardClosed) and are kept or removed after resolution.
-  const resolveScoreSafePostings = async (rows, { event, nodeId, signal, jobRunId = null } = {}) => {
+  const resolveScoreSafePostings = async (rows, { event, nodeId, signal, jobRunId = null, alternateReceipts = null } = {}) => {
     const context = getCurrentIpcRequestContext();
+    if (context) context.listingSetAsideKeys = new Set((Array.isArray(rows) ? rows : [])
+      .filter(row => listingStateRank(row) >= 3 && !hasResolvedJobDescription(row)).map(listingEvidenceKey));
     const onProgress = ({ completed = 0, total = rows.length } = {}) => {
       if (signal?.aborted || event?.sender?.isDestroyed?.()) return;
       const payload = { nodeId, jobRunId, sourceId: 'official-posting', count: 0,
@@ -11091,15 +11121,90 @@ function registerJobsHandlersWithDependencies(dependencies = {}) {
       if (!Array.isArray(resolved?.jobs) || resolved.jobs.length !== unresolved.length) throw new TypeError('Official posting resolution returned incomplete rows.');
       const complete = [...partition.jobs];
       partition.unresolvedIndices.forEach((rowIndex, index) => { complete[rowIndex] = resolved.jobs[index]; });
-      const deduped = officialPostingDedup(complete);
-      const settled = await settleBoardClosed(deduped.kept, signal);
+      const expiryCandidateKeys = new Set(partition.unresolvedIndices.flatMap((rowIndex, index) =>
+        Array.isArray(resolved.expiryCandidates?.[index]) && resolved.expiryCandidates[index].length
+          ? [listingEvidenceKey(complete[rowIndex])] : []));
+      const expiryCandidatesConfirmedClosed = row => !expiryCandidateKeys.has(listingEvidenceKey(row))
+        || officialExpiryCandidatesConfirmedClosed(row);
+      let deduped = officialPostingDedup(complete);
+      const alternatesByKey = alternateReceipts
+        ? collectListingAlternates({ ...alternateReceipts, officialDrops: deduped.dropped,
+          finalKept: deduped.kept }) : null;
+      const livenessSession = createListingLivenessSearchSession({
+        callText: callListingLiveness, bridgeStatus: handoffBridgeStatus,
+        calibrationStore: listingLivenessCalibrationStore, signal,
+        nodeId: context?.nodeId || nodeId, manualAiRunId: context?.manualAiRunId || null,
+        abortError: nodeCancellationError,
+      });
+      let alternateRestored = [];
+      let alternateClassified = new Map();
+      try {
+        deduped = { ...deduped, kept: await livenessSession.classifyPrimary(deduped.kept) };
+        if (alternatesByKey instanceof Map && alternatesByKey.size > 0) {
+          const alternateResult = await restoreListingAlternates(deduped.kept, {
+            alternatesByKey, scoreSafe: hasResolvedJobDescription,
+            shouldTryWinner: async winner => {
+              const preliminary = await settleBoardClosedRows([winner], {
+                scoreSafe: hasResolvedJobDescription,
+                getView: row => readOfficialPostingView(row, { store: dependencies.officialPostingStore, signal }),
+                minChars: JOB_DESCRIPTION_EVIDENCE_MIN_CHARS,
+                setAsideKeys: context?.listingSetAsideKeys || null,
+                expiryCandidatesConfirmedClosed,
+              });
+              return preliminary.dispositions.get(winner) !== 'kept-official';
+            },
+            hasEvidence: row => Boolean(readListingEvidence(row)),
+            classifyPending: candidates => livenessSession.classifyAlternates(candidates), signal,
+          });
+          deduped = { ...deduped, kept: alternateResult.rows };
+          alternateRestored = alternateResult.restored;
+          alternateClassified = alternateResult.classified || new Map();
+        }
+        await livenessSession.classifyExpiryCandidates(deduped.kept);
+        if (alternatesByKey instanceof Map) deduped = { ...deduped,
+          kept: carryListingAlternates(deduped.kept, { alternatesByKey,
+            restored: alternateRestored, classified: alternateClassified }) };
+      } catch (error) {
+        if (signal?.aborted) throw signal.reason || error;
+        logger.warn(`[ListingLiveness] Search check failed: ${error?.code || error?.name || 'Error'}`);
+      }
+      if (signal?.aborted) throw signal.reason || nodeCancellationError();
+      // A page on an ATS host is the employer's own listing authority. Its
+      // AI-confirmed close is terminal after cross-source alternate recovery.
+      const officialClosedDrops = [];
+      deduped = { ...deduped, kept: deduped.kept.filter(row => {
+        const evidence = readListingEvidence(row);
+        if (row?.listingLiveness?.verdict !== 'closed' || row.listingLiveness.basis !== 'ai'
+          || evidence?.finalHostClass !== 'ats') return true;
+        officialClosedDrops.push({ kept: null, dropped: row, reason: 'dropped-official-closed',
+          stage: 'board-closed', retire: true });
+        return false;
+      }) };
+      const settled = await settleBoardClosed(deduped.kept, signal, expiryCandidatesConfirmedClosed);
+      const restoredCounts = {};
+      for (const { row } of alternateRestored) {
+        const board = row?.listingLiveness?.board || row?.source;
+        if (board) bumpListingLivenessCount(restoredCounts, board, 'alternateRestored');
+      }
+      const expiryCounts = {};
+      for (const row of deduped.kept) {
+        const posting = normalizeOfficialPosting(row?.officialPosting);
+        if (posting?.outcome !== 'not-found' || !posting.trail?.includes('closed')) continue;
+        const board = row?.listingLiveness?.board || row?.boardClosed?.board;
+        if (board) bumpListingLivenessCount(expiryCounts, board, 'expiryOnlyClosedCopies');
+      }
+      const listingLiveness = mergeListingLivenessTelemetry(
+        listingLivenessTelemetryBlock({ input: rows, settled, officialClosedDrops }),
+        livenessSession.telemetry().listingLiveness, restoredCounts, expiryCounts);
       onProgress({ completed: rows.length, total: rows.length });
       return { jobs: settled.kept,
         officialPosting: mergeOfficialPostingTelemetry(partition.settledTelemetry, resolved.telemetry,
-          { boardClosed: boardClosedTelemetryBlock({ input: rows, settled, officialDedupDrops: deduped.dropped }) }),
+          { boardClosed: boardClosedTelemetryBlock({ input: rows, settled, officialDedupDrops: deduped.dropped }),
+            listingLiveness }),
         officialDedupDropped: deduped.dropped.length, officialDedupDrops: deduped.dropped,
-        boardClosedDropped: settled.dropped.length,
-        boardClosedDrops: settled.dropped.map(entry => ({ kept: null, dropped: entry.row, reason: entry.disposition, stage: 'board-closed' })) };
+        boardClosedDropped: settled.dropped.length + officialClosedDrops.length,
+        boardClosedDrops: [...officialClosedDrops, ...settled.dropped.map(entry => ({ kept: null, dropped: entry.row,
+          reason: entry.disposition, stage: 'board-closed', retire: entry.disposition !== 'deferred-unchecked' }))] };
     } catch (error) {
       if (signal?.aborted) throw signal.reason || error;
       logger.warn(`[OfficialPosting] Search resolution failed: ${error?.code || error?.name || 'Error'}`);
@@ -11107,12 +11212,15 @@ function registerJobsHandlersWithDependencies(dependencies = {}) {
       // same rule as an unresolved pass (no description: gone; description: kept).
       const settled = await settleBoardClosed(rows, signal);
       const boardClosed = boardClosedTelemetryBlock({ input: rows, settled });
+      const listingLiveness = listingLivenessTelemetryBlock({ input: rows, settled });
       return { jobs: settled.kept, officialPosting: { total: rows.length, failed: rows.length,
         levels: {}, outcomes: { failed: rows.length }, rejections: { failed: rows.length },
-        ...(Object.keys(boardClosed).length ? { boardClosed } : {}) },
+        ...(Object.keys(boardClosed).length ? { boardClosed } : {}),
+        ...(Object.keys(listingLiveness).length ? { listingLiveness } : {}) },
       officialDedupDropped: 0, officialDedupDrops: [],
       boardClosedDropped: settled.dropped.length,
-      boardClosedDrops: settled.dropped.map(entry => ({ kept: null, dropped: entry.row, reason: entry.disposition, stage: 'board-closed' })) };
+      boardClosedDrops: settled.dropped.map(entry => ({ kept: null, dropped: entry.row, reason: entry.disposition,
+        stage: 'board-closed', retire: entry.disposition !== 'deferred-unchecked' })) };
     }
   };
   void pruneStaleUnsavedAnalysisArtifacts();
@@ -13870,6 +13978,7 @@ Return a JSON object with four arrays of search query strings:
         const cooldownMins = Math.round(cooldownMs / 60_000);
         const MAX_PASSES = 40;
         let lkPool = linkedinKept.slice();
+        const lkStructuralDropped = new Set();
         // Consecutive zero-yield passes. A walled/soft-blocked pass that enriches
         // NOTHING even after a cooldown wait means the limit isn't clearing — stop
         // spinning rather than burn all MAX_PASSES on 0-yield retries.
@@ -13886,13 +13995,15 @@ Return a JSON object with four arrays of search query strings:
 
           const passStartedAt = Date.now();
           await assertSearchCurrent();
-          const { jobs: enriched, loginWall, cancelled: lkCancelled = false, successCount = 0, attempted = remaining.length, contextRotations = 0, browserGen = null, browserAgeMs = null, noDesc = 0, noDescSoftBlock = 0, noDescGenuine = 0, evalErrors = 0, navErrors = 0, browserUnavailable = false, profileReserved = false, browserError = null, usedAuthenticated = false, authenticatedFallback = false } =
+          const { jobs: enriched, structuralDroppedKeys = [], loginWall, cancelled: lkCancelled = false, successCount = 0, attempted = remaining.length, contextRotations = 0, browserGen = null, browserAgeMs = null, noDesc = 0, noDescSoftBlock = 0, noDescGenuine = 0, evalErrors = 0, navErrors = 0, browserUnavailable = false, profileReserved = false, browserError = null, usedAuthenticated = false, authenticatedFallback = false } =
             await enrichLinkedInDescriptionsLocked(remaining, combinedSignal, { preferAuthenticated: preferLinkedInAuthenticated });
           await assertSearchCurrent();
           if (lkCancelled || combinedSignal.aborted) await throwIfSearchAborted();
 
           const byUrl = new Map(enriched.map(j => [j.url, j]));
-          lkPool = lkPool.map(j => byUrl.has(j.url) ? byUrl.get(j.url) : j);
+          for (const key of structuralDroppedKeys) lkStructuralDropped.add(key);
+          lkPool = lkPool.filter(j => !lkStructuralDropped.has(sourceJobKey(j)))
+            .map(j => byUrl.has(j.url) ? byUrl.get(j.url) : j);
           const stillEmpty = filterJobsByDescriptionEvidence(lkPool).dropped.length;
 
           // The limit bites two ways: the URL-redirect wall (loginWall), and gutted
@@ -13934,7 +14045,8 @@ Return a JSON object with four arrays of search query strings:
         }
 
         const lkByUrl = new Map(lkPool.map(j => [j.url, j]));
-        kept = kept.map(j => j.source === 'linkedin' ? (lkByUrl.get(j.url) || j) : j);
+        kept = kept.filter(j => !lkStructuralDropped.has(sourceJobKey(j)))
+          .map(j => j.source === 'linkedin' ? (lkByUrl.get(j.url) || j) : j);
         clearLinkedInCeiling();
         if (lkBrowserUnavailableResult) {
           const warning = linkedInBrowserUnavailableWarning(lkBrowserUnavailableResult);
@@ -13951,7 +14063,7 @@ Return a JSON object with four arrays of search query strings:
         // In production: emits a wait-or-switch warning and leaves Solve available.
         const lkPassStartedAt = Date.now();
         await assertSearchCurrent();
-        const { jobs: enriched, loginWall, cancelled: lkCancelled = false, successCount: lkSuccess = 0, attempted: lkAttempted = linkedinKept.length, contextRotations: lkRotations = 0, browserGen: lkBrowserGen = null, browserAgeMs: lkBrowserAgeMs = null, noDesc: lkNoDesc = 0, noDescSoftBlock: lkNoDescSoft = 0, noDescGenuine: lkNoDescGenuine = 0, evalErrors: lkEvalErrors = 0, navErrors: lkNavErrors = 0, noInternet: lkNoInternet = false, browserUnavailable: lkBrowserUnavailable = false, profileReserved: lkProfileReserved = false, browserError: lkBrowserError = null, usedAuthenticated: lkUsedAuthenticated = false, authenticatedFallback: lkAuthenticatedFallback = false } = await enrichLinkedInDescriptionsLocked(linkedinKept, combinedSignal, {
+        const { jobs: enriched, structuralDroppedKeys = [], loginWall, cancelled: lkCancelled = false, successCount: lkSuccess = 0, attempted: lkAttempted = linkedinKept.length, contextRotations: lkRotations = 0, browserGen: lkBrowserGen = null, browserAgeMs: lkBrowserAgeMs = null, noDesc: lkNoDesc = 0, noDescSoftBlock: lkNoDescSoft = 0, noDescGenuine: lkNoDescGenuine = 0, evalErrors: lkEvalErrors = 0, navErrors: lkNavErrors = 0, noInternet: lkNoInternet = false, browserUnavailable: lkBrowserUnavailable = false, profileReserved: lkProfileReserved = false, browserError: lkBrowserError = null, usedAuthenticated: lkUsedAuthenticated = false, authenticatedFallback: lkAuthenticatedFallback = false } = await enrichLinkedInDescriptionsLocked(linkedinKept, combinedSignal, {
           preferAuthenticated: preferLinkedInAuthenticated,
           // Per-item beat so the card stops reading as a hang. Keep the
           // source/query counters at the one-source denominator stamped above;
@@ -13970,7 +14082,9 @@ Return a JSON object with four arrays of search query strings:
         await assertSearchCurrent();
         if (lkCancelled || combinedSignal.aborted) await throwIfSearchAborted();
         const enrichedByUrl = new Map(enriched.map(j => [j.url, j]));
-        kept = kept.map(j => j.source === 'linkedin' && enrichedByUrl.has(j.url) ? enrichedByUrl.get(j.url) : j);
+        const structurallyDropped = new Set(structuralDroppedKeys);
+        kept = kept.filter(j => !structurallyDropped.has(sourceJobKey(j)))
+          .map(j => j.source === 'linkedin' && enrichedByUrl.has(j.url) ? enrichedByUrl.get(j.url) : j);
 
         const lkStillEmpty = filterJobsByDescriptionEvidence(kept.filter(j => j.source === 'linkedin')).dropped.length;
         // The guest limit bites two ways: the hard URL-redirect wall (loginWall)
@@ -14186,7 +14300,10 @@ Return a JSON object with four arrays of search query strings:
     const finalDedupDrops = [];
     // Set-aside board-closed rows join the dedup. preferOpenRows: first-wins dedup
     // must never let a closed copy beat an open copy of the same posting.
-    kept = preferOpenRows([...kept, ...boardClosedAside]);
+    const livenessOrderInput = [...kept, ...boardClosedAside];
+    const preferredLivenessOrder = preferOpenRows(livenessOrderInput);
+    const livenessReordered = preferredLivenessOrder !== livenessOrderInput;
+    kept = preferredLivenessOrder;
     const finalDeduped = dedupByTitleCompany(kept, {
       onDuplicate: (entry) => { finalDedupDrops.push(entry); },
     });
@@ -14199,17 +14316,22 @@ Return a JSON object with four arrays of search query strings:
     await assertSearchCurrent();
     const officialResolution = await resolveScoreSafePostings(kept, {
       event, nodeId, signal: combinedSignal, jobRunId: activeRunId,
+      alternateReceipts: { admissionDrops: dedupDrops, finalDrops: finalDedupDrops },
     });
     await assertSearchCurrent();
     kept = officialResolution.jobs;
     const officialDedupDropped = officialResolution.officialDedupDropped;
     const boardClosedDropped = Math.max(0, Number(officialResolution.boardClosedDropped) || 0);
     const officialResolutionChanged = officialDedupDropped > 0 || boardClosedDropped > 0 || kept.some((job, index) =>
-      JSON.stringify([job?.postedBy, job?.officialPosting])
-        !== JSON.stringify([finalDeduped[index]?.postedBy, finalDeduped[index]?.officialPosting]));
+      JSON.stringify([job?.source, job?.url, job?.googleCardUrl, job?.jobkey,
+        job?.postedBy, job?.officialPosting, job?.boardClosed, job?.listingLiveness])
+        !== JSON.stringify([finalDeduped[index]?.source, finalDeduped[index]?.url,
+          finalDeduped[index]?.googleCardUrl, finalDeduped[index]?.jobkey,
+          finalDeduped[index]?.postedBy, finalDeduped[index]?.officialPosting,
+          finalDeduped[index]?.boardClosed, finalDeduped[index]?.listingLiveness]));
     // preferOpenRows moved board-closed rows behind the open ones for dedup; put
     // the survivors back in recency order.
-    if (kept.some(isBoardClosedRow)) kept.sort((a, b) => postedMs(b) - postedMs(a));
+    if (livenessReordered) kept.sort((a, b) => postedMs(b) - postedMs(a));
     // Keep bounded provenance for BOTH passes. The final-pass count is also a
     // first-class funnel stage below, so it cannot silently look like an AI or
     // renderer loss.
@@ -14753,7 +14875,7 @@ Return a JSON object with four arrays of search query strings:
       exactExecution?.release?.();
       recoveryLease.release();
     }
-  });
+  }, { captureListingLiveness: true });
 
   // ── Resume-from-incomplete-run IPC ──────────────────────────────────────────
   // peek-job-run (on hub load) detects a recent, incomplete run and surfaces a
@@ -15405,7 +15527,7 @@ Return a JSON object with four arrays of search query strings:
       officialDedupDropped: officialResolution.officialDedupDropped,
       warning,
     };
-  }, { beforeReply: checkpointContinuationBeforeReply('search-jobs-single-source') });
+  }, { beforeReply: checkpointContinuationBeforeReply('search-jobs-single-source'), captureListingLiveness: true });
 
   // ── Jobs history (60-day rolling CSV next to the canvas JSON) ─────────────
   handleSafe('prepare-board-jobs-history', async (event, args = {}) => prepareBoardHistoryWrite(event, args));
@@ -16249,7 +16371,7 @@ Return a JSON object with four arrays of search query strings:
         batchTotal: scoringBatches.length,
       };
     }
-  });
+  }, { captureListingLiveness: true });
 
   // Board-stage compensation research. Called after successful taxonomy
   // bucketing, so equivalent jobs across all merged search hubs share market
@@ -16923,7 +17045,7 @@ Return a JSON object with four arrays of search query strings:
           }
 
           sendProgress({ nodeId, sourceId: 'linkedin', status: 'searching', count: needEnrich.length, detail: 're-fetching descriptions', warning: null });
-          const { jobs: enriched, loginWall: walled, cancelled = false, successCount = 0, attempted = needEnrich.length, contextRotations = 0, browserGen = null, browserAgeMs = null, noDesc = 0, noDescSoftBlock = 0, noDescGenuine = 0, evalErrors = 0, navErrors = 0, noInternet = false, browserUnavailable = false, profileReserved = false, browserError = null, usedAuthenticated = false, authenticatedFallback = false } = await enrichLinkedInDescriptionsBrowser(needEnrich, signal, {
+          const { jobs: enriched, structuralDroppedKeys = [], loginWall: walled, cancelled = false, successCount = 0, attempted = needEnrich.length, contextRotations = 0, browserGen = null, browserAgeMs = null, noDesc = 0, noDescSoftBlock = 0, noDescGenuine = 0, evalErrors = 0, navErrors = 0, noInternet = false, browserUnavailable = false, profileReserved = false, browserError = null, usedAuthenticated = false, authenticatedFallback = false } = await enrichLinkedInDescriptionsBrowser(needEnrich, signal, {
             preferAuthenticated,
             // Same silence, same fix, on the Solve recovery walk.
             onProgress: ({ completed, total }) => sendProgress({
@@ -16937,7 +17059,9 @@ Return a JSON object with four arrays of search query strings:
           // Merge whatever we got this pass back into the full set (keeps prior
           // descriptions for jobs enriched before the ceiling was hit).
           const enrichedByUrl = new Map(enriched.map(j => [j.url, j]));
-          items = allLinkedIn.map(j => enrichedByUrl.get(j.url) || j);
+          const structurallyDropped = new Set(structuralDroppedKeys);
+          items = allLinkedIn.filter(j => !structurallyDropped.has(sourceJobKey(j)))
+            .map(j => enrichedByUrl.get(j.url) || j);
           const stillEmpty = filterJobsByDescriptionEvidence(items).dropped.length;
           let scoringItems;
           recordResolve({ needEnrich: needEnrich.length, enrichSuccess: successCount, contextRotations, walled, stillEmpty });
@@ -17555,7 +17679,7 @@ Return a JSON object with four arrays of search query strings:
       sourceId,
       result?.warning || null,
       items,
-      descriptionEvidence.dropped.filter(job => !isBoardClosedRow(job)),
+      descriptionEvidence.dropped.filter(job => listingStateRank(job) < 3),
     );
 
     logger.info(
@@ -17749,7 +17873,7 @@ Return a JSON object with four arrays of search query strings:
     // not only Google. Serialize its full read/visible-browser/write lifetime
     // per hub/run so two clicks cannot both consume the same queued query.
     return withDescriptionRecoveryLock({ canvasFilePath, nodeId, jobRunId, signal }, runGenericResolve);
-  }, { beforeReply: checkpointContinuationBeforeReply('resolve-job-source') });
+  }, { beforeReply: checkpointContinuationBeforeReply('resolve-job-source'), captureListingLiveness: true });
 
   // Resume an Indeed scrape that was interrupted by a login-wall mid-pagination.
   // The user re-authenticates via Settings, then clicks Continue on the source
@@ -17835,7 +17959,8 @@ Return a JSON object with four arrays of search query strings:
         remainingDescriptions: retried.remaining || 0,
         // Indeed's "gone" page is a board verdict now: only the rows the
         // official-posting pass did not keep were removed. The kept ones are counted apart.
-        unavailableDescriptions: retriedUnavailable.filter(item => !boardClosedOutcome.keptKeys.has(item?.key)),
+        unavailableDescriptions: retriedUnavailable.filter(item =>
+          !boardClosedOutcome.keptKeys.has(item?.key) && !boardClosedOutcome.deferredKeys.has(item?.key)),
         ...(retriedBoardClosedKept > 0 ? { boardClosedKept: retriedBoardClosedKept } : {}),
         challengeReason: retried.challengeReason || null,
         };
@@ -17876,7 +18001,7 @@ Return a JSON object with four arrays of search query strings:
         removedItemKeys: [...new Set([
           ...retriedUnavailable.map(item => item?.key),
           ...retiredListingKeys(descriptionEvidence.dropped, boardClosedOutcome),
-        ].filter(key => key && !boardClosedOutcome.keptKeys.has(key)))],
+        ].filter(key => key && !boardClosedOutcome.keptKeys.has(key) && !boardClosedOutcome.deferredKeys.has(key)))],
       };
     }
     let effectiveResumeState = resumeState || {};
@@ -18256,7 +18381,7 @@ Return a JSON object with four arrays of search query strings:
       // the renderer already holds. See retiredListingKeys.
       removedItemKeys: retiredListingKeys(descriptionEvidence.dropped, boardClosedRetirement(officialResolution)),
     };
-  }, { beforeReply: checkpointContinuationBeforeReply('resume-job-source') });
+  }, { beforeReply: checkpointContinuationBeforeReply('resume-job-source'), captureListingLiveness: true });
 
   // Renderer calls this after it merges captcha-resolve items into pendingJobs.
   // The IPC-side `resolve-job-source` only knows about history-dedup; the

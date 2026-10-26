@@ -37,7 +37,9 @@ function row(extra = {}) {
     sourceJobKey: 'synthetic-platform-key', source: 'google', posted: 'Today', language: 'English',
     postedBy: 'Acme Talent Partners', applyOptions: [{ label: 'Northwind careers', href: 'https://careers.example.test/jobs/platform' }],
     salaryProvenance: 'posted', officialPosting: posting(),
-    boardClosed: { board: 'linkedin', reason: 'linkedin-no-longer-accepting', at: '2026-10-24T12:00:00.000Z' }, ...extra,
+    boardClosed: { board: 'linkedin', reason: 'linkedin-no-longer-accepting', at: '2026-10-24T12:00:00.000Z' },
+    listingLiveness: { verdict: 'closed', basis: 'structural', board: 'linkedin', at: '2026-10-24T12:00:00.000Z' },
+    alternateListings: [{ board: 'indeed', url: 'https://www.indeed.com/viewjob?jk=synthetic-alternate' }], ...extra,
   };
 }
 
@@ -99,7 +101,7 @@ export default [
   {
     name: 'official-posting shared fields survive every whitelist and legacy card migration without drift',
     run() {
-      assert.deepEqual(OFFICIAL_POSTING_ROW_FIELDS, ['postedBy', 'applyOptions', 'salaryProvenance', 'officialPosting', 'boardClosed']);
+      assert.deepEqual(OFFICIAL_POSTING_ROW_FIELDS, ['postedBy', 'applyOptions', 'salaryProvenance', 'officialPosting', 'boardClosed', 'listingLiveness', 'alternateListings']);
       assert.ok(Object.isFrozen(OFFICIAL_POSTING_ROW_FIELDS));
       const input = row(); const card = cardFor(input); const frozen = safeJob(input); const scope = generateScope();
       const queuePayload = scope.slice(scope.indexOf('queueLocalApplication({'));
@@ -145,7 +147,7 @@ export default [
     },
   },
   {
-    name: 'official-posting metadata preserves scraped identity and protected posting variant keys without a row applyUrl',
+    name: 'official-posting metadata preserves scraped identity and tracks the closed variant token without a row applyUrl',
     run() {
       const input = row(); const baseline = { ...input };
       for (const field of OFFICIAL_POSTING_ROW_FIELDS) delete baseline[field];
@@ -157,7 +159,10 @@ export default [
       }
       assert.equal(Object.hasOwn(input, 'applyUrl'), false);
       assert.equal(Object.hasOwn(reused.data, 'applyUrl'), false);
-      assert.equal(postingVariantKey(buildPostingVariant(reused.data)), postingVariantKey(buildPostingVariant(baseline)));
+      assert.equal(buildPostingVariant(reused.data).liveness, 'closed');
+      assert.equal(Object.hasOwn(buildPostingVariant(baseline), 'liveness'), false);
+      assert.equal(postingVariantKey(buildPostingVariant(reused.data)), postingVariantKey({ ...buildPostingVariant(baseline), liveness: 'closed' }),
+        'confirmed closure must be the only variant-key change from official metadata');
       assert.equal(reused.data.officialPosting.officialApplyUrl, input.officialPosting.officialApplyUrl);
       assert.equal(postingVariantKey(buildPostingVariant({ ...baseline, applyUrl: input.officialPosting.officialApplyUrl }))
         === postingVariantKey(buildPostingVariant(baseline)), false, 'the control proves a row applyUrl would change identity');
@@ -170,7 +175,7 @@ export default [
       const frozen = safeJob(input);
       assert.deepEqual(Object.keys(frozen).sort(), [
         'title', 'company', 'snippet', 'location', 'salary', 'url', 'googleCardUrl', 'sourceJobKey',
-        'source', 'posted', 'language', 'postedBy', 'applyUrl', 'applyOptions', 'salaryProvenance', 'officialPosting', 'boardClosed', 'postingVariants',
+        'source', 'posted', 'language', 'postedBy', 'applyUrl', 'applyOptions', 'salaryProvenance', 'officialPosting', 'boardClosed', 'listingLiveness', 'alternateListings', 'listingAudit', 'postingVariants',
       ].sort());
       assert.equal(frozen.applyUrl, input.applyUrl, 'the second safeJob retains the host-frozen apply URL; queue admission discards renderer authority separately');
       for (const level of OFFICIAL_POSTING_LEVELS) assert.equal(safeJob(row({ officialPosting: posting({ level }) })).officialPosting.level, level);
@@ -241,8 +246,13 @@ export default [
   {
     name: 'official-posting metadata never enters any supported discovery, audit, adjudication or writer stage prompt',
     run() {
+      const auditAt = '2026-10-26T12:34:56.000Z';
       const job = safeJob(row({ postedBy: 'Unique Synthetic Poster Sentinel', snippet: 'Unique scraped snippet sentinel.',
-        applyOptions: [{ label: 'Unique apply option', href: 'https://apply-option-sentinel.example.test/job' }] }));
+        applyOptions: [{ label: 'Unique apply option', href: 'https://apply-option-sentinel.example.test/job' }],
+        listingAudit: { outcome: 'open', basis: 'ai', at: auditAt },
+        postingVariants: [{ location: 'Remote, Canada', url: 'https://listing.example.test/job/platform', liveness: 'closed' }] }));
+      assert.equal(job.listingAudit.at, auditAt);
+      assert.equal(job.postingVariants[0]?.liveness, 'closed');
       job.applyUrl = 'https://frozen-apply-sentinel.example.test/job';
       const sentinels = [job.postedBy, job.snippet, job.applyOptions[0].href, job.applyUrl,
         job.googleCardUrl, job.sourceJobKey, 'tenant-unproven', 'bridge-unavailable',
@@ -260,7 +270,8 @@ export default [
       const discovery = JSON.parse(prompts[0][1].split('Authoritative context:\n')[1]);
       assert.equal(discovery.job.company, job.company, 'ordinary identifying facts stay in the discovery context');
       assert.equal(discovery.job.url, job.url, 'the original listing URL remains an identifying fact');
-      for (const field of [...OFFICIAL_POSTING_ROW_FIELDS, 'snippet', 'applyUrl', 'googleCardUrl', 'sourceJobKey']) assert.equal(Object.hasOwn(discovery.job, field), false, field);
+      for (const field of [...OFFICIAL_POSTING_ROW_FIELDS, 'listingAudit', 'snippet', 'applyUrl', 'googleCardUrl', 'sourceJobKey']) assert.equal(Object.hasOwn(discovery.job, field), false, field);
+      assert.equal(discovery.job.postingVariants[0].liveness, undefined);
       const sourcePrompt = writeVerifySourcePrompt({ job, posting: 'Maintain dependable platform services.', requirements: [], listingEvidence: [],
         identity: { name: 'Jordan Sample' }, sourceRoles: [], profile: { skills: [] }, catalog: [] });
       const structured = { resume: { roles: [], projects: [], skills: [], education: [], credentials: [] }, coverLetter: { paragraphs: [] } };
@@ -269,7 +280,7 @@ export default [
       for (const stage of WRITE_VERIFY_STAGES.filter(stage => stage !== 'write-verify-human-stop')) {
         prompts.push([stage, writeVerifyPrompt({ stage, state, sourcePrompt, posting: 'Maintain dependable platform services.', hand: 'Synthetic approved evidence.', envelope: { stage } })]);
       }
-      for (const [stage, prompt] of prompts) for (const sentinel of sentinels) assert.equal(prompt.includes(sentinel), false, `${stage} printed metadata ${sentinel}`);
+      for (const [stage, prompt] of prompts) for (const sentinel of [...sentinels, auditAt, 'listingAudit', '"liveness":"closed"']) assert.equal(prompt.includes(sentinel), false, `${stage} printed metadata ${sentinel}`);
       assert.equal(prompts.length, 11, 'all three supported discovery stages and eight writer stages are checked');
     },
   },

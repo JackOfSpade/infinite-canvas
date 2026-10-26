@@ -6,8 +6,10 @@ import { getEventListeners } from 'node:events';
 import {
   createOfficialPostingRowBudget, resolveOfficialPosting, shouldPersistOfficialPostingResult,
 } from '../../electron/ipc/officialPostingResolver.js';
-import { createOfficialPostingStore } from '../../electron/ipc/officialPostingStore.js';
+import { createOfficialPostingStore, officialPostingAliases } from '../../electron/ipc/officialPostingStore.js';
 import { buildOfficialPostingMatchRequest } from '../../electron/ipc/officialPostingBridge.js';
+import { __runWithIpcRequestContextForTests } from '../../electron/ipc/ipcUtils.js';
+import { readOfficialExpiryCandidates } from '../../electron/ipc/listingLivenessStore.js';
 
 const EMPLOYER = 'Northwind Labs';
 const DESCRIPTION = 'Requirements include experience building reliable services and maintaining reporting workflows. Engineers design clear interfaces for dispatch teams and validate operational changes with careful review. The role includes improving data quality across scheduled pipelines and documenting decisions for partner teams. You will work with colleagues to investigate delivery failures and make service behavior understandable. Responsibilities include writing tests for new features and improving the tools used by support teams every day.';
@@ -121,6 +123,43 @@ async function hiddenContradictionScenario(kind) {
 }
 
 export default [
+  {
+    name: 'deferred expiry resolver exposes bounded candidate URLs and request-local page evidence without caching an unconfirmed miss',
+    async run() {
+      await __runWithIpcRequestContextForTests({ livenessEvidence: new Map() }, async () => {
+        const target = row({ source: 'linkedin', jobkey: 'synthetic-expiry', identifier: 'req-one' });
+        const url = 'https://northwind.test/jobs/expired';
+        const store = memoryStore();
+        const result = await resolveOfficialPosting(target, { store, researchRan: true,
+          candidateUrls: [url], fetch: network({
+            'https://northwind.test/': '<title>Northwind Labs</title>',
+            [url]: `${posting(url, { validThrough: '2000-01-01T00:00:00Z' })}<h1>Software Engineer</h1><p>This job is no longer available.</p>`,
+          }) });
+        assert.equal(result.officialPosting.outcome, 'not-found');
+        assert.deepEqual(result.expiryCandidates, [url]);
+        const captured = readOfficialExpiryCandidates(target);
+        assert.deepEqual(captured.map(candidate => candidate.url), [url]);
+        assert.ok(captured[0].evidence.chromeText.includes('This job is no longer available.'));
+        assert.equal(JSON.stringify(result).includes('This job is no longer available.'), false,
+          'candidate page text stays only in request-local storage');
+        assert.equal(store.saved.length, 0, 'an unconfirmed expired candidate must not become a durable settled miss');
+      });
+    },
+  },
+  {
+    name: 'deferred expiry direct resolver revisits historical closed-trail cache entries without a candidate receipt',
+    async run() {
+      const target = row({ source: 'linkedin', jobkey: 'synthetic-legacy-expiry' });
+      const url = 'https://northwind.test/jobs/legacy-expiry';
+      let reads = 0;
+      const result = await resolveOfficialPosting(target, { candidateUrls: [url],
+        store: { find: async () => ({ aliases: officialPostingAliases(target),
+          officialPosting: miss(['bridge-research', 'closed']) }) },
+        fetch: async () => { reads++; throw error('fetch-failed'); } });
+      assert.ok(reads > 0, 'the stale closed verdict cannot bypass the host fetch');
+      assert.equal(result.officialPosting.trail.includes('recent-miss'), false);
+    },
+  },
   {
     name: 'R3 shared run cancellation uses one bounded fanout listener and disposes every row budget',
     run() {

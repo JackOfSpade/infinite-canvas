@@ -21,6 +21,7 @@
  *   • Application-linked cards are protected and can never be dropped,
  *     replaced, or orphaned.
  */
+import { listingStateRank } from '../../electron/ipc/officialPostingFields.js';
 
 /** Minimum normalized alphanumeric length of a full description/snippet. */
 export const MIN_DESCRIPTION_ALNUM = 500;
@@ -258,6 +259,7 @@ export function buildPostingVariant(job) {
     const value = job?.[key];
     if (typeof value === 'string' && value.trim()) variant[key] = value.trim();
   }
+  if (listingStateRank(job) === 4) variant.liveness = 'closed';
   return variant;
 }
 
@@ -275,6 +277,7 @@ export function postingVariantKey(variant) {
     variant.applySource || '',
     variant.jobkey || '',
     variant.language || '',
+    variant.liveness === 'closed' ? 'closed' : '',
   ].join('\u0001');
 }
 
@@ -410,7 +413,8 @@ function buildConsolidatedRow(members, primaryMember) {
   if (!primary) {
     primary = protectedMembers.length > 0
       ? protectedMembers[0]
-      : members.slice().sort((a, b) => jobRichness(b) - jobRichness(a))[0];
+      : members.slice().sort((a, b) => listingStateRank(a) - listingStateRank(b)
+        || jobRichness(b) - jobRichness(a))[0];
   }
   const variants = mergeVariantLists(...members.map(memberVariants));
   const locations = distinctLocationsOf(members);

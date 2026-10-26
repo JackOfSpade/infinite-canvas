@@ -64,6 +64,7 @@ const KNOWN_TASKS = new Set([
   'job-taxonomy-classify',
   'job-taxonomy-classify-batch',
   'job-location-consolidation-confirmation',
+  'job-listing-liveness',
   'job-official-posting-research',
   'job-official-posting-match',
   'job-compensation-research',
@@ -208,6 +209,8 @@ const TASK_MAX_TOKENS = {
     Math.min(2048, 512 + Math.max(1, itemCount) * 128),
   // One grounded search is shared by a role/seniority/location cohort.
   'job-compensation-research': 4096,
+  'job-listing-liveness': ({ itemCount = 1 } = {}) =>
+    Math.min(MANUAL_AI_USABLE_OUTPUT_TOKENS, 1024 + Math.max(1, itemCount) * 160),
   'job-official-posting-research': ({ itemCount = 1 } = {}) =>
     Math.min(MANUAL_AI_USABLE_OUTPUT_TOKENS, 1024 + Math.max(1, Math.floor(Number(itemCount) || 1)) * 700),
   'job-official-posting-match': ({ optionCount = 1 } = {}) =>

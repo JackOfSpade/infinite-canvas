@@ -9,6 +9,8 @@ import { getNonApiAiHandoffLifecycleSnapshot, SAFE_NON_API_AI_LOG_ERROR_CODES, S
 import { formatTypeAreaUtilization, getApplicationTelemetry } from '../jobApplication.js';
 import { getApplicationSyncTelemetry } from '../applicationSync.js';
 import { getManualScraperTelemetry } from '../browser/manualScraper.js';
+import { LISTING_LIVENESS_COUNT_FIELDS } from '../listingLivenessTelemetry.js';
+import { getListingLivenessProbeCounts } from '../listingLivenessProbe.js';
 import { getJobsSettings, getGlassdoorLocIdCache, hasStoredDiceApiKey } from '../settings.js';
 import { getJobAnalysisPaths } from '../jobAnalysisPaths.js';
 import { formatJobAnalysisRecoveryLifecycleMarkdown, readJobAnalysisRecoveryLifecycle } from '../jobAnalysisRecoveryLifecycle.js';
@@ -5994,6 +5996,11 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
         .slice(0, 24)
         .map(([board, entry]) => `\`${board}\` detected ${closedCount(entry.detected)} · kept (official) ${closedCount(entry.keptOfficial)} · kept (official posting not checked) ${closedCount(entry.keptUnchecked)} · dropped ${closedCount(entry.dropped)}`);
       if (boardClosedRows.length) lines.push(`- Board-closed listings (an aggregator board reported them gone; the official source decides): ${boardClosedRows.join('; ')}.`);
+      const livenessRows = Object.entries(resolution.listingLiveness && typeof resolution.listingLiveness === 'object' ? resolution.listingLiveness : {})
+        .filter(([board, entry]) => /^[a-z0-9][a-z0-9-]{0,39}$/u.test(board) && entry && typeof entry === 'object' && !Array.isArray(entry))
+        .slice(0, 24)
+        .map(([board, entry]) => `\`${board}\` ${LISTING_LIVENESS_COUNT_FIELDS.map(key => `${key}=${closedCount(entry[key])}`).join(', ')}`);
+      if (livenessRows.length) lines.push(`- Listing liveness (per board, counts only): ${livenessRows.join('; ')}.`);
     }
     const dedup = s.dedupProvenance;
     if (dedup?.total > 0) {
@@ -8658,6 +8665,11 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
   // This is deliberately metadata-only. Generated documents, cover-letter
   // text, and career data can contain contact information and private work
   // history; diagnose them from closed status, counts, hashes, and page metrics.
+  const listingProbeCounts = getListingLivenessProbeCounts();
+  if (Object.values(listingProbeCounts).some(value => value > 0)) {
+    lines.push('\n### Generate listing checks (this process)');
+    lines.push(`- Counts: ${Object.entries(listingProbeCounts).map(([key, value]) => `${key}=${Math.max(0, Math.floor(Number(value) || 0))}`).join(', ')}.`);
+  }
   if (scopedApplication) {
     const a = scopedApplication;
     const cl = a.coverLetter || a.localAi?.coverLetterEnvelope || {};

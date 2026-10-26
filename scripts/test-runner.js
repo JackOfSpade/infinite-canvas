@@ -58,6 +58,19 @@ import official_posting_r1_legacy_binding from './tests/official-posting-r1-lega
 import official_posting_match_integrity from './tests/official-posting-match-integrity.js';
 import official_posting_amendment3 from './tests/official-posting-amendment3.js';
 import official_posting_board_closed from './tests/official-posting-board-closed.js';
+import listing_liveness from './tests/listing-liveness.js';
+import listing_liveness_linkedin_dice from './tests/listing-liveness-linkedin-dice.js';
+import listing_liveness_telemetry from './tests/listing-liveness-telemetry.js';
+import listing_liveness_capture from './tests/listing-liveness-capture.js';
+import listing_liveness_registry from './tests/listing-liveness-registry.js';
+import listing_liveness_ai from './tests/listing-liveness-ai.js';
+import listing_liveness_transport from './tests/listing-liveness-transport.js';
+import listing_liveness_alternates from './tests/listing-liveness-alternates.js';
+import listing_liveness_search_handler from './tests/listing-liveness-search-handler.js';
+import listing_liveness_search_session from './tests/listing-liveness-search-session.js';
+import listing_liveness_calibration_store from './tests/listing-liveness-calibration-store.js';
+import listing_liveness_bundle from './tests/listing-liveness-bundle.js';
+import listing_liveness_generation from './tests/listing-liveness-generation.js';
 import official_source_hosts from './tests/official-source-hosts.js';
 import official_posting_fields from './tests/official-posting-fields.js';
 import official_posting_scrape from './tests/official-posting-scrape.js';
@@ -278,6 +291,19 @@ const testGroups = [
   ['official-posting-match-integrity.js', official_posting_match_integrity],
   ['official-posting-amendment3.js', official_posting_amendment3],
   ['official-posting-board-closed.js', official_posting_board_closed],
+  ['listing-liveness.js', listing_liveness],
+  ['listing-liveness-linkedin-dice.js', listing_liveness_linkedin_dice],
+  ['listing-liveness-telemetry.js', listing_liveness_telemetry],
+  ['listing-liveness-capture.js', listing_liveness_capture],
+  ['listing-liveness-registry.js', listing_liveness_registry],
+  ['listing-liveness-ai.js', listing_liveness_ai],
+  ['listing-liveness-transport.js', listing_liveness_transport],
+  ['listing-liveness-alternates.js', listing_liveness_alternates],
+  ['listing-liveness-search-handler.js', listing_liveness_search_handler],
+  ['listing-liveness-search-session.js', listing_liveness_search_session],
+  ['listing-liveness-calibration-store.js', listing_liveness_calibration_store],
+  ['listing-liveness-bundle.js', listing_liveness_bundle],
+  ['listing-liveness-generation.js', listing_liveness_generation],
   ['official-source-hosts.js', official_source_hosts],
   ['official-posting-fields.js', official_posting_fields],
   ['official-posting-scrape.js', official_posting_scrape],

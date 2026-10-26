@@ -6,6 +6,8 @@ import { domainBrandMatchesEmployer, extractAtsTenant, isAggregatorHost, isKnown
 import { buildOfficialPostingComparisonSet, canonicalLeadUrl, coreTitle, evaluateOfficialPostingMatch, flatPostingText, frozenOfficialEmployer, locationsCompatible, posterEmployerSignals, resolveScrapedEmployer, selectOfficialPostingMatch } from './officialPostingMatch.js';
 import { officialPostingRecordMatchesScrapedIdentity } from './officialPostingStore.js';
 import { validateOfficialPostingMatchResponse } from './officialPostingBridge.js';
+import { evidenceFromHtml } from './listingLiveness.js';
+import { recordOfficialExpiryCandidates } from './listingLivenessStore.js';
 
 export const OFFICIAL_POSTING_BATCH_SIZE = 12;
 export { adapterUrl as officialPostingAdapterUrl, readableDescription as readableOfficialPostingDescription, verifiedApplyUrl as verifiedOfficialPostingApplyUrl };
@@ -608,7 +610,8 @@ export async function resolveOfficialPosting(job, {
     // shared predicate keeps a partial match durable only on a deterministic anchor.
     const durability = ['L1', 'L2', 'L3', 'L4'].includes(result.officialPosting?.level)
       ? { aborted: Boolean(signal?.aborted || budgetState.sourceSignal?.aborted) } : budget.signal;
-    if (store && persistResults && (persistMisses || !['L5', 'L6'].includes(result.officialPosting?.level))
+    if (store && persistResults && !result.expiryCandidates?.length
+      && (persistMisses || !['L5', 'L6'].includes(result.officialPosting?.level))
       && shouldPersistOfficialPostingResult(result, { signal: durability, researchRan: researchSucceeded })) {
       try {
         result.record = await store.save(job, { officialPosting: result.officialPosting, description: result.description });
@@ -622,6 +625,7 @@ export async function resolveOfficialPosting(job, {
       const record = await store.find(job);
       if (record && officialPostingRecordMatchesScrapedIdentity(job, record)) {
         if (['L5', 'L6'].includes(record.officialPosting?.level)
+          && !record.officialPosting?.trail?.includes('closed')
           && shouldPersistOfficialPostingResult(record, { signal: budget.signal })) {
           const current = fallback(job, { outcome: record.officialPosting.outcome,
             trail: [...(record.officialPosting.trail || []), 'recent-miss'], alternatives: record.officialPosting.alternatives || [] });
@@ -761,9 +765,35 @@ export async function resolveOfficialPosting(job, {
       if (evaluation.salaryMismatch) trail.push('salary-mismatch');
     }
     if (decision.outcome !== 'found') {
+      // A past validThrough alone is not proof that the visible page is gone.
+      // Keep every otherwise passing identity as a bounded URL receipt, with
+      // fetched page text only in the IPC request's evidence store. An overflow
+      // remains unsettled even if every retained candidate later says closed.
+      const expired = decision.evaluations.filter(evaluation => {
+        const candidate = evaluation.candidate;
+        const expiry = typeof candidate?.validThrough === 'string' ? Date.parse(candidate.validThrough) : NaN;
+        if (evaluation.reason !== 'closed' || !evaluation.identityPass || evaluation.salaryMismatch
+          || !Number.isFinite(expiry) || expiry >= instant()) return false;
+        return evaluateOfficialPostingMatch(job, { ...candidate, validThrough: '' }, matchOptions()).passed;
+      }).map(evaluation => evaluation.candidate).sort((left, right) => left.sourceUrl.localeCompare(right.sourceUrl));
+      const boundedExpired = expired.slice(0, 8);
+      const expiryCandidates = boundedExpired.map(candidate => candidate.sourceUrl);
+      if (expiryCandidates.length) {
+        const evidence = await Promise.all(boundedExpired.map(async candidate => {
+          const url = candidate.sourceUrl;
+          const fetched = await pages.get(url);
+          const page = fetched?.page;
+          return { url, evidence: page && /html/iu.test(page.contentType || '') && typeof page.body === 'string'
+            ? evidenceFromHtml(page.body, { board: 'generic', ruleKey: 'generic',
+              requestedUrl: url, finalUrl: page.url || page.sourceUrl || url, httpStatus: page.statusCode,
+              expectedTitle: job?.title, expectedCompany: job?.company, expectedLocation: job?.location,
+              descriptionText: candidate.description }) : null };
+        }));
+        recordOfficialExpiryCandidates(job, evidence, { truncated: expired.length > expiryCandidates.length });
+      }
       if ([...budgetState.failures.values()].includes('fetch-timeout')) trail.push('fetch-timeout');
-      return await persist(fallback(job, { outcome: decision.outcome, trail,
-        alternatives: decision.alternatives }));
+      return await persist({ ...fallback(job, { outcome: decision.outcome, trail,
+        alternatives: decision.alternatives }), ...(expiryCandidates.length ? { expiryCandidates } : {}) });
     }
     const candidate = decision.candidate;
     const unreadSite = queue.some(item => !pages.has(item.url) && belongsToWinnerSite(item.url, candidate));
