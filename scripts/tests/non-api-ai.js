@@ -3,7 +3,7 @@ import { EventEmitter } from 'node:events';
 import { rejects } from 'node:assert/strict';
 import { flushNonApiAiPersistence } from '../../electron/ipc/nonApiAi.js';
 import { _resetNonApiAiHandoffLifecycle, abortNodeTasksAndWait, applyBugReportCode, assert, buildNonApiAiHandoffLifecycleMarkdown, callLLMRaw, callLLMText, callLLMVision, createHostStagedVisionCaller, checkPromptFits, __durableStepKeysForTests, __reloadDurableStateForTests, __nonApiAiProgressScopeSnapshotForTests, __pruneInactiveEphemeralProgressScopesForTests, __selectDurableStepForTests, __selectUniqueAcceptedLegacyStepForTests, canonicalizeGeneratedUntrustedBoundaryNonces, deriveHandoffCode, durableRunHasAnyTask, durableRunSettlementSummary, electronPkg, fs, generateMarkdown, getKnownTaskIds, getNonApiAiHandoffLifecycle, handleSafe, HANDOFF_CODE_ALPHABET, hardenStructuredTaskPrompt, ipcMain, listingIdsForRootBatch, materializeNonApiPrompt, NON_API_AI_TRANSPORT, NonApiAiCodeMismatchError, registerNonApiAiHandlers, requestNonApiAi, runBoundedJobTaxonomy, runRewindableGroundedHandoff, SAFE_NON_API_AI_LOG_ERROR_CODES, SAFE_VALIDATION_DIAGNOSTIC_REASONS, taskModelRoutingSnapshot, validateCompensationEvidenceSubmission, validateJobPreferenceListingSubmission, validateNonApiAiSubmission, validateRoleFamilyExperienceBandsSubmission, wrapUntrustedText } from '../test-dependencies.js';
-import { BRIDGE_ATTACHMENT_TRANSPORT_ENABLED, readBridgeableNonApiAiAttachments } from '../../electron/ipc/nonApiAi.js';
+import { BRIDGE_ATTACHMENT_TRANSPORT_ENABLED, readBridgeableNonApiAiAttachments, readBridgeableNonApiAiHandoff, listBridgeableNonApiAiHandoffs } from '../../electron/ipc/nonApiAi.js';
 import { pendingManualHandoffsForActiveTasks } from '../../electron/ipc/bugReport.js';
 import { __claimAcceptedResponseFingerprintForTests, __defaultSafeValidationDiagnosticForTests, __nonApiAiHandoffLifecycleAggregateCountForTests, __nonApiAiLogErrorCodeForTests, __promptForRetryForTests, DUPLICATE_RESPONSE_MIN_LENGTH, getNonApiAiHandoffLifecycleSnapshot, NonApiAiCodeMissingError, NonApiAiDuplicateResponseError, submitNonApiAiResponseForBridge } from '../../electron/ipc/nonApiAi.js';
 import { getRecentLogs, logger } from '../../electron/logger.js';
@@ -26,7 +26,123 @@ const MARKETPLACE_AND_WORKSPACE_TASKS = [
   'marketplace-hub-scan',
 ];
 
+const COMPARATIVE_TASK = 'job-official-posting-match';
+const COMPARATIVE_GROUP = 'c'.repeat(64);
+async function comparativeTransportFixture(label) {
+  ipcMain.__clearInvokeHandlers();
+  registerNonApiAiHandlers();
+  const sent = [];
+  const sender = new EventEmitter();
+  sender.id = 945;
+  sender.isDestroyed = () => false;
+  sender.send = (channel, payload) => sent.push({ channel, payload });
+  const runId = `comparative-${label}-${process.pid}-${Date.now()}`;
+  handleSafe('comparative-transport-test', async (_event, args, signal) => {
+    try {
+      return { answer: await callLLMText(`SYNTHETIC comparative run ${args.run}`, { signal, task: COMPARATIVE_TASK,
+        hints: { itemCount: 1, optionCount: args.optionCount || 2 },
+        manualHandoff: { comparisonGroup: COMPARATIVE_GROUP, comparisonRun: args.run },
+        responseSchema: { type: 'object', additionalProperties: false, required: ['answer'], properties: { answer: { type: 'string', enum: ['valid'] } } } }) };
+    } catch (error) { return { failureCode: error.code || null }; }
+  });
+  const invoke = run => ipcMain.__getInvokeHandler('comparative-transport-test')({ sender }, { nodeId: 'comparative-node', manualAiRunId: runId, run });
+  const waitRequest = async (after = 0) => {
+    for (let attempt = 0; attempt < 200; attempt++) {
+      const requests = sent.filter(item => item.channel === 'non-api-ai-request').map(item => item.payload);
+      if (requests.length > after) return requests.at(-1);
+      await new Promise(resolve => setTimeout(resolve, 5));
+    }
+    throw new Error('Synthetic comparative handoff was not emitted');
+  };
+  const bridgeArgs = request => ({ requestId: request.requestId, handoffCode: request.handoffCode, allowTasks: new Set([COMPARATIVE_TASK]) });
+  const read = (request, run, isolated = run === 'B', character = run === 'A' ? '1' : '2') => readBridgeableNonApiAiHandoff({ ...bridgeArgs(request),
+    comparisonProvenance: { version: 2, transport: 'bridge', observed: true, comparisonGroup: COMPARATIVE_GROUP, comparisonRun: run,
+      conversationKey: character.repeat(64), isolated } });
+  const submit = (request, answer = 'valid') => submitNonApiAiResponseForBridge({ ...bridgeArgs(request), response: JSON.stringify({ handoffCode: request.handoffCode, answer }) });
+  const cleanup = () => ipcMain.__getInvokeHandler('complete-non-api-ai-run')({ sender }, { runId });
+  return { sent, sender, runId, invoke, waitRequest, bridgeArgs, read, submit, cleanup };
+}
+
 export default [
+  {
+    name: 'comparative transport: both runs require bridge proof and durable accepted replay issues no new handoffs',
+    run: async () => {
+      const f = await comparativeTransportFixture('proof-replay');
+      for (const run of ['A', 'B']) {
+        const before = f.sent.filter(item => item.channel === 'non-api-ai-request').length;
+        const owner = f.invoke(run); const request = await f.waitRequest(before);
+        const entry = listBridgeableNonApiAiHandoffs({ allowTasks: new Set([COMPARATIVE_TASK]) }).handoffs.find(item => item.requestId === request.requestId);
+        assert(entry.comparisonGroup === COMPARATIVE_GROUP && entry.comparisonRun === run, 'metadata reaches the private source list');
+        assert(!JSON.stringify(request).includes(COMPARATIVE_GROUP), 'routing metadata is absent from the dock prompt projection');
+        assert(readBridgeableNonApiAiHandoff(f.bridgeArgs(request)).ok === false, 'no trusted proof means no prompt read');
+        if (run === 'B') assert(f.read(request, run, false).ok === false, 'B must prove isolation as well as bridge transport');
+        assert(f.read(request, run).ok === true);
+        const manual = await ipcMain.__getInvokeHandler('submit-non-api-ai-response')({ sender: f.sender }, { requestId: request.requestId, response: JSON.stringify({ handoffCode: request.handoffCode, answer: 'valid' }) });
+        assert(manual.accepted === false, 'a local paste never inherits trusted bridge proof');
+        assert((await f.submit(request)).accepted === true);
+        assert((await owner).answer.answer === 'valid');
+      }
+      const beforeReplay = f.sent.filter(item => item.channel === 'non-api-ai-request').length;
+      await __reloadDurableStateForTests();
+      for (const run of ['A', 'B']) assert((await f.invoke(run)).answer.answer === 'valid');
+      assert(f.sent.filter(item => item.channel === 'non-api-ai-request').length === beforeReplay, 'accepted A and B replay without any new handoff');
+      const disk = JSON.parse(fs.readFileSync(`${electronPkg.app.getPath('userData')}/non-api-ai-handoffs.json`, 'utf8'));
+      const steps = Object.values(disk.runs[f.runId].steps);
+      assert(steps.length === 2 && steps.every(step => step.comparisonProof?.transport === 'bridge'
+        && step.comparisonProof.version === 2 && step.comparisonProof.observed === true)
+        && steps.find(step => step.comparisonRun === 'B').comparisonProof.isolated === true, 'accepted proof survives a process reload');
+      const acceptedB = steps.find(step => step.comparisonRun === 'B');
+      acceptedB.comparisonProof.isolated = false;
+      await __reloadDurableStateForTests();
+      fs.writeFileSync(`${electronPkg.app.getPath('userData')}/non-api-ai-handoffs.json`, JSON.stringify(disk));
+      assert((await f.invoke('B')).failureCode === 'OFFICIAL_POSTING_COMPARATIVE_UNAVAILABLE', 'accepted replay cannot inherit a missing or invalid isolation attestation');
+      acceptedB.comparisonProof.isolated = true;
+      acceptedB.comparisonProof.version = 1;
+      await __reloadDurableStateForTests();
+      fs.writeFileSync(`${electronPkg.app.getPath('userData')}/non-api-ai-handoffs.json`, JSON.stringify(disk));
+      assert((await f.invoke('B')).failureCode === 'OFFICIAL_POSTING_COMPARATIVE_UNAVAILABLE', 'the old capability-only proof version cannot replay as observed browser evidence');
+      assert(f.sent.filter(item => item.channel === 'non-api-ai-request').length === beforeReplay);
+      await f.cleanup();
+    },
+  },
+  {
+    name: 'comparative transport: an unread run cannot be submitted even through the bridge and output caps scale by options',
+    run: async () => {
+      const f = await comparativeTransportFixture('unread');
+      const owner = f.invoke('A'); const request = await f.waitRequest();
+      assert((await f.submit(request)).accepted === false);
+      assert((await owner).failureCode === 'OFFICIAL_POSTING_COMPARATIVE_UNAVAILABLE');
+      const one = await checkPromptFits('Synthetic comparison', { task: COMPARATIVE_TASK, hints: { optionCount: 1 } });
+      const eight = await checkPromptFits('Synthetic comparison', { task: COMPARATIVE_TASK, hints: { optionCount: 8 } });
+      assert(eight.reservedOutput > one.reservedOutput && eight.reservedOutput <= 15360, 'token allowance follows bounded option count');
+      await f.cleanup();
+    },
+  },
+  {
+    name: 'comparative transport: exactly one correction survives restart and a second invalid answer ends the run without manual escalation',
+    run: async () => {
+      const f = await comparativeTransportFixture('retry');
+      const owner = f.invoke('A'); const first = await f.waitRequest();
+      assert(f.read(first, 'A').ok);
+      const rejected = await f.submit(first, 'invalid');
+      assert(rejected.outcome === 'rejected' && rejected.attempt === 2, 'the first invalid answer gets one ordinary correction');
+      f.sender.emit('did-start-navigation', {}, 'file:///restart.html', false, true);
+      await owner;
+      await __reloadDurableStateForTests();
+      const before = f.sent.filter(item => item.channel === 'non-api-ai-request').length;
+      const resumedOwner = f.invoke('A'); const resumed = await f.waitRequest(before);
+      assert(f.read(resumed, 'A', false, '3').ok);
+      assert((await f.submit(resumed, 'invalid')).accepted === false);
+      assert((await resumedOwner).failureCode === 'OFFICIAL_POSTING_COMPARATIVE_INVALID');
+      const after = f.sent.filter(item => item.channel === 'non-api-ai-request').length;
+      assert((await f.invoke('A')).failureCode === 'OFFICIAL_POSTING_COMPARATIVE_INVALID');
+      assert(f.sent.filter(item => item.channel === 'non-api-ai-request').length === after, 'no third answer or manual fallback after durable retry exhaustion');
+      const disk = JSON.parse(fs.readFileSync(`${electronPkg.app.getPath('userData')}/non-api-ai-handoffs.json`, 'utf8'));
+      const step = Object.values(disk.runs[f.runId].steps)[0];
+      assert(step.comparisonInvalidCount === 2 && step.status === 'failed' && !step.bridgeEscalation, 'retry exhaustion is terminal for this run, not manual escalation');
+      await f.cleanup();
+    },
+  },
   {
     name: 'non-API AI: quit retries an already-failed deferred draft checkpoint and propagates another failure',
     run: async () => {

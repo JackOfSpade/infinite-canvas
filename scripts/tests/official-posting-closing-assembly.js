@@ -175,7 +175,7 @@ export default [
     },
   },
   {
-    name: 'Official posting closing assembly: a validated rendered project keeps the approved-target exemption at the shared stage and assembly',
+    name: 'Official posting closing assembly: a cited project name stays grounded while employment at that target still rejects',
     run() {
       const projectQuote = "I built Northwind Labs's platform for reporting systems and engineering workflows.";
       const paragraphs = [{ id: 'letter-project', text: projectQuote, evidenceIds: ['project-proof'] }, closing()];
@@ -196,13 +196,15 @@ export default [
         finalText: projectQuote, evidenceIds: ['project-proof'], acceptedEvidence: accepted, identityTokens: [],
         label: 'coverLetterParagraphs', sourceRoles, careerData: item.careerData, projects: approvedProjects,
         targetCompany: job.company, targetTitle: job.title, postingText: item.jobListing, allowListingClosing: false });
-      assert.deepEqual(baseline, [], 'the approved project paragraph passes the unchanged career rule');
-      assert.deepEqual(__validateSharedApplicationContentForTests({ coverLetter: item.paste.coverLetter }, state, item.input), [],
-        'the shared stage derives the same approved rendered project context');
+      assert.deepEqual(baseline, [], 'a project named by its actual cited career quote retains baseline grounding');
+      assert.deepEqual(__validateSharedApplicationContentForTests({ coverLetter: item.paste.coverLetter }, state, item.input), [], 'the shared stage retains cited project grounding');
       item.validateListingClosing = createApplicationListingClosingValidator({ input: item.input, state, careerData: item.careerData });
-      const result = assemblePasteApplicationResult(item);
-      assert.deepEqual(result.coverLetter.paragraphs, [projectQuote, LISTING_QUOTE]);
-      assert.deepEqual(result.qualityReview.sourceGrounding.coverLetterParagraphs[1].jobListingQuotes, [LISTING_QUOTE]);
+      assert.doesNotThrow(() => assemblePasteApplicationResult(item));
+      const employment = __pasteUnitGroundingErrorsForTests({ unitLabel: 'Cover-letter paragraph', unitId: 'employment',
+        finalText: 'At Northwind Labs, I rebuilt reporting systems.', evidenceIds: ['project-proof'], acceptedEvidence: accepted,
+        identityTokens: [], label: 'coverLetterParagraphs', sourceRoles, careerData: item.careerData, projects: approvedProjects,
+        targetCompany: job.company, targetTitle: job.title, postingText: item.jobListing });
+      assert.ok(employment.some(error => error.includes('states work at')), 'a project is not an approved career employer');
     },
   },
   {
@@ -216,9 +218,13 @@ export default [
       assert.equal(WRITE_VERIFY_BRIEF.length, 968);
       assert.equal(WRITE_VERIFY_BRIEF.includes(WRITE_VERIFY_LISTING_CLOSING_RULE), false);
       assert.equal(writeVerifyGroundingContract().split(WRITE_VERIFY_LISTING_CLOSING_RULE).length, 2);
+      const ownSentenceRule = 'Name the employer only in a short sentence of its own about its need or your wish to join it.';
+      assert.equal(WRITE_VERIFY_BRIEF.includes(ownSentenceRule), false);
+      assert.equal(writeVerifyGroundingContract().includes(ownSentenceRule), false);
       for (const stage of ['write', 'convert', 'verify-correction']) {
         const prompt = writeVerifyPrompt({ stage, state, sourcePrompt, posting: '', hand: '', envelope: {} });
         assert.ok(prompt.includes(WRITE_VERIFY_LISTING_CLOSING_RULE), stage);
+        assert.equal(prompt.includes(ownSentenceRule), false, stage);
         assert.ok(prompt.includes(`BRIEF: ${WRITE_VERIFY_BRIEF}`), stage);
       }
     },

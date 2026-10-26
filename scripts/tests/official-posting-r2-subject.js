@@ -17,46 +17,162 @@ function gates(text, targetCompany = COMPANY) {
   return { assembly, drafting };
 }
 
-export default [
-  {
-    name: 'employer SUBJECT never attributes earlier first-person work to the target',
-    run() {
-      const tails = ['that Northwind Labs relies on.', ', which Northwind Labs uses.',
-        ', which Northwind Labs depends on.', ', and Northwind Labs ships them to carriers.',
-        ', and Northwind Labs deploys them.', ', so Northwind Labs runs them every day.',
-        ', and Northwind Labs needs the same.'];
-      for (const tail of tails) for (const [gate, errors] of Object.entries(gates(`I built ${WORK}${tail.startsWith(',') ? '' : ' '}${tail}`))) {
-        assert.ok(errors.length, `${gate}: ${tail}`);
-      }
-      for (const verb of ['run', 'rebuilt', 'cut']) {
-        const text = `I ${verb} ${WORK}, and ${COMPANY} needs the same.`;
-        for (const [gate, errors] of Object.entries(gates(text))) assert.ok(errors.length, `${gate}: ${text}`);
-      }
-    },
-  },
-  {
-    name: 'standalone closed employer need clauses remain licensed',
-    run() {
-      for (const text of [`I built ${WORK}. ${COMPANY} needs reliable rosters.`, `I built ${WORK}. ${COMPANY}'s mission is clear.`,
-        `I built ${WORK}, which meets ${COMPANY}'s need for dispatch rosters.`,
-        `I admire ${WORK}, and ${COMPANY} needs reliable rosters.`,
-        `My background aligns with ${WORK}, and ${COMPANY} needs reliable rosters.`]) {
-        for (const [gate, errors] of Object.entries(gates(text))) assert.deepEqual(errors, [], `${gate}: ${text}`);
-      }
-    },
-  },
-  {
-    name: 'legal and parenthetical target names share join and need licences without freeing employment',
-    run() {
-      for (const company of [`${COMPANY}, Inc.`, `${COMPANY} (NWL)`]) {
-        for (const text of [`I am excited to join ${COMPANY}.`, `I built ${WORK}. ${COMPANY}'s mission is clear.`,
-          `I built ${WORK}, which meets ${COMPANY}'s need for dispatch rosters.`]) {
-          for (const [gate, errors] of Object.entries(gates(text, company))) assert.deepEqual(errors, [], `${gate}: ${company}: ${text}`);
-        }
-        for (const [gate, errors] of Object.entries(gates(`I rebuilt ${WORK} at ${COMPANY}.`, company))) {
-          assert.ok(errors.length, `${gate}: ${company}`);
-        }
-      }
-    },
-  },
+// Baseline-derived pins deliberately replace the stricter Amendment-5 own-sentence matrix.
+const BASELINE_VERDICTS = [
+  [
+    "I built dispatch rosters for freight routes that Northwind Labs relies on.",
+    "Northwind Labs",
+    false,
+    false
+  ],
+  [
+    "I built dispatch rosters for freight routes, which Northwind Labs uses.",
+    "Northwind Labs",
+    false,
+    false
+  ],
+  [
+    "I built dispatch rosters for freight routes, which Northwind Labs depends on.",
+    "Northwind Labs",
+    false,
+    false
+  ],
+  [
+    "I built dispatch rosters for freight routes, and Northwind Labs ships them to carriers.",
+    "Northwind Labs",
+    false,
+    false
+  ],
+  [
+    "I built dispatch rosters for freight routes, and Northwind Labs deploys them.",
+    "Northwind Labs",
+    false,
+    false
+  ],
+  [
+    "I built dispatch rosters for freight routes, so Northwind Labs runs them every day.",
+    "Northwind Labs",
+    false,
+    false
+  ],
+  [
+    "I built dispatch rosters for freight routes, and Northwind Labs needs the same.",
+    "Northwind Labs",
+    false,
+    false
+  ],
+  [
+    "I run dispatch rosters for freight routes, and Northwind Labs needs the same.",
+    "Northwind Labs",
+    true,
+    true
+  ],
+  [
+    "I rebuilt dispatch rosters for freight routes, and Northwind Labs needs the same.",
+    "Northwind Labs",
+    true,
+    true
+  ],
+  [
+    "I cut dispatch rosters for freight routes, and Northwind Labs needs the same.",
+    "Northwind Labs",
+    true,
+    true
+  ],
+  [
+    "I built dispatch rosters for freight routes. Northwind Labs needs reliable rosters.",
+    "Northwind Labs",
+    true,
+    true
+  ],
+  [
+    "I built dispatch rosters for freight routes. Northwind Labs's mission is clear.",
+    "Northwind Labs",
+    true,
+    true
+  ],
+  [
+    "I built dispatch rosters for freight routes, which meets Northwind Labs's need for dispatch rosters.",
+    "Northwind Labs",
+    false,
+    false
+  ],
+  [
+    "I admire dispatch rosters for freight routes, and Northwind Labs needs reliable rosters.",
+    "Northwind Labs",
+    true,
+    true
+  ],
+  [
+    "My background aligns with dispatch rosters for freight routes, and Northwind Labs needs reliable rosters.",
+    "Northwind Labs",
+    true,
+    true
+  ],
+  [
+    "I am excited to join Northwind Labs.",
+    "Northwind Labs, Inc.",
+    false,
+    false
+  ],
+  [
+    "I built dispatch rosters for freight routes. Northwind Labs's mission is clear.",
+    "Northwind Labs, Inc.",
+    true,
+    true
+  ],
+  [
+    "I rebuilt dispatch rosters for freight routes at Northwind Labs.",
+    "Northwind Labs, Inc.",
+    false,
+    false
+  ],
+  [
+    "I built dispatch rosters for freight routes, which meets Northwind Labs's need for dispatch rosters.",
+    "Northwind Labs, Inc.",
+    false,
+    false
+  ],
+  [
+    "I am excited to join Northwind Labs.",
+    "Northwind Labs (NWL)",
+    false,
+    false
+  ],
+  [
+    "I built dispatch rosters for freight routes. Northwind Labs's mission is clear.",
+    "Northwind Labs (NWL)",
+    true,
+    true
+  ],
+  [
+    "I rebuilt dispatch rosters for freight routes at Northwind Labs.",
+    "Northwind Labs (NWL)",
+    false,
+    false
+  ],
+  [
+    "I built dispatch rosters for freight routes, which meets Northwind Labs's need for dispatch rosters.",
+    "Northwind Labs (NWL)",
+    false,
+    false
+  ]
 ];
+export default [{
+  name: 'Amendment 7 restores baseline no-title addressing without treating a pre-dash prefix as the full target',
+  run() {
+    const text = 'Northwind Labs needs dispatch rosters for freight routes.';
+    const options = { identityTokens: [], targetCompany: 'Northwind Labs - Freight Platform', postingText: text };
+    assert.throws(() => assertSourceQuoteLinksFinalText(text, [QUOTE], 'coverLetterParagraphs', 0, options), /names/u);
+    assert.doesNotThrow(() => assertSourceQuoteLinksFinalText(text, [QUOTE], 'coverLetterParagraphs', 0, { ...options, targetTitle: 'Freight Systems Engineer' }));
+  },
+}, {
+  name: 'Amendment 6 restores all 23 employer-subject and suffix pins to measured pre-feature verdicts',
+  run() {
+    for (const [text, company, assembly, drafting] of BASELINE_VERDICTS) {
+      const errors = gates(text, company);
+      assert.equal(errors.assembly.length === 0, assembly, `assembly: ${company}: ${text}`);
+      assert.equal(errors.drafting.length === 0, drafting, `drafting: ${company}: ${text}`);
+    }
+  },
+}];

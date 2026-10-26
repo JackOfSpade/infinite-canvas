@@ -1744,13 +1744,13 @@ export function createHandoffBridgeController(options = {}) {
       return { copied: true, sessionCode: prepared.sessionCode, chatOrdinal: prepared.chatOrdinal, commitToken, ...(prepared.recopied === true ? { recopied: true } : {}) };
     } catch { return { copied: false, status: 'app_unavailable' }; }
   }
-  async function commitChat(token) {
+  async function commitChat(token, observation = null) {
     const pending = typeof token === 'string' ? preparedChats.get(token) : null;
     if (!pending) return { success: false, code: 'NOT_READY' };
     preparedChats.delete(token);
     try {
       if (!currentRuntime(pending.generation, pending.engine)) return { success: false, code: 'NOT_READY' };
-      if (pending.commit() !== true) return { success: false, code: 'NOT_READY' };
+      if (pending.commit(observation) !== true) return { success: false, code: 'NOT_READY' };
       restartConfirmed = true;
       humanAction();
       change();
@@ -1860,6 +1860,15 @@ export function createHandoffBridgeController(options = {}) {
       }
       return result && typeof result === 'object' ? result : { copied: false, status: 'session_ended' };
     } catch { return { copied: false, status: 'session_ended' }; }
+  }
+  async function observedChatCall(method, args = {}) {
+    const generation = lifecycleGeneration;
+    const activeEngine = engine;
+    if (!currentRuntime(generation, activeEngine) || serving !== 'live') return false;
+    try {
+      const result = await call(activeEngine, method, { linkId: currentLinkId(), sessionCode: args.sessionCode, observation: args.observation });
+      return currentRuntime(generation, activeEngine) && result === true;
+    } catch { return false; }
   }
   // ui.js uses this only if it could not write an engine-reserved starter to
   // the clipboard. The renderer never receives this recovery path or a key.
@@ -2084,6 +2093,9 @@ export function createHandoffBridgeController(options = {}) {
     enable, disable, shutdownForQuit, pause, resume, revokeAll, forget, release, unrelease, onBundleDiscarded, releasePushHubs, unreleasePushHub,
     newChat: args => chat('new', args), continueChat: args => chat('continue', args), startWorkerPool, copyWorkerStarter, prepareWorkerAttachment, abandonWorkerStarter, restartWorker,
     prepareChat, commitChat, abandonChat, confirmRestart, getActivity,
+    beginObservedChat: args => observedChatCall('beginObservedChat', args),
+    confirmObservedChat: args => observedChatCall('confirmObservedChat', args),
+    cancelObservedChat: args => observedChatCall('cancelObservedChat', args),
     holdForQuit, resumeAfterQuitCancel, notePairingAction, onPairingState, onAnonymous, onReconnectHint, onTransportCount, onSecurityEvent, onLinkChanged, reloadConfig, ackAlarm, refreshPushDiscovery,
   });
 }

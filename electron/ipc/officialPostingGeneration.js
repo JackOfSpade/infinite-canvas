@@ -2,13 +2,13 @@ import crypto from 'node:crypto';
 import { handleSafe } from './ipcUtils.js';
 import { getHandoffBridgeStatus } from './handoffBridge/index.js';
 import { officialPostingAliases, officialPostingRecordMatchesScrapedIdentity } from './officialPostingStore.js';
-import { getOfficialPostingStore, resolveOfficialPostings } from './officialPostingService.js';
+import { getOfficialPostingStore, mergeOfficialPostingTelemetry, resolveOfficialPostings } from './officialPostingService.js';
 import { fetchOfficialPosting } from './officialPostingFetch.js';
 import { extractOfficialPostingCandidates } from './officialPostingExtractors.js';
 import { evaluateOfficialPostingMatch, frozenOfficialEmployer } from './officialPostingMatch.js';
 import { extractAtsTenant, strictEmployerEqual } from './officialSourceHosts.js';
 import { officialPostingAdapterUrl, readableOfficialPostingDescription, unresolvedOfficialPosting, verifiedOfficialPostingApplyUrl, shouldPersistOfficialPostingResult } from './officialPostingResolver.js';
-import { normalizeOfficialLocation, normalizeOfficialPosting, normalizeOfficialSalary, officialHttpsUrl, OFFICIAL_POSTING_TRAIL } from './officialPostingFields.js';
+import { normalizeOfficialLocation, normalizeOfficialPosting, normalizeOfficialSalary, officialHttpsUrl, boundedOfficialPostingTrail } from './officialPostingFields.js';
 
 export const OFFICIAL_POSTING_PREPARE_TIMEOUT_MS = 15 * 60 * 1000;
 const PREPARED_TTL_MS = 24 * 60 * 60 * 1000;
@@ -20,7 +20,7 @@ const textLevels = new Set(['L1', 'L2', 'L3']);
 const sha256 = text => crypto.createHash('sha256').update(text).digest('hex');
 const aliasesOf = job => officialPostingAliases(job).sort();
 function errorWithCode(code) { return Object.assign(new Error(code), { code }); }
-function withTrail(posting, ...codes) { return { ...posting, trail: [...new Set([...(posting.trail || []), ...codes].filter(code => OFFICIAL_POSTING_TRAIL.includes(code)))].slice(-32) }; }
+function withTrail(posting, ...codes) { return { ...posting, trail: boundedOfficialPostingTrail([...(posting.trail || []), ...codes]) }; }
 function active(signal) { if (signal?.aborted) throw signal.reason || errorWithCode('bridge-aborted'); }
 function available(status) { return status?.enabled === true && status?.link?.state === 'linked' && status?.chat?.pool?.active === true; }
 
@@ -177,7 +177,7 @@ async function reverify(job, record, { fetch, signal, now, store }) {
     salary: normalizeOfficialSalary(candidate.salary) || { text: '', provenance: 'unknown' },
     sourceUrl: url, officialApplyUrl: verifiedOfficialPostingApplyUrl(candidate), fetchedAt: new Date(now()).toISOString(),
     contentHash: sha256(candidate.description),
-    trail: [...new Set([...(prior.trail || []), 'reverified'])].slice(-32) });
+    trail: withTrail(prior, 'reverified').trail });
   if (!posting) return preserve('invalid-text');
   active(signal);
   return { officialPosting: posting, postedBy: strictEmployerEqual(job.company, employer) ? '' : job.company,
@@ -189,7 +189,7 @@ async function reverify(job, record, { fetch, signal, now, store }) {
 export async function prepareOfficialPostingForGeneration(args, {
   projectJob = value => value, signal, store, fetch = fetchOfficialPosting, resolve = resolveOfficialPostings,
   bridgeStatus = getHandoffBridgeStatus, now = Date.now, timeoutMs = OFFICIAL_POSTING_PREPARE_TIMEOUT_MS,
-  slots = semaphore, callRaw, telemetry = { failed: 0 },
+  slots = semaphore, callRaw, callMatch, telemetry = { failed: 0 },
 } = {}) {
   const failed = error => {
     telemetry.failed = (Number(telemetry.failed) || 0) + 1;
@@ -212,7 +212,7 @@ export async function prepareOfficialPostingForGeneration(args, {
   const timer = setTimeout(() => controller.abort(errorWithCode('bridge-timeout')), timeoutMs); timer.unref?.();
   let onAbort; const cancelled = new Promise((_, reject) => { onAbort = () => reject(controller.signal.reason); });
   controller.signal.addEventListener('abort', onAbort, { once: true });
-  let release; let result; let bridgeAvailable = false; let verifiedFallback;
+  let release; let result; let bridgeAvailable = false; let verifiedFallback; let resolvedTelemetry = null;
   try {
     result = await Promise.race([(async () => {
       active(controller.signal);
@@ -239,8 +239,9 @@ export async function prepareOfficialPostingForGeneration(args, {
           trail: [...(record.officialPosting.trail || []), 'recent-miss'], alternatives: record.officialPosting.alternatives || [] });
       }
       const resolved = await resolve([scrapedJob], { store, fetch, signal: controller.signal,
-        manualAiRunId: args.manualAiRunId, nodeId: args.nodeId, callRaw, now, bridgeAvailable,
+        manualAiRunId: args.manualAiRunId, nodeId: args.nodeId, callRaw, callMatch, now, bridgeAvailable,
         timeoutMs });
+      resolvedTelemetry = mergeOfficialPostingTelemetry(resolved.telemetry);
       active(controller.signal);
       const posting = resolved.jobs[0]?.officialPosting;
       if (!normalizeOfficialPosting(posting)) return unresolvedOfficialPosting(scrapedJob, { outcome: 'failed', trail: ['fetch-failed'] });
@@ -258,12 +259,12 @@ export async function prepareOfficialPostingForGeneration(args, {
     clearTimeout(timer); signal?.removeEventListener('abort', abort); controller.signal.removeEventListener('abort', onAbort); release?.();
   }
   if (!bridgeAvailable) result.officialPosting = withTrail(result.officialPosting, 'bridge-unavailable');
-  try { return { ...remember(scrapedJob, result, now()), telemetry: { failed: telemetry.failed } }; }
+  try { return { ...remember(scrapedJob, result, now()), telemetry: { failed: telemetry.failed, ...(resolvedTelemetry ? { officialPosting: resolvedTelemetry } : {}) } }; }
   catch (error) {
     if (signal?.aborted) throw signal.reason || error;
     failed(error);
     return { officialPosting: unresolvedOfficialPosting(scrapedJob, { outcome: 'failed', trail: ['failed'] }).officialPosting,
-      telemetry: { failed: telemetry.failed } };
+      telemetry: { failed: telemetry.failed, ...(resolvedTelemetry ? { officialPosting: resolvedTelemetry } : {}) } };
   }
 }
 

@@ -2,12 +2,35 @@ import { ORIGINAL_JOB_LISTING_BODY_HEADING, ORIGINAL_JOB_LISTING_TARGETS_HEADING
 import { targetCompanyNames } from './coverLetterChecks.js';
 import { assessBulkQuantity, quantityFindings } from './applicationClaimGrounding.js';
 
+const INTENT_AFTER_SUBJECT_RE = /^(?:['’](?:d|ll)(?![\p{L}\p{N}])|\s+(?:(?:also|really|truly|just|still|very\s+much)\s+)*(?:would|will|could|can|might|may|should|shall|hope|want|plan|intend|aim|look\s+forward|welcome)(?![\p{L}\p{N}]))/iu;
+
+// Strip exactly one closed, anchored first-person intent lead. Its present
+// copula, emotion adjective or look-forward gerund is not a past-work claim;
+// everything after it still receives the ordinary past/participle tests.
+const INTENT_ADJECTIVE_LEAD_RE = /^(?:\s+(?:am|are)|['’](?:m|re))\s+(?:(?:very|so|really)\s+)?(?:eager|excited|ready|keen|happy|glad|thrilled|delighted|pleased|motivated|prepared|enthusiastic)\s+to\s+/iu;
+const INTENT_FORWARD_LEAD_RE = /^(?:(?:\s+(?:am|are)|['’](?:m|re))\s+looking|\s+look(?:ing)?)\s+forward\s+to\s+\p{L}+ing(?![\p{L}\p{N}])\s*/iu;
+const APPLICATION_INTENT_LEAD_RE = /^(?:\s+(?:am|are)|['’](?:m|re))\s+(?:applying\s+for|writing\s+to\s+apply\s+for)\s+/iu;
+
+function listingClosingIntentLeadInRemainder(text, { applicationHead = true } = {}) {
+  const value = String(text ?? '');
+  const subject = value.match(/^\s*(?:(?:and|so|but)\s+)?(?:I|we)(?![\p{L}\p{N}])/iu);
+  if (!subject) return { matched: false, remainder: value };
+  const afterSubject = value.slice(subject[0].length);
+  const lead = afterSubject.match(INTENT_ADJECTIVE_LEAD_RE)
+    || afterSubject.match(INTENT_FORWARD_LEAD_RE)
+    || (applicationHead ? afterSubject.match(APPLICATION_INTENT_LEAD_RE) : null)
+    || afterSubject.match(INTENT_AFTER_SUBJECT_RE);
+  return lead
+    ? { matched: true, remainder: afterSubject.slice(lead[0].length) }
+    : { matched: false, remainder: value };
+}
+
 const normalize = value => String(value ?? '').normalize('NFC').replace(/\s+/gu, ' ').trim();
 const escape = value => String(value).replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
 const CANDIDATE_TERMS = /\b(?:experience|expertise|background|record|years?|decades?|lifetime|senior|principal|staff|expert|proven|skilled|seasoned|candidate|applicant|application|writer|letter|resume|résumé)\b/iu;
 const BASE_CANDIDATE_TERMS = /\b(?:experience|expertise|background|record|years?|proven|skilled|seasoned|candidate|applicant|resume|résumé)\b/iu;
 const ROLE_FRAME = /\bas\s+an?\s+[\p{L}]/iu;
-const CONTINUITY_FRAME = /\b(?:rejoin\w*|return\s+to|resume\w*|continu\w*|stay\w*\s+(?:at|with)|remain\w*\s+(?:at|with)|be\s+back\s+at|go\s+back\s+to)\b/iu;
+const CONTINUITY_FRAME = /\b(?:re[\s\p{Pd}]*join\w*|return\s+to|resume\w*|continu\w*|stay\w*\s+(?:at|with)|remain\w*\s+(?:at|with)|be\s+back\s+at|go\s+back\s+to)\b/iu;
 const INTENT_CONTINUITY_FRAME = /\b(?:stay\w*|remain\w*|be\s+back)\b/iu;
 const PERFECT_WORK_FRAME = /\b(?:have|had)\s+(?:(?:already|previously|just|recently|always|never|ever)\s+)*(?:[\p{L}]+(?:ed|en)|been|built|rebuilt|run|led|done|made|written|grown|brought|kept|held|taught|thought|known|seen|won|cut|set|put|met)\b/iu;
 // These words express only the closed application/intent grammar. Any other
@@ -86,8 +109,15 @@ export function evaluateFinalParagraphListingGrounding(context, deps) {
     ...deps.meaningfulSourceTokens(targetCompanyNames(company).join(' '))]);
   sentences.forEach((sentence, sentenceIndex) => {
     const ordinal = sentenceIndex + 1;
+    if (typeof deps.targetEmployerSentenceFailures === 'function') result.corrections.push(...deps.targetEmployerSentenceFailures(sentence, index, sentenceIndex));
     const clauses = deps.groundingClauses(sentence).map(clause => clause.text).filter(Boolean);
-    const intent = deps.speaksOnlyOfApplicationIntent(sentence) || (clauses.length > 0 && clauses.every(deps.speaksOnlyOfIntent));
+    const closingIntent = clause => {
+      if (deps.speaksOnlyOfIntent(clause)) return true;
+      const { matched, remainder } = listingClosingIntentLeadInRemainder(clause);
+      return matched && !/\b(?:I|we|my|our)\b/iu.test(remainder)
+        && deps.reportsNoPastWork(withoutFrozenCompany(remainder, company)) && !deps.hasWorkIngWord(remainder);
+    };
+    const intent = deps.speaksOnlyOfApplicationIntent(sentence) || (clauses.length > 0 && clauses.every(closingIntent));
     if (deps.hasFigureOrYear(sentence)
       || quantityFindings(sentence, [], { targetOwnedFree: false, trustedNames: targetCompanyNames(company), skipPopulationNouns: false }).length
       || assessBulkQuantity(sentence, [])) fail(ordinal, 'no figure, number or year');
@@ -110,11 +140,11 @@ export function evaluateFinalParagraphListingGrounding(context, deps) {
       else fail(ordinal, closedTerms);
     }
     if (intent) {
-      // Each clause uses the same one anchored A3 lead-in as the employment
-      // guard. Coordinating two plain intents does not create career prose.
+      // Each closing clause has one anchored intent lead-in.
+      // Coordinating two plain intents does not create career prose.
       for (const [clauseIndex, clause] of (clauses.length ? clauses : [sentence]).entries()) {
         checkNewClauseFrames(clause, clauseIndex);
-        const { remainder } = deps.intentLeadInRemainder(clause);
+        const { remainder } = listingClosingIntentLeadInRemainder(clause);
         const prefix = `clause ${clauseIndex + 1} with `;
         if (!deps.reportsNoPastWork(remainder)) fail(ordinal, `${prefix}no past-work word after its single anchored intent lead-in`);
         if (/\b(?:i|we)\b/iu.test(remainder)) fail(ordinal, `${prefix}no second first-person subject after its intent lead-in`);

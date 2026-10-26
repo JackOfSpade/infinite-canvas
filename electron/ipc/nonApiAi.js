@@ -21,7 +21,7 @@ import { abortNodeTasksAndWait, cancellationError, getCurrentIpcRequestContext, 
 import { logger } from '../logger.js';
 import { isBackgroundE2E } from '../utils/backgroundE2e.js';
 import { clipCorrectionItem, REJECTED_CAUTION } from './handoffBridge/framing.js';
-import { VALIDATION_DETAIL_LIMIT, VALIDATION_RULE_ID_RE, VALIDATION_SUMMARY_RULE_ID } from './validationFailure.js';
+import { validationFailure, VALIDATION_DETAIL_LIMIT, VALIDATION_RULE_ID_RE, VALIDATION_SUMMARY_RULE_ID } from './validationFailure.js';
 
 const { app, ipcMain, shell } = electronPkg;
 
@@ -266,6 +266,24 @@ export const SAFE_NON_API_AI_LOG_ERROR_CODES = new Set([
   'CAREER_SNAPSHOT_AUDIT_INVALID',
   'VALIDATION_FAILED',
 ]);
+
+const COMPARATIVE_MATCH_TASK = 'job-official-posting-match';
+const COMPARISON_KEY_RE = /^[a-f0-9]{64}$/u;
+function comparisonError(kind = 'UNAVAILABLE') {
+  return Object.assign(new Error(kind === 'INVALID'
+    ? 'The comparative match run failed its validation retry.'
+    : 'Independent bridge conversations are unavailable for this comparative match.'), {
+    code: `OFFICIAL_POSTING_COMPARATIVE_${kind}`,
+  });
+}
+function comparisonMetadataValid(group, run) {
+  return typeof group === 'string' && COMPARISON_KEY_RE.test(group) && ['A', 'B'].includes(run);
+}
+function comparisonProofValid(proof, run) {
+  return proof?.version === 2 && proof.transport === 'bridge' && proof.observed === true
+    && typeof proof.conversationKey === 'string' && COMPARISON_KEY_RE.test(proof.conversationKey)
+    && (run === 'A' || proof.isolated === true);
+}
 
 function nonApiAiLogErrorCode(error) {
   const code = typeof error?.code === 'string' ? error.code : '';
@@ -929,6 +947,8 @@ function updateDurableStep(record, patch, { deferWrite = false } = {}) {
       // exact code the person saw originally.
       handoffCode: normalizeHandoffCode(record.handoffCode),
       handoffCodeVerificationVersion: record.handoffCodeVerificationVersion || null,
+      ...(record.comparisonGroup ? { comparisonGroup: record.comparisonGroup, comparisonRun: record.comparisonRun,
+        comparisonInvalidCount: record.comparisonInvalidCount, comparisonProof: record.comparisonProof } : {}),
       updatedAt: Date.now(),
       ...patch,
     };
@@ -2657,8 +2677,12 @@ export async function requestNonApiAi({
   canStepBack = false,
   stepBackLabel,
   initialResponse,
+  comparisonGroup,
+  comparisonRun,
   signal,
 } = {}) {
+  const comparative = task === COMPARATIVE_MATCH_TASK;
+  if (comparative && (!comparisonMetadataValid(comparisonGroup, comparisonRun) || initialResponse || legacyReplay)) throw comparisonError();
   const context = getCurrentIpcRequestContext();
   const sender = context?.sender;
   if (!sender || sender.isDestroyed?.()) {
@@ -2708,6 +2732,9 @@ export async function requestNonApiAi({
   // and reserving the winner for this new request.
   const savedCurrent = await durableStepByLogicalOrRawKey(runId, currentStepKeys);
   const savedStep = savedCurrent?.step || null;
+  if (comparative && savedStep && (savedStep.comparisonGroup !== comparisonGroup || savedStep.comparisonRun !== comparisonRun)) throw comparisonError();
+  if (comparative && Number(savedStep?.comparisonInvalidCount) >= 2) throw comparisonError('INVALID');
+  if (comparative && savedStep?.status === 'accepted' && !comparisonProofValid(savedStep.comparisonProof, comparisonRun)) throw comparisonError();
   if (savedCurrent?.stepKey) stepKey = savedCurrent.stepKey;
   let pendingLegacyReplay = null;
   const validLegacyReplay = legacyReplay && typeof legacyReplay === 'object'
@@ -2872,6 +2899,11 @@ export async function requestNonApiAi({
       : HANDOFF_CODE_VERIFICATION_VERSION,
     runId,
     stepKey,
+    comparisonGroup: comparative ? comparisonGroup : null,
+    comparisonRun: comparative ? comparisonRun : null,
+    comparisonInvalidCount: comparative ? Math.min(2, cleanRetryRejectionCount(effectiveSavedStep?.comparisonInvalidCount)) : 0,
+    // Pending replay must earn fresh trusted bridge provenance again.
+    comparisonProof: null,
     recoveryMode: context.manualAiRecoveryMode || null,
     sender,
     nodeId: context.nodeId || null,
@@ -2957,6 +2989,10 @@ export async function requestNonApiAi({
     && !record.bridgeEscalation
     ? 'mcp'
     : 'manual';
+  if (comparative && record.handoffRoute !== 'mcp') {
+    releaseHandoffCodeReservation(record.handoffCode, record.handoffReservationId);
+    throw comparisonError();
+  }
   if (record.handoffRoute !== 'mcp' || !record.runId || !record.stepKey) {
     record.retryRejectionCount = 0;
     record.retryNotBefore = null;
@@ -3142,9 +3178,21 @@ async function acceptNonApiAiResponse(record, args, { transport = 'local' } = {}
       retryAfterMs: coolingForMs,
     };
   }
+  if (record.comparisonGroup && (transport !== 'bridge' || !comparisonProofValid(record.comparisonProof, record.comparisonRun))) {
+    const error = comparisonError();
+    await updateDurableStep(record, { status: 'failed', response: null, draft: '' });
+    settle(record, { accepted: false, failed: true });
+    record.reject(error);
+    return { accepted: false, reason: 'comparative_unavailable' };
+  }
   // Where the write stands, so the caller can tell a rejected answer from a failed save.
   let phase = 'validate';
   try {
+    if (record.comparisonGroup && Buffer.byteLength(String(args.response ?? ''), 'utf8') > 1_000_000) {
+      throw validationFailure({ message: 'Official posting comparison exceeds the bridge response limit.',
+        details: ['official posting comparison is over its response bound; retain at most 12 evidence pairs, bounded distinguishing entries and no conflicts'],
+        ruleIds: ['LOOKUP_OFFICIAL_MATCH_LENGTH'], code: 'STRUCTURED_OUTPUT_SCHEMA_INVALID' });
+    }
     const value = validateNonApiAiSubmission({
       response: args.response,
       responseSchema: record.responseSchema,
@@ -3243,6 +3291,18 @@ async function acceptNonApiAiResponse(record, args, { transport = 'local' } = {}
       ...(cause ? { causeTag: rejectionCauseTag(cause.key), causeRepeats: cause.count, ruleId: cause.ruleId } : {}),
     });
     logger.warn(`[Non-API AI] Rejected response for task '${record.task || 'unknown'}' (code=${nonApiAiLogErrorCode(error)}).`);
+    if (record.comparisonGroup && phase === 'validate') {
+      record.comparisonInvalidCount = Math.min(2, record.comparisonInvalidCount + 1);
+      await updateDurableStep(record, { status: record.comparisonInvalidCount >= 2 ? 'failed' : 'pending', response: null, draft: '',
+        validationCorrectionDetails: record.validationCorrectionDetails, retryRejectionCount: 0, retryNotBefore: null });
+      if (record.comparisonInvalidCount >= 2) {
+        settle(record, { accepted: false, failed: true });
+        record.reject(comparisonError('INVALID'));
+        return { accepted: false, reason: 'comparative_invalid' };
+      }
+      sendRequest(record, 'reissue');
+      return { accepted: false, validationErrors: [message], reason: 'validation' };
+    }
     if (cause && cause.count >= BRIDGE_SAME_CAUSE_REJECTION_LIMIT) {
       // The person's dock is the existing manual route (an attachment that
       // cannot travel falls back the same way). It shows the precise message
@@ -3311,6 +3371,10 @@ export function returnBridgeHandoffToPerson({ requestId, reason } = {}) {
   const record = typeof requestId === 'string' ? pendingRequests.get(requestId) : null;
   if (!record || record.handoffRoute !== 'mcp' || record.settling
     || (reason !== 'rejection_cap' && reason !== 'worker_restart_cap')) return false;
+  if (record.comparisonGroup) {
+    abortPending(record, comparisonError());
+    return true;
+  }
   clearReissueTimer(record);
   record.handoffRoute = 'manual';
   record.bridgeEscalation = reason;
@@ -3579,6 +3643,7 @@ function bridgeListEntry(record) {
     // a count before status is built; neither scope id nor the forecast itself
     // reaches ChatGPT, a renderer, a persisted step, or a bug report.
     queuedWorkForecast: bridgeQueuedWorkForecast(record),
+    ...(record.comparisonGroup ? { comparisonGroup: record.comparisonGroup, comparisonRun: record.comparisonRun } : {}),
   });
 }
 
@@ -3645,11 +3710,17 @@ function bridgeRetryView(record) {
  * The prompt for one handoff, byte-identical to what the dock shows and copies
  * (publicRequest(record).prompt), or the reason it may not be served.
  */
-export function readBridgeableNonApiAiHandoff({ requestId, handoffCode, allowTasks, allowNodeIds = null, allowWindowNodePairs = null } = {}) {
+export function readBridgeableNonApiAiHandoff({ requestId, handoffCode, allowTasks, allowNodeIds = null, allowWindowNodePairs = null, comparisonProvenance = null } = {}) {
   const record = typeof requestId === 'string' ? pendingRequests.get(requestId) : undefined;
   if (!record || record.handoffCode !== handoffCode) return Object.freeze({ ok: false, reason: 'not_pending' });
   const reason = bridgeExclusionReason(record, { allowTasks, allowNodeIds, allowWindowNodePairs });
   if (reason) return Object.freeze({ ok: false, reason, ...(reason === 'cooldown' ? { retryAfterMs: retryAfterMs(record) } : {}) });
+  if (record.comparisonGroup) {
+    if (comparisonProvenance?.comparisonGroup !== record.comparisonGroup || comparisonProvenance?.comparisonRun !== record.comparisonRun
+      || !comparisonProofValid(comparisonProvenance, record.comparisonRun)) return Object.freeze({ ok: false, reason: 'comparative_unavailable' });
+    record.comparisonProof = { version: 2, transport: 'bridge', observed: true, conversationKey: comparisonProvenance.conversationKey,
+      isolated: comparisonProvenance.isolated === true };
+  }
   return Object.freeze({
     ok: true,
     requestId: record.requestId,
@@ -3658,6 +3729,15 @@ export function readBridgeableNonApiAiHandoff({ requestId, handoffCode, allowTas
     responseFormat: bridgeResponseFormat(record),
     ...bridgeRetryView(record),
   });
+}
+
+// Trusted main-process seam only. An obsolete bridge cannot safely fall back
+// to a manual answer when it cannot attest to separate conversations.
+export function failBridgeableComparativeHandoff({ requestId, handoffCode } = {}) {
+  const record = pendingRequests.get(requestId);
+  if (!record?.comparisonGroup || record.handoffCode !== handoffCode) return false;
+  abortPending(record, comparisonError());
+  return true;
 }
 
 const BRIDGE_ATTACHMENT_MIMES = Object.freeze({
@@ -3738,6 +3818,8 @@ export async function submitNonApiAiResponseForBridge({ requestId, handoffCode, 
       validationCode: SAFE_NON_API_AI_LOG_ERROR_CODES.has(record.validationCode) ? record.validationCode : null,
       validationDiagnostic: cloneSafeValidationDiagnostic(record.validationDiagnostic),
     });
+    case 'comparative_invalid':
+    case 'comparative_unavailable': return bridgeOutcome('not_pending');
     case 'commit_failed': return bridgeOutcome('commit_failed');
     default: return bridgeOutcome('not_pending');
   }

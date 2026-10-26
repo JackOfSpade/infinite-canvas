@@ -40,6 +40,17 @@ function twin(ctx) {
 
 export default [
   {
+    name: 'Amendment 6 listing-only guard corrections report the real sentence ordinal',
+    run() {
+      const ctx = context({ paragraphs: [structuredClone(prior), closing(`I would join ${company}. At ${company}, I rebuilt dispatch rosters.`)] });
+      const result = local.__finalParagraphListingGroundingForTests(ctx);
+      const failures = result.corrections.filter(line => line.includes('states work at'));
+      assert.equal(failures.length, 1);
+      assert.ok(failures[0].includes('paragraph 2, sentence 2'), failures[0]);
+      for (const line of twin(ctx).filter(line => line.includes('states work at'))) assert.ok(line.includes('sentence 2'), line);
+    },
+  },
+  {
     name: 'official-posting closing permits actual final intent and employer-facing sentences with one through four accepted body citations',
     run() {
       for (const text of [
@@ -79,7 +90,7 @@ export default [
         const ctx = context({ snippet: text, evidence, paragraphs: [structuredClone(prior), closing(text)] });
         const result = local.__finalParagraphListingGroundingForTests(ctx);
         assert.equal(result.eligible, expected, `${text}: ${JSON.stringify(result.corrections)}`);
-        assert.equal(twin(ctx).length === 0, expected, 'every coordinated intent clause keeps its own closed lead-in and remainder checks');
+        assert.equal(twin(ctx).length === 0, expected, 'closing intents use the restored naming rules');
       }
     },
   },
@@ -249,7 +260,8 @@ export default [
       ]) {
         const ctx = context({ paragraphs: [structuredClone(prior), closing(text)] });
         const errors = twin(ctx);
-        assert.ok(errors.some(line => line.includes('the employer this letter is addressed to')), `${text}: ${JSON.stringify(errors)}`);
+        assert.ok(errors.length, `${text}: ${JSON.stringify(errors)}`);
+        if (text.startsWith('At ') || text.startsWith('My work at ')) assert.ok(errors.some(line => line.includes('states work at')), text);
       }
       const duration = context({ paragraphs: [structuredClone(prior), closing('I bring 12 years of experience in dispatch rosters for freight routes.')] });
       assert.ok(twin(duration).some(line => /duration|years|span/iu.test(line)), 'listing-only duration is checked against no career quote');

@@ -4,12 +4,36 @@ import { JSDOM } from 'jsdom';
 import { createChatLauncher } from '../../electron/ipc/handoffBridge/chatLauncher.js';
 import { pickUserChromePid } from '../../electron/ipc/browser/appleEvents.js';
 import { buildWorkerStarterMessage } from '../../src/utils/handoffBridgeConfig.js';
-import { registerHandoffBridgeUi } from '../../electron/ipc/handoffBridge/ui.js';
+import { registerHandoffBridgeUi as registerRealHandoffBridgeUi } from '../../electron/ipc/handoffBridge/ui.js';
 import { IPC_CHANNELS, IPC_EVENTS } from '../../electron/ipc/handoffBridge/contracts.js';
 import { applyHandoffBridgeStatus, getHandoffBridgeStatus, __resetHandoffBridgeStoreForTests } from '../../src/utils/handoffBridgeStore.js';
 import { IPC_ERROR_COPY } from '../../src/utils/handoffBridgeCopy.js';
 import { clearBridgeChatOpenDiagnostic, getBridgeChatOpenDiagnostic, clearBridgeLaunchDiagnostic, getBridgeLaunchDiagnostic } from '../../electron/ipc/handoffBridge/telemetry.js';
 import { isUiRestartContext } from '../../electron/ipc/handoffBridge/restartContext.js';
+import { observedChatContext } from '../../electron/ipc/handoffBridge/observedChatContext.js';
+
+// These scheduler fixtures predate the observed-chat transport. Bootstrap the
+// controller double with the same begin/confirm/cancel handshake; confirmation
+// still requires the opaque observation the real UI minted from a landed id.
+// Negative launch outcomes and all existing scheduling assertions stay intact.
+let syntheticChatOrdinal = 0;
+function registerHandoffBridgeUi(options) {
+  const pending = new Set();
+  return registerRealHandoffBridgeUi({ ...options, controller: {
+    beginObservedChat: async ({ sessionCode }) => {
+      assert.match(sessionCode, /^[23456789ABCDEFGHJKLMNPQRSTUVWXYZ]{26}$/u);
+      pending.add(sessionCode);
+      return true;
+    },
+    confirmObservedChat: async ({ sessionCode, observation }) => {
+      const proof = observedChatContext(observation);
+      const began = pending.delete(sessionCode);
+      return began && proof?.fresh === true;
+    },
+    cancelObservedChat: async ({ sessionCode }) => { pending.delete(sessionCode); return true; },
+    ...options.controller,
+  } });
+}
 
 function harness(options = {}) {
   const calls = [];
@@ -120,7 +144,7 @@ function observedWorkerUi({ worker, clock, diagnosis, controller = {} }) {
       launch: async () => {
         calls.push(['launch']);
         worker.firstCallAt = clock.now; worker.lastCallAt = clock.now; worker.state = 'waiting';
-        return { ok: true };
+        return { ok: true, chatId: `synthetic-launcher-chat-${++syntheticChatOrdinal}` };
       } },
     getCanvasWindows: () => [],
   });
@@ -338,7 +362,7 @@ export default [
         copyWorkerStarter: async () => { starters++; return { copied: true, sessionCode: '2'.repeat(26), workerCount: 1 }; },
         restartWorker: async () => { throw new Error('must not replace credentials'); } },
       chatLauncher: { owns: () => owns, reveal: async () => ({ ok: false, reason: 'tab_not_owned' }), close: async () => true,
-        launch: async () => { launches++; owns = true; worker.firstCallAt = Date.now(); worker.state = 'working'; return { ok: true }; } },
+        launch: async () => { launches++; owns = true; worker.firstCallAt = Date.now(); worker.state = 'working'; return { ok: true, chatId: `synthetic-launcher-chat-${++syntheticChatOrdinal}` }; } },
       getCanvasWindows: () => [window], launchPresentationTimeoutMs: 8,
     });
     try {
@@ -681,7 +705,7 @@ export default [
             close: async owner => { calls.push(['close', owner]); return true; },
             launch: async () => {
               calls.push(['launch', 1]); worker.firstCallAt = Date.now(); worker.state = 'working';
-              return { ok: true };
+              return { ok: true, chatId: `synthetic-launcher-chat-${++syntheticChatOrdinal}` };
             } },
           getCanvasWindows: () => [],
         });
@@ -1023,7 +1047,7 @@ export default [
         ipc: { handle: (key, value) => handlers.set(key, value), removeHandler: key => handlers.delete(key), on() {}, removeListener() {} },
         controller: { snapshot: () => snapshot, subscribe: () => () => {},
           copyWorkerStarter: async () => ({ copied: true, sessionCode: '2'.repeat(26), workerCount: 1 }) },
-        chatLauncher: { launch: async args => { seen.push(args.application); return { ok: true }; }, close: async () => true,
+        chatLauncher: { launch: async args => { seen.push(args.application); return { ok: true, chatId: `synthetic-launcher-chat-${++syntheticChatOrdinal}` }; }, close: async () => true,
           diagnose: async () => ({ reason: 'none' }), owns: () => true, observation: () => null },
         getCanvasWindows: () => [], launchPresentationTimeoutMs: 8, launchDiagnosisIntervalMs: 1,
       });
@@ -1044,7 +1068,7 @@ export default [
       ipc: { handle: (key, value) => handlers.set(key, value), removeHandler() {}, on() {}, removeListener() {} },
       controller: { snapshot: () => snapshot, subscribe: () => () => {},
         copyWorkerStarter: async () => ({ copied: true, sessionCode: '2'.repeat(26), workerCount: 1 }) },
-      chatLauncher: { launch: async () => ({ ok: true }), close: async () => true,
+      chatLauncher: { launch: async () => ({ ok: true, chatId: `synthetic-launcher-chat-${++syntheticChatOrdinal}` }), close: async () => true,
         diagnose: async () => ({ reason: 'reconnect_required' }), owns: () => true },
       getCanvasWindows: () => [window], launchPresentationTimeoutMs: 8, launchDiagnosisIntervalMs: 1,
     });
@@ -1079,7 +1103,7 @@ export default [
       chatLauncher: { launch: async ({ owner }) => {
         launches.push(owner);
         if (owner === 'worker:25:2') snapshot.chat.pool.workers[1].firstCallAt = Date.now();
-        return { ok: true };
+        return { ok: true, chatId: `synthetic-launcher-chat-${++syntheticChatOrdinal}` };
       }, close: async owner => { closes.push(owner); return true; },
         diagnose: async () => ({ reason: 'approval_required' }), owns: () => true },
       notifyLaunchProblem: kind => notifications.push(kind),
@@ -1113,7 +1137,7 @@ export default [
       controller: { snapshot: () => snapshot, subscribe: () => () => {},
         copyWorkerStarter: async () => ({ copied: true, sessionCode: '2'.repeat(26), workerCount: 1 }),
         restartWorker: async args => { calls.push(args); return { copied: true, sessionCode: '3'.repeat(26), workerCount: 1 }; } },
-      chatLauncher: { launch: async () => { launches++; return { ok: true }; }, close: async () => true,
+      chatLauncher: { launch: async () => { launches++; return { ok: true, chatId: `synthetic-launcher-chat-${++syntheticChatOrdinal}` }; }, close: async () => true,
         diagnose: async () => ({ reason: launches === 1 ? 'usage_limit' : 'none' }),
         markProUnavailable: () => calls.push('cap'), owns: () => true, observation: () => null },
       getCanvasWindows: () => [], launchPresentationTimeoutMs: 8, launchDiagnosisIntervalMs: 1,
@@ -1160,7 +1184,7 @@ export default [
       ipc: { handle() {}, removeHandler() {}, on() {}, removeListener() {} },
       controller: { snapshot: () => snapshot, subscribe: () => () => {},
         restartWorker: async () => { calls.push('rekey'); return { copied: true, sessionCode: '3'.repeat(26), workerCount: 1 }; } },
-      chatLauncher: { launch: async () => { calls.push('launch'); return { ok: true }; },
+      chatLauncher: { launch: async () => { calls.push('launch'); return { ok: true, chatId: `synthetic-launcher-chat-${++syntheticChatOrdinal}` }; },
         close: async () => { calls.push('close'); return true; }, owns: () => true },
       getCanvasWindows: () => [],
     });
@@ -1185,7 +1209,7 @@ export default [
       controller: { snapshot: () => snapshot, subscribe: () => () => {},
         copyWorkerStarter: async () => ({ copied: true, sessionCode: '2'.repeat(26), workerCount: 1 }),
         restartWorker: async args => { calls.push(args); return { copied: true, sessionCode: '3'.repeat(26), workerCount: 1 }; } },
-      chatLauncher: { launch: async () => ({ ok: true }), close: async () => true,
+      chatLauncher: { launch: async () => ({ ok: true, chatId: `synthetic-launcher-chat-${++syntheticChatOrdinal}` }), close: async () => true,
         diagnose: async () => ({ reason: 'safety_block' }), owns: () => true, observation: () => null },
       getCanvasWindows: () => [], launchPresentationTimeoutMs: 8, launchDiagnosisIntervalMs: 1,
     });
@@ -1214,7 +1238,7 @@ export default [
       controller: { snapshot: () => snapshot, subscribe: () => () => {},
         copyWorkerStarter: async () => ({ copied: true, sessionCode: '2'.repeat(26), workerCount: 2 }),
         restartWorker: async args => { restarts.push(args); return { copied: true, sessionCode: '3'.repeat(26), workerCount: 2 }; } },
-      chatLauncher: { launch: async () => { launches++; if (resolved) snapshot.chat.pool.workers[0].firstCallAt = Date.now(); return { ok: true }; },
+      chatLauncher: { launch: async () => { launches++; if (resolved) snapshot.chat.pool.workers[0].firstCallAt = Date.now(); return { ok: true, chatId: `synthetic-launcher-chat-${++syntheticChatOrdinal}` }; },
         close: async () => true, diagnose: async () => ({ reason: resolved ? 'none' : 'plugin_missing' }),
         accountName: () => 'Example', owns: () => true, observation: () => null },
       notifyLaunchProblem: kind => notifications.push(kind),

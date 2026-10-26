@@ -5,6 +5,8 @@ import path from 'node:path';
 import { createOfficialPostingStore } from '../../electron/ipc/officialPostingStore.js';
 import { officialPostingChunks, officialPostingRequestId } from '../../electron/ipc/officialPostingResolver.js';
 import { getOfficialPostingView, officialPostingDedup, resolveOfficialPostings } from '../../electron/ipc/officialPostingService.js';
+import { CONSTANTS } from '../../electron/ipc/handoffBridge/constants.js';
+import { buildOfficialPostingMatchRequest } from '../../electron/ipc/officialPostingBridge.js';
 
 const description = 'Requirements include experience building reliable services and maintaining reporting workflows. Engineers design clear interfaces for dispatch teams and validate operational changes with careful review. The role includes improving data quality across scheduled pipelines and documenting decisions for partner teams. You will work with colleagues to investigate delivery failures and make service behavior understandable. Responsibilities include writing tests for new features and improving the tools used by support teams every day.';
 const location = 'Lakeview, Ontario, Canada';
@@ -38,6 +40,52 @@ const metadata = (url, extra = {}) => ({ level: 'L1', outcome: 'found', employer
   sourceUrl: url, officialApplyUrl: url, trail: [], ...extra });
 
 export default [
+  {
+    name: 'Amendment 8 item 1 transport: service keeps hidden contradiction text host-only in both validation paths',
+    async run() {
+      const shared = description.split(/(?<=\.)\s+/u);
+      const trueTeam = 'Team: Payments Platform. You will own the settlement services for the payments platform group and its on call rotation.';
+      const wrongTeam = 'Team: Risk Engineering. You will own the fraud scoring services for the risk engineering group and its on call rotation.';
+      const recruiter = 'Recruiters note that the candidate will join a friendly group.';
+      const job = row(1, { snippet: `${trueTeam} ${recruiter} ${shared[0]} Occasional travel may be needed. ${shared[4]} Mentoring newer colleagues is encouraged.` });
+      const candidate = { employer: job.company, title: job.title, location, sourceUrl: sourceUrl('visible') };
+      const options = [{ id: 'P1', status: 'live', title: job.title, location, candidate,
+        description: `${wrongTeam} ${description} Visible scope zero owns regional review procedures.` }];
+      const contradictionOnly = [{ candidate: { ...candidate, sourceUrl: sourceUrl('hidden-pay-veto') },
+        description: `${trueTeam} HIDDEN SOURCE ONLY: This separate historical description records a different operating scope. ${description}` }];
+      const answer = { choice: 'P1', conflicts: [], evidence: [
+        { scrapedQuote: shared[0], officialQuote: shared[0] },
+        { scrapedQuote: shared[4], officialQuote: `${shared[4]} Visible scope zero owns regional review procedures.` },
+        { scrapedQuote: recruiter, officialQuote: wrongTeam },
+      ], distinguishing: [] };
+      const visible = buildOfficialPostingMatchRequest({ job, options, run: 'A' });
+      assert.doesNotThrow(() => visible.responseValidator(answer), 'the hidden posting is the reason this otherwise valid answer must fail');
+      for (const invokeTransportValidator of [true, false]) {
+        let calls = 0;
+        let transportValidator;
+        const result = await resolveOfficialPostings([job], { store: { find: async () => null }, fetch: network({}),
+          resolve: async (input, context) => {
+            if (!context.match) return { officialPosting: { level: 'L5', outcome: 'not-found', employer: input.company, trail: [] } };
+            await assert.rejects(() => context.match(input, options, { run: 'A', contradictionOnly }),
+              error => error.code === 'comparative-invalid');
+            return { officialPosting: { level: 'L5', outcome: 'not-found', employer: input.company, trail: ['comparative-invalid'] } };
+          }, callRaw: async (prompt, context) => {
+            if (context.task.endsWith('-research')) return response(prompt);
+            calls++;
+            transportValidator = context.responseValidator;
+            assert.equal(prompt, visible.prompt, 'hidden source bytes never enter the AI prompt');
+            assert.equal(JSON.stringify(context.responseSchema).includes('HIDDEN SOURCE ONLY'), false);
+            if (invokeTransportValidator) context.responseValidator(answer);
+            return answer;
+          } });
+        if (invokeTransportValidator) assert.throws(() => transportValidator(answer),
+          error => error.correctionRuleIds?.includes('LOOKUP_OFFICIAL_MATCH_DISTINCTIVE'),
+          'the validator supplied to the transport rejects hidden contradictions independently');
+        assert.equal(calls, 2, 'an invalid answer gets one correction before the service rejects it');
+        assert.ok(result.jobs[0].officialPosting.trail.includes('comparative-invalid'));
+      }
+    },
+  },
   {
     name: 'official-posting service host-verifies every row before full twelve-member research chunks and preserves scraped identity',
     async run() {
@@ -137,7 +185,7 @@ export default [
     },
   },
   {
-    name: 'official-posting service uses quoted JSON matching only for a host hard-pass candidate and counts material text changes',
+    name: 'official-posting service uses two comparative JSON judgments for a host identity-pass candidate and counts material text changes',
     async run() {
       await withStore(async store => {
         const scraped = 'The engineer creates dispatch software for operators and reviews delayed routing records every morning. Account reports across the delivery network need clear explanations for regional planning partners. Applicants should understand how to explain design decisions to experienced business partners. Coordinate regularly with regional teams and review workflow changes through diagnostic tests before release.';
@@ -145,37 +193,98 @@ export default [
         // Amendment 3: the row's own url is a lead identity anchor, so this posting arrives through the research lead instead.
         const job = row(1, { snippet: scraped });
         const left = scraped.split(/(?<=\.)\s+/u); const right = official.split(/(?<=\.)\s+/u);
-        const answer = { sameJob: true, matchingPairs: [0, 1, 3].map(index => ({ scrapedQuote: left[index], officialQuote: right[index] })), conflicts: [] };
+        const answer = { choice: 'P1', evidence: [0, 1, 3].map(index => ({ scrapedQuote: left[index], officialQuote: right[index] })), distinguishing: [], conflicts: [] };
         const calls = [];
         const leads = new Map([[officialPostingRequestId(job), sourceUrl(1)]]);
         const result = await resolveOfficialPostings([job], { store, fetch: network({ 'https://northwind.test/': '<title>Northwind Labs</title>', [sourceUrl(1)]: jsonld(job, official) }),
           callRaw: async (prompt, options) => { calls.push(options.task); const raw = options.task.endsWith('-research') ? response(prompt, leads) : answer;
             options.responseValidator(raw); return raw; } });
-        assert.deepEqual(calls, ['job-official-posting-research', 'job-official-posting-match']);
-        assert.equal(result.jobs[0].officialPosting.level, 'L1'); assert.ok(result.jobs[0].officialPosting.trail.includes('quoted-match'));
+        assert.deepEqual(calls, ['job-official-posting-research', 'job-official-posting-match', 'job-official-posting-match']);
+        assert.equal(result.jobs[0].officialPosting.level, 'L1'); assert.ok(result.jobs[0].officialPosting.trail.includes('comparative-match'));
+        assert.ok(result.jobs[0].officialPosting.trail.includes('comparative-a-valid')); assert.ok(result.jobs[0].officialPosting.trail.includes('comparative-b-valid'));
         assert.equal((await getOfficialPostingView(result.jobs[0], { store })).description, official);
-        assert.equal(result.telemetry.materialJdChange, 1); assert.equal(result.telemetry.handoffs, 2);
+        assert.equal(result.telemetry.materialJdChange, 1); assert.equal(result.telemetry.handoffs, 3);
+        assert.equal(result.telemetry.comparisons, 1); assert.equal(result.telemetry.comparativeAgreements, 1);
         assert.ok((await store.find(job)).officialPosting.trail.includes('material-jd-change'), 'the durable verified record retains the material-change enum');
       });
     },
   },
   {
-    name: 'official-posting service never retries another comparison for a row after a match timeout and never compares a hard-gate mismatch',
+    name: 'official-posting service gives unobserved workers grace then fails comparison once without settling a miss',
+    async run() {
+      for (const observed of [false, true]) await withStore(async store => {
+        const job = row(1);
+        const official = description.split(/\s+/u).reverse().join(' ');
+        const pages = { 'https://northwind.test/': '<title>Northwind Labs</title>', [sourceUrl(1)]: jsonld(job, official) };
+        const leads = new Map([[officialPostingRequestId(job), sourceUrl(1)]]);
+        let matches = 0; let aborted = false;
+        const result = await resolveOfficialPostings([job], { store, fetch: network(pages), timeoutMs: 500,
+          comparativeGraceMs: 10, comparativeWorkerAvailable: () => observed,
+          callRaw: async (prompt, options) => {
+            if (options.task.endsWith('-research')) return response(prompt, leads);
+            matches++;
+            options.signal.addEventListener('abort', () => { aborted = true; });
+            await new Promise(resolve => setTimeout(resolve, 35));
+            return { choice: 'none', evidence: [], distinguishing: [], conflicts: [] };
+          } });
+        assert.equal(matches, observed ? 2 : 1, 'absence fails only once; a live observed worker keeps both runs eligible');
+        assert.equal(aborted, !observed);
+        assert.equal(result.jobs[0].officialPosting.trail.includes('comparative-unavailable'), !observed);
+        if (!observed) assert.equal(await store.find(job), null, 'worker absence is retryable rather than a durable miss');
+      });
+    },
+  },
+  {
+    name: 'Amendment 8 item 4: comparative worker relaunch suspends absence grace and remains bounded by the launcher timeout',
+    async run() {
+      for (const mode of ['arrives', 'cancelled', 'expires']) await withStore(async store => {
+        const job = row(1); const official = description.split(/\s+/u).reverse().join(' ');
+        const pages = { 'https://northwind.test/': '<title>Northwind Labs</title>', [sourceUrl(1)]: jsonld(job, official) };
+        const leads = new Map([[officialPostingRequestId(job), sourceUrl(1)]]);
+        let matches = 0; let available = false; let launching = true; let clockOffset = 0; let abortCode = null;
+        const scheduled = [];
+        const keepAlive = setInterval(() => {}, 1000);
+        try {
+          const result = await resolveOfficialPostings([job], { store, fetch: network(pages), timeoutMs: 500,
+            now: () => Date.now() + clockOffset, comparativeGraceMs: 5,
+            comparativeWorkerAvailable: () => available, comparativeWorkerLaunching: () => launching,
+            callRaw: async (prompt, options) => {
+              if (options.task.endsWith('-research')) return response(prompt, leads);
+              matches++;
+              options.signal.addEventListener('abort', () => { abortCode = options.signal.reason?.code; });
+              if (matches === 1) scheduled.push(setTimeout(() => {
+                if (mode === 'arrives') { available = true; launching = false; }
+                else if (mode === 'cancelled') launching = false;
+                else clockOffset += CONSTANTS.CHAT_LAUNCH_PRESENTATION_TIMEOUT_MS + 1;
+              }, 20));
+              if (mode !== 'arrives') return new Promise(() => {});
+              await new Promise(resolve => setTimeout(resolve, 35));
+              return { choice: 'none', evidence: [], distinguishing: [], conflicts: [] };
+            } });
+          assert.equal(matches, mode === 'arrives' ? 2 : 1, `${mode}: run B stays eligible through launch, absence fails only once`);
+          assert.equal(abortCode, mode === 'arrives' ? null : 'comparative-unavailable', `${mode}: only absence ends an unsuccessful relaunch`);
+          assert.equal(result.jobs[0].officialPosting.trail.includes('comparative-unavailable'), mode !== 'arrives');
+        } finally { clearInterval(keepAlive); for (const timer of scheduled) clearTimeout(timer); }
+      });
+    },
+  },
+  {
+    name: 'official-posting service never dispatches another comparative run after a transport timeout and never compares a hard-gate mismatch',
     async run() {
       await withStore(async store => {
         const reversed = description.split(/\s+/u).reverse().join(' ');
         // Amendment 3: apply options are lead identity anchors, so the two candidates are reached from the employer's careers page.
         const job = row(1, { url: 'https://northwind.test/careers' });
         const pages = { 'https://northwind.test/': '<title>Northwind Labs</title>', 'https://northwind.test/careers': `<a href="${sourceUrl(1)}">One</a><a href="${sourceUrl(2)}">Two</a>`,
-          [sourceUrl(1)]: jsonld(job, reversed), [sourceUrl(2)]: jsonld(job, reversed) };
+          [sourceUrl(1)]: jsonld(job, reversed), [sourceUrl(2)]: jsonld(job, `${reversed} Separate application workflow for inventory scheduling and delivery coordination.`) };
         let matches = 0; let aborted = false;
         const result = await resolveOfficialPostings([job], { store, fetch: network(pages), timeoutMs: 5,
           callRaw: async (prompt, options) => {
             if (options.task.endsWith('-research')) return response(prompt);
             matches++; options.signal.addEventListener('abort', () => { aborted = true; });
-            return new Promise(resolve => setTimeout(() => resolve({ sameJob: false, matchingPairs: [], conflicts: [] }), 25));
+            return new Promise(resolve => setTimeout(() => resolve({ choice: 'none', evidence: [], distinguishing: [], conflicts: [] }), 25));
           } });
-        assert.equal(matches, 1, 'a second unresolved candidate cannot trigger another handoff after the first timeout');
+        assert.equal(matches, 1, 'run B cannot trigger another handoff after run A times out');
         assert.equal(aborted, true); assert.equal(result.telemetry.bridgeTimeout, 1);
         assert.ok(result.jobs[0].officialPosting.trail.includes('bridge-timeout')); assert.equal(result.jobs[0].officialPosting.level, 'L5');
         assert.equal(await store.find(job), null, 'a match timeout is retryable even after research parsed successfully');

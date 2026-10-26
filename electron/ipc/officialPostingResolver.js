@@ -1,10 +1,11 @@
 import crypto from 'node:crypto';
 import { fetchOfficialPosting } from './officialPostingFetch.js';
-import { normalizeApplyOptions, normalizeOfficialLocation, normalizeOfficialPosting, normalizeOfficialSalary, officialHttpsUrl, OFFICIAL_POSTING_TRAIL } from './officialPostingFields.js';
+import { normalizeApplyOptions, normalizeOfficialLocation, normalizeOfficialPosting, normalizeOfficialSalary, officialHttpsUrl, boundedOfficialPostingTrail, officialPostingComparativeTrail, OFFICIAL_POSTING_TRAIL } from './officialPostingFields.js';
 import { extractOfficialPostingCandidates, scanOfficialCareersPage } from './officialPostingExtractors.js';
 import { domainBrandMatchesEmployer, extractAtsTenant, isAggregatorHost, isKnownAtsHost, isPosterAtsTenant, normalizedSourceHost, proveBidirectionalOwnership, proveEmployerDomain, registrableDomain, rootBrandingNamesPoster, rootFooterText, sameOwnershipHost, strictEmployerEqual } from './officialSourceHosts.js';
-import { canonicalLeadUrl, coreTitle, evaluateOfficialPostingMatch, frozenOfficialEmployer, locationsCompatible, posterEmployerSignals, resolveScrapedEmployer, selectOfficialPostingMatch } from './officialPostingMatch.js';
+import { buildOfficialPostingComparisonSet, canonicalLeadUrl, coreTitle, evaluateOfficialPostingMatch, flatPostingText, frozenOfficialEmployer, locationsCompatible, posterEmployerSignals, resolveScrapedEmployer, selectOfficialPostingMatch } from './officialPostingMatch.js';
 import { officialPostingRecordMatchesScrapedIdentity } from './officialPostingStore.js';
+import { validateOfficialPostingMatchResponse } from './officialPostingBridge.js';
 
 export const OFFICIAL_POSTING_BATCH_SIZE = 12;
 export { adapterUrl as officialPostingAdapterUrl, readableDescription as readableOfficialPostingDescription, verifiedApplyUrl as verifiedOfficialPostingApplyUrl };
@@ -20,9 +21,9 @@ const canonical = value => String(value ?? '').normalize('NFKC').replace(/\s+/gu
 const ROW_BUDGETS = new WeakMap();
 const ROW_ABORT_FANOUTS = new WeakMap();
 const RETRYABLE_MISS_TRAIL = new Set(['bridge-aborted', 'bridge-timeout', 'bridge-unavailable', 'research-miss',
-  'fetch-failed', 'fetch-timeout', 'crawl-budget', 'official-text-missing', 'failed']);
+  'fetch-failed', 'fetch-timeout', 'crawl-budget', 'crawl-partial', 'official-text-missing', 'failed', 'comparative-invalid', 'comparative-unavailable', 'comparative-truncated', 'insufficient-text']);
 const DEFINITIVE_MISS_TRAIL = new Set(['closed', 'title-mismatch', 'location-mismatch', 'employer-mismatch',
-  'tenant-unproven', 'poster-tenant', 'salary-mismatch', 'no-anchor', 'invalid-quotes', 'ambiguous']);
+  'tenant-unproven', 'poster-tenant', 'salary-mismatch', 'no-anchor', 'invalid-quotes', 'ambiguous', 'comparative-none', 'comparative-disagree']);
 
 /** Shared by both discovery passes. Human handoff time is never charged to
  * this host-only budget; its signal also makes a stopped crawl non-durable. */
@@ -54,6 +55,7 @@ export function createOfficialPostingRowBudget({ signal, maxPages = 16, timeoutM
       }
     } });
   ROW_BUDGETS.set(budget, { controller, sourceSignal: signal, pages: new Map(), reads: new Set(), locales: new Map(), elapsedMs: 0,
+    exhaustionReason: '', failures: new Map(), routes: new Map(),
     maxPages: Math.max(1, Math.min(16, Math.floor(Number(maxPages) || 16))),
     timeoutMs: Math.max(1, Math.min(60_000, Number(timeoutMs) || 60_000)),
     now: typeof now === 'function' ? now : () => Number(now) });
@@ -68,8 +70,8 @@ export function shouldPersistOfficialPostingResult(value, { signal, researchRan 
   if (!posting) return false;
   const trail = posting.trail || [];
   if (['L1', 'L2', 'L3', 'L4'].includes(posting.level)) {
-    const partial = trail.includes('fetch-timeout') || trail.includes('crawl-budget');
-    const deterministic = trail.includes('identifier-anchor') || trail.includes('salary-anchor');
+    const partial = trail.includes('fetch-timeout') || trail.includes('crawl-budget') || trail.includes('crawl-partial');
+    const deterministic = trail.includes('identifier-anchor');
     return ['found', 'link-only'].includes(posting.outcome) && (!partial || deterministic);
   }
   if (posting.outcome === 'failed' || trail.some(code => RETRYABLE_MISS_TRAIL.has(code))) return false;
@@ -107,7 +109,7 @@ export function officialPostingChunks(jobs) {
   for (let index = 0; index < members.length; index += OFFICIAL_POSTING_BATCH_SIZE) chunks.push(members.slice(index, index + OFFICIAL_POSTING_BATCH_SIZE));
   return chunks;
 }
-function trailCodes(values) { return [...new Set(values.filter(value => OFFICIAL_POSTING_TRAIL.includes(value)))].slice(0, 32); }
+function trailCodes(values) { return boundedOfficialPostingTrail(values); }
 function fallback(job, options = {}) {
   try {
     const { outcome = 'not-found', trail = [], alternatives = [] } = options || {};
@@ -186,12 +188,15 @@ export async function resolveOfficialPosting(job, {
     else signal.addEventListener('abort', cancel, { once: true });
   }
   const abortBudget = code => {
-    if (!budget.signal.aborted) budgetState.controller.abort(Object.assign(new Error(code), { code }));
+    if (!budget.signal.aborted) {
+      budgetState.exhaustionReason = code;
+      budgetState.controller.abort(Object.assign(new Error(code), { code }));
+    }
   };
   const abortCode = () => ['fetch-timeout', 'crawl-budget'].includes(budget.signal.reason?.code)
     ? budget.signal.reason.code : 'bridge-aborted';
   let researchSucceeded = researchRan === true;
-  const trail = []; const candidates = new Map(); const pages = budgetState.pages; const fetchedCandidates = [];
+  const trail = []; let comparison = null; const candidates = new Map(); const pages = budgetState.pages; const fetchedCandidates = [];
   const rssCandidates = new Map(); const conflictingUrls = new Set();
   const signals = posterEmployerSignals(job);
   const hypotheses = [job?.company, ...signals.hypotheses].filter(Boolean);
@@ -225,6 +230,8 @@ export async function resolveOfficialPosting(job, {
   const enqueue = (value, context = {}) => {
     const url = officialHttpsUrl(value);
     if (!url || isAggregatorHost(new URL(url).hostname) || (!context.adapter && !crawlUrlAllowed(url))) return false;
+    const route = context.route || extractAtsTenant(url);
+    if (route) budgetState.routes.set(url, route);
     const localeKey = crawlLocaleKey(url);
     if (budgetState.locales.has(localeKey) && budgetState.locales.get(localeKey) !== url) return false;
     if (queued.has(url)) {
@@ -262,7 +269,7 @@ export async function resolveOfficialPosting(job, {
             if (budget.signal.aborted) throw Object.assign(new Error(abortCode()), { code: abortCode() });
             return fetch(url, { signal: budget.signal });
           }), interrupted]);
-          return { page: page ? { ...page, requestedUrl: page.requestedUrl || url } : page };
+          return page ? { page: { ...page, requestedUrl: page.requestedUrl || url } } : { error: 'fetch-failed' };
         } catch (error) { return { error: budget.signal.aborted ? abortCode() : error?.code || 'fetch-failed' }; }
         finally { budget.signal.removeEventListener('abort', onAbort); }
       })();
@@ -272,7 +279,12 @@ export async function resolveOfficialPosting(job, {
       if (finalUrl && normalizedSourceHost(finalUrl) === normalizedSourceHost(url) && !pages.has(finalUrl)) pages.set(finalUrl, pending);
     }
     const result = await pages.get(url);
-    if (result.error) trail.push(result.error);
+    if (result.error) {
+      budgetState.failures.set(url, result.error);
+      // A page timeout is not a row-budget timeout. Once there is a winner,
+      // only an unread page on its host or tenant can make that proof partial.
+      if (result.error !== 'fetch-timeout' || budgetState.exhaustionReason) trail.push(result.error);
+    }
     return result.page || null;
   };
   const rootProof = async (url, organization) => {
@@ -445,6 +457,14 @@ export async function resolveOfficialPosting(job, {
       if (adapter) enqueue(adapter, { route: pending.route, provenEmployer: pending.organization, adapter: true });
     }
   };
+  const belongsToWinnerSite = (url, winner) => {
+    const route = budgetState.routes.get(url) || extractAtsTenant(url);
+    const winnerRoute = winner.ats && winner.tenant ? winner : extractAtsTenant(winner.sourceUrl);
+    // Shared ATS hosts contain unrelated tenants; their tenant is the site.
+    if (route && winnerRoute) return route.ats === winnerRoute.ats && route.tenant === winnerRoute.tenant;
+    return !isKnownAtsHost(normalizedSourceHost(url))
+      && normalizedSourceHost(url) === normalizedSourceHost(winner.sourceUrl);
+  };
   const matchOptions = () => ({ now: instant(), peerCandidates: fetchedCandidates, employerHypotheses: [...new Set([...candidates.values()]
     .filter(candidate => candidate.tenantProven || candidate.employerDomainProven || candidate.officialPortalProven).map(candidate => candidate.employer))] });
   const drain = async () => {
@@ -566,12 +586,11 @@ export async function resolveOfficialPosting(job, {
         // T4: stop early only on a deterministic anchor with none of the row's own leads left to read. A text-only
         // match waits until the same host or tenant has no unread queued page, so a closed twin cannot arrive after it.
         const anchor = verified.evaluations.find(item => item.passed)?.anchor;
-        const winner = verified.candidate; const winnerHost = normalizedSourceHost(winner.sourceUrl);
+        const winner = verified.candidate;
         const unread = queue.slice(cursor + 1);
         const ownLeads = new Set([job?.url, ...normalizeApplyOptions(job?.applyOptions).map(option => option.href)].map(canonicalLeadUrl).filter(Boolean));
         const unreadLead = unread.some(item => ownLeads.has(canonicalLeadUrl(item.url)));
-        const unreadSite = unread.some(item => normalizedSourceHost(item.url) === winnerHost
-          || (item.route && winner.ats && item.route.ats === winner.ats && item.route.tenant === winner.tenant));
+        const unreadSite = unread.some(item => belongsToWinnerSite(item.url, winner));
         if (!unreadLead && (anchor === 'identifier-anchor' || !unreadSite)) break;
       }
     }
@@ -583,6 +602,7 @@ export async function resolveOfficialPosting(job, {
     }
   };
   const persist = async result => {
+    if (comparison) result.comparison = comparison;
     if (result.description) result.officialPosting.contentHash = crypto.createHash('sha256').update(result.description).digest('hex');
     // Incidental host limits end the crawl without stopping the run. The
     // shared predicate keeps a partial match durable only on a deterministic anchor.
@@ -627,21 +647,129 @@ export async function resolveOfficialPosting(job, {
       } catch (error) { trail.push(error?.code || (budget.signal.aborted ? abortCode() : 'research-miss')); }
       decision = selectOfficialPostingMatch(job, [...candidates.values()], matchOptions());
     }
-    const tieBreakers = new Map();
-    if (decision.outcome !== 'found' && match && !budget.signal.aborted) {
-      for (const candidate of candidates.values()) {
-        if (budget.signal.aborted) { trail.push(abortCode()); break; }
-        const evaluation = evaluateOfficialPostingMatch(job, candidate, matchOptions());
-        if (!evaluation.hardPass || evaluation.reason !== 'no-anchor') continue;
-        try { tieBreakers.set(candidate.sourceUrl, await match(job, candidate, { signal: budget.signal })); }
-        catch (error) { trail.push(error?.code || (budget.signal.aborted ? abortCode() : 'research-miss')); }
+    // A researched row compares every identity-passing posting together. A settled
+    // deterministic closed winner remains authoritative before any AI step.
+    if (decision.outcome !== 'found' && decision.outcome !== 'closed' && researchSucceeded && !budget.signal.aborted) {
+      const context = matchOptions();
+      // A conservative floor leaves room for three independent eight-word
+      // passages across the required parts. Missing input is never a settled miss.
+      const sufficient = (flatPostingText(job?.snippet || job?.description || '').match(/[\p{L}\p{N}]+/gu) || []).length > 30;
+      const { options, preCapCount, contradictionOnly } = sufficient
+        ? buildOfficialPostingComparisonSet(job, [...candidates.values()], context) : { options: [], preCapCount: 0, contradictionOnly: [] };
+      if (!sufficient) trail.unshift('insufficient-text');
+      const seenText = new Set();
+      const identicalText = options.some(option => {
+        const flat = flatPostingText(option.description).toLocaleLowerCase();
+        if (seenText.has(flat)) return true;
+        seenText.add(flat); return false;
+      });
+      if (identicalText) {
+        trail.unshift('ambiguous');
+        decision = { ...decision, outcome: 'ambiguous', candidate: null,
+          alternatives: options.map(option => ({ url: option.candidate.sourceUrl, title: option.title })) };
+      } else if (options.length) {
+        if (preCapCount > 8) trail.unshift('comparative-truncated');
+        comparison = { optionCount: options.length, preCapCount, truncated: preCapCount > 8, validA: false, validB: false,
+          choiceA: null, choiceB: null, agreement: false, disagreement: false,
+          none: false, unavailable: false, accepted: false, invalidRuns: 0 };
+        const runs = {};
+        for (const run of ['A', 'B']) {
+          let answer = null;
+          let failure = null;
+          const attempts = match?.handlesCorrections === true ? 1 : 2;
+          let correction = {};
+          for (let attempt = 0; attempt < attempts; attempt += 1) {
+            if (!match || budget.signal.aborted) {
+              failure = Object.assign(new Error('Comparative match unavailable'), {
+                code: budget.signal.aborted ? abortCode() : 'comparative-unavailable' });
+              break;
+            }
+            try {
+              const raw = await match(job, options, { run, peerCandidates: context.peerCandidates, contradictionOnly,
+                employerHypotheses: context.employerHypotheses, signal: budget.signal, ...correction });
+              if (budget.signal.aborted) throw Object.assign(new Error('Comparison aborted'), { code: abortCode() });
+              // Host validation also covers injected callers; a stub is never an acceptance bypass.
+              answer = validateOfficialPostingMatchResponse(raw, { job, options, contradictionOnly,
+                peerCandidates: context.peerCandidates, employerHypotheses: context.employerHypotheses });
+              failure = null;
+              break;
+            } catch (error) {
+              failure = error;
+              if (!Array.isArray(error?.correctionDetails) || !error.correctionDetails.length || attempt + 1 >= attempts) break;
+              correction = { correctionDetails: [...error.correctionDetails], correctionRuleIds: [...(error.correctionRuleIds || [])], correctionAttempt: 1 };
+            }
+          }
+          runs[run] = answer;
+          comparison[`valid${run}`] = Boolean(answer);
+          comparison[`choice${run}`] = answer?.choice || null;
+          if (!answer) {
+            comparison.invalidRuns += 1;
+            const code = failure?.code === 'OFFICIAL_POSTING_COMPARATIVE_UNAVAILABLE' ? 'comparative-unavailable' : failure?.code;
+            if (['comparative-unavailable', 'bridge-unavailable'].includes(code)) comparison.unavailable = true;
+            if (OFFICIAL_POSTING_TRAIL.includes(code)) trail.push(code);
+          }
+        }
+        trail.unshift(...officialPostingComparativeTrail(comparison));
+        if (!runs.A || !runs.B) {
+          trail.unshift(comparison.unavailable ? 'comparative-unavailable' : 'comparative-invalid');
+          decision = { ...decision, outcome: 'not-found', candidate: null, alternatives: [] };
+        } else if (runs.A.choice !== runs.B.choice) {
+          comparison.disagreement = true;
+          const chosen = new Set([runs.A.choice, runs.B.choice]);
+          trail.unshift('comparative-disagree');
+          decision = { ...decision, outcome: 'ambiguous', candidate: null,
+            alternatives: options.filter(option => chosen.has(option.id)).map(option => ({ url: option.candidate.sourceUrl, title: option.title })) };
+        } else {
+          comparison.agreement = true;
+          if (runs.A.choice === 'none') {
+            comparison.none = true;
+            trail.unshift(preCapCount > 8 ? 'comparative-truncated' : 'comparative-none');
+            decision = { ...decision, outcome: 'not-found', candidate: null, alternatives: [] };
+          } else {
+            const chosen = options.find(option => option.id === runs.A.choice);
+            const evaluation = evaluateOfficialPostingMatch(job, chosen.candidate, { ...context, now: instant(), peerCandidates: [...candidates.values(), ...context.peerCandidates] });
+            if (evaluation.salaryMismatch || evaluation.reason === 'salary-mismatch') {
+              trail.unshift('salary-mismatch');
+              decision = { ...decision, outcome: 'not-found', candidate: null, alternatives: [] };
+            } else if (evaluation.identityPass && evaluation.reason === 'closed') {
+              trail.unshift('closed');
+              decision = { ...decision, outcome: 'closed', candidate: null, alternatives: [] };
+            } else {
+              // Identity is sufficient for inclusion, never for overriding pay or R1.
+              if (evaluation.closedWinner || evaluation.outranked) {
+                trail.unshift(evaluation.closedWinner ? 'closed' : 'no-anchor');
+                decision = { ...decision, outcome: evaluation.closedWinner ? 'closed' : 'not-found', candidate: null, alternatives: [] };
+              } else if (!evaluation.identityPass || evaluation.reason === 'salary-mismatch'
+                || (!evaluation.passed && evaluation.reason !== 'no-anchor')) {
+                trail.unshift('comparative-invalid');
+                trail.push(...(evaluation.reasons || []));
+                decision = { ...decision, outcome: 'not-found', candidate: null, alternatives: [] };
+              } else {
+                comparison.accepted = true;
+                trail.unshift('comparative-match');
+                const accepted = { ...evaluation, candidate: chosen.candidate, passed: true, anchor: 'comparative-match', anchors: ['comparative-match'], reasons: [] };
+                decision = { ...decision, outcome: 'found', candidate: chosen.candidate, alternatives: [],
+                  evaluations: decision.evaluations.map(item => item.candidate === chosen.candidate ? accepted : item) };
+              }
+            }
+          }
+        }
       }
-      decision = selectOfficialPostingMatch(job, [...candidates.values()], { ...matchOptions(), tieBreakers });
     }
-    for (const evaluation of decision.evaluations) trail.push(...(evaluation.reasons || []));
-    if (decision.outcome !== 'found') return await persist(fallback(job, { outcome: decision.outcome, trail,
-      alternatives: decision.alternatives }));
+    for (const evaluation of decision.evaluations) {
+      trail.push(...(evaluation.reasons || []));
+      if (evaluation.salaryMismatch) trail.push('salary-mismatch');
+    }
+    if (decision.outcome !== 'found') {
+      if ([...budgetState.failures.values()].includes('fetch-timeout')) trail.push('fetch-timeout');
+      return await persist(fallback(job, { outcome: decision.outcome, trail,
+        alternatives: decision.alternatives }));
+    }
     const candidate = decision.candidate;
+    const unreadSite = queue.some(item => !pages.has(item.url) && belongsToWinnerSite(item.url, candidate));
+    const failedSite = [...budgetState.failures].some(([url, code]) => belongsToWinnerSite(url, candidate)
+      && ['fetch-failed', 'fetch-timeout', 'crawl-budget'].includes(code));
+    if (budgetState.exhaustionReason || unreadSite || failedSite) trail.push('crawl-partial');
     const employer = frozenOfficialEmployer(job, candidate.employer);
     const readable = employer && readableDescription(candidate, job);
     const level = !readable ? 'L4' : candidate.provenance === 'careers' ? 'L2' : candidate.ats ? 'L3' : 'L1';

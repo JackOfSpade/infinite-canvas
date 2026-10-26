@@ -10,11 +10,14 @@ import { extractOfficialPostingCandidates } from './officialPostingExtractors.js
 import { officialPostingChunks, resolveOfficialPosting, unresolvedOfficialPosting, createOfficialPostingRowBudget, shouldPersistOfficialPostingResult } from './officialPostingResolver.js';
 import { descriptionOverlap } from './officialPostingMatch.js';
 import { extractAtsTenant, strictEmployerEqual } from './officialSourceHosts.js';
-import { normalizeOfficialPosting, officialHttpsUrl, OFFICIAL_POSTING_LEVELS, OFFICIAL_POSTING_OUTCOMES, OFFICIAL_POSTING_TRAIL } from './officialPostingFields.js';
+import { normalizeOfficialPosting, officialHttpsUrl, boundedOfficialPostingTrail, OFFICIAL_POSTING_LEVELS, OFFICIAL_POSTING_OUTCOMES, OFFICIAL_POSTING_TRAIL, OFFICIAL_POSTING_COMPARATIVE_CODES } from './officialPostingFields.js';
 import { mergeBoardClosedTelemetry } from './officialPostingBoardClosed.js';
 import { buildOfficialPostingResearchRequest, parseOfficialPostingResearchResponse, buildOfficialPostingMatchRequest, validateOfficialPostingMatchResponse } from './officialPostingBridge.js';
+import { hasLiveObservedWorker, hasPendingObservedWorkerLaunch } from './handoffBridge/observedChatContext.js';
+import { CONSTANTS } from './handoffBridge/constants.js';
 
 export const OFFICIAL_POSTING_HANDOFF_TIMEOUT_MS = 20 * 60 * 1_000;
+export const OFFICIAL_POSTING_COMPARATIVE_WORKER_GRACE_MS = 15_000;
 const VERIFIED_LEVELS = new Set(['L1', 'L2', 'L3', 'L4']);
 const TEXT_LEVELS = new Set(['L1', 'L2', 'L3']);
 const stores = new Map();
@@ -53,12 +56,37 @@ function failureCode(error, signal) {
   return 'research-miss';
 }
 
-async function cappedHandoff(request, { call, signal, timeoutMs, manualAiRunId, nodeId, hints, now, stats }) {
+async function cappedHandoff(request, { call, signal, timeoutMs, manualAiRunId, nodeId, hints, now, stats,
+  comparativeWorkerAvailable = null, comparativeWorkerLaunching = null, comparativeGraceMs = OFFICIAL_POSTING_COMPARATIVE_WORKER_GRACE_MS }) {
   const controller = new AbortController();
   const abort = () => controller.abort(signal?.reason || bridgeError('bridge-aborted'));
   if (signal?.aborted) abort(); else signal?.addEventListener('abort', abort, { once: true });
   const timer = setTimeout(() => controller.abort(bridgeError('bridge-timeout')), timeoutMs);
   timer.unref?.();
+  let unavailableSince = null;
+  let launchWaitingSince = null;
+  const checkWorkers = () => {
+    let available = false;
+    try { available = comparativeWorkerAvailable() === true; } catch { /* no proof of a live worker */ }
+    const stamp = now();
+    if (available) { unavailableSince = null; launchWaitingSince = null; }
+    else {
+      let launching = false;
+      try { launching = comparativeWorkerLaunching?.() === true; } catch { /* no proof of a pending launch */ }
+      if (launching) launchWaitingSince ??= stamp;
+      else launchWaitingSince = null;
+      if (launching && stamp - launchWaitingSince < CONSTANTS.CHAT_LAUNCH_PRESENTATION_TIMEOUT_MS) {
+        unavailableSince = null;
+        return;
+      }
+      unavailableSince ??= stamp;
+      if (stamp - unavailableSince >= comparativeGraceMs) controller.abort(bridgeError('comparative-unavailable'));
+    }
+  };
+  const availabilityTimer = typeof comparativeWorkerAvailable === 'function'
+    ? setInterval(checkWorkers, Math.max(1, Math.min(250, comparativeGraceMs))) : null;
+  availabilityTimer?.unref?.();
+  if (availabilityTimer) checkWorkers();
   let rejectAbort;
   const cancelled = new Promise((_, reject) => { rejectAbort = () => reject(controller.signal.reason || bridgeError('bridge-aborted')); });
   controller.signal.addEventListener('abort', rejectAbort, { once: true });
@@ -70,7 +98,7 @@ async function cappedHandoff(request, { call, signal, timeoutMs, manualAiRunId, 
     return await Promise.race([Promise.resolve().then(() => call(prompt, { ...options,
       signal: controller.signal, manualAiRunId, nodeId, hints: { ...options.hints, ...hints } })), cancelled]);
   } finally {
-    clearTimeout(timer); signal?.removeEventListener('abort', abort); controller.signal.removeEventListener('abort', rejectAbort);
+    clearTimeout(timer); clearInterval(availabilityTimer); signal?.removeEventListener('abort', abort); controller.signal.removeEventListener('abort', rejectAbort);
     const elapsed = Math.max(0, now() - start);
     stats.handoffMs += elapsed;
   }
@@ -78,8 +106,7 @@ async function cappedHandoff(request, { call, signal, timeoutMs, manualAiRunId, 
 
 function addTrail(result, code) {
   const posting = result?.officialPosting || unresolvedOfficialPosting({}).officialPosting;
-  return { ...result, officialPosting: { ...posting,
-    trail: [...new Set([...(posting.trail || []), code].filter(item => OFFICIAL_POSTING_TRAIL.includes(item)))].slice(-32) } };
+  return { ...result, officialPosting: { ...posting, trail: boundedOfficialPostingTrail([...(posting.trail || []), code]) } };
 }
 function materiallyDifferent(left, right) {
   const a = normalizedText(left); const b = normalizedText(right);
@@ -87,7 +114,7 @@ function materiallyDifferent(left, right) {
   const words = value => value.split(/\s+/u).length;
   return descriptionOverlap(a, b).score < 0.9 || Math.abs(words(a) - words(b)) / Math.max(words(a), words(b)) > 0.15;
 }
-const REJECTION_CODES = Object.freeze(['title-mismatch', 'location-mismatch', 'employer-mismatch', 'tenant-unproven', 'poster-tenant', 'salary-mismatch', 'no-anchor', 'invalid-quotes', 'ambiguous', 'closed', 'unreadable', 'oversize', 'unsafe-url', 'unsafe-address', 'fetch-timeout', 'fetch-failed', 'unsupported-content-type', 'invalid-text', 'crawl-budget']);
+const REJECTION_CODES = Object.freeze(['title-mismatch', 'location-mismatch', 'employer-mismatch', 'tenant-unproven', 'poster-tenant', 'salary-mismatch', 'no-anchor', 'invalid-quotes', 'ambiguous', 'closed', 'unreadable', 'oversize', 'unsafe-url', 'unsafe-address', 'fetch-timeout', 'fetch-failed', 'unsupported-content-type', 'invalid-text', 'crawl-budget', 'crawl-partial', ...OFFICIAL_POSTING_COMPARATIVE_CODES]);
 const FETCH_COUNTERS = Object.freeze(['fetches', 'uniqueUrls', 'cacheHits', 'breakerTrips']);
 const MISS_TTL_MS = 24 * 60 * 60 * 1_000;
 const ROW_CONCURRENCY = 6;
@@ -95,15 +122,27 @@ function telemetryBlock() {
   return { total: 0, levels: Object.fromEntries(OFFICIAL_POSTING_LEVELS.map(level => [level, 0])),
     outcomes: Object.fromEntries(OFFICIAL_POSTING_OUTCOMES.map(outcome => [outcome, 0])), rejections: {},
     handoffs: 0, handoffMs: 0, failed: 0, materialJdChange: 0, bridgeTimeout: 0, bridgeUnavailable: 0,
+    comparisons: 0, comparisonOptions: Object.fromEntries(Array.from({ length: 8 }, (_, index) => [index + 1, 0])),
+    comparativeAgreements: 0, comparativeDisagreements: 0, comparativeInvalidRuns: 0,
+    comparativeNone: 0, comparativeUnavailable: 0, comparativeMatches: 0,
     fetches: 0, uniqueUrls: 0, cacheHits: 0, maxPerHostRate: 0, breakerTrips: 0 };
 }
-function countPosting(stats, posting) {
+function countPosting(stats, posting, comparison = null) {
   stats.total += 1;
   stats.levels[posting.level] += 1; stats.outcomes[posting.outcome] += 1;
   for (const code of new Set(posting.trail || [])) {
     if (code === 'bridge-timeout') stats.bridgeTimeout += 1;
     if (code === 'bridge-unavailable') stats.bridgeUnavailable += 1;
-    if (REJECTION_CODES.includes(code)) stats.rejections[code] = (stats.rejections[code] || 0) + 1;
+    if (code !== 'comparative-match' && REJECTION_CODES.includes(code)) stats.rejections[code] = (stats.rejections[code] || 0) + 1;
+  }
+  if (['found', 'link-only'].includes(posting.outcome) && posting.trail?.includes('comparative-match')) stats.comparativeMatches += 1;
+  if (Number.isSafeInteger(comparison?.optionCount) && comparison.optionCount >= 1 && comparison.optionCount <= 8) {
+    stats.comparisons += 1; stats.comparisonOptions[comparison.optionCount] += 1;
+    if (comparison.agreement === true) stats.comparativeAgreements += 1;
+    if (comparison.disagreement === true) stats.comparativeDisagreements += 1;
+    if (comparison.none === true) stats.comparativeNone += 1;
+    if (comparison.unavailable === true) stats.comparativeUnavailable += 1;
+    if (Number.isSafeInteger(comparison.invalidRuns)) stats.comparativeInvalidRuns += Math.max(0, Math.min(2, comparison.invalidRuns));
   }
 }
 const count = value => typeof value === 'number' && Number.isFinite(value) ? Math.max(0, value) : 0;
@@ -119,7 +158,11 @@ export function mergeOfficialPostingTelemetry(...blocks) {
     }
     for (const level of OFFICIAL_POSTING_LEVELS) result.levels[level] += count(block.levels?.[level]);
     for (const outcome of OFFICIAL_POSTING_OUTCOMES) result.outcomes[outcome] += count(block.outcomes?.[outcome]);
-    for (const code of REJECTION_CODES) if (count(block.rejections?.[code])) result.rejections[code] = (result.rejections[code] || 0) + count(block.rejections[code]);
+    for (const option of Object.keys(result.comparisonOptions)) {
+      const value = block.comparisonOptions?.[option];
+      if (Number.isSafeInteger(value) && value >= 0) result.comparisonOptions[option] += value;
+    }
+    for (const code of REJECTION_CODES) if (code !== 'comparative-match' && count(block.rejections?.[code])) result.rejections[code] = (result.rejections[code] || 0) + count(block.rejections[code]);
   }
   // Per-board counts of rows an aggregator board reported closed. Present only
   // when a pass saw any, so a pass without them keeps its historical shape.
@@ -242,6 +285,9 @@ export async function resolveOfficialPostings(jobs, {
   manualAiRunId, nodeId, signal, callRaw = callLLMRaw, callMatch = callRaw, onProgress, telemetry,
   store, fetch = fetchOfficialPosting, fetchSession, resolve = resolveOfficialPosting, now = Date.now,
   timeoutMs = OFFICIAL_POSTING_HANDOFF_TIMEOUT_MS, bridgeAvailable = true,
+  comparativeWorkerAvailable = callMatch === callLLMRaw ? hasLiveObservedWorker : null,
+  comparativeWorkerLaunching = callMatch === callLLMRaw ? hasPendingObservedWorkerLaunch : null,
+  comparativeGraceMs = OFFICIAL_POSTING_COMPARATIVE_WORKER_GRACE_MS,
 } = {}) {
   const rows = Array.isArray(jobs) ? jobs : [];
   const chunks = officialPostingChunks(rows);
@@ -322,15 +368,36 @@ export async function resolveOfficialPostings(jobs, {
           results.set(member, addTrail(results.get(member), abortTrail(member.rowBudget.signal))); settle(member); return;
         }
         let matchFailure = null;
-        const match = async (job, candidate) => {
+        const match = async (job, options, context = {}) => {
           if (matchFailure) throw matchFailure;
-          try {
-            const request = buildOfficialPostingMatchRequest({ scrapedDescription: job.snippet || job.description || '', officialDescription: candidate.description });
-            const raw = await cappedHandoff(request, { call: callMatch, signal: member.rowBudget.signal, timeoutMs, manualAiRunId, nodeId,
-              hints: { itemCount: 1, batch: batch + 1, batchTotal: chunks.length }, now: clock, stats });
-            return validateOfficialPostingMatchResponse(raw, { scrapedDescription: job.snippet || job.description || '', officialDescription: candidate.description });
-          } catch (error) { matchFailure = bridgeError(failureCode(error, member.rowBudget.signal)); throw matchFailure; }
+          const request = buildOfficialPostingMatchRequest({ job, options, run: context.run,
+            peerCandidates: context.peerCandidates, employerHypotheses: context.employerHypotheses,
+            contradictionOnly: context.contradictionOnly });
+          const attempts = callMatch === callLLMRaw ? 1 : 2;
+          let correction = {};
+          for (let attempt = 0; attempt < attempts; attempt += 1) {
+            try {
+              const raw = await cappedHandoff({ ...request, ...correction }, { call: callMatch, signal: member.rowBudget.signal, timeoutMs, manualAiRunId, nodeId,
+                hints: { itemCount: 1, batch: batch + 1, batchTotal: chunks.length }, now: clock, stats, comparativeWorkerAvailable, comparativeWorkerLaunching, comparativeGraceMs });
+              return validateOfficialPostingMatchResponse(raw, { job, options,
+                peerCandidates: context.peerCandidates, employerHypotheses: context.employerHypotheses,
+                contradictionOnly: context.contradictionOnly });
+            } catch (error) {
+              // Real transport owns its single correction round. Injected raw callers
+              // emulate that seam once, keeping the original prompt byte-identical.
+              if (attempt + 1 < attempts && Array.isArray(error?.correctionDetails) && error.correctionDetails.length) {
+                correction = { correctionDetails: [...error.correctionDetails], correctionRuleIds: [...(error.correctionRuleIds || [])], correctionAttempt: 1 };
+                continue;
+              }
+              const code = ['comparative-unavailable', 'OFFICIAL_POSTING_COMPARATIVE_UNAVAILABLE'].includes(error?.code) ? 'comparative-unavailable'
+                : error?.code === 'OFFICIAL_POSTING_COMPARATIVE_INVALID' || Array.isArray(error?.correctionDetails) ? 'comparative-invalid' : failureCode(error, member.rowBudget.signal);
+              const failure = bridgeError(code === 'research-miss' ? 'comparative-invalid' : code);
+              if (['bridge-aborted', 'bridge-timeout', 'bridge-unavailable', 'comparative-unavailable'].includes(failure.code)) matchFailure = failure;
+              throw failure;
+            }
+          }
         };
+        match.handlesCorrections = true;
         let result = await safeResolve(member, { candidateUrls: leads.get(member.id) || [], bypassCache: true, match, researchRan: true });
         result = addTrail(result, 'bridge-research');
         results.set(member, await persist(member, result, { researchRan: true })); settle(member);
@@ -351,7 +418,7 @@ export async function resolveOfficialPostings(jobs, {
           results.set(member, result);
         }
       }
-      countPosting(stats, result?.officialPosting || unresolvedOfficialPosting(member.job, { outcome: 'failed', trail: ['failed'] }).officialPosting);
+      countPosting(stats, result?.officialPosting || unresolvedOfficialPosting(member.job, { outcome: 'failed', trail: ['failed'] }).officialPosting, result?.comparison);
     }
     const finalFetchStats = session.telemetry();
     for (const key of FETCH_COUNTERS) stats[key] = Math.max(0, count(finalFetchStats[key]) - count(initialFetchStats[key]));

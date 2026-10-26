@@ -162,13 +162,16 @@ const BOILERPLATE_HEADING = /^(?:about\s+(?:us|(?:the|our|this)\s+(?:company|org
 const COMPANY_SUBHEADING = /^(?:perks|eeo|total\s+rewards|who\s+we\s+are|life\s+at|why\s+(?:join|work)|our\s+(?:mission|values|culture|story|vision|people)|company\s+(?:overview|description|culture|values|background|profile))\b/iu;
 const ABOUT_SUBJECT = /^about\s+(\S.*)$/iu;
 const ROLE_ABOUT_SUBJECT = /^(?:this|these|your?|you|yourself|our\s+team|what|working|why|how|who|(?:the\s+)?(?:job|role|position|opportunity|team|internship|work))\b/iu;
-const ROLE_HEADING = new RegExp(`^(?:${[
+const STRICT_ROLE_HEADING_PARTS = [
   'responsibilit\\w*', 'requirements?', 'qualifications?', 'duties', 'you\\s+will', 'who\\s+you\\s+are', 'the\\s+role', 'in\\s+this\\s+(?:role|position)',
   'what\\s+you(?:[’\']ll|\\s+will|\\s+bring|\\s+need|\\s+have)', 'what\\s+we(?:[’\']re|\\s+are)\\s+looking\\s+for', 'your\\s+(?:role|responsibilities)',
   'about\\s+(?:the|this)\\s+(?:role|team|job|position|opportunity|internship)', 'about\\s+you(?:rself)?',
   '(?:role|position|job)\\s+(?:overview|summary|description|purpose|details|duties|responsibilities|requirements)',
   '(?:key|main|primary|core|essential|principal)\\s+(?:responsibilit\\w*|dut(?:y|ies)|functions?|requirements?|qualifications?|skills?)',
   '(?:minimum|basic|preferred|required|desired|additional|bonus)\\s+(?:qualifications?|requirements?|skills?|experience)',
+];
+const STRICT_ROLE_HEADING = new RegExp(`^(?:${STRICT_ROLE_HEADING_PARTS.join('|')})\\b`, 'iu');
+const ROLE_HEADING = new RegExp(`^(?:${[...STRICT_ROLE_HEADING_PARTS,
   'overview', 'summary', 'description', 'the\\s+opportunity', 'your\\s+(?:impact|day\\s+to\\s+day)',
   'a\\s+day\\s+in\\s+the\\s+life', 'who\\s+we[’\']re\\s+looking\\s+for', 'why\\s+this\\s+role\\s+matters',
 ].join('|')})\\b`, 'iu');
@@ -179,19 +182,22 @@ function companyHeading(sentence) {
   const subject = ABOUT_SUBJECT.exec(sentence)?.[1];
   return Boolean(subject) && /^\p{Lu}/u.test(subject) && !ROLE_ABOUT_SUBJECT.test(subject);
 }
+const HEADING_CONNECTORS = new Set(['a', 'an', 'and', 'or', 'of', 'the', 'to', 'for', 'in', 'on', 'at', 'with', 'by', 'you', 'your', 'we', 'our', 'will', 'do', 'be', 'is', 'are', 'what', 'how', 'who']);
 /** A short heading may use sentence case: no list marker, terminal sentence punctuation, or more than eight words. */
-function headingLine(raw) {
+function headingLine(raw, strict = false) {
   if (LIST_MARKER.test(raw)) return false;
   const line = text(raw).replace(/^#+\s*/u, '').replace(/:$/u, '');
   const words = line.split(' ');
-  return line.length > 0 && line.length <= 80 && words.length <= 8 && !/[.!?;,]$/u.test(line) && /^[\p{Lu}\p{N}]/u.test(line);
+  return line.length > 0 && line.length <= 80 && words.length <= 8 && !/[.!?;,]$/u.test(line) && /^[\p{Lu}\p{N}]/u.test(line)
+    && (!strict || words.every(word => /^[\p{Lu}\p{N}&(]/u.test(word) || HEADING_CONNECTORS.has(word.toLocaleLowerCase().replace(/[’'].*$/u, ''))));
 }
 const COMPANY_REGION_MAX_WORDS = 128;
-function roleDescription(value, { metadata = false } = {}) {
+function roleDescription(value, { metadata = false, strict = false } = {}) {
+  const cap = strict ? Infinity : COMPANY_REGION_MAX_WORDS;
   const lines = String(value ?? '').normalize('NFKC').split(/\r\n?|\n/u);
   // A heading ends a company region only when it introduces a paragraph: a run of short headings is a list ("Paid Time Off").
   const introducesBody = from => {
-    for (let index = from + 1; index < lines.length; index++) if (lines[index].trim()) return !headingLine(lines[index]);
+    for (let index = from + 1; index < lines.length; index++) if (lines[index].trim()) return !headingLine(lines[index], strict);
     return false;
   };
   let boilerplate = false; let companyWords = 0; let hadCompanyRegion = false; const role = [];
@@ -200,16 +206,16 @@ function roleDescription(value, { metadata = false } = {}) {
     for (const part of parts) {
       const sentence = text(part).replace(/^#+\s*/u, '');
       if (!sentence) continue;
-      if (ROLE_HEADING.test(sentence)) boilerplate = false;
+      if ((strict ? STRICT_ROLE_HEADING : ROLE_HEADING).test(sentence)) boilerplate = false;
       else if (companyHeading(sentence)) {
         boilerplate = true; hadCompanyRegion = true; companyWords = normalizedDescription(sentence).length;
-        if (companyWords <= COMPANY_REGION_MAX_WORDS) continue;
+        if (companyWords <= cap) continue;
         boilerplate = false;
       }
-      else if (boilerplate && parts.length === 1 && !COMPANY_SUBHEADING.test(sentence) && headingLine(line) && introducesBody(lineIndex)) boilerplate = false;
+      else if (boilerplate && parts.length === 1 && !COMPANY_SUBHEADING.test(sentence) && headingLine(line, strict) && introducesBody(lineIndex)) boilerplate = false;
       if (boilerplate) {
         companyWords += normalizedDescription(sentence).length;
-        if (companyWords > COMPANY_REGION_MAX_WORDS) boilerplate = false;
+        if (companyWords > cap) boilerplate = false;
       }
       if (!boilerplate && !BOILERPLATE_SENTENCE.test(sentence)) role.push(sentence);
     }
@@ -220,14 +226,16 @@ function roleDescription(value, { metadata = false } = {}) {
 const descriptionGrams = words => new Set(words.slice(0, -4).map((_, index) => words.slice(index, index + 5).join(' ')));
 function companyStrippingPreservesAnchor(scraped, official) {
   if (![scraped, official].some(source => roleDescription(source, { metadata: true }).hadCompanyRegion)) return true;
-  // A company region can swallow an unrecognized role summary, even when
-  // shared requirements are most of the source; a cap alone can instead leak
-  // huge company copy. Require exact containment of the unstripped text as
-  // corroboration before either effect can name a posting by description.
+  // Role-evidence floor: with NO cap and only title-case headings, the scraped text must still keep real role content.
+  if (normalizedDescription(roleDescription(scraped, { strict: true })).length < 40) return false;
   const left = descriptionGrams(normalizedDescription(scraped)); const right = descriptionGrams(normalizedDescription(official));
   if (!left.size || !right.size) return false;
-  const smaller = left.size <= right.size ? left : right; const larger = left.size <= right.size ? right : left;
-  return [...smaller].every(gram => larger.has(gram));
+  const larger = left.size <= right.size ? right : left;
+  // Boundary decorations (a board header, a dropped footer, a truncated last word) are tolerated; interior differences are not.
+  const BOUNDARY = 8;
+  const words = normalizedDescription(left.size <= right.size ? scraped : official);
+  const interior = descriptionGrams(words.slice(BOUNDARY, Math.max(BOUNDARY, words.length - BOUNDARY)));
+  return interior.size > 0 && [...interior].every(gram => larger.has(gram));
 }
 // Amendment 3, section 2. A gram is boilerplate when it occurs in at least
 // max(3, 20%) of the fetched peer postings on the host or tenant. Fewer than
@@ -309,12 +317,11 @@ function identifier(row) {
   const value = row?.identifier ?? row?.requisitionId ?? row?.reqId;
   return key(typeof value === 'object' ? value?.value : value);
 }
-const QUOTE_FUNCTION_WORDS = new Set(('a an the and or but for from to in on at by of with as that this these those is are was were be been being '
-  + 'will would can could should may might must has have had do does did we our us you your they their it its who which when where how').split(' '));
-function substantialQuoteVocabulary(left, right) {
-  const vocabulary = value => new Set(normalizedDescription(roleDescription(value)).filter(word => word.length > 2 && !QUOTE_FUNCTION_WORDS.has(word)));
-  const a = vocabulary(left); const b = vocabulary(right); const shared = [...a].filter(word => b.has(word)).length;
-  return shared >= 4 && shared / Math.max(a.size, b.size) >= 0.35;
+function sameRequisition(a, b) {
+  const mentions = (item, id) => id.length >= 6 && new RegExp(`(?<![\\p{L}\\p{N}])${escape(id)}(?![\\p{L}\\p{N}])`, 'iu').test(item.sourceUrl || item.url || '');
+  const left = identifier(a); const right = identifier(b);
+  return strictEmployerEqual(a.employer || a.hiringOrganization?.name, b.employer || b.hiringOrganization?.name)
+    && ((left.length >= 4 && left === right) || (left && mentions(b, left)) || (right && mentions(a, right)));
 }
 // Quote normalization. A host-fetched official text arrives as converter output ("* item", "1. item", upper-cased headings) while the
 // model quotes plain prose, so BOTH texts and BOTH quotes are compared in the same plain form. Only presentation is removed: leading list
@@ -328,36 +335,69 @@ export function plainPostingText(value) {
 /** The plain form with whitespace collapsed: what the host compares verbatim (case-sensitive). */
 export const flatPostingText = value => plainPostingText(value).replace(/\s+/gu, ' ').trim();
 
-/** A quote pair is rejected only when a quote is boilerplate (the section 2
- * frequency) or also occurs in another candidate that passes every hard gate.
- * Without gate information (`rivalDescriptions` omitted) every peer counts.
- * Quotes are located in the normalized, case-folded texts. */
-export function verifiedTieBreakerMatch(scrapedText, officialText, answer, { peerDescriptions = [], rivalDescriptions = null } = {}) {
-  if (!answer || answer.sameJob !== true || !Array.isArray(answer.matchingPairs) || answer.matchingPairs.length < 3 || !Array.isArray(answer.conflicts) || answer.conflicts.length) return false;
-  const a = flatPostingText(scrapedText).toLocaleLowerCase(); const b = flatPostingText(officialText).toLocaleLowerCase();
-  const boilerplate = boilerplateGrams(peerDescriptions);
-  const boilerplateQuote = quote => {
-    const grams = descriptionGrams(normalizedDescription(quote));
-    return grams.size > 0 && [...grams].filter(gram => boilerplate.has(gram)).length * 2 >= grams.size;
-  };
-  const rivals = (Array.isArray(rivalDescriptions) ? rivalDescriptions : Array.isArray(peerDescriptions) ? peerDescriptions : [])
-    .map(value => ` ${normalizedDescription(flatPostingText(value)).join(' ')} `);
-  const positionsA = []; const positionsB = []; const seen = new Set();
-  for (const pair of answer.matchingPairs) {
-    const left = flatPostingText(pair?.scrapedQuote); const right = flatPostingText(pair?.officialQuote);
-    if ((left.match(/[\p{L}\p{N}]+/gu) || []).length < 8 || (right.match(/[\p{L}\p{N}]+/gu) || []).length < 8) return false;
-    if (!substantialQuoteVocabulary(left, right) || boilerplateQuote(left) || boilerplateQuote(right)
-      || rivals.some(rival => rival.includes(` ${normalizedDescription(left).join(' ')} `) || rival.includes(` ${normalizedDescription(right).join(' ')} `))) return false;
-    const foldedLeft = left.toLocaleLowerCase(); const foldedRight = right.toLocaleLowerCase();
-    const atA = a.indexOf(foldedLeft); const atB = b.indexOf(foldedRight);
-    if (atA < 0 || atB < 0 || seen.has(`${atA}|${atB}`)) return false;
-    seen.add(`${atA}|${atB}`); positionsA.push([atA, atA + foldedLeft.length]); positionsB.push([atB, atB + foldedRight.length]);
+/** A verbatim role passage belonging only to a sibling contradicts the choice,
+ * regardless of which passages the model chose to quote. */
+export function officialPostingScrapedContradictsChoice(job, chosen, options, { peerCandidates = [], contradictionOnly = [] } = {}) {
+  const wordText = value => ` ${key(plainPostingText(value))} `;
+  const scraped = wordText(job?.snippet || job?.description || '');
+  const selected = wordText(chosen.description);
+  const hidden = contradictionOnly.filter(other => {
+    if (!sameRequisition(chosen.candidate || chosen, other.candidate || other)) return true;
+    const overlap = descriptionOverlap(chosen.description, other.description);
+    // A fuller or truncated copy of this requisition supplies no sibling
+    // contradiction. Different passages on both sides keep the check active.
+    return Math.max(overlap.containment, overlap.coverageRight) < SMALL_POOL_NESTING - EPSILON;
+  });
+  for (const other of [...options.filter(option => option.id !== chosen.id), ...hidden]) {
+    const source = flatPostingText(other.description);
+    const tokens = [...source.matchAll(/[\p{L}\p{N}]+/gu)];
+    for (let index = 0; index + 10 <= tokens.length; index += 1) {
+      const last = tokens[index + 9];
+      const quote = source.slice(tokens[index].index, last.index + last[0].length);
+      const folded = wordText(quote);
+      if (scraped.includes(folded) && !selected.includes(folded)
+        && !officialPostingQuoteIsBoilerplate(quote, other, { job, peerCandidates })) return true;
+    }
   }
-  // Distinct parts must be disjoint passages in both texts, rather than three
-  // overlapping excerpts carved out of one sentence.
-  const separated = (spans, length) => new Set(spans.map(([at]) => Math.min(2, Math.floor(at * 3 / length)))).size >= 2
+  return false;
+}
+
+/** Boilerplate is assessed on the chosen official source only. Recognized
+ * company/benefits/EEO regions also apply when the board is too small to
+ * estimate frequency; shared company copy never becomes role evidence. */
+export function officialPostingQuoteIsBoilerplate(quote, option, { job = {}, peerCandidates = [] } = {}) {
+  const official = option?.candidate || option;
+  const source = option?.description ?? description(official);
+  const role = flatPostingText(roleDescription(plainPostingText(source), { strict: true }));
+  const written = flatPostingText(quote);
+  if (!written) return true;
+  if (!role.includes(written)) {
+    // A quote can straddle a stripped company sentence and real duties. Count
+    // only exact eight-word windows retained in the strict role text, using
+    // the evidence word floor itself, and require role words to be the majority.
+    // A small role fragment cannot launder a mostly-company quotation.
+    const words = [...written.matchAll(/[\p{L}\p{N}]+/gu)];
+    const retained = new Set();
+    for (let index = 0; index + 8 <= words.length; index += 1) {
+      const last = words[index + 7];
+      if (!role.includes(written.slice(words[index].index, last.index + last[0].length))) continue;
+      for (let word = index; word < index + 8; word += 1) retained.add(word);
+    }
+    if (retained.size * 2 <= words.length) return true;
+  }
+  const rowTitle = coreTitle(job?.title, { company: job?.company, location: job?.location,
+    employerHypotheses: [official?.employer || official?.hiringOrganization?.name].filter(Boolean) });
+  const frequencyPeers = peerPostings(official, peerCandidates).filter(peer => coreTitle(peer.title, {
+    company: peer.employer || peer.hiringOrganization?.name, location: peer.location,
+  }) !== rowTitle);
+  const boilerplate = boilerplateGrams(frequencyPeers.map(description));
+  const grams = descriptionGrams(normalizedDescription(written));
+  return grams.size > 0 && [...grams].filter(gram => boilerplate.has(gram)).length * 2 >= grams.size;
+}
+/** The unchanged separation floor: two disjoint passages, in two thirds. */
+export function officialPostingQuotePartsSeparated(spans, length) {
+  return length > 0 && new Set(spans.map(([at]) => Math.min(2, Math.floor(at * 3 / length)))).size >= 2
     && spans.some((a, index) => spans.some((b, other) => index !== other && (a[1] <= b[0] || b[1] <= a[0])));
-  return separated(positionsA, a.length) && separated(positionsB, b.length);
 }
 /** Fetched postings on the candidate's host or tenant, one entry per URL.
  * Same-requisition duplicates of the candidate are not peers. */
@@ -435,8 +475,8 @@ export function frozenOfficialEmployer(row, verifiedEmployer) {
   return frozenEmployerName(row?.company, verifiedEmployer);
 }
 
-export function evaluateOfficialPostingMatch(row, candidate, { now = Date.now(), tieBreaker = null, employerHypotheses = [], peerCandidates = [] } = {}) {
-  const reject = (reason, hardPassed = false) => ({ passed: false, hardPassed, hardPass: hardPassed, reason, reasons: [reason], anchors: [] });
+export function evaluateOfficialPostingMatch(row, candidate, { now = Date.now(), employerHypotheses = [], peerCandidates = [] } = {}) {
+  const reject = (reason, hardPassed = false, identityPass = hardPassed) => ({ passed: false, identityPass, hardPassed, hardPass: hardPassed, reason, reasons: [reason], anchors: [] });
   const url = officialHttpsUrl(candidate?.sourceUrl || candidate?.url);
   if (!url || isAggregatorHost(new URL(url).hostname)) return reject('unsafe-url');
   const employer = text(candidate?.employer || candidate?.hiringOrganization?.name);
@@ -460,12 +500,15 @@ export function evaluateOfficialPostingMatch(row, candidate, { now = Date.now(),
     && /^\/job\/\d+\/?$/u.test(portal.pathname) && strictEmployerEqual(employer, row?.company);
   if (!tenant && candidate?.employerDomainProven !== true && !officialPortal) return reject('tenant-unproven');
   const instant = typeof now === 'function' ? Number(now()) : Number(now);
-  if (!postingIsLive(candidate, instant)) return reject('closed');
   const scrapedPay = salaryOffer(row); const officialPay = salaryOffer(candidate);
   const payEqual = scrapedPay && officialPay && ['min', 'max', 'currency', 'period', 'cadence'].every(field => scrapedPay[field] === officialPay[field]);
-  if (scrapedPay && officialPay && !payEqual) return reject('salary-mismatch', true);
+  const salaryMismatch = Boolean(scrapedPay && officialPay && !payEqual);
+  // Preserve the existing closed rejection order while exposing the pay veto
+  // to comparative selection, which is also allowed to choose a closed option.
+  if (!postingIsLive(candidate, instant)) return { ...reject('closed', false, true), salaryMismatch };
+  if (salaryMismatch) return { ...reject('salary-mismatch', true), salaryMismatch };
   const sameIdentifier = identifier(row) && identifier(row) === identifier(candidate);
-  const accept = anchor => ({ passed: true, hardPassed: true, hardPass: true, anchor, anchors: [anchor], reasons: [], employer, candidate });
+  const accept = anchor => ({ passed: true, identityPass: true, hardPassed: true, hardPass: true, anchor, anchors: [anchor], reasons: [], employer, candidate });
   // Deterministic anchors that name this exact posting: its requisition id or the board's own link for this card.
   if (sameIdentifier || leadIdentity(row, candidate)) return accept('identifier-anchor');
   const peers = peerPostings(candidate, peerCandidates);
@@ -488,32 +531,25 @@ export function evaluateOfficialPostingMatch(row, candidate, { now = Date.now(),
   const best = rivals.reduce((top, rival) => Math.max(top, rival.containment), 0);
   const top = Math.max(own.containment, best);
   // The scraped job is the closed posting: never anchor its live sibling.
-  if (rivals.some(rival => !rival.live && rival.anchored && rival.containment >= top - EPSILON)) return { ...reject('no-anchor'), closedWinner: true };
+  if (rivals.some(rival => !rival.live && rival.anchored && rival.containment >= top - EPSILON)) return { ...reject('no-anchor', false, true), closedWinner: true };
   // A live posting that anchors and beats this one by the margin is the match.
-  if (rivals.some(rival => rival.live && rival.anchored && rival.containment - own.containment >= RIVAL_MARGIN - EPSILON)) return { ...reject('no-anchor'), outranked: true };
+  if (rivals.some(rival => rival.live && rival.anchored && rival.containment - own.containment >= RIVAL_MARGIN - EPSILON)) return { ...reject('no-anchor', false, true), outranked: true };
   // T1: equal posted pay never overrides the closed-twin and outranked checks (pay bands are shared by same-title postings).
   if (payEqual) return accept('salary-anchor');
   const leads = own.containment - best >= RIVAL_MARGIN - EPSILON;
   if (own.anchored && leads && (!smallPool || Math.max(own.containment, own.coverageRight) >= SMALL_POOL_NESTING)
     && companyStrippingPreservesAnchor(description(row), description(candidate))) return accept('description-anchor');
-  // T6: a quote shared with ANY same-identity twin, closed or live, is not evidence for this posting.
-  const rivalDescriptions = rivals.map(rival => description(rival.peer));
-  if (tieBreaker && verifiedTieBreakerMatch(description(row), description(candidate), tieBreaker, { peerDescriptions, rivalDescriptions })) return accept('quoted-match');
-  return reject(tieBreaker ? 'invalid-quotes' : 'no-anchor', true);
+  return reject('no-anchor', true);
 }
-export function selectOfficialPostingMatch(row, candidates, { now = Date.now(), tieBreakers = null, employerHypotheses = [], peerCandidates = [] } = {}) {
+export function selectOfficialPostingMatch(row, candidates, { now = Date.now(), employerHypotheses = [], peerCandidates = [] } = {}) {
   const unique = [...new Map((Array.isArray(candidates) ? candidates : []).map(candidate => [officialHttpsUrl(candidate?.sourceUrl || candidate?.url), candidate]).filter(([url]) => url)).values()];
   const evaluations = unique.map(candidate => ({ candidate, ...evaluateOfficialPostingMatch(row, candidate, {
-    now, employerHypotheses, peerCandidates: [...unique, ...(Array.isArray(peerCandidates) ? peerCandidates : [])], tieBreaker: tieBreakers instanceof Map ? tieBreakers.get(candidate.sourceUrl || candidate.url) : null,
+    now, employerHypotheses, peerCandidates: [...unique, ...(Array.isArray(peerCandidates) ? peerCandidates : [])],
   }) }));
   // T12: one requisition represented on two URLs (the ATS board and the employer's embed page) is one posting, not two rivals.
   // A placeholder identifier (fewer than four characters) never merges anything.
-  const mentions = (item, id) => id.length >= 6 && new RegExp(`(?<![\\p{L}\\p{N}])${escape(id)}(?![\\p{L}\\p{N}])`, 'iu').test(item.candidate.sourceUrl || item.candidate.url || '');
-  const sameRequisition = (a, b) => strictEmployerEqual(a.candidate.employer || a.candidate.hiringOrganization?.name, b.candidate.employer || b.candidate.hiringOrganization?.name)
-    && ((identifier(a.candidate).length >= 4 && identifier(a.candidate) === identifier(b.candidate))
-      || (identifier(a.candidate) && mentions(b, identifier(a.candidate))) || (identifier(b.candidate) && mentions(a, identifier(b.candidate))));
   const merge = list => [...list].sort((a, b) => Number(Boolean(b.candidate.tenantProven)) - Number(Boolean(a.candidate.tenantProven)))
-    .filter((item, index, all) => !all.slice(0, index).some(earlier => sameRequisition(earlier, item)));
+    .filter((item, index, all) => !all.slice(0, index).some(earlier => sameRequisition(earlier.candidate, item.candidate)));
   const passing = merge(evaluations.filter(result => result.passed));
   // A requisition id or the card's own apply link names this exact posting. A same-title sibling that merely failed to anchor is not a
   // rival of that: only a sibling that itself passes (it is then in `passing`) makes the outcome ambiguous, whatever order the pages were read in.
@@ -521,7 +557,7 @@ export function selectOfficialPostingMatch(row, candidates, { now = Date.now(), 
   const named = evaluations.some(result => result.passed && result.anchor === 'identifier-anchor'
     && (leadIdentity(row, result.candidate) || (identifier(row).length >= 4 && identifier(row) === identifier(result.candidate))));
   const unresolved = named ? [] : merge(evaluations.filter(result => result.hardPassed && result.reason === 'no-anchor'))
-    .filter(item => !passing.some(winner => sameRequisition(winner, item)));
+    .filter(item => !passing.some(winner => sameRequisition(winner.candidate, item.candidate)));
   if (passing.length === 1 && !unresolved.length) return { outcome: 'found', candidate: passing[0].candidate, alternatives: [], evaluations };
   const ambiguous = passing.length > 1 || (passing.length + unresolved.length > 1);
   const alternatives = ambiguous ? [...passing, ...unresolved].slice(0, 12).map(({ candidate }) => ({ url: candidate.sourceUrl || candidate.url, title: text(candidate.title) })) : [];
@@ -529,4 +565,55 @@ export function selectOfficialPostingMatch(row, candidates, { now = Date.now(), 
   return { outcome: ambiguous ? 'ambiguous' : closed ? 'closed' : 'not-found', candidate: null, alternatives, evaluations };
 }
 
-export const __debug = { boilerplateGrams, roleGrams, gramCacheStats, descriptionGrams, normalizedDescription, roleDescription, substantialQuoteVocabulary, text, scoreDescription };
+/** Identity-passing postings without a posted-pay veto are options, including
+ * closed postings. Merge requisitions before the cap, rank by distinctive
+ * containment and give stable URL-ordered ids; return the pre-cap count too. */
+export function buildOfficialPostingComparisonSet(job, candidates, { now = Date.now(), employerHypotheses = [], peerCandidates = [] } = {}) {
+  const pool = [...(Array.isArray(candidates) ? candidates : []), ...(Array.isArray(peerCandidates) ? peerCandidates : [])];
+  const instant = typeof now === 'function' ? Number(now()) : Number(now);
+  const representationOrder = (a, b) => Number(Boolean(b.tenantProven)) - Number(Boolean(a.tenantProven))
+    || Number(postingIsLive(b, instant)) - Number(postingIsLive(a, instant));
+  const byUrl = new Map(); const evaluations = new Map();
+  for (const candidate of Array.isArray(candidates) ? candidates : []) {
+    const url = officialHttpsUrl(candidate?.sourceUrl || candidate?.url);
+    if (!url) continue;
+    evaluations.set(candidate, evaluateOfficialPostingMatch(job, candidate, { now: instant, employerHypotheses, peerCandidates: pool }));
+    const known = byUrl.get(url);
+    // Duplicate representations of one fetched URL do not gain options or
+    // depend on discovery order; prefer tenant proof, then a live source,
+    // then richer stable bytes.
+    if (!known || representationOrder(candidate, known) < 0
+      || (representationOrder(candidate, known) === 0
+        && (description(candidate).length > description(known).length
+          || (description(candidate).length === description(known).length && description(candidate) < description(known))))) byUrl.set(url, candidate);
+  }
+  const options = [];
+  for (const [url, candidate] of byUrl) {
+    const evaluation = evaluations.get(candidate);
+    if (!evaluation.identityPass || evaluation.salaryMismatch || evaluation.reason === 'salary-mismatch') continue;
+    const rowTitle = coreTitle(job?.title, { company: job?.company, location: job?.location, employerHypotheses });
+    const peers = peerPostings(candidate, pool).filter(peer => coreTitle(peer.title, {
+      company: peer.employer || peer.hiringOrganization?.name, location: peer.location,
+    }) !== rowTitle);
+    const containment = scoreDescription(description(job), description(candidate), boilerplateGrams(peers.map(description))).containment;
+    options.push({ candidate, title: text(candidate.title), location: text(candidate.location?.display ?? candidate.location),
+      status: postingIsLive(candidate, instant) ? 'live' : 'closed', description: plainPostingText(description(candidate)), containment,
+      evaluation, sourceKey: canonicalLeadUrl(url) || url, sourceUrl: url });
+  }
+  const ranked = options.sort((a, b) => representationOrder(a.candidate, b.candidate)
+    || b.containment - a.containment || a.sourceKey.localeCompare(b.sourceKey) || a.sourceUrl.localeCompare(b.sourceUrl))
+    .filter((option, index, all) => !all.slice(0, index).some(earlier => sameRequisition(earlier.candidate, option.candidate)));
+  const capped = ranked.sort((a, b) => b.containment - a.containment || a.sourceKey.localeCompare(b.sourceKey) || a.sourceUrl.localeCompare(b.sourceUrl))
+    .slice(0, 8).sort((a, b) => a.sourceKey.localeCompare(b.sourceKey) || a.sourceUrl.localeCompare(b.sourceUrl))
+    .map((option, index) => { const result = { id: `P${index + 1}`, ...option }; delete result.sourceKey; delete result.sourceUrl; return result; });
+  const selected = new Set(capped.map(option => option.candidate));
+  // These sources passed identity but cannot be chosen. Keep their text on
+  // the host so pay, cap and representation pruning cannot hide a contradiction.
+  const contradictionOnly = [...evaluations].filter(([candidate, evaluation]) => evaluation.identityPass && !selected.has(candidate))
+    .map(([candidate]) => ({ candidate, description: plainPostingText(description(candidate)) }))
+    .sort((a, b) => text(a.candidate.sourceUrl || a.candidate.url).localeCompare(text(b.candidate.sourceUrl || b.candidate.url))
+      || a.description.localeCompare(b.description) || representationOrder(a.candidate, b.candidate));
+  return { options: capped, preCapCount: ranked.length, contradictionOnly };
+}
+
+export const __debug = { boilerplateGrams, roleGrams, gramCacheStats, descriptionGrams, normalizedDescription, roleDescription, text, scoreDescription };

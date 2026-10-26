@@ -6,6 +6,8 @@ import { faultAt, withLeakCheck } from './fixtures/handoff-bridge/harness.js';
 import { getKnownTaskIds } from '../../electron/ipc/llm.js';
 import { PUSH_TASK_POLICY, assertPushTaskPolicy, createPushSource as createPushSourcePort, normalizePushHandoffCode } from '../../electron/ipc/handoffBridge/sources/push.js';
 import { createHandoffEngine } from '../../electron/ipc/handoffBridge/engine.js';
+import { createObservedChatContext, hasLiveObservedWorker, hasPendingObservedWorkerLaunch } from '../../electron/ipc/handoffBridge/observedChatContext.js';
+import { CONSTANTS } from '../../electron/ipc/handoffBridge/constants.js';
 import { createHandoffCodeGuard } from '../../electron/ipc/handoffBridge/lanes.js';
 import { TOOLS_LIST } from '../../electron/ipc/handoffBridge/tools.js';
 import { BRIDGE_ATTACHMENT_TASKS, BRIDGE_ENABLED_ATTACHMENT_TASKS, BRIDGE_RAW_RESEARCH_TASKS } from '../../electron/ipc/nonApiAi.js';
@@ -113,7 +115,518 @@ const HAND_BACK_MODES = Object.freeze([
   { name: 'sync true', handBack: () => true, released: true },
 ]);
 
+const COMPARISON_GROUP = 'a'.repeat(64);
+function comparativeFixture({ firstRun = 'A', beforeRead = null, submit = null, now = Date.now } = {}) {
+  const a = { ...entry, requestId: 'comparison-a', task: 'job-official-posting-match', comparisonGroup: COMPARISON_GROUP, comparisonRun: 'A' };
+  const b = { ...a, requestId: 'comparison-b', handoffCode: 'HANDOFF-GHJKLM', comparisonRun: 'B' };
+  let pending = [firstRun === 'A' ? a : b];
+  const reads = [], submits = [], unavailable = [];
+  const push = createPushSource({ seam: {
+    comparativeUnavailable: args => { unavailable.push(args); return true; },
+    list: async () => ({ handoffs: pending, excluded: {}, pending: pending.length }),
+    read: async args => {
+      reads.push(args);
+      if (beforeRead) await beforeRead(args);
+      const item = pending.find(value => value.requestId === args.requestId);
+      return { ok: true, handoffCode: item.handoffCode, task: item.task, prompt: `Synthetic comparative run ${item.comparisonRun}` };
+    },
+    submit: async args => {
+      submits.push(args);
+      if (submit) return submit(args, submits.length);
+      pending = pending.find(item => item.requestId === args.requestId)?.comparisonRun === 'A' ? [b] : [];
+      return { outcome: 'accepted' };
+    },
+  }, windows: new Map([[71, { __canvasFilePath: '/tmp/ada.canvas' }]]), activeNodeTasks: () => [], graceMs: 0, pollMs: 0, now });
+  assert(push.selectHub({ windowId: 71, canvasFilePath: '/tmp/ada.canvas', nodeId: 'node-ada' }));
+  return { push, reads, submits, unavailable, a, b, setPending: value => { pending = value; } };
+}
+const comparisonContext = (character, pristine = false, isCurrent = () => true) => ({ conversationKey: character.repeat(64), observed: true, pristine, isCurrent });
+let observedChatOrdinal = 0;
+async function observedNewChat(engine) {
+  const observedId = `synthetic-observed-chat-${++observedChatOrdinal}`;
+  return { ...await engine.newChat({ linkId: LINK, observation: createObservedChatContext(observedId) }), observedId };
+}
+function observeWorker(engine, starter) {
+  assert(engine.beginObservedChat({ linkId: LINK, sessionCode: starter.sessionCode }));
+  assert(engine.confirmObservedChat({ linkId: LINK, sessionCode: starter.sessionCode,
+    observation: createObservedChatContext(`synthetic-observed-worker-${++observedChatOrdinal}`) }));
+}
+const comparativeEngine = push => createHandoffEngine({ sources: { push, application: {
+  read: async () => ({ kind: 'gone' }), status: async () => ({ kind: 'gone' }), submit: async () => ({ kind: 'gone' }),
+} }, scope: { applications: false, scoring: true, marketplace: false }, holdMs: 0 });
+
 export default [
+  {
+    name: 'Amendment 9 item 3: a delayed re-copy starts a fresh bounded observed-launch window',
+    run: async () => {
+      let stamp = 1_000_000;
+      const { push } = comparativeFixture({ now: () => stamp });
+      const engine = createHandoffEngine({ sources: { push, application: {
+        read: async () => ({ kind: 'gone' }), status: async () => ({ kind: 'gone' }), submit: async () => ({ kind: 'gone' }),
+      } }, scope: { applications: false, scoring: true, marketplace: false }, holdMs: 0, now: () => stamp });
+      try {
+        const pool = await engine.startWorkerPool({ linkId: LINK, requestedWorkers: 1 });
+        const first = engine.copyWorkerStarter({ linkId: LINK, generation: pool.generation, workerOrdinal: 1 });
+        observeWorker(engine, first);
+        assert((await engine.get({ session: first.sessionCode, linkId: LINK })).status === 'served');
+        stamp += 6 * 60_000;
+        const replacement = engine.restartWorker({ linkId: LINK, generation: pool.generation, workerOrdinal: 1 });
+        assert(replacement.copied && hasPendingObservedWorkerLaunch(), 'the initial restart has bounded pending evidence');
+        stamp += CONSTANTS.CHAT_LAUNCH_PRESENTATION_TIMEOUT_MS + 1;
+        assert(!hasPendingObservedWorkerLaunch(), 'the unused clipboard restart expires');
+        const copied = engine.copyWorkerStarter({ linkId: LINK, generation: pool.generation, workerOrdinal: 1 });
+        assert(copied.recopied && copied.sessionCode === replacement.sessionCode, 're-copy retains the same worker capability');
+        assert(engine.beginObservedChat({ linkId: LINK, sessionCode: copied.sessionCode }));
+        assert(hasPendingObservedWorkerLaunch(), 'a delayed launcher gets a new window instead of the stale restart stamp');
+        stamp += CONSTANTS.CHAT_LAUNCH_PRESENTATION_TIMEOUT_MS - 1;
+        assert(engine.beginObservedChat({ linkId: LINK, sessionCode: copied.sessionCode }));
+        stamp += 1;
+        assert(!hasPendingObservedWorkerLaunch(), 'repeated begin calls do not extend an unexpired launch');
+        assert(engine.beginObservedChat({ linkId: LINK, sessionCode: copied.sessionCode }));
+        assert(hasPendingObservedWorkerLaunch(), 'begin also refreshes an already expired pending launch');
+      } finally { await engine.close(); }
+    },
+  },
+  {
+    name: 'Amendment 9 item 3: a launcher begin after an unexpired re-copy gets its own full window',
+    run: async () => {
+      let stamp = 1_000_000;
+      const { push } = comparativeFixture({ now: () => stamp });
+      const engine = createHandoffEngine({ sources: { push, application: {
+        read: async () => ({ kind: 'gone' }), status: async () => ({ kind: 'gone' }), submit: async () => ({ kind: 'gone' }),
+      } }, scope: { applications: false, scoring: true, marketplace: false }, holdMs: 0, now: () => stamp });
+      try {
+        const pool = await engine.startWorkerPool({ linkId: LINK, requestedWorkers: 1 });
+        const first = engine.copyWorkerStarter({ linkId: LINK, generation: pool.generation, workerOrdinal: 1 });
+        observeWorker(engine, first);
+        assert((await engine.get({ session: first.sessionCode, linkId: LINK })).status === 'served');
+        stamp += 6 * 60_000;
+        const replacement = engine.restartWorker({ linkId: LINK, generation: pool.generation, workerOrdinal: 1 });
+        assert(replacement.copied && hasPendingObservedWorkerLaunch());
+        stamp += 30_000;
+        const copied = engine.copyWorkerStarter({ linkId: LINK, generation: pool.generation, workerOrdinal: 1 });
+        assert(copied.recopied && copied.sessionCode === replacement.sessionCode);
+        stamp += 5_000;
+        assert(engine.beginObservedChat({ linkId: LINK, sessionCode: copied.sessionCode }));
+        stamp += CONSTANTS.CHAT_LAUNCH_PRESENTATION_TIMEOUT_MS - 1;
+        assert(hasPendingObservedWorkerLaunch(), 'the launch window starts at begin, not at the earlier restart stamp');
+        stamp += 1;
+        assert(!hasPendingObservedWorkerLaunch(), 'the refreshed window stays bounded');
+      } finally { await engine.close(); }
+    },
+  },
+  {
+    name: 'Amendment 8 item 5: a pristine run-A replacement drains ordinary work before a ready B',
+    run: async () => {
+      const { push, a, b, reads, setPending } = comparativeFixture();
+      const scoring = { ...entry, requestId: 'ready-b-scoring', handoffCode: 'HANDOFF-NPQRST' };
+      await push.get({ epoch: 'ready-b', worker: 'worker-1', comparisonContext: comparisonContext('1') });
+      await push.submit({ epoch: 'ready-b', worker: 'worker-1', comparisonContext: comparisonContext('1'),
+        handoffCode: a.handoffCode, response: JSON.stringify({ handoffCode: a.handoffCode, answer: 'A' }) });
+      setPending([b, scoring]);
+      const next = await push.get({ epoch: 'ready-b', worker: 'worker-1', comparisonContext: comparisonContext('2', true) });
+      assert(next.status === 'served' && next.handoffCode === scoring.handoffCode,
+        'a pristine chat on the same ordinal must drain ordinary work before its otherwise ready B');
+      assert(reads.length === 2 && reads[1].requestId === scoring.requestId, 'run B must remain unread');
+    },
+  },
+  {
+    name: 'Amendment 8 item 4: a single-worker observed relaunch remains pending through the launcher window',
+    run: async () => {
+      let stamp = 1_000_000;
+      const { push, a, b } = comparativeFixture({ now: () => stamp });
+      const engine = createHandoffEngine({ sources: { push, application: {
+        read: async () => ({ kind: 'gone' }), status: async () => ({ kind: 'gone' }), submit: async () => ({ kind: 'gone' }),
+      } }, scope: { applications: false, scoring: true, marketplace: false }, holdMs: 0, now: () => stamp });
+      try {
+        const pool = await engine.startWorkerPool({ linkId: LINK, requestedWorkers: 1 });
+        const first = engine.copyWorkerStarter({ linkId: LINK, generation: pool.generation, workerOrdinal: 1 });
+        observeWorker(engine, first);
+        assert((await engine.get({ session: first.sessionCode, linkId: LINK })).handoffCode === a.handoffCode);
+        await engine.submit({ session: first.sessionCode, linkId: LINK, handoffCode: a.handoffCode, response: '{}' });
+        assert((await engine.get({ session: first.sessionCode, linkId: LINK })).status === 'session_full');
+        stamp += 6 * 60_000;
+        const replacement = engine.restartWorker({ linkId: LINK, generation: pool.generation, workerOrdinal: 1 });
+        assert(hasPendingObservedWorkerLaunch() && !hasLiveObservedWorker(), 'restart preserves only bounded launch evidence');
+        assert(engine.beginObservedChat({ linkId: LINK, sessionCode: replacement.sessionCode }));
+        stamp += CONSTANTS.CHAT_LAUNCH_PRESENTATION_TIMEOUT_MS - 1;
+        assert(hasPendingObservedWorkerLaunch(), 'the launch may outlast the comparative absence grace');
+        stamp += 1;
+        assert(!hasPendingObservedWorkerLaunch(), 'a stalled launcher expires at its existing maximum');
+        engine.cancelObservedChat({ linkId: LINK, sessionCode: replacement.sessionCode });
+        assert(!hasPendingObservedWorkerLaunch(), 'cancellation removes pending evidence');
+        assert(engine.beginObservedChat({ linkId: LINK, sessionCode: replacement.sessionCode }));
+        assert(hasPendingObservedWorkerLaunch(), 'a newly observed launch gets its own bounded window');
+        assert(engine.confirmObservedChat({ linkId: LINK, sessionCode: replacement.sessionCode,
+          observation: createObservedChatContext(`synthetic-observed-worker-${++observedChatOrdinal}`) }));
+        assert(hasLiveObservedWorker() && !hasPendingObservedWorkerLaunch(), 'confirmation replaces pending with live evidence');
+        assert((await engine.get({ session: replacement.sessionCode, linkId: LINK })).handoffCode === b.handoffCode);
+      } finally { await engine.close(); }
+    },
+  },
+  {
+    name: 'Amendment 8 item 3: an unobserved replacement releases its comparison and drains scoring without consuming an attempt',
+    run: async () => {
+      let stamp = 1_000_000;
+      const { push, reads, submits, unavailable, a, setPending } = comparativeFixture({ now: () => stamp });
+      const scoring = { ...entry, requestId: 'replacement-scoring', handoffCode: 'HANDOFF-NPQRST' };
+      setPending([a, scoring]);
+      const engine = createHandoffEngine({ sources: { push, application: {
+        read: async () => ({ kind: 'gone' }), status: async () => ({ kind: 'gone' }), submit: async () => ({ kind: 'gone' }),
+      } }, scope: { applications: false, scoring: true, marketplace: false }, holdMs: 0, now: () => stamp });
+      try {
+        const pool = await engine.startWorkerPool({ linkId: LINK, requestedWorkers: 2 });
+        const one = engine.copyWorkerStarter({ linkId: LINK, generation: pool.generation, workerOrdinal: 1 });
+        const two = engine.copyWorkerStarter({ linkId: LINK, generation: pool.generation, workerOrdinal: 2 });
+        observeWorker(engine, one); observeWorker(engine, two);
+        assert((await engine.get({ session: one.sessionCode, linkId: LINK })).handoffCode === a.handoffCode);
+        stamp += 6 * 60_000;
+        const replacement = engine.restartWorker({ linkId: LINK, generation: pool.generation, workerOrdinal: 1 });
+        assert(replacement.copied === true, 'the manual replacement remains clipboard-only');
+        const ordinary = await engine.get({ session: replacement.sessionCode, linkId: LINK });
+        assert(ordinary.status === 'served' && ordinary.handoffCode === scoring.handoffCode,
+          'the unobserved replacement must reach queued scoring instead of rereading its served comparison');
+        const comparison = await engine.get({ session: two.sessionCode, linkId: LINK });
+        assert(comparison.status === 'served' && comparison.handoffCode === a.handoffCode && comparison.attempt === 1,
+          'an observed worker can reclaim the pending comparison at its original attempt');
+        assert(unavailable.length === 0 && submits.length === 0 && reads.length === 3,
+          'releasing the route neither submits nor fails the comparative request');
+      } finally { await engine.close(); }
+    },
+  },
+  {
+    name: 'comparative engine: clipboard-only New and multiple worker capabilities never prove observed conversations',
+    run: async () => {
+      for (const pooled of [false, true]) {
+        const { push, reads } = comparativeFixture(); const engine = comparativeEngine(push);
+        const chat = await engine.newChat({ linkId: LINK });
+        let starters = [chat];
+        if (pooled) {
+          const pool = await engine.startWorkerPool({ linkId: LINK, requestedWorkers: 2 });
+          starters = [1, 2].map(workerOrdinal => engine.copyWorkerStarter({ linkId: LINK, generation: pool.generation, workerOrdinal }));
+        }
+        for (const starter of starters) assert((await engine.get({ session: starter.sessionCode, linkId: LINK })).status === 'waiting');
+        assert(reads.length === 0, 'clipboard credentials reveal no comparative prompt, even when minted by New or different workers');
+        await engine.close();
+      }
+    },
+  },
+  {
+    name: 'comparative engine: an unobserved worker skips comparison for scoring and an observed second worker still claims it',
+    run: async () => {
+      const { push, reads, unavailable, a, setPending } = comparativeFixture();
+      const scoring = { ...entry, requestId: 'comparison-scoring', handoffCode: 'HANDOFF-NPQRST' };
+      setPending([a, scoring]);
+      const engine = comparativeEngine(push);
+      const pool = await engine.startWorkerPool({ linkId: LINK, requestedWorkers: 2 });
+      const one = engine.copyWorkerStarter({ linkId: LINK, generation: pool.generation, workerOrdinal: 1 });
+      const two = engine.copyWorkerStarter({ linkId: LINK, generation: pool.generation, workerOrdinal: 2 });
+      observeWorker(engine, two);
+      try {
+        assert((await engine.get({ session: one.sessionCode, linkId: LINK })).handoffCode === scoring.handoffCode);
+        assert((await engine.get({ session: two.sessionCode, linkId: LINK })).handoffCode === a.handoffCode);
+        assert(unavailable.length === 0 && reads.length === 2, 'an unobserved poll neither aborts nor reads comparative work');
+        assert(hasLiveObservedWorker(), 'an observed active worker remains available to the resolver');
+      } finally { await engine.close(); }
+    },
+  },
+  {
+    name: 'comparative push: run A drains scoring before a bounded wait for another observed worker and fresh fallback',
+    run: async () => {
+      let stamp = 1_000;
+      const { push, a, b, reads, setPending } = comparativeFixture({ now: () => stamp });
+      const context = { ...comparisonContext('1'), availableWorkerIds: () => ['worker-2'] };
+      await push.get({ epoch: 'ordinary-first', worker: 'worker-1', comparisonContext: context });
+      await push.submit({ epoch: 'ordinary-first', worker: 'worker-1', comparisonContext: context, handoffCode: a.handoffCode, response: JSON.stringify({ handoffCode: a.handoffCode, answer: 'A' }) });
+      const scoring = { ...entry, requestId: 'run-a-scoring', handoffCode: 'HANDOFF-NPQRST' };
+      setPending([b, scoring]);
+      assert((await push.get({ epoch: 'ordinary-first', worker: 'worker-1', comparisonContext: context })).handoffCode === scoring.handoffCode);
+      await push.submit({ epoch: 'ordinary-first', worker: 'worker-1', comparisonContext: context, handoffCode: scoring.handoffCode, response: JSON.stringify({ handoffCode: scoring.handoffCode, answer: 'score' }) });
+      setPending([b]);
+      assert((await push.get({ epoch: 'ordinary-first', worker: 'worker-1', comparisonContext: context })).status === 'waiting');
+      stamp += 5_001;
+      assert((await push.get({ epoch: 'ordinary-first', worker: 'worker-1', comparisonContext: context })).status === 'fresh_context_required');
+      assert(reads.length === 2, 'run B bytes never reach the run-A conversation');
+    },
+  },
+  {
+    name: 'comparative engine: application work is served before a run-B fresh-chat stop',
+    run: async () => {
+      const { engine, session } = await makeEngine({ pushGet: async () => ({ status: 'fresh_context_required', remaining: { ready: 1, working: 0, needsYou: 0 } }) });
+      try {
+        assert((await engine.get({ session, linkId: LINK })).handoffCode === 'APP-CODE');
+        assert(engine.snapshot().chat.pool.workers[0]?.quietReason !== 'fresh_context_required');
+      } finally { await engine.close(); }
+    },
+  },
+  {
+    name: 'comparative engine: push acceptance defers a run-B stop while unread application work is queued',
+    run: async () => {
+      let accepted = false; let appReads = 0;
+      const push = {
+        get: async () => accepted ? { status: 'fresh_context_required' }
+          : { status: 'served', handoffCode: CODE, task: 'job-scoring', prompt: 'Synthetic scoring work' },
+        submit: async () => { accepted = true; return { status: 'accepted' }; },
+        nextAfterAccept: async () => ({ status: 'fresh_context_required' }),
+        status: () => ({}),
+      };
+      const { engine, session } = await makeEngine({ pushSource: push,
+        appRead: async () => { appReads++; return { kind: 'open', handoff: { code: 'APP-CODE', stage: 'resume', revision: 1, prompt: 'Synthetic application work' } }; } });
+      try {
+        assert((await engine.get({ session, linkId: LINK })).handoffCode === CODE && appReads === 0);
+        const result = await engine.submit({ session, linkId: LINK, handoffCode: CODE, response: VALID_RESPONSE });
+        assert(result.status === 'accepted' && result.next?.status === 'waiting', 'the push-only probe cannot stop a worker that can serve application work');
+        assert((await engine.get({ session, linkId: LINK })).handoffCode === 'APP-CODE' && appReads > 0);
+      } finally { await engine.close(); }
+    },
+  },
+  {
+    name: 'comparative engine: a first GET waits for observed launch and forged or delayed proof cannot bind a new capability',
+    run: async () => {
+      const { push, reads, a } = comparativeFixture(); const engine = comparativeEngine(push);
+      await engine.newChat({ linkId: LINK });
+      const pool = await engine.startWorkerPool({ linkId: LINK, requestedWorkers: 1 });
+      const old = engine.copyWorkerStarter({ linkId: LINK, generation: pool.generation, workerOrdinal: 1 });
+      assert(engine.beginObservedChat({ linkId: LINK, sessionCode: old.sessionCode }));
+      assert(engine.cancelObservedChat({ linkId: LINK, sessionCode: old.sessionCode }));
+      const fresh = engine.restartWorker({ linkId: LINK, generation: pool.generation, workerOrdinal: 1, failedLaunch: true });
+      assert(fresh.copied && engine.beginObservedChat({ linkId: LINK, sessionCode: fresh.sessionCode }));
+      assert((await engine.get({ session: fresh.sessionCode, linkId: LINK })).status === 'waiting' && reads.length === 0);
+      assert(engine.confirmObservedChat({ linkId: LINK, sessionCode: fresh.sessionCode, observation: { conversationKey: '1'.repeat(64), fresh: true } }) === false);
+      assert(engine.beginObservedChat({ linkId: LINK, sessionCode: fresh.sessionCode }));
+      assert(engine.confirmObservedChat({ linkId: LINK, sessionCode: old.sessionCode,
+        observation: createObservedChatContext('synthetic-delayed-old-launch') }) === false);
+      assert(engine.confirmObservedChat({ linkId: LINK, sessionCode: fresh.sessionCode,
+        observation: createObservedChatContext('synthetic-confirmed-current-launch') }));
+      assert((await engine.get({ session: fresh.sessionCode, linkId: LINK })).handoffCode === a.handoffCode);
+      assert(reads.length === 1 && reads[0].comparisonProvenance.version === 2 && reads[0].comparisonProvenance.observed === true);
+      await engine.close();
+    },
+  },
+  {
+    name: 'comparative engine: an unobserved second worker is unavailable for preference and cannot block fresh observed fallback',
+    run: async () => {
+      const { push, reads, a, b } = comparativeFixture(); const engine = comparativeEngine(push);
+      await engine.newChat({ linkId: LINK });
+      const pool = await engine.startWorkerPool({ linkId: LINK, requestedWorkers: 2 });
+      const one = engine.copyWorkerStarter({ linkId: LINK, generation: pool.generation, workerOrdinal: 1 });
+      const two = engine.copyWorkerStarter({ linkId: LINK, generation: pool.generation, workerOrdinal: 2 });
+      observeWorker(engine, one);
+      await engine.get({ session: one.sessionCode, linkId: LINK });
+      assert((await engine.get({ session: two.sessionCode, linkId: LINK })).status === 'waiting');
+      await engine.submit({ session: one.sessionCode, linkId: LINK, handoffCode: a.handoffCode, response: JSON.stringify({ handoffCode: a.handoffCode, answer: 'A' }) });
+      assert((await engine.get({ session: one.sessionCode, linkId: LINK })).status === 'session_full');
+      const replacement = engine.restartWorker({ linkId: LINK, generation: pool.generation, workerOrdinal: 1 });
+      observeWorker(engine, replacement);
+      assert((await engine.get({ session: replacement.sessionCode, linkId: LINK })).handoffCode === b.handoffCode && reads.length === 2);
+      await engine.close();
+    },
+  },
+  {
+    name: 'comparative engine: the same invalid answer consumes the one correction instead of replaying a cached rejection',
+    run: async () => {
+      const { push, submits, a } = comparativeFixture({ submit: (_args, count) => count === 1
+        ? { outcome: 'rejected', isCorrection: true, correction: 'Return the registered comparison fields.', attempt: 2 }
+        : { outcome: 'not_pending' } });
+      const engine = createHandoffEngine({ sources: { push, application: { read: async () => ({ kind: 'gone' }), status: async () => ({ kind: 'gone' }), submit: async () => ({ kind: 'gone' }) } }, scope: { applications: false, scoring: true, marketplace: false }, holdMs: 0 });
+      const chat = await observedNewChat(engine);
+      assert((await engine.get({ session: chat.sessionCode, linkId: LINK })).handoffCode === a.handoffCode);
+      const args = { session: chat.sessionCode, linkId: LINK, handoffCode: a.handoffCode, response: '{}' };
+      const first = await engine.submit(args);
+      const second = await engine.submit(args);
+      assert(first.status === 'rejected' && second.status === 'superseded' && submits.length === 2,
+        'both source and engine caches release a completed comparative rejection before an identical correction');
+      assert(!Object.hasOwn(first, 'comparative'), 'the internal cache instruction is absent from the tool result');
+      await engine.close();
+    },
+  },
+  {
+    name: 'comparative push: two workers get independent runs and same-turn successor never reads run B in run A conversation',
+    run: async () => {
+      const { push, reads, a, b } = comparativeFixture();
+      assert((await push.get({ epoch: 'pair', worker: 'worker-1', comparisonContext: comparisonContext('1') })).status === 'served');
+      assert(reads.length === 1 && reads[0].comparisonProvenance.comparisonRun === 'A');
+      assert((await push.submit({ epoch: 'pair', worker: 'worker-1', comparisonContext: comparisonContext('1'), handoffCode: a.handoffCode, response: JSON.stringify({ handoffCode: a.handoffCode, answer: 'A' }) })).status === 'accepted');
+      const sameTurn = await push.nextAfterAccept({ epoch: 'pair', worker: 'worker-1', budgetMs: 1, comparisonContext: comparisonContext('1') });
+      assert(sameTurn.status === 'fresh_context_required' && reads.length === 1, 'run B prompt was never read by run A chat or included in its accepted batch');
+      const replayedA = await push.submit({ epoch: 'pair', worker: 'worker-2', comparisonContext: comparisonContext('2'), handoffCode: a.handoffCode,
+        response: JSON.stringify({ handoffCode: a.handoffCode, answer: 'A' }) });
+      assert(replayedA.status === 'duplicate');
+      assert((await push.get({ epoch: 'pair', worker: 'worker-2', comparisonContext: comparisonContext('2') })).status === 'fresh_context_required', 'a duplicated A answer also contaminates that conversation');
+      const second = await push.get({ epoch: 'pair', worker: 'worker-3', comparisonContext: comparisonContext('3') });
+      assert(second.status === 'served' && second.handoffCode === b.handoffCode && reads.length === 2);
+      assert(reads[1].comparisonProvenance.isolated === true && reads[0].comparisonProvenance.conversationKey !== reads[1].comparisonProvenance.conversationKey);
+      assert(!JSON.stringify(second).includes('comparisonGroup') && !JSON.stringify(push.status()).includes(COMPARISON_GROUP), 'private routing proof never reaches ChatGPT or status');
+    },
+  },
+  ...[false, true].map(queued => ({
+    name: `comparative push: A answer exposure after B serve invalidates ${queued ? 'a queued B submit' : 'B rereads and submit'}`,
+    run: async () => {
+      const { push, reads, submits, a, b } = comparativeFixture();
+      await push.get({ epoch: 'contamination', worker: 'worker-1', comparisonContext: comparisonContext('1') });
+      await push.submit({ epoch: 'contamination', worker: 'worker-1', comparisonContext: comparisonContext('1'), handoffCode: a.handoffCode, response: JSON.stringify({ handoffCode: a.handoffCode, answer: 'A' }) });
+      await push.get({ epoch: 'contamination', worker: 'worker-2', comparisonContext: comparisonContext('2') });
+      const submitB = () => push.submit({ epoch: 'contamination', worker: 'worker-2', comparisonContext: comparisonContext('2'), handoffCode: b.handoffCode, response: JSON.stringify({ handoffCode: b.handoffCode, answer: 'B' }) });
+      const pendingB = queued ? submitB() : null;
+      const duplicate = await push.submit({ epoch: 'contamination', worker: 'worker-2', comparisonContext: comparisonContext('2'), handoffCode: a.handoffCode, response: JSON.stringify({ handoffCode: a.handoffCode, answer: 'A' }) });
+      assert(duplicate.status === 'duplicate');
+      if (!queued) assert((await push.get({ epoch: 'contamination', worker: 'worker-2', comparisonContext: comparisonContext('2') })).status === 'fresh_context_required' && reads.length === 2, 'own B route never bypasses newly observed exposure');
+      const verdict = await (pendingB || submitB());
+      assert(verdict.status !== 'accepted' && submits.length === 1, 'no B answer reaches host acceptance after it saw A, including the queued-submit race');
+    },
+  })),
+  {
+    name: 'comparative push: A exposure while a B prompt read is in flight prevents delivery and survives active-route history changes',
+    run: async () => {
+      const held = deferred();
+      const { push, reads, a } = comparativeFixture({ beforeRead: args => args.comparisonProvenance.comparisonRun === 'B' ? held.promise : undefined });
+      await push.get({ epoch: 'read-race', worker: 'worker-1', comparisonContext: comparisonContext('1') });
+      await push.submit({ epoch: 'read-race', worker: 'worker-1', comparisonContext: comparisonContext('1'), handoffCode: a.handoffCode, response: JSON.stringify({ handoffCode: a.handoffCode, answer: 'A' }) });
+      const pendingRead = push.get({ epoch: 'read-race', worker: 'worker-2', comparisonContext: comparisonContext('2') });
+      while (reads.length < 2) await Promise.resolve();
+      await push.submit({ epoch: 'read-race', worker: 'worker-2', comparisonContext: comparisonContext('2'), handoffCode: a.handoffCode, response: JSON.stringify({ handoffCode: a.handoffCode, answer: 'A' }) });
+      held.resolve();
+      const result = await pendingRead;
+      assert(result.status === 'fresh_context_required' && !Object.hasOwn(result, 'prompt'), 'the now-contaminated conversation never receives B prompt bytes');
+    },
+  },
+  {
+    name: 'comparative push: bounded history eviction cannot restore a contaminated active B and a pristine replacement can recover',
+    run: async () => {
+      const { push, a, b, setPending } = comparativeFixture();
+      await push.get({ epoch: 'bounded-history', worker: 'worker-1', comparisonContext: comparisonContext('1') });
+      const submitA = () => push.submit({ epoch: 'bounded-history', worker: 'worker-1', comparisonContext: comparisonContext('1'), handoffCode: a.handoffCode, response: JSON.stringify({ handoffCode: a.handoffCode, answer: 'A' }) });
+      await submitA();
+      await push.get({ epoch: 'bounded-history', worker: 'worker-2', comparisonContext: comparisonContext('2') });
+      await push.submit({ epoch: 'bounded-history', worker: 'worker-2', comparisonContext: comparisonContext('2'), handoffCode: a.handoffCode, response: JSON.stringify({ handoffCode: a.handoffCode, answer: 'A' }) });
+      for (let index = 0; index < 501; index++) {
+        setPending([{ ...a, requestId: `comparison-history-${index}`, comparisonGroup: index.toString(16).padStart(64, '0') }, b]);
+        await push.get({ epoch: 'bounded-history', worker: 'worker-1', comparisonContext: comparisonContext('1') });
+        await submitA();
+      }
+      assert((await push.get({ epoch: 'bounded-history', worker: 'worker-2', comparisonContext: comparisonContext('2') })).status === 'fresh_context_required', 'the active route remains tainted after its group is evicted from bounded history');
+      const replacement = await push.get({ epoch: 'bounded-history', worker: 'worker-2', comparisonContext: comparisonContext('3', true) });
+      assert(replacement.status === 'served' && replacement.handoffCode === b.handoffCode, 'a pristine replacement re-attests B even after history eviction');
+    },
+  },
+  {
+    name: 'comparative push: unknown or restarted run A provenance requires a pristine New chat and stale contexts receive no prompt',
+    run: async () => {
+      const { push, reads } = comparativeFixture({ firstRun: 'B' });
+      for (const character of ['1', '2']) assert((await push.get({ epoch: 'resume', worker: 'worker-1', comparisonContext: comparisonContext(character) })).status === 'fresh_context_required');
+      assert(reads.length === 0, 'an unknown predecessor and a Continue capability cannot infer separation');
+      assert((await push.get({ epoch: 'resume', worker: 'worker-1', comparisonContext: comparisonContext('3', true, () => false) })).status === 'retry');
+      assert(reads.length === 0, 'a stale context is rejected before prompt read');
+      assert((await push.get({ epoch: 'resume', worker: 'worker-1', comparisonContext: comparisonContext('4', true) })).status === 'served');
+      assert(reads.length === 1 && reads[0].comparisonProvenance.isolated === true);
+      push.closeEpoch('resume');
+      assert((await push.get({ epoch: 'relaunch', worker: 'worker-1', comparisonContext: comparisonContext('4') })).status === 'fresh_context_required', 'relaunch forgets process-local provenance and fails closed');
+    },
+  },
+  {
+    name: 'comparative push: a fresh A ordinal waits for a different available worker before reading B',
+    run: async () => {
+      const { push, reads, a, b } = comparativeFixture();
+      await push.get({ epoch: 'preferred-worker', worker: 'worker-1', comparisonContext: comparisonContext('1') });
+      await push.submit({ epoch: 'preferred-worker', worker: 'worker-1', comparisonContext: comparisonContext('1'), handoffCode: a.handoffCode, response: JSON.stringify({ handoffCode: a.handoffCode, answer: 'A' }) });
+      const freshA = { ...comparisonContext('3', true), availableWorkerIds: () => ['worker-2'] };
+      assert((await push.get({ epoch: 'preferred-worker', worker: 'worker-1', comparisonContext: freshA })).status === 'waiting' && reads.length === 1,
+        'a new conversation on A ordinal does not outrun a different available worker');
+      assert((await push.get({ epoch: 'preferred-worker', worker: 'worker-2', comparisonContext: comparisonContext('2') })).handoffCode === b.handoffCode && reads.length === 2);
+    },
+  },
+  {
+    name: 'comparative engine: a connected waiting second worker is preferred and a busy second worker permits fresh fallback',
+    run: async () => {
+      for (const busy of [false, true]) {
+        const { push, reads, a, b, setPending } = comparativeFixture();
+        const other = { ...entry, requestId: 'comparison-unrelated-work', handoffCode: 'HANDOFF-NPQRST' };
+        if (busy) setPending([a, other]);
+        const engine = createHandoffEngine({ sources: { push, application: { read: async () => ({ kind: 'gone' }), status: async () => ({ kind: 'gone' }), submit: async () => ({ kind: 'gone' }) } }, scope: { applications: false, scoring: true, marketplace: false }, holdMs: 0, submitBudgetMs: 100 });
+        await engine.newChat({ linkId: LINK });
+        const pool = await engine.startWorkerPool({ linkId: LINK, requestedWorkers: 2 });
+        const one = engine.copyWorkerStarter({ linkId: LINK, generation: pool.generation, workerOrdinal: 1 });
+        const two = engine.copyWorkerStarter({ linkId: LINK, generation: pool.generation, workerOrdinal: 2 });
+        observeWorker(engine, one); observeWorker(engine, two);
+        await engine.get({ session: one.sessionCode, linkId: LINK });
+        const otherGet = await engine.get({ session: two.sessionCode, linkId: LINK });
+        assert(otherGet.status === (busy ? 'served' : 'waiting'));
+        const accepted = await engine.submit({ session: one.sessionCode, linkId: LINK, handoffCode: a.handoffCode, response: JSON.stringify({ handoffCode: a.handoffCode, answer: 'A' }) });
+        assert(accepted.status === 'accepted' && accepted.next?.status === 'waiting', 'pool submit never includes a successor prompt');
+        assert((await engine.get({ session: one.sessionCode, linkId: LINK })).status === (busy ? 'session_full' : 'waiting'));
+        if (busy) {
+          const replacement = engine.restartWorker({ linkId: LINK, generation: pool.generation, workerOrdinal: 1 });
+          observeWorker(engine, replacement);
+          assert(replacement.copied && (await engine.get({ session: replacement.sessionCode, linkId: LINK })).handoffCode === b.handoffCode,
+            'a busy alternative does not stall the only available worker fresh-chat fallback');
+        } else {
+          assert((await engine.get({ session: two.sessionCode, linkId: LINK })).handoffCode === b.handoffCode,
+            'the connected idle worker receives B before the A ordinal can');
+        }
+        const comparisonReads = reads.filter(item => item.comparisonProvenance);
+        assert(comparisonReads.length === 2 && comparisonReads[0].comparisonProvenance.conversationKey !== comparisonReads[1].comparisonProvenance.conversationKey);
+        await engine.close();
+      }
+    },
+  },
+  {
+    name: 'comparative engine: one worker must start a new conversation for B and Continue never substitutes for New chat',
+    run: async () => {
+      const { push, reads, a, b } = comparativeFixture();
+      const engine = createHandoffEngine({ sources: { push, application: { read: async () => ({ kind: 'gone' }), status: async () => ({ kind: 'gone' }), submit: async () => ({ kind: 'gone' }) } }, scope: { applications: false, scoring: true, marketplace: false }, holdMs: 0, submitBudgetMs: 100 });
+      const first = await observedNewChat(engine);
+      const served = await engine.get({ session: first.sessionCode, linkId: LINK });
+      assert(served.status === 'served' && served.handoffCode === a.handoffCode);
+      const result = await engine.submit({ session: first.sessionCode, linkId: LINK, handoffCode: a.handoffCode, response: JSON.stringify({ handoffCode: a.handoffCode, answer: 'A' }) });
+      assert(result.status === 'accepted' && result.next?.status === 'session_full' && reads.length === 1, 'B never enters the A submit turn');
+      const continued = await engine.continueChat({ linkId: LINK, observation: createObservedChatContext(first.observedId, 'continue') });
+      assert((await engine.get({ session: continued.sessionCode, linkId: LINK })).status === 'session_full' && reads.length === 1, 'Continue has a new key but the old conversation');
+      const fresh = await observedNewChat(engine);
+      const runB = await engine.get({ session: fresh.sessionCode, linkId: LINK });
+      assert(runB.status === 'served' && runB.handoffCode === b.handoffCode && reads.length === 2);
+      assert(reads[0].comparisonProvenance.conversationKey !== reads[1].comparisonProvenance.conversationKey);
+      await engine.close();
+    },
+  },
+  {
+    name: 'comparative engine: restarting the single worker creates a new incarnation for B before its prompt is read',
+    run: async () => {
+      const { push, reads, a, b } = comparativeFixture();
+      const engine = createHandoffEngine({ sources: { push, application: { read: async () => ({ kind: 'gone' }), status: async () => ({ kind: 'gone' }), submit: async () => ({ kind: 'gone' }) } }, scope: { applications: false, scoring: true, marketplace: false }, holdMs: 0 });
+      await engine.newChat({ linkId: LINK });
+      const pool = await engine.startWorkerPool({ linkId: LINK, requestedWorkers: 1 });
+      const original = engine.copyWorkerStarter({ linkId: LINK, generation: pool.generation, workerOrdinal: 1 });
+      observeWorker(engine, original);
+      assert((await engine.get({ session: original.sessionCode, linkId: LINK })).handoffCode === a.handoffCode);
+      await engine.submit({ session: original.sessionCode, linkId: LINK, handoffCode: a.handoffCode, response: JSON.stringify({ handoffCode: a.handoffCode, answer: 'A' }) });
+      assert((await engine.get({ session: original.sessionCode, linkId: LINK })).status === 'session_full' && reads.length === 1);
+      const replacement = engine.restartWorker({ linkId: LINK, generation: pool.generation, workerOrdinal: 1 });
+      observeWorker(engine, replacement);
+      assert(replacement.copied && replacement.sessionCode !== original.sessionCode);
+      assert((await engine.get({ session: replacement.sessionCode, linkId: LINK })).handoffCode === b.handoffCode);
+      assert(reads.length === 2 && reads[0].comparisonProvenance.conversationKey !== reads[1].comparisonProvenance.conversationKey);
+      await engine.close();
+    },
+  },
+  {
+    name: 'comparative engine: a live two-worker pool routes B away from A',
+    run: async () => {
+      const { push, reads, a, b } = comparativeFixture();
+      const engine = createHandoffEngine({ sources: { push, application: { read: async () => ({ kind: 'gone' }), status: async () => ({ kind: 'gone' }), submit: async () => ({ kind: 'gone' }) } }, scope: { applications: false, scoring: true, marketplace: false }, holdMs: 0 });
+      await engine.newChat({ linkId: LINK });
+      const pool = await engine.startWorkerPool({ linkId: LINK, requestedWorkers: 2 });
+      const one = engine.copyWorkerStarter({ linkId: LINK, generation: pool.generation, workerOrdinal: 1 });
+      const two = engine.copyWorkerStarter({ linkId: LINK, generation: pool.generation, workerOrdinal: 2 });
+      observeWorker(engine, one); observeWorker(engine, two);
+      assert(one?.sessionCode && two?.sessionCode, 'two independent starters exist');
+      assert((await engine.get({ session: one.sessionCode, linkId: LINK })).handoffCode === a.handoffCode);
+      await engine.submit({ session: one.sessionCode, linkId: LINK, handoffCode: a.handoffCode, response: JSON.stringify({ handoffCode: a.handoffCode, answer: 'A' }) });
+      assert((await engine.get({ session: one.sessionCode, linkId: LINK })).status === 'session_full');
+      assert((await engine.get({ session: two.sessionCode, linkId: LINK })).handoffCode === b.handoffCode);
+      assert(reads.length === 2 && reads[0].comparisonProvenance.conversationKey !== reads[1].comparisonProvenance.conversationKey);
+      await engine.close();
+    },
+  },
   ...['junk', 'misrouted', 'too_large'].map(kind => ({
     name: `W3 step 7: five consecutive ${kind} prechecks hand the handoff back once and never reach the seam`,
     run: async () => {

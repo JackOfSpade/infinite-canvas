@@ -29,16 +29,22 @@ export default [
         'As I read it, your dispatchers lose time moving loads out of Trackwell and Routeplan.',
         'I suspect the hard part of this role is moving carriers off Trackwell without losing history.',
         'My guess is that your customers outgrow tools they cannot adapt.',
-        'If I read the posting right, Lanecraft customers arrive with years of history in Trackwell.',
         'From what I gather, your team wants engineers who own a change through rollout.',
-        'From my understanding, Lanecraft wants engineers who own a change through rollout.',
         'In my reading of the posting, your dispatchers lose time moving loads out of Trackwell.',
         'From my read of the role, your team wants engineers who own a change through rollout.',
-        'The way I read it, Lanecraft customers arrive with years of history in Trackwell.',
         'As far as I understand the role, your team ships a change through rollout.',
         'My reading of the role is that your team wants engineers who own a change through rollout.',
       ]) {
         for (const order of ['before', 'after']) assert.equal(verdict(sentence, order), 'pass', `${order}: ${sentence}`);
+      }
+      // Restore the pre-feature naming verdicts: these hedged target readings
+      // remain claim-free in either position beside the cited career proof.
+      for (const sentence of [
+        'If I read the posting right, Lanecraft customers arrive with years of history in Trackwell.',
+        'From my understanding, Lanecraft wants engineers who own a change through rollout.',
+        'The way I read it, Lanecraft customers arrive with years of history in Trackwell.',
+      ]) for (const order of ['before', 'after']) {
+        assert.equal(verdict(sentence, order), 'pass', `${order}: ${sentence}`);
       }
       // Control: the unhedged sentence was always free; the hedge must not cost more than it.
       assert.equal(verdict('Your dispatchers lose time moving loads out of Trackwell and Routeplan.'), 'pass');

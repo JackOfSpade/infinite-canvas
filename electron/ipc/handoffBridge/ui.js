@@ -4,6 +4,7 @@ import { CONSTANTS } from './constants.js';
 import { buildContinueMessage, buildStarterMessage, buildWorkerStarterMessage } from './framing.js';
 import { sanitizeActivityItem } from './log.js';
 import { createUiRestartContext } from './restartContext.js';
+import { createObservedChatContext } from './observedChatContext.js';
 import { recordBridgeChatCopyResult, recordBridgeLaunchDiagnostic, recordBridgeChatOpenDiagnostic } from './telemetry.js';
 import { createChatLauncher } from './chatLauncher.js';
 import { BRIDGE_ENABLED_ATTACHMENT_TASKS } from '../nonApiAi.js';
@@ -189,7 +190,7 @@ export function registerHandoffBridgeUi({
   // so a failed launch can be diagnosed after the app has quit.
   recordLaunch = noOp,
   enableChromeLauncher = false,
-  launchPresentationTimeoutMs = 90_000,
+  launchPresentationTimeoutMs = CONSTANTS.CHAT_LAUNCH_PRESENTATION_TIMEOUT_MS,
   launchDiagnosisIntervalMs = 2_000,
   getCanvasWindows = () => [],
   now = Date.now,
@@ -469,11 +470,18 @@ export function registerHandoffBridgeUi({
       return false;
     }
     const application = attachment?.status === 'ready' ? false : applicationWorkPending(snapshot);
+    if (await safeCall(controller, 'beginObservedChat', { sessionCode: result.sessionCode }) !== true) {
+      await safeCall(controller, 'cancelObservedChat', { sessionCode: result.sessionCode });
+      setLaunchProgress(owner, { stage: 'failed', reason: 'starter_unavailable' });
+      publishStatus(currentStatus());
+      return false;
+    }
     const launched = await launcher.launch({ owner, starter, application,
       ...(attachment?.status === 'ready'
         ? { attachments: attachment.attachments, attachmentHandoffCode: attachment.handoffCode } : {}),
     });
     if (!launched.ok) {
+      await safeCall(controller, 'cancelObservedChat', { sessionCode: result.sessionCode });
       // A Chrome error after Send is an unknown delivery result, not a safe
       // pre-send retry. Preserve its chat/capability instead of sending twice.
       const reason = launched.sendAttempted === true ? 'send_not_confirmed' : launched.reason || 'chrome_unavailable';
@@ -484,6 +492,13 @@ export function registerHandoffBridgeUi({
         await safeCall(controller, 'abandonWorkerStarter', { generation, workerOrdinal });
       }
       if (reason === 'apple_events_js_off') retryAfterChromePermission(owner, generation, workerOrdinal);
+      publishStatus(currentStatus());
+      return false;
+    }
+    if (await safeCall(controller, 'confirmObservedChat', { sessionCode: result.sessionCode,
+      observation: createObservedChatContext(launched.chatId, 'new') }) !== true) {
+      await safeCall(controller, 'cancelObservedChat', { sessionCode: result.sessionCode });
+      setLaunchProgress(owner, { stage: 'failed', reason: 'bridge_not_presented' });
       publishStatus(currentStatus());
       return false;
     }
@@ -1338,7 +1353,8 @@ export function registerHandoffBridgeUi({
       const launched = await launcher.launch({ owner: continuing ? priorOwner : newOwner, starter: text,
         continueChat: continuing, application: applicationWorkPending(statusAtPress) });
       if (launched.ok) {
-        const committed = await safeCall(controller, 'commitChat', prepared?.commitToken);
+        const committed = await safeCall(controller, 'commitChat', prepared?.commitToken,
+          createObservedChatContext(launched.chatId, continuing ? 'continue' : 'new'));
         if (!acknowledged(committed)) { await abandonPrepared(); return finish(resultFailure(committed, 'INTERNAL')); }
         if (continuing) launcher.rekey(priorOwner, newOwner);
         else if (priorOwner !== newOwner && launcher.owns(priorOwner)) void launcher.close(priorOwner);

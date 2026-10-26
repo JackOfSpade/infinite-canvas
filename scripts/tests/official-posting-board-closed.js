@@ -459,7 +459,11 @@ const pureTests = [
             const candidate = miss(trail, { outcome });
             const expected = !['unreadable', 'failed'].includes(outcome)
               && shouldPersistOfficialPostingResult(candidate, { researchRan: false })
-              && (outcome === 'closed' || trail.includes('bridge-research'));
+              // A5 records a completed comparison directly, even without a
+              // separate research marker. Invalid or unavailable runs still
+              // fail the resolver durability check above.
+              && (outcome === 'closed' || trail.includes('bridge-research')
+                || trail.includes('comparative-none') || trail.includes('comparative-disagree'));
             assert.equal(officialResearchSettled(normalizeOfficialPosting(candidate)), expected, `${outcome} ${trail}`);
           }
         }

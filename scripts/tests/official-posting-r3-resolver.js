@@ -7,6 +7,7 @@ import {
   createOfficialPostingRowBudget, resolveOfficialPosting, shouldPersistOfficialPostingResult,
 } from '../../electron/ipc/officialPostingResolver.js';
 import { createOfficialPostingStore } from '../../electron/ipc/officialPostingStore.js';
+import { buildOfficialPostingMatchRequest } from '../../electron/ipc/officialPostingBridge.js';
 
 const EMPLOYER = 'Northwind Labs';
 const DESCRIPTION = 'Requirements include experience building reliable services and maintaining reporting workflows. Engineers design clear interfaces for dispatch teams and validate operational changes with careful review. The role includes improving data quality across scheduled pipelines and documenting decisions for partner teams. You will work with colleagues to investigate delivery failures and make service behavior understandable. Responsibilities include writing tests for new features and improving the tools used by support teams every day.';
@@ -30,6 +31,93 @@ function network(pages, requests = []) {
 function memoryStore() {
   const saved = [];
   return { saved, find: async () => null, save: async (job, record) => { saved.push({ job, ...record }); return record; } };
+}
+
+const COMPARATIVE_SCRAPED = [
+  'This position orchestrates evening freight assignments for regional distribution centers while recording unusual delivery conditions.',
+  'Our vacancy coordinates transfer procedures linking storage supervisors with contracted transportation providers throughout supply networks.',
+  'Successful applicants improve asynchronous monitoring infrastructure and diagnose record discrepancies through repeatable verification scenarios.',
+];
+const COMPARATIVE_OFFICIAL = [
+  'You will direct nightly route allocation across coastal depots and document dispatch exceptions for operations.',
+  'The scheduling group owns shipment handoffs between warehouse coordinators and third party fleet carriers.',
+  'Engineers maintain event driven telemetry pipelines and investigate data consistency failures using reproducible test cases.',
+];
+const COMPARATIVE_SIBLING = [
+  'The billing team reconciles monthly invoice adjustments across retail accounts and publishes accurate revenue ledgers.',
+  'Financial analysts coordinate payment settlements between procurement administrators and external auditing partners for quarterly reporting.',
+  'Developers operate currency conversion services and inspect transaction disputes through documented accounting review procedures.',
+];
+const comparisonRow = extra => row({ sourceJobKey: 'comparative-synthetic-row', snippet: `Requirements: ${COMPARATIVE_SCRAPED.join(' ')}`, ...extra });
+function comparisonFixture(specs = [{ id: 'one' }]) {
+  const quotes = new Map();
+  const pages = { 'https://northwind.test/': `<title>${EMPLOYER}</title>` };
+  for (const spec of specs) {
+    const url = `https://northwind.test/jobs/${spec.id}`;
+    const lines = spec.quotes || COMPARATIVE_OFFICIAL;
+    quotes.set(url, lines);
+    pages[url] = posting(url, { identifier: `request-${spec.id}`, description: `Requirements: ${lines.join(' ')}`,
+      ...(spec.closed ? { validThrough: '2000-01-01T00:00:00Z' } : {}),
+      ...(spec.city ? { jobLocation: { address: { addressLocality: spec.city, addressRegion: 'Ontario', addressCountry: 'Canada' } } } : {}),
+      ...(spec.title ? { title: spec.title } : {}), ...(spec.extra || {}) });
+  }
+  return { fetch: network(pages), candidateUrls: [...quotes.keys()], quotes };
+}
+function comparisonAnswer(options, fixture, selected = options[0]?.id) {
+  if (selected === 'none') return { choice: 'none', evidence: [], distinguishing: [], conflicts: [] };
+  const chosen = options.find(option => option.id === selected);
+  const quotes = fixture.quotes.get(chosen.candidate.sourceUrl);
+  return { choice: chosen.id, evidence: quotes.map((quote, index) => ({ scrapedQuote: COMPARATIVE_SCRAPED[index], officialQuote: quote })),
+    distinguishing: options.filter(option => option.id !== chosen.id && option.status === 'live').map(option => ({
+      optionId: option.id, officialQuote: quotes[0], reason: 'The chosen posting describes a different operating team and scope.' })), conflicts: [] };
+}
+
+export { COMPARATIVE_SCRAPED, COMPARATIVE_OFFICIAL, COMPARATIVE_SIBLING, comparisonRow, comparisonFixture, comparisonAnswer };
+
+async function hiddenContradictionScenario(kind) {
+  const shared = DESCRIPTION.split(/(?<=\.)\s+/u);
+  const trueTeam = 'Team: Payments Platform. You will own the settlement services for the payments platform group and its on call rotation.';
+  const wrongTeam = 'Team: Risk Engineering. You will own the fraud scoring services for the risk engineering group and its on call rotation.';
+  const recruiter = 'Recruiters note that the candidate will join a friendly group.';
+  const hiddenText = `${trueTeam} HIDDEN SOURCE ONLY: This separate historical description records a different operating scope. ${shared.join(' ')}`;
+  const wrongText = `${wrongTeam} ${shared.join(' ')} Visible scope zero owns regional review procedures.`;
+  const salary = { '@type': 'MonetaryAmount', currency: 'CAD', value: { '@type': 'QuantitativeValue', minValue: 130000, maxValue: 150000, unitText: 'YEAR' } };
+  const wrongSpecs = Array.from({ length: kind === 'cap' ? 8 : 1 }, (_, index) => ({ id: `visible-${index}`,
+    extra: { identifier: kind === 'collapse' ? 'request-shared' : `visible-request-${index}`,
+      description: index ? `${wrongTeam} ${shared.join(' ')} Visible scope ${index} owns separate regional review procedures.` : wrongText } }));
+  const fixture = comparisonFixture([{ id: 'hidden', extra: { identifier: kind === 'collapse' ? 'request-shared' : 'hidden-request',
+    description: kind === 'pay' ? hiddenText : `${trueTeam} HIDDEN SOURCE ONLY: Separate operating requirements. ${'Distinct budgeting documentation for auditing colleagues. '.repeat(35)}`,
+    ...(kind === 'pay' ? { baseSalary: salary } : {}) } }, ...wrongSpecs]);
+  const input = comparisonRow({ snippet: `${trueTeam} ${recruiter} ${shared[0]} Occasional travel may be needed. ${shared[4]} Mentoring newer colleagues is encouraged.`,
+    ...(kind === 'pay' ? { salary: 'CAD 120000-140000 YEAR', salaryProvenance: 'posted' } : {}) });
+  const calls = [];
+  const result = await resolveOfficialPosting(input, { ...fixture, researchRan: true,
+    match: async (job, options, context) => {
+      const chosen = options.find(option => option.candidate.sourceUrl.endsWith('/visible-0'));
+      const distinctive = `${shared[4]} Visible scope zero owns regional review procedures.`;
+      const answer = { choice: chosen.id, conflicts: [], evidence: [
+        { scrapedQuote: shared[0], officialQuote: shared[0] }, { scrapedQuote: shared[4], officialQuote: distinctive },
+        { scrapedQuote: recruiter, officialQuote: wrongTeam } ],
+      distinguishing: options.filter(option => option !== chosen && option.status === 'live').map(option => ({
+        optionId: option.id, officialQuote: 'Visible scope zero', reason: 'The visible scope differs.' })) };
+      calls.push({ options, context, answer, request: buildOfficialPostingMatchRequest({ job, options, ...context }) });
+      return answer;
+    } });
+  assert.equal(result.officialPosting.outcome, 'not-found');
+  assert.ok(result.officialPosting.trail.includes('comparative-invalid'));
+  assert.equal(calls.length, 4, 'both invalid independent runs receive one correction');
+  for (const call of calls) {
+    assert.equal(call.options.length, kind === 'cap' ? 8 : 1);
+    assert.ok(call.context.contradictionOnly.some(option => option.candidate.sourceUrl.endsWith('/hidden')));
+    assert.ok(call.options.every(option => !option.candidate.sourceUrl.endsWith('/hidden')));
+    const visible = JSON.parse(call.request.prompt.split('BEGIN UNTRUSTED POSTING COMPARISON JSON\n')[1].split('\nEND UNTRUSTED POSTING COMPARISON JSON')[0]).options;
+    assert.equal(JSON.stringify(visible).includes('HIDDEN SOURCE ONLY'), false);
+    const withoutHidden = buildOfficialPostingMatchRequest({ job: input, options: call.options, ...call.context, contradictionOnly: [] });
+    assert.equal(call.request.prompt, withoutHidden.prompt);
+    assert.deepEqual(call.request.responseSchema, withoutHidden.responseSchema);
+    assert.deepEqual(call.request.manualHandoff, withoutHidden.manualHandoff, 'host-only contradiction data never enters prompts, schemas or comparison-group digests');
+    assert.throws(() => call.request.responseValidator(call.answer), error => error.correctionRuleIds?.includes('LOOKUP_OFFICIAL_MATCH_DISTINCTIVE'));
+  }
 }
 
 export default [
@@ -72,12 +160,12 @@ export default [
     },
   },
   {
-    name: 'Amendment 4 partial verified crawl durability needs a deterministic winning anchor and old partial cache entries retry',
+    name: 'Amendment 5 partial verified crawl durability needs an identifier anchor and old partial cache entries retry',
     async run() {
-      for (const level of ['L1', 'L2', 'L3', 'L4']) for (const partial of ['fetch-timeout', 'crawl-budget']) {
+      for (const level of ['L1', 'L2', 'L3', 'L4']) for (const partial of ['fetch-timeout', 'crawl-budget', 'crawl-partial']) {
         for (const anchor of [null, 'description-anchor', 'quoted-match', 'identifier-anchor', 'salary-anchor']) {
           const value = { ...verified([partial, ...(anchor ? [anchor] : [])]), level, outcome: level === 'L4' ? 'link-only' : 'found' };
-          assert.equal(shouldPersistOfficialPostingResult(value), ['identifier-anchor', 'salary-anchor'].includes(anchor), `${level} / ${partial} / ${anchor}`);
+          assert.equal(shouldPersistOfficialPostingResult(value), anchor === 'identifier-anchor', `${level} / ${partial} / ${anchor}`);
           assert.equal(shouldPersistOfficialPostingResult(value, { signal: AbortSignal.abort() }), false, 'a stopped run is never durable');
         }
       }
@@ -90,6 +178,72 @@ export default [
         assert.notEqual(result.officialPosting.level, 'L1', 'an old partial text-only record must not short-circuit fresh resolution');
         assert.ok(!result.officialPosting.trail.includes('cache-hit'));
       } finally { await fs.rm(dir, { recursive: true, force: true }); }
+    },
+  },
+  {
+    name: 'Amendment 5 partial crawl tracks failed winner-site pages without charging irrelevant page timeouts to the row budget',
+    async run() {
+      const first = 'https://northwind.test/jobs/one'; const sibling = 'https://northwind.test/jobs/two';
+      const unrelated = 'https://cedar.test/careers';
+      const pages = { 'https://northwind.test/': `<title>${EMPLOYER}</title>`, [first]: posting(first) };
+      for (const failed of [sibling, unrelated]) for (const code of ['fetch-failed', 'fetch-timeout']) {
+        for (const before of [false, true]) {
+          const store = memoryStore(); const budget = createOfficialPostingRowBudget(); const seen = [];
+          try {
+            const result = await resolveOfficialPosting(row(), { store, rowBudget: budget,
+              candidateUrls: before ? [failed, first] : [first, failed], fetch: async url => {
+                seen.push(url); if (url === failed) throw error(code); return network(pages)(url);
+              } });
+            assert.equal(result.officialPosting.level, 'L1');
+            assert.ok(result.officialPosting.trail.includes('description-anchor'));
+            assert.equal(budget.signal.aborted, false, `${code} is a page failure, not row exhaustion`);
+            assert.equal(result.officialPosting.trail.includes('crawl-partial'), failed === sibling);
+            assert.equal(store.saved.length, failed === sibling ? 0 : 1, `${failed} / ${code} / before=${before}`);
+            if (failed === sibling) assert.ok(seen.includes(sibling), 'a discovered same-site sibling is read before settling');
+          } finally { budget.dispose(); }
+        }
+      }
+    },
+  },
+  {
+    name: 'Amendment 5 same-tenant board failures remain partial across ATS hosts while another tenant is irrelevant',
+    async run() {
+      const first = 'https://jobs.ashbyhq.com/northwind/one';
+      const board = 'https://api.ashbyhq.com/posting-api/job-board/northwind?includeCompensation=true';
+      const other = 'https://jobs.ashbyhq.com/cedar/two';
+      const root = 'https://northwind.test/';
+      const pages = { [root]: `<title>${EMPLOYER}</title><a href="${first}">Software Engineer</a>`,
+        [first]: posting(first, { hiringOrganization: { name: EMPLOYER, sameAs: root } }),
+        [board]: { body: JSON.stringify({ jobs: [] }), contentType: 'application/json' } };
+      for (const failed of [board, other]) for (const code of ['fetch-failed', 'fetch-timeout']) {
+        const store = memoryStore(); const seen = [];
+        const result = await resolveOfficialPosting(row(), { store, candidateUrls: [other, first], fetch: async url => {
+          seen.push(url); if (url === failed) throw error(code); return network(pages)(url);
+        } });
+        assert.equal(result.officialPosting.level, 'L3', JSON.stringify(result.officialPosting));
+        assert.ok(seen.includes(board), 'same-tenant board adapter is read even after the text winner');
+        assert.equal(result.officialPosting.trail.includes('crawl-partial'), failed === board);
+        assert.equal(store.saved.length, failed === board ? 0 : 1, `${failed} / ${code}`);
+      }
+    },
+  },
+  {
+    name: 'Amendment 5 a same-pay winner with an unread queued sibling is not durable when the row budget ends',
+    async run() {
+      const first = 'https://northwind.test/jobs/one'; const sibling = 'https://northwind.test/jobs/two';
+      const salary = { '@type': 'MonetaryAmount', currency: 'CAD', value: { '@type': 'QuantitativeValue', minValue: 120000, maxValue: 140000, unitText: 'YEAR' } };
+      const pages = { 'https://northwind.test/': `<title>${EMPLOYER}</title>`, [first]: posting(first, { description: `${DESCRIPTION} Further duties concern fleet forecasting.`, baseSalary: salary }) };
+      let clock = 0; const store = memoryStore(); const requests = [];
+      const budget = createOfficialPostingRowBudget({ timeoutMs: 10, now: () => clock });
+      try {
+        const result = await resolveOfficialPosting(row({ salary: 'CAD 120000-140000 YEAR', salaryProvenance: 'posted' }), {
+          store, rowBudget: budget, candidateUrls: [first, sibling], fetch: async url => {
+            requests.push(url); const value = await network(pages)(url); if (url === first) clock += 20; return value;
+          } });
+        assert.equal(result.officialPosting.level, 'L1'); assert.ok(result.officialPosting.trail.includes('salary-anchor'));
+        assert.ok(result.officialPosting.trail.includes('crawl-partial')); assert.ok(!requests.includes(sibling));
+        assert.equal(budget.signal.reason.code, 'fetch-timeout'); assert.equal(store.saved.length, 0);
+      } finally { budget.dispose(); }
     },
   },
   {
@@ -343,6 +497,405 @@ export default [
       assert.equal(noIndependentAnchor.officialPosting.level, 'L5', 'unvisited city/title peers still suppress shared board copy');
       assert.ok(noIndependentAnchor.officialPosting.trail.includes('no-anchor'));
       assert.deepEqual(peerRequests, [root, `${root}jobs.rss`, wanted]);
+    },
+  },
+  {
+    name: 'Amendment 5 resolver accepts recruiter paraphrase only after two serial verbatim-grounded comparative runs',
+    async run() {
+      const fixture = comparisonFixture(); const calls = []; let active = 0;
+      const result = await resolveOfficialPosting(comparisonRow(), { ...fixture, researchRan: true,
+        match: async (job, options, context) => {
+          assert.equal(active++, 0, 'independent runs are serial');
+          calls.push(context.run); await Promise.resolve(); active--;
+          const request = buildOfficialPostingMatchRequest({ job, options, run: context.run, peerCandidates: context.peerCandidates });
+          const rebuilt = buildOfficialPostingMatchRequest({ job: structuredClone(job), options: structuredClone(options), run: context.run, peerCandidates: context.peerCandidates });
+          assert.equal(request.prompt, rebuilt.prompt, 'resume rebuild is byte-identical');
+          return comparisonAnswer(options, fixture);
+        } });
+      assert.deepEqual(calls, ['A', 'B']); assert.equal(result.officialPosting.level, 'L1');
+      assert.ok(result.officialPosting.trail.includes('comparative-match'));
+      assert.ok(result.officialPosting.trail.includes('comparative-a-valid'));
+      assert.ok(result.officialPosting.trail.includes('comparative-b-valid'));
+      assert.ok(result.officialPosting.trail.includes('comparative-choice-p1'));
+      assert.equal(result.officialPosting.sourceUrl, fixture.candidateUrls[0]);
+      assert.equal(result.comparison.accepted, true); assert.equal(result.comparison.agreement, true);
+      const words = value => new Set(value.toLowerCase().match(/[a-z]+/gu));
+      for (let index = 0; index < 3; index++) {
+        const official = words(COMPARATIVE_OFFICIAL[index]);
+        assert.ok([...words(COMPARATIVE_SCRAPED[index])].filter(word => official.has(word)).length < 4, 'the removed shared-vocabulary floor rejected every paraphrase pair');
+      }
+    },
+  },
+  {
+    name: 'Amendment 5 resolver compares live same-title same-city teams and excludes another-city twin from requests',
+    async run() {
+      const fixture = comparisonFixture([{ id: 'one' }, { id: 'two', quotes: COMPARATIVE_SIBLING }, { id: 'city-twin', city: 'Riverton' }]);
+      const result = await resolveOfficialPosting(comparisonRow(), { ...fixture, researchRan: true,
+        match: async (job, options, context) => {
+          assert.equal(options.length, 2); assert.ok(options.every(option => !option.location.includes('Riverton')));
+          const request = buildOfficialPostingMatchRequest({ job, options, run: context.run });
+          assert.equal(request.prompt.includes('Riverton'), false);
+          return comparisonAnswer(options, fixture, options.find(option => option.candidate.sourceUrl.endsWith('/one')).id);
+        } });
+      assert.equal(result.officialPosting.sourceUrl, fixture.candidateUrls[0]); assert.equal(result.comparison.optionCount, 2);
+      let calls = 0; const store = memoryStore();
+      const invalid = await resolveOfficialPosting(comparisonRow(), { ...fixture, researchRan: true, store,
+        match: async (_job, options) => { calls++; return { ...comparisonAnswer(options, fixture), distinguishing: [] }; } });
+      assert.equal(invalid.officialPosting.outcome, 'not-found'); assert.ok(invalid.officialPosting.trail.includes('comparative-invalid'));
+      assert.equal(calls, 4, 'each independent invalid run receives exactly one correction');
+      assert.equal(invalid.comparison.invalidRuns, 2); assert.equal(store.saved.length, 0);
+    },
+  },
+  {
+    name: 'Amendment 5 resolver chooses a closed paraphrased true posting rather than its live sibling',
+    async run() {
+      const fixture = comparisonFixture([{ id: 'one', closed: true }, { id: 'two', quotes: COMPARATIVE_SIBLING }]);
+      const result = await resolveOfficialPosting(comparisonRow(), { ...fixture, researchRan: true,
+        match: async (_job, options) => {
+          const closed = options.find(option => option.status === 'closed'); assert.ok(closed);
+          return comparisonAnswer(options, fixture, closed.id);
+        } });
+      assert.equal(result.officialPosting.outcome, 'closed'); assert.equal(result.officialPosting.sourceUrl, undefined);
+      assert.equal(result.comparison.agreement, true); assert.equal(result.comparison.accepted, false);
+      assert.ok(result.officialPosting.trail.includes('comparative-choice-p1'));
+    },
+  },
+  {
+    name: 'Amendment 5 resolver records comparative disagreement and only the chosen alternatives without evidence text',
+    async run() {
+      const fixture = comparisonFixture([{ id: 'one' }, { id: 'two', quotes: COMPARATIVE_SIBLING }]);
+      const result = await resolveOfficialPosting(comparisonRow(), { ...fixture, researchRan: true,
+        match: async (_job, options, { run }) => comparisonAnswer(options, fixture, options[run === 'A' ? 0 : 1].id) });
+      assert.equal(result.officialPosting.outcome, 'ambiguous'); assert.ok(result.officialPosting.trail.includes('comparative-disagree'));
+      assert.deepEqual(result.officialPosting.alternatives.map(item => item.url), fixture.candidateUrls);
+      assert.equal(result.comparison.disagreement, true); assert.equal(result.comparison.accepted, false);
+      assert.equal(/Quote|description|reason|Requirements/u.test(JSON.stringify(result.comparison)), false);
+    },
+  },
+  {
+    name: 'Amendment 5 resolver retries a fabricated or wrong-option quote exactly once and never stores an invalid comparison',
+    async run() {
+      for (const kind of ['fabricated', 'wrong-option']) {
+        const fixture = comparisonFixture([{ id: 'one' }, { id: 'two', quotes: COMPARATIVE_SIBLING }]);
+        const calls = []; const store = memoryStore();
+        const result = await resolveOfficialPosting(comparisonRow(), { ...fixture, researchRan: true, store,
+          match: async (_job, options, context) => {
+            calls.push(context);
+            if (context.correctionAttempt) {
+              assert.ok(context.correctionRuleIds.includes('LOOKUP_OFFICIAL_MATCH_VERBATIM'));
+              assert.ok(context.correctionDetails.every(line => line.length <= 260));
+            }
+            const answer = comparisonAnswer(options, fixture);
+            answer.evidence[0].officialQuote = kind === 'fabricated' ? 'A completely fabricated passage about unrelated nocturnal satellite navigation duties.' : COMPARATIVE_SIBLING[0];
+            return answer;
+          } });
+        assert.deepEqual(calls.map(call => [call.run, call.correctionAttempt || 0]), [['A', 0], ['A', 1], ['B', 0], ['B', 1]]);
+        assert.ok(result.officialPosting.trail.includes('comparative-invalid')); assert.equal(store.saved.length, 0);
+      }
+    },
+  },
+  {
+    name: 'Amendment 6 resolver compares one merged requisition and settles distinct requisitions with identical text without handoffs',
+    async run() {
+      for (const same of [false, true]) {
+        const fixture = comparisonFixture([{ id: 'one', extra: same ? { identifier: 'request-shared' } : {} },
+          { id: 'two', extra: same ? { identifier: 'request-shared' } : {} }]);
+        let calls = 0; const store = memoryStore();
+        const result = await resolveOfficialPosting(comparisonRow(), { ...fixture, store, researchRan: true,
+          match: async (_job, options) => { calls++; assert.equal(options.length, 1); return comparisonAnswer(options, fixture); } });
+        assert.equal(calls, same ? 2 : 0);
+        assert.equal(result.officialPosting.outcome, same ? 'found' : 'ambiguous');
+        assert.equal(store.saved.length, 1);
+        if (!same) {
+          assert.ok(result.officialPosting.trail.includes('ambiguous'));
+          assert.ok(!result.officialPosting.trail.includes('comparative-invalid'));
+          assert.equal(result.officialPosting.alternatives.length, 2);
+        }
+      }
+    },
+  },
+  {
+    name: 'Amendment 6 wrong-sibling review scenario rejects a shared-evidence wrong choice and accepts the matching team',
+    async run() {
+      const shared = DESCRIPTION.split(/(?<=\.)\s+/u);
+      const teamA = 'Team: Payments Platform. You will own the settlement services for the payments platform group and its on call rotation.';
+      const teamB = 'Team: Risk Engineering. You will own the fraud scoring services for the risk engineering group and its on call rotation.';
+      const recruiter = 'Recruiters note that the candidate will join a friendly group.';
+      const scraped = `${teamA} ${recruiter} ${shared[0]} Occasional travel may be needed. ${shared[4]} Mentoring newer colleagues is encouraged.`;
+      const fixture = comparisonFixture([{ id: 'one', extra: { description: `${teamA} ${shared.join(' ')}` } },
+        { id: 'two', extra: { description: `${teamB} ${shared.join(' ')}` } }]);
+      for (const correct of [false, true]) {
+        let calls = 0;
+        const result = await resolveOfficialPosting(comparisonRow({ snippet: scraped }), { ...fixture, researchRan: true,
+          match: async (_job, options, context) => {
+            calls++;
+            if (context.correctionAttempt) assert.ok(context.correctionRuleIds.includes('LOOKUP_OFFICIAL_MATCH_DISTINCTIVE'));
+            const chosen = options.find(option => option.candidate.sourceUrl.endsWith(correct ? '/one' : '/two'));
+            const other = options.find(option => option !== chosen);
+            return { choice: chosen.id, conflicts: [], evidence: [
+              { scrapedQuote: shared[0], officialQuote: shared[0] }, { scrapedQuote: shared[4], officialQuote: shared[4] },
+              { scrapedQuote: correct ? teamA : recruiter, officialQuote: correct ? teamA : teamB } ],
+            distinguishing: [{ optionId: other.id, officialQuote: correct ? 'Team: Payments Platform' : 'Team: Risk Engineering', reason: 'The operating team differs.' }] };
+          } });
+        assert.equal(calls, correct ? 2 : 4);
+        assert.equal(result.officialPosting.outcome, correct ? 'found' : 'not-found');
+        assert.equal(result.comparison.accepted, correct);
+        if (correct) assert.equal(result.officialPosting.sourceUrl, fixture.candidateUrls[0]);
+        else assert.ok(result.officialPosting.trail.includes('comparative-invalid'));
+      }
+    },
+  },
+  {
+    name: 'Amendment 8 live same-requisition copy stays found when an earlier URL is closed',
+    async run() {
+      const fixture = comparisonFixture([{ id: 'closed-embed', closed: true, extra: { identifier: 'request-shared' } },
+        { id: 'live', extra: { identifier: 'request-shared' } }]);
+      const calls = [];
+      const result = await resolveOfficialPosting(comparisonRow(), { ...fixture, researchRan: true,
+        match: async (_job, options) => { calls.push(options); return comparisonAnswer(options, fixture); } });
+      assert.equal(result.officialPosting.outcome, 'found');
+      assert.equal(result.officialPosting.sourceUrl, fixture.candidateUrls[1]);
+      assert.equal(calls.length, 2); assert.ok(calls.every(options => options.length === 1 && options[0].status === 'live'));
+    },
+  },
+  {
+    name: 'Amendment 9 serial-comma copies preserve the true live comparative match for either scraped presentation',
+    async run() {
+      const lines = DESCRIPTION.split(/(?<=\.)\s+/u);
+      const commaCopy = DESCRIPTION.replace('building reliable services and maintaining', 'building reliable services, and maintaining')
+        .replace('improving data quality across scheduled pipelines and documenting', 'improving data quality across scheduled pipelines, and documenting');
+      const noise = ['Recruiters add that the group enjoys flexible schedules and frequent offsite gatherings throughout the year.',
+        'Candidates should enjoy mentoring newer colleagues and sharing knowledge widely across the organization.',
+        'Occasional travel to regional offices may be needed during the first quarter of employment.',
+        'Our culture values curiosity and steady collaboration between engineering and partner teams.',
+        'You will also join a friendly rotation that celebrates milestones with team lunches.',
+        'Relocation assistance may be available for exceptional candidates who join the group.'];
+      for (const source of [DESCRIPTION, commaCopy]) {
+        const parts = source.split(/(?<=\.)\s+/u);
+        const fixture = comparisonFixture([{ id: 'copy-a', extra: { identifier: 'request-shared', description: DESCRIPTION } },
+          { id: 'copy-b', extra: { identifier: 'request-shared', description: commaCopy } }]);
+        const input = comparisonRow({ snippet: parts.flatMap((part, index) => [noise[index], part]).concat(noise[5]).join(' ') });
+        let calls = 0;
+        const result = await resolveOfficialPosting(input, { ...fixture, researchRan: true,
+          match: async (_job, options) => { calls++; return { choice: options[0].id, conflicts: [],
+            evidence: [lines[1], lines[3], lines[4]].map(quote => ({ scrapedQuote: quote, officialQuote: quote })), distinguishing: [] }; } });
+        assert.equal(result.officialPosting.outcome, 'found', source);
+        assert.equal(result.officialPosting.sourceUrl, fixture.candidateUrls[0]);
+        assert.equal(calls, 2);
+      }
+    },
+  },
+  {
+    name: 'Amendment 9 non-nested same-requisition copies with different role passages remain comparative-invalid',
+    async run() {
+      const lines = DESCRIPTION.split(/(?<=\.)\s+/u);
+      const x = 'The team also covers weekend dispatch coverage for regional partners during quarterly peak planning cycles each year.';
+      const y = 'Engineers rotate through a shared on call schedule and publish a short written summary after every incident review.';
+      for (const closed of [null, 'a', 'b']) {
+        const fixture = comparisonFixture([{ id: 'a', closed: closed === 'a', extra: { identifier: 'request-shared', description: `${DESCRIPTION} ${y}` } },
+          { id: 'b', closed: closed === 'b', extra: { identifier: 'request-shared', description: `${DESCRIPTION} ${x}` } }]);
+        const input = comparisonRow({ snippet: [lines[0], x, lines[2], y, lines[4]].join(' ') });
+        let calls = 0;
+        const result = await resolveOfficialPosting(input, { ...fixture, researchRan: true,
+          match: async (_job, options) => { calls++; return { choice: options[0].id, conflicts: [],
+            evidence: [lines[0], lines[2], lines[4]].map(quote => ({ scrapedQuote: quote, officialQuote: quote })), distinguishing: [] }; } });
+        assert.equal(result.officialPosting.outcome, 'not-found', closed);
+        assert.ok(result.officialPosting.trail.includes('comparative-invalid'));
+        assert.equal(calls, 4);
+      }
+    },
+  },
+  {
+    name: 'Amendment 8 pay-vetoed true text still contradicts a wrong visible sibling without entering AI options',
+    async run() {
+      await hiddenContradictionScenario('pay');
+    },
+  },
+  {
+    name: 'Amendment 8 cap-dropped true text still contradicts a wrong visible sibling without entering AI options',
+    async run() {
+      await hiddenContradictionScenario('cap');
+    },
+  },
+  {
+    name: 'Amendment 8 collapsed duplicate text still contradicts its chosen representation without entering AI options',
+    async run() {
+      await hiddenContradictionScenario('collapse');
+    },
+  },
+  {
+    name: 'Amendment 6 insufficient scraped input skips comparative handoffs and cannot become a settled miss',
+    async run() {
+      const fixture = comparisonFixture();
+      for (const snippet of ['', 'A short description names the engineering role without enough separate passages to support reliable comparison across different source sections.', Array(30).fill('word').join(' ')]) {
+        let calls = 0; const store = memoryStore();
+        const result = await resolveOfficialPosting(comparisonRow({ snippet }), { ...fixture, researchRan: true, store,
+          match: async () => { calls++; return comparisonAnswer([], fixture, 'none'); } });
+        assert.equal(calls, 0); assert.equal(result.comparison, undefined);
+        assert.ok(result.officialPosting.trail.includes('insufficient-text'));
+        assert.equal(shouldPersistOfficialPostingResult(result, { researchRan: true }), false);
+        assert.equal(store.saved.length, 0);
+      }
+    },
+  },
+  {
+    name: 'Amendment 6 none-none on more than eight eligible options records truncation and remains retryable',
+    async run() {
+      const fixture = comparisonFixture(Array.from({ length: 10 }, (_, index) => ({ id: `option-${index}`,
+        quotes: COMPARATIVE_OFFICIAL.map((line, part) => `${line} Scope ${index} part ${part} covers distinct operating needs.`) })));
+      let calls = 0; const store = memoryStore();
+      const result = await resolveOfficialPosting(comparisonRow(), { ...fixture, researchRan: true, store,
+        match: async (_job, options) => { calls++; assert.equal(options.length, 8); return comparisonAnswer([], fixture, 'none'); } });
+      assert.equal(calls, 2); assert.equal(result.comparison.preCapCount, 10); assert.equal(result.comparison.truncated, true);
+      assert.ok(result.officialPosting.trail.includes('comparative-truncated'));
+      assert.equal(result.officialPosting.trail.includes('comparative-none'), false);
+      assert.equal(result.officialPosting.outcome, 'not-found'); assert.equal(store.saved.length, 0);
+      assert.equal(shouldPersistOfficialPostingResult(result, { researchRan: true }), false);
+    },
+  },
+  {
+    name: 'Amendment 5 resolver corrects one invalid run without sharing its answer with the other independent run',
+    async run() {
+      const fixture = comparisonFixture(); const calls = [];
+      const result = await resolveOfficialPosting(comparisonRow(), { ...fixture, researchRan: true,
+        match: async (_job, options, context) => {
+          calls.push(context);
+          assert.equal(Object.hasOwn(context, 'answer'), false);
+          if (context.run === 'A' && !context.correctionAttempt) return { choice: 'invented', evidence: [], distinguishing: [], conflicts: [] };
+          return comparisonAnswer(options, fixture);
+        } });
+      assert.deepEqual(calls.map(call => [call.run, call.correctionAttempt || 0]), [['A', 0], ['A', 1], ['B', 0]]);
+      assert.equal(result.officialPosting.level, 'L1'); assert.equal(result.comparison.invalidRuns, 0);
+    },
+  },
+  {
+    name: 'Amendment 5 resolver persists none-none as a settled miss but invalid timeout and unavailable runs stay retryable',
+    async run() {
+      const fixture = comparisonFixture();
+      const settled = memoryStore();
+      const none = await resolveOfficialPosting(comparisonRow(), { ...fixture, researchRan: true, store: settled,
+        match: async () => comparisonAnswer([], fixture, 'none') });
+      assert.equal(none.officialPosting.outcome, 'not-found'); assert.ok(none.officialPosting.trail.includes('comparative-none'));
+      assert.equal(none.comparison.none, true); assert.equal(settled.saved.length, 1);
+      for (const code of ['bridge-timeout', 'bridge-aborted', 'comparative-unavailable']) {
+        const store = memoryStore();
+        const result = await resolveOfficialPosting(comparisonRow(), { ...fixture, researchRan: true, store,
+          match: async (_job, options, { run }) => { if (run === 'B') throw error(code); return comparisonAnswer(options, fixture); } });
+        assert.equal(result.officialPosting.outcome, 'not-found'); assert.equal(store.saved.length, 0, code);
+        assert.equal(result.comparison.validA, true); assert.equal(result.comparison.validB, false);
+        assert.ok(result.officialPosting.trail.includes(code));
+        assert.equal(shouldPersistOfficialPostingResult(result, { researchRan: true }), false);
+      }
+      const unavailable = await resolveOfficialPosting(comparisonRow(), { ...fixture, researchRan: true });
+      assert.ok(unavailable.officialPosting.trail.includes('comparative-unavailable'));
+      assert.equal(shouldPersistOfficialPostingResult(unavailable, { researchRan: true }), false);
+    },
+  },
+  {
+    name: 'Amendment 6 resolver excludes posted-pay vetoes and retains definitive closed-winner gates without handoffs',
+    async run() {
+      const salary = { '@type': 'MonetaryAmount', currency: 'CAD', value: { '@type': 'QuantitativeValue', minValue: 200000, maxValue: 220000, unitText: 'YEAR' } };
+      const fixture = comparisonFixture([{ id: 'one', extra: { baseSalary: salary } }]);
+      for (const closed of [false, true]) {
+        let calls = 0; const store = memoryStore();
+        const payFixture = closed ? comparisonFixture([{ id: 'one', closed: true, extra: { baseSalary: salary } }]) : fixture;
+        const vetoed = await resolveOfficialPosting(comparisonRow({ salary: 'CAD 120000-140000 YEAR', salaryProvenance: 'posted' }), { ...payFixture, researchRan: true, store,
+          match: async () => { calls++; throw new Error('A posted-pay veto must never enter comparative matching'); } });
+        assert.equal(vetoed.officialPosting.outcome, 'not-found'); assert.ok(vetoed.officialPosting.trail.includes('salary-mismatch'));
+        assert.equal(vetoed.comparison, undefined); assert.equal(calls, 0);
+        assert.equal(vetoed.officialPosting.trail.includes('comparative-invalid'), false);
+        assert.equal(shouldPersistOfficialPostingResult(vetoed, { researchRan: true }), true); assert.equal(store.saved.length, 1);
+      }
+      const closed = comparisonFixture([{ id: 'one', closed: true }, { id: 'two', quotes: [...COMPARATIVE_OFFICIAL, 'Additional requirements cover internal accounting tools and monthly billing workflows.'] }]);
+      let calls = 0;
+      const deterministic = await resolveOfficialPosting(comparisonRow({ snippet: `Requirements: ${COMPARATIVE_OFFICIAL.join(' ')}` }), { ...closed, researchRan: true,
+        match: async () => { calls++; throw new Error('A settled closed winner needs no comparison'); } });
+      assert.equal(deterministic.officialPosting.outcome, 'closed'); assert.equal(calls, 0);
+    },
+  },
+  {
+    name: 'Amendment 6 late agreed-choice pay and sibling vetoes retain definitive reasons and remain durable',
+    async run() {
+      for (const veto of ['salary-mismatch', 'closed-winner', 'outranked']) {
+        const fixture = comparisonFixture(veto === 'salary-mismatch' ? [{ id: 'one' }]
+          : [{ id: 'one' }, { id: 'two', quotes: COMPARATIVE_SIBLING }]);
+        const store = memoryStore(); let calls = 0;
+        const result = await resolveOfficialPosting(comparisonRow(veto === 'salary-mismatch' ? { salary: 'CAD 120000-140000 YEAR', salaryProvenance: 'posted' } : {}), {
+          ...fixture, store, researchRan: true, match: async (_job, options, { run }) => {
+            calls++;
+            const chosen = options.find(option => option.candidate.sourceUrl.endsWith('/one'));
+            if (run === 'B') {
+              if (veto === 'salary-mismatch') chosen.candidate.salary = { text: 'CAD 200000-220000 YEAR', provenance: 'posted' };
+              else {
+                const sibling = options.find(option => option !== chosen).candidate;
+                sibling.description = comparisonRow().snippet;
+                if (veto === 'closed-winner') sibling.validThrough = '2000-01-01T00:00:00Z';
+              }
+            }
+            return comparisonAnswer(options, fixture, chosen.id);
+          } });
+        assert.equal(calls, 2); assert.equal(result.comparison.agreement, true); assert.equal(result.comparison.accepted, false);
+        assert.equal(result.officialPosting.trail.includes('comparative-invalid'), false, veto);
+        assert.ok(result.officialPosting.trail.includes(veto === 'closed-winner' ? 'closed' : veto === 'outranked' ? 'no-anchor' : veto));
+        assert.equal(result.officialPosting.outcome, veto === 'closed-winner' ? 'closed' : 'not-found');
+        assert.equal(shouldPersistOfficialPostingResult(result, { researchRan: true }), true, veto); assert.equal(store.saved.length, 1);
+      }
+    },
+  },
+  {
+    name: 'Amendment 5 resolver rejects boilerplate-only comparative evidence from fetched other-title peers',
+    async run() {
+      const fixture = comparisonFixture([{ id: 'one' }, ...Array.from({ length: 5 }, (_, index) => ({ id: `peer-${index}`, title: `Designer ${index}` }))]);
+      const store = memoryStore(); const result = await resolveOfficialPosting(comparisonRow(), { ...fixture, researchRan: true, store,
+        match: async (_job, options) => { assert.equal(options.length, 1); return comparisonAnswer(options, fixture); } });
+      assert.ok(result.officialPosting.trail.includes('comparative-invalid')); assert.equal(result.comparison.invalidRuns, 2);
+      assert.equal(store.saved.length, 0);
+    },
+  },
+  {
+    name: 'Amendment 5 resolver waits for research and never compares empty identity sets or settled deterministic matches',
+    async run() {
+      const fixture = comparisonFixture(); let calls = 0;
+      const match = async () => { calls++; throw new Error('This row must settle before comparative matching'); };
+      const free = await resolveOfficialPosting(comparisonRow(), { ...fixture, match });
+      assert.equal(free.comparison, undefined); assert.equal(calls, 0);
+      const foreign = await resolveOfficialPosting(comparisonRow({ company: 'Cedar Works' }), { ...fixture, match, researchRan: true });
+      assert.equal(foreign.comparison, undefined); assert.equal(calls, 0);
+      const deterministic = await resolveOfficialPosting(comparisonRow({ snippet: `Requirements: ${COMPARATIVE_OFFICIAL.join(' ')}` }), { ...fixture, match, researchRan: true });
+      assert.equal(deterministic.officialPosting.level, 'L1'); assert.ok(deterministic.officialPosting.trail.includes('description-anchor'));
+      assert.equal(deterministic.comparison, undefined); assert.equal(calls, 0);
+    },
+  },
+  {
+    name: 'Amendment 5 resolver rechecks liveness after both independent judgments before accepting a posting',
+    async run() {
+      let clock = Date.parse('2026-01-01T00:00:00Z');
+      const fixture = comparisonFixture([{ id: 'one', extra: { validThrough: new Date(clock + 1000).toISOString() } }]);
+      const result = await resolveOfficialPosting(comparisonRow(), { ...fixture, now: () => clock, researchRan: true,
+        match: async (_job, options, { run }) => {
+          assert.equal(options[0].status, 'live');
+          if (run === 'B') clock += 2000;
+          return comparisonAnswer(options, fixture);
+        } });
+      assert.equal(result.comparison.validA, true); assert.equal(result.comparison.validB, true);
+      assert.equal(result.comparison.accepted, false); assert.equal(result.officialPosting.outcome, 'closed');
+      assert.equal(result.officialPosting.sourceUrl, undefined); assert.ok(result.officialPosting.trail.includes('closed'));
+      assert.equal(result.officialPosting.trail.includes('comparative-match'), false);
+    },
+  },
+  {
+    name: 'Amendment 5 resolver refuses a late valid injected answer after the row was aborted',
+    async run() {
+      const controller = new AbortController(); const fixture = comparisonFixture(); const store = memoryStore();
+      const result = await resolveOfficialPosting(comparisonRow(), { ...fixture, store, signal: controller.signal, researchRan: true,
+        match: async (_job, options, { run }) => {
+          if (run === 'B') controller.abort(error('bridge-aborted'));
+          return comparisonAnswer(options, fixture);
+        } });
+      assert.equal(result.comparison.validA, true); assert.equal(result.comparison.validB, false);
+      assert.equal(result.comparison.accepted, false); assert.equal(result.officialPosting.outcome, 'not-found');
+      assert.equal(store.saved.length, 0); assert.ok(result.officialPosting.trail.includes('bridge-aborted'));
+      assert.equal(result.officialPosting.trail.includes('comparative-match'), false);
     },
   },
 ];

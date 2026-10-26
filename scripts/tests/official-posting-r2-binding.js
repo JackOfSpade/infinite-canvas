@@ -100,14 +100,16 @@ export default [
     },
   },
   {
-    name: 'R2 legal-suffix and parenthetical target names pass legitimate references but retain both employment gates',
+    name: 'R2 legal-suffix and parenthetical references retain the measured pre-feature name verdicts',
     run() {
       for (const company of [`${COMPANY}, Inc.`, `${COMPANY} (NWL)`, `${COMPANY} LLC (NWL)`,
         `${COMPANY}, Inc. – Freight Division`, `${COMPANY}, Inc. — Freight Division`, `${COMPANY}, Inc. | Freight Division`]) {
-        for (const text of [`I am excited to join ${COMPANY}.`, `I built dispatch rosters for freight routes, which meets ${COMPANY}'s mission.`]) {
+        for (const text of [`I built dispatch rosters for freight routes. ${COMPANY}'s mission is clear.`]) {
           for (const [gate, errors] of Object.entries(gateErrors(text, company))) assert.deepEqual(errors, [], `${gate}: ${company}: ${text}`);
         }
-        for (const text of [`At ${COMPANY}, I rebuilt dispatch rosters for freight routes.`,
+        for (const text of [`I am excited to join ${COMPANY}.`,
+          `I built dispatch rosters for freight routes, which meets ${COMPANY}'s mission.`,
+          `At ${COMPANY}, I rebuilt dispatch rosters for freight routes.`,
           `I now run dispatch rosters for freight routes at ${COMPANY}.`]) {
           for (const [gate, errors] of Object.entries(gateErrors(text, company))) assert.ok(errors.length, `${gate}: ${company}: ${text}`);
         }
@@ -115,12 +117,15 @@ export default [
     },
   },
   {
-    name: 'R2 employer correction matching uses the shared company names without changing other claim corrections',
+    name: 'R2 employer name corrections retain pre-feature wording distinct from the narrow employment guard',
     run() {
-      const expected = describeClaimFinding('Paragraph p1', { code: 'target-employment-frame', term: COMPANY });
+      const expected = `Paragraph p1 names “${COMPANY}”, which none of its bound career-data quotes states. Every capitalized or acronym term (a tool, product, organization, title, program, or place) must occur in one of the quotes the unit cites, so quote the passage that names it or leave the name out.`;
       for (const targetCompany of [`${COMPANY}, Inc.`, `${COMPANY} (NWL)`, `${COMPANY} – Freight Division`, `${COMPANY} — Freight Division`, `${COMPANY} | Freight Division`]) {
         assert.equal(describeClaimFinding('Paragraph p1', { code: 'name', term: COMPANY }, { targetCompany }), expected);
       }
+      const employment = describeClaimFinding('Paragraph p1', { code: 'target-employment-frame', term: COMPANY });
+      assert.notEqual(employment, expected);
+      assert.match(employment, /states work at/u);
       assert.match(describeClaimFinding('Paragraph p1', { code: 'name', term: 'ZephyrMesh' }, { targetCompany: COMPANY }), /none of its bound career-data quotes/u);
     },
   },

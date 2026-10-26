@@ -1,8 +1,9 @@
 import assert from 'node:assert/strict';
 import { getEventListeners } from 'node:events';
+import { COMPARATIVE_SCRAPED, COMPARATIVE_OFFICIAL, COMPARATIVE_SIBLING, comparisonRow, comparisonFixture } from './official-posting-r3-resolver.js';
 import { officialPostingAliases } from '../../electron/ipc/officialPostingStore.js';
-import { normalizeOfficialPosting } from '../../electron/ipc/officialPostingFields.js';
-import { officialPostingChunks, resolveOfficialPosting, unresolvedOfficialPosting } from '../../electron/ipc/officialPostingResolver.js';
+import { boundedOfficialPostingTrail, normalizeOfficialPosting, OFFICIAL_POSTING_TRAIL, officialPostingComparativeTrail } from '../../electron/ipc/officialPostingFields.js';
+import { officialPostingChunks, resolveOfficialPosting, unresolvedOfficialPosting, shouldPersistOfficialPostingResult } from '../../electron/ipc/officialPostingResolver.js';
 import { mergeOfficialPostingTelemetry, partitionOfficialPostingRows, resolveOfficialPostings } from '../../electron/ipc/officialPostingService.js';
 
 const description = 'Requirements include building reliable dispatch services, reviewing route reports, and documenting operational changes with the engineering team.';
@@ -21,7 +22,63 @@ function memoryStore(initial = []) {
 }
 const noNetwork = () => { throw new Error('This service fixture must not fetch.'); };
 
+function comparisonVisible(prompt) {
+  return JSON.parse(prompt.split('BEGIN UNTRUSTED POSTING COMPARISON JSON\n')[1].split('\nEND UNTRUSTED POSTING COMPARISON JSON')[0]);
+}
+function serviceComparisonAnswer(visible, selected = null) {
+  if (selected === 'none') return { choice: 'none', evidence: [], distinguishing: [], conflicts: [] };
+  const chosen = selected ? visible.options.find(option => option.id === selected)
+    : visible.options.find(option => option.description.includes(COMPARATIVE_OFFICIAL[0]));
+  const quotes = chosen.description.includes(COMPARATIVE_OFFICIAL[0]) ? COMPARATIVE_OFFICIAL : COMPARATIVE_SIBLING;
+  return { choice: chosen.id, evidence: quotes.map((quote, index) => ({ scrapedQuote: COMPARATIVE_SCRAPED[index], officialQuote: quote })),
+    distinguishing: visible.options.filter(option => option.id !== chosen.id && option.status === 'live').map(option => ({
+      optionId: option.id, officialQuote: quotes[0], reason: 'The chosen role belongs to a different operating team and scope.' })), conflicts: [] };
+}
+function comparativeServiceFixture(specs) {
+  const fixture = comparisonFixture(specs);
+  return { ...fixture,
+    fetchSession: { fetch: fixture.fetch, telemetry: () => ({ fetches: 0, uniqueUrls: 0, cacheHits: 0, maxPerHostRate: 0, breakerTrips: 0 }) },
+    research: async (prompt, options) => {
+      assert.equal(options.task, 'job-official-posting-research');
+      const ids = prompt.match(/Requested ids: ([a-f0-9, ]+)\./u)[1].split(', ');
+      return ids.map(id => `BEGIN OFFICIAL POSTING RESEARCH ${id}\n${fixture.candidateUrls.map(postingUrl => `CANDIDATE: ${JSON.stringify({ careersPageUrl: '', postingUrl, employer: 'Northwind Labs', employerDomain: 'https://northwind.test/', ats: '' })}`).join('\n')}\nEND OFFICIAL POSTING RESEARCH ${id}`).join('\n');
+    } };
+}
+export { comparisonVisible, serviceComparisonAnswer, comparativeServiceFixture };
+
 export default [
+  {
+    name: 'comparative trail compaction never turns a saturated partial crawl into a durable match',
+    run() {
+      const decorations = OFFICIAL_POSTING_TRAIL.filter(code => !code.startsWith('comparative-')
+        && !['identifier-anchor', 'crawl-partial', 'fetch-timeout', 'crawl-budget'].includes(code));
+      const flags = officialPostingComparativeTrail({ validA: true, validB: true, choiceA: 'P3', choiceB: 'P3' });
+      const trail = boundedOfficialPostingTrail([...decorations, 'comparative-match', ...flags, 'crawl-partial']);
+      assert.equal(trail.length, 32); assert.ok(trail.includes('crawl-partial'));
+      for (const flag of flags) assert.ok(trail.includes(flag));
+      assert.equal(shouldPersistOfficialPostingResult(posting({ level: 'L1', outcome: 'found', trail })), false);
+      assert.deepEqual(boundedOfficialPostingTrail(['careers-page', 'comparative-match']), ['careers-page', 'comparative-match']);
+    },
+  },
+  {
+    name: 'comparative telemetry merges counts and closed option bins without retaining evidence or arbitrary labels',
+    run() {
+      const block = { comparisons: 2, comparisonOptions: { 1: 1, 8: 1, PRIVATE_OPTION: 9 },
+        comparativeAgreements: 1, comparativeDisagreements: 1, comparativeInvalidRuns: 2,
+        comparativeNone: 1, comparativeUnavailable: 1, comparativeMatches: 1,
+        rejections: { 'comparative-invalid': 1, 'comparative-match': 1, PRIVATE_REASON: 1 },
+        evidence: 'PRIVATE_EVIDENCE', conversation: 'PRIVATE_CONVERSATION' };
+      const merged = mergeOfficialPostingTelemetry(block, block);
+      assert.equal(merged.comparisons, 4); assert.equal(merged.comparativeAgreements, 2);
+      assert.equal(merged.comparativeDisagreements, 2); assert.equal(merged.comparativeInvalidRuns, 4);
+      assert.equal(merged.comparativeNone, 2); assert.equal(merged.comparativeUnavailable, 2);
+      assert.equal(merged.comparativeMatches, 2);
+      assert.deepEqual(merged.comparisonOptions, { 1: 2, 2: 0, 3: 0, 4: 0, 5: 0, 6: 0, 7: 0, 8: 2 });
+      assert.equal(merged.rejections['comparative-invalid'], 2);
+      assert.equal(merged.rejections['comparative-match'], undefined);
+      assert.equal(JSON.stringify(merged).includes('PRIVATE_'), false);
+    },
+  },
   {
     name: 'R3 service partitions only normalized identity-bound settled rows and overlays host metadata without changing scraped fields',
     async run() {
@@ -130,7 +187,8 @@ export default [
   {
     name: 'R3 service retries old persisted transient misses through the real resolver and stores only the new clean researched conclusion',
     async run() {
-      const row = job(1); const old = record(row, posting({ level: 'L5', outcome: 'not-found', trail: ['bridge-timeout'] }));
+      const row = job(1, { snippet: `${description} The engineer reviews daily route records and explains delayed dispatch issues to experienced operational partners. Additional responsibilities include validating service changes and documenting useful release decisions with regional teams.` });
+      const old = record(row, posting({ level: 'L5', outcome: 'not-found', trail: ['bridge-timeout'] }));
       const store = memoryStore([[row.sourceJobKey, old]]); let researched = 0; let fetched = 0;
       const result = await resolveOfficialPostings([row], { store, fetch: async () => { fetched++; const error = new Error('closed'); error.code = 'closed'; throw error; },
         callRaw: async prompt => { researched++; return response(prompt); } });
@@ -247,6 +305,114 @@ export default [
       await resolveOfficialPostings(rows, { ...options, fetchSession });
       assert.equal(disposed, false, 'a caller can reuse its own shared session across service invocations');
       assert.equal(getEventListeners(controller.signal, 'abort').length, 0);
+    },
+  },
+  {
+    name: 'Amendment 5 service integrates comparative agreement correction prompt replay and counts-only accepted telemetry',
+    async run() {
+      const fixture = comparativeServiceFixture([{ id: 'one' }, { id: 'two', quotes: COMPARATIVE_SIBLING }, { id: 'city-twin', city: 'Riverton' }]);
+      const row = comparisonRow(); const store = memoryStore(); const calls = []; let researched = 0;
+      const result = await resolveOfficialPostings([row], { store, fetchSession: fixture.fetchSession,
+        callRaw: async (...args) => { researched++; return fixture.research(...args); },
+        callMatch: async (prompt, options) => {
+          const visible = comparisonVisible(prompt); const run = options.hints.comparisonRun;
+          assert.equal(visible.options.length, 2); assert.equal(prompt.includes('Riverton'), false);
+          calls.push({ prompt, options });
+          assert.match(options.manualHandoff.comparisonGroup, /^[a-f0-9]{64}$/u);
+          assert.equal(options.manualHandoff.comparisonRun, run);
+          const answer = serviceComparisonAnswer(visible);
+          if (run === 'A' && !options.correctionAttempt) answer.evidence[0].officialQuote = 'A fabricated quotation about unrelated lunar navigation and international satellite support.';
+          if (options.correctionAttempt) {
+            assert.ok(options.correctionRuleIds.includes('LOOKUP_OFFICIAL_MATCH_VERBATIM'));
+            assert.ok(options.correctionDetails.every(line => line.length <= 260));
+          }
+          return JSON.stringify(answer);
+        } });
+      assert.equal(result.jobs[0].officialPosting.sourceUrl, fixture.candidateUrls[0]);
+      assert.equal(result.jobs[0].officialPosting.level, 'L1');
+      assert.deepEqual(calls.map(call => [call.options.hints.comparisonRun, call.options.correctionAttempt || 0]), [['A', 0], ['A', 1], ['B', 0]]);
+      assert.equal(calls[0].prompt, calls[1].prompt);
+      assert.equal(calls[0].options.manualHandoff.comparisonGroup, calls[2].options.manualHandoff.comparisonGroup);
+      assert.deepEqual(comparisonVisible(calls[0].prompt).options.map(option => option.id), ['P1', 'P2']);
+      assert.deepEqual(comparisonVisible(calls[2].prompt).options.map(option => option.id), ['P2', 'P1']);
+      assert.equal(calls[2].options.correctionDetails, undefined);
+      assert.equal(researched, 1); assert.equal(result.telemetry.handoffs, 4);
+      assert.equal(result.telemetry.comparisons, 1); assert.equal(result.telemetry.comparisonOptions[2], 1);
+      assert.equal(result.telemetry.comparativeAgreements, 1); assert.equal(result.telemetry.comparativeMatches, 1);
+      assert.equal(result.telemetry.comparativeInvalidRuns, 0); assert.equal(result.telemetry.rejections['comparative-match'], undefined);
+      assert.equal(/Northwind|freight|Quote|description/u.test(JSON.stringify(result.telemetry)), false);
+      let replayed = 0;
+      const again = await resolveOfficialPostings([row], { store, fetchSession: fixture.fetchSession,
+        callRaw: async () => { replayed++; throw new Error('A cached proof must not create another handoff'); },
+        callMatch: async () => { replayed++; throw new Error('A cached proof must not create another comparison'); } });
+      assert.equal(replayed, 0); assert.equal(again.telemetry.comparisons, 0); assert.equal(again.telemetry.comparativeMatches, 1);
+      assert.equal(again.jobs[0].officialPosting.sourceUrl, fixture.candidateUrls[0]);
+      assert.ok(again.jobs[0].officialPosting.trail.includes('comparative-choice-p1'));
+    },
+  },
+  {
+    name: 'Amendment 5 service persists settled none and disagreement while retaining only bounded comparative decisions',
+    async run() {
+      for (const kind of ['none', 'disagree']) {
+        const fixture = comparativeServiceFixture([{ id: 'one' }, { id: 'two', quotes: COMPARATIVE_SIBLING }]);
+        const row = comparisonRow(); const store = memoryStore();
+        const result = await resolveOfficialPostings([row], { store, fetchSession: fixture.fetchSession, callRaw: fixture.research,
+          callMatch: async (prompt, options) => JSON.stringify(serviceComparisonAnswer(comparisonVisible(prompt), kind === 'none' ? 'none' : options.hints.comparisonRun === 'A' ? 'P1' : 'P2')) });
+        assert.equal(result.jobs[0].officialPosting.outcome, kind === 'none' ? 'not-found' : 'ambiguous');
+        assert.equal(store.saves.length, 1); assert.equal(result.telemetry.comparisons, 1);
+        assert.equal(result.telemetry.comparativeAgreements, kind === 'none' ? 1 : 0);
+        assert.equal(result.telemetry.comparativeDisagreements, kind === 'disagree' ? 1 : 0);
+        assert.equal(result.telemetry.comparativeNone, kind === 'none' ? 1 : 0);
+        assert.equal(result.telemetry.comparativeInvalidRuns, 0); assert.equal(result.telemetry.comparativeMatches, 0);
+        if (kind === 'disagree') assert.equal(result.jobs[0].officialPosting.alternatives.length, 2);
+        assert.equal(/Quote|description|distinguishing/u.test(JSON.stringify(store.saves[0].payload.officialPosting)), false);
+        let calls = 0;
+        const replay = await resolveOfficialPostings([row], { store, fetchSession: fixture.fetchSession,
+          callRaw: async () => { calls++; throw new Error('A settled miss must replay without another handoff'); } });
+        assert.equal(calls, 0); assert.ok(replay.jobs[0].officialPosting.trail.includes('recent-miss'));
+      }
+    },
+  },
+  {
+    name: 'Amendment 5 service timeout and independence-unavailable remain retryable with accurate comparative counts',
+    async run() {
+      for (const code of ['bridge-timeout', 'OFFICIAL_POSTING_COMPARATIVE_UNAVAILABLE']) {
+        const fixture = comparativeServiceFixture([{ id: 'one' }]); const store = memoryStore(); let calls = 0;
+        const keepAlive = setTimeout(() => {}, 500); let result;
+        try {
+          result = await resolveOfficialPostings([comparisonRow()], { store, fetchSession: fixture.fetchSession,
+            callRaw: fixture.research, timeoutMs: 10,
+            callMatch: async (prompt, options) => {
+              calls++;
+              if (options.hints.comparisonRun === 'B') {
+                if (code === 'bridge-timeout') return new Promise(() => {});
+                throw Object.assign(new Error(code), { code });
+              }
+              return JSON.stringify(serviceComparisonAnswer(comparisonVisible(prompt)));
+            } });
+        } finally { clearTimeout(keepAlive); }
+        assert.equal(calls, 2); assert.equal(store.saves.length, 0); assert.equal(result.jobs[0].officialPosting.outcome, 'not-found');
+        assert.ok(result.jobs[0].officialPosting.trail.includes(code === 'bridge-timeout' ? code : 'comparative-unavailable'));
+        assert.equal(result.telemetry.comparisons, 1); assert.equal(result.telemetry.comparativeInvalidRuns, 1);
+        assert.equal(result.telemetry.comparativeAgreements, 0); assert.equal(result.telemetry.comparativeMatches, 0);
+        assert.equal(result.telemetry.comparativeUnavailable, code === 'OFFICIAL_POSTING_COMPARATIVE_UNAVAILABLE' ? 1 : 0);
+        assert.equal(result.telemetry.bridgeTimeout, code === 'bridge-timeout' ? 1 : 0);
+        const healthy = await resolveOfficialPostings([comparisonRow()], { store, fetchSession: fixture.fetchSession,
+          callRaw: fixture.research, callMatch: async prompt => JSON.stringify(serviceComparisonAnswer(comparisonVisible(prompt))) });
+        assert.equal(healthy.jobs[0].officialPosting.level, 'L1');
+      }
+    },
+  },
+  {
+    name: 'Amendment 5 service corrects injected invalid raw answers once per run without double retries',
+    async run() {
+      const fixture = comparativeServiceFixture([{ id: 'one' }]); const store = memoryStore(); const calls = [];
+      const result = await resolveOfficialPostings([comparisonRow()], { store, fetchSession: fixture.fetchSession, callRaw: fixture.research,
+        callMatch: async (prompt, options) => { calls.push({ prompt, options }); return JSON.stringify({ choice: 'unknown', evidence: [], distinguishing: [], conflicts: [] }); } });
+      assert.deepEqual(calls.map(call => [call.options.hints.comparisonRun, call.options.correctionAttempt || 0]), [['A', 0], ['A', 1], ['B', 0], ['B', 1]]);
+      assert.equal(calls[0].prompt, calls[1].prompt); assert.equal(calls[2].prompt, calls[3].prompt);
+      assert.equal(result.telemetry.comparativeInvalidRuns, 2); assert.equal(store.saves.length, 0);
+      assert.ok(result.jobs[0].officialPosting.trail.includes('comparative-invalid'));
     },
   },
 ];

@@ -6,8 +6,9 @@ import {
 import {
   coreTitle, descriptionOverlap, evaluateOfficialPostingMatch, frozenOfficialEmployer,
   locationsCompatible, posterEmployerSignals, resolveScrapedEmployer,
-  selectOfficialPostingMatch, verifiedTieBreakerMatch,
+  selectOfficialPostingMatch, buildOfficialPostingComparisonSet, officialPostingScrapedContradictsChoice,
 } from '../../electron/ipc/officialPostingMatch.js';
+import { validateOfficialPostingMatchResponse } from '../../electron/ipc/officialPostingBridge.js';
 
 const EMPLOYER = 'Northwind Labs';
 const DESCRIPTION = 'Design reliable ledger reconciliation services for regional dispatch teams. '
@@ -215,21 +216,25 @@ export default [
     },
   },
   {
-    name: 'Official posting matching: quotation verifier requires three verbatim long pairs across distinct parts',
+    name: 'Official posting comparative evidence requires three verbatim long pairs across distinct parts',
     run() {
       const quotes = DESCRIPTION.split(/(?<=\.)\s+/u).filter(Boolean);
-      const answer = { sameJob: true, matchingPairs: [quotes[0], quotes[2], quotes[4]].map(quote => ({ scrapedQuote: quote, officialQuote: quote })), conflicts: [] };
-      assert.equal(verifiedTieBreakerMatch(DESCRIPTION, DESCRIPTION, answer), true);
-      assert.equal(verifiedTieBreakerMatch(DESCRIPTION, DESCRIPTION, { ...answer, matchingPairs: answer.matchingPairs.slice(0, 2) }), false);
-      assert.equal(verifiedTieBreakerMatch(DESCRIPTION, DESCRIPTION, { ...answer, matchingPairs: answer.matchingPairs.map(pair => ({ ...pair, officialQuote: 'Invented wording that never occurs in the fetched official description text.' })) }), false);
-      assert.equal(verifiedTieBreakerMatch(DESCRIPTION, DESCRIPTION, { ...answer, conflicts: ['different team'] }), false);
-      assert.equal(verifiedTieBreakerMatch(DESCRIPTION, DESCRIPTION, { ...answer, matchingPairs: [answer.matchingPairs[0], answer.matchingPairs[0], answer.matchingPairs[0]] }), false);
+      const answer = { choice: 'P1', evidence: [quotes[0], quotes[2], quotes[4]].map(quote => ({ scrapedQuote: quote, officialQuote: quote })), distinguishing: [], conflicts: [] };
+      const job = row({ salaryProvenance: 'unknown' });
+      const { options } = buildOfficialPostingComparisonSet(job, [candidate({ salary: { text: '', provenance: 'unknown' } })], { now: NOW });
+      const context = { job, options };
+      assert.deepEqual(validateOfficialPostingMatchResponse(answer, context), answer);
+      for (const invalid of [{ ...answer, evidence: answer.evidence.slice(0, 2) },
+        { ...answer, evidence: answer.evidence.map(pair => ({ ...pair, officialQuote: 'Invented wording that never occurs in the fetched official description text.' })) },
+        { ...answer, conflicts: ['different team'] }, { ...answer, evidence: [answer.evidence[0], answer.evidence[0], answer.evidence[0]] }]) {
+        assert.throws(() => validateOfficialPostingMatchResponse(invalid, context));
+      }
       const filler = 'A distinct application-specific narrative describes entirely separate day to day work and planning priorities. ';
       const officialText = `${quotes[0]} ${filler.repeat(2)} ${quotes[2]} ${filler.repeat(2)} ${quotes[4]}`;
       const noAnchor = candidate({ salary: { text: '', provenance: 'unknown' }, description: officialText });
-      assert.equal(descriptionOverlap(DESCRIPTION, officialText).anchored, false);
-      const result = evaluate(row({ salaryProvenance: 'unknown' }), noAnchor, { tieBreaker: answer });
-      assert.equal(result.anchor, 'quoted-match');
+      assert.equal(evaluate(job, noAnchor).reason, 'no-anchor', 'the evaluator itself has no pairwise acceptance path');
+      const { options: compared } = buildOfficialPostingComparisonSet(job, [noAnchor], { now: NOW });
+      assert.deepEqual(validateOfficialPostingMatchResponse(answer, { job, options: compared }), answer);
     },
   },
   {
@@ -343,17 +348,145 @@ export default [
     },
   },
   {
-    name: 'Official posting matching: quote pairs need corresponding content vocabulary and must be absent from peer postings',
+    name: 'Official posting comparison set excludes identity failures includes closed postings and caps by containment before stable URL ids',
     run() {
-      const quotes = DESCRIPTION.split(/(?<=\.)\s+/u).filter(Boolean);
-      const pairs = [quotes[0], quotes[2], quotes[4]].map(quote => ({ scrapedQuote: quote, officialQuote: quote }));
-      const answer = { sameJob: true, matchingPairs: pairs, conflicts: [] };
-      assert.equal(verifiedTieBreakerMatch(DESCRIPTION, DESCRIPTION, answer), true);
-      assert.equal(verifiedTieBreakerMatch(DESCRIPTION, DESCRIPTION, { ...answer, matchingPairs: pairs.map((pair, index) => ({ ...pair, officialQuote: pairs[(index + 1) % pairs.length].officialQuote })) }), false, 'verbatim but unrelated pairs are not correspondence');
-      assert.equal(verifiedTieBreakerMatch(DESCRIPTION, DESCRIPTION, answer, { peerDescriptions: [`${quotes[0]} Other work involves production camera calibration.`] }), false, 'either quoted side appearing in a peer invalidates the pair');
-      const benefits = 'We offer comprehensive health insurance and flexible paid parental leave to every eligible employee. ';
-      const boilerplate = { sameJob: true, matchingPairs: Array.from({ length: 3 }, () => ({ scrapedQuote: benefits.trim(), officialQuote: benefits.trim() })), conflicts: [] };
-      assert.equal(verifiedTieBreakerMatch(benefits.repeat(6), benefits.repeat(6), boilerplate), false);
+      const job = row({ salaryProvenance: 'unknown' });
+      const closed = candidate({ sourceUrl: 'https://jobs.ashbyhq.com/northwind/closed', live: false, statusCode: 410 });
+      assert.equal(evaluate(job, closed).identityPass, true); assert.equal(evaluate(job, closed).reason, 'closed');
+      const wrongPayClosed = { ...closed, salary: { text: 'CAD 90000-100000', provenance: 'posted' } };
+      assert.equal(evaluate(row(), wrongPayClosed).reason, 'closed');
+      assert.equal(evaluate(row(), wrongPayClosed).salaryMismatch, true, 'a comparative closed choice retains the posted-pay veto');
+      const rejected = [candidate({ employer: 'Cedar Works' }), candidate({ title: 'Product Designer' }),
+        candidate({ location: { display: 'Riverton, Ontario, Canada' } }), candidate({ tenantProven: false }), candidate({ posterTenant: true })];
+      for (const value of rejected) assert.equal(evaluate(job, value).identityPass, false);
+      const pool = [closed, ...Array.from({ length: 9 }, (_, index) => candidate({ sourceUrl: `https://jobs.ashbyhq.com/northwind/option-${index}` })),
+        candidate({ sourceUrl: 'https://jobs.ashbyhq.com/northwind/zz-low', description: 'A brief unrelated summary about visitor scheduling.' }), ...rejected];
+      const { options, preCapCount, contradictionOnly } = buildOfficialPostingComparisonSet(job, pool, { now: NOW });
+      assert.equal(preCapCount, 11, 'the caller sees every eligible posting before the option cap');
+      assert.equal(contradictionOnly.length, 3, 'cap-dropped identity matches are kept only for host contradiction checks');
+      assert.ok(contradictionOnly.every(option => !rejected.includes(option.candidate)), 'hard identity failures never become contradiction sources');
+      assert.equal(options.length, 8); assert.ok(options.some(option => option.status === 'closed'));
+      assert.ok(!options.some(option => option.candidate.sourceUrl.endsWith('zz-low')));
+      assert.deepEqual(options.map(option => option.id), ['P1', 'P2', 'P3', 'P4', 'P5', 'P6', 'P7', 'P8']);
+      assert.deepEqual(options.map(option => option.candidate.sourceUrl), [...options.map(option => option.candidate.sourceUrl)].sort());
+      assert.deepEqual(options, buildOfficialPostingComparisonSet(job, [...pool].reverse(), { now: NOW }).options);
+    },
+  },
+  {
+    name: 'Amendment 6 comparison set merges same requisitions before the cap and prefers a proven ATS representation',
+    run() {
+      const job = row({ salaryProvenance: 'unknown' });
+      const ats = candidate({ identifier: 'requnique', sourceUrl: 'https://jobs.ashbyhq.com/northwind/a-requnique' });
+      const embed = candidate({ ...ats, tenantProven: false, ats: '', tenant: '', employerDomainProven: true,
+        sourceUrl: 'https://careers.northwind.test/jobs/requnique' });
+      const urlOnly = { ...embed, identifier: undefined };
+      const distinct = Array.from({ length: 8 }, (_, index) => candidate({ identifier: `req-distinct-${index}`, sourceUrl: `https://jobs.ashbyhq.com/northwind/distinct-${index}` }));
+      for (const duplicate of [embed, urlOnly]) {
+        const result = buildOfficialPostingComparisonSet(job, [duplicate, ats, ...distinct], { now: NOW });
+        assert.equal(result.preCapCount, 9);
+        assert.equal(result.options.length, 8);
+        assert.ok(result.options.some(option => option.candidate === ats));
+        assert.ok(result.options.every(option => option.candidate !== duplicate));
+        assert.deepEqual(result, buildOfficialPostingComparisonSet(job, [...distinct].reverse().concat([ats, duplicate]), { now: NOW }));
+      }
+      const sameUrlUnproven = { ...ats, tenantProven: false, description: `${DESCRIPTION} Additional unproven source text.` };
+      assert.equal(buildOfficialPostingComparisonSet(job, [sameUrlUnproven, ats], { now: NOW }).options[0].candidate, ats);
+      const sameFour = buildOfficialPostingComparisonSet(job, [candidate({ identifier: 'ABCD' }), candidate({ identifier: 'ABCD', sourceUrl: 'https://careers.northwind.test/jobs/four', ats: '', tenant: '', employerDomainProven: true })], { now: NOW });
+      assert.equal(sameFour.preCapCount, 1);
+      for (const identifier of ['X', 'ABC']) assert.equal(buildOfficialPostingComparisonSet(job, [candidate({ identifier }), candidate({ identifier, sourceUrl: 'https://jobs.ashbyhq.com/northwind/other' })], { now: NOW }).preCapCount, 2);
+    },
+  },
+  {
+    name: 'Amendment 9 contradiction windows compare word tokens without punctuation or presentation markers',
+    run() {
+      const chosen = { id: 'P1', candidate: candidate({ identifier: 'chosen-request' }), description: DESCRIPTION };
+      const variants = [
+        DESCRIPTION.replace('contracts and improve', 'contracts, and improve'),
+        DESCRIPTION.split('. ').join('.\n• '),
+        DESCRIPTION.replace('reliable ledger reconciliation services', '“reliable ledger reconciliation services”'),
+        DESCRIPTION.replace('contracts and improve', 'contracts — and improve'),
+      ];
+      for (const description of variants) {
+        const other = { candidate: candidate({ identifier: 'other-request' }), description };
+        assert.equal(officialPostingScrapedContradictsChoice(row({ snippet: description }), chosen, [chosen],
+          { contradictionOnly: [other] }), false, description);
+      }
+      const exclusive = 'Engineers rotate through a shared on call schedule and publish a written summary after every incident review.';
+      const other = { candidate: candidate({ identifier: 'other-request' }), description: `${DESCRIPTION} ${exclusive}` };
+      assert.equal(officialPostingScrapedContradictsChoice(row({ snippet: `${DESCRIPTION} ${exclusive.toUpperCase()}` }),
+        chosen, [chosen], { contradictionOnly: [other] }), true, 'a ten-word role passage still contradicts across case changes');
+    },
+  },
+  {
+    name: 'Amendment 9 nested hidden copies share one requisition while different requisitions still contradict',
+    run() {
+      const extra = 'Join a rotating on call schedule and publish a written summary after every incident review. '
+        + 'Coordinate quarterly capacity planning sessions with partner teams across several regions.';
+      const full = `${DESCRIPTION} ${extra}`;
+      const job = row({ snippet: full, salaryProvenance: 'unknown' });
+      for (const [selected, hidden] of [[DESCRIPTION, full], [full, DESCRIPTION]]) {
+        const chosen = { id: 'P1', candidate: candidate({ identifier: 'request-shared' }), description: selected };
+        const other = { candidate: candidate({ identifier: 'request-shared', sourceUrl: 'https://careers.northwind.test/jobs/request-shared' }), description: hidden };
+        assert.equal(officialPostingScrapedContradictsChoice(job, chosen, [chosen], { contradictionOnly: [other] }), false,
+          'containment in either direction identifies fuller or shorter copies');
+        if (selected === DESCRIPTION) {
+          const sibling = { ...other, candidate: { ...other.candidate, identifier: 'other-request', sourceUrl: 'https://careers.northwind.test/jobs/other-request' } };
+          assert.equal(officialPostingScrapedContradictsChoice(job, chosen, [chosen], { contradictionOnly: [sibling] }), true,
+            'nested text alone never exempts another requisition');
+          assert.equal(officialPostingScrapedContradictsChoice(job, chosen, [chosen, { ...other, id: 'P2' }]), true,
+            'the narrow exception applies only to contradiction-only copies');
+        }
+      }
+    },
+  },
+  {
+    name: 'Amendment 9 tenant-proven truncated copy validates against a fuller hidden copy of the same requisition',
+    run() {
+      const lines = DESCRIPTION.split(/(?<=\.)\s+/u);
+      const full = `${DESCRIPTION} Join a rotating on call schedule and publish a written summary after every incident review. `
+        + 'Coordinate quarterly capacity planning sessions with partner teams across several regions.';
+      const noise = ['Recruiters add that the group enjoys flexible schedules and frequent offsite gatherings throughout the year.',
+        'Occasional travel to regional offices may be needed during the first quarter of employment.',
+        'Our culture values curiosity and steady collaboration between engineering and partner teams.'];
+      const job = row({ snippet: [noise[0], ...lines.slice(0, 3), noise[1], ...lines.slice(3), noise[2], full.slice(DESCRIPTION.length)].join(' '), salaryProvenance: 'unknown', salary: '' });
+      const ats = candidate({ identifier: 'req-5501', sourceUrl: 'https://jobs.ashbyhq.com/northwind/req-5501', salary: { text: '', provenance: 'unknown' } });
+      const embed = candidate({ identifier: 'req-5501', sourceUrl: 'https://careers.northwind.test/jobs/req-5501', description: full,
+        ats: '', tenant: '', tenantProven: false, employerDomainProven: true, salary: { text: '', provenance: 'unknown' } });
+      const set = buildOfficialPostingComparisonSet(job, [ats, embed], { now: NOW });
+      assert.equal(set.options[0].candidate, ats);
+      assert.equal(set.contradictionOnly[0].candidate, embed);
+      const value = { choice: set.options[0].id, conflicts: [], evidence: [lines[0], lines[3], lines[5]].map(quote => ({ scrapedQuote: quote, officialQuote: quote })), distinguishing: [] };
+      assert.deepEqual(validateOfficialPostingMatchResponse(value, { job, ...set }), value);
+    },
+  },
+  {
+    name: 'Amendment 8 same requisition representation prefers tenant proof then live status before URL order',
+    run() {
+      const job = row({ salaryProvenance: 'unknown' });
+      const closed = candidate({ identifier: 'request-shared', sourceUrl: 'https://careers.northwind.test/careers/one-embed',
+        ats: '', tenant: '', tenantProven: false, employerDomainProven: true, validThrough: '2000-01-01T00:00:00Z' });
+      const live = { ...closed, sourceUrl: 'https://careers.northwind.test/jobs/one', validThrough: undefined };
+      for (const pool of [[closed, live], [live, closed]]) {
+        const result = buildOfficialPostingComparisonSet(job, pool, { now: NOW });
+        assert.equal(result.options.length, 1);
+        assert.equal(result.options[0].candidate, live, 'a live copy wins an otherwise equal stale copy');
+      }
+      const provenClosed = { ...closed, tenantProven: true };
+      assert.equal(buildOfficialPostingComparisonSet(job, [provenClosed, live], { now: NOW }).options[0].candidate, provenClosed, 'tenant proof remains the first preference');
+      const sameUrlClosed = { ...closed, sourceUrl: live.sourceUrl };
+      assert.equal(buildOfficialPostingComparisonSet(job, [sameUrlClosed, live], { now: NOW }).options[0].candidate, live, 'duplicate bytes at one URL also prefer the live record');
+    },
+  },
+  {
+    name: 'Amendment 6 comparison options exclude live and closed postings vetoed by posted pay',
+    run() {
+      for (const live of [false, true]) {
+        const wrongPay = candidate({ live, statusCode: live ? 200 : 410, salary: { text: 'CAD 90000-100000', provenance: 'posted' } });
+        assert.equal(evaluate(row(), wrongPay).salaryMismatch, true);
+        const result = buildOfficialPostingComparisonSet(row(), [wrongPay], { now: NOW });
+        assert.deepEqual(result.options, []); assert.equal(result.preCapCount, 0);
+        assert.deepEqual(result.contradictionOnly, [{ candidate: wrongPay, description: DESCRIPTION }]);
+      }
     },
   },
   {

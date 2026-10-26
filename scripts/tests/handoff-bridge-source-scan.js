@@ -33,7 +33,7 @@ const allBridgeSiblings = [
   './constants.js', './contracts.js', './respond.js', './wire.js', './http.js', './listener.js', './tools.js', './mcp.js',
   './oauth.js', './oauthPages.js', './clientAuth.js', './cimd.js', './egressProbe.js', './oauthStore.js', './store.js',
   './laneStore.js', './engine.js', './lanes.js', './workerPool.js', './preflight.js', './framing.js', './errors.js', './audit.js', './log.js',
-  './telemetry.js', './restartContext.js', './controller.js', './pairing.js', './ui.js', './chatLauncher.js', './uiDialogs.js', './tray.js', './power.js', './index.js',
+  './telemetry.js', './restartContext.js', './observedChatContext.js', './controller.js', './pairing.js', './ui.js', './chatLauncher.js', './uiDialogs.js', './tray.js', './power.js', './index.js',
 ];
 const sibling = (...imports) => [...imports, ...allBridgeSiblings];
 
@@ -74,6 +74,8 @@ export const SOURCE_SCAN_ROWS = Object.freeze({
   'log.js': { allow: ['../logger.js'] },
   'telemetry.js': { allow: ['./log.js', '../../../src/utils/handoffScheduler.js', '../../../src/utils/handoffBridgeStatus.js'] },
   'restartContext.js': { allow: [] },
+  // Opaque main-side launcher observation uses only fixed SHA-256 lineage.
+  'observedChatContext.js': { allow: ['node:crypto'] },
   'sources/application.js': { allow: ['../../localAiApplication.js'] },
   'sources/syntheticPreflight.js': { allow: ['node:crypto', './application.js'] },
   'sources/push.js': { allow: ['../../nonApiAi.js', '../../ipcUtils.js', '../constants.js'] },
@@ -357,7 +359,7 @@ export default [
   {
     name: 'handoff bridge: source-scan: complete table skips absent planned modules and rejects a no-row module',
     run: () => {
-      assert(Object.keys(SOURCE_SCAN_ROWS).length === 52, 'every planned handoffBridge module needs exactly one row');
+      assert(Object.keys(SOURCE_SCAN_ROWS).length === 53, 'every planned handoffBridge module needs exactly one row');
       assert(scanHandoffBridgeSource().length === 0, 'the current subset and absent planned rows must conform');
       const root = makeScratchBridge();
       try {

@@ -5,6 +5,9 @@ export const LOCAL_AI_APPLICATION_SNIPPET_MAX_CHARS = 80_000;
 export const OFFICIAL_POSTING_LEVELS = Object.freeze(['L1', 'L2', 'L3', 'L4', 'L5', 'L6']);
 export const OFFICIAL_POSTING_OUTCOMES = Object.freeze(['found', 'link-only', 'not-found', 'ambiguous', 'unreadable', 'closed', 'failed']);
 export const SALARY_PROVENANCES = Object.freeze(['posted', 'estimated', 'unknown']);
+export const OFFICIAL_POSTING_COMPARATIVE_CODES = Object.freeze([
+  'comparative-match', 'comparative-disagree', 'comparative-invalid', 'comparative-none', 'comparative-unavailable',
+]);
 export const OFFICIAL_POSTING_TRAIL = Object.freeze([
   'free-lead', 'careers-page', 'ats-adapter', 'json-ld', 'structured-proof', 'domain-proof',
   'salary-anchor', 'identifier-anchor', 'description-anchor', 'quoted-match', 'cache-hit', 'recent-miss',
@@ -12,8 +15,36 @@ export const OFFICIAL_POSTING_TRAIL = Object.freeze([
   'title-mismatch', 'location-mismatch', 'employer-mismatch', 'tenant-unproven', 'poster-tenant',
   'salary-mismatch', 'no-anchor', 'invalid-quotes', 'ambiguous', 'closed', 'unreadable', 'oversize',
   'unsafe-url', 'unsafe-address', 'fetch-timeout', 'fetch-failed', 'unsupported-content-type',
-  'crawl-budget', 'invalid-text', 'stub-text', 'official-text-missing', 'no-resolution', 'reverified', 'reverify-failed', 'material-jd-change', 'failed',
+  'crawl-budget', 'crawl-partial', 'invalid-text', 'stub-text', 'official-text-missing', 'no-resolution', 'reverified', 'reverify-failed', 'material-jd-change', 'failed',
+  ...OFFICIAL_POSTING_COMPARATIVE_CODES,
+  'comparative-a-valid', 'comparative-a-invalid', 'comparative-b-valid', 'comparative-b-invalid', 'comparative-truncated', 'insufficient-text',
+  ...['a', 'b', 'choice'].flatMap(run => ['none', ...Array.from({ length: 8 }, (_, index) => `p${index + 1}`)]
+    .map(choice => `comparative-${run}-${choice}`)),
 ]);
+
+/** Bounded decisions only: no quotes, reasons, prompts or conversation ids. */
+export function officialPostingComparativeTrail({ validA = false, validB = false, choiceA, choiceB } = {}) {
+  const choiceCode = value => value === 'none' || /^P[1-8]$/u.test(String(value || '')) ? String(value).toLowerCase() : '';
+  const a = choiceCode(choiceA); const b = choiceCode(choiceB);
+  return [`comparative-a-${validA === true ? 'valid' : 'invalid'}`, `comparative-b-${validB === true ? 'valid' : 'invalid'}`,
+    ...(a ? [`comparative-a-${a}`] : []), ...(b ? [`comparative-b-${b}`] : []),
+    ...(validA === true && validB === true && a && a === b ? [`comparative-choice-${a}`] : [])];
+}
+
+const DURABILITY_TRAIL_CODES = new Set(['bridge-aborted', 'bridge-timeout', 'bridge-unavailable', 'research-miss',
+  'fetch-failed', 'fetch-timeout', 'crawl-budget', 'crawl-partial', 'official-text-missing', 'failed', 'identifier-anchor',
+  'comparative-invalid', 'comparative-unavailable', 'comparative-truncated', 'insufficient-text']);
+/** Host trail compaction must retain the evidence that prevents persistence. */
+export function boundedOfficialPostingTrail(values) {
+  const codes = [...new Set((Array.isArray(values) ? values : []).filter(code => OFFICIAL_POSTING_TRAIL.includes(code)))];
+  if (codes.length <= 32) return codes;
+  const durability = codes.filter(code => DURABILITY_TRAIL_CODES.has(code));
+  const comparison = codes.filter(code => code.startsWith('comparative-') && !DURABILITY_TRAIL_CODES.has(code));
+  const required = [...durability, ...comparison].slice(0, 32);
+  const room = 32 - required.length;
+  const others = codes.filter(code => !DURABILITY_TRAIL_CODES.has(code) && !code.startsWith('comparative-'));
+  return [...required, ...(room ? others.slice(-room) : [])];
+}
 export const OFFICIAL_POSTING_LABELS = Object.freeze({
   L1: 'Official careers site', L2: 'ATS linked from careers page', L3: "Employer's ATS",
   L4: 'Official link, listing text', L5: 'Original listing', L6: 'Original listing (employer unknown)',
@@ -139,12 +170,14 @@ export function normalizeBoardClosed(value) {
 // Trail codes meaning the research step did not run, did not finish, or hit a
 // transient failure. A miss carrying any of them is retryable, never a conclusion.
 const RESEARCH_UNSETTLED_TRAIL = Object.freeze(['bridge-aborted', 'bridge-timeout', 'bridge-unavailable', 'research-miss',
-  'fetch-failed', 'fetch-timeout', 'crawl-budget', 'official-text-missing', 'failed']);
+  'fetch-failed', 'fetch-timeout', 'crawl-budget', 'crawl-partial', 'official-text-missing', 'failed',
+  'comparative-invalid', 'comparative-unavailable', 'comparative-truncated', 'insufficient-text']);
 /** True only for a definitive miss reached after research actually ran (or an official page that is itself closed). */
 export function officialResearchSettled(value) {
   const posting = value && typeof value === 'object' ? value : null;
   if (!posting || !['L5', 'L6'].includes(posting.level) || !['not-found', 'ambiguous', 'closed'].includes(posting.outcome)) return false;
   const trail = Array.isArray(posting.trail) ? posting.trail : [];
   if (trail.some(code => RESEARCH_UNSETTLED_TRAIL.includes(code))) return false;
-  return posting.outcome === 'closed' || trail.includes('bridge-research');
+  return posting.outcome === 'closed' || trail.includes('bridge-research')
+    || trail.includes('comparative-none') || trail.includes('comparative-disagree');
 }

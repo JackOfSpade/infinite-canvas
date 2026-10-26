@@ -1,6 +1,5 @@
 // Shared production truth predicates used by the v2 content gate.
-import { targetCompanyNames, targetIntentCompanyNames } from './coverLetterChecks.js';
-export function targetIdentityNameLicensed(sentence, finding, ctx, { reportsNoPastWork, attributionTerms, sentenceAddressesTarget, groundingClauses, hasWorkIngWord, hasCandidateNonIntentClause, targetEmploymentIntentClause, speaksOnlyOfApplicationIntent, nonEmploymentTargetReference }) {
+export function targetIdentityNameLicensed(sentence, finding, ctx, { reportsNoPastWork, attributionTerms, sentenceAddressesTarget }) {
   if (finding?.code !== 'name') return false;
   const text = String(sentence ?? '');
   const noPastWork = reportsNoPastWork(text);
@@ -40,61 +39,10 @@ export function targetIdentityNameLicensed(sentence, finding, ctx, { reportsNoPa
   // Boards sometimes append a product description to the employer name.
   // Its exact prefix is a target reference too, including its possessive;
   // this licenses no claim that the candidate previously worked there.
-  const companyNames = targetCompanyNames(company).filter(name => name.length >= 3);
-  // A distinctive brand prefix is licensed only by a complete joining intent
-  // or application opener. A sibling claim keeps the whole sentence outside
-  // these closed frames, and ordinary employment receives no new exemption.
-  if (targetEmploymentIntentClause(text, company)
-    || (typeof speaksOnlyOfApplicationIntent === 'function' && speaksOnlyOfApplicationIntent(text, company, ctx?.targetTitle))) {
-    for (const name of targetIntentCompanyNames(company).filter(name => !companyNames.includes(name))) {
-      const pattern = new RegExp(`(?<![\\p{L}\\p{N}])${phrase(name)}(?:['’]s)?(?![\\p{L}\\p{N}])`, 'giu');
-      for (const match of text.matchAll(pattern)) spans.push([match.index, match.index + match[0].length]);
-    }
-  }
-  const need = String.raw`(?:needs?|requirements?|priorit(?:y|ies)|goals?|mission|roadmap|challenges?|problems?|standards?)`;
-  const word = String.raw`[\p{L}'’-]+`;
-  const needPhrase = new RegExp(`^\\s+(?:${word}\\s+){0,2}${need}\\b`, 'iu');
-  const clauseWindow = (at, end) => {
-    let start = 0;
-    for (const clause of groundingClauses(text)) if (clause.start <= at) start = Math.max(start, clause.start);
-    for (const boundary of text.slice(0, at).matchAll(/\b(?:which|that|who|and|so)\s+/giu)) start = Math.max(start, boundary.index + boundary[0].length);
-    return { before: text.slice(start, at), text: text.slice(start, end) };
-  };
+  const companyNames = [...new Set([company, company.split(/\s+[-–—|]\s+/u)[0]])].filter(name => name.length >= 3);
   for (const name of companyNames) if (sentenceAddressesTarget(text, name)) {
     const pattern = new RegExp(`(?<![\\p{L}\\p{N}])${phrase(name)}(?:['’]s)?(?![\\p{L}\\p{N}])`, 'giu');
-    for (const match of text.matchAll(pattern)) {
-      const at = match.index;
-      const end = at + match[0].length;
-      const after = text.slice(end);
-      const noun = after.match(needPhrase);
-      const window = clauseWindow(at, end + (noun?.[0].length || 0));
-      const possessive = /['’]s$/iu.test(match[0]);
-      const subjectPosition = !possessive && /^\s*$/u.test(window.before);
-      // A new employer-subject clause cannot attribute earlier candidate work
-      // to the employer. Check this before the legacy no-past-work shortcut,
-      // which intentionally does not classify present/irregular work verbs.
-      const earlier = text.slice(0, at).replace(/[,;]?\s*(?:and|so|which|that|who)\s*$/iu, '').trim();
-      if (subjectPosition && hasCandidateNonIntentClause(earlier, company, ctx?.targetTitle)
-        && !nonEmploymentTargetReference(earlier)) continue;
-      if (noPastWork || forwardReference(at)) { spans.push([at, end]); continue; }
-      const deny = /\b(?:at|for|with|inside|within|on|using|via|under|from|during|after|since)\s+$/iu.test(window.before)
-        || /\b(?:joined|joining|served|serves|helped|helps|worked)\s+$/iu.test(window.before)
-        || (possessive && /^\s+(?:platform|product|customers|users|codebase|stack|system|infrastructure|data|pipeline|app|service)\b/iu.test(after));
-      if (deny) continue;
-      const intent = targetEmploymentIntentClause(window.text.trim(), company)
-        && (/\b(?:join|help|contribute\s+to|support|bring\b[^.!?;]*\bto)\s+$/iu.test(window.before)
-          || /\blook(?:ing)?\s+forward\s+to\s+(?:joining|helping|contributing\s+to|supporting|bringing\b[^.!?;]*\bto)\s+$/iu.test(window.before));
-      const plain = reportsNoPastWork(window.text) && !hasWorkIngWord(window.before);
-      const fit = Boolean(noun) && /\b(?:meets|meet|fits|fit|matches|match|suits|suit|addresses)\s+$/iu.test(window.before);
-      const ownedNeed = possessive && Boolean(noun) && ((/^\s*$/u.test(window.before)
-        && /^\s+(?:is|are|needs|wants|asks)\b/iu.test(after.slice(noun[0].length)))
-        || /\b(?:is|are|needs|wants|asks)\s+$/iu.test(window.before));
-      const clauseTail = after.split(/[,;.!?]|\b(?:which|that|who|and|so)\b/iu)[0];
-      const subject = subjectPosition
-        && !/\b(?:i|we|me|my|our|us)\b/iu.test(clauseTail)
-        && /^\s+(?:needs|wants|asks|seeks|requires|expects|hires|is\s+(?:hiring|looking|seeking|building)|has\s+(?:a|an)\s+(?:need|mission|roadmap|goal|priority)|exists)\b/iu.test(after);
-      if (intent || (plain && (fit || ownedNeed || subject))) spans.push([at, end]);
-    }
+    for (const match of text.matchAll(pattern)) if (noPastWork || forwardReference(match.index)) spans.push([match.index, match.index + match[0].length]);
   }
   if (!spans.length || !finding.term) return false;
   const pattern = new RegExp(`(?<![\\p{L}\\p{N}])${phrase(finding.term)}(?![\\p{L}\\p{N}])`, 'giu');

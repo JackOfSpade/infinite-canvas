@@ -1,5 +1,3 @@
-import { targetCompanyNames } from './coverLetterChecks.js';
-
 /**
  * Claim-versus-evidence grounding for generated application prose.
  *
@@ -1524,19 +1522,12 @@ function describeQuantityFollower(finding) {
 }
 
 /** The writer-facing sentence for one finding. */
-export function describeClaimFinding(unit, finding, { targetCompany = '' } = {}) {
+export function describeClaimFinding(unit, finding) {
   const q = value => `“${value}”`;
-  const tokens = value => String(value ?? '').replace(/['’]s\b/giu, '').toLowerCase().match(/[\p{L}\p{N}]+/gu) || [];
-  const term = tokens(finding.term);
-  const employerTerm = term.length > 0 && targetCompanyNames(targetCompany).some(name => {
-    const company = tokens(name);
-    return company.some((_, index) => term.every((word, offset) => company[index + offset] === word));
-  });
   switch (finding.code) {
     case 'target-employment-frame':
-      return `${unit} names ${q(finding.term)}, the employer this letter is addressed to. Name it only as the owner of a need your work meets, or as a place you would join, never as a place your work happened; do not say you worked, built or helped at, for or on it.`;
+      return `${unit} states work at ${q(finding.term)}, which your cited career data does not say. Do not describe your own work as happening at the employer you are applying to.`;
     case 'name':
-      if (employerTerm) return `${unit} names ${q(finding.term)}, the employer this letter is addressed to. Name it only as the owner of a need your work meets, or as a place you would join, never as a place your work happened; do not say you worked, built or helped at, for or on it.`;
       return `${unit} names ${q(finding.term)}, which none of its bound career-data quotes states. Every capitalized or acronym term (a tool, product, organization, title, program, or place) must occur in one of the quotes the unit cites, so quote the passage that names it or leave the name out.`;
     case 'use':
       return `${unit} claims hands-on use of ${q(finding.term)}, but its bound career-data quotes ${finding.reason === 'alternative' ? 'offer it only as one of several alternatives' : 'only evaluate it, attribute it to another party, or describe a system someone else chose or owned'}. State use of a tool only where a cited quote says the candidate used that tool.`;

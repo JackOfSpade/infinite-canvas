@@ -2,6 +2,8 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { comparisonRow } from './official-posting-r3-resolver.js';
+import { comparativeServiceFixture, comparisonVisible, serviceComparisonAnswer } from './official-posting-r3-service.js';
 import { createOfficialPostingStore } from '../../electron/ipc/officialPostingStore.js';
 import { getPreparedOfficialPosting, prepareOfficialPostingForGeneration } from '../../electron/ipc/officialPostingGeneration.js';
 
@@ -271,6 +273,32 @@ export default [
         time += 24 * 60 * 60 * 1000;
         await prepareOfficialPostingForGeneration(args(job), options); assert.equal(calls, 1);
       }, { now: () => time });
+    },
+  },
+  {
+    name: 'Amendment 5 Generate forwards comparative callers through the real single-row service and stores host-verified text',
+    async run() {
+      await withStore(async store => {
+        const fixture = comparativeServiceFixture([{ id: 'one' }]); const job = comparisonRow(); const calls = [];
+        const prepared = await prepareOfficialPostingForGeneration(args(job), { store, fetch: fixture.fetch, bridgeStatus: () => status(true),
+          callRaw: fixture.research, callMatch: async (prompt, options) => {
+            calls.push(options.manualHandoff);
+            return JSON.stringify(serviceComparisonAnswer(comparisonVisible(prompt)));
+          } });
+        assert.equal(prepared.officialPosting.level, 'L1'); assert.equal(prepared.officialPosting.sourceUrl, fixture.candidateUrls[0]);
+        assert.ok(prepared.officialPosting.trail.includes('comparative-match'));
+        assert.equal(prepared.telemetry.officialPosting.comparisons, 1);
+        assert.equal(prepared.telemetry.officialPosting.comparativeAgreements, 1);
+        assert.equal(prepared.telemetry.officialPosting.comparisonOptions[1], 1);
+        assert.equal(prepared.telemetry.officialPosting.comparativeMatches, 1);
+        assert.equal(/Northwind|freight|Quote|prompt|evidence/u.test(JSON.stringify(prepared.telemetry)), false);
+        assert.deepEqual(calls.map(call => call.comparisonRun), ['A', 'B']);
+        assert.equal(calls[0].comparisonGroup, calls[1].comparisonGroup);
+        const trusted = getPreparedOfficialPosting(prepared.resolutionId, job);
+        assert.ok(trusted.description.includes('nightly route allocation across coastal depots'));
+        assert.equal(trusted.applyUrl, fixture.candidateUrls[0]);
+        assert.ok((await store.find(job)).officialPosting.trail.includes('comparative-choice-p1'));
+      });
     },
   },
 ];

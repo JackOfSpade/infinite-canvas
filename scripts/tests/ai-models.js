@@ -24,20 +24,23 @@ import { APPLICATION_COVER_LETTER_SCHEMA, APPLICATION_DIRECT_COVER_LETTER_SCHEMA
 
 export default [
   {
-    name: 'llm: official posting research and comparison tasks have bounded item-count guidance',
+    name: 'llm: official posting research sizes by rows and comparison sizes by bounded options',
     run() {
       const known = getKnownTaskIds();
       for (const task of ['job-official-posting-research', 'job-official-posting-match']) {
         assert(known.has(task), `${task} must never fall through to the default task`);
-        for (const itemCount of [0, 1, 3, 12, 1000]) {
-          const cap = taskMaxTokensFor(task, { itemCount });
+        for (const size of [0, 1, 3, 8, 12, 1000]) {
+          const cap = taskMaxTokensFor(task, task === 'job-official-posting-match' ? { optionCount: size } : { itemCount: size });
           assert(Number.isFinite(cap) && cap > 0 && cap <= 15360, `${task} has a bounded output cap`);
         }
       }
       assert(taskMaxTokensFor('job-official-posting-research', { itemCount: 1 }) === 1724);
       assert(taskMaxTokensFor('job-official-posting-research', { itemCount: 12 }) === 9424);
-      assert(taskMaxTokensFor('job-official-posting-match', { itemCount: 1 }) === 2824);
-      assert(taskMaxTokensFor('job-official-posting-match', { itemCount: 12 }) === 15360);
+      const matchCaps = Array.from({ length: 8 }, (_, index) => taskMaxTokensFor('job-official-posting-match', { optionCount: index + 1 }));
+      assert(matchCaps.every((cap, index) => index === 0 || cap > matchCaps[index - 1]), 'each additional option has output room for its distinguishing evidence');
+      assert(taskMaxTokensFor('job-official-posting-match', { optionCount: 0 }) === matchCaps[0]);
+      assert(taskMaxTokensFor('job-official-posting-match', { optionCount: 1000 }) === matchCaps[7], 'an invalid option count cannot grow the output budget past eight options');
+      assert(taskMaxTokensFor('job-official-posting-match', { optionCount: 1, itemCount: 12 }) === matchCaps[0], 'the single-row comparison budget depends on options, not research batch size');
     },
   },
 {

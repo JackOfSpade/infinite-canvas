@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import {
   OFFICIAL_POSTING_LEVELS, OFFICIAL_POSTING_OUTCOMES, OFFICIAL_POSTING_ROW_FIELDS,
-  OFFICIAL_POSTING_TRAIL, SALARY_PROVENANCES,
+  OFFICIAL_POSTING_TRAIL, SALARY_PROVENANCES, boundedOfficialPostingTrail, officialPostingComparativeTrail, officialResearchSettled,
 } from '../../electron/ipc/officialPostingFields.js';
 import {
   __pastePromptForTests, __projectLocalApplicationJobForAcceptanceHarness as safeJob,
@@ -63,6 +63,39 @@ function generateScope() {
 }
 
 export default [
+  {
+    name: 'comparative retryability survives saturation by other comparison trail codes',
+    run() {
+      const decoration = OFFICIAL_POSTING_TRAIL.filter(code => code.startsWith('comparative-')
+        && !['comparative-invalid', 'comparative-unavailable'].includes(code));
+      for (const failure of ['comparative-invalid', 'comparative-unavailable', 'comparative-truncated', 'insufficient-text']) {
+        const trail = boundedOfficialPostingTrail([...decoration, failure]);
+        assert.ok(trail.length <= 32);
+        assert.equal(new Set(trail).size, trail.length);
+        assert.ok(trail.includes(failure));
+        assert.equal(officialResearchSettled({ level: 'L5', outcome: 'not-found', employer: 'Northwind Labs', trail }), false);
+      }
+    },
+  },
+  {
+    name: 'comparative decision records preserve bounded choices and validity while invalid comparisons remain retryable',
+    run() {
+      const flags = officialPostingComparativeTrail({ validA: true, validB: true, choiceA: 'P2', choiceB: 'P2' });
+      const trail = ['comparative-match', ...flags];
+      assert.deepEqual(safeJob(row({ officialPosting: posting({ trail }) })).officialPosting.trail, trail);
+      assert.ok(trail.includes('comparative-choice-p2'));
+      assert.ok(trail.includes('comparative-a-valid')); assert.ok(trail.includes('comparative-b-valid'));
+      assert.ok(officialPostingComparativeTrail({ choiceA: 'P1 PRIVATE TEXT', validA: 1 }).every(code => OFFICIAL_POSTING_TRAIL.includes(code)));
+      const miss = { level: 'L5', outcome: 'not-found', employer: 'Northwind Labs', trail: ['comparative-none'] };
+      assert.equal(officialResearchSettled(miss), true);
+      for (const code of ['comparative-invalid', 'comparative-unavailable', 'comparative-truncated', 'insufficient-text']) {
+        assert.equal(officialResearchSettled({ ...miss, trail: [...miss.trail, code] }), false);
+        assert.deepEqual(safeJob(row({ officialPosting: posting({ trail: [code] }) })).officialPosting.trail, [code]);
+      }
+      assert.equal(officialResearchSettled({ ...miss, outcome: 'ambiguous', trail: ['comparative-disagree'] }), true);
+      assert.equal(safeJob(row({ officialPosting: posting({ comparison: { evidence: 'PRIVATE TEXT' } }) })).officialPosting, undefined);
+    },
+  },
   {
     name: 'official-posting shared fields survive every whitelist and legacy card migration without drift',
     run() {

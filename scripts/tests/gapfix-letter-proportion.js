@@ -1035,7 +1035,8 @@ export default [
           assert(!OLDER_READINGS.test(text), `${where}: the fixtures avoid the older first-person and career-action cues (${text})`);
         }
 
-        // NAME, by the employer's name. A: no posting names it. B: the posting names it. C: the posting names another employer.
+        // Restored pre-feature posting-name rules: the employer name may
+        // address the target when the posting names that employer.
         const employed = `${entry.stem} at ${entry.name}.`;
         assert(/names “/u.test(verdict(employed)) && /names “/u.test(verdict(employed, entry.employer(entry.otherName))), `${where}/employer A: rejected without the posting`);
         assert(verdict(employed, entry.employer(entry.name)) === '', `${where}/employer B: admitted once the posting names it (got ${verdict(employed, entry.employer(entry.name))})`);

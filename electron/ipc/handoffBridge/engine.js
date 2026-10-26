@@ -33,6 +33,7 @@ import {
   supersededStageNote,
 } from './framing.js';
 import { MAX_WORKER_POOL_SIZE, recommendWorkerPool } from './workerPool.js';
+import { observedChatContext, registerObservedWorkerAvailability } from './observedChatContext.js';
 import { APPLICATION_QUEUE_STAGES } from './telemetry.js';
 import { resolveHandoffConcurrency } from '../../../src/utils/handoffScheduler.js';
 
@@ -520,6 +521,8 @@ export function createHandoffEngine({
       // Worker ordinals survive a deliberate replacement. This process-local
       // incarnation identifies the exact chat capability that served a stage.
       contextIncarnation: 1,
+      observedConversation: null,
+      observedLaunchPending: false,
       // Internal-only boundary state. The public projection is the closed
       // quiet reason, never this flag or a capability/exclusion token.
       freshContextRequired: false,
@@ -2006,10 +2009,74 @@ export function createHandoffEngine({
     return MARKETPLACE_PUSH_TASKS.has(task) ? scope.marketplace : scope.scoring;
   }
 
+  function pushComparisonContext(expectedEpoch, worker, generation) {
+    const incarnation = worker?.contextIncarnation;
+    const observed = worker?.observedConversation;
+    return {
+      conversationKey: observed?.conversationKey || '',
+      observed: Boolean(observed),
+      pending: worker?.observedLaunchPending === true,
+      // Only the launcher can prove New. Continue retains the observed id.
+      pristine: observed?.fresh === true && worker.bytesServed === 0 && worker.bytesReceived === 0,
+      availableWorkerIds: () => epochCurrent(expectedEpoch, generation) ? liveEpochWorkers(expectedEpoch)
+        .filter(candidate => candidate.id !== worker?.id && candidate.observedConversation
+          && (candidate.presented === true || Number.isFinite(candidate.firstCallAt))
+          && candidate.freshContextRequired !== true && candidate.idleSince == null && candidate.activeTask !== true
+          && !(candidate.submitInFlight > 0) && (candidate.getInFlight == null || workerIsPollingAfterWait(candidate))
+          && !workerIsQuiet(candidate) && !lanes.some(lane => laneAwaitingAnswer(lane, candidate)))
+        .map(candidate => candidate.id) : [],
+      isCurrent: () => epochCurrent(expectedEpoch, generation) && worker?.contextIncarnation === incarnation
+        && worker?.observedConversation === observed,
+    };
+  }
+
+  function beginObservedChat({ linkId, sessionCode } = {}) {
+    const worker = workerForSession(epoch, linkId, sessionCode);
+    if (!workerIsLive(worker)) return false;
+    worker.observedConversation = null;
+    const stamp = safeNow(now);
+    if (worker.observedLaunchPending !== true || !Number.isFinite(worker.observedLaunchStartedAt)
+      || stamp - worker.observedLaunchStartedAt >= CONSTANTS.CHAT_LAUNCH_PRESENTATION_TIMEOUT_MS) worker.observedLaunchStartedAt = stamp;
+    worker.observedLaunchPending = true;
+    return true;
+  }
+  function confirmObservedChat({ linkId, sessionCode, observation } = {}) {
+    const worker = workerForSession(epoch, linkId, sessionCode);
+    const proof = observedChatContext(observation);
+    if (!workerIsLive(worker)) return false;
+    if (worker.observedLaunchPending !== true || !proof || proof.fresh !== true) {
+      worker.observedConversation = null;
+      worker.observedLaunchPending = false;
+      worker.observedLaunchStartedAt = null;
+      return false;
+    }
+    worker.observedConversation = proof;
+    worker.observedLaunchPending = false;
+    worker.observedLaunchStartedAt = null;
+    return true;
+  }
+  function cancelObservedChat({ linkId, sessionCode } = {}) {
+    const worker = workerForSession(epoch, linkId, sessionCode);
+    if (!workerIsLive(worker)) return false;
+    worker.observedConversation = null;
+    worker.observedLaunchPending = false;
+    worker.observedLaunchStartedAt = null;
+    return true;
+  }
+
   function framePushGet(raw, generation = sourceGeneration, expectedEpoch = epoch, worker = expectedEpoch) {
     if ((!scope.scoring && !scope.marketplace) || !epochCurrent(expectedEpoch, generation)) return makeResultBody('retry');
     const decision = raw && typeof raw === 'object' ? raw : { status: 'retry' };
     const remaining = combinedRemaining(decision.remaining);
+    if (decision.status === 'fresh_context_required') {
+      if (worker) worker.freshContextRequired = true;
+      markChatStopped(worker);
+      return makeResultBody('session_full', { remaining });
+    }
+    if (decision.status === 'comparative_unavailable') {
+      markWorkerWaiting(worker);
+      return makeResultBody('waiting', { retryAfterSeconds: 3, remaining });
+    }
     if (decision.status === 'served') {
       if (!pushTaskInScope(decision.task)) {
         // The task was actually served by the push source (it is already
@@ -2087,6 +2154,7 @@ export function createHandoffEngine({
         epoch: expectedEpochId,
         owner: pushOwner,
         worker: worker?.id,
+        comparisonContext: pushComparisonContext(expectedEpoch, worker, generation),
         keepWaiting: expectedEpoch?.poolStarted === true,
       });
       if (epochCurrent(expectedEpoch, generation)) return result;
@@ -2606,6 +2674,7 @@ export function createHandoffEngine({
     if (lane?.retry) return makeResultBody('retry');
     if (lane) return serveLane(lane, generation, expectedEpoch, worker, claimId);
 
+    if ((scope.scoring || scope.marketplace) && pushDecision?.status === 'fresh_context_required') return framePushGet(pushDecision, generation, expectedEpoch, worker);
     const pushWorking = (scope.scoring || scope.marketplace) && pushDecision?.status === 'waiting';
     const pushNeedsUser = (scope.scoring || scope.marketplace) && pushDecision?.status === 'needs_user';
     // A fresh-context transition is a deliberate session boundary, not a
@@ -2639,6 +2708,7 @@ export function createHandoffEngine({
       lane = scope.applications ? await pickVerifiedLane(chooseFreshApplication, generation, expectedEpoch, worker, claimId) : null;
       if (lane?.retry) return makeResultBody('retry');
       if (lane) return serveLane(lane, generation, expectedEpoch, worker, claimId);
+      if ((scope.scoring || scope.marketplace) && pushDecision?.status === 'fresh_context_required') return framePushGet(pushDecision, generation, expectedEpoch, worker);
       const stillWorking = ((scope.scoring || scope.marketplace) && pushDecision?.status === 'waiting')
         || (scope.applications && worker?.freshContextRequired !== true && lanes.some(laneBusy));
       if (!stillWorking) {
@@ -3264,6 +3334,7 @@ export function createHandoffEngine({
               budgetMs: successorBudgetMs,
               owner: pushOwner,
               worker: worker?.id,
+              comparisonContext: pushComparisonContext(expectedEpoch, worker, generation),
               keepWaiting: expectedEpoch?.poolStarted === true,
             }),
             successorBudgetMs,
@@ -3274,7 +3345,14 @@ export function createHandoffEngine({
           try { push?.closeEpoch?.(pushEpochId(expectedEpoch)); } catch { /* stale state is best-effort */ }
           return makeResultBody('retry');
         }
-        if (successor?.status && successor.status !== 'queue_empty') next = framePushGet(successor, generation, expectedEpoch, worker);
+        // The push-only successor probe cannot decide that an unread or
+        // available application lane needs this chat to stop. Let the next
+        // GET apply the same application-before-fresh-context ordering.
+        if (successor?.status === 'fresh_context_required' && scope.applications
+          && lanes.some(lane => ['unread', 'awaiting'].includes(lane.phase) && canAssign(lane, worker))) {
+          next = makeResultBody('waiting', { retryAfterSeconds: workerRetryAfterSeconds(expectedEpoch, worker),
+            remaining: combinedRemaining(successor.remaining) });
+        } else if (successor?.status && successor.status !== 'queue_empty') next = framePushGet(successor, generation, expectedEpoch, worker);
       }
       // A bounded successor probe can legitimately finish while more work is
       // materialising. Preserve the established top-level accepted contract,
@@ -3308,22 +3386,25 @@ export function createHandoffEngine({
   function runPushSubmit(code, text, generation = sourceGeneration, expectedEpoch = epoch, worker = expectedEpoch) {
     if ((!scope.scoring && !scope.marketplace) || !epochCurrent(expectedEpoch, generation)) return null;
     const epochId = pushEpochId(expectedEpoch);
-    const key = verdictKey(`push\n${epochId ?? ''}\n${worker?.id ?? ''}\n${codeGuard.key(code)}`, text);
+    const comparisonContext = pushComparisonContext(expectedEpoch, worker, generation);
+    const key = verdictKey(`push\n${epochId ?? ''}\n${worker?.id ?? ''}\n${worker?.contextIncarnation ?? ''}\n${codeGuard.key(code)}`, text);
     const cached = pushVerdicts.get(key);
     if (cached && safeNow(now) - cached.at <= CONSTANTS.VERDICT_CACHE_MS) return cached;
     let rawPromise;
     rawPromise = Promise.resolve()
       .then(() => semaphore.acquire())
-      .then(() => epochCurrent(expectedEpoch, generation)
-        ? push.submit({ epoch: epochId, handoffCode: code, response: text, worker: worker?.id })
+      .then(() => epochCurrent(expectedEpoch, generation) && comparisonContext.isCurrent()
+        ? push.submit({ epoch: epochId, handoffCode: code, response: text, worker: worker?.id, comparisonContext })
         : { status: 'retry' })
       .catch(() => ({ status: 'retry' }))
       .finally(() => semaphore.release());
     const record = { at: safeNow(now), rawPromise, framedPromise: null, epochId, generation, expectedEpoch, worker };
     pushVerdicts.set(key, record);
-    rawPromise.finally(() => {
+    rawPromise.then(decision => {
       const current = pushVerdicts.get(key);
-      if (epochCurrent(expectedEpoch, generation) && current === record && safeNow(now) - current.at > CONSTANTS.VERDICT_CACHE_MS) pushVerdicts.delete(key);
+      if (epochCurrent(expectedEpoch, generation) && current === record
+        && ((decision?.comparative === true && decision.status === 'rejected')
+          || safeNow(now) - current.at > CONSTANTS.VERDICT_CACHE_MS)) pushVerdicts.delete(key);
     });
     return record;
   }
@@ -3629,10 +3710,14 @@ export function createHandoffEngine({
         recopied: true,
         sessionCode: target.starterKey,
         chatOrdinal: target.n,
-        commit() {
+        commit(observation) {
           // Same chat, same key: nothing rotates. Refuse only if that chat was
           // replaced while the clipboard was being written.
           if (epoch !== target) return false;
+          const proof = observedChatContext(observation);
+          if (proof && proof.fresh !== true) return false;
+          target.observedConversation = proof;
+          target.observedLaunchPending = false;
           humanAction();
           log('starter_recopied', { chatOrdinal: target.n });
           return true;
@@ -3659,6 +3744,8 @@ export function createHandoffEngine({
       // re-copy above). Only a 'new' press hands out a re-copyable starter.
       starterKey: kind === 'new' ? sessionCode : null,
       mintedBy: kind === 'new' ? 'new' : 'continue',
+      observedConversation: null,
+      observedLaunchPending: false,
       presented: false,
       mintedAt: safeNow(now),
       bytesServed: 0,
@@ -3687,13 +3774,19 @@ export function createHandoffEngine({
       copied: true,
       sessionCode,
       chatOrdinal: prepared.n,
-      commit() {
+      commit(observation) {
         if (committed) return false;
         committed = true;
         // A later preparation may be copied and committed first. Refuse the
         // older capability instead of rotating the live chat backwards onto
         // an already-used ordinal (and therefore an aliased push namespace).
         if (prepared.n <= epochOrdinal) { prepared.starterKey = null; return false; }
+        const proof = observedChatContext(observation);
+        // A successful Continue must keep the prior browser conversation id;
+        // a clipboard capability alone never establishes any lineage.
+        if (proof && (proof.fresh !== (kind === 'new')
+          || (kind === 'continue' && !sameHex(proof.conversationKey, target?.observedConversation?.conversationKey)))) return false;
+        prepared.observedConversation = proof;
         retireEpoch(kind === 'continue' ? 'continued' : 'rotated');
         epochOrdinal = prepared.n;
         epoch = prepared;
@@ -3719,14 +3812,14 @@ export function createHandoffEngine({
   async function newChat(args = {}) {
     const prepared = await prepareChat({ ...args, kind: 'new' });
     if (!prepared.copied) return prepared;
-    prepared.commit();
+    prepared.commit(args?.observation);
     return { copied: true, sessionCode: prepared.sessionCode, chatOrdinal: prepared.chatOrdinal, ...(prepared.recopied ? { recopied: true } : {}) };
   }
 
   async function continueChat(args = {}) {
     const prepared = await prepareChat({ ...args, kind: 'continue' });
     if (!prepared.copied) return prepared;
-    prepared.commit();
+    prepared.commit(args?.observation);
     return { copied: true, sessionCode: prepared.sessionCode, chatOrdinal: prepared.chatOrdinal };
   }
 
@@ -3962,6 +4055,8 @@ export function createHandoffEngine({
     // the key is presented, called, paused, relinked, or expired.
     if (worker?.starterExported === true) {
       if (!recopiable(worker, linkId)) return { copied: false, status: worker.presented ? 'session_started' : 'starter_copied' };
+      worker.observedConversation = null;
+      worker.observedLaunchPending = false;
       return {
         copied: true,
         recopied: true,
@@ -3977,6 +4072,8 @@ export function createHandoffEngine({
     // This precedes returning the session code. ui.js abandons this temporary
     // reservation if its main-process clipboard write cannot complete.
     worker.starterExported = true;
+    worker.observedConversation = null;
+    worker.observedLaunchPending = false;
     worker.restartPending = false;
     return {
       copied: true,
@@ -4067,6 +4164,9 @@ export function createHandoffEngine({
     worker.restartPending = true;
     worker.contextIncarnation = Math.min(Number.MAX_SAFE_INTEGER,
       (Number.isSafeInteger(worker.contextIncarnation) ? worker.contextIncarnation : 0) + 1);
+    worker.observedConversation = null;
+    worker.observedLaunchPending = false;
+    worker.observedLaunchStartedAt = stamp;
     worker.freshContextRequired = false;
     worker.mintedBy = 'new';
     worker.presented = false;
@@ -5221,6 +5321,7 @@ export function createHandoffEngine({
   async function close() {
     sourceGeneration += 1;
     closed = true;
+    releaseObservedWorkerAvailability();
     pushDiscoveryCurrent = false;
     verdicts.clear();
     pushVerdicts.clear();
@@ -5245,6 +5346,14 @@ export function createHandoffEngine({
   if (lanes.some(lane => restoreProbeDue(lane, safeNow(now)))) void probeRestoredLanes().catch(() => undefined);
   loadLedger();
 
+  const releaseObservedWorkerAvailability = registerObservedWorkerAvailability(() => !closed && !paused
+    && (scope.scoring || scope.marketplace) && liveEpochWorkers().some(worker => worker.observedConversation
+      && worker.idleSince == null && worker.freshContextRequired !== true),
+  () => !closed && !paused && (scope.scoring || scope.marketplace) && liveEpochWorkers().some(worker =>
+    (worker.observedLaunchPending === true || worker.restartPending === true)
+      && Number.isFinite(worker.observedLaunchStartedAt)
+      && safeNow(now) - worker.observedLaunchStartedAt < CONSTANTS.CHAT_LAUNCH_PRESENTATION_TIMEOUT_MS));
+
   return Object.freeze({
     get,
     submit,
@@ -5265,6 +5374,7 @@ export function createHandoffEngine({
     notePresented,
     noteLink,
     prepareChat,
+    beginObservedChat, confirmObservedChat, cancelObservedChat,
     hint,
     restore,
     snapshot,

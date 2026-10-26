@@ -63,7 +63,7 @@ export default [
         `I would join ${COMPANY} as a staff engineer.`, `I would bring expertise in dispatch rosters to ${COMPANY}.`,
         `I would bring proven dispatch work to ${COMPANY}.`, `I would bring extensive dispatch work to ${COMPANY}.`,
         `I would bring leadership of dispatch teams to ${COMPANY}.`, `I would bring dispatch rosters to ${COMPANY} from a prior company.`,
-        `I am eager to rejoin ${COMPANY}.`, `I would return to ${COMPANY}.`, `I would continue dispatch rosters at ${COMPANY}.`,
+        ...['rejoin', 're-join', 're join', 're‑join'].map(verb => `I am eager to ${verb} ${COMPANY}.`), `I would return to ${COMPANY}.`, `I would continue dispatch rosters at ${COMPANY}.`,
         `I would stay at ${COMPANY}.`, `I would remain at ${COMPANY}.`, `I would be back at ${COMPANY}.`,
         `I would be glad to have rebuilt dispatch rosters at ${COMPANY}.`, `I would be glad to have run dispatch rosters at ${COMPANY}.`,
         `I would bring dispatch rosters I had built to ${COMPANY}.`,
@@ -143,12 +143,12 @@ export default [
     },
   },
   {
-    name: 'R2 listing-only closing preserves plain intent company variants and cited employer-facing work through assembly',
+    name: 'R2 listing-only closing preserves plain intent and exact frozen employer-facing names through assembly',
     run() {
       for (const company of [COMPANY, `${COMPANY}, Inc.`, `${COMPANY} (NWL)`]) {
         for (const text of [LISTING, `I would join ${COMPANY}.`, `I am excited to join ${COMPANY}.`,
           `I look forward to joining ${COMPANY}.`, `I would bring dispatch rosters to ${COMPANY}.`,
-          `${COMPANY}'s team needs dispatch rosters for freight routes.`]) {
+          `${company}'s team needs dispatch rosters for freight routes.`]) {
           const item = fixture(text, { company }); const result = checks(item);
           assert.equal(result.closing.eligible, true, `${company}: ${text}: ${JSON.stringify(result.closing.corrections)}`);
           assert.deepEqual(result.drafting, []); assert.deepEqual(result.stage, []);
@@ -157,6 +157,7 @@ export default [
           assert.deepEqual(assembled.qualityReview.sourceGrounding.coverLetterParagraphs[1].jobListingQuotes, [LISTING]);
         }
       }
+      rejected(`${COMPANY}'s team needs dispatch rosters for freight routes.`, { company: `${COMPANY} (NWL)` });
       const modern = fixture(`I would join ${COMPANY}.`); modern.input.applicationProtocol = 'write-then-verify.v2';
       assert.equal(assemblePasteApplicationResult(modern).qualityReview, null);
       const named = fixture('I would join Principal Staff Works.', { company: 'Principal Staff Works' });

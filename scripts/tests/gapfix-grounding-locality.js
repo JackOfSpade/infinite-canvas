@@ -490,9 +490,7 @@ export default [
           stem: 'nightly pipelines load appointment and billing records from three clinic scheduling systems into one reporting database', tail: 'billing records', verb: 'I run nightly pipelines that load appointment and billing records from three clinic scheduling systems into one reporting database' },
       ];
       for (const d of domains) {
-        // Re-applying to an approved former employer keeps the structural
-        // employment guard from pre-empting this test of posting-name locality.
-        const options = tool => ({ postingText: d.posting(tool), targetCompany: d.company, approvedOrganizations: [d.company] });
+        const options = tool => ({ postingText: d.posting(tool), targetCompany: d.company });
         const v = (text, tool = d.tool) => verdict(text, [d.quote], [], options(tool));
         const Stem = `${d.stem.charAt(0).toUpperCase()}${d.stem.slice(1)}`;
         // B: the round-1 shape, an impersonal sentence addressed to the target, still gets the posting's name.
@@ -510,7 +508,7 @@ export default [
         ]) {
           if (text.includes(`at ${d.company}`)) {
             const unapproved = verdict(text, [d.quote], [], { postingText: d.posting(d.tool), targetCompany: d.company });
-            assert(/the employer this letter is addressed to/u.test(unapproved), `${d.key}/A: an unapproved target employment frame is rejected before tool grounding`);
+            assert(NAMES.test(unapproved) && unapproved.includes(`“${d.tool}”`), `${d.key}/A: the restored rules still reject the unsupported tool beside the target name`);
           }
           const got = v(text);
           assert(NAMES.test(got) && got.includes(`“${d.tool}”`), `${d.key}/A: a first-person clause gets no posting name (${text}; got ${got || 'acceptance'})`);
@@ -742,9 +740,10 @@ export default [
       const quote = ['Compared on-time delivery rates for twelve carriers over six months for the weekly rotation.'];
       const lead = 'I compared on-time delivery rates for twelve carriers over six months.';
       assert(verdict(`${lead} I would run that comparison across your four distribution centers.`, quote) === '', 'an intent clause about the reader\'s sites is not a candidate claim');
-      // AMENDMENT-2 item 12 keeps first-person possessive counts grounded in every tense.
+      // The pre-feature target-owned count exemption also covers a modal
+      // possessive clause; candidate-owned and past-work counts stay grounded.
       const possessiveCount = `${lead} My carrier comparison would serve your four distribution centers.`;
-      assert(/states the count “four”/u.test(verdict(possessiveCount, quote)), 'a non-intent first-person clause cannot free a target-owned count');
+      assert(verdict(possessiveCount, quote) === '', 'the restored rules treat a modal count written as the reader\'s as the reader\'s');
       const countedQuote = ['Compared on-time delivery rates for twelve carriers over six months for the weekly rotation across four distribution centers.'];
       assert(verdict(possessiveCount, countedQuote) === '', 'the same count is accepted when its bound career quote states it for the same sites');
       assert(/states the count “four”/u.test(verdict(`${lead} My carrier comparison would serve my four distribution centers.`, quote)), 'the same count written as the candidate\'s is a claim');

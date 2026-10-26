@@ -210,8 +210,8 @@ const TASK_MAX_TOKENS = {
   'job-compensation-research': 4096,
   'job-official-posting-research': ({ itemCount = 1 } = {}) =>
     Math.min(MANUAL_AI_USABLE_OUTPUT_TOKENS, 1024 + Math.max(1, Math.floor(Number(itemCount) || 1)) * 700),
-  'job-official-posting-match': ({ itemCount = 1 } = {}) =>
-    Math.min(MANUAL_AI_USABLE_OUTPUT_TOKENS, 1024 + Math.max(1, Math.floor(Number(itemCount) || 1)) * 1800),
+  'job-official-posting-match': ({ optionCount = 1 } = {}) =>
+    Math.min(MANUAL_AI_USABLE_OUTPUT_TOKENS, 4096 + Math.min(8, Math.max(1, Math.floor(Number(optionCount) || 1))) * 900),
   // Location-based cohort consolidation makes this per-job structured output
   // materially larger than the old city-fragmented cohorts. 12,288 preserves
   // headroom through roughly 17 normal rows before the ceiling applies.
@@ -432,6 +432,8 @@ export async function callLLMText(prompt, opts = {}) {
     canStepBack: manualHandoff.canStepBack,
     stepBackLabel: manualHandoff.stepBackLabel,
     initialResponse: manualHandoff.initialResponse,
+    comparisonGroup: manualHandoff.comparisonGroup,
+    comparisonRun: manualHandoff.comparisonRun,
   });
   if (meta) meta.model = 'non-api-ai';
   return result;
@@ -478,6 +480,8 @@ export async function callLLMRaw(prompt, opts = {}) {
     canStepBack: manualHandoff.canStepBack,
     stepBackLabel: manualHandoff.stepBackLabel,
     initialResponse: manualHandoff.initialResponse,
+    comparisonGroup: manualHandoff.comparisonGroup,
+    comparisonRun: manualHandoff.comparisonRun,
   });
   if (meta) meta.model = 'non-api-ai';
   return result;
@@ -712,6 +716,8 @@ function normalizeOpts(opts) {
       canStepBack: suppliedManualHandoff.canStepBack === true,
       stepBackLabel: typeof suppliedManualHandoff.stepBackLabel === 'string' ? suppliedManualHandoff.stepBackLabel : '',
       initialResponse: typeof suppliedManualHandoff.initialResponse === 'string' ? suppliedManualHandoff.initialResponse : '',
+      comparisonGroup: suppliedManualHandoff.comparisonGroup,
+      comparisonRun: suppliedManualHandoff.comparisonRun,
     };
     const legacyReplay = opts.legacyReplay && typeof opts.legacyReplay === 'object'
       && typeof opts.legacyReplay.prompt === 'string'

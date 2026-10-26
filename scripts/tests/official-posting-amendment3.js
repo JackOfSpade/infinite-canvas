@@ -3,7 +3,7 @@ import {
   domainBrandMatchesEmployer, leadingTitleSegment, proveBidirectionalOwnership, registrableDomain,
 } from '../../electron/ipc/officialSourceHosts.js';
 import {
-  __debug, canonicalLeadUrl, descriptionOverlap, evaluateOfficialPostingMatch, flatPostingText, plainPostingText, selectOfficialPostingMatch, verifiedTieBreakerMatch,
+  __debug, canonicalLeadUrl, descriptionOverlap, evaluateOfficialPostingMatch, flatPostingText, plainPostingText, selectOfficialPostingMatch, buildOfficialPostingComparisonSet,
 } from '../../electron/ipc/officialPostingMatch.js';
 import { buildOfficialPostingMatchRequest, validateOfficialPostingMatchResponse } from '../../electron/ipc/officialPostingBridge.js';
 import { resolveOfficialPosting } from '../../electron/ipc/officialPostingResolver.js';
@@ -59,7 +59,24 @@ const NBSP = String.fromCharCode(160);
 const converted = (sentences, heading = 'RESPONSIBILITIES') => [heading, ...sentences.map((item, index) => (
   index % 3 === 0 ? `* ${item}` : index % 3 === 1 ? `${index}. ${item}` : `  - ${item}`))].join('\n');
 const joinGroups = (sentences, groups) => groups.map(group => group.map(index => sentences[index]).join(' '));
-const quoteAnswer = (pairs, extra = {}) => ({ sameJob: true, conflicts: [], ...extra, matchingPairs: pairs.map(([scrapedQuote, officialQuote]) => ({ scrapedQuote, officialQuote })) });
+const quoteAnswer = (pairs, extra = {}) => ({ choice: 'P1', conflicts: [], distinguishing: [], ...extra, evidence: pairs.map(([scrapedQuote, officialQuote]) => ({ scrapedQuote, officialQuote })) });
+const comparativeContext = (scrapedText, officialText, { peerDescriptions = [], rivalDescriptions = [] } = {}) => {
+  const job = row({ snippet: scrapedText });
+  const candidate = (id, description, title = job.title) => ({ title, employer: EMPLOYER, description, sourceUrl: `https://careers.northwind.test/job/${id}` });
+  const option = (id, description) => ({ id, title: job.title, location: job.location, status: 'live', description, candidate: candidate(id, description) });
+  return { job, options: [option('P1', officialText), ...rivalDescriptions.map((body, index) => option(`P${index + 2}`, body))],
+    peerCandidates: peerDescriptions.map((body, index) => candidate(`peer-${index}`, body, `Specialist ${index}`)) };
+};
+function verifiedComparativeEvidence(scrapedText, officialText, answer, settings = {}) {
+  const context = comparativeContext(scrapedText, officialText, settings);
+  // These normalization fixtures supply a complete distinguishing answer from
+  // their already quoted evidence; omission and wrong-source cases live in the bridge group.
+  const distinguishing = context.options.slice(1).flatMap(option => {
+    const pair = answer.evidence.find(pair => !flatPostingText(option.description).includes(flatPostingText(pair.officialQuote)));
+    return pair ? [{ optionId: option.id, officialQuote: pair.officialQuote, reason: 'The quoted role duty distinguishes this option.' }] : [];
+  });
+  try { validateOfficialPostingMatchResponse({ ...answer, distinguishing }, context); return true; } catch { return false; }
+}
 function assertNoPosting(result) {
   assert.ok(['L5', 'L6'].includes(result.officialPosting.level), JSON.stringify(result.officialPosting));
   assert.equal(result.officialPosting.sourceUrl || '', '');
@@ -275,7 +292,7 @@ export default [
       const lone = await resolveOfficialPosting(row({ snippet: actual }), { fetch: network(page(jobs(live))), candidateUrls: [ROOT] });
       assertNoPosting(lone);
       assert.ok(lone.officialPosting.trail.includes('no-anchor'));
-      // Independent anchors still accept in a small pool: posted pay, an identifier, or a validated tie-breaker.
+      // Deterministic anchors still accept before any comparative judgment.
       const own = boardJob({ descriptionPlain: lines(1, 8).join(' ') });
       const identified = await resolveOfficialPosting(row({ identifier: 'req-one' }), { fetch: network(page(jobs(own))), candidateUrls: [ROOT] });
       assert.equal(identified.officialPosting.level, 'L2'); assert.ok(identified.officialPosting.trail.includes('identifier-anchor'));
@@ -289,37 +306,35 @@ export default [
     },
   },
   {
-    name: 'Amendment 3 R2: a validated tie-breaker still accepts a description-anchored small pool candidate',
-    async run() {
+    name: 'Amendment 5 comparative validation handles a small pool after the deterministic evaluator refuses non-nested text',
+    run() {
       const text = lines(1, 12); const quotes = [text[0], text[5], text[10]];
       const candidate = { title: 'Software Engineer', employer: EMPLOYER, location: { display: 'Lakeview, Ontario, Canada' }, description: text.join(' '),
         sourceUrl: 'https://careers.northwind.test/job/1', ats: '', tenant: '', employerDomainProven: true, live: true, isListed: true, statusCode: 200 };
       const scraped = row({ snippet: text.join(' ') });
-      const answer = { sameJob: true, matchingPairs: quotes.map(quote => ({ scrapedQuote: quote, officialQuote: quote })), conflicts: [] };
-      // The scraped copy keeps one role sentence the official text lacks, so the description alone never accepts.
       const partial = row({ snippet: `${text.slice(0, 11).join(' ')} ${sentence(9998)}` });
       assert.equal(evaluateOfficialPostingMatch(partial, candidate, { now: NOW }).reason, 'no-anchor');
-      assert.equal(evaluateOfficialPostingMatch(scraped, candidate, { now: NOW }).anchor, 'description-anchor', 'nesting resolution: identical text accepts without peers');
-      const accepted = evaluateOfficialPostingMatch(partial, candidate, { now: NOW, tieBreaker: answer });
-      assert.equal(accepted.anchor, 'quoted-match');
+      assert.equal(evaluateOfficialPostingMatch(scraped, candidate, { now: NOW }).anchor, 'description-anchor');
+      const { options } = buildOfficialPostingComparisonSet(partial, [candidate], { now: NOW });
+      const answer = quoteAnswer(quotes.map(quote => [quote, quote]));
+      assert.deepEqual(validateOfficialPostingMatchResponse(answer, { job: partial, options }), answer);
     },
   },
   {
-    name: 'Amendment 3 tie-breaker: a quote is rejected only when it is boilerplate or also occurs in another candidate that passes every hard gate',
+    name: 'Amendment 5 comparative quotes require unique role evidence rather than rejecting every shared pair',
     run() {
       const text = lines(1, 12); const quotes = [text[0], text[5], text[10]];
-      const pairs = quotes.map(quote => ({ scrapedQuote: quote, officialQuote: quote }));
-      const answer = { sameJob: true, matchingPairs: pairs, conflicts: [] };
-      assert.equal(verifiedTieBreakerMatch(text.join(' '), text.join(' '), answer), true);
-      assert.equal(verifiedTieBreakerMatch(text.join(' '), text.join(' '), answer, { peerDescriptions: [`${quotes[0]} Other work.`] }), false, 'legacy callers treat every peer as a rival');
-      assert.equal(verifiedTieBreakerMatch(text.join(' '), text.join(' '), answer, { peerDescriptions: [`${quotes[0]} Other work.`], rivalDescriptions: [] }), true, 'a peer failing a hard gate is fine');
-      assert.equal(verifiedTieBreakerMatch(text.join(' '), text.join(' '), answer, { peerDescriptions: [], rivalDescriptions: [`${quotes[2]} Other work.`] }), false, 'a gate-passing rival rejects the pair');
+      const answer = quoteAnswer(quotes.map(quote => [quote, quote]));
+      assert.equal(verifiedComparativeEvidence(text.join(' '), text.join(' '), answer), true);
+      assert.equal(verifiedComparativeEvidence(text.join(' '), text.join(' '), answer, { peerDescriptions: [`${quotes[0]} Other work.`] }), true, 'one other-title peer is not a frequency estimate');
+      assert.equal(verifiedComparativeEvidence(text.join(' '), text.join(' '), answer, { rivalDescriptions: [`${quotes[2]} Other work.`] }), true, 'other quoted role duties distinguish the chosen posting');
+      assert.equal(verifiedComparativeEvidence(text.join(' '), text.join(' '), answer, { rivalDescriptions: [text.join(' ')] }), false, 'an identical same-identity rival has no distinctive evidence');
       const copy = lines(9500, 4).join(' ');
       const crowd = Array.from({ length: 6 }, (_, index) => `${lines(9600 + index * 10, 6).join(' ')} ${copy}`);
-      const boilerplate = { sameJob: true, conflicts: [], matchingPairs: [sentence(9500), sentence(9501), sentence(9502)].map(quote => ({ scrapedQuote: quote, officialQuote: quote })) };
+      const boilerplate = quoteAnswer([sentence(9500), sentence(9501), sentence(9502)].map(quote => [quote, quote]));
       const official = `${lines(9700, 3).join(' ')} ${sentence(9500)} ${lines(9710, 3).join(' ')} ${sentence(9501)} ${lines(9720, 3).join(' ')} ${sentence(9502)}`;
-      assert.equal(verifiedTieBreakerMatch(official, official, boilerplate, { peerDescriptions: [], rivalDescriptions: [] }), true);
-      assert.equal(verifiedTieBreakerMatch(official, official, boilerplate, { peerDescriptions: crowd, rivalDescriptions: [] }), false, 'quotes found in at least max(3, 20%) of the peers are boilerplate');
+      assert.equal(verifiedComparativeEvidence(official, official, boilerplate), true);
+      assert.equal(verifiedComparativeEvidence(official, official, boilerplate, { peerDescriptions: crowd }), false, 'max(3, 20%) frequency copy never counts');
     },
   },
   {
@@ -365,7 +380,7 @@ export default [
     },
   },
   {
-    name: 'Amendment 3 tie-breaker quote normalization: converter list markers, headings and typography never hide the quoted wording',
+    name: 'Amendment 5 comparative quote normalization: converter list markers, headings and typography never hide the quoted wording',
     run() {
       const sentences = lines(1, 12);
       const groups = joinGroups(sentences, [[0, 1], [5, 6, 7], [10, 11]]);
@@ -373,22 +388,24 @@ export default [
       const official = converted(sentences); const plain = sentences.join(' ');
       // The fixture is only meaningful when a raw search could not find a quote that crosses list items.
       assert.equal(official.replace(/\s+/gu, ' ').includes(groups[0]), false);
-      assert.equal(verifiedTieBreakerMatch(plain, official, answer), true, 'a bulleted official text and unbulleted quotes');
-      assert.equal(verifiedTieBreakerMatch(official, plain, answer), true, 'a bulleted scraped text and unbulleted quotes');
-      assert.equal(verifiedTieBreakerMatch(official, official, answer), true);
+      assert.equal(verifiedComparativeEvidence(plain, official, answer), true, 'a bulleted official text and unbulleted quotes');
+      assert.equal(verifiedComparativeEvidence(official, plain, answer), true, 'a bulleted scraped text and unbulleted quotes');
+      assert.equal(verifiedComparativeEvidence(official, official, answer), true);
       const nbsp = sentences.map((sentence, index) => `${NBSP}• ${sentence.replace(' and ', `${NBSP}and `)}${index % 2 ? NBSP : ''}`).join('\r\n');
-      assert.equal(verifiedTieBreakerMatch(nbsp, official, answer), true, 'bullet glyphs, non-breaking spaces and CRLF');
+      assert.equal(verifiedComparativeEvidence(nbsp, official, answer), true, 'bullet glyphs, non-breaking spaces and CRLF');
       // Quotes copied with their own markers and line breaks locate the same way.
       const marked = official.split('\n');
       const withMarkers = quoteAnswer([[groups[0], marked.slice(1, 3).join('\n')], [groups[1], marked.slice(6, 9).join('\n')], [groups[2], marked.slice(11, 13).join('\n')]]);
-      assert.equal(verifiedTieBreakerMatch(plain, official, withMarkers), true);
-      // Case-insensitive: converters upper-case headings, and some render whole blocks in capitals.
+      assert.equal(verifiedComparativeEvidence(plain, official, withMarkers), true);
+      // Verbatim evidence preserves case, including text upper-cased by a converter.
       const shouted = converted(sentences.map((sentence, index) => (index >= 5 && index <= 7 ? sentence.toUpperCase() : sentence)));
-      assert.equal(verifiedTieBreakerMatch(plain, shouted, answer), true);
+      assert.equal(verifiedComparativeEvidence(plain, shouted, answer), false);
+      const shoutedAnswer = quoteAnswer(groups.map((quote, index) => [quote, index === 1 ? quote.toUpperCase() : quote]));
+      assert.equal(verifiedComparativeEvidence(plain, shouted, shoutedAnswer), true);
     },
   },
   {
-    name: 'Amendment 3 tie-breaker quote normalization: typographic quotes, dashes and non-breaking spaces compare as plain punctuation',
+    name: 'Amendment 5 comparative quote normalization: typographic quotes, dashes and non-breaking spaces compare as plain punctuation',
     run() {
       const typed = ['Partner with dispatchers on the scheduler\'s nightly rebalancing pass, including carrier lane exceptions during peak volume.',
         'Draft the "quarterly lane review" for finance - covering tariff tables, fuel cards and settlement files.',
@@ -399,17 +416,17 @@ export default [
       const official = converted([fill[0], ...typed.slice(0, 1).map(typeset), fill[1], typeset(typed[1]), fill[2], typeset(typed[2])]);
       assert.notEqual(official.replace(/\s+/gu, ' ').includes(typed[1]), true, 'fixture: the typeset text differs from the plain quotes');
       const answer = quoteAnswer(typed.map(quote => [quote, quote]));
-      assert.equal(verifiedTieBreakerMatch(scraped, official, answer), true);
-      assert.equal(verifiedTieBreakerMatch(official, scraped, answer), true);
+      assert.equal(verifiedComparativeEvidence(scraped, official, answer), true);
+      assert.equal(verifiedComparativeEvidence(official, scraped, answer), true);
       // The reverse direction: typeset quotes against plain text.
-      assert.equal(verifiedTieBreakerMatch(scraped, scraped, quoteAnswer(typed.map(quote => [typeset(quote), typeset(quote)]))), true);
+      assert.equal(verifiedComparativeEvidence(scraped, scraped, quoteAnswer(typed.map(quote => [typeset(quote), typeset(quote)]))), true);
       // Punctuation is unified, not removed: a different word is still a different quote.
       const reworded = quoteAnswer([[typed[0], typed[0]], [typed[1], typed[1].replace('finance', 'treasury')], [typed[2], typed[2]]]);
-      assert.equal(verifiedTieBreakerMatch(scraped, official, reworded), false);
+      assert.equal(verifiedComparativeEvidence(scraped, official, reworded), false);
     },
   },
   {
-    name: 'Amendment 3 tie-breaker quote normalization: a quote absent from either text still fails, even when the other text needs normalization to match',
+    name: 'Amendment 5 comparative quote normalization: a quote absent from either text still fails, even when the other text needs normalization to match',
     run() {
       const sentences = lines(1, 12);
       const groups = joinGroups(sentences, [[0, 1], [5, 6, 7], [10, 11]]);
@@ -418,11 +435,11 @@ export default [
       const dropped = quote => quote.replace(' and ', ' ');
       const withMiddle = replacement => quoteAnswer(groups.map((quote, index) => [quote, index === 1 ? replacement : quote]));
       for (const [scrapedText, officialText] of [[official, plain], [plain, official], [official, official]]) {
-        assert.equal(verifiedTieBreakerMatch(scrapedText, officialText, quoteAnswer(groups.map(quote => [quote, quote]))), true);
+        assert.equal(verifiedComparativeEvidence(scrapedText, officialText, quoteAnswer(groups.map(quote => [quote, quote]))), true);
         for (const side of [0, 1]) {
           for (const change of [altered, dropped]) {
             const pairs = groups.map((quote, index) => (index === 1 ? [side === 0 ? change(quote) : quote, side === 1 ? change(quote) : quote] : [quote, quote]));
-            assert.equal(verifiedTieBreakerMatch(scrapedText, officialText, quoteAnswer(pairs)), false,
+            assert.equal(verifiedComparativeEvidence(scrapedText, officialText, quoteAnswer(pairs)), false,
               `one quote absent from the ${side === 0 ? 'scraped' : 'official'} text (${change.name})`);
           }
         }
@@ -431,35 +448,35 @@ export default [
       // A quote present in only one of the texts fails for the other, however each is normalized.
       const onlyOfficial = `${converted(sentences)}\n* ${sentence(9990)}`;
       const lone = quoteAnswer([[groups[0], groups[0]], [groups[1], groups[1]], [sentence(9990), sentence(9990)]]);
-      assert.equal(verifiedTieBreakerMatch(plain, onlyOfficial, lone), false);
-      assert.equal(verifiedTieBreakerMatch(onlyOfficial, plain, lone), false);
+      assert.equal(verifiedComparativeEvidence(plain, onlyOfficial, lone), false);
+      assert.equal(verifiedComparativeEvidence(onlyOfficial, plain, lone), false);
       // Normalization joins adjacent list items, never non-adjacent ones.
-      assert.equal(verifiedTieBreakerMatch(plain, official, quoteAnswer([[`${sentences[0]} ${sentences[2]}`, `${sentences[0]} ${sentences[2]}`], [groups[1], groups[1]], [groups[2], groups[2]]])), false);
+      assert.equal(verifiedComparativeEvidence(plain, official, quoteAnswer([[`${sentences[0]} ${sentences[2]}`, `${sentences[0]} ${sentences[2]}`], [groups[1], groups[1]], [groups[2], groups[2]]])), false);
       // Still required: three pairs, eight words, no conflicts, two separated parts.
-      assert.equal(verifiedTieBreakerMatch(plain, official, quoteAnswer(groups.slice(0, 2).map(quote => [quote, quote]))), false);
-      assert.equal(verifiedTieBreakerMatch(plain, official, quoteAnswer(groups.map(quote => [quote, quote]), { conflicts: ['different team'] })), false);
-      assert.equal(verifiedTieBreakerMatch(plain, official, quoteAnswer(groups.map(() => [groups[0], groups[0]]))), false, 'repeating one passage');
+      assert.equal(verifiedComparativeEvidence(plain, official, quoteAnswer(groups.slice(0, 2).map(quote => [quote, quote]))), false);
+      assert.equal(verifiedComparativeEvidence(plain, official, quoteAnswer(groups.map(quote => [quote, quote]), { conflicts: ['different team'] })), false);
+      assert.equal(verifiedComparativeEvidence(plain, official, quoteAnswer(groups.map(() => [groups[0], groups[0]]))), false, 'repeating one passage');
       const short = quoteAnswer([[groups[0], groups[0]], [groups[1], groups[1]], ['* Calibrate nightly freight lanes', 'Calibrate nightly freight lanes']]);
-      assert.equal(verifiedTieBreakerMatch(plain, official, short), false, 'a marker is not a word');
+      assert.equal(verifiedComparativeEvidence(plain, official, short), false, 'a marker is not a word');
     },
   },
   {
-    name: 'Amendment 3 tie-breaker quote normalization: numbered rivals and boilerplate crowds are compared in the same plain form',
+    name: 'Amendment 5 comparative quote normalization: numbered rivals and boilerplate crowds are compared in the same plain form',
     run() {
       const sentences = lines(1, 12);
       const groups = joinGroups(sentences, [[0, 1], [5, 6, 7], [10, 11]]);
       const plain = sentences.join(' '); const official = converted(sentences);
       const answer = quoteAnswer(groups.map(quote => [quote, quote]));
       const numberedRival = sentences.map((item, index) => `${index + 1}. ${item}`).join('\n');
-      assert.equal(verifiedTieBreakerMatch(plain, official, answer, { peerDescriptions: [], rivalDescriptions: [numberedRival] }), false, 'a quote crossing numbered items of a gate-passing rival');
-      assert.equal(verifiedTieBreakerMatch(plain, official, answer, { peerDescriptions: [], rivalDescriptions: [converted(lines(700, 12))] }), true);
+      assert.equal(verifiedComparativeEvidence(plain, official, answer, { peerDescriptions: [], rivalDescriptions: [numberedRival] }), false, 'a quote crossing numbered items of a gate-passing rival');
+      assert.equal(verifiedComparativeEvidence(plain, official, answer, { peerDescriptions: [], rivalDescriptions: [converted(lines(700, 12))] }), true);
       // Boilerplate frequency counts numbered copies of the same wording as the same wording.
       const crowd = Array.from({ length: 6 }, (_, index) => `${converted(lines(800 + index * 10, 6))}\n${numberedRival}`);
-      assert.equal(verifiedTieBreakerMatch(plain, official, answer, { peerDescriptions: crowd, rivalDescriptions: [] }), false);
+      assert.equal(verifiedComparativeEvidence(plain, official, answer, { peerDescriptions: crowd, rivalDescriptions: [] }), false);
     },
   },
   {
-    name: 'Amendment 3 tie-breaker quote normalization: only list markers at a line start go, and a normalized form is stable',
+    name: 'Amendment 5 comparative quote normalization: only list markers at a line start go, and a normalized form is stable',
     run() {
       const kept = ['3.5 years of experience with carrier ledgers', '401(k) matching for every employee', '-5% variance on weigh tickets', 'A. Smith and Co. audits', '**Bold** claim about yard queues', 'Scale to 10,000 pallet routes'];
       for (const line of kept) assert.equal(plainPostingText(line), line);
@@ -470,21 +487,19 @@ export default [
     },
   },
   {
-    name: 'Amendment 3 tie-breaker quote normalization: a converter-rendered official text accepts through the evaluator on a quoted match',
+    name: 'Amendment 5 comparative quote normalization: a converter-rendered official text validates after deterministic refusal',
     run() {
       const text = lines(1, 12);
       const candidate = { title: 'Software Engineer', employer: EMPLOYER, location: { display: 'Lakeview, Ontario, Canada' }, description: converted(text),
         sourceUrl: 'https://careers.northwind.test/job/1', ats: '', tenant: '', employerDomainProven: true, live: true, isListed: true, statusCode: 200 };
-      // The scraped copy keeps one role sentence the official text lacks, so the description alone never accepts.
       const partial = row({ snippet: `${text.slice(0, 11).join(' ')} ${sentence(9998)}` });
       const groups = joinGroups(text, [[0, 1], [4, 5, 6], [9, 10]]);
       const answer = quoteAnswer(groups.map(quote => [quote, quote]));
       assert.equal(evaluateOfficialPostingMatch(partial, candidate, { now: NOW }).reason, 'no-anchor');
-      const accepted = evaluateOfficialPostingMatch(partial, candidate, { now: NOW, tieBreaker: answer });
-      assert.equal(accepted.passed, true, JSON.stringify(accepted.reasons)); assert.equal(accepted.anchor, 'quoted-match');
+      const { options } = buildOfficialPostingComparisonSet(partial, [candidate], { now: NOW });
+      assert.deepEqual(validateOfficialPostingMatchResponse(answer, { job: partial, options }), answer);
       const invented = quoteAnswer(groups.map((quote, index) => (index === 1 ? [quote, quote.replace(' and ', ' plus ')] : [quote, quote])));
-      const rejected = evaluateOfficialPostingMatch(partial, candidate, { now: NOW, tieBreaker: invented });
-      assert.equal(rejected.passed, false); assert.equal(rejected.reason, 'invalid-quotes');
+      assert.throws(() => validateOfficialPostingMatchResponse(invented, { job: partial, options }));
     },
   },
   {
@@ -493,25 +508,27 @@ export default [
       const sentences = lines(1, 12);
       const groups = joinGroups(sentences, [[0, 1], [5, 6, 7], [10, 11]]);
       const scrapedDescription = converted(sentences, 'About the role'); const officialDescription = converted(sentences);
-      const request = buildOfficialPostingMatchRequest({ scrapedDescription, officialDescription });
+      const context = comparativeContext(scrapedDescription, officialDescription);
+      const request = buildOfficialPostingMatchRequest({ ...context, run: 'A' });
       const supplied = JSON.parse(request.prompt.split('BEGIN UNTRUSTED POSTING COMPARISON JSON\n')[1].split('\nEND UNTRUSTED POSTING COMPARISON JSON')[0]);
-      assert.deepEqual(supplied, { scrapedDescription: plainPostingText(scrapedDescription), officialDescription: plainPostingText(officialDescription) });
-      for (const shown of Object.values(supplied)) {
+      assert.equal(supplied.scraped.description, plainPostingText(scrapedDescription));
+      assert.equal(supplied.options[0].description, plainPostingText(officialDescription));
+      for (const shown of [supplied.scraped.description, supplied.options[0].description]) {
         assert.equal(/^[ \t]*(?:[*•-]|\d{1,3}[.)])[ \t]/mu.test(shown), false, 'no list marker survives at a line start');
         assert.ok(sentences.every(sentence => shown.includes(sentence)), 'every sentence is shown verbatim');
       }
       const answer = quoteAnswer(groups.map(quote => [quote, quote]));
       assert.deepEqual(request.responseValidator(answer), answer);
-      assert.deepEqual(validateOfficialPostingMatchResponse(JSON.stringify(answer), { scrapedDescription, officialDescription }), answer);
+      assert.deepEqual(validateOfficialPostingMatchResponse(JSON.stringify(answer), context), answer);
       // A quote copied with its markers and line breaks is the same wording.
       const marked = officialDescription.split('\n');
       const copied = quoteAnswer([[groups[0], marked.slice(1, 3).join('\n')], [groups[1], marked.slice(6, 9).join('\n')], [groups[2], marked.slice(11, 13).join('\n')]]);
-      assert.deepEqual(validateOfficialPostingMatchResponse(copied, { scrapedDescription, officialDescription }), copied);
-      const failing = pairs => { try { validateOfficialPostingMatchResponse(quoteAnswer(pairs), { scrapedDescription, officialDescription }); } catch (error) { return error.correctionRuleIds || []; } return null; };
+      assert.deepEqual(validateOfficialPostingMatchResponse(copied, context), copied);
+      const failing = pairs => { try { validateOfficialPostingMatchResponse(quoteAnswer(pairs), context); } catch (error) { return error.correctionRuleIds || []; } return null; };
       const quote = groups[1].replace(' and ', ' plus ');
       assert.ok(failing([[groups[0], groups[0]], [quote, groups[1]], [groups[2], groups[2]]])?.includes('LOOKUP_OFFICIAL_MATCH_VERBATIM'), 'absent from the scraped text');
       assert.ok(failing([[groups[0], groups[0]], [groups[1], quote], [groups[2], groups[2]]])?.includes('LOOKUP_OFFICIAL_MATCH_VERBATIM'), 'absent from the official text');
-      // The verbatim check stays case-sensitive; only the host tie-breaker location is case-insensitive.
+      // The comparative verbatim check remains case-sensitive.
       assert.ok(failing([[groups[0], groups[0]], [groups[1].toUpperCase(), groups[1]], [groups[2], groups[2]]])?.includes('LOOKUP_OFFICIAL_MATCH_VERBATIM'));
       assert.ok(failing(groups.slice(0, 2).map(item => [item, item]))?.includes('LOOKUP_OFFICIAL_MATCH_COUNT'));
     },
@@ -778,6 +795,41 @@ export default [
           sourceUrl: 'https://careers.northwind.test/job/true', employerDomainProven: true, live: true, isListed: true, statusCode: 200 };
         assert.equal(selectOfficialPostingMatch(row({ snippet }), [candidate], { now: NOW }).candidate?.sourceUrl, candidate.sourceUrl, heading);
       }
+    },
+  },
+  {
+    name: 'Amendment 5 company-only truncated snippets never anchor a live same-title sibling',
+    run() {
+      const company = lines(7000, 30);
+      for (const heading of ['About Northwind Labs', 'About Us']) for (const flat of [false, true]) {
+        for (const tagline of ['', 'Building tools for regional carriers', 'Description of our company']) {
+          const join = parts => parts.filter(Boolean).join(flat ? ' ' : '\n');
+          const official = join([heading, tagline, ...company, 'Responsibilities', ...lines(500, 8), 'What You Bring', ...lines(3000, 6)]);
+          const candidate = { title: 'Software Engineer', employer: EMPLOYER, location: { display: 'Lakeview, Ontario, Canada' }, description: official,
+            sourceUrl: 'https://careers.northwind.test/job/sibling', employerDomainProven: true, live: true, isListed: true, statusCode: 200 };
+          for (const take of [5, 20, 24, 28, 30]) {
+            const snippet = join([heading, tagline, ...company.slice(0, take)]);
+            const decision = selectOfficialPostingMatch(row({ snippet }), [candidate], { now: NOW });
+            assert.notEqual(decision.outcome, 'found', `${heading} / flat=${flat} / ${tagline} / ${take}`);
+          }
+        }
+      }
+    },
+  },
+  {
+    name: 'Amendment 5 company corroboration tolerates char-truncated boundaries but still refuses interior rewrites',
+    run() {
+      const company = lines(7000, 5).join(' ');
+      const official = ['About Northwind Labs', company, 'Responsibilities', ...lines(100, 8), 'Requirements', ...lines(3000, 6),
+        'Benefits', 'We offer health coverage and paid time off for every employee.', 'Northwind Labs is an equal opportunity employer and welcomes every applicant.'].join('\n');
+      const candidate = (id, description, extra = {}) => ({ title: 'Software Engineer', employer: EMPLOYER, location: { display: 'Lakeview, Ontario, Canada' }, description,
+        sourceUrl: `https://careers.northwind.test/job/${id}`, employerDomainProven: true, live: true, isListed: true, statusCode: 200, ...extra });
+      const peers = Array.from({ length: 6 }, (_, index) => candidate(`peer-${index}`, ['About Northwind Labs', company, 'Responsibilities', ...lines(1000 + index * 40, 8)].join('\n'), { title: `Specialist ${index}` }));
+      for (let cut = 900; cut < official.length; cut += 3) {
+        assert.equal(selectOfficialPostingMatch(row({ snippet: `${official.slice(0, cut)}…` }), [candidate('true', official), ...peers], { now: NOW }).outcome, 'found', `cut ${cut}`);
+      }
+      const rewritten = official.replace(sentence(104), sentence(9904));
+      assert.notEqual(selectOfficialPostingMatch(row({ snippet: rewritten }), [candidate('true', official), ...peers], { now: NOW }).outcome, 'found');
     },
   },
   {

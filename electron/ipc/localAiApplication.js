@@ -29,7 +29,7 @@ import { replaceApplicationBundleAtomically } from './applicationFileTransaction
 import { APPLICATION_PDF_MISMATCH_IS_DETERMINISTIC, APPLICATION_PDF_PAGINATION_GEOMETRY_REVISION, APPLICATION_PDF_RECONCILE_REVISION, APPLICATION_PDF_VARIANT_REVISION, GENERATION_AUDIT_VERSION, RESUME_BULLET_CHARACTER_BUDGET, RESUME_BULLET_OPENING_VARIETY_RULE, RESUME_ROLE_BULLET_CEILING, applicationVariantAttrsForJob, assertRetainedResumeRoleBullets, evaluateResumeProseChecks, extractResumeEvidence, formatTypeAreaUtilization, getApplicationTelemetry, isPendingApplicationWorkspaceSaveInFlight, normalizeApplicationAdditionalNotes, normalizeCoverLetterParagraphs, recordApplicationTelemetry, registerPendingApplicationWorkspace, resumeProjectProvenanceFailures, resumeRoleBlockSample, resumeRoleLocationFailures, resumeTypeAreaUtilization, targetPageCountForJob, withUnregisteredApplicationWorkspacePruneClaim } from './jobApplication.js';
 import { applicationConvergenceInstruction, expectedApplicationQualityDecision, isApplicationQualityDecision } from './applicationConvergence.js';
 import { ADJACENT_SENTENCE_SHAPE_RULE, ARGUMENT_CLAIM_SPAN_RULE, ARGUMENT_LATER_RELEVANCE_SPAN_RULE, ARGUMENT_MAPPING_REQUIRED_RULE, ARGUMENT_PROOF_SPAN_RULE, ARGUMENT_RELEVANCE_SPAN_RULE, ARGUMENT_SPAN_ALIGNMENT_RULE, ARGUMENT_SPAN_BUDGET_RULES, authorCoverLetterEnvelope, checkEvidenceGrounding, checkMappingNarrativeStructure, checkParagraphArgumentLinks, checkRoleThesis, COVER_LETTER_EQUIVALENCE_CARRIERS, COVER_LETTER_LOGISTICS_PROMISE_CLASSES, COVER_LETTER_SALIENT_ECHO_PHRASES, DANGLING_DEMONSTRATIVE_RULE, DURATION_CLAIM_SHAPE_RULE, evaluateCoverLetterChecks, findUnsupportedDurationClaim, formatCoverLetterDate, LETTER_PROPORTION_RULE, MAX_ARGUMENT_MAPPING_FIELD_CHARS, MAX_EXPLICIT_TRANSFER_PARAGRAPHS, MIN_STANDALONE_SENTENCE_PARAGRAPH_ALLOWANCE, OWING_PROOF_PARAGRAPHS, MAX_LETTER_FIGURES, MAX_LETTER_OFF_POSTING_TOOLS, MAX_PARAGRAPH_OFF_POSTING_TOOLS, MAX_SENTENCE_WORDS, MIN_ANCHOR_RELEVANCE_CORPUS_WORDS, MIN_ROLE_THESIS_WORDS, MIN_SHARED_SHAPE_PARAGRAPHS, REPEATED_PHRASE_RULE, REPEATED_TRANSFER_CARRIER_RULE, SENTENCE_SHAPE_FRAME_WORDS, REDUNDANCY_SHINGLE_WORDS, SHARED_SENTENCE_SHAPE_CEILING_RULE, sentenceSegments, TRANSFER_BENEFIT_SUPPORT_RULE } from './coverLetterChecks.js';
-import { checkDisposition, partitionCheckResults, targetCompanyNameForms, targetCompanyNames, targetIntentCompanyNames } from './coverLetterChecks.js';
+import { checkDisposition, partitionCheckResults, targetCompanyNames } from './coverLetterChecks.js';
 import { RESUME_CHECK_DISPOSITIONS, partitionResumeCheckResults } from './resumeCheckDispositions.js';
 import { atomicWriteJson, ensureDirectoryWithinRoot, isWithinDirectory } from '../utils/pathSafety.js';
 import { logger } from '../logger.js';
@@ -58,6 +58,8 @@ import { describeRoleStrengthFinding, roleStrengthFindings } from './application
 import { WRITE_VERIFY_PROTOCOL, WRITE_VERIFY_STAGES, WRITE_VERIFY_MAX_CORRECTIONS, WRITE_VERIFY_MAX_FIT_CORRECTIONS, WRITE_VERIFY_LISTING_CLOSING_RULE, acceptedWriteVerifyCandidates, droppedCandidateFindings, factCorrectionTransition, fullApprovedHand, initialWriteVerifyState, isWriteVerifyJob, appendWriteVerifyRejection, writeVerifyRankingErrors, writeVerifyRankingShapeError, writeVerifyRankingReasonErrors, writeVerifyCandidateCount, writeVerifyNextAfterCandidate, writeVerifyPrompt, writeVerifySourcePrompt, writeVerifyStageKey, writeVerifyFactFindingErrors, writeVerifyChangedFindingErrors } from './applicationWriteVerify.js';
 import { applicationProtocolSetting } from './applicationProtocolSetting.js';
 import { targetIdentityNameLicensed, validateSharedApplicationContent } from './applicationTruthGates.js';
+import { targetEmploymentFrames } from './applicationEmploymentGuard.js';
+export { targetEmploymentFrames } from './applicationEmploymentGuard.js';
 import { v2RejectionEvidencePaths } from './applicationV2RejectionEvidence.js';
 import { archiveV2Content } from './applicationV2EvidenceArchive.js';
 import { archiveV2WriterNotes, splitWriteVerifyWriterResponse } from './applicationV2WriterShortlist.js';
@@ -4140,7 +4142,6 @@ export function writeVerifyGroundingContract() {
   return [
     CLAIM_GROUNDING_RULE,
     `Qualifier words are matched by word form, never by meaning, in these families: ${sourceGroundingQualifierForms()}`,
-    'The employer this letter is addressed to may be named without a quote as the owner of a need the work meets, never as a place the work happened',
     SOURCE_FIGURE_GROUNDING_RULE,
     WRITE_VERIFY_LISTING_CLOSING_RULE.replace(/\.$/u, ''),
     `Every sentence about the candidate's own work must share at least ${MIN_SHARED_SOURCE_TERMS} meaningful terms with the quotes its unit cites, where ${SOURCE_TERM_OVERLAP_RULE}, and ${LETTER_TERM_FORMS_RULE}`,
@@ -5047,6 +5048,7 @@ async function writeVerifyHandoffRecord({ jobId, input, state, corrections = [] 
   // deterministic findings ride along as observations (applicationWriteVerify
   // droppedCandidateFindings). Corrections stay the current candidate's own.
   const prompt = writeVerifyPrompt({ stage: state.stage, state: state.writeVerify, ...context,
+    targetCompany: input.job?.company || '',
     envelope, corrections, droppedFindings: state.stage === 'write' ? droppedCandidateFindings(state.writeVerify) : [] });
   assertApplicationV2PromptLimit(prompt);
   const record = { ...envelope, prompt, draft: '', progress: applicationWorkflowProgress(input, state) };
@@ -6116,7 +6118,6 @@ export function createApplicationListingClosingValidator(hostContext = {}) {
   const identityTokens = hostContext.identityTokens ?? careerIdentityTokens(renderedEvidence || { roles: sourceRoles });
   const frozenJobListing = jobListingQuoteSource(input.job || {});
   const company = input.job?.company || '';
-  const jobTitle = input.job?.title || '';
   const qualifierContext = { meaningful: meaningfulSourceTokens, trustedNames: [] };
   const openingVerb = /^(?:(?:also|then|later|now|still|always|never|personally|currently|just|even|once|often)\s+)*(?:am|is|are|was|were|be|been|being|have|has|had|do|does|did|can|could|will|would|shall|should|may|might|must|need|needs|require|requires|support|report|review|plan|built|wrote|led|ran|kept|held|made|took|gave|got|set|put|cut|sent|taught|chose|began|won|spent|drove|found|met|paid|sold|told|brought|thought|understood|grew|drew|rose|lost|left|saw|knew|became|fed|hold|lead|run|build|write|keep|make|take|give|get|send|teach|choose|own|manage|coach|train|mentor|maintain|deliver|create|develop|analyze|analyse|monitor|oversee|supervise|organize|organise|prepare|produce|provide|serve|hire|handle|schedule|track|ship|launch|\p{L}+ed|\p{L}+ing)\b/iu;
   const nonverbOpener = /^(?:you|your|yours|the|this|that|these|those|a|an)\b/iu;
@@ -6128,10 +6129,13 @@ export function createApplicationListingClosingValidator(hostContext = {}) {
     const byId = new Map(acceptedEvidence.map(item => [item?.id, item]));
     return evaluateFinalParagraphListingGrounding({ paragraphs, index, acceptedEvidence, frozenJobListing, company, identityTokens }, {
       groundingSentences, groundingClauses,
-      speaksOnlyOfApplicationIntent: text => speaksOnlyOfApplicationIntent(text, company, jobTitle),
-      speaksOnlyOfIntent: text => speaksOnlyOfIntent(text) || targetEmploymentIntentClause(text, company), reportsNoPastWork,
-      intentLeadInRemainder, hasWorkIngWord, speaksAsCandidate, sentenceAddressesTarget,
-      isCandidateCareerSentence: (text, tokens) => isCandidateCareerSentence(text, tokens, company, jobTitle),
+      targetEmployerSentenceFailures: (text, paragraphIndex, sentenceOffset) => targetEmploymentFrameFailureParts(text, paragraphIndex, { targetCompany: company,
+        approvedOrganizations: approvedOrganizationsForCareer(sourceRoles, authority, projects),
+        approvedCareerEmployers: sourceRoles.map(role => role?.company).filter(Boolean) }, sentenceOffset),
+      speaksOnlyOfApplicationIntent: text => speaksOnlyOfApplicationIntent(text),
+      speaksOnlyOfIntent, reportsNoPastWork,
+      hasWorkIngWord, speaksAsCandidate, sentenceAddressesTarget,
+      isCandidateCareerSentence: (text, tokens) => isCandidateCareerSentence(text, tokens),
       meaningfulSourceTokens, MIN_SHARED_SOURCE_TERMS,
       hasCareerClaimFrame: text => CAREER_CLAIM_FRAME_RE.test(text),
       hasFigureOrYear: text => /\d/u.test(text) || new RegExp(`\\b${SPELLED_NUMBER_PATTERN}\\b`, 'iu').test(text),
@@ -6178,7 +6182,8 @@ function pasteUnitGroundingErrors({ unitLabel, unitId, finalText, evidenceIds, a
     if (label === 'coverLetterParagraphs') {
       // The amendment's guard must run before the listing-only early return.
       errors.push(...targetEmploymentFrameFailureParts(text, paragraphIndex, {
-        targetCompany, targetTitle, approvedOrganizations: approvedOrganizationsForCareer(sourceRoles, authority, projects),
+        targetCompany, approvedOrganizations: approvedOrganizationsForCareer(sourceRoles, authority, projects),
+        approvedCareerEmployers: sourceRoles.map(role => role?.company).filter(Boolean),
       }));
       const durationError = unsupportedDurationClaimError(`${unitLabel} ${String(unitId ?? '')}`, text, []);
       if (durationError) errors.push(durationError);
@@ -6206,6 +6211,7 @@ function pasteUnitGroundingErrors({ unitLabel, unitId, finalText, evidenceIds, a
       identityTokens,
       trustedNames: trustedNamesForRoles(sourceRoles, projects),
       approvedOrganizations: approvedOrganizationsForCareer(sourceRoles, authority, projects),
+      approvedCareerEmployers: sourceRoles.map(role => role?.company).filter(Boolean),
       trustedYears: trustedYearsForRoles(sourceRoles),
       postingText,
       targetCompany,
@@ -12482,14 +12488,9 @@ function careerIdentityTokens(resumeEvidence = {}) {
 
 // identityTokens is required here too: its one caller asserts the array, and a
 // default would restore the same quiet narrowing one level down.
-function isCandidateCareerSentence(sentence, identityTokens, targetCompany = '', targetTitle = '') {
-  if (speaksOnlyOfApplicationIntent(sentence, targetCompany, targetTitle)) return false;
-  // Only a safe A3 lead may remove its copula/adjective from the career
-  // reading. An impure application head retains its original first-person
-  // claim, including a coordinated or subordinate claim after that head.
-  const remainder = speaksOnlyOfIntent(sentence) || targetEmploymentIntentClause(sentence, targetCompany)
-    ? intentLeadInRemainder(sentence, { applicationHead: false }).remainder : sentence;
-  const hasCareerAction = CAREER_ASSERTION_ACTION_RE.test(remainder) || CAREER_ASSERTION_REGULAR_PAST_RE.test(remainder);
+function isCandidateCareerSentence(sentence, identityTokens) {
+  if (speaksOnlyOfApplicationIntent(sentence)) return false;
+  const hasCareerAction = CAREER_ASSERTION_ACTION_RE.test(sentence) || CAREER_ASSERTION_REGULAR_PAST_RE.test(sentence);
   if (!hasCareerAction) return false;
   const firstPerson = /\b(?:i|we|my|our)\b/iu.test(withoutStanceHedges(sentence));
   if (firstPerson) return true;
@@ -12507,8 +12508,8 @@ function isCandidateCareerSentence(sentence, identityTokens, targetCompany = '',
 // that is substantively about the cited career evidence. That still leaves
 // listing-only statements alone: they either have no career action or do not
 // share the required career-data terms.
-function isCandidateCareerFigureSentence(sentence, identityTokens, sourceQuotes, targetCompany = '', targetTitle = '') {
-  if (isCandidateCareerSentence(sentence, identityTokens, targetCompany, targetTitle)) return true;
+function isCandidateCareerFigureSentence(sentence, identityTokens, sourceQuotes) {
+  if (isCandidateCareerSentence(sentence, identityTokens)) return true;
   const hasCareerAction = CAREER_ASSERTION_ACTION_RE.test(sentence) || CAREER_ASSERTION_REGULAR_PAST_RE.test(sentence);
   if (!hasCareerAction) return false;
   const sentenceTokens = meaningfulSourceTokens(sentence);
@@ -12524,8 +12525,8 @@ function isCandidateCareerFigureSentence(sentence, identityTokens, sourceQuotes,
 // counts, credentials and years reads it exactly as it reads a career action.
 const CAREER_CLAIM_FRAME_RE = /\b(?:i|we)\s+(?:also\s+|currently\s+|now\s+|still\s+)?(?:have|has|hold|possess|bring|offer)\b|\b(?:my|our)\s+(?:[\p{L}'-]+\s+){0,2}(?:experience|expertise|proficiency|background|training|certification|licen[sc]e|degree)\b/iu;
 
-function isCandidateClaimSentence(sentence, identityTokens, sourceQuotes, targetCompany = '', targetTitle = '') {
-  return isCandidateCareerFigureSentence(sentence, identityTokens, sourceQuotes, targetCompany, targetTitle) || CAREER_CLAIM_FRAME_RE.test(sentence);
+function isCandidateClaimSentence(sentence, identityTokens, sourceQuotes) {
+  return isCandidateCareerFigureSentence(sentence, identityTokens, sourceQuotes) || CAREER_CLAIM_FRAME_RE.test(sentence);
 }
 
 // A sentence that never says who did something can still be a claim about the
@@ -12581,14 +12582,14 @@ function isImpersonalSourceRestatement(sentence, sourceBodyTokens) {
 // points at this role, team or position, which is how a sentence about the
 // target's own stack reads whatever its tense.
 const TARGET_ADDRESS_RE = /\b(?:you|your|yours|yourself|you['’](?:re|ll|ve|d))\b|\bthis\s+(?:role|position|job|team|company|organi[sz]ation|opportunity|department)\b/iu;
+const COMPANY_SUFFIX_WORDS = new Set(['inc', 'incorporated', 'llc', 'ltd', 'limited', 'corp', 'corporation', 'co', 'company', 'plc', 'gmbh', 'lp', 'llp']);
+
 export function sentenceAddressesTarget(sentence, targetCompany = '') {
   if (TARGET_ADDRESS_RE.test(String(sentence ?? ''))) return true;
-  const written = ` ${normalizedTokens(sentence).join(' ')} `;
-  return targetCompanyNames(targetCompany).some(value => {
-    const name = normalizedTokens(value);
-    return name.length > 0 && !(name.length === 1 && name[0].length < 3)
-      && written.includes(` ${name.join(' ')} `);
-  });
+  const name = normalizedTokens(targetCompany);
+  while (name.length > 1 && COMPANY_SUFFIX_WORDS.has(name[name.length - 1])) name.pop();
+  if (!name.length || (name.length === 1 && name[0].length < 3)) return false;
+  return ` ${normalizedTokens(sentence).join(' ')} `.includes(` ${name.join(' ')} `);
 }
 
 // The posting's freedom is decided per CLAUSE, never per sentence. A clause that
@@ -12694,36 +12695,16 @@ function textWritesGroundedClaim(text, grounding, targetCompany, { strength = fa
 // for the target, not a statement of the candidate's own work, so it does not
 // make the sentence a claim; "I would bring MY <tool> skills" does.
 function speaksAsCandidateWithClaim(sentence, verbHints, referenceTexts, grounding, targetCompany) {
+  const targetOwned = reportsNoPastWork(sentence) ? finding => termOnlyWrittenAsTargets(sentence, finding) : null;
   return groundingClauses(sentence, verbHints)
     .some(clause => speaksAsCandidate(clause.text, referenceTexts)
       && !speaksOnlyOfIntent(withoutQuotedRomanOne(clause.text, referenceTexts))
-      && textWritesGroundedClaim(clause.text, grounding, targetCompany));
+      && textWritesGroundedClaim(clause.text, grounding, targetCompany, { ignore: targetOwned }));
 }
 
 const FIRST_PERSON_POSSESSIVE_RE = /(?<![\p{L}\p{N}])(?:[Mm]y|[Mm]ine|[Oo]ur|[Oo]urs)(?![\p{L}\p{N}])/u;
 const FIRST_PERSON_SUBJECT_RE = /(?<![\p{L}\p{N}])(?:I|[Ww]e)(?![\p{L}\p{N}])/gu;
 const INTENT_AFTER_SUBJECT_RE = /^(?:['’](?:d|ll)(?![\p{L}\p{N}])|\s+(?:(?:also|really|truly|just|still|very\s+much)\s+)*(?:would|will|could|can|might|may|should|shall|hope|want|plan|intend|aim|look\s+forward|welcome)(?![\p{L}\p{N}]))/iu;
-
-// Strip exactly one closed, anchored first-person intent lead. Its present
-// copula, emotion adjective or look-forward gerund is not a past-work claim;
-// everything after it still receives the ordinary past/participle tests.
-const INTENT_ADJECTIVE_LEAD_RE = /^(?:\s+(?:am|are)|['’](?:m|re))\s+(?:(?:very|so|really)\s+)?(?:eager|excited|ready|keen|happy|glad|thrilled|delighted|pleased|motivated|prepared|enthusiastic)\s+to\s+/iu;
-const INTENT_FORWARD_LEAD_RE = /^(?:(?:\s+(?:am|are)|['’](?:m|re))\s+looking|\s+look(?:ing)?)\s+forward\s+to\s+\p{L}+ing(?![\p{L}\p{N}])\s*/iu;
-const APPLICATION_INTENT_LEAD_RE = /^(?:\s+(?:am|are)|['’](?:m|re))\s+(?:applying\s+for|writing\s+to\s+apply\s+for)\s+/iu;
-
-export function intentLeadInRemainder(text, { applicationHead = true } = {}) {
-  const value = String(text ?? '');
-  const subject = value.match(/^\s*(?:(?:and|so|but)\s+)?(?:I|we)(?![\p{L}\p{N}])/iu);
-  if (!subject) return { matched: false, remainder: value };
-  const afterSubject = value.slice(subject[0].length);
-  const lead = afterSubject.match(INTENT_ADJECTIVE_LEAD_RE)
-    || afterSubject.match(INTENT_FORWARD_LEAD_RE)
-    || (applicationHead ? afterSubject.match(APPLICATION_INTENT_LEAD_RE) : null)
-    || afterSubject.match(INTENT_AFTER_SUBJECT_RE);
-  return lead
-    ? { matched: true, remainder: afterSubject.slice(lead[0].length) }
-    : { matched: false, remainder: value };
-}
 
 function speaksOnlyOfIntent(text) {
   const value = String(text ?? '');
@@ -12732,523 +12713,34 @@ function speaksOnlyOfIntent(text) {
   return subjects.length > 0 && subjects.every(subject => INTENT_AFTER_SUBJECT_RE.test(value.slice(subject.index + subject[0].length)));
 }
 
-const regexEscape = value => String(value).replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
-
-// A plain application head: "I am applying for the <title> role at <employer>."
-// or "... the role of <title> at <employer>.". The host-owned company and title
-// are matched as the frozen strings they are, so their own punctuation, digits
-// and number words ("4Birch", "Two Willows", "C++ Developer", "Software Engineer 3")
-// are not claims; any other digit, number word, organization or clause is.
-const APPLICATION_OPENER_LEAD = String.raw`^(?:I am|We are|I['’]m|We['’]re)\s+(?:applying\s+for|writing\s+to\s+apply\s+for)\s+(?:(?:the|this|your|an?)\s+)?`;
-const APPLICATION_ROLE_NOUN = String.raw`(?:role|position|job|opportunity|opening|vacancy|post)`;
-const APPLICATION_PLAIN_WORD = String.raw`(?!(?:I|we|my|our|with|as|and|since|once|that|which|where|who|when|after|before|while|if|because|having)\b)[\p{L}'’-]+`;
-const APPLICATION_EMPLOYER_INTRODUCERS = new Set(['at', 'with', 'for']);
-const TARGET_INTENT_OPEN_CLAUSE_OR_EMPLOYMENT_RE = /\b(?:because|since|while|when|which|where|who|that|after|before|having|employs?|hires?|pays?|salary|staff|employees?|employer|employment|tenure)\b/iu;
-
-// The leading article of a frozen name is the writer's choice ("The Alder Yard"
-// and "Alder Yard" name one employer); nothing else is equated.
-const employerComparable = value => normalizeSourceGroundingText(value).toLocaleLowerCase().replace(/^the\s+/u, '').trim();
-
-function isFrozenEmployerName(candidate, targetCompany) {
-  const written = employerComparable(candidate);
-  return Boolean(written) && targetIntentCompanyNames(targetCompany).some(name => employerComparable(name) === written);
-}
-
-function blankFrozenNames(text, names) {
-  let rest = String(text ?? '');
-  for (const name of [...names].sort((a, b) => b.length - a.length)) {
-    const body = String(name).trim().split(/\s+/u).map(regexEscape).join('\\s+');
-    if (body) rest = rest.replace(new RegExp(`(?<![\\p{L}\\p{N}])${body}(?![\\p{L}\\p{N}])`, 'giu'), ' ');
-  }
-  return rest;
-}
-
-function applicationTitleWindow(title) {
-  const plain = `(?:${APPLICATION_PLAIN_WORD}\\s+)`;
-  if (!title) return `${plain}{0,7}`;
-  const literal = title.split(/\s+/u).map(regexEscape).join('\\s+');
-  return `(?:${plain}{0,3}(?<title>${literal})\\s+${plain}{0,3}|${plain}{0,7})`;
-}
-
-function speaksOnlyOfApplicationIntent(text, targetCompany = '', targetTitle = '') {
+function speaksOnlyOfApplicationIntent(text) {
   const value = String(text ?? '').trim();
-  const title = normalizeSourceGroundingText(targetTitle ?? '').trim();
-  const names = targetIntentCompanyNames(targetCompany);
-  const countFree = piece => {
-    const rest = blankFrozenNames(piece, names);
-    return !/\d/u.test(rest) && !new RegExp(`\\b${SPELLED_NUMBER_PATTERN}\\b`, 'iu').test(rest);
-  };
-  // Nothing after the role (or the title) but a frozen employer: "at|with|for [the] <employer>".
-  const employerOnly = rawTail => {
-    const trimmed = String(rawTail ?? '').trim();
-    const tail = trimmed.replace(/[.!?]$/u, '').trim();
-    if (!tail) return true;
-    return [tail, trimmed].some(candidate => {
-      const employer = /^(?:at|with|for)\s+(.+)$/iu.exec(candidate)?.[1];
-      return Boolean(employer) && isFrozenEmployerName(employer, targetCompany);
-    });
-  };
-  const head = new RegExp(`${APPLICATION_OPENER_LEAD}${applicationTitleWindow(title)}${APPLICATION_ROLE_NOUN}(?<tail>[^]*)$`, 'iu').exec(value);
-  if (head) {
-    const heading = value.slice(0, value.length - head.groups.tail.length);
-    if (countFree(head.groups.title ? heading.replace(head.groups.title, ' ') : heading) && employerOnly(head.groups.tail)) return true;
-  }
-  const roleOf = new RegExp(`${APPLICATION_OPENER_LEAD}${APPLICATION_ROLE_NOUN}\\s+of\\s+(?<rest>[^]*)$`, 'iu').exec(value);
-  if (!roleOf) return false;
-  const plainTitle = new RegExp(`^(?:${APPLICATION_PLAIN_WORD}\\s+){0,6}${APPLICATION_PLAIN_WORD}$`, 'iu');
-  const titleTerms = new Set(attributionTerms(title));
-  // With the host title in hand, "role of ..." names that title or a shortening
-  // of it (its own words only); without one, a short run of plain words.
-  const titleOk = phrase => {
-    const written = normalizeSourceGroundingText(phrase).trim();
-    if (!written) return false;
-    if (title) return written.toLocaleLowerCase() === title.toLocaleLowerCase()
-      || (attributionTerms(written).length > 0 && attributionTerms(written).every(term => titleTerms.has(term)));
-    return plainTitle.test(written) && countFree(written) && reportsNoPastWork(written) && !hasWorkIngWord(written)
-      && !written.toLowerCase().split(/\s+/u).some(word => APPLICATION_EMPLOYER_INTRODUCERS.has(word));
-  };
-  const rest = roleOf.groups.rest.trim();
-  const unpunctuated = rest.replace(/[.!?]$/u, '').trim();
-  if (titleOk(unpunctuated)) return true;
-  return [unpunctuated, rest].some(variant => [...variant.matchAll(/\s+(?:at|with|for)\s+/giu)]
-    .some(split => titleOk(variant.slice(0, split.index)) && isFrozenEmployerName(variant.slice(split.index + split[0].length), targetCompany)));
-}
-
-export const NON_PAST_ED_WORDS = Object.freeze(new Set([
-  'need', 'speed', 'seed', 'feed', 'indeed', 'exceed', 'proceed', 'succeed', 'deed', 'heed', 'breed', 'bleed', 'greed', 'creed', 'weed', 'embed', 'hundred', 'sacred', 'kindred',
-]));
-
-export function isPastEdWord(word) {
-  const value = String(word ?? '').toLowerCase();
-  return /^\p{L}+ed$/u.test(value) && !NON_PAST_ED_WORDS.has(value);
+  return /^(?:I am|We are) (?:applying for|writing to apply for) [^,;.!?]+[.!?]?$/iu.test(value)
+    && !FIRST_PERSON_POSSESSIVE_RE.test(value)
+    && !/\b(?:who|having|after|because|where)\b/iu.test(value)
+    && !/\b(?:that|which)\b[^,;.!?]*\b(?:I|we|my|our)\b/iu.test(value);
 }
 
 function reportsNoPastWork(text) {
   const value = String(text ?? '');
-  return ![...value.matchAll(new RegExp(PAST_EFFECT_WORD_RE, 'giu'))].some(match => !/ed$/iu.test(match[0]) || isPastEdWord(match[0]))
-    && !CAREER_ASSERTION_ACTION_RE.test(value)
-    && ![...value.matchAll(new RegExp(CAREER_ASSERTION_REGULAR_PAST_RE, 'giu'))].some(match => isPastEdWord(match[0]));
+  return !PAST_EFFECT_WORD_RE.test(value) && !CAREER_ASSERTION_ACTION_RE.test(value) && !CAREER_ASSERTION_REGULAR_PAST_RE.test(value);
 }
 
 export const __reportsNoPastWorkForTests = reportsNoPastWork;
-
-const TARGET_EMPLOYMENT_BOUNDARY_RE = /(?:[;:]\s+|\s[—–]\s|,?\s+(?:and|but|then|while|so|yet|which|that|who|where)\s+)/giu;
-const TARGET_LOCATING_NOUN_RE = /(?<![\p{L}\p{N}])(?:roles?|positions?|openings?|teams?|groups?|colleagues?|missions?|customers?|the\s+work)\s+$/iu;
-const TARGET_EMPLOYMENT_FRAMES = Object.freeze([
-  { frame: 'initial-at', before: /^\s*["“(]*(?:at|within|inside|under)\s+(?:the\s+)?$/iu },
-  { frame: 'prep', before: /(?<![\p{L}\p{N}])(?:at|for|with|inside|within|on|under|from|in|across|by|via|using|alongside|among|throughout|of|as\s+part\s+of|on\s+behalf\s+of)\s+(?:the\s+)?$/iu },
-  { frame: 'temporal', before: /(?<![\p{L}\p{N}])(?:while|when|during|after|since|before|throughout)\s+(?:(?:at|working\s+(?:at|for|with)|employed\s+(?:at|by)|joining|leaving)\s+)?$/iu },
-  { frame: 'my-work-at', before: /(?<![\p{L}\p{N}])(?:my|our)\s+(?:[\p{L}'’-]+\s+)*?(?:work|role|time|tenure|years?|job|position|employment|career|team|colleagues?|manager)\s+(?:at|with|for|on)\s+(?:the\s+)?$/iu },
-  { frame: 'role-at', before: /(?<![\p{L}\p{N}])(?:in|as)\s+(?:an?|the)\s+(?:[\p{L}'’-]+\s+){0,6}(?:role|position|job)\s+(?:at|with|for)\s+(?:the\s+)?$/iu },
-  { frame: 'as-target-role', before: /(?<![\p{L}\p{N}])as\s+an?\s+$/iu },
-  { frame: 'my-target-team', before: /(?<![\p{L}\p{N}])(?:my|our)\s+$/iu,
-    requiredAfter: /^\s+(?:teams?|colleagues?|manager|role|job|position|career|work|time|tenure|years?)(?![\p{L}\p{N}])/iu },
-  { frame: 'bare-verb', before: /(?<![\p{L}\p{N}])(?:joined|joining|worked|served|serves|serving|helped|helps|helping)\s+$|(?<![\p{L}\p{N}])to\s+(?:help|serve|assist|support)\s+(?:the\s+)?$/iu },
-  { frame: 'artifact', after: /^\s+(?:platforms?|products?|customers?|users?|codebase|stack|systems?|infrastructure|data|pipelines?|apps?|services?)(?![\p{L}\p{N}])/iu },
-  { frame: 'employer-of-candidate', after: /^\s+(?:(?:employs?|hires?|pays?)\s+(?:me|us)|is\s+(?:my|our)\s+(?:current\s+)?employer)\b/iu },
-  // The optional leading period is the one a legal suffix ("Northwind Labs, Inc.") leaves after the name.
-  { frame: 'relative-where', after: /^\.?\s*,?\s*(?:(?:is\s+)?where|(?:at|in|for|under|with)\s+which)\s+(?:I|we)(?![\p{L}\p{N}])/iu },
-]);
-
-function targetEmploymentClauseStart(text, at) {
-  let start = 0;
-  for (const boundary of text.slice(0, at).matchAll(TARGET_EMPLOYMENT_BOUNDARY_RE)) start = boundary.index + boundary[0].length;
-  return start;
-}
 
 export function hasWorkIngWord(text) {
   return [...String(text ?? '').matchAll(/(?<![\p{L}\p{N}])\p{L}+ing(?![\p{L}\p{N}])/giu)]
     .some(match => match[0].toLowerCase() !== 'bring');
 }
 
-export function targetEmploymentIntentClause(text, targetCompany = '') {
-  const { matched, remainder } = intentLeadInRemainder(text);
-  if (!matched || FIRST_PERSON_POSSESSIVE_RE.test(remainder)
-    || /(?<![\p{L}\p{N}])(?:I|we)(?![\p{L}\p{N}])/iu.test(remainder)) return false;
-  let unlicensed = remainder;
-  for (const name of targetIntentCompanyNames(targetCompany).sort((a, b) => b.length - a.length)) {
-    const body = attributionTerms(name).map(term => term.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')).join('[^\\p{L}\\p{N}]+');
-    if (body) unlicensed = unlicensed.replace(new RegExp(`(?<![\\p{L}\\p{N}])${body}(?:['’]s|(?<=s)['’])?(?![\\p{L}\\p{N}])`, 'giu'), ' ');
-  }
-  if (TARGET_INTENT_OPEN_CLAUSE_OR_EMPLOYMENT_RE.test(unlicensed)) return false;
-  return !/\d|\p{Lu}/u.test(unlicensed)
-    && !new RegExp(`\\b${SPELLED_NUMBER_PATTERN}\\b`, 'iu').test(unlicensed)
-    && reportsNoPastWork(remainder)
-    && !hasWorkIngWord(remainder);
-}
-
-export function hasCandidateNonIntentClause(text, targetCompany = '', targetTitle = '') {
-  return groundingClauses(text).some(clause => speaksAsCandidate(clause.text)
-    && !speaksOnlyOfApplicationIntent(clause.text, targetCompany, targetTitle)
-    && !targetEmploymentIntentClause(clause.text, targetCompany));
-}
-
-function implicitCandidateWork(text) {
-  const first = String(text ?? '').trim().replace(/^["“(]+/u, '').match(/^\p{L}+/u)?.[0] || '';
-  return isPastEdWord(first) || /^(?:rebuilt|rewrote|redid|undid|cut|kept|made|took|gave|got|ran|led|built|wrote|held|sent|taught|won|drove|brought|grew|rose|saw|became|did|went|put|set|met|paid|sold|told|found|spent|left|lost|began|drew|fed)$/iu.test(first);
-}
-
-// A name the host froze, located in a clause. Overlapping aliases count once
-// (the longest wins). A name derived by stripping a legal suffix or a
-// parenthetical ("Anchor" from "Anchor Corporation") can also be an ordinary
-// lowercase word, so a derived one-word alias must be written with its own
-// initial capital; the frozen name itself and its pre-separator prefix match in
-// any case, as before.
-function targetNameMatches(text, targetCompany) {
-  const matches = [];
-  for (const form of targetCompanyNameForms(targetCompany).sort((a, b) => b.name.length - a.name.length)) {
-    const terms = attributionTerms(form.name);
-    if (!terms.length) continue;
-    const pattern = new RegExp(`(?<![\\p{L}\\p{N}])${terms.map(regexEscape).join('[^\\p{L}\\p{N}]+')}(?:['’]s|(?<=s)['’])?(?![\\p{L}\\p{N}])`, 'giu');
-    const ownCapital = form.derived && !/\s/u.test(form.name) && /^\p{Lu}/u.test(form.name);
-    for (const match of String(text ?? '').matchAll(pattern)) {
-      if (ownCapital && !/^\p{Lu}/u.test(match[0])) continue;
-      const from = match.index;
-      const to = from + match[0].length;
-      if (!matches.some(other => from < other.to && to > other.from)) matches.push({ from, to, name: form.name, text: match[0] });
-    }
-  }
-  return matches.sort((a, b) => a.from - b.from);
-}
-
-function maskTargetNames(text, matches) {
-  let masked = String(text ?? '');
-  for (const match of [...matches].sort((a, b) => b.from - a.from)) masked = `${masked.slice(0, match.from)}TARGETNAME${masked.slice(match.to)}`;
-  return masked;
-}
-
-// The closed exemptions below accept a clause only when everything in it is a
-// plain phrase: single words of letters, digits and apostrophes (so no comma,
-// semicolon, colon, dash, parenthesis or ampersand), no first-person subject or
-// clause opener, and no verb form that could report work (a gerund, a regular
-// or irregular past tense, a participle). What remains cannot assert that the
-// candidate did anything anywhere.
-const CLOSED_PHRASE_BLOCKED = new Set([
-  'i', 'we', 'us', 'my', 'mine', 'our', 'ours', 'myself', 'ourselves', 'that', 'which', 'who', 'whom', 'whose', 'where', 'when', 'whenever',
-  'while', 'because', 'since', 'after', 'before', 'as', 'if', 'unless', 'until', 'though', 'although', 'whereas', 'what', 'whatever',
-  'why', 'having', 'had', 'has', 'have', 'been', 'being', 'was', 'were', 'am', 'and', 'or', 'but', 'so', 'yet', 'then',
-  // Words that say the candidate was, or already is, part of the employer.
-  'again', 'back', 'anew', 'once', 'former', 'formerly', 'previous', 'previously', 'prior', 'already', 'still', 'ever', 'always',
-  'year', 'years', 'month', 'months', 'week', 'weeks', 'decade', 'decades', 'tenure', 'career', 'employed', 'employee', 'employees',
-  'employer', 'employment', 'colleague', 'colleagues', 'coworker', 'coworkers', 'staff', 'manager',
-]);
-const CLOSED_PHRASE_PARTICIPLES = new Set([
-  'rebuilt', 'run', 'written', 'overseen', 'driven', 'given', 'taken', 'done', 'gone', 'begun', 'shown', 'chosen', 'grown', 'known', 'seen',
-  'cut', 'put', 'undertaken', 'forgotten', 'spoken', 'broken', 'drawn', 'thrown', 'understood', 'stood', 'bought', 'caught', 'dealt', 'built',
-]);
-const CLOSED_PHRASE_WORD_RE = /^[\p{L}\p{N}][\p{L}\p{N}'’-]*$/u;
-const FIRST_PERSON_WORK_RE = /\b(?:I|we)\s+(?:(?:also|now|currently|still|personally)\s+)*(?:run|rebuild|cut|work|build|write|lead|own|manage|maintain|deliver|create|develop|handle|serve|support|operate|deploy|ship|oversee|coordinate|design|use|make|keep|teach|train|mentor)\b/iu;
-
-// Ordinary nouns, prepositions and adjectives that end in -ing; every other -ing word may be a work gerund.
-const CLOSED_PHRASE_ING_WORDS = new Set([
-  'posting', 'postings', 'listing', 'listings', 'opening', 'openings', 'engineering', 'hiring', 'recruiting', 'marketing', 'meeting', 'meetings',
-  'morning', 'evening', 'during', 'thing', 'things', 'something', 'anything', 'nothing', 'everything', 'ceiling',
-  'exciting', 'interesting', 'rewarding', 'fulfilling', 'inspiring', 'challenging', 'motivating', 'appealing', 'compelling', 'thrilling', 'engaging',
-]);
-
-// A gerund inside a noun phrase names a topic or a kind of thing ("focus on
-// routing", "freight routing"). It reports work when it opens a participial
-// phrase: straight after the employer's name ("E running rosters"), or after a
-// word that dates or explains an action ("after rebuilding", "by running").
-const CLOSED_PHRASE_PARTICIPIAL_LEADS = new Set([
-  'by', 'through', 'via', 'during', 'using', 'upon', 'from', 'without', 'at', 'after', 'before', 'since', 'while', 'when', 'as', 'if', 'then', 'and', 'or', 'but', 'than', 'targetname',
-]);
-
-function closedPhraseVerbish(word, { noun = false } = {}) {
-  const lower = String(word).toLowerCase().replace(/['’]s$/u, '');
-  return (hasWorkIngWord(lower) && !noun && !CLOSED_PHRASE_ING_WORDS.has(lower)) || !reportsNoPastWork(lower) || CLOSED_PHRASE_PARTICIPLES.has(lower);
-}
-
-function closedPlainPhrase(text, { maxWords = 10, allowMe = false } = {}) {
-  const value = String(text ?? '').trim().replace(/[.!?]+$/u, '').trim();
-  if (!value) return true;
-  const words = value.split(/\s+/u);
-  return words.length <= maxWords && words.every((word, index) => CLOSED_PHRASE_WORD_RE.test(word)
-    && (word === 'TARGETNAME' || (!CLOSED_PHRASE_BLOCKED.has(word.toLowerCase()) && (allowMe || word.toLowerCase() !== 'me')
-      && !closedPhraseVerbish(word, { noun: index > 0 && !CLOSED_PHRASE_PARTICIPIAL_LEADS.has(words[index - 1].toLowerCase()) }))));
-}
-
-// The employer is the first noun phrase of the object ("with E's mission"), or
-// follows one need-like noun ("the needs at E"); work-like nouns before it
-// ("years of work at E") would make it a place the work happened.
-const CLOSED_ALIGNMENT_OBJECT_RE = /^\s*(?:(?:the\s+)?(?:needs?|mission|goals?|priorities|roadmap|challenges|culture|values|focus|roles?|positions?|openings?|teams?|groups?|customers?)\s+(?:at|of|for|with|from|in)\s+)?(?:(?:how|what|the\s+way)\s+)?(?:the\s+)?TARGETNAME(?<tail>[^]*)$/iu;
-const CLOSED_ALIGNMENT_RE = /^(?:(?<subject>(?:my|our)\s+(?!(?:[^,;.!?]*\b(?:that|which|who|where|and|but|runs?|owns?|builds?|manages?|maintains?|ships?|uses?)\b))[^,;.!?]+?)\s+(?:aligns?|resonates?|matches?|fits?|suits?|(?:is|are)\s+relevant)|(?:I|we)\s+(?:identify|agree|admire))(?![\p{L}\p{N}])/iu;
-const CLOSED_GERUND_LEAD_RE = /^(?:would|will|could|can|may|might|should|is|are|seems?|sounds?|feels?|looks?)(?![\p{L}\p{N}])/iu;
-const CLOSED_GERUND_PREPOSITIONS_RE = /(?:^|\s)(?:for|at|with|within|inside|on|across|among|alongside|of|like)$/iu;
-// A word between the employer and the verb that follows it ("Joining E again
-// would ...", "Joining E's team would ...") is a plain noun or adverb: no
-// figure, and no preposition that could date or place work ("in 2019").
-const CLOSED_GERUND_BETWEEN_BLOCKED = new Set(['in', 'on', 'at', 'since', 'from', 'during', 'for', 'with', 'by', 'after', 'before', 'until', 'through', 'throughout', 'within', 'across', 'over', 'under', 'between', 'to', 'of']);
-
-// "Building <work> for <employer> would let me ...", "Joining <employer> would
-// let me ...": the employer is the object of an activity named by a gerund
-// subject, and the verb that follows the name is a modal or a copula. The
-// gerund phrase before the name and the whole tail after it must be plain, and
-// the employer is mentioned once.
-function closedGerundSubject(masked, matches) {
-  if (matches.length > 1) return false;
-  const gerund = /^\p{L}+ing(?![\p{L}\p{N}])/iu.exec(masked);
-  if (!gerund) return false;
-  if (/^(?:staying|remaining|continuing|resuming)$/iu.test(gerund[0])
-    || /\b(?:pays?|employs?|salary|job|employment|employer)\b/iu.test(masked)) return false;
-  const rest = masked.slice(gerund[0].length);
-  if (!matches.length) return closedPlainPhrase(rest, { allowMe: true });
-  const at = rest.indexOf('TARGETNAME');
-  const pre = rest.slice(0, at).trim().replace(/(?:^|\s)(?:the|teams?\s+like|a\s+team\s+like)$/iu, '').trim();
-  if (pre) {
-    const preposition = CLOSED_GERUND_PREPOSITIONS_RE.exec(pre);
-    if (!preposition || !closedPlainPhrase(pre.slice(0, preposition.index), { maxWords: 10 })) return false;
-  }
-  const words = rest.slice(at + 'TARGETNAME'.length).trim().split(/\s+/u).filter(Boolean);
-  const verb = words.findIndex(word => CLOSED_GERUND_LEAD_RE.test(word));
-  if (verb < 0 || verb > 3) return false;
-  // Direct employer activities must be prospective. A current copula can
-  // describe ongoing work; the comparative "teams like E" topic is safe.
-  if (!/^(?:would|will|could|can|may|might|should)$/iu.test(words[verb]) && !/\bteams?\s+like\s+TARGETNAME/iu.test(masked)) return false;
-  const between = words.slice(0, verb);
-  return between.every(word => !/\d/u.test(word) && !CLOSED_GERUND_BETWEEN_BLOCKED.has(word.toLowerCase()))
-    && closedPlainPhrase(between.join(' '), { maxWords: 3 }) && closedPlainPhrase(words.slice(verb + 1).join(' '), { allowMe: true });
-}
-
-const CLOSED_THANKS_RE = /^(?:thank\s+you|thanks)(?:\s+(?:so|very)\s+much)?\s+for\s+(?:considering|reviewing)\s+(?:my|our)\s+application(?:\s+(?:to|for|at|with)\s+(?:the\s+)?TARGETNAME(?<mid>(?:\s+[\p{L}'’-]+){0,4}?)(?:\s+(?:team|role|position|opening|posting|job))?)?(?:\s+and\s+(?:for\s+)?your\s+(?:time|attention|consideration))?[.!?]*$/iu;
-
-export function nonEmploymentTargetReference(text, targetCompany = '') {
-  const value = String(text ?? '').trim().replace(/[,;]?\s+(?:and|so|but)\s*$/iu, '').trim();
-  // Closed non-work relations do not assert employment. A past/current work
-  // claim elsewhere in this same clause still prevents the exemption.
-  if (!reportsNoPastWork(value) || FIRST_PERSON_WORK_RE.test(value)) return false;
-  if (/\b(?:I|we)\b/iu.test(value.replace(/^(?:I|we)\b/iu, ''))) return false;
-  const needsFit = /^(?:I|we)\s+can\s+see\s+how\s+(?:my|our)\s+work\s+applies\s+to\s+the\s+needs\s+at\s+(.+?)\s*[.!?]?$/iu.exec(value);
-  if (needsFit) return targetCompanyNames(targetCompany).some(name =>
-    normalizeSourceGroundingText(name).toLocaleLowerCase() === normalizeSourceGroundingText(needsFit[1]).toLocaleLowerCase());
-  // Each exemption below holds only for a clause that is entirely its closed
-  // frame, with at most one mention of the employer and nothing after the
-  // frame but a plain phrase: no comma, participle or gerund can carry a work
-  // claim (or a second employer mention) in with it.
-  const matches = targetNameMatches(value, targetCompany);
-  if (matches.length > 1) return false;
-  const masked = maskTargetNames(value, matches);
-  const alignment = CLOSED_ALIGNMENT_RE.exec(masked);
-  if (alignment) {
-    // A target already owned by the subject ("my rosters at E align") is
-    // still an employment claim, rather than the object of an alignment.
-    if (/TARGETNAME/u.test(alignment.groups.subject || '')) return false;
-    const object = masked.slice(alignment[0].length)
-      .replace(/^\s+(?:(?:very|well|closely|strongly|perfectly|naturally|directly|clearly|especially|particularly)\s+)?(?:(?:with|to|for|at|in|on|within|inside|among)\s+)?/iu, ' ');
-    if (!matches.length) return closedPlainPhrase(object);
-    const targeted = CLOSED_ALIGNMENT_OBJECT_RE.exec(object);
-    return Boolean(targeted) && closedPlainPhrase(targeted.groups.tail);
-  }
-  if (/^\p{L}+ing\b/iu.test(masked)) return closedGerundSubject(masked, matches);
-  const thanks = CLOSED_THANKS_RE.exec(masked);
-  return Boolean(thanks) && closedPlainPhrase(thanks.groups.mid || '', { maxWords: 4 });
-}
-
-// "I read the post by the <employer> engineering team." The employer names the
-// place a posting or article was read, not a place the candidate worked: the
-// clause is a perception verb, plain words, and one source noun after the name.
-const READING_VERB_RE = /^\s*(?:and\s+|also\s+)?I\s+(?:also\s+)?(?:read|saw|noticed|found|viewed|reviewed|browsed|watched|heard|learned|learnt|discovered|came\s+across)(?![\p{L}\p{N}])/iu;
-const READING_PREPOSITION_RE = /(?<![\p{L}\p{N}])(on|in|from|by|via|through|across)\s+(?:the\s+)?$/iu;
-const READING_SOURCE_RE = /^(?<modifiers>(?:\s+[\p{L}'’-]+){0,2}?)\s+(?<noun>website|site|blog|page|careers\s+page|jobs\s+page|job\s+board|board|job\s+listing|listing|posting|post|posts|newsletter|documentation|docs|team)(?![\p{L}\p{N}])/iu;
-
-function readingSourceReference(clause, targetCompany) {
-  const value = String(clause ?? '');
-  if (/\b(?:on\s+the\s+job|during\s+(?:my|our)\s+(?:work|tenure)|salary|pays?\s+(?:me|us)|employs?\s+(?:me|us))\b/iu.test(value)) return false;
-  const mentions = targetNameMatches(value, targetCompany);
-  if (mentions.length !== 1) return false;
-  const [mention] = mentions;
-  if (/(?:['’]s|s['’])$/iu.test(mention.text)) return false;
-  const before = value.slice(0, mention.from);
-  const after = value.slice(mention.to);
-  const preposition = READING_PREPOSITION_RE.exec(before);
-  const lead = READING_VERB_RE.exec(before);
-  const source = READING_SOURCE_RE.exec(after);
-  if (!preposition || !lead) return false;
-  // "Came across E while researching ..." names the research subject itself.
-  if (!source && /^across$/iu.test(preposition[1]) && /\bcame\s+across\s+(?:the\s+)?$/iu.test(before)) {
-    return !after.trim() || (/^\s+while\s+researching\s+/iu.test(after)
-      && closedPlainPhrase(after.replace(/^\s+while\s+researching\s+/iu, ''), { maxWords: 10 }));
-  }
-  if (!source || preposition.index < lead[0].length) return false;
-  if (/^team$/iu.test(source.groups.noun) && !/^(?:by|from)$/iu.test(preposition[1])) return false;
-  const modifiers = source.groups.modifiers.trim().split(/\s+/u).filter(Boolean);
-  if (modifiers.some(word => CLOSED_PHRASE_BLOCKED.has(word.toLowerCase()) || isPastEdWord(word) || CLOSED_PHRASE_PARTICIPLES.has(word.toLowerCase()))) return false;
-  return closedPlainPhrase(`${before.slice(lead[0].length, preposition.index)} TARGETNAME ${after.slice(source[0].length)}`, { maxWords: 14 });
-}
-
-// A relative clause that follows an exempt clause ("..., which I helped
-// build", "..., where I rebuilt ...") binds to the employer just named. The
-// exemption stands only when that tail reports no work.
-function relativeTailReportsWork(text, boundary, clauseEnd) {
-  if (!boundary || !/^,?\s+(?:which|that|who|where)\s+$/iu.test(boundary[0])) return false;
-  const tail = String(text ?? '').slice(clauseEnd + boundary[0].length).split(/[;:]\s+|\s[—–]\s/u)[0];
-  if (prospectiveTargetClause(tail)) return false;
-  return /\b(?:I|we|me|us|my|our)\b/iu.test(tail) || FIRST_PERSON_WORK_RE.test(tail)
-    || (tail.match(/[\p{L}][\p{L}'’-]*/gu) || []).some(word => closedPhraseVerbish(word));
-}
-
-function prospectiveTargetClause(text) {
-  const value = String(text ?? '').trim();
-  if (!reportsNoPastWork(value) || TARGET_INTENT_OPEN_CLAUSE_OR_EMPLOYMENT_RE.test(value)
-    || /\b(?:continue|continuing|resume|resuming|remain|remaining|stay|staying|again)\b/iu.test(value)) return false;
-  if (targetEmploymentIntentClause(value)) return true;
-  // Relative modal clauses can have an object pronoun: "which would let me
-  // build ...". A later first-person work clause still invalidates them.
-  return /^(?:would|will|could|can|may|might|should)\b/iu.test(value)
-    && !FIRST_PERSON_POSSESSIVE_RE.test(value) && !/\b(?:I|we)\b/iu.test(value);
-}
-
-const TARGET_SIBLING_ANAPHOR_RE = /\b(?:there|the\s+company|the\s+organization|(?:my|our)\s+(?:current\s+)?employer|(?:my|our)\s+tenure|their\s+team)\b/iu;
-const TARGET_SIBLING_EMPLOYER_PREDICATE_RE = /\bit\s+(?:employs?|hires?|pays?)\s+(?:me|us)\b/iu;
-
-function siblingClauseSubject(text, targetCompany) {
-  const clause = String(text ?? '').trim().replace(/^(?:and|also)\s+/iu, '');
-  if (/^(?:I|we|my|our)\b/iu.test(clause)) return true;
-  if (/^(?:they|he|she|it|you|the|a|an|this|that|these|those|their|his|her|its|your|which|who|where)\b/iu.test(clause)
-    || targetNameMatches(clause, targetCompany).some(mention => mention.from === 0)) return false;
-  return null;
-}
-
-function lastSiblingTargetEmploymentClaim(text, targetCompany) {
-  const tail = String(text ?? '');
-  // Most sentences have neither a relative clause nor a target-referring
-  // sibling. Do this once, before looking at individual employer occurrences.
-  if (!TARGET_SIBLING_ANAPHOR_RE.test(tail) && !TARGET_SIBLING_EMPLOYER_PREDICATE_RE.test(tail)
-    && !/\b(?:which|that|who|where)\b/iu.test(tail)) return -1;
-  const boundaries = [...tail.matchAll(/(?:[,;:]\s+|\s[—–]\s|,?\s+(?:and|but|then|while|so|yet|which|that|who|where|because)\s+)/giu)];
-  const inheritedCandidate = new Set();
-  const head = tail.slice(0, boundaries[0]?.index ?? tail.length);
-  let subject = siblingClauseSubject(head, targetCompany);
-  let forward = prospectiveTargetClause(head) || targetEmploymentIntentClause(head, targetCompany);
-  // A subject-less coordinated predicate inherits its governing I/we,
-  // regardless of the verb. An explicit independent subject resets that
-  // inheritance; a modal or joining intent keeps its coordinated work future.
-  for (const [index, boundary] of boundaries.entries()) {
-    const end = boundary.index + boundary[0].length;
-    const clause = tail.slice(end, boundaries[index + 1]?.index ?? tail.length).trim()
-      .replace(/^(?:and|so|but|then|yet)\s+/iu, '');
-    const explicit = siblingClauseSubject(clause, targetCompany);
-    const relative = /\b(?:which|that|who|where|because)\s+$/iu.test(boundary[0]);
-    const prospective = prospectiveTargetClause(clause) || targetEmploymentIntentClause(clause, targetCompany);
-    if (!prospective && (!reportsNoPastWork(clause)
-      || /^(?:(?:also|personally)\s+)*(?:(?:would|will|could|can|may|might|should)\s+)?(?:again|back|anew|once|former|formerly|previous|previously|prior|already|still|ever|always|now|currently|continue|continuing|resume|resuming|remain|remaining|stay|staying)\b/iu.test(clause))) forward = false;
-    if (explicit === null && !relative && subject === true && !forward) inheritedCandidate.add(boundary.index);
-    if (explicit !== null) subject = explicit;
-    else if (relative) subject = false;
-    if (explicit !== null || relative) forward = false;
-    if (prospective) forward = true;
-  }
-  // Only the last matching boundary is needed: every earlier target mention
-  // sees that claim too. Avoid rescanning every suffix for every target name.
-  for (const boundary of boundaries.reverse()) {
-    const marker = boundary[0].trim().replace(/^[,;:]\s*/u, '');
-    const clause = tail.slice(boundary.index + boundary[0].length).replace(/^(?:which|that|who|where|and|so|but)\s+/iu, '');
-    if (prospectiveTargetClause(clause)) continue;
-    const candidate = inheritedCandidate.has(boundary.index) || /\b(?:I|we|me|us|my|our)\b/iu.test(clause) || implicitCandidateWork(clause)
-      || FIRST_PERSON_WORK_RE.test(`I ${clause}`) || /^(?:have\s+(?:a\s+)?job|get\s+paid)\b/iu.test(clause);
-    const relative = /^(?:which|that|who|where)$/iu.test(marker) || /^\s*(?:which|that|who|where)\s+/iu.test(tail.slice(boundary.index + boundary[0].length));
-    const anaphor = TARGET_SIBLING_ANAPHOR_RE.test(clause) || TARGET_SIBLING_EMPLOYER_PREDICATE_RE.test(clause);
-    if (candidate && (relative || anaphor)) return boundary.index;
-  }
-  return -1;
-}
-
-// This structural guard precedes every grounding classifier. A target name
-// cannot turn a candidate's employer claim into an unexamined listing fact,
-// regardless of the verb used for the work.
-export function targetEmploymentFrames(sentence, targetCompany, { approvedOrganizations = [], targetTitle = '' } = {}) {
-  const text = String(sentence ?? '');
-  const company = String(targetCompany ?? '').trim();
-  const forms = targetCompanyNameForms(company).filter(form => attributionTerms(form.name).length);
-  const names = forms.map(form => form.name);
-  if (!names.length || (!speaksAsCandidate(text) && !implicitCandidateWork(text))) return [];
-  if (names.some(name => approvedOrganizations.some(approved => organizationDenotes(name, approved)))) return [];
-  // Short brands get the same employment scrutiny, never a wider exemption.
-  for (const name of targetIntentCompanyNames(company)) if (!names.includes(name)) forms.push({ name, derived: false });
-  const lastSiblingClaim = lastSiblingTargetEmploymentClaim(text, company);
-  const findings = [];
-  const seen = new Set();
-  const nameSpans = [];
-  for (const { name, derived } of forms.sort((a, b) => b.name.length - a.name.length)) {
-    const body = attributionTerms(name).map(term => term.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')).join('[^\\p{L}\\p{N}]+');
-    const pattern = new RegExp(`(?<![\\p{L}\\p{N}])${body}(?:['’]s|(?<=s)['’])?(?![\\p{L}\\p{N}])`, 'giu');
-    // See targetNameMatches: a derived one-word alias is an ordinary word unless capitalized.
-    const ownCapital = derived && !/\s/u.test(name) && /^\p{Lu}/u.test(name);
-    for (const match of text.matchAll(pattern)) {
-      if (ownCapital && !/^\p{Lu}/u.test(match[0])) continue;
-      if (nameSpans.some(span => match.index < span.to && match.index + match[0].length > span.from)) continue;
-      nameSpans.push({ from: match.index, to: match.index + match[0].length });
-      if (seen.has(match.index)) continue;
-      const before = text.slice(0, match.index);
-      const end = match.index + match[0].length;
-      const after = text.slice(end);
-      if (lastSiblingClaim >= end) {
-        seen.add(match.index);
-        findings.push({ code: 'target-employment-frame', term: match[0], frame: 'target-anaphor', index: match.index });
-        continue;
-      }
-      for (const frame of TARGET_EMPLOYMENT_FRAMES) {
-        const beforeMatch = frame.before ? before.match(frame.before) : null;
-        if (!(beforeMatch || frame.after?.test(after))) continue;
-        if (frame.requiredAfter && !frame.requiredAfter.test(after)) continue;
-        const followingBoundary = [...after.matchAll(TARGET_EMPLOYMENT_BOUNDARY_RE)][0];
-        const clauseEnd = followingBoundary ? end + followingBoundary.index : text.length;
-        const localClause = text.slice(targetEmploymentClauseStart(text, match.index), clauseEnd);
-        // A relative clause after an exempt clause binds to the employer just named.
-        const tailReportsWork = relativeTailReportsWork(text, followingBoundary, clauseEnd);
-        if (frame.frame === 'prep') {
-          if (TARGET_LOCATING_NOUN_RE.test(before.slice(0, beforeMatch.index))) continue;
-          // This target occurrence is the object of interest, not a workplace.
-          // Later candidate work still runs through the ordinary claim gates.
-          if (/^(?:I\s+am|I['’]m|we\s+are|we['’]re)\s+(?:particularly\s+)?interested\s+in\s+$/iu
-            .test(before.slice(targetEmploymentClauseStart(text, match.index)))) continue;
-          if (/^on\s+(?:the\s+)?$/iu.test(beforeMatch[0])
-            && (/(?:['’]s|s['’])$/iu.test(match[0]) || (/^on\s+the\s+$/iu.test(beforeMatch[0])
-              && /^\s+careers\s+page(?![\p{L}\p{N}])/iu.test(after)))
-            && /^\s+(?:blog|site|careers\s+page|posting|website)(?![\p{L}\p{N}])/iu.test(after)) continue;
-          // The employer as the place a posting or article was read.
-          if (!tailReportsWork && readingSourceReference(localClause, company)) continue;
-        }
-        const followsName = frame.frame === 'relative-where' || (beforeMatch && !before.slice(0, beforeMatch.index).trim());
-        let governing;
-        if (followsName) {
-          const rest = frame.frame === 'relative-where'
-            ? after.replace(/^\.?\s*,?\s*(?:(?:is\s+)?where|(?:at|in|for|under|with)\s+which)\s+/iu, '')
-            : after.replace(/^\s*,\s*/u, '');
-          const nextBoundary = [...rest.matchAll(TARGET_EMPLOYMENT_BOUNDARY_RE)][0];
-          governing = nextBoundary ? rest.slice(0, nextBoundary.index) : rest;
-        } else {
-          // The actor can follow the name: "As an engineer at E, I run…"
-          // and "rosters for E are what I run" still associate that work.
-          governing = localClause;
-        }
-        if (speaksOnlyOfApplicationIntent(governing, company, targetTitle) || targetEmploymentIntentClause(governing, company)) continue;
-        const affiliation = ['my-work-at', 'role-at', 'as-target-role', 'my-target-team', 'artifact'].includes(frame.frame);
-        const relationClause = frame.frame === 'artifact' ? text : frame.frame === 'relative-where' ? governing : localClause;
-        const clauseBound = frame.frame !== 'artifact' && frame.frame !== 'relative-where';
-        if (nonEmploymentTargetReference(relationClause, names.includes(name) ? company : name)
-          && !(clauseBound && tailReportsWork)) continue;
-        if (!affiliation && !speaksAsCandidate(governing) && !implicitCandidateWork(governing)) continue;
-        seen.add(match.index);
-        findings.push({ code: 'target-employment-frame', term: match[0], frame: frame.frame, index: match.index });
-        break;
-      }
-    }
-  }
-  return findings;
-}
-
-function targetEmploymentFrameFailureParts(finalText, index, options) {
+function targetEmploymentFrameFailureParts(finalText, index, options, sentenceOffset = 0) {
   const targetCompany = String(options?.targetCompany ?? '').trim();
   if (!targetCompany) return [];
-  // Completion has the trusted-name projection rather than the full career
-  // authority; paste callers supply the narrower approved organizations list.
-  const approvedOrganizations = Array.isArray(options?.approvedOrganizations)
-    ? options.approvedOrganizations
-    : Array.isArray(options?.trustedNames) ? options.trustedNames : [];
+  const approvedOrganizations = Array.isArray(options?.approvedOrganizations) ? options.approvedOrganizations : [];
+  const approvedCareerEmployers = Array.isArray(options?.approvedCareerEmployers) ? options.approvedCareerEmployers : [];
   return groundingSentences(finalText).flatMap((sentence, sentenceIndex) =>
-    targetEmploymentFrames(sentence, targetCompany, { approvedOrganizations, targetTitle: options?.targetTitle ?? '' }).map(finding =>
-      describeClaimFinding(`cover-letter paragraph ${index + 1}, sentence ${sentenceIndex + 1}`, finding, { targetCompany })));
+    targetEmploymentFrames(sentence, targetCompany, { approvedOrganizations, approvedCareerEmployers })
+      .map(finding => describeClaimFinding(`cover-letter paragraph ${index + 1}, sentence ${sentenceOffset + sentenceIndex + 1}`, finding)));
 }
 
 // A trailing or coordinated clause that ONLY addresses the target ("..., which
@@ -13290,7 +12782,7 @@ function clauseOnlyAddressesTarget(part, sentence, grounding, targetCompany, ref
     && !/^\p{L}+ing\b/iu.test(text)
     && sentenceAddressesTarget(text, targetCompany)
     && !speaksAsCandidate(text, referenceTexts)
-    && reportsNoPastWork(text)
+    && !CAREER_ASSERTION_ACTION_RE.test(text) && !CAREER_ASSERTION_REGULAR_PAST_RE.test(text) && !PAST_EFFECT_WORD_RE.test(text)
     && !textWritesGroundedClaim(text, grounding, targetCompany, { strength: true });
 }
 
@@ -13304,8 +12796,7 @@ export const __clauseOnlyAddressesTargetForTests = clauseOnlyAddressesTarget;
 function sentenceClaimFindings(sentence, quotes, ctx) {
   const findings = postingGrantedClaimFindings(sentence, quotes, ctx);
   // A name or count written only as the reader's, in a first-person sentence that reports no past work; see speaksAsCandidateWithClaim.
-  return findings.filter(finding => !targetIdentityNameLicensed(sentence, finding, ctx, { reportsNoPastWork, attributionTerms, sentenceAddressesTarget, groundingClauses, intentLeadInRemainder, hasWorkIngWord, targetEmploymentIntentClause, speaksOnlyOfApplicationIntent, hasCandidateNonIntentClause,
-    nonEmploymentTargetReference: text => nonEmploymentTargetReference(text, ctx?.targetCompany) })
+  return findings.filter(finding => !targetIdentityNameLicensed(sentence, finding, ctx, { reportsNoPastWork, attributionTerms, sentenceAddressesTarget })
     && !(ctx?.targetOwnedFree && termOnlyWrittenAsTargets(sentence, finding)));
 }
 
@@ -13621,9 +13112,9 @@ const MAX_REPORTED_CLAIM_FINDINGS = 4;
 // Names, tool-use strength, counts, rate intervals, credentials, calendar
 // years and appended clauses: one numbered item per ungrounded claim, so a
 // bullet that invents a tool AND a count is repaired in one round.
-function claimGroundingFailureParts(sentence, sourceQuotes, unit, grounding, targetCompany = '') {
+function claimGroundingFailureParts(sentence, sourceQuotes, unit, grounding) {
   const findings = sentenceClaimFindings(sentence, sourceQuotes, grounding);
-  const parts = findings.slice(0, MAX_REPORTED_CLAIM_FINDINGS).map(finding => describeClaimFinding(unit, finding, { targetCompany }));
+  const parts = findings.slice(0, MAX_REPORTED_CLAIM_FINDINGS).map(finding => describeClaimFinding(unit, finding));
   if (findings.length > MAX_REPORTED_CLAIM_FINDINGS) {
     parts.push(`${unit} has ${findings.length - MAX_REPORTED_CLAIM_FINDINGS} further ungrounded claim(s) of these kinds that are not listed here.`);
   }
@@ -13774,8 +13265,8 @@ export function assertSourceQuoteLinksFinalText(finalText, sourceQuotes, label, 
   const shared = sharedTerms(finalTokens);
   const minimumShared = finalTokens.length === 1 ? 1 : MIN_SHARED_SOURCE_TERMS;
   const applicationIntentOnly = label === 'coverLetterParagraphs' && String(finalText).trim() !== ''
-    && groundingSentences(finalText).every(sentence => speaksOnlyOfApplicationIntent(sentence, options.targetCompany, options.targetTitle)
-      || speaksOnlyOfIntent(sentence) || targetEmploymentIntentClause(sentence, options.targetCompany));
+    && groundingSentences(finalText).every(sentence => speaksOnlyOfApplicationIntent(sentence)
+      || speaksOnlyOfIntent(sentence));
   if ((!finalTokens.length || shared.length < minimumShared) && !applicationIntentOnly) {
     const unit = label === 'resumeBullets' ? 'résumé bullet' : 'cover-letter paragraph';
     const ordinal = `${unit} ${index + 1}`;
@@ -13809,7 +13300,6 @@ export function assertSourceQuoteLinksFinalText(finalText, sourceQuotes, label, 
   const sourceBodyTokens = new Set(meaningfulSourceTokens(sourceQuotes.map(evidenceBody).filter(Boolean).join(' ')));
   const postingText = typeof options.postingText === 'string' ? options.postingText : '';
   const targetCompany = typeof options.targetCompany === 'string' ? options.targetCompany : '';
-  const targetTitle = typeof options.targetTitle === 'string' ? options.targetTitle : '';
   const sourceBodies = sourceQuotes.map(evidenceBody).filter(Boolean);
   const sourceVerbHints = quoteVerbHints(sourceBodies);
   // The texts whose own wording decides that a capital "I" is a Roman numeral (see withoutQuotedRomanOne).
@@ -13820,21 +13310,21 @@ export function assertSourceQuoteLinksFinalText(finalText, sourceQuotes, label, 
     exemptClause: (part, sentence) => clauseOnlyAddressesTarget(part, sentence, grounding, targetCompany, referenceTexts),
   };
   for (const [sentenceIndex, sentence] of groundingSentences(finalText).entries()) {
-    if (speaksOnlyOfApplicationIntent(sentence, targetCompany, targetTitle)) continue;
-    const candidateCareerSentence = isCandidateCareerSentence(sentence, identityTokens, targetCompany, targetTitle);
+    if (speaksOnlyOfApplicationIntent(sentence)) continue;
+    const candidateCareerSentence = isCandidateCareerSentence(sentence, identityTokens);
     // Held to the figure, qualifier, count, name and clause readings below
     // without being a sentence about the candidate: see
     // isImpersonalSourceRestatement. It owes no unrelated-sentence floor,
     // because sharing most of its terms with the quotes is how it got here.
     const impersonalRestatement = !candidateCareerSentence && isImpersonalSourceRestatement(sentence, sourceBodyTokens);
-    const claimSentence = isCandidateClaimSentence(sentence, identityTokens, sourceQuotes, targetCompany, targetTitle);
+    const claimSentence = isCandidateClaimSentence(sentence, identityTokens, sourceQuotes);
     // A sentence none of the readings above judges, whose first-person clause
     // writes a name, count, figure or qualifier: see speaksAsCandidateWithClaim.
     // The employer's own name is not a claim about the candidate's work in it.
     const firstPersonClaim = !(candidateCareerSentence || impersonalRestatement || claimSentence)
       && speaksAsCandidateWithClaim(sentence, sourceVerbHints, referenceTexts, grounding, targetCompany);
     const baseGrounding = firstPersonClaim
-      ? { ...letterGrounding, trustedNames: [...grounding.trustedNames, ...(targetCompany ? [targetCompany] : [])], targetOwnedFree: reportsNoPastWork(sentence) && !hasCandidateNonIntentClause(sentence, targetCompany, targetTitle) }
+      ? { ...letterGrounding, trustedNames: [...grounding.trustedNames, ...(targetCompany ? [targetCompany] : [])], targetOwnedFree: reportsNoPastWork(sentence) }
       : letterGrounding;
     // Only a CLAUSE ADDRESSED TO THE TARGET, with no first-person word, in a
     // sentence that NO older reading judged may use the posting's names and
@@ -13850,7 +13340,7 @@ export function assertSourceQuoteLinksFinalText(finalText, sourceQuotes, label, 
     // those identity words while still being grounded in the selected career
     // evidence, so it receives the same exact figure proof as a résumé
     // bullet. Listing-only figures continue to stand down.
-    const figureSentence = impersonalRestatement || firstPersonClaim || isCandidateCareerFigureSentence(sentence, identityTokens, sourceQuotes, targetCompany, targetTitle);
+    const figureSentence = impersonalRestatement || firstPersonClaim || isCandidateCareerFigureSentence(sentence, identityTokens, sourceQuotes);
     if (figureSentence) {
       assertSupportedSourceFigures(sentence, sourceQuotes, `${unit}, sentence ${sentenceIndex + 1}`);
     }
@@ -13887,7 +13377,7 @@ export function assertSourceQuoteLinksFinalText(finalText, sourceQuotes, label, 
     const failures = collectGroundingFailures([
       () => assertSupportedSourceQualifiers(sentence, sourceQuotes, sentenceUnit, grounding),
     ]);
-    failures.push(...claimGroundingFailureParts(sentence, sourceQuotes, sentenceUnit, sentenceGrounding, targetCompany));
+    failures.push(...claimGroundingFailureParts(sentence, sourceQuotes, sentenceUnit, sentenceGrounding));
     failures.push(...roleStrengthFailureParts(sentence, sourceQuotes, sentenceUnit, options));
     // Every claim above is supported by SOME cited quote. A claim a quote about
     // other work supports is still borrowed; see poolingBorrowFailures.
@@ -14288,6 +13778,8 @@ function sanitizeSourceGrounding(raw, { careerData, resumeEvidence, coverLetter,
       assertSourceQuoteLinksFinalText(finalText, sourceQuotes, label, index, {
         identityTokens: careerIdentityTokens(resumeEvidence),
         trustedNames: trustedNamesForRoles(resumeEvidence?.roles, resumeEvidence?.projects),
+        approvedOrganizations: approvedOrganizationsForCareer(resumeEvidence?.roles, null, resumeEvidence?.projects),
+        approvedCareerEmployers: (resumeEvidence?.roles || []).map(role => role?.company).filter(Boolean),
         trustedYears: trustedYearsForRoles(resumeEvidence?.roles),
         postingText,
         targetCompany: postingCompany,

@@ -1127,7 +1127,7 @@ export default [
     },
   },
   {
-    name: 'non-API AI bridge seam: official posting research and JSON match are eligible and validate corrected answers through callLLMRaw',
+    name: 'non-API AI bridge seam: official posting research and comparative JSON judgment validate corrected answers through callLLMRaw',
     run: async () => {
       const { sender, waitFor } = freshHarness();
       const nodeId = 'bridge-seam-official-postings';
@@ -1135,7 +1135,9 @@ export default [
       const job = { title: 'Platform Engineer', company: 'Acme Talent Partners', location: 'Lakeview, Canada',
         snippet: 'Maintain dependable platform services with documented delivery practices.', url: 'https://listing.example.test/platform' };
       const description = 'Maintain dependable platform services with documented engineering delivery practices.';
-      const specs = [buildOfficialPostingResearchRequest([job]), buildOfficialPostingMatchRequest({ scrapedDescription: description, officialDescription: description })];
+      const comparison = buildOfficialPostingMatchRequest({ job: { ...job, snippet: description }, run: 'A',
+        options: [{ id: 'P1', title: job.title, location: job.location, status: 'live', description }] });
+      const specs = [buildOfficialPostingResearchRequest([job]), comparison];
       handleSafe('bridge-seam-official-postings-workflow', async (_event, _args, signal) => ({
         values: await Promise.all(specs.map(({ prompt, ...options }) => callLLMRaw(prompt, { ...options, signal }))),
       }));
@@ -1149,15 +1151,18 @@ export default [
       assert(listed.handoffs.length === 2 && requests.every(request => request.mcpEligible), 'both reviewed task contracts must ride the bridge');
       const research = requests.find(request => request.task === 'job-official-posting-research');
       const match = requests.find(request => request.task === 'job-official-posting-match');
-      const identities = request => ({ requestId: request.requestId, handoffCode: request.handoffCode, ...allowed });
+      const identities = request => ({ requestId: request.requestId, handoffCode: request.handoffCode, ...allowed,
+        ...(request.task === 'job-official-posting-match' ? { comparisonProvenance: { version: 2, transport: 'bridge', observed: true,
+          ...comparison.manualHandoff, conversationKey: 'b'.repeat(64), isolated: false } } : {}) });
       assert(listed.handoffs.find(item => item.task === research.task)?.responseFormat === 'text'
         && listed.handoffs.find(item => item.task === match.task)?.responseFormat === 'json',
       'the narrow callLLMRaw match dispatch must use the schema-backed JSON route while grounded research stays raw text');
       const badResearch = await submitNonApiAiResponseForBridge({ ...identities(research), response: `Handoff: ${research.handoffCode}\n\nVERIFIED EMPLOYER: invented` });
+      assert(readBridgeableNonApiAiHandoff(identities(match)).ok, 'the comparative judgment first receives trusted bridge conversation provenance');
       const badMatch = await submitNonApiAiResponseForBridge({ ...identities(match), response: JSON.stringify({ handoffCode: match.handoffCode,
-        sameJob: true, matchingPairs: [{ scrapedQuote: 'Unique invented quoted content that never appears in either supplied description.', officialQuote: 'Unique invented quoted content that never appears in either supplied description.' }], conflicts: [] }) });
+        choice: 'P1', evidence: [{ scrapedQuote: 'Unique invented quoted content that never appears in either supplied description.', officialQuote: 'Unique invented quoted content that never appears in either supplied description.' }], distinguishing: [], conflicts: [] }) });
       assert(badResearch.outcome === 'rejected' && badResearch.isCorrection && /sections|marker/iu.test(badResearch.correction), 'malformed research must yield a section correction');
-      assert(badMatch.outcome === 'rejected' && badMatch.isCorrection && /absent from its own supplied text/iu.test(badMatch.correction)
+      assert(badMatch.outcome === 'rejected' && badMatch.isCorrection && /1 scraped/iu.test(badMatch.correction)
         && !badMatch.correction.includes('Unique invented'), 'a nonverbatim JSON answer must yield a source-free domain correction');
       for (const request of [research, match]) {
         const retry = readBridgeableNonApiAiHandoff(identities(request));
@@ -1166,13 +1171,13 @@ export default [
       const id = officialPostingResearchId(job);
       const validResearch = `BEGIN OFFICIAL POSTING RESEARCH ${id}\nCANDIDATE: ${JSON.stringify({ careersPageUrl: 'https://careers.example.test/', postingUrl: 'https://jobs.ashbyhq.com/northwind-synthetic/platform', employer: 'Northwind Labs', employerDomain: 'https://northwind.example.test', ats: 'ashby' })}\nEND OFFICIAL POSTING RESEARCH ${id}`;
       const acceptedResearch = await submitNonApiAiResponseForBridge({ ...identities(research), response: `Handoff: ${research.handoffCode}\n\n${validResearch}` });
-      const acceptedMatch = await submitNonApiAiResponseForBridge({ ...identities(match), response: JSON.stringify({ handoffCode: match.handoffCode, sameJob: false, matchingPairs: [], conflicts: [] }) });
+      const acceptedMatch = await submitNonApiAiResponseForBridge({ ...identities(match), response: JSON.stringify({ handoffCode: match.handoffCode, choice: 'none', evidence: [], distinguishing: [], conflicts: [] }) });
       assert(acceptedResearch.accepted && acceptedMatch.accepted, 'valid raw leads and a valid JSON miss must both accept');
       const completed = await run;
       assert(completed.values?.[0] === validResearch
-        && completed.values?.[1]?.sameJob === false, 'the injected raw caller retains raw research and returns parsed JSON only for the new comparison task');
+        && completed.values?.[1]?.choice === 'none', 'the injected raw caller retains raw research and returns parsed JSON only for the new comparison task');
       const replay = await invoke();
-      assert(replay.values?.[0] === validResearch && replay.values?.[1]?.sameJob === false
+      assert(replay.values?.[0] === validResearch && replay.values?.[1]?.choice === 'none'
         && (await waitFor(2)).length === 4, 'accepted tasks replay without emitting any new handoff requests');
       // waitFor counts correction reissues as requests too: two originals plus
       // one correction of each task are the complete delivered sequence.
@@ -1288,7 +1293,8 @@ export default [
         sender,
         nodeId,
         runId: null,
-        handoffs: tasks.map((task, index) => ({ prompt: `TASK SWEEP ${index}`, task, responseSchema: SCHEMA, batch: index + 1, batchTotal: tasks.length, itemCount: 1 })),
+        handoffs: tasks.map((task, index) => ({ prompt: `TASK SWEEP ${index}`, task, responseSchema: SCHEMA, batch: index + 1, batchTotal: tasks.length, itemCount: 1,
+          ...(task === 'job-official-posting-match' ? { comparisonGroup: 'd'.repeat(64), comparisonRun: 'A' } : {}) })),
       });
       const requests = await waitFor(tasks.length);
       const selected = listBridgeableNonApiAiHandoffs({ allowTasks: new Set([TASK]), allowNodeIds: new Set([nodeId]) });

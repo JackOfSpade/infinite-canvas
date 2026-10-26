@@ -103,6 +103,8 @@ Only after the packaged app is healthy, the public protected-resource self-probe
 
 Use a dedicated ChatGPT Project or chat for handoffs, with memory, browsing, and unrelated connected apps configured intentionally. Delete handoff chats when appropriate for the selected data controls. Never paste the pairing code, chat epoch key, OAuth tokens, or tunnel credential into a chat.
 
+For independent comparative runs, turn off ChatGPT Memory and "Reference chat history" for the worker account; a fresh conversation alone does not establish independence from account memory.
+
 ## 6. Backup and local credential hygiene
 
 The default safe choice is to keep tunnel credentials and bridge state out of Time Machine. On the Mac that owns the bridge, run the following paths after confirming the app's user-data location:

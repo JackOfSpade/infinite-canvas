@@ -137,6 +137,27 @@ export default [
   },
 
   {
+    name: 'v2 fact prompts flag employment only at the frozen target and retain the generic empty-company fallback',
+    run() {
+      const state = initialWriteVerifyState(1);
+      state.candidates[0].structured = { resume: { roles: [{ company: 'Cedar Works', bullets: [] }] }, coverLetter: { paragraphs: [] } };
+      state.ranking = [state.candidates[0].id]; state.factIndex = 0;
+      for (const stage of ['fact-check', 'fact-recheck']) {
+        for (const targetCompany of ['Northwind Labs', 'Northwind Labs - Platform', '', '   ']) {
+          const target = targetCompany.trim() ? JSON.stringify(targetCompany.trim()) : 'the employer this letter is addressed to';
+          const expected = `List only actual inflation of ownership, scope, metrics, dates, tools or employment. Employment inflation is any statement or implication that the candidate works at, worked at, joined, left, or was otherwise employed by or affiliated with ${target}, unless ${target} is one of the résumé role companies. Applying to ${target}, wanting to join it, or describing what you would do there is not employment.`;
+          const prompt = writeVerifyPrompt({ stage, state, targetCompany, hand: 'Synthetic approved career quotes.', envelope: {} });
+          assert.ok(prompt.includes(expected), `${stage}: ${targetCompany || 'empty company'}`);
+          assert.equal(prompt.split('Employment inflation is ').length, 2, 'the target-only category occurs exactly once');
+          assert.ok(!prompt.includes('dates or tools.'));
+        }
+      }
+      const hostSource = fs.readFileSync(path.resolve('electron/ipc/localAiApplication.js'), 'utf8');
+      assert.match(hostSource, /writeVerifyPrompt\(\{ stage: state\.stage, state: state\.writeVerify, \.\.\.context,\s*targetCompany: input\.job\?\.company \|\| ''/u,
+        'the host passes its frozen salutation identity, without a poster or model substitution');
+    },
+  },
+  {
     name: 'v2 judge rubric carries grading text only and the pick prompt owns its output format',
     run: () => {
       assert.ok(!WRITE_VERIFY_JUDGE_RUBRIC.includes('Return JSON only'));
@@ -239,9 +260,9 @@ export default [
       assert.equal(contract.split(CLAIM_GROUNDING_RULE).length, 2, 'the claim rule prints once');
       assert.ok(contract.includes('sole ownership (single-handedly, solely, sole, independently, alone, on my own)'), 'sole-ownership forms');
       assert.ok(contract.includes('reduction outcome (reduce(d/s/ing), reduction(s)'), 'reduction forms');
-      const employerLicence = 'The employer this letter is addressed to may be named without a quote as the owner of a need the work meets, never as a place the work happened';
-      assert.equal(contract.split(employerLicence).length, 2, 'the target-employer need licence prints once');
-      assert.ok(contract.includes(`. ${employerLicence}. ${SOURCE_FIGURE_GROUNDING_RULE}.`), 'the employer licence follows the qualifier families and precedes the figure rule');
+      const employerLicence = 'Name the employer only in a short sentence of its own about its need or your wish to join it';
+      assert.equal(contract.includes(employerLicence), false, 'Amendment 6 removes the employer naming instruction');
+      assert.equal(WRITE_VERIFY_BRIEF.includes(employerLicence), false, 'the own-sentence rule remains outside the brief');
       assert.ok(contract.includes(`. ${SOURCE_FIGURE_GROUNDING_RULE}. ${WRITE_VERIFY_LISTING_CLOSING_RULE} Every sentence about the candidate's own work must share at least ${MIN_SHARED_SOURCE_TERMS} meaningful terms with the quotes its unit cites, where ${SOURCE_TERM_OVERLAP_RULE}, and ${LETTER_TERM_FORMS_RULE}.`), 'figure rule then the scoped final-paragraph exception and unchanged career overlap floor');
       assert.ok(contract.endsWith(`where ${SOURCE_TERM_OVERLAP_RULE}, and ${LETTER_TERM_FORMS_RULE}.`), 'ends on the unchanged career overlap rule, the letter word-form clause and a period');
       assert.equal(contract.split(WRITE_VERIFY_LISTING_CLOSING_RULE).length, 2, 'the structural closing exception is stated once outside the brief');
@@ -799,10 +820,10 @@ export default [
         const taggedErrors = text => __pasteUnitGroundingErrorsForTests({ ...args, targetCompany: `${company} - Operations Tools`, finalText: text });
         assert.deepEqual(taggedErrors(`I maintained ${work}. I would bring this work to ${company}'s team.`), [],
           'the exact employer prefix and possessive in a forward reference are licensed');
-        assert.ok(taggedErrors(`I maintained ${work} at ${company}.`).some(error => error.includes('names')),
+        assert.ok(taggedErrors(`I maintained ${work} at ${company}.`).some(error => error.includes('states work at')),
           'a display-name prefix does not license a past-employment claim');
         assert.ok(errors(`I worked as a ${title} on ${work}.`).some(error => error.includes('names')), `${title}: past title mutation fails`);
-        assert.ok(errors(`I maintained ${work} at ${company}.`).some(error => error.includes('names')), `${company}: past employer mutation fails`);
+        assert.ok(errors(`I maintained ${work} at ${company}.`).some(error => error.includes('states work at')), `${company}: past employer mutation fails`);
         assert.ok(errors(`I maintained ${work}. The Orbital Systems Engineer role appeals to me because it involves this work.`)
           .some(error => error.includes('Orbital Systems Engineer')), `${title}: unlisted title mutation fails`);
         assert.ok(__pasteUnitGroundingErrorsForTests({ ...args, targetTitle: '', finalText: target })

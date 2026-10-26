@@ -705,6 +705,7 @@ function createControllerBridge() {
     pause: call('pause'), resume: call('resume'), release: call('release'), unrelease: call('unrelease'),
     releasePushHubs: call('releasePushHubs'), unreleasePushHub: call('unreleasePushHub'),
     newChat: call('newChat'), continueChat: call('continueChat'), startWorkerPool: call('startWorkerPool'), copyWorkerStarter: call('copyWorkerStarter'), prepareWorkerAttachment: call('prepareWorkerAttachment'), abandonWorkerStarter: call('abandonWorkerStarter'), refreshPushDiscovery: call('refreshPushDiscovery'), restartWorker: call('restartWorker'), prepareChat: call('prepareChat'), commitChat: call('commitChat'), abandonChat: call('abandonChat'),
+    beginObservedChat: call('beginObservedChat'), confirmObservedChat: call('confirmObservedChat'), cancelObservedChat: call('cancelObservedChat'),
     getActivity: call('getActivity'),
     reloadConfig: async () => {
       const active = activeController(current);

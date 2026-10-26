@@ -84,6 +84,29 @@ import { claimJobAnalysisOperationAuthority } from '../../electron/ipc/jobAnalys
 
 export default [
   {
+    name: 'official-posting comparative bug report exposes only closed option-count bins and outcome counts',
+    run() {
+      const telemetry = getJobsTelemetry(); const saved = structuredClone(telemetry);
+      try {
+        for (const key of Object.keys(telemetry)) delete telemetry[key];
+        Object.assign(telemetry, { nodeId: 'synthetic-comparative-report', windowId: null,
+          search: { ts: Date.now(), queries: 1, raw: 1, deduped: 1, ageDropped: 0, historyDropped: 0, kept: 1,
+            officialPosting: { total: 1, levels: { L2: 1 }, outcomes: { found: 1 }, rejections: {},
+              comparisons: 5, comparisonOptions: { 2: 3, 8: 2, PRIVATE_OPTION_TEXT: 9 },
+              comparativeAgreements: 3, comparativeDisagreements: 1, comparativeInvalidRuns: 2,
+              comparativeNone: 1, comparativeUnavailable: 1, comparativeMatches: 2,
+              evidence: 'PRIVATE_EVIDENCE_TEXT', conversation: 'PRIVATE_CONVERSATION_TEXT' } } });
+        const report = buildJobsPipelineSnapshot(new Set(['synthetic-comparative-report']), null, null);
+        assert(report.includes('Official-posting comparisons: 5; options per comparison 1=0, 2=3'));
+        assert(report.includes('8=2; agreements 3; disagreements 1; invalid runs 2; none-none 1; independence unavailable 1; accepted by comparative-match 2.'));
+        assert(!report.includes('PRIVATE_'), 'comparison reports retain no evidence, conversation or arbitrary option labels');
+      } finally {
+        for (const key of Object.keys(telemetry)) delete telemetry[key];
+        Object.assign(telemetry, saved);
+      }
+    },
+  },
+  {
     name: 'W3 scoring: duplicate, invalid and ungrounded rows keep exact messages and typed corrections',
     run: () => {
       const jobs = [{ title: 'Synthetic engineer', snippet: 'Required: React experience.' }];

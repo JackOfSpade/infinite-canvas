@@ -1,5 +1,6 @@
 import { assert } from './testHelpers.js';
 import { isUiRestartContext } from '../../electron/ipc/handoffBridge/restartContext.js';
+import { observedChatContext } from '../../electron/ipc/handoffBridge/observedChatContext.js';
 import { IPC_CHANNELS, IPC_EVENTS, PUBLISH_JOBS_EXAMPLE } from '../../electron/ipc/handoffBridge/contracts.js';
 import { registerHandoffBridgeUi } from '../../electron/ipc/handoffBridge/ui.js';
 import { createHandoffBridgeTray } from '../../electron/ipc/handoffBridge/tray.js';
@@ -43,11 +44,11 @@ function deferred() {
 async function settle(turns = 4) {
   for (let index = 0; index < turns; index += 1) await Promise.resolve();
 }
-function setup({ windows = null, getCanvasWindows = null, controller = {}, dialogs = {}, application = {}, engine = {}, push = {}, clipboard = {}, store = {}, tunnel = {}, oauth = {}, enableConsent = {}, onSetupMutation = null, processStartedAt, validateHostname, now, timers, Notification, ipc: providedIpc = null } = {}) {
+function setup({ windows = null, getCanvasWindows = null, controller = {}, dialogs = {}, application = {}, engine = {}, push = {}, clipboard = {}, store = {}, tunnel = {}, oauth = {}, enableConsent = {}, onSetupMutation = null, processStartedAt, validateHostname, now, timers, Notification, chatLauncher, launchPresentationTimeoutMs, ipc: providedIpc = null } = {}) {
   const ipc = providedIpc || fakeIpc(); const sender = { id: 9, __isCanvasRenderer: true, sent: [], send(channel, value) { this.sent.push({ channel, value }); } };
   const window = { __canvasFilePath: PATH, webContents: sender, isDestroyed: () => false };
   const canvasWindows = getCanvasWindows || (() => windows === null ? [window] : windows);
-  const api = registerHandoffBridgeUi({ ipc, getCanvasWindows: canvasWindows, processStartedAt, validateHostname, now, timers, Notification, controller: { snapshot: () => ({ enabled: true, setup: { tunnelReachable: true }, config: { hostname: 'bridge.example.com', scope: { applications: true, scoring: false }, autoStart: false }, limits: { releaseTtlHours: 24, chatKeyMaxAgeHours: 24, idlePauseMinutes: 1440 }, prefs: { sourcePolicy: 'enforce', pairingNetworkCheck: true }, pauseCause: null, autoRelease: false }), subscribe: () => () => undefined, enable: async () => ({ success: true }), disable: async () => ({ success: true }), pause: async () => ({ success: true }), resume: async () => ({ success: true }), revokeAll: async () => ({ success: true }), forget: async () => ({ success: true }), release: async () => ({ success: true, released: 1 }), unrelease: async () => ({ success: true }), ackAlarm: async () => ({ success: true }), getActivity: async () => [], reloadConfig: async () => ({ success: true }), ...controller }, store: { writeConfig: async () => ({ ok: true }), ...store }, dialogs: { ask: async () => ({ ok: true }), choose: async () => ({ ok: true, filePath: '/tmp/file' }), ...dialogs }, application: { describeForConfirm: async () => ({ ok: true, canvasFilePath: PATH, items: [{ jobId: JOB, title: 'Ada Lovelace', company: 'Example' }] }), ...application }, engine: { hold: async () => ({ ok: true }), resume: async () => ({ ok: true }), ...engine }, push, clipboard, tunnel: { chooseBinary: async () => ({ ok: true }), getApprovalDetails: async () => ({ ok: true, version: '2026.9.3', sha256: 'a'.repeat(64) }), approveBinary: async () => ({ ok: true }), chooseCredentials: async () => ({ ok: true }), restart: async () => ({ ok: true }), reapOrphans: async () => ({ ok: true, reaped: 1 }), getLog: async () => [], ...tunnel }, oauth: { openPairing: async () => ({ ok: true, expiresAt: 1, pairingCode: '23456-789AB' }), cancelPairing: async () => ({ ok: true }), ...oauth }, enableConsent: { describe: async () => ({ hostname: 'bridge.example.com', consentFingerprint: 'test-consent-fingerprint', idlePauseMinutes: 1440, items: [], long: true }), verify: async () => ({ ok: true }), accept: async () => ({ ok: true }), ...enableConsent }, onSetupMutation });
+  const api = registerHandoffBridgeUi({ ipc, getCanvasWindows: canvasWindows, processStartedAt, validateHostname, now, timers, Notification, chatLauncher, launchPresentationTimeoutMs, controller: { snapshot: () => ({ enabled: true, setup: { tunnelReachable: true }, config: { hostname: 'bridge.example.com', scope: { applications: true, scoring: false }, autoStart: false }, limits: { releaseTtlHours: 24, chatKeyMaxAgeHours: 24, idlePauseMinutes: 1440 }, prefs: { sourcePolicy: 'enforce', pairingNetworkCheck: true }, pauseCause: null, autoRelease: false }), subscribe: () => () => undefined, enable: async () => ({ success: true }), disable: async () => ({ success: true }), pause: async () => ({ success: true }), resume: async () => ({ success: true }), revokeAll: async () => ({ success: true }), forget: async () => ({ success: true }), release: async () => ({ success: true, released: 1 }), unrelease: async () => ({ success: true }), ackAlarm: async () => ({ success: true }), getActivity: async () => [], reloadConfig: async () => ({ success: true }), ...controller }, store: { writeConfig: async () => ({ ok: true }), ...store }, dialogs: { ask: async () => ({ ok: true }), choose: async () => ({ ok: true, filePath: '/tmp/file' }), ...dialogs }, application: { describeForConfirm: async () => ({ ok: true, canvasFilePath: PATH, items: [{ jobId: JOB, title: 'Ada Lovelace', company: 'Example' }] }), ...application }, engine: { hold: async () => ({ ok: true }), resume: async () => ({ ok: true }), ...engine }, push, clipboard, tunnel: { chooseBinary: async () => ({ ok: true }), getApprovalDetails: async () => ({ ok: true, version: '2026.9.3', sha256: 'a'.repeat(64) }), approveBinary: async () => ({ ok: true }), chooseCredentials: async () => ({ ok: true }), restart: async () => ({ ok: true }), reapOrphans: async () => ({ ok: true, reaped: 1 }), getLog: async () => [], ...tunnel }, oauth: { openPairing: async () => ({ ok: true, expiresAt: 1, pairingCode: '23456-789AB' }), cancelPairing: async () => ({ ok: true }), ...oauth }, enableConsent: { describe: async () => ({ hostname: 'bridge.example.com', consentFingerprint: 'test-consent-fingerprint', idlePauseMinutes: 1440, items: [], long: true }), verify: async () => ({ ok: true }), accept: async () => ({ ok: true }), ...enableConsent }, onSetupMutation });
   return { ipc, sender, window, api, event: { sender } };
 }
 const invoke = (h, channel, payload) => h.ipc.handlers.get(channel)(h.event, payload);
@@ -385,6 +386,98 @@ export default [
     const badCalls = []; const bad = setup({ controller: { prepareChat: async () => ({ commitToken: 't', starter: 'synthetic' }), commitChat: async () => { badCalls.push('commit'); }, abandonChat: async () => { badCalls.push('abandon'); } }, clipboard: { writeText() { throw new Error('denied'); } } });
     assert((await invoke(bad, IPC_CHANNELS.NEW_CHAT)).code === 'CLIPBOARD_FAILED' && JSON.stringify(badCalls) === JSON.stringify(['abandon']), 'clipboard failure abandons prepared chat and never commits');
   } },
+  { name: 'handoff bridge: ipc: observed browser identity reaches New and Continue commits only through the main launcher', async run() {
+    const proofs = [];
+    for (const continuing of [false, true]) {
+      const calls = [];
+      const h = setup({
+        controller: {
+          snapshot: () => ({ autoLaunchChats: true, config: {}, chat: { ordinal: 3 }, queue: {} }),
+          prepareChat: async () => ({ commitToken: 'synthetic-observed-commit', starter: 'synthetic observed starter', chatOrdinal: 4 }),
+          commitChat: async (token, observation) => { calls.push(['commit', token]); proofs.push(observedChatContext(observation)); return { success: true }; },
+        },
+        chatLauncher: {
+          owns: () => continuing,
+          launch: async args => { calls.push(['launch', args.continueChat]); return { ok: true, chatId: 'synthetic-observed-browser-chat' }; },
+          rekey: () => true, close: async () => true,
+        },
+        clipboard: { writeText: () => { throw new Error('observed launch must not use clipboard fallback'); } },
+      });
+      try {
+        const reply = await invoke(h, continuing ? IPC_CHANNELS.CONTINUE_CHAT : IPC_CHANNELS.NEW_CHAT);
+        assert(reply.success && reply.launched && JSON.stringify(calls) === JSON.stringify([['launch', continuing], ['commit', 'synthetic-observed-commit']]),
+          'only a confirmed launcher result supplies the opaque observation to the prepared commit');
+        assert(!JSON.stringify(reply).includes('synthetic-observed-browser-chat') && !JSON.stringify(reply).includes('conversationKey'),
+          'the renderer never receives browser identity or the private conversation digest');
+      } finally { h.api.dispose(); }
+    }
+    assert(proofs.every(Boolean) && proofs[0].fresh === true && proofs[1].fresh === false
+      && proofs[0].conversationKey === proofs[1].conversationKey,
+    'Continue keeps the observed browser lineage and changes only its fresh status');
+    assert(observedChatContext({ conversationKey: proofs[0].conversationKey, fresh: true }) === null,
+      'an object copied from a renderer payload cannot forge an observed browser capability');
+  } },
+  { name: 'handoff bridge: ipc: clipboard and launcher replies without a browser id never establish observed conversation proof', async run() {
+    for (const mode of ['manual', 'missing-id', 'failed-before-send']) {
+      const observations = []; const writes = [];
+      const h = setup({
+        controller: {
+          snapshot: () => ({ autoLaunchChats: mode !== 'manual', config: {}, chat: { ordinal: 1 }, queue: {} }),
+          prepareChat: async () => ({ commitToken: 'synthetic-unobserved-commit', starter: 'synthetic unobserved starter', chatOrdinal: 2 }),
+          commitChat: async (_token, observation) => { observations.push(observedChatContext(observation)); return { success: true }; },
+        },
+        chatLauncher: { owns: () => false, launch: async () => mode === 'missing-id'
+          ? { ok: true } : { ok: false, reason: 'tab_open_failed' }, close: async () => true },
+        clipboard: { writeText: value => writes.push(value), readText: () => '', clear() {} },
+      });
+      try {
+        assert((await invoke(h, IPC_CHANNELS.NEW_CHAT)).success && observations.length === 1 && observations[0] === null,
+          `${mode} may create a starter capability but cannot establish browser conversation evidence`);
+        assert(writes.length === (mode === 'missing-id' ? 0 : 1), 'the missing-id control must exercise the launcher-success branch');
+      } finally { h.api.dispose(); }
+    }
+  } },
+  { name: 'handoff bridge: ipc: automatic worker launches bind observed proof and cancel failed pending observations', async run() {
+    for (const mode of ['observed', 'missing-id', 'failed-after-send', 'begin-rejected']) {
+      const calls = []; const clock = fakeClock();
+      const worker = { ordinal: 1, state: 'ready', firstCallAt: null };
+      const snapshot = { enabled: true, serving: 'live', autoLaunchChats: true, config: {}, queue: {},
+        chat: { pool: { active: true, generation: 11, workerCount: 1, workers: [worker] } } };
+      const h = setup({
+        now: clock.now, timers: clock.timers, launchPresentationTimeoutMs: 0,
+        controller: {
+          snapshot: () => snapshot,
+          copyWorkerStarter: async () => ({ copied: true, generation: 11, workerOrdinal: 1, workerCount: 1, sessionCode: '2'.repeat(26) }),
+          beginObservedChat: async args => { calls.push(['begin', args.sessionCode]); return mode !== 'begin-rejected'; },
+          confirmObservedChat: async args => { calls.push(['confirm', args.sessionCode, observedChatContext(args.observation)]); return Boolean(observedChatContext(args.observation)); },
+          cancelObservedChat: async args => { calls.push(['cancel', args.sessionCode]); return true; },
+        },
+        chatLauncher: {
+          owns: () => false, close: async () => true,
+          launch: async () => { calls.push(['launch']); return mode === 'failed-after-send'
+            ? { ok: false, sendAttempted: true, reason: 'send_not_confirmed' }
+            : { ok: true, ...(mode === 'observed' ? { chatId: 'synthetic-observed-worker-chat' } : {}) }; },
+        },
+      });
+      try {
+        h.api.publishStatus(snapshot);
+        await settle(80);
+        assert(calls[0]?.[0] === 'begin', 'the worker prepares trusted observation before its launcher can send the starter');
+        if (mode === 'begin-rejected') {
+          assert(calls.length === 2 && calls[1][0] === 'cancel', 'a refused observation preparation sends no starter and clears pending state');
+        } else if (mode === 'failed-after-send') {
+          assert(calls.length === 3 && calls[2][0] === 'cancel', 'an unconfirmed send clears its pending observation and never binds proof');
+        } else {
+          assert(calls.length === (mode === 'observed' ? 3 : 4) && calls[1]?.[0] === 'launch' && calls[2][0] === 'confirm'
+            && (mode === 'observed' ? calls[2][2]?.fresh === true : calls[2][2] === null),
+          'only the observed worker chat id becomes an opaque trusted proof');
+          if (mode === 'missing-id') assert(calls[3][0] === 'cancel', 'missing browser evidence clears the pending state after confirmation is refused');
+        }
+        assert(calls.filter(item => item[0] !== 'launch').every(item => item[1] === '2'.repeat(26)),
+          'begin, confirm and cancellation bind the exact starter capability rather than a reusable worker ordinal');
+      } finally { h.api.dispose(); }
+    }
+  } },
   { name: 'handoff bridge: ipc: worker-pool starters stay main-side while the renderer receives only bounded metadata', async run() {
     const calls = []; let clipboardText = '';
     const h = setup({
@@ -397,6 +490,8 @@ export default [
           calls.push(['copy', value]);
           return { copied: true, generation: 7, workerOrdinal: 2, workerCount: 3, sessionCode: '2ABCDEFGHJKLMNPQRSTUVWXYZ2' };
         },
+        beginObservedChat: async () => { calls.push(['unexpected observed begin']); return true; },
+        confirmObservedChat: async () => { calls.push(['unexpected observed proof']); return true; },
       },
       clipboard: { writeText: text => { clipboardText = text; }, readText: () => clipboardText, clear() {} },
     });

@@ -244,6 +244,42 @@ async function assertV2FreshChatTrace(steps, createEngine = createHandoffEngine)
 
 const tests = [
   {
+    name: 'Amendment 8 item 5: a fresh-context stop records idle and claims while clearing active work',
+    run: async () => {
+      const enginePath = path.resolve('electron/ipc/handoffBridge/engine.js');
+      const original = fs.readFileSync(enginePath, 'utf8');
+      const marker = 'return Object.freeze({\n    get,\n    submit,';
+      assert(original.includes(marker), 'the engine return exists for private bookkeeping inspection');
+      let inspected = original.replace(marker, 'return Object.freeze({\n    workerForTests: () => epochWorkers(epoch)[0],\n    get,\n    submit,');
+      inspected = inspected.replace(/from '(\.{1,2}\/[^']+)'/g, (_, relative) =>
+        `from '${new URL(relative, pathToFileURL(enginePath)).href}'`);
+      const inspectedModule = await import(`data:text/javascript;base64,${Buffer.from(inspected).toString('base64')}`);
+      let reads = 0;
+      const claim = '44444444-4444-4444-8444-444444444444';
+      const push = {
+        status: () => ({ available: [claim], working: 0, needsYou: 0 }), closeEpoch() {},
+        submit: async () => ({ status: 'accepted' }),
+        get: async () => ++reads === 1 ? { status: 'served', handoffCode: 'HANDOFF-NPQRST', task: 'job-scoring',
+          prompt: 'Synthetic active scoring work', remaining: { ready: 0, working: 1, needsYou: 0 } }
+          : { status: 'fresh_context_required', remaining: { ready: 0, working: 0, needsYou: 0 } },
+      };
+      const engine = inspectedModule.createHandoffEngine({ sources: { application: source().api, push },
+        scope: { applications: false, scoring: true, marketplace: false }, now: () => 1234, holdMs: 0 });
+      try {
+        const chat = await engine.newChat({ linkId: LINK });
+        assert((await engine.get({ session: chat.sessionCode, linkId: LINK })).status === 'served');
+        assert(engine.workerForTests().activeTask === true, 'the prior handoff made the worker active');
+        assert((await engine.get({ session: chat.sessionCode, linkId: LINK })).status === 'session_full');
+        const worker = engine.workerForTests();
+        assert(worker.idleSince === 1234, 'stopping must record the idle timestamp');
+        assert(worker.stoppedPushClaims instanceof Set && worker.stoppedPushClaims.has(claim),
+          'stopping must retain the currently available push claims');
+        assert(worker.activeTask === false && worker.activeTaskKind === null && worker.activeTaskSince === null,
+          'stopping clears all active task bookkeeping');
+      } finally { await engine.close(); }
+    },
+  },
+  {
     name: 'handoff bridge: v2 fresh-chat trace covers candidate-1 and candidate-2 drops, judge, fallback and recheck',
     run: async () => {
       const drop = candidate => [
@@ -1465,8 +1501,11 @@ const tests = [
         const ui = registerHandoffBridgeUi({
           ipc: { handle() {}, removeHandler() {}, on() {}, removeListener() {} },
           controller: { snapshot: () => ({ ...engine.snapshot(), autoLaunchChats: true, serving: 'live' }),
-            subscribe: () => () => {}, restartWorker: args => (replacement = engine.restartWorker({ linkId: LINK, ...args })) },
-          chatLauncher: { owns: () => false, close: async () => true, launch: async () => { launches++; return { ok: true }; } },
+            subscribe: () => () => {}, restartWorker: args => (replacement = engine.restartWorker({ linkId: LINK, ...args })),
+            beginObservedChat: args => engine.beginObservedChat({ linkId: LINK, ...args }),
+            confirmObservedChat: args => engine.confirmObservedChat({ linkId: LINK, ...args }),
+            cancelObservedChat: args => engine.cancelObservedChat({ linkId: LINK, ...args }) },
+          chatLauncher: { owns: () => false, close: async () => true, launch: async () => { launches++; return { ok: true, chatId: 'synthetic-new-push-chat' }; } },
           getCanvasWindows: () => [],
         });
         try {
@@ -1517,8 +1556,11 @@ const tests = [
         const ui = registerHandoffBridgeUi({
           ipc: { handle() {}, removeHandler() {}, on() {}, removeListener() {} },
           controller: { snapshot: () => ({ ...engine.snapshot(), autoLaunchChats: true, serving: 'live' }),
-            subscribe: () => () => {}, restartWorker: args => (replacement = engine.restartWorker({ linkId: LINK, ...args })) },
-          chatLauncher: { owns: () => false, close: async () => true, launch: async () => { launches++; return { ok: true }; } },
+            subscribe: () => () => {}, restartWorker: args => (replacement = engine.restartWorker({ linkId: LINK, ...args })),
+            beginObservedChat: args => engine.beginObservedChat({ linkId: LINK, ...args }),
+            confirmObservedChat: args => engine.confirmObservedChat({ linkId: LINK, ...args }),
+            cancelObservedChat: args => engine.cancelObservedChat({ linkId: LINK, ...args }) },
+          chatLauncher: { owns: () => false, close: async () => true, launch: async () => { launches++; return { ok: true, chatId: 'synthetic-new-application-chat' }; } },
           getCanvasWindows: () => [],
         });
         try {
