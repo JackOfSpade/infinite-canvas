@@ -818,6 +818,9 @@ export function assemblePasteApplicationResult({
       paragraphs: letter.paragraphs.map(paragraph => paragraph.text),
     },
     coverLetterArgument,
+    // V2 has no AI quality review, but the host's exact citation bindings
+    // still feed completion checks. Do not discard them with that review.
+    ...(writeVerifyV2 ? { sourceGrounding: { resumeBullets, coverLetterParagraphs } } : {}),
     qualityReview,
     generationAudit: deepClone(generationAudit),
   };

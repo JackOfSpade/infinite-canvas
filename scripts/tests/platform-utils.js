@@ -2012,6 +2012,36 @@ export default [
     },
   },
 {
+    name: 'PDF font gate accepts mapped color emoji and rejects prose or incomplete Type 3 subsets',
+    run: async () => {
+      const { pdfDocContainsUnsafeType3Fonts } = await import('../../electron/ipc/pdfFontSafety.js');
+      const makePdf = async ({ name = 'ABCDEF+AppleColorEmoji', mapping = '1 beginbfchar\n<33> <D83EDD2B>\nendbfchar', mapped = true } = {}) => {
+        const pdf = await PDFDocument.create();
+        pdf.addPage();
+        pdf.context.register(pdf.context.obj({ Type: 'Font', Subtype: 'Type3',
+          FontDescriptor: { FontName: name },
+          ...(mapped ? { ToUnicode: pdf.context.register(pdf.context.flateStream(mapping)) } : {}),
+          Encoding: { Differences: [0, 'g0', 51, 'gA29'] },
+          CharProcs: { g0: pdf.context.register(pdf.context.stream('')), gA29: pdf.context.register(pdf.context.stream('')) },
+        }));
+        // Use the same serialized representation the production renderer reads.
+        return PDFDocument.load(await pdf.save());
+      };
+      assert(!pdfDocContainsUnsafeType3Fonts(await makePdf()), 'mapped color emoji can print without changing the draft');
+      for (const options of [
+        { name: 'ABCDEF+Inter' }, { mapped: false },
+        { mapping: '1 beginbfchar\n<33> <0041>\nendbfchar' },
+        { mapping: '1 beginbfchar\n<34> <D83EDD2B>\nendbfchar' },
+        { mapping: '2 beginbfchar\n<33> <D83EDD2B>\nendbfchar' },
+        { mapping: '1 beginbfchar\n<33> <D83E>\nendbfchar' },
+        { mapping: '1 beginbfrange\n<33> <34> <0041>\nendbfrange' },
+      ]) assert(pdfDocContainsUnsafeType3Fonts(await makePdf(options)), 'unsafe or incomplete Type 3 fonts still withhold the PDF');
+      assert(!pdfDocContainsUnsafeType3Fonts(await makePdf({ mapping: '1 beginbfrange\n<33> <34> <D83EDD2B>\nendbfrange' })),
+        'contiguous emoji mappings preserve Unicode too');
+      return { ok: true };
+    },
+  },
+{
     name: 'PDF render typography uses ATS-safe system fonts and rejects Type 3 font programs',
     run: async () => {
       const expression = atsSafePdfFontExpression();

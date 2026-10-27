@@ -151,7 +151,7 @@ export function Canvas() {
     });
   }, [nodes, setEdges]);
 
-  const { addToast } = useToast();
+  const { addToast, removeToast } = useToast();
 
   // ── Settings ────────────────────────────────────────────────────────────
   const { settings, updateSetting, updateShortcut, resetShortcuts, animationDuration } = useSettings();
@@ -375,6 +375,7 @@ export function Canvas() {
 
   useCanvasInitialization({
     nodes, edges, drawings, currentFile, setCurrentFile, hasUnsavedChanges, setHasUnsavedChanges,
+    addToast, removeToast,
     flushStack: navigation.flushStack,
     quitGateRef,
     quitFenceReleaseVersion,

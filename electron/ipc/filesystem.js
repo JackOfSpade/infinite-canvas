@@ -5,6 +5,7 @@ import electronPkg from 'electron';
 const { shell, dialog, app } = electronPkg;
 import { handleSafe } from './ipcUtils.js';
 import { logger } from '../logger.js';
+import { recordWorkspaceWriteOutcome } from './workspaceIoDiagnostics.js';
 import path from 'path';
 import fs from 'fs';
 import { createHash, randomUUID } from 'crypto';
@@ -513,9 +514,10 @@ export function createFileWatchRegistry({
 
   // A directory watcher observes names, not a capability to the file those
   // names currently resolve to.  Re-check the lexical target before notifying
-  // a renderer so a later symlink/hard-link/private-store swap terminates the
-  // subscription instead of extending it to the replacement.  Safe regular
-  // replacements are allowed to rebind (ordinary atomic text saves rely on
+  // a renderer so a later private-store swap terminates the subscription.
+  // A watch-only hard-link refusal suspends notifications until revalidated;
+  // cloud sync can temporarily add a second name to an otherwise safe file.
+  // Safe regular replacements may rebind (ordinary atomic text saves rely on
   // that), but every new identity must pass the same single-link policy.
   const validateEntry = (filePath, entry, reason) => {
     if (typeof validateTarget !== 'function') return Promise.resolve(true);
@@ -527,11 +529,30 @@ export function createFileWatchRegistry({
           previous: entry.targetValidation || null,
           reason,
         });
+        entry.validationSuspended = false;
+        if (entry.validationRetryTimer) clearTimeout(entry.validationRetryTimer);
+        entry.validationRetryTimer = null;
         return activeWatchers.get(filePath) === entry && entry.clients.size > 0;
       } catch (error) {
         if (activeWatchers.get(filePath) === entry) {
-          onError(error, entry.requestPath || filePath);
-          closeEntry(filePath, entry);
+          if (error?.code === 'RENDERER_WORKSPACE_PATH_CHANGED' && error.watchTargetLinked === true) {
+            // This lease observes metadata only. It must not notify/read while
+            // linked, but need not permanently lose its subscribers. Retry the
+            // full lexical/private-path validation even if fs.watch drops the
+            // unlink event. Ordinary workspace/read/write refusals stay fatal.
+            if (!entry.validationSuspended) onError(error, entry.requestPath || filePath);
+            entry.validationSuspended = true;
+            if (!entry.validationRetryTimer) {
+              entry.validationRetryTimer = setTimeout(() => {
+                entry.validationRetryTimer = null;
+                void rebindLexicalTarget(filePath, entry);
+                broadcastValidated(filePath, entry, 'hardlink-recovery');
+              }, retryMs);
+            }
+          } else {
+            onError(error, entry.requestPath || filePath);
+            closeEntry(filePath, entry);
+          }
         }
         return false;
       }
@@ -588,6 +609,8 @@ export function createFileWatchRegistry({
     entry.retryTimer = null;
     if (entry.aliasRetryTimer) clearTimeout(entry.aliasRetryTimer);
     entry.aliasRetryTimer = null;
+    if (entry.validationRetryTimer) clearTimeout(entry.validationRetryTimer);
+    entry.validationRetryTimer = null;
     stopPolling(filePath, entry);
     stopVerificationPolling(filePath, entry);
     stopAliasPolling(filePath, entry);
@@ -938,6 +961,8 @@ export function createFileWatchRegistry({
       starting: null,
       targetValidation: null,
       validationTail: Promise.resolve(),
+      validationSuspended: false,
+      validationRetryTimer: null,
       broadcastValidationPending: false,
       broadcastValidationQueued: false,
     };
@@ -1002,7 +1027,8 @@ export function createFileWatchRegistry({
 const fileWatchRegistry = createFileWatchRegistry({
   // Follow only a public, regular, single-link resolved target before
   // registration and after each watch event. Public aliases remain supported;
-  // a retarget into a private store or multi-link inode closes the watcher.
+  // a retarget into a private store closes the watcher. A temporary multi-link
+  // inode suspends notifications until full validation succeeds again.
   validateTarget: filePath => inspectRendererWatchPath(filePath, { allowMissing: true }),
 });
 
@@ -1119,9 +1145,12 @@ export async function atomicWriteFile(targetPath, data) {
   }
 }
 
-function rendererWorkspacePathChangedError() {
-  const error = new Error('The workspace path changed while it was being accessed. Please retry the operation.');
+function rendererWorkspacePathChangedError(reason = 'binding-changed') {
+  const error = new Error(reason === 'target-hardlink'
+    ? 'Another file entry shares this workspace file, which can happen during cloud sync. Saving is paused to protect both copies. Retry after syncing finishes, or use Save As to save a separate copy.'
+    : 'The workspace path changed while it was being accessed. Please retry the operation.');
   error.code = 'RENDERER_WORKSPACE_PATH_CHANGED';
+  error.workspacePathCheck = reason;
   return error;
 }
 
@@ -1227,13 +1256,14 @@ export async function inspectRendererWorkspacePath(filePath, { allowMissing = fa
     ]);
   } catch (error) {
     if (allowMissing && (error?.code === 'ENOENT' || error?.code === 'ENOTDIR')) {
-      throw rendererWorkspacePathChangedError();
+      throw rendererWorkspacePathChangedError('parent-unavailable');
     }
     throw error;
   }
   if (!sameRendererWorkspacePath(parentRealPath, parentPath)
       || !parentStat.isDirectory() || parentStat.isSymbolicLink()) {
-    throw rendererWorkspacePathChangedError();
+    throw rendererWorkspacePathChangedError(!parentStat.isDirectory() ? 'parent-not-directory'
+      : parentStat.isSymbolicLink() ? 'parent-symlink' : 'parent-path-mismatch');
   }
 
   let targetStat = null;
@@ -1250,7 +1280,9 @@ export async function inspectRendererWorkspacePath(filePath, { allowMissing = fa
         // semantics, so reject ambiguity before either reads or writes.
         || (typeof targetStat.nlink === 'number' && targetStat.nlink > 1)
         || !sameRendererWorkspacePath(await fs.promises.realpath(canonicalPath), canonicalPath)) {
-      throw rendererWorkspacePathChangedError();
+      throw rendererWorkspacePathChangedError(targetStat.isSymbolicLink() ? 'target-symlink'
+        : !targetStat.isFile() ? 'target-not-file'
+          : targetStat.nlink > 1 ? 'target-hardlink' : 'target-path-mismatch');
     }
   }
   return {
@@ -1283,6 +1315,12 @@ export async function inspectRendererWatchPath(filePath, { allowMissing = false 
   }
   if (targetStat && (!targetStat.isFile() || targetStat.isSymbolicLink()
       || (typeof targetStat.nlink === 'number' && targetStat.nlink > 1))) {
+    if (targetStat.isFile() && !targetStat.isSymbolicLink() && targetStat.nlink > 1) {
+      const error = new Error('Document change notifications are paused while the file has another hard link.');
+      error.code = 'RENDERER_WORKSPACE_PATH_CHANGED';
+      error.watchTargetLinked = true;
+      throw error;
+    }
     throw rendererWorkspacePathChangedError();
   }
   return {
@@ -1798,7 +1836,18 @@ async function readRendererWorkspaceBytesIfPresent(filePath) {
  * fails closed with `RENDERER_WORKSPACE_RECOVERY_AMBIGUOUS`; it never trusts,
  * deletes, overwrites, or returns the unproven final entry.
  */
-export async function atomicWriteRendererWorkspaceFile(filePath, data, {
+export async function atomicWriteRendererWorkspaceFile(filePath, data, options = {}) {
+  try {
+    const result = await writeRendererWorkspaceFile(filePath, data, options);
+    recordWorkspaceWriteOutcome();
+    return result;
+  } catch (error) {
+    recordWorkspaceWriteOutcome(error);
+    throw error;
+  }
+}
+
+async function writeRendererWorkspaceFile(filePath, data, {
   // Test seams model both the validation→open gap and late swaps after a
   // handle is bound; production callers do not supply these callbacks.
   beforeOpen = null,

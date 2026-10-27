@@ -4991,7 +4991,7 @@ export default [
         && canvas.includes('setQuitFenceReleaseVersion(version => version + 1);')
         && canvas.includes('quitFenceReleaseVersion,')
         && initialization.includes('quitFenceReleaseVersion = 0,')
-        && initialization.includes('quitGateRef, quitFenceReleaseVersion]);')
+        && initialization.includes('quitGateRef, quitFenceReleaseVersion, addToast, removeToast]);')
         && drop.includes('const isCurrentDrop = () => !quitGateRef?.current?.frozen')
         && localAiFallback.includes('const isCurrentQuitGeneration = (generation) => {')
         && localAiFallback.includes('generation = currentQuitGeneration()')

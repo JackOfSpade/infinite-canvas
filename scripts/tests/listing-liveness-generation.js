@@ -353,8 +353,8 @@ export default [
       assert.equal(decision(row, miss(), 'unclear', 'ai').listingCheck.action, 'hold');
       assert.equal(decision(row, miss(), 'open', 'ai').listingCheck.action, 'proceed');
       assert.equal(decision(row, miss(), 'unobservable', 'unobservable').listingAudit.outcome, 'unobservable');
-      assert.equal(decision(row, miss(), 'closed', 'ai', true).listingCheck.action, 'refuse-final');
-      assert.equal(decision(row, miss(), 'pending', 'closed-marker', true).listingCheck.action, 'refuse-retry');
+      assert.equal(decision(row, miss(), 'closed', 'ai', true).listingCheck.action, 'proceed');
+      assert.equal(decision(row, miss(), 'pending', 'closed-marker', true).listingCheck.action, 'proceed');
       const override = decision(row, miss(), 'unclear', 'ai', true);
       assert.equal(override.listingCheck.action, 'proceed');
       assert.equal(override.listingCheck.override, true);
@@ -508,7 +508,7 @@ export default [
     },
   },
   {
-    name: 'Generate override skips the probe and converts only a hold; tail failure preserves the official result',
+    name: 'Generate override skips the probe and converts listing-status pauses; tail failure preserves the official result',
     async run() {
       const row = job({ listingLiveness: state('unclear', 'ai') });
       let overrideVisits = 0;
@@ -547,7 +547,34 @@ export default [
     },
   },
   {
-    name: 'Generate override survives a whole-budget timeout and a projection error but cannot convert a stored refusal',
+    name: 'Generate override bypasses possible and confirmed closure while retaining evidence and a bound audit',
+    async run() {
+      for (const [verdict, basis, posting] of [
+        ['pending', 'closed-marker', miss()],
+        ['closed', 'structural', miss()],
+        ['closed', 'ai', ambiguous()],
+        ['closed', 'ai', miss({ outcome: 'closed' })],
+      ]) {
+        const row = job({ listingLiveness: state(verdict, basis), boardClosed: marker() });
+        const result = await prepareOfficialPostingForGeneration({ ...args(row), listingOverride: true }, {
+          store: { find: async () => null }, bridgeStatus: async () => ({ enabled: false }),
+          resolve: async jobs => ({ jobs: jobs.map(value => ({ ...value, officialPosting: posting })) }),
+          listingProbe: { probe: async () => { throw new Error('Override must skip the listing probe'); } },
+          now: () => AT,
+        });
+        assert.equal(result.listingCheck.action, 'proceed');
+        assert.equal(result.listingCheck.override, true);
+        assert.equal(result.listingCheck.verdict, verdict);
+        assert.deepEqual(result.listingLiveness, row.listingLiveness);
+        assert.deepEqual(result.boardClosed, row.boardClosed);
+        const prepared = getPreparedOfficialPosting(result.resolutionId, row, { now: AT });
+        assert.equal(prepared.listingAudit.outcome, 'override');
+        assert.equal(prepared.listingAudit.basis, basis);
+      }
+    },
+  },
+  {
+    name: 'Generate override survives a whole-budget timeout and a projection error and converts a stored refusal',
     async run() {
       const timeoutRow = job({ sourceJobKey: 'synthetic-timeout' });
       const pending = prepareOfficialPostingForGeneration({ ...args(timeoutRow), listingOverride: true }, {
@@ -568,8 +595,8 @@ export default [
       const refused = await prepareOfficialPostingForGeneration({
         ...args(job({ boardClosed: marker(), listingLiveness: state('closed', 'structural') })), listingOverride: true,
       }, { projectJob: () => { throw new Error('synthetic projection failure'); }, now: () => AT });
-      assert.equal(refused.listingCheck.action, 'refuse-retry');
-      assert.equal(refused.listingCheck.override, false);
+      assert.equal(refused.listingCheck.action, 'proceed');
+      assert.equal(refused.listingCheck.override, true);
     },
   },
   {
@@ -586,8 +613,8 @@ export default [
           const closedRow = job({ sourceJobKey: `synthetic-closed-timeout-${override}`,
             listingLiveness: state('closed', 'ai'), boardClosed: marker() });
           const closed = await prepareOfficialPostingForGeneration({ ...args(closedRow), listingOverride: override }, timeoutOptions);
-          assert.equal(closed.listingCheck.action, 'refuse-retry');
-          assert.equal(closed.listingCheck.override, false);
+          assert.equal(closed.listingCheck.action, override ? 'proceed' : 'refuse-retry');
+          assert.equal(closed.listingCheck.override, override);
         }
         const openRow = job({ sourceJobKey: 'synthetic-open-timeout', listingLiveness: state('open', 'ai') });
         const open = await prepareOfficialPostingForGeneration(args(openRow), timeoutOptions);

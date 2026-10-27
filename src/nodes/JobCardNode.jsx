@@ -104,6 +104,11 @@ function auditCountLabel(count, singular, plural = `${singular}s`) {
   return `${count} ${count === 1 ? singular : plural}`;
 }
 
+// Every action that resumes or retries a paused generation shares this tone.
+// Labels still distinguish a safe recheck from an explicit listing override.
+const GENERATION_RECOVERY_BUTTON_CLASS = 'rounded-lg border border-amber-400/25 bg-amber-400/10 text-amber-200 hover:bg-amber-400/15 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-300/60 disabled:opacity-50 disabled:cursor-default';
+const GENERATION_RECOVERY_SMALL_BUTTON_CLASS = `${GENERATION_RECOVERY_BUTTON_CLASS} mt-2 px-2.5 py-1.5 text-[11px] font-semibold`;
+
 function compactAuditSummary(audit) {
   if (!audit?.isAudited) return 'Verified requirement detail unavailable';
   const parts = [];
@@ -473,6 +478,11 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
   const bridgeHeldLine = localApplication
     ? bridgeHeldCardLine(bridgeHeldKey, { pasteTransport: isPasteApplication, awaitingPaste: applicationAwaitsPaste(localApplication.status) })
     : null;
+  const listingGenerationPaused = !hasLinkedApplicationOutput && !hasApplicationRun && !localJobPending
+    && Boolean(data.listingGenerationNotice?.message || data.listingHold === true);
+  const listingOverrideAvailable = listingGenerationPaused;
+  const localApplicationNeedsAttention = Boolean(bridgeHeldLine || (localApplication
+    && ['failed', 'invalid', 'blocked', 'render-retry-required', 'revision-required', 'revision-exhausted', 'status-error'].includes(localApplication.status)));
   const postingDisplay = useMemo(() => officialPostingDisplay(data), [data]);
   const salaryCurrencyLabel = useMemo(
     () => formatSalaryCurrencyLabel(postingDisplay.salary, postingDisplay.location),
@@ -498,21 +508,25 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
   }, [data.hubId]));
   const personalRecommendationCurrent = isCompensationRecommendationCurrent(personalRecommendation,
     liveSalaryCareerKey === undefined ? (data.compensationCareerSnapshotId ?? data.careerSnapshotId) : liveSalaryCareerKey);
-  const personalRecommendationOutdated = personalRecommendation
-    && personalRecommendation.status !== 'unavailable' && !personalRecommendationCurrent;
+  const personalRecommendationAvailable = Boolean(personalRecommendation
+    && personalRecommendation.status !== 'unavailable' && personalRecommendation.range
+    && personalRecommendation.desiredSalary > 0);
+  const personalRecommendationOutdated = personalRecommendationAvailable && !personalRecommendationCurrent;
   const copyDesiredSalary = useCallback(async (event) => {
     event.stopPropagation();
-    if (!personalRecommendationCurrent || !personalRecommendation?.desiredSalary) return;
+    if (!personalRecommendationAvailable) return;
     try {
       const numericValue = personalRecommendation.desiredSalary.toLocaleString('en-US', {
         useGrouping: false, maximumFractionDigits: 20,
       });
       await navigator.clipboard.writeText(numericValue);
-      addToast({ title: 'Desired salary copied', description: 'The number is ready to paste into an application.', type: 'success' });
+      addToast(personalRecommendationOutdated
+        ? { title: 'Previous desired salary copied', description: 'This recommendation is outdated because your career data changed.', type: 'success' }
+        : { title: 'Desired salary copied', description: 'The number is ready to paste into an application.', type: 'success' });
     } catch {
       addToast({ title: 'Could not copy salary', description: 'Select and copy the desired salary number manually.', type: 'error' });
     }
-  }, [personalRecommendationCurrent, personalRecommendation, addToast]);
+  }, [personalRecommendationAvailable, personalRecommendationOutdated, personalRecommendation, addToast]);
   const hiringFitAudit = useMemo(() => compactHiringFitAudit(data.fitAssessment), [data.fitAssessment]);
 
   const score = data.matchScore || 0;
@@ -1219,24 +1233,35 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
                 googleCardUrl: data.googleCardUrl,
               }),
             ))) {
+          const listingGenerationNotice = {
+            action: prepared?.listingCheck?.action || 'hold',
+            verdict: prepared?.listingCheck?.verdict || 'unknown',
+            basis: prepared?.listingCheck?.basis || 'unavailable',
+            message: prepared?.message || "Couldn't confirm the listing is still open",
+            at: new Date().toISOString(),
+          };
           updateGlobal(idRef.current, {
+            listingGenerationNotice,
             listingLiveness: prepared?.listingLiveness ?? undefined,
             boardClosed: prepared?.boardClosed ?? undefined,
             listingHold: prepared?.listingCheck?.action === 'hold' || !prepared?.listingCheck?.action,
           });
+          EventLogger.log(`[JobCard] listing check stopped generation action=${listingGenerationNotice.action} verdict=${listingGenerationNotice.verdict} basis=${listingGenerationNotice.basis}`);
           addToast({
             title: 'Listing check',
-            description: prepared?.message || "Couldn't confirm the listing is still open",
+            description: listingGenerationNotice.message,
             type: 'error',
           });
           return;
         }
-        if (JSON.stringify(prepared?.listingLiveness ?? null) !== JSON.stringify(preparedCard?.data?.listingLiveness ?? null)
+        if (preparedCard?.data?.listingHold || preparedCard?.data?.listingGenerationNotice
+          || JSON.stringify(prepared?.listingLiveness ?? null) !== JSON.stringify(preparedCard?.data?.listingLiveness ?? null)
           || JSON.stringify(prepared?.boardClosed ?? null) !== JSON.stringify(preparedCard?.data?.boardClosed ?? null)) {
           updateGlobal(idRef.current, {
             listingLiveness: prepared?.listingLiveness ?? undefined,
             boardClosed: prepared?.boardClosed ?? undefined,
             listingHold: false,
+            listingGenerationNotice: null,
           });
         }
         resolutionId = typeof prepared?.resolutionId === 'string' ? prepared.resolutionId : null;
@@ -1676,9 +1701,17 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
 
         {showCompensationDetails && (
           <div className="px-3 pb-2.5 text-xs leading-relaxed text-white/55">
-            {personalRecommendationCurrent ? (
+            {personalRecommendationAvailable ? (
               <div className="mb-2.5 rounded-md border border-blue-300/20 bg-blue-300/[0.045] p-2">
-                <div className="text-[10px] font-medium uppercase tracking-wider text-blue-200/65">Desired salary to enter</div>
+                {personalRecommendationOutdated && (
+                  <div className="mb-2 rounded border border-amber-300/20 bg-amber-300/[0.06] p-2 text-[11px] text-amber-200/85">
+                    <span className="font-semibold">Outdated recommendation.</span>{' '}
+                    Your career data changed. The previous recommendation is shown below. Combine saved results again on the Job Board to refresh it.
+                  </div>
+                )}
+                <div className="text-[10px] font-medium uppercase tracking-wider text-blue-200/65">
+                  {personalRecommendationOutdated ? 'Previously computed desired salary' : 'Desired salary to enter'}
+                </div>
                 <div className="mt-1 flex items-start justify-between gap-2">
                   <div className="min-w-0 text-sm font-semibold text-white/90">
                     {cashRangeLabel({ ...personalRecommendation.range, min: personalRecommendation.desiredSalary, max: personalRecommendation.desiredSalary }, 20)}
@@ -1692,7 +1725,9 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
                   >Copy</button>
                 </div>
                 <div className="mt-1.5 text-white/65">
-                  <span className="text-white/40">{personalRecommendation.status === 'personalized' ? 'Recommended range for you:' : 'Estimated application range:'}</span>{' '}
+                  <span className="text-white/40">{personalRecommendation.status === 'personalized'
+                    ? (personalRecommendationOutdated ? 'Previously recommended range for you:' : 'Recommended range for you:')
+                    : (personalRecommendationOutdated ? 'Previous estimated application range:' : 'Estimated application range:')}</span>{' '}
                   {cashRangeLabel(personalRecommendation.range, 20)}
                 </div>
                 <p className="mt-1.5 text-white/65">{personalRecommendation.explanation}</p>
@@ -1708,10 +1743,8 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
               </div>
             ) : (
               <div className="mb-2.5 rounded-md border border-white/10 bg-white/[0.025] p-2 text-[11px] text-white/50">
-                {personalRecommendationOutdated
-                  ? 'Salary guidance is outdated because the career data changed. Combine jobs again on the Job Board for a current desired salary.'
-                  : personalRecommendation?.explanation || 'This saved result has no personal salary guidance. Combine jobs again on the Job Board to include your career data.'}
-                {!personalRecommendationOutdated && personalRecommendation?.limitations.length > 0 && (
+                {personalRecommendation?.explanation || 'This saved result has no personal salary guidance. Combine jobs again on the Job Board to include your career data.'}
+                {personalRecommendation?.limitations.length > 0 && (
                   <ul className="mt-1 list-disc space-y-0.5 pl-3.5">
                     {personalRecommendation.limitations.map((limitation, index) => <li key={index}>{limitation}</li>)}
                   </ul>
@@ -1940,7 +1973,7 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
           {(localApplication.mode === 'paste' || localApplication.transport === 'paste') && applicationAwaitsPaste(localApplication.status) && (
             <button
               onClick={(e) => { e.stopPropagation(); requestApplicationHandoffFocus(localApplication.id); }}
-              className="mt-2 rounded-md border border-emerald-400/25 bg-emerald-500/10 px-2 py-1 text-[10px] font-medium text-emerald-200 transition-colors hover:bg-emerald-500/15"
+              className={localApplicationNeedsAttention ? GENERATION_RECOVERY_SMALL_BUTTON_CLASS : "mt-2 rounded-md border border-emerald-400/25 bg-emerald-500/10 px-2 py-1 text-[10px] font-medium text-emerald-200 transition-colors hover:bg-emerald-500/15"}
             >
               {bridgeHeldLine ? bridgeHeldLine.openLabel : 'Continue AI handoff'}
             </button>
@@ -2024,7 +2057,7 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
             && Array.isArray(localApplication.missingArtifacts) && localApplication.missingArtifacts.length > 0 && (
             <button
               onClick={(e) => { e.stopPropagation(); importCompletedLocalApplication(localApplication.id); }}
-              className="mt-2 rounded-md border border-amber-400/20 bg-amber-400/10 px-2 py-1 text-[10px] font-medium text-amber-200 transition-colors hover:bg-amber-400/15"
+              className={GENERATION_RECOVERY_SMALL_BUTTON_CLASS}
               title="Rebuild the final bundle from this Local AI result, including any missing PDFs."
             >
               Repair bundle
@@ -2036,7 +2069,7 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
                 e.stopPropagation();
                 importCompletedLocalApplication(localApplication.id, localApplication.resultSha256);
               }}
-              className="mt-2 ml-1.5 rounded-md border border-amber-400/20 bg-amber-400/10 px-2 py-1 text-[10px] font-medium text-amber-200 transition-colors hover:bg-amber-400/15"
+              className={GENERATION_RECOVERY_SMALL_BUTTON_CLASS}
               title="Render and measure both PDFs again without asking the AI to rewrite them."
             >
               Retry layout check
@@ -2050,7 +2083,7 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
           {localApplication.status === 'invalid' && (
             <button
               onClick={(e) => { e.stopPropagation(); importCompletedLocalApplication(localApplication.id); }}
-              className="mt-2 ml-1.5 rounded-md border border-amber-400/20 bg-amber-400/10 px-2 py-1 text-[10px] font-medium text-amber-200 transition-colors hover:bg-amber-400/15"
+              className={GENERATION_RECOVERY_SMALL_BUTTON_CLASS}
               title="Revalidate and import this Local AI result after correcting its reported issue."
             >
               Retry import
@@ -2059,15 +2092,37 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
         </div>
       )}
 
+      {listingGenerationPaused && (
+        <div role="status" className="mx-3 mb-2 rounded-lg border border-amber-400/20 bg-amber-400/10 px-2.5 py-2 text-[11px] text-amber-100">
+          <div className="font-semibold">Generation paused · Listing check</div>
+          <div className="mt-1 whitespace-pre-wrap break-words">
+            {data.listingGenerationNotice?.message || "Couldn't confirm the listing is still open"}
+          </div>
+          <div className="mt-1 text-amber-100/70">
+            Generate anyways to continue, or check the posting again.
+          </div>
+          <button
+            onClick={effectiveLock ? undefined : (e) => { e.stopPropagation(); generateApplication(); }}
+            disabled={effectiveLock}
+            className={GENERATION_RECOVERY_SMALL_BUTTON_CLASS}
+            title="Check whether the listing is still open again."
+          >
+            Check again
+          </button>
+        </div>
+      )}
+
       {/* Generate the application bundle. Submission remains a manual action on
           the employer's site; this disposable hierarchy tracks no application state. */}
       {!hasLinkedApplicationOutput && <div className="px-3 py-2 border-t border-white/5 flex items-center gap-1.5" onPointerDown={(e) => e.stopPropagation()}>
         <button
-          onClick={effectiveLock ? undefined : (e) => { e.stopPropagation(); generateApplication(); }}
+          onClick={effectiveLock ? undefined : (e) => { e.stopPropagation(); generateApplication({ listingOverride: listingOverrideAvailable }); }}
           disabled={hasApplicationRun || localJobPending || effectiveLock}
           className={`flex-1 min-w-0 flex items-center justify-center gap-1.5 py-2 rounded-lg text-xs font-semibold transition-colors ${
             effectiveLock
               ? 'bg-white/5 text-white/20 cursor-default'
+              : listingGenerationPaused || (!hasApplicationRun && localApplicationNeedsAttention)
+              ? GENERATION_RECOVERY_BUTTON_CLASS
               : 'bg-gradient-to-r from-emerald-500/15 to-blue-500/15 text-emerald-300 hover:from-emerald-500/25 hover:to-blue-500/25 hover:text-emerald-200 disabled:opacity-50'
           }`}
           title={localJobPending
@@ -2078,6 +2133,8 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
             ? displayedApplicationRun.blocked
               ? applicationLimitMessage()
               : `Queued at position ${displayedApplicationRun.position} — application generation runs one at a time to protect model quota and document rendering, and starts automatically when an application slot is free.`
+            : listingOverrideAvailable
+            ? 'Generate an application even if this listing is closed or could not be confirmed open.'
             : 'Copy app-provided prompts into your local AI chat and paste back structured JSON. Infinite Canvas validates, renders, reviews, and saves the tailored application bundle next to your canvas'}
         >
           <Sparkles size={13} className={hasApplicationRun ? 'animate-pulse' : ''} />
@@ -2086,18 +2143,9 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
             : displayedApplicationRun.state === 'queued'
             ? `Queued · #${displayedApplicationRun.position}`
             : displayedApplicationRun.state === 'resolving' ? 'Finding official posting…'
-            : displayedApplicationRun.state === 'generating' ? 'Generating…' : 'Generate'}
+            : displayedApplicationRun.state === 'generating' ? 'Generating…'
+            : listingOverrideAvailable ? 'Generate anyways' : localApplicationNeedsAttention ? 'Retry generation' : 'Generate'}
         </button>
-        {displayedApplicationRun.state === 'idle' && !localJobPending && data.listingHold === true && (
-          <button
-            onClick={effectiveLock ? undefined : (e) => { e.stopPropagation(); generateApplication({ listingOverride: true }); }}
-            disabled={effectiveLock}
-            className="shrink-0 py-2 px-2.5 rounded-lg text-xs font-medium text-amber-200 bg-amber-400/10 hover:bg-amber-400/15 disabled:opacity-50"
-            title="Generate an application even though this listing could not be confirmed open."
-          >
-            Generate anyway
-          </button>
-        )}
         {displayedApplicationRun.state === 'queued' && (
           <button
             onClick={(e) => { e.stopPropagation(); cancelQueuedRunsForNode(id, 'Application generation cancelled before it started'); }}

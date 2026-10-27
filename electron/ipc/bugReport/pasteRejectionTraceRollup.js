@@ -488,7 +488,7 @@ export function buildPasteRejectionTraceMarkdown(canvasFilePath, localApplicatio
     const run = longestRun(rows);
     const runLabel = run.length > 1
       ? `longest same-cause run: ${run.length} consecutive rejection(s) — stage \`${run.row.stage}\`, check${run.row.checkIds.length > 1 ? 's' : ''} ${run.row.checkIds.map(id => `${id}${run.row.checkFingerprints[id] ? ` (${run.row.checkFingerprints[id]})` : ''}`).join(', ')}`
-      : 'no repeated cause — every retained rejection differs in stage, check id, or branch';
+      : 'no consecutive same-cause run — causes may recur across intervening stages or checks';
     lines.push(`- ${jobLabel(item)} · ${rows.length} rejection(s) retained${trace.source === 'terminal-receipt' ? ' · preserved with successful save' : ''} · ${runLabel}`);
     lines.push(workflowLine);
     const newestFirst = [...rows].sort((a, b) => b.atMs - a.atMs).slice(0, MAX_ROWS_PER_JOB);

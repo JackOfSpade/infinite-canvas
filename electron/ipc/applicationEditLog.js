@@ -226,7 +226,7 @@ export function editedPairsSinceSession(state) {
     .filter(entry => entry.diffs.length > 0);
 }
 
-export const GATE_PROMPT_VERSION = 1;
+export const GATE_PROMPT_VERSION = 2;
 export const GATE_MIN_EDITED_BUNDLES = 3;
 export const GATE_RECURRENCE_MIN = 3;
 
@@ -235,7 +235,7 @@ export function generationGateInputDigest(state, editedPairs) {
   return digest(JSON.stringify([
     GATE_PROMPT_VERSION,
     state?.lastSessionAt || '',
-    (editedPairs || []).map(({ pair }) => [pair.id, pair.savedAt, pair.editNotesAt || '']),
+    (editedPairs || []).map(({ pair }) => [pair.id, pair.savedAt, pair.editNotesAt || '', pair.editNotesByDocument || {}, pair.editNotesByDocumentAt || {}]),
   ]));
 }
 
@@ -358,8 +358,16 @@ export function normalizeEditNotes(value) {
     .trim();
 }
 
-function applyEditNotes(pair, editNotes) {
+function applyEditNotes(pair, editNotes, document) {
   const text = normalizeEditNotes(editNotes);
+  if (document !== undefined) {
+    if (!['resume', 'cover'].includes(document)) throw new Error('Edit notes need a resume or cover document.');
+    pair.editNotesByDocument ||= {};
+    pair.editNotesByDocumentAt ||= {};
+    pair.editNotesByDocument[document] = text;
+    pair.editNotesByDocumentAt[document] = new Date().toISOString();
+    return text;
+  }
   if (text) {
     pair.editNotes = text;
     pair.editNotesAt = new Date().toISOString();
@@ -370,14 +378,14 @@ function applyEditNotes(pair, editNotes) {
   return text;
 }
 
-export async function logBundleEditNotes({ root, workspaceDir, editNotes }) {
+export async function logBundleEditNotes({ root, workspaceDir, editNotes, document }) {
   return serialize(async () => {
     const state = await alignModel(root, await read(root));
     const pair = state.pairs.findLast(item => item.workspaceId === idFor(workspaceDir));
     if (!pair) return null;
-    const text = applyEditNotes(pair, editNotes);
+    const text = applyEditNotes(pair, editNotes, document);
     await write(root, state);
-    return { editNotes: text };
+    return { editNotes: text, ...(document ? { document } : {}) };
   });
 }
 
@@ -389,11 +397,12 @@ export async function bundleEditNotes({ root, workspaceDir }) {
     return {
       editNotes: typeof pair.editNotes === 'string' ? pair.editNotes : '',
       editNotesAt: typeof pair.editNotesAt === 'string' ? pair.editNotesAt : null,
+      ...(pair.editNotesByDocument ? { editNotesByDocument: { ...pair.editNotesByDocument }, editNotesByDocumentAt: { ...pair.editNotesByDocumentAt } } : {}),
     };
   });
 }
 
-export async function logSavedBundle({ root, workspaceDir, html, letterRemoved = false, editNotes }) {
+export async function logSavedBundle({ root, workspaceDir, html, letterRemoved = false, editNotes, editNotesDocument }) {
   return serialize(async () => {
     const state = await alignModel(root, await read(root));
     const pair = state.pairs.findLast(item => item.workspaceId === idFor(workspaceDir));
@@ -402,7 +411,7 @@ export async function logSavedBundle({ root, workspaceDir, html, letterRemoved =
     const at = new Date().toISOString();
     pair.saved = documentSnapshot(html);
     pair.savedAt = at;
-    if (typeof editNotes === 'string') applyEditNotes(pair, editNotes);
+    if (typeof editNotes === 'string') applyEditNotes(pair, editNotes, editNotesDocument);
     if (letterRemoved || pair.saved.letterRemoved) {
       pair.generated.letter = null;
       pair.saved.letter = null;

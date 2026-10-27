@@ -4,6 +4,9 @@ import fs from 'node:fs';
 import path from 'node:path';
 import electronPkg from 'electron';
 import { assert } from './testHelpers.js';
+import { generateMarkdown } from '../../electron/ipc/bugReport.js';
+import { applyBugReportCode } from '../../src/utils/bugReportCodes.js';
+import { recordWorkspaceWriteOutcome, workspaceIoDiagnosticsMarkdown } from '../../electron/ipc/workspaceIoDiagnostics.js';
 import { isRendererSensitivePath, isSensitivePath } from '../../electron/utils/pathSafety.js';
 import { callLLMVision } from '../../electron/ipc/llm.js';
 import { __runWithIpcRequestContextForTests } from '../../electron/ipc/ipcUtils.js';
@@ -14,6 +17,7 @@ import {
   __recoveryRebindJournalForTests,
   createFileWatchRegistry,
   inspectRendererWorkspacePath,
+  inspectRendererWatchPath,
   inspectAllowedOpenFilePath,
   readRendererWorkspaceFile,
   registerFilesystemHandlers,
@@ -56,6 +60,117 @@ async function rejects(action) {
 }
 
 export default [
+  ...['recover', 'private-retarget', 'stop'].map(outcome => ({
+    name: `document watcher: temporary hard link suspends notifications safely (${outcome})`,
+    run: async () => {
+      const root = await fs.promises.mkdtemp(path.join(process.cwd(), '.watch-link-recovery-'));
+      const file = path.join(root, 'notes.md');
+      const alias = path.join(root, 'alias.md');
+      const privateDir = path.join(root, 'interview-helper-artifacts');
+      const privateFile = path.join(privateDir, 'notes.md');
+      const { sender } = eventForTest();
+      const notifications = [], errors = [], watchers = [];
+      let validations = 0;
+      const registry = createFileWatchRegistry({
+        retryMs: 20,
+        validateTarget: async target => { validations++; return inspectRendererWatchPath(target, { allowMissing: true }); },
+        watch: (_directory, callback) => {
+          const watcher = new EventEmitter();
+          watcher.callback = callback;
+          watcher.close = () => {};
+          watchers.push(watcher);
+          return watcher;
+        },
+        // Drop every OS/stat event after the first hard-link notification:
+        // recovery must still refresh the document without another user edit.
+        watchFile: () => {}, unwatchFile: () => {},
+        onError: error => errors.push(error.code),
+      });
+      sender.send = (_channel, changedPath) => notifications.push(changedPath);
+      const until = async predicate => {
+        for (let i = 0; i < 100; i++) {
+          if (predicate()) return;
+          await new Promise(resolve => setTimeout(resolve, 10));
+        }
+        throw new Error('Timed out waiting for watcher validation');
+      };
+      try {
+        await fs.promises.writeFile(file, 'baseline');
+        await fs.promises.link(file, alias);
+        assert(await rejects(() => registry.start(sender, file)), 'an initially hard-linked target cannot acquire a watch lease');
+        assert(registry.getCounts().targets === 0, 'failed starts release quota');
+        await fs.promises.unlink(alias);
+        await registry.start(sender, file);
+        await new Promise(resolve => setTimeout(resolve, 10));
+        await fs.promises.link(file, alias);
+        watchers.at(-1).callback('change', path.basename(file));
+        await until(() => errors.length > 0);
+        await fs.promises.writeFile(file, 'changed during cloud sync');
+        await new Promise(resolve => setTimeout(resolve, 60));
+        assert(notifications.length === 0, 'no linked-file notification may reach the renderer');
+        assert(errors.length === 1, 'a sustained pause logs once instead of flooding the ring');
+        assert(registry.getCounts().targets === 1, 'the suspended lease remains bounded by its existing quota');
+        assert(await rejects(() => readRendererWorkspaceFile(file)), 'watch recovery grants no linked-file read authority');
+        assert(await rejects(() => atomicWriteRendererWorkspaceFile(file, 'forbidden')), 'watch recovery grants no linked-file write authority');
+        if (outcome === 'recover') {
+          await fs.promises.unlink(alias);
+          await until(() => notifications.length > 0);
+          assert(notifications.every(target => target === file), 'recovery refreshes only the originally subscribed document');
+          assert(await fs.promises.readFile(file, 'utf8') === 'changed during cloud sync', 'recovery does not write payload bytes');
+        } else if (outcome === 'private-retarget') {
+          await fs.promises.mkdir(privateDir);
+          await fs.promises.writeFile(privateFile, 'private');
+          await fs.promises.unlink(file);
+          await fs.promises.symlink(privateFile, file);
+          await until(() => registry.getCounts().targets === 0);
+          assert(notifications.length === 0 && errors.includes('PRIVATE_RENDERER_PATH'), 'private retargets terminate the paused lease without notifying');
+        } else {
+          registry.stop(sender, file);
+          const stoppedAt = validations;
+          await fs.promises.unlink(alias);
+          await new Promise(resolve => setTimeout(resolve, 60));
+          assert(validations === stoppedAt && notifications.length === 0, 'unmount cancels recovery without resurrecting a subscription');
+        }
+      } finally {
+        registry.stop(sender, file);
+        await fs.promises.rm(root, { recursive: true, force: true });
+      }
+    },
+  })),
+  {
+    name: 'workspace save diagnostics: exact refusal reasons reach FULL and WSIO without private path data',
+    run: async () => {
+      const root = await fs.promises.realpath(await fs.promises.mkdtemp(path.join(process.cwd(), '.workspace-check-')));
+      const canvas = path.join(root, 'canvas.json');
+      const alias = path.join(root, 'alias.json');
+      try {
+        await atomicWriteRendererWorkspaceFile(canvas, '{"private":"workspace-content-sentinel"}');
+        await fs.promises.link(canvas, alias);
+        let refused;
+        try { await atomicWriteRendererWorkspaceFile(canvas, '{"attempted":true}'); }
+        catch (error) { refused = error; }
+        assert(refused?.code === 'RENDERER_WORKSPACE_PATH_CHANGED'
+          && refused.workspacePathCheck === 'target-hardlink'
+          && /cloud sync/.test(refused.message) && /Save As/.test(refused.message), 'a hard-linked canvas gets actionable guidance');
+        assert((await fs.promises.readFile(alias, 'utf8')).includes('workspace-content-sentinel'),
+          'reporting the refusal never weakens the hard-link boundary or overwrites the shared inode');
+        recordWorkspaceWriteOutcome({ code: root, workspacePathCheck: 'workspace-content-sentinel', message: root });
+        const diagnostic = workspaceIoDiagnosticsMarkdown();
+        assert(diagnostic.includes('target-hardlink') && diagnostic.includes('saved · OK')
+          && diagnostic.includes('OTHER · check unclassified') && !diagnostic.includes(root)
+          && !diagnostic.includes('workspace-content-sentinel'), 'only fixed diagnostic fields survive');
+        const payload = { nodes: [], edges: [], drawings: [], eventLog: [], description: 'Synthetic save check' };
+        for (const filterCode of ['FULL', 'WSIO', 'SAVE']) {
+          const report = generateMarkdown({ ...payload, filterCode }).markdown;
+          assert(report.includes('## Workspace Save Diagnostics (WSIO)') && report.includes('target-hardlink'),
+            `${filterCode} includes the new checks`);
+        }
+        assert(!generateMarkdown({ ...payload, filterCode: 'APPOUTPUT' }).markdown.includes('## Workspace Save Diagnostics'),
+          'unrelated narrow output reports omit save receipts');
+        assert(applyBugReportCode([], {}, 'WSIO').matchedCodes.includes('WSIO'), 'WSIO is a recognized filter');
+      } finally { await fs.promises.rm(root, { recursive: true, force: true }); }
+    },
+  },
   {
     name: 'interview private stores: post-guard directory swaps cannot redirect workspace reads or handle-bound saves',
     run: async () => {

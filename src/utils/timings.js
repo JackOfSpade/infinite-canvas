@@ -18,6 +18,11 @@
  */
 import { clamp } from './mathUtils.js';
 
+export const AUTOSAVE_FAILURE_RETRY_MS = Object.freeze([2000, 5000, 15000]);
+// Sync clients can retain a hard link for minutes. Keep checking at a low
+// frequency after the initial retries so recovery never requires another edit.
+export const AUTOSAVE_FAILURE_POLL_MS = 30000;
+
 export const TIMINGS = {
   // ── Debounce: input settles → commit ──────────────────────────────────────
   UNDO_SNAPSHOT_DEBOUNCE_MS:   500,  // safety-net auto-snapshot after canvas edits settle

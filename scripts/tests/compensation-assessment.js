@@ -139,7 +139,7 @@ export default [
       assert(isCompensationRecommendationCurrent(normalized.personalRecommendation, 'a'.repeat(64))
         && !isCompensationRecommendationCurrent(normalized.personalRecommendation, 'b'.repeat(64))
         && !isCompensationRecommendationCurrent(normalized.personalRecommendation, undefined),
-      'a desired salary may only be displayed and copied for the exact career snapshot used to calculate it');
+      'freshness is true only for the exact career snapshot used to calculate the desired salary');
       const legacy = normalizeCompensationAssessment({ ...assessment, personalRecommendation: undefined });
       assert(legacy.personalRecommendation === null && legacy.status === 'below_market',
         'legacy market assessments must remain renderable without creating a personal answer');

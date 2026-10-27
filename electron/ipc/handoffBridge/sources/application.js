@@ -213,6 +213,9 @@ export function createApplicationSource({
       const outcome = await bounded('read', key, () => getHandoff({ jobId: lane?.jobId, canvasFilePath: lane?.canvasFilePath, matchTaskId: lane?.matchTaskId }));
       if (outcome.timeout) return { kind: 'busy' };
       if (outcome.error) return { kind: 'threw', ...classifyApplicationThrow(outcome.error) };
+      // The shared handoff reader now reconciles known cleanup/discard reads
+      // itself. Preserve the engine's existing missing-job status probe path.
+      if (outcome.result?.gone === true) return { kind: 'threw', ...classifyApplicationThrow({ code: 'ENOENT' }) };
       // A completed authority-match claim is not a completed application.
       // Keep that distinction private to the bridge: the engine turns this
       // into one unkeyed discovery seed and asks the authority for the next

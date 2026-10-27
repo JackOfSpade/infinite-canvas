@@ -1,10 +1,16 @@
+import assertStrict from 'node:assert/strict';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import { assert, buildResumeDocument, extractResumeEvidence, projectContactChannels, projectTrustedIdentity, resumeRoleLocationFailures, validateLocalApplicationResult } from '../test-dependencies.js';
 import { FROZEN_COMPLETED_PACKAGE, LOCAL_AI_JOB_INTEGRITY_CODE, MAX_FROZEN_SOURCE_CHARS, MAX_UNIT_CAREER_DATA_QUOTES, assemblePasteApplicationResult, assertAuthorityDraftSelection, isJobIntegrityFault, normalizeBoundDocumentText } from '../../electron/ipc/pasteApplicationAssembly.js';
-import { APPLICATION_QUALITY_CHECKLIST_VERSION, APPLICATION_QUALITY_CRITERIA, LOCAL_AI_GENERATION_AUDIT_VERSION, __queueLegacyLocalApplicationFixtureForTests, pasteRejectionChangeDocuments, sanitizeQualityReview, stampPasteQualityReviewFromFit } from '../../electron/ipc/localAiApplication.js';
+import { APPLICATION_QUALITY_CHECKLIST_VERSION, APPLICATION_QUALITY_CRITERIA, LOCAL_AI_GENERATION_AUDIT_VERSION, __completedParagraphCitationsForTests, __queueLegacyLocalApplicationFixtureForTests, pasteRejectionChangeDocuments, sanitizeQualityReview, stampPasteQualityReviewFromFit } from '../../electron/ipc/localAiApplication.js';
 import { CAREER_SNAPSHOT_HISTORICAL_SKILL_EVIDENCE_VERSION, CAREER_SNAPSHOT_SKILL_EVIDENCE_VERSION, careerAttestedSkillTerms, formatRoleDateForPresentation, MAX_REQUIRED_CAREER_SKILL_TERMS, MAX_REQUIRED_POSTING_SKILL_TERMS, missingPostingNamedSkillTerms, missingRequiredCareerSkillTerms, NEUTRAL_SKILL_GROUP_LABELS, NEUTRAL_SKILL_GROUP_RULE, neutralSkillGroupRule, postingNamedAttestedSkillTerms, requiredCareerAttestedSkillTerms, renderStructuredApplicationResume, SKILLS_BLOCK_BUDGET_RULE, STRUCTURED_RESUME_LIMITS, STRUCTURED_RESUME_SCHEMA_VERSION, skillGroupVocabulary, STRUCTURED_RESUME_SKILLS_BUDGET, titleCaseSkillGroupLabel, validateStructuredApplicationResume } from '../../electron/ipc/structuredResume.js';
 import { careerDataProjectProvenanceHeadingForName } from '../../electron/ipc/jobApplication.js';
+import { recordApplicationCitationFlow, applicationCitationDiagnosticsMarkdown } from '../../electron/ipc/applicationCitationDiagnostics.js';
+import { generateMarkdown } from '../../electron/ipc/bugReport.js';
+import { applyBugReportCode } from '../../src/utils/bugReportCodes.js';
+import { recordApplicationCorrectionCheck, applicationCorrectionDiagnosticsMarkdown } from '../../electron/ipc/applicationCorrectionDiagnostics.js';
+import { __writeVerifyCandidateGateForTests } from '../../electron/ipc/localAiApplication.js';
 
 const careerData = 'Ada Lovelace\nada@example.test\n## Analytical Engines\nSoftware Engineer\n\nBuilt reporting systems that reduced manual work.';
 const sourceRoles = [{ id: 'role-1', title: 'Software Engineer', company: 'Analytical Engines', dates: '2020 – 2024', location: '' }];
@@ -74,6 +80,110 @@ function fixture(overrides = {}, frozen = {}) {
 }
 
 export default [
+  {
+    name: 'document gates report each overlapping closing repair once and retain other failures',
+    async run() {
+      const kit = fixture();
+      const extra = { id: 'closing', text: 'I would help your team while building reporting systems.', evidenceIds: ['job-need'] };
+      const coverLetter = { ...kit.paste.coverLetter, paragraphs: [...kit.paste.coverLetter.paragraphs, extra] };
+      const state = { ...kit.paste, stage: 'convert', careerData, jobListing: kit.jobListing, handoffCode: 'test', baseHashes: {} };
+      const result = await __writeVerifyCandidateGateForTests({
+        raw: { resume: kit.paste.resume, coverLetter }, state,
+        input: { ...kit.input, job: { company: 'Synthetic Reporting', title: 'Engineer', snippet: kit.jobListing } },
+        frozen: { careerData, jobListing: kit.jobListing, careerSkillEvidence: { skills: [] } }, manifest: {},
+      });
+      assert(result.errors.length > 0, 'the invalid closing remains rejected');
+      assert(result.errors.some(error => error.includes('listing-grounded closing')), 'closing repair remains present');
+      assert(result.errors.some(error => error.includes('career-data evidence ID')), 'citation repair remains present');
+      assertStrict.equal(result.errors.length, new Set(result.errors).size, 'overlapping validators produce one copy of each repair');
+      assertStrict.deepEqual(result.contentErrors, result.errors);
+      assertStrict.deepEqual(result.fitErrors, []);
+      assertStrict.equal(result.findings.length > 0, true, 'the correction still receives located findings');
+    },
+  },
+  {
+    name: 'APPCORRECT includes bounded private-free correction causes in FULL and relevant narrow reports',
+    run() {
+      for (let index = 0; index < 65; index++) recordApplicationCorrectionCheck({ jobId: 'private-job-sentinel', stage: 'convert',
+        errors: ['Cover-letter paragraph PRIVATE needs at least one career-data evidence ID.',
+          'Cover-letter paragraph 2, sentence 1: listing-grounded closing requires a valid clause.',
+          'Cover-letter paragraph 2, sentence 1: listing-grounded closing requires a valid clause.',
+          'unit-source-grounding: private-quote-sentinel', 'references unknown evidence private-id-sentinel'] });
+      recordApplicationCorrectionCheck({ stage: 'private-stage-sentinel', errors: ['private-text'] });
+      const diagnostic = applicationCorrectionDiagnosticsMarkdown();
+      assertStrict.equal((diagnostic.match(/ · stage `convert`/gu) || []).length, 60);
+      assert(diagnostic.includes('distinct findings 4 · duplicate findings suppressed 1'));
+      assert(diagnostic.includes('listing-closing=1') && diagnostic.includes('missing-career-citation=1')
+        && diagnostic.includes('source-grounding=1') && diagnostic.includes('unknown-evidence=1'));
+      assert(!/private-|PRIVATE|valid clause/u.test(diagnostic), 'no raw values leave the projection');
+      const payload = { nodes: [], edges: [], drawings: [], eventLog: [], description: 'Synthetic' };
+      for (const filterCode of ['FULL', 'APPCORRECT', 'APPLICATION', 'APPVALIDATION'])
+        assert(generateMarkdown({ ...payload, filterCode }).markdown.includes('## Application Correction Causes (APPCORRECT)'));
+      assert(!generateMarkdown({ ...payload, filterCode: 'APPOUTPUT' }).markdown.includes('## Application Correction Causes'));
+      assert(applyBugReportCode([], {}, 'APPCORRECT').matchedCodes.includes('APPCORRECT'));
+      recordApplicationCorrectionCheck({ stage: 'fit-correction', errors: [] });
+      assert(applicationCorrectionDiagnosticsMarkdown().includes('stage `fit-correction` · passed · distinct findings 0'));
+    },
+  },
+  {
+    name: 'APPCITE reports bounded citation counts in FULL without private data',
+    run() {
+      for (let index = 0; index < 45; index++) recordApplicationCitationFlow({
+        phase: 'private-phase-sentinel', v2: true, paragraphs: ['private-prose-sentinel'],
+        citations: index % 2 ? [['private-quote-sentinel']] : null,
+      });
+      const diagnostic = applicationCitationDiagnosticsMarkdown();
+      assert((diagnostic.match(/ · completion · /g) || []).length === 40, 'the check ring is bounded');
+      assert(!diagnostic.includes('sentinel') && diagnostic.includes('bindings unavailable')
+        && diagnostic.includes('career-cited paragraphs 1'), 'only fixed codes and counts survive');
+      const payload = { nodes: [], edges: [], drawings: [], eventLog: [], description: 'Synthetic' };
+      for (const filterCode of ['FULL', 'APPCITE', 'APPLICATION', 'APPVALIDATION']) {
+        assert(generateMarkdown({ ...payload, filterCode }).markdown.includes('## Application Citation Flow (APPCITE)'),
+          `${filterCode} includes the citation checks`);
+      }
+      assert(!generateMarkdown({ ...payload, filterCode: 'APPOUTPUT' }).markdown.includes('## Application Citation Flow'),
+        'unrelated narrow reports omit it');
+      assert(applyBugReportCode([], {}, 'APPCITE').matchedCodes.includes('APPCITE'), 'registered filter');
+    },
+  },
+  {
+    name: 'V2 assembly preserves host citations without an AI review and completion accepts only aligned frozen quotes',
+    run() {
+      const args = fixture();
+      args.input.applicationProtocol = 'write-then-verify.v2';
+      const quote = '\n  Built reporting systems serving 17 offices that reduced manual work.\n';
+      args.careerData += `\n${quote}`;
+      args.paste.evidencePlan.evidence.push({ id: 'career-metric', sourceId: 'career-data', quote });
+      const paragraph = args.paste.coverLetter.paragraphs[0];
+      paragraph.text = 'I built reporting systems serving 17 offices that reduced manual work.';
+      paragraph.evidenceIds = ['career-metric'];
+      const result = assemblePasteApplicationResult(args);
+      assert(result.qualityReview === null && result.generationAudit === null,
+        'V2 keeps AI reviews absent');
+      const options = { hostV2: true, evidencePlan: args.paste.evidencePlan };
+      const texts = result.coverLetter.paragraphs;
+      const citations = __completedParagraphCitationsForTests(result, texts, options);
+      assert(JSON.stringify(citations) === JSON.stringify([[quote.trim()]]), 'host citations survive assembly, including its boundary whitespace trim');
+      // The argument's selected résumé bullet contains no figure. Only the
+      // paragraph's cited quote licenses it, through the real completion gate.
+      validateLocalApplicationResult(result, args.input.jobId, '/synthetic', {}, {
+        careerData: null, applicationProtocol: args.input.applicationProtocol,
+        frozenSourceQuotes: true, evidencePlan: args.paste.evidencePlan,
+      });
+      const changed = structuredClone(result);
+      changed.sourceGrounding.coverLetterParagraphs[0].careerDataQuotes = ['Invented 999 offices.'];
+      assert(__completedParagraphCitationsForTests(changed, texts, options) === null, 'unknown quotes grant no figure authority');
+      changed.sourceGrounding.coverLetterParagraphs[0] = { paragraph: 'Different paragraph.', careerDataQuotes: [quote.trim()] };
+      assert(__completedParagraphCitationsForTests(changed, texts, options) === null, 'stale bindings grant no authority');
+      assert(__completedParagraphCitationsForTests(result, texts) === null, 'a package cannot select the host V2 route itself');
+      let rejected = false;
+      try { validateLocalApplicationResult(result, args.input.jobId, '/synthetic', {}, {
+        careerData: null, applicationProtocol: args.input.applicationProtocol,
+        frozenSourceQuotes: true, evidencePlan: { evidence: [] },
+      }); } catch (error) { rejected = /figure-discipline/.test(error.message); }
+      assert(rejected, 'a metric absent from the frozen catalog still fails completion');
+    },
+  },
   {
     name: 'Structured résumé renderer preserves trusted metadata and rejects unsupported pasted structure',
     run() {
@@ -2166,7 +2276,7 @@ Dates: May 2019 — August 2019
   {
     name: 'projectContactChannels drops application-logistics values that carry no channel, exactly the shipped letterhead defect',
     run() {
-      const contact = ['Email: riley.okafor@example.test', 'Phone: (555) 010-0142', 'Freedonian citizenship', 'Willing to work anywhere. Can obtain a work visa without sponsorship.'];
+      const contact = ['Email: riley.okafor@example.test', 'Phone: (555) 010-0142', 'Freedonian citizenship', 'Willing to relocate. Work authorization requires no sponsorship.'];
       const projected = projectContactChannels(contact);
       assert(JSON.stringify(projected) === JSON.stringify(['Email: riley.okafor@example.test', 'Phone: (555) 010-0142']),
         `the projection keeps only the email and phone, in order, and drops the citizenship and visa lines (got ${JSON.stringify(projected)})`);
@@ -2221,7 +2331,7 @@ Dates: May 2019 — August 2019
   {
     name: 'A rendered résumé contact row excludes application logistics even when the trusted identity supplied them',
     run() {
-      const contact = ['ada@example.test', 'Freedonian citizenship', 'Willing to work anywhere. Can obtain a work visa without sponsorship.'];
+      const contact = ['ada@example.test', 'Freedonian citizenship', 'Willing to relocate. Work authorization requires no sponsorship.'];
       const resume = {
         schemaVersion: STRUCTURED_RESUME_SCHEMA_VERSION,
         identity: { name: 'Ada Lovelace', contact },

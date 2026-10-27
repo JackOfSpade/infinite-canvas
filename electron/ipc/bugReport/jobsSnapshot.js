@@ -8677,7 +8677,7 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
     if (applicationScope?.note) lines.push(applicationScope.note.trimEnd());
     lines.push(`- Generation correlation: ${reportCorrelationDigest(a.nodeId)}`);
     if (a.source === 'local-ai') {
-      lines.push(`- Route: Local AI manual handoff${a.localAi?.jobId ? ` · job correlation ${reportCorrelationDigest(a.localAi.jobId)}` : ''}`);
+      lines.push(`- Route: Local AI application handoff${a.localAi?.jobId ? ` · job correlation ${reportCorrelationDigest(a.localAi.jobId)}` : ''}`);
       const handoffHistory = Array.isArray(a.localAi?.handoffHistory) ? a.localAi.handoffHistory : [];
       if (handoffHistory.length) {
         // Events are appended oldest-first (appendLocalAiHandoffEvent), so a

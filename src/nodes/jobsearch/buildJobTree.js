@@ -205,7 +205,7 @@ function normalizedPersonalRecommendation(value, marketRange) {
   return normalized;
 }
 
-/** A saved answer is usable only for the career snapshot it was calculated from. */
+/** Whether a saved answer matches the current career snapshot; older answers remain displayable with an outdated label. */
 export function isCompensationRecommendationCurrent(recommendation, careerSnapshotId) {
   return Boolean(recommendation && recommendation.status !== 'unavailable'
     && recommendation.careerSnapshotId === (typeof careerSnapshotId === 'string' ? careerSnapshotId.trim() : ''));

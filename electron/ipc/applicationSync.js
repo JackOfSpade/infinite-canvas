@@ -1183,11 +1183,13 @@ const MAX_EDIT_NOTES_BYTES = 64 * 1024;
 async function recordWorkspaceEditNotes(payload) {
   const { workspace } = registeredWorkspaceForToken(payload);
   const editNotes = typeof payload?.editNotes === 'string' ? payload.editNotes : '';
+  const document = payload?.document;
+  if (document !== undefined && !['resume', 'cover'].includes(document)) throw Object.assign(new Error('Invalid notes document.'), { statusCode: 400 });
   if (Buffer.byteLength(editNotes, 'utf8') > MAX_EDIT_NOTES_BYTES) {
     throw Object.assign(new Error('The edit notes are too long.'), { statusCode: 400 });
   }
-  const result = await logBundleEditNotes({ root: app.getPath('userData'), workspaceDir: workspace.workspaceDir, editNotes });
-  return { editNotes: result?.editNotes ?? '' };
+  const result = await logBundleEditNotes({ root: app.getPath('userData'), workspaceDir: workspace.workspaceDir, editNotes, document });
+  return { editNotes: result?.editNotes ?? '', ...(document ? { document } : {}) };
 }
 export const __recordWorkspaceEditNotesForTests = recordWorkspaceEditNotes;
 
@@ -1195,10 +1197,10 @@ async function workspaceStatus(payload) {
   const { workspace } = registeredWorkspaceForToken(payload);
   const root = app.getPath('userData');
   const status = await improvementStatus(root);
-  let editNotes = '';
-  try { editNotes = (await bundleEditNotes({ root, workspaceDir: workspace.workspaceDir })).editNotes; }
+  let notes = { editNotes: '', editNotesByDocument: {} };
+  try { notes = await bundleEditNotes({ root, workspaceDir: workspace.workspaceDir }); }
   catch (error) { logger.warn(`[ApplicationSync] Could not read edit notes: ${error?.message || error}`); }
-  return { ...status, editNotes };
+  return { ...status, ...notes, editNotesSchemaVersion: 2 };
 }
 export const __workspaceStatusForTests = workspaceStatus;
 
@@ -1206,6 +1208,7 @@ async function syncWorkspace(payload) {
   const { token, workspace } = registeredWorkspaceForToken(payload);
   const documentKind = payload?.document === 'cover' ? 'cover' : payload?.document === 'resume' ? 'resume' : '';
   const html = typeof payload?.html === 'string' ? payload.html : '';
+  if (payload?.editNotesDocument !== undefined && payload.editNotesDocument !== documentKind) throw Object.assign(new Error('Notes document must match the synced document.'), { statusCode: 400 });
   if (!documentKind || !html.trim() || Buffer.byteLength(html, 'utf8') > MAX_HTML_BYTES) {
     throw Object.assign(new Error('Sync received an invalid application document.'), { statusCode: 400 });
   }
@@ -1358,6 +1361,7 @@ async function syncWorkspace(payload) {
         await logSavedBundle({
           root: app.getPath('userData'), workspaceDir: workspace.workspaceDir, html: mergedHtml,
           editNotes: typeof payload?.editNotes === 'string' ? payload.editNotes : undefined,
+          editNotesDocument: payload?.editNotesDocument === documentKind ? documentKind : undefined,
         });
       }
       catch (error) { logger.warn(`[ApplicationSync] Could not record synced application edit: ${error?.message || error}`); }

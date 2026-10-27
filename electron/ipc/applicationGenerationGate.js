@@ -54,7 +54,10 @@ export function buildEditRecurrencePrompt(editedPairs) {
   (editedPairs || []).forEach(({ pair, diffs }, index) => {
     lines.push(`Bundle ${index + 1}`);
     const notes = typeof pair?.editNotes === 'string' && pair.editNotes.trim() ? pair.editNotes.trim() : 'none given';
-    lines.push(`User's stated reasons: ${notes}`);
+    lines.push(`User's earlier shared reasons (document unspecified): ${notes}`);
+    for (const [document, label] of [['resume', 'Résumé'], ['cover', 'Cover letter']]) {
+      lines.push(`${label} edit reasons: ${pair?.editNotesByDocument?.[document]?.trim() || 'none given'}`);
+    }
     for (const diff of diffs || []) {
       lines.push(`- ${diff.document} / ${diff.section || '(no section)'} / ${diff.kind} / ${diff.op}`);
       lines.push(`  BEFORE: ${diff.before || '(none)'}`);

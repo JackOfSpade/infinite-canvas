@@ -85,6 +85,19 @@ import { checkListingForGeneration } from '../../electron/ipc/listingLivenessPro
 
 export default [
   {
+    name: 'FULL listing check diagnostics retain the card hold and closed decision codes without message text',
+    run() {
+      const report = generateMarkdown({ filterCode: 'FULL', description: 'Synthetic listing hold',
+        nodes: [{ id: 'synthetic-card', type: 'jobcard', data: { listingHold: true,
+          listingGenerationNotice: { action: 'hold', verdict: 'pending', basis: 'neither', message: 'PRIVATE_NOTICE_TEXT' } } }],
+        edges: [], drawings: [], frontEndState: {}, nodeInternals: [{ id: 'synthetic-card', type: 'jobcard', position: {} }], nodeComponentStates: [], eventLogs: [],
+      }).markdown;
+      assert(report.includes('listingHold: true'));
+      assert(report.includes('listing check: hold/pending/neither, message recorded: true'));
+      assert(!report.includes('PRIVATE_NOTICE_TEXT'));
+    },
+  },
+  {
     name: 'listing-liveness bug report prints bounded board and Generate counts without page data',
     async run() {
       const telemetry = getJobsTelemetry(); const saved = structuredClone(telemetry);
@@ -550,6 +563,14 @@ export default [
         for (const leak of ['PRIVATE_PASTED_RESPONSE', 'PRIVATE_PROMPT_TEXT', 'PRIVATE_QUOTE_SPAN']) {
           assert(!markdown.includes(leak), `only the fixed metadata whitelist may render; ${leak} leaked into ${markdown}`);
         }
+        // The same cause on either side of a fit round is recurrent, but is
+        // not a consecutive run. Do not describe that as no repeated cause.
+        fs.writeFileSync(path.join(jobDir, 'Paste Rejections.json'), JSON.stringify([
+          rows[1], { ...rows[2], stage: 'fit-correction', checkIds: ['measured-one-page-fit'], checkFingerprints: {} }, rows[3],
+        ]));
+        const alternating = buildPasteRejectionTraceMarkdown(canvas, localApplications);
+        assert(alternating.includes('no consecutive same-cause run') && alternating.includes('causes may recur')
+          && !alternating.includes('every retained rejection differs'), 'intervening stages do not erase recurring causes');
         return { runLength: 4 };
       } finally {
         fs.rmSync(dir, { recursive: true, force: true });

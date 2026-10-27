@@ -123,8 +123,8 @@ export default [{
       assert(prompt.includes(`BEFORE: ${word} opening line about steady craft\n`), `bundle ${index} before text`);
       assert(prompt.includes(`AFTER: ${word} opening line about steady craft trimmed shorter\n`), `bundle ${index} after text`);
     }
-    assert(prompt.includes("User's stated reasons: shortened the quarry opener"));
-    assert(prompt.includes("User's stated reasons: the opener was too long"));
+    assert(prompt.includes("User's earlier shared reasons (document unspecified): shortened the quarry opener"));
+    assert(prompt.includes("User's earlier shared reasons (document unspecified): the opener was too long"));
     assert(prompt.indexOf('Bundle 1\n') < prompt.indexOf('quarry opening') && prompt.indexOf('Bundle 3\n') < prompt.indexOf('thimble opening'), 'bundles numbered oldest first');
     assert(!prompt.includes('meadow'), 'an unedited bundle is not sent');
     assert.deepEqual([result.blocked, result.checked, result.reason, result.editedBundleCount], [true, true, 'checked', 3]);
@@ -181,7 +181,12 @@ export default [{
     assert(validateResponseSchema({ version: 1, patterns: [{ summary: 'y', kind: 'truth', bundles: [1] }] }, APPLICATION_EDIT_RECURRENCE_SCHEMA).length > 0,
       'a one-bundle pattern is schema-invalid');
     const prompt = buildEditRecurrencePrompt([{ pair: { id: 'a' }, diffs: [{ document: 'letter', section: '', kind: 'p', op: 'removed', before: 'old words', after: '' }] }]);
-    assert(prompt.includes("User's stated reasons: none given"));
+    assert(prompt.includes("User's earlier shared reasons (document unspecified): none given"));
+    const scoped = buildEditRecurrencePrompt([{ pair: { editNotes: 'Historical reason.', editNotesByDocument: { resume: 'Resume-specific reason.', cover: 'Cover-specific reason.' } }, diffs: [] }]);
+    assert(scoped.includes('Résumé edit reasons: Resume-specific reason.'));
+    assert(scoped.includes('Cover letter edit reasons: Cover-specific reason.'));
+    assert(scoped.includes("User's earlier shared reasons (document unspecified): Historical reason."));
+
     assert(prompt.includes('- letter / (no section) / p / removed\n  BEFORE: old words\n  AFTER: (none)'));
     assert(prompt.includes('{ "version": 1, "patterns": [] }'));
   },

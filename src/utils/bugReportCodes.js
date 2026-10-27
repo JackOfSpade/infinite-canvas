@@ -46,6 +46,13 @@ export const CODE_DEFINITIONS = {
       /save|load|open|close|write|read|file|EACCES|ENOSPC|disk|export|import/i.test(line),
   },
 
+  WSIO: {
+    label: 'Workspace Save Checks',
+    description: 'Bounded workspace save outcomes and exact host path-check refusal reasons. Included automatically in FULL. No paths, file contents, inode values or exception text are retained.',
+    logFilter: line => /save-workspace|auto-save|FileSystem/i.test(line),
+    excludeSections: ['nodes', 'edges', 'drawings', 'nodeInternals', 'nodeComponentStates', 'imageState', 'mediaState'],
+  },
+
   CRASH: {
     label: 'JS Crashes',
     description: 'JavaScript errors, unhandled promise rejections, console errors',
@@ -316,6 +323,20 @@ export const CODE_DEFINITIONS = {
   APPOUTPUT: {
     label: 'Application Output',
     description: 'Complete, sanitized in-memory projection of final cover-letter and résumé output so prose quality can be reviewed. Included automatically in FULL; this narrow code selects it directly. It never reads artifact paths, raw career source, hidden files, or job-listing text. Use while the output is still available in this app process.',
+  },
+
+  APPCITE: {
+    label: 'Application Citation Flow',
+    description: 'Bounded counts of career-cited paragraphs at draft and completion checks, exposing lost citation bindings without prose, quotes, IDs or paths. Included automatically in FULL.',
+    logFilter: line => /LocalAI|validation|handoff/i.test(line),
+    excludeSections: ['nodes', 'edges', 'drawings', 'nodeInternals', 'nodeComponentStates', 'imageState', 'mediaState'],
+  },
+
+  APPCORRECT: {
+    label: 'Application Correction Causes',
+    description: 'Bounded document-check outcomes with fixed closing, citation, grounding, figure and overflow cause counts, plus duplicate findings suppressed. No validation text, prose, quotes or paths. Included automatically in FULL.',
+    logFilter: line => /LocalAI|validation|handoff/i.test(line),
+    excludeSections: ['nodes', 'edges', 'drawings', 'nodeInternals', 'nodeComponentStates', 'imageState', 'mediaState'],
   },
 
   HANDOFF: {

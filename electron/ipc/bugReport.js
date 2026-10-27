@@ -28,6 +28,9 @@ import { codeIncludesApplicationOutput } from './bugReport/applicationOutput.js'
 import { buildPasteHandoffDiagnosticsMarkdown } from './pasteHandoffDiagnostics.js';
 import { buildPasteRejectionTraceMarkdown } from './bugReport/pasteRejectionTraceRollup.js';
 import { buildRendererCrashMarkdown } from '../rendererRecovery.js';
+import { workspaceIoDiagnosticsMarkdown } from './workspaceIoDiagnostics.js';
+import { applicationCitationDiagnosticsMarkdown } from './applicationCitationDiagnostics.js';
+import { applicationCorrectionDiagnosticsMarkdown } from './applicationCorrectionDiagnostics.js';
 import { buildWindowSizeLine, buildPointerProbeMarkdown } from './bugReport/pointerProbeMarkdown.js';
 import { writeSavedBugReport, buildClipboardPointer } from './bugReport/reportFile.js';
 import { resolveNodePresence } from '../../src/utils/nodePresence.js';
@@ -1241,6 +1244,13 @@ function buildNodeDiagnosticsMarkdown(nodeInternals, nodeComponentStates, nodes,
         previewParts.push(bundle?.id
           ? `appBundle: ${status || 'unknown'} (${reportCorrelationDigest(bundle.id)})`
           : 'appBundle: none');
+      }
+      if (d.listingHold === true) previewParts.push('listingHold: true');
+      const notice = d.listingGenerationNotice;
+      if (['hold', 'refuse-final', 'refuse-retry'].includes(notice?.action)) {
+        const verdict = ['open', 'closed', 'pending', 'unknown', 'unclear', 'unobservable'].includes(notice.verdict) ? notice.verdict : 'unknown';
+        const basis = ['neither', 'both', 'ai', 'structural', 'closed-marker', 'official', 'unavailable'].includes(notice.basis) ? notice.basis : 'unknown';
+        previewParts.push(`listing check: ${notice.action}/${verdict}/${basis}, message recorded: ${!!notice.message}`);
       }
       if (typeof d.matchScore === 'number') previewParts.push(`score: ${d.matchScore}`);
       // Link state above is enough to diagnose whether a card can be opened.
@@ -2842,6 +2852,10 @@ export function generateMarkdown(payload, reportWindowId = null, options = {}) {
     try { pasteHandoffMarkdown = buildPasteHandoffDiagnosticsMarkdown(); }
     catch { /* never break the report on diagnostic failure */ }
   }
+  const applicationCitationsMarkdown = (isFullReport || reportCodes.has('APPCITE') || reportCodes.has('APPLICATION') || reportCodes.has('APPVALIDATION'))
+    ? applicationCitationDiagnosticsMarkdown() : '';
+  const applicationCorrectionsMarkdown = (isFullReport || reportCodes.has('APPCORRECT') || reportCodes.has('APPLICATION') || reportCodes.has('APPVALIDATION'))
+    ? applicationCorrectionDiagnosticsMarkdown() : '';
 
   // The durable counterpart to the section immediately above: that section is
   // a process-local ring, wiped on restart, so a report filed after a restart
@@ -3094,7 +3108,7 @@ ${viewportBlock}
 - Runtime: Electron ${systemInfo.electronVersion || '?'} · Chromium ${systemInfo.chromiumVersion || '?'} · Node ${systemInfo.nodeVersion || '?'}
 - OS release: ${systemInfo.osRelease}
 - Report generated: ${systemInfo.generatedAt} · timezone ${systemInfo.timezone} · UTC offset ${systemInfo.utcOffsetMinutes >= 0 ? '+' : ''}${systemInfo.utcOffsetMinutes} min
-${buildRendererCrashMarkdown(app.getPath('userData'))}${buildFreshnessMarkdown}${pointerProbeMarkdown}${persistedWorkspaceMarkdown}${missingPreviewRelinkMarkdown}${activeTasksMarkdown}${handoffBridgeDiagnosticsMarkdown}${sellHubResolveMarkdown}${aiConfigMarkdown}${jobsConfigMarkdown}${jobCompletionAssessmentMarkdown}${jobBoardDiagnosticsMarkdown}${nonApiHandoffMarkdown}${pasteHandoffMarkdown}${pasteRejectionTraceMarkdown}${applicationOutputMarkdown}${(isFullReport || reportCodes.has('APPLINK')) ? savedApplicationLinkDiagnosticsMarkdown() : ''}${jobLinkMarkdown}${jobRecoveryOfferMarkdown}${jobRecoveryMarkdown}${issueReporterDraftMarkdown}${jobsPipelineMarkdown}${marketplacePipelineMarkdown}${marketplaceModuleRollupMarkdown}${sellHubPriceDropRollupMarkdown}${sessionPersistenceMarkdown}${marketplaceSessionsMarkdown}${jobSessionsMarkdown}${verifyTimingMarkdown}${authWindowMarkdown}${scraperAdaptationMarkdown}${activeEditableMarkdown}${lastSaveErrorMarkdown}${nodeDiagMarkdown}${mediaMarkdown}${imageMarkdown}
+${buildRendererCrashMarkdown(app.getPath('userData'))}${(isFullReport || reportCodes.has('WSIO') || reportCodes.has('SAVE')) ? workspaceIoDiagnosticsMarkdown() : ''}${buildFreshnessMarkdown}${pointerProbeMarkdown}${persistedWorkspaceMarkdown}${missingPreviewRelinkMarkdown}${activeTasksMarkdown}${handoffBridgeDiagnosticsMarkdown}${sellHubResolveMarkdown}${aiConfigMarkdown}${jobsConfigMarkdown}${jobCompletionAssessmentMarkdown}${jobBoardDiagnosticsMarkdown}${nonApiHandoffMarkdown}${pasteHandoffMarkdown}${applicationCitationsMarkdown}${applicationCorrectionsMarkdown}${pasteRejectionTraceMarkdown}${applicationOutputMarkdown}${(isFullReport || reportCodes.has('APPLINK')) ? savedApplicationLinkDiagnosticsMarkdown() : ''}${jobLinkMarkdown}${jobRecoveryOfferMarkdown}${jobRecoveryMarkdown}${issueReporterDraftMarkdown}${jobsPipelineMarkdown}${marketplacePipelineMarkdown}${marketplaceModuleRollupMarkdown}${sellHubPriceDropRollupMarkdown}${sessionPersistenceMarkdown}${marketplaceSessionsMarkdown}${jobSessionsMarkdown}${verifyTimingMarkdown}${authWindowMarkdown}${scraperAdaptationMarkdown}${activeEditableMarkdown}${lastSaveErrorMarkdown}${nodeDiagMarkdown}${mediaMarkdown}${imageMarkdown}
 `;
 
   const events = payload.eventLogs || [];

@@ -733,6 +733,8 @@ export default [
         assert.ok(prompt.includes('Achievement or project quote IDs cannot be skill-group citations'), domain);
         assert.ok(prompt.includes('A project needs project quote IDs'), domain);
         assert.ok(prompt.includes('written as "Title at Company"'), domain);
+        assert.ok(prompt.includes('TRUSTED EDUCATION AND CREDENTIAL FIELDS'), domain);
+        assert.ok(prompt.includes('do not append a location to either field'), domain);
       }
     },
   },

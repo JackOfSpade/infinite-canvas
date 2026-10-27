@@ -1,3 +1,4 @@
+import { upgradeApplicationEditNotesHtml } from '../../electron/ipc/applicationEditNotesUi.js';
 import crypto from 'node:crypto';
 import os from 'node:os';
 import {
@@ -41,6 +42,28 @@ const sha256 = value => value == null
     .digest('hex');
 
 export default [
+  {
+    name: 'application notes upgrade preserves application panels and is idempotent',
+    run() {
+      const old = `<html><body><main class="page">Synthetic unchanged prose</main><section class="ic-panel ic-notes-panel"><textarea id="ic-edit-notes"></textarea></section><script>
+  var notesInput = document.getElementById('ic-edit-notes');
+  var obsoleteNotesCode = true;
+  var skillStorageKey = 'unchanged';
+      if (notesInput && body && body.success) { obsoleteRestore(); }
+      if (improvementDue) {}
+    activeDocument = kind;
+  var payload = {editNotes: notesInput ? notesInput.value : ''};
+</script></body></html>`;
+      const next = upgradeApplicationEditNotesHtml(old);
+      assert(next.includes('<main class="page">Synthetic unchanged prose</main>'), 'prose stays exact');
+      assert(next.includes('ic-edit-notes-resume') && next.includes('ic-edit-notes-cover') && next.includes('ic-legacy-edit-notes'), 'independent inputs and historical notes survive');
+      assert(!next.includes('obsoleteNotesCode') && !next.includes('obsoleteRestore'), 'old shared handlers are removed');
+      assert(upgradeApplicationEditNotesHtml(next) === next, 'upgrade is idempotent');
+      let refused = false; try { upgradeApplicationEditNotesHtml('<html>unknown editor</html>'); } catch { refused = true; }
+      assert(refused, 'unknown markup is never blindly rewritten');
+    },
+  },
+
   {
     name: 'application bundle: hardened names and pretty source-faithful job Markdown',
     run: () => {
@@ -231,16 +254,16 @@ export default [
         beforeParse(window) {
           window.fetch = async (_url, options) => {
             calls.push(JSON.parse(options.body));
-            return { ok: true, json: async () => ({ success: true }) };
+            return { ok: true, json: async () => ({ success: true, editNotesSchemaVersion: 2 }) };
           };
         },
       });
       try {
         const { document } = dom.window;
-        const textarea = document.getElementById('ic-edit-notes');
+        const textarea = document.getElementById('ic-edit-notes-resume');
         assert(textarea && textarea.tagName === 'TEXTAREA', 'the notes textarea must render');
         assert(textarea.closest('.ic-workspace-sidebar'), 'the notes textarea must sit inside the workspace sidebar');
-        assert(!textarea.closest('main') && !document.querySelector('main #ic-edit-notes'), 'the notes must never be inside a printed document main');
+        assert(!textarea.closest('main') && !document.querySelector('main #ic-edit-notes-resume'), 'the notes must never be inside a printed document main');
         assert(textarea.value === '', 'a fresh page starts with no notes');
         await new Promise(resolve => dom.window.setTimeout(resolve, 0));
         textarea.value = typed;
@@ -250,24 +273,37 @@ export default [
         await new Promise(resolve => dom.window.setTimeout(resolve, 700));
         const notesCalls = calls.filter(call => call.action === 'notes');
         assert(notesCalls.length === 1, `typing must post exactly one notes request, got ${notesCalls.length}`);
-        assert(notesCalls[0].token === token && notesCalls[0].editNotes === typed, 'the notes request must carry the capability and typed text');
-        assert(dom.window.localStorage.getItem(`ic-edit-notes:${docId}`) === typed, 'the notes must be mirrored to localStorage under the doc id');
-        assert(document.getElementById('ic-notes-status').textContent === 'Saved', 'a confirmed save must say Saved');
+        assert(notesCalls[0].token === token && notesCalls[0].document === 'resume' && notesCalls[0].editNotes === typed, 'the notes request must carry the capability and typed text');
+        assert(dom.window.localStorage.getItem(`ic-edit-notes:${docId}:resume`) === typed, 'the notes must be mirrored to localStorage under the doc id');
+        assert(document.getElementById('ic-notes-status-resume').textContent === 'Saved', 'a confirmed save must say Saved');
         const mains = Array.from(document.querySelectorAll('main'));
         assert(mains.length > 0 && mains.every(main => !main.textContent.includes(typed)), 'the notes text must never enter a document main');
         const bundleData = document.getElementById('ic-application-bundle-data').textContent;
         assert(!bundleData.includes(typed), 'the notes text must never enter BUNDLE_DATA');
+        const coverNotes = document.getElementById('ic-edit-notes-cover');
+        textarea.value = 'Resume-only reason.';
+        textarea.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
+        document.querySelector('[data-ic-document-tab="cover"]').click();
+        assert(document.querySelector('[data-ic-notes-document="resume"]').hidden && !document.querySelector('[data-ic-notes-document="cover"]').hidden, 'notes follow the selected document');
+        assert(coverNotes.value === '', 'resume notes never populate the cover field');
+        coverNotes.value = 'Letter-only reason.';
+        coverNotes.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
+        await new Promise(resolve => dom.window.setTimeout(resolve, 1000));
+        assert(calls.some(call => call.action === 'notes' && call.document === 'resume' && call.editNotes === 'Resume-only reason.'), 'switching tabs before debounce keeps the resume binding');
+        assert(calls.some(call => call.action === 'notes' && call.document === 'cover' && call.editNotes === 'Letter-only reason.'), 'cover notes save independently');
+        assert(dom.window.localStorage.getItem('ic-edit-notes:' + docId + ':resume') === 'Resume-only reason.' && dom.window.localStorage.getItem('ic-edit-notes:' + docId + ':cover') === 'Letter-only reason.', 'browser slots are independent');
+
       } finally { dom.window.close(); }
 
       const restored = new JSDOM(doc, {
         runScripts: 'dangerously', url: 'https://edit-notes-restore.local/Application.html',
         beforeParse(window) {
-          window.localStorage.setItem(`ic-edit-notes:${docId}`, 'Kept the summary short on purpose.');
+          window.localStorage.setItem(`ic-edit-notes:${docId}:resume`, 'Kept the summary short on purpose.');
           window.fetch = () => new Promise(() => {});
         },
       });
       try {
-        assert(restored.window.document.getElementById('ic-edit-notes').value === 'Kept the summary short on purpose.',
+        assert(restored.window.document.getElementById('ic-edit-notes-resume').value === 'Kept the summary short on purpose.',
           'a page opened with stored notes must show them in the textarea');
       } finally { restored.window.close(); }
 
@@ -277,18 +313,34 @@ export default [
           window.fetch = async (_url, options) => ({
             ok: true,
             json: async () => JSON.parse(options.body).action === 'status'
-              ? { success: true, due: false, editNotes: 'Reworded the headline to match the posting.' }
+              ? { success: true, editNotesSchemaVersion: 2, due: false, editNotesByDocument: { resume: 'Reworded the headline to match the posting.', cover: 'Kept the letter focused.' }, editNotes: 'Earlier shared explanation.' }
               : { success: true },
           });
         },
       });
       try {
         await new Promise(resolve => fromServer.window.setTimeout(resolve, 10));
-        assert(fromServer.window.document.getElementById('ic-edit-notes').value === 'Reworded the headline to match the posting.',
+        assert(fromServer.window.document.getElementById('ic-edit-notes-resume').value === 'Reworded the headline to match the posting.',
           'the status response must restore notes when localStorage is empty');
-        assert(fromServer.window.localStorage.getItem(`ic-edit-notes:${docId}`) === 'Reworded the headline to match the posting.',
+        assert(fromServer.window.localStorage.getItem(`ic-edit-notes:${docId}:resume`) === 'Reworded the headline to match the posting.',
           'restored notes are mirrored back into localStorage');
+        assert(fromServer.window.document.getElementById('ic-edit-notes-cover').value === 'Kept the letter focused.', 'cover notes restore under their own label');
+        assert(fromServer.window.document.getElementById('ic-legacy-edit-notes').value === 'Earlier shared explanation.', 'legacy notes remain explicitly unattributed');
+
       } finally { fromServer.window.close(); }
+      const oldCalls = [];
+      const oldHost = new JSDOM(doc, { runScripts: 'dangerously', url: 'https://old-notes-host.local/', beforeParse(window) {
+        window.fetch = async (_url, options) => { oldCalls.push(JSON.parse(options.body)); return { ok: true, json: async () => ({ success: true }) }; };
+      } });
+      try {
+        await new Promise(resolve => oldHost.window.setTimeout(resolve, 0));
+        const input = oldHost.window.document.getElementById('ic-edit-notes-cover');
+        input.value = 'Cover-only offline reason.';
+        input.dispatchEvent(new oldHost.window.Event('input', { bubbles: true }));
+        await new Promise(resolve => oldHost.window.setTimeout(resolve, 1000));
+        assert(!oldCalls.some(call => call.action === 'notes'), 'a bridge without document-note support cannot receive a scoped note as shared notes');
+        assert(oldHost.window.localStorage.getItem('ic-edit-notes:' + docId + ':cover') === input.value, 'the offline note is retained');
+      } finally { oldHost.window.close(); }
       return { debounced: true };
     },
   },
@@ -1330,7 +1382,7 @@ export default [
       }
       assert(dismissButton.includes('disabled={effectiveLock}')
         && notes.includes('disabled={effectiveLock || hasApplicationRun || localJobPending}')
-        && generateButton.includes('onClick={effectiveLock ? undefined : (e) => { e.stopPropagation(); generateApplication(); }}')
+        && generateButton.includes('onClick={effectiveLock ? undefined : (e) => { e.stopPropagation(); generateApplication({ listingOverride: listingOverrideAvailable }); }}')
         && generateButton.includes('disabled={hasApplicationRun || localJobPending || effectiveLock}')
         && !generateButton.includes('job-search') && !generateButton.includes('activeRuns'),
       'dismiss, notes, and Generate must share the effective owning-board lock while Generate stays enabled during an unrelated active Job Search module');

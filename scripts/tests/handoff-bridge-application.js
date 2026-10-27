@@ -47,6 +47,15 @@ function source(overrides = {}) {
 }
 
 export default [
+  { name: 'handoff bridge: application: a reconciled gone read keeps the missing-job probe while a save remains host-owned', async run() {
+    const gone = await source({ api: { getLocalApplicationHandoff: async () => ({ gone: true, handoff: null }) } }).read(lane);
+    const saving = source({ api: {
+      getLocalApplicationHandoff: async () => ({ completed: true, handoff: null, localJob: { status: 'importing' } }),
+      localApplicationStatus: async () => ({ status: 'importing' }),
+    } });
+    assert(gone.kind === 'threw' && gone.enoent && gone.code === 'ENOENT', 'a known gone job triggers the same status reconciliation as a missing pathname');
+    assert((await saving.read(lane)).kind === 'host' && (await saving.status(lane)).kind === 'host', 'a live save never releases its lane before its terminal status');
+  } },
   { name: 'handoff bridge: application: submission exception observation retains stage without exporting raw error', async run() {
     const observations = [];
     const error = new TypeError('PRIVATE-ERROR-TEXT');

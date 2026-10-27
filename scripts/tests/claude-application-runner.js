@@ -701,6 +701,37 @@ export default [
     },
   },
   {
+    name: 'claude runner driver: repeated discovery after completion never reopens a job during bundle cleanup',
+    async run() {
+      let reads = 0;
+      let cleaned = false;
+      const runner = createClaudeApplicationRunner({
+        api: {
+          getHandoff: async () => {
+            reads += 1;
+            if (cleaned) throw Object.assign(new Error('Private job manifest disappeared during save'), { code: 'LOCAL_AI_JOB_INTEGRITY' });
+            return { completed: true };
+          },
+        },
+        stateFile: tempStateFile(), logger: quietLogger(),
+      });
+      try {
+        runner.ensure({ jobId: 'job-completed-cleanup', canvasFilePath: '/c.canvas' });
+        await waitFor(() => runner.status(['job-completed-cleanup'])['job-completed-cleanup']?.status === 'done', 'completed job');
+        cleaned = true;
+        for (let index = 0; index < 3; index++) {
+          assert.equal(runner.ensure({ jobId: 'job-completed-cleanup', canvasFilePath: '/c.canvas' }).status, 'done');
+        }
+        assert.equal(reads, 1);
+        assert.equal(runner.status(['job-completed-cleanup'])['job-completed-cleanup'].status, 'done');
+        // A deliberate retry may re-open host work; background discovery may not.
+        cleaned = false;
+        await runner.retry({ jobId: 'job-completed-cleanup', canvasFilePath: '/c.canvas' });
+        await waitFor(() => reads === 2 && runner.status(['job-completed-cleanup'])['job-completed-cleanup']?.status === 'done', 'explicit retry');
+      } finally { await runner.shutdown(); }
+    },
+  },
+  {
     name: 'claude runner driver: a rejection resends the correction prompt, then acceptance completes',
     async run() {
       const script = scriptedApi([{ handoffCode: 'code-1', stage: 'draft', prompt: 'prompt one' }], { rejectFirst: true });

@@ -34,6 +34,7 @@ import { PDFDocument } from 'pdf-lib';
 import { logger } from '../logger.js';
 import { ATS_SAFE_PDF_FONT_TOKENS, getDesignSystemDir, webFontFacesReadyExpression } from './resumeHtml.js';
 import { isBackgroundE2E } from '../utils/backgroundE2e.js';
+import { pdfDocContainsUnsafeType3Fonts } from './pdfFontSafety.js';
 
 const { BrowserWindow } = electronPkg;
 
@@ -98,15 +99,14 @@ export function atsSafePdfFontExpression() {
   })()`;
 }
 
-/** Detect font programs that render visually but routinely break text extraction. */
+/** Detect any Type 3 programs, including extractable color-emoji subsets. */
 export async function pdfContainsType3Fonts(bytes) {
   const pdf = await PDFDocument.load(bytes, { ignoreEncryption: true });
   return pdfDocContainsType3Fonts(pdf);
 }
 
-// Split out from pdfContainsType3Fonts() so renderPdf() can reuse the
-// PDFDocument it already loaded (to read pageCount) instead of parsing the
-// same freshly-printed PDF bytes with pdf-lib a second time on every render.
+// Keep the raw diagnostic separate from the production safety check, which
+// distinguishes mapped color emoji from Type 3 prose fonts.
 function pdfDocContainsType3Fonts(pdf) {
   const type3 = PDFLib.PDFName.of('Type3');
   const subtype = PDFLib.PDFName.of('Subtype');
@@ -486,7 +486,7 @@ async function renderPdfOnce(html, { signal, document = null } = {}) {
     const pdfDoc = await PDFDocument.load(pdfBuffer);
     throwIfAborted(signal);
     const pageCount = pdfDoc.getPageCount();
-    if (pdfDocContainsType3Fonts(pdfDoc)) {
+    if (pdfDocContainsUnsafeType3Fonts(pdfDoc)) {
       throw new Error('renderPdf produced Type 3 fonts that are not safe for ATS/PDF text extraction.');
     }
     if (!fontsLoaded) {

@@ -327,7 +327,9 @@ export function decideGenerationListingCheck({
     action = officialResearchSettled(official) && ['not-found', 'closed'].includes(official.outcome)
       ? 'refuse-final' : 'refuse-retry';
   } else if (hasClosedMarker(basis)) action = 'refuse-retry';
-  const override = listingOverride === true && action === 'hold';
+  // A deliberate user override bypasses every listing-status pause. Keep the
+  // observed verdict and basis intact for the audit and card display.
+  const override = listingOverride === true && action !== 'proceed';
   if (override) action = 'proceed';
   const listingCheck = { action, verdict: isOfficialLive(official) ? 'unobservable' : verdict,
     basis: isOfficialLive(official) ? 'official' : basis, board, at: timestamp, override };

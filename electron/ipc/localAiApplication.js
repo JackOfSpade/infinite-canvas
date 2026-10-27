@@ -43,6 +43,8 @@ import { recordPasteHandoffDiagnostic } from './pasteHandoffDiagnostics.js';
 import { approvedCareerEvidenceCatalog, CAREER_SNAPSHOT_SCHEMA_VERSION, careerSnapshotStorageRoot, isCareerSkillIndexEligible, projectApprovedCareerSnapshotForApplication, projectLegacyCareerProfile, readCareerSnapshot, readPinnedCareerSnapshot, vettedCareerSkillInventory } from './careerSnapshot.js';
 import { cleanCareerSkillNames, readCareerCleanLayer } from './careerCleanLayer.js';
 import { authorityEntityEvidenceQuotes, authorityProjectRoleOf, buildApplicationCareerAuthority, resolveAuthorityCertification, resolveAuthorityEducation, resolveAuthorityEvidence, resolveAuthorityProject, validateAuthorityCertificationEvidence, validateAuthorityEducationEvidence, validateAuthorityIdentityAndLocation, validateAuthorityProjectEvidence, validateAuthorityRoleEvidence, validateAuthoritySkillGroup } from './applicationCareerAuthority.js';
+import { recordApplicationCitationFlow } from './applicationCitationDiagnostics.js';
+import { recordApplicationCorrectionCheck } from './applicationCorrectionDiagnostics.js';
 import { MAX_SOURCE_GROUNDING_QUOTE_CHARS as SOURCE_GROUNDING_QUOTE_CHARS } from './applicationSourceLimits.js';
 import { canonicalizeHostOwnedResumeFields, hostOwnedResumeRecordFields } from './hostOwnedResumeFields.js';
 import { expectedExactlyClause } from './hostOwnedText.js';
@@ -5114,6 +5116,15 @@ export function __writeVerifyRenderPhaseForTests(args) { return writeVerifyRende
 async function writeVerifyCandidateGate({ raw, state, input, frozen, manifest, render }) {
   const findingMeta = {};
   const finish = result => {
+    // Shape validation and the completion twin can report the same closing
+    // failure. Keep every distinct finding, but send each repair only once.
+    // Do this before locating units so repeated messages cannot inflate the
+    // correction prompt, rejection count or unit-repair findings.
+    if (!result.hostFault && !result.renderFault) recordApplicationCorrectionCheck({
+      jobId: input.jobId, stage: state.stage, errors: result.errors,
+    });
+    result = { ...result, errors: [...new Set(result.errors)],
+      contentErrors: [...new Set(result.contentErrors)], fitErrors: [...new Set(result.fitErrors)] };
     const registry = applicationUnitRegistry(result.structured);
     return { ...result, findings: locateGateFindings({ errors: result.errors, documents: result.structured, registry, meta: findingMeta }),
       fitMeasurement: result.measured ? Object.entries(result.measured).map(([document, values]) => ({ document, ...values })) : null };
@@ -5647,6 +5658,7 @@ function pasteAcceptedAdvisories(state, response, input) {
       jobText: jobTextForCoverLetter(input.job || {}), researchText: '',
       companyName: input.job?.company || '', postedBy: input.job?.postedBy || '', referenceDate: input.createdAt,
       paragraphCitations: pasteTwinParagraphCitations(rawParagraphs, state.evidencePlan?.evidence || []),
+      v2: isWriteVerifyJob(input),
     });
     for (const advisory of partitionCheckResults(checks).advisory) add(advisory.id, advisory.count);
   }
@@ -5659,7 +5671,10 @@ function pasteAcceptedAdvisories(state, response, input) {
 // A check added to the battery reaches the totality test without a second
 // edit, which is what keeps PASTE_CHECK_PROSE_UNITS total as the pipeline
 // grows.
-function pasteCoverLetterChecks({ plan, paragraphs, evidence, jobText, researchText, companyName, postedBy = '', referenceDate = null, paragraphCitations = null }, { activeOnly = true } = {}) {
+function pasteCoverLetterChecks({ plan, paragraphs, evidence, jobText, researchText, companyName, postedBy = '', referenceDate = null, paragraphCitations = null, citationPhase = 'draft', v2 = false }, { activeOnly = true } = {}) {
+  if (Array.isArray(paragraphs) && paragraphs.length) recordApplicationCitationFlow({
+    phase: citationPhase, paragraphs, citations: paragraphCitations, v2,
+  });
   return [
     checkRoleThesis(plan),
     ...(activeOnly && checkDisposition('mapping-narrative-structure') === 'off' ? [] : [checkMappingNarrativeStructure(plan)]),
@@ -5682,9 +5697,24 @@ function pasteTwinParagraphCitations(rawParagraphs, acceptedEvidence) {
   return list.map(paragraph => pasteCareerQuotesForEvidenceIds(paragraph?.evidenceIds, acceptedEvidence));
 }
 
-function completedParagraphCitations(raw, paragraphs) {
-  const entries = raw?.qualityReview?.sourceGrounding?.coverLetterParagraphs;
+function completedParagraphCitations(raw, paragraphs, { hostV2 = false, evidencePlan = null } = {}) {
+  const entries = hostV2 ? raw?.sourceGrounding?.coverLetterParagraphs
+    : raw?.qualityReview?.sourceGrounding?.coverLetterParagraphs;
   if (!Array.isArray(entries) || entries.length !== (Array.isArray(paragraphs) ? paragraphs.length : -1)) return null;
+  if (hostV2) {
+    // Only host-assembled V2 packages may supply these bindings. Check their
+    // final-text alignment and membership in the frozen career catalog again
+    // before an editorial check uses them as authority for a figure.
+    const quotes = new Set();
+    for (const row of evidencePlan?.evidence || []) {
+      if (row?.sourceId !== 'career-data' || typeof row.quote !== 'string') continue;
+      quotes.add(row.quote.trim());
+      if (typeof row.cleanQuote === 'string') quotes.add(row.cleanQuote.trim());
+    }
+    if (entries.some((entry, index) => entry?.paragraph !== paragraphs[index]
+      || !Array.isArray(entry.careerDataQuotes)
+      || entry.careerDataQuotes.some(quote => !quotes.has(quote)))) return null;
+  }
   return entries.map(entry => (Array.isArray(entry?.careerDataQuotes)
     ? entry.careerDataQuotes.filter(quote => typeof quote === 'string')
     : []));
@@ -5694,8 +5724,8 @@ export function __pasteTwinParagraphCitationsForTests(rawParagraphs, acceptedEvi
   return pasteTwinParagraphCitations(rawParagraphs, acceptedEvidence);
 }
 
-export function __completedParagraphCitationsForTests(raw, paragraphs) {
-  return completedParagraphCitations(raw, paragraphs);
+export function __completedParagraphCitationsForTests(raw, paragraphs, options) {
+  return completedParagraphCitations(raw, paragraphs, options);
 }
 
 /**
@@ -6495,6 +6525,7 @@ function pasteCoverLetterCompletionTwinErrors(response, state, input) {
       paragraphCitations: coverLetter.paragraphs.length === rawParagraphs.length
         ? pasteTwinParagraphCitations(rawParagraphs, Array.isArray(state.evidencePlan?.evidence) ? state.evidencePlan.evidence : [])
         : null,
+      v2: isWriteVerifyJob(input),
     });
     const gradableChecks = coverLetterArgument
       ? checks
@@ -7709,7 +7740,41 @@ async function recoverRequirementsAuditHandoff(loaded, canvasFilePath) {
   return getPasteApplicationState(input.jobId, canvasFilePath);
 }
 
-export async function getLocalApplicationHandoff({ jobId, canvasFilePath } = {}) {
+export async function getLocalApplicationHandoff(args = {}) {
+  try {
+    return await readLocalApplicationHandoff(args);
+  } catch (error) {
+    if (error?.code !== 'ENOENT' && !isJobIntegrityFault(error)) throw error;
+    // The direct Claude driver and the IPC dock must share the same lifecycle
+    // reconciliation. A successful save renames the private folder before its
+    // final cleanup notification, so an in-flight read may lose that path.
+    if (await isDiscardingJob(args)) {
+      logger.info(`[LocalAI] read of gone job job=${String(args?.jobId || '').slice(0, 8)} phase=discarding`);
+      return { gone: true, handoff: null, localJob: null };
+    }
+    const status = await localApplicationStatus(args.jobId, args.canvasFilePath).catch(() => null);
+    if (status?.status === 'importing') {
+      const canvas = await resolveCanvasProject(args.canvasFilePath);
+      const { dir } = jobDirectory(args.jobId, canvas.canvasRoot);
+      // Neither a stale phase stamp nor a missing folder alone proves a save.
+      // Require the host's live save lease and its canvas-bound receipt.
+      if (isPendingApplicationWorkspaceSaveInFlight(dir)
+        && await readLocalAiTerminalReceipt(canvas.canvasRoot, canvas.canonicalCanvasFilePath, args.jobId)) {
+        return { completed: true, handoff: null, localJob: status };
+      }
+    }
+    if (error?.code === 'ENOENT') {
+      const gone = await goneJobPhase(args);
+      if (gone) {
+        logger.info(`[LocalAI] read of gone job job=${String(args?.jobId || '').slice(0, 8)} phase=${gone}`);
+        return { gone: true, handoff: null, localJob: null };
+      }
+    }
+    throw error;
+  }
+}
+
+async function readLocalApplicationHandoff({ jobId, canvasFilePath } = {}) {
   const snapshot = await withLocalAiJobMutationLock(jobId, async () => {
     const loaded = await recoverRequirementsAuditHandoff(await getPasteApplicationState(jobId, canvasFilePath), canvasFilePath);
     const { root, dir, input } = loaded;
@@ -14180,7 +14245,12 @@ export function validateLocalApplicationResult(raw, jobId, projectRoot, job, opt
     companyName: job?.company || '',
     postedBy: job?.postedBy || '',
     referenceDate: options.referenceDate,
-    paragraphCitations: completedParagraphCitations(raw, coverLetter.paragraphs),
+    paragraphCitations: completedParagraphCitations(raw, coverLetter.paragraphs, {
+      hostV2: writeVerifyV2 && options.frozenSourceQuotes === true,
+      evidencePlan: options.evidencePlan,
+    }),
+    citationPhase: 'completion',
+    v2: writeVerifyV2,
   });
   // The cover-letter checks, the dash-punctuation assert and the quality
   // review all read artifacts that are already built above, so none of them
@@ -17963,35 +18033,7 @@ export function registerLocalAiApplicationHandlers() {
     }
   });
   handleSafe('get-local-application-status', async (_event, { jobId, canvasFilePath } = {}) => ({ localJob: await localApplicationStatus(jobId, canvasFilePath) }));
-  handleSafe('get-local-application-handoff', async (_event, args = {}) => {
-    try {
-      return await getLocalApplicationHandoff(args);
-    } catch (error) {
-      // The dock probes a bundle it has just been told to forget (a discard
-      // races its own refresh). That is an expected read of a job whose
-      // folder is gone, not a fault: handleSafe would log it at ERROR and a
-      // bug report would read it as a failed discard. Only a job the app
-      // itself recorded as gone (discard/prune tombstone, or a saved receipt)
-      // is answered quietly; any other ENOENT still rethrows and stays loud.
-      // A discard that is still removing the folder is the same expected
-      // "gone" read, whichever half-removed state the read landed in: the
-      // folder already absent (ENOENT, before the 'discarded' stamp exists) or
-      // the manifest already removed inside a folder that is still there (a
-      // job-integrity fault). Only a discard this process is running counts.
-      if ((error?.code === 'ENOENT' || isJobIntegrityFault(error)) && await isDiscardingJob(args)) {
-        logger.info(`[LocalAI] read of gone job job=${String(args?.jobId || '').slice(0, 8)} phase=discarding`);
-        return { gone: true, handoff: null, localJob: null };
-      }
-      if (error?.code === 'ENOENT') {
-        const gone = await goneJobPhase(args);
-        if (gone) {
-          logger.info(`[LocalAI] read of gone job job=${String(args?.jobId || '').slice(0, 8)} phase=${gone}`);
-          return { gone: true, handoff: null, localJob: null };
-        }
-      }
-      throw error;
-    }
-  });
+  handleSafe('get-local-application-handoff', async (_event, args = {}) => getLocalApplicationHandoff(args));
   handleSafe('submit-local-application-handoff', async (_event, args = {}) =>
     submitLocalApplicationHandoff({ ...args, route: null }));
   handleSafe('update-local-application-draft', async (_event, args = {}) =>

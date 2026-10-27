@@ -1142,7 +1142,9 @@ export function createClaudeApplicationRunner({
   function ensure({ jobId, canvasFilePath } = {}) {
     if (!nonEmptyString(jobId) || !nonEmptyString(canvasFilePath)) return { status: 'invalid' };
     const existing = states.get(jobId);
-    if (existing?.status === 'failed') return { ...existing };
+    // Discovery keeps ensuring a completed job until its bundle is saved.
+    // Reopening it here raced the successful save's private-folder cleanup.
+    if (existing?.status === 'failed' || existing?.status === 'done') return { ...existing };
     if (drivers.has(jobId)) return existing ? { ...existing } : { status: 'running', stage: null };
     if (shuttingDown) return { status: 'stopped' };
     let laned = false;
@@ -1153,7 +1155,7 @@ export function createClaudeApplicationRunner({
 
   async function retry({ jobId, canvasFilePath } = {}) {
     if (!nonEmptyString(jobId) || !nonEmptyString(canvasFilePath)) return { status: 'invalid' };
-    if (states.get(jobId)?.status === 'failed') {
+    if (['failed', 'done'].includes(states.get(jobId)?.status)) {
       states.delete(jobId);
       await persist();
     }

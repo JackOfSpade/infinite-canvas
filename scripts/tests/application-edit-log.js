@@ -2,8 +2,8 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { EDIT_NOTES_MAX_CHARS, RECURRING_MIN_BUNDLES, RECURRING_WINDOW, bundleEditNotes, documentSnapshot, editSummaries, improvementStatus, logBundleEditNotes, logGeneratedBundle, logSavedBundle, normalizeEditNotes, recurringEditSections, resetImprovementCounter } from '../../electron/ipc/applicationEditLog.js';
-import { __recordWorkspaceEditNotesForTests, __removeCoverLetterForTests, __withoutCoverLetterForTests, inspectApplicationSyncRevision, mergeSelectedApplicationPanel, registerApplicationSyncWorkspace } from '../../electron/ipc/applicationSync.js';
+import { EDIT_NOTES_MAX_CHARS, RECURRING_MIN_BUNDLES, RECURRING_WINDOW, bundleEditNotes, documentSnapshot, generationGateInputDigest, editSummaries, improvementStatus, logBundleEditNotes, logGeneratedBundle, logSavedBundle, normalizeEditNotes, recurringEditSections, resetImprovementCounter } from '../../electron/ipc/applicationEditLog.js';
+import { __recordWorkspaceEditNotesForTests, __workspaceStatusForTests, __removeCoverLetterForTests, __withoutCoverLetterForTests, inspectApplicationSyncRevision, mergeSelectedApplicationPanel, registerApplicationSyncWorkspace } from '../../electron/ipc/applicationSync.js';
 import electronPkg from 'electron';
 import { PDFDocument } from 'pdf-lib';
 
@@ -285,11 +285,55 @@ export default [{
       const state = JSON.parse(await fs.readFile(path.join(appRoot, 'application-improvement/state.json'), 'utf8'));
       const pair = state.pairs.findLast(item => item.posting === 'Synthetic notes posting');
       assert.equal(pair.editNotes, 'Kept the letter brief.');
+      await __recordWorkspaceEditNotesForTests({ token, document: 'resume', editNotes: 'Resume reason.' });
+      await __recordWorkspaceEditNotesForTests({ token, document: 'cover', editNotes: 'Cover reason.' });
+      const status = await __workspaceStatusForTests({ token });
+      assert.equal(status.editNotesSchemaVersion, 2);
+      assert.deepEqual(status.editNotesByDocument, { resume: 'Resume reason.', cover: 'Cover reason.' });
+      assert.equal(status.editNotes, 'Kept the letter brief.', 'old shared notes are not reassigned');
+      await assert.rejects(__recordWorkspaceEditNotesForTests({ token, document: 'other', editNotes: 'x' }), { statusCode: 400 });
+
       assert(!JSON.stringify(state.summaries).includes('Kept the letter brief'), 'notes never enter summaries');
       await assert.rejects(__recordWorkspaceEditNotesForTests({ token: '1'.repeat(64), editNotes: 'x' }), { statusCode: 403 });
       await assert.rejects(__recordWorkspaceEditNotesForTests({ token, editNotes: 'x'.repeat(64 * 1024 + 1) }), { statusCode: 400 });
       const unchanged = JSON.parse(await fs.readFile(path.join(appRoot, 'application-improvement/state.json'), 'utf8'));
       assert.equal(unchanged.pairs.findLast(item => item.posting === 'Synthetic notes posting').editNotes, 'Kept the letter brief.', 'a refused request leaves the notes alone');
+    } finally { await fs.rm(root, { recursive: true, force: true }); }
+  },
+}, {
+  name: 'application edits: document notes remain independent through save, clear, and regeneration',
+  run: async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'document-notes-'));
+    const workspaceDir = path.join(root, 'Workspace');
+    const read = async () => JSON.parse(await fs.readFile(path.join(root, 'application-improvement/state.json'), 'utf8'));
+    try {
+      const source = html('<p>resume before</p>', '<p>letter before</p>');
+      await logGeneratedBundle({ root, workspaceDir, html: source, posting: 'Document notes fixture', appVersion: 'test' });
+      await logBundleEditNotes({ root, workspaceDir, editNotes: 'Unattributed older reason.' });
+      const before = await read();
+      const beforeDigest = generationGateInputDigest(before, [{ pair: before.pairs.at(-1) }]);
+      await Promise.all([
+        logBundleEditNotes({ root, workspaceDir, document: 'resume', editNotes: '  Shorter project description.  ' }),
+        logBundleEditNotes({ root, workspaceDir, document: 'cover', editNotes: 'Kept one proof paragraph.' }),
+      ]);
+      let state = await read();
+      let pair = state.pairs.at(-1);
+      assert.deepEqual(pair.editNotesByDocument, { resume: 'Shorter project description.', cover: 'Kept one proof paragraph.' });
+      assert.equal(pair.editNotes, 'Unattributed older reason.');
+      assert.notEqual(generationGateInputDigest(state, [{ pair }]), beforeDigest, 'document notes invalidate recurrence input');
+      assert.equal(state.countSinceSession, before.countSinceSession);
+      assert.deepEqual(state.summaries, before.summaries);
+      assert.equal(pair.savedAt, before.pairs.at(-1).savedAt);
+      assert(pair.editNotesByDocumentAt.resume && pair.editNotesByDocumentAt.cover);
+      await logSavedBundle({ root, workspaceDir, html: source, editNotes: 'Revised resume explanation.', editNotesDocument: 'resume' });
+      await logBundleEditNotes({ root, workspaceDir, document: 'cover', editNotes: '' });
+      pair = (await read()).pairs.at(-1);
+      assert.deepEqual(pair.editNotesByDocument, { resume: 'Revised resume explanation.', cover: '' }, 'clearing the letter preserves resume notes');
+      assert.equal((await bundleEditNotes({ root, workspaceDir })).editNotesByDocument.cover, '', 'empty is a saved clear');
+      await logGeneratedBundle({ root, workspaceDir, html: source, posting: 'Document notes fixture', appVersion: 'test' });
+      state = await read();
+      assert.equal(state.pairs.at(-1).editNotesByDocument, undefined, 'a regeneration starts fresh');
+      assert.equal(state.pairs.at(-2).editNotesByDocument.resume, 'Revised resume explanation.', 'history retains the document association');
     } finally { await fs.rm(root, { recursive: true, force: true }); }
   },
 }];

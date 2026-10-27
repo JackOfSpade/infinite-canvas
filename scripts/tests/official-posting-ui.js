@@ -165,7 +165,10 @@ export default [
         assert.equal(test.calls.filter(call => call.kind === 'queue').length, 0, action);
         assert.equal(test.leases, 0, action);
         assert.equal(test.updates.length, 1, action);
-        assert.deepEqual(test.updates[0], { listingLiveness, ...(boardClosed ? { boardClosed } : {}), listingHold: action === 'hold' });
+        assert.deepEqual(test.updates[0], { listingGenerationNotice: copy(test.card.data.listingGenerationNotice), listingLiveness, ...(boardClosed ? { boardClosed } : {}), listingHold: action === 'hold' });
+        assert.equal(test.card.data.listingGenerationNotice.action, action);
+        assert.equal(test.card.data.listingGenerationNotice.message, 'Synthetic listing decision.');
+        assert.ok(Number.isFinite(Date.parse(test.card.data.listingGenerationNotice.at)));
         assert.equal(test.toasts[0]?.title, 'Listing check');
         assert.equal(test.toasts[0]?.description, 'Synthetic listing decision.');
         assert.equal(test.states.at(-1)?.state, 'idle');
@@ -216,7 +219,7 @@ export default [
         prepare: { success: true, listingCheck: { action: 'proceed' }, listingLiveness: open, boardClosed: null } });
       await changed.callback();
       assert.equal(changed.leases, 1);
-      assert.deepEqual(changed.updates[0], { listingLiveness: open, listingHold: false });
+      assert.deepEqual(changed.updates[0], { listingLiveness: open, listingHold: false, listingGenerationNotice: null });
       const prepareJob = changed.calls.find(call => call.kind === 'prepare')?.args.job;
       const queueJob = changed.calls.find(call => call.kind === 'queue')?.args.job;
       assert.equal(JSON.stringify(prepareJob), JSON.stringify(queueJob));
@@ -231,11 +234,47 @@ export default [
         'the card sends its listing state to Prepare');
       assert.deepEqual(same.calls.find(call => call.kind === 'queue')?.args.job.listingLiveness, open,
         'the queue receives the same listing state projection');
+      const cleared = harness({ data: row({ listingLiveness: open, listingHold: true,
+        listingGenerationNotice: { action: 'hold', message: 'Previous uncertainty' } }),
+        prepare: { success: true, listingCheck: { action: 'proceed' }, listingLiveness: open, boardClosed: null } });
+      await cleared.callback({ listingOverride: true });
+      assert.equal(cleared.card.data.listingHold, false, 'proceed clears a hold even with identical liveness');
+      assert.equal(cleared.card.data.listingGenerationNotice, null);
       const source = fs.readFileSync(new URL('../../src/nodes/JobCardNode.jsx', import.meta.url), 'utf8');
+      assert.ok(source.includes('data.listingGenerationNotice?.message || data.listingHold === true'));
+      assert.ok(source.includes('Generation paused · Listing check'));
       assert.equal(source.split("liveness: variant.liveness === 'closed' ? 'closed' : undefined,").length - 1, 2);
-      assert.ok(source.includes("displayedApplicationRun.state === 'idle' && !localJobPending && data.listingHold === true && (")
-        && source.includes("generateApplication({ listingOverride: true })")
-        && source.includes('Generate anyway'));
+      assert.ok(source.includes('const listingOverrideAvailable = listingGenerationPaused;')
+        && source.includes('generateApplication({ listingOverride: listingOverrideAvailable })')
+        && source.includes("listingOverrideAvailable ? 'Generate anyways' : localApplicationNeedsAttention"));
+      assert.ok(source.includes('Check again'));
+    },
+  },
+  {
+    name: 'listing liveness card: every listing pause offers an explicit override and recheck',
+    async run() {
+      const source = fs.readFileSync(new URL('../../src/nodes/JobCardNode.jsx', import.meta.url), 'utf8');
+      const start = source.indexOf('  const listingGenerationPaused =');
+      const end = source.indexOf('  const localApplicationNeedsAttention =', start);
+      for (const action of ['hold', 'refuse-retry', 'refuse-final']) {
+        const data = row({ listingHold: action === 'hold',
+          listingGenerationNotice: { action, message: 'Synthetic listing pause' } });
+        const available = runInNewContext(`${source.slice(start, end)}\nlistingOverrideAvailable;`, {
+          data, hasLinkedApplicationOutput: false, hasApplicationRun: false, localJobPending: false,
+        });
+        assert.equal(available, true, action);
+        const test = harness({ data, prepare: input => ({ success: true,
+          listingCheck: { action: input.listingOverride ? 'proceed' : action } }) });
+        await test.callback({ listingOverride: available });
+        assert.equal(test.calls.find(call => call.kind === 'prepare').args.listingOverride, true);
+        assert.equal(test.calls.some(call => call.kind === 'queue'), true);
+        assert.equal(test.card.data.listingGenerationNotice, null);
+      }
+      const notice = source.slice(source.indexOf('      {listingGenerationPaused && ('),
+        source.indexOf('      {/* Generate the application bundle.'));
+      assert.ok(notice.includes('Check again'));
+      assert.ok(notice.includes('generateApplication();'));
+      assert.equal(notice.includes('data.listingHold === true &&'), false);
     },
   },
   {

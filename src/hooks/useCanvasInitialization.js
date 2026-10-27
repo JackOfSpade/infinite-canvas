@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useRef } from 'react';
 import { EventLogger } from '../utils/EventLogger';
-import { TIMINGS, autosaveDebounceMs } from '../utils/timings';
+import { TIMINGS, AUTOSAVE_FAILURE_RETRY_MS, AUTOSAVE_FAILURE_POLL_MS, autosaveDebounceMs } from '../utils/timings';
 import { useIsMountedRef } from './useIsMountedRef';
 import { buildSaveData } from './canvasSaveData';
 
@@ -19,8 +19,11 @@ export function useCanvasInitialization({
   navigationStateSwapRef,
   saveStateRef, // Ref to the active save state — prevents auto-save running concurrently with manual saves
   saveOperationRef, // Promise lane shared with close-time/manual saves
+  addToast,
+  removeToast,
 }) {
   const isMountedRef = useIsMountedRef();
+  const saveFailureRef = useRef(null);
 
   // Keep latest state in a ref so the auto-save timer reads current data
   // without the effect being torn down on every state change.
@@ -37,14 +40,26 @@ export function useCanvasInitialization({
   useLayoutEffect(() => { flushRef.current = flushStack; }, [flushStack]);
 
   const hasUnsavedChangesRef = useRef(hasUnsavedChanges);
-  useLayoutEffect(() => { hasUnsavedChangesRef.current = hasUnsavedChanges; }, [hasUnsavedChanges]);
+  useLayoutEffect(() => {
+    hasUnsavedChangesRef.current = hasUnsavedChanges;
+    if (!hasUnsavedChanges) {
+      if (saveFailureRef.current?.toastId) removeToast?.(saveFailureRef.current.toastId);
+      saveFailureRef.current = null;
+    }
+  }, [hasUnsavedChanges, removeToast]);
 
   // Mirror currentFile into a ref for the in-flight-file-switch guard below —
   // an already-fired attemptSave keeps running to completion even after the
   // effect re-runs (clearTimeout only stops a timer that hasn't fired yet), so
   // it needs a way to notice the live file changed out from under it.
   const currentFileRef = useRef(currentFile);
-  useLayoutEffect(() => { currentFileRef.current = currentFile; }, [currentFile]);
+  useLayoutEffect(() => {
+    currentFileRef.current = currentFile;
+    if (saveFailureRef.current?.filePath !== currentFile) {
+      if (saveFailureRef.current?.toastId) removeToast?.(saveFailureRef.current.toastId);
+      saveFailureRef.current = null;
+    }
+  }, [currentFile, removeToast]);
 
   // Mark the canvas dirty whenever content changes.
   // Skip the very first render where all collections are empty — that's the clean
@@ -80,6 +95,25 @@ export function useCanvasInitialization({
       && quitGateRef?.current?.generation === gateGeneration;
     const retry = (delayMs) => {
       if (!cancelled && isCurrentGeneration()) timer = setTimeout(attemptSave, delayMs);
+    };
+    const recordFailure = error => {
+      if (cancelled || !isMountedRef.current || !isCurrentGeneration()
+        || currentFileRef.current !== currentFile) return;
+      const reason = error?.error || error?.message || (typeof error === 'string' ? error : 'Could not save the workspace.');
+      EventLogger.recordSaveError(reason, currentFile);
+      if (saveFailureRef.current?.filePath !== currentFile) {
+        saveFailureRef.current = { filePath: currentFile, attempts: 0, notified: false };
+      }
+      const failure = saveFailureRef.current;
+      failure.attempts += 1;
+      // Re-enter the normal snapshot/path/quit guards on each retry. Never
+      // reuse serialized bytes or bypass the host's path identity checks.
+      const retryDelay = AUTOSAVE_FAILURE_RETRY_MS[failure.attempts - 1];
+      retry(retryDelay ?? AUTOSAVE_FAILURE_POLL_MS);
+      if (!retryDelay && !failure.notified) {
+        failure.notified = true;
+        failure.toastId = addToast?.({ title: 'Auto-save Failed', description: `Your changes are still unsaved. ${reason} Auto-save will keep retrying.`, type: 'error', duration: 0 });
+      }
     };
     const attemptSave = async () => {
       if (cancelled || !isCurrentGeneration()) return;
@@ -118,10 +152,16 @@ export function useCanvasInitialization({
       // in-progress contenteditable edit (a text node the user is still
       // typing into) before serializing, so a debounce window landing
       // mid-edit can't silently persist stale pre-edit text.
-      const data = await buildSaveData({
-        flushStack: flushRef.current,
-        fallbackState: stateRef.current,
-      });
+      let data;
+      try {
+        data = await buildSaveData({
+          flushStack: flushRef.current,
+          fallbackState: stateRef.current,
+        });
+      } catch (error) {
+        recordFailure(error);
+        return;
+      }
       if (cancelled || !isMountedRef.current || !isCurrentGeneration()) return;
       if (!data.nodes || !Array.isArray(data.nodes)) return;
 
@@ -161,14 +201,19 @@ export function useCanvasInitialization({
             // Only update currentFile if the path changed (e.g. an on-disk rename
             // was resolved by the save implementation).
             if (res.filePath !== currentFile) setCurrentFile(res.filePath);
+            if (saveFailureRef.current?.notified) {
+              if (saveFailureRef.current.toastId) removeToast?.(saveFailureRef.current.toastId);
+              addToast?.({ title: 'Auto-save Restored', description: 'Your canvas changes have been saved.', type: 'success' });
+            }
+            saveFailureRef.current = null;
             hasUnsavedChangesRef.current = false;
             setHasUnsavedChanges(false);
           } else if (!res?.success && !res?.canceled) {
-            EventLogger.error('[auto-save] saveWorkspace failed:', res?.error || 'unknown error');
+            if (res?.errorCode !== 'APP_QUIT_PAUSED') recordFailure(res);
           }
           return Boolean(res?.success && res.filePath && snapshotIsCurrent);
         } catch (err) {
-          EventLogger.error('[auto-save] saveWorkspace failed:', err);
+          recordFailure(err);
           return false;
         } finally {
           if (saveStateRef?.current === 'autosaving') saveStateRef.current = 'idle';
@@ -188,5 +233,5 @@ export function useCanvasInitialization({
       cancelled = true;
       clearTimeout(timer);
     };
-  }, [nodes, edges, drawings, currentFile, setCurrentFile, setHasUnsavedChanges, isAnimatingRef, saveStateRef, saveOperationRef, isMountedRef, quitGateRef, quitFenceReleaseVersion]);
+  }, [nodes, edges, drawings, currentFile, setCurrentFile, setHasUnsavedChanges, isAnimatingRef, saveStateRef, saveOperationRef, isMountedRef, quitGateRef, quitFenceReleaseVersion, addToast, removeToast]);
 }

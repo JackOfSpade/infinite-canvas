@@ -5119,6 +5119,13 @@ export default [
         await saveEntered;
         const duringCleanup = await localApplicationStatus(jobId, project.canvasFilePath);
         const saveClaimActive = isPendingApplicationWorkspaceSaveInFlight(workDir);
+        const directHandoff = await getLocalApplicationHandoff({ jobId, canvasFilePath: project.canvasFilePath });
+        registerLocalAiApplicationHandlers();
+        const ipcHandoff = await ipcMain.__getInvokeHandler('get-local-application-handoff')({ sender }, { jobId, canvasFilePath: project.canvasFilePath });
+        assert(directHandoff.completed && directHandoff.handoff === null && directHandoff.localJob.status === 'importing'
+          && ipcHandoff.success && ipcHandoff.completed && ipcHandoff.localJob.status === 'importing'
+          && !directHandoff.gone && !ipcHandoff.gone,
+        'both driver and dock reads recognize the receipt-backed save window without releasing the bundle early');
         releaseSave();
         await saving;
         assert(duringCleanup.status === 'importing'
