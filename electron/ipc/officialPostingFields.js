@@ -16,15 +16,16 @@ export const OFFICIAL_POSTING_TRAIL = Object.freeze([
   'salary-mismatch', 'no-anchor', 'invalid-quotes', 'ambiguous', 'closed', 'unreadable', 'oversize',
   'unsafe-url', 'unsafe-address', 'fetch-timeout', 'fetch-failed', 'unsupported-content-type',
   'crawl-budget', 'crawl-partial', 'invalid-text', 'stub-text', 'official-text-missing', 'no-resolution', 'reverified', 'reverify-failed', 'official-liveness-unconfirmed', 'material-jd-change', 'failed',
+  'semantic-match-v1', 'semantic-uncertain', 'semantic-overflow',
   ...OFFICIAL_POSTING_COMPARATIVE_CODES,
   'comparative-a-valid', 'comparative-a-invalid', 'comparative-b-valid', 'comparative-b-invalid', 'comparative-truncated', 'insufficient-text',
-  ...['a', 'b', 'choice'].flatMap(run => ['none', ...Array.from({ length: 8 }, (_, index) => `p${index + 1}`)]
+  ...['a', 'b', 'choice'].flatMap(run => ['none', 'uncertain', ...Array.from({ length: 8 }, (_, index) => `p${index + 1}`)]
     .map(choice => `comparative-${run}-${choice}`)),
 ]);
 
 /** Bounded decisions only: no quotes, reasons, prompts or conversation ids. */
 export function officialPostingComparativeTrail({ validA = false, validB = false, choiceA, choiceB } = {}) {
-  const choiceCode = value => value === 'none' || /^P[1-8]$/u.test(String(value || '')) ? String(value).toLowerCase() : '';
+  const choiceCode = value => ['none', 'uncertain'].includes(value) || /^P[1-8]$/u.test(String(value || '')) ? String(value).toLowerCase() : '';
   const a = choiceCode(choiceA); const b = choiceCode(choiceB);
   return [`comparative-a-${validA === true ? 'valid' : 'invalid'}`, `comparative-b-${validB === true ? 'valid' : 'invalid'}`,
     ...(a ? [`comparative-a-${a}`] : []), ...(b ? [`comparative-b-${b}`] : []),
@@ -33,16 +34,16 @@ export function officialPostingComparativeTrail({ validA = false, validB = false
 
 const DURABILITY_TRAIL_CODES = new Set(['bridge-aborted', 'bridge-timeout', 'bridge-unavailable', 'research-miss',
   'fetch-failed', 'fetch-timeout', 'crawl-budget', 'crawl-partial', 'official-text-missing', 'failed', 'identifier-anchor',
-  'comparative-invalid', 'comparative-unavailable', 'comparative-truncated', 'insufficient-text']);
+  'comparative-invalid', 'comparative-unavailable', 'comparative-truncated', 'insufficient-text', 'semantic-uncertain', 'semantic-overflow', 'official-liveness-unconfirmed']);
 /** Host trail compaction must retain the evidence that prevents persistence. */
 export function boundedOfficialPostingTrail(values) {
   const codes = [...new Set((Array.isArray(values) ? values : []).filter(code => OFFICIAL_POSTING_TRAIL.includes(code)))];
   if (codes.length <= 32) return codes;
-  const durability = codes.filter(code => DURABILITY_TRAIL_CODES.has(code));
+  const durability = codes.filter(code => DURABILITY_TRAIL_CODES.has(code) || code === 'semantic-match-v1');
   const comparison = codes.filter(code => code.startsWith('comparative-') && !DURABILITY_TRAIL_CODES.has(code));
   const required = [...durability, ...comparison].slice(0, 32);
   const room = 32 - required.length;
-  const others = codes.filter(code => !DURABILITY_TRAIL_CODES.has(code) && !code.startsWith('comparative-'));
+  const others = codes.filter(code => !DURABILITY_TRAIL_CODES.has(code) && code !== 'semantic-match-v1' && !code.startsWith('comparative-'));
   return [...required, ...(room ? others.slice(-room) : [])];
 }
 export const OFFICIAL_POSTING_LABELS = Object.freeze({
@@ -80,6 +81,10 @@ function shortString(value, max = 500) {
   return typeof value === 'string' && value.length <= max && !/[<>]/u.test(value)
     && ![...value].some(char => char.charCodeAt(0) < 32 || char.charCodeAt(0) === 127);
 }
+/** Bounded source text only; semantic employer identity belongs to AI. */
+export function officialPostingEmployerText(value) {
+  return shortString(value, 120) ? value.trim() : '';
+}
 export function normalizeOfficialSalary(value) {
   if (!exactKeys(value, ['text', 'provenance']) || !shortString(value.text, 500) || !SALARY_PROVENANCES.includes(value.provenance)) return null;
   return { text: value.text, provenance: value.provenance };
@@ -100,7 +105,7 @@ export function normalizeOfficialLocation(value) {
 
 export function normalizeOfficialPosting(value) {
   const keys = ['level', 'outcome', 'employer', 'title', 'location', 'salary', 'sourceUrl', 'officialApplyUrl',
-    'ats', 'tenant', 'fetchedAt', 'contentHash', 'scrapedListingSha256', 'trail', 'alternatives'];
+    'ats', 'tenant', 'fetchedAt', 'contentHash', 'scrapedListingSha256', 'trail', 'alternatives', 'semanticMatch'];
   if (!exactKeys(value, keys) || !OFFICIAL_POSTING_LEVELS.includes(value.level) || !OFFICIAL_POSTING_OUTCOMES.includes(value.outcome)
     || !shortString(value.employer, 120)) return null;
   const result = { level: value.level, outcome: value.outcome, employer: value.employer };
@@ -120,6 +125,13 @@ export function normalizeOfficialPosting(value) {
   for (const key of ['contentHash', 'scrapedListingSha256']) {
     if (value[key] === undefined || value[key] === '') continue;
     if (!/^[a-f0-9]{64}$/u.test(value[key])) return null; result[key] = value[key];
+  }
+  if (value.semanticMatch !== undefined) {
+    if (!exactKeys(value.semanticMatch, ['version', 'inputHash', 'sourceHash']) || value.semanticMatch.version !== 1
+      || !/^[a-f0-9]{64}$/u.test(value.semanticMatch.inputHash)) return null;
+    if (value.semanticMatch.sourceHash !== undefined && !/^[a-f0-9]{64}$/u.test(value.semanticMatch.sourceHash)) return null;
+    result.semanticMatch = { version: 1, inputHash: value.semanticMatch.inputHash,
+      ...(value.semanticMatch.sourceHash ? { sourceHash: value.semanticMatch.sourceHash } : {}) };
   }
   if (value.fetchedAt !== undefined) {
     if (!shortString(value.fetchedAt, 40) || !Number.isFinite(Date.parse(value.fetchedAt))) return null;
@@ -208,7 +220,7 @@ export function listingStateRank(job) {
 // transient failure. A miss carrying any of them is retryable, never a conclusion.
 const RESEARCH_UNSETTLED_TRAIL = Object.freeze(['bridge-aborted', 'bridge-timeout', 'bridge-unavailable', 'research-miss',
   'fetch-failed', 'fetch-timeout', 'crawl-budget', 'crawl-partial', 'official-text-missing', 'failed',
-  'comparative-invalid', 'comparative-unavailable', 'comparative-truncated', 'insufficient-text']);
+  'comparative-invalid', 'comparative-unavailable', 'comparative-truncated', 'insufficient-text', 'semantic-uncertain', 'semantic-overflow', 'official-liveness-unconfirmed']);
 /** True only for a definitive miss reached after research actually ran (or an official page that is itself closed). */
 export function officialResearchSettled(value) {
   const posting = value && typeof value === 'object' ? value : null;

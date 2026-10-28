@@ -3,6 +3,8 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { bundleComponent, withDom } from './fixtures/handoff-bridge/mountComponent.js';
+import { EventLoggerSingleton } from '../../src/utils/EventLogger.js';
+import { buildLastSaveErrorMarkdown } from '../../electron/ipc/bugReport.js';
 
 async function withAutosave(run) {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'ic-autosave-test-'));
@@ -57,6 +59,40 @@ export function Probe(props) { useCanvasInitialization(props); return null; }`);
   } finally { await bundle?.dispose(); await fs.rm(directory, { recursive: true, force: true }); }
 }
 
+async function withManualSave(run) {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'ic-manual-save-test-'));
+  const entry = path.join(directory, 'ManualSaveProbe.jsx');
+  await fs.writeFile(entry, `import { useLayoutEffect } from 'react';
+import { useCanvasPersistence } from ${JSON.stringify(path.resolve('src/hooks/useCanvasPersistence.js'))};
+export { EventLogger } from ${JSON.stringify(path.resolve('src/utils/EventLogger.js'))};
+export function Probe({ onSnapshot, ...props }) { const state = useCanvasPersistence(props); useLayoutEffect(() => onSnapshot(state)); return null; }`);
+  let bundle;
+  try {
+    bundle = await bundleComponent(entry);
+    await withDom(async window => {
+      const { React, act, createRoot, Probe, EventLogger } = bundle.module;
+      const root = createRoot(window.document.getElementById('root'));
+      let state;
+      const props = {
+        nodes: [{ id: 'note', type: 'text', position: { x: 0, y: 0 }, data: { text: 'Unsaved revision' } }],
+        edges: [], drawings: [], addToast: () => {}, setNodes: () => {}, setEdges: () => {}, setDrawings: () => {},
+        onSnapshot: value => { state = value; },
+      };
+      let write = async () => ({ success: true, filePath: state.currentFile });
+      window.electronAPI = { saveWorkspace: args => write(args) };
+      const render = async patch => {
+        Object.assign(props, patch);
+        await act(async () => root.render(React.createElement(Probe, props)));
+      };
+      try {
+        await render({});
+        await act(async () => { state.setCurrentFile('/workspace/canvas.json'); state.setHasUnsavedChanges(true); });
+        await run({ props, render, act, state: () => state, EventLogger, setWrite: next => { write = next; } });
+      } finally { await act(async () => root.unmount()); }
+    });
+  } finally { await bundle?.dispose(); await fs.rm(directory, { recursive: true, force: true }); }
+}
+
 export default [
   { name: 'Autosave retries a transient host path refusal without another edit and releases the writer lock', async run() {
     await withAutosave(async ({ props, writes, dirty, toasts, fire, setWrite, EventLogger }) => {
@@ -67,10 +103,15 @@ export default [
       assert.equal(props.saveStateRef.current, 'idle');
       assert.equal(props.saveOperationRef.current, null);
       assert.equal(EventLogger.getLastSaveError().filePath, props.currentFile);
+      assert.equal(EventLogger.getLastSaveError().recoveredAt, undefined);
+      const failure = EventLogger.getLastSaveError();
       assert.ok(!dirty.includes(false), 'a refused write cannot mark changes clean');
       await fire();
       assert.equal(writes.length, 2);
       assert.equal(dirty.at(-1), false);
+      assert.ok(EventLogger.getLastSaveError().recoveredAt, 'the current snapshot save marks the historical failure recovered');
+      assert.equal(EventLogger.getLastSaveError().timestamp, failure.timestamp, 'recovery keeps the original failure time');
+      assert.equal(EventLogger.getLastSaveError().reason, failure.reason, 'recovery keeps the original failure reason');
       assert.equal(toasts.length, 0, 'briefly recovering failures do not raise a persistent-failure warning');
     });
   } },
@@ -102,16 +143,20 @@ export default [
     });
   } },
   { name: 'Autosave retry cannot cross a workspace switch or write during a quit fence', async run() {
-    await withAutosave(async ({ props, writes, timers, fire, render, setWrite }) => {
+    await withAutosave(async ({ props, writes, timers, fire, render, setWrite, EventLogger }) => {
       setWrite(async () => ({ success: false, error: 'Temporary write refusal.' }));
       await fire();
       const oldRetry = timers.values().next().value.fn;
       await render({ currentFile: '/workspace/other.json', nodes: props.nodes.map(node => ({ ...node, data: { text: 'Other workspace' } })) });
       await oldRetry();
       assert.equal(writes.length, 1, 'a cancelled retry never writes old or new workspace bytes');
+      setWrite(async () => ({ success: true, filePath: props.currentFile }));
+      await fire();
+      assert.equal(EventLogger.getLastSaveError().recoveredAt, undefined, 'saving another workspace cannot recover the previous workspace failure');
+      await render({ nodes: props.nodes.map(node => ({ ...node, data: { text: 'Another edit' } })) });
       props.quitGateRef.current.frozen = true;
       await fire();
-      assert.equal(writes.length, 1, 'a quit fence prevents the retry from starting');
+      assert.equal(writes.length, 2, 'a quit fence prevents the retry from starting');
     });
   } },
   { name: 'Autosave retries thrown serialization and IPC failures without leaking an unhandled promise', async run() {
@@ -140,5 +185,55 @@ export default [
       assert.equal(writes.length, 2);
       assert.equal(timers.size, 1, 'a later edit gets a fresh retry allowance');
     });
+  } },
+  { name: 'Save diagnostics retain the original failure and distinguish recovery from an unrelated save', run() {
+    const logger = new EventLoggerSingleton();
+    logger.recordSaveSuccess('/workspace/unrelated.json');
+    assert.equal(logger.getLastSaveError(), null);
+    logger.recordSaveError('Temporary write refusal.', '/workspace/canvas.json');
+    const failure = logger.getLastSaveError();
+    logger.recordSaveSuccess('/workspace/unrelated.json');
+    assert.equal(logger.getLastSaveError(), failure);
+    logger.recordSaveSuccess('/workspace/canvas.json');
+    const recovered = logger.getLastSaveError();
+    assert.ok(recovered.recoveredAt);
+    assert.equal(recovered.reason, failure.reason);
+    assert.equal(recovered.timestamp, failure.timestamp);
+    logger.recordSaveSuccess('/workspace/canvas.json');
+    assert.equal(logger.getLastSaveError(), recovered, 'subsequent saves preserve the first recovery time');
+    logger.recordSaveError('A later refusal.', '/workspace/canvas.json');
+    assert.equal(logger.getLastSaveError().recoveredAt, undefined, 'a later failure starts an unresolved receipt');
+  } },
+  { name: 'Manual saves mark a failure recovered only after the current content revision reaches disk', async run() {
+    await withManualSave(async ({ props, state, render, act, EventLogger, setWrite }) => {
+      EventLogger.recordSaveError('Temporary write refusal.', '/workspace/canvas.json');
+      let complete;
+      let entered;
+      const started = new Promise(resolve => { entered = resolve; });
+      setWrite(() => new Promise(resolve => { complete = resolve; entered(); }));
+      let saving;
+      await act(async () => { saving = state().saveCanvas(); });
+      await started;
+      await render({ nodes: props.nodes.map(node => ({ ...node, data: { text: 'Newer unsaved revision' } })) });
+      let saved;
+      await act(async () => { complete({ success: true, filePath: '/workspace/canvas.json' }); saved = await saving; });
+      assert.equal(saved, false, 'the earlier snapshot does not satisfy the current save');
+      assert.equal(EventLogger.getLastSaveError().recoveredAt, undefined, 'an earlier revision cannot recover the failure');
+      setWrite(async () => ({ success: true, filePath: '/workspace/canvas.json' }));
+      await act(async () => { saved = await state().saveCanvas(); });
+      assert.equal(saved, true);
+      assert.ok(EventLogger.getLastSaveError().recoveredAt);
+    });
+  } },
+  { name: 'Last Save Error report explicitly shows recovery without losing the historical failure', run() {
+    const failure = { reason: 'Temporary write refusal.', filePath: '/private-workspace/canvas.json', timestamp: '2026-01-01T10:00:00.000Z' };
+    const pending = buildLastSaveErrorMarkdown(failure);
+    assert.match(pending, /Status: no matching recovery recorded/);
+    assert.match(pending, /When: 2026-01-01T10:00:00.000Z/);
+    const recovered = buildLastSaveErrorMarkdown({ ...failure, recoveredAt: '2026-01-01T10:00:05.000Z' });
+    assert.match(recovered, /Status: recovered/);
+    assert.match(recovered, /When: 2026-01-01T10:00:00.000Z/);
+    assert.match(recovered, /Recovered: 2026-01-01T10:00:05.000Z/);
+    assert.ok(!recovered.includes(failure.reason) && !recovered.includes(failure.filePath), 'recovery adds no raw error or workspace path to the report');
   } },
 ];

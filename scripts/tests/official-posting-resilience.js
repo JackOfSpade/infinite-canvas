@@ -8,6 +8,7 @@ import { unresolvedOfficialPosting, officialPostingRequestId } from '../../elect
 import { resolveOfficialPostings } from '../../electron/ipc/officialPostingService.js';
 import { createOfficialPostingStore, officialPostingView } from '../../electron/ipc/officialPostingStore.js';
 import { prepareOfficialPostingForGeneration } from '../../electron/ipc/officialPostingGeneration.js';
+import { officialPostingSemanticInputHash, officialPostingSemanticSourceHash } from '../../electron/ipc/officialPostingSemantic.js';
 import { __freezeOfficialPostingJobForTests } from '../../electron/ipc/localAiApplication.js';
 import { __registerJobsHandlersForTests, getJobsTelemetry, registerJobsHandlers } from '../../electron/ipc/jobs.js';
 import { claimJobAnalysisOperationAuthority } from '../../electron/ipc/jobAnalysisOperationAuthorityStore.js';
@@ -28,6 +29,12 @@ const notFound = (prompt, options) => {
   return answer;
 };
 const noNetwork = async () => { throw new Error('Unexpected network request.'); };
+const confirmSemanticMatch = (_prompt, options) => {
+  const answer = { choice: 'P1', evidence: [{ scrapedQuote: DESCRIPTION, officialQuote: DESCRIPTION }],
+    distinguishing: [], conflicts: [] };
+  options.responseValidator(answer);
+  return JSON.stringify(answer);
+};
 
 async function withStore(run) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'official-resilience-'));
@@ -179,7 +186,9 @@ export default [
             hiringOrganization: { name: row.company }, description: DESCRIPTION,
             jobLocation: { address: { addressLocality: 'Lakeview', addressRegion: 'Ontario', addressCountry: 'Canada' } } })}</script>` };
       };
-      const { result } = await search(rows, (jobs, options) => resolveOfficialPostings(jobs, { ...options, fetch, callRaw: notFound }));
+      const { result } = await search(rows, (jobs, options) => resolveOfficialPostings(jobs, {
+        ...options, fetch, callRaw: notFound, callMatch: confirmSemanticMatch,
+      }));
       assert.equal(result.success, true, result.error); assert.equal(result.jobs.length, 3);
       const byId = new Map(result.jobs.map(row => [officialPostingRequestId(row), row]));
       for (const row of rows) {
@@ -212,10 +221,17 @@ export default [
         return { jobs: jobs.map(row => ({ ...row, ...unresolvedOfficialPosting(row) })),
           telemetry: { total: jobs.length, levels: { L5: jobs.length }, outcomes: { 'not-found': jobs.length } } };
       }, { prepareStore: async store => {
+        const verifiedSource = { employer: rows[0].company, title: rows[0].title,
+          sourceUrl: 'https://careers.northwind.example/jobs/cache-one', description: DESCRIPTION };
         const verified = await store.save(rows[0], { officialPosting: { level: 'L1', outcome: 'found',
-          employer: rows[0].company, title: rows[0].title, sourceUrl: 'https://careers.northwind.example/jobs/cache-one', trail: ['description-anchor'] }, description: DESCRIPTION });
+          employer: verifiedSource.employer, title: verifiedSource.title, sourceUrl: verifiedSource.sourceUrl,
+          semanticMatch: { version: 1, inputHash: officialPostingSemanticInputHash(rows[0]),
+            sourceHash: officialPostingSemanticSourceHash(verifiedSource) },
+          trail: ['comparative-match', 'semantic-match-v1'] }, description: DESCRIPTION });
         rows[0].officialPosting = verified.officialPosting;
-        const miss = await store.save(rows[1], { officialPosting: { ...unresolvedOfficialPosting(rows[1]).officialPosting, trail: ['bridge-research'] } });
+        const miss = await store.save(rows[1], { officialPosting: { ...unresolvedOfficialPosting(rows[1]).officialPosting,
+          semanticMatch: { version: 1, inputHash: officialPostingSemanticInputHash(rows[1]) },
+          trail: ['bridge-research', 'comparative-none', 'semantic-match-v1'] } });
         rows[1].officialPosting = miss.officialPosting;
         rows[3].officialPosting = structuredClone(verified.officialPosting);
       } });

@@ -95,8 +95,13 @@ try {
     const skip = page.getByRole('button', { name: 'Skip', exact: true });
     if (await skip.isVisible()) await skip.click();
     const card = page.locator('.react-flow__node-jobcard[data-id="salary-guidance-card"]');
-    const disclosure = card.getByRole('button', { name: 'Salary guidance (CAD)', exact: true });
+    const disclosure = card.getByRole('button', { name: /^(?:Cannot determine pay competitiveness|Competitive cash pay|Likely below-market cash pay)$/ });
     await disclosure.waitFor();
+    const savedRecommendation = fixture.nodes[0].data.compensationAssessment.personalRecommendation;
+    if (savedRecommendation?.status === 'personalized') {
+      assert.match(await card.innerText(), /(?:Previous desired salary|Desired salary to enter):\s*CAD 125,000 \/ annual/,
+        'a collapsed card must make its separate desired-salary guidance visible');
+    }
     await disclosure.click();
     await page.waitForFunction(() => document.querySelector('.react-flow__node-jobcard [aria-expanded="true"]'));
     return card;
@@ -132,13 +137,15 @@ try {
 
   const stale = await showFixture('stale', canvasFixture(personalRecommendation, 'b'.repeat(64)));
   const staleText = await stale.innerText();
-  assert.match(staleText, /Salary guidance is outdated because the career data changed/);
-  assert.match(staleText, /Combine jobs again on the Job Board/);
-  assert.equal(await stale.getByRole('button', { name: 'Copy desired salary number', exact: true }).count(), 0,
-    'a stale salary answer must never offer Copy');
+  assert.match(staleText, /Outdated recommendation/);
+  assert.match(staleText, /Your career data changed/);
+  assert.match(staleText, /Combine saved results again on the Job Board/);
+  assert.equal(await stale.getByRole('button', { name: 'Copy desired salary number', exact: true }).count(), 1,
+    'an explicitly previous recommendation retains its numeric-only Copy action');
   assert.equal(await stale.getByText('Desired salary to enter', { exact: true }).count(), 0);
-  assert.ok(!staleText.includes('125,000') && !staleText.includes('110,000–CAD 130,000'),
-    'stale personal numbers must be hidden while market context remains visible');
+  assert.match(staleText, /Previously computed desired salary\s*CAD 125,000 \/ annual/i);
+  assert.match(staleText, /Previously recommended range for you:\s*CAD 110,000–CAD 130,000 \/ annual/,
+    'previous values must be clearly labeled while market context remains visible');
   assert.match(staleText, /Researched market range:\s*CAD 100,000–CAD 200,000 \/ annual/);
 
   const estimate = await showFixture('market-estimate', canvasFixture({
@@ -153,7 +160,7 @@ try {
   assert.match(estimateText, /Market estimate · limited career evidence\s*· Low confidence/);
   assert.equal(await estimate.getByRole('button', { name: 'Copy desired salary number', exact: true }).count(), 1);
   assert.deepEqual(errors, [], 'salary guidance must render without uncaught runtime errors');
-  console.log('PASS: built renderer shows personal salary guidance and full market context; Copy sends a numeric-only payload and shows success; stale answers hide figures/Copy; market estimates retain the full range with low confidence.');
+  console.log('PASS: built renderer shows collapsed desired salary and full market context; Copy sends a numeric-only payload and shows success; outdated answers retain clearly labeled previous values; market estimates retain the full range with low confidence.');
 } catch (error) {
   const page = application?.windows()[0];
   if (page) {

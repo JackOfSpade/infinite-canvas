@@ -95,6 +95,62 @@ export default [
     },
   },
   {
+    name: 'official-posting closing distinguishes cited employer-team nouns from candidate work gerunds',
+    run() {
+      const quote = 'Your Route Engineering teams maintain dispatch rosters while building dispatch tools.';
+      const base = context();
+      const evidence = [base.acceptedEvidence[0], { id: 'job-team', sourceId: 'job-listing', quote },
+        { id: 'job-other', sourceId: 'job-listing', quote: listingQuotes[0] }];
+      const check = (text, ids = ['job-team'], extra = {}) => {
+        const ctx = context({ snippet: `${quote}\n${listingQuotes[0]}`, evidence,
+          paragraphs: [structuredClone(prior), closing(text, ids)], ...extra });
+        return { result: local.__finalParagraphListingGroundingForTests(ctx), errors: twin(ctx) };
+      };
+      const positive = check('I would welcome the chance to join your Route Engineering teams.');
+      assert.equal(positive.result.eligible, true, JSON.stringify(positive.result.corrections));
+      assert.deepEqual(positive.errors, []);
+      for (const text of [
+        'I would join your Route Engineering teams while building dispatch tools.',
+        'I would join your Route Engineering teams, and I rebuilt dispatch rosters.',
+        'I would join your Route Engineering teams, and rebuilt dispatch rosters.',
+        'I would join your Route Engineering teams with my dispatch rosters.',
+        'I would join your Route Engineering teams for 12 dispatch routes.',
+        'I would join your Route Engineering teams daily.',
+      ]) {
+        const rejected = check(text);
+        assert.equal(rejected.result.eligible, false, text);
+        assert.ok(rejected.errors.length, text);
+      }
+      assert.ok(check('I would join your Route Engineering teams while building dispatch tools.').result.corrections
+        .some(error => error.includes('no work gerund')), 'the quoted team name cannot mask a separate candidate work gerund');
+      for (const [text, ids] of [
+        ['I would join your Route Engineering teams.', ['job-other']],
+        ['I would join your Other Engineering teams.', ['job-team']],
+      ]) {
+        const rejected = check(text, ids);
+        assert.equal(rejected.result.eligible, false, 'only the exact actually cited team name can be a noun exemption');
+        assert.ok(rejected.errors.length);
+      }
+      for (const company of ['Riverton Engineering', 'Riverton Shipping', 'Engineering']) {
+        const input = { ...base.input, job: { ...base.input.job, company } };
+        const accepted = check(`I would join ${company}.`, ['job-other'], { input });
+        assert.equal(accepted.result.eligible, true, JSON.stringify(accepted.result.corrections));
+        assert.deepEqual(accepted.errors, []);
+        const rejected = check(`I would join ${company} while building dispatch tools.`, ['job-team'], { input });
+        assert.equal(rejected.result.eligible, false, 'a frozen employer name cannot mask a separate candidate work gerund');
+        assert.ok(rejected.errors.length);
+      }
+      const verbCompany = { ...base.input, job: { ...base.input.job, company: 'Engineering' } };
+      for (const text of ['I would help engineering dispatch tools.',
+        'I would join Engineering while engineering dispatch tools.']) {
+        const rejected = check(text, ['job-team'], { input: verbCompany });
+        assert.equal(rejected.result.eligible, false, 'an employer word used as a candidate verb keeps the gerund check');
+        assert.ok(rejected.result.corrections.some(error => error.includes('no work gerund')), text);
+        assert.ok(rejected.errors.length);
+      }
+    },
+  },
+  {
     name: 'official-posting closing requires a final paragraph and an earlier paragraph that passes unchanged career grounding',
     run() {
       for (const options of [

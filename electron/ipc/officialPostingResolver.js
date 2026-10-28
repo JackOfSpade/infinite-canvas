@@ -1,11 +1,13 @@
 import crypto from 'node:crypto';
 import { fetchOfficialPosting } from './officialPostingFetch.js';
-import { normalizeApplyOptions, normalizeOfficialLocation, normalizeOfficialPosting, normalizeOfficialSalary, officialHttpsUrl, boundedOfficialPostingTrail, officialPostingComparativeTrail, OFFICIAL_POSTING_TRAIL } from './officialPostingFields.js';
+import { officialPostingEmployerText, normalizeApplyOptions, normalizeOfficialLocation, normalizeOfficialPosting, normalizeOfficialSalary, officialHttpsUrl, boundedOfficialPostingTrail, officialPostingComparativeTrail, OFFICIAL_POSTING_TRAIL } from './officialPostingFields.js';
 import { extractOfficialPostingCandidates, scanOfficialCareersPage } from './officialPostingExtractors.js';
 import { domainBrandMatchesEmployer, extractAtsTenant, isAggregatorHost, isKnownAtsHost, isPosterAtsTenant, normalizedSourceHost, proveBidirectionalOwnership, proveEmployerDomain, registrableDomain, rootBrandingNamesPoster, rootFooterText, sameOwnershipHost, strictEmployerEqual } from './officialSourceHosts.js';
 import { buildOfficialPostingComparisonSet, canonicalLeadUrl, coreTitle, evaluateOfficialPostingMatch, flatPostingText, frozenOfficialEmployer, locationsCompatible, posterEmployerSignals, resolveScrapedEmployer, selectOfficialPostingMatch } from './officialPostingMatch.js';
 import { officialPostingRecordMatchesScrapedIdentity } from './officialPostingStore.js';
 import { validateOfficialPostingMatchResponse } from './officialPostingBridge.js';
+import { resolveSemanticOfficialPosting } from './officialPostingSemanticResolution.js';
+import { officialPostingSemanticInputHash, officialPostingSemanticProofMatches, officialPostingSemanticSourceHash } from './officialPostingSemantic.js';
 import { evidenceFromHtml } from './listingLiveness.js';
 import { recordOfficialExpiryCandidates } from './listingLivenessStore.js';
 
@@ -23,7 +25,7 @@ const canonical = value => String(value ?? '').normalize('NFKC').replace(/\s+/gu
 const ROW_BUDGETS = new WeakMap();
 const ROW_ABORT_FANOUTS = new WeakMap();
 const RETRYABLE_MISS_TRAIL = new Set(['bridge-aborted', 'bridge-timeout', 'bridge-unavailable', 'research-miss',
-  'fetch-failed', 'fetch-timeout', 'crawl-budget', 'crawl-partial', 'official-text-missing', 'failed', 'comparative-invalid', 'comparative-unavailable', 'comparative-truncated', 'insufficient-text']);
+  'fetch-failed', 'fetch-timeout', 'crawl-budget', 'crawl-partial', 'official-text-missing', 'failed', 'comparative-invalid', 'comparative-unavailable', 'comparative-truncated', 'insufficient-text', 'semantic-uncertain', 'semantic-overflow', 'official-liveness-unconfirmed']);
 const DEFINITIVE_MISS_TRAIL = new Set(['closed', 'title-mismatch', 'location-mismatch', 'employer-mismatch',
   'tenant-unproven', 'poster-tenant', 'salary-mismatch', 'no-anchor', 'invalid-quotes', 'ambiguous', 'comparative-none', 'comparative-disagree']);
 
@@ -65,7 +67,7 @@ export function createOfficialPostingRowBudget({ signal, maxPages = 16, timeoutM
 }
 
 /** Reads and writes use the same rule, including historical cached results.
- * A partial crawl needs a deterministic winning anchor; a run abort never writes. */
+ * A partial crawl needs a verified identity decision; a run abort never writes. */
 export function shouldPersistOfficialPostingResult(value, { signal, researchRan = false } = {}) {
   if (signal?.aborted) return false;
   const posting = normalizeOfficialPosting(value?.officialPosting || value?.posting || value);
@@ -73,8 +75,13 @@ export function shouldPersistOfficialPostingResult(value, { signal, researchRan 
   const trail = posting.trail || [];
   if (['L1', 'L2', 'L3', 'L4'].includes(posting.level)) {
     const partial = trail.includes('fetch-timeout') || trail.includes('crawl-budget') || trail.includes('crawl-partial');
-    const deterministic = trail.includes('identifier-anchor');
-    return ['found', 'link-only'].includes(posting.outcome) && (!partial || deterministic);
+    const agreedChoice = trail.find(code => /^comparative-choice-p[1-8]$/u.test(code))?.slice('comparative-choice-'.length);
+    const semanticIdentity = posting.semanticMatch?.version === 1 && /^[a-f0-9]{64}$/u.test(posting.semanticMatch?.sourceHash)
+      && trail.includes('semantic-match-v1') && trail.includes('comparative-match')
+      && trail.includes('comparative-a-valid') && trail.includes('comparative-b-valid') && agreedChoice
+      && trail.includes(`comparative-a-${agreedChoice}`) && trail.includes(`comparative-b-${agreedChoice}`);
+    const identityProof = trail.includes('identifier-anchor') || semanticIdentity;
+    return ['found', 'link-only'].includes(posting.outcome) && (!partial || identityProof);
   }
   if (posting.outcome === 'failed' || trail.some(code => RETRYABLE_MISS_TRAIL.has(code))) return false;
   return researchRan || trail.includes('bridge-research') || posting.outcome === 'closed'
@@ -177,7 +184,7 @@ function readableDescription(candidate, job) {
  * page bytes, employer attestations, tenant proofs and decisions originate
  * here. This core has no IPC, bridge registration or renderer dependency. */
 export async function resolveOfficialPosting(job, {
-  store = null, fetch = fetchOfficialPosting, candidateUrls = [], research = null, match = null,
+  store = null, fetch = fetchOfficialPosting, candidateUrls = [], research = null, match = null, shortlist = null, semanticMatching = false,
   signal, now = Date.now, bypassCache = false, persistMisses = true, persistResults = true, researchRan = false, rowBudget,
 } = {}) {
   const instant = () => typeof now === 'function' ? now() : Number(now);
@@ -198,6 +205,8 @@ export async function resolveOfficialPosting(job, {
   const abortCode = () => ['fetch-timeout', 'crawl-budget'].includes(budget.signal.reason?.code)
     ? budget.signal.reason.code : 'bridge-aborted';
   let researchSucceeded = researchRan === true;
+  let semanticSettled = false;
+  let semanticSource = null;
   const trail = []; let comparison = null; const candidates = new Map(); const pages = budgetState.pages; const fetchedCandidates = [];
   const rssCandidates = new Map(); const conflictingUrls = new Set();
   const signals = posterEmployerSignals(job);
@@ -366,7 +375,7 @@ export async function resolveOfficialPosting(job, {
   const capture = async (candidate, context) => {
     const url = officialHttpsUrl(candidate.sourceUrl);
     if (!url) return;
-    if (conflictingUrls.has(url)) return;
+    if (!semanticMatching && conflictingUrls.has(url)) return;
     if (!context.boardApi && url !== officialHttpsUrl(context.fetchedUrl)) {
       if (context.follow) context.follow(url);
       else enqueue(url);
@@ -383,8 +392,8 @@ export async function resolveOfficialPosting(job, {
     const careerEmployer = tenants.get(routeKey) || context.provenEmployer || '';
     const organization = candidate.employer || candidate.hiringOrganization?.name || careerEmployer;
     const matchesHypothesis = hypotheses.some(name => strictEmployerEqual(name, organization));
-    if (!organization || !matchesHypothesis || (statedEmployers.length && !statedEmployers.some(name => strictEmployerEqual(name, organization)))) return;
-    if (route && (!strictEmployerEqual(organization, job?.company) || signals.S3) && isPosterAtsTenant(route, job?.company)) {
+    if (!organization || (!semanticMatching && (!matchesHypothesis || (statedEmployers.length && !statedEmployers.some(name => strictEmployerEqual(name, organization)))))) return;
+    if (!semanticMatching && route && (!strictEmployerEqual(organization, job?.company) || signals.S3) && isPosterAtsTenant(route, job?.company)) {
       trail.push('poster-tenant'); return;
     }
     const sameAs = candidate.sameAs || candidate.hiringOrganization?.sameAs || '';
@@ -421,22 +430,29 @@ export async function resolveOfficialPosting(job, {
       officialPortalProven,
       posterTenant: false,
       provenance: linked || roundTrip ? 'careers' : route ? 'structured' : 'employer' };
-    const existing = candidates.get(url);
-    if (existing && (!strictEmployerEqual(existing.employer, enriched.employer)
-      || coreTitle(existing.title, { company: existing.employer, location: existing.location })
-        !== coreTitle(enriched.title, { company: enriched.employer, location: enriched.location })
-      || !locationsCompatible(existing, enriched)
-      || (existing.identifier && enriched.identifier && existing.identifier !== enriched.identifier))) {
-      candidates.delete(url); conflictingUrls.add(url); trail.push('ambiguous'); return;
+    if (semanticMatching) {
+      // Separate host-fetched representations may disagree about the same URL.
+      // Keep each intact so AI sees that disagreement rather than a merged fiction.
+      const key = `${url}|${crypto.createHash('sha256').update(JSON.stringify(enriched)).digest('hex')}`;
+      candidates.set(key, enriched);
+    } else {
+      const existing = candidates.get(url);
+      if (existing && (!strictEmployerEqual(existing.employer, enriched.employer)
+        || coreTitle(existing.title, { company: existing.employer, location: existing.location })
+          !== coreTitle(enriched.title, { company: enriched.employer, location: enriched.location })
+        || !locationsCompatible(existing, enriched)
+        || (existing.identifier && enriched.identifier && existing.identifier !== enriched.identifier))) {
+        candidates.delete(url); conflictingUrls.add(url); trail.push('ambiguous'); return;
+      }
+      // RSS provides full text while the same page's JSON-LD adds posted pay.
+      const best = existing ? { ...existing, ...enriched,
+        description: existing.description.length > enriched.description.length ? existing.description : enriched.description,
+        salary: enriched.salary?.provenance === 'posted' ? enriched.salary : existing.salary,
+        tenantProven: existing.tenantProven || enriched.tenantProven,
+        provenance: existing.provenance === 'careers' ? 'careers' : enriched.provenance,
+      } : enriched;
+      candidates.set(url, best);
     }
-    // RSS provides full text while the same page's JSON-LD adds posted pay.
-    const best = existing ? { ...existing, ...enriched,
-      description: existing.description.length > enriched.description.length ? existing.description : enriched.description,
-      salary: enriched.salary?.provenance === 'posted' ? enriched.salary : existing.salary,
-      tenantProven: existing.tenantProven || enriched.tenantProven,
-      provenance: existing.provenance === 'careers' ? 'careers' : enriched.provenance,
-    } : enriched;
-    candidates.set(url, best);
     if (route && proven) {
       tenants.set(routeKey, organization);
       const adapter = adapterUrl(route, url);
@@ -448,7 +464,8 @@ export async function resolveOfficialPosting(job, {
   const retryRoundTrips = async () => {
     for (const [url, pending] of [...pendingRoundTrips]) {
       if (budget.signal.aborted) return;
-      if (!candidates.has(url) || conflictingUrls.has(url) || candidates.get(url).tenantProven) { pendingRoundTrips.delete(url); continue; }
+      const pendingSources = [...candidates.values()].filter(candidate => candidate.sourceUrl === url);
+      if (!pendingSources.length || conflictingUrls.has(url) || pendingSources.every(candidate => candidate.tenantProven)) { pendingRoundTrips.delete(url); continue; }
       if (pending.epoch === proofEpoch) continue;
       let proven = false;
       try { proven = await roundTripOwnership(pending.candidate, pending.route, url, pending.organization); }
@@ -501,7 +518,7 @@ export async function resolveOfficialPosting(job, {
           const page = { host, url: sourceUrl, employer: careersEmployer, links: scan.links.map(link => link.url) };
           careersPages.set(sourceUrl, page);
           for (const link of scan.links) {
-            const existing = candidates.get(link.url);
+            const existing = [...candidates.values()].find(candidate => candidate.sourceUrl === link.url);
             if (!(extractAtsTenant(link.url) || (existing && normalizedSourceHost(link.url) === host
               && strictEmployerEqual(existing.employer, careersEmployer)))) continue;
             if (!careersLinkProof(page, link.url)) continue;
@@ -557,6 +574,10 @@ export async function resolveOfficialPosting(job, {
             // The board bytes are already fetched. Keep every description in
             // the distinctive-phrase cohort, even when its page is irrelevant.
             fetchedCandidates.push({ ...candidate, ats: route.ats, tenant: route.tenant });
+            if (semanticMatching) {
+              await capture(candidate, { ...context, route, provenEmployer: employer, fetchedUrl: sourceUrl, boardApi: true });
+              continue;
+            }
             const rowTitle = coreTitle(job?.title, { company: job?.company, location: job?.location,
               employerHypotheses: [employer, ...signals.hypotheses].filter(Boolean) });
             if (!rowTitle || rowTitle !== coreTitle(candidate.title, { company: candidate.employer || employer,
@@ -569,7 +590,7 @@ export async function resolveOfficialPosting(job, {
           const rss = rssCandidates.get(officialHttpsUrl(candidate.sourceUrl));
           const idsAgree = rss && (!(rss.identifier && candidate.identifier) || rss.identifier === candidate.identifier);
           const employersAgree = rss && (!(rss.employer && candidate.employer) || strictEmployerEqual(rss.employer, candidate.employer));
-          const boundRss = rss && idsAgree && employersAgree
+          const boundRss = !semanticMatching && rss && idsAgree && employersAgree
             && coreTitle(rss.title, { company: rss.employer, location: rss.location })
               === coreTitle(candidate.title, { company: candidate.employer, location: candidate.location })
             && ((rss.identifier && candidate.identifier && rss.identifier === candidate.identifier) || locationsCompatible(rss, candidate));
@@ -582,6 +603,7 @@ export async function resolveOfficialPosting(job, {
         if (extracted.length) trail.push(context.adapter ? 'ats-adapter' : 'json-ld');
       } catch { trail.push('unreadable'); }
       try { await retryRoundTrips(); } catch { trail.push('unreadable'); }
+      if (semanticMatching) continue;
       const verified = selectOfficialPostingMatch(job, [...candidates.values()], matchOptions());
       if (verified.outcome === 'found' && frozenOfficialEmployer(job, verified.candidate.employer)
         && readableDescription(verified.candidate, job)) {
@@ -605,9 +627,14 @@ export async function resolveOfficialPosting(job, {
   };
   const persist = async result => {
     if (comparison) result.comparison = comparison;
+    if (semanticMatching && semanticSettled && result.officialPosting) {
+      result.officialPosting.semanticMatch = { version: 1, inputHash: officialPostingSemanticInputHash(job),
+        ...(semanticSource ? { sourceHash: officialPostingSemanticSourceHash(semanticSource, { now: instant }) } : {}) };
+      result.officialPosting.trail = trailCodes([...(result.officialPosting.trail || []), 'semantic-match-v1']);
+    }
     if (result.description) result.officialPosting.contentHash = crypto.createHash('sha256').update(result.description).digest('hex');
     // Incidental host limits end the crawl without stopping the run. The
-    // shared predicate keeps a partial match durable only on a deterministic anchor.
+    // shared predicate keeps a partial match durable only on a verified identity decision.
     const durability = ['L1', 'L2', 'L3', 'L4'].includes(result.officialPosting?.level)
       ? { aborted: Boolean(signal?.aborted || budgetState.sourceSignal?.aborted) } : budget.signal;
     if (store && persistResults && !result.expiryCandidates?.length
@@ -623,12 +650,14 @@ export async function resolveOfficialPosting(job, {
   try {
     if (store && !bypassCache) {
       const record = await store.find(job);
-      if (record && officialPostingRecordMatchesScrapedIdentity(job, record)) {
+      if (record && officialPostingRecordMatchesScrapedIdentity(job, record)
+        && (!semanticMatching || officialPostingSemanticProofMatches(job, record))) {
         if (['L5', 'L6'].includes(record.officialPosting?.level)
           && !record.officialPosting?.trail?.includes('closed')
           && shouldPersistOfficialPostingResult(record, { signal: budget.signal })) {
           const current = fallback(job, { outcome: record.officialPosting.outcome,
             trail: [...(record.officialPosting.trail || []), 'recent-miss'], alternatives: record.officialPosting.alternatives || [] });
+          if (semanticMatching) current.officialPosting.semanticMatch = record.officialPosting.semanticMatch;
           return { ...current, record: { ...record, officialPosting: current.officialPosting } };
         }
         if (!['L5', 'L6'].includes(record.officialPosting?.level)
@@ -639,7 +668,14 @@ export async function resolveOfficialPosting(job, {
     for (const url of freeOfficialPostingLeads(job)) enqueue(url);
     for (const lead of candidateUrls) addLead(lead);
     await drain();
-    let decision = selectOfficialPostingMatch(job, [...candidates.values()], matchOptions());
+    const semanticDecision = async () => {
+      const result = await resolveSemanticOfficialPosting(job, [...candidates.values()], { match, shortlist, signal, now: instant });
+      trail.push(...result.trail);
+      comparison = result.comparison || null; semanticSettled = result.settled;
+      semanticSource = result.evaluations?.find(item => item.identityPass)?.candidate || null;
+      return result;
+    };
+    let decision = semanticMatching ? await semanticDecision() : selectOfficialPostingMatch(job, [...candidates.values()], matchOptions());
     if (decision.outcome !== 'found' && !budget.signal.aborted && research) {
       trail.push('bridge-research');
       try {
@@ -649,11 +685,11 @@ export async function resolveOfficialPosting(job, {
         for (const lead of leads) addLead(lead);
         await drain();
       } catch (error) { trail.push(error?.code || (budget.signal.aborted ? abortCode() : 'research-miss')); }
-      decision = selectOfficialPostingMatch(job, [...candidates.values()], matchOptions());
+      decision = semanticMatching ? await semanticDecision() : selectOfficialPostingMatch(job, [...candidates.values()], matchOptions());
     }
     // A researched row compares every identity-passing posting together. A settled
     // deterministic closed winner remains authoritative before any AI step.
-    if (decision.outcome !== 'found' && decision.outcome !== 'closed' && researchSucceeded && !budget.signal.aborted) {
+    if (!semanticMatching && decision.outcome !== 'found' && decision.outcome !== 'closed' && researchSucceeded && !budget.signal.aborted) {
       const context = matchOptions();
       // A conservative floor leaves room for three independent eight-word
       // passages across the required parts. Missing input is never a settled miss.
@@ -774,7 +810,7 @@ export async function resolveOfficialPosting(job, {
         const expiry = typeof candidate?.validThrough === 'string' ? Date.parse(candidate.validThrough) : NaN;
         if (evaluation.reason !== 'closed' || !evaluation.identityPass || evaluation.salaryMismatch
           || !Number.isFinite(expiry) || expiry >= instant()) return false;
-        return evaluateOfficialPostingMatch(job, { ...candidate, validThrough: '' }, matchOptions()).passed;
+        return semanticMatching || evaluateOfficialPostingMatch(job, { ...candidate, validThrough: '' }, matchOptions()).passed;
       }).map(evaluation => evaluation.candidate).sort((left, right) => left.sourceUrl.localeCompare(right.sourceUrl));
       const boundedExpired = expired.slice(0, 8);
       const expiryCandidates = boundedExpired.map(candidate => candidate.sourceUrl);
@@ -800,8 +836,9 @@ export async function resolveOfficialPosting(job, {
     const failedSite = [...budgetState.failures].some(([url, code]) => belongsToWinnerSite(url, candidate)
       && ['fetch-failed', 'fetch-timeout', 'crawl-budget'].includes(code));
     if (budgetState.exhaustionReason || unreadSite || failedSite) trail.push('crawl-partial');
-    const employer = frozenOfficialEmployer(job, candidate.employer);
-    const readable = employer && readableDescription(candidate, job);
+    // AI has judged employer identity; the host checks only its wire bounds.
+    const employer = semanticMatching ? officialPostingEmployerText(candidate.employer) : frozenOfficialEmployer(job, candidate.employer);
+    const readable = employer && (semanticMatching ? Boolean(String(candidate.description || '').trim()) : readableDescription(candidate, job));
     const level = !readable ? 'L4' : candidate.provenance === 'careers' ? 'L2' : candidate.ats ? 'L3' : 'L1';
     const evaluation = decision.evaluations.find(item => item.candidate === candidate);
     const officialPosting = normalizeOfficialPosting({ level, outcome: readable ? 'found' : 'link-only', employer,

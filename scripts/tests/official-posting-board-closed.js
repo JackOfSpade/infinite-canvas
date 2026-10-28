@@ -26,6 +26,7 @@ import {
 } from '../../electron/ipc/officialPostingBoardClosed.js';
 import { createOfficialPostingRecoveryPassResolver, mergeOfficialPostingTelemetry, officialPostingDedup } from '../../electron/ipc/officialPostingService.js';
 import { shouldPersistOfficialPostingResult } from '../../electron/ipc/officialPostingResolver.js';
+import { officialPostingSemanticInputHash } from '../../electron/ipc/officialPostingSemantic.js';
 import {
   composeDetailBlockReprobeResult, didDetailBlockReprobeRecover, unavailableDetailDisposition,
 } from '../../electron/ipc/browser/manualScraper.js';
@@ -73,12 +74,59 @@ const pendingClosedRow = (extra = {}, basis = 'closed-marker') => {
 const scrapedSafe = job => filterJobsByDescriptionEvidence([job]).jobs.length === 1;
 const viewOf = text => async job => ({ employer: job.company, title: job.title, location: job.location, salary: '',
   description: text, officialPosting: normalizeOfficialPosting(job.officialPosting) || undefined });
+const semanticPosting = (job, value) => ({ ...value, trail: [...(value.trail || []), 'semantic-match-v1'],
+  semanticMatch: { version: 1, inputHash: officialPostingSemanticInputHash(job),
+    ...(['L1', 'L2', 'L3', 'L4'].includes(value.level) ? { sourceHash: 'b'.repeat(64) } : {}) } });
 
 async function settle(rows, getView = viewOf(longText('Official posting')), options = {}) {
   return settleBoardClosedRows(rows, { scoreSafe: scrapedSafe, getView, minChars: 400, ...options });
 }
 
 const pureTests = [
+  {
+    name: 'production board-closed settlement requires current semantic proof for both official rescue and settled retirement',
+    async run() {
+      for (const value of [posting(), miss(['bridge-research'])]) {
+        const legacy = confirmedClosedRow({ officialPosting: value });
+        const unchecked = await settle([legacy], undefined, { requireSemantic: true });
+        assert.deepEqual(unchecked.kept, [legacy]);
+        assert.equal(unchecked.dispositions.get(legacy), BOARD_CLOSED_DISPOSITIONS.keptUnchecked);
+        const current = { ...legacy, officialPosting: semanticPosting(legacy, value) };
+        const verified = await settle([current], undefined, { requireSemantic: true });
+        if (value.outcome === 'found') assert.equal(verified.dispositions.get(current), BOARD_CLOSED_DISPOSITIONS.keptOfficial);
+        else assert.equal(verified.dropped[0].disposition, BOARD_CLOSED_DISPOSITIONS.droppedSettled);
+        const changed = { ...current, snippet: `${current.snippet} A changed requirement.` };
+        assert.equal((await settle([changed], undefined, { requireSemantic: true })).dispositions.get(changed), BOARD_CLOSED_DISPOSITIONS.keptUnchecked);
+      }
+      const blank = confirmedClosedRow({ snippet: '', officialPosting: posting() });
+      assert.equal((await settle([blank], undefined, { requireSemantic: true })).dropped[0].disposition,
+        BOARD_CLOSED_DISPOSITIONS.deferredUnchecked, 'legacy official text cannot rescue a blank row through an injected view');
+    },
+  },
+  {
+    name: 'recovery pass rejudges changed source text after either a kept or dropped semantic receipt',
+    async run() {
+      for (const droppedFirst of [false, true]) {
+        let calls = 0;
+        const original = row({ sourceJobKey: `semantic-recovery-${droppedFirst}` });
+        const resolver = createOfficialPostingRecoveryPassResolver(async jobs => {
+          calls++;
+          const dropped = droppedFirst && calls === 1 ? jobs.map(job => ({ kept: null, dropped: job, reason: 'dropped-settled' })) : [];
+          return { jobs: dropped.length ? [] : jobs, officialPosting: { total: jobs.length },
+            officialDedupDropped: 0, officialDedupDrops: [], boardClosedDropped: dropped.length, boardClosedDrops: dropped };
+        });
+        await resolver([original]);
+        await resolver([{ ...original }]);
+        assert.equal(calls, 1, 'unchanged source inputs reuse the checkpoint receipt');
+        const changed = { ...original, snippet: `${original.snippet} A newly captured requirement.` };
+        const fresh = await resolver([changed]);
+        assert.equal(calls, 2, 'changed text must reach judgment even if the old input was dropped');
+        assert.equal(fresh.jobs.length, 1);
+        assert.equal(fresh.jobs[0].snippet, changed.snippet);
+        assert.equal(sourceJobKey(fresh.jobs[0]), sourceJobKey(changed));
+      }
+    },
+  },
   {
     name: 'deferred expiry settlement requires confirmed candidate closure before retiring a board-closed row',
     async run() {
@@ -839,7 +887,14 @@ async function runSearch({ canvasFilePath, careerSnapshotId, nodeId, rows, resol
       }
       return results;
     },
-    resolveOfficialPostings: async (jobs, options) => { calls.push(jobs); return resolveOfficialPostings(jobs, options); },
+    resolveOfficialPostings: async (jobs, options) => {
+      calls.push(jobs);
+      const result = await resolveOfficialPostings(jobs, options);
+      // Injected successful host resolutions carry the current semantic
+      // receipt that the production resolver now creates.
+      return { ...result, jobs: result.jobs.map(job => normalizeOfficialPosting(job.officialPosting)
+        ? { ...job, officialPosting: semanticPosting(job, job.officialPosting) } : job) };
+    },
     getOfficialPostingView,
     ...extraDependencies,
   });
@@ -958,6 +1013,24 @@ handlerTests.push(
     },
   },
   {
+    name: 'production resolver failure cannot keep or retire a described row using legacy inline official metadata',
+    async run() {
+      await withSearchHarness(async ({ canvasFilePath, careerSnapshotId }) => {
+        const rows = [
+          confirmedClosedRow({ title: 'Legacy Found Engineer', url: 'https://listing.example.test/legacy-found', officialPosting: posting() }),
+          confirmedClosedRow({ title: 'Legacy Miss Engineer', url: 'https://listing.example.test/legacy-miss', officialPosting: miss(['bridge-research']) }),
+        ];
+        const { result } = await runSearch({ canvasFilePath, careerSnapshotId, nodeId: 'legacy-inline-outage', rows,
+          getOfficialPostingView: viewOf(longText('Official')),
+          resolveOfficialPostings: async () => { throw new Error('synthetic resolver outage'); } });
+        assert.equal(result.success, true, result.error);
+        assert.deepEqual(result.jobs.map(job => job.title).sort(), ['Legacy Found Engineer', 'Legacy Miss Engineer']);
+        assert.deepEqual(getJobsTelemetry().search.officialPosting.boardClosed,
+          { linkedin: { detected: 2, keptOfficial: 0, keptUnchecked: 2, dropped: 0 } });
+      });
+    },
+  },
+  {
     name: 'board-closed report: a description retry separates the listings it removed from the board-closed ones it kept',
     run() {
       const telemetry = getJobsTelemetry();
@@ -1040,9 +1113,9 @@ handlerTests.push(
           resolveOfficialPostings: async jobs => {
             if (failure === 'resolution') throw new Error('synthetic official resolution failure');
             return ({
-            jobs: jobs.map(job => ({ ...job, officialPosting: job.title === 'Kept Engineer'
+            jobs: jobs.map(job => ({ ...job, officialPosting: semanticPosting(job, job.title === 'Kept Engineer'
               ? posting({ employer: 'Kept Engineer Co', title: 'Kept Engineer' })
-              : miss(job.title === 'Deferred Engineer' ? ['bridge-unavailable'] : ['bridge-research']) })),
+              : miss(job.title === 'Deferred Engineer' ? ['bridge-unavailable'] : ['bridge-research'])) })),
             telemetry: { total: jobs.length },
             });
           },

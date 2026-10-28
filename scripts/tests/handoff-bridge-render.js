@@ -13,6 +13,7 @@ import { EMPTY_BRIDGE_STATUS, normalizeBridgeStatus } from '../../src/utils/hand
 import { deriveBridgeHealth } from '../../src/utils/handoffBridgeView.js';
 import { __resetBridgeUiForTests } from '../../src/utils/handoffBridgeUiStore.js';
 import { IPC_ERROR_COPY } from '../../src/utils/handoffBridgeCopy.js';
+import { deriveBridgePushProgress } from '../../src/utils/bridgeJobProgress.js';
 
 const NOW = 1_700_000_000_000;
 const root = path.resolve('.');
@@ -40,6 +41,22 @@ function sameDescriptor(first, second) {
 }
 
 export default [
+  {
+    name: 'handoff bridge: render: lost tunnel overrides both claimed and queued push progress until recovery',
+    run() {
+      const chat = { state: 'working', ordinal: 1, lastCallAt: NOW };
+      const bridge = { enabled: true, serving: 'live', linked: true, tunnelReachable: false };
+      for (const awaitingClaim of [true, false]) {
+        const lost = deriveBridgePushProgress({ chat, bridge, awaitingClaim });
+        assert(lost.kind === 'push-connection-lost' && lost.tone === 'attention'
+          && !lost.headline.includes('working'), 'an unreachable tunnel must not imply active handoff delivery');
+      }
+      assert(deriveBridgePushProgress({ chat, bridge: { ...bridge, tunnelReachable: true } }).kind === 'push-working',
+        'a reachable tunnel restores the exact claimed handoff progress');
+      assert(deriveBridgePushProgress({ chat, bridge: { ...bridge, paused: true } }).kind === 'push-paused',
+        'a deliberate pause stays authoritative over network recovery');
+    },
+  },
   {
     name: 'handoff bridge: render: one bundled React mounts two hooks under StrictMode and restores navigator',
     async run() {

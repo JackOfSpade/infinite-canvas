@@ -3005,6 +3005,7 @@ export function buildJobCompletionAssessment(
       hubState: receiptIdentifier(boardDiagnosticValue(board, 'hubState'), 'empty'),
       resultCount: boardNonnegativeCount(boardDiagnosticValue(board, 'resultCount')),
       mergeUnique: boardNonnegativeCount(boardDiagnosticValue(board, 'mergeUnique')),
+      locationPostingsCollapsed: boardNonnegativeCount(boardDiagnosticValue(board, 'locationPostingsCollapsed') ?? 0),
       renderedCardCount: boardNonnegativeCount(boardDiagnosticValue(board, 'renderedCardCount')),
       stale: boardDiagnosticValue(board, 'stale') === true,
       staleReason: boardStaleReasonFact(boardDiagnosticValue(board, 'staleReason')),
@@ -3280,10 +3281,13 @@ export function buildJobCompletionAssessment(
   // documented Combine feature, and the board checks below already carve out
   // that case. Comparing the two directly therefore made every multi-hub board
   // permanently INDETERMINATE and buried whatever the real gaps were. When the
-  // taxonomy input matches a multi-hub board's own union, the two numbers are
-  // measuring different things by design and reconcile through the board.
+  // taxonomy input matches a multi-hub or location-consolidated Board's output,
+  // the two numbers measure different things and reconcile through the Board.
   const unionTaxonomyBoard = taxonomyInput == null ? null : relevantBoards.find(board => (
-    !board.stale && board.combinedSourceHubIds.length > 1 && board.resultCount === taxonomyInput
+    !board.stale && board.resultCount === taxonomyInput
+    && (board.combinedSourceHubIds.length > 1
+      || (board.combinedSourceHubIds.length === 1 && board.locationPostingsCollapsed > 0
+        && board.mergeUnique - board.locationPostingsCollapsed === board.resultCount))
   )) || null;
 
   const gaps = [];
@@ -3401,17 +3405,21 @@ export function buildJobCompletionAssessment(
       gaps.push(`Job Board \`${boardLabel(board)}\` did not retain a result count`);
       continue;
     }
+    const collapsed = board.locationPostingsCollapsed;
+    if (collapsed == null || (board.mergeUnique != null && collapsed > board.mergeUnique)) {
+      gaps.push(`Job Board \`${boardLabel(board)}\` has invalid location-consolidation counts`);
+    }
     if (board.mergeUnique == null) {
       gaps.push(`Job Board \`${boardLabel(board)}\` did not retain merge-count provenance`);
-    } else if (board.resultCount !== board.mergeUnique) {
-      gaps.push(`Job Board \`${boardLabel(board)}\` results ${board.resultCount} ≠ merged unique ${board.mergeUnique}`);
+    } else if (board.resultCount !== board.mergeUnique - (collapsed ?? 0)) {
+      gaps.push(`Job Board \`${boardLabel(board)}\` results ${board.resultCount} ≠ merged unique ${board.mergeUnique}${collapsed ? ` − ${collapsed} location postings collapsed` : ''}`);
     }
     // A one-source board has no legitimate cross-module dedup adjustment, so
-    // its visible count must equal this run's score-ready result. Multi-source
-    // boards instead validate their renderer-side merge receipt above.
+    // its pre-consolidation count must equal this run's score-ready result.
+    // Multi-source boards validate their renderer-side merge receipt above.
     if (board.combinedSourceHubIds.length === 1 && boardExpectedCount != null
-      && board.resultCount !== boardExpectedCount) {
-      gaps.push(`Job Board \`${boardLabel(board)}\` results ${board.resultCount} ≠ current run ${boardExpectedCount}`);
+      && board.resultCount + (collapsed ?? 0) !== boardExpectedCount) {
+      gaps.push(`Job Board \`${boardLabel(board)}\` results ${board.resultCount}${collapsed ? ` + ${collapsed} location postings collapsed` : ''} ≠ current run ${boardExpectedCount}`);
     }
   }
 
@@ -3530,7 +3538,7 @@ export function buildJobCompletionAssessment(
     ? telemetryAmbiguity
       ? `- Taxonomy: not attributable — ${telemetryAmbiguity}.`
       : '- Taxonomy: not retained in this process.'
-    : `- Taxonomy: input ${taxonomyInput ?? '?'} · missing ${taxonomyMissing ?? '?'} · duplicated ${taxonomyDuplicated ?? '?'}${taxonomy.error ? ' · ⚠️ error recorded' : ''}${unionTaxonomyBoard ? ` · input is Job Board \`${boardLabel(unionTaxonomyBoard)}\`'s union across ${unionTaxonomyBoard.combinedSourceHubIds.length} source hub(s), so it exceeds this hub's ${scored ?? '?'} scored job(s) by design` : ''}.`;
+    : `- Taxonomy: input ${taxonomyInput ?? '?'} · missing ${taxonomyMissing ?? '?'} · duplicated ${taxonomyDuplicated ?? '?'}${taxonomy.error ? ' · ⚠️ error recorded' : ''}${unionTaxonomyBoard ? ` · input is Job Board \`${boardLabel(unionTaxonomyBoard)}\`'s union across ${unionTaxonomyBoard.combinedSourceHubIds.length} source hub(s), ${unionTaxonomyBoard.locationPostingsCollapsed ? `after ${unionTaxonomyBoard.locationPostingsCollapsed} location postings collapsed; this hub scored ${scored ?? '?'} job(s)` : `so it can differ from this hub's ${scored ?? '?'} scored job(s) by design`}` : ''}.`;
   const receiptLine = receiptState.liveOwnerWithoutTerminalReceipt
     ? '- Terminal receipt: not recorded for the selected live run — it is incomplete until a terminal receipt is written.'
     : !receiptState.exists
@@ -3584,7 +3592,7 @@ export function buildJobCompletionAssessment(
       ? `- Job Board consumers: ⚠️ ${staleBoards.length}/${totalBoards} stale — ${staleBoards.map(board => `\`${boardLabel(board)}\` has ${board.resultCount ?? '?'} cached result(s) hidden pending board action${board.staleReason ? ` (${board.staleReason})` : ''}`).join('; ')}${deliberatelyClearedBoards.length ? ` · deliberately cleared: ${deliberatelyClearedBoards.map(board => `\`${boardLabel(board)}\` (prior ${board.clearProvenance.priorResultCount ?? '?'}; result cards no longer present)`).join('; ')}` : ''}${totalBoards > boards.length ? ` · ${totalBoards - boards.length} additional board(s) omitted from this bounded summary` : ''}.`
       : relevantBoards.length === 0
         ? `- Job Board consumers: ${totalBoards} recorded · none correlate to this source run.`
-        : `- Job Board consumers: ${relevantBoards.length}/${totalBoards} correlate to this source run · no stale board state${deliberatelyClearedBoards.length ? ` · deliberately cleared: ${deliberatelyClearedBoards.map(board => `\`${boardLabel(board)}\` (prior ${board.clearProvenance.priorResultCount ?? '?'}; result cards no longer present)`).join('; ')}` : ''}${renderedCardFacts.length ? ` · rendered cards: ${renderedCardFacts.join('; ')}` : ''}.`) + boardStateBoundedSuffix;
+        : `- Job Board consumers: ${relevantBoards.length}/${totalBoards} correlate to this source run · no stale board state${deliberatelyClearedBoards.length ? ` · deliberately cleared: ${deliberatelyClearedBoards.map(board => `\`${boardLabel(board)}\` (prior ${board.clearProvenance.priorResultCount ?? '?'}; result cards no longer present)`).join('; ')}` : ''}${relevantBoards.some(board => board.locationPostingsCollapsed > 0) ? ` · location consolidation: ${relevantBoards.filter(board => board.locationPostingsCollapsed > 0).map(board => `${board.mergeUnique} merged − ${board.locationPostingsCollapsed} collapsed = ${board.resultCount} cards`).join('; ')}` : ''}${renderedCardFacts.length ? ` · rendered cards: ${renderedCardFacts.join('; ')}` : ''}.`) + boardStateBoundedSuffix;
   const googleSource = telemetry?.search?.bySource?.google || receipt?.sources?.google || null;
   const googleReveal = googleSource ? revealCoverageFact(googleSource) : null;
   const googleCoverage = !googleSource
@@ -3782,7 +3790,7 @@ function sourceConsumptionFacts(source) {
     ? consumption
     : null;
   const origin = boardDiagnosticValue(receipt, 'origin');
-  const safeOrigin = origin === 'job-board' || origin === 'standalone' ? origin : null;
+  const safeOrigin = ['job-board', 'standalone', 'board-cancelled', 'saved-jobs-rescore'].includes(origin) ? origin : null;
   const admissionVersion = boardDiagnosticValue(receipt, 'admissionVersion');
   const version = Number.isSafeInteger(admissionVersion) && admissionVersion >= 0 && admissionVersion <= 100
     ? String(admissionVersion)
@@ -4005,6 +4013,8 @@ function boardResumeFacts(resume) {
   if (!resume || typeof resume !== 'object' || Array.isArray(resume)) return 'not retained';
   return {
     phase: receiptIdentifier(resume.phase, 'not recorded'),
+    pausedByUser: resume.pausedByUser === true,
+    autoResumeEligible: resume.autoResumeEligible !== false,
     runId: recordedRunToken(resume.boardRunId || resume.runId),
     active: diagnosticOpaqueIds([
       resume.activeSourceId, resume.activeSourceHubId,
@@ -4022,9 +4032,11 @@ function boardResumeFacts(resume) {
 
 function boardResumeSummary(resumeFacts, labelContext = null) {
   if (resumeFacts === 'not retained') return resumeFacts;
-  const { phase, runId, active, awaiting, completed } = resumeFacts;
+  const { phase, runId, active, awaiting, completed, pausedByUser, autoResumeEligible } = resumeFacts;
   const bits = [
     `phase=${phase}`,
+    `paused-by-user=${pausedByUser ? 'yes' : 'no'}`,
+    `auto-resume=${autoResumeEligible ? 'eligible' : 'disabled'}`,
     runId ? `run=\`${boardDiagnosticIdList([runId], labelContext).replace(/`/g, '')}\`` : 'run=not recorded',
     `active=${boardDiagnosticIdList(active, labelContext)}`,
     `awaiting=${boardDiagnosticIdList(awaiting, labelContext)}`,
@@ -6631,7 +6643,7 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
         lines.push(`  - 0 retained after the title relevance gate: ${zeroTitleFiltered.join(', ')}`);
       }
       if (zeroClean.length) {
-        lines.push(`  - 0 results, no warning (genuinely empty / off-category): ${zeroClean.join(', ')}`);
+        lines.push(`  - 0 results, no retained warning (this alone does not prove an empty provider result set): ${zeroClean.join(', ')}`);
       }
       // Every branch above is gated on `count === 0`, so a source that returned
       // rows carried its warning silently — a Glassdoor run that gathered 897
@@ -7212,6 +7224,9 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
 
   if (hasBrowserScrape) {
     lines.push('\n### Active Browser Scrape');
+    if (browserScrape.beat?.tabLayout === 'results-and-details') {
+      lines.push('- Tab roles: one collector · results tab parked · job-detail tab active · detail requests run one at a time. Open site pages may still make their own background requests.');
+    }
     const a = browserScrape.active;
     if (a) {
       const ageMs = Date.now() - (a.ts || Date.now());

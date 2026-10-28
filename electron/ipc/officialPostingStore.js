@@ -6,6 +6,7 @@ import { googleJobsDocumentId } from '../../src/utils/jobListingUrl.js';
 import { atomicWriteJson, ensureDirectoryWithinRoot } from '../utils/pathSafety.js';
 import { normalizeOfficialPosting } from './officialPostingFields.js';
 import { coreTitle, locationsCompatible } from './officialPostingMatch.js';
+import { officialPostingSemanticProofMatches } from './officialPostingSemantic.js';
 import { strictEmployerEqual } from './officialSourceHosts.js';
 
 const TEXT_BYTE_LIMIT = 3 * 1024 * 1024;
@@ -294,12 +295,13 @@ async function restoreMissingText(record, store, refetch) {
 }
 
 /** The one main-process posting view; row metadata alone never supplies official facts. */
-export async function officialPostingView(job, { store, refetch } = {}) {
+export async function officialPostingView(job, { store, refetch, requireSemantic = false } = {}) {
   if (!store || typeof store.find !== 'function' || typeof store.readText !== 'function') return scrapedView(job);
   let record;
   try { record = await store.find(job); } catch { return scrapedView(job); }
   if (!record || !officialPostingRecordMatchesScrapedIdentity(job, record)) return scrapedView(job);
   const posting = record.officialPosting;
+  if (requireSemantic && !officialPostingSemanticProofMatches(job, posting)) return scrapedView(job);
   const fallback = scrapedView(job, posting);
   if (!OFFICIAL_TEXT_LEVELS.has(posting.level) || !posting.contentHash || job?.officialPosting?.contentHash !== posting.contentHash) return fallback;
   let description;

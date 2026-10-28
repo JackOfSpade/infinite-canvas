@@ -117,6 +117,17 @@ export class EventLoggerSingleton {
     this.error('Save failed:', reason, filePath ? `(path=${filePath})` : '');
   }
 
+  /**
+   * Call only after the current revision of the same open workspace is saved.
+   * Retain the failure for diagnosis, but distinguish it from an unresolved
+   * failure. A save of another workspace must not resolve this receipt.
+   */
+  recordSaveSuccess(filePath) {
+    if (!this._lastSaveError || this._lastSaveError.recoveredAt
+        || this._lastSaveError.filePath !== (filePath || null)) return;
+    this._lastSaveError = { ...this._lastSaveError, recoveredAt: new Date().toISOString() };
+  }
+
   getLastSaveError() {
     return this._lastSaveError;
   }

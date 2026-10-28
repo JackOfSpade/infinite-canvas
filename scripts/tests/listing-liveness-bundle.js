@@ -106,7 +106,7 @@ export default [
     assert.deepEqual(visits, [alternateUrl]);
     assert.equal(prepared.listingCheck.action, 'proceed');
     assert.equal(prepared.listingLinkUrl, alternateUrl);
-    const frozen = getPreparedOfficialPosting(prepared.resolutionId, primary);
+    const frozen = getPreparedOfficialPosting(prepared.resolutionId, project(primary));
     assert.equal(frozen.scrapedJob.url, primary.url);
     assert.equal(frozen.listingLinkUrl, alternateUrl);
     assert.equal(frozen.listingAudit.outcome, 'alternate');
@@ -245,7 +245,7 @@ export default [
         officialApplyUrl: 'https://careers.example.test/jobs/synthetic-open-official',
         trail: ['description-anchor'] };
       const preparedClosed = await prepareOfficialPostingForGeneration({ job: confirmed }, {
-        projectJob: project, store: { find: async () => null },
+        projectJob: project, semanticMatching: false, store: { find: async () => null },
         resolve: async rows => ({ jobs: [{ ...rows[0], officialPosting: liveOfficial }], telemetry: {} }),
         bridgeStatus: () => ({ enabled: false }),
         listingProbe: { probe: async () => { throw new Error('official live must skip the listing probe'); } },

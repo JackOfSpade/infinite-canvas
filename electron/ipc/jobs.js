@@ -11081,12 +11081,14 @@ function registerJobsHandlersWithDependencies(dependencies = {}) {
       || new Set((Array.isArray(rows) ? rows : []).filter(row => listingStateRank(row) >= 3 && !hasResolvedJobDescription(row)).map(listingEvidenceKey));
     try {
       return await settleBoardClosedRowsForHandler(rows, { scoreSafe: hasResolvedJobDescription,
+        requireSemantic: true,
         getView: row => readOfficialPostingView(row, { store: dependencies.officialPostingStore, signal }),
         minChars: JOB_DESCRIPTION_EVIDENCE_MIN_CHARS, setAsideKeys, expiryCandidatesConfirmedClosed });
     } catch (error) {
       if (signal?.aborted) throw signal.reason || error;
       logger.warn(`[OfficialPosting] Board-closed settlement failed: ${error?.code || error?.name || 'Error'}`);
       return settleBoardClosedRows(rows, { scoreSafe: hasResolvedJobDescription,
+        requireSemantic: true,
         minChars: JOB_DESCRIPTION_EVIDENCE_MIN_CHARS, setAsideKeys, expiryCandidatesConfirmedClosed });
     }
   };
@@ -11094,14 +11096,17 @@ function registerJobsHandlersWithDependencies(dependencies = {}) {
   // evidence gate. Identity rows stay scraped; only resolution fields are added.
   // Board-closed rows the evidence gate dropped arrive here too (see
   // scoreSafeRowsWithBoardClosed) and are kept or removed after resolution.
-  const resolveScoreSafePostings = async (rows, { event, nodeId, signal, jobRunId = null, alternateReceipts = null } = {}) => {
+  const resolveScoreSafePostings = async (rows, { event, nodeId, signal, jobRunId = null, alternateReceipts = null, progressSourceId = null } = {}) => {
     const context = getCurrentIpcRequestContext();
     if (context) context.listingSetAsideKeys = new Set((Array.isArray(rows) ? rows : [])
       .filter(row => listingStateRank(row) >= 3 && !hasResolvedJobDescription(row)).map(listingEvidenceKey));
     const onProgress = ({ completed = 0, total = rows.length } = {}) => {
       if (signal?.aborted || event?.sender?.isDestroyed?.()) return;
-      const payload = { nodeId, jobRunId, sourceId: 'official-posting', count: 0,
-        status: completed >= total ? 'done' : 'searching',
+      const payload = { nodeId, jobRunId, sourceId: progressSourceId || 'official-posting',
+        ...(progressSourceId ? { activity: 'official-posting', activityCompleted: completed, activityTotal: total } : { count: 0 }),
+        // A source Solve still has to checkpoint and reconcile its warning.
+        // Only its final reply can mark that provider card complete.
+        status: !progressSourceId && completed >= total ? 'done' : 'searching',
         detail: `Finding official postings ${completed} / ${total}`, warning: null };
       // This is a progress stage with zero provider volume. The existing
       // searching detail renders it without adding a provider card or count.
@@ -11145,6 +11150,7 @@ function registerJobsHandlersWithDependencies(dependencies = {}) {
             alternatesByKey, scoreSafe: hasResolvedJobDescription,
             shouldTryWinner: async winner => {
               const preliminary = await settleBoardClosedRows([winner], {
+                requireSemantic: true,
                 scoreSafe: hasResolvedJobDescription,
                 getView: row => readOfficialPostingView(row, { store: dependencies.officialPostingStore, signal }),
                 minChars: JOB_DESCRIPTION_EVIDENCE_MIN_CHARS,
@@ -15084,6 +15090,11 @@ Return a JSON object with four arrays of search query strings:
       }
       const admitted = await withCurrentJobAnalysisOperationAuthority({
         canvasFilePath, hubId: ownerNodeId, ...authority, tombstoneAfterWrite: true,
+        // A prior Stop already closed this exact writer. Repeating Stop (or
+        // quitting after restart) still needs to acknowledge its manual run
+        // and finish any interrupted continuation cleanup. The host lock
+        // continues to reject a superseded receipt; no writes are re-enabled.
+        allowRevoked: state.manifest.recoveryDisposition === 'manual',
       }, () => pauseRunForManualResume(canvasFilePath, {
         expectedRunId,
         nodeId: ownerNodeId,
@@ -15093,6 +15104,7 @@ Return a JSON object with four arrays of search query strings:
         ? admitted.value
         : { ok: false, paused: false, operationAuthorityMismatch: true };
       if (pauseReceipt?.ok !== true || pauseReceipt?.paused !== true) {
+        logger.info(`[Jobs] saved_pause outcome=refused reason=${admitted.admitted ? 'manual-checkpoint-not-saved' : 'operation-authority-mismatch'}`);
         // Fail closed. Keeping the worker alive is safer than acknowledging a
         // Stop whose recoverability policy was not committed to disk.
         return { ...pauseReceipt, settled: false };
@@ -16913,7 +16925,7 @@ Return a JSON object with four arrays of search query strings:
           : allLinkedInRaw.slice(0, normalizedCollectionLimits.jobsPerPlatform);
         const needEnrich = filterJobsByDescriptionEvidence(allLinkedIn).dropped;
         const admitForScoring = async rows => (await resolveScoreSafePostings(
-          scoreSafeRowsWithBoardClosed(filterJobsByDescriptionEvidence(overlayResolvedRecoveryRows(rows, snapshotRecoveryJobs))), { event, nodeId, signal, jobRunId },
+          scoreSafeRowsWithBoardClosed(filterJobsByDescriptionEvidence(overlayResolvedRecoveryRows(rows, snapshotRecoveryJobs))), { event, nodeId, signal, jobRunId, progressSourceId: 'linkedin' },
         )).jobs;
         const persistRecoveryPool = async (updatedLinkedIn) => {
           const descriptionRecoveryJobs = mergeDescriptionRecoverySourceJobs(
@@ -17044,13 +17056,15 @@ Return a JSON object with four arrays of search query strings:
             return { resolved: true, items: await admitForScoring(allLinkedIn), warning: switchWarning, replaceSourceItems: true, nextBlockedUrl: null };
           }
 
-          sendProgress({ nodeId, sourceId: 'linkedin', status: 'searching', count: needEnrich.length, detail: 're-fetching descriptions', warning: null });
+          sendProgress({ nodeId, sourceId: 'linkedin', status: 'searching', count: needEnrich.length, detail: 're-fetching descriptions', warning: null,
+            activity: 'description-enrichment', activityCompleted: 0, activityTotal: needEnrich.length });
           const { jobs: enriched, structuralDroppedKeys = [], loginWall: walled, cancelled = false, successCount = 0, attempted = needEnrich.length, contextRotations = 0, browserGen = null, browserAgeMs = null, noDesc = 0, noDescSoftBlock = 0, noDescGenuine = 0, evalErrors = 0, navErrors = 0, noInternet = false, browserUnavailable = false, profileReserved = false, browserError = null, usedAuthenticated = false, authenticatedFallback = false } = await enrichLinkedInDescriptionsBrowser(needEnrich, signal, {
             preferAuthenticated,
             // Same silence, same fix, on the Solve recovery walk.
             onProgress: ({ completed, total }) => sendProgress({
               nodeId, sourceId: 'linkedin', status: 'searching',
               detail: `Re-fetching descriptions… ${completed}/${total}`, warning: null,
+              activity: 'description-enrichment', activityCompleted: completed, activityTotal: total,
             }),
           });
           if (cancelled || signal?.aborted) {

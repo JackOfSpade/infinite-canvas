@@ -5,7 +5,9 @@ import path from 'node:path';
 import { EventEmitter } from 'node:events';
 import electronPkg from 'electron';
 import { createOfficialPostingStore } from '../../electron/ipc/officialPostingStore.js';
-import { createOfficialPostingPrepareSemaphore, getPreparedOfficialPosting, prepareOfficialPostingForGeneration, registerOfficialPostingGenerationHandlers } from '../../electron/ipc/officialPostingGeneration.js';
+import { createOfficialPostingPrepareSemaphore, getPreparedOfficialPosting, prepareOfficialPostingForGeneration as prepareSemanticOfficialPostingForGeneration, registerOfficialPostingGenerationHandlers } from '../../electron/ipc/officialPostingGeneration.js';
+import { officialPostingSemanticInputHash, officialPostingSemanticSourceHash } from '../../electron/ipc/officialPostingSemantic.js';
+import { extractOfficialPostingCandidates } from '../../electron/ipc/officialPostingExtractors.js';
 import { abortNodeTasksAndWait, beginSenderQuitPause, releaseSenderQuitPause, snapshotActiveNodeTasks } from '../../electron/ipc/ipcUtils.js';
 
 const text = 'Requirements include experience building reliable dispatch tools and maintaining reporting workflows. Engineers design clear interfaces for operations teams and validate changes through careful review. The role improves data quality across scheduled pipelines and documents decisions for partner groups. You will collaborate with colleagues to investigate delivery failures and make service behavior understandable. Responsibilities include writing tests for new features and improving tools that support teams use every day.';
@@ -37,6 +39,15 @@ function deferred() { let resolve; const promise = new Promise(done => { resolve
 const flush = async () => { for (let i = 0; i < 30; i++) await new Promise(resolve => setImmediate(resolve)); };
 async function waitFor(predicate) { for (let i = 0; i < 1000 && !predicate(); i++) await new Promise(resolve => setTimeout(resolve, 2)); assert.ok(predicate(), 'expected asynchronous boundary is reached'); }
 const fallbackResolve = async rows => ({ jobs: rows.map(row => ({ ...row, officialPosting: { level: 'L5', outcome: 'not-found', employer: row.company, trail: [] } })) });
+// Historical reverify cases retain their explicit legacy contract. Production
+// and the migration cases below use the semantic default.
+const prepareOfficialPostingForGeneration = (args, options = {}) => prepareSemanticOfficialPostingForGeneration(args, { semanticMatching: false, ...options });
+function semanticPosting(original, body = page(), extra = {}) {
+  const candidate = extractOfficialPostingCandidates({ body, sourceUrl: officialUrl, contentType: 'text/html', employer: 'Northwind Labs' })[0];
+  return posting({ title: candidate.title, location: candidate.location, salary: candidate.salary,
+    semanticMatch: { version: 1, inputHash: officialPostingSemanticInputHash(original),
+      sourceHash: officialPostingSemanticSourceHash({ ...candidate, provenance: 'employer' }) }, trail: ['semantic-match-v1', 'comparative-match'], ...extra });
+}
 
 export default [
   {
@@ -270,6 +281,119 @@ export default [
           beginSenderQuitPause(sender);
           assert.equal((await invoke({ sender }, args())).errorCode, 'APP_QUIT_PAUSED');
         } finally { releaseSenderQuitPause(sender); if (previous) electronPkg.ipcMain.handle('prepare-official-posting-for-generation', previous); }
+      });
+    },
+  },
+  {
+    name: 'semantic generation rechecks legacy proof with AI and never returns it after a failed fresh resolution',
+    async run() {
+      for (const reject of [false, true]) await withStore(async store => {
+        const original = job(); await store.save(original, { officialPosting: posting(), description: text });
+        let calls = 0; let fetches = 0;
+        const prepared = await prepareSemanticOfficialPostingForGeneration(args(original), { store, bridgeStatus: status,
+          fetch: async () => { fetches++; throw new Error('Legacy proof is not eligible for direct reverify.'); },
+          resolve: async (rows, options) => {
+            calls++; assert.equal(options.semanticMatching, true); assert.equal(options.bypassCache, true);
+            assert.deepEqual(options.candidateUrls, [officialUrl]);
+            if (reject) throw Object.assign(new Error('AI unavailable'), { code: 'comparative-unavailable' });
+            return fallbackResolve(rows);
+          } });
+        assert.equal(calls, 1); assert.equal(fetches, 0);
+        assert.ok(['L5', 'L6'].includes(prepared.officialPosting.level));
+        assert.equal(prepared.officialPosting.officialApplyUrl, undefined);
+        assert.equal(getPreparedOfficialPosting(prepared.resolutionId, original).description, undefined);
+        for (const change of [{ snippet: 'Edited source responsibilities.' }, { salary: 'CAD 135000 per year', salaryProvenance: 'posted' }]) {
+          assert.equal(getPreparedOfficialPosting(prepared.resolutionId, { ...original, ...change }), null, 'miss and unavailable receipts also bind the complete input');
+        }
+        assert.ok(getPreparedOfficialPosting(prepared.resolutionId, original), 'rejected changed inputs do not consume the original receipt');
+      });
+    },
+  },
+  {
+    name: 'semantic generation reuses unchanged source proof and binds prepared content to every semantic input',
+    async run() {
+      await withStore(async store => {
+        const original = job(); const before = await store.save(original, { officialPosting: semanticPosting(original), description: text });
+        let resolutions = 0;
+        const prepared = await prepareSemanticOfficialPostingForGeneration(args(original), { store, bridgeStatus: status,
+          fetch: network({ [officialUrl]: page() }), resolve: async () => { resolutions++; throw new Error('Unchanged approved source can reuse its semantic proof.'); } });
+        assert.equal(resolutions, 0); assert.equal(prepared.officialPosting.level, 'L1');
+        assert.equal(prepared.officialPosting.contentHash, before.officialPosting.contentHash);
+        assert.ok(prepared.officialPosting.trail.includes('reverified'));
+        assert.equal(getPreparedOfficialPosting(prepared.resolutionId, original).description, text);
+        for (const change of [{ snippet: `${original.snippet} New scope.` }, { workMode: 'remote' }, { identifier: 'different-req' }]) {
+          assert.equal(getPreparedOfficialPosting(prepared.resolutionId, { ...original, ...change }), null);
+        }
+      });
+    },
+  },
+  {
+    name: 'semantic generation sends changed title location and requisition facts to AI without deterministic identity rejection',
+    async run() {
+      for (const extra of [{ title: 'Platform Developer' }, { jobLocation: { address: { addressLocality: 'Lakeview', addressRegion: 'ON', addressCountry: 'CA' } } },
+        { identifier: { value: 'REQ-NEW' } }]) await withStore(async store => {
+        const original = job(); await store.save(original, { officialPosting: semanticPosting(original), description: text });
+        let resolutions = 0;
+        const prepared = await prepareSemanticOfficialPostingForGeneration(args(original), { store, bridgeStatus: status,
+          fetch: network({ [officialUrl]: page(text, extra) }), resolve: async (rows, options) => {
+            resolutions++; assert.equal(options.semanticMatching, true); assert.equal(options.bypassCache, true);
+            assert.deepEqual(options.candidateUrls, [officialUrl]); return fallbackResolve(rows);
+          } });
+        assert.equal(resolutions, 1); assert.ok(['L5', 'L6'].includes(prepared.officialPosting.level));
+        assert.equal(prepared.officialPosting.officialApplyUrl, undefined);
+      });
+    },
+  },
+  {
+    name: 'semantic generation accepts changed official text only through newly saved semantic proof',
+    async run() {
+      await withStore(async store => {
+        const original = job(); await store.save(original, { officialPosting: semanticPosting(original), description: text });
+        const changed = `${text} The role also owns route planning.`; const changedPage = page(changed, { title: 'Platform Developer' });
+        let resolutions = 0;
+        const prepared = await prepareSemanticOfficialPostingForGeneration(args(original), { store, bridgeStatus: status,
+          fetch: network({ [officialUrl]: changedPage }), resolve: async rows => {
+            resolutions++; const record = await store.save(original, { officialPosting: semanticPosting(original, changedPage), description: changed });
+            return { jobs: [{ ...rows[0], officialPosting: record.officialPosting }] };
+          } });
+        assert.equal(resolutions, 1); assert.equal(prepared.officialPosting.title, 'Platform Developer');
+        assert.equal(getPreparedOfficialPosting(prepared.resolutionId, original).description, changed);
+        assert.equal((await store.find(original)).officialPosting.title, 'Platform Developer');
+      });
+    },
+  },
+  {
+    name: 'semantic generation rejects unsafe source redirects and explicit closure despite cached semantic proof',
+    async run() {
+      for (const closed of [false, true]) await withStore(async store => {
+        const original = job(); await store.save(original, { officialPosting: semanticPosting(original), description: text });
+        let resolutions = 0;
+        const prepared = await prepareSemanticOfficialPostingForGeneration(args(original), { store, bridgeStatus: status,
+          fetch: async () => ({ url: closed ? officialUrl : 'https://foreign.test/job', statusCode: closed ? 404 : 200, contentType: 'text/html', body: page() }),
+          resolve: async () => { resolutions++; throw new Error('A mechanically unsafe or closed page cannot reuse cached identity.'); } });
+        assert.equal(resolutions, 0); assert.equal(prepared.officialPosting.level, 'L6');
+        assert.equal(prepared.officialPosting.officialApplyUrl, undefined);
+        assert.equal(prepared.officialPosting.outcome, closed ? 'closed' : 'failed');
+        if (closed) {
+          assert.ok(prepared.officialPosting.trail.includes('semantic-match-v1'));
+          assert.equal(prepared.officialPosting.semanticMatch.inputHash, officialPostingSemanticInputHash(original));
+        }
+      });
+    },
+  },
+  {
+    name: 'semantic generation timeout after detecting changed source cannot resurrect prior proof',
+    async run() {
+      await withStore(async store => {
+        const original = job(); await store.save(original, { officialPosting: semanticPosting(original), description: text });
+        const started = deferred();
+        const pending = prepareSemanticOfficialPostingForGeneration(args(original), { store, bridgeStatus: status, timeoutMs: 30,
+          fetch: network({ [officialUrl]: page(`${text} Changed source facts.`) }),
+          resolve: async () => { started.resolve(); return new Promise(() => {}); } });
+        await started.promise; const keepAlive = setTimeout(() => {}, 50);
+        const prepared = await pending; clearTimeout(keepAlive);
+        assert.equal(prepared.officialPosting.level, 'L6'); assert.equal(prepared.officialPosting.officialApplyUrl, undefined);
+        assert.equal(prepared.officialPosting.trail.includes('bridge-timeout'), true);
       });
     },
   },

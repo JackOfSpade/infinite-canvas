@@ -5,7 +5,7 @@ import path from 'node:path';
 import { comparisonRow } from './official-posting-r3-resolver.js';
 import { comparativeServiceFixture, comparisonVisible, serviceComparisonAnswer } from './official-posting-r3-service.js';
 import { createOfficialPostingStore } from '../../electron/ipc/officialPostingStore.js';
-import { getPreparedOfficialPosting, prepareOfficialPostingForGeneration } from '../../electron/ipc/officialPostingGeneration.js';
+import { getPreparedOfficialPosting, prepareOfficialPostingForGeneration as prepareSemanticOfficialPostingForGeneration } from '../../electron/ipc/officialPostingGeneration.js';
 
 const description = 'Requirements include experience building reliable dispatch tools and maintaining reporting workflows. Engineers design clear interfaces for operations teams and validate changes through careful review. The role improves data quality across scheduled pipelines and documents decisions for partner groups. You will collaborate with colleagues to investigate delivery failures and make service behavior understandable. Responsibilities include writing tests for new features and improving tools that support teams use every day.';
 const location = 'Lakeview, Ontario, Canada';
@@ -25,6 +25,7 @@ function html(text = description, extra = {}) {
 const page = (body, extra = {}) => ({ url: sourceUrl, statusCode: 200, contentType: 'text/html', body, ...extra });
 const missResponse = prompt => prompt.match(/Requested ids: ([a-f0-9, ]+)\./u)[1].split(', ').map(id =>
   `BEGIN OFFICIAL POSTING RESEARCH ${id}\nNOT FOUND\nEND OFFICIAL POSTING RESEARCH ${id}`).join('\n');
+const prepareOfficialPostingForGeneration = (args, options = {}) => prepareSemanticOfficialPostingForGeneration(args, { semanticMatching: false, ...options });
 async function withStore(run, options) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'official-r4-generation-'));
   try { await run(createOfficialPostingStore(path.join(root, 'official-postings'), options)); }

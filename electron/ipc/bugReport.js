@@ -29,6 +29,7 @@ import { buildPasteHandoffDiagnosticsMarkdown } from './pasteHandoffDiagnostics.
 import { buildPasteRejectionTraceMarkdown } from './bugReport/pasteRejectionTraceRollup.js';
 import { buildRendererCrashMarkdown } from '../rendererRecovery.js';
 import { workspaceIoDiagnosticsMarkdown } from './workspaceIoDiagnostics.js';
+import { buildJobCompensationSnapshot } from './bugReport/jobCompensationSnapshot.js';
 import { applicationCitationDiagnosticsMarkdown } from './applicationCitationDiagnostics.js';
 import { applicationCorrectionDiagnosticsMarkdown } from './applicationCorrectionDiagnostics.js';
 import { buildWindowSizeLine, buildPointerProbeMarkdown } from './bugReport/pointerProbeMarkdown.js';
@@ -1602,14 +1603,16 @@ function buildActiveEditableMarkdown(activeEditableText) {
   return activeEditableMarkdown;
 }
 
-function buildLastSaveErrorMarkdown(lastSaveError) {
+export function buildLastSaveErrorMarkdown(lastSaveError) {
   let lastSaveErrorMarkdown = '';
   if (lastSaveError) {
     lastSaveErrorMarkdown = `
 ## Last Save Error
+- Status: ${lastSaveError.recoveredAt ? 'recovered — a later current workspace snapshot was saved' : 'no matching recovery recorded'}
 - Reason: \`${closeReportDiagnostic(lastSaveError.reason, 'unknown')}\`
 - File: \`${redactReportPath(lastSaveError.filePath, '(no current file)')}\`
 - When: ${lastSaveError.timestamp || 'unknown'}
+${lastSaveError.recoveredAt ? `- Recovered: ${lastSaveError.recoveredAt}\n` : ''}
 `;
   }
   return lastSaveErrorMarkdown;
@@ -2184,6 +2187,7 @@ ${launches.map(entry => `  - ${new Date(entry.at).toISOString()} · worker ${ent
   const bootstrapMarkdown = `
 - Bridge bootstrap: config \`${bootstrap.config}\` · consent \`${bootstrap.consent}\` · configured auto-start \`${bootstrap.autoStart}\` · enabled \`${bootstrap.enabled}\` · runtime \`${bootstrap.runtime}\` · tunnel \`${bootstrap.tunnel}\`
 - Setup readiness: hostname \`${bootstrap.setup.hostname}\` · binary \`${bootstrap.setup.binary}\` · credentials \`${bootstrap.setup.credentials}\` · public tunnel \`${bootstrap.setup.tunnelReachable}\`
+- Live tunnel health: last exit \`${bootstrap.tunnelRuntime.lastExit}\` · crash count ${bootstrap.tunnelRuntime.restarts} · public probe \`${bootstrap.tunnelRuntime.probeState}\` · reason \`${bootstrap.tunnelRuntime.probeReason}\` · consecutive failures ${bootstrap.tunnelRuntime.failures}
 - Startup policy: decision \`${bootstrap.startup.decision}\` · refusal \`${bootstrap.startup.refusal}\``;
   let queueMarkdown = '';
   if (queue) {
@@ -2905,6 +2909,11 @@ export function generateMarkdown(payload, reportWindowId = null, options = {}) {
   // detailed evidence remains in the pipeline immediately below.
   let jobCompletionAssessmentMarkdown = '';
   let jobBoardDiagnosticsMarkdown = '';
+  let jobCompensationMarkdown = '';
+  if (isFullReport || reportCodes.has('JOBPAY')) {
+    try { jobCompensationMarkdown = buildJobCompensationSnapshot(nodes, payload.jobCompensationSnapshot); }
+    catch { jobCompensationMarkdown = diagnosticRenderFailureMarkdown('Job Card Salary Audit (JOBPAY)', new Error('could not inspect salary assessments')); }
+  }
   if (hasJobNodes || isFullReport || reportCodes.has('JOBS') || reportCodes.has('RECOVERY')) {
     const rawJobBoardStates = Array.isArray(payload.filterStats?.jobBoardStates)
       ? payload.filterStats.jobBoardStates
@@ -2944,6 +2953,7 @@ export function generateMarkdown(payload, reportWindowId = null, options = {}) {
             staleReason: node.data?.staleReason,
             combineSignature: node.data?.combineSignature,
             mergeUnique: node.data?.mergeStats?.unique,
+            locationPostingsCollapsed: node.data?.mergeStats?.locationVariantPostingsCollapsed,
             clearProvenance,
           };
         });
@@ -2991,6 +3001,7 @@ export function generateMarkdown(payload, reportWindowId = null, options = {}) {
         staleReason: node.data?.staleReason,
         combineSignature: node.data?.combineSignature,
         mergeUnique: node.data?.mergeStats?.unique,
+        locationPostingsCollapsed: node.data?.mergeStats?.locationVariantPostingsCollapsed,
         clearProvenance: node.data?.clearProvenance,
       }));
     const jobBoardStates = [...rawJobBoardStates, ...liveOnlyBoards].map((board) => {
@@ -3108,7 +3119,7 @@ ${viewportBlock}
 - Runtime: Electron ${systemInfo.electronVersion || '?'} · Chromium ${systemInfo.chromiumVersion || '?'} · Node ${systemInfo.nodeVersion || '?'}
 - OS release: ${systemInfo.osRelease}
 - Report generated: ${systemInfo.generatedAt} · timezone ${systemInfo.timezone} · UTC offset ${systemInfo.utcOffsetMinutes >= 0 ? '+' : ''}${systemInfo.utcOffsetMinutes} min
-${buildRendererCrashMarkdown(app.getPath('userData'))}${(isFullReport || reportCodes.has('WSIO') || reportCodes.has('SAVE')) ? workspaceIoDiagnosticsMarkdown() : ''}${buildFreshnessMarkdown}${pointerProbeMarkdown}${persistedWorkspaceMarkdown}${missingPreviewRelinkMarkdown}${activeTasksMarkdown}${handoffBridgeDiagnosticsMarkdown}${sellHubResolveMarkdown}${aiConfigMarkdown}${jobsConfigMarkdown}${jobCompletionAssessmentMarkdown}${jobBoardDiagnosticsMarkdown}${nonApiHandoffMarkdown}${pasteHandoffMarkdown}${applicationCitationsMarkdown}${applicationCorrectionsMarkdown}${pasteRejectionTraceMarkdown}${applicationOutputMarkdown}${(isFullReport || reportCodes.has('APPLINK')) ? savedApplicationLinkDiagnosticsMarkdown() : ''}${jobLinkMarkdown}${jobRecoveryOfferMarkdown}${jobRecoveryMarkdown}${issueReporterDraftMarkdown}${jobsPipelineMarkdown}${marketplacePipelineMarkdown}${marketplaceModuleRollupMarkdown}${sellHubPriceDropRollupMarkdown}${sessionPersistenceMarkdown}${marketplaceSessionsMarkdown}${jobSessionsMarkdown}${verifyTimingMarkdown}${authWindowMarkdown}${scraperAdaptationMarkdown}${activeEditableMarkdown}${lastSaveErrorMarkdown}${nodeDiagMarkdown}${mediaMarkdown}${imageMarkdown}
+${buildRendererCrashMarkdown(app.getPath('userData'))}${(isFullReport || reportCodes.has('WSIO') || reportCodes.has('SAVE')) ? workspaceIoDiagnosticsMarkdown() : ''}${buildFreshnessMarkdown}${pointerProbeMarkdown}${persistedWorkspaceMarkdown}${missingPreviewRelinkMarkdown}${activeTasksMarkdown}${handoffBridgeDiagnosticsMarkdown}${sellHubResolveMarkdown}${aiConfigMarkdown}${jobsConfigMarkdown}${jobCompletionAssessmentMarkdown}${jobBoardDiagnosticsMarkdown}${jobCompensationMarkdown}${nonApiHandoffMarkdown}${pasteHandoffMarkdown}${applicationCitationsMarkdown}${applicationCorrectionsMarkdown}${pasteRejectionTraceMarkdown}${applicationOutputMarkdown}${(isFullReport || reportCodes.has('APPLINK')) ? savedApplicationLinkDiagnosticsMarkdown() : ''}${jobLinkMarkdown}${jobRecoveryOfferMarkdown}${jobRecoveryMarkdown}${issueReporterDraftMarkdown}${jobsPipelineMarkdown}${marketplacePipelineMarkdown}${marketplaceModuleRollupMarkdown}${sellHubPriceDropRollupMarkdown}${sessionPersistenceMarkdown}${marketplaceSessionsMarkdown}${jobSessionsMarkdown}${verifyTimingMarkdown}${authWindowMarkdown}${scraperAdaptationMarkdown}${activeEditableMarkdown}${lastSaveErrorMarkdown}${nodeDiagMarkdown}${mediaMarkdown}${imageMarkdown}
 `;
 
   const events = payload.eventLogs || [];

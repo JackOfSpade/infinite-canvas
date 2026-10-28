@@ -16,6 +16,7 @@ import {
   canonicalizeCompensationLocation,
   compensationCohortKey,
   selectCompensationExperienceYears,
+  requiredYearsIsCorroboratedByDescription,
   estimateCompensationExperienceYearsFromDescription,
   isValidCompensationExperienceBandLadder,
   selectCompensationExperienceBand,
@@ -29,6 +30,65 @@ import { normalizeRemoteResidences } from '../../src/utils/jobSearchLocations.js
 import { JOB_COMPENSATION_EVIDENCE_BATCH_SCHEMA, ROLE_FAMILY_EXPERIENCE_BANDS_BATCH_SCHEMA, ROLE_FAMILY_EXPERIENCE_BANDS_SCHEMA } from '../../electron/ipc/aiSchemas.js';
 
 export default [{
+  name: 'Experience requirement ranges preserve grounded minima instead of promoting jobs to an upper-end salary band',
+  run() {
+    const ladder = [
+      { label: 'Early', minYears: 0, maxYears: 2 },
+      { label: 'Mid', minYears: 3, maxYears: 4 },
+      { label: 'Senior', minYears: 5, maxYears: 99 },
+    ];
+    for (const range of ['3–5', '3-5', '3 — 5', '3 to 5', 'between 3 and 5']) {
+      const job = { title: 'Synthetic Product Designer', description: `Requirements: ${range} years of product design experience.` };
+      const context = { job, seniority: 'mid', requiredYears: `${range} years` };
+      const selected = selectCompensationExperienceYears({ categorySpecificExperience: [
+        { requiredMinimumYears: 3, jobEvidenceGrounded: true, reportedYears: '8 years' },
+      ] }, context);
+      const estimated = estimateCompensationExperienceYearsFromDescription(job, context);
+      assert(selected.years === 3 && selected.basis === 'job-stated-minimum'
+        && estimated.years === 3 && estimated.basis === 'description-stated-minimum'
+        && selectCompensationExperienceBand(ladder, selected.years)?.label === 'Mid',
+      'range punctuation must not turn a mid-level minimum into senior salary research');
+      assert(requiredYearsIsCorroboratedByDescription(job, 3)
+        && requiredYearsIsCorroboratedByDescription(job, `${range} years`)
+        && !requiredYearsIsCorroboratedByDescription(job, 5),
+      'only the lower requirement endpoint is corroborated by a literal range');
+    }
+    const alternatives = {
+      title: 'Synthetic Product Designer',
+      description: 'Requirements: 3–5 years of product design experience with qualification A, or 2–3 years of relevant experience with qualification B.',
+    };
+    const selectedAlternative = selectCompensationExperienceYears({ categorySpecificExperience: [
+      { requiredMinimumYears: 3, jobEvidenceGrounded: true },
+    ] }, { job: alternatives, requiredYears: '3–5 years with qualification A; 2–3 with qualification B' });
+    assert(selectedAlternative.years === 3 && selectedAlternative.basis === 'job-stated-minimum'
+      && estimateCompensationExperienceYearsFromDescription(alternatives).years === 3,
+    'separate qualification pathways retain the highest grounded minimum rather than the smallest number or largest upper endpoint');
+    const separateAsks = { description: 'Requirements: 3–5 years of design experience, including at least 6 years of management experience.' };
+    const selectedAsks = selectCompensationExperienceYears({ categorySpecificExperience: [
+      { requiredMinimumYears: 3, jobEvidenceGrounded: true },
+      { requiredMinimumYears: 6, jobEvidenceGrounded: true },
+    ] }, { job: separateAsks });
+    assert(selectedAsks.years === 6
+      && estimateCompensationExperienceYearsFromDescription(separateAsks).years === 6,
+    'the highest distinct stated minimum still determines the salary experience band');
+    assert(selectCompensationExperienceYears({ categorySpecificExperience: [
+      { reportedYears: '4–6.5 years', candidateEvidenceGrounded: true },
+    ] }).years === 6.5,
+    'candidate-reported experience keeps its independent maximum-value policy');
+    const fractional = { description: 'Requires 3.5–5.5 years of product design experience.' };
+    assert(estimateCompensationExperienceYearsFromDescription(fractional).years === 3.5
+      && requiredYearsIsCorroboratedByDescription(fractional, 3.5)
+      && !requiredYearsIsCorroboratedByDescription(fractional, 5.5)
+      && !requiredYearsIsCorroboratedByDescription(fractional, 5),
+    'decimal boundaries must preserve the lower endpoint without matching fractional tails');
+    const reversed = { description: 'Requires 5–3 years of product design experience.' };
+    assert(!requiredYearsIsCorroboratedByDescription(reversed, 3)
+      && !requiredYearsIsCorroboratedByDescription(reversed, 5)
+      && estimateCompensationExperienceYearsFromDescription(reversed).basis !== 'description-stated-minimum',
+    'a reversed range cannot be reinterpreted as a standalone upper endpoint');
+    return { rangeVariants: 5, selectedYears: selectedAlternative.years };
+  },
+}, {
   name: 'Missing or failed role-band evidence still reaches grounded listing-level salary research without inventing a ladder',
   run() {
     const source = readFileSync(new URL('../../electron/ipc/jobs.js', import.meta.url), 'utf8');
@@ -1304,7 +1364,7 @@ Model prose happens to mention https://prose.example.test/untrusted.`);
       reasonCode: 'below_fit_threshold',
       justification: `The competitive-pay check is reserved for stronger matches (fit score ${COMPENSATION_MIN_FIT_SCORE} or above); this job scored ${justBelowThreshold}.`,
     });
-    assert(knownLowScoreSkip.reasonCode === 'below_fit_threshold' && knownLowScoreSkip.offered?.max === 90000,
+    assert(knownLowScoreSkip.status === 'not_evaluated' && knownLowScoreSkip.reasonCode === 'below_fit_threshold' && knownLowScoreSkip.offered?.max === 90000,
       'a known below-threshold score must be skipped with reasonCode below_fit_threshold while still carrying the real parsed offer');
     assert(knownLowScoreSkip.justification.includes(String(justBelowThreshold)),
       'a known below-threshold score justification must name the actual score so it reads as a real assessment, not a missing one');
@@ -1318,7 +1378,9 @@ Model prose happens to mention https://prose.example.test/untrusted.`);
       reasonCode: 'fit_score_unavailable',
       justification: `The competitive-pay check is reserved for stronger matches (fit score ${COMPENSATION_MIN_FIT_SCORE} or above); this job's fit score was unavailable, so no comparison was made.`,
     });
-    assert(unknownScoreSkip.reasonCode === 'fit_score_unavailable', 'an unscored job must retain its own fit_score_unavailable reason code');
+    assert(unknownScoreSkip.status === 'not_evaluated' && unknownScoreSkip.reasonCode === 'fit_score_unavailable', 'an unscored job must remain not evaluated with its own fit_score_unavailable reason code');
+    const attemptedWithoutEvidence = compensationAssessment({ offer: knownLowOffer, researchAttempted: true });
+    assert(attemptedWithoutEvidence.status === 'uncertain', 'research without comparable evidence must remain distinct from deliberate admission skips');
     assert(unknownScoreSkip.justification.includes('unavailable') && !unknownScoreSkip.justification.includes('scored'),
       'an unscored skip must read as "score unavailable", not be confused with a known below-threshold score');
     assert(knownLowScoreSkip.justification !== unknownScoreSkip.justification,

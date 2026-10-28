@@ -4,7 +4,10 @@ import { COMPARATIVE_SCRAPED, COMPARATIVE_OFFICIAL, COMPARATIVE_SIBLING, compari
 import { officialPostingAliases } from '../../electron/ipc/officialPostingStore.js';
 import { boundedOfficialPostingTrail, normalizeOfficialPosting, OFFICIAL_POSTING_TRAIL, officialPostingComparativeTrail } from '../../electron/ipc/officialPostingFields.js';
 import { officialPostingChunks, resolveOfficialPosting, unresolvedOfficialPosting, shouldPersistOfficialPostingResult } from '../../electron/ipc/officialPostingResolver.js';
-import { mergeOfficialPostingTelemetry, partitionOfficialPostingRows, resolveOfficialPostings } from '../../electron/ipc/officialPostingService.js';
+import { mergeOfficialPostingTelemetry, partitionOfficialPostingRows as partitionRows, resolveOfficialPostings as resolveRows } from '../../electron/ipc/officialPostingService.js';
+// These legacy fixtures pin the earlier deterministic/comparative contract.
+const partitionOfficialPostingRows = (jobs, options) => partitionRows(jobs, { semanticMatching: false, ...options });
+const resolveOfficialPostings = (jobs, options) => resolveRows(jobs, { semanticMatching: false, ...options });
 
 const description = 'Requirements include building reliable dispatch services, reviewing route reports, and documenting operational changes with the engineering team.';
 const job = (id, extra = {}) => ({ title: `Dispatch Engineer ${id}`, company: 'Northwind Labs', location: 'Lakeview, Ontario, Canada',
@@ -92,7 +95,7 @@ export default [
       const block = { comparisons: 2, comparisonOptions: { 1: 1, 8: 1, PRIVATE_OPTION: 9 },
         comparativeAgreements: 1, comparativeDisagreements: 1, comparativeInvalidRuns: 2,
         comparativeNone: 1, comparativeUnavailable: 1, comparativeMatches: 1,
-        rejections: { 'comparative-invalid': 1, 'comparative-match': 1, PRIVATE_REASON: 1 },
+        rejections: { 'comparative-invalid': 1, 'comparative-match': 1, 'semantic-uncertain': 1, 'semantic-overflow': 1, PRIVATE_REASON: 1 },
         evidence: 'PRIVATE_EVIDENCE', conversation: 'PRIVATE_CONVERSATION' };
       const merged = mergeOfficialPostingTelemetry(block, block);
       assert.equal(merged.comparisons, 4); assert.equal(merged.comparativeAgreements, 2);
@@ -101,6 +104,8 @@ export default [
       assert.equal(merged.comparativeMatches, 2);
       assert.deepEqual(merged.comparisonOptions, { 1: 2, 2: 0, 3: 0, 4: 0, 5: 0, 6: 0, 7: 0, 8: 2 });
       assert.equal(merged.rejections['comparative-invalid'], 2);
+      assert.equal(merged.rejections['semantic-uncertain'], 2);
+      assert.equal(merged.rejections['semantic-overflow'], 2);
       assert.equal(merged.rejections['comparative-match'], undefined);
       assert.equal(JSON.stringify(merged).includes('PRIVATE_'), false);
     },

@@ -937,6 +937,27 @@ stopc`, 'watchdog program bytes drifted from the measured interruptible TERM TER
     },
   },
   {
+    name: 'handoff bridge: tunnel: Wi-Fi DNS discovery exits keep retrying past the crash guard and recover',
+    async run() {
+      const harness = createSupervisorHarness(); await harness.supervisor.start();
+      for (const delay of [1000, 2000, 4000, 8000, 16000, 30000, 30000]) {
+        const child = harness.fakeSpawn.last().child;
+        child.__writeStderr('Settings: map[credentials-file:/synthetic/credentials.json]\n');
+        child.__writeStderr('Could not lookup srv records on _v2-origintunneld._tcp.argotunnel.com: lookup edge on [::1]:53: read: connection refused\n');
+        child.__exit(1); await flush();
+        assert(harness.supervisor.status().state === 'backoff'
+          && harness.supervisor.status().lastExit === 'network-unreachable'
+          && harness.supervisor.status().restarts === 0, 'DNS loss must not consume the crash budget or become a credential failure');
+        harness.clock.advance(delay); await flush();
+        assert(harness.fakeSpawn.last().child !== child, 'a DNS outage must keep receiving bounded retries');
+      }
+      await harness.supervisor.probe();
+      assert(harness.supervisor.status().state === 'online' && harness.alarms.length === 0, 'restored Wi-Fi must recover without a manual restart');
+      await harness.supervisor.stop();
+      assert(classifyExit({ code: 1, lines: ['Settings: map[credentials-file:/synthetic/credentials.json]', 'unexpected failure'] }) === 'exited-early', 'ordinary settings are not an authentication verdict');
+    },
+  },
+  {
     name: 'handoff bridge: tunnel: transient network exits follow the full 1 2 4 8 16 30 backoff ladder',
     async run() {
       const harness = createSupervisorHarness(); await harness.supervisor.start();

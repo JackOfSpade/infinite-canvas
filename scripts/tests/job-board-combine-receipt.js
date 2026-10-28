@@ -8,6 +8,7 @@ import { replaceBoardDisplayChildren } from '../../src/nodes/jobboard/replaceBoa
 import { combineCommitMismatchReason } from '../../src/nodes/jobboard/boardRecoveryNotice.js';
 import { attachProtectedCards, isProtectedJobCard } from '../../src/utils/jobLocationConsolidation.js';
 import { getConnectedJobSearchIds, normalizeJobBoardRecoveryTimestamp } from '../../src/utils/jobBoardSearchSelection.js';
+import { JOB_COMPENSATION_METHOD_VERSION } from '../../src/utils/jobCompensationVersion.js';
 import { resolveSalaryCareerSnapshotId } from '../../src/utils/jobBoardCareerOverride.js';
 
 import {
@@ -119,7 +120,7 @@ async function startCombineCommitFixture({ unmatchedProtected = false } = {}) {
     getNode: nodeId => nodes.find(node => node.id === nodeId), getNodes: () => nodes, getEdges: () => edges,
     setNodes: update => { nodes = typeof update === 'function' ? update(nodes) : update; }, updateGlobal,
     cancelled: () => false, liveCombineInputs: () => liveInputs, boardInputSignature: inputSignature,
-    getConnectedJobSearchIds, resolveSalaryCareerSnapshotId, salaryCareerAtCombine: { careerSnapshotId: null },
+    getConnectedJobSearchIds, resolveSalaryCareerSnapshotId, JOB_COMPENSATION_METHOD_VERSION, salaryCareerAtCombine: { careerSnapshotId: null },
     isJobWorkflowDeletionPending: nodeId => pendingDeletionIds.has(nodeId),
     selectedRunsMatchExpected: () => true,
     combineInputsMatchExpected: (modules, expected) => modules.length === expected.length
@@ -206,6 +207,7 @@ export default [
         fixture.updateGlobal('protected-card', { localApplication: latestApplication, additionalNotes: 'new notes saved during preflight' });
         fixture.releaseHistory();
         assert.equal((await fixture.execution).status, 'completed');
+        assert.equal(fixture.getNodes().find(node => node.id === 'board').data.salaryMethodVersion, JOB_COMPENSATION_METHOD_VERSION, 'only a successful board publication records the refreshed salary method');
         assert.equal(fixture.calls.clear.length, 1);
         const deletion = fixture.calls.clear[0];
         assert(!deletion.nodes.some(node => node.id === 'protected-card'), 'the retained card must never enter the deletion lifecycle');

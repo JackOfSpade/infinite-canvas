@@ -11,14 +11,14 @@ import { US_STATES, CA_PROVINCES } from './jobLocation.js';
 const US_STATE_NAMES = Object.values(US_STATES).join('|');
 
 const EXPLICIT_CURRENCIES = [
-  ['CAD', /(?:\bCAD\b|CA\$|C\$)/i],
-  ['USD', /(?:\bUSD\b|US\$)/i],
-  ['AUD', /(?:\bAUD\b|AU\$|A\$)/i],
-  ['NZD', /(?:\bNZD\b|NZ\$)/i],
-  ['HKD', /(?:\bHKD\b|HK\$)/i],
-  ['SGD', /(?:\bSGD\b|SG\$|S\$)/i],
-  ['MXN', /(?:\bMXN\b|MX\$)/i],
-  ['BRL', /(?:\bBRL\b|R\$)/i],
+  ['CAD', /(?:\bCAD\b|(?<![a-z])(?:CA\$|C\$))/i],
+  ['USD', /(?:\bUSD\b|(?<![a-z])US\$)/i],
+  ['AUD', /(?:\bAUD\b|(?<![a-z])(?:AU\$|A\$))/i],
+  ['NZD', /(?:\bNZD\b|(?<![a-z])NZ\$)/i],
+  ['HKD', /(?:\bHKD\b|(?<![a-z])HK\$)/i],
+  ['SGD', /(?:\bSGD\b|(?<![a-z])(?:SG\$|S\$))/i],
+  ['MXN', /(?:\bMXN\b|(?<![a-z])MX\$)/i],
+  ['BRL', /(?:\bBRL\b|(?<![a-z])R\$)/i],
   ['EUR', /(?:\bEUR\b|€)/i],
   ['GBP', /(?:\bGBP\b|£)/i],
   ['INR', /(?:\bINR\b|₹)/i],
@@ -39,7 +39,7 @@ const EXPLICIT_CURRENCIES = [
 
 const LOCATION_CURRENCIES = [
   ['CAD', /\b(?:canada|ontario|quebec|british columbia|alberta|manitoba|saskatchewan|nova scotia|new brunswick|newfoundland(?: and labrador)?|prince edward island|northwest territories|nunavut|yukon)\b/i],
-  ['USD', new RegExp(`\\b(?:united states(?: of america)?|u\\.?s\\.?a?\\.?|${US_STATE_NAMES})\\b`, 'i')],
+  ['USD', new RegExp(`\\b(?:united states(?: of america)?|u\\.?s\\.?a?\\.?|san francisco bay area|${US_STATE_NAMES})\\b`, 'i')],
   ['GBP', /\b(?:united kingdom|great britain|england|scotland|wales|northern ireland)\b/i],
   ['EUR', /\b(?:ireland|germany|deutschland|france|spain|italy|netherlands|belgium|austria|portugal|finland|greece|luxembourg|estonia|latvia|lithuania|slovakia|slovenia|croatia|cyprus|malta)\b/i],
   ['AUD', /\b(?:australia|new south wales|queensland|victoria,? australia|western australia|south australia|tasmania|australian capital territory)\b/i],
@@ -63,11 +63,13 @@ const US_STATE_CODE_RE = new RegExp(`,\\s*(?:${Object.keys(US_STATES).map((code)
 
 /** Return an explicitly stated salary currency, or null when the listing is ambiguous. */
 export function explicitSalaryCurrency(salary) {
+  const currencies = explicitSalaryCurrencies(salary);
+  return currencies.length === 1 ? currencies[0] : null;
+}
+
+export function explicitSalaryCurrencies(salary) {
   const pay = String(salary || '');
-  for (const [currency, pattern] of EXPLICIT_CURRENCIES) {
-    if (pattern.test(pay)) return currency;
-  }
-  return null;
+  return EXPLICIT_CURRENCIES.filter(([, pattern]) => pattern.test(pay)).map(([currency]) => currency);
 }
 
 /**
@@ -75,20 +77,23 @@ export function explicitSalaryCurrency(salary) {
  * always wins; a location fallback is deliberately exposed as an inference.
  */
 export function inferSalaryCurrency(salary, location) {
-  const explicit = explicitSalaryCurrency(salary);
-  if (explicit) return { currency: explicit, inferred: false };
+  const explicit = explicitSalaryCurrencies(salary);
+  if (explicit.length > 1) return null;
+  if (explicit.length === 1) return { currency: explicit[0], inferred: false };
 
   const place = String(location || '');
   if (!place.trim()) return null;
-  if (CANADIAN_PROVINCE_CODE_RE.test(place)) return { currency: 'CAD', inferred: true };
-  if (US_STATE_CODE_RE.test(place)) return { currency: 'USD', inferred: true };
+  const currencies = new Set();
+  if (CANADIAN_PROVINCE_CODE_RE.test(place)) currencies.add('CAD');
+  if (US_STATE_CODE_RE.test(place)) currencies.add('USD');
   for (const [currency, pattern] of LOCATION_CURRENCIES) {
-    if (pattern.test(place)) return { currency, inferred: true };
+    if (pattern.test(place)) currencies.add(currency);
   }
-  return null;
+  return currencies.size === 1 ? { currency: [...currencies][0], inferred: true } : null;
 }
 
 export function formatSalaryCurrencyLabel(salary, location) {
+  if (explicitSalaryCurrencies(salary).length > 1) return 'Multiple currencies · see listing';
   const info = inferSalaryCurrency(salary, location);
   if (!info) return 'Currency not specified';
   return info.inferred ? `${info.currency} · inferred from location` : info.currency;

@@ -42,7 +42,7 @@ function actualGenericGlue(resolveRows, row, checkpoints) {
 
 export default [
   {
-    name: 'R3 generic Solve checkpoints a transient real-service result then publishes it without a second handoff while new rows resolve once',
+    name: 'R3 generic Solve rejudges changed checkpoint input and resolves genuinely new rows once',
     async run() {
       const first = job('one'); const fresh = job('two'); const calls = []; const checkpoints = []; let handoffs = 0; let saves = 0;
       const resolveRows = async rows => {
@@ -59,10 +59,10 @@ export default [
       assert.ok(checkpoints[0].jobs[0].officialPosting.trail.includes('fetch-failed'));
       const cleaned = { ...first, snippet: 'Requirements include newly cleaned dispatch responsibilities.', salary: '$80 - $90 per hour' };
       const published = await glue.publish([cleaned, fresh]);
-      assert.deepEqual(calls, [[first.url], [fresh.url]]); assert.equal(handoffs, 2, 'one handoff per genuinely unprocessed input, including a transient first row');
+      assert.deepEqual(calls, [[first.url], [cleaned.url, fresh.url]]); assert.equal(handoffs, 2, 'the changed source and new row share one fresh research chunk');
       assert.equal(saves, 0); assert.equal(published.jobs[0].snippet, cleaned.snippet); assert.equal(published.jobs[0].salary, cleaned.salary);
       for (const field of ['title', 'company', 'location', 'url', 'source']) assert.equal(published.jobs[0][field], cleaned[field]);
-      assert.equal(published.officialPosting.total, 2); assert.equal(published.officialPosting.handoffs, 2);
+      assert.equal(published.officialPosting.total, 3); assert.equal(published.officialPosting.handoffs, 2);
       await glue.publish([cleaned, fresh]); assert.equal(handoffs, 2);
     },
   },
@@ -84,15 +84,16 @@ export default [
     },
   },
   {
-    name: 'R3 recovery reuses an already processed global fallback without manufacturing metadata or storing it',
+    name: 'R3 recovery rejudges changed global fallback input without manufacturing metadata or storing it',
     async run() {
       const row = job('one'); let calls = 0;
       const resolve = createOfficialPostingRecoveryPassResolver(async rows => { calls++; return result(rows, { total: rows.length, failed: rows.length, outcomes: { failed: rows.length } }); });
       const initial = await resolve([row]); assert.equal(initial.jobs[0].officialPosting, undefined);
       const cleaned = { ...row, snippet: 'A newly cleaned description stays intact.' };
       const again = await resolve([cleaned]);
-      assert.equal(calls, 1); assert.equal(again.jobs[0].officialPosting, undefined); assert.equal(again.jobs[0].snippet, cleaned.snippet);
-      assert.equal(again.officialPosting.failed, 1); assert.equal(again.officialPosting.total, 1);
+      assert.equal(calls, 2); assert.equal(again.jobs[0].officialPosting, undefined); assert.equal(again.jobs[0].snippet, cleaned.snippet);
+      assert.equal(again.officialPosting.failed, 2); assert.equal(again.officialPosting.total, 2);
+      await resolve([{ ...cleaned }]); assert.equal(calls, 2, 'an unchanged retry still reuses its own fallback receipt');
     },
   },
   {

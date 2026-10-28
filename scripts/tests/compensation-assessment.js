@@ -1,6 +1,11 @@
 import { assert } from '../test-dependencies.js';
 import { buildJobTreeNodes, isCompensationRecommendationCurrent, normalizeCompensationAssessment } from '../../src/nodes/jobsearch/buildJobTree.js';
 import { estimateCompensationExperienceYearsFromDescription, selectCompensationExperienceYears } from '../../electron/ipc/jobCompensation.js';
+import { compensationAssessment, parseGuaranteedCashOffer } from '../../electron/ipc/jobCompensation.js';
+import { jobCompensationDisplay } from '../../src/utils/jobCompensationDisplay.js';
+import { advertisedSalaryForJob } from '../../src/utils/jobAdvertisedSalary.js';
+import { collectJobCompensationReport } from '../../src/utils/jobCompensationReport.js';
+import { buildJobCompensationSnapshot } from '../../electron/ipc/bugReport/jobCompensationSnapshot.js';
 
 const personalRecommendation = {
   schemaVersion: 1,
@@ -28,6 +33,127 @@ const assessment = {
 };
 
 export default [
+  {
+    name: 'Repeated description salary bands remain usable without merging genuinely different offers',
+    run() {
+      const location = 'Toronto, Ontario, Canada';
+      for (const description of [
+        'The actual base salary offered depends on experience. CAD $92,000–$134,000\nWage Notice CAD $92,000–$134,000',
+        'Compensation reflects base salary only and excludes equity or benefits. $92,000–$134,000 CAD\nBase Salary $92,000–$134,000 CAD',
+        'Annual base salary: CAD $92k–$134k\nSalary range CAD $92,000–$134,000 per year',
+      ]) {
+        const result = parseGuaranteedCashOffer({ location, description });
+        assert(result.usable && result.min === 92000 && result.max === 134000 && result.currency === 'CAD',
+          'one pay band repeated under different labels must support the advertised-pay comparison');
+      }
+      for (const description of [
+        'Salary: CAD $92,000–$134,000\nWage notice CAD $95,000–$140,000',
+        'Salary: CAD $92–$134 per hour\nSalary: CAD $92–$134 per day',
+        'Salary: USD $92,000–$134,000\nSalary: CAD $92,000–$134,000',
+        'Base salary CAD $92,000–$134,000 plus CAD $20,000 bonus\nSalary: CAD $92,000–$134,000',
+        'Canada salary $92,000–$134,000\nUnited States base salary $92,000–$134,000',
+        'Base salary USD $92,000–$134,000\nTotal compensation USD $92,000–$134,000',
+        'Base salary USD $92,000–$134,000\nOn-target earnings compensation USD $92,000–$134,000',
+        'Salary in Toronto CAD $92,000–$134,000\nSalary in Vancouver CAD $92,000–$134,000',
+        'Toronto salary CAD $92,000–$134,000\nVancouver salary CAD $92,000–$134,000',
+      ]) {
+        const result = parseGuaranteedCashOffer({ location, description });
+        assert(!result.usable && result.reasonCode === 'ambiguous_description_salary',
+          'differing amounts, periods, currencies or extra money remain ambiguous');
+      }
+      for (const [currency, description] of [
+        ['EUR', 'Salary: EUR €92,000–€134,000 per year'],
+        ['GBP', 'Salary: GBP £92,000–£134,000 per year'],
+      ]) {
+        const result = parseGuaranteedCashOffer({ location, description });
+        assert(result.usable && result.currency === currency, 'a currency code and its own symbol name one pay currency');
+      }
+      const mixedField = parseGuaranteedCashOffer({ location, salary: 'USD $92,000–CAD $134,000' });
+      assert(!mixedField.usable && mixedField.reasonCode === 'currency_unclear',
+        'a dedicated salary field must reject mixed currencies just as a description does');
+      for (const salary of [
+        'USD 92,000 base salary + CAD 20,000 bonus',
+        'USD $92,000 base salary + CAD $20,000 bonus',
+        'Base salary USD $92,000 + CAD $20,000 bonus',
+        '$92,000 USD base salary + CAD $20,000 bonus',
+      ]) {
+        const baseAndForeignBonus = parseGuaranteedCashOffer({ location, salary });
+        assert(baseAndForeignBonus.usable && baseAndForeignBonus.currency === 'USD' && baseAndForeignBonus.max === 92000,
+          'a foreign variable-pay currency cannot relabel separately stated base pay');
+      }
+      const bareBase = parseGuaranteedCashOffer({ location: 'Austin, TX', salary: '$92,000 base salary + CAD $20,000 bonus' });
+      assert(bareBase.usable && bareBase.currency === 'USD' && bareBase.currencyInferredFromLocation,
+        'a base figure without an explicit currency must use its own market, never an excluded bonus currency');
+      const bareWithoutMarket = parseGuaranteedCashOffer({ salary: '$92,000 base salary + CAD $20,000 bonus' });
+      assert(!bareWithoutMarket.usable && bareWithoutMarket.reasonCode === 'currency_unclear',
+        'an excluded bonus cannot establish the currency of an otherwise ambiguous base amount');
+    },
+  },
+  {
+    name: 'Salary comparison reads description pay without mixing currencies, levels, or unrelated financial figures',
+    run() {
+      const job = { salary: '', location: 'Toronto, Ontario, Canada', description: 'Build useful tools.\nThe annual base salary range is CAD $90,000–$120,000.\nJoin our team.' };
+      const offer = parseGuaranteedCashOffer(job);
+      assert(offer.usable && offer.min === 90000 && offer.max === 120000 && offer.currency === 'CAD');
+      assert(compensationAssessment({ offer, competitiveRanges: [{ min: 100000, max: 140000, currency: 'CAD' }] }).status === 'competitive');
+      const split = parseGuaranteedCashOffer({ location: job.location, description: 'Compensation Range:\nCAD $90,000–$120,000' });
+      assert(split.usable && split.max === 120000, 'a pay label on the preceding line must retain the stated range');
+      const hourly = parseGuaranteedCashOffer({ location: job.location, description: 'Base pay: CAD $45/hour.\nFull-time, 40 hours per week.' });
+      assert(hourly.usable && hourly.max === 93600, 'description recovery must preserve cadence and known hours');
+      const minimum = parseGuaranteedCashOffer({ location: job.location, description: 'Salary starts from CAD $90,000.' });
+      assert(!minimum.usable && minimum.reasonCode === 'salary_maximum_unstated');
+      const ambiguous = [
+        'Salary: USD $90,000–$120,000.\nSalary: CAD $110,000–$150,000.',
+        'Targeted cash compensation:\nP2: $90,000–$120,000\nP3: $120,000–$160,000',
+        'Salary: USD $90,000–CAD $120,000.',
+      ];
+      for (const description of ambiguous) {
+        const result = parseGuaranteedCashOffer({ location: job.location, description });
+        assert(!result.usable && result.reasonCode === 'ambiguous_description_salary', 'multiple pay markets or levels must not become one invented offer');
+      }
+      const financial = parseGuaranteedCashOffer({ location: job.location, description: 'Our company raised $120,000,000. We offer competitive compensation.' });
+      assert(!financial.usable, 'company funding must not become an advertised salary');
+      const unrelated = parseGuaranteedCashOffer({ ...job, descriptionCapture: 'external-page-full-text' });
+      assert(!unrelated.usable && unrelated.reasonCode === 'description_scope_unclear');
+      assert(advertisedSalaryForJob({ ...job, salary: 'CAD $80,000 per year' }).source === 'salary_field', 'the dedicated pay field stays primary');
+    },
+  },
+  {
+    name: 'Every salary disclosure separates an advertised-pay verdict from guidance and explains research skips',
+    run() {
+      for (const reasonCode of ['below_fit_threshold', 'comparison_location_unavailable', 'market_currency_unavailable', 'fit_score_unavailable', 'research_interrupted']) {
+        const result = jobCompensationDisplay({ compensationAssessment: { schemaVersion: 1, status: 'not_evaluated', reasonCode } });
+        assert(result.label === 'Cannot determine pay competitiveness' && result.explanation.includes('No advertised cash pay'), 'missing pay remains explicit even when another gate skipped research');
+      }
+      const marketJob = { compensationAssessment: { ...assessment, status: 'market_recommendation', reasonCode: 'market_range_recommended', offered: null } };
+      const market = jobCompensationDisplay(marketJob);
+      assert(!market.determined && market.explanation.includes('researched market range') && market.explanation.includes('No advertised cash pay'));
+      const stale = jobCompensationDisplay({ ...marketJob, location: 'Toronto, Ontario, Canada', description: 'Base salary: CAD $90,000–$120,000.' });
+      assert(stale.hasAdvertisedPay && stale.offerReason === 'description_pay_unassessed' && stale.explanation.includes('did not compare it') && !stale.explanation.includes('No advertised cash pay'));
+      assert(jobCompensationDisplay({ compensationAssessment: assessment }).determined, 'a retained supported below-market verdict remains visible');
+      const skipped = compensationAssessment({ offer: { usable: false, reasonCode: 'hourly_hours_unclear' }, reasonCode: 'below_fit_threshold' });
+      assert(skipped.reasonCode === 'below_fit_threshold' && skipped.offerReasonCode === 'hourly_hours_unclear', 'retain the pay limitation independently of the skip reason');
+      const hourly = jobCompensationDisplay({ salary: '$45/hour', compensationAssessment: skipped });
+      assert(hourly.explanation.includes('Weekly hours') && hourly.explanation.includes('hiring fit'));
+    },
+  },
+  {
+    name: 'Salary audit covers hidden nested cards after restart and emits only fixed metadata',
+    run() {
+      const nodes = [{ type: 'group', data: { canvasData: { nodes: [
+        { id: 'private-card-id', type: 'jobcard', hidden: true, data: { salary: 'PRIVATE_SALARY', compensationAssessment: { ...assessment, justification: 'PRIVATE_PROSE', sourceLinks: [{ url: 'https://private.example.test' }] } } },
+        { id: 'missing', type: 'jobcard', data: {} },
+      ] } } }];
+      const snapshot = collectJobCompensationReport(nodes);
+      assert(snapshot.inspectedCards === 2 && snapshot.rows[0].thresholdCheck === 'consistent');
+      const report = buildJobCompensationSnapshot([], snapshot);
+      assert(report.includes('2 inspected') && report.includes('below_market=1') && report.includes('legacy_unresearched'));
+      for (const privateValue of ['PRIVATE_SALARY', 'PRIVATE_PROSE', 'private-card-id', 'private.example.test']) assert(!JSON.stringify(snapshot).replace('private-card-id', '').includes(privateValue) && !report.includes(privateValue));
+      const malicious = buildJobCompensationSnapshot([], { inspectedCards: 1, rows: [{ id: 'id', status: 'PRIVATE_STATUS', reason: 'PRIVATE_REASON', offerReason: 'PRIVATE_REASON', thresholdCheck: 'PRIVATE_CHECK' }] });
+      assert(!malicious.includes('PRIVATE_'), 'main-process rendering revalidates renderer metadata');
+      assert(collectJobCompensationReport(nodes, { flat: true }).inspectedCards === 0, 'flat live inventories must not descend into stale embedded snapshots');
+    },
+  },
   {
     name: 'Compensation assessments fail open for legacy and malformed cards',
     run: () => {
@@ -238,6 +364,7 @@ export default [
     run: () => {
       const jobs = [{
         title: 'Senior Designer', company: 'Acme', location: 'Toronto, ON', salary: 'C$70k–C$85k',
+        descriptionCapture: 'external-page-full-text',
         matchScore: 88, reasoning: 'Strong match.', compensationAssessment: assessment,
       }];
       const common = { displayedJobs: jobs, originalPos: { x: 0, y: 0 }, hubId: 'hub', baseNodeId: 'run' };
@@ -251,6 +378,8 @@ export default [
       });
       assert(grouped.newNodes.find((node) => node.type === 'jobcard')?.data?.compensationAssessment === assessment,
         'grouped hierarchy cards must retain compensation research');
+      assert(grouped.newNodes.find((node) => node.type === 'jobcard')?.data?.descriptionCapture === 'external-page-full-text',
+        'cards must retain description scope so a whole careers page cannot supply another job’s salary');
       assert(grouped.newNodes.find((node) => node.type === 'jobcard')?.data?.compensationAssessment.personalRecommendation.desiredSalary === 105000,
         'grouped hierarchy cards must retain personal guidance alongside the market assessment');
       return { groupedCards: grouped.newNodes.filter((node) => node.type === 'jobcard').length };
@@ -298,8 +427,8 @@ export default [
       });
       assert(explicitMinimum.years === 5 && explicitMinimum.basis === 'description-stated-minimum',
         'an explicit job-description minimum must place the listing in a salary experience band when structured scoring evidence lacks years');
-      assert(explicitRange.years === 5 && explicitRange.basis === 'description-stated-minimum',
-        'a stated experience range must use its highest explicit requirement when choosing a salary market');
+      assert(explicitRange.years === 3 && explicitRange.basis === 'description-stated-minimum',
+        'a stated experience range must use its lower required endpoint when choosing a salary market');
       assert(titleSeniority.years === 5 && titleSeniority.basis === 'description-seniority-estimate'
         && principalSeniority.years === 10 && principalSeniority.basis === 'description-seniority-estimate',
       'a listed seniority level must produce a clearly marked market estimate when the description has no numeric experience requirement');

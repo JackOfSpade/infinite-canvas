@@ -291,6 +291,13 @@ export function deriveBridgePushProgress({ chat: rawChat, bridge: rawBridge, own
       headline: BRIDGE_COPY.health.paused[0], detail: BRIDGE_COPY.health.paused[1], tone: 'attention',
     });
   }
+  if (bridge.enabled === true && bridge.serving === 'live' && bridge.tunnelReachable === false) {
+    return build({ kind: 'push-connection-lost', steps }, {
+      headline: 'ChatGPT handoff connection is unavailable',
+      detail: 'Waiting for the connection to recover. This handoff is still pending; ChatGPT cannot send or receive handoffs while the tunnel is unreachable.',
+      tone: 'attention',
+    });
+  }
   if (awaitingClaim === true && (bridge.enabled !== true || bridge.serving !== 'live' || bridge.tunnelReachable !== true || bridge.linked !== true)) {
     return build({ kind: 'push-not-ready', steps }, {
       headline: 'ChatGPT handoff is not ready',

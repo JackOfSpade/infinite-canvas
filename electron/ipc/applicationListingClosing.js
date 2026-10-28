@@ -56,6 +56,25 @@ function withoutFrozenCompany(text, company) {
   return remainder;
 }
 
+// A cited employer team name is a noun phrase, even when one of its words
+// ends in -ing. Keep that narrow grammatical context separate from the
+// original prose: every claim, figure, qualifier and name still gets checked.
+function withoutEmployerNounsForGerundCheck(text, company, quotes) {
+  const sources = quotes.map(normalize).join('\n');
+  let remainder = String(text ?? '');
+  // A company word can also be a verb. Require its exact frozen casing and
+  // the explicit join-target grammar before treating it as a company noun.
+  for (const name of targetCompanyNames(company).sort((a, b) => b.length - a.length)) {
+    remainder = remainder.replace(new RegExp(`(?<![\\p{L}\\p{N}])((?:join|joining)\\s+)${escape(name)}(?:['’]s?)?(?![\\p{L}\\p{N}])`, 'gu'),
+      (phrase, lead) => lead + ' '.repeat(phrase.length - lead.length));
+  }
+  return remainder.replace(
+    /(?<![\p{L}\p{N}])(?:your|Your)\s+((?:\p{Lu}[\p{L}\p{N}'’.-]*\s+){1,8}[Tt]eams?)(?![\p{L}\p{N}])/gu,
+    (phrase, name) => new RegExp(`(?<![\\p{L}\\p{N}])${escape(normalize(name))}(?![\\p{L}\\p{N}])`, 'iu').test(sources)
+      ? ' '.repeat(phrase.length) : phrase,
+  );
+}
+
 function postingBody(markdown) {
   const lines = String(markdown ?? '').replace(/\r\n?/gu, '\n').split('\n');
   const heading = lines.indexOf(ORIGINAL_JOB_LISTING_BODY_HEADING);
@@ -115,7 +134,8 @@ export function evaluateFinalParagraphListingGrounding(context, deps) {
       if (deps.speaksOnlyOfIntent(clause)) return true;
       const { matched, remainder } = listingClosingIntentLeadInRemainder(clause);
       return matched && !/\b(?:I|we|my|our)\b/iu.test(remainder)
-        && deps.reportsNoPastWork(withoutFrozenCompany(remainder, company)) && !deps.hasWorkIngWord(remainder);
+        && deps.reportsNoPastWork(withoutFrozenCompany(remainder, company))
+        && !deps.hasWorkIngWord(withoutEmployerNounsForGerundCheck(remainder, company, result.listingQuotes));
     };
     const intent = deps.speaksOnlyOfApplicationIntent(sentence) || (clauses.length > 0 && clauses.every(closingIntent));
     if (deps.hasFigureOrYear(sentence)
@@ -148,7 +168,7 @@ export function evaluateFinalParagraphListingGrounding(context, deps) {
         const prefix = `clause ${clauseIndex + 1} with `;
         if (!deps.reportsNoPastWork(remainder)) fail(ordinal, `${prefix}no past-work word after its single anchored intent lead-in`);
         if (/\b(?:i|we)\b/iu.test(remainder)) fail(ordinal, `${prefix}no second first-person subject after its intent lead-in`);
-        if (deps.hasWorkIngWord(remainder)) fail(ordinal, `${prefix}no work gerund after its single anchored intent lead-in`);
+        if (deps.hasWorkIngWord(withoutEmployerNounsForGerundCheck(remainder, company, result.listingQuotes))) fail(ordinal, `${prefix}no work gerund after its single anchored intent lead-in`);
       }
       if (/\b(?:my|our|mine|ours)\b/iu.test(sentence)) fail(ordinal, 'no first-person possessive');
       if (!capitalizedTermsStated(sentence, result.listingQuotes, company)) fail(ordinal, 'every capitalized or acronym term in the frozen company or a cited listing quote');

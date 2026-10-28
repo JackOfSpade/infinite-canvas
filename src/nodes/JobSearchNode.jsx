@@ -35,6 +35,7 @@ import { createRunOwnershipGuard } from '../utils/runOwnership';
 import { createJobAnalysisOperationLedger, jobAnalysisOperationMatches } from '../utils/jobAnalysisOperationLedger';
 import { jobAnalysisInputDigest } from '../utils/jobAnalysisInputDigest';
 import { createManualAiPreSearchRecovery, exactStagedOfferSupersedesPreSearchManualAiResume, isLiveManualAiRecoveryBoardOwner, isSavedJobReanalysisManualAiResume, isSavedScrapeManualAiResume, isStaleOrdinaryManualAiResume, manualAiPreSearchRecoveryForResume, REANALYZE_SAVED_JOBS_MANUAL_AI_RECOVERY_MODE, staleOrdinaryManualAiResumeBlocksAdmission } from '../utils/manualAiRecovery';
+import { cardOfficialPostingHubMarkerCleanup, isCardOfficialPostingRunId } from '../utils/jobHubManualAiOwnership';
 import { isTerminalSourceStatus } from '../utils/sourceProgress';
 import { detectQueryOperators } from '../utils/jobTitleMatch';
 
@@ -79,7 +80,7 @@ import { isJobBoardUserCancellation } from '../utils/jobBoardAiProvider';
 import { exactInterruptedRecoveryBackendFailure, hasCheckpointedPostCollectionAnalysis } from '../utils/jobBoardRecoveryAdmission';
 import { classifyJobBoardSourceAdmission } from '../utils/jobBoardSourceAdmission';
 import { buildJobHubCareerOnlyClearPatch, buildJobHubScrapeClearPatch, buildSavedJobsRescoreMarker, hubRetainsSavedJobs, isCareerClearedWithSavedJobs, pendingSavedJobsRescore, savedJobCount as countSavedJobs, savedJobsRescoreCompletionPatch } from '../utils/jobSearchSplitClear';
-import { createJobCareerImportCapability, freshJobCareerImportCapability, jobCareerImportBoardAdmission, jobCareerImportConsumptionPatch, retryableUnstartedJobCareerImportCapability } from '../utils/jobCareerImportCapability';
+import { createJobCareerImportCapability, freshJobCareerImportCapability, jobCareerImportBoardAdmission, jobCareerImportConsumptionPatch, retryableUnstartedJobCareerImportCapability, retryableCancelledJobCareerImportCapability } from '../utils/jobCareerImportCapability';
 import { isCareerCompilerTask } from '../utils/careerCompilerTasks';
 import { pausedCareerImportCompilation, restartCareerImportCompilationPatch, approveCareerImportCompilation, beginCareerImportCompilation, careerCompileResumeExplanation, careerImportCompilationAdmission, careerResumeBannerStatus, careerImportCompilationMatches, careerResumeInputPaths, currentApprovedCareerImportSnapshot, failCareerImportCompilation, resumableCareerImportCompilation } from '../utils/jobCareerCompilationReceipt';
 import { buildJobCareerQueryCacheKey, canClaimJobRunCollectionCompletion, careerSnapshotBindingMatches, exactJobRunCareerSnapshotBindingMatches, normalizedJobCareerSnapshotId } from '../utils/jobCareerSnapshotBinding';
@@ -217,11 +218,12 @@ function removeManualAiCleanupReceipt(receipts, runId) {
 
 function hasCancellationPendingManualAiCleanup(data) {
   return normalizeManualAiCleanupReceipts(data?.manualAiCleanupReceipts)
-    .some(receipt => receipt.cancellationPending === true);
+    .some(receipt => !isCardOfficialPostingRunId(receipt.runId) && receipt.cancellationPending === true);
 }
 
 function hasPendingManualAiRetirement(data) {
-  return data?.manualAiResume?.retirementPending === true
+  return (!isCardOfficialPostingRunId(data?.manualAiResume?.runId)
+    && data?.manualAiResume?.retirementPending === true)
     || hasCancellationPendingManualAiCleanup(data);
 }
 
@@ -1140,8 +1142,8 @@ function boardRunRollbackPatch(previousData, nodeId) {
   return {
     ...prior,
     // A cancelled Board must not restore an unconsumed import capability from
-    // its pre-run snapshot. The retained profile can still support exact
-    // recovery, but a new provider run requires Clear + re-import.
+    // its pre-run snapshot before backend cleanup is acknowledged. A later
+    // Board turn may reclaim this explicit cancellation after checking disk.
     ...(freshImportCapability ? jobCareerImportConsumptionPatch({
       capability: freshImportCapability,
       origin: 'board-cancelled',
@@ -1168,6 +1170,7 @@ function boardRunRollbackPatch(previousData, nodeId) {
       scrapedCount: 0,
       gatheredCount: 0,
       resultDisposition: null,
+      scrapeWarnings: [],
       errorMessage: null,
     }),
   };
@@ -1343,7 +1346,17 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
   // The app-level dialog reports immutable manual run ids. Keep the currently
   // published request identity so a late cancellation for an older standalone
   // run cannot reset whichever workflow now owns this hub.
-  const activeManualAiRunIdRef = useRef(data.manualAiResume?.runId || null);
+  const activeManualAiRunIdRef = useRef(isCardOfficialPostingRunId(data.manualAiResume?.runId)
+    ? null : data.manualAiResume?.runId || null);
+  // Older renderers adopted card research as Search recovery because the card
+  // routes through this hub's bridge. Remove the copied markers without
+  // cancelling or retiring the card-owned request.
+  useEffect(() => {
+    const liveData = getNode(id)?.data || data;
+    if (!cardOfficialPostingHubMarkerCleanup(liveData)) return;
+    if (isCardOfficialPostingRunId(activeManualAiRunIdRef.current)) activeManualAiRunIdRef.current = null;
+    updateGlobal(id, node => cardOfficialPostingHubMarkerCleanup(node?.data));
+  }, [data, getNode, id, updateGlobal]);
   // A stale standalone recovery owns admission until the person either starts
   // or discards that exact marker. Keep both React-visible and synchronous
   // ownership so two rapid clicks cannot race a resume against a discard.
@@ -2128,7 +2141,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
   }, [sourceProgress, hubState, data.scrapeWarnings, id, getNodes, scheduleCleanSourceCardDismiss, cancelCleanSourceCardDismiss]);
 
   const retireManualAiRunDurably = useCallback(async (runId) => {
-    if (!runId) return true;
+    if (!runId || isCardOfficialPostingRunId(runId)) return true;
     if (!window.electronAPI?.completeNonApiAiRun) {
       throw new Error('Durable manual-AI cleanup is unavailable.');
     }
@@ -2150,13 +2163,13 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     acknowledgedRunIds = null,
     beforeRetirement = null,
   } = {}) => {
-    if (!runId) return true;
+    if (!runId || isCardOfficialPostingRunId(runId)) return true;
     const cancellationWasPreAcknowledged = Array.isArray(acknowledgedRunIds);
     let cancellationAcknowledged = cancellationWasPreAcknowledged || !requireCancellationAck;
     const runIds = new Set([
       runId,
       ...(cancellationWasPreAcknowledged ? acknowledgedRunIds : []),
-    ].filter(Boolean));
+    ].filter(value => value && !isCardOfficialPostingRunId(value)));
     let acknowledgementError = null;
     if (requireCancellationAck && !cancellationWasPreAcknowledged) {
       attemptedManualAiCleanupRunIdsRef.current.add(runId);
@@ -2225,7 +2238,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         }
         cancellationAcknowledged = true;
         for (const acknowledgedRunId of acknowledgement?.manualAiRunIds || []) {
-          if (acknowledgedRunId) runIds.add(acknowledgedRunId);
+          if (acknowledgedRunId && !isCardOfficialPostingRunId(acknowledgedRunId)) runIds.add(acknowledgedRunId);
         }
       } catch (error) {
         acknowledgementError = error;
@@ -5024,6 +5037,33 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         EventLogger.log(
           `[JobSearch][${currentId}] Reclaimed legacy unstarted Board import for post-login retry board=${boardRunId}`,
         );
+      }
+
+      // A rollback can become visible before its asynchronous cleanup settles.
+      // Reclaim cancelled imports only under this Board's lane, after the host
+      // confirms that no old worker or staged run can race the new generation.
+      if (queueManagedByBoard && freshImportCapability
+        && retryableCancelledJobCareerImportCapability(getNode(currentId)?.data, { nodeId: currentId }) === freshImportCapability) {
+        const acknowledged = await window.electronAPI.cancelNodeTaskAndWait?.(currentId, 'cancelled-search-retry');
+        if (cancelled()) return searchRunOutcome('cancelled');
+        if (acknowledged?.settled !== true || !canvasFilePath || !window.electronAPI.peekJobRun) {
+          return searchRunOutcome('not-ready', { error: 'The cancelled search has not finished stopping. Retry cancellation before searching again.' });
+        }
+        const recovery = await window.electronAPI.peekJobRun({ canvasFilePath, nodeId: currentId });
+        if (cancelled()) return searchRunOutcome('cancelled');
+        if (recovery?.success !== true || recovery.found !== false) {
+          return searchRunOutcome('not-ready', { error: 'The cancelled search still has recovery work. Finish cancelling its Job Board before retrying.' });
+        }
+        updateGlobal(currentId, (node) => (
+          retryableCancelledJobCareerImportCapability(node?.data, { nodeId: currentId }) === freshImportCapability
+            ? { careerImportFreshCapability: freshImportCapability, careerImportConsumption: null }
+            : null
+        ));
+        await waitForRendererCommitFrame();
+        if (freshJobCareerImportCapability(getNode(currentId)?.data, { nodeId: currentId }) !== freshImportCapability) {
+          return searchRunOutcome('not-ready', { error: 'Career import changed while the cancelled search was being checked.' });
+        }
+        EventLogger.log(`[JobSearch][${currentId}] Cancelled Board import ready for retry board=${boardRunId}`);
       }
 
       processingToken = processingRunsRef.current.start();
@@ -10004,7 +10044,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
   useEffect(() => {
     const onManualAiNodeCancelled = (event) => {
       const detail = event.detail || {};
-      if (detail.nodeId !== id) return;
+      if (detail.nodeId !== id || isCardOfficialPostingRunId(detail.runId)) return;
       if (!detail.runId) {
         // An unscoped legacy event cannot prove which generation it belongs
         // to. The pipeline that owned the dialog still observes its backend
@@ -10115,6 +10155,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     const onPending = (event) => {
       const detail = event.detail || {};
       if (detail.nodeId !== id || !detail.runId) return;
+      if (isCardOfficialPostingRunId(detail.runId)) return;
       if (cancelledBoardManualAiRunIdsRef.current.has(detail.runId)) return;
       const boardControl = boardRunControlRef.current;
       const activeRunId = activeManualAiRunIdRef.current;
@@ -10224,7 +10265,8 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
 
   useEffect(() => {
     if (isJobWorkflowDeletionPending(id)) return;
-    const receipts = normalizeManualAiCleanupReceipts(data.manualAiCleanupReceipts);
+    const receipts = normalizeManualAiCleanupReceipts(data.manualAiCleanupReceipts)
+      .filter(receipt => !isCardOfficialPostingRunId(receipt.runId));
     const next = receipts.find(receipt => (
       !attemptedManualAiCleanupRunIdsRef.current.has(receipt.runId)
     ));
@@ -10436,7 +10478,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
           ? cleanupPatch.manualAiRunIds
           : []),
         cleanupPatch.manualAiRunId,
-      ].filter(runId => typeof runId === 'string' && runId);
+      ].filter(runId => typeof runId === 'string' && runId && !isCardOfficialPostingRunId(runId));
       updateGlobal(orchestratorNodeId, (node) => {
         const livePlan = node?.data?.boardScanResume;
         if (livePlan?.boardRunId !== boardRunId) return null;
@@ -10452,15 +10494,13 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
             : []),
           sourceCleanup.manualAiRunId,
           ...requestedRunIds,
-        ].filter(runId => typeof runId === 'string' && runId))];
+        ].filter(runId => typeof runId === 'string' && runId && !isCardOfficialPostingRunId(runId)))];
         const nextSourceCleanup = {
           ...sourceCleanup,
           ...cleanupPatch,
           sourceId: cleanupSourceId,
-          manualAiRunId: cleanupPatch.manualAiRunId
-            || sourceCleanup.manualAiRunId
-            || manualAiRunIds[0]
-            || null,
+          manualAiRunId: [cleanupPatch.manualAiRunId, sourceCleanup.manualAiRunId, ...manualAiRunIds]
+            .find(runId => runId && !isCardOfficialPostingRunId(runId)) || null,
           manualAiRunIds,
           commitNonce,
         };
@@ -10513,6 +10553,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
           ? boardPlan.activeSourceRollbacks[id]
           : null);
       const exactPersistedMarker = liveResume?.runId
+        && !isCardOfficialPostingRunId(liveResume.runId)
         && liveResume.orchestratorNodeId === orchestratorNodeId
         && liveResume.boardRunId === boardRunId;
       const durablePlanClaim = boardPlan?.version === 1
@@ -10569,6 +10610,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
 
       const ownsPersistedMarker = !!(
         liveResume?.runId
+        && !isCardOfficialPostingRunId(liveResume.runId)
         && (!liveResume.orchestratorNodeId || liveResume.orchestratorNodeId === orchestratorNodeId)
         && (!liveResume.boardRunId || liveResume.boardRunId === boardRunId)
       );
@@ -10579,11 +10621,10 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         persistedCleanup?.manualAiRunId,
         boardPlan?.activeSourceManualAiRunIds?.[id],
         ownsPersistedMarker ? liveResume.runId : null,
-      ].filter(Boolean));
-      let cancellationManualAiRunId = persistedCleanup?.manualAiRunId
-        || (ownsPersistedMarker ? liveResume.runId : null)
-        || [...cancellationManualAiRunIds][0]
-        || null;
+      ].filter(runId => runId && !isCardOfficialPostingRunId(runId)));
+      let cancellationManualAiRunId = [persistedCleanup?.manualAiRunId,
+        ownsPersistedMarker ? liveResume.runId : null, ...cancellationManualAiRunIds]
+        .find(runId => runId && !isCardOfficialPostingRunId(runId)) || null;
       if (ownsPersistedMarker) {
         rememberBoundedRunId(cancelledBoardManualAiRunIdsRef.current, liveResume.runId);
         if (activeManualAiRunIdRef.current === liveResume.runId) activeManualAiRunIdRef.current = null;
@@ -10651,7 +10692,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         }
         cancellationAcknowledged = true;
         for (const acknowledgedRunId of acknowledgement?.manualAiRunIds || []) {
-          if (acknowledgedRunId) cancellationManualAiRunIds.add(acknowledgedRunId);
+          if (acknowledgedRunId && !isCardOfficialPostingRunId(acknowledgedRunId)) cancellationManualAiRunIds.add(acknowledgedRunId);
         }
         cancellationManualAiRunId = cancellationManualAiRunId
           || [...cancellationManualAiRunIds][0]
@@ -10867,9 +10908,10 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     // publish over the restored result snapshot.
     control.cancelled = true;
     control.rollbackApplied = true;
-    const controlManualAiRunIds = control.manualAiRunIds instanceof Set
-      ? control.manualAiRunIds
-      : new Set([control.manualAiRunId].filter(Boolean));
+    const controlManualAiRunIds = new Set([
+      ...(control.manualAiRunIds instanceof Set ? control.manualAiRunIds : []),
+      control.manualAiRunId,
+    ].filter(runId => runId && !isCardOfficialPostingRunId(runId)));
     control.manualAiRunIds = controlManualAiRunIds;
     for (const ownedRunId of controlManualAiRunIds) {
       rememberBoundedRunId(cancelledBoardManualAiRunIdsRef.current, ownedRunId);
@@ -10915,13 +10957,12 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         throw new Error('The active Job Search did not finish cancelling before the safety timeout.');
       }
       for (const acknowledgedRunId of acknowledgement?.manualAiRunIds || []) {
-        if (!acknowledgedRunId) continue;
+        if (!acknowledgedRunId || isCardOfficialPostingRunId(acknowledgedRunId)) continue;
         controlManualAiRunIds.add(acknowledgedRunId);
         rememberBoundedRunId(cancelledBoardManualAiRunIdsRef.current, acknowledgedRunId);
       }
-      const primaryManualAiRunId = control.manualAiRunId
-        || [...controlManualAiRunIds][0]
-        || null;
+      const primaryManualAiRunId = [control.manualAiRunId, ...controlManualAiRunIds]
+        .find(runId => runId && !isCardOfficialPostingRunId(runId)) || null;
       if (primaryManualAiRunId) {
         const liveMarker = getNode(id)?.data?.manualAiResume;
         await settleManualAiRetirement({
@@ -12668,7 +12709,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
   // clearing its files would otherwise make the eventual live-turn validation
   // silently reject work the UI still claimed was queued.
   const cleanupRetirementPending = hasPendingManualAiRetirement(data);
-  const savedManualAiRecovery = data.manualAiResume;
+  const savedManualAiRecovery = isCardOfficialPostingRunId(data.manualAiResume?.runId) ? null : data.manualAiResume;
   const manualAiRecoveryNeedsDecision = !!savedManualAiRecovery?.runId
     && savedManualAiRecovery.retirementPending !== true
     && !manualAiRecoveryBoardOwnerKey;
@@ -13572,7 +13613,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
   const [manualAiAutoResumeRetryRevision, setManualAiAutoResumeRetryRevision] = useState(0);
   useEffect(() => {
     const resume = data.manualAiResume;
-    if (!resume?.runId) return;
+    if (!resume?.runId || isCardOfficialPostingRunId(resume.runId)) return;
     if (isJobWorkflowDeletionPending(id)) {
       // Do not consume any recovery latch while deletion is still reversible.
       // An already-running exact retirement keeps its attempt token until it

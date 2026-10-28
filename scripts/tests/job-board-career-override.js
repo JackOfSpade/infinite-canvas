@@ -21,7 +21,7 @@ import {
   resolveSalaryCareerSnapshotId,
   jobBoardCareerOverrideView,
   isBoardCombineManualAiRunId,
-  careerOverrideBoardMarkerCleanup,
+  boardIndependentManualAiMarkerCleanup,
 } from '../../src/utils/jobBoardCareerOverride.js';
 import { collectDeletedManualAiRetirements } from '../../src/utils/canvasInteractions.js';
 import { hasActiveExternalRunState } from '../../src/utils/undoNonRestorableState.js';
@@ -68,6 +68,43 @@ const COMBINE_RUN_2 = 'job-board:board-1:combine-2';
 
 export default [
   {
+    name: 'Board recovery self-heals saved card research without changing its owner or a real Combine',
+    run: () => {
+      const researchRun = 'official-posting:board-1-job-9:research';
+      const realReceipt = { runId: COMBINE_RUN, retirementPending: true };
+      const searchPlan = { boardRunId: 'search-run-7', phase: 'searches' };
+      const officialPosting = { preparationId: researchRun };
+      const saved = {
+        hubState: 'done', resultCount: 73, officialPosting,
+        manualAiResume: { runId: researchRun, task: 'official-posting', retirementPending: true },
+        manualAiCleanupReceipts: [{ runId: researchRun, cancellationPending: true }, realReceipt],
+        boardCancellation: { operationId: 'cancel-combine', manualAiRunIds: [researchRun, COMBINE_RUN] },
+        boardScanResume: searchPlan,
+      };
+      const patch = boardIndependentManualAiMarkerCleanup(saved);
+      assert.deepStrictEqual(patch, {
+        manualAiResume: null,
+        manualAiCleanupReceipts: [realReceipt],
+        boardCancellation: { operationId: 'cancel-combine', manualAiRunIds: [COMBINE_RUN] },
+      });
+      const healed = { ...saved, ...patch };
+      assert.strictEqual(healed.officialPosting, officialPosting, 'research owner state is retained');
+      assert.strictEqual(healed.boardScanResume, searchPlan, 'a real search continuation is retained');
+      assert.strictEqual(healed.hubState, 'done');
+      assert.strictEqual(healed.resultCount, 73);
+      assert.strictEqual(saved.manualAiResume.runId, researchRun, 'saved input is not mutated');
+      assert.strictEqual(boardIndependentManualAiMarkerCleanup(healed), null, 'cleanup is idempotent');
+      assert.deepStrictEqual(boardIndependentManualAiMarkerCleanup({
+        boardCancellation: { operationId: 'copied-cancel', boardRunId: researchRun, manualAiRunIds: [researchRun], sourceIds: [] },
+      }), { boardCancellation: null }, 'a foreign-only cancellation cannot keep retrying against the shared bridge hub');
+      const combinePlan = { version: 1, boardRunId: 'real-scan', phase: 'combine',
+        completedSourceRuns: { search: { runId: 'completed-search' } }, combineManualAiRunId: researchRun };
+      assert.deepStrictEqual(boardIndependentManualAiMarkerCleanup({ boardScanResume: combinePlan }), {
+        boardScanResume: { ...combinePlan, combineManualAiRunId: null },
+      }, 'a real scan retains completed source receipts while discarding the copied card token');
+    },
+  },
+  {
     name: 'salary source: Board wins; an empty Board uses the most recent connected Search import',
     run: () => {
       const search = (id, careerSnapshotId, approvedAt) => ({ id, data: { careerSnapshotId,
@@ -94,6 +131,8 @@ export default [
       assert.strictEqual(isBoardCombineManualAiRunId(COMBINE_RUN), true);
       assert.strictEqual(isBoardCombineManualAiRunId('search-run-7'), true);
       assert.strictEqual(isBoardCombineManualAiRunId(RUN_1), false);
+      assert.strictEqual(isBoardCombineManualAiRunId('official-posting:board-1-job-9:research'), false,
+        'card research shares the Board bridge hub but never owns Board recovery');
       assert.strictEqual(isBoardCombineManualAiRunId(''), false);
       assert.strictEqual(isBoardCombineManualAiRunId(null), false);
       assert.strictEqual(isBoardCombineManualAiRunId(undefined), false);
@@ -111,22 +150,22 @@ export default [
         boardScanResume: null,
         manualAiResume: { runId: RUN_2, task: 'career', startedAt: 10, updatedAt: 20 },
       };
-      const patch = careerOverrideBoardMarkerCleanup(saved);
+      const patch = boardIndependentManualAiMarkerCleanup(saved);
       assert.deepStrictEqual(patch, { manualAiResume: null });
       const applied = { ...saved, ...patch };
       assert.strictEqual(applied.manualAiResume, null);
       assert.deepStrictEqual(applied.jobBoardCareerOverride, record);
-      assert.strictEqual(careerOverrideBoardMarkerCleanup(applied), null, 'idempotent');
+      assert.strictEqual(boardIndependentManualAiMarkerCleanup(applied), null, 'idempotent');
 
       const combine = {
         manualAiResume: { runId: COMBINE_RUN, task: 'combine' },
         boardScanResume: { boardRunId: 'br-1', combineManualAiRunId: RUN_1 },
         jobBoardCareerOverride: record,
       };
-      assert.strictEqual(careerOverrideBoardMarkerCleanup(combine), null);
-      assert.strictEqual(careerOverrideBoardMarkerCleanup({}), null);
-      assert.strictEqual(careerOverrideBoardMarkerCleanup(null), null);
-      assert.strictEqual(careerOverrideBoardMarkerCleanup({ manualAiResume: { task: 'x' } }), null);
+      assert.strictEqual(boardIndependentManualAiMarkerCleanup(combine), null);
+      assert.strictEqual(boardIndependentManualAiMarkerCleanup({}), null);
+      assert.strictEqual(boardIndependentManualAiMarkerCleanup(null), null);
+      assert.strictEqual(boardIndependentManualAiMarkerCleanup({ manualAiResume: { task: 'x' } }), null);
     },
   },
   {
@@ -146,7 +185,7 @@ export default [
         manualAiCleanupReceipts: [combineReceipt, careerReceipt, combineReceipt2],
         boardCancellation: cancellation,
       };
-      const patch = careerOverrideBoardMarkerCleanup(saved);
+      const patch = boardIndependentManualAiMarkerCleanup(saved);
       assert.deepStrictEqual(patch, {
         manualAiCleanupReceipts: [combineReceipt, combineReceipt2],
         boardCancellation: {
@@ -157,9 +196,9 @@ export default [
         },
       });
       assert.deepStrictEqual(saved.boardCancellation.manualAiRunIds, [COMBINE_RUN, RUN_2, COMBINE_RUN_2, RUN_3], 'input not mutated');
-      assert.strictEqual(careerOverrideBoardMarkerCleanup({ ...saved, ...patch }), null, 'idempotent');
+      assert.strictEqual(boardIndependentManualAiMarkerCleanup({ ...saved, ...patch }), null, 'idempotent');
 
-      const onlyReceipts = careerOverrideBoardMarkerCleanup({
+      const onlyReceipts = boardIndependentManualAiMarkerCleanup({
         manualAiCleanupReceipts: [careerReceipt],
         boardCancellation: { operationId: 'op-2', manualAiRunIds: [COMBINE_RUN] },
       });
@@ -170,7 +209,7 @@ export default [
         manualAiCleanupReceipts: [combineReceipt],
         boardCancellation: { operationId: 'op-3', manualAiRunIds: [COMBINE_RUN_2] },
       };
-      assert.strictEqual(careerOverrideBoardMarkerCleanup(allClean), null);
+      assert.strictEqual(boardIndependentManualAiMarkerCleanup(allClean), null);
     },
   },
   {

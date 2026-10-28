@@ -189,3 +189,15 @@ Classification, by the user's notes first:
   Each appears once. They are evidence to watch, not rules.
 
 No guidance, brief, rubric or truth-gate change was proposed, so no offline replay or panel was run, and no quality gain is claimed. Frozen regression set: the 15 earlier pairs plus the 2 accepted pairs of this window (17). Counter reset after this entry.
+
+### 2026-10-28 — semantic official-posting identity; user-directed; counter not reset
+
+Moved production posting identity judgments to two independent AI comparisons of host-fetched source facts. Employer, title, location, work mode, pay and paraphrased descriptions are evaluated by meaning; source ownership, safe URLs, response shape and literal quotations remain host checks. Conflicting representations stay visible, larger inventories receive explicit AI triage, and uncertain decisions remain retryable. Cache and prepared-generation receipts bind the reviewed inputs and source facts; legacy decisions require a fresh comparison. This changes source resolution, not writer guidance, the model label or the frozen writing regression set. Verification uses synthetic semantic responses and a private captured-source replay; no live AI accuracy or writing-quality gain is claimed. The private improvement counter remains due and was not reset.
+
+### 2026-10-28 — bug-report evidence review; collection window extended
+
+Reviewed all 12 retained accepted pairs since the last reset, with no superseded pairs. Three contain saved prose edits; four removed letters were excluded from letter analysis. Notes-first classification of seven conceptual edits: wording 2, evidence choice 1, structure 1, length 1, letter structure 1 and user judgment 1, with no truth errors. Exact frozen source history was inspected for all 12 pairs, including later source adoption. No saved correction was classified as source-resolved.
+
+No precise defect recurs across three bundles. The strongest wording preference appears in two; the broader trimming category also spans two but differs in substance. Extend collection until further accepted edits with reasons establish a recurring defect. The private review retains the pair, source and editorial evidence. The counter remains due at 12; the model label, writer guidance, rubric and frozen regression set are unchanged. No comparative writing replay or panel was run, and no writing-quality gain is claimed.
+
+The bug review separately repaired ownership of card posting lookups routed through Board/Search hubs and a closing-validator false positive on cited employer-team nouns ending in “ing”. Other candidate-claim checks remain in place. Existing APPCORRECT diagnostics now distinguish closing rejection subcauses without retaining prose. Validation passed 5,320 unit tests and all 12 PDF suites/439 checks, production compilation, touched-file lint and the zero-ngram oracle gate.

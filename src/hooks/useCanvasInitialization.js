@@ -198,6 +198,7 @@ export function useCanvasInitialization({
           const snapshotIsCurrent = currentFileRef.current === currentFile
             && stateRevisionRef.current === savedRevision;
           if (res?.success && res.filePath && snapshotIsCurrent) {
+            EventLogger.recordSaveSuccess(currentFile);
             // Only update currentFile if the path changed (e.g. an on-disk rename
             // was resolved by the save implementation).
             if (res.filePath !== currentFile) setCurrentFile(res.filePath);

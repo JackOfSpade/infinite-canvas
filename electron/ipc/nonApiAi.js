@@ -3429,7 +3429,7 @@ const bridgeRawResearchTasks = new Set(BRIDGE_RAW_RESEARCH_TASKS);
 // source policy imports this list and adds its explicit never rows, so a new
 // task is manual by default until it is deliberately reviewed here.
 export const BRIDGE_RELEASE_ONE_TASKS = Object.freeze([
-  'job-listing-liveness', 'job-official-posting-research', 'job-official-posting-match',
+  'job-listing-liveness', 'job-official-posting-research', 'job-official-posting-shortlist', 'job-official-posting-match',
   'bundle-price-synthesis', 'job-compensation-assessment', 'job-compensation-assessment-batch',
   'job-compensation-research', 'job-compensation-research-batch', 'job-preference-evaluation',
   'job-preference-interpretation', 'job-preference-research', 'job-preference-research-assessment',

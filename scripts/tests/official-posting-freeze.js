@@ -12,6 +12,7 @@ import {
 import { writeApprovedCareerSnapshotFixture } from './careerSnapshotFixture.mjs';
 import { createOfficialPostingStore } from '../../electron/ipc/officialPostingStore.js';
 import { prepareOfficialPostingForGeneration } from '../../electron/ipc/officialPostingGeneration.js';
+import { officialPostingSemanticInputHash } from '../../electron/ipc/officialPostingSemantic.js';
 import { formatOriginalJobListingMarkdown } from '../../electron/ipc/applicationBundle.js';
 
 const hash = text => crypto.createHash('sha256').update(text).digest('hex');
@@ -27,6 +28,22 @@ const prepared = (description = officialText, extra = {}) => ({ description, pos
     ats: 'ashby', tenant: 'northwind-synthetic', contentHash: hash(description), trail: ['careers-page'], ...extra } });
 
 export default [
+  {
+    name: 'semantic queue freeze retains a verified hyphenated employer and its official description',
+    run() {
+      const raw = row();
+      const input = project(raw);
+      const value = prepared(officialText, { employer: 'Atlas-Orbit Labs', trail: ['semantic-match-v1'],
+        semanticMatch: { version: 1, inputHash: officialPostingSemanticInputHash(input), sourceHash: 'd'.repeat(64) } });
+      const result = freeze(raw, value);
+      assert.equal(result.company, 'Atlas-Orbit Labs');
+      assert.equal(result.postedBy, raw.company);
+      assert.equal(result.snippet, officialText);
+      assert.equal(result.officialPosting.level, 'L2');
+      const changed = freeze({ ...raw, snippet: 'Different source facts.' }, value);
+      assert.notEqual(changed.officialPosting.level, 'L2', 'a mismatched semantic proof cannot bypass the legacy fallback');
+    },
+  },
   {
     name: 'official-posting freeze overlays only trusted employer and complete text while preserving scraped identity and second-pass fields',
     run() {
@@ -94,7 +111,7 @@ export default [
           jobLocationType: 'TELECOMMUTE', applicantLocationRequirements: { '@type': 'Country', name: 'Canada' },
           description: text, validThrough: '2030-12-31', baseSalary: { currency: 'CAD', value: { value: 120000, unitText: 'YEAR' } } };
         const preparedResult = await prepareOfficialPostingForGeneration({ job: raw, cardId: 'bound-card', nodeId: 'bound-board', manualAiRunId: 'bound-run' }, {
-          projectJob: project, store, bridgeStatus: () => ({ enabled: false }),
+          projectJob: project, store, semanticMatching: false, bridgeStatus: () => ({ enabled: false }),
           fetch: async url => ({ body: `<script type="application/ld+json">${JSON.stringify(node)}</script>`, contentType: 'text/html', statusCode: 200, url }),
         });
         assert.ok(preparedResult.resolutionId); assert.equal(preparedResult.officialPosting.level, 'L2');

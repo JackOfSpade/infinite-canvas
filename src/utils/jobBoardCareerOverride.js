@@ -8,6 +8,7 @@ import {
   approveCareerImportCompilation,
   failCareerImportCompilation,
 } from './jobCareerCompilationReceipt.js';
+import { isCardOfficialPostingRunId } from './jobHubManualAiOwnership.js';
 
 export const JOB_BOARD_CAREER_OVERRIDE_VERSION = 1;
 // Deliberately distinct from the Board's own `job-board:` combine runs so an
@@ -49,35 +50,54 @@ export function isJobBoardCareerOverrideRunId(value) {
     && value.startsWith(JOB_BOARD_CAREER_OVERRIDE_RUN_PREFIX);
 }
 
-// A run id that may belong to a Board Combine/scan transaction. Career
-// override runs share the Board's node id but never own Board-run state.
+// These independent workflows share the Board bridge hub but own their own
+// lifecycle. In particular, card research uses the Board node id for routing
+// while its official-posting run id remains owned by the requesting card.
+export function isBoardIndependentManualAiRunId(runId) {
+  return isJobBoardCareerOverrideRunId(runId)
+    || isCardOfficialPostingRunId(runId);
+}
+
+// Preserve legacy Combine ids, which predate the job-board: prefix, while
+// excluding the independent workflows that cannot own Board-run state.
 export function isBoardCombineManualAiRunId(runId) {
   return typeof runId === 'string'
     && runId.length > 0
-    && !isJobBoardCareerOverrideRunId(runId);
+    && !isBoardIndependentManualAiRunId(runId);
 }
 
-// Patch that removes career override run ids wrongly adopted into Board-run
+// Patch that removes independent run ids wrongly adopted into Board-run
 // recovery state (manualAiResume, cleanup receipts, cancellation run ids).
-// Returns null when nothing needs cleaning; never touches the override record,
-// boardScanResume, or any non-career id.
-export function careerOverrideBoardMarkerCleanup(data) {
+// Returns null when nothing needs cleaning; never retires another workflow's
+// backend run or touches its owner state or legacy Combine ids. A copied card
+// token in an otherwise real scan plan is unclaimed so the Board can mint its
+// own replacement while retaining completed source receipts.
+export function boardIndependentManualAiMarkerCleanup(data) {
   if (!data || typeof data !== 'object') return null;
   const patch = {};
-  if (isJobBoardCareerOverrideRunId(data.manualAiResume?.runId)) {
+  if (isBoardIndependentManualAiRunId(data.manualAiResume?.runId)) {
     patch.manualAiResume = null;
   }
   if (Array.isArray(data.manualAiCleanupReceipts)) {
     const kept = data.manualAiCleanupReceipts.filter(
-      receipt => !isJobBoardCareerOverrideRunId(receipt?.runId),
+      receipt => !isBoardIndependentManualAiRunId(receipt?.runId),
     );
     if (kept.length !== data.manualAiCleanupReceipts.length) patch.manualAiCleanupReceipts = kept;
   }
+  const plan = data.boardScanResume;
+  if (isCardOfficialPostingRunId(plan?.combineManualAiRunId)) {
+    patch.boardScanResume = { ...plan, combineManualAiRunId: null };
+  }
   const cancellation = data.boardCancellation;
   if (cancellation && typeof cancellation === 'object' && Array.isArray(cancellation.manualAiRunIds)) {
-    const kept = cancellation.manualAiRunIds.filter(runId => !isJobBoardCareerOverrideRunId(runId));
+    const kept = cancellation.manualAiRunIds.filter(runId => !isBoardIndependentManualAiRunId(runId));
     if (kept.length !== cancellation.manualAiRunIds.length) {
       patch.boardCancellation = { ...cancellation, manualAiRunIds: kept };
+    }
+    if (isCardOfficialPostingRunId(cancellation.boardRunId)
+      && kept.length === 0 && !plan?.boardRunId
+      && !cancellation.sourceId && !(Array.isArray(cancellation.sourceIds) && cancellation.sourceIds.length)) {
+      patch.boardCancellation = null;
     }
   }
   return Object.keys(patch).length > 0 ? patch : null;

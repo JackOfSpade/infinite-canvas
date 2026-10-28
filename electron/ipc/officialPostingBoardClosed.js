@@ -9,6 +9,7 @@
 import { sourceJobKey } from '../../src/utils/jobIdentity.js';
 import { isAggregatorHost } from './officialSourceHosts.js';
 import { listingStateRank, normalizeBoardClosed, normalizeListingLiveness, normalizeOfficialPosting, officialResearchSettled } from './officialPostingFields.js';
+import { officialPostingSemanticProofMatches } from './officialPostingSemantic.js';
 
 const TEXT_LEVELS = new Set(['L1', 'L2', 'L3']);
 const OFFICIAL_LINK_LEVELS = new Set(['L1', 'L2', 'L3', 'L4']);
@@ -108,12 +109,13 @@ const setAsideIdentity = row => {
   return source && identity ? `${source}|${identity}` : '';
 };
 
-async function officialTextIsEvidence(row, { getView, minChars }) {
+async function officialTextIsEvidence(row, { getView, minChars, requireSemantic }) {
   if (typeof getView !== 'function') return false;
   let view;
   try { view = await getView(row); } catch { return false; }
   const served = normalizeOfficialPosting(view?.officialPosting);
   if (!served || !TEXT_LEVELS.has(served.level) || (served.trail || []).includes('official-text-missing')) return false;
+  if (requireSemantic && !officialPostingSemanticProofMatches(row, served)) return false;
   const body = normalizedText(view.description);
   return body.length >= minChars && body !== normalizedText(row?.snippet || row?.description);
 }
@@ -127,7 +129,7 @@ async function officialTextIsEvidence(row, { getView, minChars }) {
  * to why it was kept, `dropped` lists each removed row with why.
  */
 export async function settleBoardClosedRows(rows, {
-  scoreSafe, getView, minChars = 400, setAsideKeys = null, expiryCandidatesConfirmedClosed = null,
+  scoreSafe, getView, minChars = 400, setAsideKeys = null, expiryCandidatesConfirmedClosed = null, requireSemantic = false,
 } = {}) {
   const kept = []; const dropped = []; const dispositions = new Map();
   const keep = (row, disposition) => { kept.push(row); dispositions.set(row, disposition); };
@@ -138,9 +140,10 @@ export async function settleBoardClosedRows(rows, {
     // across an AI restamp that can remove its closed marker and lower its rank.
     const wasSetAside = setAsideKeys instanceof Set && setAsideKeys.has(setAsideIdentity(row));
     if (rank < 3 && !wasSetAside) { kept.push(row); continue; }
-    const posting = normalizeOfficialPosting(row.officialPosting);
+    const savedPosting = normalizeOfficialPosting(row.officialPosting);
+    const posting = requireSemantic && !officialPostingSemanticProofMatches(row, savedPosting) ? null : savedPosting;
     const live = Boolean(posting) && ['found', 'link-only'].includes(posting.outcome);
-    if (live && TEXT_LEVELS.has(posting.level) && (scrapedOk || await officialTextIsEvidence(row, { getView, minChars }))) {
+    if (live && TEXT_LEVELS.has(posting.level) && (scrapedOk || await officialTextIsEvidence(row, { getView, minChars, requireSemantic }))) {
       keep(row, BOARD_CLOSED_DISPOSITIONS.keptOfficial); continue;
     }
     if (live && posting.level === 'L4' && scrapedOk) { keep(row, BOARD_CLOSED_DISPOSITIONS.keptOfficial); continue; }

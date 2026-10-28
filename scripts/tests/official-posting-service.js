@@ -4,7 +4,9 @@ import os from 'node:os';
 import path from 'node:path';
 import { createOfficialPostingStore } from '../../electron/ipc/officialPostingStore.js';
 import { officialPostingChunks, officialPostingRequestId } from '../../electron/ipc/officialPostingResolver.js';
-import { getOfficialPostingView, officialPostingDedup, resolveOfficialPostings } from '../../electron/ipc/officialPostingService.js';
+import { getOfficialPostingView as readPostingView, officialPostingDedup, resolveOfficialPostings as resolvePostings, partitionOfficialPostingRows } from '../../electron/ipc/officialPostingService.js';
+import { officialPostingAliases } from '../../electron/ipc/officialPostingStore.js';
+import { officialPostingSemanticInputHash } from '../../electron/ipc/officialPostingSemantic.js';
 import { CONSTANTS } from '../../electron/ipc/handoffBridge/constants.js';
 import { buildOfficialPostingMatchRequest } from '../../electron/ipc/officialPostingBridge.js';
 
@@ -38,8 +40,143 @@ function response(prompt, leads = new Map()) {
 }
 const metadata = (url, extra = {}) => ({ level: 'L1', outcome: 'found', employer: 'Northwind Labs', title: 'Engineer',
   sourceUrl: url, officialApplyUrl: url, trail: [], ...extra });
+// Historical deterministic-contract fixtures remain explicit. New semantic
+// coverage below exercises the production mode through resolvePostings.
+const resolveOfficialPostings = (jobs, options) => resolvePostings(jobs, { semanticMatching: false, ...options });
+const getOfficialPostingView = (job, options) => readPostingView(job, { requireSemantic: false, ...options });
 
 export default [
+  {
+    name: 'production service asks semantic A/B on free host evidence before research even when titles differ',
+    async run() {
+      await withStore(async store => {
+        const job = row('paraphrase', { url: sourceUrl('paraphrase') });
+        const officialTitle = 'Dispatch Platform Specialist';
+        const calls = [];
+        const result = await resolvePostings([job], { store,
+          fetch: network({ 'https://northwind.test/': '<title>Northwind Labs</title>',
+            [job.url]: jsonld(job, description, { title: officialTitle }) }),
+          callRaw: async (_prompt, options) => {
+            calls.push(options);
+            assert.equal(options.task, 'job-official-posting-match', 'a complete free candidate needs final judgment before broader research');
+            return { choice: 'P1', evidence: [{ scrapedQuote: job.title, officialQuote: officialTitle }], distinguishing: [], conflicts: [] };
+          } });
+        assert.equal(result.jobs[0].officialPosting.outcome, 'found');
+        assert.ok(result.jobs[0].officialPosting.trail.includes('semantic-match-v1'));
+        assert.equal(result.jobs[0].title, job.title, 'semantic judgment does not rewrite scraped candidate facts');
+        assert.deepEqual(calls.map(call => call.manualHandoff.comparisonRun), ['A', 'B']);
+        assert.equal(calls[0].manualHandoff.comparisonGroup, calls[1].manualHandoff.comparisonGroup);
+      });
+    },
+  },
+  {
+    name: 'production service rejudges cached deterministic found and miss results through semantic A/B',
+    async run() {
+      for (const outcome of ['found', 'not-found']) await withStore(async store => {
+        const job = row(`legacy-${outcome}`, { url: sourceUrl(`legacy-${outcome}`) });
+        const prior = outcome === 'found' ? metadata(job.url, { title: job.title })
+          : { level: 'L5', outcome, employer: job.company, trail: ['bridge-research'] };
+        const old = await store.save(job, { officialPosting: prior, ...(outcome === 'found' ? { description } : {}) });
+        job.officialPosting = old.officialPosting;
+        let decisions = 0;
+        const result = await resolvePostings([job], { store,
+          fetch: network({ 'https://northwind.test/': '<title>Northwind Labs</title>', [job.url]: jsonld(job) }),
+          callRaw: async (_prompt, options) => {
+            assert.equal(options.task, 'job-official-posting-match'); decisions++;
+            return { choice: 'P1', evidence: [{ scrapedQuote: job.title, officialQuote: job.title }], distinguishing: [], conflicts: [] };
+          } });
+        assert.equal(decisions, 2, `legacy ${outcome} cannot short-circuit current semantic judgment`);
+        assert.equal(result.jobs[0].officialPosting.outcome, 'found');
+        assert.ok(result.jobs[0].officialPosting.trail.includes('semantic-match-v1'));
+        assert.equal(old.officialPosting.trail.includes('semantic-match-v1'), false, 'the prior record snapshot stays unchanged');
+      });
+    },
+  },
+  {
+    name: 'semantic service supplies ordinary shortlist and independent A/B callbacks before free discovery and reuses them after research',
+    async run() {
+      const job = row('semantic');
+      const option = { id: 'P1', title: 'Platform Services Specialist', location, status: 'live', description,
+        candidate: { sourceUrl: sourceUrl('semantic'), title: 'Platform Services Specialist', employer: job.company, location } };
+      const candidates = [{ ...option, id: 'C1' }];
+      const calls = []; const contexts = [];
+      const controller = new AbortController();
+      const fetchedSeed = sourceUrl('seed');
+      const store = { find: async () => null, save: async (_job, payload) => ({ officialPosting: payload.officialPosting }) };
+      const result = await resolvePostings([job], { store, semanticMatching: true, bypassCache: true, candidateUrls: [fetchedSeed], signal: controller.signal,
+        resolve: async (input, context) => {
+          contexts.push(context);
+          assert.equal(context.semanticMatching, true);
+          assert.equal(context.signal, controller.signal, 'AI comparisons use the run signal independently of the host crawl budget');
+          assert.equal(context.bypassCache, true);
+          assert.ok(context.candidateUrls.includes(fetchedSeed));
+          const shortlist = await context.shortlist(input, candidates);
+          assert.deepEqual(shortlist, { selected: ['C1'], uncertain: false });
+          for (const run of ['A', 'B']) assert.equal((await context.match(input, [option], { run })).choice, 'P1');
+          if (!context.researchRan) return { officialPosting: { level: 'L5', outcome: 'not-found', employer: input.company, trail: [] } };
+          return { officialPosting: metadata(sourceUrl('semantic'), { title: option.title, trail: ['semantic-match-v1'],
+            semanticMatch: { version: 1, inputHash: officialPostingSemanticInputHash(input), sourceHash: 'b'.repeat(64) } }) };
+        },
+        callRaw: async prompt => { calls.push({ task: 'research' }); return response(prompt); },
+        callMatch: async (_prompt, options) => {
+          calls.push(options);
+          if (options.task === 'job-official-posting-shortlist') {
+            assert.deepEqual(options.manualHandoff, {});
+            return { selected: ['C1'], uncertain: false };
+          }
+          assert.equal(options.task, 'job-official-posting-match');
+          assert.ok(['A', 'B'].includes(options.manualHandoff.comparisonRun));
+          return { choice: 'P1', evidence: [{ scrapedQuote: job.title, officialQuote: option.title }], distinguishing: [], conflicts: [] };
+        } });
+      assert.equal(result.jobs[0].officialPosting.outcome, 'found');
+      assert.equal(contexts.length, 2);
+      assert.equal(contexts[0].match, contexts[1].match);
+      assert.equal(contexts[0].shortlist, contexts[1].shortlist);
+      assert.deepEqual(calls.map(call => call.task), ['job-official-posting-shortlist', 'job-official-posting-match', 'job-official-posting-match',
+        'research', 'job-official-posting-shortlist', 'job-official-posting-match', 'job-official-posting-match']);
+      const comparisons = calls.filter(call => call.task === 'job-official-posting-match');
+      assert.ok(comparisons.every(call => call.manualHandoff.comparisonGroup === comparisons[0].manualHandoff.comparisonGroup));
+      assert.deepEqual(comparisons.map(call => call.manualHandoff.comparisonRun), ['A', 'B', 'A', 'B']);
+    },
+  },
+  {
+    name: 'semantic cache partition rechecks legacy found and misses and changed source evidence without rewriting saved records',
+    async run() {
+      const jobs = Array.from({ length: 5 }, (_, index) => row(index + 1));
+      const values = [metadata(sourceUrl(1)),
+        { level: 'L5', outcome: 'not-found', employer: jobs[1].company, trail: ['bridge-research'] },
+        metadata(sourceUrl(3), { trail: ['semantic-match-v1'], semanticMatch: { version: 1, inputHash: officialPostingSemanticInputHash(jobs[2]), sourceHash: 'b'.repeat(64) } }),
+        { level: 'L5', outcome: 'not-found', employer: jobs[3].company, trail: ['bridge-research', 'semantic-match-v1'],
+          semanticMatch: { version: 1, inputHash: officialPostingSemanticInputHash(jobs[3]) } },
+        metadata(sourceUrl(5), { trail: ['semantic-match-v1'], semanticMatch: { version: 1, inputHash: 'a'.repeat(64) } })];
+      jobs.forEach((job, index) => { job.officialPosting = values[index]; });
+      const records = jobs.map((job, index) => ({ aliases: officialPostingAliases(job), savedAt: Date.now(), officialPosting: values[index] }));
+      const before = JSON.stringify({ jobs, records });
+      const store = { find: async job => records[jobs.indexOf(job)], save: () => { throw new Error('Partition must not rewrite records'); } };
+      const partition = await partitionOfficialPostingRows(jobs, { store });
+      assert.deepEqual(partition.unresolvedIndices, [0, 1, 4]);
+      assert.equal(partition.settledTelemetry.total, 2);
+      assert.equal(JSON.stringify({ jobs, records }), before);
+    },
+  },
+  {
+    name: 'production posting view withholds legacy official facts until semantic proof matches the current input',
+    async run() {
+      await withStore(async store => {
+        const job = row('legacy-view');
+        const record = await store.save(job, { officialPosting: metadata(sourceUrl('legacy-view'), { title: 'Legacy official title' }),
+          description: `${description} Official source details.` });
+        job.officialPosting = record.officialPosting;
+        assert.equal((await readPostingView(job, { store })).title, job.title);
+        assert.equal((await readPostingView(job, { store })).officialPosting, undefined);
+        const current = { ...record.officialPosting, trail: ['semantic-match-v1'],
+          semanticMatch: { version: 1, inputHash: officialPostingSemanticInputHash(job), sourceHash: 'b'.repeat(64) } };
+        await store.save(job, { officialPosting: current, description: `${description} Official source details.` });
+        assert.equal((await readPostingView(job, { store })).title, 'Legacy official title');
+        assert.equal((await readPostingView({ ...job, snippet: `${job.snippet} A newly captured requirement.` }, { store })).officialPosting, undefined);
+      });
+    },
+  },
   {
     name: 'Amendment 8 item 1 transport: service keeps hidden contradiction text host-only in both validation paths',
     async run() {

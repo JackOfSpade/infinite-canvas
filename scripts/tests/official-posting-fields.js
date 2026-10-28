@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import {
   OFFICIAL_POSTING_LEVELS, OFFICIAL_POSTING_OUTCOMES, OFFICIAL_POSTING_ROW_FIELDS,
-  OFFICIAL_POSTING_TRAIL, SALARY_PROVENANCES, boundedOfficialPostingTrail, officialPostingComparativeTrail, officialResearchSettled,
+  normalizeOfficialPosting, OFFICIAL_POSTING_TRAIL, SALARY_PROVENANCES, boundedOfficialPostingTrail, officialPostingComparativeTrail, officialResearchSettled,
 } from '../../electron/ipc/officialPostingFields.js';
 import {
   __pastePromptForTests, __projectLocalApplicationJobForAcceptanceHarness as safeJob,
@@ -65,6 +65,22 @@ function generateScope() {
 }
 
 export default [
+  {
+    name: 'semantic proof hashes survive shared whitelists and unresolved decisions stay retryable',
+    run() {
+      const semanticMatch = { version: 1, inputHash: 'c'.repeat(64), sourceHash: 'd'.repeat(64) };
+      const value = posting({ semanticMatch, trail: ['semantic-match-v1'] });
+      assert.deepEqual(normalizeOfficialPosting(value).semanticMatch, semanticMatch);
+      assert.deepEqual(safeJob(row({ officialPosting: value })).officialPosting.semanticMatch, semanticMatch);
+      assert.equal(normalizeOfficialPosting(posting({ semanticMatch: { ...semanticMatch, sourceHash: 'private source text' } })), null);
+      for (const failure of ['semantic-uncertain', 'semantic-overflow', 'official-liveness-unconfirmed']) {
+        const trail = boundedOfficialPostingTrail([...OFFICIAL_POSTING_TRAIL.filter(code => code.startsWith('comparative-')), 'semantic-match-v1', failure]);
+        assert.ok(trail.includes(failure)); assert.ok(trail.includes('semantic-match-v1'));
+        assert.equal(officialResearchSettled({ level: 'L5', outcome: 'closed', employer: 'Northwind Labs', trail }), false);
+      }
+      assert.ok(officialPostingComparativeTrail({ validA: true, validB: true, choiceA: 'uncertain', choiceB: 'uncertain' }).includes('comparative-choice-uncertain'));
+    },
+  },
   {
     name: 'comparative retryability survives saturation by other comparison trail codes',
     run() {

@@ -82,8 +82,81 @@ import os from 'node:os';
 import { appendJobsHistory, loadJobsHistory } from '../../electron/ipc/jobsHistory.js';
 import { claimJobAnalysisOperationAuthority } from '../../electron/ipc/jobAnalysisOperationAuthorityStore.js';
 import { checkListingForGeneration } from '../../electron/ipc/listingLivenessProbe.js';
+import { collectJobCompensationReport } from '../../src/utils/jobCompensationReport.js';
+import { buildJobCompensationSnapshot } from '../../electron/ipc/bugReport/jobCompensationSnapshot.js';
+import { normalizeCompensationAssessment } from '../../src/nodes/jobsearch/buildJobTree.js';
 
 export default [
+  {
+    name: 'Salary audit includes bounded personal-guidance validation without private amounts or evidence',
+    run() {
+      const personal = { schemaVersion: 1, methodologyVersion: 1, status: 'personalized',
+        range: { min: 91000, max: 113000, currency: 'CAD', period: 'annual' }, desiredSalary: 107000,
+        confidence: 'medium', explanation: 'PRIVATE_PERSONAL_EXPLANATION', limitations: ['PRIVATE_LIMITATION'],
+        careerSnapshotId: 'c'.repeat(64), evidenceIds: ['PRIVATE_EVIDENCE_ID'] };
+      const assessment = { schemaVersion: 1, status: 'market_recommendation', reasonCode: 'market_range_recommended',
+        competitiveRange: { min: 90000, max: 120000, currency: 'CAD', period: 'annual' } };
+      const nodes = [personal, { ...personal, desiredSalary: 150000 },
+        { ...personal, status: 'unavailable', range: null, desiredSalary: null, evidenceIds: [] }, undefined]
+        .map((personalRecommendation, index) => ({ id: `synthetic-personal-${index}`, type: 'jobcard', data: {
+          compensationAssessment: { ...assessment, ...(personalRecommendation === undefined ? {} : { personalRecommendation }) },
+        } }));
+      const snapshot = collectJobCompensationReport(nodes);
+      assert(snapshot.rows[0].recommendationStatus === 'personalized'
+        && snapshot.rows[0].recommendationCheck === 'valid_saved_guidance'
+        && snapshot.rows[0].recommendationEvidenceCount === 1 && snapshot.rows[0].recommendationCareerPin);
+      assert(snapshot.rows[1].recommendationStatus === 'unavailable'
+        && snapshot.rows[1].recommendationCheck === 'invalid_saved_guidance', 'out-of-bounds targets must be identifiable after normalization');
+      assert(snapshot.rows[2].recommendationCheck === 'unavailable' && snapshot.rows[3].recommendationCheck === 'absent');
+      const normalizedInvalid = { ...nodes[1], data: { compensationAssessment: normalizeCompensationAssessment(nodes[1].data.compensationAssessment) } };
+      assert(collectJobCompensationReport([normalizedInvalid]).rows[0].recommendationCheck === 'invalid_saved_guidance',
+        'reused normalized invalid guidance must retain its diagnostic classification');
+      const malformedCitations = { ...nodes[0], data: { compensationAssessment: { ...assessment,
+        personalRecommendation: { ...personal, evidenceIds: [null, {}, '', 1, 'same-id', 'same-id'] },
+      } } };
+      assert(collectJobCompensationReport([malformedCitations]).rows[0].recommendationEvidenceCount === 1,
+        'only bounded unique nonempty string identifiers count as saved citations');
+      const inconsistentVerdict = { id: 'synthetic-inconsistent', type: 'jobcard', data: { compensationAssessment: {
+        ...assessment, status: 'competitive', offered: { min: 70000, max: 80000, currency: 'CAD', period: 'annual' },
+      } } };
+      assert(collectJobCompensationReport([inconsistentVerdict]).rows[0].thresholdCheck === 'inconsistent',
+        'a neutralized inconsistent verdict must remain visible to the audit');
+      for (const filterCode of ['FULL', 'JOBPAY']) {
+        const report = generateMarkdown({ filterCode, description: 'Synthetic guidance audit',
+          nodes: [], edges: [], drawings: [], frontEndState: {}, jobCompensationSnapshot: snapshot,
+          nodeInternals: [], nodeComponentStates: [], eventLogs: [],
+        }).markdown;
+        assert(report.includes('personalized=1') && report.includes('personalized/valid_saved_guidance')
+          && report.includes('unavailable/invalid_saved_guidance') && report.includes('cited evidence 1'));
+        for (const privateValue of ['91000', '113000', '107000', '150000', 'PRIVATE_PERSONAL_EXPLANATION',
+          'PRIVATE_LIMITATION', 'PRIVATE_EVIDENCE_ID', 'c'.repeat(64)]) {
+          assert(!JSON.stringify(snapshot).includes(privateValue) && !report.includes(privateValue), 'private guidance data must stay out of diagnostics');
+        }
+      }
+      const hostile = buildJobCompensationSnapshot([], { rows: [{ id: 'synthetic', recommendationStatus: 'PRIVATE_STATUS',
+        recommendationCheck: 'PRIVATE_CHECK', recommendationEvidenceCount: 999, recommendationCareerPin: 'PRIVATE_PIN' }] });
+      assert(!hostile.includes('PRIVATE_') && hostile.includes('absent/absent') && hostile.includes('cited evidence 6'));
+    },
+  },
+  {
+    name: 'JOBPAY and FULL include saved-card salary audits even when narrow filters omit nodes',
+    run() {
+      const nodes = [{ id: 'synthetic-pay-card', type: 'jobcard', hidden: true, data: {
+        compensationAssessment: { schemaVersion: 1, status: 'not_evaluated', reasonCode: 'below_fit_threshold' },
+      } }];
+      const snapshot = collectJobCompensationReport(nodes);
+      const filtered = applyBugReportCode(['salary research skipped', 'unrelated event'], {}, 'JOBPAY');
+      assert(!filtered.unknownCodes.length && filtered.sectionExclusions.has('nodes'));
+      for (const filterCode of ['FULL', 'JOBPAY']) {
+        const report = generateMarkdown({ filterCode, description: 'Synthetic salary audit',
+          nodes: filterCode === 'FULL' ? nodes : [], edges: [], drawings: [], frontEndState: {},
+          jobCompensationSnapshot: snapshot, nodeInternals: [], nodeComponentStates: [], eventLogs: [],
+        }).markdown;
+        assert(report.includes('Job Card Salary Audit (JOBPAY)') && report.includes('1 inspected'));
+        assert(report.includes('below_fit_threshold') && report.includes('advertised pay absent'));
+      }
+    },
+  },
   {
     name: 'FULL listing check diagnostics retain the card hold and closed decision codes without message text',
     run() {
@@ -1160,7 +1233,7 @@ export default [
         const board = { id: boardId, type: 'jobboard', data: {
           hubState: 'empty', resultCount: 0, stale: false,
           selectedSearchModuleIds: [hubId, secondHubId],
-          boardScanResume: { phase: 'awaiting-source', boardRunId: 'sameprefix-run-board', activeSourceId: hubId, awaitingSourceId: secondHubId, completedSourceRuns: [{ sourceHubId: hubId, runId: 'sameprefix-run-A' }] },
+          boardScanResume: { phase: 'awaiting-source', pausedByUser: true, autoResumeEligible: false, boardRunId: 'sameprefix-run-board', activeSourceId: hubId, awaitingSourceId: secondHubId, completedSourceRuns: [{ sourceHubId: hubId, runId: 'sameprefix-run-A' }] },
           combineSignature: '8:[["sameprefix-source-A","a"],["sameprefix-source-B","b"]]',
           // The manual-combine receipt deliberately uses sourceId rather than
           // persisted sourceHubId. FULL diagnostics must retain this pair.
@@ -1183,7 +1256,9 @@ export default [
         const sourceLabels = [...boardReport.matchAll(/#[a-f0-9]{10}/g)].map(match => match[0]);
         const boardLabels = [...boardReport.matchAll(/- Board `(#[a-f0-9]{10})`:/g)].map(match => match[1]);
         assert(boardReport.includes('connected=') && boardReport.includes('groups=1 · cards=1')
-          && boardReport.includes('phase=awaiting-source') && boardReport.includes('recoverable-failure=recorded')
+          && boardReport.includes('phase=awaiting-source')
+          && boardReport.includes('paused-by-user=yes · auto-resume=disabled')
+          && boardReport.includes('recoverable-failure=recorded')
           && boardReport.includes('cancellation=recorded') && boardReport.includes('clear=recorded (prior results 4)')
           && boardReport.includes('combine-source-runs=1')
           && new Set(sourceLabels).size >= 4
@@ -1202,6 +1277,7 @@ export default [
           nodes: [{ id: hubId, type: 'jobhub', data: {} }, board],
           edges: longEdges, drawings: [], frontEndState: { currentFile: canvas }, nodeInternals: [], nodeComponentStates: [], eventLogs: [],
         }).markdown;
+        assert(full.includes('paused-by-user=yes · auto-resume=disabled'), 'FULL retains the Board pause policy');
         assert(full.includes('Job Board consumers: 1/1 correlate to this source run'),
           'a Board omitted from compact filter stats still inherits its live Job Search edge for completion correlation');
       } finally {
@@ -3314,6 +3390,39 @@ export default [
           && !boardCountAssessment.includes('✅ **VERIFIED COMPLETE**'),
         'a non-stale one-source board with a mismatched result count cannot inherit the search-only green verdict');
 
+        // Location variants remain represented by one card; reconcile that
+        // reduction for both single-source and combined-source Boards.
+        const originalTaxonomyInput = telemetry.bucketing.input;
+        telemetry.bucketing.input = 11;
+        for (const sources of [[nodeId], [nodeId, 'sibling-source']]) {
+          for (const collapsed of [5, 0, -1, 17, 'private-count-sentinel']) {
+            const payload = {
+              filterCode: 'FULL',
+              filterStats: {
+                hasJobNodes: true, currentNodeIds: [nodeId, 'consolidated-board'],
+                jobBoardStates: [{
+                  id: 'consolidated-board', hubState: 'done', resultCount: 11,
+                  mergeUnique: 16, locationPostingsCollapsed: collapsed,
+                  renderedCardCount: 11,
+                  combineSignature: sources.map(source => `${source}=fingerprint`).join('|'),
+                  connectedSourceHubIds: sources,
+                }],
+              },
+              nodes: [{ id: nodeId, type: 'jobhub', data: {} }], edges: [], drawings: [],
+              frontEndState: { currentFile: canvas }, nodeInternals: [], nodeComponentStates: [], eventLogs: [],
+            };
+            const output = generateMarkdown(payload).markdown;
+            const assessment = output.slice(output.indexOf('## Job Completion Assessment'), output.indexOf('## Job Search Pipeline'));
+            assert(assessment.includes(collapsed === 5 ? '✅ **VERIFIED COMPLETE**' : '⚠️ **INDETERMINATE**'),
+              'only a valid consolidation count can reconcile the missing cards');
+            assert(!assessment.includes('private-count-sentinel'), 'invalid count text is never exported');
+            if (collapsed === 5) assert(assessment.includes('16 merged − 5 collapsed = 11 cards'),
+              'the completion summary explains the legitimate card reduction');
+          }
+        }
+
+        telemetry.bucketing.input = originalTaxonomyInput;
+
         const boardSourceMismatch = generateMarkdown({
           description: 'A board edge points at this run but its combine baseline does not.', filterCode: 'FULL',
           filterStats: {
@@ -3666,6 +3775,7 @@ export default [
           && issueReporterSource.includes('jobBoardStateCount: allJobBoardStates.length')
           && issueReporterSource.includes("combineSignature: typeof safeReportField(data, 'combineSignature')")
           && issueReporterSource.includes("mergeUnique: reportBoardCount(safeReportField(safeReportField(data, 'mergeStats'), 'unique'))")
+          && issueReporterSource.includes("locationPostingsCollapsed: reportBoardCount(safeReportField(safeReportField(data, 'mergeStats'), 'locationVariantPostingsCollapsed'))")
           && issueReporterSource.includes('connectedSourceHubIds:'),
         'the renderer stamps bounded board count, merge, and source-correlation facts before JOBS/RECOVERY filters remove the node payload');
 
@@ -11165,6 +11275,18 @@ export default [
       assert(!isIgnorableManualBrowserTelemetry({ text: 'This document requires TrustedHTML assignment. The action has been blocked.' }),
         'unknown console failures without a target URL remain visible');
       return { ignored: ignoredUrls.length, genuinePreserved: 6 };
+    },
+  },
+{
+    name: 'FULL report explains parked results and active detail tabs without inventing a second collector',
+    run() {
+      resetManualScraperTelemetry();
+      recordManualScraperTelemetry({ phase: 'detail-expand', sourceId: 'ziprecruiter', srcName: 'ZipRecruiter' });
+      recordActivityBeat({ srcName: 'ZipRecruiter', count: 12, tabLayout: 'results-and-details' });
+      const report = buildJobsPipelineSnapshot(new Set(), null, null);
+      assert(report.includes('one collector · results tab parked · job-detail tab active'));
+      assert(report.includes('Open site pages may still make their own background requests'));
+      resetManualScraperTelemetry();
     },
   },
 {

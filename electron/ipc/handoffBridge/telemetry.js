@@ -115,6 +115,21 @@ const enumOr = (value, allowed, fallback = 'unknown') => allowed.has(value) ? va
 
 export function clearFailedStartDiagnostic() { latest = null; }
 
+// Live failures happen long after startup, so the failed-start receipt alone
+// cannot explain a tunnel lost during a network change. Keep this projection
+// separate from raw tunnel logs and operational identifiers.
+export function reduceTunnelRuntimeDiagnostic(value) {
+  const tunnel = value && typeof value === 'object' ? value : {};
+  const probe = tunnel.probe && typeof tunnel.probe === 'object' ? tunnel.probe : {};
+  return Object.freeze({
+    lastExit: enumOr(tunnel.lastExit, CAUSES, 'none'),
+    restarts: Math.min(999, finite(tunnel.restarts) ?? 0),
+    probeState: enumOr(probe.state, PROBE_STATES),
+    probeReason: enumOr(probe.reason, PROBE_REASONS, 'none'),
+    failures: Math.min(999, finite(probe.consecutiveFailures) ?? 0),
+  });
+}
+
 export function recordFailedStartDiagnostic({ telemetry = false, phase, cause, tunnel, startedAt = null, at = Date.now() } = {}) {
   const rawTunnel = tunnel && typeof tunnel === 'object' ? tunnel : {};
   const stamp = finite(at) ?? Date.now();
@@ -426,7 +441,7 @@ const QUEUE_POOL_CLOSE_REASONS = new Set(['drained', 'source_ended', 'continued'
 const QUEUE_MAX_WORKERS = MAX_HANDOFF_CONCURRENCY;
 const QUEUE_ACTIVITY_LIMIT = 20;
 const QUEUE_PUSH_TASKS = new Set([
-  'job-listing-liveness', 'job-official-posting-research', 'job-official-posting-match',
+  'job-listing-liveness', 'job-official-posting-research', 'job-official-posting-shortlist', 'job-official-posting-match',
   'price-synthesis', 'price-synthesis-batch', 'bundle-price-synthesis', 'platform-fit-assessment',
   'resume-parse', 'career-profile-compile', 'career-profile-clean', 'career-profile-audit-completeness', 'career-profile-audit-grounding',
   'career-profile-audit-attribution', 'career-profile-audit-metrics', 'career-profile-audit-skills',

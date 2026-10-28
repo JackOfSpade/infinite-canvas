@@ -1384,17 +1384,20 @@ async function assertRendererWorkspaceHandleBinding(target, handleStat, {
     fs.promises.lstat(target.parentPath),
     fs.promises.lstat(target.canonicalPath),
   ]);
+  const targetHardLinked = (typeof entryStat.nlink === 'number' && entryStat.nlink > 1)
+    || (typeof handleStat?.nlink === 'number' && handleStat.nlink > 1);
   if (!guarded?.resolvedPath || !sameRendererWorkspacePath(guarded.resolvedPath, target.canonicalPath)
       || !sameRendererWorkspacePath(parentRealPath, target.parentPath)
       || !parentStat.isDirectory() || parentStat.isSymbolicLink()
       || !hasSameIdentity(parentStat, target.parentIdentity)
       || !entryStat.isFile() || entryStat.isSymbolicLink()
-      || (typeof entryStat.nlink === 'number' && entryStat.nlink > 1)
+      || targetHardLinked
       || !handleStat?.isFile?.() || !hasSameIdentity(entryStat, handleStat)
-      || (typeof handleStat?.nlink === 'number' && handleStat.nlink > 1)
       || (target.exists && !hasSameIdentity(handleStat, target.targetIdentity))
       || (!target.exists && !allowCreated)) {
-    throw rendererWorkspacePathChangedError();
+    // Sync may add a link after initial inspection. Keep the same safe refusal
+    // guidance and diagnostic reason at every point in the handle-bound save.
+    throw rendererWorkspacePathChangedError(targetHardLinked ? 'target-hardlink' : 'binding-changed');
   }
   return {
     ...target,

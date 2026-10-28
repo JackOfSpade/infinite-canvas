@@ -74,6 +74,8 @@ import listing_liveness_generation from './tests/listing-liveness-generation.js'
 import official_source_hosts from './tests/official-source-hosts.js';
 import official_posting_fields from './tests/official-posting-fields.js';
 import official_posting_scrape from './tests/official-posting-scrape.js';
+import official_posting_semantic from './tests/official-posting-semantic.js';
+import official_posting_semantic_resolution from './tests/official-posting-semantic-resolution.js';
 import official_posting_bridge from './tests/official-posting-bridge.js';
 import official_posting_service from './tests/official-posting-service.js';
 import official_posting_search from './tests/official-posting-search.js';
@@ -102,6 +104,7 @@ import paste_application_fit_save from './tests/paste-application-fit-save.js';
 import local_ai_deletion from './tests/local-ai-deletion.js';
 import login_url_markers from './tests/login-url-markers.js';
 import compensation_assessment from './tests/compensation-assessment.js';
+import job_compensation_display from './tests/job-compensation-display.js';
 import personal_salary_recommendation from './tests/personal-salary-recommendation.js';
 import job_compensation_pipeline from './tests/job-compensation-pipeline.js';
 import job_location_lookup from './tests/job-location-lookup.js';
@@ -308,6 +311,8 @@ const testGroups = [
   ['official-source-hosts.js', official_source_hosts],
   ['official-posting-fields.js', official_posting_fields],
   ['official-posting-scrape.js', official_posting_scrape],
+  ['official-posting-semantic.js', official_posting_semantic],
+  ['official-posting-semantic-resolution.js', official_posting_semantic_resolution],
   ['official-posting-bridge.js', official_posting_bridge],
   ['official-posting-service.js', official_posting_service],
   ['official-posting-search.js', official_posting_search],
@@ -339,6 +344,7 @@ const testGroups = [
   ['local-ai-deletion.js', local_ai_deletion],
   ['login-url-markers.js', login_url_markers],
   ['compensation-assessment.js', compensation_assessment],
+  ['job-compensation-display.js', job_compensation_display],
   ['personal-salary-recommendation.js', personal_salary_recommendation],
   ['application-bundle-links.js', application_bundle_links],
   ['job-compensation-pipeline.js', job_compensation_pipeline],

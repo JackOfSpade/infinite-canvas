@@ -126,6 +126,31 @@ export default [
     },
   },
   {
+    name: 'APPCORRECT distinguishes closing gerund rejections from other gates without retaining private text',
+    run() {
+      const prefix = 'Cover-letter paragraph 2, sentence 1: listing-grounded closing requires ';
+      const gerund = `${prefix}clause 1 with no work gerund after its single anchored intent lead-in.`;
+      recordApplicationCorrectionCheck({ jobId: 'private-closing-job', stage: 'verify-correction', errors: [
+        gerund, gerund,
+        `${prefix}no figure, number or year.`,
+        `${prefix}clause 1 with no candidate-experience term.`,
+        `${prefix}every meaningful term in the closed intent vocabulary listed in the closing rule, the frozen company name or a cited listing quote.`,
+        `${prefix}private-future-rule-sentinel.`,
+        'unit-source-grounding: private-unrelated-source-sentinel',
+      ] });
+      const diagnostic = applicationCorrectionDiagnosticsMarkdown();
+      const latest = diagnostic.split('\n').find(line => line.startsWith('- '));
+      assert(latest.includes('distinct findings 6 · duplicate findings suppressed 1'));
+      assert(latest.includes('listing-closing=5'));
+      assert(latest.includes('closing checks work-gerund=1, figure=1, candidate-frame=1, vocabulary=1, other=1'));
+      assert(!/private-|Cover-letter paragraph|no work gerund/u.test(diagnostic));
+      const payload = { nodes: [], edges: [], drawings: [], eventLog: [], description: 'Synthetic' };
+      for (const filterCode of ['FULL', 'APPCORRECT']) {
+        assert(generateMarkdown({ ...payload, filterCode }).markdown.includes('closing checks work-gerund=1'));
+      }
+    },
+  },
+  {
     name: 'APPCITE reports bounded citation counts in FULL without private data',
     run() {
       for (let index = 0; index < 45; index++) recordApplicationCitationFlow({

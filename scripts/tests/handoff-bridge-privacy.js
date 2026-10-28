@@ -24,7 +24,7 @@ import {
   redactReportUrlsInText,
   setReportRedactedHosts,
 } from '../../electron/ipc/bugReport/helpers.js';
-import { clearApplicationSubmitFailures, recordApplicationSubmitFailure, clearBridgeChatOpenDiagnostic, recordBridgeChatOpenDiagnostic, clearBridgeLaunchDiagnostic, recordBridgeLaunchDiagnostic, clearBridgeChatCopyDiagnostic, clearBridgeQueueDiagnostic, getBridgeQueueDiagnostic, reduceBridgeQueue, retireBridgeQueueDiagnosticProvider, setBridgeQueueDiagnosticProvider, clearBridgeMetadataDiagnostic, getBridgeMetadataDiagnostic, recordBridgeMetadataDiagnostic, clearClientAuthDiagnostic, clearFailedStartDiagnostic, clearMcpRateLimitDiagnostic, clearOAuthRejectionDiagnostic, clearSourceRejectionDiagnostic, getFailedStartDiagnosticLines, recordBridgeChatCopyDiagnostic, recordBridgeChatCopyResult, recordClientAuthDiagnostic, recordFailedStartDiagnostic, recordMcpRateLimitDiagnostic, recordOAuthRejectionDiagnostic, recordSourceRejectionDiagnostic } from '../../electron/ipc/handoffBridge/telemetry.js';
+import { reduceTunnelRuntimeDiagnostic, clearApplicationSubmitFailures, recordApplicationSubmitFailure, clearBridgeChatOpenDiagnostic, recordBridgeChatOpenDiagnostic, clearBridgeLaunchDiagnostic, recordBridgeLaunchDiagnostic, clearBridgeChatCopyDiagnostic, clearBridgeQueueDiagnostic, getBridgeQueueDiagnostic, reduceBridgeQueue, retireBridgeQueueDiagnosticProvider, setBridgeQueueDiagnosticProvider, clearBridgeMetadataDiagnostic, getBridgeMetadataDiagnostic, recordBridgeMetadataDiagnostic, clearClientAuthDiagnostic, clearFailedStartDiagnostic, clearMcpRateLimitDiagnostic, clearOAuthRejectionDiagnostic, clearSourceRejectionDiagnostic, getFailedStartDiagnosticLines, recordBridgeChatCopyDiagnostic, recordBridgeChatCopyResult, recordClientAuthDiagnostic, recordFailedStartDiagnostic, recordMcpRateLimitDiagnostic, recordOAuthRejectionDiagnostic, recordSourceRejectionDiagnostic } from '../../electron/ipc/handoffBridge/telemetry.js';
 
 const fixtureDirectory = fileURLToPath(new URL('./fixtures/handoff-bridge/', import.meta.url));
 const repoRoot = fileURLToPath(new URL('../../', import.meta.url));
@@ -315,6 +315,14 @@ export default [
 }, {
   name: 'handoff bridge: privacy: FULL and BRIDGE retain a closed bootstrap receipt without runtime telemetry',
   run: () => {
+    const live = reduceTunnelRuntimeDiagnostic({ lastExit: 'network-unreachable', restarts: 0,
+      probe: { state: 'failing', reason: 'dns-not-found', consecutiveFailures: 9 }, secret: 'never export' });
+    assert(live.lastExit === 'network-unreachable' && live.probeReason === 'dns-not-found' && live.failures === 9,
+      'live failure evidence survives independently of a failed startup');
+    const hostile = reduceTunnelRuntimeDiagnostic({ lastExit: 'secret.example.test', restarts: Infinity,
+      probe: { state: '/private/path', reason: 'raw credential value', consecutiveFailures: -1 } });
+    assert(JSON.stringify(hostile) === JSON.stringify({ lastExit: 'none', restarts: 0, probeState: 'unknown', probeReason: 'none', failures: 0 }),
+      'unrecognized tunnel strings and nonfinite counters never reach a report');
     const secretHost = 'private-bridge.example.test';
     const secretPath = '/private/bridge-secret/cloudflared';
     const setup = {
@@ -358,6 +366,8 @@ export default [
     const bridge = generateMarkdown({ ...base, filterCode: 'BRIDGE' }).markdown;
     const focused = generateMarkdown({ ...base, filterCode: 'JOBS' }).markdown;
     const heading = '## Handoff Bridge Diagnostics';
+    assert(full.includes('Live tunnel health:') && bridge.includes('Live tunnel health:') && !focused.includes('Live tunnel health:'),
+      'FULL and BRIDGE retain live tunnel failure evidence even when startup succeeded');
     assert(full.includes(heading) && full.split(heading).length === 2 && full.includes('Bridge bootstrap:')
       && bridge.includes('Bridge bootstrap:') && bridge.split(heading).length === 2 && !focused.includes('Bridge bootstrap:'),
     'FULL and BRIDGE include bootstrap evidence even when no runtime event was recorded');

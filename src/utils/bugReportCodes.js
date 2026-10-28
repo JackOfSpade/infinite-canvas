@@ -161,6 +161,13 @@ export const CODE_DEFINITIONS = {
     excludeSections: ['nodes', 'edges', 'drawings', 'nodeInternals', 'nodeComponentStates', 'imageState', 'mediaState'],
   },
 
+  JOBPAY: {
+    label: 'Job Card Salary Analysis',
+    description: 'All current job cards: salary verdict, advertised-pay presence, missing-pay and research-skip reasons, market-evidence counts, verdict consistency, and personal-guidance status, saved-range checks, career-pin presence and citation counts. Includes collapsed cards and nested canvases after a restart. Included automatically in FULL; omits prose and salary amounts.',
+    logFilter: line => /compensation|salary|\[JobCard\]|\[JobBoard\]/i.test(line),
+    excludeSections: ['nodes', 'edges', 'drawings', 'nodeInternals', 'nodeComponentStates', 'imageState', 'mediaState'],
+  },
+
   SCORE: {
     label: 'Job Scoring Consistency',
     description: 'Job-scoring audit — batch outcomes plus bounded per-job score/direction/reason evidence and cross-batch drift flags for effectively identical postings. Use when similar jobs received inconsistent scores. Included automatically in FULL; keeps the compact Job Search Pipeline section while dropping heavy canvas/media dumps.',
@@ -334,7 +341,7 @@ export const CODE_DEFINITIONS = {
 
   APPCORRECT: {
     label: 'Application Correction Causes',
-    description: 'Bounded document-check outcomes with fixed closing, citation, grounding, figure and overflow cause counts, plus duplicate findings suppressed. No validation text, prose, quotes or paths. Included automatically in FULL.',
+    description: 'Bounded document-check outcomes with fixed closing, citation, grounding, figure and overflow cause counts, closing rejection subcauses and duplicate findings suppressed. No validation text, prose, quotes or paths. Included automatically in FULL.',
     logFilter: line => /LocalAI|validation|handoff/i.test(line),
     excludeSections: ['nodes', 'edges', 'drawings', 'nodeInternals', 'nodeComponentStates', 'imageState', 'mediaState'],
   },

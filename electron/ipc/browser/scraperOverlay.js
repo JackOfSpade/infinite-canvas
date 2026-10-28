@@ -14,6 +14,29 @@
  *   state: { srcLabel, srcName, qLabel, qText, count, status, progressText, challenge, error }
  */
 
+// Both pages belong to one serial collector. Keep their panels in one group,
+// and poll Pause only from the detail page while the results page is parked.
+const detailOverlayGroups = new WeakMap();
+
+export function linkDetailOverlayPages(resultsPage, detailPage) {
+  const group = { resultsPage, detailPage };
+  detailOverlayGroups.set(resultsPage, group);
+  detailOverlayGroups.set(detailPage, group);
+  return () => {
+    for (const page of [resultsPage, detailPage]) {
+      if (detailOverlayGroups.get(page) === group) detailOverlayGroups.delete(page);
+    }
+  };
+}
+
+export function overlayControlPage(page) {
+  return detailOverlayGroups.get(page)?.detailPage || page;
+}
+
+export function overlayTabLayout(page) {
+  return detailOverlayGroups.has(page) ? 'results-and-details' : 'single-page';
+}
+
 export function buildOverlayScript({ withPause = true } = {}) {
   const buttonStyles = withPause
     ? `'#__ic-panel button:hover:not(:disabled){filter:brightness(1.2)}',
@@ -89,11 +112,12 @@ export function buildOverlayScript({ withPause = true } = {}) {
   header.appendChild(make('div', 'ic-dot', '', 'width:9px;height:9px;border-radius:50%;background:#4ade80;animation:ic-blink 1.4s ease-in-out infinite;flex-shrink:0'));
   header.appendChild(make('b', '', 'Job Collector', 'font-size:13px;letter-spacing:-.2px'));
   el.appendChild(header);
+  el.appendChild(make('div', 'ic-tab-role', '', 'font-size:11px;color:#94a3b8;margin-bottom:6px'));
   el.appendChild(make('div', 'ic-src-label', '', 'font-size:11px;color:#475569;margin-bottom:1px'));
   el.appendChild(make('div', 'ic-src-name', '', 'font-weight:700;font-size:16px;margin-bottom:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis'));
   el.appendChild(make('div', 'ic-q-label', '', 'font-size:11px;color:#64748b;margin-bottom:2px'));
   el.appendChild(make('div', 'ic-q-text', '', 'font-size:12px;color:#94a3b8;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-bottom:11px'));
-  const countRow = make('div', '', null, 'display:flex;align-items:baseline;gap:6px;margin-bottom:4px');
+  const countRow = make('div', 'ic-count-row', null, 'display:flex;align-items:baseline;gap:6px;margin-bottom:4px');
   countRow.appendChild(make('span', 'ic-count', '0', 'font-size:32px;font-weight:800;line-height:1;color:#f8fafc'));
   countRow.appendChild(make('span', 'ic-count-meta', 'jobs collected', 'font-size:12px;color:#64748b'));
   el.appendChild(countRow);
@@ -110,23 +134,46 @@ export function buildOverlayScript({ withPause = true } = {}) {
 }
 
 export async function updateOverlay(page, state) {
+  const group = detailOverlayGroups.get(page);
+  if (!group) return paintOverlayPage(page, state);
+  // Await both displays before another card can start. These are panel writes,
+  // not provider requests; they do not introduce a second scrape worker.
+  await Promise.all([
+    paintOverlayPage(group.resultsPage, { ...state, tabRole: 'parked-results' }),
+    paintOverlayPage(group.detailPage, { ...state, tabRole: 'active-details', progressText: 'job details' }),
+  ]);
+}
+
+async function paintOverlayPage(page, state) {
   await page.evaluate((s) => {
     const p = document.getElementById('__ic-panel');
     if (!p) return;
     const g   = id => p.querySelector('#' + id);
     const set = (id, v) => { const e = g(id); if (e && v != null) e.textContent = v; };
 
+    const parked = s.tabRole === 'parked-results';
+    set('ic-tab-role', parked ? 'Results tab · waiting' : s.tabRole === 'active-details' ? 'Job details · one at a time' : '');
+    const countRow = g('ic-count-row');
+    if (countRow) countRow.style.display = parked ? 'none' : 'flex';
+    const pause = g('ic-pause');
+    if (pause) {
+      pause.hidden = parked;
+      pause.disabled = parked;
+    }
     set('ic-src-label', s.srcLabel);
     set('ic-src-name',  s.srcName);
     set('ic-q-label',   s.qLabel);
     set('ic-q-text',    s.qText);
     if (s.count != null) set('ic-count', s.count);
     set('ic-count-meta', s.progressText ?? 'jobs collected');
-    set('ic-status',    s.status ?? '');
+    set('ic-status', parked ? 'Progress and Pause are in the job-details tab. This results tab is waiting.' : s.status ?? '');
 
     const dot = g('ic-dot');
     if (dot) {
-      if (s.error) {
+      if (parked) {
+        dot.style.background = '#94a3b8';
+        dot.style.animation = 'none';
+      } else if (s.error) {
         dot.style.background = '#ef4444';
         dot.style.animation  = 'none';
       } else if (s.challenge) {

@@ -2,6 +2,7 @@ import { hubHasAcceptedInitialDrop } from './hubDropEligibility.js';
 import {
   freshJobCareerImportCapability,
   retryableUnstartedJobCareerImportCapability,
+  retryableCancelledJobCareerImportCapability,
 } from './jobCareerImportCapability.js';
 import {
   careerImportCompilationAdmission,
@@ -123,7 +124,8 @@ export function classifyJobBoardSourceAdmission(source) {
       // any parser/provider work began.  The capability helper proves that
       // narrow no-work shape before allowing a new Board transaction to claim
       // it; ordinary failed/partial imports remain clear-and-reimport only.
-      || retryableUnstartedJobCareerImportCapability(data, { nodeId: source.id });
+      || retryableUnstartedJobCareerImportCapability(data, { nodeId: source.id })
+      || retryableCancelledJobCareerImportCapability(data, { nodeId: source.id });
     if (freshImportCapability) {
       return { kind: 'fresh-imported-input', freshImportCapability };
     }

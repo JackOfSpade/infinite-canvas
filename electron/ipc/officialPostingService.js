@@ -9,11 +9,14 @@ import { createOfficialPostingFetchSession } from './officialPostingFetchSession
 import { extractOfficialPostingCandidates } from './officialPostingExtractors.js';
 import { officialPostingChunks, resolveOfficialPosting, unresolvedOfficialPosting, createOfficialPostingRowBudget, shouldPersistOfficialPostingResult } from './officialPostingResolver.js';
 import { descriptionOverlap } from './officialPostingMatch.js';
+import { officialPostingSemanticInputHash, officialPostingSemanticProofMatches } from './officialPostingSemantic.js';
 import { extractAtsTenant, strictEmployerEqual } from './officialSourceHosts.js';
 import { normalizeOfficialPosting, officialHttpsUrl, boundedOfficialPostingTrail, OFFICIAL_POSTING_LEVELS, OFFICIAL_POSTING_OUTCOMES, OFFICIAL_POSTING_TRAIL, OFFICIAL_POSTING_COMPARATIVE_CODES } from './officialPostingFields.js';
 import { mergeListingLivenessTelemetry } from './listingLivenessTelemetry.js';
 import { mergeBoardClosedTelemetry } from './officialPostingBoardClosed.js';
-import { buildOfficialPostingResearchRequest, parseOfficialPostingResearchResponse, buildOfficialPostingMatchRequest, validateOfficialPostingMatchResponse } from './officialPostingBridge.js';
+import { buildOfficialPostingResearchRequest, parseOfficialPostingResearchResponse, buildOfficialPostingMatchRequest, validateOfficialPostingMatchResponse,
+  buildSemanticOfficialPostingMatchRequest, validateSemanticOfficialPostingMatchResponse,
+  buildSemanticOfficialPostingShortlistRequest, validateSemanticOfficialPostingShortlistResponse } from './officialPostingBridge.js';
 import { hasLiveObservedWorker, hasPendingObservedWorkerLaunch } from './handoffBridge/observedChatContext.js';
 import { CONSTANTS } from './handoffBridge/constants.js';
 
@@ -34,7 +37,7 @@ export function getOfficialPostingStore() {
 
 /** Missing text is fetched through the bounded host fetcher; the store accepts
  * only bytes reproducing the already verified record's content hash. */
-export async function getOfficialPostingView(job, { store, fetch = fetchOfficialPosting, signal, refetch } = {}) {
+export async function getOfficialPostingView(job, { store, fetch = fetchOfficialPosting, signal, refetch, requireSemantic = true } = {}) {
   if (!normalizeOfficialPosting(job?.officialPosting)) return officialPostingView(job);
   try { store ||= getOfficialPostingStore(); } catch { return officialPostingView(job); }
   const restore = refetch || (async (url, { contentHash }) => {
@@ -45,7 +48,7 @@ export async function getOfficialPostingView(job, { store, fetch = fetchOfficial
       ats: route?.ats || '', tenant: route?.tenant || '' });
     return candidates.find(candidate => hash(candidate.description || '') === contentHash)?.description;
   });
-  return officialPostingView(job, { store, refetch: restore });
+  return officialPostingView(job, { store, refetch: restore, requireSemantic });
 }
 
 function bridgeError(code) { const error = new Error(code); error.code = code; return error; }
@@ -115,7 +118,7 @@ function materiallyDifferent(left, right) {
   const words = value => value.split(/\s+/u).length;
   return descriptionOverlap(a, b).score < 0.9 || Math.abs(words(a) - words(b)) / Math.max(words(a), words(b)) > 0.15;
 }
-const REJECTION_CODES = Object.freeze(['title-mismatch', 'location-mismatch', 'employer-mismatch', 'tenant-unproven', 'poster-tenant', 'salary-mismatch', 'no-anchor', 'invalid-quotes', 'ambiguous', 'closed', 'unreadable', 'oversize', 'unsafe-url', 'unsafe-address', 'fetch-timeout', 'fetch-failed', 'unsupported-content-type', 'invalid-text', 'crawl-budget', 'crawl-partial', ...OFFICIAL_POSTING_COMPARATIVE_CODES]);
+const REJECTION_CODES = Object.freeze(['title-mismatch', 'location-mismatch', 'employer-mismatch', 'tenant-unproven', 'poster-tenant', 'salary-mismatch', 'no-anchor', 'invalid-quotes', 'ambiguous', 'closed', 'unreadable', 'oversize', 'unsafe-url', 'unsafe-address', 'fetch-timeout', 'fetch-failed', 'unsupported-content-type', 'invalid-text', 'crawl-budget', 'crawl-partial', 'semantic-uncertain', 'semantic-overflow', ...OFFICIAL_POSTING_COMPARATIVE_CODES]);
 const FETCH_COUNTERS = Object.freeze(['fetches', 'uniqueUrls', 'cacheHits', 'breakerTrips']);
 const MISS_TTL_MS = 24 * 60 * 60 * 1_000;
 const ROW_CONCURRENCY = 6;
@@ -188,7 +191,7 @@ function abortTrail(signal) {
 
 /** Only host records bound to this scraped identity can settle an inline row.
  * Unresolved indices preserve input order for the caller's exact merge. */
-export async function partitionOfficialPostingRows(jobs, { store, signal, now = Date.now } = {}) {
+export async function partitionOfficialPostingRows(jobs, { store, signal, now = Date.now, semanticMatching = true } = {}) {
   const rows = Array.isArray(jobs) ? jobs : [];
   const carried = rows.slice(); const settled = new Set(); const settledTelemetry = telemetryBlock();
   const instant = typeof now === 'function' ? Number(now()) : Number(now);
@@ -199,6 +202,7 @@ export async function partitionOfficialPostingRows(jobs, { store, signal, now = 
     try { record = await store.find(job); } catch { return; }
     const posting = normalizeOfficialPosting(record?.officialPosting);
     if (!posting || !officialPostingRecordMatchesScrapedIdentity(job, record)
+      || (semanticMatching && !officialPostingSemanticProofMatches(job, posting))
       || !shouldPersistOfficialPostingResult(posting, { signal })) return;
     // Older closed-trail misses lack a candidate confirmation receipt. Revisit
     // them rather than treating an expired validThrough as a proved closure.
@@ -222,20 +226,25 @@ export async function partitionOfficialPostingRows(jobs, { store, signal, now = 
 export function createOfficialPostingRecoveryPassResolver(resolveRows, { signal } = {}) {
   if (typeof resolveRows !== 'function') throw new TypeError('Recovery resolution needs a host resolver.');
   const receipts = new Map(); const drops = []; const boardClosedDrops = [];
+  const inputHash = job => {
+    try { return officialPostingSemanticInputHash(job); } catch { return null; }
+  };
   let passTelemetry = telemetryBlock();
   return async rows => {
     if (signal?.aborted) throw signal.reason || bridgeError('bridge-aborted');
     const input = Array.isArray(rows) ? rows : [];
     const consumed = new Set();
     const planned = input.map(job => {
+      const currentHash = inputHash(job);
       const receipt = (receipts.get(sourceJobKey(job)) || []).find(value => !consumed.has(value)
+        && currentHash && value.inputHash === currentHash
         && officialPostingRecordMatchesScrapedIdentity(job, value));
       if (receipt) consumed.add(receipt);
       return { job, receipt };
     });
     const fresh = planned.filter(item => !item.receipt);
     // Snapshot authorization before a provider or cleanup can mutate a row.
-    const identities = fresh.map(({ job }) => ({ key: sourceJobKey(job), aliases: officialPostingAliases(job) }));
+    const identities = fresh.map(({ job }) => ({ key: sourceJobKey(job), aliases: officialPostingAliases(job), inputHash: inputHash(job) }));
     if (fresh.length) {
       const resolved = await resolveRows(fresh.map(item => item.job));
       if (signal?.aborted) throw signal.reason || bridgeError('bridge-aborted');
@@ -258,7 +267,7 @@ export function createOfficialPostingRecoveryPassResolver(resolveRows, { signal 
         if (keptIndex >= 0) usedKept.add(keptIndex); else usedDrops.add(droppedIndex);
         const kept = resolved.jobs[keptIndex];
         const bucket = receipts.get(identity.key) || [];
-        item.receipt = { aliases: identity.aliases, dropped: !kept,
+        item.receipt = { aliases: identity.aliases, inputHash: identity.inputHash, dropped: !kept,
           postedBy: kept?.postedBy, officialPosting: normalizeOfficialPosting(kept?.officialPosting) || undefined,
           boardClosed: kept?.boardClosed, listingLiveness: kept?.listingLiveness };
         bucket.push(item.receipt);
@@ -295,6 +304,7 @@ export function createOfficialPostingRecoveryPassResolver(resolveRows, { signal 
 export async function resolveOfficialPostings(jobs, {
   manualAiRunId, nodeId, signal, callRaw = callLLMRaw, callMatch = callRaw, onProgress, telemetry,
   store, fetch = fetchOfficialPosting, fetchSession, resolve = resolveOfficialPosting, now = Date.now,
+  semanticMatching = resolve === resolveOfficialPosting, bypassCache = false, candidateUrls = [],
   timeoutMs = OFFICIAL_POSTING_HANDOFF_TIMEOUT_MS, bridgeAvailable = true,
   comparativeWorkerAvailable = callMatch === callLLMRaw ? hasLiveObservedWorker : null,
   comparativeWorkerLaunching = callMatch === callLLMRaw ? hasPendingObservedWorkerLaunch : null,
@@ -312,25 +322,70 @@ export async function resolveOfficialPostings(jobs, {
   try { store ||= getOfficialPostingStore(); } catch { store = null; }
   const progress = () => { try { onProgress?.({ completed: finished.size, total: rows.length }); } catch { /* Progress cannot fail the search. */ } };
   const settle = member => { finished.add(member); progress(); };
+  const callbacksFor = (member, batch) => {
+    let matchFailure = null;
+    const callDecision = async (request, validate, comparative) => {
+      if (matchFailure) throw matchFailure;
+      if (!bridgeAvailable) throw bridgeError('bridge-unavailable');
+      const attempts = callMatch === callLLMRaw ? 1 : 2;
+      let correction = {};
+      for (let attempt = 0; attempt < attempts; attempt += 1) {
+        try {
+          const raw = await cappedHandoff({ ...request, ...correction }, { call: callMatch,
+            signal: semanticMatching ? signal : member.rowBudget.signal, timeoutMs, manualAiRunId, nodeId,
+            hints: { itemCount: 1, batch: batch + 1, batchTotal: chunks.length }, now: clock, stats,
+            ...(comparative ? { comparativeWorkerAvailable, comparativeWorkerLaunching, comparativeGraceMs } : {}) });
+          return validate(raw);
+        } catch (error) {
+          // The real transport owns its correction. Injected callers emulate
+          // that seam once with the original prompt and comparison identity.
+          if (attempt + 1 < attempts && Array.isArray(error?.correctionDetails) && error.correctionDetails.length) {
+            correction = { correctionDetails: [...error.correctionDetails], correctionRuleIds: [...(error.correctionRuleIds || [])], correctionAttempt: 1 };
+            continue;
+          }
+          const decisionSignal = semanticMatching ? signal : member.rowBudget.signal;
+          const code = ['comparative-unavailable', 'OFFICIAL_POSTING_COMPARATIVE_UNAVAILABLE'].includes(error?.code) ? 'comparative-unavailable'
+            : error?.code === 'OFFICIAL_POSTING_COMPARATIVE_INVALID' || Array.isArray(error?.correctionDetails) ? 'comparative-invalid' : failureCode(error, decisionSignal);
+          const failure = bridgeError(code === 'research-miss' ? 'comparative-invalid' : code);
+          if (['bridge-aborted', 'bridge-timeout', 'bridge-unavailable', 'comparative-unavailable'].includes(failure.code)) matchFailure = failure;
+          throw failure;
+        }
+      }
+    };
+    const match = async (job, options, context = {}) => {
+      const input = { job, options, run: context.run, peerCandidates: context.peerCandidates,
+        employerHypotheses: context.employerHypotheses, contradictionOnly: context.contradictionOnly };
+      const request = semanticMatching ? buildSemanticOfficialPostingMatchRequest(input) : buildOfficialPostingMatchRequest(input);
+      return callDecision(request, raw => semanticMatching
+        ? validateSemanticOfficialPostingMatchResponse(raw, input) : validateOfficialPostingMatchResponse(raw, input), true);
+    };
+    match.handlesCorrections = true;
+    const shortlist = async (job, candidates) => callDecision(buildSemanticOfficialPostingShortlistRequest({ job, candidates }),
+      raw => validateSemanticOfficialPostingShortlistResponse(raw, { candidates }), false);
+    shortlist.handlesCorrections = true;
+    return { match, ...(semanticMatching ? { shortlist } : {}) };
+  };
+  for (const [batch, chunk] of chunks.entries()) for (const member of chunk) member.callbacks = callbacksFor(member, batch);
   const safeResolve = async (member, options) => {
-    const rowSignal = member.rowBudget.signal;
-    if (rowSignal.aborted) return unresolvedOfficialPosting(member.job, { outcome: 'failed', trail: [abortTrail(rowSignal)] });
+    const rowSignal = semanticMatching ? signal : member.rowBudget.signal;
+    if (rowSignal?.aborted) return unresolvedOfficialPosting(member.job, { outcome: 'failed', trail: [abortTrail(rowSignal)] });
     try {
       const result = await resolve(member.job, { store, fetch: session.fetch, signal: rowSignal, rowBudget: member.rowBudget,
-        now: clock, persistResults: false, persistMisses: false, ...options });
+        now: clock, persistResults: false, persistMisses: false, semanticMatching, bypassCache, candidateUrls,
+        ...(semanticMatching ? member.callbacks : {}), ...options });
       if (!normalizeOfficialPosting(result?.officialPosting)) throw new TypeError('Invalid official posting resolution.');
       return result;
     } catch (error) {
-      if (!rowSignal.aborted) {
+      if (!rowSignal?.aborted) {
         stats.failed += 1;
         console.warn('[OfficialPosting] Row resolution failed:', error?.code || error?.name || 'Error');
       }
-      return unresolvedOfficialPosting(member.job, { outcome: 'failed', trail: [rowSignal.aborted ? abortTrail(rowSignal) : 'failed'] });
+      return unresolvedOfficialPosting(member.job, { outcome: 'failed', trail: [rowSignal?.aborted ? abortTrail(rowSignal) : 'failed'] });
     }
   };
   const persist = async (member, result, { researchRan = false } = {}) => {
     // A row budget can end while the run continues. The shared predicate
-    // requires a deterministic anchor before a partial verified crawl is durable.
+    // requires a verified identity decision before a partial crawl is durable.
     const durability = VERIFIED_LEVELS.has(result.officialPosting?.level) ? signal : member.rowBudget.signal;
     if (!store || result.record || result.expiryCandidates?.length
       || result.officialPosting?.trail?.includes('recent-miss')
@@ -379,38 +434,8 @@ export async function resolveOfficialPostings(jobs, {
         if (signal?.aborted || member.rowBudget.signal.aborted) {
           results.set(member, addTrail(results.get(member), abortTrail(member.rowBudget.signal))); settle(member); return;
         }
-        let matchFailure = null;
-        const match = async (job, options, context = {}) => {
-          if (matchFailure) throw matchFailure;
-          const request = buildOfficialPostingMatchRequest({ job, options, run: context.run,
-            peerCandidates: context.peerCandidates, employerHypotheses: context.employerHypotheses,
-            contradictionOnly: context.contradictionOnly });
-          const attempts = callMatch === callLLMRaw ? 1 : 2;
-          let correction = {};
-          for (let attempt = 0; attempt < attempts; attempt += 1) {
-            try {
-              const raw = await cappedHandoff({ ...request, ...correction }, { call: callMatch, signal: member.rowBudget.signal, timeoutMs, manualAiRunId, nodeId,
-                hints: { itemCount: 1, batch: batch + 1, batchTotal: chunks.length }, now: clock, stats, comparativeWorkerAvailable, comparativeWorkerLaunching, comparativeGraceMs });
-              return validateOfficialPostingMatchResponse(raw, { job, options,
-                peerCandidates: context.peerCandidates, employerHypotheses: context.employerHypotheses,
-                contradictionOnly: context.contradictionOnly });
-            } catch (error) {
-              // Real transport owns its single correction round. Injected raw callers
-              // emulate that seam once, keeping the original prompt byte-identical.
-              if (attempt + 1 < attempts && Array.isArray(error?.correctionDetails) && error.correctionDetails.length) {
-                correction = { correctionDetails: [...error.correctionDetails], correctionRuleIds: [...(error.correctionRuleIds || [])], correctionAttempt: 1 };
-                continue;
-              }
-              const code = ['comparative-unavailable', 'OFFICIAL_POSTING_COMPARATIVE_UNAVAILABLE'].includes(error?.code) ? 'comparative-unavailable'
-                : error?.code === 'OFFICIAL_POSTING_COMPARATIVE_INVALID' || Array.isArray(error?.correctionDetails) ? 'comparative-invalid' : failureCode(error, member.rowBudget.signal);
-              const failure = bridgeError(code === 'research-miss' ? 'comparative-invalid' : code);
-              if (['bridge-aborted', 'bridge-timeout', 'bridge-unavailable', 'comparative-unavailable'].includes(failure.code)) matchFailure = failure;
-              throw failure;
-            }
-          }
-        };
-        match.handlesCorrections = true;
-        let result = await safeResolve(member, { candidateUrls: leads.get(member.id) || [], bypassCache: true, match, researchRan: true });
+        let result = await safeResolve(member, { candidateUrls: [...candidateUrls, ...(leads.get(member.id) || [])],
+          bypassCache: true, ...member.callbacks, researchRan: true });
         result = addTrail(result, 'bridge-research');
         results.set(member, await persist(member, result, { researchRan: true })); settle(member);
       });

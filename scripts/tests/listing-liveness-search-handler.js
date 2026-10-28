@@ -8,6 +8,7 @@ import { claimJobAnalysisOperationAuthority } from '../../electron/ipc/jobAnalys
 import { finalizeListingEvidence, LISTING_LIVENESS_RULES } from '../../electron/ipc/listingLiveness.js';
 import { memoListingVerdict, recordListingEvidence, recordOfficialExpiryCandidates } from '../../electron/ipc/listingLivenessStore.js';
 import { writeApprovedCareerSnapshotFixture } from './careerSnapshotFixture.mjs';
+import { officialPostingSemanticInputHash } from '../../electron/ipc/officialPostingSemantic.js';
 
 const AT = '2026-10-25T12:00:00.000Z';
 const DESCRIPTION = 'Build reliable platform services, review incidents, and document service recovery with the engineering team. '.repeat(8);
@@ -81,7 +82,12 @@ async function runSearch({ canvasFilePath, careerSnapshotId, nodeId, rows, evide
       }
       return results;
     },
-    resolveOfficialPostings: async jobs => ({ jobs: jobs.map(row => ({ ...row, officialPosting: officialPosting(row) })),
+    resolveOfficialPostings: async jobs => ({ jobs: jobs.map(row => {
+      const posting = officialPosting(row);
+      return { ...row, officialPosting: { ...posting, trail: [...(posting.trail || []), 'semantic-match-v1'],
+        semanticMatch: { version: 1, inputHash: officialPostingSemanticInputHash(row),
+          ...(['L1', 'L2', 'L3', 'L4'].includes(posting.level) ? { sourceHash: 'b'.repeat(64) } : {}) } } };
+    }),
       expiryCandidates: jobs.map(row => {
         const candidates = expiryCandidatesForRow?.(row) || [];
         if (candidates.length) assert.equal(recordOfficialExpiryCandidates(row, candidates), true);

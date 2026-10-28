@@ -179,11 +179,15 @@ export function extractAshbyPostings(body, options = {}) {
   if (!data || !Array.isArray(data.jobs)) return [];
   return data.jobs.filter(job => job && typeof job === 'object').map(job => {
     const places = [plain(job.location), ...array(job.secondaryLocations).map(value => typeof value === 'string' ? value : value?.location).map(plain)].filter(Boolean);
-    const remote = job.isRemote === true || /^remote$/iu.test(job.workplaceType || '');
+    const workplaceType = plain(job.workplaceType).toLowerCase();
+    const knownWorkplaceType = /^(?:remote|hybrid|onsite)$/u.test(workplaceType);
+    // Some boards keep the legacy remote flag set for hybrid postings. The
+    // explicit workplace type supplies the more precise work arrangement.
+    const remote = knownWorkplaceType ? workplaceType === 'remote' : job.isRemote === true;
     return posting({
       title: job.title, employer: job.hiringOrganization?.name || job.companyName || options.employer || '',
       hiringOrganization: job.hiringOrganization, sameAs: job.hiringOrganization?.sameAs || '',
-      location: location([...new Set(places)].join(' | '), { remote, workMode: /^(?:remote|hybrid|onsite)$/iu.test(job.workplaceType || '') ? job.workplaceType.toLowerCase() : '' }),
+      location: location([...new Set(places)].join(' | '), { remote, workMode: knownWorkplaceType ? workplaceType : '' }),
       salary: ashbySalary(job), identifier: job.id, description: plainDescription(job.descriptionPlain) || officialDescriptionText(job.descriptionHtml),
       sourceUrl: job.jobUrl, officialApplyUrl: job.applyUrl || job.jobUrl, isListed: job.isListed,
     }, { ...options, ats: 'ashby' });

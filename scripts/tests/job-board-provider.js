@@ -1,5 +1,7 @@
 import { assert } from './testHelpers.js';
 import { readFileSync } from 'node:fs';
+import { JSDOM } from 'jsdom';
+import { buildOverlayScript, linkDetailOverlayPages, overlayControlPage, overlayTabLayout, updateOverlay as paintScraperOverlay } from '../../electron/ipc/browser/scraperOverlay.js';
 import { runInNewContext } from 'node:vm';
 import { isJobBoardUserCancellation, isLegacyUnbucketedJobBoard, validateJobBoardTaxonomy } from '../../src/utils/jobBoardAiProvider.js';
 import { attachCompensationRemoteResidences, combineSignature, emptyReplacementIneligibilityReason, isLegacyCombineSignature, moduleCombineFingerprint, moduleFingerprint, normalizeJobMatchScore, parseCombineSignature, shouldKeepCompletedBoardSnapshotVisible, staleReason, unionScoredJobs } from '../../src/nodes/jobboard/mergeJobs.js';
@@ -16,17 +18,194 @@ import { boundedCombinedSourceRuns } from '../../src/utils/jobBoardProvenance.js
 import { exactInterruptedRecoveryAdmission, exactInterruptedRecoveryBackendFailure, hasCheckpointedPostCollectionAnalysis } from '../../src/utils/jobBoardRecoveryAdmission.js';
 import { cancelJobBoardChildrenSequentially, promoteJobBoardPausedSourceResolution, runJobBoardChildFanout } from '../../src/utils/jobBoardChildFanout.js';
 import { classifyJobBoardSourceAdmission, completedJobSearchOutcomeMatches, jobSearchOutcomeReceiptMatches, partitionJobBoardSourceAdmissions } from '../../src/utils/jobBoardSourceAdmission.js';
-import { jobCareerImportBoardAdmission, jobCareerImportConsumptionPatch, retryableUnstartedJobCareerImportCapability } from '../../src/utils/jobCareerImportCapability.js';
+import { jobCareerImportBoardAdmission, jobCareerImportConsumptionPatch, retryableUnstartedJobCareerImportCapability, retryableCancelledJobCareerImportCapability, freshJobCareerImportCapability } from '../../src/utils/jobCareerImportCapability.js';
 import { approveCareerImportCompilation, approvedCareerImportCompilation, beginCareerImportCompilation, careerImportCompilationAdmission, careerImportCompilationMatches, compileBeforeCareerProvider, currentApprovedCareerImportSnapshot, failCareerImportCompilation, resumableCareerImportCompilation } from '../../src/utils/jobCareerCompilationReceipt.js';
 import { buildJobCareerQueryCacheKey, careerSnapshotBindingMatches } from '../../src/utils/jobCareerSnapshotBinding.js';
 import { prepareBackgroundBoardChildRequest } from '../../src/utils/jobBoardBackgroundRecovery.js';
 import { buildJobHubCareerClearPatch } from '../../src/utils/hubDropEligibility.js';
-import { providerTotalShortfallRecoveryReceipt, resolveManualSourceStopReason, zipRecruiterProviderShortfallRecoveryOutcome, zipRecruiterProviderTotalShortfallWarning } from '../../electron/ipc/browser/manualScraper.js';
+import { clickNextPage, clickLoadMore, zipRecruiterDetailGapMs, providerTotalShortfallRecoveryReceipt, resolveManualSourceStopReason, zipRecruiterProviderShortfallRecoveryOutcome, zipRecruiterProviderTotalShortfallWarning } from '../../electron/ipc/browser/manualScraper.js';
 
 import careerCompilationQueueTests from './careerCompilationQueueFixture.mjs';
 
 export default [
   ...careerCompilationQueueTests,
+  {
+    name: 'one collector parks its results panel and shares current detail progress and pause ownership',
+    async run() {
+      const doms = [];
+      const makePage = () => {
+        const dom = new JSDOM('<html><head></head><body></body></html>', {
+          url: 'https://www.ziprecruiter.com/jobs/test', runScripts: 'outside-only',
+        });
+        doms.push(dom);
+        dom.window.eval(buildOverlayScript());
+        dom.window.document.dispatchEvent(new dom.window.Event('DOMContentLoaded'));
+        const page = { evaluate: async (fn, ...args) => dom.window.eval(`(${fn.toString()})`)(...args) };
+        return { page, dom, get: id => dom.window.document.getElementById(id) };
+      };
+      const list = makePage();
+      const detail = makePage();
+      const unlink = linkDetailOverlayPages(list.page, detail.page);
+      try {
+        await paintScraperOverlay(list.page, { count: 5, status: 'Fetching descriptions… 5/20' });
+        await paintScraperOverlay(detail.page, { count: 12, status: 'Fetching descriptions… 12/20' });
+        assert(list.get('ic-count').textContent === '12' && detail.get('ic-count').textContent === '12');
+        assert(list.get('ic-count-row').style.display === 'none', 'parked results cannot display a stale second counter');
+        assert(list.get('ic-pause').hidden && list.get('ic-pause').disabled, 'parked results cannot offer a nonfunctional Pause');
+        assert(list.get('ic-dot').style.animation === 'none' && list.get('ic-status').textContent.includes('job-details tab'));
+        assert(detail.get('ic-tab-role').textContent === 'Job details · one at a time');
+        assert(!detail.get('ic-pause').hidden && !detail.get('ic-pause').disabled);
+        detail.get('ic-pause').click();
+        assert(await overlayControlPage(list.page).evaluate(() => window.__icPaused), 'the results-side loop observes the active detail Pause');
+        assert(overlayTabLayout(list.page) === 'results-and-details');
+        unlink();
+        assert(overlayControlPage(list.page) === list.page && overlayTabLayout(list.page) === 'single-page');
+        await paintScraperOverlay(list.page, { count: 20, status: 'Loading next results page…' });
+        assert(list.get('ic-count-row').style.display === 'flex' && !list.get('ic-pause').hidden && !list.get('ic-pause').disabled);
+        assert(list.get('ic-tab-role').textContent === '' && list.get('ic-count').textContent === '20');
+        assert(detail.get('ic-count').textContent === '12', 'a retired detail page receives no further paints');
+      } finally { unlink(); for (const dom of doms) dom.window.close(); }
+      const source = readFileSync(new URL('../../electron/ipc/browser/manualScraper.js', import.meta.url), 'utf8');
+      const cleanupStart = source.indexOf('      detailPacing.lastNavigationAt = lastDetailNavigationAt;');
+      const cleanupEnd = source.indexOf('    // If the main page was used as fallback', cleanupStart);
+      const cleanup = source.slice(cleanupStart, cleanupEnd);
+      assert(cleanupStart > 0 && cleanup.indexOf('unlinkDetailOverlays();') < cleanup.indexOf('await detailPage?.close()'),
+        'the detail group retires before its tab closes in the expansion finally block');
+    },
+  },
+  {
+    name: 'cancelled Board imports retry only after acknowledged stop and absent backend recovery',
+    async run() {
+      const nodeId = 'cancelled-search';
+      const capability = `career-import:${nodeId}:original`;
+      const data = {
+        hubState: 'empty', careerFilePaths: ['/synthetic/career.pdf'],
+        careerImportGeneration: capability, careerSnapshotId: 'a'.repeat(64),
+        careerImportCompilation: { version: 1, status: 'approved', generation: capability, careerSnapshotId: 'a'.repeat(64) },
+        ...jobCareerImportConsumptionPatch({ capability, origin: 'board-cancelled' }),
+      };
+      assert(retryableCancelledJobCareerImportCapability(data, { nodeId }) === capability);
+      assert(classifyJobBoardSourceAdmission({ id: nodeId, type: 'jobhub', data }).kind === 'fresh-imported-input');
+      assert(jobCareerImportBoardAdmission(data, { nodeId, capability, boardRunId: 'retry' }).kind === 'reclaimable-cancelled');
+      for (const patch of [
+        { jobRunId: 'partial' }, { pendingJobs: [] }, { scoredJobs: [] }, { hubState: 'done' },
+        { manualAiResume: { runId: 'handoff' } }, { manualAiCleanupReceipts: [{}] },
+        { careerImportCompilation: null }, { careerImportFreshCapability: capability },
+        { careerImportConsumption: { ...data.careerImportConsumption, origin: 'job-board' } },
+      ]) assert(!retryableCancelledJobCareerImportCapability({ ...data, ...patch }, { nodeId }), JSON.stringify(patch));
+      assert(!retryableCancelledJobCareerImportCapability(data, { nodeId: 'copied' }));
+      const source = readFileSync(new URL('../../src/nodes/JobSearchNode.jsx', import.meta.url), 'utf8');
+      const start = source.indexOf('      // A rollback can become visible');
+      const end = source.indexOf('      processingToken = processingRunsRef.current.start();', start);
+      const body = source.slice(start, end);
+      assert(start > 0 && end > start);
+      const rollbackStart = source.indexOf('function boardRunRollbackPatch(');
+      const rollbackEnd = source.indexOf('\n/**', rollbackStart);
+      const rollback = runInNewContext(`(${source.slice(rollbackStart, rollbackEnd)})`, {
+        freshJobCareerImportCapability, jobCareerImportConsumptionPatch,
+      });
+      const warning = { sourceId: 'ziprecruiter', code: 'pagination-unhandled', severity: 'block' };
+      const restored = rollback({ ...data, careerImportFreshCapability: capability,
+        careerImportConsumption: null, scrapeWarnings: [warning] }, nodeId);
+      assert(restored.scrapeWarnings.length === 0 && restored.hubState === 'empty');
+      assert(retryableCancelledJobCareerImportCapability(restored, { nodeId }) === capability);
+      assert(rollback({ ...data, hubState: 'done', scrapeWarnings: [warning] }, nodeId).scrapeWarnings.length === 1,
+        'cancelling a rerun preserves the warnings belonging to restored completed results');
+      for (const scenario of ['ready', 'unsettled', 'recovery', 'peek-failed', 'changed', 'cancelled']) {
+        let live = structuredClone(data);
+        let checks = 0;
+        let cancelled = false;
+        const result = await runInNewContext(`(async () => { ${body}; return { status: 'ready' }; })()`, {
+          queueManagedByBoard: true, freshImportCapability: capability, currentId: nodeId,
+          boardRunId: 'retry', canvasFilePath: '/synthetic/canvas', jobRunIdRef: { current: null },
+          getNode: () => ({ data: live }), cancelled: () => cancelled,
+          retryableCancelledJobCareerImportCapability, freshJobCareerImportCapability,
+          searchRunOutcome: (status, fields) => ({ status, ...fields }),
+          updateGlobal: (_id, updater) => { const patch = updater({ data: live }); if (patch) live = { ...live, ...patch }; },
+          waitForRendererCommitFrame: async () => {}, EventLogger: { log() {} },
+          window: { electronAPI: {
+            cancelNodeTaskAndWait: async () => { cancelled = scenario === 'cancelled'; return { settled: scenario !== 'unsettled' }; },
+            peekJobRun: async () => {
+              checks++;
+              if (scenario === 'changed') live = { ...live, careerImportGeneration: 'new-drop' };
+              return { success: scenario !== 'peek-failed', found: scenario === 'recovery' };
+            },
+          } },
+        });
+        assert(result.status === (scenario === 'ready' ? 'ready' : scenario === 'cancelled' ? 'cancelled' : 'not-ready'), scenario);
+        assert((live.careerImportFreshCapability === capability) === (scenario === 'ready'), `${scenario}: only verified retry is rearmed`);
+        if (scenario === 'unsettled' || scenario === 'cancelled') assert(checks === 0);
+      }
+    },
+  },
+  {
+    name: 'ZipRecruiter clearance starts its next-request cooldown after the human solve',
+    async run() {
+      const source = readFileSync(new URL('../../electron/ipc/browser/manualScraper.js', import.meta.url), 'utf8');
+      const begin = source.indexOf('                const postWaitSignals = await getChallengeSignals(fetchPage);');
+      const end = source.indexOf("                recordManualScraperTelemetry({\n                  phase: 'detail-challenge', srcName:", begin);
+      const gapStart = source.indexOf("        const detailGapMs = sourceId === 'ziprecruiter'");
+      const gapEnd = source.indexOf('        await updateOverlay(interactionPage,', gapStart);
+      assert(begin > 0 && end > begin && gapStart > 0 && gapEnd > gapStart);
+      for (const result of ['ok', 'recovered', 'abort']) {
+        let listForegrounds = 0;
+        let waited = 0;
+        const actual = await runInNewContext(`(async () => {
+          let solvedDetailChallenges = 0, lastDetailNavigationAt = 1, keepDetailForeground = false;
+          ${source.slice(begin, end)}
+          for (let once = 0; once < 1; once++) { ${source.slice(gapStart, gapEnd)} }
+          return { keepDetailForeground, solvedDetailChallenges, lastDetailNavigationAt };
+        })()`, {
+          sourceId: 'ziprecruiter', detailWaitResult: result, fetchPage: {}, signal: null,
+          overlayBase: { srcName: 'ZipRecruiter' }, Date: { now: () => 120_000 },
+          page: { bringToFront: async () => { listForegrounds++; } },
+          getChallengeSignals: async () => ({}), injectOverlay: async () => {},
+          recordManualScraperTelemetry() {}, zipRecruiterDetailGapMs,
+          runtime: { delay: async ms => { waited = ms; return true; } },
+        });
+        if (result === 'abort') {
+          assert(!actual.keepDetailForeground && actual.solvedDetailChallenges === 0 && listForegrounds === 1);
+        } else {
+          assert(actual.keepDetailForeground && actual.solvedDetailChallenges === 1 && listForegrounds === 0);
+          assert(actual.lastDetailNavigationAt === 120_000 && waited === 10_000,
+            'a long human solve must not exhaust the cooldown before clearance');
+        }
+      }
+    },
+  },
+  {
+    name: 'job pagination accepts exact current labels and ignores disabled hidden and recommendation controls',
+    async run() {
+      for (const [html, sourceId, expected] of [
+        ['<a title="Next page" href="/jobs-search/2">Next page</a>', 'ziprecruiter', true],
+        ['<button aria-label="Next page">→</button>', 'ziprecruiter', true],
+        ['<a title="Next Page" style="display:none">hidden</a><a title="Next page">Next page</a>', 'ziprecruiter', true],
+        ['<a title="Next page" aria-disabled="true">Next page</a>', 'ziprecruiter', false],
+        ['<a>Next Page Media — Engineer</a>', 'ziprecruiter', false],
+        ['<button>See more jobs</button>', 'glassdoor', true],
+        ['<a href="/jobs/2">See more jobs</a>', 'glassdoor', true],
+        ['<button disabled>See more jobs</button>', 'glassdoor', false],
+        ['<button style="display:none">Show more jobs</button>', 'glassdoor', false],
+        ['<a>See more jobs like this</a>', 'glassdoor', false],
+      ]) {
+        const dom = new JSDOM(html, { url: 'https://www.example.test/', runScripts: 'outside-only' });
+        let clicks = 0;
+        dom.window.HTMLElement.prototype.scrollIntoView = () => {};
+        dom.window.document.addEventListener('click', event => { clicks++; event.preventDefault(); });
+        const page = { evaluate: async (fn, ...args) => dom.window.eval(`(${fn.toString()})`)(...args) };
+        try {
+          const result = sourceId === 'glassdoor'
+            ? await clickLoadMore(page, '[data-test="load-more"]')
+            : await clickNextPage(page, sourceId);
+          assert(result.clicked === expected && clicks === Number(expected), html);
+        } finally { dom.window.close(); }
+      }
+      assert(zipRecruiterDetailGapMs(0) === 2500);
+      assert(zipRecruiterDetailGapMs(1) === 10000);
+      assert(zipRecruiterDetailGapMs(2) === 20000);
+      assert(zipRecruiterDetailGapMs(20) === 30000);
+    },
+  },
   {
     name: 'a candidate snapshot failure cannot resurrect fresh or resumed scoring after saved Pause',
     async run() {
@@ -4722,8 +4901,9 @@ export default [
         && childCancel.includes('cancelNodeTaskAndWait(id, reason)')
         && childCancel.includes('acknowledgement?.settled !== true')
         && activeChildCancelStart >= 0
-        && activeChildCancel.includes('const controlManualAiRunIds = control.manualAiRunIds instanceof Set')
-        && activeChildCancel.includes(': new Set([control.manualAiRunId].filter(Boolean));')
+        && activeChildCancel.includes('const controlManualAiRunIds = new Set([')
+        && activeChildCancel.includes('...(control.manualAiRunIds instanceof Set ? control.manualAiRunIds : [])')
+        && activeChildCancel.includes('.filter(runId => runId && !isCardOfficialPostingRunId(runId))')
         && activeChildCancel.includes('manualAiRunIds: [...controlManualAiRunIds],')
         && activeAcknowledgementAt >= 0 && activeDiscoveryAt > activeAcknowledgementAt
         && activeSettlementAt > activeDiscoveryAt && activeParentFenceAt > activeSettlementAt
@@ -4795,7 +4975,7 @@ export default [
         && board.includes('activeCombineManualAiRunRef.current?.token === combineToken')
         && board.includes('const retireActiveCombineManualAiRun = useCallback')
         && board.includes('const runIds = expectedRunId')
-        && board.includes(': new Set([active?.runId, persistedRunId].filter(Boolean));')
+        && board.includes(': new Set([active?.runId, persistedRunId].filter(isBoardCombineManualAiRunId));')
         && board.includes('const retireBoardCleanupReceipt = useCallback')
         && board.includes('if (receipt.cancellationPending === true)')
         && board.includes('const acknowledgement = await window.electronAPI.cancelNodeTaskAndWait(')
@@ -5356,7 +5536,8 @@ export default [
         && exactCancel.includes('control.cleanupArtifacts = () => {')
         && exactCancel.includes('if (control.cleanupPromise) return control.cleanupPromise;')
         && exactCancel.includes('await abortAndDiscoverRun();')
-        && exactCancel.includes('const controlManualAiRunIds = control.manualAiRunIds instanceof Set')
+        && exactCancel.includes('const controlManualAiRunIds = new Set([')
+        && exactCancel.includes('...(control.manualAiRunIds instanceof Set ? control.manualAiRunIds : [])')
         && exactCancel.includes('acknowledgedRunIds: [...controlManualAiRunIds],')
         && exactCancel.includes('beforeRetirement: acknowledgedIds => persistChildCancellationCleanup({')
         && !exactCancel.includes('await retireManualAiRunDurably(control.manualAiRunId);')
@@ -5885,6 +6066,10 @@ export default [
       const combineStart = board.indexOf('const handleCombine');
       const combineEnd = board.indexOf('\n  return (', combineStart);
       const combine = board.slice(combineStart, combineEnd);
+      assert(board.includes('const salaryNeedsRefresh = jobBoardSalaryNeedsRefresh(data, salaryCareerKey);')
+        && board.includes('stale: stale || salaryNeedsRefresh,')
+        && combine.includes('salaryMethodVersion: JOB_COMPENSATION_METHOD_VERSION,'),
+      'a salary methodology change must expose Re-combine and successful publication must save the new version');
       const combineBusyAt = combine.indexOf("if (combineRunRef.current || combineRecoveryTokenClaimRef.current) return { status: 'busy' };");
       const scanBusyAt = combine.indexOf("if (scanRunRef.current && options?.afterSearch !== true) return { status: 'busy' };");
       const combineTokenAt = combine.indexOf("const combineToken = Symbol('job-board-combine');");

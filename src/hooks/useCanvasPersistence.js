@@ -179,6 +179,7 @@ export function useCanvasPersistence({
           return false;
         }
 
+        EventLogger.recordSaveSuccess(attemptedFilePath);
         hasUnsavedChangesRef.current = false;
         setHasUnsavedChanges(false);
         setSaveStatus('saved');

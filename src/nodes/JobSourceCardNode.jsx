@@ -113,7 +113,7 @@ function jobSourceProgressDisplay(status, progress) {
   const measured = Number.isInteger(total) && total > 0
     && Number.isInteger(completed) && completed >= 0 && completed <= total;
   return {
-    label: descriptions ? 'Descriptions checked' : activity ? 'Current activity' : 'Search tasks',
+    label: descriptions ? 'Descriptions checked' : progress?.activity === 'official-posting' ? 'Official postings checked' : activity ? 'Current activity' : 'Search tasks',
     completed: measured ? completed : null,
     total: measured ? total : null,
     percent: measured ? (completed / total) * 100 : null,
@@ -2000,7 +2000,7 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
       : isDone
         ? `${count ?? 0} jobs`
         : isSearching
-          ? (isDescriptionEnrichment ? 'Reading descriptions…' : 'Searching…')
+          ? (isDescriptionEnrichment ? 'Reading descriptions…' : liveProgress?.activity === 'official-posting' ? 'Checking official postings…' : 'Searching…')
           : 'Idle';
 
   // Red for hard failures/blocks, amber for throttles/skips/warn

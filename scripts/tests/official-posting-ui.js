@@ -15,6 +15,7 @@ import { getConnectedJobSearchIds } from '../../src/utils/jobBoardSearchSelectio
 import { APPLICATION_HANDOFF_LIMIT, countActiveApplicationHandoffs } from '../../src/utils/applicationHandoffDock.js';
 import { dedupJobsAcrossSources, uniqueJobsAcrossSources } from '../../src/utils/jobIdentity.js';
 import { mergeResolvedSourceItems } from '../../src/utils/jobSourceResolveMerge.js';
+import { cardOfficialPostingHubMarkerCleanup, isCardOfficialPostingRunId } from '../../src/utils/jobHubManualAiOwnership.js';
 
 const copy = value => JSON.parse(JSON.stringify(value));
 const posting = extra => ({ level: 'L2', outcome: 'found', employer: 'Northwind Labs', title: 'Official Platform Engineer',
@@ -81,6 +82,179 @@ function harness({ prepare, data = row(), queueResult = { success: false }, abse
 }
 
 export default [
+  {
+    name: 'official-posting card tokens never retire through saved Search child-cancellation ledgers',
+    async run() {
+      const source = fs.readFileSync(new URL('../../src/nodes/JobSearchNode.jsx', import.meta.url), 'utf8');
+      const callback = (name, scope) => {
+        const start = source.indexOf(`  const ${name} = useCallback(`);
+        const bodyStart = source.indexOf('useCallback(', start) + 'useCallback('.length;
+        const end = source.indexOf('\n  }, [', bodyStart);
+        assert.ok(start > 0 && bodyStart > start && end > bodyStart);
+        return new Function(...Object.keys(scope), `return (${source.slice(bodyStart, end)}\n});`)(...Object.values(scope));
+      };
+      const cardRunId = 'official-posting:card:research';
+      assert.equal(await callback('retireManualAiRunDurably', { isCardOfficialPostingRunId })(cardRunId), true);
+      assert.equal(await callback('settleManualAiRetirement', { isCardOfficialPostingRunId })({
+        runId: cardRunId, requireCancellationAck: true,
+      }), true, 'copied card state cannot cancel the parent hub or complete the card run');
+
+      const node = { id: 'search', data: { manualAiResume: { runId: 'legacy-search' } } };
+      const retired = [];
+      const parentReceipts = [];
+      const normalize = value => value || [];
+      const remove = (receipts, id) => normalize(receipts).filter(receipt => receipt.runId !== id);
+      const settle = callback('settleManualAiRetirement', {
+        isCardOfficialPostingRunId, id: 'search',
+        getNode: () => node, updateGlobal: (_id, update) => { node.data = { ...node.data, ...update(node) }; },
+        waitForRendererCommitFrame: async () => {}, retireManualAiRunDurably: async id => { retired.push(id); },
+        attemptedManualAiCleanupRunIdsRef: { current: new Set() }, activeManualAiRunIdRef: { current: 'legacy-search' },
+        cancelledBoardManualAiRunIdsRef: { current: new Set() }, manualAiCleanupErrorMessagesRef: { current: new Set() },
+        normalizeManualAiCleanupReceipts: normalize, removeManualAiCleanupReceipt: remove,
+        upsertManualAiCleanupReceipt: (receipts, receipt) => [...remove(receipts, receipt.runId), receipt],
+        rememberBoundedRunId: (ids, id) => ids.add(id),
+      });
+      await settle({ runId: 'legacy-search', acknowledgedRunIds: ['legacy-search', cardRunId],
+        beforeRetirement: async ids => { parentReceipts.push(...ids); } });
+      assert.deepEqual(retired, ['legacy-search']);
+      assert.deepEqual(parentReceipts, ['legacy-search'], 'foreign discoveries cannot become Board child cleanup receipts');
+      assert.equal(node.data.manualAiResume, null);
+      assert.equal(node.data.manualAiCleanupReceipts, null);
+
+      const persistenceStart = source.indexOf('    const persistChildCancellationCleanup = async (cleanupPatch = {}) => {');
+      const persistenceEnd = source.indexOf('\n    };', persistenceStart) + '\n    };'.length;
+      assert.ok(persistenceStart > 0 && persistenceEnd > persistenceStart);
+      for (const [priorRunId, requestedIds, expectedRunId] of [
+        [cardRunId, [], null], [cardRunId, ['legacy-child'], 'legacy-child'], ['legacy-child', [], 'legacy-child'],
+      ]) {
+        const board = { id: 'board', data: { boardScanResume: { boardRunId: 'parent-scan', phase: 'searches',
+          cancellationCleanup: { sourceId: 'search', manualAiRunId: priorRunId, manualAiRunIds: [cardRunId] } } } };
+        const persist = runInNewContext(`${source.slice(persistenceStart, persistenceEnd)}\npersistChildCancellationCleanup;`, {
+          id: 'search', orchestratorNodeId: 'board', boardRunId: 'parent-scan', isCardOfficialPostingRunId,
+          getNode: () => board, waitForRendererCommitFrame: async () => {},
+          updateGlobal: (_id, update) => { board.data = { ...board.data, ...update(board) }; },
+        });
+        assert.equal(await persist({ sourceId: 'search', manualAiRunId: cardRunId, manualAiRunIds: requestedIds }), true);
+        for (const receipt of [board.data.boardScanResume.cancellationCleanup,
+          board.data.boardScanResume.cancellationCleanupsBySource.search]) {
+          assert.equal(receipt.manualAiRunId, expectedRunId, 'singular cleanup ownership must exclude copied card tokens');
+          assert.deepEqual(Array.from(receipt.manualAiRunIds), expectedRunId ? [expectedRunId] : []);
+        }
+      }
+    },
+  },
+  {
+    name: 'official-posting card research cannot become Search recovery or cancel its parent run',
+    run() {
+      const source = fs.readFileSync(new URL('../../src/nodes/JobSearchNode.jsx', import.meta.url), 'utf8');
+      const pendingStart = source.indexOf('const onPending = (event) => {');
+      const pendingEnd = source.indexOf("    document.addEventListener('non-api-ai-node-pending', onPending);", pendingStart);
+      const cancelStart = source.indexOf('const onManualAiNodeCancelled = (event) => {');
+      const cancelEnd = source.indexOf("    document.addEventListener('non-api-ai-node-cancelled', onManualAiNodeCancelled);", cancelStart);
+      assert.ok(pendingStart > 0 && pendingEnd > pendingStart && cancelStart > 0 && cancelEnd > cancelStart);
+      for (const runId of ['legacy-search-7', 'job-search:search:parent']) {
+        const node = { id: 'search', data: { jobRunId: 'gather-1', resumeProfile: { roles: ['Engineer'] } } };
+        const effects = [];
+        const active = { current: null };
+        const context = {
+          id: node.id, isCardOfficialPostingRunId,
+          activeManualAiRunIdRef: active, cancelledBoardManualAiRunIdsRef: { current: new Set() },
+          boardRunControlRef: { current: null }, jobRunIdRef: { current: 'gather-1' },
+          getNode: () => node, getNodes: () => [node], getEdges: () => [],
+          updateGlobal: (_id, change) => {
+            effects.push('update');
+            const patch = typeof change === 'function' ? change(node) : change;
+            node.data = { ...node.data, ...patch };
+          },
+          settleManualAiRetirement: () => { throw new Error('card request retired by Search'); },
+          stopHandler: () => { effects.push('stop'); },
+          rememberBoundedRunId: (ids, id) => ids.add(id), findJobSearchBoardRecoveryOwner: () => null,
+          isCareerCompilationTask: () => false, createManualAiPreSearchRecovery: () => { throw new Error('invented a fresh search'); },
+          REANALYZE_SAVED_JOBS_MANUAL_AI_RECOVERY_MODE: 'reanalyze-saved-jobs', EventLogger: { log() {}, error() {} },
+        };
+        const pending = runInNewContext(`${source.slice(pendingStart, pendingEnd)}\nonPending;`, context);
+        const cancel = runInNewContext(`${source.slice(cancelStart, cancelEnd)}\nonManualAiNodeCancelled;`, context);
+        const cardEvent = { detail: { nodeId: 'search', runId: 'official-posting:card:research', task: 'official-posting' } };
+        pending(cardEvent);
+        cancel(cardEvent);
+        assert.deepEqual(effects, []);
+        assert.equal(active.current, null);
+        assert.equal(node.data.manualAiResume, undefined);
+        // Search-owned official-posting checks share their Search run id. The
+        // task name alone must never suppress those legitimate checkpoints.
+        const searchEvent = { detail: { nodeId: 'search', runId, task: 'official-posting' } };
+        pending(searchEvent);
+        assert.equal(node.data.manualAiResume.runId, runId);
+        assert.equal(node.data.manualAiResume.jobRunId, 'gather-1');
+        assert.equal(active.current, runId);
+        cancel(searchEvent);
+        assert.deepEqual(effects, ['update', 'stop']);
+      }
+    },
+  },
+  {
+    name: 'official-posting copied hub markers self-heal without changing card ownership or saved Search results',
+    run() {
+      const research = { runId: 'official-posting:card:research', retirementPending: true, cancellationPending: true };
+      const receipt = { runId: 'legacy-search-7', cancellationPending: true };
+      const saved = { hubState: 'done', scoredJobs: [{ id: 'saved-result' }], resumeProfile: { roles: ['Engineer'] },
+        manualAiResume: research, manualAiCleanupReceipts: [research, receipt] };
+      const patch = cardOfficialPostingHubMarkerCleanup(saved);
+      assert.deepEqual(patch, { manualAiResume: null, manualAiCleanupReceipts: [receipt] });
+      const restored = { ...saved, ...patch };
+      assert.equal(restored.scoredJobs, saved.scoredJobs);
+      assert.equal(restored.resumeProfile, saved.resumeProfile);
+      assert.equal(restored.hubState, 'done');
+      assert.equal(saved.manualAiResume, research, 'cleanup does not mutate its input');
+      assert.equal(cardOfficialPostingHubMarkerCleanup(restored), null, 'cleanup is idempotent');
+      assert.equal(cardOfficialPostingHubMarkerCleanup({ manualAiResume: { runId: 'search-parent', task: 'official-posting' } }), null);
+      assert.equal(isCardOfficialPostingRunId('official-posting:card:research'), true);
+      assert.equal(isCardOfficialPostingRunId('search-parent'), false);
+
+      const source = fs.readFileSync(new URL('../../src/nodes/JobSearchNode.jsx', import.meta.url), 'utf8');
+      const cleanupStart = source.indexOf('    const liveData = getNode(id)?.data || data;', source.indexOf('// Older renderers adopted card research'));
+      const cleanupEnd = source.indexOf('\n  }, [', cleanupStart);
+      assert.ok(cleanupStart > 0 && cleanupEnd > cleanupStart);
+      const cleanup = new Function('getNode', 'id', 'data', 'cardOfficialPostingHubMarkerCleanup',
+        'isCardOfficialPostingRunId', 'activeManualAiRunIdRef', 'updateGlobal', source.slice(cleanupStart, cleanupEnd));
+      for (const currentRun of [research.runId, 'search-parent']) {
+        const node = { id: 'search', data: { ...saved } };
+        const active = { current: currentRun };
+        const calls = [];
+        cleanup(() => node, node.id, node.data, cardOfficialPostingHubMarkerCleanup,
+          isCardOfficialPostingRunId, active, (_id, update) => {
+            calls.push('update');
+            node.data = { ...node.data, ...update(node) };
+          });
+        assert.deepEqual(calls, ['update']);
+        assert.equal(active.current, currentRun === research.runId ? null : currentRun);
+        assert.equal(node.data.manualAiResume, null);
+        assert.equal(node.data.scoredJobs, saved.scoredJobs);
+        assert.deepEqual(node.data.manualAiCleanupReceipts, [receipt]);
+      }
+
+      const receiptsStart = source.indexOf('    if (isJobWorkflowDeletionPending(id)) return;', source.indexOf("document.removeEventListener('non-api-ai-node-pending'"));
+      const receiptsEnd = source.indexOf('\n  }, [', receiptsStart);
+      assert.ok(receiptsStart > 0 && receiptsEnd > receiptsStart);
+      const receiptsEffect = new Function('data', 'id', 'isJobWorkflowDeletionPending',
+        'normalizeManualAiCleanupReceipts', 'isCardOfficialPostingRunId', 'attemptedManualAiCleanupRunIdsRef',
+        'processingRunsRef', 'boardRunControlRef', 'BOARD_BUSY_SEARCH_STATES', 'settleManualAiRetirement',
+        source.slice(receiptsStart, receiptsEnd));
+      receiptsEffect({ hubState: 'done', manualAiCleanupReceipts: [research] }, 'search', () => false,
+        value => value || [], isCardOfficialPostingRunId, { current: new Set() },
+        { current: { active: false } }, { current: null }, new Set(),
+        () => { throw new Error('saved card receipt reached Search retirement'); });
+
+      const recoveryStart = source.indexOf('    const resume = data.manualAiResume;', source.indexOf('  const autoResumedManualAiRunRef ='));
+      const recoveryGuardEnd = source.indexOf('    if (isJobWorkflowDeletionPending(id))', recoveryStart);
+      assert.ok(recoveryStart > 0 && recoveryGuardEnd > recoveryStart);
+      const guard = new Function('data', 'isCardOfficialPostingRunId',
+        `${source.slice(recoveryStart, recoveryGuardEnd)}\nthrow new Error('card research reached Search auto-resume');`);
+      guard(saved, isCardOfficialPostingRunId);
+      assert.throws(() => guard({ manualAiResume: { runId: 'search-parent', task: 'official-posting' } }, isCardOfficialPostingRunId),
+        /reached Search auto-resume/u, 'legitimate Search checkpoints remain eligible');
+    },
+  },
   {
     name: 'official-posting card displays verified facts and via labels without rewriting scraped identity',
     run() {

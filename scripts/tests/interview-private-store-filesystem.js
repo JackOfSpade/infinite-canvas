@@ -441,6 +441,43 @@ export default [
       }
     },
   },
+  ...['beforeOpen', 'beforeWrite', 'beforeFinalVerification'].map(phase => ({
+    name: `workspace saves: a late hard link retains safe refusal guidance and recovers (${phase})`,
+    run: async () => {
+      const root = await fs.promises.mkdtemp(path.join(process.cwd(), '.workspace-late-link-'));
+      const canvas = path.join(root, 'canvas.json');
+      const alias = path.join(root, 'alias.json');
+      const baseline = '{"baseline":true}';
+      const attempted = '{"saved":true}';
+      try {
+        await fs.promises.writeFile(canvas, baseline);
+        let refused;
+        try {
+          await atomicWriteRendererWorkspaceFile(canvas, attempted, {
+            [phase]: async () => { await fs.promises.link(canvas, alias); },
+          });
+        } catch (error) { refused = error; }
+        assert(refused?.code === 'RENDERER_WORKSPACE_PATH_CHANGED'
+          && refused.workspacePathCheck === 'target-hardlink'
+          && /cloud sync/.test(refused.message) && /Save As/.test(refused.message),
+        'a link appearing after inspection needs the same actionable refusal as an initially linked canvas');
+        const expectedBeforeRecovery = phase === 'beforeFinalVerification' ? attempted : baseline;
+        assert(await fs.promises.readFile(canvas, 'utf8') === expectedBeforeRecovery
+          && await fs.promises.readFile(alias, 'utf8') === expectedBeforeRecovery,
+        'a pre-write link refusal does not mutate either alias, and a post-write link is never falsely reported as success');
+        assert(await rejects(() => readRendererWorkspaceFile(canvas))
+          && await rejects(() => atomicWriteRendererWorkspaceFile(canvas, attempted)),
+        'neither recovery nor a retry can read or write through the linked inode');
+        await fs.promises.unlink(alias);
+        const recovered = await readRendererWorkspaceFile(canvas);
+        assert(recovered.content === (phase === 'beforeOpen' ? baseline : attempted),
+          'after the link disappears, only the exact interrupted journal can finish');
+        await atomicWriteRendererWorkspaceFile(canvas, '{"latest":true}');
+        assert((await readRendererWorkspaceFile(canvas)).content === '{"latest":true}',
+          'ordinary saves resume after the safe refusal');
+      } finally { await fs.promises.rm(root, { recursive: true, force: true }); }
+    },
+  })),
   {
     name: 'interview private stores: a post-write competing replacement cannot be reported as the published workspace',
     run: async () => {

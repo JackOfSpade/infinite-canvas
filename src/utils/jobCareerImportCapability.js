@@ -2,8 +2,8 @@
 // was minted when the person explicitly dropped career files after a Clear.
 // Keeping the capability separate from career identity is important: a failed
 // or cancelled run intentionally retains its profile/files for inspection and
-// exact recovery, but that retained identity is not permission to start a new
-// generation.
+// exact recovery. An explicitly cancelled Board import may be retried only
+// after the executor verifies that its backend work and recovery are gone.
 
 import { currentApprovedCareerImportSnapshot } from './jobCareerCompilationReceipt.js';
 
@@ -128,6 +128,31 @@ export function retryableUnstartedJobCareerImportCapability(data, { nodeId } = {
   return capability;
 }
 
+/** A cancelled Board rollback retains the original file-drop identity. This
+ * selects a retry candidate, not provider authority: the executor must first
+ * acknowledge cancellation and prove that no recovery run remains on disk.
+ * Ordinary failed, partial, and completed claims are deliberately excluded.
+ */
+export function retryableCancelledJobCareerImportCapability(data, { nodeId } = {}) {
+  const consumption = data?.careerImportConsumption;
+  const token = nonEmptyString(consumption?.capability);
+  if (!token || !capabilityBelongsToNode(token, nodeId)
+    || data?.careerImportGeneration !== token
+    || data?.careerImportFreshCapability != null
+    || consumption?.generation !== token
+    || consumption?.origin !== 'board-cancelled'
+    || consumption?.admissionVersion !== 2
+    || data?.hubState !== 'empty'
+    || !hasRetainedCareerFiles(data)
+    || data?.jobRunId || data?.resultDisposition
+    || data?.manualAiResume || data?.terminalFinalizationRecovery
+    || data?.manualAiCleanupReceipts?.length
+    || data?.pendingJobs != null || data?.pendingTargetRole || data?.pendingCareerData
+    || data?.scoredJobs != null
+    || !currentApprovedCareerImportSnapshot(data, { generation: token })) return null;
+  return token;
+}
+
 export function exactJobCareerImportConsumption(data, {
   capability,
   boardRunId,
@@ -147,7 +172,8 @@ export function exactJobCareerImportConsumption(data, {
 // Used at a Board child's actual lane turn. `fresh` is consumed immediately;
 // `owned` is the same Board transaction resuming after its write/crash; the
 // narrowly proven pre-fix no-work shape can be atomically reclaimed once.
-// No provider-started or partial shape may start a replacement search.
+// A cancelled rollback is a retry candidate only; its executor must verify
+// backend retirement before rearming it. Partial runs still require recovery.
 export function jobCareerImportBoardAdmission(data, {
   capability,
   boardRunId,
@@ -171,6 +197,9 @@ export function jobCareerImportBoardAdmission(data, {
   }
   if (retryableUnstartedJobCareerImportCapability(data, { nodeId }) === expectedCapability) {
     return { kind: 'reclaimable-unstarted', capability: expectedCapability };
+  }
+  if (retryableCancelledJobCareerImportCapability(data, { nodeId }) === expectedCapability) {
+    return { kind: 'reclaimable-cancelled', capability: expectedCapability };
   }
   return { kind: 'missing' };
 }

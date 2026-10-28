@@ -33,6 +33,7 @@ import { applicationBundleIndicator, APPLICATION_BUNDLE_TONES } from '../utils/j
 import { resolveApplicationCareerSnapshotId, resolveSalaryCareerSnapshotId } from '../utils/jobBoardCareerOverride';
 import { getConnectedJobSearchIds } from '../utils/jobBoardSearchSelection';
 import { officialPostingDisplay } from '../utils/officialPostingDisplay';
+import { jobCompensationDisplay } from '../utils/jobCompensationDisplay';
 import { beginOfficialPostingPreparation, getOfficialPostingPreparation, subscribeOfficialPostingPreparation } from '../utils/officialPostingPreparation';
 
 // Accent color encodes the hiring-fit band: a compact evidence-based assessment
@@ -49,14 +50,6 @@ const COMPENSATION_BORDER_COLORS = {
   below_market: '#ef4444',
 };
 const COMPENSATION_NEUTRAL_BORDER = 'rgba(255,255,255,0.12)';
-
-function compensationLabel(status, currency = '') {
-  if (status === 'competitive') return 'Competitive cash pay';
-  if (status === 'below_market') return 'Likely below-market cash pay';
-  if (status === 'market_recommendation') return `Salary guidance${currency ? ` (${currency})` : ''}`;
-  if (status === 'uncertain') return 'Cash-pay comparison uncertain';
-  return 'Cash pay not evaluated';
-}
 
 function cashRangeLabel(range, maximumFractionDigits = 0) {
   const min = typeof range?.min === 'number' && Number.isFinite(range.min) ? range.min : null;
@@ -495,6 +488,7 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
   const compensationSourceLinks = useMemo(() => compensationAssessment.sourceLinks
     .map((source) => ({ ...source, safeUrl: normalizeExternalHttpUrl(source.url) }))
     .filter((source) => source.safeUrl), [compensationAssessment]);
+  const compensationDisplay = useMemo(() => jobCompensationDisplay(data, compensationAssessment), [data, compensationAssessment]);
   const personalRecommendation = compensationAssessment.personalRecommendation;
   const liveSalaryCareerKey = useStore(useCallback(store => {
     const board = store.nodeLookup.get(data.hubId);
@@ -1692,12 +1686,26 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
           aria-expanded={showCompensationDetails}
           title={showCompensationDetails ? 'Hide cash-pay research' : 'Show cash-pay research'}
         >
-          <span className="min-w-0 truncate">{compensationLabel(
-            compensationAssessment.status,
-            compensationAssessment.competitiveRange.currency || compensationAssessment.offered.currency,
-          )}</span>
+          <span className="min-w-0">{compensationDisplay.label}</span>
           <ChevronDown size={13} className={`shrink-0 transition-transform ${showCompensationDetails ? 'rotate-180' : ''}`} aria-hidden="true" />
         </button>
+
+        {!showCompensationDetails && (personalRecommendationAvailable || compensationDisplay.marketGuidanceAvailable) && (
+          <div className="px-3 pb-1.5 text-[10px] leading-relaxed text-blue-200/70">
+            <span className="text-white/45">{personalRecommendationAvailable
+              ? (personalRecommendationOutdated ? 'Previous desired salary:' : 'Desired salary to enter:')
+              : 'Market guidance:'}</span>{' '}
+            {personalRecommendationAvailable
+              ? cashRangeLabel({ ...personalRecommendation.range, min: personalRecommendation.desiredSalary, max: personalRecommendation.desiredSalary }, 20)
+              : cashRangeLabel(compensationAssessment.competitiveRange)}
+          </div>
+        )}
+
+        {!compensationDisplay.determined && (
+          <div className="px-3 pb-2">
+            <p className="line-clamp-2 text-[10px] leading-relaxed text-white/50" title={compensationDisplay.explanation}>{compensationDisplay.explanation}</p>
+          </div>
+        )}
 
         {showCompensationDetails && (
           <div className="px-3 pb-2.5 text-xs leading-relaxed text-white/55">
@@ -1751,11 +1759,9 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
                 )}
               </div>
             )}
-            <p className="text-white/70">{compensationAssessment.justification}</p>
-            {(cashRangeLabel(compensationAssessment.offered) || data.salary) && (
-              <div className="mt-1.5"><span className="text-white/35">Advertised cash:</span> {cashRangeLabel(compensationAssessment.offered) || data.salary}</div>
-            )}
-            {cashRangeLabel(compensationAssessment.competitiveRange) && (
+            <p className="text-white/70">{compensationDisplay.assessmentOutdated ? compensationDisplay.explanation : compensationAssessment.justification}</p>
+            <div className="mt-1.5"><span className="text-white/35">Advertised cash:</span> {cashRangeLabel(compensationAssessment.offered) || compensationDisplay.salary || 'Not advertised'}</div>
+            {compensationDisplay.marketGuidanceAvailable && (
               <div><span className="text-white/35">Researched market range:</span> {cashRangeLabel(compensationAssessment.competitiveRange)}</div>
             )}
             {compensationAssessment.status === 'market_recommendation' && compensationAssessment.competitiveRange.currency && (

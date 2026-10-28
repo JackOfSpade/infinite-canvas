@@ -4,7 +4,8 @@
  * but it cannot accidentally add a hidden safety margin or value benefits.
  */
 
-import { inferSalaryCurrency } from '../../src/utils/salaryCurrency.js';
+import { explicitSalaryCurrencies, inferSalaryCurrency } from '../../src/utils/salaryCurrency.js';
+import { advertisedSalaryForJob } from '../../src/utils/jobAdvertisedSalary.js';
 import { normalizeLocationInput, normalizeCountry } from '../../src/utils/jobLocation.js';
 import { GROUNDED_SOURCE_METADATA_MARKER, groundedMetadataUrls } from './groundedSourceAppendix.js';
 import { normalizePersonalSalaryRecommendation } from './personalSalaryRecommendation.js';
@@ -18,14 +19,6 @@ function amount(raw, suffix = '') {
   const n = Number(String(raw).replace(/,/g, ''));
   if (!Number.isFinite(n) || n <= 0) return null;
   return n * (/k/i.test(suffix) ? 1000 : /m/i.test(suffix) ? 1000000 : 1);
-}
-
-function currencyFor(text, fallback = '') {
-  if (/C\$|CA\$|\bCAD\b/i.test(text)) return 'CAD';
-  if (/US\$|\bUSD\b/i.test(text)) return 'USD';
-  if (/€/.test(text)) return 'EUR';
-  if (/£/.test(text)) return 'GBP';
-  return fallback || '';
 }
 
 function bareSalaryAmounts(text, cadence) {
@@ -94,7 +87,7 @@ function rangeSalaryAmounts(text, cadence) {
 // value when it is close to an excluded label, leaving the base value for the
 // regular range parser below.
 function removeExcludedPayAmounts(text) {
-  const money = String.raw`(?:US\$|C\$|CA\$|CAD\s*|USD\s*|\$|€|£)?\s*[\d,.]+\s*[km]?`;
+  const money = String.raw`(?:US\$|C\$|CA\$|(?:CAD|USD)\s*\$?|\$|€|£)?\s*[\d,.]+\s*[km]?`;
   const excluded = String.raw`(?:commission(?:[-\s]?only)?|tips?|on[-\s]?target earnings|OTE|bonus(?:es)?|equity|stock(?:\s+options?)?|restricted stock|RSUs?|total\s+(?:comp(?:ensation)?|rewards?)|medical|dental|vision|health(?:care)? benefits?|insurance|retirement|pension|401\s*\(?k\)?|paid time off|PTO)`;
   // "€100k OTE", "equity worth $100k", "bonus: $20,000", and the
   // occasional parenthetical qualifier are all treated as excluded.  A short
@@ -111,12 +104,12 @@ function removeExcludedPayAmounts(text) {
 // figure—and the inverse wording is equally common.  Keeping only the marked
 // span also ensures a following OTE/bonus number cannot leak back in.
 function explicitBasePayText(text) {
-  const money = String.raw`(?:US\$|C\$|CA\$|CAD\s*|USD\s*|\$|€|£)?\s*[\d,.]+\s*[km]?`;
+  const money = String.raw`(?:US\$|C\$|CA\$|(?:CAD|USD)\s*\$?|\$|€|£)?\s*[\d,.]+\s*[km]?`;
   // The unit belongs to the base figure too. Leaving `/hour`, `/week`, or
   // `/month` behind while extracting the marked span would silently turn a
   // valid rate into an annual $45/$2,000/$8,000 offer.
   const cadence = String.raw`(?:\s*(?:\/\s*(?:h|hr|hour|wk|week|mo|month|day)|(?:per|an?)\s+(?:hour|hr|week|wk|month|mo|day|year)|\b(?:hourly|weekly|monthly|daily|annual(?:ly)?|yearly)\b))?`;
-  const cashAmount = String.raw`${money}(?:\s*(?:[-–—]|\bto\b)\s*${money})?${cadence}`;
+  const cashAmount = String.raw`${money}(?:\s*(?:[-–—]|\bto\b)\s*${money})?(?:\s*(?:CAD|USD|EUR|GBP)\b)?${cadence}`;
   const portions = [];
   const seen = new Set();
   const add = (match) => {
@@ -138,9 +131,9 @@ export function parseGuaranteedCashOffer(job = {}, comparisonLocation = null) {
   // Scrapers occasionally leave `salary` as whitespace while preserving a
   // populated fallback compensation field. `||` would treat that whitespace
   // as present and skip a usable offer entirely.
-  const text = [job.salary, job.compensation]
-    .map(value => String(value ?? '').trim())
-    .find(Boolean) || '';
+  const advertised = advertisedSalaryForJob(job);
+  const text = advertised.text;
+  if (advertised.reasonCode) return { usable: false, reasonCode: advertised.reasonCode };
   if (!text) return { usable: false, reasonCode: 'no_cash_salary' };
   // OTE, tips, and commission are not guaranteed salary. A separately stated
   // base remains usable, but never let a second variable-pay figure inflate the
@@ -201,8 +194,14 @@ export function parseGuaranteedCashOffer(job = {}, comparisonLocation = null) {
     ? comparisonLocation
     : comparisonLocation?.display || '';
   const suppliedCurrency = String(job.currency || '').trim().toUpperCase();
-  const statedCurrency = currencyFor(text, suppliedCurrency);
-  const inferred = inferSalaryCurrency(text, comparisonDisplay || job.location || '');
+  // Apply currency evidence to the retained base-pay span. A bonus in another
+  // currency cannot relabel base salary, and two currencies in one cash span
+  // cannot be collapsed into the first recognized code, even in a dedicated
+  // scraper salary field that bypasses description ambiguity checks.
+  const explicitCurrencies = explicitSalaryCurrencies(cashText);
+  if (explicitCurrencies.length > 1) return { usable: false, reasonCode: 'currency_unclear' };
+  const statedCurrency = explicitCurrencies[0] || (/^[A-Z]{3}$/.test(suppliedCurrency) ? suppliedCurrency : '');
+  const inferred = inferSalaryCurrency(cashText, comparisonDisplay || job.location || '');
   const currency = statedCurrency || inferred?.currency || '';
   if (!currency) return { usable: false, reasonCode: 'currency_unclear' };
   if (/\bstarting\s+(?:at|from)\b/i.test(text) && !/\b(?:to|–|—|-)\b/.test(text)) {
@@ -272,6 +271,9 @@ export function compensationAssessment({ offer, competitiveRanges, marketCurrenc
     schemaVersion: 1,
     status: 'not_evaluated',
     reasonCode: reasonCode || 'no_cash_salary',
+    // Retain the offer limitation independently of a research/fit skip. Both
+    // facts matter when explaining why advertised pay cannot be compared.
+    offerReasonCode: offer?.usable ? 'usable_cash_salary' : offer?.reasonCode || 'no_cash_salary',
     offered: offer?.usable ? offer : null,
     competitiveRange: null,
     comparisonLocation,
@@ -312,6 +314,10 @@ export function compensationAssessment({ offer, competitiveRanges, marketCurrenc
     return base;
   }
   if (!merged) {
+    // A deliberate admission skip is unresearched even when the posting has
+    // usable pay. Reserve uncertain for an attempted or unavailable market
+    // comparison, retaining the stated offer and the exact skip reason.
+    if (['below_fit_threshold', 'fit_score_unavailable'].includes(reasonCode)) return base;
     return { ...base, status: 'uncertain', reasonCode: reasonCode || 'market_range_unavailable', justification: base.justification || 'A comparable competitive cash-salary range could not be established.' };
   }
   // This is the entire threshold: the stated maximum (or fixed amount) must
@@ -600,6 +606,20 @@ function positiveFiniteNumber(value) {
   return values.length ? Math.max(...values) : null;
 }
 
+function requiredMinimumYears(value) {
+  if (typeof value === 'number') return Number.isFinite(value) && value > 0 ? value : null;
+  // A requirement range names an acceptable interval, not a requirement to
+  // reach its upper endpoint. Keep the highest minimum across separate asks
+  // or qualification pathways, without turning 3–5 years into five years.
+  // Candidate-reported experience keeps its separate maximum-value policy.
+  const values = [...String(value || '').matchAll(
+    /(?<![\w.])(?:between\s+)?(\d+(?:\.\d+)?)(?:\s*(?:[-–—]|\bto\b|\band\b)\s*(\d+(?:\.\d+)?))?(?![\d.])/gi,
+  )].filter(match => !match[2] || Number(match[2]) >= Number(match[1]))
+    .map(match => Number(match[1]))
+    .filter(number => Number.isFinite(number) && number > 0);
+  return values.length ? Math.max(...values) : null;
+}
+
 /**
  * Compensation is priced for the most demanding material experience ask.
  * Prefer the listing's stated numeric requirements. If none are stated, use
@@ -617,13 +637,13 @@ export function selectCompensationExperienceYears(experienceAssessment = {}, con
   const hasRawJob = Boolean(rawJob && typeof rawJob === 'object');
   const required = categories
     .filter(category => category?.jobEvidenceGrounded !== false)
-    .map(category => positiveFiniteNumber(category?.requiredMinimumYears))
+    .map(category => requiredMinimumYears(category?.requiredMinimumYears))
     .filter(years => years && (!hasRawJob || requiredYearsIsCorroboratedByDescription(rawJob, years)));
   // `requiredYears` is model-produced context. It can price a cohort as a
   // stated listing requirement only when the same number occurs in the raw
   // listing text; otherwise the description estimator below remains explicit.
   if (requiredYearsIsCorroboratedByDescription(context?.job, context?.requiredYears)) {
-    required.push(positiveFiniteNumber(context.requiredYears));
+    required.push(requiredMinimumYears(context.requiredYears));
   }
   if (required.length) {
     return { years: Math.max(...required), basis: 'job-stated-minimum' };
@@ -647,10 +667,11 @@ function jobDescriptionText(job = {}) {
 
 function statedExperienceYearsInDescription(description) {
   return [...String(description || '').matchAll(
-    /\b(?:at\s+least|minimum(?:\s+of)?|more\s+than|over)?\s*(\d{1,2})(?:\s*\+|\s+or\s+more)?\s*(?:years?|yrs?)\s+(?:of\s+)?(?:(?:[a-z]+[-\s]){0,4})?experience\b/gi,
+    /(?<![\w.])(?:(?:at\s+least|minimum(?:\s+of)?|more\s+than|over|between)\s+)?(\d{1,2}(?:\.\d+)?)(?:\s*(?:[-–—]|\bto\b|\band\b)\s*(\d{1,2}(?:\.\d+)?))?(?:\s*\+|\s+or\s+more)?\s*(?:years?|yrs?)\s+(?:of\s+)?(?:(?:[a-z]+[-\s]){0,4})?experience\b/gi,
   )]
+    .filter(match => !match[2] || Number(match[2]) >= Number(match[1]))
     .map(match => Number(match[1]))
-    .filter(years => Number.isInteger(years) && years >= 0 && years <= 40);
+    .filter(years => Number.isFinite(years) && years >= 0 && years <= 40);
 }
 
 function hasExplicitTitleSeniority(job = {}) {
@@ -658,7 +679,7 @@ function hasExplicitTitleSeniority(job = {}) {
 }
 
 export function requiredYearsIsCorroboratedByDescription(job = {}, requiredYears) {
-  const required = positiveFiniteNumber(requiredYears);
+  const required = requiredMinimumYears(requiredYears);
   // Full external pages can contain several listings. An un-attributed years
   // phrase on one must not override this row's explicit title level.
   if (job?.descriptionCapture === 'external-page-full-text' && hasExplicitTitleSeniority(job)) return false;

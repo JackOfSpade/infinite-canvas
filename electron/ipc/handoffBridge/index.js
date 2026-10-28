@@ -34,7 +34,7 @@ import { createHandoffBridgeDialogs } from './uiDialogs.js';
 import { registerHandoffBridgeUi } from './ui.js';
 import { createHandoffBridgeTray } from './tray.js';
 import { createHandoffBridgePower } from './power.js';
-import { clearApplicationSubmitFailures, recordApplicationSubmitFailure, clearBridgeChatOpenDiagnostic, clearBridgeLaunchDiagnostic, clearBridgeChatCopyDiagnostic, clearBridgeQueueDiagnostic, clearBridgeMetadataDiagnostic, clearClientAuthDiagnostic, clearFailedStartDiagnostic, clearMcpRateLimitDiagnostic, clearOAuthRejectionDiagnostic, clearSourceRejectionDiagnostic, getFailedStartDiagnosticLines, recordBridgeMetadataDiagnostic, recordClientAuthDiagnostic, recordFailedStartDiagnostic, recordMcpRateLimitDiagnostic, recordOAuthRejectionDiagnostic, recordSourceRejectionDiagnostic, retireBridgeQueueDiagnosticProvider, setBridgeQueueDiagnosticProvider } from './telemetry.js';
+import { reduceTunnelRuntimeDiagnostic, clearApplicationSubmitFailures, recordApplicationSubmitFailure, clearBridgeChatOpenDiagnostic, clearBridgeLaunchDiagnostic, clearBridgeChatCopyDiagnostic, clearBridgeQueueDiagnostic, clearBridgeMetadataDiagnostic, clearClientAuthDiagnostic, clearFailedStartDiagnostic, clearMcpRateLimitDiagnostic, clearOAuthRejectionDiagnostic, clearSourceRejectionDiagnostic, getFailedStartDiagnosticLines, recordBridgeMetadataDiagnostic, recordClientAuthDiagnostic, recordFailedStartDiagnostic, recordMcpRateLimitDiagnostic, recordOAuthRejectionDiagnostic, recordSourceRejectionDiagnostic, retireBridgeQueueDiagnosticProvider, setBridgeQueueDiagnosticProvider } from './telemetry.js';
 
 let registered = false;
 let registeredIpcMain = null;
@@ -479,6 +479,7 @@ export function getHandoffBridgeBootstrapDiagnostic(context = bootstrapContext) 
       enabled: status?.enabled === true ? 'on' : 'off',
       runtime: live,
       tunnel: tunnelState,
+      tunnelRuntime: reduceTunnelRuntimeDiagnostic(status?.tunnel),
       setup: {
         hostname: status?.setup?.hostnameOk === true ? 'ready' : 'missing',
         binary: status?.setup?.binaryApproved === true ? 'ready' : 'missing',
@@ -497,6 +498,7 @@ export function getHandoffBridgeBootstrapDiagnostic(context = bootstrapContext) 
     return {
       config: 'unreadable', consent: 'missing', autoStart: 'unknown', enabled: 'off',
       runtime: 'inactive', tunnel: 'unknown',
+      tunnelRuntime: reduceTunnelRuntimeDiagnostic(null),
       setup: { hostname: 'missing', binary: 'missing', credentials: 'missing', tunnelReachable: 'not-reachable' },
       startup: { decision: 'state-unreadable', refusal: 'state-unreadable' },
     };

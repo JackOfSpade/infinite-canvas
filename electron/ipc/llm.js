@@ -66,6 +66,7 @@ const KNOWN_TASKS = new Set([
   'job-location-consolidation-confirmation',
   'job-listing-liveness',
   'job-official-posting-research',
+  'job-official-posting-shortlist',
   'job-official-posting-match',
   'job-compensation-research',
   'job-compensation-assessment',
@@ -213,6 +214,9 @@ const TASK_MAX_TOKENS = {
     Math.min(MANUAL_AI_USABLE_OUTPUT_TOKENS, 1024 + Math.max(1, itemCount) * 160),
   'job-official-posting-research': ({ itemCount = 1 } = {}) =>
     Math.min(MANUAL_AI_USABLE_OUTPUT_TOKENS, 1024 + Math.max(1, Math.floor(Number(itemCount) || 1)) * 700),
+  // A bounded candidate board produces at most eight IDs and a boolean.
+  'job-official-posting-shortlist': ({ optionCount = 1 } = {}) =>
+    1024 + Math.min(64, Math.max(1, Math.floor(Number(optionCount) || 1))) * 16,
   'job-official-posting-match': ({ optionCount = 1 } = {}) =>
     Math.min(MANUAL_AI_USABLE_OUTPUT_TOKENS, 4096 + Math.min(8, Math.max(1, Math.floor(Number(optionCount) || 1))) * 900),
   // Location-based cohort consolidation makes this per-job structured output
@@ -452,9 +456,9 @@ export async function callLLMText(prompt, opts = {}) {
  * instruction inside the copied prompt (see materializeNonApiPrompt).
  */
 export async function callLLMRaw(prompt, opts = {}) {
-  // This reviewed comparison uses the same injected caller as research while
+  // These reviewed decisions use the same injected caller as research while
   // retaining the existing schema-backed JSON transport and validator path.
-  if (opts.task === 'job-official-posting-match' && opts.responseSchema) return callLLMText(prompt, opts);
+  if (['job-official-posting-match', 'job-official-posting-shortlist'].includes(opts.task) && opts.responseSchema) return callLLMText(prompt, opts);
   const {
     signal,
     task,

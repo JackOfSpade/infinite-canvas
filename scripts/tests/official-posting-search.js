@@ -2,6 +2,8 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import vm from 'node:vm';
+import { mergeSourceProgress } from '../../src/utils/sourceProgress.js';
 import { ipcMain } from 'electron';
 import { __registerJobsHandlersForTests, getJobsTelemetry, reconcileSearchFunnel, registerJobsHandlers } from '../../electron/ipc/jobs.js';
 import { claimJobAnalysisOperationAuthority } from '../../electron/ipc/jobAnalysisOperationAuthorityStore.js';
@@ -10,6 +12,41 @@ import { writeApprovedCareerSnapshotFixture } from './careerSnapshotFixture.mjs'
 import { reconcileGlassdoorSalaryFromDescription } from '../../src/utils/jobSalaryReconciliation.js';
 
 export default [
+  {
+    name: 'official-posting search: LinkedIn recovery replaces completed description activity while keeping the source pending',
+    run() {
+      const source = fs.readFileSync(new URL('../../electron/ipc/jobs.js', import.meta.url), 'utf8');
+      const resolver = source.indexOf('const resolveScoreSafePostings = async');
+      const start = source.indexOf('const onProgress =', resolver);
+      const end = source.indexOf('\n    try {', start);
+      const sent = [];
+      const context = { rows: Array(12), progressSourceId: 'linkedin', nodeId: 'hub', jobRunId: 'run',
+        signal: new AbortController().signal, recordJobSourceProgress() {},
+        event: { sender: { isDestroyed: () => false, send: (_channel, payload) => sent.push(payload) } } };
+      vm.runInNewContext(`${source.slice(start, end)}\nglobalThis.reportProgress = onProgress;`, context);
+      let progress = { status: 'searching', count: 70, completed: 1, total: 1,
+        activity: 'description-enrichment', activityCompleted: 19, activityTotal: 19 };
+      context.reportProgress({ completed: 0, total: 12 });
+      progress = mergeSourceProgress(progress, sent.at(-1));
+      assert.equal(progress.count, 70, 'research does not replace provider volume with zero');
+      assert.equal(progress.activity, 'official-posting');
+      assert.equal(progress.activityCompleted, 0);
+      assert.equal(progress.activityTotal, 12);
+      context.reportProgress({ completed: 12, total: 12 });
+      progress = mergeSourceProgress(progress, sent.at(-1));
+      assert.equal(progress.status, 'searching', 'checkpoint and warning reconciliation still own terminal completion');
+      assert.equal(mergeSourceProgress(progress, { status: 'done' }).activity, null);
+      const linked = source.slice(source.indexOf('const isLinkedInReEnrich ='), source.indexOf("// Use the source's ordinary list extractor"));
+      const admitStart = linked.indexOf('const admitForScoring =');
+      const admitEnd = linked.indexOf('const persistRecoveryPool =', admitStart);
+      let options;
+      const binding = { resolveScoreSafePostings: async (_rows, value) => { options = value; return { jobs: [] }; },
+        scoreSafeRowsWithBoardClosed: value => value, filterJobsByDescriptionEvidence: value => value,
+        overlayResolvedRecoveryRows: value => value, snapshotRecoveryJobs: [], event: context.event, nodeId: 'hub', signal: context.signal, jobRunId: 'run' };
+      vm.runInNewContext(`${linked.slice(admitStart, admitEnd)}\nglobalThis.admit = admitForScoring;`, binding);
+      return binding.admit([]).then(() => assert.equal(options.progressSourceId, 'linkedin'));
+    },
+  },
   {
     name: 'official-posting search: description-reconciled salary cannot retain a structured posted-pay anchor',
     run() {

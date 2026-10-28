@@ -147,6 +147,7 @@ const PERSONAL_RECOMMENDATION_CONFIDENCES = new Set(['low', 'medium', 'high']);
 
 function unavailablePersonalRecommendation() {
   return {
+    isInvalid: true,
     schemaVersion: 1,
     status: 'unavailable',
     range: null,
@@ -234,6 +235,8 @@ function textValue(value) {
 }
 
 function positiveNumber(value) {
+  if ((typeof value !== 'number' && typeof value !== 'string')
+    || (typeof value === 'string' && !value.trim())) return null;
   const numeric = Number(value);
   return Number.isFinite(numeric) && numeric >= 0 && numeric <= MAX_CREDIBLE_ANNUAL_CASH ? numeric : null;
 }
@@ -250,8 +253,11 @@ function normalizedRange(value, fallback = {}) {
   const max = positiveNumber(source.max ?? source.high ?? source.maximum ?? fallback.max);
   const currency = textValue(source.currency ?? source.currencyCode ?? fallback.currency).toUpperCase();
   const period = normalizedPayPeriod(source.period ?? source.payPeriod ?? source.unit ?? fallback.period);
-  const resolvedMin = min ?? max;
-  const resolvedMax = max ?? min;
+  // A missing endpoint is incomplete evidence. A genuine fixed amount is
+  // stored with equal explicit endpoints; filling one from the other would
+  // turn a minimum-only offer or partial market band into a complete result.
+  const resolvedMin = min;
+  const resolvedMax = max;
   // Do not silently reorder a malformed offer or research range. A reversed
   // range is incomplete evidence, not a safe basis for a coloured card.
   const isOrdered = resolvedMin === null || resolvedMax === null || resolvedMin <= resolvedMax;
@@ -351,7 +357,7 @@ export function normalizeCompensationAssessment(value) {
     normalized.reasonCode = 'incomplete_comparison_data';
     normalized.justification = 'Compensation research did not retain a complete cash-pay comparison, so no green or red conclusion is shown.';
   } else if (['competitive', 'below_market'].includes(normalized.status)
-    && (!normalized.offered.currency || !normalized.competitiveRange.currency
+    && (!/^[A-Z]{3}$/.test(normalized.offered.currency) || !/^[A-Z]{3}$/.test(normalized.competitiveRange.currency)
       || normalized.offered.currency !== normalized.competitiveRange.currency)) {
     // Values without an explicit shared currency cannot be compared. The
     // backend always normalizes a valid assessment to one currency, but
@@ -364,9 +370,14 @@ export function normalizeCompensationAssessment(value) {
     normalized.status = 'uncertain';
     normalized.reasonCode = 'incompatible_comparison_period';
     normalized.justification = 'Compensation research did not retain reliably annualized cash figures, so no green or red conclusion is shown.';
+  } else if (['competitive', 'below_market'].includes(normalized.status)
+    && (normalized.status === 'competitive') !== (normalized.offered.max >= normalized.competitiveRange.min)) {
+    normalized.status = 'uncertain';
+    normalized.reasonCode = 'inconsistent_comparison_verdict';
+    normalized.justification = 'The saved cash-pay conclusion conflicts with its salary ranges. Re-combine saved results on the Job Board to refresh the comparison.';
   } else if (normalized.status === 'market_recommendation'
     && (!(normalized.competitiveRange.min > 0) || !(normalized.competitiveRange.max > 0)
-      || !normalized.competitiveRange.currency || normalized.competitiveRange.period !== 'annual')) {
+      || !/^[A-Z]{3}$/.test(normalized.competitiveRange.currency) || normalized.competitiveRange.period !== 'annual')) {
     normalized.status = 'uncertain';
     normalized.reasonCode = 'incomplete_market_recommendation';
     normalized.justification = 'Compensation research did not retain a complete annual market range and currency, so no salary recommendation is shown.';
@@ -1030,6 +1041,7 @@ export function buildJobTreeNodes({
         hubId,
         title: job.title, company: job.company, location: job.location,
         salary: job.salary, snippet: job.snippet, matchScore: job.matchScore,
+        descriptionCapture: job.descriptionCapture,
         // Always overwrite a protected card's prior resolution, including
         // clearing it when the latest source row has none.
         postedBy: job.postedBy,

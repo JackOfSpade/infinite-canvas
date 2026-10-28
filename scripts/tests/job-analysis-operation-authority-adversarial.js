@@ -105,6 +105,55 @@ async function settlesWithin(promise, ms = 2_000) {
 
 export default [
   {
+    name: 'saved pause: repeated Stop and quit after restart accept only the exact tombstoned run',
+    async run() {
+      const directory = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'ic-job-repeat-pause-'));
+      const canvas = path.join(directory, 'canvas.json');
+      const sender = new EventEmitter(); sender.id = 893; sender.isDestroyed = () => false;
+      const nodeId = 'paused-hub'; const runId = 'paused-run';
+      try {
+        ipcMain.__clearInvokeHandlers(); registerJobsHandlers();
+        await fs.promises.writeFile(canvas, '{}');
+        const claimed = await claimJobAnalysisOperationAuthority({ canvasFilePath: canvas, hubId: nodeId,
+          operationId: 'paused-operation', semanticBase: base('job-board-scan', { runId }) });
+        await startRun(canvas, { runId, startedAt: Date.now(), nodeId, careerSnapshotId: pin,
+          profileFingerprint: 'b'.repeat(64), sourceIds: ['provider'], operationAuthority: claimed.receipt });
+        await recordSourcePage(canvas, { sourceId: 'provider', query: 'synthetic', page: 0,
+          jobs: [{ title: 'Retained listing' }], now: Date.now(), expectedRunId: runId, nodeId,
+          expectedOperationAuthority: claimed.receipt });
+        const args = { canvasFilePath: canvas, nodeId, runId, operationAuthority: claimed.receipt };
+        const first = await ipcMain.__getInvokeHandler('pause-job-run-and-cancel')({ sender }, args);
+        assert(first.ok && first.paused && first.settled, 'the initial Stop must commit its manual checkpoint');
+        // Re-register handlers to exercise the on-disk receipt without any
+        // previous handler state, as on the next app launch.
+        ipcMain.__clearInvokeHandlers(); registerJobsHandlers();
+        for (const cause of ['user-stopped', 'app-quit', 'app-quit']) {
+          if (cause === 'app-quit') beginSenderQuitPause(sender);
+          const repeated = await ipcMain.__getInvokeHandler('pause-job-run-and-cancel')({ sender }, { ...args, cause });
+          assert(repeated.ok && repeated.paused && repeated.settled,
+            `a repeated ${cause} must acknowledge the already-manual exact run: ${JSON.stringify(repeated)}`);
+          releaseSenderQuitPause(sender);
+        }
+        const state = await readRunState(canvas, Date.now(), { nodeId });
+        assert(state.manifest.recoveryDisposition === 'manual' && state.stagedJobs[0]?.job?.title === 'Retained listing',
+          'repeated pause must preserve the saved listings and manual recovery');
+        assert(!await currentJobAnalysisOperationAuthority({ canvasFilePath: canvas, hubId: nodeId, ...claimed.receipt }),
+          'acknowledging a saved pause must never reactivate its write capability');
+        const successor = await claimJobAnalysisOperationAuthority({ canvasFilePath: canvas, hubId: nodeId,
+          operationId: 'successor-operation', semanticBase: base('search', { runId: 'successor-run' }) });
+        assert(successor.admitted, 'the replacement operation must be admitted');
+        const refused = await ipcMain.__getInvokeHandler('pause-job-run-and-cancel')({ sender }, args);
+        assert(refused.operationAuthorityMismatch && !refused.ok && !refused.settled,
+          'the old tombstone cannot acknowledge a pause after its authority has been superseded');
+        assert(await currentJobAnalysisOperationAuthority({ canvasFilePath: canvas, hubId: nodeId, ...successor.receipt }),
+          'a stale pause cannot revoke the replacement operation');
+      } finally {
+        releaseSenderQuitPause(sender);
+        await fs.promises.rm(directory, { recursive: true, force: true });
+      }
+    },
+  },
+  {
     name: 'app quit pause: final staged page drains before authority tombstone and every saved listing remains recoverable',
     async run() {
       const directory = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'ic-job-quit-pause-page-'));

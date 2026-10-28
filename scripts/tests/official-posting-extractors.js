@@ -132,6 +132,26 @@ export default [
     },
   },
   {
+    name: 'Ashby explicit workplace type takes precedence over a conflicting legacy remote flag',
+    run() {
+      for (const [workplaceType, isRemote, expectedMode, expectedRemote] of [
+        ['Hybrid', true, 'hybrid', false],
+        ['OnSite', true, 'onsite', false],
+        [' remote ', false, 'remote', true],
+        [undefined, true, 'remote', true],
+        ['Flexible', true, 'remote', true],
+        ['Flexible', false, '', false],
+      ]) {
+        const [found] = extractAshbyPostings(json({ jobs: [{
+          id: 'dispatch-workplace', title: 'Dispatch Systems Engineer', location: 'Lakeview, Ontario, Canada',
+          jobUrl: 'https://jobs.ashbyhq.com/northwind/dispatch-workplace', workplaceType, isRemote,
+        }] }));
+        assert.equal(found.location.remote, expectedRemote, `${workplaceType} / ${isRemote}`);
+        assert.equal(found.location.workMode, expectedMode, `${workplaceType} / ${isRemote}`);
+      }
+    },
+  },
+  {
     name: 'Greenhouse structured content decodes markup and only structured pay ranges are posted salary',
     run() {
       const job = { id: 17, requisition_id: 'dispatch-17', title: 'Dispatch Systems Engineer', company_name: 'Northwind Labs',

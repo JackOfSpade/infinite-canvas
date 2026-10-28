@@ -1127,6 +1127,40 @@ export default [
     },
   },
   {
+    name: 'non-API AI bridge seam: official posting shortlist uses ordinary validated JSON without comparative provenance',
+    run: async () => {
+      const { sender, waitFor } = freshHarness();
+      const task = 'job-official-posting-shortlist';
+      const nodeId = 'bridge-seam-official-shortlist';
+      const runId = `bridge-seam-official-shortlist-${process.pid}-${Date.now()}`;
+      handleSafe('bridge-seam-official-shortlist-workflow', async (_event, _args, signal) => ({
+        value: await callLLMRaw('SYNTHETIC bounded official posting shortlist', {
+          task, signal, responseSchema: SCHEMA,
+        }),
+      }));
+      const run = handler('bridge-seam-official-shortlist-workflow')({ sender }, { nodeId, manualAiRunId: runId });
+      const requests = await waitFor(1);
+      const request = requests[0];
+      try {
+        const allow = { allowTasks: new Set([task]), allowNodeIds: new Set([nodeId]) };
+        const listed = listBridgeableNonApiAiHandoffs(allow);
+        assert(request.task === task && request.mcpEligible && listed.handoffs.length === 1
+          && listed.handoffs[0].responseFormat === 'json', 'shortlisting must retain the reviewed JSON bridge route');
+        assert(!BRIDGE_RAW_RESEARCH_TASKS.includes(task), 'shortlisting cannot admit arbitrary raw research prose');
+        const identity = { requestId: request.requestId, handoffCode: request.handoffCode, ...allow };
+        const read = readBridgeableNonApiAiHandoff(identity);
+        assert(read.ok && read.responseFormat === 'json', 'ordinary shortlist reads require no comparative conversation proof');
+        const accepted = await submitNonApiAiResponseForBridge({ ...identity, response: answer(request, 'shortlisted') });
+        assert(accepted.accepted, 'ordinary shortlist answers require no A/B comparison provenance');
+        const result = await run;
+        assert(result.value.answer === 'shortlisted', 'callLLMRaw must return the schema-validated JSON result');
+      } finally {
+        await cancelAll(sender, requests);
+        await run.catch(() => {});
+      }
+    },
+  },
+  {
     name: 'non-API AI bridge seam: official posting research and comparative JSON judgment validate corrected answers through callLLMRaw',
     run: async () => {
       const { sender, waitFor } = freshHarness();

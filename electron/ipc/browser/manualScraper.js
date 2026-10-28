@@ -21,7 +21,7 @@ import {
 } from '../stealthBrowser.js';
 import { logger } from '../../logger.js';
 import { filterJobsByPostedSince, POSTED_DATE_PATTERN } from '../jobDateFilter.js';
-import { buildOverlayScript, updateOverlay as paintOverlay } from './scraperOverlay.js';
+import { buildOverlayScript, updateOverlay as paintOverlay, linkDetailOverlayPages, overlayControlPage, overlayTabLayout } from './scraperOverlay.js';
 import { prepareBackgroundScrapeLaunchOptions, createBackgroundScrapePage } from './backgroundScrapeBrowser.js';
 import { isProfileLockCollision } from '../browserLaunchTelemetry.js';
 import { humanCooldown, humanDelay } from '../../utils/humanDelay.js';
@@ -95,6 +95,11 @@ const DETAIL_TERMINAL_PRESENT_MS = 5_000;
 // collection), retry once, then stop the detail pass rather than hammering a
 // rate-limited session for every remaining card.
 const ZIPRECRUITER_DETAIL_GAP_MS = 2500;
+export function zipRecruiterDetailGapMs(solvedChallenges = 0) {
+  return solvedChallenges > 0
+    ? Math.min(30_000, 10_000 * (2 ** Math.min(2, solvedChallenges - 1)))
+    : ZIPRECRUITER_DETAIL_GAP_MS;
+}
 const ZIPRECRUITER_429_FALLBACK_WAIT_MS = 45_000;
 const ZIPRECRUITER_429_MAX_WAIT_MS = 60_000;
 const ZIPRECRUITER_429_RETRIES = 1;
@@ -2376,7 +2381,7 @@ const OVERLAY_SCRIPT = buildOverlayScript({ withPause: true });
  * beat can never drift out of sync with what the window shows.
  */
 async function updateOverlay(page, state) {
-  recordActivityBeat(state);
+  recordActivityBeat({ ...state, tabLayout: overlayTabLayout(page) });
   return paintOverlay(page, state);
 }
 
@@ -2400,6 +2405,7 @@ export function recordActivityBeat(state) {
     queryIndex: state?.queryIndex ?? null,
     queryTotal: state?.queryTotal ?? null,
     pageNum:    state?.pageNum ?? null,
+    tabLayout: state?.tabLayout === 'results-and-details' ? 'results-and-details' : 'single-page',
   };
   manualScraperTelemetry.beat = beat;
   // Throttled so a scroll loop cannot flood the renderer, but ordinary callers
@@ -2472,7 +2478,7 @@ async function waitIfPaused(page, signal) {
   while (true) {
     if (signal?.aborted) return 'abort';
     let paused = false;
-    try { paused = await page.evaluate(() => !!window.__icPaused); } catch { /* page mid-navigation */ }
+    try { paused = await overlayControlPage(page).evaluate(() => !!window.__icPaused); } catch { /* page mid-navigation */ }
     manualScraperTelemetry.paused = paused;
     if (!paused) return 'ok';
     await new Promise(r => setTimeout(r, humanDelay(500)));
@@ -2735,7 +2741,7 @@ async function waitForReady(page, sourceId, overlayBase, signal, resumeUrl = nul
       if (Date.now() - lastChallengeBeatAt >= CHALLENGE_ACTIVITY_BEAT_MS) {
         lastChallengeBeatAt = Date.now();
         recordActivityBeat({
-          ...overlayBase,
+          ...overlayBase, tabLayout: overlayTabLayout(page),
           status: `⚠️ Complete the challenge above to continue (${formatChallengeElapsed(challengeElapsedMs)} waiting)`,
           challenge: true,
         });
@@ -2968,6 +2974,7 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
     // stays put — eliminates the visual ping-pong between search results and
     // individual job pages. Falls back to the main page if newPage() fails.
     let detailPage = null;
+    let unlinkDetailOverlays = () => {};
     const createDetailPage = async () => {
       const nextPage = await createBackgroundScrapePage(page.browser(), { width: 1280, height: 900 });
       await nextPage.evaluateOnNewDocument(() => {
@@ -2981,6 +2988,14 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
       if (ua) await nextPage.setUserAgent(ua).catch(() => {});
       const vp = page.viewport();
       if (vp) await nextPage.setViewport(vp).catch(() => {});
+      await nextPage.evaluateOnNewDocument(OVERLAY_SCRIPT).catch(() => {});
+      await injectOverlay(nextPage);
+      unlinkDetailOverlays();
+      unlinkDetailOverlays = linkDetailOverlayPages(page, nextPage);
+      await updateOverlay(page, {
+        ...overlayBase, count: baseCount,
+        status: `Fetching descriptions… 0/${enhanced.length}`,
+      });
       return nextPage;
     };
     try {
@@ -2999,7 +3014,10 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
     let descMissDiagDone = false;
     let dateMissDiagDone = false;
     let expandedCount = 0;
-    let lastDetailNavigationAt = 0;
+    const detailPacing = walkPlan?.detailPacing || {};
+    let lastDetailNavigationAt = detailPacing.lastNavigationAt || 0;
+    let solvedDetailChallenges = detailPacing.solvedChallenges || 0;
+    let keepDetailForeground = false;
     let zipRecruiter429Retries = 0;
     let zipRecruiterAppcastRestrictionRetries = 0;
     // `i--; continue;` re-enters the loop body, so a budget counter declared
@@ -3061,18 +3079,19 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
           continue;
         }
 
-        const navPause = await waitIfPaused(page, signal);
+        const interactionPage = keepDetailForeground ? fetchPage : page;
+        const navPause = await waitIfPaused(interactionPage, signal);
         if (navPause === 'abort') break;
 
         const detailGapMs = sourceId === 'ziprecruiter'
-          ? ZIPRECRUITER_DETAIL_GAP_MS
+          ? zipRecruiterDetailGapMs(solvedDetailChallenges)
           : 0;
         if (detailGapMs > 0 && lastDetailNavigationAt) {
           const waitMs = detailGapMs - (Date.now() - lastDetailNavigationAt);
           if (waitMs > 0 && !(await (runtime?.delay || waitForAbortableDelay)(waitMs, signal))) break;
         }
 
-        await updateOverlay(page, {
+        await updateOverlay(interactionPage, {
           ...overlayBase,
           count:  baseCount + i + 1,
           status: `Fetching descriptions… ${i + 1}/${enhanced.length}`,
@@ -3100,6 +3119,13 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
             navigationResponse = await fetchPage.goto(viewUrl, { waitUntil: 'domcontentloaded', timeout: 12000 });
           } catch (error) {
             navigationError = error;
+          }
+          if (keepDetailForeground) {
+            await injectOverlay(fetchPage).catch(() => {});
+            await updateOverlay(fetchPage, {
+              ...overlayBase, count: baseCount + i + 1,
+              status: `Fetching descriptions… ${i + 1}/${enhanced.length}`,
+            }).catch(() => {});
           }
           const finalUrl = fetchPage.url();
           const navigationMoved = finalUrl && finalUrl !== previousUrl && finalUrl !== 'about:blank';
@@ -3250,6 +3276,7 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
                 challenge: true,
               }).catch(() => {});
               if (detailPage) {
+                unlinkDetailOverlays();
                 await detailPage.close().catch(() => {});
                 detailPage = null;
                 fetchPage = page;
@@ -3449,8 +3476,19 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
                   },
                 );
                 const postWaitSignals = await getChallengeSignals(fetchPage);
-                await page.bringToFront().catch(() => {});
-                await injectOverlay(page).catch(() => {});
+                if (sourceId === 'ziprecruiter' && ['ok', 'recovered'].includes(detailWaitResult)) {
+                  solvedDetailChallenges += 1;
+                  lastDetailNavigationAt = Date.now();
+                  keepDetailForeground = true;
+                  recordManualScraperTelemetry({
+                    phase: 'detail-challenge', sourceId, srcName: overlayBase.srcName,
+                    disposition: 'paced-after-solve',
+                    reason: `foreground; next detail waits ${zipRecruiterDetailGapMs(solvedDetailChallenges)}ms`,
+                  }, { updateActive: false });
+                } else {
+                  await page.bringToFront().catch(() => {});
+                }
+                await injectOverlay(keepDetailForeground ? fetchPage : page).catch(() => {});
 
                 recordManualScraperTelemetry({
                   phase: 'detail-challenge', srcName: overlayBase.srcName,
@@ -3478,8 +3516,8 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
 
                 if (detailWaitResult === 'ok' || detailWaitResult === 'recovered') {
                   detailChallengeResolved = true;
-                  logger.info(`[BrowserScraper] ${overlayBase.srcName}: detail verification resolved; returning to the list and continuing "${job.title || job.url || '?'}"`);
-                  await updateOverlay(page, {
+                  logger.info(`[BrowserScraper] ${overlayBase.srcName}: detail verification resolved; continuing "${job.title || job.url || '?'}"`);
+                  await updateOverlay(keepDetailForeground ? fetchPage : page, {
                     ...overlayBase,
                     count: baseCount + i + 1,
                     status: `Fetching descriptions… ${i + 1}/${enhanced.length}`,
@@ -3557,7 +3595,7 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
               if (Date.now() - descBeatAt >= CHALLENGE_ACTIVITY_BEAT_MS) {
                 descBeatAt = Date.now();
                 recordActivityBeat({
-                  ...overlayBase,
+                  ...overlayBase, tabLayout: overlayTabLayout(page),
                   count: baseCount + i + 1,
                   status: `⚠️ Complete the verification to continue (${descElapsedLabel} waiting)`,
                   challenge: true,
@@ -4109,7 +4147,11 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
         }
       }
     } finally {
+      detailPacing.lastNavigationAt = lastDetailNavigationAt;
+      detailPacing.solvedChallenges = solvedDetailChallenges;
+      unlinkDetailOverlays();
       await detailPage?.close().catch(() => {});
+      if (keepDetailForeground) await page.bringToFront().catch(() => {});
     }
 
     // If the main page was used as fallback, return it to the list URL.
@@ -4125,6 +4167,10 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
     try { await injectOverlay(page); } catch {
       // Overlay reinjection is best-effort after detail navigation.
     }
+    await updateOverlay(page, {
+      ...overlayBase, count: totalSoFar,
+      status: signal?.aborted ? 'Stopping…' : 'Returning to search results…',
+    });
     return {
       jobs: enhanced.filter(Boolean),
       descError: null,
@@ -5169,7 +5215,7 @@ async function inspectNextPageControl(page, { loadMore = false } = {}) {
 
 // Returns the click result plus any enabled next-page control that remains
 // unhandled. Callers must never collapse the latter into a normal completion.
-async function clickNextPage(page, sourceId) {
+export async function clickNextPage(page, sourceId) {
   const sel = NEXT_PAGE_SELECTORS[sourceId];
   // A SCROLL source has no pager by construction, so probing for one can only
   // produce a false alarm — and the probe raises a BLOCK-severity warning.
@@ -5182,12 +5228,21 @@ async function clickNextPage(page, sourceId) {
   if (!sel && SCROLL_SOURCES.has(sourceId)) return { clicked: false, unhandled: null };
   if (!sel) return { clicked: false, unhandled: await inspectNextPageControl(page) };
   try {
-    const clicked = await page.evaluate((s) => {
-      const btn = document.querySelector(s);
-      if (!btn || btn.disabled || btn.getAttribute('aria-disabled') === 'true') return false;
+    const clicked = await page.evaluate((s, allowLabelFallback) => {
+      const usable = el => {
+        if (!el || el.disabled || el.getAttribute('aria-disabled') === 'true') return false;
+        const style = window.getComputedStyle(el);
+        return style.display !== 'none' && style.visibility !== 'hidden';
+      };
+      const btn = [...document.querySelectorAll(s)].find(usable)
+        || (allowLabelFallback && [...document.querySelectorAll('a, button')].find(el => (
+          usable(el) && [el.getAttribute('aria-label'), el.getAttribute('title'), el.textContent]
+            .some(label => /^next\s+page$/i.test(String(label || '').trim()))
+        )));
+      if (!btn) return false;
       btn.click();
       return true;
-    }, sel);
+    }, sel, sourceId === 'ziprecruiter');
     return { clicked, unhandled: clicked ? null : await inspectNextPageControl(page) };
   } catch {
     return { clicked: false, unhandled: await inspectNextPageControl(page) };
@@ -5205,13 +5260,23 @@ async function clickNextPage(page, sourceId) {
 // Same contract as clickNextPage: never collapse an unhandled-but-present
 // control into a normal completion, or a stale selector reads as an exhausted
 // board.
-async function clickLoadMore(page, sel) {
+export async function clickLoadMore(page, sel) {
   try {
     const clicked = await page.evaluate((s) => {
-      const btn = document.querySelector(s);
-      if (!btn || btn.disabled || btn.getAttribute('aria-disabled') === 'true') return false;
-      const style = window.getComputedStyle(btn);
-      if (style.display === 'none' || style.visibility === 'hidden') return false;
+      const usable = el => {
+        if (!el || el.disabled || el.getAttribute('aria-disabled') === 'true') return false;
+        const style = window.getComputedStyle(el);
+        return style.display !== 'none' && style.visibility !== 'hidden';
+      };
+      // Glassdoor alternates Show/See more jobs without a stable data-test.
+      // Only exact action labels qualify; recommendation links and job titles
+      // mentioning these words are not pagination controls.
+      const btn = [...document.querySelectorAll(s)].find(usable)
+        || [...document.querySelectorAll('button, a')].find(el => (
+          usable(el) && [el.getAttribute('aria-label'), el.textContent]
+            .some(label => /^(?:show|load|view|see)\s+(?:\d+\s+)?more\s+jobs?$/i.test(String(label || '').trim()))
+        ));
+      if (!btn) return false;
       btn.scrollIntoView({ block: 'center' });
       btn.click();
       return true;
@@ -6577,6 +6642,7 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
       // retries the page we just reached, never speculates about another one.
       let providerTotalShortfallRecovery = null;
       let hitUnhandledPagination   = false;
+      const sourceDetailPacing = {};
       let sourceDetailBlockCode    = null;
       let sourceDetailBlockAt      = 0;    // ms epoch the block was (re)armed — drives the cooldown re-probe
       let sourceDetailBlockPage    = null; // first page whose descriptions were skipped, for the report
@@ -7423,6 +7489,7 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
             task.options?.collectionStartTimestamp,
           );
           const walkPlan = buildPhysicalCardWalkPlan(extracted, jobsToExpand);
+          walkPlan.detailPacing = sourceDetailPacing;
           await updateOverlay(page, {
             ...overlayBase,
             pageNum,
@@ -7520,7 +7587,7 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
               const restJobs = jobsToExpand.slice(probeJobs.length);
               const probeResult = await expandDescriptions(
                 page, probeJobs, sourceId, { ...overlayBase, pageNum }, allJobs.length + probeJobs.length, signal,
-                buildPhysicalCardWalkPlan(extracted, probeJobs),
+                { ...buildPhysicalCardWalkPlan(extracted, probeJobs), detailPacing: sourceDetailPacing },
               );
               if (didDetailBlockReprobeRecover(probeResult)) {
                 // The throttle lifted — finish the page normally. A confirmed
@@ -7530,7 +7597,7 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
                 const restResult = restJobs.length > 0
                   ? await expandDescriptions(
                     page, restJobs, sourceId, { ...overlayBase, pageNum }, allJobs.length + jobsToExpand.length, signal,
-                    buildPhysicalCardWalkPlan(extracted, restJobs),
+                    { ...buildPhysicalCardWalkPlan(extracted, restJobs), detailPacing: sourceDetailPacing },
                   )
                   : {
                     jobs: [],
@@ -7746,6 +7813,7 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
             break;
           }
 
+          if (signal?.aborted) break;
           // Captured BEFORE the click so a URL-paginated source can prove the
           // page actually turned (see the wait after the settle below).
           const beforeUrl = urlPaginated ? safePageUrl(page) : null;

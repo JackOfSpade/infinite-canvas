@@ -66,9 +66,10 @@ import { v2RejectionEvidencePaths } from './applicationV2RejectionEvidence.js';
 import { archiveV2Content } from './applicationV2EvidenceArchive.js';
 import { archiveV2WriterNotes, splitWriteVerifyWriterResponse } from './applicationV2WriterShortlist.js';
 import { tryGetStore } from './settings.js';
-import { normalizeAlternateListings, normalizeApplyOptions, normalizeBoardClosed, normalizeListingLiveness, normalizeOfficialPosting, officialHttpsUrl, OFFICIAL_POSTING_ROW_FIELDS, SALARY_PROVENANCES, LOCAL_AI_APPLICATION_SNIPPET_MAX_CHARS } from './officialPostingFields.js';
+import { officialPostingEmployerText, normalizeAlternateListings, normalizeApplyOptions, normalizeBoardClosed, normalizeListingLiveness, normalizeOfficialPosting, officialHttpsUrl, OFFICIAL_POSTING_ROW_FIELDS, SALARY_PROVENANCES, LOCAL_AI_APPLICATION_SNIPPET_MAX_CHARS } from './officialPostingFields.js';
 export { LOCAL_AI_APPLICATION_SNIPPET_MAX_CHARS } from './officialPostingFields.js';
 import { unresolvedOfficialPosting } from './officialPostingResolver.js';
+import { officialPostingSemanticProofMatches } from './officialPostingSemantic.js';
 import { frozenOfficialEmployer } from './officialPostingMatch.js';
 import { strictEmployerEqual } from './officialSourceHosts.js';
 import { getPreparedOfficialPosting, registerOfficialPostingGenerationHandlers } from './officialPostingGeneration.js';
@@ -10234,7 +10235,8 @@ function applyPreparedOfficialPosting(scrapedJob, prepared = null) {
   if (!posting) return fallback();
   const verified = ['L1', 'L2', 'L3', 'L4'].includes(posting.level);
   if (verified && !officialHttpsUrl(posting.officialApplyUrl || posting.sourceUrl)) return fallback();
-  const frozenEmployer = frozenOfficialEmployer(scrapedJob, posting.employer);
+  const frozenEmployer = verified && officialPostingSemanticProofMatches(scrapedJob, posting)
+    ? officialPostingEmployerText(posting.employer) : frozenOfficialEmployer(scrapedJob, posting.employer);
   const employer = posting.level === 'L6' ? '' : posting.level === 'L5' && frozenEmployer && strictEmployerEqual(posting.employer, scrapedJob.company)
     ? scrapedJob.company : frozenEmployer;
   if (!verified && posting.level !== 'L6' && !employer) {
