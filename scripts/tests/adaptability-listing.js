@@ -108,7 +108,6 @@ import {
   APPLICATION_QUALITY_CRITERIA,
   LOCAL_AI_GENERATION_AUDIT_VERSION,
   __snapshotCareerSkillEvidenceForTests,
-  createApplicationListingClosingValidator,
   assertSourceQuoteLinksFinalText,
   pasteAttributionScopeErrors,
   validateLocalApplicationResult,
@@ -1059,10 +1058,8 @@ export default [
         const assembledBullet = attempt(() => assemblePasteApplicationResult(packageFor(A, L, { bullet: requirementAsBullet, bulletEvidenceIds: ['job-need'] })));
         assert(!assembledBullet.ok && /career-data evidence ID; job-listing evidence alone cannot support/u.test(assembledBullet.message), `${label}: assembly refuses a listing-only bullet (${assembledBullet.message})`);
         const oneParagraph = packageFor(A, L, { paragraphEvidenceIds: ['job-need'] });
-        oneParagraph.validateListingClosing = createApplicationListingClosingValidator({ input: oneParagraph.input,
-          state: { careerData: A.careerData, evidencePlan: oneParagraph.paste.evidencePlan }, authority: A.authority, sourceRoles: A.sourceRoles });
         const assembledLetter = attempt(() => assemblePasteApplicationResult(oneParagraph));
-        assert(!assembledLetter.ok && /job-listing evidence alone cannot support candidate copy/u.test(assembledLetter.message), `${label}: even with the host closing validator, assembly refuses a one-paragraph listing-only cover letter (${assembledLetter.message})`);
+        assert(!assembledLetter.ok && /job-listing evidence alone cannot support candidate copy/u.test(assembledLetter.message), `${label}: assembly refuses a listing-only cover-letter paragraph (${assembledLetter.message})`);
         assert(attempt(() => assemblePasteApplicationResult(packageFor(A, L))).ok, `${label}: the same package assembles when the paragraph also cites career evidence`);
       }
     },

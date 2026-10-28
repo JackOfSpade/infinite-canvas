@@ -53,7 +53,7 @@ export function targetIdentityNameLicensed(sentence, finding, ctx, { reportsNoPa
 
 // Shared résumé and letter validation called by v2 and by historical stage replay.
 export function validateSharedApplicationContent(response, state, input, authority, {
-  nonemptyText, PASTE_RESUME_BULLET_FIELD_LABEL, unsupportedDurationClaimError, pasteCareerQuotesForEvidenceIds, selectedSourceRoles, validateAuthorityResumeArtifacts, isCurrentAuthorityProtocol, isWriteVerifyJob, currentAuthorityFinalResumeArtifactErrors, assertAuthorityDraftSelection, frozenPlanListingEvidenceIds, validateStructuredApplicationResume, selectedAuthorityCareerSkillEvidence, structuredResumeFailureParts, pasteResumeCompletionTwinErrors, pasteResumeUnderfillErrors, projectContactChannels, PASTE_COVER_PARAGRAPH_UNIT_LABEL, MAX_COVER_LETTER_PARAGRAPH_EVIDENCE_IDS, pasteCoverLetterCompletionTwinErrors, createApplicationListingClosingValidator
+  nonemptyText, PASTE_RESUME_BULLET_FIELD_LABEL, unsupportedDurationClaimError, pasteCareerQuotesForEvidenceIds, selectedSourceRoles, validateAuthorityResumeArtifacts, isCurrentAuthorityProtocol, isWriteVerifyJob, currentAuthorityFinalResumeArtifactErrors, assertAuthorityDraftSelection, frozenPlanListingEvidenceIds, validateStructuredApplicationResume, selectedAuthorityCareerSkillEvidence, structuredResumeFailureParts, pasteResumeCompletionTwinErrors, pasteResumeUnderfillErrors, projectContactChannels, PASTE_COVER_PARAGRAPH_UNIT_LABEL, MAX_COVER_LETTER_PARAGRAPH_EVIDENCE_IDS, pasteCoverLetterCompletionTwinErrors
 }) {
   const errors = [];
   if (state.stage === 'resume') {
@@ -135,7 +135,6 @@ export function validateSharedApplicationContent(response, state, input, authori
     const paragraphs = Array.isArray(response.coverLetter?.paragraphs) ? response.coverLetter.paragraphs : [];
     const evidenceIds = new Set(acceptedEvidence.map(item => item?.id));
     const paragraphIds = new Set();
-    let validateListingClosing = null;
     if (!paragraphs.length) errors.push('Cover letter needs at least one paragraph.');
     // Split by cause (pasteStableIdError above states the same reasoning for
     // the same reason): a name mismatch and a contact mismatch are different
@@ -170,22 +169,9 @@ export function validateSharedApplicationContent(response, state, input, authori
       for (const id of ids) if (!evidenceIds.has(id)) errors.push(`${unit} references unknown evidence ${String(id)}. evidenceIds may only name an ID from the accepted evidence plan.`);
       const careerQuotes = pasteCareerQuotesForEvidenceIds(ids, acceptedEvidence);
       if (!ids.some(id => acceptedEvidence.find(item => item?.id === id)?.sourceId === 'career-data')) {
-        // Historical callers and ordinary career-grounded paragraphs do not
-        // need the optional closing context. Missing injection keeps the old
-        // citation rule; only a host validator can grant the exception.
-        if (!validateListingClosing && ids.length && ids.every(id => acceptedEvidence.find(item => item?.id === id)?.sourceId === 'job-listing')
-          && typeof createApplicationListingClosingValidator === 'function') {
-          validateListingClosing = createApplicationListingClosingValidator({
-            input, state: { ...state, resume: response.resume || state.resume }, authority,
-          });
-        }
-        const validation = validateListingClosing?.({ paragraphs, index, acceptedEvidence });
-        if (!validation?.eligible) {
-          errors.push(`${unit} needs at least one career-data evidence ID.`);
-          if (Array.isArray(validation?.corrections)) errors.push(...validation.corrections);
-        }
+        errors.push(`${unit} needs at least one career-data evidence ID.`);
       }
-      // Listing-only prose never borrows the posting's requested duration.
+      // A paragraph without career quotes never borrows the posting's requested duration.
       const durationError = unsupportedDurationClaimError(unit, paragraph?.text, careerQuotes);
       if (durationError) errors.push(durationError);
     });

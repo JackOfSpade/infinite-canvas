@@ -298,6 +298,30 @@ export default [
     },
   },
   {
+    name: 'job listing history keeps query-based requisitions and opaque path case distinct',
+    run: () => {
+      const key = url => jobAndVariantKeys({ url })[0];
+      for (const parameter of ['jid', 'gh_jid', 'jobId', 'jobid', 'job_id', 'requisitionId', 'reqId']) {
+        const first = `https://employer.example/jobs?${parameter}=ABC123&utm_source=one`;
+        const replay = `https://www.employer.example/jobs?utm_source=two&${parameter}=ABC123`;
+        const distinct = `https://employer.example/jobs?${parameter}=DEF456`;
+        assert.equal(key(first), key(replay), `${parameter} ignores session noise`);
+        assert.notEqual(key(first), key(distinct), `${parameter} retains separate requisitions on a shared path`);
+      }
+      assert.notEqual(key('https://employer.example/jobs/AbC'), key('https://employer.example/jobs/abc'),
+        'case-sensitive listing paths cannot suppress a different requisition');
+      assert.notEqual(key('https://employer.example/jobs?jobId=AbC'), key('https://employer.example/jobs?jobId=abc'),
+        'opaque employer listing ids retain their case');
+      const legacy = 'https://www.google.com/webhp#htidocid=ABC123&htiq=engineer';
+      const current = 'https://google.com/search?q=engineer&htidocid=ABC123';
+      const other = 'https://www.google.com/webhp#htidocid=DEF456&htiq=engineer';
+      assert.equal(key(legacy), key(current), 'the shared Google parser recognizes a saved legacy fragment id');
+      assert.notEqual(key(legacy), key(other), 'distinct legacy fragment cards cannot collapse through /webhp');
+      assert.notEqual(key('https://employer.example/webhp#htidocid=ABC123'), key(current),
+        'only genuine Google URLs share Google document identities');
+    },
+  },
+  {
     name: 'view deletion preserves all posting variants for a saved-results recombine',
     run: () => {
       const first = { title: 'First', company: 'Example', url: 'https://example.test/first' };

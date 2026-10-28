@@ -2,6 +2,10 @@ import React, { useState } from 'react';
 import { JOB_SOURCE_BY_ID } from '../../utils/constants';
 import { SlidersHorizontal, X, RefreshCw, Trash2, Layers, AlertTriangle } from 'lucide-react';
 
+function summaryCount(value) {
+  return Number.isSafeInteger(value) && value >= 0 ? value : 0;
+}
+
 /**
  * Done-state summary and cascade filters for the Job Board Module. Search-run
  * selection and queue controls are rendered by the board directly above this
@@ -13,6 +17,9 @@ export function JobBoardDoneState({
   moduleCount = 0,
   totalIncoming = 0,
   duplicatesRemoved = 0,
+  preferenceFilteredSkipped = 0,
+  locationPostingsCollapsed = 0,
+  locationVariantGroups = 0,
   stale = false,
   staleReason = '',
   canReplaceWithEmpty = false,
@@ -36,6 +43,15 @@ export function JobBoardDoneState({
   combining = false,
 }) {
   const [filtersOpen, setFiltersOpen] = useState(false);
+
+  // The merge counts preference exclusions separately, before totalIncoming.
+  const mergeInputPostings = summaryCount(totalIncoming);
+  const preferenceExcluded = Math.min(summaryCount(preferenceFilteredSkipped), Number.MAX_SAFE_INTEGER - mergeInputPostings);
+  const collectedPostings = mergeInputPostings + preferenceExcluded;
+  const duplicatePostings = Math.min(summaryCount(duplicatesRemoved), mergeInputPostings);
+  const distinctPostings = mergeInputPostings - duplicatePostings;
+  const groupedPostings = Math.min(summaryCount(locationPostingsCollapsed), distinctPostings);
+  const locationGroups = Math.min(summaryCount(locationVariantGroups), distinctPostings);
 
   const sliderUsable = scoreRangeMax > scoreRangeMin;
   const sliderActive = sliderUsable && scoreThreshold > scoreRangeMin;
@@ -62,9 +78,9 @@ export function JobBoardDoneState({
         </>
       ) : (
         <>
-          {/* Unique jobs kept after dedup (NOT the raw total — that's below). */}
+          {/* One card can retain several distinct posting targets. */}
           <div className="text-emerald-400 text-2xl font-bold">{resultCount || 0}</div>
-          <p className="text-white/40 text-xs">unique jobs</p>
+          <p className="text-white/40 text-xs">job cards</p>
 
           {moduleCount > 0 && (
             <p className="flex items-center gap-1 text-white/25 text-[10px] mt-0.5">
@@ -73,12 +89,19 @@ export function JobBoardDoneState({
             </p>
           )}
 
-          {/* Dedup provenance — total pulled in vs. unique kept (the big number). */}
-          {totalIncoming > 0 && (
+          {/* Source targets, preference exclusions, and merge duplicates precede location grouping. */}
+          {collectedPostings > 0 && (
             <p className="text-white/25 text-[10px]">
-              {totalIncoming} collected · {duplicatesRemoved > 0
-                ? `${duplicatesRemoved} duplicate${duplicatesRemoved === 1 ? '' : 's'} removed`
+              {collectedPostings} posting target{collectedPostings === 1 ? '' : 's'} collected · {duplicatePostings > 0
+                ? `${duplicatePostings} duplicate${duplicatePostings === 1 ? '' : 's'} removed`
                 : 'no duplicates'}
+              {preferenceExcluded > 0 ? ` · ${preferenceExcluded} excluded by preferences` : ''}
+            </p>
+          )}
+          {groupedPostings > 0 && (
+            <p className="text-center text-white/30 text-[10px] leading-snug" data-summary="location-consolidation">
+              {distinctPostings} distinct posting targets · {groupedPostings} additional location posting{groupedPostings === 1 ? '' : 's'} grouped
+              {locationGroups > 0 ? ` in ${locationGroups} group${locationGroups === 1 ? '' : 's'}` : ''}
             </p>
           )}
         </>

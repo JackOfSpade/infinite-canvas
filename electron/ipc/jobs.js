@@ -5329,10 +5329,9 @@ function createJobsTelemetry() {
   };
 }
 
-// Board-level aggregation is intentionally shared for these legacy channels.
-// Every other node-addressed IPC handler receives telemetry private to its
-// WebContents + Job Search hub, while callers outside an IPC request retain
-// the previous ambient-object behavior used by reports and legacy tests.
+// These channels belong to Boards (and individual compensation cards), rather
+// than source Searches. Node-addressed requests have a separate sender-local
+// registry; old callers without an owner retain their ambient behavior.
 const LEGACY_JOBS_TELEMETRY_CHANNELS = new Set([
   'append-jobs-history',
   'research-job-compensation',
@@ -5341,7 +5340,43 @@ const LEGACY_JOBS_TELEMETRY_CHANNELS = new Set([
 let jobsTelemetryBySender = new WeakMap();
 let latestJobsTelemetryBySender = new WeakMap();
 let legacyJobsTelemetryByRequest = new WeakMap();
+let jobsBoardTelemetryBySender = new WeakMap();
+// Request pins outlive a test reset, but their registry does not. An in-flight
+// old request may finish its orphan record without republishing it after reset.
+const jobsBoardTelemetryByRequest = new WeakMap();
+const jobsBoardTelemetryCanvasScope = new WeakMap();
+const JOB_BOARD_TELEMETRY_CAP = 32;
 let latestJobsTelemetry = createJobsTelemetry();
+
+function boardTelemetryCanvasScope(value) {
+  return typeof value === 'string' && value.trim() ? path.resolve(value).normalize('NFC') : null;
+}
+
+function boardJobsTelemetry(context, sender, nodeId) {
+  let telemetry = jobsBoardTelemetryByRequest.get(context);
+  if (telemetry) return telemetry;
+  let byBoard = jobsBoardTelemetryBySender.get(sender);
+  if (!byBoard) {
+    byBoard = new Map();
+    jobsBoardTelemetryBySender.set(sender, byBoard);
+  }
+  const canvasScope = boardTelemetryCanvasScope(sender.__canvasPath);
+  const ownerKey = JSON.stringify([canvasScope, nodeId]);
+  telemetry = byBoard.get(ownerKey);
+  // Each bucket call starts a new latest attempt. A predecessor's pinned
+  // callbacks can finish only its old record, never the replacement's stages.
+  if (!telemetry || context.channel === 'bucket-jobs') {
+    telemetry = createJobsTelemetry();
+    telemetry.boardNodeId = nodeId;
+    telemetry.windowId = sender.id ?? null;
+    jobsBoardTelemetryCanvasScope.set(telemetry, canvasScope);
+    byBoard.delete(ownerKey);
+    byBoard.set(ownerKey, telemetry);
+    while (byBoard.size > JOB_BOARD_TELEMETRY_CAP) byBoard.delete(byBoard.keys().next().value);
+  }
+  jobsBoardTelemetryByRequest.set(context, telemetry);
+  return telemetry;
+}
 
 function getScopedJobsTelemetry() {
   const context = getCurrentIpcRequestContext();
@@ -5350,10 +5385,8 @@ function getScopedJobsTelemetry() {
     ? context.nodeId.trim()
     : null;
 
-  // Board-owned IPC preserves its historical ambient-object behavior, but an
-  // individual request must not switch targets if another hub becomes latest
-  // while this handler is awaiting model/browser work.
   if (LEGACY_JOBS_TELEMETRY_CHANNELS.has(context?.channel)) {
+    if (sender && nodeId) return boardJobsTelemetry(context, sender, nodeId);
     if (!context || typeof context !== 'object') return latestJobsTelemetry;
     let telemetry = legacyJobsTelemetryByRequest.get(context);
     if (!telemetry) {
@@ -5423,6 +5456,7 @@ export function __resetJobsTelemetryForTests() {
   jobsTelemetryBySender = new WeakMap();
   latestJobsTelemetryBySender = new WeakMap();
   legacyJobsTelemetryByRequest = new WeakMap();
+  jobsBoardTelemetryBySender = new WeakMap();
   latestJobsTelemetry = createJobsTelemetry();
 }
 
@@ -5590,6 +5624,85 @@ export function getJobsTelemetryForReport(currentNodeIds, reportWindowId = null)
 
 export function __getJobsTelemetryForReportForTests(currentNodeIds, reportWindowId = null) {
   return getJobsTelemetryForReport(currentNodeIds, reportWindowId);
+}
+
+const BOARD_BUCKET_COUNTS = ['ts', 'input', 'placed', 'missing', 'duplicated', 'roleCount',
+  'taxonomyChunksCompleted', 'taxonomyChunkCount', 'taxonomyChunkSize', 'taxonomyVocabularySize',
+  'taxonomyRepresentativeCount', 'taxonomyPlannedAssignments', 'taxonomyClassifiedAssignments', 'taxonomyAuditOmitted'];
+const BOARD_COMPENSATION_COUNTS = ['ts', 'scoredInput', 'eligible', 'preResearchCandidates', 'skippedBelowFit',
+  'skippedNoExperience', 'skippedNoExperienceBand', 'missingOffer', 'recommendedNoOffer', 'skippedNoCurrency',
+  'skippedNoLocation', 'roleBandLookups', 'roleBandResearches', 'roleBandCacheHits', 'roleBandFailures',
+  'roleBandFailureJobs', 'roleBandUnavailable', 'roleBandUnavailableJobs', 'roleBandInterruptedJobs',
+  'roleBandFallbackJobs', 'marketCandidates', 'cohorts', 'researched', 'failedCohorts', 'marketCohortFailures',
+  'assessed', 'minFitScore', 'cacheHits'];
+const BOARD_LOCATION_COUNTS = ['postings', 'jobs', 'handoffs', 'cacheHit', 'overflowPostings', 'noIdentityJobs',
+  'resolved', 'foundUnresolved', 'rejected', 'notFound', 'failed', 'interrupted'];
+const BOARD_TAXONOMY_STAGES = new Set(['planning', 'planned', 'classifying', 'complete']);
+const BOARD_ERROR_CODES = new Set(['JOB_BOARD_TAXONOMY_INVALID', 'STRUCTURED_OUTPUT_SCHEMA_INVALID',
+  'NON_API_AI_CAPABILITY_UNAVAILABLE', 'ABORT_ERR', 'APP_QUIT_PAUSED']);
+
+function boardTelemetryCounts(value, keys) {
+  const out = {};
+  for (const key of keys) {
+    if (typeof value?.[key] === 'number' && Number.isSafeInteger(value[key]) && value[key] >= 0
+      && (key !== 'ts' || Number.isFinite(new Date(value[key]).getTime()))) out[key] = value[key];
+  }
+  return out;
+}
+
+function boardTelemetryStage(value, keys) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  return { ...boardTelemetryCounts(value, keys), error: Boolean(value.error),
+    errorCode: value.errorCode ? (BOARD_ERROR_CODES.has(value.errorCode) ? value.errorCode : 'OTHER') : null };
+}
+
+/**
+ * Latest Board-stage attempts, independently attributable to this reporting
+ * window's typed Board IDs. This is not a source funnel or run-ID correlation.
+ * Export counts and fixed enums only: model text, cohort/listing identities,
+ * salary prose, raw errors and source snapshots never leave this boundary.
+ * An explicit canvas selects its captured canonical spelling; null selects
+ * unsaved ownership. Neither the private scope nor a path is returned.
+ */
+export function getJobsBoardTelemetryForReport(boardIds, reportWindowId = null, canvasFilePath = undefined) {
+  const sender = getCurrentIpcRequestContext()?.sender;
+  if (!sender || !Number.isSafeInteger(sender.id) || sender.id < 0
+    || (reportWindowId != null && sender.id !== reportWindowId)) return [];
+  const ids = boardIds instanceof Set ? boardIds : new Set(Array.isArray(boardIds) ? boardIds : []);
+  const byBoard = jobsBoardTelemetryBySender.get(sender);
+  if (!byBoard) return [];
+  if (canvasFilePath !== undefined && canvasFilePath !== null
+    && (typeof canvasFilePath !== 'string' || !canvasFilePath.trim() || !path.isAbsolute(canvasFilePath))) return [];
+  const canvasScope = boardTelemetryCanvasScope(canvasFilePath);
+  const matches = [...byBoard.entries()].filter(([ownerKey, telemetry]) => ids.has(telemetry.boardNodeId)
+    && ownerKey === JSON.stringify([jobsBoardTelemetryCanvasScope.get(telemetry), telemetry.boardNodeId])
+    && telemetry.nodeId == null && telemetry.windowId === sender.id
+    && (canvasFilePath === undefined || jobsBoardTelemetryCanvasScope.get(telemetry) === canvasScope))
+    .map(([, telemetry]) => telemetry);
+  // Older consumers supplied only window+Board IDs. Keep their
+  // latest-owner view while real canvas-aware reports select exact ownership.
+  return [...new Map(matches.map(telemetry => [telemetry.boardNodeId, telemetry])).entries()]
+    .sort(([left], [right]) => left.localeCompare(right))
+    .slice(0, JOB_BOARD_TELEMETRY_CAP)
+    .map(([boardNodeId, telemetry]) => {
+      const bucketing = boardTelemetryStage(telemetry.bucketing, BOARD_BUCKET_COUNTS);
+      if (bucketing) {
+        bucketing.taxonomyStage = BOARD_TAXONOMY_STAGES.has(telemetry.bucketing.taxonomyStage) ? telemetry.bucketing.taxonomyStage : null;
+        bucketing.blocked = telemetry.bucketing.blocked === true;
+      }
+      const compensation = boardTelemetryStage(telemetry.compensation, BOARD_COMPENSATION_COUNTS);
+      if (compensation && telemetry.compensation.locationLookup) {
+        compensation.locationLookup = boardTelemetryStage(telemetry.compensation.locationLookup, BOARD_LOCATION_COUNTS);
+      }
+      const displayed = telemetry.history?.boardDisplay;
+      const boardDisplay = displayed && typeof displayed === 'object' && !Array.isArray(displayed)
+        ? { ...boardTelemetryCounts(displayed, ['ts', 'input', 'staged', 'written', 'pruned', 'unreadable']),
+          skipped: displayed.skipped === 'no-canvas-path' ? 'no-canvas-path' : null,
+          skips: boardTelemetryCounts(displayed.skips, ['noKey', 'url', 'titleCompany', 'inBatch']), error: Boolean(displayed.error) }
+        : null;
+      return { boardNodeId, windowId: telemetry.windowId, bucketing, compensation,
+        history: boardDisplay ? { boardDisplay } : null };
+    });
 }
 
 // This deliberately has DIFFERENT semantics from getJobsTelemetryForReport:
@@ -11062,6 +11175,8 @@ function registerJobsHandlersWithDependencies(dependencies = {}) {
   const beforeScoreSideEffect = dependencies.beforeScoreSideEffect || (async () => {});
   const runScoreBatch = dependencies.runScoreBatch || callLLMText;
   const runGapReview = dependencies.runGapReview || callLLMText;
+  const runBoardTaxonomy = dependencies.runBoardTaxonomy || runBoundedJobTaxonomy;
+  const resolveBoardCompensationCareerInputs = dependencies.resolveCompensationCareerInputs || resolveCompensationCareerInputs;
   const runHttpSources = dependencies.fetchHttpSources || fetchHttpSources;
   const beforeSearchStageWrite = dependencies.beforeSearchStageWrite || (async () => {});
   const afterSearchProviderResult = dependencies.afterSearchProviderResult || (async () => {});
@@ -15552,6 +15667,7 @@ Return a JSON object with four arrays of search query strings:
   });
 
   handleSafe('append-jobs-history', async (event, { canvasFilePath, jobs, nodeId, historyStage, historyToken = null } = {}) => {
+    const telemetry = getScopedJobsTelemetry(); // pin this Board before the authority/write awaits
     // A Board may write only after the renderer has committed its cards. The
     // host-issued one-shot token binds those rows to the exact sealed source
     // artifacts it checked before that UI commit; arbitrary renderer rows can
@@ -15562,7 +15678,7 @@ Return a JSON object with four arrays of search query strings:
       : { success: false, operationSuperseded: true, error: 'History writes require a Board display receipt.' };
     // The board caller is deliberately awaited after it has added result cards.
     // Keep board-owned telemetry separate from the source search's identity.
-    if (nodeId && nodeId === jobsTelemetry.boardNodeId && historyStage === 'boardDisplay') {
+    if (nodeId && nodeId === telemetry.boardNodeId && historyStage === 'boardDisplay') {
       recordHistoryWrite('boardDisplay', jobs, result);
     }
     return result;
@@ -16391,11 +16507,13 @@ Return a JSON object with four arrays of search query strings:
   // than discarding the board's scored jobs.
   handleSafe('research-job-compensation', async (event, { jobs, nodeId, requestId = null, remoteResidences, salaryCareerSnapshotId } = {}, signal) => {
     if (!Array.isArray(jobs)) throw new Error('Compensation research requires a jobs array.');
+    const telemetry = getScopedJobsTelemetry(); // pin this attempt before reading career/model data
     const startedAt = Date.now();
+    telemetry.compensation = { ts: startedAt, scoredInput: jobs.length };
     logger.info(`[Jobs][${nodeId}] Board compensation started: ${jobs.length} job(s)`);
     try {
       const manualAiRunId = getCurrentIpcRequestContext()?.manualAiRunId;
-      const careerInputs = await resolveCompensationCareerInputs(jobs, { signal, salaryCareerSnapshotId });
+      const careerInputs = await resolveBoardCompensationCareerInputs(jobs, { signal, salaryCareerSnapshotId });
       const enrichedJobs = await researchCompensationAssessments(jobs, {
         remoteResidences: remoteResidences || {}, event, nodeId, requestId, signal, manualAiRunId, careerInputs, salaryCareerSnapshotId,
         legacyResearchStepProbe: ({ prompt, task, grounding, hints }) => hasExactDurableRawHandoff(prompt, {
@@ -16416,6 +16534,7 @@ Return a JSON object with four arrays of search query strings:
       logger.info(`[Jobs][${nodeId}] Board compensation completed: ${enrichedJobs.length} job(s) in ${Date.now() - startedAt}ms`);
       return { success: true, jobs: enrichedJobs };
     } catch (error) {
+      telemetry.compensation = { ...telemetry.compensation, ts: Date.now(), error: true, errorCode: error?.code || null };
       logger.warn(`[Jobs][${nodeId}] Board compensation ${signal?.aborted ? 'cancelled' : 'failed'} after ${Date.now() - startedAt}ms`);
       throw error;
     } finally {
@@ -16455,15 +16574,18 @@ Return a JSON object with four arrays of search query strings:
   // contract and the local backstop both require complete assignments before
   // renderer placement; a partial taxonomy never becomes a plausible board.
   handleSafe('bucket-jobs', async (event, { jobs, nodeId }, signal) => {
+    const telemetry = getScopedJobsTelemetry();
     logger.info(`[Jobs][${nodeId}] Bucketing ${jobs.length} jobs into fit-score/salary/role taxonomy`);
     recordJobsBoardScope(nodeId, event.sender?.id ?? null);
+    telemetry.bucketing = { ts: Date.now(), input: jobs.length, roleCount: 0,
+      placed: 0, missing: jobs.length, duplicated: 0, taxonomyStage: 'planning' };
     // This handler returns a taxonomy only; its local shadows never replace rows.
-    jobs = await officialPostingConsumerJobs(jobs);
     const provider = NON_API_AI_TRANSPORT;
     const bucketMeta = {}; // populated with the model that actually served a taxonomy stage
     let taxonomyProgress = { stage: 'planning', completedBatches: 0, batchCount: 0, chunkSize: 0, vocabularySize: 0, representativeCount: 0, plannedAssignments: 0, classifiedAssignments: 0 };
     let result;
     try {
+      jobs = await officialPostingConsumerJobs(jobs);
       const manualAiContext = getCurrentIpcRequestContext();
       const hasLegacyClassifier = await durableRunHasAnyTask(
         manualAiContext?.manualAiRunId,
@@ -16478,7 +16600,7 @@ Return a JSON object with four arrays of search query strings:
             hints,
           })
         : null;
-      result = await runBoundedJobTaxonomy(jobs, {
+      result = await runBoardTaxonomy(jobs, {
         signal,
         meta: bucketMeta,
         callText: callLLMText,
@@ -16496,6 +16618,12 @@ Return a JSON object with four arrays of search query strings:
             plannedAssignments: progress.plannedAssignments || 0,
             classifiedAssignments: progress.classifiedAssignments || 0,
           };
+          telemetry.bucketing = { ...telemetry.bucketing, ts: Date.now(), taxonomyStage: taxonomyProgress.stage,
+            taxonomyChunksCompleted: taxonomyProgress.completedBatches, taxonomyChunkCount: taxonomyProgress.batchCount,
+            taxonomyChunkSize: taxonomyProgress.chunkSize, taxonomyVocabularySize: taxonomyProgress.vocabularySize,
+            taxonomyRepresentativeCount: taxonomyProgress.representativeCount,
+            taxonomyPlannedAssignments: taxonomyProgress.plannedAssignments,
+            taxonomyClassifiedAssignments: taxonomyProgress.classifiedAssignments };
           // A plan is always the first manual handoff; classifier chunks are
           // discovered only after it returns.  Label the 0/0 planning receipt
           // explicitly so it cannot look like a zero-job classification run.
@@ -16514,7 +16642,7 @@ Return a JSON object with four arrays of search query strings:
       // from a failed generation attempt. An ABORT isn't a provider failure —
       // don't stamp a spurious failure; just propagate.
       if (!signal?.aborted) {
-        jobsTelemetry.bucketing = {
+        telemetry.bucketing = {
           ts: Date.now(),
           input: jobs.length,
           roleCount: 0,
@@ -16581,7 +16709,7 @@ Return a JSON object with four arrays of search query strings:
         ...rawRoleShape.nonStringIndices,
         ...rawRoleCoverage.missingIndices,
       ])].slice(0, 5);
-      jobsTelemetry.bucketing = {
+      telemetry.bucketing = {
         ts: Date.now(),
         input: jobs.length,
         roleCount: rawRoleCoverage.roleCount,
@@ -16736,7 +16864,7 @@ Return a JSON object with four arrays of search query strings:
       };
     });
 
-    jobsTelemetry.bucketing = {
+    telemetry.bucketing = {
       ts: Date.now(),
       input: jobs.length,
       roleCount: repairedRoleCoverage.roleCount,

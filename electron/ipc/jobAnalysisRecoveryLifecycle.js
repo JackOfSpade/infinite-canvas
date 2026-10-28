@@ -54,6 +54,7 @@ function safeSnapshotCreatedAtMs(value) {
 }
 
 function normalizeEvent(input = {}, { persisted = false } = {}) {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return null;
   const operation = enumValue(input.operation, OPERATIONS, null);
   if (!operation) return null;
   const recordedAt = typeof input.at === 'number' && Number.isSafeInteger(input.at) && input.at > 0
@@ -148,19 +149,16 @@ export async function recordJobAnalysisRecoveryLifecycle(filePath, input) {
   const event = normalizeEvent(input);
   if (!filePath || !event) return false;
   const prior = tails.get(filePath) || Promise.resolve();
-  const task = prior.then(async () => {
-    const journal = await readJournal(filePath);
-    journal.events = [...journal.events, event].slice(-JOB_ANALYSIS_RECOVERY_LIFECYCLE_CAP);
-    await writeAtomically(filePath, journal);
-    return true;
-  }, async () => {
+  const task = prior.catch(() => {}).then(async () => {
     const journal = await readJournal(filePath);
     journal.events = [...journal.events, event].slice(-JOB_ANALYSIS_RECOVERY_LIFECYCLE_CAP);
     await writeAtomically(filePath, journal);
     return true;
   });
-  tails.set(filePath, task.then(() => {}, () => {}));
+  const tail = task.then(() => {}, () => {});
+  tails.set(filePath, tail);
   try { return await task; } catch { return false; }
+  finally { if (tails.get(filePath) === tail) tails.delete(filePath); }
 }
 
 /** Sync, bounded report reader. It never returns paths, IDs, prompts, or rows. */

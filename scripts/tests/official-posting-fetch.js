@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { EventEmitter, getEventListeners } from 'node:events';
 import { PassThrough } from 'node:stream';
-import { fetchOfficialPosting, isPublicOfficialAddress, OFFICIAL_FETCH_MAX_BYTES } from '../../electron/ipc/officialPostingFetch.js';
+import { fetchOfficialPosting, isPublicOfficialAddress, OfficialPostingFetchError, OFFICIAL_FETCH_MAX_BYTES, OFFICIAL_FETCH_FAILURE_REASONS } from '../../electron/ipc/officialPostingFetch.js';
 import { normalizeApplyOptions, normalizeOfficialLocation, normalizeOfficialPosting, OFFICIAL_POSTING_ROW_FIELDS } from '../../electron/ipc/officialPostingFields.js';
 
 const publicLookup = async () => [{ address: '1.1.1.1', family: 4 }];
@@ -25,6 +25,103 @@ function transport(pages, requests = []) {
 }
 
 export default [
+  {
+    name: 'Official posting HTTP failures distinguish blocked access, rate limits and server failures while retaining status and retry headers',
+    async run() {
+      for (const [statusCode, reason, code = 'fetch-failed'] of [
+        [401, 'access-denied'], [403, 'access-denied'], [429, 'rate-limited'],
+        [500, 'server-error'], [503, 'server-error'], [599, 'server-error'],
+        [400, undefined], [451, undefined], [404, undefined, 'closed'], [410, undefined, 'closed'],
+      ]) {
+        await assert.rejects(fetchOfficialPosting('https://careers.northwind.test/job', {
+          lookup: publicLookup, request: transport([{ status: statusCode, headers: { 'retry-after': '120' } }]),
+        }), error => {
+          assert.equal(error.code, code); assert.equal(error.statusCode, statusCode);
+          assert.equal(error.reason, reason); assert.equal(error.retryAfter, '120');
+          assert.equal(error.url, 'https://careers.northwind.test/job');
+          return true;
+        });
+      }
+      const bounded = new OfficialPostingFetchError('fetch-failed', { statusCode: 429, retryAfter: 'x'.repeat(500), reason: 'raw provider text' });
+      assert.equal(bounded.reason, 'rate-limited'); assert.equal(bounded.retryAfter.length, 160);
+      assert.equal(new OfficialPostingFetchError('fetch-failed', { reason: 'raw provider text' }).reason, undefined);
+      assert.equal(new OfficialPostingFetchError('fetch-timeout', { reason: 'network-error' }).reason, undefined);
+      assert.equal(Object.isFrozen(OFFICIAL_FETCH_FAILURE_REASONS), true);
+    },
+  },
+  {
+    name: 'Official posting DNS and transport failures retain bounded causes without exposing raw errors or changing cancellation',
+    async run() {
+      let requests = 0;
+      await assert.rejects(fetchOfficialPosting('https://careers.northwind.test/job', {
+        lookup: async () => { throw Object.assign(new Error('private resolver details'), { code: 'ENOTFOUND' }); },
+        request: () => { requests += 1; throw new Error('must not request after failed DNS'); },
+      }), error => {
+        assert.equal(error.code, 'fetch-failed'); assert.equal(error.reason, 'dns-error');
+        assert.equal(error.url, 'https://careers.northwind.test/job');
+        assert.doesNotMatch(error.message, /private resolver details/u); return true;
+      });
+      assert.equal(requests, 0);
+      for (const failure of ['request-throw', 'request-error', 'response-error', 'response-aborted', 'response-close']) {
+        const request = (_url, _options, callback) => {
+          if (failure === 'request-throw') throw new Error('private transport details');
+          const req = new EventEmitter(); req.destroy = () => {};
+          req.end = () => queueMicrotask(() => {
+            if (failure === 'request-error') { req.emit('error', new Error('private transport details')); return; }
+            const response = new PassThrough(); response.statusCode = 200; response.headers = { 'content-type': 'text/html' };
+            callback(response); response.write('partial');
+            if (failure === 'response-error') response.emit('error', new Error('private transport details'));
+            else if (failure === 'response-aborted') response.emit('aborted');
+            else response.destroy();
+          });
+          return req;
+        };
+        await assert.rejects(fetchOfficialPosting('https://careers.northwind.test/job', { lookup: publicLookup, request }), error => {
+          assert.equal(error.code, 'fetch-failed', failure); assert.equal(error.reason, 'network-error', failure);
+          assert.equal(error.url, 'https://careers.northwind.test/job', failure);
+          assert.doesNotMatch(error.message, /private transport details/u); return true;
+        });
+      }
+      const controller = new AbortController();
+      const pending = fetchOfficialPosting('https://careers.northwind.test/job', {
+        lookup: () => new Promise(() => {}), signal: controller.signal,
+      });
+      controller.abort();
+      await assert.rejects(pending, error => {
+        assert.equal(error.code, 'bridge-aborted'); assert.equal(error.reason, undefined); return true;
+      });
+      assert.equal(getEventListeners(controller.signal, 'abort').length, 0);
+    },
+  },
+  {
+    name: 'Official posting failures identify the final rejected hop and bound diagnostic URLs without changing safe URL validation',
+    async run() {
+      await assert.rejects(fetchOfficialPosting('https://careers.northwind.test/job', {
+        lookup: publicLookup,
+        request: transport([{ status: 302, headers: { location: 'https://jobs.northwind.test/role' } }, { status: 403 }]),
+      }), error => {
+        assert.equal(error.reason, 'access-denied'); assert.equal(error.url, 'https://jobs.northwind.test/role'); return true;
+      });
+      const upstream = new OfficialPostingFetchError('fetch-failed', { statusCode: 503 });
+      upstream.url = 'https://ats.northwind.test/failed-hop';
+      await assert.rejects(fetchOfficialPosting('https://careers.northwind.test/job', {
+        lookup: publicLookup, hopHooks: { beforeRequest: async () => ({ reuse: Promise.reject(upstream) }) },
+        request: () => { throw new Error('a reused hop must not request'); },
+      }), error => {
+        assert.equal(error, upstream); assert.equal(error.url, 'https://ats.northwind.test/failed-hop'); return true;
+      });
+      await assert.rejects(fetchOfficialPosting(`https://careers.northwind.test/${'x'.repeat(2000)}`, {
+        lookup: publicLookup, request: transport([{ status: 429 }]),
+      }), error => {
+        assert.equal(error.code, 'fetch-failed'); assert.equal(error.reason, 'rate-limited'); assert.equal(error.url, undefined); return true;
+      });
+      await assert.rejects(fetchOfficialPosting('https://user:pass@careers.northwind.test/job', {
+        lookup: publicLookup, request: () => { throw new Error('must not request credentials'); },
+      }), error => {
+        assert.equal(error.code, 'unsafe-url'); assert.equal(error.url, undefined); assert.equal(error.reason, undefined); return true;
+      });
+    },
+  },
   {
     name: 'Official posting fetch pins every validated DNS hop and preserves TLS hostname through redirects',
     async run() {

@@ -103,8 +103,8 @@ export default [
     run() {
       const cases = [
         ['bridge-unavailable', /research unavailable/u], ['bridge-timeout', /research timed out/u],
-        ['fetch-timeout', /page fetch timed out/u], ['crawl-budget', /search coverage limited/u],
-        ['fetch-failed', /page could not be fetched/u], ['semantic-uncertain', /match uncertain/u],
+        ['fetch-timeout', /Employer site verification timed out/u], ['crawl-budget', /search coverage limited/u],
+        ['fetch-failed', /Employer site verification incomplete/u], ['semantic-uncertain', /match uncertain/u],
         ['comparative-invalid', /match uncertain/u], ['official-text-missing', /posting could not be read/u],
       ];
       for (const level of ['L5', 'L6']) for (const [code, reason] of cases) {
@@ -138,6 +138,75 @@ export default [
     },
   },
   {
+    name: 'Official posting bundle: failed employer fetch details survive cards, Markdown and inert HTML while the original link remains usable',
+    run() {
+      const fetchFailure = { url: 'https://careers.northwind.example/jobs/one', code: 'fetch-failed', reason: 'access-denied', statusCode: 403 };
+      const officialPosting = { level: 'L5', outcome: 'not-found', employer: 'Northwind',
+        trail: ['bridge-research', 'fetch-failed'], fetchFailures: [fetchFailure] };
+      const value = { ...job, officialPosting, postingVariants: [], applyUrl: '' };
+      const status = officialPostingLookupStatus(officialPosting);
+      assert.equal(status.state, 'incomplete');
+      assert.equal(status.label, 'Employer site verification incomplete');
+      assert.equal(status.retryable, true);
+      assert.match(status.detail, /careers\.northwind\.example/u);
+      assert.match(status.detail, /access denied \(HTTP 403\)/u);
+      assert.match(status.detail, /The original listing is retained\./u);
+      assert.match(status.detail, /Retry the official posting lookup in the app\./u);
+      const card = officialPostingDisplay(value);
+      assert.equal(card.statusLabel, status.label);
+      assert.equal(card.statusDetail, status.detail);
+      assert.equal(card.applyUrl, value.url);
+      const markdown = formatOriginalJobListingMarkdown(value, { audience: 'bundle' });
+      assert.ok(markdown.includes(`**Official posting check:** ${status.label}`));
+      assert.ok(markdown.includes('careers\\.northwind\\.example/jobs/one'));
+      assert.ok(markdown.includes('access denied') && markdown.includes('HTTP 403'));
+      assert.ok(markdown.includes('The original listing is retained'));
+      assert.ok(markdown.includes('Retry the official posting lookup in the app'));
+      assert.ok(markdown.includes(`**Listing URL:** <${value.url}>`));
+      assert.ok(!markdown.includes('**Official posting:**'));
+      const dom = new JSDOM(buildResumeDocument({
+        resumeMainHtml: '<main class="page"><h1 class="name">Synthetic Candidate</h1><p>Unchanged document copy.</p></main>',
+        downloadBundle: { jobUrl: value.url, officialPosting, jobMarkdown: markdown },
+      }));
+      try {
+        const document = dom.window.document;
+        const data = JSON.parse(document.getElementById('ic-application-bundle-data').textContent);
+        assert.deepEqual(data.officialPosting.fetchFailures, [fetchFailure]);
+        assert.deepEqual(data.officialPosting, normalizeOfficialPosting(officialPosting));
+        assert.equal(data.jobMarkdown, markdown);
+        const notice = document.querySelector('[data-ic-official-posting-status="incomplete"]');
+        assert.equal(notice.querySelector('strong').textContent, status.label);
+        assert.equal(notice.querySelector('span').textContent, status.detail);
+        const link = document.querySelector('.ic-job-posting-link');
+        assert.equal(link.href, value.url);
+        assert.equal(link.textContent, 'View original job posting');
+        assert.ok(!document.querySelector('[data-ic-document-panel]').textContent.includes(status.detail));
+      } finally { dom.window.close(); }
+    },
+  },
+  {
+    name: 'Official posting bundle: legacy fetch failures retain the original listing without inventing an HTTP cause',
+    run() {
+      const officialPosting = { level: 'L5', outcome: 'not-found', employer: 'Northwind', trail: ['fetch-failed'] };
+      const value = { ...job, officialPosting, postingVariants: [], applyUrl: '' };
+      const status = officialPostingLookupStatus(officialPosting);
+      assert.equal(status.label, 'Employer site verification incomplete');
+      assert.equal(status.retryable, true);
+      assert.match(status.detail, /The original listing is retained\./u);
+      assert.match(status.detail, /Retry the official posting lookup in the app\./u);
+      assert.doesNotMatch(status.detail, /HTTP\s*\d|access denied|blocked|rate[- ]limit|server error|DNS|TLS/iu);
+      const card = officialPostingDisplay(value);
+      assert.equal(card.applyUrl, value.url);
+      assert.equal(card.statusDetail, status.detail);
+      const markdown = formatOriginalJobListingMarkdown(value, { audience: 'bundle' });
+      assert.ok(markdown.includes('The original listing is retained'));
+      assert.ok(markdown.includes('Retry the official posting lookup in the app'));
+      assert.ok(markdown.includes(`**Listing URL:** <${value.url}>`));
+      assert.ok(!markdown.includes('**Official posting:**'));
+      assert.equal(normaliseResumeDownloadBundle({ officialPosting }).officialPosting.fetchFailures, undefined);
+    },
+  },
+  {
     name: 'Official posting bundle: completed no-match, ambiguity and closure stay distinct from interrupted research',
     run() {
       for (const [outcome, trail, state, label] of [
@@ -162,7 +231,7 @@ export default [
       assert.equal(status.state, 'verified'); assert.equal(status.retryable, true);
       assert.equal(status.sourceUrl, officialPosting.sourceUrl);
       assert.equal(status.label, 'Previously verified official posting');
-      assert.match(status.detail, /page could not be fetched/u); assert.match(status.detail, /Retry/u);
+      assert.match(status.detail, /Employer site verification incomplete/u); assert.match(status.detail, /Retry/u);
       const markdown = formatOriginalJobListingMarkdown({ ...job, officialPosting }, { audience: 'bundle' });
       assert.ok(markdown.includes(status.label) && markdown.includes('Latest recheck'));
       const dom = new JSDOM(buildResumeDocument({ resumeMainHtml: '<main class="page"><h1 class="name">Synthetic Candidate</h1></main>',

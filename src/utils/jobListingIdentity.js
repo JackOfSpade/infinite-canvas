@@ -1,20 +1,28 @@
 // Listing identity shared by seen-history and Board dismissal. Keep both paths
 // on the same key so a dismissed consolidated card covers every posting variant.
-const IDENTITY_PARAMS = ['jk', 'htidocid'];
+import { googleJobsDocumentId } from './jobListingUrl.js';
+
+// Preserve a provider's listing identity while dropping search/session noise.
+// Many employer boards serve every requisition through one shared URL path.
+const IDENTITY_PARAMS = ['jk', 'htidocid', 'jid', 'gh_jid', 'jobId', 'jobid', 'job_id', 'requisitionId', 'requisitionid', 'reqId'];
 
 function normUrl(url) {
   if (!url || typeof url !== 'string') return '';
   try {
     const u = new URL(url);
     const host = u.hostname.toLowerCase().replace(/^www\./, '');
-    const path = u.pathname.toLowerCase().replace(/\/+$/, '');
+    // URL paths and opaque ATS ids can be case-sensitive; only hosts and the
+    // known case-insensitive Indeed key are safe to fold.
+    const path = u.pathname.replace(/\/+$/, '');
+    const googleId = googleJobsDocumentId(url);
+    if (googleId) return `https://${host}/search?htidocid=${encodeURIComponent(googleId)}`;
     const identity = IDENTITY_PARAMS.find(p => u.searchParams.get(p));
     if (identity) {
       const raw = u.searchParams.get(identity);
-      const value = identity === 'htidocid' ? raw : raw.toLowerCase();
+      const value = identity === 'jk' ? raw.toLowerCase() : raw;
       return `https://${host}${path}?${identity}=${encodeURIComponent(value)}`;
     }
-    if (/\/(?:rc|pagead)\/clk$/.test(path)) return '';
+    if (/\/(?:rc|pagead)\/clk$/i.test(path)) return '';
     return `https://${host}${path}`;
   } catch {
     return String(url).split('?')[0].trim().toLowerCase()

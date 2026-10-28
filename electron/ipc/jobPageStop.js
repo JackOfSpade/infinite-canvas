@@ -29,7 +29,7 @@
  * under relevance sort; with an explicit ceiling the old lossless behaviour
  * (walk it out, let the cross-source dedup absorb repeats) still applies.
  */
-import { parsePostedDate } from './jobDateFilter.js';
+import { parsePostedDate, postedDateMeetsAgeCutoff } from './jobDateFilter.js';
 import { sourceJobKey } from '../../src/utils/jobIdentity.js';
 
 /** Consecutive conclusive pages required before a heuristic rule stops a walk. */
@@ -82,7 +82,7 @@ export function makeJobPageStop({ maxAgeDays = null, unlimited = false, sourceLa
         const posted = parsePostedDate(row?.posted, clock);
         if (!posted) continue;          // unparseable → not evidence either way
         dated++;
-        if (posted.getTime() >= cutoff) inWindow++;
+        if (postedDateMeetsAgeCutoff(posted, cutoff)) inWindow++;
       }
       stats.rowsDated += dated;
       stats.rowsInWindow += inWindow;

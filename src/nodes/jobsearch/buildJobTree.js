@@ -104,6 +104,21 @@ export function shouldReflowMeasuredJobCard({ visible, previousMeasuredHeight, m
 // Leaf (role) groups paginate their cards; reveal the first N on expand.
 export const ROLE_VISIBLE_DEFAULT = 10;
 
+/** Saved pagination values must never become a negative slice or reveal all jobs. */
+export function normalizeJobGroupVisibleCount(value) {
+  return Number.isSafeInteger(value) && value >= 0 ? value : ROLE_VISIBLE_DEFAULT;
+}
+
+function isOwnedJobTreeNode(node, hubId) {
+  return !!node && node.data?.hubId === hubId && (node.type === 'jobgroup' || node.type === 'jobcard');
+}
+
+function jobTreeChildIds(node) {
+  return node?.type === 'jobgroup' && Array.isArray(node.data?.childIds)
+    ? [...new Set(node.data.childIds)]
+    : [];
+}
+
 // One scoring rubric, shared by every run and every saved taxonomy. Allowing the
 // bucketing model to move these thresholds made a score of 55 "Good fit" even
 // though the scoring rubric defines 40–69 as a partial/stretch outcome.
@@ -587,9 +602,11 @@ export function normalizeRangesWithRepairs(ranges) {
   const byMin = new Map();
   let sawUnspecified = false;
   for (const raw of input) {
-    let minSalary = Math.max(0, Math.round(Number(raw?.minSalary) || 0));
-    let maxSalary = Math.max(0, Math.round(Number(raw?.maxSalary) || 0));
-    if (!Number.isFinite(Number(raw?.minSalary)) || !Number.isFinite(Number(raw?.maxSalary))) repairs.push('repaired non-numeric salary bound');
+    const minValue = Number(raw?.minSalary);
+    const maxValue = Number(raw?.maxSalary);
+    let minSalary = Number.isFinite(minValue) ? Math.max(0, Math.round(minValue)) : 0;
+    let maxSalary = Number.isFinite(maxValue) ? Math.max(0, Math.round(maxValue)) : 0;
+    if (!Number.isFinite(minValue) || !Number.isFinite(maxValue)) repairs.push('repaired non-numeric salary bound');
     if (minSalary === 0 && maxSalary === 0) {
       if (sawUnspecified) repairs.push('dropped duplicate Unspecified salary range');
       sawUnspecified = true;
@@ -759,8 +776,10 @@ export function computeLayoutPositions(nodes, hubId, COL_X_, hubPos) {
 
   const allChildIds = new Set();
   nodes.forEach(n => {
-    if (n.data?.hubId === hubId && Array.isArray(n.data?.childIds)) {
-      n.data.childIds.forEach(cid => allChildIds.add(cid));
+    if (isOwnedJobTreeNode(n, hubId)) {
+      jobTreeChildIds(n).forEach(cid => {
+        if (isOwnedJobTreeNode(nodeById.get(cid), hubId)) allChildIds.add(cid);
+      });
     }
   });
 
@@ -778,7 +797,7 @@ export function computeLayoutPositions(nodes, hubId, COL_X_, hubPos) {
     if (laidOut.has(nodeId)) return startY;
     laidOut.add(nodeId);
     const node = nodeById.get(nodeId);
-    if (!node) return startY;
+    if (!isOwnedJobTreeNode(node, hubId)) return startY;
     // Hidden nodes (collapsed OR filtered out) take no layout space, so the tree
     // tightens around whatever is removed. Visibility is owned by `hidden`
     // (see computeJobTreeView); this function just lays out what's visible.
@@ -811,7 +830,7 @@ export function computeLayoutPositions(nodes, hubId, COL_X_, hubPos) {
     // layout space — so the old visibleCount slice here would have skipped
     // revealed cards that sit beyond the raw-index window when a filter is on,
     // leaving them unpositioned.
-    const childIds = Array.isArray(node.data?.childIds) ? node.data.childIds : [];
+    const childIds = jobTreeChildIds(node);
     let nextY = startY;
     for (const cid of childIds) nextY = layoutNode(cid, nextY);
     return nextY;
@@ -835,9 +854,10 @@ export function computeLayoutPositions(nodes, hubId, COL_X_, hubPos) {
  * @param {string[]} childIds   the group's data.childIds
  * @param {(id: string) => object|undefined} getNodeById
  * @param {{scoreThreshold?: number, sourceFilter?: string|null}} filter
+ * @param {string} [hubId] optional owner boundary for mounted group counts
  * @returns {number}
  */
-export function countMatchingDescendantCards(childIds, getNodeById, filter = {}) {
+export function countMatchingDescendantCards(childIds, getNodeById, filter = {}, hubId) {
   let count = 0;
   const visited = new Set();
   const stack = Array.isArray(childIds) ? [...childIds] : [];
@@ -846,11 +866,11 @@ export function countMatchingDescendantCards(childIds, getNodeById, filter = {})
     if (visited.has(cid)) continue;
     visited.add(cid);
     const n = getNodeById(cid);
-    if (!n) continue; // dismissed/deleted — takes no slot
+    if (!n || (hubId !== undefined && !isOwnedJobTreeNode(n, hubId))) continue;
     if (n.type === 'jobcard') {
       if (isJobCardVisible(n.data || {}, filter)) count++;
-    } else if (Array.isArray(n.data?.childIds)) {
-      stack.push(...n.data.childIds);
+    } else if (n.type === 'jobgroup') {
+      stack.push(...jobTreeChildIds(n));
     }
   }
   return count;
@@ -881,9 +901,9 @@ export function computeJobTreeView(nodes, hubId, filter = {}, COL_X_ = COL_X, fo
     if (matchCount.has(id)) return matchCount.get(id);
     matchCount.set(id, 0); // guard against cycles
     let c = 0;
-    for (const cid of byId.get(id)?.data?.childIds || []) {
+    for (const cid of jobTreeChildIds(byId.get(id))) {
       const child = byId.get(cid);
-      if (!child) continue;
+      if (!isOwnedJobTreeNode(child, hubId)) continue;
       c += child.type === 'jobcard' ? (cardMatch(child.data) ? 1 : 0) : countMatches(cid);
     }
     matchCount.set(id, c);
@@ -892,7 +912,12 @@ export function computeJobTreeView(nodes, hubId, filter = {}, COL_X_ = COL_X, fo
 
   // Band roots = this hub's jobgroups not referenced as anyone's child.
   const allChildIds = new Set();
-  list.forEach(n => { if (n.data?.hubId === hubId && Array.isArray(n.data?.childIds)) n.data.childIds.forEach(c => allChildIds.add(c)); });
+  list.forEach(n => {
+    if (!isOwnedJobTreeNode(n, hubId)) return;
+    jobTreeChildIds(n).forEach(cid => {
+      if (isOwnedJobTreeNode(byId.get(cid), hubId)) allChildIds.add(cid);
+    });
+  });
   const rootGroups = list.filter(n => n.data?.hubId === hubId && n.type === 'jobgroup' && !allChildIds.has(n.id));
 
   // Walk open paths; collect what should be VISIBLE (matching cards + non-empty
@@ -912,18 +937,24 @@ export function computeJobTreeView(nodes, hubId, filter = {}, COL_X_ = COL_X, fo
     if (walked.has(id)) return;
     walked.add(id);
     const node = byId.get(id);
-    if (!node) return;
+    if (!isOwnedJobTreeNode(node, hubId)) return;
     if (node.type === 'jobcard') { if (cardMatch(node.data)) visible.add(id); return; }
     if (countMatches(id) === 0) return;          // empty branch → removed
     visible.add(id);
     if (!node.data?.expanded) return;
-    const childIds = Array.isArray(node.data?.childIds) ? node.data.childIds : [];
+    const childIds = jobTreeChildIds(node).filter(cid => isOwnedJobTreeNode(byId.get(cid), hubId));
     const childrenAreCards = childIds.some(cid => byId.get(cid)?.type === 'jobcard');
     if (childrenAreCards) {
-      childIds
+      const page = new Set(childIds
         .filter(cid => { const c = byId.get(cid); return c?.type === 'jobcard' && cardMatch(c.data); })
-        .slice(0, node.data?.visibleCount ?? ROLE_VISIBLE_DEFAULT)
-        .forEach(cid => visible.add(cid));
+        .slice(0, normalizeJobGroupVisibleCount(node.data?.visibleCount)));
+      childIds.forEach(cid => {
+        if (byId.get(cid)?.type === 'jobcard') {
+          if (page.has(cid)) visible.add(cid);
+        } else {
+          walk(cid);
+        }
+      });
     } else {
       childIds.forEach(walk);
     }
@@ -968,7 +999,7 @@ export function computeJobTreeView(nodes, hubId, filter = {}, COL_X_ = COL_X, fo
   let positionChanged = false;
   const result = laidOutNodes.map(n => {
     const p = positions[n.id];
-    if (p && (p.x !== n.position.x || p.y !== n.position.y)) {
+    if (p && (p.x !== n.position?.x || p.y !== n.position?.y)) {
       positionChanged = true;
       return { ...n, position: p };
     }

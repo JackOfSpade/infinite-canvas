@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import careerCompilationProgressTests from './careerCompilationProgressFixture.mjs';
+import jobRendererIntegrityTests from './jobRendererIntegrityFixture.mjs';
 import assert from 'node:assert';
 
 function readSource(relativePath) {
@@ -12,6 +13,7 @@ const sourcesReady = () => readSource('../../src/nodes/jobsearch/JobSearchSource
 
 export default [
   ...careerCompilationProgressTests,
+  ...jobRendererIntegrityTests,
   {
     name: 'TwoStepConfirmButton never uses a browser confirm/alert dialog',
     run: async () => {
@@ -42,7 +44,7 @@ export default [
       const src = button();
       // onConfirm is invoked exactly once, after the armed check.
       assert.strictEqual(src.match(/onConfirm\?\.\(/g)?.length, 1, 'onConfirm must be called exactly once');
-      const armedGuard = src.indexOf('if (!armed)');
+      const armedGuard = src.indexOf('if (!armed || Date.now() >= armedUntilRef.current)');
       const confirmCall = src.indexOf('onConfirm?.(');
       assert(armedGuard !== -1 && confirmCall > armedGuard, 'onConfirm must come after the not-armed early return');
       const armBranch = src.slice(armedGuard, confirmCall);
@@ -50,9 +52,9 @@ export default [
       assert(armBranch.includes('return;'), 'first click must return before confirming');
       assert(src.includes('if (disabled) return;'), 'disabled clicks must be a no-op');
       // Unmount cleanup is inside a useEffect cleanup function.
-      assert(/useEffect\(\(\) => \(\) => \{[^}]*clearTimeout\(timerRef\.current\)/.test(src), 'timer must be cleared in a useEffect cleanup');
+      assert(/return \(\) => \{[^}]*clearTimeout\(timerRef\.current\)/.test(src), 'timer must be cleared in a useEffect cleanup');
       // Confirm path clears the timer before disarming.
-      assert(/clearTimer\(\);\s*setArmed\(false\);\s*onConfirm\?\.\(/.test(src), 'confirm must clear timer and disarm before calling onConfirm');
+      assert(/clearTimer\(\);\s*armedUntilRef\.current = 0;\s*setArmed\(false\);\s*onConfirm\?\.\(/.test(src), 'confirm must clear timer and disarm before calling onConfirm');
     },
   },
   {

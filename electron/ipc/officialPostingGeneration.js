@@ -10,7 +10,7 @@ import { extractOfficialPostingCandidates } from './officialPostingExtractors.js
 import { evaluateOfficialPostingMatch, flatPostingText, frozenOfficialEmployer } from './officialPostingMatch.js';
 import { extractAtsTenant, strictEmployerEqual } from './officialSourceHosts.js';
 import { officialPostingAdapterUrl, readableOfficialPostingDescription, unresolvedOfficialPosting, verifiedOfficialPostingApplyUrl, shouldPersistOfficialPostingResult } from './officialPostingResolver.js';
-import { normalizeAlternateListings, normalizeOfficialLocation, normalizeOfficialPosting, normalizeOfficialSalary, officialHttpsUrl, boundedOfficialPostingTrail, officialPostingLookupStatus } from './officialPostingFields.js';
+import { normalizeAlternateListings, normalizeOfficialLocation, normalizeOfficialPosting, normalizeOfficialSalary, officialHttpsUrl, boundedOfficialPostingTrail, officialPostingLookupStatus, officialPostingFetchFailure } from './officialPostingFields.js';
 import { checkListingForGeneration, decideGenerationListingCheck, normalizeListingAudit, recordGenerationFallbackHold } from './listingLivenessProbe.js';
 import { checkPostingVariantsForGeneration } from './listingLivenessProbe.js';
 import { normaliseJobPostingVariants } from './applicationBundle.js';
@@ -177,7 +177,12 @@ async function reverify(job, record, { fetch, signal, now, store, callText, brid
   semanticMatching, resolveFresh, invalidateCachedProof }) {
   const prior = record.officialPosting; const url = prior.sourceUrl;
   const postedBy = strictEmployerEqual(job.company, prior.employer) ? '' : job.company;
-  const preserve = async code => {
+  const reverifiedPosting = () => {
+    const { fetchFailures: _previousFailures, ...previous } = prior;
+    return withTrail({ ...previous, trail: (previous.trail || []).filter(code => code !== 'reverify-failed'
+      && !(previous.trail?.includes('reverify-failed') && code === 'fetch-failed')) }, 'reverified');
+  };
+  const preserve = async (code, fetchFailure) => {
     if (semanticMatching && code === 'unsafe-url') {
       invalidateCachedProof();
       return unresolvedOfficialPosting(job, { outcome: 'failed', trail: ['unsafe-url', 'reverify-failed'] });
@@ -188,7 +193,9 @@ async function reverify(job, record, { fetch, signal, now, store, callText, brid
     // A failed recheck does not turn the prior complete discovery proof into
     // a partial crawl. Keep old trail codes; classify only this new failure.
     const recheckCode = ['fetch-timeout', 'crawl-budget'].includes(code) ? 'fetch-failed' : code;
-    return { postedBy, officialPosting: withTrail(prior, recheckCode, 'reverify-failed'), ...(typeof description === 'string' ? { description } : {}) };
+    const { fetchFailures: _previousFailures, ...previous } = prior;
+    return { postedBy, officialPosting: { ...withTrail(previous, recheckCode, 'reverify-failed'),
+      ...(fetchFailure ? { fetchFailures: [fetchFailure] } : {}) }, ...(typeof description === 'string' ? { description } : {}) };
   };
   const closed = () => {
     if (semanticMatching) invalidateCachedProof();
@@ -201,13 +208,14 @@ async function reverify(job, record, { fetch, signal, now, store, callText, brid
   try { page = await fetch(url, { signal }); active(signal); }
   catch (error) {
     active(signal);
-    return [404, 410].includes(error?.statusCode) ? closed() : preserve(error?.code || 'fetch-failed');
+    return [404, 410].includes(error?.statusCode) ? closed()
+      : preserve(error?.code || 'fetch-failed', officialPostingFetchFailure({ ...error, code: error?.code || 'fetch-failed' }, url));
   }
   if (!page || typeof page !== 'object') return preserve('unreadable');
   const fetchedUrl = officialHttpsUrl(page?.url || page?.sourceUrl || url);
   if (fetchedUrl !== officialHttpsUrl(url) || page.requestedUrl && officialHttpsUrl(page.requestedUrl) !== officialHttpsUrl(url)) return preserve('unsafe-url');
   if ([404, 410].includes(page.statusCode)) return closed();
-  if (page.statusCode && page.statusCode !== 200) return preserve('fetch-failed');
+  if (page.statusCode && page.statusCode !== 200) return preserve('fetch-failed', officialPostingFetchFailure({ code: 'fetch-failed', statusCode: page.statusCode }, url));
   if (failedBoardPage(page)) return preserve('unreadable');
   if (!prior.employer) return preserve('unreadable');
   const route = extractAtsTenant(url, { html: page.body });
@@ -287,19 +295,18 @@ async function reverify(job, record, { fetch, signal, now, store, callText, brid
     return unconfirmed();
   }
   if (!changed) {
-    return { postedBy, officialPosting: withTrail(prior, 'reverified'), ...(textLevels.has(prior.level) ? { description: candidate.description } : {}) };
+    return { postedBy, officialPosting: reverifiedPosting(), ...(textLevels.has(prior.level) ? { description: candidate.description } : {}) };
   }
   if (semanticMatching) return resolveFresh({ candidateUrls: [url], bypassCache: true });
   const employer = frozenOfficialEmployer(job, candidate.employer);
   const readable = employer && readableOfficialPostingDescription(candidate, job);
   if (!readable) return preserve('stub-text');
-  const posting = normalizeOfficialPosting({ ...prior, employer, level: prior.level === 'L4' ? route ? 'L3' : 'L1' : prior.level,
+  const posting = normalizeOfficialPosting({ ...reverifiedPosting(), employer, level: prior.level === 'L4' ? route ? 'L3' : 'L1' : prior.level,
     outcome: 'found', title: candidate.title,
     location: normalizeOfficialLocation(candidate.location) || prior.location,
     salary: normalizeOfficialSalary(candidate.salary) || { text: '', provenance: 'unknown' },
     sourceUrl: url, officialApplyUrl: verifiedOfficialPostingApplyUrl(candidate), fetchedAt: new Date(now()).toISOString(),
-    contentHash: sha256(candidate.description),
-    trail: withTrail(prior, 'reverified').trail });
+    contentHash: sha256(candidate.description) });
   if (!posting) return preserve('invalid-text');
   active(signal);
   return { officialPosting: posting, postedBy: strictEmployerEqual(job.company, employer) ? '' : job.company,
@@ -473,7 +480,7 @@ export async function prepareOfficialPostingForGeneration(args, {
   } catch (error) {
     if (signal?.aborted) { cleanup(); throw signal.reason || error; }
     failed(error);
-    const code = controller.signal.reason?.code === 'bridge-timeout' ? 'bridge-timeout' : error?.code || 'fetch-failed';
+    const code = controller.signal.reason?.code === 'bridge-timeout' ? 'bridge-timeout' : error?.code || 'failed';
     finalPosting = code === 'bridge-timeout' && controller.signal.aborted && verifiedFallback
       ? { ...verifiedFallback, officialPosting: withTrail(verifiedFallback.officialPosting, 'bridge-timeout', 'reverify-failed') }
       : unresolvedOfficialPosting(scrapedJob, { outcome: 'failed', trail: [code] });

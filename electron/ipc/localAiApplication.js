@@ -29,7 +29,7 @@ import { replaceApplicationBundleAtomically } from './applicationFileTransaction
 import { APPLICATION_PDF_MISMATCH_IS_DETERMINISTIC, APPLICATION_PDF_PAGINATION_GEOMETRY_REVISION, APPLICATION_PDF_RECONCILE_REVISION, APPLICATION_PDF_VARIANT_REVISION, GENERATION_AUDIT_VERSION, RESUME_BULLET_CHARACTER_BUDGET, RESUME_BULLET_OPENING_VARIETY_RULE, RESUME_ROLE_BULLET_CEILING, applicationVariantAttrsForJob, assertRetainedResumeRoleBullets, evaluateResumeProseChecks, extractResumeEvidence, formatTypeAreaUtilization, getApplicationTelemetry, isPendingApplicationWorkspaceSaveInFlight, normalizeApplicationAdditionalNotes, normalizeCoverLetterParagraphs, recordApplicationTelemetry, registerPendingApplicationWorkspace, resumeProjectProvenanceFailures, resumeRoleBlockSample, resumeRoleLocationFailures, resumeTypeAreaUtilization, targetPageCountForJob, withUnregisteredApplicationWorkspacePruneClaim } from './jobApplication.js';
 import { applicationConvergenceInstruction, expectedApplicationQualityDecision, isApplicationQualityDecision } from './applicationConvergence.js';
 import { ADJACENT_SENTENCE_SHAPE_RULE, ARGUMENT_CLAIM_SPAN_RULE, ARGUMENT_LATER_RELEVANCE_SPAN_RULE, ARGUMENT_MAPPING_REQUIRED_RULE, ARGUMENT_PROOF_SPAN_RULE, ARGUMENT_RELEVANCE_SPAN_RULE, ARGUMENT_SPAN_ALIGNMENT_RULE, ARGUMENT_SPAN_BUDGET_RULES, authorCoverLetterEnvelope, checkEvidenceGrounding, checkMappingNarrativeStructure, checkParagraphArgumentLinks, checkRoleThesis, COVER_LETTER_EQUIVALENCE_CARRIERS, COVER_LETTER_LOGISTICS_PROMISE_CLASSES, COVER_LETTER_SALIENT_ECHO_PHRASES, DANGLING_DEMONSTRATIVE_RULE, DURATION_CLAIM_SHAPE_RULE, evaluateCoverLetterChecks, findUnsupportedDurationClaim, formatCoverLetterDate, LETTER_PROPORTION_RULE, MAX_ARGUMENT_MAPPING_FIELD_CHARS, MAX_EXPLICIT_TRANSFER_PARAGRAPHS, MIN_STANDALONE_SENTENCE_PARAGRAPH_ALLOWANCE, OWING_PROOF_PARAGRAPHS, MAX_LETTER_FIGURES, MAX_LETTER_OFF_POSTING_TOOLS, MAX_PARAGRAPH_OFF_POSTING_TOOLS, MAX_SENTENCE_WORDS, MIN_ANCHOR_RELEVANCE_CORPUS_WORDS, MIN_ROLE_THESIS_WORDS, MIN_SHARED_SHAPE_PARAGRAPHS, REPEATED_PHRASE_RULE, REPEATED_TRANSFER_CARRIER_RULE, SENTENCE_SHAPE_FRAME_WORDS, REDUNDANCY_SHINGLE_WORDS, SHARED_SENTENCE_SHAPE_CEILING_RULE, sentenceSegments, TRANSFER_BENEFIT_SUPPORT_RULE } from './coverLetterChecks.js';
-import { checkDisposition, partitionCheckResults, targetCompanyNames } from './coverLetterChecks.js';
+import { checkDisposition, partitionCheckResults } from './coverLetterChecks.js';
 import { RESUME_CHECK_DISPOSITIONS, partitionResumeCheckResults } from './resumeCheckDispositions.js';
 import { atomicWriteJson, ensureDirectoryWithinRoot, isWithinDirectory } from '../utils/pathSafety.js';
 import { logger } from '../logger.js';
@@ -48,8 +48,7 @@ import { recordApplicationCorrectionCheck } from './applicationCorrectionDiagnos
 import { MAX_SOURCE_GROUNDING_QUOTE_CHARS as SOURCE_GROUNDING_QUOTE_CHARS } from './applicationSourceLimits.js';
 import { canonicalizeHostOwnedResumeFields, hostOwnedResumeRecordFields } from './hostOwnedResumeFields.js';
 import { expectedExactlyClause } from './hostOwnedText.js';
-import { CLAIM_GROUNDING_RULE, SPELLED_NUMBER_PATTERN, assessBulkQuantity, assessComparativeMagnitude, assessScaleWord, assessStrengthFamily, claimGroundingFindings, claimedIntervals, clauseIndexesContaining, credentialFindings, describeClaimFinding, evidenceBody, groundingClauses, namedTermFindings, quoteVerbHints, relatedQuoteIndexes, relatednessStem, scanStrengthMentions, spelledNumberValue, statedBesideSameWords, statedIntervals } from './applicationClaimGrounding.js';
-import { evaluateFinalParagraphListingGrounding } from './applicationListingClosing.js';
+import { CLAIM_GROUNDING_RULE, SPELLED_NUMBER_PATTERN, assessBulkQuantity, assessComparativeMagnitude, assessScaleWord, assessStrengthFamily, claimGroundingFindings, claimedIntervals, clauseIndexesContaining, describeClaimFinding, evidenceBody, groundingClauses, quoteVerbHints, relatedQuoteIndexes, relatednessStem, spelledNumberValue, statedBesideSameWords, statedIntervals } from './applicationClaimGrounding.js';
 import { supportsExpensePurpose } from './expenseOutcomeEquivalence.js';
 import { createAuthorityLedgerStore, openAuthorityLedgerStore } from './applicationAuthorityLedgerStore.js';
 import { APPLICATION_AUTHORITY_MATCH_PAGE_EVIDENCE, APPLICATION_AUTHORITY_WORKFLOW_VERSION, authorityDigest, createStoreAuthorityWorkflowRoot } from './applicationAuthorityWorkflow.js';
@@ -57,7 +56,7 @@ import { applicationBlindReviewValidatorStamp, isApplicationBlindReviewValidator
 import { BLIND_REPAIR_RAISED_CYCLES_RULE, BLIND_REPAIR_TRUNCATION_RULE } from './applicationRepairConvergence.js';
 import { RESUME_SUPPORT_VERB_RULE } from './applicationWriterGuidance.js';
 import { describeRoleStrengthFinding, roleStrengthFindings } from './applicationRoleStrength.js';
-import { WRITE_VERIFY_PROTOCOL, WRITE_VERIFY_STAGES, WRITE_VERIFY_MAX_CORRECTIONS, WRITE_VERIFY_MAX_FIT_CORRECTIONS, WRITE_VERIFY_LISTING_CLOSING_RULE, acceptedWriteVerifyCandidates, droppedCandidateFindings, factCorrectionTransition, fullApprovedHand, initialWriteVerifyState, isWriteVerifyJob, appendWriteVerifyRejection, writeVerifyRankingErrors, writeVerifyRankingShapeError, writeVerifyRankingReasonErrors, writeVerifyCandidateCount, writeVerifyNextAfterCandidate, writeVerifyPrompt, writeVerifySourcePrompt, writeVerifyStageKey, writeVerifyFactFindingErrors, writeVerifyChangedFindingErrors } from './applicationWriteVerify.js';
+import { WRITE_VERIFY_PROTOCOL, WRITE_VERIFY_STAGES, WRITE_VERIFY_MAX_CORRECTIONS, WRITE_VERIFY_MAX_FIT_CORRECTIONS, acceptedWriteVerifyCandidates, droppedCandidateFindings, factCorrectionTransition, fullApprovedHand, initialWriteVerifyState, isWriteVerifyJob, appendWriteVerifyRejection, writeVerifyRankingErrors, writeVerifyRankingShapeError, writeVerifyRankingReasonErrors, writeVerifyCandidateCount, writeVerifyNextAfterCandidate, writeVerifyPrompt, writeVerifySourcePrompt, writeVerifyStageKey, writeVerifyFactFindingErrors, writeVerifyChangedFindingErrors } from './applicationWriteVerify.js';
 import { applicationProtocolSetting } from './applicationProtocolSetting.js';
 import { targetIdentityNameLicensed, validateSharedApplicationContent } from './applicationTruthGates.js';
 import { targetEmploymentFrames } from './applicationEmploymentGuard.js';
@@ -4151,7 +4150,6 @@ export function writeVerifyGroundingContract() {
     CLAIM_GROUNDING_RULE,
     `Qualifier words are matched by word form, never by meaning, in these families: ${sourceGroundingQualifierForms()}`,
     SOURCE_FIGURE_GROUNDING_RULE,
-    WRITE_VERIFY_LISTING_CLOSING_RULE.replace(/\.$/u, ''),
     `Every sentence about the candidate's own work must share at least ${MIN_SHARED_SOURCE_TERMS} meaningful terms with the quotes its unit cites, where ${SOURCE_TERM_OVERLAP_RULE}, and ${LETTER_TERM_FORMS_RULE}`,
   ].join('. ') + '.';
 }
@@ -5175,7 +5173,6 @@ async function writeVerifyCandidateGate({ raw, state, input, frozen, manifest, r
         __careerCleanQuoteById: input.__careerCleanQuoteById,
         careerSkillEvidence: frozen.careerSkillEvidence }, paste: packageState,
         careerData: frozen.careerData, jobListing: frozen.jobListing, authority: frozen.authority,
-        validateListingClosing: createApplicationListingClosingValidator({ input, state: packageState, sourceRoles, careerData: frozen.careerData, authority: frozen.authority }),
         authorityListingReceiptValidated: isCurrentAuthorityProtocol(input) });
       validateLocalApplicationResult(packageRaw, input.jobId, input.canvasRoot, input.job,
         completedResultValidationOptions({ manifest, frozen, sourceRoles }));
@@ -6131,107 +6128,23 @@ function boundAuthorityEntityQuoteGroups(evidenceIds, acceptedEvidence, authorit
   return [...groups.values()];
 }
 
-// This exception receives only host-owned sources. The frozen full companion
-// supplies the body boundary even when a modern prompt projects a listing page.
-export function createApplicationListingClosingValidator(hostContext = {}) {
-  const { input = {}, state = {} } = hostContext;
-  const sourceRoles = hostContext.sourceRoles ?? selectedSourceRoles(state, input);
-  const authority = hostContext.authority === undefined ? applicationCareerAuthority(input) : hostContext.authority;
-  const careerData = hostContext.careerData ?? state.careerData ?? '';
-  let renderedEvidence = null;
-  let renderedContextUnavailable = false;
-  if (state.resume && (hostContext.projects === undefined || hostContext.identityTokens === undefined)) {
-    try {
-      renderedEvidence = extractResumeEvidence(pasteRenderedResumeMainHtml(state.resume,
-        { ...state, careerData }, { ...input, sourceRoles }));
-    } catch (error) {
-      if (error?.code === 'STRUCTURED_RESUME_CONFIGURATION' || error?.code === 'LOCAL_AI_VALIDATION_CONFIGURATION') throw error;
-      // An invalid résumé cannot establish the earlier paragraph's baseline.
-      renderedContextUnavailable = true;
-    }
-  }
-  const projects = hostContext.projects ?? renderedEvidence?.projects ?? [];
-  const identityTokens = hostContext.identityTokens ?? careerIdentityTokens(renderedEvidence || { roles: sourceRoles });
-  const frozenJobListing = jobListingQuoteSource(input.job || {});
-  const company = input.job?.company || '';
-  const qualifierContext = { meaningful: meaningfulSourceTokens, trustedNames: [] };
-  const openingVerb = /^(?:(?:also|then|later|now|still|always|never|personally|currently|just|even|once|often)\s+)*(?:am|is|are|was|were|be|been|being|have|has|had|do|does|did|can|could|will|would|shall|should|may|might|must|need|needs|require|requires|support|report|review|plan|built|wrote|led|ran|kept|held|made|took|gave|got|set|put|cut|sent|taught|chose|began|won|spent|drove|found|met|paid|sold|told|brought|thought|understood|grew|drew|rose|lost|left|saw|knew|became|fed|hold|lead|run|build|write|keep|make|take|give|get|send|teach|choose|own|manage|coach|train|mentor|maintain|deliver|create|develop|analyze|analyse|monitor|oversee|supervise|organize|organise|prepare|produce|provide|serve|hire|handle|schedule|track|ship|launch|\p{L}+ed|\p{L}+ing)\b/iu;
-  const nonverbOpener = /^(?:you|your|yours|the|this|that|these|those|a|an)\b/iu;
-  const prepositionalOpener = /^(?:at|in|within|for|to|from|with|without|through|across|around|alongside|under|on|of|by|before|after|between|among|during|since|throughout|into|onto|upon|beyond|toward|towards|beside|beneath|behind|outside|inside)\s+(.+)$/iu;
-  const companyOpeners = targetCompanyNames(company)
-    .filter(name => name.length >= 3)
-    .map(name => new RegExp(String.raw`^${name.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')}(?:['’]s)?(?![\p{L}\p{N}])`, 'iu'));
-  return ({ paragraphs = [], index, acceptedEvidence = state.evidencePlan?.evidence || [] } = {}) => {
-    const byId = new Map(acceptedEvidence.map(item => [item?.id, item]));
-    return evaluateFinalParagraphListingGrounding({ paragraphs, index, acceptedEvidence, frozenJobListing, company, identityTokens }, {
-      groundingSentences, groundingClauses,
-      targetEmployerSentenceFailures: (text, paragraphIndex, sentenceOffset) => targetEmploymentFrameFailureParts(text, paragraphIndex, { targetCompany: company,
-        approvedOrganizations: approvedOrganizationsForCareer(sourceRoles, authority, projects),
-        approvedCareerEmployers: sourceRoles.map(role => role?.company).filter(Boolean) }, sentenceOffset),
-      speaksOnlyOfApplicationIntent: text => speaksOnlyOfApplicationIntent(text),
-      speaksOnlyOfIntent, reportsNoPastWork,
-      hasWorkIngWord, speaksAsCandidate, sentenceAddressesTarget,
-      isCandidateCareerSentence: (text, tokens) => isCandidateCareerSentence(text, tokens),
-      meaningfulSourceTokens, MIN_SHARED_SOURCE_TERMS,
-      hasCareerClaimFrame: text => CAREER_CLAIM_FRAME_RE.test(text),
-      hasFigureOrYear: text => /\d/u.test(text) || new RegExp(`\\b${SPELLED_NUMBER_PATTERN}\\b`, 'iu').test(text),
-      hasCredentialWord: text => credentialFindings(text, []).length > 0,
-      hasQualifierWord: text => scanStrengthMentions(text, 'claim').length > 0
-        || SOURCE_GROUNDING_QUALIFIER_RULES.some(rule => rule.assess
-          ? Boolean(rule.assess(text, [], qualifierContext)) : rule.claim.test(text)),
-      opensWithVerb: text => {
-        const value = String(text).trim().replace(/^["“(]+/u, '')
-          .replace(/^(?:(?:also|then|later|now|still|always|never|personally|currently|just|even|once|often)\s+)+/iu, '');
-        // This bounded exception needs positive grammatical proof. An unknown
-        // noun opener and an unknown imperative both keep the baseline rules.
-        const nounOpener = value => nonverbOpener.test(value) || companyOpeners.some(pattern => pattern.test(value));
-        const prepositionalNoun = value.match(prepositionalOpener)?.[1];
-        return openingVerb.test(value) || !(nounOpener(value) || (prepositionalNoun && nounOpener(prepositionalNoun)));
-      },
-      namedTermFindings: (text, bodies, context) => namedTermFindings(text, bodies, { ...context, meaningful: meaningfulSourceTokens, currencyCodes: SOURCE_FIGURE_CURRENCY_CODE_SET }),
-      validateEarlierParagraph: (paragraph, priorIndex) => {
-        const ids = paragraph?.evidenceIds;
-        if (renderedContextUnavailable || typeof paragraph?.id !== 'string' || !paragraph.id.trim()
-          || typeof paragraph?.text !== 'string' || !paragraph.text.trim()
-          || !Array.isArray(ids) || ids.length < 1 || ids.length > MAX_COVER_LETTER_PARAGRAPH_EVIDENCE_IDS
-          || ids.some(id => !byId.has(id)) || !ids.some(id => byId.get(id)?.sourceId === 'career-data')) return ['Earlier paragraph fails the unchanged citation shape.'];
-        return pasteUnitGroundingErrors({
-          unitLabel: PASTE_COVER_PARAGRAPH_UNIT_LABEL, unitId: paragraph.id, finalText: paragraph.text,
-          evidenceIds: ids, acceptedEvidence, identityTokens, label: 'coverLetterParagraphs', sourceRoles,
-          careerData, authority, projects, targetCompany: company, targetTitle: input.job?.title || '',
-          postingText: jobTextForCoverLetter(input.job || {}), paragraphs, paragraphIndex: priorIndex, allowListingClosing: false,
-        });
-      },
-    });
-  };
-}
-
-export function __finalParagraphListingGroundingForTests(context) {
-  return createApplicationListingClosingValidator(context)(context);
-}
-
-function pasteUnitGroundingErrors({ unitLabel, unitId, finalText, evidenceIds, acceptedEvidence, identityTokens, label, sourceRoles = [], careerData = '', authority = null, projects = [], targetCompany = '', targetTitle = '', postingText = '', paragraphs = [], paragraphIndex = 0, validateListingClosing = null, allowListingClosing = true }) {
+function pasteUnitGroundingErrors({ unitLabel, unitId, finalText, evidenceIds, acceptedEvidence, identityTokens, label, sourceRoles = [], careerData = '', authority = null, projects = [], targetCompany = '', targetTitle = '', postingText = '', paragraphIndex = 0 }) {
   const errors = [];
   const { normalized, citationCount } = pasteUnitCareerQuotes(evidenceIds, acceptedEvidence);
   const text = normalizeSourceGroundingText(finalText);
   if (!normalized.length) {
     if (label === 'coverLetterParagraphs') {
-      // The amendment's guard must run before the listing-only early return.
+      // A paragraph citing no career quote is always rejected, but its
+      // employment-frame and duration guards still report in the same round.
       errors.push(...targetEmploymentFrameFailureParts(text, paragraphIndex, {
         targetCompany, approvedOrganizations: approvedOrganizationsForCareer(sourceRoles, authority, projects),
         approvedCareerEmployers: sourceRoles.map(role => role?.company).filter(Boolean),
       }));
       const durationError = unsupportedDurationClaimError(`${unitLabel} ${String(unitId ?? '')}`, text, []);
       if (durationError) errors.push(durationError);
-      const validation = allowListingClosing && typeof validateListingClosing === 'function'
-        ? validateListingClosing({ paragraphs, index: paragraphIndex, acceptedEvidence }) : null;
-      if (!validation?.eligible) {
-        errors.push(`${unitLabel} ${JSON.stringify(String(unitId ?? ''))} needs at least one career-data evidence ID unless it passes the structural final-paragraph listing-grounding rule.`);
-        if (Array.isArray(validation?.corrections)) errors.push(...validation.corrections);
-      }
+      errors.push(`${unitLabel} ${JSON.stringify(String(unitId ?? ''))} needs at least one career-data evidence ID.`);
     }
-    // A proven final closing bypasses the career unit/sentence/figure floors
-    // together. All other units below retain those exact existing checks.
+    // Without a career quote the floors below have nothing to compare against.
     return errors;
   }
   if (citationCount > MAX_UNIT_CAREER_DATA_QUOTES) {
@@ -6549,8 +6462,6 @@ function pasteCoverLetterCompletionTwinErrors(response, state, input) {
     // a gate in checkParagraphArgumentLinks at review time.
     const acceptedEvidence = Array.isArray(state.evidencePlan?.evidence) ? state.evidencePlan.evidence : [];
     const identityTokens = careerIdentityTokens(evidence);
-    const validateListingClosing = createApplicationListingClosingValidator({ input, state, identityTokens, projects: evidence.projects });
-    const paragraphs = rawParagraphs.map((paragraph, index) => ({ ...paragraph, text: paragraphTexts[index] }));
     if (coverLetter.paragraphs.length === rawParagraphs.length) {
       coverLetter.paragraphs.forEach((text, index) => {
         errors.push(...pasteUnitGroundingErrors({
@@ -6570,9 +6481,7 @@ function pasteCoverLetterCompletionTwinErrors(response, state, input) {
           // The same posting copy the completion gate reads, so the twin is
           // never stricter than the gate about a name the posting uses.
           postingText: jobTextForCoverLetter(input.job || {}),
-          paragraphs,
           paragraphIndex: index,
-          validateListingClosing,
         }));
       });
     }
@@ -6633,7 +6542,7 @@ function pasteResumeUnderfillErrors(resume, acceptedEvidence) {
 function sharedApplicationContentErrors(response, state, input, authority = applicationCareerAuthority(input)) {
   const nonemptyText = value => typeof value === 'string' && value.trim().length > 0;
   return validateSharedApplicationContent(response, state, input, authority, {
-    nonemptyText, PASTE_RESUME_BULLET_FIELD_LABEL, unsupportedDurationClaimError, pasteCareerQuotesForEvidenceIds, selectedSourceRoles, validateAuthorityResumeArtifacts, isCurrentAuthorityProtocol, isWriteVerifyJob, currentAuthorityFinalResumeArtifactErrors, assertAuthorityDraftSelection, frozenPlanListingEvidenceIds, validateStructuredApplicationResume, selectedAuthorityCareerSkillEvidence, structuredResumeFailureParts, pasteResumeCompletionTwinErrors, pasteResumeUnderfillErrors, projectContactChannels, PASTE_COVER_PARAGRAPH_UNIT_LABEL, MAX_COVER_LETTER_PARAGRAPH_EVIDENCE_IDS, pasteCoverLetterCompletionTwinErrors, createApplicationListingClosingValidator,
+    nonemptyText, PASTE_RESUME_BULLET_FIELD_LABEL, unsupportedDurationClaimError, pasteCareerQuotesForEvidenceIds, selectedSourceRoles, validateAuthorityResumeArtifacts, isCurrentAuthorityProtocol, isWriteVerifyJob, currentAuthorityFinalResumeArtifactErrors, assertAuthorityDraftSelection, frozenPlanListingEvidenceIds, validateStructuredApplicationResume, selectedAuthorityCareerSkillEvidence, structuredResumeFailureParts, pasteResumeCompletionTwinErrors, pasteResumeUnderfillErrors, projectContactChannels, PASTE_COVER_PARAGRAPH_UNIT_LABEL, MAX_COVER_LETTER_PARAGRAPH_EVIDENCE_IDS, pasteCoverLetterCompletionTwinErrors,
   });
 }
 
@@ -7155,7 +7064,6 @@ async function pastePassingReviewFinalPackageErrors({ jobId, root, dir, manifest
       careerData: frozen.careerData,
       jobListing: frozen.jobListing,
       authority: frozen.authority,
-      validateListingClosing: createApplicationListingClosingValidator({ input, state: candidate, sourceRoles: selectedRoles, careerData: frozen.careerData, authority: frozen.authority }),
       authorityListingReceiptValidated: isCurrentAuthorityProtocol(input),
     });
     // Measured-fit stamps are host-owned input to the same final validator.
@@ -8270,7 +8178,6 @@ async function submitWriteVerifyHandoff({ root, jobId, dir, manifest, input, fro
     const raw = assemblePasteApplicationResult({ input: { ...input, sourceRoles: selectedSourceRoles(next, input), careerSkillEvidence: frozen.careerSkillEvidence,
       __careerCleanSkillNames: input.__careerCleanSkillNames, __careerCleanQuoteById: input.__careerCleanQuoteById },
       paste: next, careerData: frozen.careerData, jobListing: frozen.jobListing, authority: frozen.authority,
-      validateListingClosing: createApplicationListingClosingValidator({ input, state: next, careerData: frozen.careerData, authority: frozen.authority }),
       authorityListingReceiptValidated: isCurrentAuthorityProtocol(input) });
     validateLocalApplicationResult(raw, jobId, input.canvasRoot, input.job, validationOptions);
     await atomicJson(path.join(dir, 'result.json'), raw);
@@ -8898,7 +8805,6 @@ export async function submitLocalApplicationHandoff({ jobId, canvasFilePath, han
           // source-order skill a late, completion-only requirement.
           careerSkillEvidence: frozen.careerSkillEvidence,
         }, paste: next, careerData: frozen.careerData, jobListing: frozen.jobListing, authority: frozen.authority,
-          validateListingClosing: createApplicationListingClosingValidator({ input, state: next, careerData: frozen.careerData, authority: frozen.authority }),
           authorityListingReceiptValidated: isCurrentAuthorityProtocol(input) });
         // A paste workflow's own editorial rounds happen before its first PDF
         // measurement.  Once a measured fit advisory exists, however, the
@@ -12817,19 +12723,14 @@ function reportsNoPastWork(text) {
 
 export const __reportsNoPastWorkForTests = reportsNoPastWork;
 
-export function hasWorkIngWord(text) {
-  return [...String(text ?? '').matchAll(/(?<![\p{L}\p{N}])\p{L}+ing(?![\p{L}\p{N}])/giu)]
-    .some(match => match[0].toLowerCase() !== 'bring');
-}
-
-function targetEmploymentFrameFailureParts(finalText, index, options, sentenceOffset = 0) {
+function targetEmploymentFrameFailureParts(finalText, index, options) {
   const targetCompany = String(options?.targetCompany ?? '').trim();
   if (!targetCompany) return [];
   const approvedOrganizations = Array.isArray(options?.approvedOrganizations) ? options.approvedOrganizations : [];
   const approvedCareerEmployers = Array.isArray(options?.approvedCareerEmployers) ? options.approvedCareerEmployers : [];
   return groundingSentences(finalText).flatMap((sentence, sentenceIndex) =>
     targetEmploymentFrames(sentence, targetCompany, { approvedOrganizations, approvedCareerEmployers })
-      .map(finding => describeClaimFinding(`cover-letter paragraph ${index + 1}, sentence ${sentenceOffset + sentenceIndex + 1}`, finding)));
+      .map(finding => describeClaimFinding(`cover-letter paragraph ${index + 1}, sentence ${sentenceIndex + 1}`, finding)));
 }
 
 // A trailing or coordinated clause that ONLY addresses the target ("..., which
@@ -13942,8 +13843,7 @@ function sanitizeSourceGrounding(raw, { careerData, resumeEvidence, coverLetter,
   return { resumeBullets: resumeBulletsGrounding, coverLetterParagraphs };
 }
 
-// Retained filesystem jobs keep career-only grounding even though structured
-// paste jobs can prove a final listing-grounded closing through host context.
+// Test seam: every bound unit, legacy or paste, needs an exact career-data quote.
 export const __sanitizeSourceGroundingForTests = sanitizeSourceGrounding;
 
 // Exported for the focused test that calls it directly: its strictness lives

@@ -4,6 +4,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { JSDOM } from 'jsdom';
 import { careerImportReview, careerImportStatus } from './careerImportLog.js';
+import { watchlistStatus } from './applicationWatchlist.js';
 
 const MAX_PAIRS = 100;
 const SUMMARY_AGE_MS = 183 * 24 * 60 * 60 * 1000;
@@ -475,7 +476,9 @@ export async function improvementStatus(root) {
       ? { blocked: gate.blocked, checkedAt: gate.checkedAt, patterns: gate.patterns.map(item => ({ summary: item.summary, count: item.bundles.length })) }
       : null;
     const careerDataHistory = await careerImportStatus(root);
-    return { count, due: count >= SESSION_DUE_COUNT, earlyDue: recurring.length > 0, recurring, modelLabel: state.modelLabel, generationGate, careerDataHistory };
+    // A damaged watch list must not hide the counter; the session CLI reports the parse error itself.
+    const watchlist = await watchlistStatus(root).catch(() => ({ unreadable: true }));
+    return { count, due: count >= SESSION_DUE_COUNT, earlyDue: recurring.length > 0, recurring, modelLabel: state.modelLabel, generationGate, careerDataHistory, watchlist };
   });
 }
 

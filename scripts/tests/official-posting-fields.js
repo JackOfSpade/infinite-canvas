@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import {
   OFFICIAL_POSTING_LEVELS, OFFICIAL_POSTING_OUTCOMES, OFFICIAL_POSTING_ROW_FIELDS,
   normalizeOfficialPosting, OFFICIAL_POSTING_TRAIL, SALARY_PROVENANCES, boundedOfficialPostingTrail, officialPostingComparativeTrail, officialResearchSettled,
+  officialPostingFetchFailure, officialPostingLookupStatus, OFFICIAL_FETCH_FAILURE_LIMIT,
 } from '../../electron/ipc/officialPostingFields.js';
 import {
   __pastePromptForTests, __projectLocalApplicationJobForAcceptanceHarness as safeJob,
@@ -65,6 +66,31 @@ function generateScope() {
 }
 
 export default [
+  {
+    name: 'official fetch diagnostics remain bounded across source whitelists without changing lookup decisions',
+    run() {
+      const failure = officialPostingFetchFailure({ code: 'fetch-failed', statusCode: 403, message: 'PRIVATE RESPONSE BODY',
+        reason: 'server-error' }, 'https://careers.example.test/blocked?utm_source=board#detail');
+      assert.deepEqual(failure, { url: 'https://careers.example.test/blocked', code: 'fetch-failed', reason: 'access-denied', statusCode: 403 });
+      const value = posting({ fetchFailures: [failure] });
+      assert.deepEqual(normalizeOfficialPosting(value).fetchFailures, [failure]);
+      assert.deepEqual(safeJob(row({ officialPosting: value })).officialPosting.fetchFailures, [failure]);
+      assert.deepEqual(cardFor(row({ officialPosting: value })).data.officialPosting.fetchFailures, [failure]);
+      const miss = { level: 'L5', outcome: 'not-found', employer: 'Northwind Labs', trail: ['bridge-research'], fetchFailures: [failure] };
+      assert.equal(officialResearchSettled(miss), true, 'diagnostic receipts alone cannot change a completed decision');
+      assert.equal(officialPostingLookupStatus(miss).state, 'not-found');
+      const incomplete = { ...miss, trail: [...miss.trail, 'fetch-failed'] };
+      assert.equal(officialResearchSettled(incomplete), false);
+      assert.equal(officialPostingLookupStatus(incomplete).state, 'incomplete');
+      assert.equal(normalizeOfficialPosting(posting({ fetchFailures: Array(OFFICIAL_FETCH_FAILURE_LIMIT).fill(failure) })).fetchFailures.length, OFFICIAL_FETCH_FAILURE_LIMIT);
+      for (const fetchFailures of [null, {}, Array(OFFICIAL_FETCH_FAILURE_LIMIT + 1).fill(failure),
+        [{ ...failure, url: 'http://careers.example.test/blocked' }], [{ ...failure, url: 'https://secret@careers.example.test/blocked' }],
+        [{ ...failure, reason: 'PRIVATE RESPONSE BODY' }], [{ ...failure, message: 'PRIVATE RESPONSE BODY' }],
+        [{ ...failure, statusCode: 600 }], [{ ...failure, statusCode: '403' }], [{ ...failure, code: 'closed' }]]) {
+        assert.equal(normalizeOfficialPosting(posting({ fetchFailures })), null);
+      }
+    },
+  },
   {
     name: 'semantic proof hashes survive shared whitelists and unresolved decisions stay retryable',
     run() {

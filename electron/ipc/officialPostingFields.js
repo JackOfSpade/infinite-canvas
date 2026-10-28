@@ -7,6 +7,9 @@ export const LOCAL_AI_APPLICATION_SNIPPET_MAX_CHARS = 80_000;
 export const OFFICIAL_POSTING_GENERATION_RECEIPT_MAX_AGE_MS = 5 * 60 * 1_000;
 export const OFFICIAL_POSTING_LEVELS = Object.freeze(['L1', 'L2', 'L3', 'L4', 'L5', 'L6']);
 export const OFFICIAL_POSTING_OUTCOMES = Object.freeze(['found', 'link-only', 'not-found', 'ambiguous', 'unreadable', 'closed', 'failed']);
+export const OFFICIAL_FETCH_FAILURE_REASONS = Object.freeze(['access-denied', 'rate-limited', 'server-error', 'network-error', 'dns-error']);
+const FETCH_FAILURE_CODES = Object.freeze(['fetch-failed', 'fetch-timeout', 'unsafe-url', 'unsafe-address', 'unsupported-content-type', 'oversize', 'invalid-text']);
+export const OFFICIAL_FETCH_FAILURE_LIMIT = 8;
 export const SALARY_PROVENANCES = Object.freeze(['posted', 'estimated', 'unknown']);
 export const OFFICIAL_POSTING_COMPARATIVE_CODES = Object.freeze([
   'comparative-match', 'comparative-disagree', 'comparative-invalid', 'comparative-none', 'comparative-unavailable',
@@ -18,7 +21,7 @@ export const OFFICIAL_POSTING_TRAIL = Object.freeze([
   'title-mismatch', 'location-mismatch', 'employer-mismatch', 'tenant-unproven', 'poster-tenant',
   'salary-mismatch', 'no-anchor', 'invalid-quotes', 'ambiguous', 'closed', 'unreadable', 'oversize',
   'unsafe-url', 'unsafe-address', 'fetch-timeout', 'fetch-failed', 'unsupported-content-type',
-  'crawl-budget', 'crawl-partial', 'invalid-text', 'stub-text', 'official-text-missing', 'no-resolution', 'reverified', 'reverify-failed', 'official-liveness-unconfirmed', 'material-jd-change', 'failed',
+  'crawl-budget', 'crawl-partial', 'invalid-text', 'stub-text', 'official-text-missing', 'no-resolution', 'reverified', 'reverify-failed', 'official-liveness-unconfirmed', 'material-jd-change', 'storage-failed', 'failed',
   'semantic-match-v1', 'semantic-uncertain', 'semantic-overflow',
   ...OFFICIAL_POSTING_COMPARATIVE_CODES,
   'comparative-a-valid', 'comparative-a-invalid', 'comparative-b-valid', 'comparative-b-invalid', 'comparative-truncated', 'insufficient-text',
@@ -36,7 +39,7 @@ export function officialPostingComparativeTrail({ validA = false, validB = false
 }
 
 const DURABILITY_TRAIL_CODES = new Set(['bridge-aborted', 'bridge-timeout', 'bridge-unavailable', 'research-miss',
-  'fetch-failed', 'fetch-timeout', 'crawl-budget', 'crawl-partial', 'official-text-missing', 'failed', 'identifier-anchor',
+  'fetch-failed', 'fetch-timeout', 'crawl-budget', 'crawl-partial', 'official-text-missing', 'storage-failed', 'failed', 'identifier-anchor',
   'comparative-invalid', 'comparative-unavailable', 'comparative-truncated', 'insufficient-text', 'semantic-uncertain', 'semantic-overflow', 'official-liveness-unconfirmed']);
 /** Host trail compaction must retain the evidence that prevents persistence. */
 export function boundedOfficialPostingTrail(values) {
@@ -84,6 +87,25 @@ function shortString(value, max = 500) {
   return typeof value === 'string' && value.length <= max && !/[<>]/u.test(value)
     && ![...value].some(char => char.charCodeAt(0) < 32 || char.charCodeAt(0) === 127);
 }
+/** Diagnostic metadata only: never retain response bodies or raw error messages. */
+export function normalizeOfficialPostingFetchFailure(value) {
+  if (!exactKeys(value, ['url', 'code', 'reason', 'statusCode']) || !FETCH_FAILURE_CODES.includes(value.code)) return null;
+  const url = officialHttpsUrl(value.url);
+  if (!url || (value.reason !== undefined && (value.code !== 'fetch-failed' || !OFFICIAL_FETCH_FAILURE_REASONS.includes(value.reason)))
+    || (value.statusCode !== undefined && (!Number.isInteger(value.statusCode) || value.statusCode < 100 || value.statusCode > 599))) return null;
+  return { url, code: value.code, ...(value.reason ? { reason: value.reason } : {}),
+    ...(value.statusCode !== undefined ? { statusCode: value.statusCode } : {}) };
+}
+export function officialPostingFetchFailure(error, requestedUrl) {
+  const code = error?.code;
+  const statusCode = error?.statusCode;
+  const reason = code !== 'fetch-failed' ? undefined
+    : [401, 403].includes(statusCode) ? 'access-denied' : statusCode === 429 ? 'rate-limited'
+      : statusCode >= 500 && statusCode <= 599 ? 'server-error'
+        : OFFICIAL_FETCH_FAILURE_REASONS.includes(error?.reason) ? error.reason : undefined;
+  return normalizeOfficialPostingFetchFailure({ url: officialHttpsUrl(error?.url) || requestedUrl, code,
+    ...(reason ? { reason } : {}), ...(Number.isInteger(statusCode) ? { statusCode } : {}) });
+}
 /** Bounded source text only; semantic employer identity belongs to AI. */
 export function officialPostingEmployerText(value) {
   return shortString(value, 120) ? value.trim() : '';
@@ -108,7 +130,7 @@ export function normalizeOfficialLocation(value) {
 
 export function normalizeOfficialPosting(value) {
   const keys = ['level', 'outcome', 'employer', 'title', 'location', 'salary', 'sourceUrl', 'officialApplyUrl',
-    'ats', 'tenant', 'fetchedAt', 'contentHash', 'scrapedListingSha256', 'trail', 'alternatives', 'semanticMatch'];
+    'ats', 'tenant', 'fetchedAt', 'contentHash', 'scrapedListingSha256', 'trail', 'alternatives', 'semanticMatch', 'fetchFailures'];
   if (!exactKeys(value, keys) || !OFFICIAL_POSTING_LEVELS.includes(value.level) || !OFFICIAL_POSTING_OUTCOMES.includes(value.outcome)
     || !shortString(value.employer, 120)) return null;
   const result = { level: value.level, outcome: value.outcome, employer: value.employer };
@@ -143,6 +165,15 @@ export function normalizeOfficialPosting(value) {
   if (value.trail !== undefined) {
     if (!Array.isArray(value.trail) || value.trail.length > 32 || value.trail.some(item => !OFFICIAL_POSTING_TRAIL.includes(item))) return null;
     result.trail = [...new Set(value.trail)];
+  }
+  if (value.fetchFailures !== undefined) {
+    if (!Array.isArray(value.fetchFailures) || value.fetchFailures.length > OFFICIAL_FETCH_FAILURE_LIMIT) return null;
+    result.fetchFailures = [];
+    for (const item of value.fetchFailures) {
+      const failure = normalizeOfficialPostingFetchFailure(item);
+      if (!failure) return null;
+      result.fetchFailures.push(failure);
+    }
   }
   if (value.alternatives !== undefined) {
     if (!Array.isArray(value.alternatives) || value.alternatives.length > 12) return null;
@@ -222,7 +253,7 @@ export function listingStateRank(job) {
 // Trail codes meaning the research step did not run, did not finish, or hit a
 // transient failure. A miss carrying any of them is retryable, never a conclusion.
 const RESEARCH_UNSETTLED_TRAIL = Object.freeze(['bridge-aborted', 'bridge-timeout', 'bridge-unavailable', 'research-miss',
-  'fetch-failed', 'fetch-timeout', 'crawl-budget', 'crawl-partial', 'official-text-missing', 'failed',
+  'fetch-failed', 'fetch-timeout', 'crawl-budget', 'crawl-partial', 'official-text-missing', 'storage-failed', 'failed',
   'comparative-invalid', 'comparative-unavailable', 'comparative-truncated', 'insufficient-text', 'semantic-uncertain', 'semantic-overflow', 'official-liveness-unconfirmed']);
 /** True only for a definitive miss reached after research actually ran (or an official page that is itself closed). */
 export function officialResearchSettled(value) {
@@ -247,7 +278,8 @@ export function officialPostingLookupStatus(value) {
   const trail = new Set(posting.trail || []);
   if (official && ['found', 'link-only'].includes(posting.outcome) && (posting.sourceUrl || posting.officialApplyUrl)) {
     if (trail.has('reverify-failed')) {
-      const recheck = officialPostingLookupStatus({ ...posting, level: 'L5', outcome: 'failed' });
+      const recheck = officialPostingLookupStatus({ ...posting, level: 'L5', outcome: 'failed',
+        ...(posting.fetchFailures?.length ? { trail: posting.fetchFailures.map(failure => failure.code) } : {}) });
       return result('verified', 'Previously verified official posting', `Latest recheck: ${recheck.label}. ${recheck.detail}`, true,
         posting.sourceUrl || '', posting.officialApplyUrl || '');
     }
@@ -262,12 +294,24 @@ export function officialPostingLookupStatus(value) {
     return result('not-found', 'No exact official posting found', 'The lookup completed without a verified exact match. The original listing is retained.', false);
   }
   const retry = 'Retry the official posting lookup in the app.';
+  const retained = `The original listing is retained. ${retry}`;
+  const failureLabels = { 'access-denied': 'access denied', 'rate-limited': 'rate limited', 'server-error': 'server error',
+    'network-error': 'network request failed', 'dns-error': 'DNS lookup failed', 'fetch-timeout': 'request timed out',
+    'fetch-failed': 'request failed', 'unsafe-url': 'URL rejected', 'unsafe-address': 'address rejected',
+    'unsupported-content-type': 'unsupported page format', oversize: 'page exceeded the size limit', 'invalid-text': 'page text could not be decoded' };
+  const fetchDetail = () => {
+    const failures = posting.fetchFailures || [];
+    const detail = failures.length ? failures.map(failure => `${failure.url}: ${failureLabels[failure.reason || failure.code]}${failure.statusCode ? ` (HTTP ${failure.statusCode})` : ''}.`).join('\n')
+      : 'An employer careers or hiring-platform page could not be fetched during verification. The failed URL and response details were not recorded.';
+    return `${detail}\n${retained}`;
+  };
+  if (trail.has('storage-failed')) return result('incomplete', 'Official posting check could not be saved', retained, true);
   if (trail.has('bridge-unavailable') || trail.has('comparative-unavailable')) return result('incomplete', 'Official lookup incomplete: research unavailable', 'Reconnect ChatGPT research, then retry the official posting lookup in the app.', true);
   if (trail.has('bridge-timeout')) return result('incomplete', 'Official lookup incomplete: research timed out', retry, true);
   if (trail.has('bridge-aborted')) return result('incomplete', 'Official lookup incomplete: research interrupted', retry, true);
-  if (trail.has('fetch-timeout')) return result('incomplete', 'Official lookup incomplete: page fetch timed out', retry, true);
+  if (trail.has('fetch-timeout')) return result('incomplete', 'Employer site verification timed out', fetchDetail(), true);
   if (trail.has('crawl-budget') || trail.has('crawl-partial')) return result('incomplete', 'Official lookup incomplete: search coverage limited', retry, true);
-  if (trail.has('fetch-failed')) return result('incomplete', 'Official lookup incomplete: page could not be fetched', retry, true);
+  if (trail.has('fetch-failed') || posting.fetchFailures?.length) return result('incomplete', 'Employer site verification incomplete', fetchDetail(), true);
   if (posting.outcome === 'ambiguous' || ['semantic-uncertain', 'semantic-overflow', 'comparative-invalid', 'comparative-truncated', 'insufficient-text', 'official-liveness-unconfirmed'].some(code => trail.has(code))) {
     return result('incomplete', 'Official posting match uncertain', `An exact, current official match has not been verified. ${retry}`, true);
   }

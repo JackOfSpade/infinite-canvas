@@ -2781,6 +2781,15 @@ export function generateMarkdown(payload, reportWindowId = null, options = {}) {
   // Job Search hub can own an analysis bundle. Prefer the deep renderer index
   // (which survives filtered reports), then recover it from unfiltered nodes.
   const currentJobHubIds = new Set();
+  const compactBoardCounts = new Map();
+  const liveBoardCounts = new Map();
+  const suppliedCompactBoards = Array.isArray(payload?.filterStats?.jobBoardStates) ? payload.filterStats.jobBoardStates : [];
+  const compactBoards = suppliedCompactBoards.slice(0, 25);
+  for (const board of compactBoards) {
+    if (typeof board?.id === 'string' && currentNodeIds.has(board.id)) {
+      compactBoardCounts.set(board.id, (compactBoardCounts.get(board.id) || 0) + 1);
+    }
+  }
   for (const nodeId of Array.isArray(payload?.filterStats?.currentJobHubIds)
     ? payload.filterStats.currentJobHubIds
     : []) {
@@ -2789,10 +2798,24 @@ export function generateMarkdown(payload, reportWindowId = null, options = {}) {
   const collectCurrentJobHubIds = (items) => {
     for (const node of Array.isArray(items) ? items : []) {
       if (node?.type === 'jobhub' && typeof node.id === 'string' && node.id) currentJobHubIds.add(node.id);
+      if (node?.type === 'jobboard' && typeof node.id === 'string' && node.id) liveBoardCounts.set(node.id, (liveBoardCounts.get(node.id) || 0) + 1);
       collectCurrentJobHubIds(node?.data?.canvasData?.nodes);
     }
   };
   collectCurrentJobHubIds(nodes);
+  const boardTelemetryOwnership = {
+    ambiguousOwnerIds: 0,
+    topologyBounded: (payload?.filterStats?.jobBoardStateCount > compactBoards.length)
+      || suppliedCompactBoards.length > compactBoards.length
+      || (Array.isArray(payload?.filterStats?.jobBoardStateOmissions) && payload.filterStats.jobBoardStateOmissions.length > 0),
+  };
+  const currentJobBoardIds = new Set();
+  for (const id of new Set([...compactBoardCounts.keys(), ...liveBoardCounts.keys()])) {
+    // Compact and raw rows can describe the same owner, but two occurrences
+    // within either inventory represent ambiguous canvas-local ownership.
+    if (Math.max(compactBoardCounts.get(id) || 0, liveBoardCounts.get(id) || 0) > 1) boardTelemetryOwnership.ambiguousOwnerIds += 1;
+    else if (!boardTelemetryOwnership.topologyBounded) currentJobBoardIds.add(id);
+  }
   // Older renderer builds did not send the typed index. Retain their recovery
   // visibility when the filter says this is a job canvas; current builds always
   // supply `currentJobHubIds`, which is the ownership-safe path above.
@@ -2830,7 +2853,7 @@ export function generateMarkdown(payload, reportWindowId = null, options = {}) {
   // it exists purely as this marker.
   const omitJobAudit = sectionOmitted('jobAuditDetail');
   let jobsPipelineMarkdown = '';
-  try { jobsPipelineMarkdown = buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvasFilePath, localApplications, omitJobAudit, currentJobHubIds); }
+  try { jobsPipelineMarkdown = buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvasFilePath, localApplications, omitJobAudit, currentJobHubIds, currentJobBoardIds, boardTelemetryOwnership); }
   catch { /* never break the report on diagnostic failure */ }
 
   // Its own top-level section, deliberately ordered before the Job Search
@@ -2952,6 +2975,7 @@ export function generateMarkdown(payload, reportWindowId = null, options = {}) {
             stale: node.data?.stale,
             staleReason: node.data?.staleReason,
             combineSignature: node.data?.combineSignature,
+            combineSourceRuns: node.data?.combineSourceRuns,
             mergeUnique: node.data?.mergeStats?.unique,
             locationPostingsCollapsed: node.data?.mergeStats?.locationVariantPostingsCollapsed,
             clearProvenance,
@@ -3000,6 +3024,7 @@ export function generateMarkdown(payload, reportWindowId = null, options = {}) {
         stale: node.data?.stale,
         staleReason: node.data?.staleReason,
         combineSignature: node.data?.combineSignature,
+        combineSourceRuns: node.data?.combineSourceRuns,
         mergeUnique: node.data?.mergeStats?.unique,
         locationPostingsCollapsed: node.data?.mergeStats?.locationVariantPostingsCollapsed,
         clearProvenance: node.data?.clearProvenance,

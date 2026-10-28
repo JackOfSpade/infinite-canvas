@@ -10,6 +10,7 @@ import { createOfficialPostingStore, officialPostingAliases } from '../../electr
 import { buildOfficialPostingMatchRequest } from '../../electron/ipc/officialPostingBridge.js';
 import { __runWithIpcRequestContextForTests } from '../../electron/ipc/ipcUtils.js';
 import { readOfficialExpiryCandidates } from '../../electron/ipc/listingLivenessStore.js';
+import { officialPostingLookupStatus } from '../../electron/ipc/officialPostingFields.js';
 
 const EMPLOYER = 'Northwind Labs';
 const DESCRIPTION = 'Requirements include experience building reliable services and maintaining reporting workflows. Engineers design clear interfaces for dispatch teams and validate operational changes with careful review. The role includes improving data quality across scheduled pipelines and documenting decisions for partner teams. You will work with colleagues to investigate delivery failures and make service behavior understandable. Responsibilities include writing tests for new features and improving the tools used by support teams every day.';
@@ -123,6 +124,38 @@ async function hiddenContradictionScenario(kind) {
 }
 
 export default [
+  {
+    name: 'official fetch diagnostics clear an inherited redirect-hop failure after the hop succeeds through its URL or a new redirect',
+    async run() {
+      const original = 'https://careers.northwind.example/redirect';
+      const final = 'https://careers.northwind.example/jobs/one';
+      const alias = 'https://careers.northwind.example/current';
+      for (const recoveredUrl of [final, alias]) {
+        const first = createOfficialPostingRowBudget();
+        let second;
+        const reads = [];
+        const fetch = async url => {
+          reads.push(url);
+          if (url === original) throw Object.assign(error('fetch-failed'), { statusCode: 503, url: final });
+          return html('<html><title>Northwind Labs</title><body>Careers</body></html>', url === recoveredUrl ? final : url);
+        };
+        try {
+          const initial = await resolveOfficialPosting(row(), { fetch, rowBudget: first, candidateUrls: [original],
+            researchRan: true, bypassCache: true, semanticMatching: false, persistResults: false });
+          assert.deepEqual(initial.officialPosting.fetchFailures, [{ url: final, code: 'fetch-failed', reason: 'server-error', statusCode: 503 }]);
+          second = createOfficialPostingRowBudget({ previous: first, retryUrls: [recoveredUrl] });
+          const recovered = await resolveOfficialPosting(row(), { fetch, rowBudget: second, candidateUrls: [recoveredUrl],
+            researchRan: true, bypassCache: true, semanticMatching: false, persistResults: false });
+          assert.ok(reads.includes(recoveredUrl), 'the recovery read must actually succeed');
+          assert.deepEqual(recovered.officialPosting.fetchFailures || [], [], 'a successful actual hop must not retain its old 503 receipt');
+          const status = officialPostingLookupStatus(recovered.officialPosting);
+          assert.doesNotMatch(status.label, /Employer site verification/u, 'remaining match uncertainty must not be mislabeled as a current fetch failure');
+          assert.doesNotMatch(status.detail, /server error|HTTP 503/u);
+          assert.equal(reads.filter(url => url === original).length, 1, 'diagnostic reconciliation does not silently refetch the original redirect');
+        } finally { first.dispose(); second?.dispose(); }
+      }
+    },
+  },
   {
     name: 'deferred expiry resolver exposes bounded candidate URLs and request-local page evidence without caching an unconfirmed miss',
     async run() {

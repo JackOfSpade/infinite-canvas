@@ -743,7 +743,8 @@ Model prose happens to mention https://prose.example.test/untrusted.`);
     const source = readFileSync(new URL('../../electron/ipc/jobs.js', import.meta.url), 'utf8');
     const handlerStart = source.indexOf("handleSafe('research-job-compensation'");
     const handler = source.slice(handlerStart, source.indexOf("handleSafe(", handlerStart + 1));
-    assert(handlerStart >= 0 && handler.includes('await resolveCompensationCareerInputs(jobs, { signal, salaryCareerSnapshotId })')
+    assert(handlerStart >= 0 && handler.includes('await resolveBoardCompensationCareerInputs(jobs, { signal, salaryCareerSnapshotId })')
+      && source.includes('dependencies.resolveCompensationCareerInputs || resolveCompensationCareerInputs')
       && handler.includes('manualAiRunId, careerInputs,'),
     'the real IPC handler must resolve approved inputs itself before passing the host map into compensation research');
     return { uniqueApprovedReads: reads.length, resolvedSnapshots: inputs.size };

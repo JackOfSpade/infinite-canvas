@@ -19,7 +19,7 @@ import { APPLICATION_PDF_RECONCILE_REVISION, reconcileApplicationHtmlFromPdf } f
 import { applyDualPdf, pdfHasDualModeBackground, renderPdf } from './resumeRender.js';
 import { LEDGER_VERSION, MINING_TARGET } from '../../src/utils/achievementLedger.js';
 import { logger } from '../logger.js';
-import { sanitizeApplicationBundlePart } from './applicationBundle.js';
+import { sanitizeApplicationBundlePart, truncateApplicationBundlePart } from './applicationBundle.js';
 import { applicationSyncConfig, applicationSyncStatusSnapshot, registerApplicationSyncWorkspace, withApplicationSyncWorkspaceLock } from './applicationSync.js';
 import { replaceApplicationBundleAtomically } from './applicationFileTransaction.js';
 import { logGeneratedBundle, logSavedBundle } from './applicationEditLog.js';
@@ -1932,13 +1932,6 @@ function sanitizeFilePart(s, fallback) {
   return sanitizeApplicationBundlePart(s, fallback);
 }
 
-// sanitizeApplicationBundlePart caps every part at 100 code points
-// ([...cleaned].slice(0, 100), electron/ipc/applicationBundle.js:23) and
-// does not re-export that number. resolveApplicationExportDirectory's
-// disambiguation suffix (below) needs it to reserve room for the suffix
-// BEFORE concatenating, not after — see that function for why.
-const SANITIZED_PART_CAP = 100;
-
 function isGenerationAuditObject(value) {
   return value != null && typeof value === 'object' && !Array.isArray(value);
 }
@@ -2483,18 +2476,9 @@ async function resolveApplicationExportDirectory(applicationOutputRoot, baseDir,
   for (const hexLength of [8, 16]) {
     const suffix = crypto.createHash('sha256').update(currentListing).digest('hex').slice(0, hexLength);
     const suffixWrapper = ` (${suffix})`;
-    // Reserve room for the suffix BEFORE sanitizeFilePart's cap runs, not
-    // after: concatenating an already-100-code-point baseName with
-    // suffixWrapper and letting the CONCATENATED result get re-capped to 100
-    // chops the suffix off instead of the (already over-length) base — at
-    // exactly 100 base chars both hexLength candidates below collapsed onto
-    // the identical, still-colliding name and a genuinely resolvable
-    // collision hard-failed (filed report: "Software Development Engineer 2,
-    // Amazon Kids, Amazon Kids" is long enough to hit this). Slicing by code
-    // point (not by UTF-16 unit) matches sanitizeApplicationBundlePart's own
-    // [...cleaned].slice(...), so a surrogate pair is never split either.
-    const truncatedBase = [...baseName].slice(0, Math.max(0, SANITIZED_PART_CAP - suffixWrapper.length)).join('');
-    const disambiguated = path.join(path.dirname(baseDir), sanitizeFilePart(`${truncatedBase}${suffixWrapper}`, `Application (${suffix})`));
+    // The shared truncator reserves both UTF-8 bytes and code points before
+    // appending the suffix, so long Unicode names remain distinct and writable.
+    const disambiguated = path.join(path.dirname(baseDir), sanitizeFilePart(truncateApplicationBundlePart(baseName, suffixWrapper), `Application (${suffix})`));
     if (!(await collidesWithADifferentJob(disambiguated))) return resolved(disambiguated);
   }
   throw new Error('A different job’s saved application already occupies this destination, and no distinct folder name could be found for this job either.');

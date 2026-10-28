@@ -255,78 +255,74 @@ function locationCityOrNull(job) {
  * group entry instead of being swallowed too.
  */
 export function dedupJobsAcrossSources(jobs, { onDuplicate } = {}) {
-  const arr = Array.isArray(jobs) ? jobs : [];
-  const groups = new Map(); // titleCompanyKey -> [{ job, loc, source }] kept representatives, in first-seen order
-  const contentGroups = new Map(); // title|full-JD fingerprint -> [{ source, city, job }]
-  const sourceListingReps = new Map(); // source+host+native/stable URL identity -> kept job
+  const groups = new Map(); // title/company -> retained representatives
+  const contentGroups = new Map(); // title/full description -> representative/city
+  const sourceListingReps = new Map(); // source listing identity -> representative
   const result = [];
-  for (const job of arr) {
-    // Do this before title/company grouping. A board can alter an employer's
-    // display slug between pages (or emit a suffix such as ", Inc."), which
-    // made two URLs with the same real listing ID land in separate groups.
-    const listingIdentity = sourceListingIdentityKey(job);
-    const listingMatch = listingIdentity ? sourceListingReps.get(listingIdentity) : null;
-    if (listingMatch) {
-      onDuplicate?.({ reason: 'same-source-listing-id', kept: listingMatch, dropped: job });
-      continue;
+
+  // Every index points to a retained representative, including aliases learned
+  // from dropped cross-board copies. Remember all represented sources: once an
+  // Indeed row absorbs one LinkedIn listing, another distinct LinkedIn listing
+  // cannot use that same cross-board heuristic to disappear into it too.
+  const remember = (rep, job, source, listingIdentity, contentKey, city) => {
+    if (source) {
+      const sourceRows = rep.sourceRows.get(source) || [];
+      // Parsed/native identities are already indexed above. Only unparseable
+      // legacy URLs need the fallback comparison, and repeated pages must not
+      // grow that list with copies of the same row.
+      if (!listingIdentity && !sourceRows.some(row => sameSourceListingIdentity(row, job))) sourceRows.push(job);
+      rep.sourceRows.set(source, sourceRows);
     }
-    const content = descriptionFingerprint(job);
-    const source = keyPart(job?.source);
-    const city = locationCityOrNull(job);
-    if (content) {
-      const contentKey = `${keyPart(job?.title)}|${content}`;
-      const contentReps = contentGroups.get(contentKey) || [];
-      const contentMatch = contentReps.find(rep =>
-        rep.source !== source && (city === null || rep.city === null || city === rep.city));
-      if (contentMatch) {
-        // Retain this source's exact listing identity even though its first
-        // card lost to a cross-source copy. A later page can spell the company
-        // differently while carrying the same native ID/jid; without this
-        // alias it would miss both the source map and title/company group and
-        // re-enter the result set.
-        if (listingIdentity) sourceListingReps.set(listingIdentity, contentMatch.job);
-        onDuplicate?.({ reason: 'cross-source-full-description', kept: contentMatch.job, dropped: job });
-        continue;
-      }
-      contentReps.push({ source, city, job });
-      contentGroups.set(contentKey, contentReps);
-    }
-    const groupKey = jobTitleCompanyKey(job);
     const loc = normalizedLocationOrNull(job);
-    const kept = groups.get(groupKey);
-    if (!kept) {
-      groups.set(groupKey, [{ job, loc, source }]);
-      result.push(job);
-      if (listingIdentity) sourceListingReps.set(listingIdentity, job);
+    if (rep.loc === null && loc !== null) rep.loc = loc;
+    if (listingIdentity) sourceListingReps.set(listingIdentity, rep);
+    const groupKey = jobTitleCompanyKey(job);
+    const group = groups.get(groupKey) || [];
+    if (!group.includes(rep)) group.push(rep);
+    groups.set(groupKey, group);
+    if (contentKey) {
+      const content = contentGroups.get(contentKey) || [];
+      const entry = content.find(candidate => candidate.rep === rep);
+      if (!entry) content.push({ rep, city });
+      else if (entry.city === null && city !== null) entry.city = city;
+      contentGroups.set(contentKey, content);
+    }
+  };
+
+  for (const job of Array.isArray(jobs) ? jobs : []) {
+    const source = keyPart(job?.source);
+    const listingIdentity = sourceListingIdentityKey(job);
+    const content = descriptionFingerprint(job);
+    const contentKey = content ? `${keyPart(job?.title)}|${content}` : '';
+    const city = locationCityOrNull(job);
+    const loc = normalizedLocationOrNull(job);
+    const group = groups.get(jobTitleCompanyKey(job)) || [];
+    const sameSource = rep => !!source && rep.sourceRows.has(source);
+    const listingMatch = (listingIdentity && sourceListingReps.get(listingIdentity))
+      || group.find(rep => sameSource(rep)
+        && rep.sourceRows.get(source).some(row => sameSourceListingIdentity(row, job)));
+    const contentMatch = !listingMatch && contentKey
+      ? (contentGroups.get(contentKey) || []).find(entry =>
+        !sameSource(entry.rep) && (source || entry.rep.sourceRows.size > 0)
+        && (city === null || entry.city === null || city === entry.city))?.rep
+      : null;
+    const metadataMatch = !listingMatch && !contentMatch
+      ? group.find(rep => !sameSource(rep) && (loc === null || rep.loc === null || loc === rep.loc))
+      : null;
+    const match = listingMatch || contentMatch || metadataMatch;
+    if (match) {
+      remember(match, job, source, listingIdentity, contentKey, city);
+      onDuplicate?.({
+        reason: listingMatch ? 'same-source-listing-id'
+          : contentMatch ? 'cross-source-full-description' : 'cross-source-title-company-location',
+        kept: match.job,
+        dropped: job,
+      });
       continue;
     }
-    // Legacy/unit-test rows may omit source entirely. In that ambiguous case
-    // retain the historic cross-board heuristic; only a known shared source
-    // switches us to the stricter native-id/URL comparison.
-    const isKnownSameSource = (rep) => !!source && !!rep.source && rep.source === source;
-    const sameSourceMatch = kept.find(rep => isKnownSameSource(rep) && sameSourceListingIdentity(rep.job, job));
-    if (sameSourceMatch) {
-      onDuplicate?.({ reason: 'same-source-listing-id', kept: sameSourceMatch.job, dropped: job });
-      continue;
-    }
-    // This deliberately excludes same-source rows. The title/company/location
-    // heuristic is only reliable for copies from DIFFERENT boards.
-    const match = kept.find(rep => !isKnownSameSource(rep) && (loc === null || rep.loc === null || loc === rep.loc));
-    if (!match) {
-      kept.push({ job, loc, source });
-      result.push(job);
-      if (listingIdentity) sourceListingReps.set(listingIdentity, job);
-      continue;
-    }
-    // Matched an ambiguous (unknown-location) representative via a
-    // known-location job — adopt that location so later jobs compare against
-    // the real city, not "anything goes" forever.
-    if (match.loc === null && loc !== null) match.loc = loc;
-    // As above, a first card may be absorbed by the cross-board heuristic.
-    // Preserve its stronger per-source identity so future spelling/path
-    // variants of that exact listing cannot reappear as a new group.
-    if (listingIdentity) sourceListingReps.set(listingIdentity, match.job);
-    onDuplicate?.({ reason: 'cross-source-title-company-location', kept: match.job, dropped: job });
+    const rep = { job, loc, sourceRows: new Map() };
+    result.push(job);
+    remember(rep, job, source, listingIdentity, contentKey, city);
   }
   return result;
 }

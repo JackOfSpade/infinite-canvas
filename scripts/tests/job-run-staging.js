@@ -5354,11 +5354,13 @@ export default [
       releaseBoard();
       const boardTelemetry = await board;
 
-      assert(boardTelemetry === hubATelemetry
-        && hubATelemetry.bucketing?.phase === 'finished'
+      assert(boardTelemetry !== hubATelemetry
+        && boardTelemetry.nodeId == null && boardTelemetry.boardNodeId === 'board-a'
+        && boardTelemetry.bucketing?.phase === 'finished'
+        && hubATelemetry.bucketing == null
         && hubBTelemetry.bucketing == null,
-      `a bucket request must retain its first ambient telemetry target across awaits, got ${JSON.stringify({ hubA: hubATelemetry.bucketing, hubB: hubBTelemetry.bucketing })}`);
-      return { boardTarget: hubATelemetry.nodeId, isolatedFrom: hubBTelemetry.nodeId };
+      `a bucket request must retain its independent Board telemetry across awaits, got ${JSON.stringify({ board: boardTelemetry.bucketing, hubA: hubATelemetry.bucketing, hubB: hubBTelemetry.bucketing })}`);
+      return { boardTarget: boardTelemetry.boardNodeId, isolatedFrom: hubBTelemetry.nodeId };
     },
   },
   {

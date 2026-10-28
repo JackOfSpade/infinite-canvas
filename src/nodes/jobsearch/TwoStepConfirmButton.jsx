@@ -18,7 +18,15 @@ export function TwoStepConfirmButton({
   timeoutMs = 4000,
 }) {
   const [armed, setArmed] = useState(false);
+  const [wasDisabled, setWasDisabled] = useState(disabled);
   const timerRef = useRef(null);
+  const armedUntilRef = useRef(0);
+
+  // Reset during the prop transition so an unlock never paints a stale prompt.
+  if (wasDisabled !== disabled) {
+    setWasDisabled(disabled);
+    setArmed(false);
+  }
 
   const clearTimer = () => {
     if (timerRef.current != null) {
@@ -27,27 +35,39 @@ export function TwoStepConfirmButton({
     }
   };
 
-  // Unmount cleanup so a pending auto-disarm never fires on a dead component.
-  useEffect(() => () => {
-    if (timerRef.current != null) {
-      clearTimeout(timerRef.current);
-      timerRef.current = null;
+  // Locking the owner invalidates its pending confirmation. A later unlock
+  // must always require two fresh clicks, even if the old timer has not fired.
+  useEffect(() => {
+    if (disabled) {
+      armedUntilRef.current = 0;
     }
-  }, []);
+    return () => {
+      if (timerRef.current != null) {
+        clearTimeout(timerRef.current);
+        timerRef.current = null;
+      }
+    };
+  }, [disabled]);
 
   const handleClick = (event) => {
     event.stopPropagation();
     if (disabled) return;
-    if (!armed) {
+    // Timers can be delayed while Electron is suspended or its main thread is
+    // busy. Check the deadline as well so an expired confirmation cannot run.
+    if (!armed || Date.now() >= armedUntilRef.current) {
       setArmed(true);
       clearTimer();
+      const duration = Number.isFinite(timeoutMs) ? Math.max(0, timeoutMs) : 4000;
+      armedUntilRef.current = Date.now() + duration;
       timerRef.current = setTimeout(() => {
         timerRef.current = null;
+        armedUntilRef.current = 0;
         setArmed(false);
-      }, timeoutMs);
+      }, duration);
       return;
     }
     clearTimer();
+    armedUntilRef.current = 0;
     setArmed(false);
     onConfirm?.(event);
   };

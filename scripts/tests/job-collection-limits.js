@@ -141,7 +141,7 @@ export default [
   {
     name: 'jobCollectionLimits: blank/null/undefined/0/negative/non-numeric all fall back to "All" (null), independently per field',
     run: () => {
-      const fallbackCases = ['', null, undefined, 0, -4, 'not-a-number', NaN, Infinity, -Infinity];
+      const fallbackCases = ['', '   ', null, undefined, 0, 0.5, '0.9', -4, 'not-a-number', NaN, Infinity, -Infinity, true, false, [], [7], {}];
       for (const value of fallbackCases) {
         const jobs = normalizeJobCollectionLimits({ jobsPerPlatform: value });
         assert(jobs.jobsPerPlatform === null, `jobsPerPlatform ${JSON.stringify(value)} must fall back to null (All), got ${jobs.jobsPerPlatform}`);
@@ -151,6 +151,19 @@ export default [
         assert(pages.jobsPerPlatform === null, 'an untouched field must independently default to null, not inherit the other field\'s input');
       }
       return { fallbackCasesChecked: fallbackCases.length };
+    },
+  },
+  {
+    name: 'jobCollectionLimits: malformed query counts never allocate browser page budgets',
+    run: () => {
+      for (const count of [null, undefined, '', -1, 0.5, true, [], [2], {}, NaN, Infinity, -Infinity, Number.MAX_SAFE_INTEGER]) {
+        for (const limits of [{}, { pagesPerPlatform: 7 }]) {
+          assert(resolveBrowserPageBudgets(limits, count).length === 0,
+            `malformed query count ${String(count)} must not manufacture work or throw`);
+        }
+      }
+      assert(resolveBrowserPageBudgets({ pagesPerPlatform: 7 }, '2').join(',') === '7,7',
+        'ordinary numeric strings retain their supported explicit allocation');
     },
   },
   {

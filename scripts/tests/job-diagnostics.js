@@ -1211,6 +1211,142 @@ export default [
     },
   },
   {
+    name: 'legacy terminal receipts never present a missing traversal counter as a measured zero-to-positive funnel',
+    run: () => {
+      __resetJobsTelemetryForTests();
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ic-legacy-traversal-count-'));
+      const canvas = path.join(dir, 'canvas.json');
+      const hubId = 'synthetic-legacy-traversal-hub';
+      try {
+        fs.writeFileSync(lastRunReceiptPathForCanvas(canvas, hubId), JSON.stringify({
+          runId: 'synthetic-legacy-traversal-run', nodeId: hubId,
+          terminal: { status: 'completed', outcome: 'populated', scoreReadyCount: 52 },
+          cleanup: { attempted: true, cleared: true },
+          sources: { linkedin: { count: 181, providerGathered: 0 }, dice: { count: 4, providerGathered: 8 } },
+        }));
+        const report = buildJobRecoverySnapshot(canvas, new Set([hubId]), new Set([hubId]));
+        assert(report.includes('traversal count unavailable/inconsistent → 181 usable row(s) retained')
+          && !report.includes('0 candidate identities traversed → 181'),
+        'a persisted zero default cannot claim a measured traversal when retained rows prove the counter is incomplete');
+        assert(report.includes('8 candidate identities traversed → 4 usable row(s) retained'),
+          'consistent measured traversal remains distinct from the usable-row count');
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+        __resetJobsTelemetryForTests();
+      }
+    },
+  },
+  {
+    name: 'multi-source Board completion joins only its exact prior source runs across unrelated retained receipts',
+    run: () => {
+      __resetJobsTelemetryForTests();
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ic-multi-board-completion-'));
+      const canvas = path.join(dir, 'canvas.json');
+      const hubs = new Set(Array.from({ length: 8 }, (_, index) => `PRIVATE_SOURCE_${index}`));
+      const sources = [...hubs].slice(0, 2);
+      const boardId = 'PRIVATE_BOARD_ID';
+      const ids = new Set([...hubs, boardId]);
+      const runs = sources.map((sourceHubId, index) => ({ sourceHubId, runId: `PRIVATE_CONSUMED_RUN_${index}` }));
+      const board = { id: boardId, hubState: 'done', stale: false, resultCount: 73, renderedCardCount: 73,
+        mergeUnique: 118, locationPostingsCollapsed: 45,
+        connectedSourceHubIds: sources, combineSourceRuns: runs,
+        combineSignature: `8:${JSON.stringify(sources.map(id => [id, 'PRIVATE_FINGERPRINT']))}` };
+      const writeGeneration = (hubId, runId, count, { candidateCount = count, outcome = 'populated', funnel = null, recovery = null } = {}) => {
+        const analysis = getJobAnalysisPaths(canvas, path.join(dir, 'analysis'), hubId);
+        fs.writeFileSync(analysis.jsonPath, JSON.stringify({ runId, sourceHubId: hubId, canvasFilePath: canvas,
+          gatheredJobCount: count, jobs: Array.from({ length: candidateCount }, () => ({ description: 'PRIVATE_JOB_CONTENT' })) }));
+        fs.writeFileSync(lastRunReceiptPathForCanvas(canvas, hubId), JSON.stringify({ runId, nodeId: hubId,
+          terminal: { status: 'completed', outcome, scoreReadyCount: count }, cleanup: { attempted: true, cleared: true }, funnel, recovery }));
+        return analysis;
+      };
+      const assess = (state = board) => buildJobCompletionAssessment(canvas, ids, [state], 1, hubs);
+      try {
+        [...hubs].forEach((hubId, index) => writeGeneration(hubId, index < 2 ? runs[index].runId : `PRIVATE_UNRELATED_RUN_${index}`, index === 0 ? 66 : index === 1 ? 52 : 1));
+        // A legacy ninth receipt must not compete with the Board's two exact
+        // consumed generations, just as the eight current hubs must not.
+        fs.writeFileSync(lastRunReceiptPathForCanvas(canvas), JSON.stringify({ runId: 'PRIVATE_LEGACY_RUN', nodeId: [...hubs][7],
+          terminal: { status: 'completed', outcome: 'populated', scoreReadyCount: 12 }, cleanup: { attempted: true, cleared: true } }));
+        const output = assess();
+        assert(output.includes('**BOARD DISPLAY COMPLETE**') && output.includes('66 score-ready job(s)')
+          && output.includes('52 score-ready job(s)') && output.includes('results 73 · rendered cards 73')
+          && !output.includes('ambiguous across') && !output.includes('12 score-ready'),
+        'one multi-source display must reconcile its exact two prior runs rather than nominate any of nine receipts');
+        for (const secret of [...hubs, boardId, ...runs.map(run => run.runId), dir, 'PRIVATE_FINGERPRINT', 'PRIVATE_JOB_CONTENT']) {
+          assert(!output.includes(secret), 'Board/source/run identifiers and payload evidence must remain private');
+        }
+        assert(output.includes('do not prove that the current Board was saved to disk'), 'display proof must not imply a durable workspace save');
+        for (const state of [
+          { ...board, stale: true },
+          { ...board, combineSourceRuns: [runs[0]] },
+          { ...board, combineSourceRuns: [runs[0], { ...runs[1], runId: 'PRIVATE_WRONG_RUN' }] },
+          { ...board, connectedSourceHubIds: [sources[0]] },
+          { ...board, connectedSourceHubIds: [...sources, [...hubs][2]] },
+          { ...board, mergeUnique: 119 },
+          { ...board, locationPostingsCollapsed: 119 },
+          { ...board, renderedCardCount: 74 },
+        ]) assert(assess(state).includes('**BOARD COMPLETION INDETERMINATE**'), 'stale, missing, mismatched or structurally conflicting display evidence cannot earn completion');
+        assert(assess({ ...board, selectedSearchModuleIds: [sources[0]] }).includes('**BOARD DISPLAY COMPLETE**'),
+          'launch selection does not narrow the set of completed source results consumed by Combine');
+        assert(assess({ ...board, connectedSourceHubIds: [...sources, [...hubs][2]], selectedSearchModuleIds: sources })
+          .includes('completion/admission evidence is unavailable'),
+        'an additional connected source needs consumed-run/admission evidence regardless of its launch selection');
+        assert(assess({ ...board, renderedCardCount: 70 }).includes('**BOARD DISPLAY COMPLETE**'),
+          'deliberate card dismissal may reduce rendered cards while the saved Board result/merge counts still agree');
+        const withEmptySource = { ...board, resultCount: 66, renderedCardCount: 66, mergeUnique: 66, locationPostingsCollapsed: 0 };
+        writeGeneration(sources[1], runs[1].runId, 0, { outcome: 'zero', funnel: { kept: 0 } });
+        assert(assess(withEmptySource).includes('**BOARD DISPLAY COMPLETE**'),
+          'an exact completed zero-result source is a legitimate consumed input beside a populated source');
+        writeGeneration(sources[1], runs[1].runId, 0, { outcome: 'preference-filtered', candidateCount: 7, funnel: { kept: 5 }, recovery: { mergeNet: 2 } });
+        assert(assess(withEmptySource).includes('**BOARD DISPLAY COMPLETE**'),
+          'a fully preference-filtered source retains its exact initial-plus-recovery candidate pool while contributing zero scored rows');
+        for (const options of [
+          { outcome: 'zero', candidateCount: 1, funnel: { kept: 0 } },
+          { outcome: 'preference-filtered', candidateCount: 6, funnel: { kept: 5 }, recovery: { mergeNet: 2 } },
+          { outcome: 'zero' },
+          { outcome: 'populated', funnel: { kept: 0 } },
+          { outcome: 'collection-only', funnel: { kept: 0 } },
+        ]) {
+          writeGeneration(sources[1], runs[1].runId, 0, options);
+          assert(assess(withEmptySource).includes('**BOARD COMPLETION INDETERMINATE**'),
+            'an empty array with mismatched/missing candidate-pool provenance or a nonterminal scoring disposition cannot certify completion');
+        }
+        writeGeneration(sources[1], runs[1].runId, 52);
+        const secondAnalysis = getJobAnalysisPaths(canvas, path.join(dir, 'analysis'), sources[1]);
+        fs.unlinkSync(secondAnalysis.jsonPath);
+        assert(assess().includes('**BOARD COMPLETION INDETERMINATE**'), 'a missing exact-generation snapshot cannot borrow another hub snapshot');
+        writeGeneration(sources[1], runs[1].runId, 52);
+        const receiptPath = lastRunReceiptPathForCanvas(canvas, sources[1]);
+        const receipt = JSON.parse(fs.readFileSync(receiptPath, 'utf8'));
+        fs.writeFileSync(receiptPath, JSON.stringify({ ...receipt, scoring: {
+          input: 52, selected: 52, scored: 51, unscored: 1, placeholders: 0, failedBatches: 0,
+        } }));
+        assert(assess().includes('terminal scoring counters are incomplete or inconsistent'),
+          'retained scoring failures must qualify an otherwise count-matching saved output');
+        writeGeneration(sources[1], runs[1].runId, 52);
+        assert(buildJobCompletionAssessment(canvas, ids, [board], 1, hubs, null, ['topology-budget'])
+          .includes('Board topology inspection was bounded'), 'bounded topology cannot silently certify a complete Board inspection');
+        Object.assign(getJobsTelemetry(), { nodeId: sources[0], search: { kept: 66, runId: runs[0].runId },
+          pipeline: { active: true, phase: 'searching', runId: runs[0].runId } });
+        assert(!assess().includes('**BOARD DISPLAY COMPLETE**') && assess().includes('live search stage is `searching`'),
+          'an explicitly live source pipeline takes precedence over an older completed Board');
+        __resetJobsTelemetryForTests();
+        const reporter = fs.readFileSync(path.resolve('src/hooks/useIssueReporter.js'), 'utf8');
+        assert(reporter.includes("combineSourceRuns: boundedCombinedSourceRuns(safeReportField(data, 'combineSourceRuns'))"),
+          'filtered compact report payloads must retain the exact source-run receipt');
+        for (const filterCode of ['FULL', 'JOBS', 'JOBBOARD', 'RECOVERY']) {
+          const report = generateMarkdown({ filterCode, description: 'Synthetic multi-source combine',
+            nodes: [], edges: [], drawings: [], frontEndState: { currentFile: canvas }, nodeInternals: [], nodeComponentStates: [], eventLogs: [],
+            filterStats: { hasJobNodes: true, currentNodeIds: [...ids], currentJobHubIds: [...hubs], jobBoardStates: [board], jobBoardStateCount: 1 },
+          }).markdown;
+          assert(report.includes('**BOARD DISPLAY COMPLETE**'), `${filterCode} must include the exact multi-source Board assessment`);
+        }
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+        __resetJobsTelemetryForTests();
+      }
+    },
+  },
+  {
     name: 'job diagnostics bound oversized snapshots and retain Board transaction metadata',
     run: () => {
       const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ic-board-diagnostic-bounds-'));
@@ -9238,6 +9374,44 @@ export default [
         'enrichment-ready full descriptions collapse the confirmed cross-board copy');
 
       return { crossSource: crossSource.length, distinctCities: distinctCities.length, sameCity: sameCity.length, orderDependent: orderDependent.length };
+    },
+  },
+{
+    name: 'cross-source dedup remembers every represented board before matching concurrent requisitions',
+    run: () => {
+      const first = { title: 'Engineer', company: 'Example', location: 'Toronto, ON', source: 'indeed', jobkey: 'i-1' };
+      const linked = { ...first, source: 'linkedin', jobkey: 'l-1' };
+      const concurrent = { ...linked, jobkey: 'l-2' };
+      const replay = { ...linked, company: 'Example Incorporated' };
+      const drops = [];
+      const kept = dedupJobsAcrossSources([first, linked, concurrent, replay], { onDuplicate: row => drops.push(row) });
+      assert(kept.length === 2 && kept[0] === first && kept[1] === concurrent,
+        'a representative already containing LinkedIn must retain another distinct LinkedIn requisition');
+      assert(drops.length === 2 && drops.every(row => row.kept === first),
+        'a replay of an absorbed listing must resolve to the retained representative');
+      const description = 'Requisition 101. ' + 'Build and operate connected products and support customers. '.repeat(15);
+      const withDescriptions = [first, linked, concurrent].map(row => ({ ...row, snippet: description }));
+      assert(dedupJobsAcrossSources(withDescriptions).length === 2,
+        'matching full description text cannot erase a distinct requisition from an already represented board');
+    },
+  },
+{
+    name: 'cross-source description index always refers to retained jobs and upgrades unknown cities',
+    run: () => {
+      const description = 'Requisition 202. ' + 'Design and maintain engineering systems for customer service. '.repeat(15);
+      const first = { title: 'Engineer', company: 'Example', location: 'Toronto, ON', source: 'indeed', jobkey: 'i-1' };
+      const enriched = { ...first, source: 'linkedin', jobkey: 'l-1', snippet: description };
+      const thirdBoard = { ...enriched, source: 'dice', jobkey: 'd-1', company: 'Example Incorporated' };
+      const drops = [];
+      const kept = dedupJobsAcrossSources([first, enriched, thirdBoard], { onDuplicate: row => drops.push(row) });
+      assert(kept.length === 1 && drops.every(row => kept.includes(row.kept)),
+        'content learned from a dropped duplicate must point at the retained job, never the dropped row');
+      const unknown = { ...first, location: '', snippet: description };
+      const toronto = { ...thirdBoard, company: 'Example Toronto' };
+      const ottawa = { ...enriched, company: 'Example Ottawa', location: 'Ottawa, ON' };
+      const cities = dedupJobsAcrossSources([unknown, toronto, ottawa]);
+      assert(cities.length === 2 && cities[1] === ottawa,
+        'an unknown-city description representative adopts Toronto before comparing the distinct Ottawa requisition');
     },
   },
 {

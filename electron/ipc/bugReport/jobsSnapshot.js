@@ -4,7 +4,7 @@ const { app } = electronPkg;
 import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
-import { CAREER_CONVERGENCE_CATEGORIES, sanitizeCareerConvergenceRound, getCurrentRequestJobAnalysisPaths, getJobsCareerCompilationForReport, getJobsResumeAttributionForReport, getJobsSourceRunHistoryForReport, getJobsTelemetryForReport, getJobsTelemetryHubCountForReport, JOB_DESCRIPTION_EVIDENCE_MIN_CHARS, listDescriptionRecoveryCheckpointsSync } from '../jobs.js';
+import { CAREER_CONVERGENCE_CATEGORIES, sanitizeCareerConvergenceRound, getCurrentRequestJobAnalysisPaths, getJobsBoardTelemetryForReport, getJobsCareerCompilationForReport, getJobsResumeAttributionForReport, getJobsSourceRunHistoryForReport, getJobsTelemetryForReport, getJobsTelemetryHubCountForReport, JOB_DESCRIPTION_EVIDENCE_MIN_CHARS, listDescriptionRecoveryCheckpointsSync } from '../jobs.js';
 import { getNonApiAiHandoffLifecycleSnapshot, SAFE_NON_API_AI_LOG_ERROR_CODES, SAFE_VALIDATION_DIAGNOSTIC_REASONS } from '../nonApiAi.js';
 import { formatTypeAreaUtilization, getApplicationTelemetry } from '../jobApplication.js';
 import { getApplicationSyncTelemetry } from '../applicationSync.js';
@@ -969,8 +969,14 @@ function formatLastRunReceipt(receiptState, currentNodeIds, livePipeline, label 
       const retained = nonnegativeCount(source.count);
       const traversed = nonnegativeCount(source.providerGathered);
       const unavailableDetailDropped = nonnegativeCount(source.unavailableDetailDropped);
+      // Legacy/recovery receipts can retain usable rows without the original
+      // traversal counter. Its old zero default is not an observed zero-card
+      // walk, and must not render an impossible 0 -> N measured funnel.
+      const traversal = traversed != null && retained != null && traversed < retained
+        ? 'traversal count unavailable/inconsistent'
+        : `${traversed ?? '?'} candidate ${traversed === 1 ? 'identity' : 'identities'} traversed`;
       const parts = [
-        `${traversed ?? '?'} candidate ${traversed === 1 ? 'identity' : 'identities'} traversed → ${retained ?? '?'} usable row(s) retained`,
+        `${traversal} → ${retained ?? '?'} usable row(s) retained`,
         `${source.relevanceDropped} relevance-dropped`,
       ];
       if (unavailableDetailDropped != null && unavailableDetailDropped > 0) {
@@ -2388,6 +2394,121 @@ function hasDurableCompletedOutput(receipt, snapshot) {
     && snapshot.jobs === receiptScoreReady;
 }
 
+function hasDurableCompletedBoardSource(receipt, snapshot) {
+  if (hasDurableCompletedOutput(receipt, snapshot)) return snapshot.jobs > 0;
+  const outcome = receipt?.terminal?.outcome;
+  if (!['zero', 'preference-filtered'].includes(outcome)) return false;
+  // Empty sources are legitimate Board inputs, but an empty array alone does
+  // not prove a completed search. Keep the same exact ownership/cleanup join
+  // and reconcile its retained pre-preference candidate pool independently.
+  if (receipt?.terminal?.status !== 'completed'
+    || receipt?.cleanup?.attempted !== true || receipt?.cleanup?.cleared !== true
+    || !recordedRunToken(receipt.runId) || !receiptIdentifier(receipt.nodeId, '')
+    || snapshot?.state !== 'parseable' || snapshot.runId !== receipt.runId || snapshot.nodeId !== receipt.nodeId
+    || snapshot.hubPresent !== true || snapshot.canvasMatches !== true
+    || nonnegativeCount(receipt.terminal.scoreReadyCount) !== 0 || snapshot.jobs !== 0) return false;
+  const initial = nonnegativeCount(receipt.funnel?.kept);
+  const recovered = receipt.recovery == null ? 0 : signedCount(receipt.recovery.mergeNet);
+  if (initial == null || recovered == null || initial + recovered < 0) return false;
+  const candidates = initial + recovered;
+  return snapshot.candidatePoolJobs === candidates
+    && (outcome === 'zero' ? candidates === 0 : candidates > 0);
+}
+
+// A completed Board can consume several independently completed searches. Its
+// source-run receipt selects those generations explicitly; unrelated retained
+// searches must not force this downstream display into a single-run ambiguity.
+function multiSourceBoardCompletionAssessment(canvasFilePath, hubIds, jobBoardStates, reportWindowId, omissions) {
+  if (!canvasFilePath || !Array.isArray(jobBoardStates) || jobBoardStates.length !== 1) return '';
+  const board = jobBoardStates[0];
+  // An empty/in-flight Board can still carry a previous combine signature.
+  // Its source-search assessment must retain precedence until it displays a
+  // completed result again.
+  if (boardDiagnosticValue(board, 'hubState') !== 'done') return '';
+  const { combinedSourceHubIds, connectedSourceHubIds } = boardSourceHubIds(board);
+  if (combinedSourceHubIds.length < 2) return '';
+  const pairs = boardDiagnosticSafely(() => boundedBoardRunPairs(boardDiagnosticValue(board, 'combineSourceRuns')), []);
+  const boardId = opaqueHubIdForCorrelation(boardDiagnosticValue(board, 'id'));
+  const problems = [];
+  if (!boardId) problems.push('Board identity was not retained');
+  if (Array.isArray(omissions) && omissions.length) problems.push('Board topology inspection was bounded');
+  if (boardDiagnosticValue(board, 'stale') === true) problems.push('Board inputs are stale');
+  const results = boardNonnegativeCount(boardDiagnosticValue(board, 'resultCount'));
+  const cards = boardNonnegativeCount(boardDiagnosticValue(board, 'renderedCardCount'));
+  if (results == null || cards == null) problems.push('Board display counts were not retained');
+  else if (cards > results) problems.push('rendered cards exceed the Board result count');
+  const merged = boardNonnegativeCount(boardDiagnosticValue(board, 'mergeUnique'));
+  const collapsed = boardNonnegativeCount(boardDiagnosticValue(board, 'locationPostingsCollapsed'));
+  if (merged != null && collapsed != null && (collapsed > merged || (results != null && merged - collapsed !== results))) {
+    problems.push('Board result count does not reconcile with merged unique minus collapsed location postings');
+  }
+  // Launch selection only controls which searches start/continue. Combine
+  // consumes every connected completed source; a new connection without an
+  // exact consumed run needs admission/readiness evidence, not an assumption
+  // that it was intentionally excluded by the launch selection.
+  if (connectedSourceHubIds.some(id => !combinedSourceHubIds.includes(id))) {
+    problems.push('completion/admission evidence is unavailable for connected sources outside the consumed source runs');
+  }
+  if (pairs.length !== combinedSourceHubIds.length
+    || pairs.some(pair => !combinedSourceHubIds.includes(pair.sourceHubId))) {
+    problems.push('source-run provenance does not exactly cover the combined sources');
+  }
+  const sourceLines = combinedSourceHubIds.map(ownerId => {
+    const runs = pairs.filter(pair => pair.sourceHubId === ownerId);
+    let issue = !hubIds.has(ownerId) ? 'source is absent from this canvas'
+      : !connectedSourceHubIds.includes(ownerId) ? 'source is no longer connected'
+        : runs.length !== 1 ? 'exact source-run provenance is missing or conflicting' : null;
+    const runId = runs.length === 1 ? runs[0].runId : null;
+    let snapshot = null;
+    if (!issue) {
+      const state = readReceiptForCurrentHubs(canvasFilePath, new Set([ownerId]), ownerId);
+      const receipt = state?.receipt;
+      if (!receipt || receipt.nodeId !== ownerId || receipt.runId !== runId) issue = 'terminal receipt does not match the consumed source run';
+      else {
+        snapshot = currentSavedSnapshotFact(canvasFilePath, new Set([ownerId]), { ownerId, runId });
+        if (!hasDurableCompletedBoardSource(receipt, snapshot)) issue = 'completed receipt and owned same-run score-ready snapshot do not agree';
+        const scoring = receipt.scoring;
+        if (scoring) {
+          const input = nonnegativeCount(scoring.selected ?? scoring.selectedForScoring ?? scoring.input);
+          const scored = nonnegativeCount(scoring.scored);
+          if (['placeholders', 'unscored', 'failedBatches'].some(key => (nonnegativeCount(scoring[key]) || 0) > 0)
+            || (input != null && scored != null && input !== scored)
+            || (scored != null && scored !== snapshot.jobs)) issue = 'terminal scoring counters are incomplete or inconsistent';
+        }
+      }
+    }
+    if (issue) problems.push(`source ${reportCorrelationDigest(ownerId)}: ${issue}`);
+    return `- Source \`${reportCorrelationDigest(ownerId)}\`${runId ? ` · consumed run \`${reportCorrelationDigest(runId)}\`` : ''}: ${issue ? `⚠️ ${issue}` : `durable output complete · ${snapshot.jobs} score-ready job(s) · exact owner, run and canvas agree${snapshot.metadataOnly ? ' (bounded count metadata; payload not inspected)' : ''}`}.`;
+  });
+  let boardTelemetry = null;
+  try { boardTelemetry = getJobsBoardTelemetryForReport(new Set([boardId]), reportWindowId, canvasFilePath).find(entry => entry.boardNodeId === boardId) || null; }
+  catch { /* Board attempt telemetry is optional and never a source-run join. */ }
+  const taxonomy = boardTelemetry?.bucketing;
+  const taxonomyInput = nonnegativeCount(taxonomy?.input);
+  if (taxonomy && (taxonomy.error || taxonomy.errorCode || (nonnegativeCount(taxonomy.missing) || 0) > 0
+    || (nonnegativeCount(taxonomy.duplicated) || 0) > 0)) problems.push('latest Board taxonomy attempt recorded a failure');
+  const history = boardTelemetry?.history?.boardDisplay;
+  if (history?.error) problems.push('Board displayed-history write failed');
+  const compensation = boardTelemetry?.compensation;
+  if (compensation?.error || compensation?.errorCode || (nonnegativeCount(compensation?.failedCohorts) || 0) > 0) problems.push('latest Board compensation attempt recorded failures');
+  const verdict = problems.length
+    ? `⚠️ **BOARD COMPLETION INDETERMINATE** — ${problems.join('; ')}.`
+    : '✅ **BOARD DISPLAY COMPLETE** — the completed Board and its exact source-run receipts reconcile independently.';
+  return `
+## Job Completion Assessment
+> Separate assessment of a multi-source Board display. Its source searches are independent prior runs; no single search generation was selected.
+
+- ${verdict}
+- Board \`${reportCorrelationDigest(boardId)}\`: results ${results ?? 'not retained'} · rendered cards ${cards ?? 'not retained'} · consumed sources ${combinedSourceHubIds.length}. Fewer remaining cards can reflect deliberate card removal.
+${sourceLines.join('\n')}
+- Latest in-process Board taxonomy: ${taxonomy ? `input ${taxonomyInput ?? '?'} · placed ${nonnegativeCount(taxonomy.placed) ?? '?'} · missing ${nonnegativeCount(taxonomy.missing) ?? '?'} · duplicated ${nonnegativeCount(taxonomy.duplicated) ?? '?'}` : 'not retained for this Board in this process'}.
+- Latest in-process Board compensation: ${compensation ? `eligible ${nonnegativeCount(compensation.eligible) ?? '?'} · assessed ${nonnegativeCount(compensation.assessed) ?? '?'} · researched ${nonnegativeCount(compensation.researched) ?? '?'} · failed cohorts ${nonnegativeCount(compensation.failedCohorts) ?? '?'}` : 'not retained for this Board in this process'}.
+- Latest in-process seen-history write: ${history ? history.error ? '⚠️ failed' : `input ${nonnegativeCount(history.input) ?? '?'} · written ${nonnegativeCount(history.written) ?? '?'}` : 'not retained for this Board in this process'}.
+- Attempt correlation: latest in-process phase records are Board/window-scoped; no exact display-generation token was retained for them.
+- Scope: prior source collection coverage was not reverified. These display facts do not prove that the current Board was saved to disk.
+`;
+}
+
 function formatRecoveryManifest(manifest, currentNodeIds, label, absentNote = '', artifact = null) {
   if (!manifest?.exists) return [`- ${label}: absent${absentNote}`];
   if (manifest.errorCode) return [`- ${label}: ⚠️ unreadable (\`${manifest.errorCode}\`)`];
@@ -2864,6 +2985,13 @@ export function buildJobCompletionAssessment(
 - Reanalysis scoring: ${completion ? `input ${completionInput} → scored ${completionScored} · placeholders 0 · unscored 0 · failed batches 0` : 'completion not retained or does not correlate to this saved-job revision'}.
 - Saved reanalysis snapshot: metadata schema v2 · source run ${reanalysisSnapshot.runId ? `\`${snapshotRunIdentifier(reanalysisSnapshot.runId)}\`` : 'not recorded (valid for saved-job reanalysis)'} · revision \`${reportCorrelationDigest(reanalysisSnapshot.analysisRevisionId)}\`${reanalysisSnapshot.metadataOnly ? ' · verified from bounded ownership/count metadata only; payload not inspected' : ''}.
 `;
+  }
+  if (!telemetry?.search && !telemetry?.pipeline && attributableHubRecordCount === 0
+    && (jobBoardStateCount == null || jobBoardStateCount === 1)) {
+    const boardAssessment = multiSourceBoardCompletionAssessment(
+      canvasFilePath, hubIds, jobBoardStates, reportWindowId, jobBoardStateOmissions,
+    );
+    if (boardAssessment) return boardAssessment;
   }
   const receiptInitialKept = nonnegativeCount(receipt?.funnel?.kept);
   const receiptRecovery = signedCount(receipt?.recovery?.mergeNet);
@@ -5561,13 +5689,36 @@ export function renderCareerConvergenceLines(rounds, evicted) {
   return out;
 }
 
-export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvasFilePath, localApplications = [], omitJobAudit = false, currentJobHubIds = currentNodeIds) {
+function boardWorkTelemetryLines(records, ownership = {}) {
+  const ambiguous = nonnegativeCount(ownership.ambiguousOwnerIds) || 0;
+  if (!records.length && !ambiguous && !ownership.topologyBounded) return [];
+  const count = value => nonnegativeCount(value) ?? '?';
+  const lines = ['\n### Job Board work (current process)',
+    '> Each record belongs to this Board and window, independently of the source-search funnel. These are the latest retained stage observations, not proof of a workspace disk save or an exact display-generation match.'];
+  if (ambiguous) lines.push(`- Live counters omitted for ${ambiguous} ambiguous Board owner ID(s) occurring in multiple canvas scopes.`);
+  if (ownership.topologyBounded) lines.push('- Live Board counters omitted because the Board ownership inventory was bounded; unique canvas-local ownership was not proven.');
+  for (const record of records) {
+    lines.push(`- Board \`${reportCorrelationDigest(record.boardNodeId)}\`:`);
+    const taxonomy = record.bucketing;
+    if (taxonomy) lines.push(`  - Taxonomy${ago(taxonomy.ts)}: input ${count(taxonomy.input)} · placed ${count(taxonomy.placed)} · missing ${count(taxonomy.missing)} · duplicated ${count(taxonomy.duplicated)} · ${taxonomy.error || taxonomy.blocked ? 'failed or blocked' : 'stage recorded'}.`);
+    const compensation = record.compensation;
+    if (compensation) lines.push(`  - Compensation${ago(compensation.ts)}: input ${count(compensation.scoredInput)} · eligible ${count(compensation.eligible)} · assessed ${count(compensation.assessed)} · researched cohorts ${count(compensation.researched)} · failed cohorts ${count(compensation.failedCohorts)}.`);
+    const history = record.history?.boardDisplay;
+    if (history) lines.push(`  - Seen-history${ago(history.ts)}: ${history.error ? 'failed' : history.skipped ? 'deferred' : 'recorded'} · input ${count(history.input)} · provisional rows ${count(history.staged)} · committed rows ${count(history.written)}. Provisional rows remain unseen until source deletion or its next scrape.`);
+  }
+  return lines;
+}
+
+export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvasFilePath, localApplications = [], omitJobAudit = false, currentJobHubIds = currentNodeIds, currentJobBoardIds = new Set(), boardTelemetryOwnership = {}) {
   let t;
   // Older direct callers/tests do not have the renderer's typed hub index.
   // Only an explicit sixth argument may narrow telemetry to typed Job Search
   // owners; otherwise preserve the historic node-set diagnostic seam.
   const telemetryOwners = arguments.length >= 6 ? currentJobHubIds : currentNodeIds;
   try { t = getJobsTelemetryForReport(telemetryOwners, reportWindowId); } catch { return ''; }
+  let boardTelemetry = [];
+  try { boardTelemetry = getJobsBoardTelemetryForReport(currentJobBoardIds, reportWindowId, canvasFilePath); } catch { /* optional Board stage diagnostics */ }
+  const hasBoardTelemetry = boardTelemetry.length > 0 || (nonnegativeCount(boardTelemetryOwnership.ambiguousOwnerIds) || 0) > 0 || boardTelemetryOwnership.topologyBounded === true;
   let careerCompilationOwners = [];
   // A Job Board's career override compiles under the Board's node id, so
   // career-compilation owners come from the full current node set (Boards
@@ -5667,14 +5818,14 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
   // whole-section drop the resumeAttempts comment above already documents.
   // Compilation can wait on AI before any provider pipeline is created.
   // Keep its diagnostics visible even when no search has started.
-  if (careerCompilationOwners.length === 0 && !t.careerSnapshotCache && !t.search && !t.pipeline && !hasResolves && !hasLinkedInEnrich && !t.scoring && !t.scoringHeartbeat && !t.bucketing && !t.compensation && !t.history && !hasBrowserScrape && !scopedApplication && !applicationSync && !t.indeedSession && !hasResumeAttempts && !hasSourceRunHistory && !hasMultiHubAttribution && visibleLocalApplications.length === 0) return '';
+  if (!hasBoardTelemetry && careerCompilationOwners.length === 0 && !t.careerSnapshotCache && !t.search && !t.pipeline && !hasResolves && !hasLinkedInEnrich && !t.scoring && !t.scoringHeartbeat && !t.bucketing && !t.compensation && !t.history && !hasBrowserScrape && !scopedApplication && !applicationSync && !t.indeedSession && !hasResumeAttempts && !hasSourceRunHistory && !hasMultiHubAttribution && visibleLocalApplications.length === 0) return '';
 
   const scope = pipelineScope(t.nodeId, t.windowId, currentNodeIds, reportWindowId, {
     label: 'Source hub',
     deletedNoun: 'hub',
   });
   if (scope.foreign) {
-    if (careerCompilationOwners.length === 0 && !scopedApplication && !applicationSync && visibleLocalApplications.length === 0 && !hasSourceRunHistory && !hasMultiHubAttribution) return `\n## Job Search Pipeline\n${scope.note}`;
+    if (!hasBoardTelemetry && careerCompilationOwners.length === 0 && !scopedApplication && !applicationSync && visibleLocalApplications.length === 0 && !hasSourceRunHistory && !hasMultiHubAttribution) return `\n## Job Search Pipeline\n${scope.note}`;
     // A local application generation/Sync must remain reportable even when a
     // different window owns the process-global last jobs run. Drop only that
     // foreign funnel rather than returning before the local sections render.
@@ -5698,6 +5849,7 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
   } catch { /* cache absent is fine — treat all platforms as unconfirmed */ }
 
   const lines = [];
+  lines.push(...boardWorkTelemetryLines(boardTelemetry, boardTelemetryOwnership));
   // Preserve legacy unowned/synthetic telemetry while real windows use the
   // sender-local, per-hub inventory above. Never merge these stage records
   // into a single owner's provider/search funnel.
@@ -8673,7 +8825,9 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
   } else {
     lines.push(telemetryAmbiguity
       ? `\n### Taxonomy (hiring fit → salary → role)\n- (not attributed: ${telemetryAmbiguity}. Taxonomy counters are not summed across hubs.)`
-      : '\n### Taxonomy (hiring fit → salary → role)\n- (no taxonomy recorded this session)');
+      : hasBoardTelemetry
+        ? '\n### Taxonomy (hiring fit → salary → role)\n- (no source-owned taxonomy recorded; independently owned stages are listed under Job Board work above)'
+        : '\n### Taxonomy (hiring fit → salary → role)\n- (no taxonomy recorded this session)');
   }
 
   // ── Application generation (last) ──────────────────────────────────────────

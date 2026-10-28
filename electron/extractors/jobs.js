@@ -109,6 +109,17 @@ export const GLASSDOOR_EXTRACTOR = `
     ? location.origin
     : 'https://www.glassdoor.com';
 
+  // Apollo and DOM links can each be absolute, protocol-relative or relative.
+  // Resolve all of them the same way; prefixing the origin corrupts the first
+  // two forms and leaves path-relative links without a separating slash.
+  const listingUrl = (value) => {
+    if (typeof value !== 'string' || !value.trim()) return '';
+    try {
+      const parsed = new URL(value, gdOrigin + '/');
+      return /^https?:$/.test(parsed.protocol) ? parsed.href : '';
+    } catch { return ''; }
+  };
+
   // Strategy 0: believe the board's own stated count.
   //
   // A Glassdoor search with genuinely zero matches still RENDERS about five
@@ -151,7 +162,7 @@ export const GLASSDOOR_EXTRACTOR = `
           salary: value.salarySource?.payRange ? String(value.salarySource.payRange) : (value.salaryEstimate || ''),
           salaryProvenance: value.salarySource?.payRange ? 'unknown' : value.salaryEstimate ? 'estimated' : 'unknown',
           snippet: (employer.overallRating ? 'Rating: ' + employer.overallRating + '/5 | ' : '') + (value.jobDescription || ''),
-          url: value.seoJobLink ? (gdOrigin + value.seoJobLink) : (value.jobLink || ''),
+          url: listingUrl(value.seoJobLink) || listingUrl(value.jobLink),
           posted: value.ageInDays != null ? (value.ageInDays + 'd ago') : '',
           source: 'glassdoor'
         });
@@ -177,7 +188,7 @@ export const GLASSDOOR_EXTRACTOR = `
                     || titleEl?.closest('a')
                     || card.querySelector('a[href*=".htm"]');
         const href = linkEl?.getAttribute('href') || (jobId ? '/partner/jobListing.htm?jl=' + jobId : '');
-        const url = href.startsWith('http') ? href : (href ? gdOrigin + href : '');
+        const url = listingUrl(href);
 
         // Employer NAME only. The name-specific selectors come first because
         // [data-test="detailRecruiter"] is the wrapper that also holds the star

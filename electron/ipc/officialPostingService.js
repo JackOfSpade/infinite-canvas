@@ -418,7 +418,8 @@ export async function resolveOfficialPostings(jobs, {
     } catch (error) {
       stats.failed += 1;
       console.warn('[OfficialPosting] Resolution storage failed:', error?.code || error?.name || 'Error');
-      return unresolvedOfficialPosting(member.job, { outcome: 'failed', trail: [...(result.officialPosting?.trail || []), 'failed'] });
+      return unresolvedOfficialPosting(member.job, { outcome: 'failed', trail: [...(result.officialPosting?.trail || []), 'storage-failed'],
+        fetchFailures: result.officialPosting?.fetchFailures });
     }
   };
   try {

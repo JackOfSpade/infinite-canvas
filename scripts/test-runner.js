@@ -2,6 +2,11 @@ import application_bundle_links from './tests/application-bundle-links.js';
 import application_unit_patches from './tests/application-unit-patches.js';
 import application_render_faults from './tests/application-render-faults.js';
 import application_rule_tally from './tests/application-rule-tally.js';
+import job_artifact_hardening from './tests/job-artifact-hardening.js';
+import job_backend_hardening from './tests/job-backend-hardening.js';
+import job_board_result_summary from './tests/job-board-result-summary.js';
+import job_board_telemetry from './tests/job-board-telemetry.js';
+import job_board_reporting from './tests/job-board-reporting.js';
 import fs from 'node:fs';
 import base64 from './tests/base64.js';
 import marketplace_monitor from './tests/marketplace-monitor.js';
@@ -18,6 +23,7 @@ import platform_utils from './tests/platform-utils.js';
 import skill_opportunities from './tests/skill-opportunities.js';
 import resume_download_bundle from './tests/resume-download-bundle.js';
 import application_edit_log from './tests/application-edit-log.js';
+import application_watchlist from './tests/application-watchlist.js';
 import career_import_log from './tests/career-import-log.js';
 import application_generation_gate from './tests/application-generation-gate.js';
 import application_multi_posting from './tests/application-multi-posting.js';
@@ -44,7 +50,6 @@ import official_posting_r4_skills from './tests/official-posting-r4-skills.js';
 import official_posting_r4_generation from './tests/official-posting-r4-generation.js';
 import official_posting_r2_guard from './tests/official-posting-r2-guard.js';
 import official_posting_r2_binding from './tests/official-posting-r2-binding.js';
-import official_posting_r2_closing from './tests/official-posting-r2-closing.js';
 import official_posting_skills from './tests/official-posting-skills.js';
 import official_posting_skill_selection from './tests/official-posting-skill-selection.js';
 import official_posting_fetch from './tests/official-posting-fetch.js';
@@ -240,6 +245,11 @@ import oracle_leak_gate from './tests/oracle-leak-gate.js';
 // Keep the file name beside its group so omissions and stale registrations
 // fail before a green test run gives a false signal.
 const testGroups = [
+  ['job-artifact-hardening.js', job_artifact_hardening],
+  ['job-backend-hardening.js', job_backend_hardening],
+  ['job-board-result-summary.js', job_board_result_summary],
+  ['job-board-telemetry.js', job_board_telemetry],
+  ['job-board-reporting.js', job_board_reporting],
   ['base64.js', base64],
   ['marketplace-monitor.js', marketplace_monitor],
   ['ai-models.js', ai_models],
@@ -255,6 +265,7 @@ const testGroups = [
   ['skill-opportunities.js', skill_opportunities],
   ['resume-download-bundle.js', resume_download_bundle],
   ['application-edit-log.js', application_edit_log],
+  ['application-watchlist.js', application_watchlist],
   ['career-import-log.js', career_import_log],
   ['application-generation-gate.js', application_generation_gate],
   ['application-multi-posting.js', application_multi_posting],
@@ -281,7 +292,6 @@ const testGroups = [
   ['official-posting-r4-generation.js', official_posting_r4_generation],
   ['official-posting-r2-guard.js', official_posting_r2_guard],
   ['official-posting-r2-binding.js', official_posting_r2_binding],
-  ['official-posting-r2-closing.js', official_posting_r2_closing],
   ['official-posting-skills.js', official_posting_skills],
   ['official-posting-skill-selection.js', official_posting_skill_selection],
   ['official-posting-fetch.js', official_posting_fetch],

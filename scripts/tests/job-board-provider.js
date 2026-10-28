@@ -6176,7 +6176,8 @@ export default [
       'the optional request id must travel through IPC and every compensation progress event without breaking non-board callers');
       const bucketHandlerStart = main.indexOf("handleSafe('bucket-jobs'");
       const bucketHandler = main.slice(bucketHandlerStart, main.indexOf("handleSafe('resolve-job-source'", bucketHandlerStart));
-      assert(bucketHandler.includes('runBoundedJobTaxonomy(jobs')
+      assert(bucketHandler.includes('runBoardTaxonomy(jobs')
+        && main.includes('dependencies.runBoardTaxonomy || runBoundedJobTaxonomy')
         && bucketHandler.includes('strategy: \'bounded-plan-chunks\'')
         && bucketHandler.includes('inspectJobBoardRoleByIndex(result?.roleByIndex')
         && bucketHandler.includes('normalizeJobBoardRoleByIndex(result?.roleByIndex'),

@@ -65,7 +65,7 @@ try {
   const rebuilt = page.locator('.react-flow__node-jobcard[data-id="rebuilt-card"]');
   const retry = page.locator('.react-flow__node-jobcard[data-id="lookup-retry-card"]');
   await retry.getByRole('button', { name: 'Check again', exact: true }).waitFor();
-  assert.match(await retry.innerText(), /Official lookup incomplete: page fetch timed out/u);
+  assert.match(await retry.innerText(), /Employer site verification timed out/u);
   assert.match(await retry.innerText(), /Complete the official posting lookup before generating/u);
   assert.equal(await retry.getByRole('button', { name: 'Generate anyways', exact: true }).count(), 0,
     'an incomplete source lookup offers retry, without a bypass');

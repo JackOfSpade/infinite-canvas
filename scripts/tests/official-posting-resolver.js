@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { freeOfficialPostingLeads, officialPostingChunks, officialPostingRequestId, resolveOfficialPosting } from '../../electron/ipc/officialPostingResolver.js';
 import { createOfficialPostingStore, officialPostingView } from '../../electron/ipc/officialPostingStore.js';
+import { officialPostingLookupStatus } from '../../electron/ipc/officialPostingFields.js';
 
 const description = 'Requirements include experience building reliable services and maintaining reporting workflows. Engineers design clear interfaces for dispatch teams and validate operational changes with careful review. The role includes improving data quality across scheduled pipelines and documenting decisions for partner teams. You will work with colleagues to investigate delivery failures and make service behavior understandable. Responsibilities include writing tests for new features and improving the tools used by support teams every day.';
 const row = (extra = {}) => ({ title: 'Software Engineer at Northwind Labs', company: 'Acme Talent Partners', location: 'Lakeview, Ontario, Canada',
@@ -41,6 +42,42 @@ function teamtailorPages({ rssId = 'req-one', pageId = 'req-one' } = {}) {
 }
 
 export default [
+  {
+    name: 'official lookup retains the failed verification URL and HTTP cause without replacing the scraped listing',
+    async run() {
+      const url = 'https://northwind.test/jobs/blocked';
+      const original = row({ company: 'Northwind Labs', title: 'Software Engineer' });
+      const before = JSON.stringify(original);
+      const result = await resolveOfficialPosting(original, { candidateUrls: [url], research: async () => [],
+        fetch: async requested => { throw Object.assign(new Error('PRIVATE RESPONSE BODY'), {
+          code: 'fetch-failed', statusCode: 403, url: requested,
+        }); } });
+      assert.equal(JSON.stringify(original), before);
+      assert.ok(result.officialPosting.fetchFailures.some(failure => failure.url === url && failure.statusCode === 403 && failure.reason === 'access-denied'));
+      assert.ok(result.officialPosting.fetchFailures.length <= 8);
+      assert.equal(JSON.stringify(result).includes('PRIVATE RESPONSE BODY'), false);
+      const status = officialPostingLookupStatus(result.officialPosting);
+      assert.equal(status.state, 'incomplete'); assert.equal(status.retryable, true);
+      assert.match(status.detail, /northwind\.test\/jobs\/blocked/u);
+      assert.match(status.detail, /HTTP 403/u); assert.match(status.detail, /original listing is retained/u);
+    },
+  },
+  {
+    name: 'official lookup reports storage failures separately from a failed page request',
+    async run() {
+      let saves = 0;
+      const result = await resolveOfficialPosting(row(), { candidateUrls: ['https://northwind.test/'], fetch: network(careersPages()),
+        store: { find: async () => null, save: async () => { saves++; throw new Error('Disk unavailable'); } } });
+      assert.equal(saves, 1);
+      assert.equal(result.officialPosting.outcome, 'failed');
+      assert.ok(result.officialPosting.trail.includes('storage-failed'));
+      assert.equal(result.officialPosting.trail.includes('fetch-failed'), false);
+      assert.equal(officialPostingLookupStatus(result.officialPosting).label, 'Official posting check could not be saved');
+      const unexpected = await resolveOfficialPosting(row(), { store: { find: async () => { throw new Error('Unexpected lookup failure'); } } });
+      assert.equal(unexpected.officialPosting.trail.includes('fetch-failed'), false);
+      assert.equal(officialPostingLookupStatus(unexpected.officialPosting).label, 'Official posting lookup incomplete');
+    },
+  },
   {
     name: 'official tenant ownership propagates from a later proven root through already-fetched careers pages in every lead order',
     async run() {

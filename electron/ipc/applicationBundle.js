@@ -15,6 +15,25 @@ const WINDOWS_RESERVED_NAMES = new Set([
   'LPT1', 'LPT2', 'LPT3', 'LPT4', 'LPT5', 'LPT6', 'LPT7', 'LPT8', 'LPT9',
 ]);
 
+export const APPLICATION_BUNDLE_PART_MAX_CODE_POINTS = 100;
+export const APPLICATION_BUNDLE_PART_MAX_BYTES = 255;
+const utf8Encoder = new TextEncoder();
+
+/** Leave room for a trusted collision suffix under both filesystem limits. */
+export function truncateApplicationBundlePart(value, suffix = '') {
+  let bytes = utf8Encoder.encode(suffix).length;
+  let points = [...suffix].length;
+  let prefix = '';
+  for (const char of value) {
+    const size = utf8Encoder.encode(char).length;
+    if (points >= APPLICATION_BUNDLE_PART_MAX_CODE_POINTS || bytes + size > APPLICATION_BUNDLE_PART_MAX_BYTES) break;
+    prefix += char;
+    points += 1;
+    bytes += size;
+  }
+  return prefix + suffix;
+}
+
 export function sanitizeApplicationBundlePart(value, fallback) {
   const cleaned = String(value || '')
     .replace(/[\s\S]/g, char => (char.charCodeAt(0) < 32 || char.charCodeAt(0) === 127) ? ' ' : char)
@@ -22,7 +41,7 @@ export function sanitizeApplicationBundlePart(value, fallback) {
     .replace(/\s+/g, ' ')
     .replace(/^[. ]+|[. ]+$/g, '')
     .trim();
-  const capped = [...cleaned].slice(0, 100).join('').replace(/[. ]+$/g, '').trim();
+  const capped = truncateApplicationBundlePart(cleaned).replace(/[. ]+$/g, '').trim();
   if (!capped || capped === '.' || capped === '..') return fallback;
   const stem = capped.split('.')[0].toUpperCase();
   return WINDOWS_RESERVED_NAMES.has(stem) ? fallback : capped;
@@ -109,7 +128,6 @@ function safeVariantText(value, maxLength) {
   if (value == null) return '';
   if (typeof value !== 'string' && typeof value !== 'number') return '';
   const raw = String(value).replace(CONTROL_CHAR_GLOBAL_RE, ' ').replace(/\s+/g, ' ').trim();
-  if (raw.length > maxLength * 4) return [...raw].slice(0, maxLength).join('').trim();
   return [...raw].slice(0, maxLength).join('').trim();
 }
 
@@ -150,7 +168,9 @@ export function normaliseJobPostingVariants(raw) {
     if (!url && !googleCardUrl) continue;
     const location = safeVariantText(entry.location, MAX_POSTING_VARIANT_LOCATION_LENGTH);
     const liveness = entry.liveness === 'closed' ? 'closed' : '';
-    const key = `${(url || googleCardUrl).toLowerCase()}\u0000${location.toLowerCase()}\u0000${liveness}`;
+    // URL canonicalization already folds host casing. Paths, query values and
+    // fragment routes can identify distinct postings and remain case-sensitive.
+    const key = `${url || googleCardUrl}\u0000${location.toLowerCase()}\u0000${liveness}`;
     if (seen.has(key)) continue;
     seen.add(key);
     out.push({
@@ -170,7 +190,8 @@ export function normaliseJobPostingVariants(raw) {
 
 function textFence(value) {
   const source = String(value || '');
-  const longest = Math.max(2, ...(source.match(/`+/g) || []).map(run => run.length));
+  let longest = 2;
+  for (const match of source.matchAll(/`+/g)) longest = Math.max(longest, match[0].length);
   const fence = '`'.repeat(longest + 1);
   return `${fence}text\n${source}\n${fence}`;
 }

@@ -6,6 +6,8 @@ import { comparisonRow } from './official-posting-r3-resolver.js';
 import { comparativeServiceFixture, comparisonVisible, serviceComparisonAnswer } from './official-posting-r3-service.js';
 import { createOfficialPostingStore } from '../../electron/ipc/officialPostingStore.js';
 import { getPreparedOfficialPosting, prepareOfficialPostingForGeneration as prepareSemanticOfficialPostingForGeneration } from '../../electron/ipc/officialPostingGeneration.js';
+import { OfficialPostingFetchError } from '../../electron/ipc/officialPostingFetch.js';
+import { officialPostingLookupStatus } from '../../electron/ipc/officialPostingFields.js';
 
 const description = 'Requirements include experience building reliable dispatch tools and maintaining reporting workflows. Engineers design clear interfaces for operations teams and validate changes through careful review. The role improves data quality across scheduled pipelines and documents decisions for partner groups. You will collaborate with colleagues to investigate delivery failures and make service behavior understandable. Responsibilities include writing tests for new features and improving tools that support teams use every day.';
 const location = 'Lakeview, Ontario, Canada';
@@ -49,6 +51,42 @@ async function assertPreserved(store, job, before, fetch) {
 }
 
 export default [
+  {
+    name: 'Official posting rechecks retain only the latest transport failure and clear stale diagnostics after unchanged success',
+    async run() {
+      await withStore(async store => {
+        const job = row(); const before = await store.save(job, { officialPosting: posting(), description });
+        for (const [statusCode, reason, url] of [
+          [403, 'access-denied', 'https://northwind.test/careers/blocked'],
+          [503, 'server-error', 'https://northwind.test/jobs/unavailable'],
+        ]) {
+          const result = await assertPreserved(store, job, before, async target => {
+            assert.equal(target, sourceUrl);
+            throw Object.assign(new OfficialPostingFetchError('fetch-failed', { statusCode }), { url });
+          });
+          const expected = [{ url, code: 'fetch-failed', reason, statusCode }];
+          assert.deepEqual(result.officialPosting.fetchFailures, expected, 'a new recheck replaces the previous transport diagnosis');
+          assert.deepEqual((await store.find(job)).officialPosting.fetchFailures, expected, 'the current failure survives storage');
+          assert.equal(officialPostingLookupStatus(result.officialPosting).label, 'Previously verified official posting');
+        }
+        const recovered = await prepareOfficialPostingForGeneration(args(job), {
+          store, bridgeStatus: () => status(true), fetch: async target => { assert.equal(target, sourceUrl); return page(html()); },
+        });
+        const saved = await store.find(job);
+        for (const current of [recovered.officialPosting, saved.officialPosting]) {
+          assert.equal(current.level, before.officialPosting.level);
+          assert.equal(current.contentHash, before.officialPosting.contentHash);
+          assert.equal(current.fetchFailures, undefined);
+          assert.equal(current.trail.includes('reverify-failed'), false);
+          assert.equal(current.trail.includes('fetch-failed'), false);
+          assert.equal(current.trail.includes('fetch-failed'), false);
+          assert.equal(officialPostingLookupStatus(current).label, 'Exact official posting verified');
+        }
+        assert.equal(getPreparedOfficialPosting(recovered.resolutionId, job).description, description);
+        assert.equal(await store.readText(saved.officialPosting.contentHash), description);
+      });
+    },
+  },
   {
     name: 'Amendment 4 complete cached proof survives repeated transient rechecks without becoming a partial crawl',
     async run() {

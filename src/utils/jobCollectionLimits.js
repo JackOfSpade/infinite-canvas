@@ -36,9 +36,10 @@ export const JOB_COLLECTION_AUTO_LIMITS = Object.freeze({
 export const JOB_COLLECTION_PAGE_CEILING = JOB_COLLECTION_AUTO_LIMITS.pagesPerQuery;
 
 function positiveInteger(value, fallback, maximum) {
-  if (value == null || value === '') return fallback;
+  if ((typeof value !== 'number' && typeof value !== 'string')
+      || (typeof value === 'string' && !value.trim())) return fallback;
   const number = Number(value);
-  return Number.isFinite(number) && number > 0
+  return Number.isFinite(number) && number >= 1
     ? Math.min(Math.floor(number), maximum)
     : fallback;
 }
@@ -81,7 +82,12 @@ export function resolvePageCeiling(limits) {
  * Explicit page values intentionally opt out of this aggregate Auto budget.
  */
 export function resolveBrowserPageBudgets(limits, queryCount) {
-  const count = Math.max(0, Math.floor(Number(queryCount) || 0));
+  // Query count comes from the query bundle, not a user limit. Refuse malformed
+  // counts before allocating: Infinity previously reached Array(Infinity),
+  // while booleans/arrays silently manufactured queries.
+  const number = (typeof queryCount === 'number' || typeof queryCount === 'string')
+    ? Number(queryCount) : NaN;
+  const count = Number.isSafeInteger(number) && number > 0 && number <= 0xFFFFFFFF ? number : 0;
   if (count === 0) return [];
   const explicit = normalizeJobCollectionLimits(limits).pagesPerPlatform;
   if (explicit != null) return Array(count).fill(explicit);

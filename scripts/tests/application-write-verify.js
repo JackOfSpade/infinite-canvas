@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {
-  WRITE_VERIFY_BRIEF, WRITE_VERIFY_BRIEF_MAX_CHARS, WRITE_VERIFY_JUDGE_RUBRIC, WRITE_VERIFY_SHORTLIST_STEP, WRITE_VERIFY_LISTING_CLOSING_RULE,
+  WRITE_VERIFY_BRIEF, WRITE_VERIFY_BRIEF_MAX_CHARS, WRITE_VERIFY_JUDGE_RUBRIC, WRITE_VERIFY_SHORTLIST_STEP,
   WRITE_VERIFY_PROTOCOL, WRITE_VERIFY_DEFAULT_CANDIDATES, WRITE_VERIFY_STAGES, WRITE_VERIFY_MAX_FIT_CORRECTIONS, acceptedWriteVerifyCandidates,
   WRITE_VERIFY_DROPPED_FINDINGS_HEADING, WRITE_VERIFY_DROPPED_FINDINGS_MAX, droppedCandidateFindings,
   WRITE_VERIFY_PRIOR_ROUND_FINDINGS_MAX, WRITE_VERIFY_PRIOR_ROUNDS_HEADING, priorRoundFindings,
@@ -208,7 +208,7 @@ export default [
       assert.equal(WRITE_VERIFY_BRIEF.split("which of this job's needs it meets").length, 2, 'the need-it-meets phrase appears exactly once');
       assert.ok(WRITE_VERIFY_BRIEF.includes('Do not open consecutive paragraphs with the same word or link two paragraphs to the job with the same sentence pattern.'), 'the brief forbids consecutive paragraphs opening with the same word');
       assert.equal(WRITE_VERIFY_BRIEF.includes('where this job needs it'), false, 'the old where-this-job-needs-it wording is gone (user decision, 2026-10-20)');
-      assert.equal(WRITE_VERIFY_BRIEF.length, 968, 'the brief is exactly 968 characters after the equal-length closing sentence swap');
+      assert.equal(WRITE_VERIFY_BRIEF.length, 968, 'the brief is exactly 968 characters after the equal-length unused-proof closing swap');
       assert.equal(WRITE_VERIFY_BRIEF.includes('the need it serves'), false, 'the need-it-serves wording was replaced so the point says the work meets the need (user decision, 2026-10-21)');
       assert.equal(WRITE_VERIFY_BRIEF.includes('in plain words'), false, 'the plain-words wording was replaced by the explicit-link wording (user decision, 2026-10-21)');
       assert.equal(WRITE_VERIFY_BRIEF.includes('a claim about your work this job needs'), false, 'the implicit-link wording is gone');
@@ -217,7 +217,7 @@ export default [
       assert.match(WRITE_VERIFY_SHORTLIST_STEP, /a line reading exactly EDITORIAL SUMMARY, give a short explanation of the finished application/u);
       assert.ok(WRITE_VERIFY_SHORTLIST_STEP.indexOf('EDITORIAL SUMMARY') > WRITE_VERIFY_SHORTLIST_STEP.indexOf('EVIDENCE SHORTLIST'), 'the explanation follows the evidence appendix');
       assert.match(WRITE_VERIFY_SHORTLIST_STEP, /After the complete letter, add two editorial appendices/u);
-      assert.ok(WRITE_VERIFY_BRIEF.includes(' Close on wider significance, not a recap. '), 'the close widens the argument rather than recapping it');
+      assert.ok(WRITE_VERIFY_BRIEF.includes(' Close on a wider point from unused proof. '), 'the close draws a wider point from proof the body has not used');
       assert.equal(WRITE_VERIFY_BRIEF.includes('End on your argument, not stock courtesy.'), false, 'the old closing sentence is replaced');
       // Sabotage: the replaced letter sentences must be gone, so the brief carries one letter instruction set, not two.
       assert.equal(WRITE_VERIFY_BRIEF.includes('your hedged read'), false, 'the old hedged-read wording is gone');
@@ -231,7 +231,7 @@ export default [
       assert.ok(WRITE_VERIFY_JUDGE_RUBRIC.includes('states its full point in its first one or two sentences'), 'the panel rewards point-first paragraphs');
       assert.ok(WRITE_VERIFY_JUDGE_RUBRIC.includes('opens on evidence or only on what the role needs'), 'the panel marks evidence-first paragraphs down');
       assert.ok(WRITE_VERIFY_JUDGE_RUBRIC.includes("a closing of stock courtesy rather than the letter's own argument"), 'the panel marks a courtesy close down');
-      assert.ok(WRITE_VERIFY_JUDGE_RUBRIC.includes("a close that recaps the letter's examples instead of widening the case"), 'the panel marks an example-recap close down');
+      assert.ok(WRITE_VERIFY_JUDGE_RUBRIC.includes("a close that retells details or examples the body already gave, however it frames them, or rests on a maxim any applicant could write, instead of drawing a wider point from proof the body has not used"), 'the panel marks an example-recap close down');
       assert.ok(WRITE_VERIFY_JUDGE_RUBRIC.includes('framed once as that reading rather than as a probability'), 'the panel rewards a thesis framed as a reading, not a probability');
       assert.ok(WRITE_VERIFY_JUDGE_RUBRIC.includes('same connective or sentence pattern linking the candidate\'s work to the job in two or more paragraphs'), 'the panel marks a repeated connective down');
       assert.ok(WRITE_VERIFY_JUDGE_RUBRIC.includes('past or present perfect'), 'the panel checks the tense of past work');
@@ -263,9 +263,9 @@ export default [
       const employerLicence = 'Name the employer only in a short sentence of its own about its need or your wish to join it';
       assert.equal(contract.includes(employerLicence), false, 'Amendment 6 removes the employer naming instruction');
       assert.equal(WRITE_VERIFY_BRIEF.includes(employerLicence), false, 'the own-sentence rule remains outside the brief');
-      assert.ok(contract.includes(`. ${SOURCE_FIGURE_GROUNDING_RULE}. ${WRITE_VERIFY_LISTING_CLOSING_RULE} Every sentence about the candidate's own work must share at least ${MIN_SHARED_SOURCE_TERMS} meaningful terms with the quotes its unit cites, where ${SOURCE_TERM_OVERLAP_RULE}, and ${LETTER_TERM_FORMS_RULE}.`), 'figure rule then the scoped final-paragraph exception and unchanged career overlap floor');
+      assert.ok(contract.includes(`. ${SOURCE_FIGURE_GROUNDING_RULE}. Every sentence about the candidate's own work must share at least ${MIN_SHARED_SOURCE_TERMS} meaningful terms with the quotes its unit cites, where ${SOURCE_TERM_OVERLAP_RULE}, and ${LETTER_TERM_FORMS_RULE}.`), 'figure rule then the unchanged career overlap floor');
       assert.ok(contract.endsWith(`where ${SOURCE_TERM_OVERLAP_RULE}, and ${LETTER_TERM_FORMS_RULE}.`), 'ends on the unchanged career overlap rule, the letter word-form clause and a period');
-      assert.equal(contract.split(WRITE_VERIFY_LISTING_CLOSING_RULE).length, 2, 'the structural closing exception is stated once outside the brief');
+      assert.equal(/job-listing IDs|closed intent vocabulary/u.test(contract), false, 'no paragraph may substitute listing citations for career evidence');
       assert.ok(contract.includes(`${MIN_SHARED_SOURCE_TERMS} meaningful terms`));
       assert.ok(contract.includes('word form'));
       const heading = 'GROUNDING CONTRACT (deterministic checks read every unit against the quotes it cites, literally): ';

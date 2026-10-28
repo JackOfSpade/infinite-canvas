@@ -8,6 +8,8 @@ export default defineConfig([
   globalIgnores([
     'dist', 'dist-electron',
     '.gemini',                           // private agent scratch state
+    '.test-artifacts/*',                 // private probes and copied source snapshots
+    '!.test-artifacts/blackbox-run/',     // retain the maintained root harness scripts
     '.test-artifacts/blackbox-run/*/',     // generated runs; root harness scripts stay linted
     'tmp', 'temp', 'scratch',             // disposable local output, not maintained source
     'release',                            // electron-builder output (gitignored) — never lint built app copies

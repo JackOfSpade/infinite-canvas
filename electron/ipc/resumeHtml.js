@@ -68,6 +68,7 @@ import { titleCaseSkillGroupLabel } from './skillGroupLabel.js';
 // so this file re-uses the shared normalizer instead of a second copy.
 import {
   normaliseJobPostingVariants,
+  sanitizeApplicationBundlePart,
   normalizeBundleOfficialPosting,
   normalizeJobListingExternalUrl,
   MAX_POSTING_VARIANTS,
@@ -1261,20 +1262,6 @@ export function normaliseResumeDownloadBundle(raw = {}) {
     .replace(/\s+/g, ' ')
     .trim()
     .slice(0, maxLength);
-  const safePart = (value, fallback) => {
-    const cleaned = String(value ?? '')
-    .replace(/[/\\:*?"<>|]+/g, ' ')
-    .replace(/[\s\S]/g, char => (char.charCodeAt(0) < 32 || char.charCodeAt(0) === 127) ? ' ' : char)
-    .replace(/\s+/g, ' ')
-    .replace(/^[. ]+|[. ]+$/g, '')
-    .trim();
-    const capped = [...cleaned].slice(0, 100).join('').replace(/[. ]+$/g, '').trim();
-    // Windows rejects these names even with a normal-looking extension. ZIPs
-    // often get unpacked there, so use a friendly deterministic fallback.
-    return !capped || /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(capped)
-      ? fallback
-      : capped;
-  };
   const validPdfBase64 = (value) => {
     const pdfBase64 = String(value || '').replace(/\s/g, '');
     // Legacy saved workspaces may still contain embedded PDF bytes. Keep only
@@ -1361,8 +1348,8 @@ export function normaliseResumeDownloadBundle(raw = {}) {
   } : undefined;
   const officialPosting = normalizeBundleOfficialPosting(raw.officialPosting);
   return {
-    company: safePart(raw.company, 'Company'),
-    candidateName: safePart(raw.candidateName, 'Application'),
+    company: sanitizeApplicationBundlePart(raw.company, 'Company'),
+    candidateName: sanitizeApplicationBundlePart(raw.candidateName, 'Application'),
     jobUrl: safeJobPostingUrl(raw.jobUrl),
     listingLinkUrl: safeJobPostingUrl(raw.listingLinkUrl),
     ...(officialPosting ? { officialPosting } : {}),

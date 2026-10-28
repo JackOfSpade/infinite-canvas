@@ -3,7 +3,7 @@ import { useReactFlow, useStore } from '@xyflow/react';
 import { ChevronRight, ChevronDown, Plus } from 'lucide-react';
 import { NodeHandles } from './_shared/NodeHandles';
 import { EventLogger } from '../utils/EventLogger';
-import { clearRestoredJobTreeLayout, computeJobTreeView, countMatchingDescendantCards, ROLE_VISIBLE_DEFAULT } from './jobsearch/buildJobTree';
+import { clearRestoredJobTreeLayout, computeJobTreeView, countMatchingDescendantCards, normalizeJobGroupVisibleCount, ROLE_VISIBLE_DEFAULT } from './jobsearch/buildJobTree';
 import { hubCardFilter } from '../utils/jobCardFilters';
 
 /**
@@ -65,12 +65,13 @@ export const JobGroupNode = React.memo(function JobGroupNode({ id, data }) {
         data.childIds || [],
         (nid) => s.nodeLookup.get(nid),
         hubCardFilter(hubData),
+        data.hubId,
       );
     }, [data.hubId, data.childIds])
   );
 
   const visibleCount = isLeaf
-    ? Math.min(data.visibleCount ?? ROLE_VISIBLE_DEFAULT, liveCount)
+    ? Math.min(normalizeJobGroupVisibleCount(data.visibleCount), liveCount)
     : liveCount;
   const hasMore = isLeaf && visibleCount < liveCount;
   const remaining = liveCount - visibleCount;
@@ -102,13 +103,15 @@ export const JobGroupNode = React.memo(function JobGroupNode({ id, data }) {
       // re-expand starts fresh (computeJobTreeView then derives `hidden`).
       const resetIds = new Set();
       if (!willExpand) {
-        const queue = [...childIds];
-        while (queue.length > 0) {
-          const cid = queue.shift();
+        const stack = [...childIds];
+        while (stack.length > 0) {
+          const cid = stack.pop();
           if (resetIds.has(cid)) continue;
+          const child = byId.get(cid);
+          if (child?.data?.hubId !== data.hubId || child.type !== 'jobgroup') continue;
           resetIds.add(cid);
-          const grand = byId.get(cid)?.data?.childIds;
-          if (Array.isArray(grand)) queue.push(...grand);
+          const grand = child.data.childIds;
+          if (Array.isArray(grand)) stack.push(...grand);
         }
       }
       const updated = nodes.map(n => {

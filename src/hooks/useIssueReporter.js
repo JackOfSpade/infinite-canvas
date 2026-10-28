@@ -7,6 +7,7 @@ import { isJobNodeType, isSellNodeType } from '../utils/nodePresence';
 import { buildSellHubResolveSnapshot } from '../utils/sellHubResolveSnapshot';
 import { redactNodeForIssueReport } from '../utils/issueReportRedaction';
 import { collectCompactJobBoardTopology } from '../utils/jobBoardReportTopology';
+import { boundedCombinedSourceRuns } from '../utils/jobBoardProvenance';
 import { collectJobCompensationReport } from '../utils/jobCompensationReport';
 import { collectPointerProbes } from '../utils/pointerOcclusionProbe';
 import { useIsMountedRef } from './useIsMountedRef';
@@ -275,6 +276,7 @@ export function useIssueReporter({
             stale: safeReportField(data, 'stale') === true,
             staleReason: typeof safeReportField(data, 'staleReason') === 'string' ? safeReportField(data, 'staleReason').slice(0, 120) : null,
             combineSignature: typeof safeReportField(data, 'combineSignature') === 'string' ? safeReportField(data, 'combineSignature').slice(0, 4_000) : null,
+            combineSourceRuns: boundedCombinedSourceRuns(safeReportField(data, 'combineSourceRuns')),
             mergeUnique: reportBoardCount(safeReportField(safeReportField(data, 'mergeStats'), 'unique')),
             locationPostingsCollapsed: reportBoardCount(safeReportField(safeReportField(data, 'mergeStats'), 'locationVariantPostingsCollapsed')),
             connectedSourceHubIds: [...new Set(connectedSourceHubIds)].slice(0, 25),

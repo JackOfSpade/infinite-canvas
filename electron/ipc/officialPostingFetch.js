@@ -1,17 +1,29 @@
 import https from 'node:https';
 import dns from 'node:dns/promises';
 import net from 'node:net';
+import { OFFICIAL_FETCH_FAILURE_REASONS, officialHttpsUrl } from './officialPostingFields.js';
+
+export { OFFICIAL_FETCH_FAILURE_REASONS } from './officialPostingFields.js';
 
 export const OFFICIAL_FETCH_MAX_BYTES = 3 * 1024 * 1024;
 export const OFFICIAL_FETCH_TIMEOUT_MS = 15_000;
 export const OFFICIAL_FETCH_MAX_REDIRECTS = 5;
 export const OFFICIAL_FETCH_HOP_CAPABILITY = Symbol.for('infinite-canvas.official-posting-fetch-hop-hooks');
 
+function httpFailureReason(statusCode) {
+  if (statusCode === 401 || statusCode === 403) return 'access-denied';
+  if (statusCode === 429) return 'rate-limited';
+  if (Number.isInteger(statusCode) && statusCode >= 500 && statusCode <= 599) return 'server-error';
+  return undefined;
+}
+
 export class OfficialPostingFetchError extends Error {
-  constructor(code, { statusCode, retryAfter } = {}) {
+  constructor(code, { statusCode, retryAfter, reason } = {}) {
     super(`Official posting fetch rejected: ${code}`); this.name = 'OfficialPostingFetchError'; this.code = code;
     if (Number.isInteger(statusCode) && statusCode >= 100 && statusCode <= 599) this.statusCode = statusCode;
     if (typeof retryAfter === 'string') this.retryAfter = retryAfter.slice(0, 160);
+    const failureReason = httpFailureReason(this.statusCode) || reason;
+    if (code === 'fetch-failed' && OFFICIAL_FETCH_FAILURE_REASONS.includes(failureReason)) this.reason = failureReason;
   }
 }
 
@@ -56,6 +68,19 @@ function fetchUrl(value) {
 }
 export { fetchUrl as officialPostingFetchUrl };
 
+function failureAtUrl(error, value) {
+  if (!(error instanceof OfficialPostingFetchError)) return error;
+  const boundedUrl = candidate => {
+    if (!officialHttpsUrl(candidate)) return '';
+    try { return fetchUrl(candidate).href; } catch { return ''; }
+  };
+  // A reused transfer can fail on a later redirect hop than this subscriber
+  // reached. Preserve its validated origin rather than relabeling that failure.
+  const url = boundedUrl(error.url) || boundedUrl(value);
+  if (url) error.url = url; else delete error.url;
+  return error;
+}
+
 async function pinnedAddress(url, lookup) {
   const host = url.hostname.replace(/^\[|\]$/gu, '');
   if (net.isIP(host)) {
@@ -64,7 +89,7 @@ async function pinnedAddress(url, lookup) {
   }
   let rows;
   try { rows = await lookup(host, { all: true, verbatim: true }); }
-  catch { throw new OfficialPostingFetchError('fetch-failed'); }
+  catch { throw new OfficialPostingFetchError('fetch-failed', { reason: 'dns-error' }); }
   if (!Array.isArray(rows)) rows = [rows];
   if (!rows.length || rows.some(row => !isPublicOfficialAddress(row?.address))) throw new OfficialPostingFetchError('unsafe-address');
   return { address: rows[0].address, family: net.isIP(rows[0].address) };
@@ -102,8 +127,9 @@ export async function fetchOfficialPosting(value, {
       timer = setTimeout(timeout, Math.max(0, deadline - now())); timer.unref?.();
     }
   };
+  let url;
   try {
-    let url = fetchUrl(value);
+    url = fetchUrl(value);
     const requestedUrl = url.href;
     for (let redirects = 0; ; redirects += 1) {
       if (controller.signal.aborted) throw interrupted();
@@ -131,7 +157,7 @@ export async function fetchOfficialPosting(value, {
         const fail = error => {
           if (finished) return; finished = true; cleanup();
           response?.destroy(); req?.destroy();
-          reject(error instanceof OfficialPostingFetchError ? error : new OfficialPostingFetchError('fetch-failed'));
+          reject(failureAtUrl(error instanceof OfficialPostingFetchError ? error : new OfficialPostingFetchError('fetch-failed', { reason: 'network-error' }), url.href));
         };
         const onAbort = () => fail(interrupted());
         controller.signal.addEventListener('abort', onAbort, { once: true });
@@ -148,8 +174,8 @@ export async function fetchOfficialPosting(value, {
           }, res => {
             response = res;
             res.on('error', fail);
-            res.on('aborted', () => fail(new OfficialPostingFetchError('fetch-failed')));
-            res.on('close', () => { if (!finished) fail(new OfficialPostingFetchError('fetch-failed')); });
+            res.on('aborted', () => fail(new OfficialPostingFetchError('fetch-failed', { reason: 'network-error' })));
+            res.on('close', () => { if (!finished) fail(new OfficialPostingFetchError('fetch-failed', { reason: 'network-error' })); });
             const status = res.statusCode || 0;
             if ([301, 302, 303, 307, 308].includes(status)) {
               const location = res.headers.location;
@@ -190,11 +216,13 @@ export async function fetchOfficialPosting(value, {
         } catch (error) { fail(error); }
         });
         if (now() >= deadline) throw new OfficialPostingFetchError('fetch-timeout');
-      } catch (error) { hopError = error; throw error; }
+      } catch (error) { hopError = failureAtUrl(error, url.href); throw hopError; }
       finally { lease?.release?.(hopError, result); }
       if (!result.redirect) return { ...result, requestedUrl };
       url = result.redirect;
     }
+  } catch (error) {
+    throw failureAtUrl(error, url?.href);
   } finally {
     clearTimeout(timer); signal?.removeEventListener('abort', abort);
   }

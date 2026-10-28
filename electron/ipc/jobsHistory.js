@@ -152,7 +152,7 @@ function isWithinAge(seenDate, maxAgeDays = MAX_AGE_DAYS) {
  * parser had to discard (a legacy row written before csvEscape collapsed
  * newlines split into <5-column fragments). Callers that don't care omit it.
  */
-async function loadJobsHistoryUnlocked(canvasFilePath, stats = null) {
+async function loadJobsHistoryUnlocked(canvasFilePath, stats = null, { requireReadable = false } = {}) {
   const filePath = historyPathForCanvas(canvasFilePath);
   if (!filePath) return [];
   let content;
@@ -162,6 +162,10 @@ async function loadJobsHistoryUnlocked(canvasFilePath, stats = null) {
     if (err.code === 'ENOENT') {
       logger.info('[JobsHistory] No history file found — treating as fresh start');
     } else {
+      // Reads fail open for search suppression. A read-modify-write must fail
+      // closed, or a transient disk/permission error erases the entire history
+      // when the later atomic replacement happens to succeed.
+      if (requireReadable) throw err;
       logger.warn('[JobsHistory] Read failed:', err.message);
     }
     return [];
@@ -354,7 +358,7 @@ export async function appendJobsHistory(canvasFilePath, jobs) {
 async function appendJobsHistoryLocked(canvasFilePath, filePath, jobs) {
   try {
     const readStats = {};
-    const existing = await loadJobsHistoryUnlocked(canvasFilePath, readStats);
+    const existing = await loadJobsHistoryUnlocked(canvasFilePath, readStats, { requireReadable: true });
     const fresh = existing.filter(r => isWithinAge(r.seen_date));
 
     // One normalized URL can occasionally be reused by a broken extractor or

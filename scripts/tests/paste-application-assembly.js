@@ -81,7 +81,7 @@ function fixture(overrides = {}, frozen = {}) {
 
 export default [
   {
-    name: 'document gates report each overlapping closing repair once and retain other failures',
+    name: 'document gates report a listing-only closing citation repair once and retain other failures',
     async run() {
       const kit = fixture();
       const extra = { id: 'closing', text: 'I would help your team while building reporting systems.', evidenceIds: ['job-need'] };
@@ -93,7 +93,6 @@ export default [
         frozen: { careerData, jobListing: kit.jobListing, careerSkillEvidence: { skills: [] } }, manifest: {},
       });
       assert(result.errors.length > 0, 'the invalid closing remains rejected');
-      assert(result.errors.some(error => error.includes('listing-grounded closing')), 'closing repair remains present');
       assert(result.errors.some(error => error.includes('career-data evidence ID')), 'citation repair remains present');
       assertStrict.equal(result.errors.length, new Set(result.errors).size, 'overlapping validators produce one copy of each repair');
       assertStrict.deepEqual(result.contentErrors, result.errors);
@@ -106,16 +105,16 @@ export default [
     run() {
       for (let index = 0; index < 65; index++) recordApplicationCorrectionCheck({ jobId: 'private-job-sentinel', stage: 'convert',
         errors: ['Cover-letter paragraph PRIVATE needs at least one career-data evidence ID.',
-          'Cover-letter paragraph 2, sentence 1: listing-grounded closing requires a valid clause.',
-          'Cover-letter paragraph 2, sentence 1: listing-grounded closing requires a valid clause.',
+          'Cover-letter paragraph PRIVATE needs at least one career-data evidence ID.',
+          'Cover-letter paragraph PRIVATE has no text.',
           'unit-source-grounding: private-quote-sentinel', 'references unknown evidence private-id-sentinel'] });
       recordApplicationCorrectionCheck({ stage: 'private-stage-sentinel', errors: ['private-text'] });
       const diagnostic = applicationCorrectionDiagnosticsMarkdown();
       assertStrict.equal((diagnostic.match(/ · stage `convert`/gu) || []).length, 60);
       assert(diagnostic.includes('distinct findings 4 · duplicate findings suppressed 1'));
-      assert(diagnostic.includes('listing-closing=1') && diagnostic.includes('missing-career-citation=1')
+      assert(diagnostic.includes('missing-career-citation=1') && diagnostic.includes('other=1')
         && diagnostic.includes('source-grounding=1') && diagnostic.includes('unknown-evidence=1'));
-      assert(!/private-|PRIVATE|valid clause/u.test(diagnostic), 'no raw values leave the projection');
+      assert(!/private-|PRIVATE/u.test(diagnostic), 'no raw values leave the projection');
       const payload = { nodes: [], edges: [], drawings: [], eventLog: [], description: 'Synthetic' };
       for (const filterCode of ['FULL', 'APPCORRECT', 'APPLICATION', 'APPVALIDATION'])
         assert(generateMarkdown({ ...payload, filterCode }).markdown.includes('## Application Correction Causes (APPCORRECT)'));
@@ -123,31 +122,6 @@ export default [
       assert(applyBugReportCode([], {}, 'APPCORRECT').matchedCodes.includes('APPCORRECT'));
       recordApplicationCorrectionCheck({ stage: 'fit-correction', errors: [] });
       assert(applicationCorrectionDiagnosticsMarkdown().includes('stage `fit-correction` · passed · distinct findings 0'));
-    },
-  },
-  {
-    name: 'APPCORRECT distinguishes closing gerund rejections from other gates without retaining private text',
-    run() {
-      const prefix = 'Cover-letter paragraph 2, sentence 1: listing-grounded closing requires ';
-      const gerund = `${prefix}clause 1 with no work gerund after its single anchored intent lead-in.`;
-      recordApplicationCorrectionCheck({ jobId: 'private-closing-job', stage: 'verify-correction', errors: [
-        gerund, gerund,
-        `${prefix}no figure, number or year.`,
-        `${prefix}clause 1 with no candidate-experience term.`,
-        `${prefix}every meaningful term in the closed intent vocabulary listed in the closing rule, the frozen company name or a cited listing quote.`,
-        `${prefix}private-future-rule-sentinel.`,
-        'unit-source-grounding: private-unrelated-source-sentinel',
-      ] });
-      const diagnostic = applicationCorrectionDiagnosticsMarkdown();
-      const latest = diagnostic.split('\n').find(line => line.startsWith('- '));
-      assert(latest.includes('distinct findings 6 · duplicate findings suppressed 1'));
-      assert(latest.includes('listing-closing=5'));
-      assert(latest.includes('closing checks work-gerund=1, figure=1, candidate-frame=1, vocabulary=1, other=1'));
-      assert(!/private-|Cover-letter paragraph|no work gerund/u.test(diagnostic));
-      const payload = { nodes: [], edges: [], drawings: [], eventLog: [], description: 'Synthetic' };
-      for (const filterCode of ['FULL', 'APPCORRECT']) {
-        assert(generateMarkdown({ ...payload, filterCode }).markdown.includes('closing checks work-gerund=1'));
-      }
     },
   },
   {

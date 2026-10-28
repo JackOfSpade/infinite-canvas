@@ -107,8 +107,6 @@ export default [
         }
       }
       for (const form of targetCompanyNameForms('Northwind Labs, Inc.')) assert.deepEqual(Object.keys(form), ['name']);
-      const closing = fs.readFileSync(new URL('../../electron/ipc/applicationListingClosing.js', import.meta.url), 'utf8');
-      assert.equal(closing.includes('same one anchored A3 lead-in as the employment'), false);
     },
   },
   {
@@ -122,14 +120,9 @@ export default [
     },
   },
   {
-    name: 'Amendment 9 closing and no-quote guard calls omit unread target title while quoted grounding retains it',
+    name: 'Amendment 9 no-quote guard call omits unread target title while quoted grounding retains it',
     run() {
       const source = fs.readFileSync(new URL('../../electron/ipc/localAiApplication.js', import.meta.url), 'utf8');
-      const closing = source.slice(source.indexOf('export function createApplicationListingClosingValidator('), source.indexOf('export function __finalParagraphListingGroundingForTests('));
-      assert.equal(/\bjobTitle\b/u.test(closing), false, 'closing closure has no dead jobTitle constant');
-      const guardCall = closing.slice(closing.indexOf('targetEmployerSentenceFailures:'), closing.indexOf('speaksOnlyOfApplicationIntent:'));
-      assert.equal(/\btargetTitle\s*:/u.test(guardCall), false, 'employment guard does not read a title');
-      assert.match(closing, /targetTitle: input\.job\?\.title/u);
       const unit = source.slice(source.indexOf('function pasteUnitGroundingErrors('), source.indexOf('// Test seam: the per-unit grounding twin'));
       const noQuote = unit.slice(unit.indexOf('if (!normalized.length)'), unit.indexOf('if (citationCount >'));
       assert.doesNotMatch(noQuote, /\btargetTitle\b/u);

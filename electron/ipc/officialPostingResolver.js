@@ -1,6 +1,6 @@
 import crypto from 'node:crypto';
 import { fetchOfficialPosting } from './officialPostingFetch.js';
-import { officialPostingEmployerText, normalizeApplyOptions, normalizeOfficialLocation, normalizeOfficialPosting, normalizeOfficialSalary, officialHttpsUrl, boundedOfficialPostingTrail, officialPostingComparativeTrail, OFFICIAL_POSTING_TRAIL } from './officialPostingFields.js';
+import { officialPostingEmployerText, normalizeApplyOptions, normalizeOfficialLocation, normalizeOfficialPosting, normalizeOfficialSalary, officialHttpsUrl, boundedOfficialPostingTrail, officialPostingComparativeTrail, officialPostingFetchFailure, normalizeOfficialPostingFetchFailure, OFFICIAL_FETCH_FAILURE_LIMIT, OFFICIAL_POSTING_TRAIL } from './officialPostingFields.js';
 import { extractOfficialPostingCandidates, scanOfficialCareersPage, officialSmartRecruitersAdapterUrl } from './officialPostingExtractors.js';
 import { domainBrandMatchesEmployer, extractAtsTenant, isAggregatorHost, isKnownAtsHost, isPosterAtsTenant, normalizedSourceHost, proveBidirectionalOwnership, proveEmployerDomain, registrableDomain, rootBrandingNamesPoster, rootFooterText, sameOwnershipHost, strictEmployerEqual } from './officialSourceHosts.js';
 import { buildOfficialPostingComparisonSet, canonicalLeadUrl, coreTitle, evaluateOfficialPostingMatch, flatPostingText, frozenOfficialEmployer, locationsCompatible, posterEmployerSignals, resolveScrapedEmployer, selectOfficialPostingMatch } from './officialPostingMatch.js';
@@ -25,7 +25,7 @@ const canonical = value => String(value ?? '').normalize('NFKC').replace(/\s+/gu
 const ROW_BUDGETS = new WeakMap();
 const ROW_ABORT_FANOUTS = new WeakMap();
 const RETRYABLE_MISS_TRAIL = new Set(['bridge-aborted', 'bridge-timeout', 'bridge-unavailable', 'research-miss',
-  'fetch-failed', 'fetch-timeout', 'crawl-budget', 'crawl-partial', 'official-text-missing', 'failed', 'comparative-invalid', 'comparative-unavailable', 'comparative-truncated', 'insufficient-text', 'semantic-uncertain', 'semantic-overflow', 'official-liveness-unconfirmed']);
+  'fetch-failed', 'fetch-timeout', 'crawl-budget', 'crawl-partial', 'official-text-missing', 'storage-failed', 'failed', 'comparative-invalid', 'comparative-unavailable', 'comparative-truncated', 'insufficient-text', 'semantic-uncertain', 'semantic-overflow', 'official-liveness-unconfirmed']);
 const DEFINITIVE_MISS_TRAIL = new Set(['closed', 'title-mismatch', 'location-mismatch', 'employer-mismatch',
   'tenant-unproven', 'poster-tenant', 'salary-mismatch', 'no-anchor', 'invalid-quotes', 'ambiguous', 'comparative-none', 'comparative-disagree']);
 
@@ -126,7 +126,7 @@ export function officialPostingChunks(jobs) {
 function trailCodes(values) { return boundedOfficialPostingTrail(values); }
 function fallback(job, options = {}) {
   try {
-    const { outcome = 'not-found', trail = [], alternatives = [] } = options || {};
+    const { outcome = 'not-found', trail = [], alternatives = [], fetchFailures = [] } = options || {};
     // Scraped identity remains untouched; only the bounded resolution display
     // fields use this projection. A malformed display cannot poison a run.
     // eslint-disable-next-line no-control-regex
@@ -136,8 +136,10 @@ function fallback(job, options = {}) {
       const url = officialHttpsUrl(item?.url); const title = display(item?.title, 500);
       return url && title ? [{ url, title }] : [];
     });
+    const failures = (Array.isArray(fetchFailures) ? fetchFailures : []).map(normalizeOfficialPostingFetchFailure).filter(Boolean).slice(0, OFFICIAL_FETCH_FAILURE_LIMIT);
     const officialPosting = normalizeOfficialPosting({ level: scraped.level, outcome,
-      employer: display(scraped.employer, 120), trail: trailCodes(Array.isArray(trail) ? trail : []), alternatives: safeAlternatives });
+      employer: display(scraped.employer, 120), trail: trailCodes(Array.isArray(trail) ? trail : []), alternatives: safeAlternatives,
+      ...(failures.length ? { fetchFailures: failures } : {}) });
     if (officialPosting) return { postedBy: scraped.postedBy || undefined, officialPosting };
   } catch { /* Even the fallback must tolerate an invalid scraped row. */ }
   return { officialPosting: { level: 'L6', outcome: 'failed', employer: '', trail: ['failed'] } };
@@ -304,7 +306,7 @@ export async function resolveOfficialPosting(job, {
           }), interrupted]);
           return page ? { page: { ...page, requestedUrl: page.requestedUrl || url } } : { error: 'fetch-failed' };
         } catch (error) { return { error: budget.signal.aborted ? abortCode() : error?.code || 'fetch-failed',
-          statusCode: error?.statusCode }; }
+          statusCode: error?.statusCode, reason: error?.reason, url: error?.url }; }
         finally { budget.signal.removeEventListener('abort', onAbort); }
       })();
       pages.set(url, pending);
@@ -318,7 +320,7 @@ export async function resolveOfficialPosting(job, {
       // A page timeout is not a row-budget timeout. Once there is a winner,
       // only an unread page on its host or tenant can make that proof partial.
       if (result.error !== 'fetch-timeout' || budgetState.exhaustionReason) trail.push(result.error);
-    }
+    } else budgetState.failures.delete(url);
     return result.page || null;
   };
   const rootProof = async (url, organization) => {
@@ -778,6 +780,24 @@ export async function resolveOfficialPosting(job, {
     }
   };
   const persist = async result => {
+    const receipts = await Promise.all([...pages].map(async ([url, pending]) => [url, await pending]));
+    // A researched lead can recover a previously failed redirect destination.
+    // Do not keep blaming that hop through its older requested-URL alias.
+    const recoveredUrls = new Set();
+    for (const [url, receipt] of receipts) {
+      if (!receipt.page || receipt.page.statusCode && receipt.page.statusCode !== 200) continue;
+      for (const value of [url, receipt.page.url, receipt.page.sourceUrl]) {
+        const recovered = officialHttpsUrl(value);
+        if (recovered) recoveredUrls.add(recovered);
+      }
+    }
+    const failures = new Map();
+    for (const [url, page] of receipts) {
+      if (!page.error) continue;
+      const failure = officialPostingFetchFailure({ ...page, code: page.error }, url);
+      if (failure && !recoveredUrls.has(failure.url)) failures.set(failure.url, failure);
+    }
+    if (result.officialPosting && failures.size) result.officialPosting.fetchFailures = [...failures.values()].slice(0, OFFICIAL_FETCH_FAILURE_LIMIT);
     if (comparison) result.comparison = comparison;
     if (semanticMatching && semanticSettled && result.officialPosting) {
       result.officialPosting.semanticMatch = { version: 1, inputHash: officialPostingSemanticInputHash(job),
@@ -795,7 +815,7 @@ export async function resolveOfficialPosting(job, {
       try {
         result.record = await store.save(job, { officialPosting: result.officialPosting, description: result.description });
         result.officialPosting = result.record.officialPosting;
-      } catch { return fallback(job, { outcome: 'failed', trail: [...(result.officialPosting?.trail || []), 'fetch-failed'] }); }
+      } catch { return fallback(job, { outcome: 'failed', trail: [...(result.officialPosting?.trail || []), 'storage-failed'], fetchFailures: result.officialPosting?.fetchFailures }); }
     }
     return result;
   };
@@ -1030,7 +1050,7 @@ export async function resolveOfficialPosting(job, {
     return await persist({ postedBy: !strictEmployerEqual(job?.company, employer) ? job?.company : undefined,
       officialPosting, ...(readable ? { description: candidate.description } : {}) });
   } catch (error) {
-    return await persist(fallback(job, { outcome: 'failed', trail: [...trail, error?.code || 'fetch-failed'] }));
+    return await persist(fallback(job, { outcome: 'failed', trail: [...trail, error?.code || 'failed'] }));
   } finally {
     if (cancel) signal.removeEventListener('abort', cancel);
     if (ownsBudget) budget.dispose();

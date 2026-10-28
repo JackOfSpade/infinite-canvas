@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { formatOriginalJobListingMarkdown, ORIGINAL_JOB_LISTING_BODY_HEADING, ORIGINAL_JOB_LISTING_TARGETS_HEADING } from '../../electron/ipc/applicationBundle.js';
+import { formatOriginalJobListingMarkdown } from '../../electron/ipc/applicationBundle.js';
 import * as local from '../../electron/ipc/localAiApplication.js';
 
 const company = 'Northwind Labs';
@@ -7,34 +7,24 @@ const careerQuote = 'I built dispatch rosters for freight routes. I maintained r
 const listingQuotes = [
   'Your team needs dispatch rosters for freight routes.',
   'Your mission is clear handoffs between dispatch teams and freight operations.',
-  'Your roadmap covers release checklists and route reporting.',
-  'Your teams use CedarOS for dispatch scheduling.',
 ];
 const prior = { id: 'career-paragraph', text: 'I built dispatch rosters for freight routes.', evidenceIds: ['career-one'] };
 const closing = (text = listingQuotes[0], evidenceIds = ['job-one']) => ({ id: 'listing-closing', text, evidenceIds });
-function context({ snippet = listingQuotes.join('\n'), evidence = null, paragraphs = null, ...extra } = {}) {
-  const input = { job: { title: 'Platform Engineer', company, location: 'Lakeview, Canada', url: 'https://board.example.test/platform',
-    snippet, postingVariants: [{ location: 'Riverton', url: 'https://board.example.test/other-location' }] } };
-  const acceptedEvidence = evidence || [{ id: 'career-one', sourceId: 'career-data', quote: careerQuote },
-    ...listingQuotes.map((quote, index) => ({ id: ['job-one', 'job-two', 'job-three', 'job-four'][index], sourceId: 'job-listing', quote }))];
-  const state = { careerData: careerQuote, sourceRoles: [], jobListing: formatOriginalJobListingMarkdown(input.job),
-    evidencePlan: { evidence: acceptedEvidence } };
-  return { input, state, acceptedEvidence, identityTokens: [], sourceRoles: [], projects: [], authority: null,
-    paragraphs: paragraphs || [structuredClone(prior), closing()], index: 1, ...extra };
-}
-function evaluate(options = {}) {
-  const ctx = context(options);
-  return local.__finalParagraphListingGroundingForTests(ctx);
+function context({ paragraphs = null } = {}) {
+  const job = { title: 'Platform Engineer', company, location: 'Lakeview, Canada', url: 'https://board.example.test/platform',
+    snippet: listingQuotes.join('\n') };
+  const acceptedEvidence = [{ id: 'career-one', sourceId: 'career-data', quote: careerQuote },
+    ...listingQuotes.map((quote, index) => ({ id: ['job-one', 'job-two'][index], sourceId: 'job-listing', quote }))];
+  return { job, acceptedEvidence, jobListing: formatOriginalJobListingMarkdown(job),
+    paragraphs: paragraphs || [structuredClone(prior), closing()], index: 1 };
 }
 function twin(ctx) {
   const paragraph = ctx.paragraphs[ctx.index];
   return local.__pasteUnitGroundingErrorsForTests({
     unitLabel: 'Cover-letter paragraph', unitId: paragraph.id, finalText: paragraph.text, evidenceIds: paragraph.evidenceIds,
     acceptedEvidence: ctx.acceptedEvidence, label: 'coverLetterParagraphs',
-    identityTokens: [], targetCompany: ctx.input.job.company, targetTitle: ctx.input.job.title, postingText: ctx.state.jobListing,
-    careerData: ctx.state.careerData, sourceRoles: [], authority: null,
-    paragraphs: ctx.paragraphs, paragraphIndex: ctx.index,
-    validateListingClosing: local.createApplicationListingClosingValidator(ctx),
+    identityTokens: [], targetCompany: ctx.job.company, targetTitle: ctx.job.title, postingText: ctx.jobListing,
+    careerData: careerQuote, sourceRoles: [], authority: null, paragraphIndex: ctx.index,
   });
 }
 
@@ -43,265 +33,11 @@ export default [
     name: 'Amendment 6 listing-only guard corrections report the real sentence ordinal',
     run() {
       const ctx = context({ paragraphs: [structuredClone(prior), closing(`I would join ${company}. At ${company}, I rebuilt dispatch rosters.`)] });
-      const result = local.__finalParagraphListingGroundingForTests(ctx);
-      const failures = result.corrections.filter(line => line.includes('states work at'));
-      assert.equal(failures.length, 1);
+      const errors = twin(ctx);
+      const failures = errors.filter(line => line.includes('states work at'));
+      assert.equal(failures.length, 1, JSON.stringify(errors));
       assert.ok(failures[0].includes('paragraph 2, sentence 2'), failures[0]);
-      for (const line of twin(ctx).filter(line => line.includes('states work at'))) assert.ok(line.includes('sentence 2'), line);
-    },
-  },
-  {
-    name: 'official-posting closing permits actual final intent and employer-facing sentences with one through four accepted body citations',
-    run() {
-      for (const text of [
-        listingQuotes[0], 'Your mission is clear handoffs between dispatch teams and freight operations.',
-        `I am applying for the role at ${company}.`, `I would join ${company}.`,
-        `I am excited to join ${company}.`, `I am eager to join ${company}.`, `I'm ready to help ${company}.`,
-        `I look forward to joining ${company}.`, `I would love to contribute to ${company}.`,
-        `I'd join ${company}.`, `I’d join ${company}.`, `I'll join ${company}.`, `I’ll join ${company}.`,
-        `We'd join ${company}.`, `We’d join ${company}.`, `We'll join ${company}.`, `We’ll join ${company}.`,
-        `I would support ${company}’ mission.`, `I would support ${company}'s mission.`,
-      ]) {
-        // Token coverage requires the actual mission quote for this positive.
-        const ids = text === listingQuotes[1] ? ['job-two'] : ['job-one'];
-        const ctx = context({ paragraphs: [structuredClone(prior), closing(text, ids)] });
-        const result = local.__finalParagraphListingGroundingForTests(ctx);
-        assert.equal(result.eligible, true, `${text}: ${JSON.stringify(result.corrections)}`);
-        assert.equal(result.listingOnly, true); assert.deepEqual(result.corrections, []);
-        assert.deepEqual(twin(ctx), [], `drafting twin accepts ${text}`);
-      }
-      const unrelated = evaluate({ paragraphs: [structuredClone(prior), closing(listingQuotes[1], ['job-one'])] });
-      assert.equal(unrelated.eligible, false, 'a dispatch-roster quote does not license an uncited mission sentence');
-      for (let count = 1; count <= 4; count++) {
-        const ids = ['job-one', 'job-two', 'job-three', 'job-four'].slice(0, count);
-        const result = evaluate({ paragraphs: [structuredClone(prior), closing(listingQuotes[0], ids)] });
-        assert.equal(result.eligible, true, JSON.stringify(result.corrections));
-        assert.equal(result.listingQuotes.length, count);
-      }
-      const named = evaluate({ paragraphs: [structuredClone(prior), closing('Your team needs CedarOS dispatch rosters for freight routes.', ['job-one', 'job-four'])] });
-      assert.equal(named.eligible, true, JSON.stringify(named.corrections));
-      for (const [text, expected] of [
-        [`I would join ${company}, and I would help ${company}.`, true],
-        [`I would join ${company}, and I rebuilt dispatch rosters for freight routes.`, false],
-        [`I would join ${company}, and I would help ${company} while building dispatch rosters.`, false],
-      ]) {
-        const base = context();
-        const evidence = [base.acceptedEvidence[0], { id: 'job-one', sourceId: 'job-listing', quote: text }];
-        const ctx = context({ snippet: text, evidence, paragraphs: [structuredClone(prior), closing(text)] });
-        const result = local.__finalParagraphListingGroundingForTests(ctx);
-        assert.equal(result.eligible, expected, `${text}: ${JSON.stringify(result.corrections)}`);
-        assert.equal(twin(ctx).length === 0, expected, 'closing intents use the restored naming rules');
-      }
-    },
-  },
-  {
-    name: 'official-posting closing distinguishes cited employer-team nouns from candidate work gerunds',
-    run() {
-      const quote = 'Your Route Engineering teams maintain dispatch rosters while building dispatch tools.';
-      const base = context();
-      const evidence = [base.acceptedEvidence[0], { id: 'job-team', sourceId: 'job-listing', quote },
-        { id: 'job-other', sourceId: 'job-listing', quote: listingQuotes[0] }];
-      const check = (text, ids = ['job-team'], extra = {}) => {
-        const ctx = context({ snippet: `${quote}\n${listingQuotes[0]}`, evidence,
-          paragraphs: [structuredClone(prior), closing(text, ids)], ...extra });
-        return { result: local.__finalParagraphListingGroundingForTests(ctx), errors: twin(ctx) };
-      };
-      const positive = check('I would welcome the chance to join your Route Engineering teams.');
-      assert.equal(positive.result.eligible, true, JSON.stringify(positive.result.corrections));
-      assert.deepEqual(positive.errors, []);
-      for (const text of [
-        'I would join your Route Engineering teams while building dispatch tools.',
-        'I would join your Route Engineering teams, and I rebuilt dispatch rosters.',
-        'I would join your Route Engineering teams, and rebuilt dispatch rosters.',
-        'I would join your Route Engineering teams with my dispatch rosters.',
-        'I would join your Route Engineering teams for 12 dispatch routes.',
-        'I would join your Route Engineering teams daily.',
-      ]) {
-        const rejected = check(text);
-        assert.equal(rejected.result.eligible, false, text);
-        assert.ok(rejected.errors.length, text);
-      }
-      assert.ok(check('I would join your Route Engineering teams while building dispatch tools.').result.corrections
-        .some(error => error.includes('no work gerund')), 'the quoted team name cannot mask a separate candidate work gerund');
-      for (const [text, ids] of [
-        ['I would join your Route Engineering teams.', ['job-other']],
-        ['I would join your Other Engineering teams.', ['job-team']],
-      ]) {
-        const rejected = check(text, ids);
-        assert.equal(rejected.result.eligible, false, 'only the exact actually cited team name can be a noun exemption');
-        assert.ok(rejected.errors.length);
-      }
-      for (const company of ['Riverton Engineering', 'Riverton Shipping', 'Engineering']) {
-        const input = { ...base.input, job: { ...base.input.job, company } };
-        const accepted = check(`I would join ${company}.`, ['job-other'], { input });
-        assert.equal(accepted.result.eligible, true, JSON.stringify(accepted.result.corrections));
-        assert.deepEqual(accepted.errors, []);
-        const rejected = check(`I would join ${company} while building dispatch tools.`, ['job-team'], { input });
-        assert.equal(rejected.result.eligible, false, 'a frozen employer name cannot mask a separate candidate work gerund');
-        assert.ok(rejected.errors.length);
-      }
-      const verbCompany = { ...base.input, job: { ...base.input.job, company: 'Engineering' } };
-      for (const text of ['I would help engineering dispatch tools.',
-        'I would join Engineering while engineering dispatch tools.']) {
-        const rejected = check(text, ['job-team'], { input: verbCompany });
-        assert.equal(rejected.result.eligible, false, 'an employer word used as a candidate verb keeps the gerund check');
-        assert.ok(rejected.result.corrections.some(error => error.includes('no work gerund')), text);
-        assert.ok(rejected.errors.length);
-      }
-    },
-  },
-  {
-    name: 'official-posting closing requires a final paragraph and an earlier paragraph that passes unchanged career grounding',
-    run() {
-      for (const options of [
-        { paragraphs: [closing()], index: 0 },
-        { paragraphs: [structuredClone(prior), closing(), structuredClone(prior)], index: 1 },
-        { paragraphs: [{ ...prior, text: 'I built unrelated invented hospital systems.' }, closing()] },
-        { paragraphs: [{ ...prior, evidenceIds: ['job-one'] }, closing()] },
-        { paragraphs: [{ ...prior, evidenceIds: ['unknown-career'] }, closing()] },
-      ]) {
-        const ctx = context(options); const result = local.__finalParagraphListingGroundingForTests(ctx);
-        assert.equal(result.eligible, false, JSON.stringify(options));
-        assert.ok(twin(ctx).length, 'drafting retains the strict rule when earlier context does not qualify');
-      }
-      const falseFlag = evaluate({ paragraphs: [closing()], index: 0, eligible: true, finalParagraphListingGrounded: true });
-      assert.equal(falseFlag.eligible, false, 'model-shaped flags never grant the structural exception');
-    },
-  },
-  {
-    name: 'official-posting closing admits only one to four known listing-only ids and quote slices within the actual frozen posting fence',
-    run() {
-      const idsCases = [[], ['unknown-listing'], ['career-one'], ['career-one', 'job-one'],
-        ['job-one', 'job-two', 'job-three', 'job-four', 'job-five']];
-      for (const ids of idsCases) assert.equal(evaluate({ paragraphs: [structuredClone(prior), closing(listingQuotes[0], ids)] }).eligible, false, JSON.stringify(ids));
-      const base = context();
-      const fifthQuote = 'Your work needs route checklists for dispatch teams.';
-      const fiveKnown = evaluate({ snippet: [...listingQuotes, fifthQuote].join('\n'),
-        evidence: [...base.acceptedEvidence, { id: 'job-five', sourceId: 'job-listing', quote: fifthQuote }],
-        paragraphs: [structuredClone(prior), closing(listingQuotes[0], ['job-one', 'job-two', 'job-three', 'job-four', 'job-five'])] });
-      assert.equal(fiveKnown.eligible, false, 'five known body citations still exceed the four-id limit');
-      assert.ok(base.state.jobListing.includes(ORIGINAL_JOB_LISTING_BODY_HEADING));
-      assert.ok(base.state.jobListing.includes(ORIGINAL_JOB_LISTING_TARGETS_HEADING));
-      const header = base.state.jobListing.split('\n').find(line => line.startsWith('**Company:**'));
-      const target = base.state.jobListing.split('\n').find(line => line.startsWith('- **Riverton:**'));
-      for (const quote of [header, target, 'This accepted-plan quote never occurs in the posting body.']) {
-        assert.ok(quote);
-        const evidence = [...base.acceptedEvidence, { id: 'job-outside', sourceId: 'job-listing', quote }];
-        assert.equal(evaluate({ evidence, paragraphs: [structuredClone(prior), closing(listingQuotes[0], ['job-outside'])] }).eligible, false, quote);
-        assert.equal(evaluate({ evidence, paragraphs: [structuredClone(prior), closing(listingQuotes[0], ['job-one', 'job-outside'])] }).eligible, false,
-          'one valid body citation cannot hide a header, target or absent sibling quote');
-      }
-      assert.equal(evaluate({ snippet: '', paragraphs: [structuredClone(prior), closing()] }).eligible, false,
-        'an empty posting has no fenced quote body even if a prior accepted item names a quote');
-      assert.equal(evaluate({ snippet: `A source line with literal \`\`\` markers.\n${listingQuotes.join('\n')}` }).eligible, true,
-        'the formatter expands its fence around embedded markers without losing real body quotes');
-      const shortQuote = { id: 'job-one', sourceId: 'job-listing', quote: 'Northwind Labs' };
-      assert.equal(evaluate({ evidence: [base.acceptedEvidence[0], shortQuote] }).eligible, false,
-        'a company named only in metadata is not an in-body quote');
-    },
-  },
-  {
-    name: 'official-posting closing rejects every prohibited candidate, career, figure, qualifier, credential and unsupported-name sentence at the drafting twin',
-    run() {
-      for (const text of [
-        'I rebuilt dispatch rosters for freight routes.',
-        'Your team needs ZephyrWorks dispatch rosters for freight routes.',
-        'Your team needs dispatch rosters for 12 freight routes.',
-        'Your team needs dispatch rosters for twelve freight routes.',
-        'Your team needs dispatch rosters in 2024 for freight routes.',
-        'Your team needs certification in dispatch rosters for freight routes.',
-        'Your team needs daily dispatch rosters for freight routes.',
-        'Your team needs my dispatch rosters for freight routes.',
-        'Your team needs our dispatch rosters for freight routes.',
-        'Your team needs experience with dispatch rosters for freight routes.',
-        'Your team needs proven expertise in dispatch rosters for freight routes.',
-        'Build dispatch rosters for your freight routes.',
-        'Dispatch rosters cover freight routes.',
-        'Your team built dispatch rosters for freight routes.',
-        `I would bring my dispatch rosters to ${company}.`,
-        `I would join ${company} in 2027.`,
-        `I would join ZephyrWorks.`,
-        `I was excited to join ${company}.`,
-        `I am applying for the role that I led across forty ZephyrWorks sites.`,
-      ]) {
-        const ctx = context({ paragraphs: [structuredClone(prior), closing(text)] });
-        const result = local.__finalParagraphListingGroundingForTests(ctx);
-        assert.equal(result.eligible, false, text);
-        assert.ok(twin(ctx).length, `drafting rejects ${text}`);
-      }
-    },
-  },
-  {
-    name: 'official-posting closing intent grants capitalized listing terms only at whole-term boundaries',
-    run() {
-      for (const [term, longer] of [['API', 'XAPIX'], ['Zorgon', 'ZorgonX']]) {
-        const quote = `Your team needs ${longer} dispatch rosters for freight routes.`;
-        const base = context();
-        const evidence = [base.acceptedEvidence[0], { id: 'job-one', sourceId: 'job-listing', quote }];
-        const bad = context({ snippet: quote, evidence, paragraphs: [structuredClone(prior), closing(`I would bring ${term} to ${company}.`)] });
-        assert.equal(local.__finalParagraphListingGroundingForTests(bad).eligible, false, `${longer} cannot license ${term}`);
-        assert.ok(twin(bad).length);
-        const good = context({ snippet: quote, evidence, paragraphs: [structuredClone(prior), closing(`I would bring ${longer} to ${company}.`)] });
-        const accepted = local.__finalParagraphListingGroundingForTests(good);
-        assert.equal(accepted.eligible, true, JSON.stringify(accepted.corrections));
-      }
-      const foreign = `I would support Zorgon's mission.`;
-      assert.equal(evaluate({ paragraphs: [structuredClone(prior), closing(foreign)] }).eligible, false);
-      const quote = 'Your team needs Zorgon dispatch rosters for freight routes.';
-      const base = context();
-      const stated = evaluate({ snippet: quote,
-        evidence: [base.acceptedEvidence[0], { id: 'job-one', sourceId: 'job-listing', quote }],
-        paragraphs: [structuredClone(prior), closing(foreign)] });
-      assert.equal(stated.eligible, true, JSON.stringify(stated.corrections));
-    },
-  },
-  {
-    name: 'official-posting closing refuses the whole final paragraph when one sentence fails and reports source-free ordinal corrections per cause',
-    run() {
-      const bad = 'I rebuilt ZephyrWorks dispatch rosters for 12 freight routes.';
-      const ctx = context({ paragraphs: [structuredClone(prior), closing(`${listingQuotes[0]} ${bad}`)] });
-      const result = local.__finalParagraphListingGroundingForTests(ctx);
-      assert.equal(result.eligible, false); assert.equal(result.listingOnly, true);
-      assert.ok(result.corrections.length >= 3, JSON.stringify(result.corrections));
-      assert.equal(new Set(result.corrections).size, result.corrections.length);
-      assert.ok(result.corrections.some(line => /sentence\s+2/iu.test(line)), JSON.stringify(result.corrections));
-      for (const line of result.corrections) {
-        assert.ok(!line.includes(bad) && !line.includes(listingQuotes[0]) && !line.includes(careerQuote), line);
-        assert.ok(!line.includes('ZephyrWorks') && !line.includes('12 freight'), 'corrections must name generic failures without reproducing source or unsupported facts');
-      }
-      assert.ok(twin(ctx).length, 'a good first sentence cannot exempt its invalid sibling');
-    },
-  },
-  {
-    name: 'official-posting closing employer-facing figure credential and qualifier bans still apply when the cited listing states them',
-    run() {
-      for (const text of [
-        'Your team needs dispatch rosters for 12 freight routes.',
-        'Your team needs dispatch rosters for twelve freight routes.',
-        'Your team needs dispatch rosters in 2024 for freight routes.',
-        'Your team needs certification in dispatch rosters for freight routes.',
-        'Your team needs daily dispatch rosters for freight routes.',
-      ]) {
-        const base = context();
-        const evidence = [base.acceptedEvidence[0], { id: 'job-one', sourceId: 'job-listing', quote: text }];
-        const ctx = context({ snippet: text, evidence, paragraphs: [structuredClone(prior), closing(text)] });
-        assert.equal(local.__finalParagraphListingGroundingForTests(ctx).eligible, false, `a stated listing fact cannot relax the structural ban: ${text}`);
-        assert.ok(twin(ctx).length);
-      }
-    },
-  },
-  {
-    name: 'official-posting closing conservatively refuses opening verbs even outside a finite action list when their listing quote states them',
-    run() {
-      for (const text of ['Compose your dispatch rosters for freight routes.', 'Protect your dispatch rosters for freight routes.']) {
-        const base = context();
-        const evidence = [base.acceptedEvidence[0], { id: 'job-one', sourceId: 'job-listing', quote: text }];
-        const ctx = context({ snippet: text, evidence, paragraphs: [structuredClone(prior), closing(text)] });
-        const result = local.__finalParagraphListingGroundingForTests(ctx);
-        assert.equal(result.eligible, false, text);
-        assert.ok(result.corrections.some(line => /opening verb/iu.test(line)), JSON.stringify(result.corrections));
-        assert.ok(twin(ctx).some(line => /opening verb/iu.test(line)));
-      }
+      assert.ok(errors.some(line => /needs at least one career-data evidence ID\.$/u.test(line)), 'the citation rule reports alongside the guard');
     },
   },
   {
@@ -333,7 +69,7 @@ export default [
       ] };
       const sourceContext = { careerData: careerQuote, resumeEvidence: { roles: [], projects: [] },
         coverLetter: { paragraphs: [prior.text, prior.text] }, coverLetterArgument: null,
-        postingText: ctx.state.jobListing, postingCompany: company };
+        postingText: ctx.jobListing, postingCompany: company };
       assert.doesNotThrow(() => local.__sanitizeSourceGroundingForTests({ resumeBullets: [], coverLetterParagraphs: [
         { paragraph: prior.text, careerDataQuotes: [careerQuote] }, { paragraph: prior.text, careerDataQuotes: [careerQuote] },
       ] }, sourceContext), 'the strict sanitizer control must bind valid career text before testing the listing-only refusal');
