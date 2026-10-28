@@ -5,7 +5,9 @@ import path from 'node:path';
 import { runInNewContext } from 'node:vm';
 import { JSDOM } from 'jsdom';
 import { formatOriginalJobListingMarkdown, ORIGINAL_JOB_LISTING_BODY_HEADING } from '../../electron/ipc/applicationBundle.js';
-import { buildResumeDocument } from '../../electron/ipc/resumeHtml.js';
+import { buildResumeDocument, normaliseResumeDownloadBundle } from '../../electron/ipc/resumeHtml.js';
+import { normalizeOfficialPosting, officialPostingLookupStatus } from '../../electron/ipc/officialPostingFields.js';
+import { officialPostingDisplay } from '../../src/utils/officialPostingDisplay.js';
 import { captureInterviewPreparationBundle } from '../../electron/ipc/interviewPreparation.js';
 import { applicationDockRequest, brokenApplicationDockRequest, workingApplicationDockRequest } from '../../src/utils/applicationHandoffDock.js';
 
@@ -46,7 +48,8 @@ export default [
       const unsafe = formatOriginalJobListingMarkdown({ ...job, applyUrl: 'https://secret@careers.example.test/one', officialPosting: { level: '__proto__' } }, { audience: 'bundle' });
       assert.ok(!unsafe.includes('Apply URL') && !unsafe.includes('Source level') && !unsafe.includes('secret'));
       const absent = formatOriginalJobListingMarkdown({ title: 'Legacy role', snippet: 'Legacy body' }, { audience: 'bundle' });
-      assert.equal(absent, formatOriginalJobListingMarkdown({ title: 'Legacy role', snippet: 'Legacy body' }));
+      assert.ok(absent.includes('**Official posting check:** Official posting not checked'));
+      assert.equal(absent.split('\n---\n')[1], formatOriginalJobListingMarkdown({ title: 'Legacy role', snippet: 'Legacy body' }).split('\n---\n')[1]);
     },
   },
   {
@@ -85,7 +88,7 @@ export default [
       try {
         const data = JSON.parse(dom.window.document.getElementById('ic-application-bundle-data').textContent);
         assert.equal(data.company, unknown.postedBy); assert.equal(data.jobUrl, unknown.url);
-        assert.equal(data.officialPosting, undefined);
+        assert.deepEqual(data.officialPosting, unknown.officialPosting);
         assert.ok(data.jobMarkdown.includes('**Company:** Unknown company'));
         const link = dom.window.document.querySelector('.ic-job-posting-link');
         assert.equal(link.href, unknown.url); assert.equal(link.textContent, 'View original job posting');
@@ -93,6 +96,106 @@ export default [
         assert.ok(panels.length >= 2); assert.ok(panels.every(panel => !panel.textContent.includes(unknown.postedBy)));
         assert.ok(!dom.window.document.getElementById('ic-print-variant-note')?.getAttribute('data-ic-paper-context')?.includes(unknown.postedBy));
       } finally { dom.window.close(); }
+    },
+  },
+  {
+    name: 'Official posting bundle: incomplete lookup reasons survive inert JSON and agree across cards, Markdown and HTML',
+    run() {
+      const cases = [
+        ['bridge-unavailable', /research unavailable/u], ['bridge-timeout', /research timed out/u],
+        ['fetch-timeout', /page fetch timed out/u], ['crawl-budget', /search coverage limited/u],
+        ['fetch-failed', /page could not be fetched/u], ['semantic-uncertain', /match uncertain/u],
+        ['comparative-invalid', /match uncertain/u], ['official-text-missing', /posting could not be read/u],
+      ];
+      for (const level of ['L5', 'L6']) for (const [code, reason] of cases) {
+        const officialPosting = { level, outcome: 'not-found', employer: level === 'L6' ? '' : 'Northwind',
+          sourceUrl: 'https://careers.northwind.example/unverified-candidate',
+          trail: ['bridge-research', code], fetchedAt: '2026-10-01T12:00:00.000Z', scrapedListingSha256: 'b'.repeat(64) };
+        const value = { ...job, officialPosting, postingVariants: [], applyUrl: '' };
+        const status = officialPostingLookupStatus(officialPosting);
+        assert.equal(status.state, 'incomplete'); assert.equal(status.retryable, true);
+        assert.match(status.label, reason); assert.match(status.detail, /retry/iu);
+        const markdown = formatOriginalJobListingMarkdown(value, { audience: 'bundle' });
+        assert.ok(markdown.includes(`**Official posting check:** ${status.label}`));
+        assert.ok(!markdown.includes('**Official posting:**') && !markdown.includes('No exact official posting found'));
+        const card = officialPostingDisplay(value);
+        assert.ok(card.statusLabel.includes(status.label)); assert.equal(card.statusDetail, status.detail);
+        assert.equal(card.applyUrl, value.url);
+        const dom = new JSDOM(buildResumeDocument({ resumeMainHtml: '<main class="page"><h1 class="name">Synthetic Candidate</h1><p>Unchanged document copy.</p></main>',
+          downloadBundle: { jobUrl: value.url, officialPosting, jobMarkdown: markdown } }));
+        try {
+          const document = dom.window.document;
+          const data = JSON.parse(document.getElementById('ic-application-bundle-data').textContent);
+          assert.deepEqual(data.officialPosting, normalizeOfficialPosting(officialPosting));
+          const notice = document.querySelector('[data-ic-official-posting-status="incomplete"]');
+          assert.equal(notice.querySelector('strong').textContent, status.label);
+          assert.equal(notice.querySelector('span').textContent, status.detail);
+          assert.equal(document.querySelector('.ic-job-posting-link').href, value.url);
+          assert.equal(document.querySelector('.ic-job-posting-link').textContent, 'View original job posting');
+          assert.ok(!document.querySelector('[data-ic-document-panel]').textContent.includes(status.label));
+        } finally { dom.window.close(); }
+      }
+    },
+  },
+  {
+    name: 'Official posting bundle: completed no-match, ambiguity and closure stay distinct from interrupted research',
+    run() {
+      for (const [outcome, trail, state, label] of [
+        ['not-found', ['bridge-research'], 'not-found', 'No exact official posting found'],
+        ['ambiguous', ['comparative-disagree'], 'ambiguous', 'Several official postings match'],
+        ['closed', ['closed'], 'closed', 'Official posting closed'],
+      ]) {
+        const officialPosting = { level: 'L5', outcome, employer: 'Northwind', trail };
+        const status = officialPostingLookupStatus(officialPosting);
+        assert.equal(status.state, state); assert.equal(status.label, label); assert.equal(status.retryable, false);
+        assert.equal(officialPostingDisplay({ ...job, officialPosting }).statusLabel, label);
+        assert.ok(formatOriginalJobListingMarkdown({ ...job, officialPosting }, { audience: 'bundle' }).includes(label));
+        assert.deepEqual(normaliseResumeDownloadBundle({ officialPosting }).officialPosting, officialPosting);
+      }
+    },
+  },
+  {
+    name: 'Official posting bundle: a failed recheck keeps the previous exact link while disclosing its current uncertainty',
+    run() {
+      const officialPosting = { ...job.officialPosting, trail: ['structured-proof', 'fetch-failed', 'reverify-failed'] };
+      const status = officialPostingLookupStatus(officialPosting);
+      assert.equal(status.state, 'verified'); assert.equal(status.retryable, true);
+      assert.equal(status.sourceUrl, officialPosting.sourceUrl);
+      assert.equal(status.label, 'Previously verified official posting');
+      assert.match(status.detail, /page could not be fetched/u); assert.match(status.detail, /Retry/u);
+      const markdown = formatOriginalJobListingMarkdown({ ...job, officialPosting }, { audience: 'bundle' });
+      assert.ok(markdown.includes(status.label) && markdown.includes('Latest recheck'));
+      const dom = new JSDOM(buildResumeDocument({ resumeMainHtml: '<main class="page"><h1 class="name">Synthetic Candidate</h1></main>',
+        downloadBundle: { jobUrl: job.url, officialPosting } }));
+      try {
+        const document = dom.window.document;
+        assert.equal(document.querySelector('[data-ic-official-posting-status] strong').textContent, status.label);
+        assert.equal(document.querySelector('.ic-job-posting-link').href, officialPosting.sourceUrl);
+        assert.ok([...document.querySelectorAll('.ic-job-posting-link')].some(link => link.href === job.url), 'original provenance remains visible');
+      } finally { dom.window.close(); }
+    },
+  },
+  {
+    name: 'Official posting bundle: older verified link metadata migrates safely while modern failure metadata is retained without promoting links',
+    run() {
+      const legacy = { level: 'L2', sourceUrl: 'https://careers.northwind.example/jobs/one?utm_source=mirror',
+        officialApplyUrl: 'https://careers.northwind.example/jobs/one/application' };
+      const normalized = normaliseResumeDownloadBundle({ officialPosting: legacy }).officialPosting;
+      assert.equal(officialPostingLookupStatus(normalized).state, 'verified');
+      assert.equal(normalized.sourceUrl, 'https://careers.northwind.example/jobs/one');
+      for (const failed of [
+        { ...legacy, outcome: 'failed', employer: 'Northwind', trail: ['fetch-timeout'] },
+        { ...legacy, level: 'L5', outcome: 'not-found', employer: 'Northwind', trail: ['bridge-unavailable'] },
+      ]) {
+        const saved = normaliseResumeDownloadBundle({ officialPosting: failed }).officialPosting;
+        assert.deepEqual(saved, normalizeOfficialPosting(failed));
+        assert.equal(officialPostingLookupStatus(saved).sourceUrl, '');
+        assert.equal(officialPostingLookupStatus(saved).applyUrl, '');
+      }
+      for (const invalid of [
+        { level: 'L2', sourceUrl: 'https://user:secret@careers.northwind.example/one' },
+        { ...legacy, outcome: 'failed' }, { ...legacy, level: 'L5' }, { ...legacy, untrusted: 'extra' },
+      ]) assert.equal(normaliseResumeDownloadBundle({ officialPosting: invalid }).officialPosting, undefined);
     },
   },
   {

@@ -9,6 +9,7 @@ import { officialPostingAliases } from '../../electron/ipc/officialPostingStore.
 import { officialPostingSemanticInputHash } from '../../electron/ipc/officialPostingSemantic.js';
 import { CONSTANTS } from '../../electron/ipc/handoffBridge/constants.js';
 import { buildOfficialPostingMatchRequest } from '../../electron/ipc/officialPostingBridge.js';
+import { bridgeComparisonAvailable } from '../../electron/ipc/handoffBridge/bridgeAvailability.js';
 
 const description = 'Requirements include experience building reliable services and maintaining reporting workflows. Engineers design clear interfaces for dispatch teams and validate operational changes with careful review. The role includes improving data quality across scheduled pipelines and documenting decisions for partner teams. You will work with colleagues to investigate delivery failures and make service behavior understandable. Responsibilities include writing tests for new features and improving the tools used by support teams every day.';
 const location = 'Lakeview, Ontario, Canada';
@@ -46,6 +47,140 @@ const resolveOfficialPostings = (jobs, options) => resolvePostings(jobs, { seman
 const getOfficialPostingView = (job, options) => readPostingView(job, { requireSemantic: false, ...options });
 
 export default [
+  {
+    name: 'closed official identity survives repeated fresh lookups and weeks of retention without blocking a fresh exact replacement',
+    async run() {
+      let clock = Date.UTC(2030, 0, 1);
+      await withStore(async store => {
+        const job = row('persistent-close'); const url = sourceUrl('persistent-close'); const replacement = sourceUrl('persistent-replacement');
+        let mode = 'open'; let research = 0;
+        const run = async (priorOfficialRecords = [], candidateUrls = [url], bypassCache = true) => resolvePostings([job], {
+          store, priorOfficialRecords, candidateUrls, bypassCache, now: () => clock,
+          fetchSession: { telemetry: () => ({}), fetch: async target => {
+            if (target === url && mode !== 'open') {
+              if (mode === 'unreadable') return { url: target, contentType: 'text/html', statusCode: 200, body: '<p>Loading current posting information.</p>' };
+              throw Object.assign(new Error('Gone'), { code: 'closed', statusCode: 410 });
+            }
+            if (target === url || target === replacement) return { url: target, contentType: 'text/html', statusCode: 200, body: jsonld(job) };
+            return { url: target, contentType: 'text/html', statusCode: 200, body: '<title>Northwind Labs</title>' };
+          } },
+          callRaw: async prompt => { research++; return response(prompt); },
+          callMatch: async prompt => {
+            const visible = JSON.parse(prompt.split('BEGIN UNTRUSTED SEMANTIC POSTING COMPARISON JSON\n')[1]
+              .split('\nEND UNTRUSTED SEMANTIC POSTING COMPARISON JSON')[0]);
+            const selected = visible.options.find(option => option.status === 'live') || visible.options[0];
+            return { choice: selected.id, evidence: [{ scrapedQuote: job.title, officialQuote: job.title }], distinguishing: [], conflicts: [] };
+          },
+        });
+        await run();
+        mode = 'closed';
+        const first = await run([await store.find(job)]);
+        assert.equal(first.jobs[0].officialPosting.outcome, 'closed');
+        assert.equal(first.jobs[0].officialPosting.sourceUrl, url);
+        assert.equal(first.jobs[0].officialPosting.level, 'L1');
+        clock += 42 * 24 * 60 * 60_000;
+        const retained = await store.find(job);
+        assert.equal(retained.officialPosting.outcome, 'closed', 'closed identity is durable beyond the miss TTL');
+        let textReads = 0;
+        await readPostingView({ ...job, officialPosting: retained.officialPosting }, { requireSemantic: true,
+          store: { find: async () => retained, readText: async () => { textReads++; throw new Error('Historical text unavailable'); } } });
+        assert.equal(textReads, 0, 'a closed view never overlays or repairs historical text');
+        await fs.rm(path.join(store.rootDir, 'texts', `${retained.officialPosting.contentHash}.txt`));
+        const partition = await partitionOfficialPostingRows([{ ...job, officialPosting: retained.officialPosting }], { store, now: () => clock });
+        assert.deepEqual(partition.unresolvedIndices, [0]);
+        const second = await run([], [], false);
+        assert.equal(second.jobs[0].officialPosting.outcome, 'closed', 'ordinary lookup also refreshes durable closed history');
+        assert.ok(research >= 2, 'closed history never skips replacement research');
+        mode = 'unreadable';
+        const uncertain = await run([await store.find(job)], []);
+        assert.equal(uncertain.jobs[0].officialPosting.outcome, 'unreadable');
+        assert.ok(uncertain.jobs[0].officialPosting.trail.includes('official-liveness-unconfirmed'));
+        assert.equal((await store.find(job)).officialPosting.sourceUrl, url, 'an incomplete visit retains the durable identity receipt');
+        mode = 'closed';
+        const replaced = await run([await store.find(job)], [replacement]);
+        assert.equal(replaced.jobs[0].officialPosting.outcome, 'found');
+        assert.equal(replaced.jobs[0].officialPosting.sourceUrl, replacement);
+      }, { now: () => clock });
+    },
+  },
+  {
+    name: 'shared official lookup verifies visible closure through the existing quoted liveness handoff before semantic identity',
+    async run() {
+      for (const invalidQuote of [false, true]) await withStore(async store => {
+        const job = row('current-closure'); const url = sourceUrl('current-closure');
+        const tasks = [];
+        const fetchSession = { telemetry: () => ({}), fetch: network({
+          'https://northwind.test/': '<title>Northwind Labs</title>',
+          [url]: `${jsonld(job)}<title>Northwind Labs current careers opportunities</title><h1>${job.title}</h1><nav>Find engineering roles and learn about our teams across all regional offices.</nav><div>This job is no longer available.</div>`,
+        }) };
+        const result = await resolvePostings([job], { store, fetchSession, candidateUrls: [url], bypassCache: true,
+          callRaw: async prompt => response(prompt),
+          callMatch: async (prompt, options) => {
+            tasks.push(options.task);
+            if (options.task === 'job-listing-liveness') return { rows: [{ id: 'r1', verdict: 'closed',
+              quote: invalidQuote ? 'An invented closure sentence.' : 'This job is no longer available.' }] };
+            const visible = JSON.parse(prompt.split('BEGIN UNTRUSTED SEMANTIC POSTING COMPARISON JSON\n')[1]
+              .split('\nEND UNTRUSTED SEMANTIC POSTING COMPARISON JSON')[0]);
+            return { choice: visible.options[0].id, evidence: [{ scrapedQuote: job.title, officialQuote: job.title }], distinguishing: [], conflicts: [] };
+          } });
+        assert.ok(tasks.includes('job-listing-liveness'));
+        assert.equal(result.jobs[0].officialPosting.outcome, invalidQuote ? 'unreadable' : 'closed');
+        if (invalidQuote) assert.ok(result.jobs[0].officialPosting.trail.includes('official-liveness-unconfirmed'));
+      });
+    },
+  },
+  {
+    name: 'official comparison availability admits a linked single chat and retains observed-worker checks for pools',
+    run() {
+      const linked = { enabled: true, link: { state: 'linked' }, chat: { pool: { active: false } } };
+      assert.equal(bridgeComparisonAvailable(linked, () => false), true);
+      const pooled = { ...linked, chat: { pool: { active: true } } };
+      assert.equal(bridgeComparisonAvailable(pooled, () => false), false);
+      assert.equal(bridgeComparisonAvailable(pooled, () => true), true);
+      assert.equal(bridgeComparisonAvailable({ ...linked, enabled: false }, () => true), false);
+    },
+  },
+  {
+    name: 'production research gets a fresh bounded crawl and fetches its exact posting after initial discovery exhausts the page limit',
+    async run() {
+      await withStore(async store => {
+        const free = Array.from({ length: 24 }, (_, index) => `https://northwind.test/careers/menu-${index}`);
+        const job = row('fresh-budget', { url: 'https://www.linkedin.com/jobs/view/synthetic-budget',
+          snippet: `${description}\n${free.join('\n')}` });
+        const exact = sourceUrl('researched'); const requests = []; let readsBeforeResearch = 0;
+        const comparisons = [];
+        const fetchSession = { telemetry: () => ({}), fetch: async url => {
+          requests.push(url);
+          return { url, contentType: 'text/html', statusCode: 200,
+            body: url === exact ? jsonld(job) : url === free[0]
+              ? jsonld(job, description, { title: 'Sibling Engineer' }) : '<title>Northwind Labs</title>' };
+        } };
+        const result = await resolvePostings([job], { store, fetchSession,
+          callRaw: async prompt => {
+            readsBeforeResearch = requests.length;
+            assert.equal(readsBeforeResearch, 16, 'initial discovery reaches its own page cap');
+            return response(prompt, new Map([[officialPostingRequestId(job), exact]]));
+          },
+          callMatch: async prompt => {
+            const visible = JSON.parse(prompt.split('BEGIN UNTRUSTED SEMANTIC POSTING COMPARISON JSON\n')[1]
+              .split('\nEND UNTRUSTED SEMANTIC POSTING COMPARISON JSON')[0]);
+            comparisons.push(visible.options.map(option => option.sourceUrl));
+            const selected = visible.options.find(option => option.sourceUrl === exact);
+            return selected ? { choice: selected.id, evidence: [{ scrapedQuote: job.title, officialQuote: job.title }], distinguishing: [], conflicts: [] }
+              : { choice: 'none', evidence: [], distinguishing: [], conflicts: ['This is a different team posting.'] };
+          },
+        });
+        assert.equal(requests[readsBeforeResearch], exact, 'the researched posting precedes the exhausted navigation leads');
+        assert.equal(result.jobs[0].officialPosting.sourceUrl, exact);
+        assert.equal(result.jobs[0].officialPosting.outcome, 'found');
+        assert.ok(result.jobs[0].officialPosting.trail.includes('comparative-match'));
+        assert.deepEqual(comparisons.map(options => options.length), [1, 1, 2, 2]);
+        assert.ok(comparisons.slice(-2).every(options => options.includes(free[0])), 'the earlier sibling remains visible to both final comparisons');
+        assert.equal((await store.find(job)).officialPosting.sourceUrl, exact);
+        assert.ok(requests.length <= 32, 'the research pass has its own bounded allowance');
+      });
+    },
+  },
   {
     name: 'production service asks semantic A/B on free host evidence before research even when titles differ',
     async run() {

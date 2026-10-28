@@ -18,7 +18,10 @@ import { buildOfficialPostingResearchRequest, parseOfficialPostingResearchRespon
   buildSemanticOfficialPostingMatchRequest, validateSemanticOfficialPostingMatchResponse,
   buildSemanticOfficialPostingShortlistRequest, validateSemanticOfficialPostingShortlistResponse } from './officialPostingBridge.js';
 import { hasLiveObservedWorker, hasPendingObservedWorkerLaunch } from './handoffBridge/observedChatContext.js';
+import { getHandoffBridgeStatus } from './handoffBridge/index.js';
+import { bridgeComparisonAvailable } from './handoffBridge/bridgeAvailability.js';
 import { CONSTANTS } from './handoffBridge/constants.js';
+import { buildListingLivenessRequest, validateListingLivenessResponse } from './listingLivenessAi.js';
 
 export const OFFICIAL_POSTING_HANDOFF_TIMEOUT_MS = 20 * 60 * 1_000;
 export const OFFICIAL_POSTING_COMPARATIVE_WORKER_GRACE_MS = 15_000;
@@ -204,6 +207,7 @@ export async function partitionOfficialPostingRows(jobs, { store, signal, now = 
     if (!posting || !officialPostingRecordMatchesScrapedIdentity(job, record)
       || (semanticMatching && !officialPostingSemanticProofMatches(job, posting))
       || !shouldPersistOfficialPostingResult(posting, { signal })) return;
+    if (posting.outcome === 'closed') return;
     // Older closed-trail misses lack a candidate confirmation receipt. Revisit
     // them rather than treating an expired validThrough as a proved closure.
     if (['L5', 'L6'].includes(posting.level) && posting.trail?.includes('closed')) return;
@@ -305,8 +309,10 @@ export async function resolveOfficialPostings(jobs, {
   manualAiRunId, nodeId, signal, callRaw = callLLMRaw, callMatch = callRaw, onProgress, telemetry,
   store, fetch = fetchOfficialPosting, fetchSession, resolve = resolveOfficialPosting, now = Date.now,
   semanticMatching = resolve === resolveOfficialPosting, bypassCache = false, candidateUrls = [],
+  priorOfficialRecords = [],
   timeoutMs = OFFICIAL_POSTING_HANDOFF_TIMEOUT_MS, bridgeAvailable = true,
-  comparativeWorkerAvailable = callMatch === callLLMRaw ? hasLiveObservedWorker : null,
+  bridgeStatus = getHandoffBridgeStatus,
+  comparativeWorkerAvailable = callMatch === callLLMRaw ? () => bridgeComparisonAvailable(bridgeStatus(), hasLiveObservedWorker) : null,
   comparativeWorkerLaunching = callMatch === callLLMRaw ? hasPendingObservedWorkerLaunch : null,
   comparativeGraceMs = OFFICIAL_POSTING_COMPARATIVE_WORKER_GRACE_MS,
 } = {}) {
@@ -318,7 +324,15 @@ export async function resolveOfficialPostings(jobs, {
   const session = fetchSession || createOfficialPostingFetchSession({ fetch, signal });
   const initialFetchStats = session.telemetry();
   const members = chunks.flat();
-  for (const member of members) member.rowBudget = createOfficialPostingRowBudget({ signal });
+  for (const member of members) member.priorOfficialRecord = priorOfficialRecords[rows.indexOf(member.job)] || null;
+  const budgets = new Set();
+  const freshBudget = (member, retryUrls = []) => {
+    const previous = member.rowBudget;
+    previous?.dispose();
+    member.rowBudget = createOfficialPostingRowBudget({ signal, previous, retryUrls });
+    budgets.add(member.rowBudget);
+  };
+  for (const member of members) freshBudget(member);
   try { store ||= getOfficialPostingStore(); } catch { store = null; }
   const progress = () => { try { onProgress?.({ completed: finished.size, total: rows.length }); } catch { /* Progress cannot fail the search. */ } };
   const settle = member => { finished.add(member); progress(); };
@@ -363,7 +377,14 @@ export async function resolveOfficialPostings(jobs, {
     const shortlist = async (job, candidates) => callDecision(buildSemanticOfficialPostingShortlistRequest({ job, candidates }),
       raw => validateSemanticOfficialPostingShortlistResponse(raw, { candidates }), false);
     shortlist.handlesCorrections = true;
-    return { match, ...(semanticMatching ? { shortlist } : {}) };
+    const checkLiveness = async (job, evidence) => {
+      const input = [{ row: job, evidence }];
+      return callDecision(buildListingLivenessRequest(input), raw => {
+        const answer = validateListingLivenessResponse(typeof raw === 'string' ? JSON.parse(raw) : raw, input);
+        return answer.rows[0].verdict;
+      }, false);
+    };
+    return { match, ...(semanticMatching ? { shortlist, checkLiveness } : {}) };
   };
   for (const [batch, chunk] of chunks.entries()) for (const member of chunk) member.callbacks = callbacksFor(member, batch);
   const safeResolve = async (member, options) => {
@@ -372,6 +393,7 @@ export async function resolveOfficialPostings(jobs, {
     try {
       const result = await resolve(member.job, { store, fetch: session.fetch, signal: rowSignal, rowBudget: member.rowBudget,
         now: clock, persistResults: false, persistMisses: false, semanticMatching, bypassCache, candidateUrls,
+        priorOfficialRecord: member.priorOfficialRecord,
         ...(semanticMatching ? member.callbacks : {}), ...options });
       if (!normalizeOfficialPosting(result?.officialPosting)) throw new TypeError('Invalid official posting resolution.');
       return result;
@@ -404,8 +426,10 @@ export async function resolveOfficialPostings(jobs, {
     await parallelRows(members, async member => {
       let result = await safeResolve(member);
       if (VERIFIED_LEVELS.has(result.officialPosting?.level)) result = await persist(member, result);
+      if (result.officialPosting?.outcome === 'closed' && result.record) member.priorOfficialRecord = result.record;
       results.set(member, result);
-      if (VERIFIED_LEVELS.has(result.officialPosting?.level) || result.officialPosting?.trail?.includes('recent-miss') || member.rowBudget.signal.aborted) settle(member);
+      if (VERIFIED_LEVELS.has(result.officialPosting?.level) && ['found', 'link-only'].includes(result.officialPosting?.outcome)
+        || result.officialPosting?.trail?.includes('recent-miss') || signal?.aborted) settle(member);
     });
     for (let batch = 0; batch < chunks.length; batch += 1) {
       const chunk = chunks[batch];
@@ -431,10 +455,18 @@ export async function resolveOfficialPostings(jobs, {
         continue;
       }
       await parallelRows(pending, async member => {
-        if (signal?.aborted || member.rowBudget.signal.aborted) {
-          results.set(member, addTrail(results.get(member), abortTrail(member.rowBudget.signal))); settle(member); return;
+        if (signal?.aborted) {
+          results.set(member, addTrail(results.get(member), abortTrail(signal))); settle(member); return;
         }
-        let result = await safeResolve(member, { candidateUrls: [...candidateUrls, ...(leads.get(member.id) || [])],
+        // Discovery can exhaust its page/time allowance before AI supplies an
+        // exact posting. Give those new leads a separate bounded crawl while
+        // retaining the shared fetch cache, rate limits and circuit breakers.
+        const researchedLeads = leads.get(member.id) || [];
+        const researchedUrls = researchedLeads.flatMap(lead => typeof lead === 'string' ? [lead]
+          : [lead.postingUrl, lead.url, lead.careersPageUrl, lead.employerDomain].filter(Boolean));
+        session.retryFailedUrls?.(researchedUrls);
+        freshBudget(member, researchedUrls);
+        let result = await safeResolve(member, { candidateUrls: [...researchedLeads, ...candidateUrls],
           bypassCache: true, ...member.callbacks, researchRan: true });
         result = addTrail(result, 'bridge-research');
         results.set(member, await persist(member, result, { researchRan: true })); settle(member);
@@ -442,7 +474,7 @@ export async function resolveOfficialPostings(jobs, {
     }
     for (const member of members) {
       let result = results.get(member);
-      if (TEXT_LEVELS.has(result.officialPosting?.level)) {
+      if (TEXT_LEVELS.has(result.officialPosting?.level) && ['found', 'link-only'].includes(result.officialPosting?.outcome)) {
         let description = result.description;
         if (!description && store && result.officialPosting.contentHash) try { description = await store.readText(result.officialPosting.contentHash); } catch { /* The view handles missing/corrupt text. */ }
         if (materiallyDifferent(member.job.snippet || member.job.description, description)) {
@@ -467,7 +499,7 @@ export async function resolveOfficialPostings(jobs, {
     return { jobs: resolved, telemetry: stats,
       expiryCandidates: rows.map(job => byJob.get(job)?.expiryCandidates || []) };
   } finally {
-    for (const member of members) member.rowBudget.dispose();
+    for (const budget of budgets) budget.dispose();
     if (!fetchSession) session.dispose?.();
   }
 }
@@ -493,7 +525,7 @@ export function officialPostingDedup(jobs) {
   const kept = []; const dropped = []; const urls = new Map(); const ids = new Map();
   for (const job of Array.isArray(jobs) ? jobs : []) {
     const posting = normalizeOfficialPosting(job?.officialPosting);
-    if (!posting || !TEXT_LEVELS.has(posting.level)) { kept.push(job); continue; }
+    if (!posting || !TEXT_LEVELS.has(posting.level) || !['found', 'link-only'].includes(posting.outcome)) { kept.push(job); continue; }
     const url = officialHttpsUrl(posting.sourceUrl); const id = atsPostingKey(posting);
     const prior = (url && urls.get(url)) || (id && ids.get(id));
     if (!prior) { kept.push(job); if (url) urls.set(url, job); if (id) ids.set(id, job); continue; }

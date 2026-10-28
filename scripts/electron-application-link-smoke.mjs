@@ -34,6 +34,19 @@ try {
     id: 'rebuilt-card', type: 'jobcard', position: { x: 400, y: 0 },
     data: { title: 'Synthetic Engineer', company: 'Synthetic', matchScore: 80,
       url: 'https://example.test/jobs/synthetic' },
+  }, {
+    id: 'lookup-retry-card', type: 'jobcard', position: { x: 800, y: 0 },
+    data: { title: 'Synthetic Engineer', company: 'Synthetic', matchScore: 80,
+      url: 'https://example.test/jobs/retry',
+      officialPosting: { level: 'L5', outcome: 'not-found', employer: 'Synthetic', trail: ['fetch-timeout'] },
+      listingGenerationNotice: { action: 'refuse-retry', basis: 'official-lookup', message: 'Retry the official posting lookup.' } },
+  }, {
+    id: 'closed-posting-card', type: 'jobcard', position: { x: 800, y: 400 },
+    data: { title: 'Synthetic Engineer', company: 'Synthetic', matchScore: 80,
+      url: 'https://example.test/jobs/old-source',
+      officialPosting: { level: 'L2', outcome: 'closed', employer: 'Synthetic',
+        sourceUrl: 'https://careers.example.test/jobs/closed', trail: ['closed'] },
+      listingGenerationNotice: { action: 'refuse-final', basis: 'official-closed', message: 'The official posting is closed.' } },
   }], edges: [], drawings: [] }));
   application = await electron.launch({ args: ['.', `--user-data-dir=${path.join(root, 'profile')}`], env });
   const page = await application.firstWindow();
@@ -50,6 +63,17 @@ try {
   if (await skip.isVisible()) await skip.click();
   const card = page.locator('.react-flow__node-jobcard[data-id="saved-card"]');
   const rebuilt = page.locator('.react-flow__node-jobcard[data-id="rebuilt-card"]');
+  const retry = page.locator('.react-flow__node-jobcard[data-id="lookup-retry-card"]');
+  await retry.getByRole('button', { name: 'Check again', exact: true }).waitFor();
+  assert.match(await retry.innerText(), /Official lookup incomplete: page fetch timed out/u);
+  assert.match(await retry.innerText(), /Complete the official posting lookup before generating/u);
+  assert.equal(await retry.getByRole('button', { name: 'Generate anyways', exact: true }).count(), 0,
+    'an incomplete source lookup offers retry, without a bypass');
+  const closed = page.locator('.react-flow__node-jobcard[data-id="closed-posting-card"]');
+  await closed.getByRole('button', { name: 'Check again', exact: true }).waitFor();
+  assert.match(await closed.innerText(), /Generation paused · Official posting closed/u);
+  assert.equal(await closed.getByRole('button', { name: 'Generate anyways', exact: true }).count(), 0,
+    'a closed official identity offers a fresh lookup without a board-only override');
   await rebuilt.getByRole('button', { name: 'Open saved folder', exact: true }).waitFor();
   assert.equal(await rebuilt.getByTestId('job-card-bundle-cross').count(), 1, 'the restored bundle displays its red X');
   assert.equal(await rebuilt.getByRole('button', { name: 'Generate', exact: true }).count(), 0,
@@ -62,8 +86,8 @@ try {
   assert.equal(await card.getByRole('button', { name: 'Generate', exact: true }).count(), 0,
     'editing or deleting a file inside a linked folder must not unlock generation');
   await fs.rm(outputDir, { recursive: true });
-  await card.getByRole('button', { name: 'Generate', exact: true }).waitFor({ timeout: 20_000 });
-  await rebuilt.getByRole('button', { name: 'Generate', exact: true }).waitFor({ timeout: 20_000 });
+  await card.getByRole('button', { name: 'Retry generation', exact: true }).waitFor({ timeout: 20_000 });
+  await rebuilt.getByRole('button', { name: 'Retry generation', exact: true }).waitFor({ timeout: 20_000 });
   assert.equal(await rebuilt.getByTestId('job-card-bundle-cross').count(), 0, 'a deleted bundle clears the restored X');
   assert.equal(await card.getByRole('button', { name: 'Open saved folder', exact: true }).count(), 0,
     'external folder removal must clear the saved indicator');
@@ -71,7 +95,7 @@ try {
   assert.equal(status.localJob.savedOutputMissing, true);
   assert.equal(await fs.readFile(path.join(receiptsRoot, `${jobId}.json`), 'utf8'), JSON.stringify({ ...receipt, listingKeys: ['https://example.test/jobs/synthetic'] }),
     'a missing-output check must preserve the prior receipt');
-  console.log('PASS: rebuilt card restores saved bundle; linked bundle hides Generate; external folder deletion restores it without deleting the receipt.');
+  console.log('PASS: incomplete and closed official postings offer fresh lookup without bypass; saved bundles restore and external folder deletion unlocks retry without deleting the receipt.');
 } catch (error) {
   const page = application?.windows()[0];
   if (page) {

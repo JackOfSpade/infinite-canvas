@@ -9,6 +9,7 @@ import {
   officialPostingSemanticProofMatches,
   officialPostingSemanticScrapedEvidence,
   officialPostingSemanticSourceHash,
+  withHostOfficialPostingLiveness,
 } from '../../electron/ipc/officialPostingSemantic.js';
 
 const NOW = Date.UTC(2030, 0, 1);
@@ -23,6 +24,22 @@ const source = (extra = {}) => ({
 });
 
 export default [
+  {
+    name: 'current official availability is a host receipt carried through semantic snapshots and source hashes',
+    run() {
+      const original = source();
+      const unclear = withHostOfficialPostingLiveness(original, 'unclear');
+      const closed = withHostOfficialPostingLiveness(original, 'closed');
+      assert.equal(evaluateOfficialPostingSourceEligibility(unclear).status, 'unavailable');
+      const snapshot = buildOfficialPostingSemanticInventory([closed])[0];
+      assert.equal(snapshot.status, 'closed');
+      assert.equal(officialPostingSemanticSourceHash(snapshot.candidate), officialPostingSemanticSourceHash(closed));
+      assert.notEqual(officialPostingSemanticSourceHash(original), officialPostingSemanticSourceHash(unclear));
+      assert.notEqual(officialPostingSemanticSourceHash(original), officialPostingSemanticSourceHash(closed));
+      assert.equal(evaluateOfficialPostingSourceEligibility({ ...original, currentLiveness: 'closed', hostLiveness: 'closed' }).status, 'live');
+      assert.equal(evaluateOfficialPostingSourceEligibility(structuredClone(closed)).status, 'live', 'plain wire objects cannot manufacture the host receipt');
+    },
+  },
   {
     name: 'Semantic source admission checks fetched ownership rather than employer title location pay or wording identity',
     run() {

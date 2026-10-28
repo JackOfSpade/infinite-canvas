@@ -2,6 +2,9 @@
 // the same field list. Scraped identity fields remain separate from these.
 export const OFFICIAL_POSTING_ROW_FIELDS = Object.freeze(['postedBy', 'applyOptions', 'salaryProvenance', 'officialPosting', 'boardClosed', 'listingLiveness', 'alternateListings']);
 export const LOCAL_AI_APPLICATION_SNIPPET_MAX_CHARS = 80_000;
+// Generation receipts cover the final queue boundary; search/cache retention
+// is separate and never extends this short-lived source check.
+export const OFFICIAL_POSTING_GENERATION_RECEIPT_MAX_AGE_MS = 5 * 60 * 1_000;
 export const OFFICIAL_POSTING_LEVELS = Object.freeze(['L1', 'L2', 'L3', 'L4', 'L5', 'L6']);
 export const OFFICIAL_POSTING_OUTCOMES = Object.freeze(['found', 'link-only', 'not-found', 'ambiguous', 'unreadable', 'closed', 'failed']);
 export const SALARY_PROVENANCES = Object.freeze(['posted', 'estimated', 'unknown']);
@@ -224,9 +227,50 @@ const RESEARCH_UNSETTLED_TRAIL = Object.freeze(['bridge-aborted', 'bridge-timeou
 /** True only for a definitive miss reached after research actually ran (or an official page that is itself closed). */
 export function officialResearchSettled(value) {
   const posting = value && typeof value === 'object' ? value : null;
-  if (!posting || !['L5', 'L6'].includes(posting.level) || !['not-found', 'ambiguous', 'closed'].includes(posting.outcome)) return false;
+  if (!posting || !['not-found', 'ambiguous', 'closed'].includes(posting.outcome)) return false;
   const trail = Array.isArray(posting.trail) ? posting.trail : [];
+  const officialClosed = ['L1', 'L2', 'L3', 'L4'].includes(posting.level) && posting.outcome === 'closed'
+    && officialHttpsUrl(posting.sourceUrl) && trail.includes('closed') && trail.includes('semantic-match-v1')
+    && /^[a-f0-9]{64}$/u.test(posting.semanticMatch?.inputHash || '') && /^[a-f0-9]{64}$/u.test(posting.semanticMatch?.sourceHash || '');
+  if (!['L5', 'L6'].includes(posting.level) && !officialClosed) return false;
   if (trail.some(code => RESEARCH_UNSETTLED_TRAIL.includes(code))) return false;
   return posting.outcome === 'closed' || trail.includes('bridge-research')
     || trail.includes('comparative-none') || trail.includes('comparative-disagree');
+}
+
+/** Shared user-facing lookup state. A failed search is never an exact-match miss. */
+export function officialPostingLookupStatus(value) {
+  const posting = normalizeOfficialPosting(value);
+  const result = (state, label, detail, retryable, sourceUrl = '', applyUrl = '') => ({ state, label, detail, retryable, sourceUrl, applyUrl });
+  if (!posting) return result('unchecked', 'Official posting not checked', 'Run the official posting lookup in the app.', true);
+  const official = ['L1', 'L2', 'L3', 'L4'].includes(posting.level);
+  const trail = new Set(posting.trail || []);
+  if (official && ['found', 'link-only'].includes(posting.outcome) && (posting.sourceUrl || posting.officialApplyUrl)) {
+    if (trail.has('reverify-failed')) {
+      const recheck = officialPostingLookupStatus({ ...posting, level: 'L5', outcome: 'failed' });
+      return result('verified', 'Previously verified official posting', `Latest recheck: ${recheck.label}. ${recheck.detail}`, true,
+        posting.sourceUrl || '', posting.officialApplyUrl || '');
+    }
+    return result('verified', 'Exact official posting verified',
+      posting.outcome === 'link-only' ? 'The official link is verified; the application uses the original listing text.' : '',
+      false, posting.sourceUrl || '', posting.officialApplyUrl || '');
+  }
+  const unsettled = [...trail].some(code => RESEARCH_UNSETTLED_TRAIL.includes(code));
+  if (!unsettled && (officialResearchSettled(posting) || (official && posting.outcome === 'closed'))) {
+    if (posting.outcome === 'closed') return result('closed', 'Official posting closed', 'The official posting is no longer accepting applications.', false);
+    if (posting.outcome === 'ambiguous' || trail.has('comparative-disagree')) return result('ambiguous', 'Several official postings match', 'The completed lookup could not identify one exact match. The original listing is retained.', false);
+    return result('not-found', 'No exact official posting found', 'The lookup completed without a verified exact match. The original listing is retained.', false);
+  }
+  const retry = 'Retry the official posting lookup in the app.';
+  if (trail.has('bridge-unavailable') || trail.has('comparative-unavailable')) return result('incomplete', 'Official lookup incomplete: research unavailable', 'Reconnect ChatGPT research, then retry the official posting lookup in the app.', true);
+  if (trail.has('bridge-timeout')) return result('incomplete', 'Official lookup incomplete: research timed out', retry, true);
+  if (trail.has('bridge-aborted')) return result('incomplete', 'Official lookup incomplete: research interrupted', retry, true);
+  if (trail.has('fetch-timeout')) return result('incomplete', 'Official lookup incomplete: page fetch timed out', retry, true);
+  if (trail.has('crawl-budget') || trail.has('crawl-partial')) return result('incomplete', 'Official lookup incomplete: search coverage limited', retry, true);
+  if (trail.has('fetch-failed')) return result('incomplete', 'Official lookup incomplete: page could not be fetched', retry, true);
+  if (posting.outcome === 'ambiguous' || ['semantic-uncertain', 'semantic-overflow', 'comparative-invalid', 'comparative-truncated', 'insufficient-text', 'official-liveness-unconfirmed'].some(code => trail.has(code))) {
+    return result('incomplete', 'Official posting match uncertain', `An exact, current official match has not been verified. ${retry}`, true);
+  }
+  if (posting.outcome === 'unreadable' || ['official-text-missing', 'unreadable', 'stub-text', 'invalid-text'].some(code => trail.has(code))) return result('incomplete', 'Official lookup incomplete: posting could not be read', retry, true);
+  return result('incomplete', 'Official posting lookup incomplete', `The lookup did not finish, so no exact-match conclusion was reached. ${retry}`, true);
 }

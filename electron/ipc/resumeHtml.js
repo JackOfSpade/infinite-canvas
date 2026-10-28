@@ -1,6 +1,6 @@
 import { APPLICATION_EDIT_NOTES_MARKUP, APPLICATION_EDIT_NOTES_RUNTIME, APPLICATION_EDIT_NOTES_RESTORE } from './applicationEditNotesUi.js';
 import { forbiddenPunctuationKinds } from './candidatePunctuation.js';
-import { officialHttpsUrl } from './officialPostingFields.js';
+import { officialPostingLookupStatus } from './officialPostingFields.js';
 export { forbiddenPunctuationKinds } from './candidatePunctuation.js';
 /**
  * Self-contained HTML builders for the job-application generator (résumé +
@@ -68,6 +68,7 @@ import { titleCaseSkillGroupLabel } from './skillGroupLabel.js';
 // so this file re-uses the shared normalizer instead of a second copy.
 import {
   normaliseJobPostingVariants,
+  normalizeBundleOfficialPosting,
   normalizeJobListingExternalUrl,
   MAX_POSTING_VARIANTS,
   MAX_POSTING_VARIANT_URL_LENGTH,
@@ -910,6 +911,9 @@ const INJECTED_CHROME_CSS = `
 .ic-job-posting-links { display: flex; flex-direction: column; gap: 6px; margin: -8px 0 18px; }
 .ic-job-posting-links .ic-job-posting-link { margin: 0; }
 .ic-job-posting-link:hover { color: #fffaf0; }
+.ic-official-posting-status { margin: -4px 0 18px; color: #f7f1e6; font-size: 12px; line-height: 1.5; }
+.ic-official-posting-status strong { display: block; color: inherit; font-weight: 600; }
+.ic-official-posting-status span { color: #c8c1b5; }
 .ic-workspace-sidebar .ic-toolbar { position: static; display: grid; grid-template-columns: 1fr; gap: 8px; padding: 0; background: transparent; }
 .ic-workspace-sidebar .ic-toolbar .ic-btn { min-height: 34px; text-align: left; }
 .ic-workspace-sidebar .ic-toolbar .ic-hint { margin: 5px 0 0; color: #cfc2b0; font-size: 11px; }
@@ -1355,18 +1359,13 @@ export function normaliseResumeDownloadBundle(raw = {}) {
       : 'checks-passed',
     note: 'Deterministic checks support factual and structural review; they are not a persuasive-quality score.',
   } : undefined;
-  const official = raw.officialPosting;
-  const officialPosting = ['L1', 'L2', 'L3', 'L4'].includes(official?.level) ? {
-    level: official.level,
-    sourceUrl: officialHttpsUrl(official.sourceUrl),
-    officialApplyUrl: officialHttpsUrl(official.officialApplyUrl),
-  } : null;
+  const officialPosting = normalizeBundleOfficialPosting(raw.officialPosting);
   return {
     company: safePart(raw.company, 'Company'),
     candidateName: safePart(raw.candidateName, 'Application'),
     jobUrl: safeJobPostingUrl(raw.jobUrl),
     listingLinkUrl: safeJobPostingUrl(raw.listingLinkUrl),
-    ...(officialPosting && (officialPosting.sourceUrl || officialPosting.officialApplyUrl) ? { officialPosting } : {}),
+    ...(officialPosting ? { officialPosting } : {}),
     jobMarkdown: String(raw.jobMarkdown || '').replace(/\r\n/g, '\n'),
     postingVariants: normalisePostingVariants(raw.postingVariants),
     resumePdfBase64,
@@ -1675,7 +1674,8 @@ function buildSkillWorkspace({ skillInsights, skillHistogram, jobContext, jobUrl
     || (contextRoles.length ? `Tailored for ${contextRoles.join(' · ')}` : 'Review high-value adjacent skills before export.');
   const selectedListingUrl = safeJobPostingUrl(listingLinkUrl);
   const safeOriginalJobUrl = selectedListingUrl || safeJobPostingUrl(jobUrl);
-  const officialUrl = officialPosting?.sourceUrl || officialPosting?.officialApplyUrl || '';
+  const officialStatus = officialPostingLookupStatus(officialPosting);
+  const officialUrl = officialStatus.sourceUrl || officialStatus.applyUrl;
   // The official page precedes retained location-specific scraped links.
   const safePostingVariants = normalisePostingVariants(postingVariants);
   const postingLinkTargets = safePostingVariants
@@ -1693,7 +1693,11 @@ function buildSkillWorkspace({ skillInsights, skillHistogram, jobContext, jobUrl
     ? `<a class="ic-job-posting-link" href="${escapeHtml(singlePostingUrl)}" target="_blank" rel="noopener noreferrer">View ${officialUrl ? 'official' : 'original'} job posting</a>`
     : '';
   if ((officialUrl || selectedListingUrl) && postingLinks.length) postingLinks.unshift(originalJobLink);
+  if (officialUrl && !postingLinks.length && safeOriginalJobUrl && safeOriginalJobUrl !== officialUrl) {
+    postingLinks.push(originalJobLink, `<a class="ic-job-posting-link" href="${escapeHtml(safeOriginalJobUrl)}" target="_blank" rel="noopener noreferrer">View original job posting</a>`);
+  }
   const postingLinksBlock = postingLinks.length ? `<div class="ic-job-posting-links">${postingLinks.join('\n')}</div>` : '';
+  const postingStatusBlock = `<p class="ic-official-posting-status" data-ic-official-posting-status="${officialStatus.state}" role="status"><strong>${escapeHtml(officialStatus.label)}</strong>${officialStatus.detail ? `<span>${escapeHtml(officialStatus.detail)}</span>` : ''}</p>`;
   const card = (item) => `<article class="ic-insight-card${item.kind === 'learn' ? ' ic-learn-card' : ''}" data-ic-insight="${escapeHtml(item.id)}" data-ic-kind="${item.kind}">
   <p class="ic-insight-skill">${escapeHtml(item.skill)}</p>
   <p class="ic-insight-meta">${escapeHtml(item.importance || 'high')} impact · ${item.kind === 'verify' ? 'nearby — verify first' : 'learn first'}</p>
@@ -1735,6 +1739,7 @@ function buildSkillWorkspace({ skillInsights, skillHistogram, jobContext, jobUrl
   <h1 class="ic-workspace-title">Application, with receipts.</h1>
   <p class="ic-workspace-context">${escapeHtml(context)}</p>
   ${postingLinksBlock || originalJobLink}
+  ${postingStatusBlock}
   ${coverLetterCheckSummary ? `<p class="ic-panel-note" role="status">${escapeHtml(coverLetterCheckSummary)}</p>` : ''}
   <div id="ic-skill-workspace-data" data-ic-workspace="${escapeHtml(json)}" hidden></div>
   <div class="ic-toolbar" role="toolbar" aria-label="Document controls">

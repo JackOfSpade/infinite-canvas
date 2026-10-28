@@ -146,9 +146,12 @@ export default [
       assert(prepareAt > start && acquireAt > prepareAt && acquireAt < queueAt,
         'official preparation finishes before the application lane while final live career resolution still precedes queueing');
       for (const field of ['postedBy', 'applyOptions', 'salaryProvenance', 'officialPosting', 'googleCardUrl', 'sourceJobKey']) {
-        assert(new RegExp(`\\b${field}:\\s*data\\.${field}\\b`).test(payload),
+        const projection = fs.readFileSync(new URL('../../src/utils/officialPostingPreparation.js', import.meta.url), 'utf8');
+        assert(new RegExp(`\\b${field}:\\s*data\\.${field}\\b`).test(projection),
           `the resolved snapshot payload must retain ${field} for host-side preparation`);
       }
+      assert(payload.includes('job: queueJob,') && src.includes('const queueJob = projectOfficialPostingGenerationJob(cardBeforeQueue.data)'),
+        'the resolved snapshot queue payload must use the current live source projection');
     },
   },
 ];

@@ -2,7 +2,8 @@ import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
 import { assert } from './testHelpers.js';
 import { createModuleRunQueue } from '../../src/utils/moduleRunQueue.js';
-import { beginOfficialPostingPreparation } from '../../src/utils/officialPostingPreparation.js';
+import { beginOfficialPostingPreparation, projectOfficialPostingGenerationJob,
+  officialPostingPreparationSourceKey, officialPostingPreparationNeedsRefresh } from '../../src/utils/officialPostingPreparation.js';
 import { hasLinkedLocalApplicationOutput, queuedLocalApplicationStartDecision } from '../../src/utils/localAiApplicationLifecycle.js';
 import { resolveApplicationCareerSnapshotId } from '../../src/utils/jobBoardCareerOverride.js';
 import { getConnectedJobSearchIds } from '../../src/utils/jobBoardSearchSelection.js';
@@ -115,6 +116,7 @@ export default [
           useCallback: fn => fn,
           window: { electronAPI: {
             queueLocalApplication: async args => { ipcCalls += 1; selectedPin = args.careerSnapshotId; return { success: false }; },
+            prepareOfficialPostingForGeneration: async () => ({ success: true, resolutionId: 'prepared-source', preparedAt: new Date().toISOString(), listingCheck: { action: 'proceed' } }),
             checkApplicationGenerationGate: async () => ({ success: true, blocked: false }),
             completeNonApiAiRun: async () => {},
           } },
@@ -134,7 +136,7 @@ export default [
           getDismissedApplicationBundles: () => new Set(),
           hasLinkedLocalApplicationOutput, queuedLocalApplicationStartDecision,
           normalizeJobListingExternalUrl: job => job.url || 'https://example.test/job',
-          beginOfficialPostingPreparation,
+          beginOfficialPostingPreparation, projectOfficialPostingGenerationJob, officialPostingPreparationSourceKey, officialPostingPreparationNeedsRefresh,
           acquireModuleRun: options => queue.acquireModuleRun({
             ...options,
             onStart: info => {
@@ -196,6 +198,7 @@ export default [
           useCallback: fn => fn,
           window: { electronAPI: {
             queueLocalApplication: async () => { queueCalls += 1; return { success: false }; },
+            prepareOfficialPostingForGeneration: async () => ({ success: true, resolutionId: 'prepared-source', preparedAt: new Date().toISOString(), listingCheck: { action: 'proceed' } }),
             checkApplicationGenerationGate: async args => { gateCalls.push(args); return gateResult; },
             completeNonApiAiRun: async runId => { completed.push(runId); },
           } },
@@ -215,14 +218,15 @@ export default [
           getDismissedApplicationBundles: () => new Set(),
           hasLinkedLocalApplicationOutput, queuedLocalApplicationStartDecision,
           normalizeJobListingExternalUrl: job => job.url || 'https://example.test/job',
-          beginOfficialPostingPreparation,
+          beginOfficialPostingPreparation, projectOfficialPostingGenerationJob, officialPostingPreparationSourceKey, officialPostingPreparationNeedsRefresh,
           acquireModuleRun: options => queue.acquireModuleRun(options),
         });
         await callback();
         const label = gateResult.success ? `blocked=${gateResult.blocked}` : 'failed check';
         assert(gateCalls.length === 1 && gateCalls[0].nodeId === 'card' && gateCalls[0].manualAiRunId === 'application-gate:card:gate-run',
           `${label}: the gate runs once with the card's durable run id`);
-        assert(completed.length === 1 && completed[0] === 'application-gate:card:gate-run', `${label}: the gate run is retired`);
+        assert(completed.filter(id => id.startsWith('application-gate:')).length === 1
+          && completed.includes('application-gate:card:gate-run'), `${label}: the gate run is retired`);
         assert(queue.getSnapshot().active === null, `${label}: the lease is released`);
         assert(runStates.at(-1) === 'idle', `${label}: the card returns to idle`);
         if (gateResult.success && !gateResult.blocked) {

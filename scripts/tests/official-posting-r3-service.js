@@ -157,7 +157,7 @@ export default [
     },
   },
   {
-    name: 'R3 service runs six host rows in parallel with one shared fetch session and row budget while research chunks remain sequential',
+    name: 'R3 service runs six host rows in parallel with a shared fetch session and separate discovery budgets while research chunks remain sequential',
     async run() {
       const rows = Array.from({ length: 13 }, (_, index) => job(index)); const before = JSON.stringify(rows);
       const store = memoryStore(); const budgets = new Map(); const phases = { free: 0, pending: 0 }; const peak = { free: 0, pending: 0 };
@@ -169,7 +169,7 @@ export default [
           const phase = options.bypassCache ? 'pending' : 'free'; phases[phase]++; peak[phase] = Math.max(peak[phase], phases[phase]);
           assert.equal(options.persistResults, false); assert.equal(options.persistMisses, false);
           assert.equal(options.signal, options.rowBudget.signal);
-          if (budgets.has(row.sourceJobKey)) assert.equal(options.rowBudget, budgets.get(row.sourceJobKey)); else budgets.set(row.sourceJobKey, options.rowBudget);
+          if (budgets.has(row.sourceJobKey)) assert.notEqual(options.rowBudget, budgets.get(row.sourceJobKey)); else budgets.set(row.sourceJobKey, options.rowBudget);
           await options.fetch('https://shared.test/', { signal: options.signal }); await delay(Number(row.sourceJobKey.split('-')[1]) % 3 + 2);
           phases[phase]--;
           if (phase === 'free') { freeCompleted++; return unresolvedOfficialPosting(row); }

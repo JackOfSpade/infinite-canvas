@@ -3,7 +3,8 @@ import { extractJobPostingBaseSalary, extractJobPostingDescription, walkJsonLdJo
 import { locationsCompatible } from '../../electron/ipc/officialPostingMatch.js';
 import {
   extractAshbyPostings, extractGreenhousePostings, extractJsonLdPostings, extractLeverPostings,
-  extractOfficialPostingCandidates, extractTeamtailorRss, officialDescriptionText, scanOfficialCareersPage,
+  extractOfficialPostingCandidates, extractSmartRecruitersPostings, extractSmartRecruitersHtmlPostings,
+  extractTeamtailorRss, officialDescriptionText, officialSmartRecruitersAdapterUrl, scanOfficialCareersPage,
 } from '../../electron/ipc/officialPostingExtractors.js';
 
 const sourceUrl = 'https://careers.northwind.example/jobs/alpha-7';
@@ -17,8 +18,107 @@ const node = extra => ({
   baseSalary: { '@type': 'MonetaryAmount', currency: 'CAD', value: { minValue: 117000, maxValue: 139000, unitText: 'YEAR' } },
   identifier: { '@type': 'PropertyValue', name: 'requisition', value: 'alpha-7' }, validThrough: '2050-12-31', ...extra,
 });
+const smartUrl = 'https://jobs.smartrecruiters.com/Northwind/740000000000017-dispatch-engineer';
+const smartApiUrl = 'https://api.smartrecruiters.com/v1/companies/Northwind/postings/740000000000017';
+const smartJob = extra => ({ id: '740000000000017', name: 'Dispatch Systems Engineer', refNumber: 'REF-17',
+  company: { name: 'Northwind Labs', identifier: 'Northwind' },
+  location: { city: 'Lakeview', region: 'Ontario', country: 'ca', remote: false },
+  postingUrl: smartUrl, applyUrl: `${smartUrl}?oga=true`, active: true,
+  jobAd: { sections: { companyDescription: { title: 'Company Description', text: '<p>A dispatch software company.</p>' },
+    jobDescription: { title: 'Job Description', text: '<p>Maintain relay scheduling and review releases.</p>' },
+    qualifications: { title: 'Qualifications', text: '<p>Experience with terminal arrival prediction.</p>' },
+    additionalInformation: { title: 'Additional Information', text: '<p>Posted pay CAD 117000 to 139000 annually.</p>' } } }, ...extra });
 
 export default [
+  {
+    name: 'SmartRecruiters detail adapters use only observed tenant and posting identifiers and retain API identifier case',
+    run() {
+      const route = { ats: 'smartrecruiters', tenant: 'northwind' };
+      assert.equal(officialSmartRecruitersAdapterUrl(route, smartUrl), smartApiUrl);
+      assert.equal(officialSmartRecruitersAdapterUrl(route, smartUrl.replace('-dispatch-engineer', '')), smartApiUrl);
+      for (const value of ['https://jobs.smartrecruiters.com/Northwind',
+        'https://jobs.smartrecruiters.com/Other/740000000000017-dispatch-engineer',
+        'https://jobs.smartrecruiters.com/Northwind/not-an-id',
+        'https://jobs.smartrecruiters.com/Northwind/740000000000017/apply',
+        'https://attacker.test/Northwind/740000000000017',
+        'https://jobs.smartrecruiters.com:444/Northwind/740000000000017',
+        'https://user:pass@jobs.smartrecruiters.com/Northwind/740000000000017']) {
+        assert.equal(officialSmartRecruitersAdapterUrl(route, value), '', value);
+      }
+      assert.equal(officialSmartRecruitersAdapterUrl({ ats: 'ashby', tenant: 'northwind' }, smartUrl), '');
+    },
+  },
+  {
+    name: 'SmartRecruiters documented detail responses preserve every job-ad section liveness and explicit employer without inventing salary or ownership',
+    run() {
+      const options = { sourceUrl: smartApiUrl, tenant: 'northwind' };
+      const [found] = extractSmartRecruitersPostings(json(smartJob()), options);
+      assert.equal(found.title, 'Dispatch Systems Engineer');
+      assert.equal(found.employer, 'Northwind Labs');
+      assert.equal(found.identifier, 'REF-17');
+      assert.equal(found.sourceUrl, smartUrl);
+      assert.equal(found.officialApplyUrl, `${smartUrl}?oga=true`);
+      assert.equal(found.location.display, 'Lakeview, Ontario, Canada');
+      assert.equal(found.tenant, 'northwind');
+      assert.equal(found.ats, 'smartrecruiters');
+      assert.equal(found.live, true);
+      assert.equal(found.sameAs, '');
+      assert.equal(found.salary.provenance, 'unknown');
+      for (const text of ['A dispatch software company.', 'Maintain relay scheduling and review releases.',
+        'Qualifications', 'Experience with terminal arrival prediction.', 'Posted pay CAD 117000 to 139000 annually.']) assert.ok(found.description.includes(text));
+      const [closed] = extractOfficialPostingCandidates({ body: json(smartJob({ active: false })), ...options, contentType: 'application/json', ats: 'smartrecruiters' });
+      assert.equal(closed.live, false);
+      const [remote] = extractSmartRecruitersPostings(json(smartJob({ location: { city: 'Lakeview', country: 'ca', remote: true } })), options);
+      assert.equal(remote.location.remote, true);
+    },
+  },
+  {
+    name: 'SmartRecruiters detail extraction rejects swapped tenants postings summary responses and API redirects',
+    run() {
+      for (const extra of [{ id: '740000000000018' }, { company: { name: 'Other Labs', identifier: 'other' } },
+        { postingUrl: smartUrl.replace('Northwind', 'Other') }, { postingUrl: smartUrl.replace('017-', '018-') },
+        { jobAd: undefined }, { active: undefined }, { postingUrl: 'https://attacker.test/job/17' }]) {
+        assert.deepEqual(extractSmartRecruitersPostings(json(smartJob(extra)), { sourceUrl: smartApiUrl, tenant: 'northwind' }), [], json(extra));
+      }
+      for (const sourceUrl of [smartApiUrl.replace('api.smartrecruiters.com', 'attacker.test'),
+        smartApiUrl.replace('/Northwind/', '/Other/'), `${smartApiUrl}?redirect=1`, smartUrl]) {
+        assert.deepEqual(extractSmartRecruitersPostings(json(smartJob()), { sourceUrl, tenant: 'northwind' }), [], sourceUrl);
+      }
+      assert.deepEqual(extractSmartRecruitersPostings(json(smartJob()), { sourceUrl: smartApiUrl, tenant: 'other' }), []);
+      assert.deepEqual(extractSmartRecruitersPostings('{bad', { sourceUrl: smartApiUrl }), []);
+    },
+  },
+  {
+    name: 'SmartRecruiters static microdata extraction preserves full source facts without treating a branded logo as ownership proof',
+    run() {
+      const html = `<header><a title="Northwind Labs" href="https://northwind.example"><img alt="Northwind Labs logo"></a></header>
+        <main itemscope itemtype="http://schema.org/JobPosting"><h1 itemprop="title">Dispatch Systems Engineer</h1>
+        <div itemprop="hiringOrganization" itemscope itemtype="http://schema.org/Organization"><meta itemprop="name" content="Northwind Labs"></div>
+        <div itemprop="jobLocation"><div itemprop="address"><meta itemprop="addressCountry" content="Canada"><meta itemprop="addressLocality" content="Lakeview"><meta itemprop="addressRegion" content="Ontario"></div></div>
+        <spl-job-location workplaceType="hybrid"></spl-job-location>
+        <div itemprop="description"><section><h2>Responsibilities</h2><p>Maintain relay scheduling services.</p></section><section><h2>Qualifications</h2><p>Experience reviewing releases.</p></section><p>Posted pay CAD 117000 to 139000 annually.</p></div></main>`;
+      const [found] = extractOfficialPostingCandidates({ body: html, sourceUrl: smartUrl, ats: 'smartrecruiters', tenant: 'northwind', contentType: 'text/html' });
+      assert.equal(found.employer, 'Northwind Labs');
+      assert.equal(found.location.display, 'Lakeview, Ontario, Canada');
+      assert.equal(found.location.workMode, 'hybrid');
+      assert.equal(found.location.remote, false);
+      assert.equal(found.sameAs, '');
+      assert.equal(found.sourceUrl, smartUrl);
+      assert.ok(found.description.includes('Experience reviewing releases.'));
+      assert.ok(found.description.includes('Posted pay CAD 117000 to 139000 annually.'));
+      assert.deepEqual(extractSmartRecruitersHtmlPostings(html + html, { sourceUrl: smartUrl }), []);
+      assert.equal(extractSmartRecruitersHtmlPostings(`<link rel="canonical" href="${smartUrl}">${html}`, {
+        sourceUrl: smartUrl.replace('-dispatch-engineer', ''),
+      }).length, 1, 'a title slug does not change the observed posting id');
+      for (const foreign of [smartUrl.replace('017-', '018-'), smartUrl.replace('Northwind', 'Other')]) {
+        assert.deepEqual(extractSmartRecruitersHtmlPostings(`<link rel="canonical" href="${foreign}">${html}`, { sourceUrl: smartUrl }), []);
+        assert.deepEqual(extractSmartRecruitersHtmlPostings(`<meta property="og:url" content="${foreign}">${html}`, { sourceUrl: smartUrl }), []);
+      }
+      assert.deepEqual(extractSmartRecruitersHtmlPostings(html, { sourceUrl: 'https://attacker.test/job/17' }), []);
+      assert.deepEqual(extractSmartRecruitersHtmlPostings(html, { sourceUrl: smartUrl, tenant: 'other' }), []);
+      assert.deepEqual(extractSmartRecruitersHtmlPostings('<h1>Dispatch Systems Engineer</h1>', { sourceUrl: smartUrl }), []);
+    },
+  },
   {
     name: 'Official JSON-LD walk returns every nested normalized posting and preserves raw callback short-circuit behavior',
     run() {

@@ -1369,17 +1369,18 @@ export default [
         && !generate.includes("lane: 'job-search'")
         && !generate.includes('moduleRunSnapshot.active'),
       'Generate\'s guard must use the effective board lock plus a live race fence, never active Job Search work');
-      const dependencies = generate.slice(generate.lastIndexOf('}, ['));
       assert(generate.indexOf('await window.electronAPI.prepareOfficialPostingForGeneration?.({')
           < generate.indexOf('lease = await acquireModuleRun({')
         && generate.includes('        resolutionId,')
         && generate.includes('cancelledBeforeStart || prepared?.cancelled'),
       'official preparation must precede the application lane, pass its opaque identity, and fence explicit cancellation');
       for (const field of ['postedBy', 'applyOptions', 'salaryProvenance', 'officialPosting', 'googleCardUrl', 'sourceJobKey']) {
-        assert(new RegExp(`\\b${field}:\\s*data\\.${field}\\b`).test(generate)
-          && new RegExp(`\\bdata\\.${field}\\b`).test(dependencies),
-        `Generate must forward ${field} and refresh its callback when that card field changes`);
+        const projection = fs.readFileSync(path.resolve('src/utils/officialPostingPreparation.js'), 'utf8');
+        assert(new RegExp(`\\b${field}:\\s*data\\.${field}\\b`).test(projection),
+          `Generate's shared live projection must forward ${field}`);
       }
+      assert(generate.includes('const queueJob = projectOfficialPostingGenerationJob(cardBeforeQueue.data)')
+        && generate.includes('job: queueJob,'), 'Generate queues the current live card through the same source projection as research');
       assert(dismissButton.includes('disabled={effectiveLock}')
         && notes.includes('disabled={effectiveLock || hasApplicationRun || localJobPending}')
         && generateButton.includes('onClick={effectiveLock ? undefined : (e) => { e.stopPropagation(); generateApplication({ listingOverride: listingOverrideAvailable }); }}')

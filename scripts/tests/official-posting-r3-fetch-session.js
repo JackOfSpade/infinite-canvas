@@ -55,6 +55,39 @@ function forwarded(pages, timer, starts = [], lookup = async () => [{ address: '
 
 export default [
   {
+    name: 'research can retry one settled transient URL failure without evicting good bytes or resetting host safety limits',
+    async run() {
+      const timer = clock(); const attempts = new Map();
+      const session = createOfficialPostingFetchSession({ now: timer.now, sleep: timer.sleep, fetch: async url => {
+        const count = (attempts.get(url) || 0) + 1; attempts.set(url, count);
+        if (url.endsWith('/retry') && count === 1 || new URL(url).hostname === 'fails.test') throw new OfficialPostingFetchError('fetch-timeout');
+        if (url.endsWith('/closed')) throw new OfficialPostingFetchError('closed', { statusCode: 404 });
+        return page(url);
+      } });
+      const retry = 'https://retry.test/retry';
+      await assert.rejects(session.fetch(retry), /fetch-timeout/u);
+      assert.equal(session.retryFailedUrls([retry]), 1);
+      const recovered = session.fetch(retry); await timer.tick(250); await recovered;
+      assert.equal(attempts.get(retry), 2);
+      assert.equal(session.retryFailedUrls([retry]), 0);
+      await session.fetch(retry); assert.equal(attempts.get(retry), 2, 'success bytes stay cached');
+      const closed = 'https://closed.test/closed';
+      await assert.rejects(session.fetch(closed), /closed/u);
+      assert.equal(session.retryFailedUrls([closed]), 0, 'definitive gone pages are not retried');
+      const fails = 'https://fails.test/fails';
+      await assert.rejects(session.fetch(fails), /fetch-timeout/u);
+      assert.equal(session.retryFailedUrls([fails]), 1);
+      const again = assert.rejects(session.fetch(fails), /fetch-timeout/u); await timer.tick(250); await again;
+      assert.equal(session.retryFailedUrls([fails]), 0, 'one URL cannot retry repeatedly');
+      const third = assert.rejects(session.fetch('https://fails.test/other'), /fetch-timeout/u);
+      await timer.tick(250); await third;
+      assert.equal(session.telemetry().breakerTrips, 1, 'retrying does not reset consecutive host failures');
+      await assert.rejects(session.fetch('https://fails.test/fourth'), /fetch-failed/u);
+      assert.equal(attempts.size, 4, 'the tripped host admits no fourth transfer');
+      session.dispose();
+    },
+  },
+  {
     name: 'R3 fetch session coalesces subscribers and final aliases while a row abort leaves the shared request usable',
     async run() {
       const wait = deferred(); let calls = 0; const first = new AbortController(); const second = new AbortController();

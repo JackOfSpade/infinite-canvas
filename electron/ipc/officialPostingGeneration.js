@@ -2,7 +2,7 @@ import crypto from 'node:crypto';
 import { stripHtmlToText } from '../../src/utils/textEncoding.js';
 import { handleSafe } from './ipcUtils.js';
 import { getHandoffBridgeStatus } from './handoffBridge/index.js';
-import { bridgeWorkerPoolActive } from './handoffBridge/bridgeAvailability.js';
+import { bridgeLinked } from './handoffBridge/bridgeAvailability.js';
 import { officialPostingAliases, officialPostingRecordMatchesScrapedIdentity } from './officialPostingStore.js';
 import { getOfficialPostingStore, mergeOfficialPostingTelemetry, resolveOfficialPostings } from './officialPostingService.js';
 import { fetchOfficialPosting } from './officialPostingFetch.js';
@@ -10,7 +10,7 @@ import { extractOfficialPostingCandidates } from './officialPostingExtractors.js
 import { evaluateOfficialPostingMatch, flatPostingText, frozenOfficialEmployer } from './officialPostingMatch.js';
 import { extractAtsTenant, strictEmployerEqual } from './officialSourceHosts.js';
 import { officialPostingAdapterUrl, readableOfficialPostingDescription, unresolvedOfficialPosting, verifiedOfficialPostingApplyUrl, shouldPersistOfficialPostingResult } from './officialPostingResolver.js';
-import { normalizeAlternateListings, normalizeOfficialLocation, normalizeOfficialPosting, normalizeOfficialSalary, officialHttpsUrl, boundedOfficialPostingTrail } from './officialPostingFields.js';
+import { normalizeAlternateListings, normalizeOfficialLocation, normalizeOfficialPosting, normalizeOfficialSalary, officialHttpsUrl, boundedOfficialPostingTrail, officialPostingLookupStatus } from './officialPostingFields.js';
 import { checkListingForGeneration, decideGenerationListingCheck, normalizeListingAudit, recordGenerationFallbackHold } from './listingLivenessProbe.js';
 import { checkPostingVariantsForGeneration } from './listingLivenessProbe.js';
 import { normaliseJobPostingVariants } from './applicationBundle.js';
@@ -25,6 +25,7 @@ export const OFFICIAL_POSTING_PREPARE_TIMEOUT_MS = 15 * 60 * 1000;
 const PREPARED_TTL_MS = 24 * 60 * 60 * 1000;
 const MAX_PREPARED_RECORDS = 128;
 const MAX_PREPARED_BYTES = 32 * 1024 * 1024;
+const STORE_DRAIN_TIMEOUT_MS = 2_000;
 const prepared = new Map();
 const officialLevels = new Set(['L1', 'L2', 'L3', 'L4']);
 const textLevels = new Set(['L1', 'L2', 'L3']);
@@ -33,7 +34,7 @@ const aliasesOf = job => officialPostingAliases(job).sort();
 function errorWithCode(code) { return Object.assign(new Error(code), { code }); }
 function withTrail(posting, ...codes) { return { ...posting, trail: boundedOfficialPostingTrail([...(posting.trail || []), ...codes]) }; }
 function active(signal) { if (signal?.aborted) throw signal.reason || errorWithCode('bridge-aborted'); }
-function available(status) { return bridgeWorkerPoolActive(status); }
+function available(status) { return bridgeLinked(status); }
 
 export function createOfficialPostingPrepareSemaphore(limit = 3) {
   let running = 0; const waiting = [];
@@ -67,10 +68,12 @@ function remember(scrapedJob, result, now, semanticMatching = true) {
     description: typeof result.description === 'string' ? result.description : undefined,
     postedBy: result.postedBy || '', applyUrl: officialPosting.officialApplyUrl || '',
     listingAudit: normalizeListingAudit(result.listingAudit),
+    listingCheck: result.listingCheck ? structuredClone(result.listingCheck) : undefined,
     listingLinkUrl: officialHttpsUrl(result.listingLinkUrl) || '',
     postingVariants: normaliseJobPostingVariants(result.postingVariants ?? scrapedJob.postingVariants),
     listingLiveness: normalizeListingLiveness(result.listingLiveness),
     boardClosed: normalizeBoardClosed(result.boardClosed), aliases, createdAt: now, semanticMatching,
+    ...(semanticMatching ? { freshness: 'fresh-discovery' } : {}),
     ...(semanticMatching ? { inputHash: officialPostingSemanticInputHash(scrapedJob) } : {}) };
   const resolutionId = crypto.randomUUID();
   prepared.set(resolutionId, record);
@@ -79,6 +82,7 @@ function remember(scrapedJob, result, now, semanticMatching = true) {
     const first = prepared.keys().next().value; bytes -= Buffer.byteLength(JSON.stringify(prepared.get(first))); prepared.delete(first);
   }
   return { resolutionId: prepared.has(resolutionId) ? resolutionId : undefined,
+    preparedAt: new Date(record.createdAt).toISOString(),
     officialPosting: record.officialPosting, postedBy: record.postedBy,
     listingCheck: result.listingCheck, listingLiveness: record.listingLiveness,
     boardClosed: record.boardClosed, listingLinkUrl: record.listingLinkUrl,
@@ -88,6 +92,7 @@ function remember(scrapedJob, result, now, semanticMatching = true) {
 
 async function checkAlternateLinks({ job, posting, primary, probe, callText, bridgeAvailable,
   calibrationStore, signal, now, deadline, manualAiRunId, nodeId }) {
+  if (primary?.listingCheck?.basis === 'official-closed') return primary;
   if (!['refuse-final', 'refuse-retry'].includes(primary?.listingCheck?.action)
     || primary.listingCheck.verdict !== 'closed') return primary;
   const alternates = normalizeAlternateListings(job?.alternateListings);
@@ -317,6 +322,16 @@ export async function prepareOfficialPostingForGeneration(args, {
     listingLiveness: normalizeListingLiveness(job?.listingLiveness),
     boardClosed: normalizeBoardClosed(job?.boardClosed),
   });
+  const guardOfficialLookup = (posting, listing) => {
+    const lookup = officialPostingLookupStatus(posting);
+    if (!semanticMatching || !['incomplete', 'unchecked'].includes(lookup.state)
+      || listing.listingCheck?.action === 'refuse-final') return listing;
+    return { ...listing, listingCheck: { ...listing.listingCheck,
+      action: 'refuse-retry', basis: 'official-lookup', override: false },
+    message: `${lookup.label}. ${posting.trail?.includes('bridge-unavailable')
+      ? 'Reconnect ChatGPT, then retry Generate.' : 'Retry Generate to finish checking the official posting.'}`,
+    listingAudit: null };
+  };
   // The budget can expire before research or during the tail. Stored closed,
   // fresh open and unobservable decisions need neither a probe nor the AI.
   const typedFallback = (job, posting) => checkListingForGeneration({
@@ -346,19 +361,46 @@ export async function prepareOfficialPostingForGeneration(args, {
     });
   };
   let scrapedJob;
+  let cardPosting;
   try {
     scrapedJob = structuredClone(projectJob(args.job || {}));
     if (!scrapedJob || typeof scrapedJob !== 'object' || Array.isArray(scrapedJob)) throw new TypeError('Invalid scraped job projection.');
+    cardPosting = normalizeOfficialPosting(scrapedJob.officialPosting);
   }
   catch (error) {
     if (signal?.aborted) throw signal.reason || error;
     failed(error);
     const officialPosting = unresolvedOfficialPosting(args.job, { outcome: 'failed', trail: ['failed'] }).officialPosting;
-    return { officialPosting, ...holdFallback(args.job, officialPosting), telemetry: { failed: telemetry.failed } };
+    return { officialPosting, ...guardOfficialLookup(officialPosting, holdFallback(args.job, officialPosting)), telemetry: { failed: telemetry.failed } };
   }
   delete scrapedJob.applyUrl; delete scrapedJob.officialPosting; delete scrapedJob.postedBy;
   delete scrapedJob.listingAudit; delete scrapedJob.listingCheck;
   const deadline = now() + timeoutMs;
+  const pendingStoreOperations = new Set();
+  const trackedStore = target => {
+    const wrapper = Object.create(target);
+    for (const key of ['find', 'readText', 'save', 'restoreText']) {
+      const method = target[key];
+      if (typeof method !== 'function') continue;
+      Object.defineProperty(wrapper, key, { value: (...values) => {
+        const operation = Promise.resolve().then(() => method.apply(target, values));
+        pendingStoreOperations.add(operation);
+        void operation.finally(() => pendingStoreOperations.delete(operation)).catch(() => {});
+        return operation;
+      } });
+    }
+    return wrapper;
+  };
+  const drainStoreOperations = async () => {
+    if (!pendingStoreOperations.size) return;
+    let timer;
+    const stopped = new Promise(resolve => { timer = setTimeout(resolve, STORE_DRAIN_TIMEOUT_MS); });
+    try {
+      await Promise.race([stopped, (async () => {
+        while (pendingStoreOperations.size) await Promise.allSettled([...pendingStoreOperations]);
+      })()]);
+    } finally { clearTimeout(timer); }
+  };
   const controller = new AbortController(); const abort = () => controller.abort(signal.reason || errorWithCode('bridge-aborted'));
   if (signal?.aborted) abort(); else signal?.addEventListener('abort', abort, { once: true });
   const timer = setTimeout(() => controller.abort(errorWithCode('bridge-timeout')), timeoutMs); timer.unref?.();
@@ -375,13 +417,14 @@ export async function prepareOfficialPostingForGeneration(args, {
       active(controller.signal);
       try { bridgeAvailable = available(await bridgeStatus()); } catch { bridgeAvailable = false; }
       active(controller.signal); release = await slots.acquire(controller.signal); active(controller.signal);
-      store ||= getOfficialPostingStore();
+      store = trackedStore(store || getOfficialPostingStore());
       const record = await store.find(scrapedJob); active(controller.signal);
-      const resolveFresh = async ({ candidateUrls = [], bypassCache = false } = {}) => {
+      const resolveFresh = async ({ candidateUrls = [], bypassCache = false, priorOfficialRecord } = {}) => {
         if (semanticMatching && bypassCache) verifiedFallback = undefined;
         const resolved = await resolve([scrapedJob], { store, fetch, signal: controller.signal,
           manualAiRunId: args.manualAiRunId, nodeId: args.nodeId, callRaw, callMatch, now, bridgeAvailable,
-          timeoutMs, semanticMatching, candidateUrls, bypassCache });
+          timeoutMs, semanticMatching, candidateUrls, bypassCache, bridgeStatus,
+          ...(priorOfficialRecord ? { priorOfficialRecords: [priorOfficialRecord] } : {}) });
         resolvedTelemetry = mergeOfficialPostingTelemetry(resolvedTelemetry, resolved.telemetry);
         active(controller.signal);
         const posting = normalizeOfficialPosting(resolved.jobs[0]?.officialPosting);
@@ -392,6 +435,16 @@ export async function prepareOfficialPostingForGeneration(args, {
         return { officialPosting: posting, postedBy: resolved.jobs[0].postedBy, resolvedFresh: true,
           description: textLevels.has(posting.level) && posting.contentHash ? await store.readText(posting.contentHash) : undefined };
       };
+      if (semanticMatching) {
+        const boundRecord = record && officialPostingRecordMatchesScrapedIdentity(scrapedJob, record) ? record : null;
+        const cachedPosting = normalizeOfficialPosting(boundRecord?.officialPosting);
+        const candidateUrls = [...new Set([cachedPosting?.sourceUrl, cachedPosting?.officialApplyUrl,
+          cardPosting?.sourceUrl, cardPosting?.officialApplyUrl].map(officialHttpsUrl).filter(Boolean))];
+        // Every generation uses the current shared discovery and comparison
+        // process. Old URLs are leads; neither cached facts nor a weak fresh
+        // recheck may authorize this application's official posting.
+        return resolveFresh({ candidateUrls, bypassCache: true, priorOfficialRecord: boundRecord });
+      }
       if (record && officialPostingRecordMatchesScrapedIdentity(scrapedJob, record)) {
         const storedPosting = normalizeOfficialPosting(record.officialPosting);
         const reusableProof = !semanticMatching || officialPostingSemanticProofMatches(scrapedJob, storedPosting)
@@ -425,10 +478,17 @@ export async function prepareOfficialPostingForGeneration(args, {
       ? { ...verifiedFallback, officialPosting: withTrail(verifiedFallback.officialPosting, 'bridge-timeout', 'reverify-failed') }
       : unresolvedOfficialPosting(scrapedJob, { outcome: 'failed', trail: [code] });
   } finally {
+    // Cancellation must finish owned filesystem work before cancel-and-wait
+    // releases this preparation. Research may ignore its signal, so only the
+    // bounded host-store operations participate in this short drain.
+    if (controller.signal.aborted) await drainStoreOperations();
     release?.();
   }
   try {
-    if (!bridgeAvailable) finalPosting.officialPosting = withTrail(finalPosting.officialPosting, 'bridge-unavailable');
+    const cachedLookup = officialPostingLookupStatus(finalPosting.officialPosting);
+    const settledCache = finalPosting.officialPosting.trail?.includes('recent-miss')
+      && ['not-found', 'ambiguous', 'closed'].includes(cachedLookup.state);
+    if (!bridgeAvailable && !settledCache) finalPosting.officialPosting = withTrail(finalPosting.officialPosting, 'bridge-unavailable');
     let listing;
     if (controller.signal.aborted && !signal?.aborted) {
       listing = await typedFallback(scrapedJob, finalPosting.officialPosting);
@@ -451,6 +511,7 @@ export async function prepareOfficialPostingForGeneration(args, {
       posting: finalPosting.officialPosting, primary: listing, probe: listingProbe,
       callText, bridgeAvailable, calibrationStore, signal: controller.signal, now, deadline,
       manualAiRunId: args.manualAiRunId, nodeId: args.nodeId });
+    listing = guardOfficialLookup(finalPosting.officialPosting, listing);
     let postingVariants = normaliseJobPostingVariants(scrapedJob.postingVariants);
     if (!controller.signal.aborted && postingVariants.length) try {
       postingVariants = await checkPostingVariantsForGeneration({ job: scrapedJob,
@@ -469,7 +530,7 @@ export async function prepareOfficialPostingForGeneration(args, {
     failed(error);
     const officialPosting = normalizeOfficialPosting(finalPosting?.officialPosting)
       || unresolvedOfficialPosting(scrapedJob, { outcome: 'failed', trail: ['failed'] }).officialPosting;
-    return { officialPosting, ...holdFallback(scrapedJob, officialPosting),
+    return { officialPosting, ...guardOfficialLookup(officialPosting, holdFallback(scrapedJob, officialPosting)),
       telemetry: { failed: telemetry.failed, ...(resolvedTelemetry ? { officialPosting: resolvedTelemetry } : {}) } };
   } finally {
     cleanup();

@@ -2,8 +2,9 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import { runInNewContext } from 'node:vm';
 import { officialPostingDisplay } from '../../src/utils/officialPostingDisplay.js';
-import { beginOfficialPostingPreparation } from '../../src/utils/officialPostingPreparation.js';
-import { OFFICIAL_POSTING_LABELS } from '../../electron/ipc/officialPostingFields.js';
+import { beginOfficialPostingPreparation, projectOfficialPostingGenerationJob,
+  officialPostingPreparationSourceKey, officialPostingPreparationNeedsRefresh } from '../../src/utils/officialPostingPreparation.js';
+import { OFFICIAL_POSTING_LABELS, officialPostingLookupStatus } from '../../electron/ipc/officialPostingFields.js';
 import { normalizeJobListingExternalUrl } from '../../src/utils/jobListingUrl.js';
 import { createModuleRunQueue } from '../../src/utils/moduleRunQueue.js';
 import {
@@ -18,6 +19,7 @@ import { mergeResolvedSourceItems } from '../../src/utils/jobSourceResolveMerge.
 import { cardOfficialPostingHubMarkerCleanup, isCardOfficialPostingRunId } from '../../src/utils/jobHubManualAiOwnership.js';
 
 const copy = value => JSON.parse(JSON.stringify(value));
+const flushMicrotasks = async () => { for (let index = 0; index < 30; index++) await Promise.resolve(); };
 const posting = extra => ({ level: 'L2', outcome: 'found', employer: 'Northwind Labs', title: 'Official Platform Engineer',
   location: { display: 'Lakeview, Canada', workMode: 'onsite', remote: false },
   salary: { text: 'Synthetic posted salary', provenance: 'posted' },
@@ -49,7 +51,8 @@ function harness({ prepare, data = row(), queueResult = { success: false }, abse
   const electronAPI = {
     ...(absent ? {} : { prepareOfficialPostingForGeneration: async args => {
       calls.push({ kind: 'prepare', args: copy(args) });
-      return typeof prepare === 'function' ? prepare(args) : prepare;
+      const result = await (typeof prepare === 'function' ? prepare(args) : prepare);
+      return result && typeof result === 'object' ? { preparedAt: new Date().toISOString(), ...result } : result;
     } }),
     queueLocalApplication: async args => { calls.push({ kind: 'queue', args: copy(args) }); return queueResult; },
     checkApplicationGenerationGate: async () => ({ success: true, blocked: false }),
@@ -73,7 +76,8 @@ function harness({ prepare, data = row(), queueResult = { success: false }, abse
     getDismissedApplicationBundles: () => new Set(), hasLinkedLocalApplicationOutput, queuedLocalApplicationStartDecision,
     queuedLocalApplicationSettlement, replacedLocalApplicationForCleanup,
     requestApplicationHandoffFocus() {}, requestApplicationHandoffRefresh() {},
-    normalizeJobListingExternalUrl, beginOfficialPostingPreparation, setTimeout: fn => { fn(); return 0; },
+    normalizeJobListingExternalUrl, beginOfficialPostingPreparation, projectOfficialPostingGenerationJob,
+    officialPostingPreparationSourceKey, officialPostingPreparationNeedsRefresh, setTimeout: fn => { fn(); return 0; },
     acquireModuleRun: options => { leases++; laneLabel = options.label; return queue.acquireModuleRun(options); },
   };
   return { callback: runInNewContext(`${generateBody()}\ngenerateApplication;`, context), context, states, calls, completed, cancelled, updates, toasts,
@@ -280,18 +284,46 @@ export default [
       assert.equal(officialPostingDisplay(row({ officialPosting: posting({ outcome: 'closed' }) })).statusLabel, 'Official posting closed');
       const alternatives = [{ title: 'Platform Engineer A', url: 'https://careers.example.test/platform-a' },
         { title: 'Platform Engineer B', url: 'https://careers.example.test/platform-b' }];
-      assert.equal(officialPostingDisplay(row({ officialPosting: posting({ outcome: 'ambiguous', alternatives }) })).statusLabel, 'Ambiguous: 2 candidates');
-      assert.equal(officialPostingDisplay(row({ officialPosting: posting({ outcome: 'ambiguous' }) })).statusLabel, 'Ambiguous: 0 candidates');
+      assert.equal(officialPostingDisplay(row({ officialPosting: posting({ outcome: 'ambiguous', alternatives }) })).statusLabel, 'Official posting match uncertain');
+      assert.equal(officialPostingDisplay(row({ officialPosting: posting({ outcome: 'ambiguous' }) })).statusLabel, 'Official posting match uncertain');
       const maximumAlternatives = Array.from({ length: 12 }, (_, index) => ({ title: `Platform Engineer ${index}`, url: `https://careers.example.test/platform-${index}` }));
-      assert.equal(officialPostingDisplay(row({ officialPosting: posting({ outcome: 'ambiguous', alternatives: maximumAlternatives }) })).statusLabel, 'Ambiguous: 12 candidates');
-      assert.equal(officialPostingDisplay(row({ officialPosting: posting({ outcome: 'ambiguous', alternatives: [...maximumAlternatives, alternatives[0]] }) })).statusLabel, '');
-      assert.equal(officialPostingDisplay(row({ officialPosting: posting({ outcome: 'ambiguous', alternatives: [{ title: 'Invalid URL', url: 'javascript:alert(1)' }] }) })).statusLabel, '');
+      assert.equal(officialPostingDisplay(row({ officialPosting: posting({ outcome: 'ambiguous', alternatives: maximumAlternatives }) })).statusLabel, 'Official posting match uncertain');
+      assert.equal(officialPostingDisplay(row({ officialPosting: posting({ outcome: 'ambiguous', alternatives: [...maximumAlternatives, alternatives[0]] }) })).statusLabel, 'Official posting not checked');
+      assert.equal(officialPostingDisplay(row({ officialPosting: posting({ outcome: 'ambiguous', alternatives: [{ title: 'Invalid URL', url: 'javascript:alert(1)' }] }) })).statusLabel, 'Official posting not checked');
       const legacy = officialPostingDisplay(row({ officialPosting: undefined, company: '  ', postedBy: '  Synthetic Poster  ' }));
       assert.equal(legacy.label, 'Synthetic Poster'); assert.equal(legacy.title, 'Scraped Platform Engineer'); assert.equal(legacy.levelLabel, '');
       assert.equal(officialPostingDisplay(row({ officialPosting: posting({ officialApplyUrl: 'javascript:alert(1)' }) })).applyUrl, 'https://listing.example.test/platform');
       assert.equal(officialPostingDisplay(row({ url: '', googleCardUrl: '', officialPosting: posting() })).applyUrl, 'https://apply.example.test/platform');
       const google = officialPostingDisplay(row({ officialPosting: undefined, url: '', googleCardUrl: 'https://www.google.com/search?htidocid=synthetic-card' }));
       assert.match(google.applyUrl, /https:\/\/www\.google\.com\/search\?/u);
+    },
+  },
+  {
+    name: 'official-posting closed history opens its known official page for inspection without authorizing an apply URL',
+    async run() {
+      const source = fs.readFileSync(new URL('../../src/nodes/JobCardNode.jsx', import.meta.url), 'utf8');
+      const start = source.indexOf('  const openJobUrl = useCallback(');
+      const end = source.indexOf(');', source.indexOf('\n  }, [', start)) + 2;
+      assert.ok(start > 0 && end > start);
+      for (const level of ['L1', 'L2', 'L3', 'L4']) {
+        const job = row({ officialPosting: posting({ level, outcome: 'closed', trail: ['closed'] }) });
+        const display = officialPostingDisplay(job);
+        assert.equal(display.title, job.officialPosting.title);
+        assert.equal(display.viewUrl, job.officialPosting.sourceUrl);
+        assert.match(display.viewLabel, /official posting previously marked closed/u);
+        assert.equal(display.applyUrl, job.url);
+        assert.equal(officialPostingLookupStatus(job.officialPosting).applyUrl, '');
+        assert.equal(display.statusLabel, 'Official posting closed');
+        const opened = [];
+        const open = runInNewContext(`${source.slice(start, end)}\nopenJobUrl;`, {
+          useCallback: fn => fn, data: job, postingDisplay: display, id: 'synthetic-closed-card', normalizeJobListingExternalUrl,
+          summarizeJobListingUrl: () => ({}), EventLogger: { log() {} }, addToast: value => { throw new Error(value.description); },
+          window: { electronAPI: { openExternal: async url => { opened.push(url); return { success: true }; } } },
+        });
+        await open();
+        assert.deepEqual(opened, [job.officialPosting.sourceUrl]);
+        assert.ok(!opened.includes(job.officialPosting.officialApplyUrl), 'closed history never opens the application form');
+      }
     },
   },
   {
@@ -302,7 +334,7 @@ export default [
       const prepared = test.calls.find(call => call.kind === 'prepare'); const queued = test.calls.find(call => call.kind === 'queue');
       assert.equal(prepared.args.nodeId, 'board'); assert.equal(prepared.args.cardId, 'card');
       assert.equal(prepared.args.manualAiRunId, 'official-posting:card:fresh-1');
-      assert.equal(JSON.stringify(prepared.args.job), JSON.stringify(queued.args.job), 'both IPCs must receive byte-equivalent matching projections');
+      assert.equal(officialPostingPreparationSourceKey(prepared.args.job), officialPostingPreparationSourceKey(queued.args.job), 'both IPCs must receive the same source through the shared live projection');
       assert.equal(queued.args.resolutionId, 'opaque-resolution'); assert.equal(test.leases, 1);
       assert.deepEqual(test.completed, ['official-posting:card:fresh-1', 'application-gate:card:fresh-2']);
       assert.equal(test.states.at(-1).state, 'idle'); assert.equal(test.queue.getSnapshot().active, null);
@@ -313,14 +345,147 @@ export default [
     },
   },
   {
-    name: 'official-posting Generate tolerates absent IPC, missing resolution ids and unexpected preparation failures',
+    name: 'official-posting preparation freshness ignores its own derived metadata but refreshes changed source inputs and missing or aged receipts',
+    run() {
+      const now = Date.parse('2026-10-01T12:00:00.000Z');
+      const original = projectOfficialPostingGenerationJob(row());
+      const preparedSourceKey = officialPostingPreparationSourceKey(original);
+      const fresh = { preparedAt: new Date(now).toISOString(), preparedSourceKey, job: original, now };
+      assert.equal(officialPostingPreparationNeedsRefresh(fresh), false);
+      assert.equal(officialPostingPreparationNeedsRefresh({ ...fresh, now: now + 4 * 60 * 1000 - 1 }), false);
+      assert.equal(officialPostingPreparationNeedsRefresh({ ...fresh, now: now + 4 * 60 * 1000 }), true);
+      assert.equal(officialPostingPreparationNeedsRefresh({ ...fresh, preparedAt: undefined }), true);
+      assert.equal(officialPostingPreparationNeedsRefresh({ ...fresh, preparedAt: new Date(now + 1).toISOString() }), true);
+      const derived = { ...original, postedBy: 'Fresh Poster', officialPosting: posting({ title: 'Refreshed official title' }),
+        listingLiveness: { verdict: 'open', basis: 'ai', board: 'linkedin', at: new Date(now).toISOString() },
+        boardClosed: { board: 'linkedin', reason: 'http-not-found', at: new Date(now).toISOString() } };
+      assert.equal(officialPostingPreparationNeedsRefresh({ ...fresh, job: derived }), false, 'fresh lookup outputs must not cause another search');
+      for (const patch of [{ title: 'Changed role' }, { company: 'Changed Employer' }, { snippet: 'Changed responsibilities' },
+        { salary: 'Changed posted salary' }, { location: 'Different City' }, { url: 'https://listing.example.test/changed' },
+        { applyOptions: [{ label: 'Fresh destination', href: 'https://careers.example.test/new' }] },
+        { postingVariants: [{ location: 'Changed City', url: 'https://listing.example.test/new-location' }] }]) {
+        assert.equal(officialPostingPreparationNeedsRefresh({ ...fresh, job: { ...original, ...patch } }), true, Object.keys(patch)[0]);
+      }
+    },
+  },
+  {
+    name: 'official-posting Generate refreshes an aged receipt after a blocked application lane before queueing once',
+    async run() {
+      let discoveries = 0;
+      const test = harness({ prepare: () => ({ success: true, resolutionId: `fresh-resolution-${++discoveries}`,
+        preparedAt: new Date(Date.now() - (discoveries === 1 ? 5 * 60 * 1000 : 0)).toISOString(),
+        officialPosting: posting(), postedBy: 'Acme Talent Partners' }) });
+      const blocker = await test.queue.acquireModuleRun({ nodeId: 'other-card', lane: 'application', kind: 'application' });
+      const pending = test.callback();
+      await flushMicrotasks();
+      assert.equal(discoveries, 1); assert.equal(test.calls.some(call => call.kind === 'queue'), false);
+      blocker.release();
+      await pending;
+      assert.equal(discoveries, 2, 'the aged proof is refreshed only after admission');
+      assert.equal(test.calls.filter(call => call.kind === 'queue').length, 1);
+      assert.equal(test.calls.find(call => call.kind === 'queue').args.resolutionId, 'fresh-resolution-2');
+      assert.equal(test.completed.filter(id => id.startsWith('official-posting:')).length, 2);
+      assert.equal(test.queue.getSnapshot().active, null);
+    },
+  },
+  {
+    name: 'official-posting Generate refreshes changed live inputs after the gate and displays the fresh source without recombining',
+    async run() {
+      let discoveries = 0;
+      const test = harness({ prepare: args => ({ success: true, resolutionId: `changed-resolution-${++discoveries}`,
+        officialPosting: posting({ employer: args.job.company, title: `${args.job.title} verified`,
+          location: { display: args.job.location, workMode: 'onsite', remote: false },
+          salary: { text: args.job.salary, provenance: 'posted' } }), postedBy: 'Synthetic Recruiting Poster' }) });
+      test.context.window.electronAPI.checkApplicationGenerationGate = async () => {
+        test.card.data = { ...test.card.data, title: 'Updated Platform Engineer', company: 'Updated Synthetic Employer',
+          snippet: 'Current source responsibilities.', location: 'Bayview, Canada', salary: 'Updated synthetic salary',
+          url: 'https://listing.example.test/current',
+          postingVariants: [{ location: 'Bayview, Canada', url: 'https://listing.example.test/current-location' }] };
+        return { success: true, blocked: false };
+      };
+      await test.callback();
+      assert.equal(discoveries, 2);
+      const fresh = test.calls.filter(call => call.kind === 'prepare')[1].args.job;
+      const queued = test.calls.find(call => call.kind === 'queue').args;
+      assert.equal(fresh.title, 'Updated Platform Engineer'); assert.equal(fresh.snippet, 'Current source responsibilities.');
+      assert.equal(fresh.url, 'https://listing.example.test/current'); assert.equal(fresh.postingVariants[0].location, 'Bayview, Canada');
+      assert.equal(officialPostingPreparationSourceKey(fresh), officialPostingPreparationSourceKey(queued.job));
+      assert.equal(queued.resolutionId, 'changed-resolution-2');
+      const display = officialPostingDisplay(test.card.data);
+      assert.equal(display.title, 'Updated Platform Engineer verified'); assert.equal(display.location, 'Bayview, Canada');
+      assert.equal(display.salary, 'Updated synthetic salary');
+      assert.equal(test.card.data.snippet, 'Current source responsibilities.', 'research metadata does not overwrite original source evidence');
+    },
+  },
+  {
+    name: 'official-posting Generate stops on a failed, closed or timestamp-free refresh and releases the admitted lane',
+    async run() {
+      for (const refresh of [
+        { success: false, message: 'Synthetic fresh lookup unavailable' },
+        { success: true, resolutionId: 'closed-resolution', officialPosting: posting({ level: 'L5', outcome: 'closed', trail: ['closed'] }),
+          listingCheck: { action: 'refuse-final', verdict: 'closed', basis: 'official-closed' }, message: 'Official posting closed' },
+        { success: true, resolutionId: 'missing-time', preparedAt: null, officialPosting: posting() },
+      ]) {
+        let discoveries = 0;
+        const test = harness({ prepare: () => ++discoveries === 1
+          ? { success: true, resolutionId: 'aged-resolution', preparedAt: new Date(Date.now() - 5 * 60 * 1000).toISOString(), officialPosting: posting() }
+          : refresh });
+        await test.callback({ listingOverride: true });
+        assert.equal(discoveries, 2); assert.equal(test.calls.some(call => call.kind === 'queue'), false);
+        assert.equal(test.leases, 1); assert.equal(test.queue.getSnapshot().active, null);
+        assert.equal(test.context.applicationSubmissionRef.current, false);
+        assert.ok(test.toasts.length > 0);
+        if (refresh.listingCheck) assert.equal(test.card.data.listingGenerationNotice.basis, 'official-closed');
+      }
+    },
+  },
+  {
+    name: 'official-posting Generate rejects a source changed again during its refresh without attaching the stale result',
+    async run() {
+      let discoveries = 0; let test;
+      test = harness({ prepare: () => {
+        discoveries++;
+        if (discoveries === 2) test.card.data = { ...test.card.data, snippet: 'Edited again while fresh research was running.' };
+        return { success: true, resolutionId: `racing-resolution-${discoveries}`,
+          preparedAt: new Date(Date.now() - (discoveries === 1 ? 5 * 60 * 1000 : 0)).toISOString(),
+          officialPosting: posting({ title: discoveries === 1 ? 'First verified title' : 'Stale refreshed title' }) };
+      } });
+      await test.callback();
+      assert.equal(discoveries, 2, 'rapid source changes do not create an unbounded refresh loop');
+      assert.equal(test.calls.some(call => call.kind === 'queue'), false);
+      assert.equal(test.card.data.officialPosting.title, 'First verified title', 'the stale refreshed source must not overwrite the live card');
+      assert.match(test.toasts.at(-1).description, /job changed/iu);
+      assert.equal(test.queue.getSnapshot().active, null);
+    },
+  },
+  {
+    name: 'official-posting Generate cancellation during its admitted refresh prevents queueing and retires both research runs',
+    async run() {
+      let discoveries = 0; let release;
+      const test = harness({ prepare: () => ++discoveries === 1
+        ? { success: true, resolutionId: 'aged-resolution', preparedAt: new Date(Date.now() - 5 * 60 * 1000).toISOString(), officialPosting: posting() }
+        : new Promise(resolve => { release = resolve; }) });
+      const pending = test.callback();
+      await flushMicrotasks();
+      assert.equal(discoveries, 2); assert.equal(test.leases, 1);
+      test.states.filter(state => state.state === 'resolving').at(-1).cancel();
+      release({ success: true, resolutionId: 'late-refresh', officialPosting: posting() });
+      await pending;
+      assert.equal(test.calls.some(call => call.kind === 'queue'), false);
+      assert.deepEqual(test.cancelled, ['card']);
+      assert.equal(test.completed.filter(id => id.startsWith('official-posting:')).length, 2);
+      assert.equal(test.queue.getSnapshot().active, null);
+    },
+  },
+  {
+    name: 'official-posting Generate stops absent IPC, missing receipts and preparation failures before taking a lane',
     async run() {
       for (const options of [{ absent: true }, { prepare: { success: true } }, { prepare: { success: false, error: 'Synthetic unavailable' } },
         { prepare: async () => { throw new Error('Synthetic transport failure'); } }]) {
         const test = harness(options); await test.callback();
-        assert.equal(test.calls.filter(call => call.kind === 'queue').length, 1);
-        assert.equal(test.calls.find(call => call.kind === 'queue').args.resolutionId, null);
-        assert.equal(test.leases, 1); assert.equal(test.queue.getSnapshot().active, null);
+        assert.equal(test.calls.filter(call => call.kind === 'queue').length, 0);
+        assert.equal(test.leases, 0); assert.equal(test.queue.getSnapshot().active, null);
+        assert.equal(test.toasts[0]?.title, 'Official posting lookup');
         assert.equal(test.completed.filter(id => id.startsWith('official-posting:')).length, options.absent ? 0 : 1);
       }
     },
@@ -351,33 +516,31 @@ export default [
     },
   },
   {
-    name: 'listing liveness card: a failed or missing probe result holds board URLs and override can continue',
+    name: 'official lookup transport failure stops all source URLs and cannot be bypassed by a liveness override',
     async run() {
-      for (const [url, shouldHold] of [
-        ['https://www.linkedin.com/jobs/view/synthetic-card', true],
-        ['https://careers.ziprecruiter.com/jobs/synthetic-card', true],
-        ['https://www.dice.com/job-detail/synthetic-card', true],
-        ['https://ca.indeed.co.uk/viewjob?jk=synthetic', true],
-        ['https://linkedin.com.evil.test/jobs/view/synthetic-card', false],
-        ['https://listing.example.test/jobs/synthetic-card', false],
+      for (const url of [
+        'https://www.linkedin.com/jobs/view/synthetic-card',
+        'https://careers.ziprecruiter.com/jobs/synthetic-card',
+        'https://www.dice.com/job-detail/synthetic-card',
+        'https://ca.indeed.co.uk/viewjob?jk=synthetic',
+        'https://linkedin.com.evil.test/jobs/view/synthetic-card',
+        'https://listing.example.test/jobs/synthetic-card',
       ]) {
         const test = harness({ data: row({ url }), prepare: { success: false, error: 'Synthetic unavailable.' } });
         await test.callback();
-        assert.equal(test.leases, shouldHold ? 0 : 1, url);
-        assert.equal(test.calls.some(call => call.kind === 'queue'), !shouldHold, url);
-        assert.equal(test.card.data.listingHold, shouldHold ? true : undefined, url);
-        if (shouldHold) {
-          assert.equal(test.toasts[0]?.title, 'Listing check', url);
-          assert.equal(test.toasts[0]?.description, "Couldn't confirm the listing is still open", url);
-        }
+        assert.equal(test.leases, 0, url);
+        assert.equal(test.calls.some(call => call.kind === 'queue'), false, url);
+        assert.equal(test.card.data.listingHold, false, url);
+        assert.equal(test.card.data.listingGenerationNotice.action, 'refuse-retry');
+        assert.equal(test.toasts[0]?.title, 'Official posting lookup', url);
       }
       const override = harness({ data: row({ url: 'https://www.linkedin.com/jobs/view/synthetic-override' }),
         prepare: async () => { throw new Error('Synthetic transport error'); } });
       await override.callback({ listingOverride: true });
       assert.equal(override.calls.find(call => call.kind === 'prepare')?.args.listingOverride, true);
-      assert.equal(override.calls.some(call => call.kind === 'queue'), true);
-      assert.equal(override.leases, 1);
-      assert.equal(override.toasts.some(toast => toast.title === 'Listing check'), false);
+      assert.equal(override.calls.some(call => call.kind === 'queue'), false);
+      assert.equal(override.leases, 0);
+      assert.equal(override.toasts[0]?.title, 'Official posting lookup');
     },
   },
   {
@@ -390,17 +553,18 @@ export default [
         { location: 'Bayview', url: 'https://listing.example.test/open' },
       ];
       const changed = harness({ data: row({ postingVariants: variants }),
-        prepare: { success: true, listingCheck: { action: 'proceed' }, listingLiveness: open, boardClosed: null } });
+        prepare: { success: true, resolutionId: 'resolution', listingCheck: { action: 'proceed' }, listingLiveness: open, boardClosed: null } });
       await changed.callback();
       assert.equal(changed.leases, 1);
       assert.deepEqual(changed.updates[0], { listingLiveness: open, listingHold: false, listingGenerationNotice: null });
       const prepareJob = changed.calls.find(call => call.kind === 'prepare')?.args.job;
       const queueJob = changed.calls.find(call => call.kind === 'queue')?.args.job;
-      assert.equal(JSON.stringify(prepareJob), JSON.stringify(queueJob));
+      assert.equal(officialPostingPreparationSourceKey(prepareJob), officialPostingPreparationSourceKey(queueJob));
+      assert.deepEqual(queueJob.listingLiveness, open, 'queue uses the latest prepared card state without treating it as a source edit');
       assert.equal(prepareJob.postingVariants[0].liveness, 'closed');
       assert.equal(Object.hasOwn(prepareJob.postingVariants[1], 'liveness'), false);
       const same = harness({ data: row({ listingLiveness: open }),
-        prepare: { success: true, listingCheck: { action: 'proceed' }, listingLiveness: open, boardClosed: null } });
+        prepare: { success: true, resolutionId: 'resolution', listingCheck: { action: 'proceed' }, listingLiveness: open, boardClosed: null } });
       await same.callback();
       assert.equal(same.leases, 1);
       assert.deepEqual(same.updates, []);
@@ -410,22 +574,23 @@ export default [
         'the queue receives the same listing state projection');
       const cleared = harness({ data: row({ listingLiveness: open, listingHold: true,
         listingGenerationNotice: { action: 'hold', message: 'Previous uncertainty' } }),
-        prepare: { success: true, listingCheck: { action: 'proceed' }, listingLiveness: open, boardClosed: null } });
+        prepare: { success: true, resolutionId: 'resolution', listingCheck: { action: 'proceed' }, listingLiveness: open, boardClosed: null } });
       await cleared.callback({ listingOverride: true });
       assert.equal(cleared.card.data.listingHold, false, 'proceed clears a hold even with identical liveness');
       assert.equal(cleared.card.data.listingGenerationNotice, null);
       const source = fs.readFileSync(new URL('../../src/nodes/JobCardNode.jsx', import.meta.url), 'utf8');
       assert.ok(source.includes('data.listingGenerationNotice?.message || data.listingHold === true'));
       assert.ok(source.includes('Generation paused · Listing check'));
-      assert.equal(source.split("liveness: variant.liveness === 'closed' ? 'closed' : undefined,").length - 1, 2);
-      assert.ok(source.includes('const listingOverrideAvailable = listingGenerationPaused;')
-        && source.includes('generateApplication({ listingOverride: listingOverrideAvailable })')
+      const projection = fs.readFileSync(new URL('../../src/utils/officialPostingPreparation.js', import.meta.url), 'utf8');
+      assert.equal(projection.split("liveness: variant.liveness === 'closed' ? 'closed' : undefined,").length - 1, 1);
+      assert.ok(source.includes('job: sourceJob,') && source.includes('job: queueJob,'));
+      assert.ok(source.includes('generateApplication({ listingOverride: listingOverrideAvailable })')
         && source.includes("listingOverrideAvailable ? 'Generate anyways' : localApplicationNeedsAttention"));
       assert.ok(source.includes('Check again'));
     },
   },
   {
-    name: 'listing liveness card: every listing pause offers an explicit override and recheck',
+    name: 'listing liveness card offers liveness overrides while incomplete official research requires a recheck',
     async run() {
       const source = fs.readFileSync(new URL('../../src/nodes/JobCardNode.jsx', import.meta.url), 'utf8');
       const start = source.indexOf('  const listingGenerationPaused =');
@@ -437,13 +602,21 @@ export default [
           data, hasLinkedApplicationOutput: false, hasApplicationRun: false, localJobPending: false,
         });
         assert.equal(available, true, action);
-        const test = harness({ data, prepare: input => ({ success: true,
+        const test = harness({ data, prepare: input => ({ success: true, resolutionId: 'resolution',
           listingCheck: { action: input.listingOverride ? 'proceed' : action } }) });
         await test.callback({ listingOverride: available });
         assert.equal(test.calls.find(call => call.kind === 'prepare').args.listingOverride, true);
         assert.equal(test.calls.some(call => call.kind === 'queue'), true);
         assert.equal(test.card.data.listingGenerationNotice, null);
       }
+      const sourceFailure = row({ listingGenerationNotice: { action: 'refuse-retry', basis: 'official-lookup', message: 'Research unavailable' } });
+      assert.equal(runInNewContext(`${source.slice(start, end)}\nlistingOverrideAvailable;`, {
+        data: sourceFailure, hasLinkedApplicationOutput: false, hasApplicationRun: false, localJobPending: false,
+      }), false, 'Generate anyway cannot bypass an unfinished official lookup');
+      assert.equal(runInNewContext(`${source.slice(start, end)}\nlistingOverrideAvailable;`, {
+        data: row({ listingGenerationNotice: { action: 'refuse-final', basis: 'official-closed', message: 'Official posting closed' } }),
+        hasLinkedApplicationOutput: false, hasApplicationRun: false, localJobPending: false,
+      }), false, 'Generate anyway cannot bypass an official closure');
       const notice = source.slice(source.indexOf('      {listingGenerationPaused && ('),
         source.indexOf('      {/* Generate the application bundle.'));
       assert.ok(notice.includes('Check again'));
@@ -511,9 +684,9 @@ export default [
     run() {
       const source = fs.readFileSync(new URL('../../src/nodes/JobCardNode.jsx', import.meta.url), 'utf8');
       assert.ok(source.includes("from '../utils/officialPostingDisplay'"));
-      assert.ok(source.includes('normalizeJobListingExternalUrl({ ...data, url: postingDisplay.applyUrl || data.url })'));
-      assert.ok(source.includes('(postingDisplay.applyUrl || data.url || data.googleCardUrl)'));
-      assert.ok(source.includes('title={postingDisplay.levelLabel ?') && source.includes('aria-label={postingDisplay.levelLabel ?'));
+      assert.ok(source.includes('normalizeJobListingExternalUrl({ ...data, url: postingDisplay.viewUrl || data.url })'));
+      assert.ok(source.includes('(postingDisplay.viewUrl || data.url || data.googleCardUrl)'));
+      assert.ok(source.includes('title={postingDisplay.viewLabel}') && source.includes('aria-label={postingDisplay.viewLabel}'));
       assert.ok(source.includes('Finding official posting…') && source.includes("{displayedApplicationRun.state === 'resolving' && ("));
       assert.ok(source.includes('displayedApplicationRun.cancel?.()'));
       const body = generateBody(); const prepareAt = body.indexOf('await window.electronAPI.prepareOfficialPostingForGeneration?.(');

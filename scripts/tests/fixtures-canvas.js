@@ -1766,7 +1766,7 @@ export default [
       assert(latchGuard >= 0 && latchSet > latchGuard && acquire > latchSet,
         'a synchronous per-card latch must reject duplicate clicks before a queue lease is requested');
       assert(prepareIpc > latchSet && acquire > prepareIpc
-        && generationScope.includes('nodeId: data.hubId,')
+        && generationScope.includes('nodeId: sourceCard.data.hubId,')
         && generationScope.includes('cardId: idRef.current,')
         && generationScope.includes('await window.electronAPI.completeNonApiAiRun?.(prepareRunId)'),
       'official preparation must use Board ownership after the latch and retire its fresh run before requesting an application lane');
@@ -1786,10 +1786,13 @@ export default [
         && !generationScope.includes('originHubId')
         && !generationScope.includes('const originHub ='),
       'the queue payload must carry only the immutable career snapshot pin, never mutable hub authority or an origin-hub recovery path');
+      const postingProjection = fs.readFileSync(path.resolve('src/utils/officialPostingPreparation.js'), 'utf8');
       for (const field of ['postedBy', 'applyOptions', 'salaryProvenance', 'officialPosting', 'googleCardUrl', 'sourceJobKey']) {
-        assert(new RegExp(`\\b${field}:\\s*data\\.${field}\\b`).test(generationScope),
-          `Generate must carry ${field} inline without adding a free sandbox identifier`);
+        assert(new RegExp(`\\b${field}:\\s*data\\.${field}\\b`).test(postingProjection),
+          `Generate's shared live projection must carry ${field}`);
       }
+      assert(generationScope.includes('const queueJob = projectOfficialPostingGenerationJob(cardBeforeQueue.data)')
+        && generationScope.includes('job: queueJob,'), 'Generate must pass the live projection at the final queue boundary');
       assert(source.includes('getLocalApplicationStatus({ jobId, canvasFilePath })')
         && source.includes('const jobCanvasFilePath = queuedCanvasFilePath || canvasFilePath;')
         && source.includes('canvasFilePath: jobCanvasFilePath,')
@@ -1816,7 +1819,7 @@ export default [
       // invariant asserted here is unchanged: resolve against the complete
       // navigation graph, never isMountedRef or a level-scoped getNode.
       assert(!generationScope.includes('if (!isMountedRef.current) return;')
-        && generationScope.includes('const cardBeforeQueue = getLiveNode(idRef.current);')
+        && generationScope.includes('let cardBeforeQueue = getLiveNode(idRef.current);')
         && generationScope.includes('queuedLocalApplicationStartDecision(cardBeforeQueue, getLiveNode(cardBeforeQueue?.data?.hubId))')
         && generationScope.includes('const expectedPriorLocalApplication = cardBeforeQueue.data?.localApplication || null;')
         && generationScope.includes('const settlement = queuedLocalApplicationSettlement(')
@@ -1828,7 +1831,7 @@ export default [
         && generationScope.includes('if (!decision.allowed) {') && generationScope.includes('cancelledBeforeStart = true;'),
       'a removed queued card must be cancelled or rejected at turn start before it can invoke generation IPC');
       assert(source.includes('Additional notes for AI')
-        && source.includes('additionalNotes: additionalNotes.trim()')
+        && source.includes('additionalNotes: String(cardBeforeQueue.data?.additionalNotes ?? additionalNotes).trim()')
         && source.includes('updateGlobal(id, { additionalNotes: additionalNotes.trim() })')
         && localApplicationIpcSource.includes('normalizeApplicationAdditionalNotes(args.additionalNotes)'),
       'job-specific applicant notes must persist on the card, reach the local handoff, and stay bounded at IPC');

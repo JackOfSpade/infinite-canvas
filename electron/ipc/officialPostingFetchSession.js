@@ -53,6 +53,7 @@ export function createOfficialPostingFetchSession({ fetch = fetchOfficialPosting
   if (parentSignal?.aborted) abortRun(); else parentSignal?.addEventListener('abort', abortRun, { once: true });
   const clock = () => Number(now());
   const cache = new Map(); const hosts = new Map(); const queue = []; const uniqueUrls = new Set();
+  const retriedUrls = new Set();
   const stats = { fetches: 0, uniqueUrls: 0, cacheHits: 0, maxPerHostRate: 0, breakerTrips: 0 };
   let active = 0; let wake = null; let pumping = false;
   const hostState = host => {
@@ -181,16 +182,34 @@ export function createOfficialPostingFetchSession({ fetch = fetchOfficialPosting
       const final = result?.url || result?.sourceUrl;
       if (final) { try { const alias = officialPostingFetchUrl(final).href; if (!cached(alias)) cache.set(alias, entry); } catch { /* The transport owns result validation. */ } }
       return recorded;
-    }, error => { entry.expiresAt = clock() + OFFICIAL_FETCH_NEGATIVE_CACHE_MS; throw error; });
+    }, error => { entry.failure = error; entry.expiresAt = clock() + OFFICIAL_FETCH_NEGATIVE_CACHE_MS; throw error; });
     // A row may detach before a shared operation settles. Its eventual
     // rejection still belongs to the cache, never the unhandled-rejection queue.
     void entry.promise.catch(() => {});
     cache.set(key, entry);
     return waitFor(entry.promise, callerSignal).then(asked);
   };
+  const retryFailedUrls = values => {
+    let evicted = 0;
+    for (const value of Array.isArray(values) ? values : []) {
+      let key;
+      try { key = officialPostingFetchUrl(value).href; } catch { continue; }
+      if (retriedUrls.has(key)) continue;
+      const entry = cached(key);
+      // A research lead may retry a settled transport failure once. Successes,
+      // in-flight transfers and definitive per-page rejections stay shared.
+      // Host health, Retry-After and the circuit breaker remain authoritative.
+      if (!entry?.failure || !hostFailure(entry.failure)) continue;
+      for (const [alias, cachedEntry] of cache) if (cachedEntry === entry) {
+        retriedUrls.add(alias); cache.delete(alias);
+      }
+      retriedUrls.add(key); evicted += 1;
+    }
+    return evicted;
+  };
   const retire = () => { cancelWake(); pump(); };
   signal.addEventListener('abort', retire, { once: true });
-  return { fetch: fetchCached, telemetry: () => ({ ...stats }), dispose() {
+  return { fetch: fetchCached, retryFailedUrls, telemetry: () => ({ ...stats }), dispose() {
     parentSignal?.removeEventListener('abort', abortRun);
     controller.abort(); signal.removeEventListener('abort', retire); cancelWake(); cache.clear();
   } };

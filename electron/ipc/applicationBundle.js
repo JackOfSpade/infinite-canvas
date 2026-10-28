@@ -7,7 +7,7 @@
  * company, and a pretty, source-faithful Markdown rendering of the scraped
  * job listing.
  */
-import { OFFICIAL_POSTING_LABELS, boardClosedBoardLabel, officialHttpsUrl } from './officialPostingFields.js';
+import { OFFICIAL_POSTING_LABELS, boardClosedBoardLabel, normalizeOfficialPosting, officialHttpsUrl, officialPostingLookupStatus } from './officialPostingFields.js';
 
 const WINDOWS_RESERVED_NAMES = new Set([
   'CON', 'PRN', 'AUX', 'NUL',
@@ -50,6 +50,20 @@ function safeHttpUrl(value) {
       ? parsed.href
       : '';
   } catch { return ''; }
+}
+
+/** Migrate the verified-link-only metadata stored in older saved bundles. */
+export function normalizeBundleOfficialPosting(value) {
+  const posting = normalizeOfficialPosting(value);
+  if (posting) return posting;
+  if (!value || typeof value !== 'object' || Array.isArray(value)
+    || Object.keys(value).some(key => !['level', 'sourceUrl', 'officialApplyUrl'].includes(key))
+    || !['L1', 'L2', 'L3', 'L4'].includes(value.level)) return null;
+  const sourceUrl = officialHttpsUrl(value.sourceUrl);
+  const officialApplyUrl = officialHttpsUrl(value.officialApplyUrl);
+  if (!sourceUrl && !officialApplyUrl) return null;
+  return { level: value.level, outcome: value.level === 'L4' ? 'link-only' : 'found', employer: '',
+    ...(sourceUrl ? { sourceUrl } : {}), ...(officialApplyUrl ? { officialApplyUrl } : {}) };
 }
 
 // ---------------------------------------------------------------------------
@@ -219,12 +233,15 @@ export function formatOriginalJobListingMarkdown(job = {}, { audience = 'prompt'
       ? listingOutcomes[job.listingAudit.outcome] : '';
     if (listingOutcome) lines.push(`**Listing check:** ${listingOutcome}`);
     const postedBy = markdownInlineText(job.postedBy);
-    const applyUrl = safeHttpUrl(job.applyUrl || job.officialPosting?.officialApplyUrl);
-    const officialUrl = ['L1', 'L2', 'L3', 'L4'].includes(job.officialPosting?.level) ? officialHttpsUrl(job.officialPosting.sourceUrl) : '';
-    const level = job.officialPosting?.level;
+    const officialPosting = normalizeBundleOfficialPosting(job.officialPosting);
+    const status = officialPostingLookupStatus(officialPosting);
+    const applyUrl = safeHttpUrl(job.applyUrl || status.applyUrl);
+    const officialUrl = status.sourceUrl || status.applyUrl;
+    const level = officialPosting?.level;
     if (postedBy) lines.push(`**Posted by:** ${postedBy}`);
     if (applyUrl) lines.push(`**Apply URL:** <${applyUrl}>`);
     if (officialUrl) lines.push(`**Official posting:** <${officialUrl}>`);
+    lines.push(`**Official posting check:** ${markdownInlineText(status.label)}${status.detail ? `. ${markdownInlineText(status.detail)}` : ''}`);
     if (Object.hasOwn(OFFICIAL_POSTING_LABELS, level)) lines.push(`**Source level:** ${level}: ${markdownInlineText(OFFICIAL_POSTING_LABELS[level])}`);
   }
   // The shared description is emitted EXACTLY ONCE below; posting locations

@@ -42,6 +42,62 @@ function teamtailorPages({ rssId = 'req-one', pageId = 'req-one' } = {}) {
 
 export default [
   {
+    name: 'official tenant ownership propagates from a later proven root through already-fetched careers pages in every lead order',
+    async run() {
+      const smart = 'https://jobs.smartrecruiters.com/Northwind/740000000000018-software-engineer';
+      const api = 'https://api.smartrecruiters.com/v1/companies/Northwind/postings/740000000000018';
+      const root = 'https://www.northwind.test/'; const career = 'https://careers.northwind.test/jobs/one';
+      for (const linked of [false, true]) for (const leads of [[smart, career, root], [career, smart, root], [root, career, smart]]) {
+        const pages = { [root]: `<title>Northwind Labs</title>${linked ? '<a href="https://careers.northwind.test/careers">Careers</a>' : ''}`,
+          'https://careers.northwind.test/': `<title>Northwind Careers</title><a href="${smart}">Open role</a>`,
+          'https://careers.northwind.test/careers': '<title>Northwind Careers</title>',
+          [career]: `<title>Northwind Careers</title><a href="${smart}">Apply</a>`,
+          [api]: { contentType: 'application/json', body: JSON.stringify({ id: '740000000000018', name: 'Software Engineer',
+            company: { identifier: 'Northwind', name: 'Northwind Labs' }, postingUrl: smart, active: true,
+            location: { city: 'Lakeview', region: 'Ontario', country: 'ca' },
+            jobAd: { sections: { jobDescription: { title: 'Responsibilities', text: description } } } }) } };
+        let matches = 0; const read = network(pages);
+        const result = await resolveOfficialPosting(row({ company: 'Northwind Labs', title: 'Software Engineer' }), {
+          semanticMatching: true, candidateUrls: leads,
+          fetch: async url => {
+            if (url === smart) throw Object.assign(new Error('Forbidden'), { code: 'fetch-failed', statusCode: 403 });
+            return read(url);
+          }, match: async () => { matches++; return { choice: 'P1', evidence: [{ scrapedQuote: 'Software Engineer', officialQuote: 'Software Engineer' }], distinguishing: [], conflicts: [] }; },
+        });
+        assert.equal(result.officialPosting.sourceUrl, linked ? smart : undefined, `${linked}: ${leads.join(', ')}`);
+        assert.equal(matches, linked ? 2 : 0, 'conventional careers branding alone cannot prove the employer');
+      }
+    },
+  },
+  {
+    name: 'SmartRecruiters exact detail API survives blocked public HTML while ownership still requires the fetched employer careers link',
+    async run() {
+      const smart = 'https://jobs.smartrecruiters.com/Northwind/740000000000017-software-engineer';
+      const api = 'https://api.smartrecruiters.com/v1/companies/Northwind/postings/740000000000017';
+      for (const linked of [false, true]) {
+        const requests = []; let matches = 0;
+        const pages = { 'https://northwind.test/': '<title>Northwind Labs</title><a href="/careers">Careers</a>',
+          'https://northwind.test/careers': `<a href="${smart}">Open role</a>`,
+          [api]: { contentType: 'application/json', body: JSON.stringify({ id: '740000000000017', name: 'Software Engineer',
+            company: { identifier: 'Northwind', name: 'Northwind Labs' }, postingUrl: smart, active: true,
+            location: { city: 'Lakeview', region: 'Ontario', country: 'ca' },
+            jobAd: { sections: { jobDescription: { title: 'Responsibilities', text: description } } } }) } };
+        const read = network(pages, requests);
+        const result = await resolveOfficialPosting(row({ company: 'Northwind Labs', title: 'Software Engineer' }), {
+          semanticMatching: true, candidateUrls: [linked ? 'https://northwind.test/careers' : smart],
+          fetch: async url => {
+            if (url === smart) { requests.push(url); throw Object.assign(new Error('Forbidden'), { code: 'fetch-failed', statusCode: 403 }); }
+            return read(url);
+          }, match: async () => { matches++; return { choice: 'P1', evidence: [{ scrapedQuote: 'Software Engineer', officialQuote: 'Software Engineer' }], distinguishing: [], conflicts: [] }; },
+        });
+        assert.ok(requests.includes(api), 'the observed exact posting supplies a bounded documented detail route');
+        assert.equal(result.officialPosting.sourceUrl, linked ? smart : undefined);
+        assert.equal(matches, linked ? 2 : 0, 'an ATS name alone cannot grant ownership');
+        if (linked) assert.equal(result.description.includes(description), true);
+      }
+    },
+  },
+  {
     name: 'Official posting resolver follows a careers host discovered from a strictly proven employer root',
     async run() {
       const pages = careersPages();

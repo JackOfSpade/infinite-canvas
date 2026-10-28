@@ -84,6 +84,22 @@ async function settle(rows, getView = viewOf(longText('Official posting')), opti
 
 const pureTests = [
   {
+    name: 'board closure settlement retires proof-bearing current official closed history but retains incomplete rechecks',
+    async run() {
+      const original = confirmedClosedRow();
+      const officialPosting = semanticPosting(original, posting({ outcome: 'closed', trail: ['closed'] }));
+      const input = { ...original, officialPosting };
+      assert.equal(officialResearchSettled(officialPosting), true);
+      const result = await settle([input], undefined, { requireSemantic: true });
+      assert.deepEqual(result.kept, []);
+      for (const trail of [['closed', 'semantic-match-v1', 'fetch-failed'], ['closed', 'semantic-match-v1', 'official-liveness-unconfirmed']]) {
+        const uncertain = { ...input, officialPosting: { ...officialPosting, trail } };
+        assert.equal(officialResearchSettled(uncertain.officialPosting), false);
+        assert.deepEqual((await settle([uncertain], undefined, { requireSemantic: true })).kept, [uncertain]);
+      }
+    },
+  },
+  {
     name: 'production board-closed settlement requires current semantic proof for both official rescue and settled retirement',
     async run() {
       for (const value of [posting(), miss(['bridge-research'])]) {
@@ -675,23 +691,23 @@ const pureTests = [
             `Closed on ${label} · open on official site`, `${board} ${level}`);
         }
         assert.equal(display({ boardClosed: marker(board, 'detail-page-not-found'), officialPosting: miss(['bridge-unavailable']) }).statusLabel,
-          `Closed on ${label} · official posting not checked`);
+          `Closed on ${label} · Official lookup incomplete: research unavailable`);
       }
-      assert.equal(display({ boardClosed: marker() }).statusLabel, 'Closed on LinkedIn · official posting not checked', 'no resolution at all');
-      assert.equal(display({ boardClosed: marker(), officialPosting: miss([], { outcome: 'failed' }) }).statusLabel, 'Closed on LinkedIn · official posting not checked', 'a failure label does not stack');
+      assert.equal(display({ boardClosed: marker() }).statusLabel, 'Closed on LinkedIn · Official posting not checked', 'no resolution at all');
+      assert.equal(display({ boardClosed: marker(), officialPosting: miss([], { outcome: 'failed' }) }).statusLabel, 'Closed on LinkedIn · Official posting lookup incomplete', 'the failed lookup stays visible');
       // An L6 poster keeps its own label in front.
       assert.equal(display({ boardClosed: marker(), officialPosting: { ...miss(['bridge-unavailable']), level: 'L6', employer: '' } }).statusLabel,
-        'poster, employer unknown · Closed on LinkedIn · official posting not checked');
+        'poster, employer unknown · Closed on LinkedIn · Official lookup incomplete: research unavailable');
       // Settled after a later Generate-time check: say what is known, not "not checked".
-      assert.equal(display({ boardClosed: marker(), officialPosting: miss(['bridge-research']) }).statusLabel, 'Closed on LinkedIn');
+      assert.equal(display({ boardClosed: marker(), officialPosting: miss(['bridge-research']) }).statusLabel, 'Closed on LinkedIn · No exact official posting found');
       assert.equal(display({ boardClosed: marker(), officialPosting: miss(['bridge-research'], { outcome: 'closed' }) }).statusLabel, 'Closed on LinkedIn · Official posting closed');
       assert.equal(display({ boardClosed: marker(), officialPosting: miss(['bridge-research', 'ambiguous'], { outcome: 'ambiguous' }) }).statusLabel,
-        'Closed on LinkedIn · several official postings match');
+        'Closed on LinkedIn · Several official postings match');
       assert.equal(display({ boardClosed: marker(), officialPosting: miss(['comparative-disagree']) }).statusLabel,
-        'Closed on LinkedIn · several official postings match');
+        'Closed on LinkedIn · Several official postings match');
       // Unflagged and invalid markers change nothing; the link logic is untouched.
-      assert.equal(display({ officialPosting: miss(['bridge-research']) }).statusLabel, '');
-      assert.equal(display({ boardClosed: { board: 'linkedin' }, officialPosting: posting() }).statusLabel, '');
+      assert.equal(display({ officialPosting: miss(['bridge-research']) }).statusLabel, 'No exact official posting found');
+      assert.equal(display({ boardClosed: { board: 'linkedin' }, officialPosting: posting() }).statusLabel, 'Exact official posting verified');
       assert.equal(display({ boardClosed: marker(), officialPosting: posting() }).applyUrl, display({ officialPosting: posting() }).applyUrl);
       assert.equal(display({ boardClosed: marker(), officialPosting: posting() }).levelLabel, 'ATS linked from careers page');
     },
@@ -1007,7 +1023,7 @@ handlerTests.push(
         });
         assert.equal(result.success, true, result.error);
         assert.equal(result.jobs.length, 1); assert.equal(result.jobs[0].boardClosed.board, 'linkedin');
-        assert.equal(officialPostingDisplay(result.jobs[0]).statusLabel, 'Closed on LinkedIn · official posting not checked');
+        assert.equal(officialPostingDisplay(result.jobs[0]).statusLabel, 'Closed on LinkedIn · Official posting not checked');
         assert.deepEqual(getJobsTelemetry().search.officialPosting.boardClosed, { linkedin: { detected: 1, keptOfficial: 0, keptUnchecked: 1, dropped: 0 } });
       });
     },

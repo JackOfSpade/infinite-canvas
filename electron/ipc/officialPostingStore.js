@@ -103,7 +103,10 @@ function sameVerifiedOfficialPosting(left, right) {
 }
 
 function durableRecord(record) {
-  return DURABLE_LEVELS.has(record.officialPosting?.level) && DURABLE_OUTCOMES.has(record.officialPosting?.outcome);
+  const posting = record.officialPosting;
+  return DURABLE_LEVELS.has(posting?.level) && (DURABLE_OUTCOMES.has(posting?.outcome)
+    || posting?.outcome === 'closed' && posting.sourceUrl && posting.trail?.includes('semantic-match-v1')
+      && posting.trail?.includes('closed') && CONTENT_HASH_RE.test(posting.semanticMatch?.sourceHash || ''));
 }
 
 function storeError(message, code = 'OFFICIAL_POSTING_STORE_INVALID') {
@@ -246,7 +249,7 @@ export function createOfficialPostingStore(rootDir, { now = Date.now } = {}) {
       if (posting.contentHash && posting.contentHash !== contentHash) throw storeError('Official posting metadata and text have different content hashes.');
       posting.contentHash = contentHash;
       await writeText(contentHash, description);
-    } else if (OFFICIAL_TEXT_LEVELS.has(posting.level)
+    } else if (OFFICIAL_TEXT_LEVELS.has(posting.level) && posting.outcome !== 'closed'
       && (!posting.contentHash || !compatiblePrevious.some(record => record.officialPosting.contentHash === posting.contentHash))) {
       throw storeError('An official-text resolution needs its content-hashed description.');
     }
@@ -303,6 +306,7 @@ export async function officialPostingView(job, { store, refetch, requireSemantic
   const posting = record.officialPosting;
   if (requireSemantic && !officialPostingSemanticProofMatches(job, posting)) return scrapedView(job);
   const fallback = scrapedView(job, posting);
+  if (posting.outcome === 'closed') return fallback;
   if (!OFFICIAL_TEXT_LEVELS.has(posting.level) || !posting.contentHash || job?.officialPosting?.contentHash !== posting.contentHash) return fallback;
   let description;
   let missing = false;

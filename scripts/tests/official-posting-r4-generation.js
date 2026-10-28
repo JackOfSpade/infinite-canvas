@@ -87,7 +87,7 @@ export default [
     },
   },
   {
-    name: 'R4 Generate keeps the active-pool gate without storing an idle skip and researches the next active click',
+    name: 'Generate retries unavailable research through a linked single chat without requiring an active pool',
     async run() {
       for (const legacy of [false, true]) await withStore(async store => {
         const job = row(); let calls = 0;
@@ -95,12 +95,12 @@ export default [
         const fetch = async () => { throw Object.assign(new Error('unavailable'), { code: 'fetch-failed' }); };
         const callRaw = async (prompt, options) => { calls++; const raw = missResponse(prompt); options.responseValidator(raw); return raw; };
         if (!legacy) {
-          const idle = await prepareOfficialPostingForGeneration(args(job), { store, fetch, callRaw, bridgeStatus: () => status(false) });
+          const idle = await prepareOfficialPostingForGeneration(args(job), { store, fetch, callRaw, bridgeStatus: () => ({ enabled: false }) });
           assert.equal(calls, 0); assert.ok(idle.officialPosting.trail.includes('bridge-unavailable'));
           assert.equal(await store.find(job), null, 'a research-free idle click does not save a miss');
         }
-        const active = await prepareOfficialPostingForGeneration(args(job), { store, fetch, callRaw, bridgeStatus: () => status(true) });
-        assert.equal(calls, 1, legacy ? 'old unavailable misses retry' : 'a later active click researches');
+        const active = await prepareOfficialPostingForGeneration(args(job), { store, fetch, callRaw, bridgeStatus: () => status(false) });
+        assert.equal(calls, 1, legacy ? 'old unavailable misses retry' : 'a later linked single chat researches');
         assert.equal(active.officialPosting.trail.includes('recent-miss'), false);
         assert.ok(active.officialPosting.trail.includes('bridge-research'));
       });

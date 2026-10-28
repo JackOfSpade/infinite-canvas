@@ -225,6 +225,93 @@ export function extractLeverPostings(body, options = {}) {
   }).filter(Boolean);
 }
 
+function smartRecruitersPostingRoute(value) {
+  let url;
+  try { url = new URL(value); } catch { return null; }
+  if (url.protocol !== 'https:' || url.username || url.password || url.port || url.hostname !== 'jobs.smartrecruiters.com') return null;
+  const parts = url.pathname.split('/').filter(Boolean);
+  if (parts.length !== 2 || !/^[a-z0-9][a-z0-9_.-]{0,119}$/iu.test(parts[0])) return null;
+  const id = /^(\d+)(?:-[^/]*)?$/u.exec(parts[1])?.[1];
+  return id ? { tenant: parts[0], id } : null;
+}
+
+/** The documented public detail API needs only the observed tenant and id.
+ * Never enumerate an unbounded employer board or guess a company identifier. */
+export function officialSmartRecruitersAdapterUrl(route, value) {
+  const source = smartRecruitersPostingRoute(value);
+  return route?.ats === 'smartrecruiters' && source && source.tenant.toLowerCase() === route.tenant?.toLowerCase()
+    ? `https://api.smartrecruiters.com/v1/companies/${encodeURIComponent(source.tenant)}/postings/${source.id}` : '';
+}
+
+/** SmartRecruiters PostingDetails, as documented in its public Posting API.
+ * Bind response identity to the exact fetched detail route before using it. */
+export function extractSmartRecruitersPostings(body, options = {}) {
+  const job = structured(body);
+  let source;
+  try { source = new URL(options.sourceUrl); } catch { return []; }
+  const path = /^\/v1\/companies\/([a-z0-9][a-z0-9_.-]{0,119})\/postings\/(\d+)\/?$/iu.exec(source.pathname);
+  if (source.protocol !== 'https:' || source.hostname !== 'api.smartrecruiters.com' || source.port || source.username || source.password
+    || source.search || !path || !job || typeof job !== 'object' || Array.isArray(job) || String(job.id) !== path[2]
+    || typeof job.active !== 'boolean' || !job.jobAd?.sections || typeof job.jobAd.sections !== 'object' || Array.isArray(job.jobAd.sections)) return [];
+  const linked = smartRecruitersPostingRoute(job.postingUrl);
+  const tenant = path[1].toLowerCase();
+  if (!linked || linked.tenant.toLowerCase() !== tenant || linked.id !== path[2]
+    || (options.tenant && options.tenant.toLowerCase() !== tenant)
+    || typeof job.company?.identifier !== 'string' || job.company.identifier.toLowerCase() !== tenant) return [];
+  const sections = job.jobAd.sections;
+  const description = ['companyDescription', 'jobDescription', 'qualifications', 'additionalInformation'].flatMap(key => {
+    const section = sections[key];
+    return section && typeof section === 'object' ? [officialDescriptionText(section.title), officialDescriptionText(section.text)].filter(Boolean) : [];
+  }).join('\n\n');
+  const result = posting({ title: job.name, employer: job.company.name,
+    location: location(addressText({ addressLocality: job.location?.city, addressRegion: job.location?.region,
+      addressCountry: job.location?.country }), { remote: job.location?.remote === true }),
+    salary: unknownSalary(), identifier: job.refNumber || job.id, description,
+    sourceUrl: job.postingUrl, officialApplyUrl: job.applyUrl || job.postingUrl, isListed: job.active,
+  }, { ...options, ats: 'smartrecruiters', tenant });
+  return result ? [result] : [];
+}
+
+/** Public SmartRecruiters ads expose static schema.org microdata even when
+ * they omit JSON-LD. Only explicit schema fields become posting facts. */
+export function extractSmartRecruitersHtmlPostings(body, options = {}) {
+  const route = smartRecruitersPostingRoute(options.sourceUrl);
+  if (!route || (options.tenant && options.tenant.toLowerCase() !== route.tenant.toLowerCase())) return [];
+  rawText(body);
+  const document = JSDOM.fragment(body);
+  const declaredUrls = [...document.querySelectorAll('link[rel~="canonical"],meta[property="og:url"]')]
+    .map(node => node.getAttribute('href') || node.getAttribute('content') || '').filter(Boolean);
+  if (declaredUrls.some(value => {
+    const declared = smartRecruitersPostingRoute(value);
+    return !declared || declared.id !== route.id || declared.tenant.toLowerCase() !== route.tenant.toLowerCase();
+  })) return [];
+  const nodes = [...document.querySelectorAll('[itemscope][itemtype]')]
+    .filter(node => /^https?:\/\/schema\.org\/JobPosting\/?$/iu.test(node.getAttribute('itemtype')));
+  if (nodes.length !== 1) return [];
+  const node = nodes[0];
+  const field = (parent, name) => {
+    const element = parent?.querySelector(`[itemprop~="${name}"]`);
+    return element?.getAttribute('content') || element?.textContent || '';
+  };
+  const organization = node.querySelector('[itemprop~="hiringOrganization"]');
+  const address = node.querySelector('[itemprop~="address"]');
+  const description = node.querySelector('[itemprop~="description"]');
+  const employer = field(organization, 'name');
+  if (!employer || !description) return [];
+  const workplace = node.querySelector('spl-job-location')?.getAttribute('workplaceType')?.toLowerCase() || '';
+  const workMode = /^(?:remote|hybrid|onsite)$/u.test(workplace) ? workplace : '';
+  // A brand logo is not schema sameAs and must not silently grant ownership.
+  const sameAs = organization?.querySelector('[itemprop~="sameAs"]')?.getAttribute('href') || field(organization, 'sameAs');
+  const result = posting({ title: field(node, 'title'), employer, hiringOrganization: { name: employer, sameAs }, sameAs,
+    location: location(addressText({ addressLocality: field(address, 'addressLocality'),
+      addressRegion: field(address, 'addressRegion'), addressCountry: field(address, 'addressCountry') }), {
+      workMode, remote: workMode === 'remote',
+    }), salary: unknownSalary(), description: officialDescriptionText(description.innerHTML),
+    sourceUrl: options.sourceUrl, officialApplyUrl: options.sourceUrl,
+  }, { ...options, ats: 'smartrecruiters', tenant: route.tenant.toLowerCase() });
+  return result ? [result] : [];
+}
+
 export function extractTeamtailorRss(body, options = {}) {
   rawText(body);
   if (/<!DOCTYPE|<!ENTITY/iu.test(body)) return [];
@@ -292,6 +379,8 @@ export function extractOfficialPostingCandidates({ body, sourceUrl, contentType 
   if (ats === 'ashby') return json ? extractAshbyPostings(body, options) : extractJsonLdPostings(body, options);
   if (ats === 'greenhouse') return json ? extractGreenhousePostings(body, options) : extractJsonLdPostings(body, options);
   if (ats === 'lever') return json ? extractLeverPostings(body, options) : extractJsonLdPostings(body, options);
+  if (ats === 'smartrecruiters') return json ? extractSmartRecruitersPostings(body, options)
+    : [...extractJsonLdPostings(body, options), ...extractSmartRecruitersHtmlPostings(body, options)];
   if (ats === 'teamtailor' && /(?:xml|rss)/iu.test(contentType)) return extractTeamtailorRss(body, options);
   // Workday and iCIMS intentionally have no application-state or DOM fallback.
   return extractJsonLdPostings(body, options);

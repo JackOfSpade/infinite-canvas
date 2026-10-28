@@ -121,6 +121,9 @@ export default [
       assert.ok(Object.isFrozen(OFFICIAL_POSTING_ROW_FIELDS));
       const input = row(); const card = cardFor(input); const frozen = safeJob(input); const scope = generateScope();
       const queuePayload = scope.slice(scope.indexOf('queueLocalApplication({'));
+      const projection = fs.readFileSync(new URL('../../src/utils/officialPostingPreparation.js', import.meta.url), 'utf8');
+      assert.match(queuePayload, /job: queueJob/u);
+      assert.match(scope, /const queueJob = projectOfficialPostingGenerationJob\(cardBeforeQueue\.data\)/u);
       const migrated = migrateLegacyJobHubResults([
         { id: 'board-fields', type: 'jobhub', data: {} }, card,
       ]).find(node => node.id === 'board-fields').data.scoredJobs[0];
@@ -129,8 +132,7 @@ export default [
         assert.deepEqual(card.data[field], input[field], `pushCard must carry ${field}`);
         assert.equal(Object.hasOwn(frozen, field), true, `safeJob must whitelist ${field}`);
         assert.deepEqual(migrated[field], input[field], `legacy card migration must retain ${field}`);
-        assert.match(queuePayload, new RegExp(`\\b${field}:\\s*data\\.${field}\\b`, 'u'), `Generate must inline ${field} in the queued job`);
-        assert.match(scope.slice(scope.lastIndexOf('}, [')), new RegExp(`\\bdata\\.${field}\\b`, 'u'), `Generate dependencies must include ${field}`);
+        assert.match(projection, new RegExp(`\\b${field}:\\s*data\\.${field}\\b`, 'u'), `Generate's shared live projection must carry ${field}`);
       }
       assert.equal(frozen.postedBy, input.postedBy);
       assert.deepEqual(frozen.applyOptions, input.applyOptions);

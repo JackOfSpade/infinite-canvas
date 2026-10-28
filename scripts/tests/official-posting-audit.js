@@ -76,7 +76,7 @@ const tests = [
   {
     name: 'official-posting audit collision normalization removes only formatter header lines and preserves all other bytes',
     run() {
-      const original = job({ snippet: '**Posted by:** keep this body line\n**Apply URL:** keep this too\n**Official posting:** keep this body link\n**Source level:** keep this body level',
+      const original = job({ snippet: '**Posted by:** keep this body line\n**Apply URL:** keep this too\n**Official posting:** keep this body link\n**Official posting check:** keep this body status\n**Source level:** keep this body level',
         officialPosting: { level: 'L4', employer: 'Acme Talent Partners', sourceUrl: 'https://careers.example.test/platform' } });
       const legacy = Buffer.from(formatOriginalJobListingMarkdown(original));
       assert.equal(legacyListingCollisionBytes(legacy), legacy, 'header-free legacy bytes need no reconstruction');
@@ -91,7 +91,7 @@ const tests = [
       assert.equal(legacyListingCollisionBytes(malformed), malformed);
       const binaryTail = Buffer.concat([Buffer.from('# A\n**Posted by:** Remove\n\n---\n'), Buffer.from([255, 0, 13, 10])]);
       assert.deepEqual(legacyListingCollisionBytes(binaryTail), Buffer.concat([Buffer.from('# A\n\n---\n'), Buffer.from([255, 0, 13, 10])]));
-      const almost = Buffer.from('# A\n **Posted by:** Keep\n**Posted by:** Keep CRLF\r\n\n---\n**Posted by:** Keep body\n');
+      const almost = Buffer.from('# A\n **Posted by:** Keep\n**Posted by:** Keep CRLF\r\n **Official posting check:** Keep leading space\n**Official posting check:** Keep CRLF\r\n\n---\n**Posted by:** Keep body\n**Official posting check:** Keep body status\n');
       assert.equal(legacyListingCollisionBytes(almost), almost, 'only exact formatter LF header lines may be removed');
     },
   },

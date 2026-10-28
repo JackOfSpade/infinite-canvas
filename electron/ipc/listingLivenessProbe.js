@@ -321,13 +321,17 @@ export function decideGenerationListingCheck({
   const official = normalizeOfficialPosting(posting);
   const board = boardOf(job);
   const timestamp = new Date(at).toISOString();
+  if (official?.outcome === 'closed') return {
+    listingCheck: { action: 'refuse-final', verdict: 'closed', basis: 'official-closed', board, at: timestamp, override: false },
+    message: 'Official posting closed — no current exact open posting found', listingAudit: null,
+  };
   let action = 'hold';
   if (isOfficialLive(official) || verdict === 'open' || verdict === 'unobservable') action = 'proceed';
   else if (verdict === 'closed') {
     action = officialResearchSettled(official) && ['not-found', 'closed'].includes(official.outcome)
       ? 'refuse-final' : 'refuse-retry';
   } else if (hasClosedMarker(basis)) action = 'refuse-retry';
-  // A deliberate user override bypasses every listing-status pause. Keep the
+  // A deliberate user override bypasses board-only listing-status pauses. Keep the
   // observed verdict and basis intact for the audit and card display.
   const override = listingOverride === true && action !== 'proceed';
   if (override) action = 'proceed';
@@ -374,6 +378,7 @@ export async function checkListingForGeneration({
   };
   const storedVerdict = stored.listingLiveness?.verdict || (stored.boardClosed ? 'pending' : 'unknown');
   const storedBasis = stored.listingLiveness?.basis || (stored.boardClosed ? 'closed-marker' : 'neither');
+  if (official?.outcome === 'closed') return finish(job, 'closed', 'official-closed');
   if (isOfficialLive(official)) return finish(job, storedVerdict, storedBasis);
   if (storedVerdict === 'closed' && ['structural', 'ai'].includes(storedBasis)) return finish(job, 'closed', storedBasis);
   const latestDemotedAt = async () => {

@@ -2339,7 +2339,7 @@ export function legacyListingCollisionBytes(data) {
   const bytes = Buffer.isBuffer(data) ? data : Buffer.from(data);
   const separator = bytes.indexOf(Buffer.from('\n---\n'));
   if (separator < 0) return bytes;
-  const prefixes = ['**Posted by:** ', '**Apply URL:** ', '**Official posting:** ', '**Source level:** ', '**Listing check:** '].map(value => Buffer.from(value));
+  const prefixes = ['**Posted by:** ', '**Apply URL:** ', '**Official posting:** ', '**Official posting check:** ', '**Source level:** ', '**Listing check:** '].map(value => Buffer.from(value));
   const chunks = [];
   let keepStart = 0;
   for (let start = 0; start < separator;) {

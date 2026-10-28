@@ -66,7 +66,7 @@ import { v2RejectionEvidencePaths } from './applicationV2RejectionEvidence.js';
 import { archiveV2Content } from './applicationV2EvidenceArchive.js';
 import { archiveV2WriterNotes, splitWriteVerifyWriterResponse } from './applicationV2WriterShortlist.js';
 import { tryGetStore } from './settings.js';
-import { officialPostingEmployerText, normalizeAlternateListings, normalizeApplyOptions, normalizeBoardClosed, normalizeListingLiveness, normalizeOfficialPosting, officialHttpsUrl, OFFICIAL_POSTING_ROW_FIELDS, SALARY_PROVENANCES, LOCAL_AI_APPLICATION_SNIPPET_MAX_CHARS } from './officialPostingFields.js';
+import { officialPostingEmployerText, officialPostingLookupStatus, normalizeAlternateListings, normalizeApplyOptions, normalizeBoardClosed, normalizeListingLiveness, normalizeOfficialPosting, officialHttpsUrl, OFFICIAL_POSTING_ROW_FIELDS, SALARY_PROVENANCES, LOCAL_AI_APPLICATION_SNIPPET_MAX_CHARS, OFFICIAL_POSTING_GENERATION_RECEIPT_MAX_AGE_MS } from './officialPostingFields.js';
 export { LOCAL_AI_APPLICATION_SNIPPET_MAX_CHARS } from './officialPostingFields.js';
 import { unresolvedOfficialPosting } from './officialPostingResolver.js';
 import { officialPostingSemanticProofMatches } from './officialPostingSemantic.js';
@@ -10254,7 +10254,19 @@ function applyPreparedOfficialPosting(scrapedJob, prepared = null) {
     else if (text.length > LOCAL_AI_APPLICATION_SNIPPET_MAX_CHARS || text.length > MAX_FROZEN_SOURCE_CHARS) rejectedText = 'oversize';
     else snippet = text;
   }
-  const withMetadata = () => ({ ...base, company: employer, snippet, postedBy,
+  const freshFacts = verified && prepared.freshness === 'fresh-discovery' && prepared.semanticMatching !== false;
+  const currentPostedPay = posting.salary?.provenance === 'posted' ? posting.salary.text.trim() : '';
+  const currentDetails = () => {
+    if (!freshFacts) return {};
+    const freshTextFacts = !rejectedText && ['L1', 'L2', 'L3'].includes(posting.level);
+    return {
+      ...(posting.title?.trim() ? { title: posting.title } : {}),
+      ...(freshTextFacts || posting.location?.display?.trim() ? { location: posting.location?.display || '' } : {}),
+      ...(freshTextFacts || currentPostedPay
+        ? { salary: currentPostedPay, salaryProvenance: currentPostedPay ? 'posted' : 'unknown' } : {}),
+    };
+  };
+  const withMetadata = () => ({ ...base, ...currentDetails(), company: employer, snippet, postedBy,
     applyUrl: verified ? officialHttpsUrl(posting.officialApplyUrl || posting.sourceUrl) : '', officialPosting: posting });
   if (!rejectedText && ['L1', 'L2', 'L3'].includes(posting.level)) {
     try { jobListingQuoteSource(withMetadata()); } catch { rejectedText = 'oversize'; }
@@ -16101,6 +16113,7 @@ export async function queueLocalApplicationJob(args = {}, signal = null) {
 // Test-only fixture adapter for retained pre-snapshot queue receipts. It is
 // absent from IPC and preload, so ordinary callers cannot request this path.
 const LEGACY_APPLICATION_TEST_CAPABILITY = Symbol('legacy-application-test-capability');
+const REQUIRE_PREPARED_POSTING = Symbol('require-prepared-posting');
 export async function __queueLegacyLocalApplicationFixtureForTests(args = {}, signal = null) {
   if (typeof args.careerSnapshotId === 'string' && args.careerSnapshotId) return queueLocalApplicationJob({ ...args, [LEGACY_APPLICATION_TEST_CAPABILITY]: true }, signal);
   return queueLocalApplicationJobWithAuthority(args, signal, '', null);
@@ -16108,6 +16121,36 @@ export async function __queueLegacyLocalApplicationFixtureForTests(args = {}, si
 
 async function queueLocalApplicationJobWithAuthority(args = {}, signal = null, requestedCareerSnapshotId = '', snapshotInput = null) {
   throwIfAborted(signal);
+  // Source preparation must succeed before any queue directory, routine or
+  // application lane can become durable. Only retained internal fixtures may
+  // omit a receipt; the production IPC always requires one.
+  const rendererJob = { ...args.job };
+  for (const key of ['listingAudit', 'listingLiveness', 'boardClosed', 'listingLinkUrl', 'alternateListings']) delete rendererJob[key];
+  const scrapedJob = safeJob(rendererJob);
+  const preparedPosting = getPreparedOfficialPosting(args.resolutionId, scrapedJob);
+  if (args[REQUIRE_PREPARED_POSTING] || args.resolutionId) {
+    const lookup = officialPostingLookupStatus(preparedPosting?.officialPosting);
+    if (!preparedPosting || ['incomplete', 'unchecked'].includes(lookup.state)) {
+      throw Object.assign(new Error(`${lookup.label}. ${lookup.detail || 'Retry the official posting lookup before generating.'}`),
+        { code: 'OFFICIAL_POSTING_LOOKUP_INCOMPLETE' });
+    }
+    if (preparedPosting.semanticMatching !== false) {
+      const age = Date.now() - preparedPosting.createdAt;
+      if (preparedPosting.freshness !== 'fresh-discovery' || !Number.isFinite(age) || age < 0
+        || age >= OFFICIAL_POSTING_GENERATION_RECEIPT_MAX_AGE_MS) {
+        throw Object.assign(new Error('The official posting lookup is out of date. Retry Generate to check the current posting before drafting.'),
+          { code: 'OFFICIAL_POSTING_LOOKUP_STALE' });
+      }
+      if (lookup.state === 'closed') {
+        throw Object.assign(new Error('The official posting is closed. Check again for a current replacement before generating.'),
+          { code: 'OFFICIAL_POSTING_CLOSED' });
+      }
+    }
+    if (preparedPosting.listingCheck && preparedPosting.listingCheck.action !== 'proceed') {
+      throw Object.assign(new Error('The listing check did not permit generation. Retry from the job card.'),
+        { code: 'LOCAL_AI_LISTING_CHECK_REQUIRED' });
+    }
+  }
   const canvas = await resolveCanvasProject(args.canvasFilePath);
   if (args.priorLocalApplicationId != null) {
     if (typeof args.priorLocalApplicationId !== 'string' || !JOB_ID_RE.test(args.priorLocalApplicationId)) {
@@ -16153,21 +16196,7 @@ async function queueLocalApplicationJobWithAuthority(args = {}, signal = null, r
     // Listing facts from the renderer are display state, not queue authority.
     // The prepared record is identity-checked against the scraped projection
     // before any such fact is frozen into this application job.
-    const rendererJob = { ...args.job };
-    delete rendererJob.listingAudit;
-    delete rendererJob.listingLiveness;
-    delete rendererJob.boardClosed;
-    delete rendererJob.listingLinkUrl;
-    delete rendererJob.alternateListings;
-    const scrapedJob = safeJob(rendererJob);
     const officialPostingTelemetry = { failed: 0 };
-    let preparedPosting = null;
-    try { preparedPosting = getPreparedOfficialPosting(args.resolutionId, scrapedJob); }
-    catch (error) {
-      throwIfAborted(signal);
-      officialPostingTelemetry.failed += 1;
-      console.warn('[OfficialPosting] Queue preparation lookup failed:', error?.code || error?.name || 'Error');
-    }
     const job = safeJob({
       ...frozenJobWithOfficialPosting(scrapedJob, preparedPosting, officialPostingTelemetry),
       listingAudit: normalizeListingAudit(preparedPosting?.listingAudit) || { outcome: 'unavailable' },
@@ -16179,7 +16208,8 @@ async function queueLocalApplicationJobWithAuthority(args = {}, signal = null, r
         ?? (args.resolutionId ? [] : scrapedJob.postingVariants),
     });
     delete job.officialPosting.scrapedListingSha256;
-    const scrapedListingMarkdown = job.snippet !== scrapedJob.snippet || job.company !== scrapedJob.company
+    const scrapedListingMarkdown = ['snippet', 'company', 'title', 'location', 'salary', 'salaryProvenance']
+      .some(key => job[key] !== scrapedJob[key])
       ? formatOriginalJobListingMarkdown(scrapedJob) : null;
     if (scrapedListingMarkdown != null) job.officialPosting.scrapedListingSha256 = contentHash(scrapedListingMarkdown);
     // A snapshot authority is not copied into this job folder. Its complete
@@ -17647,9 +17677,7 @@ async function importLocalApplicationJobAttempt({ jobId, canvasFilePath, senderI
   const jobListingMarkdown = formatOriginalJobListingMarkdown(input.job, { audience: 'bundle' });
   const scrapedListingMarkdown = await readScrapedListingAudit(root, dir, input);
   const trustedBundlePosting = normalizeOfficialPosting(input.job?.officialPosting);
-  const downloadOfficialPosting = trustedBundlePosting && ['L1', 'L2', 'L3', 'L4'].includes(trustedBundlePosting.level)
-    ? { level: trustedBundlePosting.level, ...(trustedBundlePosting.sourceUrl ? { sourceUrl: trustedBundlePosting.sourceUrl } : {}),
-      ...(trustedBundlePosting.officialApplyUrl ? { officialApplyUrl: trustedBundlePosting.officialApplyUrl } : {}) } : undefined;
+  const downloadOfficialPosting = trustedBundlePosting || undefined;
   const applicationHtml = buildResumeDocument({ resumeMainHtml: resumeFit.mainHtml, variantAttrs: resumeFit.variantAttrs, ledger, docId, coverLetter: result.coverLetter, trustedRenderedRoleDates: validationOptions.trustedRenderedRoleDates, jobContext: { title: input.job?.title || '', company: input.job?.company || '', location: input.job?.location || '' }, downloadBundle: { company: input.job?.company || input.job?.postedBy || '', candidateName: result.coverLetter.name, jobUrl: input.job?.url || '', listingLinkUrl: input.job?.listingLinkUrl || '', officialPosting: downloadOfficialPosting, jobMarkdown: jobListingMarkdown, postingVariants: input.job?.postingVariants || [] } });
   let resumePdf = resumeFit.bytes; let coverPdf = coverLetterFit.bytes;
   const missingArtifacts = [];
@@ -18020,7 +18048,7 @@ export function registerLocalAiApplicationHandlers() {
     const onAbort = () => { void discardQueuedJob(); };
     signal?.addEventListener?.('abort', onAbort, { once: true });
     try {
-      localJob = await queueLocalApplicationJob(args, signal);
+      localJob = await queueLocalApplicationJob({ ...args, [REQUIRE_PREPARED_POSTING]: true }, signal);
       if (signal?.aborted) {
         await discardQueuedJob();
         throwIfAborted(signal);

@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { EventEmitter } from 'node:events';
 import electronPkg from 'electron';
-import { createOfficialPostingStore } from '../../electron/ipc/officialPostingStore.js';
+import { createOfficialPostingStore, officialPostingAliases } from '../../electron/ipc/officialPostingStore.js';
 import { createOfficialPostingPrepareSemaphore, getPreparedOfficialPosting, prepareOfficialPostingForGeneration as prepareSemanticOfficialPostingForGeneration, registerOfficialPostingGenerationHandlers } from '../../electron/ipc/officialPostingGeneration.js';
 import { officialPostingSemanticInputHash, officialPostingSemanticSourceHash } from '../../electron/ipc/officialPostingSemantic.js';
 import { extractOfficialPostingCandidates } from '../../electron/ipc/officialPostingExtractors.js';
@@ -51,6 +51,180 @@ function semanticPosting(original, body = page(), extra = {}) {
 
 export default [
   {
+    name: 'fresh official closure refuses stale board-open and alternate links even with a generation override',
+    async run() {
+      await withStore(async store => {
+        const original = job({ source: 'linkedin', url: 'https://www.linkedin.com/jobs/view/synthetic-source-closed',
+          listingLiveness: { board: 'linkedin', verdict: 'open', basis: 'ai', at: new Date().toISOString() },
+          alternateListings: [{ board: 'indeed', url: 'https://www.indeed.com/viewjob?jk=synthetic-stale-alternate' }] });
+        await store.save(original, { officialPosting: semanticPosting(original), description: text });
+        let probes = 0;
+        const prepared = await prepareSemanticOfficialPostingForGeneration({ ...args(original), listingOverride: true }, {
+          store, bridgeStatus: status,
+          resolve: async rows => ({ jobs: rows.map(row => ({ ...row,
+            officialPosting: { level: 'L5', outcome: 'closed', employer: row.company, trail: ['bridge-research', 'closed'] } })) }),
+          listingProbe: { probe: async () => { probes++; throw new Error('Closed official source cannot reopen through board links.'); } },
+        });
+        assert.equal(prepared.listingCheck.action, 'refuse-final');
+        assert.equal(prepared.listingCheck.basis, 'official-closed');
+        assert.equal(prepared.listingCheck.override, false);
+        assert.equal(probes, 0);
+        assert.deepEqual(prepared.listingLiveness, original.listingLiveness, 'historical board evidence remains separate');
+        assert.equal(prepared.listingLinkUrl, '');
+        assert.equal(getPreparedOfficialPosting(prepared.resolutionId, original).listingAudit, null);
+      });
+    },
+  },
+  {
+    name: 'generation freezes a fresh shared-process official replacement instead of the prior verified URL',
+    async run() {
+      await withStore(async store => {
+        const original = job(); await store.save(original, { officialPosting: semanticPosting(original), description: text });
+        const replacement = 'https://northwind.test/jobs/replacement';
+        const prepared = await prepareSemanticOfficialPostingForGeneration(args(original), { store, bridgeStatus: status,
+          resolve: async rows => {
+            const record = await store.save(original, { officialPosting: posting({ level: 'L4', outcome: 'link-only',
+              sourceUrl: replacement, officialApplyUrl: replacement,
+              semanticMatch: { version: 1, inputHash: officialPostingSemanticInputHash(original), sourceHash: 'c'.repeat(64) },
+              trail: ['semantic-match-v1', 'comparative-match'] }) });
+            return { jobs: [{ ...rows[0], officialPosting: record.officialPosting }] };
+          } });
+        assert.equal(prepared.listingCheck.action, 'proceed');
+        assert.equal(getPreparedOfficialPosting(prepared.resolutionId, original).officialPosting.sourceUrl, replacement);
+      });
+    },
+  },
+  {
+    name: 'semantic generation treats normalized card URLs as discovery-only leads and discards foreign host cache receipts',
+    async run() {
+      const cardUrl = 'https://card-lead.test/jobs/unverified';
+      const original = job({ officialPosting: posting({ sourceUrl: cardUrl, officialApplyUrl: `${cardUrl}/apply` }) });
+      const foreign = { aliases: officialPostingAliases(job({ title: 'Unrelated Supervisor', company: 'Other Employer' })),
+        officialPosting: posting({ sourceUrl: 'https://foreign-cache.test/jobs/one' }) };
+      let calls = 0;
+      const prepared = await prepareSemanticOfficialPostingForGeneration(args(original), {
+        store: { find: async () => foreign }, bridgeStatus: status,
+        resolve: async (rows, options) => {
+          calls++; assert.equal(options.bypassCache, true);
+          assert.deepEqual(options.candidateUrls, [cardUrl, `${cardUrl}/apply`]);
+          assert.equal(options.priorOfficialRecords, undefined);
+          assert.equal(rows[0].officialPosting, undefined, 'renderer official facts cannot reach fresh identity authority');
+          return { jobs: rows.map(row => ({ ...row,
+            officialPosting: { level: 'L5', outcome: 'not-found', employer: row.company, trail: ['bridge-research'] } })) };
+        },
+      });
+      assert.equal(calls, 1);
+      assert.equal(prepared.officialPosting.level, 'L5');
+      assert.equal(prepared.officialPosting.sourceUrl, undefined, 'a card URL cannot become a verified result by itself');
+    },
+  },
+  {
+    name: 'official preparation store drain stays bounded when an injected store never returns',
+    async run() {
+      const started = deferred(); let released = false; let guard;
+      const pending = prepareSemanticOfficialPostingForGeneration(args(), { bridgeStatus: status, timeoutMs: 5,
+        slots: { acquire: async () => () => { released = true; } },
+        store: { find: async () => { started.resolve(); return new Promise(() => {}); } },
+      });
+      await started.promise;
+      try {
+        const result = await Promise.race([pending, new Promise((_resolve, reject) => {
+          guard = setTimeout(() => reject(new Error('The store drain exceeded its bounded cleanup allowance.')), 4_000);
+        })]);
+        assert.equal(released, true);
+        assert.equal(result.listingCheck.action, 'refuse-retry');
+        assert.ok(result.officialPosting.trail.includes('bridge-timeout'));
+      } finally { clearTimeout(guard); }
+    },
+  },
+  {
+    name: 'official preparation cancellation drains an in-flight host store operation before releasing ownership',
+    async run() {
+      const started = deferred(); const finish = deferred(); const controller = new AbortController();
+      let settled = false; let resolutions = 0;
+      const pending = prepareSemanticOfficialPostingForGeneration(args(), { signal: controller.signal, bridgeStatus: status,
+        store: { find: async () => { started.resolve(); await finish.promise; return null; } },
+        resolve: async rows => { resolutions++; return fallbackResolve(rows); },
+      });
+      const rejected = assert.rejects(pending, /synthetic cancellation/u).then(() => { settled = true; });
+      await started.promise; controller.abort(new Error('synthetic cancellation')); await flush();
+      assert.equal(settled, false, 'cancel-and-wait still owns the in-flight filesystem operation');
+      finish.resolve(); await rejected;
+      assert.equal(resolutions, 0, 'cancelled store reads cannot start research afterwards');
+    },
+  },
+  {
+    name: 'official preparation cancellation never waits for an uncooperative research promise',
+    async run() {
+      const started = deferred(); const controller = new AbortController(); let settled = false;
+      const pending = prepareSemanticOfficialPostingForGeneration(args(), { signal: controller.signal, bridgeStatus: status,
+        store: { find: async () => null }, resolve: async () => { started.resolve(); return new Promise(() => {}); },
+      });
+      const rejected = assert.rejects(pending, /synthetic cancellation/u).then(() => { settled = true; });
+      await started.promise; controller.abort(new Error('synthetic cancellation'));
+      await waitFor(() => settled); await rejected;
+    },
+  },
+  {
+    name: 'production generation repeats a definitive cached miss and refuses generation when fresh research is unavailable',
+    async run() {
+      await withStore(async store => {
+        const original = job({ source: 'linkedin', url: 'https://www.linkedin.com/jobs/view/synthetic-cached-miss',
+          listingLiveness: { board: 'linkedin', verdict: 'open', basis: 'open-marker', at: new Date().toISOString() } });
+        await store.save(original, { officialPosting: { level: 'L5', outcome: 'not-found', employer: original.company,
+          trail: ['bridge-research', 'semantic-match-v1'],
+          semanticMatch: { version: 1, inputHash: officialPostingSemanticInputHash(original) } } });
+        let calls = 0;
+        const prepared = await prepareSemanticOfficialPostingForGeneration(args(original), {
+          store, bridgeStatus: () => ({ enabled: false }),
+          resolve: async (rows, options) => {
+            calls++; assert.equal(options.bypassCache, true);
+            return { jobs: rows.map(row => ({ ...row, officialPosting: { level: 'L5', outcome: 'not-found', employer: row.company,
+              trail: ['bridge-unavailable'] } })) };
+          },
+        });
+        assert.equal(calls, 1);
+        assert.equal(prepared.listingCheck.action, 'refuse-retry');
+        assert.equal(prepared.officialPosting.trail.includes('recent-miss'), false);
+        assert.equal(prepared.officialPosting.trail.includes('bridge-unavailable'), true);
+      });
+    },
+  },
+  {
+    name: 'production generation refuses incomplete official research even with an open original listing and an override',
+    async run() {
+      for (const trail of [['bridge-unavailable'], ['fetch-timeout'], ['crawl-budget'], ['comparative-invalid'], []]) {
+        const original = job({ source: 'linkedin', url: 'https://www.linkedin.com/jobs/view/synthetic-retry',
+          listingLiveness: { board: 'linkedin', verdict: 'open', basis: 'open-marker', at: new Date().toISOString() } });
+        const prepared = await prepareSemanticOfficialPostingForGeneration({ ...args(original), listingOverride: true }, {
+          store: { find: async () => null }, bridgeStatus: status,
+          resolve: async rows => ({ jobs: rows.map(row => ({ ...row,
+            officialPosting: { level: 'L5', outcome: 'not-found', employer: row.company, trail } })) }),
+        });
+        assert.equal(prepared.listingCheck.action, 'refuse-retry', trail.join(','));
+        assert.equal(prepared.listingCheck.override, false);
+        assert.equal(prepared.listingCheck.basis, 'official-lookup');
+        assert.match(prepared.message, /retry Generate/iu);
+        assert.equal(getPreparedOfficialPosting(prepared.resolutionId, original).listingCheck.action, 'refuse-retry');
+      }
+    },
+  },
+  {
+    name: 'production generation retains a completed no-match fallback when the original listing is open',
+    async run() {
+      const original = job({ source: 'linkedin', url: 'https://www.linkedin.com/jobs/view/synthetic-complete',
+        listingLiveness: { board: 'linkedin', verdict: 'open', basis: 'open-marker', at: new Date().toISOString() } });
+      const prepared = await prepareSemanticOfficialPostingForGeneration(args(original), {
+        store: { find: async () => null }, bridgeStatus: () => ({ ...status(), chat: { pool: { active: false } } }),
+        resolve: async rows => ({ jobs: rows.map(row => ({ ...row,
+          officialPosting: { level: 'L5', outcome: 'not-found', employer: row.company, trail: ['bridge-research', 'comparative-none'] } })) }),
+      });
+      assert.equal(prepared.listingCheck.action, 'proceed');
+      assert.equal(prepared.officialPosting.level, 'L5');
+      assert.equal(prepared.officialPosting.trail.includes('bridge-unavailable'), false);
+    },
+  },
+  {
     name: 'official-posting prepare re-extracts changed host text, marks unavailable bridge and binds an opaque immutable record to exact scraped identity and aliases',
     async run() {
       await withStore(async store => {
@@ -94,7 +268,7 @@ export default [
     },
   },
   {
-    name: 'official-page expiry is demoted only after quoted AI closure and checks the board link in the same Generate',
+    name: 'official-page expiry is demoted only after quoted AI closure and refuses without probing stale board links',
     async run() {
       await withStore(async store => {
         const original = job({ source: 'linkedin', url: 'https://www.linkedin.com/jobs/view/synthetic-one' });
@@ -113,10 +287,11 @@ export default [
             return { board: 'linkedin', ruleKey: 'linkedin', requestedUrl: url, finalUrl: url,
               httpStatus: 404, title: 'Page not found', chromeText: 'This posting could not be found.' }; } },
         });
-        assert.equal(aiCalls, 1); assert.equal(boardVisits, 1);
+        assert.equal(aiCalls, 1); assert.equal(boardVisits, 0);
         assert.equal(prepared.officialPosting.level, 'L6'); assert.equal(prepared.officialPosting.outcome, 'closed');
         assert.equal(prepared.listingCheck.action, 'refuse-final');
-        assert.equal(prepared.boardClosed.reason, 'http-not-found');
+        assert.equal(prepared.listingCheck.basis, 'official-closed');
+        assert.equal(prepared.boardClosed, null, 'official closure does not invent a board closure observation');
         assert.equal((await store.find(original)).officialPosting.outcome, 'closed');
       });
     },
@@ -310,20 +485,32 @@ export default [
     },
   },
   {
-    name: 'semantic generation reuses unchanged source proof and binds prepared content to every semantic input',
+    name: 'semantic generation reruns current host fetches and both shared AI comparisons on every unchanged cached posting',
     async run() {
       await withStore(async store => {
-        const original = job(); const before = await store.save(original, { officialPosting: semanticPosting(original), description: text });
-        let resolutions = 0;
-        const prepared = await prepareSemanticOfficialPostingForGeneration(args(original), { store, bridgeStatus: status,
-          fetch: network({ [officialUrl]: page() }), resolve: async () => { resolutions++; throw new Error('Unchanged approved source can reuse its semantic proof.'); } });
-        assert.equal(resolutions, 0); assert.equal(prepared.officialPosting.level, 'L1');
-        assert.equal(prepared.officialPosting.contentHash, before.officialPosting.contentHash);
-        assert.ok(prepared.officialPosting.trail.includes('reverified'));
-        assert.equal(getPreparedOfficialPosting(prepared.resolutionId, original).description, text);
-        for (const change of [{ snippet: `${original.snippet} New scope.` }, { workMode: 'remote' }, { identifier: 'different-req' }]) {
-          assert.equal(getPreparedOfficialPosting(prepared.resolutionId, { ...original, ...change }), null);
+        const original = job(); await store.save(original, { officialPosting: semanticPosting(original), description: text });
+        const requests = []; const comparisons = [];
+        const fetch = network({ [officialUrl]: page(), 'https://northwind.test/': '<title>Northwind Labs</title>' }, requests);
+        for (let attempt = 0; attempt < 2; attempt++) {
+          const prepared = await prepareSemanticOfficialPostingForGeneration(args(original), { store, bridgeStatus: status, fetch,
+            callRaw: async () => { throw new Error('A verified fresh source needs final comparisons before broader research.'); },
+            callMatch: async (_prompt, options) => {
+              comparisons.push(options.manualHandoff.comparisonRun);
+              return { choice: 'P1', evidence: [{ scrapedQuote: 'Software Engineer', officialQuote: 'Software Engineer' }], distinguishing: [], conflicts: [] };
+            } });
+          assert.equal(prepared.officialPosting.level, 'L1');
+          assert.equal(prepared.officialPosting.trail.includes('reverified'), false);
+          assert.equal(prepared.officialPosting.trail.includes('cache-hit'), false);
+          const receipt = getPreparedOfficialPosting(prepared.resolutionId, original);
+          assert.equal(receipt.description, text);
+          assert.equal(receipt.freshness, 'fresh-discovery');
+          assert.equal(Date.parse(prepared.preparedAt), receipt.createdAt);
+          for (const change of [{ snippet: `${original.snippet} New scope.` }, { workMode: 'remote' }, { identifier: 'different-req' }]) {
+            assert.equal(getPreparedOfficialPosting(prepared.resolutionId, { ...original, ...change }), null);
+          }
         }
+        assert.equal(requests.filter(url => url === officialUrl).length, 2, 'each Generate owns a fresh host fetch session');
+        assert.deepEqual(comparisons, ['A', 'B', 'A', 'B']);
       });
     },
   },
@@ -363,21 +550,24 @@ export default [
     },
   },
   {
-    name: 'semantic generation rejects unsafe source redirects and explicit closure despite cached semantic proof',
+    name: 'semantic generation sends formerly verified sources through current shared resolution rather than direct reverify',
     async run() {
-      for (const closed of [false, true]) await withStore(async store => {
-        const original = job(); await store.save(original, { officialPosting: semanticPosting(original), description: text });
-        let resolutions = 0;
+      for (const outcome of ['closed', 'failed']) await withStore(async store => {
+        const original = job(); const before = await store.save(original, { officialPosting: semanticPosting(original), description: text });
+        let resolutions = 0; let directFetches = 0;
         const prepared = await prepareSemanticOfficialPostingForGeneration(args(original), { store, bridgeStatus: status,
-          fetch: async () => ({ url: closed ? officialUrl : 'https://foreign.test/job', statusCode: closed ? 404 : 200, contentType: 'text/html', body: page() }),
-          resolve: async () => { resolutions++; throw new Error('A mechanically unsafe or closed page cannot reuse cached identity.'); } });
-        assert.equal(resolutions, 0); assert.equal(prepared.officialPosting.level, 'L6');
+          fetch: async () => { directFetches++; throw new Error('Only the shared process may decide fresh source status.'); },
+          resolve: async (rows, options) => {
+            resolutions++; assert.equal(options.bypassCache, true);
+            assert.deepEqual(options.priorOfficialRecords[0].officialPosting, before.officialPosting);
+            return { jobs: rows.map(row => ({ ...row, officialPosting: { level: 'L5', outcome, employer: row.company,
+              trail: outcome === 'closed' ? ['bridge-research', 'closed'] : ['fetch-failed'] } })) };
+          } });
+        assert.equal(resolutions, 1); assert.equal(directFetches, 0);
+        assert.equal(prepared.officialPosting.level, 'L5');
         assert.equal(prepared.officialPosting.officialApplyUrl, undefined);
-        assert.equal(prepared.officialPosting.outcome, closed ? 'closed' : 'failed');
-        if (closed) {
-          assert.ok(prepared.officialPosting.trail.includes('semantic-match-v1'));
-          assert.equal(prepared.officialPosting.semanticMatch.inputHash, officialPostingSemanticInputHash(original));
-        }
+        assert.equal(prepared.officialPosting.outcome, outcome);
+        assert.equal(getPreparedOfficialPosting(prepared.resolutionId, original).description, undefined);
       });
     },
   },

@@ -97,7 +97,7 @@ export default [
       resolve: async rows => ({ jobs: [{ ...rows[0], officialPosting: {
         level: 'L5', outcome: 'not-found', employer: primary.company, trail: ['bridge-research'],
       } }], telemetry: {} }),
-      bridgeStatus: () => ({ enabled: false }),
+      bridgeStatus: () => ({ enabled: true, link: { state: 'linked' } }),
       listingProbe: { probe: async url => { visits.push(url); return page; } },
       calibrationStore: { snapshot: async () => ({ rulesFor: key => ({ ...LISTING_LIVENESS_RULES[key],
         openRules: LISTING_LIVENESS_RULES[key].openRules.map(rule => ({ ...rule, state: 'active' })) }) }),
@@ -213,7 +213,7 @@ export default [
       const prepared = await prepareOfficialPostingForGeneration({ job: raw }, {
         projectJob: project, store: { find: async () => null },
         resolve: async rows => ({ jobs: [{ ...rows[0], officialPosting }], telemetry: {} }),
-        bridgeStatus: () => ({ enabled: false }),
+        bridgeStatus: () => ({ enabled: true, link: { state: 'linked' } }),
       });
       assert.ok(prepared.resolutionId);
       assert.equal(prepared.listingCheck?.action, 'proceed');
@@ -289,7 +289,7 @@ export default [
         resolve: async rows => ({ jobs: [{ ...rows[0], officialPosting: {
           level: 'L5', outcome: 'not-found', employer: primary.company, trail: ['bridge-research'],
         } }], telemetry: {} }),
-        bridgeStatus: () => ({ enabled: false }),
+        bridgeStatus: () => ({ enabled: true, link: { state: 'linked' } }),
         listingProbe: { probe: async () => page },
         calibrationStore: { snapshot: async () => ({ rulesFor: key => ({ ...LISTING_LIVENESS_RULES[key],
           openRules: LISTING_LIVENESS_RULES[key].openRules.map(rule => ({ ...rule, state: 'active' })) }) }),
@@ -317,11 +317,9 @@ export default [
       ] };
       assert.equal(getPreparedOfficialPosting(prepared.resolutionId, project(forgedVariant)), null,
         'a changed variant must fail the exact prepared alias identity check');
-      const fallback = await queueLocalApplicationJob({ canvasFilePath, transport: 'paste', careerSnapshotId,
-        resolutionId: prepared.resolutionId, job: forgedVariant });
-      const fallbackJob = JSON.parse(await fs.readFile(path.join(fallback.folder, 'input.json'), 'utf8')).job;
-      assert.equal(fallbackJob.listingLinkUrl, undefined);
-      assert.equal(fallbackJob.postingVariants.some(variant => variant.url === injected), false);
+      await assert.rejects(queueLocalApplicationJob({ canvasFilePath, transport: 'paste', careerSnapshotId,
+        resolutionId: prepared.resolutionId, job: forgedVariant }), error => error.code === 'OFFICIAL_POSTING_LOOKUP_INCOMPLETE',
+      'a changed variant must require fresh preparation instead of silently accepting an unprepared fallback');
     } finally { await fs.rm(root, { recursive: true, force: true }); }
   } },
 ];

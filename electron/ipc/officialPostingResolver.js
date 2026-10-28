@@ -1,14 +1,14 @@
 import crypto from 'node:crypto';
 import { fetchOfficialPosting } from './officialPostingFetch.js';
 import { officialPostingEmployerText, normalizeApplyOptions, normalizeOfficialLocation, normalizeOfficialPosting, normalizeOfficialSalary, officialHttpsUrl, boundedOfficialPostingTrail, officialPostingComparativeTrail, OFFICIAL_POSTING_TRAIL } from './officialPostingFields.js';
-import { extractOfficialPostingCandidates, scanOfficialCareersPage } from './officialPostingExtractors.js';
+import { extractOfficialPostingCandidates, scanOfficialCareersPage, officialSmartRecruitersAdapterUrl } from './officialPostingExtractors.js';
 import { domainBrandMatchesEmployer, extractAtsTenant, isAggregatorHost, isKnownAtsHost, isPosterAtsTenant, normalizedSourceHost, proveBidirectionalOwnership, proveEmployerDomain, registrableDomain, rootBrandingNamesPoster, rootFooterText, sameOwnershipHost, strictEmployerEqual } from './officialSourceHosts.js';
 import { buildOfficialPostingComparisonSet, canonicalLeadUrl, coreTitle, evaluateOfficialPostingMatch, flatPostingText, frozenOfficialEmployer, locationsCompatible, posterEmployerSignals, resolveScrapedEmployer, selectOfficialPostingMatch } from './officialPostingMatch.js';
-import { officialPostingRecordMatchesScrapedIdentity } from './officialPostingStore.js';
+import { officialPostingAliases, officialPostingRecordMatchesScrapedIdentity } from './officialPostingStore.js';
 import { validateOfficialPostingMatchResponse } from './officialPostingBridge.js';
 import { resolveSemanticOfficialPosting } from './officialPostingSemanticResolution.js';
-import { officialPostingSemanticInputHash, officialPostingSemanticProofMatches, officialPostingSemanticSourceHash } from './officialPostingSemantic.js';
-import { evidenceFromHtml } from './listingLiveness.js';
+import { evaluateOfficialPostingSourceEligibility, officialPostingSemanticInputHash, officialPostingSemanticProofMatches, officialPostingSemanticSourceHash, withHostOfficialPostingLiveness } from './officialPostingSemantic.js';
+import { classifyListingLiveness, evidenceFromHtml, LISTING_LIVENESS_RULES } from './listingLiveness.js';
 import { recordOfficialExpiryCandidates } from './listingLivenessStore.js';
 
 export const OFFICIAL_POSTING_BATCH_SIZE = 12;
@@ -31,7 +31,8 @@ const DEFINITIVE_MISS_TRAIL = new Set(['closed', 'title-mismatch', 'location-mis
 
 /** Shared by both discovery passes. Human handoff time is never charged to
  * this host-only budget; its signal also makes a stopped crawl non-durable. */
-export function createOfficialPostingRowBudget({ signal, maxPages = 16, timeoutMs = 60_000, now = Date.now } = {}) {
+export function createOfficialPostingRowBudget({ signal, maxPages = 16, timeoutMs = 60_000, now = Date.now,
+  previous, retryUrls = [] } = {}) {
   const controller = new AbortController();
   let fanout;
   if (signal?.aborted) controller.abort(signal.reason);
@@ -58,7 +59,9 @@ export function createOfficialPostingRowBudget({ signal, maxPages = 16, timeoutM
         signal.removeEventListener('abort', fanout.abort); ROW_ABORT_FANOUTS.delete(signal);
       }
     } });
-  ROW_BUDGETS.set(budget, { controller, sourceSignal: signal, pages: new Map(), reads: new Set(), locales: new Map(), elapsedMs: 0,
+  const previousState = ROW_BUDGETS.get(previous);
+  ROW_BUDGETS.set(budget, { controller, sourceSignal: signal, pages: new Map(previousState?.pages),
+    retryUrls: new Set(retryUrls.map(officialHttpsUrl).filter(Boolean)), reads: new Set(), locales: new Map(), elapsedMs: 0,
     exhaustionReason: '', failures: new Map(), routes: new Map(),
     maxPages: Math.max(1, Math.min(16, Math.floor(Number(maxPages) || 16))),
     timeoutMs: Math.max(1, Math.min(60_000, Number(timeoutMs) || 60_000)),
@@ -74,6 +77,8 @@ export function shouldPersistOfficialPostingResult(value, { signal, researchRan 
   if (!posting) return false;
   const trail = posting.trail || [];
   if (['L1', 'L2', 'L3', 'L4'].includes(posting.level)) {
+    if (posting.outcome === 'closed') return trail.includes('closed') && trail.includes('semantic-match-v1')
+      && /^[a-f0-9]{64}$/u.test(posting.semanticMatch?.sourceHash || '');
     const partial = trail.includes('fetch-timeout') || trail.includes('crawl-budget') || trail.includes('crawl-partial');
     const agreedChoice = trail.find(code => /^comparative-choice-p[1-8]$/u.test(code))?.slice('comparative-choice-'.length);
     const semanticIdentity = posting.semanticMatch?.version === 1 && /^[a-f0-9]{64}$/u.test(posting.semanticMatch?.sourceHash)
@@ -170,6 +175,7 @@ function adapterUrl(route, url) {
   if (route.ats === 'greenhouse') return `https://boards-api.greenhouse.io/v1/boards/${tenant}/jobs?content=true`;
   if (route.ats === 'lever') return `https://api.lever.co/v0/postings/${tenant}?mode=json`;
   if (route.ats === 'teamtailor') return new URL('/jobs.rss', url).href;
+  if (route.ats === 'smartrecruiters') return officialSmartRecruitersAdapterUrl(route, url);
   return '';
 }
 function readableDescription(candidate, job) {
@@ -185,6 +191,7 @@ function readableDescription(candidate, job) {
  * here. This core has no IPC, bridge registration or renderer dependency. */
 export async function resolveOfficialPosting(job, {
   store = null, fetch = fetchOfficialPosting, candidateUrls = [], research = null, match = null, shortlist = null, semanticMatching = false,
+  priorOfficialRecord = null, checkLiveness = null,
   signal, now = Date.now, bypassCache = false, persistMisses = true, persistResults = true, researchRan = false, rowBudget,
 } = {}) {
   const instant = () => typeof now === 'function' ? now() : Number(now);
@@ -208,6 +215,16 @@ export async function resolveOfficialPosting(job, {
   let semanticSettled = false;
   let semanticSource = null;
   const trail = []; let comparison = null; const candidates = new Map(); const pages = budgetState.pages; const fetchedCandidates = [];
+  const bindPrior = record => {
+    const prior = normalizeOfficialPosting(record?.officialPosting);
+    return semanticMatching && prior && ['L1', 'L2', 'L3', 'L4'].includes(prior.level)
+      && ['found', 'link-only', 'closed'].includes(prior.outcome) && prior.sourceUrl
+      && officialPostingRecordMatchesScrapedIdentity(job, record)
+      && officialPostingAliases(job).every(alias => record.aliases.includes(alias))
+      && officialPostingSemanticProofMatches(job, prior) ? prior : null;
+  };
+  let boundPrior = bindPrior(priorOfficialRecord);
+  const liveness = new Map(); let priorClosed = false; let priorUnclear = false;
   const rssCandidates = new Map(); const conflictingUrls = new Set();
   const signals = posterEmployerSignals(job);
   const hypotheses = [job?.company, ...signals.hypotheses].filter(Boolean);
@@ -217,6 +234,7 @@ export async function resolveOfficialPosting(job, {
     : signals.S4.length ? signals.S4 : !signals.S3 ? [job?.company].filter(Boolean) : [];
   const domains = new Map(); const tenants = new Map(); const queue = []; const queued = new Set();
   const rootSites = new Map(); const careersPages = new Map(); const discoveredDomains = new Map(); const posterHosts = new Set();
+  const scannedPages = new Map(); const followedByPage = new Map();
   // Amendment 3 section 1: which fetched root or careers pages link to a tenant or posting.
   const linkSources = new Map();
   // Round-trip ownership is decided on the pages read, not on the order they were read in. A posting whose proof had nothing to
@@ -259,12 +277,16 @@ export async function resolveOfficialPosting(job, {
     if (typeof lead === 'string') { enqueue(lead); return; }
     if (!lead || typeof lead !== 'object') return;
     if (typeof lead.employer === 'string' && lead.employer.length <= 120 && !hypotheses.includes(lead.employer)) hypotheses.push(lead.employer);
-    for (const key of ['careersPageUrl', 'postingUrl', 'url', 'employerDomain']) {
+    for (const key of ['postingUrl', 'url', 'careersPageUrl', 'employerDomain']) {
       if (lead[key]) enqueue(key === 'employerDomain' && !lead[key].includes('://') ? `https://${lead[key]}/` : lead[key]);
     }
   };
   const read = async url => {
     if (budget.signal.aborted) { trail.push(abortCode()); return null; }
+    if (budgetState.retryUrls.delete(url) && pages.has(url)) {
+      const previous = await pages.get(url);
+      if (previous.error) pages.delete(url);
+    }
     if (!pages.has(url)) {
       if (budgetState.reads.size >= budgetState.maxPages) { abortBudget('crawl-budget'); trail.push('crawl-budget'); return null; }
       budgetState.reads.add(url);
@@ -281,7 +303,8 @@ export async function resolveOfficialPosting(job, {
             return fetch(url, { signal: budget.signal });
           }), interrupted]);
           return page ? { page: { ...page, requestedUrl: page.requestedUrl || url } } : { error: 'fetch-failed' };
-        } catch (error) { return { error: budget.signal.aborted ? abortCode() : error?.code || 'fetch-failed' }; }
+        } catch (error) { return { error: budget.signal.aborted ? abortCode() : error?.code || 'fetch-failed',
+          statusCode: error?.statusCode }; }
         finally { budget.signal.removeEventListener('abort', onAbort); }
       })();
       pages.set(url, pending);
@@ -307,6 +330,7 @@ export async function resolveOfficialPosting(job, {
     if (!sameOwnershipHost(page.url || page.sourceUrl || rootUrl, host)) return false;
     if (normalizedSourceHost(page.requestedUrl || rootUrl) !== host) return false;
     const scan = { ...scanOfficialCareersPage(page.body, page.url || rootUrl), footer: rootFooterText(page.body) };
+    scannedPages.set(rootUrl, { scan, route: extractAtsTenant(rootUrl, { html: page.body }) });
     if (!rootSites.has(host)) proofEpoch += 1;
     rootSites.set(host, scan); noteLinks(rootUrl, scan.links);
     if (!strictEmployerEqual(job?.company, organization)
@@ -476,6 +500,59 @@ export async function resolveOfficialPosting(job, {
       if (adapter) enqueue(adapter, { route: pending.route, provenEmployer: pending.organization, adapter: true });
     }
   };
+  // Source pages may precede the root that proves their ownership. Reapply
+  // the same fetched-link attestations when that proof arrives; queue order
+  // must not decide whether an already-read posting belongs to its employer.
+  const propagateOwnership = async () => {
+    let changed = true;
+    while (changed && !budget.signal.aborted) {
+      changed = false;
+      for (const [host, employer] of discoveredDomains) {
+        if (domains.has(host) || posterHosts.has(host)) continue;
+        if (await rootProof(`https://${host}/`, employer)) { changed = true; proofEpoch += 1; }
+      }
+      for (const [sourceUrl, { scan, route }] of scannedPages) {
+        const host = normalizedSourceHost(sourceUrl); const employer = domains.get(host);
+        if (!employer || posterHosts.has(host)) continue;
+        let followed = followedByPage.get(sourceUrl) || 0;
+        if (route && !tenants.has(`${route.ats}|${route.tenant}`)) {
+          tenants.set(`${route.ats}|${route.tenant}`, employer); changed = true; proofEpoch += 1;
+        }
+        for (const link of scan.links) {
+          const linkedRoute = extractAtsTenant(link.url);
+          if (linkedRoute) {
+            const key = `${linkedRoute.ats}|${linkedRoute.tenant}`;
+            if (!tenants.has(key)) {
+              tenants.set(key, employer); changed = true; proofEpoch += 1;
+            }
+            continue;
+          }
+          const linkHost = normalizedSourceHost(link.url);
+          if (link.tag !== 'a' || link.attribute !== 'href' || linkHost === host || isKnownAtsHost(linkHost)
+            || isAggregatorHost(linkHost) || !crawlUrlAllowed(link.url)
+            || !(/\/(?:careers?|jobs?|positions?|openings?)(?:\/|$)/iu.test(new URL(link.url).pathname)
+              || /^(?:careers?|jobs?)\./iu.test(linkHost))) continue;
+          if (!discoveredDomains.has(linkHost)) {
+            discoveredDomains.set(linkHost, employer); changed = true;
+          }
+          if (followed < 8 && enqueue(link.url)) followed += 1;
+        }
+        followedByPage.set(sourceUrl, followed);
+      }
+      for (const [key, candidate] of candidates) {
+        const route = candidate.ats && candidate.tenant ? candidate : extractAtsTenant(candidate.sourceUrl);
+        const employer = route ? tenants.get(`${route.ats}|${route.tenant}`) : domains.get(normalizedSourceHost(candidate.sourceUrl));
+        if (!strictEmployerEqual(employer, candidate.employer)) continue;
+        if (route && !candidate.tenantProven) {
+          candidates.set(key, { ...candidate, tenantProven: true, provenance: 'careers' });
+          const adapter = adapterUrl(route, candidate.sourceUrl);
+          if (adapter) enqueue(adapter, { route, provenEmployer: employer, adapter: true });
+        } else if (!route && !candidate.employerDomainProven) {
+          candidates.set(key, { ...candidate, employerDomainProven: true, provenance: 'employer' });
+        }
+      }
+    }
+  };
   const belongsToWinnerSite = (url, winner) => {
     const route = budgetState.routes.get(url) || extractAtsTenant(url);
     const winnerRoute = winner.ats && winner.tenant ? winner : extractAtsTenant(winner.sourceUrl);
@@ -497,6 +574,15 @@ export async function resolveOfficialPosting(job, {
       if (budgetState.now() - started >= remaining) abortBudget('fetch-timeout');
       if (budget.signal.aborted) { trail.push(abortCode()); break; }
       const context = queue[cursor];
+      // A known direct ATS detail route can expose its documented API even
+      // when the public HTML is blocked. The URL-derived adapter supplies
+      // source bytes only; capture still requires normal ownership proof.
+      const directRoute = context.route || extractAtsTenant(context.url);
+      if (!context.adapter && directRoute?.ats === 'smartrecruiters') {
+        const adapter = adapterUrl(directRoute, context.url);
+        if (adapter) enqueue(adapter, { route: directRoute, adapter: true,
+          ...(context.provenEmployer ? { provenEmployer: context.provenEmployer } : {}) });
+      }
       const page = await read(context.url);
       if (!page) continue;
       const sourceUrl = page.url || page.sourceUrl || context.url;
@@ -506,6 +592,7 @@ export async function resolveOfficialPosting(job, {
       let scan = null;
       if (/html/iu.test(page.contentType || '')) {
         scan = scanOfficialCareersPage(page.body, sourceUrl);
+        scannedPages.set(sourceUrl, { scan, route });
         const host = normalizedSourceHost(sourceUrl);
         noteLinks(sourceUrl, scan.links);
         for (const organization of hypotheses) if (await rootProof(sourceUrl, organization)) break;
@@ -558,6 +645,7 @@ export async function resolveOfficialPosting(job, {
             }
           }
         }
+        followedByPage.set(sourceUrl, followed);
       }
       if (route && !context.adapter) {
         const employer = tenants.get(`${route.ats}|${route.tenant}`) || '';
@@ -602,7 +690,7 @@ export async function resolveOfficialPosting(job, {
         }
         if (extracted.length) trail.push(context.adapter ? 'ats-adapter' : 'json-ld');
       } catch { trail.push('unreadable'); }
-      try { await retryRoundTrips(); } catch { trail.push('unreadable'); }
+      try { await propagateOwnership(); await retryRoundTrips(); } catch { trail.push('unreadable'); }
       if (semanticMatching) continue;
       const verified = selectOfficialPostingMatch(job, [...candidates.values()], matchOptions());
       if (verified.outcome === 'found' && frozenOfficialEmployer(job, verified.candidate.employer)
@@ -623,6 +711,70 @@ export async function resolveOfficialPosting(job, {
       budgetState.elapsedMs += Math.max(0, budgetState.now() - started);
       if (budgetState.elapsedMs >= budgetState.timeoutMs) abortBudget('fetch-timeout');
       if (budget.signal.aborted) trail.push(abortCode());
+    }
+  };
+  const settleSourceLiveness = async () => {
+    if (!semanticMatching) return;
+    const sources = new Map();
+    for (const candidate of candidates.values()) {
+      if (!evaluateOfficialPostingSourceEligibility(candidate, { now: instant }).eligible) continue;
+      const key = canonicalLeadUrl(candidate.sourceUrl);
+      if (!sources.has(key)) sources.set(key, { url: candidate.sourceUrl, candidate });
+    }
+    const priorKey = boundPrior ? canonicalLeadUrl(boundPrior.sourceUrl) : '';
+    if (priorKey && !sources.has(priorKey)) sources.set(priorKey, { url: boundPrior.sourceUrl, candidate: null });
+    for (const [key, { url, candidate }] of sources) {
+      if (!liveness.has(key)) {
+        const fetched = await pages.get(url) || await pages.get([...pages.keys()].find(value => canonicalLeadUrl(value) === key));
+        const page = fetched?.page;
+        let verdict = [404, 410].includes(Number(fetched?.statusCode ?? page?.statusCode)) ? 'closed' : null;
+        if (!verdict && page && /html/iu.test(page.contentType || '') && typeof page.body === 'string') {
+          const evidence = evidenceFromHtml(page.body, { board: 'official', ruleKey: 'generic',
+            requestedUrl: url, finalUrl: page.url || page.sourceUrl || url, httpStatus: page.statusCode || 200,
+            expectedTitle: candidate?.title || boundPrior?.title || job?.title,
+            expectedCompany: candidate?.employer || boundPrior?.employer || job?.company,
+            expectedLocation: candidate?.location?.display || job?.location,
+            descriptionText: candidate?.description || '' });
+          const expired = candidate?.validThrough && Date.parse(candidate.validThrough) < instant();
+          if (expired || evidence.closedHits.some(hit => hit.insideDescription === false)) {
+            verdict = 'unclear';
+            const classification = classifyListingLiveness(evidence, LISTING_LIVENESS_RULES.generic);
+            if (classification.verdict === 'closed') verdict = 'closed';
+            else if (classification.verdict === 'needs-ai' && typeof checkLiveness === 'function' && !signal?.aborted) {
+              try {
+                const answer = await checkLiveness(job, evidence, { signal });
+                if (['open', 'closed'].includes(answer)) verdict = answer;
+              } catch { /* Unresolved current closure cannot become live. */ }
+            }
+          }
+        }
+        if (!verdict && key === priorKey && (!candidate || fetched?.error || !page)) verdict = 'unclear';
+        if (verdict) liveness.set(key, verdict);
+      }
+      const verdict = liveness.get(key);
+      if (!verdict) continue;
+      if (verdict === 'unclear') trail.push('official-liveness-unconfirmed');
+      if (key === priorKey) {
+        priorClosed ||= verdict === 'closed'; priorUnclear ||= verdict === 'unclear';
+        // A current status-only page still belongs to the exact previously
+        // proved identity. Its historical text remains labelled by status;
+        // no old result is returned as a fresh open match.
+        if (!candidate) {
+          let description = '';
+          if (boundPrior.contentHash && store?.readText) try { description = await store.readText(boundPrior.contentHash) || ''; } catch { /* Metadata still binds the historical identity. */ }
+          const historyRoute = extractAtsTenant(boundPrior.sourceUrl);
+          const atsSource = Boolean(historyRoute || isKnownAtsHost(normalizedSourceHost(boundPrior.sourceUrl)));
+          const historical = { ...boundPrior, description, employer: boundPrior.employer,
+            hiringOrganization: { name: boundPrior.employer, sameAs: '' },
+            ats: historyRoute?.ats || boundPrior.ats || '', tenant: historyRoute?.tenant || boundPrior.tenant || '',
+            tenantProven: atsSource, employerDomainProven: !atsSource,
+            provenance: 'historical verified posting', sourceUrl: boundPrior.sourceUrl };
+          candidates.set(`historical|${key}`, withHostOfficialPostingLiveness(historical, verdict));
+        }
+      }
+      for (const [id, record] of candidates) if (canonicalLeadUrl(record.sourceUrl) === key) {
+        candidates.set(id, withHostOfficialPostingLiveness(record, verdict));
+      }
     }
   };
   const persist = async result => {
@@ -661,18 +813,30 @@ export async function resolveOfficialPosting(job, {
           return { ...current, record: { ...record, officialPosting: current.officialPosting } };
         }
         if (!['L5', 'L6'].includes(record.officialPosting?.level)
+          && ['found', 'link-only'].includes(record.officialPosting.outcome)
           && shouldPersistOfficialPostingResult(record, { signal: budget.signal })) return { record, postedBy: strictEmployerEqual(record.officialPosting.employer, job?.company) ? undefined : job?.company,
           officialPosting: { ...record.officialPosting, trail: trailCodes([...(record.officialPosting.trail || []), 'cache-hit']) } };
+        if (record.officialPosting?.outcome === 'closed') boundPrior ||= bindPrior(record);
       }
     }
-    for (const url of freeOfficialPostingLeads(job)) enqueue(url);
+    if (boundPrior) enqueue(boundPrior.sourceUrl);
     for (const lead of candidateUrls) addLead(lead);
+    for (const url of freeOfficialPostingLeads(job)) enqueue(url);
     await drain();
     const semanticDecision = async () => {
+      await settleSourceLiveness();
       const result = await resolveSemanticOfficialPosting(job, [...candidates.values()], { match, shortlist, signal, now: instant });
       trail.push(...result.trail);
       comparison = result.comparison || null; semanticSettled = result.settled;
       semanticSource = result.evaluations?.find(item => item.identityPass)?.candidate || null;
+      if (result.outcome !== 'found' && priorClosed) {
+        trail.push('closed');
+        semanticSource = [...candidates.values()].find(candidate => canonicalLeadUrl(candidate.sourceUrl) === canonicalLeadUrl(boundPrior.sourceUrl));
+        semanticSettled = true;
+        return { ...result, outcome: 'closed', candidate: null, trail: [...result.trail, 'closed'] };
+      }
+      if (result.outcome !== 'found' && priorUnclear) return { ...result, outcome: 'unreadable', candidate: null,
+        trail: [...result.trail, 'official-liveness-unconfirmed'] };
       return result;
     };
     let decision = semanticMatching ? await semanticDecision() : selectOfficialPostingMatch(job, [...candidates.values()], matchOptions());
@@ -801,6 +965,20 @@ export async function resolveOfficialPosting(job, {
       if (evaluation.salaryMismatch) trail.push('salary-mismatch');
     }
     if (decision.outcome !== 'found') {
+      if (semanticMatching && decision.outcome === 'closed' && semanticSource) {
+        const candidate = semanticSource;
+        const historical = boundPrior && canonicalLeadUrl(boundPrior.sourceUrl) === canonicalLeadUrl(candidate.sourceUrl);
+        const level = historical ? boundPrior.level : candidate.provenance === 'careers' ? 'L2' : candidate.ats ? 'L3' : 'L1';
+        const officialPosting = normalizeOfficialPosting({ ...(historical ? boundPrior : {}), level, outcome: 'closed',
+          employer: candidate.employer, title: candidate.title, sourceUrl: candidate.sourceUrl,
+          officialApplyUrl: verifiedApplyUrl(candidate), ats: candidate.ats || '', tenant: candidate.tenant || '',
+          location: normalizeOfficialLocation(candidate.location) || undefined,
+          salary: normalizeOfficialSalary(candidate.salary) || undefined,
+          fetchedAt: new Date(instant()).toISOString(), trail: trailCodes([...trail, 'closed']),
+        });
+        if (officialPosting) return await persist({ officialPosting,
+          ...(!historical && candidate.description ? { description: candidate.description } : {}) });
+      }
       // A past validThrough alone is not proof that the visible page is gone.
       // Keep every otherwise passing identity as a bounded URL receipt, with
       // fetched page text only in the IPC request's evidence store. An overflow

@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { resolveOfficialPosting, shouldPersistOfficialPostingResult } from '../../electron/ipc/officialPostingResolver.js';
 import { resolveSemanticOfficialPosting } from '../../electron/ipc/officialPostingSemanticResolution.js';
 import { officialPostingSemanticInputHash, officialPostingSemanticProofMatches } from '../../electron/ipc/officialPostingSemantic.js';
+import { officialPostingAliases } from '../../electron/ipc/officialPostingStore.js';
 
 const SCRAPED = 'Create delivery planning tools for regional operations teams. Talk with distribution coordinators to learn what slows their work. Turn their findings into dependable systems and improve the way schedules are prepared.';
 const OFFICIAL = 'Engineers improve route allocation services used by depot supervisors. Interview operational partners about freight handoffs, then design software that makes dispatch decisions easier. Maintain reliable release procedures while refining the product around customer feedback.';
@@ -39,6 +40,113 @@ const noMatch = reason => ({ choice: 'none', evidence: [], distinguishing: [], c
 const uncertain = reason => ({ choice: 'uncertain', evidence: [], distinguishing: [], conflicts: [reason] });
 
 export default [
+  {
+    name: 'fresh shared resolution retains a bound historical identity when its exact official URL now returns 404 or 410',
+    async run() {
+      for (const statusCode of [404, 410]) {
+        const f = fixture(); const job = row();
+        const first = await resolveOfficialPosting(job, { fetch: f.fetch, candidateUrls: [f.url],
+          semanticMatching: true, match: async (_job, options) => choose(options[0]) });
+        const priorOfficialRecord = { aliases: officialPostingAliases(job), officialPosting: first.officialPosting };
+        let calls = 0;
+        const result = await resolveOfficialPosting(job, { priorOfficialRecord, bypassCache: true, semanticMatching: true, persistResults: false,
+          store: { readText: async () => OFFICIAL }, fetch: async () => { throw Object.assign(new Error('Gone'), { code: 'closed', statusCode }); },
+          match: async (_job, options) => { calls++; assert.ok(options.every(option => option.status === 'closed')); return choose(options[0]); } });
+        assert.equal(result.officialPosting.outcome, 'closed');
+        assert.ok(result.officialPosting.trail.includes('closed'));
+        assert.equal(calls, 2);
+        assert.equal(result.description, undefined);
+        for (const changed of [{ ...priorOfficialRecord, aliases: [] },
+          { ...priorOfficialRecord, officialPosting: { ...first.officialPosting, semanticMatch: { ...first.officialPosting.semanticMatch, inputHash: 'f'.repeat(64) } } },
+          { ...priorOfficialRecord, officialPosting: { ...first.officialPosting, semanticMatch: { ...first.officialPosting.semanticMatch, sourceHash: undefined } } }]) {
+          const rejected = await resolveOfficialPosting(job, { priorOfficialRecord: changed, semanticMatching: true, bypassCache: true,
+            candidateUrls: [f.url], fetch: async () => { throw Object.assign(new Error('Gone'), { code: 'closed', statusCode }); },
+            match: async () => { throw new Error('No historical identity should be admitted'); } });
+          assert.equal(rejected.officialPosting.outcome, 'not-found');
+        }
+      }
+    },
+  },
+  {
+    name: 'minimal verified ATS receipts infer their tenant from the source URL and stale API active cannot override its fresh HTTP closure',
+    async run() {
+      const job = row({ title: 'Software Engineer' });
+      const url = 'https://jobs.smartrecruiters.com/Northwind/740000000000019-software-engineer';
+      const api = 'https://api.smartrecruiters.com/v1/companies/Northwind/postings/740000000000019';
+      const priorOfficialRecord = { aliases: officialPostingAliases(job), officialPosting: {
+        level: 'L2', outcome: 'found', employer: job.company, title: job.title, sourceUrl: url,
+        trail: ['semantic-match-v1'], semanticMatch: { version: 1, inputHash: officialPostingSemanticInputHash(job), sourceHash: 'a'.repeat(64) },
+      } };
+      let calls = 0;
+      const result = await resolveOfficialPosting(job, { priorOfficialRecord, bypassCache: true, semanticMatching: true,
+        candidateUrls: ['https://northwind.test/careers'], fetch: async value => {
+          if (value === url) throw Object.assign(new Error('Gone'), { code: 'closed', statusCode: 404 });
+          if (value === api) return { url: value, contentType: 'application/json', statusCode: 200, body: JSON.stringify({
+            id: '740000000000019', name: job.title, active: true, postingUrl: url,
+            company: { identifier: 'Northwind', name: job.company },
+            jobAd: { sections: { jobDescription: { title: 'Responsibilities', text: OFFICIAL } } },
+          }) };
+          return html(`<title>Northwind Labs</title><a href="${url}">Current opportunity</a>`, value);
+        }, match: async (_job, options) => {
+          calls++; assert.ok(options.length > 0); assert.ok(options.every(option => option.status === 'closed'));
+          return { choice: options[0].id, evidence: [{ scrapedQuote: job.title, officialQuote: job.title }], distinguishing: [], conflicts: [] };
+        } });
+      assert.equal(calls, 2);
+      assert.equal(result.officialPosting.outcome, 'closed');
+    },
+  },
+  {
+    name: 'a new exact open official source can replace a now-closed previously verified URL',
+    async run() {
+      const f = fixture(); const job = row();
+      const first = await resolveOfficialPosting(job, { fetch: f.fetch, candidateUrls: [f.url], semanticMatching: true,
+        match: async (_job, options) => choose(options[0]) });
+      const replacement = 'https://northwind.test/jobs/dispatch-replacement';
+      f.pages[replacement] = posting(replacement);
+      const result = await resolveOfficialPosting(job, { bypassCache: true, semanticMatching: true, persistResults: false,
+        priorOfficialRecord: { aliases: officialPostingAliases(job), officialPosting: first.officialPosting },
+        candidateUrls: [replacement], store: { readText: async () => OFFICIAL },
+        fetch: async url => { if (url === f.url) throw Object.assign(new Error('Gone'), { code: 'closed', statusCode: 410 }); return f.fetch(url); },
+        match: async (_job, options) => { assert.ok(options.some(option => option.status === 'closed'));
+          return choose(options.find(option => option.sourceUrl === replacement)); } });
+      assert.equal(result.officialPosting.outcome, 'found');
+      assert.equal(result.officialPosting.sourceUrl, replacement);
+    },
+  },
+  {
+    name: 'a known prior closure never labels a distinct unavailable identity as the closed source',
+    async run() {
+      const f = fixture(); const job = row();
+      const first = await resolveOfficialPosting(job, { fetch: f.fetch, candidateUrls: [f.url], semanticMatching: true,
+        match: async (_job, options) => choose(options[0]) });
+      const other = 'https://northwind.test/jobs/unavailable-other';
+      f.pages[other] = posting(other, { validThrough: '2000-01-01' });
+      const result = await resolveOfficialPosting(job, { bypassCache: true, semanticMatching: true, persistResults: false,
+        priorOfficialRecord: { aliases: officialPostingAliases(job), officialPosting: first.officialPosting },
+        candidateUrls: [other], store: { readText: async () => OFFICIAL },
+        fetch: async url => { if (url === f.url) throw Object.assign(new Error('Gone'), { code: 'closed', statusCode: 410 }); return f.fetch(url); },
+        match: async (_job, options) => choose(options.find(option => option.sourceUrl === other)) });
+      assert.equal(result.officialPosting.outcome, 'closed');
+      assert.equal(result.officialPosting.sourceUrl, f.url);
+      assert.notEqual(result.officialPosting.sourceUrl, other);
+    },
+  },
+  {
+    name: 'fresh host visible closure uses the shared liveness callback and uncertain closure never becomes live',
+    async run() {
+      for (const verdict of ['closed', 'unclear', 'open']) {
+        const f = fixture(); const job = row();
+        f.pages[f.url] += '<h1>Dispatch Systems Engineer</h1><nav>Northwind Labs official careers. Explore current opportunities and learn about the engineering team.</nav><div>This job is no longer available.</div>';
+        let livenessCalls = 0;
+        const result = await resolveOfficialPosting(job, { fetch: f.fetch, candidateUrls: [f.url], semanticMatching: true,
+          checkLiveness: async (_job, evidence) => { livenessCalls++; assert.ok(evidence.closedHits.some(hit => !hit.insideDescription)); return verdict; },
+          match: async (_job, options) => choose(options[0]) });
+        assert.equal(livenessCalls, 1);
+        assert.equal(result.officialPosting.outcome, verdict === 'open' ? 'found' : verdict === 'closed' ? 'closed' : 'unreadable');
+        if (verdict === 'unclear') assert.ok(result.officialPosting.trail.includes('official-liveness-unconfirmed'));
+      }
+    },
+  },
   {
     name: 'a partial crawl keeps an independently agreed semantic identity durable without an identifier anchor',
     run() {

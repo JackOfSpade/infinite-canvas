@@ -23,6 +23,7 @@ import {
   normalizeJobListingExternalUrl,
 } from '../../electron/ipc/applicationBundle.js';
 import { normalisePostingVariants } from '../../electron/ipc/resumeHtml.js';
+import { projectOfficialPostingGenerationJob } from '../../src/utils/officialPostingPreparation.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(HERE, '..', '..');
@@ -216,10 +217,15 @@ export default [
       const jobCard = read('src/nodes/JobCardNode.jsx');
       // The handoff payload must forward variants, and each external URL must
       // pass the same normalizer used for the primary listing before IPC.
-      const payloadStart = jobCard.indexOf('postingVariants: (Array.isArray(data.postingVariants)');
-      assert(payloadStart !== -1, 'JobCardNode must forward data.postingVariants in the queueLocalApplication payload');
-      const payloadWindow = jobCard.slice(payloadStart, payloadStart + 1400);
-      assert(payloadWindow.includes('normalizeJobListingExternalUrl({'), 'each variant URL must be normalized before IPC');
+      assert(jobCard.includes('projectOfficialPostingGenerationJob(sourceCard.data)')
+        && jobCard.includes('projectOfficialPostingGenerationJob(cardBeforeQueue.data)')
+        && jobCard.includes('job: sourceJob,') && jobCard.includes('job: queueJob,'),
+      'research and queue payloads must forward the shared live posting projection');
+      const payload = projectOfficialPostingGenerationJob({ title: 'Platform Engineer', company: 'Acme',
+        postingVariants: [{ location: 'Lakeview', url: 'https://jobs.example.test/lakeview' },
+          { location: 'Unsafe', url: 'javascript:alert(1)' }] });
+      assert(payload.postingVariants[0].url === 'https://jobs.example.test/lakeview'
+        && payload.postingVariants[1].url === '', 'each variant URL must be normalized before IPC');
       assert(jobCard.includes('const subtitleLocation = useMemo(') && jobCard.includes('Multiple locations'),
         'the card subtitle must resolve a bounded "Multiple locations" label');
 

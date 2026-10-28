@@ -9,10 +9,22 @@ export const OFFICIAL_POSTING_SEMANTIC_OPTION_CAP = 8;
 const text = value => typeof value === 'string' ? value.trim() : '';
 const header = value => text(value).normalize('NFKC').replace(/\s+/gu, ' ');
 const sourceOf = value => value?.candidate && typeof value.candidate === 'object' ? value.candidate : value;
+const hostLiveness = new WeakMap();
+
+/** Host-only receipt: object fields from a renderer or fetched JSON cannot
+ * manufacture a current availability verdict. Preserve it across snapshots. */
+export function withHostOfficialPostingLiveness(candidate, verdict) {
+  if (!['open', 'closed', 'unclear'].includes(verdict)) throw new TypeError('Invalid host official posting liveness.');
+  const result = { ...candidate };
+  hostLiveness.set(result, verdict);
+  return result;
+}
 
 function sourceStatus(candidate, now) {
   const code = Number(candidate.statusCode ?? candidate.httpStatus);
   if ([404, 410].includes(code) || candidate.isListed === false) return 'closed';
+  const observed = hostLiveness.get(candidate);
+  if (observed) return observed === 'open' ? 'live' : observed === 'closed' ? 'closed' : 'unavailable';
   const instant = typeof now === 'function' ? Number(now()) : Number(now);
   const expiry = typeof candidate.validThrough === 'string' ? Date.parse(candidate.validThrough) : NaN;
   // An expired structured date is a lead for the host's closure check. It is
@@ -186,7 +198,7 @@ export function buildOfficialPostingSemanticInventory(candidates, { now = Date.n
     const eligibility = evaluateOfficialPostingSourceEligibility(candidate, { now });
     if (!eligibility.eligible) continue;
     let key;
-    try { key = canonicalRecord(candidate); }
+    try { key = canonicalRecord({ candidate, status: eligibility.status }); }
     catch (error) { throw inventoryError(error.message); }
     if (!records.has(key)) {
       // The prompt and its later quote checks share one source snapshot even
@@ -194,6 +206,7 @@ export function buildOfficialPostingSemanticInventory(candidates, { now = Date.n
       let snapshot;
       try { snapshot = structuredClone(candidate); }
       catch { throw inventoryError('Official source records must be cloneable data.'); }
+      if (hostLiveness.has(candidate)) hostLiveness.set(snapshot, hostLiveness.get(candidate));
       records.set(key, { candidate: snapshot, eligibility });
     }
   }
